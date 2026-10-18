@@ -645,3 +645,67 @@ async fn apply_persists_stop_clears_and_unapplied_start_leaves_intent_alone() {
         before
     );
 }
+
+#[tokio::test]
+async fn cancel_stop_selection_changes_and_shutdown_prevent_late_activation() {
+    for case in ["cancel", "stop", "provider", "binding", "shutdown"] {
+        let fixture = Restoring::new();
+        fixture.seed();
+        fixture.tell("hold", 1);
+        let starting = fixture.restore(true).unwrap();
+        assert!(
+            starting
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == "restore"),
+            "restore must expose a cancellable operation"
+        );
+        let operation = starting.operation.as_ref().unwrap().id.clone();
+        fixture.started(1).await;
+        match case {
+            "cancel" => {
+                fixture.manager.cancel(&operation).unwrap();
+            }
+            "stop" => {
+                fixture
+                    .manager
+                    .stop(starting.server.id.as_deref().unwrap_or_default())
+                    .unwrap();
+            }
+            "provider" => {
+                fs::write(&fixture.settings, b"{}").unwrap();
+                fixture.manager.notify_settings_changed();
+            }
+            "binding" => {
+                let mut root: Value =
+                    serde_json::from_slice(&fs::read(&fixture.settings).unwrap()).unwrap();
+                root["smart"][crate::MANAGED_MODEL_KEY]["revision"] =
+                    json!(&fixture.models[0].files[0].sha256[..40]);
+                fs::write(&fixture.settings, serde_json::to_vec(&root).unwrap()).unwrap();
+                fixture.manager.notify_settings_changed();
+            }
+            "shutdown" => fixture.manager.shutdown(),
+            _ => unreachable!(),
+        }
+        let settings = fs::read(&fixture.settings).unwrap();
+        fixture.tell("go", 1);
+        let finished = crate::tests::settled_snapshot(&fixture.manager).await;
+        assert_eq!(fixture.starts(), 1);
+        assert_ne!(
+            finished.server.state, "ready",
+            "{case} installed a late server"
+        );
+        assert!(
+            finished.server.provider.is_none(),
+            "{case} left an installed server"
+        );
+        assert!(!finished.server.checked);
+        assert_eq!(fs::read(&fixture.settings).unwrap(), settings);
+        assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fixture.intent_path().exists(),
+            case == "shutdown",
+            "wrong intent persistence for {case}"
+        );
+    }
+}
