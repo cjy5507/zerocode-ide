@@ -604,6 +604,169 @@ mod tests {
     }
 
     #[test]
+    fn alternating_browser_views_keep_one_unchanged_surface_revision() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        for _ in 0..4 {
+            for (argv, text) in [
+                (vec!["read", "browser-1"], "Whole page including Next"),
+                (vec!["read", "browser-1", "h1"], "Next"),
+                (
+                    vec!["read", "browser-1", "--full"],
+                    "Full page including Next",
+                ),
+            ] {
+                let read = argv.into_iter().map(str::to_string).collect::<Vec<_>>();
+                let evidence = scope
+                    .finish_at(
+                        &read,
+                        &browser_answer(text, 7),
+                        Some(&browser_observation("browser-1", text)),
+                        &mut tracker,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    evidence.state_revision, 0,
+                    "an unchanged view must not borrow another view's fingerprint"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_browser_view_switch_after_an_action_is_not_a_confirmed_change() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        scope
+            .finish_at(
+                &["read".into(), "browser-1".into()],
+                &browser_answer("Whole page", 7),
+                Some(&browser_observation("browser-1", "Whole page")),
+                &mut tracker,
+            )
+            .unwrap();
+        scope
+            .finish_at(
+                &["click".into(), "browser-1".into(), "#next".into()],
+                &browser_answer("clicked", 7),
+                None,
+                &mut tracker,
+            )
+            .unwrap();
+        let switched = scope
+            .finish_at(
+                &["read".into(), "browser-1".into(), "h1".into()],
+                &browser_answer("Heading", 7),
+                Some(&browser_observation("browser-1", "Heading")),
+                &mut tracker,
+            )
+            .unwrap();
+        assert_eq!(
+            switched.effect,
+            SurfaceEffect::Observation,
+            "a first observation of another view cannot confirm the preceding act"
+        );
+        assert_eq!(
+            switched.state_revision, 0,
+            "a new view starts at the existing revision"
+        );
+    }
+
+    #[test]
+    fn browser_eval_content_changes_do_not_confirm_an_action() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        let read = ["read".into(), "browser-1".into()];
+        scope
+            .finish_at(
+                &read,
+                &browser_answer("Before", 7),
+                Some(&browser_observation("browser-1", "Before")),
+                &mut tracker,
+            )
+            .unwrap();
+        scope
+            .finish_at(
+                &[
+                    "eval".into(),
+                    "browser-1".into(),
+                    "document.title = 'After'".into(),
+                ],
+                &browser_answer("After", 7),
+                None,
+                &mut tracker,
+            )
+            .unwrap();
+        let changed = scope
+            .finish_at(
+                &read,
+                &browser_answer("After", 7),
+                Some(&browser_observation("browser-1", "After")),
+                &mut tracker,
+            )
+            .unwrap();
+        assert!(
+            changed.state_revision > 0,
+            "changed content still advances its observation revision"
+        );
+        assert_eq!(
+            changed.effect,
+            SurfaceEffect::Observation,
+            "agent-authored eval changes cannot confirm progress"
+        );
+    }
+
+    #[test]
+    fn computer_stop_and_resume_preserve_the_owned_surface_identity() {
+        let mut tracker = Tracker::default();
+        let mut owner = context("term-7");
+        let before = execution(&look(&mut tracker, &owner, 43, "Ready"));
+        owner.stopped += 1;
+        let after = execution(&envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            observed(43, "Ready"),
+            Some(&owner),
+            Epoch {
+                stopped: owner.stopped,
+                ..EPOCH
+            },
+            &mut tracker,
+        ));
+        assert_eq!(
+            after, before,
+            "an agent stop/resume cannot mint a new Computer surface or revision"
+        );
+    }
+
+    #[test]
+    fn browser_stop_and_resume_preserve_the_owned_surface_identity() {
+        let mut tracker = Tracker::default();
+        let mut scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        let read = ["read".into(), "browser-1".into()];
+        let before = scope
+            .finish_at(
+                &read,
+                &browser_answer("Ready", 7),
+                Some(&browser_observation("browser-1", "Ready")),
+                &mut tracker,
+            )
+            .unwrap();
+        scope.stopped += 1;
+        let after = scope
+            .finish_at(
+                &read,
+                &browser_answer("Ready", 7),
+                Some(&browser_observation("browser-1", "Ready")),
+                &mut tracker,
+            )
+            .unwrap();
+        assert_eq!(
+            after, before,
+            "an agent stop/resume cannot mint a new browser surface or revision"
+        );
+    }
+
+    #[test]
     fn a_first_host_observation_is_a_zero_baseline_not_an_effect() {
         let mut tracker = Tracker::default();
         let answer = look(&mut tracker, &context("term-7"), 43, "Next");

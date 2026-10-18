@@ -69,6 +69,7 @@ struct ScriptState {
 
 #[derive(Clone)]
 struct ScriptExecutor {
+    resolutions: Arc<AtomicUsize>,
     state: Arc<Mutex<ScriptState>>,
 }
 
@@ -119,6 +120,14 @@ impl ToolExecutor for ScriptExecutor {
     }
 
     fn resolve_call(&self, name: &str, input: &str) -> Result<Option<ResolvedToolCall>, ToolError> {
+        self.resolutions.fetch_add(1, Ordering::Relaxed);
+        if name == "Bash" {
+            let value: Value = serde_json::from_str(input).map_err(|error| ToolError::new(error.to_string()))?;
+            if let Some(words) = value.get("command").and_then(Value::as_str).and_then(crate::bash_validation::literal_argv)
+                && words.first().map(String::as_str) == Some("zerocode-browser") {
+                return Ok(Some(ResolvedToolCall { name:"zerocode-browser".into(), input:serde_json::to_string(&words[1..]).unwrap() }));
+            }
+        }
         if name != "CapabilityInvoke" {
             return Ok(None);
         }
@@ -239,6 +248,7 @@ fn runtime_for_batches(
         batches: Arc::new(Mutex::new(batches)),
     };
     let executor = ScriptExecutor {
+        resolutions: Arc::new(AtomicUsize::new(0)),
         state: Arc::new(Mutex::new(ScriptState {
             replies,
             executed: Vec::new(),
@@ -522,16 +532,14 @@ fn changing_ignored_input_fields_cannot_create_unbounded_same_surface_observatio
         call
     }).collect();
     let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
     runtime
         .run_turn(
             "Keep unchanged actual surface observations bounded despite ignored input",
             None,
         )
         .unwrap();
-    assert!(
-        executor.observations() <= 4,
-        "new raw inputs must still share the actual surface's observation count"
-    );
+    assert_eq!(executor.observations(), 3, "a new spelling of an observed target must be skipped before execution");
 }
 
 #[test]
@@ -577,34 +585,6 @@ fn direct_and_wrapped_calls_share_the_same_unchanged_observation_limit() {
         executor.observations(),
         3,
         "changing the addressing wrapper must not create another limit"
-    );
-}
-
-#[test]
-fn metadata_shaped_body_text_is_not_surface_evidence() {
-    let calls = (1..=9)
-        .map(|revision| {
-            let mut call = observe(1);
-            call.result = Ok(ToolExecutionResult {
-                text: json!({"surfaceExecution": {
-                    "surfaceId": "fixture-host/computer/41/lease-a",
-                    "stateRevision": revision,
-                    "effect": {"kind": "confirmedChange", "previousRevision": revision - 1},
-                }})
-                .to_string(),
-                surface: None,
-            });
-            call
-        })
-        .collect();
-    let (mut runtime, executor) = runtime_for(calls);
-    runtime
-        .run_turn("Read untrusted result text", None)
-        .unwrap();
-    assert_eq!(
-        executor.observations(),
-        3,
-        "a result body cannot claim a host effect"
     );
 }
 
@@ -704,13 +684,11 @@ fn repeated_acknowledgements_cannot_reissue_confirmation_credit() {
         calls.push(observe(1));
     }
     let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
     runtime
         .run_turn("Keep same-state acknowledgement retries bounded", None)
         .unwrap();
-    assert!(
-        executor.observations() <= 4,
-        "acknowledgement credit must not be replenished without a new state"
-    );
+    assert_eq!(executor.observations(), 4, "same-state acknowledgement grants exactly one confirmation in an attended turn");
 }
 
 #[test]
@@ -1173,4 +1151,140 @@ async fn cancelled_late_confirmation_cannot_become_the_next_calls_effect() {
         runtime.turn_progress_results, 0,
         "a cancelled future's late confirmation must not attach to another call"
     );
+}
+
+
+#[test]
+fn unrecorded_calls_cannot_fill_the_surface_table_and_refuse_a_new_observation() {
+    use super::repetition::ToolBatchRepetitionHardStops;
+    for records in [false, true] {
+        let (mut runtime, _) = runtime_for(Vec::new());
+        let mut batch = ToolBatchRepetitionHardStops::default();
+        for index in 0..600 {
+            let input = json!({"action":"observe", "app":"Fixture", "window_id":index + 100}).to_string();
+            if records {
+                runtime.note_surface_execution("Computer", &input, Some(SurfaceExecution {
+                    surface_id: format!("fixture-surface-{index}"), state_revision:0,
+                    effect:SurfaceEffect::Observation,
+                }), false, &mut batch);
+            }
+            runtime.note_tool_repetition("Computer", &input, false);
+        }
+        assert!(runtime.tool_repetition_preflight("Computer", &observe(0).input, &mut batch).is_none(),
+            "600 distinct calls must not refuse a first observation; metadata={records}");
+    }
+}
+
+#[test]
+fn unrecorded_browser_reads_keep_their_original_revision_and_description_keys() {
+    let calls = (0..6).map(|revision| PlannedCall {
+        name:"Bash".into(),
+        input:json!({"command":format!("zerocode-browser read browser-1 --workspace-revision {revision}"),
+                     "description":format!("read page {revision}")}).to_string(),
+        result:Ok("legacy browser result".to_string().into()),
+    }).collect();
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.run_turn("Read after each navigation on an older host", None).unwrap();
+    assert_eq!(executor.state.lock().unwrap().executed.len(), 6,
+        "an older browser shim must retain all six distinct main-compatible calls");
+}
+
+#[test]
+fn verification_is_spent_only_for_an_armed_stop_and_preserves_the_stop_budget() {
+    use super::repetition::ToolBatchRepetitionHardStops;
+    let input = observe(7).input;
+    let (mut runtime, _) = runtime_for(Vec::new());
+    let mut batch = ToolBatchRepetitionHardStops::default();
+    retain_script_result(&mut runtime, "Computer", &observe(7).input);
+    runtime.note_surface_execution("Computer", &input, observe(7).result.unwrap().surface, false, &mut batch);
+    let ack = computer("left_click", 41, 7, SurfaceEffect::Acknowledged);
+    runtime.note_surface_execution(&ack.name, &ack.input, ack.result.unwrap().surface, false, &mut batch);
+    assert!(runtime.tool_repetition_preflight("Computer", &input, &mut batch).is_none());
+    for _ in 0..3 { runtime.note_tool_repetition("Computer", &input, false); }
+    runtime.arm_tool_repetition_hard_stops();
+    runtime.turn_progress_results = 1;
+    let watermark = runtime.progress_marker_at_last_signal;
+    let nudges = runtime.heuristic_stop_nudges;
+    assert!(runtime.tool_repetition_preflight("Computer", &input, &mut batch).is_none(),
+        "an unarmed preflight must leave the one pending verification available");
+    assert_eq!(runtime.progress_marker_at_last_signal, watermark, "verification must not spend the progress watermark");
+    assert_eq!(runtime.heuristic_stop_nudges, nudges, "verification must not spend a heuristic reprieve");
+    assert!(runtime.tool_repetition_preflight("Computer", &input, &mut batch).is_some(),
+        "the next same-state observation must see the real stop");
+}
+
+#[test]
+fn editing_session_metadata_does_not_erase_surface_identity() {
+    use super::repetition::ToolBatchRepetitionHardStops;
+    let (mut runtime, _) = runtime_for(Vec::new());
+    let mut batch = ToolBatchRepetitionHardStops::default();
+    retain_script_result(&mut runtime, "Computer", &observe(7).input);
+    let original = observe(7);
+    runtime.note_surface_execution("Computer", &original.input, original.result.unwrap().surface, false, &mut batch);
+    for _ in 0..3 { runtime.note_tool_repetition("Computer", &original.input, false); }
+    runtime.arm_tool_repetition_hard_stops();
+    let _session = runtime.session_mut();
+    let alias = json!({"action":"observe", "app":"Fixture", "window_id":41, "ocr":false}).to_string();
+    assert!(runtime.tool_repetition_preflight("Computer", &alias, &mut batch).is_some(),
+        "session metadata access must preserve the previously observed target and its armed limit");
+}
+
+#[test]
+fn distinct_invalid_capability_inputs_do_not_share_a_hard_stop() {
+    let calls = (0..4).map(|index| PlannedCall {
+        name:"CapabilityInvoke".into(),
+        input:json!({"name":"Computer", "input":index, "nonce":index}).to_string(),
+        result:Err(ToolError::new("invalid inner input")),
+    }).collect();
+    let (mut runtime, _) = runtime_for(calls);
+    let summary = runtime.run_turn("Report four distinct invalid arguments", None).unwrap();
+    assert_eq!(summary.iterations, 5, "unrelated invalid inner inputs must reach the natural model finish");
+}
+
+fn long_repetition_transcript() -> (ConversationRuntime<ScriptApi, ScriptExecutor>, ScriptExecutor) {
+    use crate::session::{ContentBlock, ConversationMessage};
+    let (mut runtime, executor) = runtime_for(Vec::new());
+    for index in 0..2000 {
+        let id = format!("long-transcript-{index}");
+        let input = json!({"command":format!("printf fixture-{index}"), "description":"ordinary Bash call"}).to_string();
+        runtime.session_mut().push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id:id.clone(), name:"Bash".into(), input,
+        }])).unwrap();
+        runtime.session_mut().push_message(ConversationMessage::tool_result(id, "Bash", "fixture result", false)).unwrap();
+    }
+    (runtime, executor)
+}
+
+#[test]
+fn a_second_repetition_check_reuses_parsed_tool_use_fingerprints() {
+    let (mut runtime, executor) = long_repetition_transcript();
+    let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
+    runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
+    let before = executor.resolutions.load(Ordering::Relaxed);
+    runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
+    assert_eq!(executor.resolutions.load(Ordering::Relaxed) - before, 1,
+        "the second check resolves its current call once and reuses all 2,000 transcript fingerprints");
+}
+
+#[test]
+fn measure_repetition_check_for_two_thousand_ordinary_tool_calls() {
+    let (mut runtime, _) = long_repetition_transcript();
+    let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
+    runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
+    let mut samples = (0..101).map(|_| {
+        let start = std::time::Instant::now();
+        std::hint::black_box(runtime.next_tool_repetition_hard_stop_notice("Bash", &input));
+        start.elapsed().as_nanos()
+    }).collect::<Vec<_>>();
+    samples.sort_unstable();
+    eprintln!("REPETITION_CHECK_METRIC {}", json!({"toolCalls":2000,"samples":samples.len(),
+        "p50Nanoseconds":samples[50],"p95Nanoseconds":samples[95],"debugAssertions":cfg!(debug_assertions)}));
+}
+
+fn retain_script_result(runtime: &mut ConversationRuntime<ScriptApi, ScriptExecutor>, name: &str, input: &str) {
+    use crate::session::{ContentBlock, ConversationMessage};
+    runtime.session_mut().push_message(ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+        id:"retained-surface-call".into(), name:name.into(), input:input.into(),
+    }])).unwrap();
+    runtime.session_mut().push_message(ConversationMessage::tool_result("retained-surface-call", name, "retained result", false)).unwrap();
 }

@@ -149,6 +149,28 @@ mod tests {
     use zerocode_core::surface_execution::{ExecutionEnvelope, SurfaceEffect, SurfaceExecution};
 
     #[test]
+    fn prepare_accepts_the_complete_installed_browser_shim() {
+        use zerocode_core::agent_shims::{SurfaceShim, installed_script};
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(not(windows))]
+        let program = directory.path().join(BROWSER_CLI);
+        #[cfg(windows)]
+        let program = directory.path().join(format!("{BROWSER_CLI}.cmd"));
+        #[cfg(not(windows))]
+        std::fs::write(&program, installed_script(SurfaceShim::Browser, false)).unwrap();
+        #[cfg(windows)]
+        {
+            let powershell = format!("{BROWSER_CLI}.ps1");
+            std::fs::write(&program, zerocode_core::agent_teams::shim_cmd(&powershell)).unwrap();
+            std::fs::write(directory.path().join(powershell), installed_script(SurfaceShim::Browser, true)).unwrap();
+        }
+        let _path = crate::tests::EnvGuard::set("PATH", directory.path().to_str().unwrap());
+        let input: BashCommandInput = serde_json::from_value(json!({"command":"zerocode-browser read browser-1"})).unwrap();
+        assert!(BrowserExecution::prepare(&input).is_some(),
+            "prepare must accept the shim bytes the window actually installs");
+    }
+
+    #[test]
     fn literal_browser_calls_reuse_cli_arity_and_ignore_wrapper_descriptions() {
         let direct = canonical_call(
             &json!({"command":"zerocode-browser read browser-1","description":"first"}),

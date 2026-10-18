@@ -167,6 +167,18 @@ mod surface_state_tests {
     }
 
     #[test]
+    fn only_host_record_producing_verbs_are_surface_observations() {
+        for verb in ["open", "close", "viewport", "wait", "find", "click"] {
+            assert!(!is_surface_observation(BROWSER_CLI, &serde_json::to_string(&[verb, "browser-1"]).unwrap()),
+                "browser {verb} does not produce a surface observation");
+        }
+        for action in ["read", "find", "wait_for", "left_click"] {
+            assert!(!is_surface_observation("Computer", &serde_json::json!({"action":action}).to_string()),
+                "Computer {action} is not an attested observation verb");
+        }
+    }
+
+    #[test]
     fn new_surfaces_past_the_memory_limit_do_not_receive_forgiveness() {
         let mut state = SurfaceRepetitionState::default();
         for index in 0..SURFACE_EXECUTION_CACHE_LIMIT {

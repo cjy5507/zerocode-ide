@@ -3199,6 +3199,28 @@ mod tests {
     }
 
     #[test]
+    fn installed_surface_shims_match_the_shared_consumer_bytes_on_both_platforms() {
+        use zerocode_core::agent_shims::{SurfaceShim, installed_script};
+        let dir = tempfile::tempdir().unwrap();
+        write_shim_dir(dir.path(), &dir.path().join("fixture-mirror"), &[]).unwrap();
+        for shim in [SurfaceShim::Browser, SurfaceShim::Computer] {
+            #[cfg(not(windows))]
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(shim.name())).unwrap(),
+                installed_script(shim, false),
+                "the installer and metadata verifier must share the complete POSIX bytes"
+            );
+            let scripts = windows_door_scripts();
+            let name = format!("{}.ps1", shim.name());
+            assert_eq!(
+                scripts.iter().find(|(file, _)| file == &name).unwrap().1,
+                installed_script(shim, true),
+                "the installer and metadata verifier must share the PowerShell loader and BOM"
+            );
+        }
+    }
+
+    #[test]
     fn settings_and_endpoint_use_their_injected_roots() {
         let config = tempfile::tempdir().expect("no config dir");
         let local_data = tempfile::tempdir().expect("no local data dir");

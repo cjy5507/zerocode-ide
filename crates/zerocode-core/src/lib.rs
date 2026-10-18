@@ -17,6 +17,7 @@ pub mod agent_browser;
 pub mod agent_emulator;
 pub mod agent_exit;
 pub mod agent_lineage;
+pub mod agent_shims;
 pub mod agent_teams;
 pub mod app;
 pub mod artifact;

@@ -2408,6 +2408,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_replaced_computer_shim_cannot_attest_outer_host_surface_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_shim(dir.path());
+        let expected = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".into(), state_revision:7,
+            effect:zerocode_core::surface_execution::SurfaceEffect::Observation };
+        std::fs::write(dir.path().join("reply-observe"), json!({"ok":true,"surfaceExecution":expected,
+            "result":{"window":{"id":41}}}).to_string()).unwrap();
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&inherited_path))).unwrap();
+        let _path = crate::tests::EnvGuard::set("PATH", path.to_str().unwrap());
+        let result = crate::GlobalToolRegistry::builtin().execute_result("Computer",
+            &json!({"action":"observe","app":"Fixture","window_id":41})).unwrap();
+        assert!(result.surface.is_none(), "a replaced shim must not attest host metadata even at the outer envelope");
+        assert_eq!(calls(dir.path()), ["observe"], "legacy output still executes once");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn production_registry_surface_results_preserve_permission_toggle_and_nested_denials() {
         let dir = tempfile::tempdir().unwrap();
         fake_shim(dir.path());
