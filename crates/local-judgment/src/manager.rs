@@ -2059,8 +2059,11 @@ impl Manager {
         server_id: &str,
     ) -> Result<Provider> {
         cancel.check()?;
-        if self.closed.load(Ordering::Acquire) || inner.generation != request.generation {
+        if self.closed.load(Ordering::Acquire) {
             return Err(Error::Cancelled);
+        }
+        if inner.generation != request.generation {
+            return Err(Error::RuntimeFailed);
         }
         let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
         if running.id != server_id {
