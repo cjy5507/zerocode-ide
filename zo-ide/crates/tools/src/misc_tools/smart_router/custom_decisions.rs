@@ -252,7 +252,7 @@ fn read(definition: &Definition, response: &SystemOneResponse) -> Result<Reading
             Ok(Reading {
                 chosen: Value::from(chose.chosen.as_str()),
                 confidence: chose.confidence,
-                spread: chose.probabilities.values().copied().collect(),
+                spread: vec![top],
                 top,
                 shown: chose.chosen,
             })

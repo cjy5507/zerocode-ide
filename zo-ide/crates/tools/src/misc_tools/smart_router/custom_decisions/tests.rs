@@ -864,3 +864,19 @@ fn a_choice_alone_at_the_top_at_a_line_of_a_half_hands_its_line() {
         assert_eq!((&row["chosen"], &row["applied"]), (&Value::from("small"), &Value::from(true)));
     });
 }
+
+/// Two options as likely as each other hand nothing, whichever one the
+/// answer names; the row keeps the answer all the same.
+#[test]
+fn a_two_option_tie_hands_nothing() {
+    let spread = [("ship", 0.5), ("wait", 0.5), (custom::NOT_APPLICABLE, 0.0)];
+    let mock = replying(move |_| a_choice("ship", &spread, 0.5));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let mut definition = choosing("Ship", Point::AgentAsks, &["ship", "wait"]);
+        definition.act_from = *custom::ACT_FROM.start();
+        keep(&definition, JevMode::On);
+        let (verdict, row) = decided(cwd, &definition);
+        assert_eq!(verdict.line, None);
+        assert_eq!((&row["chosen"], &row["applied"]), (&Value::from("ship"), &Value::from(false)));
+    });
+}
