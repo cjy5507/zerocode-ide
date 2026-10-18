@@ -356,3 +356,49 @@ fn shadow_asks_and_writes_but_hands_nothing() {
         assert_eq!(pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP), None, "the next turn");
     });
 }
+
+/// A decision that is on hands its one line, in DESIGN 2.4's shape and under
+/// its cap, for each kind of answer as sure as its act-from line; one below
+/// it, or one that answers it does not apply, hands none and still keeps its
+/// row — with a score's level counted from zero there.
+#[test]
+fn on_above_the_bar_hands_one_line_and_below_hands_none() {
+    let (docs, tests, unsure) =
+        (yes_no("Docs", Point::TurnStart), yes_no("Tests", Point::TurnStart), yes_no("Unsure", Point::TurnStart));
+    let size = choosing("Size", Point::TurnStart, &["small", "large"]);
+    let effort = scoring("Effort", Point::TurnStart, 4);
+    let scope = choosing("Scope", Point::TurnStart, &["docs", "code"]);
+    let answers = BTreeMap::from([
+        (docs.id.clone(), a_noul(0.9)),
+        (tests.id.clone(), a_noul(0.1)),
+        (unsure.id.clone(), a_noul(0.7)),
+        (size.id.clone(), a_choice("large", &[("small", 0.1), ("large", 0.85), (custom::NOT_APPLICABLE, 0.05)], 0.85)),
+        (effort.id.clone(), a_score(&[0.0, 0.05, 0.9, 0.05], 0.85)),
+        (scope.id.clone(), a_choice(custom::NOT_APPLICABLE, &[("docs", 0.05), ("code", 0.05), (custom::NOT_APPLICABLE, 0.9)], 0.9)),
+    ]);
+    let mock = replying(move |id| answers.get(id).cloned().unwrap_or_default());
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        for definition in [&docs, &tests, &unsure, &size, &effort, &scope] {
+            keep(definition, JevMode::On);
+        }
+        let lines = run_blocking(at_turn_start(cwd.to_path_buf(), TASK.to_string()));
+        let (yes, no) = (AGENT_TOOL_ASK_OPTIONS[0], AGENT_TOOL_ASK_OPTIONS[1]);
+        let handed = [
+            custom::line("Docs", yes, 0.9),
+            custom::line("Tests", no, 1.0 - 0.1),
+            custom::line("Size", "large", 0.85),
+            custom::line("Effort", &custom::shown_level(2, 4), 0.85),
+        ];
+        assert_eq!(lines, handed);
+        assert!(lines.iter().all(|line| line.chars().count() <= custom::LINE_MAX_CHARS), "{lines:?}");
+        let rows = rows_now(cwd);
+        let applied = |definition: &Definition| rows_of(&rows, &definition.id).first().map(|row| row["applied"].clone());
+        for (definition, was) in [(&docs, true), (&tests, true), (&unsure, false), (&size, true), (&effort, true), (&scope, false)] {
+            assert_eq!(applied(definition), Some(Value::from(was)), "{}", definition.name);
+        }
+        let unsure_row = rows_of(&rows, &unsure.id)[0];
+        assert_eq!((&unsure_row["chosen"], &unsure_row["confidence"]), (&Value::from(yes), &Value::from(0.7)));
+        assert_eq!(rows_of(&rows, &effort.id)[0]["chosen"], 2, "the row keeps the level counted from zero");
+        assert_eq!(rows_of(&rows, &scope.id)[0]["chosen"], custom::NOT_APPLICABLE);
+    });
+}
