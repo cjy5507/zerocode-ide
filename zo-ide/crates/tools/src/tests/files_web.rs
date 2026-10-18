@@ -133,6 +133,40 @@ fn web_fetch_caps_response_body_and_stays_recoverable() {
     let _ = std::fs::remove_dir_all(&artifact_dir);
 }
 
+/// `WebFetch` hangs up once it has read its body cap, before the server has
+/// written the rest (t-47060). Here the client hangs up after the server has
+/// read its request and before it writes: the fixture server must take the
+/// failed write as the end of that exchange, not die of it.
+#[test]
+fn the_fixture_server_outlives_a_client_that_hangs_up_before_the_response() {
+    let (serving, request_read) = std::sync::mpsc::channel::<()>();
+    let (hung_up, wait_for_hang_up) = std::sync::mpsc::channel::<()>();
+    let wait_for_hang_up = Mutex::new(wait_for_hang_up);
+    let server = TestServer::spawn(Arc::new(move |_request_line: &str| {
+        let _ = serving.send(());
+        let _ = wait_for_hang_up
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv();
+        // Larger than any socket buffer, so the write cannot land whole
+        // before the hang-up is seen.
+        HttpResponse::text(200, "OK", &"word ".repeat(1_600_000))
+    }));
+
+    let mut client = std::net::TcpStream::connect(server.addr()).expect("connect");
+    client
+        .write_all(b"GET /large HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .expect("send request");
+    request_read.recv().expect("the server read the request");
+    drop(client);
+    hung_up.send(()).expect("tell the handler the client hung up");
+
+    assert!(
+        server.stop().is_ok(),
+        "the fixture server died when its client hung up before the response"
+    );
+}
+
 #[test]
 fn web_search_extracts_and_filters_results() {
     let server = TestServer::spawn(Arc::new(|request_line: &str| {

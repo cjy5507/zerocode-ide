@@ -2131,6 +2131,50 @@ mod tests {
 
     #[test]
     fn a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence() {
+        prove_a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence(|| ());
+    }
+
+    /// A neighbour test of this binary opens pipes once the proof has counted
+    /// its descriptors and holds them past the proof's last look (t-54220,
+    /// tools/release/flakes.txt): they are not the proof's, and must not read
+    /// as escaped writers.
+    #[test]
+    fn pipes_a_neighbour_test_holds_do_not_read_as_escaped_writers() {
+        prove_a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence(|| {
+            (0..2)
+                .map(|_| std::io::pipe().expect("neighbour pipe"))
+                .collect::<Vec<_>>()
+        });
+    }
+
+    /// `neighbour` stands for another test of this binary; what it returns
+    /// stays open until the proof is over. The proof counts the descriptors of
+    /// its process (`/dev/fd`), so it runs in a process of its own and counts
+    /// only the descriptors it made (t-54220).
+    fn prove_a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence<T>(
+        neighbour: impl FnOnce() -> T,
+    ) {
+        const ALONE: &str = "ZEROCODE_PIPE_HOLDER_PROOF_ALONE";
+        const PROOF: &str = "test_evidence::tests::a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence";
+        if std::env::var_os(ALONE).is_some() {
+            prove_a_daemonized_pipe_holder_in_this_process();
+            return;
+        }
+        let _neighbour = neighbour();
+        let output = Command::new(std::env::current_exe().expect("test binary"))
+            .args([PROOF, "--exact", "--test-threads=1"])
+            .env(ALONE, "1")
+            .output()
+            .expect("run the proof in a process of its own");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "the proof failed in a process of its own:\n{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn prove_a_daemonized_pipe_holder_in_this_process() {
         let repository = repository(Vec::new());
         let home = tempfile::tempdir().expect("authority home");
         let (_, store) = store(&home);

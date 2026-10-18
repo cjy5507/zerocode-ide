@@ -67,6 +67,39 @@ pub(crate) fn env_lock() -> &'static Mutex<()> {
     })
 }
 
+/// The threads waiting for `env_lock` that said so first (t-57711). A test
+/// that holds a cwd window open closes it once the colliding call waits for
+/// the lock, so the collision needs no timing.
+fn env_lock_waiters() -> &'static Mutex<Vec<thread::ThreadId>> {
+    static WAITERS: OnceLock<Mutex<Vec<thread::ThreadId>>> = OnceLock::new();
+    WAITERS.get_or_init(Mutex::default)
+}
+
+/// Whether `waiter` waits for `env_lock` and said so.
+pub(crate) fn waits_for_env_lock(waiter: thread::ThreadId) -> bool {
+    env_lock_waiters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&waiter)
+}
+
+/// `env_lock`, taken by a thread that first says it waits for it.
+pub(crate) fn lock_env_announced() -> std::sync::MutexGuard<'static, ()> {
+    let me = thread::current().id();
+    env_lock_waiters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(me);
+    let guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    env_lock_waiters()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|waiter| *waiter != me);
+    guard
+}
+
 /// A `ToolContext` for tests that may run beside another test's `set_current_dir`
 /// window (t-21146). `ToolContext::new()` binds the process cwd's `.zo/registries`
 /// when it is built, so the construction waits for `env_lock`, which each window's
@@ -309,9 +342,10 @@ impl TestServer {
                         let request = String::from_utf8_lossy(&buffer[..size]).into_owned();
                         let request_line = request.lines().next().unwrap_or_default().to_string();
                         let response = handler(&request_line);
-                        stream
-                            .write_all(response.to_bytes().as_slice())
-                            .expect("write response");
+                        // A client may hang up before the whole response is
+                        // out (WebFetch does at its body cap); that ends the
+                        // exchange, and the client asserts what it received.
+                        let _ = stream.write_all(response.to_bytes().as_slice());
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -330,6 +364,14 @@ impl TestServer {
 
     fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Stop the server; `Err` when its thread ended in a panic.
+    fn stop(mut self) -> thread::Result<()> {
+        if let Some(tx) = self.shutdown.take() {
+            let _ = tx.send(());
+        }
+        self.handle.take().map_or(Ok(()), thread::JoinHandle::join)
     }
 }
 
