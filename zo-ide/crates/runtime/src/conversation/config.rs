@@ -1301,9 +1301,17 @@ where
         session_tracer.record_security_audit(action, attributes);
     }
 
-    /// Mutable access to the underlying session (for rewind, truncation, etc.).
-    pub fn session_mut(&mut self) -> &mut Session {
+    /// Invalidate host bindings after replacing or rewinding the session or
+    /// restoring workspace files. Metadata edits and process notices keep them.
+    pub fn reset_surface_repetition_state(&mut self) {
+        self.resolved_tool_use_fingerprints.get_mut().clear();
         self.surface_repetition_state = super::SurfaceRepetitionState::default();
+    }
+
+    /// Mutable access to session metadata. Use the explicit rewind/replace
+    /// methods when changing the conversation history.
+    pub fn session_mut(&mut self) -> &mut Session {
+        self.resolved_tool_use_fingerprints.get_mut().clear();
         &mut self.session
     }
 
@@ -1318,7 +1326,7 @@ where
     /// with `writer lease held`, and after `/new` no other zo window could open
     /// the previous session either.
     pub fn replace_session(&mut self, session: Session) {
-        self.surface_repetition_state = super::SurfaceRepetitionState::default();
+        self.reset_surface_repetition_state();
         self.session.release_writer_lease();
         // Recall dedup is a property of the TRANSCRIPT, not the process: the
         // incoming one has its own persisted bodies (usually none, on `/new`),
@@ -1331,7 +1339,7 @@ where
     /// Remove the last `steps` assistant turns from the conversation.
     /// Returns the number of messages removed.
     pub fn rewind_turns(&mut self, steps: usize) -> usize {
-        self.surface_repetition_state = super::SurfaceRepetitionState::default();
+        self.reset_surface_repetition_state();
         self.session.rewind_turns(steps)
     }
 

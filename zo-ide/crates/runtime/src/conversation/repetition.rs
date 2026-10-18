@@ -25,6 +25,8 @@ const MAX_SURFACE_FINGERPRINTS: usize = 512;
 pub(super) struct SurfaceRepetitionState {
     surfaces: HashMap<String, SurfaceRevision>,
     fingerprints: HashMap<u64, String>,
+    targets: HashMap<String, String>,
+    generation: u64,
 }
 
 struct SurfaceRevision {
@@ -43,10 +45,26 @@ struct SurfaceUpdate {
 }
 
 impl SurfaceRepetitionState {
-    fn protect(&mut self, fingerprint: u64) {
-        if self.fingerprints.len() < MAX_SURFACE_FINGERPRINTS {
-            self.fingerprints.entry(fingerprint).or_default();
+    fn bind(&mut self, fingerprint: u64, identity: &str) {
+        if self.fingerprints.get(&fingerprint).map(String::as_str) != Some(identity) {
+            self.generation = self.generation.wrapping_add(1);
+            self.fingerprints.insert(fingerprint, identity.to_string());
         }
+    }
+
+    fn bind_targets(&mut self, tool_name: &str, input: &str, identity: &str) {
+        for target in surface_target_keys(tool_name, input) {
+            if (self.targets.contains_key(&target) || self.targets.len() < MAX_SURFACE_FINGERPRINTS)
+                && self.targets.get(&target).map(String::as_str) != Some(identity) {
+                self.targets.insert(target, identity.to_string());
+                self.generation = self.generation.wrapping_add(1);
+            }
+        }
+    }
+
+    fn identity(&self, tool_name: &str, input: &str, raw: u64) -> Option<&str> {
+        self.fingerprints.get(&raw).filter(|identity| !identity.is_empty()).map(String::as_str)
+            .or_else(|| surface_target_keys(tool_name, input).first().and_then(|target| self.targets.get(target)).map(String::as_str))
     }
 
     fn apply(&mut self, fingerprint: u64, execution: SurfaceExecution) -> SurfaceUpdate {
@@ -64,7 +82,7 @@ impl SurfaceRepetitionState {
         if let Some(previous) = previous {
             previous.fingerprints.remove(&fingerprint);
         }
-        self.fingerprints.insert(fingerprint, execution.surface_id.clone());
+        self.bind(fingerprint, &execution.surface_id);
         let surface = self.surfaces.entry(execution.surface_id).or_insert_with(|| SurfaceRevision {
             revision: execution.state_revision,
             observed: false,
@@ -128,12 +146,46 @@ fn is_surface_observation(tool_name: &str, input: &str) -> bool {
     if tool_name == "Computer" {
         return serde_json::from_str::<serde_json::Value>(input).is_ok_and(|value| {
             matches!(value.get("action").and_then(serde_json::Value::as_str),
-                Some("observe" | "screenshot" | "read" | "find" | "wait_for"))
+                Some("observe" | "screenshot"))
         });
     }
     tool_name == BROWSER_CLI && serde_json::from_str::<Vec<String>>(input).is_ok_and(|argv| {
-        argv.len() > 1 && argv.first().is_some_and(|verb| agent_browser::browser_verb(verb)
-            .is_some_and(|verb| !verb.acts))
+        argv.len() > 1 && argv.first().is_some_and(|verb| verb == "read")
+    })
+}
+
+fn surface_target_keys(tool_name: &str, input: &str) -> Vec<String> {
+    if tool_name == "Computer" {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else { return Vec::new(); };
+        let argv = value.get("argv").and_then(serde_json::Value::as_array);
+        let argument = |flag: &str| argv.and_then(|argv| argv.windows(2).find(|pair| pair[0].as_str() == Some(flag)))
+            .and_then(|pair| pair[1].as_str());
+        let window = value.get("window_id").and_then(serde_json::Value::as_u64).map(|window| window.to_string())
+            .or_else(|| argument("--window-id").map(str::to_string));
+        let app = value.get("app").and_then(serde_json::Value::as_str).or_else(|| argument("--app"));
+        return window.map(|window| format!("Computer/window/{window}")).into_iter()
+            .chain(app.map(|app| format!("Computer/app/{}", app.trim()))).collect();
+    }
+    if tool_name == BROWSER_CLI {
+        return serde_json::from_str::<Vec<String>>(input).ok().and_then(|argv| argv.get(1).cloned())
+            .map(|label| vec![format!("{BROWSER_CLI}/label/{label}")]).unwrap_or_default();
+    }
+    Vec::new()
+}
+
+fn invalid_capability_call(input: &str) -> ResolvedToolCall {
+    let input = serde_json::from_str::<serde_json::Value>(input).ok().map_or_else(
+        || input.to_string(),
+        |value| serde_json::json!({"name":value.get("name"), "input":value.get("input")}).to_string());
+    ResolvedToolCall { name:"CapabilityInvoke".into(), input }
+}
+
+fn legacy_repetition_call(tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
+    if tool_name != "CapabilityInvoke" { return None; }
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    Some(ResolvedToolCall {
+        name:value.get("name")?.as_str()?.trim().to_string(),
+        input:value.get("input").cloned().unwrap_or_else(|| serde_json::json!({})).to_string(),
     })
 }
 
@@ -146,12 +198,9 @@ fn surface_observation_fingerprint(tool_name: &str, input: &str, surface_id: &st
         }
         serde_json::to_string(&(surface_id, action)).ok()?
     } else if tool_name == BROWSER_CLI {
-        let mut argv: Vec<String> = serde_json::from_str(input).ok()?;
-        if argv.len() < 2 || !agent_browser::observes(&argv[0]) {
-            return None;
-        }
-        argv.remove(1);
-        serde_json::to_string(&(surface_id, argv)).ok()?
+        let argv: Vec<String> = serde_json::from_str(input).ok()?;
+        let read = agent_browser::parse_read(&argv).ok()?;
+        serde_json::to_string(&(surface_id, ("read", read.selector.as_deref().map(str::trim), read.full))).ok()?
     } else {
         return None;
     };
@@ -194,7 +243,7 @@ mod surface_state_tests {
     fn the_binding_limit_keeps_existing_surface_confirmation_available() {
         let mut state = SurfaceRepetitionState::default();
         for index in 0..MAX_SURFACE_FINGERPRINTS {
-            state.protect(u64::try_from(index).unwrap());
+            state.apply(u64::try_from(index).unwrap(), observation("retained-fixture-surface".to_string(), 0));
         }
         let discarded = state.apply(u64::try_from(MAX_SURFACE_FINGERPRINTS).unwrap(),
             observation("discarded-fixture-surface".to_string(), 1));
@@ -565,13 +614,10 @@ where
     C: ApiClient,
     T: ToolExecutor,
 {
-    fn resolved_repetition_call(&self, tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
+    fn resolved_surface_call(&self, tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
         let resolved = match self.tool_executor.resolve_call(tool_name, input) {
             Ok(resolved) => resolved,
-            Err(_) if tool_name == "CapabilityInvoke" => Some(ResolvedToolCall {
-                name: tool_name.to_string(),
-                input: "invalid capability invocation".to_string(),
-            }),
+            Err(_) if tool_name == "CapabilityInvoke" => Some(invalid_capability_call(input)),
             Err(_) => None,
         };
         let (name, input) = resolved.as_ref()
@@ -591,10 +637,22 @@ where
         resolved
     }
 
+    fn resolved_repetition_call(&self, tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
+        let resolved = self.resolved_surface_call(tool_name, input);
+        if let Some(call) = &resolved {
+            if call.name == BROWSER_CLI && self.surface_repetition_state.identity(&call.name, &call.input,
+                fingerprint_tool_call(&call.name, &call.input)).is_none() {
+                // Legacy hosts have no attested content revision. Preserve the
+                // original Bash description and control revision, as on main.
+                return legacy_repetition_call(tool_name, input);
+            }
+        }
+        resolved
+    }
+
     fn repetition_fingerprint(&self, tool_name: &str, input: &str) -> u64 {
         let raw = fingerprint_tool_call(tool_name, input);
-        self.surface_repetition_state.fingerprints.get(&raw)
-            .filter(|identity| !identity.is_empty())
+        self.surface_repetition_state.identity(tool_name, input, raw)
             .and_then(|identity| surface_observation_fingerprint(tool_name, input, identity))
             .unwrap_or(raw)
     }
@@ -633,34 +691,21 @@ where
         let resolved = self.resolved_repetition_call(tool_name, input);
         let (tool_name, input) = resolved.as_ref()
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
-        let raw = fingerprint_tool_call(tool_name, input);
-        if is_surface_observation(tool_name, input)
-            && self.surface_repetition_state.fingerprints.len() >= MAX_SURFACE_FINGERPRINTS
-            && !self.surface_repetition_state.fingerprints.contains_key(&raw)
-        {
-            return Some((
-                "<system-reminder>This scoped observation cannot be tracked within the current surface evidence bound. Keep the original target and use an already observed scoped request, or start a fresh authorized session.</system-reminder>".to_string(),
-                self.attendance == Attendance::Unattended,
-            ));
-        }
         let fingerprint = self.repetition_fingerprint(tool_name, input);
-        let previous_count = self.tool_fingerprint_counts.get(&fingerprint).copied();
-        let notice = batch_hard_stops.preflight_notice_for(fingerprint, tool_name, || {
-            self.next_tool_repetition_hard_stop_notice(tool_name, input)
-        });
-        if is_surface_observation(tool_name, input)
-            && self.surface_repetition_state.take_verification(fingerprint)
-            && notice.is_some()
-        {
+        let next_count = self.tool_fingerprint_counts.get(&fingerprint).copied().unwrap_or(0).saturating_add(1);
+        let armed = batch_hard_stops.hard_stopped_fps.contains_key(&fingerprint)
+            || (next_count >= TOOL_REPETITION_HARD_STOP && self.tool_repetition_hard_stop_fps.contains(&fingerprint))
+            || (next_count == 1 && self.cross_turn_tool_fingerprints.get(&fingerprint).copied().unwrap_or(0).saturating_add(1)
+                >= TOOL_REPETITION_CROSS_TURN_HARD_STOP && self.cross_turn_tool_repetition_hard_stop_fps.contains(&fingerprint));
+        if is_surface_observation(tool_name, input) && armed
+            && !self.latest_matching_tool_result_was_microcompacted(fingerprint)
+            && self.surface_repetition_state.take_verification(fingerprint) {
             batch_hard_stops.forget(&[fingerprint]);
-            if let Some(count) = previous_count {
-                self.tool_fingerprint_counts.insert(fingerprint, count);
-            } else {
-                self.tool_fingerprint_counts.remove(&fingerprint);
-            }
             return None;
         }
-        notice
+        batch_hard_stops.preflight_notice_for(fingerprint, tool_name, || {
+            self.next_tool_repetition_hard_stop_notice(tool_name, input)
+        })
     }
 
     pub(super) fn note_surface_execution(
@@ -674,7 +719,11 @@ where
         let Some(surface) = surface.filter(|_| !is_error) else {
             return;
         };
-        let resolved = self.resolved_repetition_call(tool_name, input);
+        let previous = self.resolved_repetition_call(tool_name, input);
+        let (previous_name, previous_input) = previous.as_ref()
+            .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
+        let original = self.repetition_fingerprint(previous_name, previous_input);
+        let resolved = self.resolved_surface_call(tool_name, input);
         let (tool_name, input) = resolved.as_ref()
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
         let raw = fingerprint_tool_call(tool_name, input);
@@ -689,8 +738,11 @@ where
         if !update.accepted {
             return;
         }
-        self.surface_repetition_state.fingerprints.insert(raw, identity);
+        self.surface_repetition_state.bind(raw, &identity);
+        self.surface_repetition_state.bind_targets(tool_name, input, &identity);
+        self.move_repetition_fingerprint(original, fingerprint);
         self.move_repetition_fingerprint(raw, fingerprint);
+        batch_hard_stops.rekey(original, fingerprint);
         batch_hard_stops.rekey(raw, fingerprint);
         if self.surface_repetition_state.fingerprints.contains_key(&fingerprint) {
             self.pathless_fingerprints.remove(&raw);
@@ -731,10 +783,6 @@ where
         let resolved = self.resolved_repetition_call(tool_name, input);
         let (tool_name, input) = resolved.as_ref()
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
-        let raw = fingerprint_tool_call(tool_name, input);
-        if matches!(tool_name, "Computer" | BROWSER_CLI) {
-            self.surface_repetition_state.protect(raw);
-        }
         let fp = self.repetition_fingerprint(tool_name, input);
         let is_mutation = is_edit_or_write_tool(tool_name);
         // A SUCCESSFUL file mutation is real progress: re-reading a just-edited
@@ -994,11 +1042,16 @@ where
             for block in &message.blocks {
                 match block {
                     ContentBlock::ToolUse { id, name, input } => {
-                        let resolved = self.resolved_repetition_call(name, input);
-                        let (name, input) = resolved.as_ref()
-                            .map_or((name.as_str(), input.as_str()), |call| (call.name.as_str(), call.input.as_str()));
-                        tool_use_fingerprints
-                            .insert(id.as_str(), self.repetition_fingerprint(name, input));
+                        let mut cache = self.resolved_tool_use_fingerprints.borrow_mut();
+                        let generation = self.surface_repetition_state.generation;
+                        let cached = cache.entry(id.clone()).or_insert((u64::MAX, 0));
+                        if cached.0 != generation {
+                            let resolved = self.resolved_repetition_call(name, input);
+                            let (name, input) = resolved.as_ref()
+                                .map_or((name.as_str(), input.as_str()), |call| (call.name.as_str(), call.input.as_str()));
+                            *cached = (generation, self.repetition_fingerprint(name, input));
+                        }
+                        tool_use_fingerprints.insert(id.as_str(), cached.1);
                     }
                     ContentBlock::ToolResult {
                         tool_use_id,

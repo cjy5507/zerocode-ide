@@ -7,10 +7,6 @@ use zerocode_core::surface_execution::EXECUTION_ENVELOPE_ENV;
 
 use crate::{ToolContext, ToolError};
 
-const HOOK_PORT_ENV: &str = "ZEROCODE_HOOK_PORT";
-const BROWSER_CAPABILITY_ENV: &str = "ZEROCODE_BROWSER_TOKEN";
-const HOOK_CAPABILITY_ENV: &str = "ZEROCODE_HOOK_TOKEN";
-
 pub(crate) struct BrowserExecution {
     program: PathBuf,
     argv: Vec<String>,
@@ -44,19 +40,6 @@ pub(crate) fn canonical_call(input: &Value) -> Option<ResolvedToolCall> {
     })
 }
 
-fn matches_program(program: &Path, expected: &str) -> bool {
-    if !expected.contains(EXECUTION_ENVELOPE_ENV) {
-        return false;
-    }
-    let Ok(cap) = u64::try_from(expected.len()) else {
-        return false;
-    };
-    runtime::secure_fs::read_regular_file_absolute_no_follow_bounded(program, cap)
-        .ok()
-        .flatten()
-        .is_some_and(|contents| contents.as_bytes() == expected.as_bytes())
-}
-
 impl BrowserExecution {
     pub(crate) fn prepare(input: &BashCommandInput) -> Option<Self> {
         if input.run_in_background == Some(true) {
@@ -74,31 +57,7 @@ impl BrowserExecution {
             .find(|program| program.is_file())?;
         let parent = std::fs::canonicalize(candidate.parent()?).ok()?;
         let program = parent.join(candidate.file_name()?);
-        #[cfg(not(windows))]
-        let supported = matches_program(
-            &program,
-            &agent_browser::shim_script(HOOK_PORT_ENV, BROWSER_CAPABILITY_ENV, HOOK_CAPABILITY_ENV),
-        );
-        #[cfg(windows)]
-        let supported = {
-            let powershell_name = format!("{BROWSER_CLI}.ps1");
-            let expected_launcher = zerocode_core::agent_teams::shim_cmd(&powershell_name);
-            let launcher = runtime::secure_fs::read_regular_file_absolute_no_follow_bounded(
-                &program,
-                u64::try_from(expected_launcher.len()).ok()?,
-            )
-            .ok()
-            .flatten();
-            launcher.as_deref() == Some(expected_launcher.as_str())
-                && matches_program(
-                    &parent.join(powershell_name),
-                    &agent_browser::shim_script_powershell(
-                        HOOK_PORT_ENV,
-                        BROWSER_CAPABILITY_ENV,
-                        HOOK_CAPABILITY_ENV,
-                    ),
-                )
-        };
+        let supported = crate::surface_shim::is_installed(&program, zerocode_core::agent_shims::SurfaceShim::Browser);
         supported.then_some(Self { program, argv })
     }
 
@@ -160,7 +119,7 @@ mod tests {
         std::fs::write(&program, installed_script(SurfaceShim::Browser, false)).unwrap();
         #[cfg(windows)]
         {
-            let powershell = format!("{BROWSER_CLI}.ps1");
+            let powershell = format!("{BROWSER_CLI}.impl.ps1");
             std::fs::write(&program, zerocode_core::agent_teams::shim_cmd(&powershell)).unwrap();
             std::fs::write(directory.path().join(powershell), installed_script(SurfaceShim::Browser, true)).unwrap();
         }
@@ -168,6 +127,40 @@ mod tests {
         let input: BashCommandInput = serde_json::from_value(json!({"command":"zerocode-browser read browser-1"})).unwrap();
         assert!(BrowserExecution::prepare(&input).is_some(),
             "prepare must accept the shim bytes the window actually installs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_installed_browser_shim_returns_metadata_through_prepare_and_the_real_transport() {
+        mod surface_host {
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../crates/zerocode-core/tests/support/surface_host.rs"));
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let expected = SurfaceExecution { surface_id:"fixture-host/browser/1/lease-a".into(),
+            state_revision:8, effect:SurfaceEffect::Observation };
+        let reply = ExecutionEnvelope { stdout:"fixture page".into(), stderr:String::new(), exit_code:0,
+            surface_execution:Some(expected.clone()) };
+        let host = surface_host::SurfaceHost::start(directory.path(), Some(vec![json!({"verb":"read","answer":reply})]),
+            zerocode_core::agent_shims::SurfaceShim::Browser);
+        let _host_environment = host.environment().into_iter().map(|(key, value)| match value {
+            Some(value) => crate::tests::EnvGuard::set(key, &value),
+            None => crate::tests::EnvGuard::clear(key),
+        }).collect::<Vec<_>>();
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf())
+            .chain(std::env::split_paths(&inherited_path))).unwrap();
+        let _path = crate::tests::EnvGuard::set("PATH", path.to_str().unwrap());
+        let input: BashCommandInput = serde_json::from_value(json!({"command":"zerocode-browser read browser-1",
+            "timeout":5000,"dangerouslyDisableSandbox":true})).unwrap();
+        let prepared = BrowserExecution::prepare(&input);
+        assert!(prepared.is_some(), "the real installed transport must be admitted before metadata can be received");
+        let mut context = ToolContext::new();
+        context.cwd = Some(directory.path().to_path_buf());
+        let result = prepared.unwrap().run(input, &context, Some("installed-browser-fixture"), false).unwrap();
+        assert_eq!(result.surface, Some(expected), "the installed shim's authenticated frame must reach the same execution result");
+        let visible: runtime::BashCommandOutput = serde_json::from_str(&result.text).unwrap();
+        assert_eq!(visible.stdout, "fixture page");
+        assert_eq!(std::fs::read_to_string(directory.path().join("calls")).unwrap().lines().count(), 1);
     }
 
     #[test]

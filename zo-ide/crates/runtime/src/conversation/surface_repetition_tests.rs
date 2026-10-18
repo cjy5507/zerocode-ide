@@ -123,9 +123,10 @@ impl ToolExecutor for ScriptExecutor {
         self.resolutions.fetch_add(1, Ordering::Relaxed);
         if name == "Bash" {
             let value: Value = serde_json::from_str(input).map_err(|error| ToolError::new(error.to_string()))?;
-            if let Some(words) = value.get("command").and_then(Value::as_str).and_then(crate::bash_validation::literal_argv)
-                && words.first().map(String::as_str) == Some("zerocode-browser") {
-                return Ok(Some(ResolvedToolCall { name:"zerocode-browser".into(), input:serde_json::to_string(&words[1..]).unwrap() }));
+            if let Some(words) = value.get("command").and_then(Value::as_str).and_then(crate::bash_validation::literal_argv) {
+                if words.first().map(String::as_str) == Some("zerocode-browser") {
+                    return Ok(Some(ResolvedToolCall { name:"zerocode-browser".into(), input:serde_json::to_string(&words[1..]).unwrap() }));
+                }
             }
         }
         if name != "CapabilityInvoke" {
@@ -1177,16 +1178,24 @@ fn unrecorded_calls_cannot_fill_the_surface_table_and_refuse_a_new_observation()
 
 #[test]
 fn unrecorded_browser_reads_keep_their_original_revision_and_description_keys() {
-    let calls = (0..6).map(|revision| PlannedCall {
-        name:"Bash".into(),
-        input:json!({"command":format!("zerocode-browser read browser-1 --workspace-revision {revision}"),
-                     "description":format!("read page {revision}")}).to_string(),
-        result:Ok("legacy browser result".to_string().into()),
-    }).collect();
+    let mut calls = Vec::new();
+    for revision in 0..6 {
+        if revision > 0 { calls.push(PlannedCall {
+            name:"Bash".into(), input:json!({"command":format!("zerocode-browser goto browser-1 https://example.test/page-{revision} --workspace-revision {revision}")}).to_string(),
+            result:Ok("legacy navigation".to_string().into()),
+        }); }
+        calls.push(PlannedCall { name:"Bash".into(),
+            input:json!({"command":format!("zerocode-browser read browser-1 --workspace-revision {revision}"),
+                         "description":format!("read page {revision}")}).to_string(),
+            result:Ok("legacy browser result".to_string().into()),
+        });
+    }
     let (mut runtime, executor) = runtime_for(calls);
     runtime.run_turn("Read after each navigation on an older host", None).unwrap();
-    assert_eq!(executor.state.lock().unwrap().executed.len(), 6,
-        "an older browser shim must retain all six distinct main-compatible calls");
+    let state = executor.state.lock().unwrap();
+    let reads = state.executed.iter().filter(|call| call.name == "zerocode-browser"
+        && serde_json::from_str::<Vec<String>>(&call.input).is_ok_and(|argv| argv.first().map(String::as_str) == Some("read"))).count();
+    assert_eq!(reads, 6, "all six page reads, including the fourth after navigation, must retain the older host's main-compatible keys");
 }
 
 #[test]
@@ -1287,4 +1296,87 @@ fn retain_script_result(runtime: &mut ConversationRuntime<ScriptApi, ScriptExecu
         id:"retained-surface-call".into(), name:name.into(), input:input.into(),
     }])).unwrap();
     runtime.session_mut().push_message(ConversationMessage::tool_result("retained-surface-call", name, "retained result", false)).unwrap();
+}
+
+
+#[test]
+fn armed_verification_preserves_the_progress_watermark_and_reprieve() {
+    use super::repetition::ToolBatchRepetitionHardStops;
+    let (mut runtime, _) = runtime_for(Vec::new());
+    let input = observe(7).input;
+    retain_script_result(&mut runtime, "Computer", &input);
+    let mut batch = ToolBatchRepetitionHardStops::default();
+    runtime.note_surface_execution("Computer", &input, observe(7).result.unwrap().surface, false, &mut batch);
+    for _ in 0..3 { runtime.note_tool_repetition("Computer", &input, false); }
+    runtime.arm_tool_repetition_hard_stops();
+    let ack = computer("left_click", 41, 7, SurfaceEffect::Acknowledged);
+    runtime.note_surface_execution(&ack.name, &ack.input, ack.result.unwrap().surface, false, &mut batch);
+    runtime.turn_progress_results = 1;
+    let watermark = runtime.progress_marker_at_last_signal;
+    let nudges = runtime.heuristic_stop_nudges;
+    assert!(runtime.tool_repetition_preflight("Computer", &input, &mut batch).is_none());
+    assert_eq!(runtime.progress_marker_at_last_signal, watermark, "acknowledged verification must not advance the progress watermark");
+    assert_eq!(runtime.heuristic_stop_nudges, nudges, "acknowledged verification must not spend a heuristic reprieve");
+}
+
+#[test]
+fn first_seen_computer_target_aliases_do_not_execute_past_an_attended_limit() {
+    for alias in [json!({"action":"observe","app":"Fixture"}),
+                  json!({"action":"observe","app":"pid:4242","window_id":41,"ocr":false})] {
+        let mut calls = vec![observe(7), observe(7), observe(7)];
+        for _ in 0..3 { let mut call = observe(7); call.input = alias.to_string(); calls.push(call); }
+        let (mut runtime, executor) = runtime_for(calls);
+        runtime.set_attendance(Attendance::Attended);
+        runtime.run_turn("Keep the observed target bounded for each spelling", None).unwrap();
+        assert_eq!(executor.observations(), 3, "the first spelling of a known target must be stopped before dispatch: {alias}");
+    }
+}
+
+#[test]
+fn a_new_window_of_the_same_app_is_not_the_previously_stopped_target() {
+    let mut calls = vec![observe(7), observe(7), observe(7)];
+    calls.push(computer("observe", 52, 0, SurfaceEffect::Observation));
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
+    runtime.run_turn("Observe another authorized window of the same app", None).unwrap();
+    assert_eq!(executor.observations(), 4, "an unknown explicit window must not borrow the app alias of another window");
+}
+
+#[test]
+fn alternating_unchanged_browser_views_each_stop_at_exactly_three_reads() {
+    let mut calls = Vec::new();
+    for _ in 0..6 {
+        for selector in [None, Some("h1")] {
+            let mut argv = vec!["read", "browser-1"];
+            if let Some(selector) = selector { argv.push(selector); }
+            calls.push(PlannedCall { name:"zerocode-browser".into(), input:serde_json::to_string(&argv).unwrap(),
+                result:Ok(ToolExecutionResult { text:"unchanged view".into(), surface:Some(SurfaceExecution {
+                    surface_id:"fixture-browser-surface".into(), state_revision:0, effect:SurfaceEffect::Observation,
+                }) }) });
+        }
+    }
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
+    runtime.run_turn("Read unchanged page and selector views without releasing either limit", None).unwrap();
+    let state = executor.state.lock().unwrap();
+    for length in [2, 3] {
+        let count = state.executed.iter().filter(|call| serde_json::from_str::<Vec<String>>(&call.input)
+            .is_ok_and(|argv| argv.len() == length)).count();
+        assert_eq!(count, 3, "each unchanged browser view must stop at exactly three reads, argv length={length}");
+    }
+}
+
+#[test]
+fn a_first_seen_browser_selector_spelling_cannot_run_past_an_attended_limit() {
+    let calls = (0..9).map(|index| PlannedCall { name:"zerocode-browser".into(),
+        input:serde_json::to_string(&["read".to_string(), "browser-1".into(), format!("{}h1{}", " ".repeat(index), " ".repeat(index))]).unwrap(),
+        result:Ok(ToolExecutionResult { text:"same heading".into(), surface:Some(SurfaceExecution {
+            surface_id:"fixture-browser-surface".into(), state_revision:0, effect:SurfaceEffect::Observation,
+        }) }),
+    }).collect();
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
+    runtime.run_turn("Keep whitespace aliases of the same selector bounded", None).unwrap();
+    assert_eq!(executor.state.lock().unwrap().executed.len(), 3,
+        "a first spelling of the same selector must not get a fourth execution");
 }

@@ -107,6 +107,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
+#[cfg(test)]
 pub(crate) fn dispatch(
     ctx: &ToolContext,
     enforcer: Option<&PermissionEnforcer>,

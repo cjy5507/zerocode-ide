@@ -3600,6 +3600,11 @@ mod oauth_refresh_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod surface_host {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../crates/zerocode-core/tests/support/surface_host.rs"));
+    }
+
     use super::*;
     use std::io;
     #[cfg(unix)]
@@ -3893,15 +3898,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn production_result_dispatch_and_cli_executor_share_computer_metadata_and_gates() {
-        use std::os::unix::fs::PermissionsExt as _;
         use runtime::ToolExecutor;
         use zerocode_core::surface_execution::{SurfaceEffect, SurfaceExecution};
 
         let _environment = crate::test_env_lock();
         let directory = tempfile::tempdir().unwrap();
-        let shim = directory.path().join("zerocode-computer");
-        std::fs::write(&shim, "#!/bin/sh\nprintf '%s\\n' '{\"ok\":true,\"surfaceExecution\":{\"surfaceId\":\"fixture-host/computer/41/lease-a\",\"stateRevision\":7,\"effect\":{\"kind\":\"observation\"}},\"result\":{\"window\":{\"id\":41}}}'\n").unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let expected = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".to_string(),
+            state_revision:7, effect:SurfaceEffect::Observation };
+        std::fs::write(directory.path().join("reply-observe"), serde_json::json!({"ok":true,
+            "surfaceExecution":expected,"result":{"window":{"id":41}}}).to_string()).unwrap();
+        let host = surface_host::SurfaceHost::start(directory.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = host.environment().into_iter().map(|(key, value)|
+            crate::support::EnvVarGuard::set(key, value.as_deref())).collect::<Vec<_>>();
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf())
             .chain(std::env::split_paths(&inherited_path))).unwrap();
@@ -3909,8 +3917,7 @@ mod tests {
         let registry = GlobalToolRegistry::builtin();
         let turn_allowed = Arc::new(Mutex::new(None));
         let input = r#"{"name":"Computer","input":{"action":"observe","app":"Fixture","window_id":41},"nonce":"wrapper-only"}"#;
-        let expected = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".to_string(),
-            state_revision:7, effect:SurfaceEffect::Observation };
+
 
         let concurrent = dispatch_concurrent_tool_result(&registry, None, None, &turn_allowed, None, None, "CapabilityInvoke", input).unwrap();
         assert_eq!(concurrent.surface.as_ref(), Some(&expected));
@@ -3938,16 +3945,20 @@ mod tests {
     fn production_computer_capability_loop_confirms_the_same_surface_in_sync_and_streaming() {
         use std::collections::VecDeque;
         use std::future::Future;
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::pin::Pin;
         use runtime::{AsyncApiClient, AssistantEvent, Session};
         use runtime::message_stream::types::{BlockId, RenderBlock};
 
         #[derive(Clone)]
-        struct LoopApi(Arc<Mutex<VecDeque<Vec<AssistantEvent>>>>);
+        struct LoopApi {
+            batches: Arc<Mutex<VecDeque<Vec<AssistantEvent>>>>,
+            requests: Arc<AtomicUsize>,
+        }
         impl LoopApi {
             fn next(&self) -> Vec<AssistantEvent> {
-                self.0.lock().unwrap().pop_front().unwrap_or_else(|| vec![
+                self.requests.fetch_add(1, Ordering::Relaxed);
+                self.batches.lock().unwrap().pop_front().unwrap_or_else(|| vec![
                     AssistantEvent::TextDelta("finished".to_string()), AssistantEvent::MessageStop,
                 ])
             }
@@ -3975,49 +3986,11 @@ mod tests {
         let mut completed_modes = Vec::new();
         for streaming in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let shim = directory.path().join("zerocode-computer");
-            std::fs::write(&shim, r#"#!/usr/bin/env python3
-import json
-import os
-import pathlib
-import sys
-root = pathlib.Path(__file__).parent
-verb = sys.argv[1]
-with (root / "calls.txt").open("a") as calls:
-    calls.write(verb + "\n")
-trace_path = os.environ.get("ZEROCODE_SURFACE_TRACE_PATH")
-if trace_path:
-    trace = json.loads(pathlib.Path(trace_path).read_text())
-    cursor_path = root / "cursor.txt"
-    cursor = int(cursor_path.read_text()) if cursor_path.exists() else 0
-    if cursor >= len(trace) or trace[cursor]["verb"] != verb:
-        print(json.dumps({"ok": False, "error": {"code": "fixture_sequence_mismatch"}}))
-        sys.exit(0)
-    cursor_path.write_text(str(cursor + 1))
-    print(json.dumps(trace[cursor]["answer"]))
-    sys.exit(0)
-state_path = root / "state.txt"
-state = int(state_path.read_text()) if state_path.exists() else 0
-pending = root / "pending.txt"
-effect = {"kind": "observation"}
-revision = state
-if verb == "click":
-    pending.write_text(str(state))
-    state_path.write_text(str(state + 1))
-    effect = {"kind": "acknowledged"}
-elif verb == "observe" and pending.exists():
-    previous = int(pending.read_text())
-    pending.unlink()
-    effect = {"kind": "confirmedChange", "previousRevision": previous}
-result = {"app": {"pid": 4242, "bundleId": "test.fixture"},
-          "window": {"id": 41},
-          "tree": {"window": {"id": 41}, "text": "Page " + str(state), "elementCount": 2},
-          "action": {"targetWindowId": 41}}
-print(json.dumps({"ok": True, "result": result,
-                  "surfaceExecution": {"surfaceId": "fixture-host/computer/41/lease-a",
-                                       "stateRevision": revision, "effect": effect}}))
-"#).unwrap();
-            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let trace = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                "/../../../../crates/zerocode-core/tests/fixtures/surface-host-trace.json"))).unwrap();
+            let host = surface_host::SurfaceHost::start(directory.path(), Some(trace), zerocode_core::agent_shims::SurfaceShim::Computer);
+            let _host_environment = host.environment().into_iter().map(|(key, value)|
+                crate::support::EnvVarGuard::set(key, value.as_deref())).collect::<Vec<_>>();
             let inherited_path = std::env::var_os("PATH").unwrap_or_default();
             let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf())
                 .chain(std::env::split_paths(&inherited_path))).unwrap();
@@ -4032,7 +4005,8 @@ print(json.dumps({"ok": True, "result": result,
                     input:serde_json::json!({"name":"Computer","input":inner}).to_string(),
                 }, AssistantEvent::MessageStop]);
             }
-            let api = LoopApi(Arc::new(Mutex::new(batches)));
+            let model_requests = Arc::new(AtomicUsize::new(0));
+            let api = LoopApi { batches:Arc::new(Mutex::new(batches)), requests:Arc::clone(&model_requests) };
             let registry = GlobalToolRegistry::builtin();
             let executor = crate::CliToolExecutor::new(None, None, false, registry.clone(), None);
             let mut conversation = ConversationRuntime::new(Session::new(), api.clone(), executor,
@@ -4054,20 +4028,22 @@ print(json.dumps({"ok": True, "result": result,
             } else {
                 conversation.run_turn("Confirm each change on the selected window",None).unwrap();
             }
-            let calls = std::fs::read_to_string(directory.path().join("calls.txt")).unwrap();
+            let calls = std::fs::read_to_string(directory.path().join("calls")).unwrap();
             let observations = calls.lines().filter(|verb| *verb == "observe").count();
             let clicks = calls.lines().filter(|verb| *verb == "click").count();
             let fallbacks = calls.lines().filter(|verb| !matches!(*verb, "observe" | "click")).count();
             eprintln!("SURFACE_LOOP_METRIC {}", serde_json::json!({
                 "streaming":streaming,
-                "hostProducerTrace":std::env::var_os("ZEROCODE_SURFACE_TRACE_PATH").is_some(),
+                "hostProducerTrace":true,
                 "identicalModelObservations":observations.saturating_sub(clicks),
                 "hostObservations":observations, "backgroundClicks":clicks,
-                "fallbacks":fallbacks, "hostSteps":calls.lines().count(),
+                "additionalHostCalls":fallbacks, "hostSteps":calls.lines().count(),
+                "modelRequests":model_requests.load(Ordering::Relaxed),
                 "completed":observations == 11 && clicks == 5,
-                "completionModelSteps":if observations == 11 && clicks == 5 { Some(11) } else { None },
+                "completionModelRequests":if observations == 11 && clicks == 5 { Some(model_requests.load(Ordering::Relaxed)) } else { None },
             }));
-            assert_eq!(fallbacks, 0, "the fixture must not escape to screenshot, open or activate");
+            assert_eq!(fallbacks, 0, "the tool layer must add no other host calls to the scripted scene");
+            assert_eq!(model_requests.load(Ordering::Relaxed), 12, "eleven tool batches and the final finish must issue twelve actual model requests");
             completed_modes.push((streaming, observations, clicks));
         }
         assert!(completed_modes.iter().all(|(_, observations, clicks)| *observations == 11 && *clicks == 5),

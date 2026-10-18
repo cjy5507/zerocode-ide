@@ -46,11 +46,9 @@ type BuiltinDispatcher = fn(
 ) -> Option<Result<String, ToolError>>;
 
 const BUILTIN_DISPATCHERS: &[BuiltinDispatcher] = &[
-    bash_tools::dispatch,
     codegraph_tools::dispatch,
     file_tools::dispatch,
     image_tools::dispatch,
-    computer_tools::dispatch,
     artifact_tools::dispatch,
     web_tools::dispatch,
     task_tools::dispatch,

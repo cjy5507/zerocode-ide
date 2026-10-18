@@ -518,15 +518,6 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     }]
 }
 
-pub(crate) fn dispatch(
-    ctx: &ToolContext,
-    enforcer: Option<&PermissionEnforcer>,
-    name: &str,
-    input: &Value,
-) -> Option<Result<String, ToolError>> {
-    dispatch_result(ctx, enforcer, name, input).map(|result| result.map(|result| result.text))
-}
-
 pub(crate) fn dispatch_result(
     ctx: &ToolContext,
     enforcer: Option<&PermissionEnforcer>,
@@ -1281,6 +1272,7 @@ fn seconds_to_ms(duration: Option<f64>, action: &str) -> Result<u64, ToolError> 
 
 /// One trip down the shim: the command, its JSON envelope back, bounded.
 fn call_shim(road: &ComputerRoad, argv: &[String], cwd: Option<&Path>) -> Result<Value, ToolError> {
+    let trusted = crate::surface_shim::is_installed(&road.program, zerocode_core::agent_shims::SurfaceShim::Computer);
     let mut command = std::process::Command::new(&road.program);
     command
         .args(argv)
@@ -1349,7 +1341,12 @@ fn call_shim(road: &ComputerRoad, argv: &[String], cwd: Option<&Path>) -> Result
     // own words (no window, no token) and is reported as they are.
     let envelope = zerocode_core::computer_use_protocol::answer_envelope(&stdout, &stderr);
     match envelope {
-        Some(envelope) => Ok(envelope),
+        Some(mut envelope) => {
+            if !trusted {
+                if let Some(object) = envelope.as_object_mut() { object.remove("surfaceExecution"); }
+            }
+            Ok(envelope)
+        },
         None => Err(ToolError::Execution(format!(
             "`{COMPUTER_SHIM} {}` answered without an envelope (exit {}): {}",
             argv.join(" "),
@@ -2157,6 +2154,11 @@ pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &Co
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod surface_host {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../crates/zerocode-core/tests/support/surface_host.rs"));
+    }
+
     use super::*;
     #[cfg(unix)]
     use runtime::{CompactionSummarizer, ContentBlock, ConversationMessage, MessageRole, Session};
@@ -2381,7 +2383,11 @@ mod tests {
     #[test]
     fn production_registry_and_capability_preserve_only_outer_host_surface_metadata() {
         let dir = tempfile::tempdir().unwrap();
-        fake_shim(dir.path());
+        let _host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = _host.environment().into_iter().map(|(key, value)| match value {
+            Some(value) => crate::tests::EnvGuard::set(key, &value),
+            None => crate::tests::EnvGuard::clear(key),
+        }).collect::<Vec<_>>();
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
         let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf())
             .chain(std::env::split_paths(&inherited_path))).unwrap();
@@ -2453,7 +2459,12 @@ mod tests {
     #[test]
     fn a_post_action_observation_keeps_its_host_effect_outside_the_visible_body() {
         let dir = tempfile::tempdir().unwrap();
-        let (road, _) = fake_shim(dir.path());
+        let _host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = _host.environment().into_iter().map(|(key, value)| match value {
+            Some(value) => crate::tests::EnvGuard::set(key, &value),
+            None => crate::tests::EnvGuard::clear(key),
+        }).collect::<Vec<_>>();
+        let road = ComputerRoad { program:dir.path().join(COMPUTER_SHIM) };
         let ctx = crate::tests::tool_context_outside_cwd_windows();
         let acknowledged = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".into(), state_revision:7,
             effect:zerocode_core::surface_execution::SurfaceEffect::Acknowledged };
@@ -2473,7 +2484,12 @@ mod tests {
     #[test]
     fn a_changed_control_identity_during_post_action_observation_cannot_claim_progress() {
         let dir = tempfile::tempdir().unwrap();
-        let (road, _) = fake_shim(dir.path());
+        let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = host.environment().into_iter().map(|(key, value)| match value {
+            Some(value) => crate::tests::EnvGuard::set(key, &value),
+            None => crate::tests::EnvGuard::clear(key),
+        }).collect::<Vec<_>>();
+        let road = ComputerRoad { program:dir.path().join(COMPUTER_SHIM) };
         let ctx = crate::tests::tool_context_outside_cwd_windows();
         std::fs::write(dir.path().join("reply-click"), json!({"ok":true,"surfaceExecution":{
             "surfaceId":"fixture-host/computer/41/lease-a","stateRevision":7,"effect":{"kind":"acknowledged"}},

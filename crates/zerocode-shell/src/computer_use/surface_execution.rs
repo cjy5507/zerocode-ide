@@ -119,7 +119,7 @@ fn supported(method: ComputerMethod) -> bool {
 
 struct HeldSurface {
     identity: String,
-    fingerprint: [u8; 32],
+    views: VecDeque<(String, [u8; 32])>,
     revision: u64,
     acknowledged: Option<u64>,
 }
@@ -145,7 +145,6 @@ impl Tracker {
         let mut digest = Sha256::new();
         digest.update(self.instance);
         digest.update(epoch.provider.to_le_bytes());
-        digest.update(epoch.stopped.to_le_bytes());
         hash_word(&mut digest, context.actor.pane.as_deref());
         hash_word(&mut digest, context.actor.task.as_deref());
         hash_word(&mut digest, context.actor.scope.as_deref());
@@ -155,11 +154,25 @@ impl Tracker {
     }
 
     fn observe(&mut self, identity: String, fingerprint: [u8; 32]) -> Option<SurfaceExecution> {
+        self.observe_view(identity, String::new(), fingerprint)
+    }
+
+    fn observe_view(
+        &mut self,
+        identity: String,
+        view: String,
+        fingerprint: [u8; 32],
+    ) -> Option<SurfaceExecution> {
         let index = self.held.iter().position(|held| held.identity == identity);
-        let (held, effect) = if let Some(index) = index {
+        let (mut held, effect) = if let Some(index) = index {
             let mut held = self.held.remove(index)?;
             let previous = held.revision;
-            let changed = held.fingerprint != fingerprint;
+            let previous_view = held
+                .views
+                .iter()
+                .position(|(key, _)| key == &view)
+                .and_then(|index| held.views.remove(index));
+            let changed = previous_view.is_some_and(|(_, previous)| previous != fingerprint);
             let acknowledged = held.acknowledged.take();
             let effect = if changed {
                 let Some(revision) = self.revision.checked_add(1) else {
@@ -168,7 +181,6 @@ impl Tracker {
                 };
                 self.revision = revision;
                 held.revision = revision;
-                held.fingerprint = fingerprint;
                 if acknowledged == Some(previous) {
                     SurfaceEffect::ConfirmedChange {
                         previous_revision: previous,
@@ -187,13 +199,17 @@ impl Tracker {
             (
                 HeldSurface {
                     identity: identity.clone(),
-                    fingerprint,
+                    views: VecDeque::new(),
                     revision: 0,
                     acknowledged: None,
                 },
                 SurfaceEffect::Observation,
             )
         };
+        if held.views.len() >= SURFACE_EXECUTION_CACHE_LIMIT {
+            held.views.pop_front();
+        }
+        held.views.push_back((view, fingerprint));
         let evidence = SurfaceExecution {
             surface_id: identity,
             state_revision: held.revision,
@@ -203,12 +219,12 @@ impl Tracker {
         Some(evidence)
     }
 
-    fn acknowledge(&mut self, identity: String) -> Option<SurfaceExecution> {
+    fn acknowledge(&mut self, identity: String, can_confirm: bool) -> Option<SurfaceExecution> {
         let held = self
             .held
             .iter_mut()
             .find(|held| held.identity == identity)?;
-        held.acknowledged = Some(held.revision);
+        held.acknowledged = can_confirm.then_some(held.revision);
         Some(SurfaceExecution {
             surface_id: identity,
             state_revision: held.revision,
@@ -437,7 +453,6 @@ impl BrowserContext {
         hash_word(&mut digest, self.actor.scope.as_deref());
         hash_word(&mut digest, Some(&self.label));
         digest.update(self.control_revision.to_le_bytes());
-        digest.update(self.stopped.to_le_bytes());
         let identity = format!("{:x}", digest.finalize());
         if verb == "read" {
             // This last line was stamped by finish_observation, after the page
@@ -453,9 +468,13 @@ impl BrowserContext {
                 return None;
             }
             let observation = observation.filter(|observed| observed.label == self.label)?;
-            tracker.observe(identity, observation.fingerprint)
+            let read = zerocode_core::agent_browser::parse_read(&command.argv).ok()?;
+            let view =
+                serde_json::to_string(&(verb, read.selector.as_deref().map(str::trim), read.full))
+                    .ok()?;
+            tracker.observe_view(identity, view, observation.fingerprint)
         } else if zerocode_core::agent_browser::acts(verb) {
-            tracker.acknowledge(identity)
+            tracker.acknowledge(identity, verb != "eval")
         } else {
             None
         }
@@ -515,7 +534,7 @@ fn envelope_at(
             ) {
                 tracker.observe(identity, target.fingerprint()?)
             } else {
-                tracker.acknowledge(identity)
+                tracker.acknowledge(identity, true)
             }
         });
     let mut envelope = json!({ "ok": true, "result": result });
@@ -1172,6 +1191,19 @@ mod tests {
             trace.push(json!({"verb":"observe", "answer":look(&mut tracker, &owner, 41, &text)}));
             trace.push(json!({"verb":"observe", "answer":look(&mut tracker, &owner, 41, &text)}));
         }
+        let mut stable = trace.clone();
+        for row in &mut stable {
+            row["answer"]["surfaceExecution"]["surfaceId"] =
+                json!("fixture-host/computer/41/lease-a");
+        }
+        let fixture: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../zerocode-core/tests/fixtures/surface-host-trace.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            stable, fixture,
+            "the committed CLI trace must still match the real host producer"
+        );
         if let Some(destination) = std::env::var_os("ZEROCODE_SURFACE_TRACE_PATH") {
             std::fs::write(destination, serde_json::to_vec_pretty(&trace).unwrap()).unwrap();
         }

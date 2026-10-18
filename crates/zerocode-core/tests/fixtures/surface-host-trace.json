@@ -1,0 +1,499 @@
+[
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 0",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 0,
+        "effect": {
+          "kind": "observation"
+        }
+      }
+    }
+  },
+  {
+    "verb": "click",
+    "answer": {
+      "ok": true,
+      "result": {
+        "snapshot": {
+          "id": "snapshot-other",
+          "app": {
+            "pid": 4242,
+            "bundleId": "test.fixture"
+          },
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "treeText": "Page 0",
+          "elementCount": 2
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 0,
+        "effect": {
+          "kind": "acknowledged"
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 1",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 1,
+        "effect": {
+          "kind": "confirmedChange",
+          "previousRevision": 0
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 1",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 1,
+        "effect": {
+          "kind": "observation"
+        }
+      }
+    }
+  },
+  {
+    "verb": "click",
+    "answer": {
+      "ok": true,
+      "result": {
+        "snapshot": {
+          "id": "snapshot-other",
+          "app": {
+            "pid": 4242,
+            "bundleId": "test.fixture"
+          },
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "treeText": "Page 1",
+          "elementCount": 2
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 1,
+        "effect": {
+          "kind": "acknowledged"
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 2",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 2,
+        "effect": {
+          "kind": "confirmedChange",
+          "previousRevision": 1
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 2",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 2,
+        "effect": {
+          "kind": "observation"
+        }
+      }
+    }
+  },
+  {
+    "verb": "click",
+    "answer": {
+      "ok": true,
+      "result": {
+        "snapshot": {
+          "id": "snapshot-other",
+          "app": {
+            "pid": 4242,
+            "bundleId": "test.fixture"
+          },
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "treeText": "Page 2",
+          "elementCount": 2
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 2,
+        "effect": {
+          "kind": "acknowledged"
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 3",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 3,
+        "effect": {
+          "kind": "confirmedChange",
+          "previousRevision": 2
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 3",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 3,
+        "effect": {
+          "kind": "observation"
+        }
+      }
+    }
+  },
+  {
+    "verb": "click",
+    "answer": {
+      "ok": true,
+      "result": {
+        "snapshot": {
+          "id": "snapshot-other",
+          "app": {
+            "pid": 4242,
+            "bundleId": "test.fixture"
+          },
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "treeText": "Page 3",
+          "elementCount": 2
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 3,
+        "effect": {
+          "kind": "acknowledged"
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 4",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 4,
+        "effect": {
+          "kind": "confirmedChange",
+          "previousRevision": 3
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 4",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 4,
+        "effect": {
+          "kind": "observation"
+        }
+      }
+    }
+  },
+  {
+    "verb": "click",
+    "answer": {
+      "ok": true,
+      "result": {
+        "snapshot": {
+          "id": "snapshot-other",
+          "app": {
+            "pid": 4242,
+            "bundleId": "test.fixture"
+          },
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "treeText": "Page 4",
+          "elementCount": 2
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 4,
+        "effect": {
+          "kind": "acknowledged"
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 5",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 5,
+        "effect": {
+          "kind": "confirmedChange",
+          "previousRevision": 4
+        }
+      }
+    }
+  },
+  {
+    "verb": "observe",
+    "answer": {
+      "ok": true,
+      "result": {
+        "app": {
+          "pid": 4242,
+          "bundleId": "test.fixture"
+        },
+        "tree": {
+          "id": "snapshot-fixture",
+          "window": {
+            "id": 41,
+            "title": "Fixture"
+          },
+          "text": "Page 5",
+          "elementCount": 2
+        },
+        "screenshot": null,
+        "marks": {
+          "lookId": "look-fixture"
+        }
+      },
+      "surfaceExecution": {
+        "surfaceId": "fixture-host/computer/41/lease-a",
+        "stateRevision": 5,
+        "effect": {
+          "kind": "observation"
+        }
+      }
+    }
+  }
+]
