@@ -323,3 +323,36 @@ impl runtime::ApiClient for Answers {
         Ok(vec![AssistantEvent::TextDelta("done".to_string()), AssistantEvent::MessageStop])
     }
 }
+
+/// A recording decision is asked at every point and keeps its row, and what
+/// the agent reads — a turn's notes, a command's result, the next turn's
+/// advice, an agent's own answer — carries nothing of it.
+#[test]
+fn shadow_asks_and_writes_but_hands_nothing() {
+    let mock = replying(|_| a_noul(0.95));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        for point in Point::ALL {
+            keep(&yes_no(point.key(), point), JevMode::Shadow);
+        }
+        assert_eq!(run_blocking(SkillSuggestionJudge::at(cwd).suggest(TASK.to_string())), None, "the turn's notes");
+        let guard = ToolGuardJudge::at(cwd);
+        guard.command(command_ask(cwd, "clean", "rm -rf build"));
+        assert_eq!(run_blocking(guard.command_ran(finished("clean"))), None, "the command's result");
+        note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(TASK)]);
+        let verdict = decide(cwd, Point::AgentAsks.key(), Some("the diff adds one test"), &[]).expect("a verdict");
+        assert_eq!((verdict.line.as_deref(), verdict.mode.as_str()), (None, JevMode::Shadow.key()), "an agent's answer");
+        let rows = rows_in(cwd, Point::ALL.len());
+        let points: BTreeSet<&str> = rows.iter().filter_map(|row| row["point"].as_str()).collect();
+        assert_eq!(points, Point::ALL.into_iter().map(Point::key).collect::<BTreeSet<&str>>(), "{rows:?}");
+        for row in &rows {
+            assert_eq!(row["mode"], JevMode::Shadow.key(), "{row}");
+            assert_eq!(row["outcome"], door::ANSWERED_OUTCOME, "{row}");
+            assert_eq!(row["chosen"], AGENT_TOOL_ASK_OPTIONS[0], "{row}");
+            assert_eq!(row["requests"], 1, "{row}");
+            assert_eq!(row["applied"], false, "{row}");
+        }
+        assert_eq!(rows.len(), Point::ALL.len(), "{rows:?}");
+        assert_eq!(mock.requests().len(), Point::ALL.len());
+        assert_eq!(pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP), None, "the next turn");
+    });
+}
