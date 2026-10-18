@@ -1,0 +1,802 @@
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
+
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use zerocode_core::computer_use::{ComputerCommand, ComputerMethod};
+use zerocode_core::surface_execution::{
+    SURFACE_EXECUTION_CACHE_LIMIT, SurfaceEffect, SurfaceExecution,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Epoch {
+    provider: u64,
+    stopped: u64,
+}
+
+impl Epoch {
+    fn current() -> Self {
+        Self {
+            provider: super::session_epoch(),
+            stopped: super::guard::stop_generation(),
+        }
+    }
+}
+
+pub(crate) struct Context {
+    actor: crate::run_evidence::Actor,
+    stopped: u64,
+    provider: Rc<Cell<ProviderTrace>>,
+    previous: Option<Rc<Cell<ProviderTrace>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderTrace {
+    Unseen,
+    One(u64),
+    Changed,
+}
+
+thread_local! {
+    static PROVIDER_TRACE: RefCell<Option<Rc<Cell<ProviderTrace>>>> = const { RefCell::new(None) };
+}
+
+impl Context {
+    fn epoch(&self) -> Option<Epoch> {
+        match self.provider.get() {
+            ProviderTrace::One(provider) => Some(Epoch {
+                provider,
+                stopped: self.stopped,
+            }),
+            ProviderTrace::Unseen | ProviderTrace::Changed => None,
+        }
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        PROVIDER_TRACE.with(|active| {
+            let mut active = active.borrow_mut();
+            if active
+                .as_ref()
+                .is_some_and(|trace| Rc::ptr_eq(trace, &self.provider))
+            {
+                *active = self.previous.take();
+            }
+        });
+    }
+}
+
+fn begin_for(actor: crate::run_evidence::Actor, before: Epoch) -> Context {
+    let provider = Rc::new(Cell::new(ProviderTrace::Unseen));
+    let previous = PROVIDER_TRACE.with(|active| active.replace(Some(Rc::clone(&provider))));
+    Context {
+        actor,
+        stopped: before.stopped,
+        provider,
+        previous,
+    }
+}
+
+pub(super) fn record_provider(provider: u64) {
+    PROVIDER_TRACE.with(|active| {
+        if let Some(trace) = active.borrow().as_ref() {
+            trace.set(match trace.get() {
+                ProviderTrace::Unseen => ProviderTrace::One(provider),
+                ProviderTrace::One(previous) if previous == provider => {
+                    ProviderTrace::One(provider)
+                }
+                ProviderTrace::One(_) | ProviderTrace::Changed => ProviderTrace::Changed,
+            });
+        }
+    });
+}
+
+pub(crate) fn begin(method: ComputerMethod) -> Option<Context> {
+    if !supported(method) {
+        return None;
+    }
+    let actor = crate::run_evidence::actor()?;
+    actor.pane.as_deref().filter(|pane| !pane.is_empty())?;
+    Some(begin_for(actor, Epoch::current()))
+}
+
+fn supported(method: ComputerMethod) -> bool {
+    matches!(
+        method,
+        ComputerMethod::Observe
+            | ComputerMethod::GetAppState
+            | ComputerMethod::Click
+            | ComputerMethod::SetValue
+            | ComputerMethod::TypeText
+            | ComputerMethod::PressKey
+            | ComputerMethod::Scroll
+    )
+}
+
+struct HeldSurface {
+    identity: String,
+    fingerprint: [u8; 32],
+    revision: u64,
+    acknowledged: Option<u64>,
+}
+
+struct Tracker {
+    instance: [u8; 16],
+    revision: u64,
+    held: VecDeque<HeldSurface>,
+}
+
+impl Default for Tracker {
+    fn default() -> Self {
+        Self {
+            instance: rand::random(),
+            revision: 0,
+            held: VecDeque::with_capacity(SURFACE_EXECUTION_CACHE_LIMIT),
+        }
+    }
+}
+
+impl Tracker {
+    fn identity(&self, context: &Context, target: &Target<'_>, epoch: Epoch) -> String {
+        let mut digest = Sha256::new();
+        digest.update(self.instance);
+        digest.update(epoch.provider.to_le_bytes());
+        digest.update(epoch.stopped.to_le_bytes());
+        hash_word(&mut digest, context.actor.pane.as_deref());
+        hash_word(&mut digest, context.actor.task.as_deref());
+        digest.update(target.process.to_le_bytes());
+        digest.update(target.window_id.to_le_bytes());
+        format!("{:x}", digest.finalize())
+    }
+
+    fn observe(&mut self, identity: String, fingerprint: [u8; 32]) -> Option<SurfaceExecution> {
+        let index = self.held.iter().position(|held| held.identity == identity);
+        let (held, effect) = if let Some(index) = index {
+            let mut held = self.held.remove(index)?;
+            let previous = held.revision;
+            let changed = held.fingerprint != fingerprint;
+            let acknowledged = held.acknowledged.take();
+            let effect = if changed {
+                let Some(revision) = self.revision.checked_add(1) else {
+                    self.held.push_back(held);
+                    return None;
+                };
+                self.revision = revision;
+                held.revision = revision;
+                held.fingerprint = fingerprint;
+                if acknowledged == Some(previous) {
+                    SurfaceEffect::ConfirmedChange {
+                        previous_revision: previous,
+                    }
+                } else {
+                    SurfaceEffect::Observation
+                }
+            } else {
+                SurfaceEffect::Observation
+            };
+            (held, effect)
+        } else {
+            if self.held.len() >= SURFACE_EXECUTION_CACHE_LIMIT {
+                self.held.pop_front();
+            }
+            (
+                HeldSurface {
+                    identity: identity.clone(),
+                    fingerprint,
+                    revision: 0,
+                    acknowledged: None,
+                },
+                SurfaceEffect::Observation,
+            )
+        };
+        let evidence = SurfaceExecution {
+            surface_id: identity,
+            state_revision: held.revision,
+            effect,
+        };
+        self.held.push_back(held);
+        Some(evidence)
+    }
+
+    fn acknowledge(&mut self, identity: String) -> Option<SurfaceExecution> {
+        let held = self
+            .held
+            .iter_mut()
+            .find(|held| held.identity == identity)?;
+        held.acknowledged = Some(held.revision);
+        Some(SurfaceExecution {
+            surface_id: identity,
+            state_revision: held.revision,
+            effect: SurfaceEffect::Acknowledged,
+        })
+    }
+}
+
+struct Target<'a> {
+    process: u64,
+    window_id: u64,
+    window: &'a Value,
+    text: Option<&'a str>,
+    elements: Option<u64>,
+}
+
+impl<'a> Target<'a> {
+    fn read(command: &ComputerCommand, result: &'a Value) -> Option<Self> {
+        let (app, window, text, elements) = if command.method == ComputerMethod::Observe {
+            let tree = result.get("tree")?;
+            (
+                result.get("app")?,
+                tree.get("window")?,
+                tree.get("text"),
+                tree.get("elementCount"),
+            )
+        } else {
+            let snapshot = result.get("snapshot")?;
+            (
+                snapshot.get("app")?,
+                snapshot.get("window")?,
+                snapshot.get("treeText"),
+                snapshot.get("elementCount"),
+            )
+        };
+        let process = app.get("pid")?.as_u64().filter(|process| *process > 0)?;
+        let window_id = window.get("id")?.as_u64().filter(|window| *window > 0)?;
+        if let Some(requested) = command.params.get("windowId")
+            && requested.as_u64() != Some(window_id)
+        {
+            return None;
+        }
+        if let Some(requested) = command
+            .params
+            .get("app")
+            .and_then(Value::as_str)
+            .and_then(|app| app.strip_prefix("pid:"))
+            && requested.parse::<u64>().ok() != Some(process)
+        {
+            return None;
+        }
+        Some(Self {
+            process,
+            window_id,
+            window,
+            text: text.and_then(Value::as_str),
+            elements: elements.and_then(Value::as_u64),
+        })
+    }
+
+    fn fingerprint(&self) -> Option<[u8; 32]> {
+        let mut digest = Sha256::new();
+        hash_word(&mut digest, Some(self.text?));
+        hash_word(
+            &mut digest,
+            self.window.get("title").and_then(Value::as_str),
+        );
+        hash_word(
+            &mut digest,
+            self.elements.map(|count| count.to_string()).as_deref(),
+        );
+        for field in ["x", "y", "width", "height"] {
+            let value = self.window.get(field).map(Value::to_string);
+            hash_word(&mut digest, value.as_deref());
+        }
+        Some(digest.finalize().into())
+    }
+}
+
+fn hash_word(digest: &mut Sha256, value: Option<&str>) {
+    if let Some(value) = value {
+        digest.update([1]);
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value.as_bytes());
+    } else {
+        digest.update([0]);
+    }
+}
+
+static TRACKER: OnceLock<Mutex<Tracker>> = OnceLock::new();
+
+pub(crate) fn envelope(
+    command: &ComputerCommand,
+    result: Value,
+    context: Option<&Context>,
+) -> Value {
+    let Some(context) = context else {
+        return json!({ "ok": true, "result": result });
+    };
+    let mut tracker = TRACKER
+        .get_or_init(|| Mutex::new(Tracker::default()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    envelope_at(
+        command,
+        result,
+        Some(context),
+        Epoch::current(),
+        &mut tracker,
+    )
+}
+
+fn envelope_at(
+    command: &ComputerCommand,
+    result: Value,
+    context: Option<&Context>,
+    current: Epoch,
+    tracker: &mut Tracker,
+) -> Value {
+    let evidence = context
+        .and_then(|context| Some((context, context.epoch()?)))
+        .filter(|(context, epoch)| {
+            *epoch == current
+                && supported(command.method)
+                && context
+                    .actor
+                    .pane
+                    .as_deref()
+                    .is_some_and(|pane| !pane.is_empty())
+        })
+        .and_then(|(context, epoch)| {
+            let target = Target::read(command, &result)?;
+            let identity = tracker.identity(context, &target, epoch);
+            if matches!(
+                command.method,
+                ComputerMethod::Observe | ComputerMethod::GetAppState
+            ) {
+                tracker.observe(identity, target.fingerprint()?)
+            } else {
+                tracker.acknowledge(identity)
+            }
+        });
+    let mut envelope = json!({ "ok": true, "result": result });
+    if let Some(evidence) = evidence.and_then(|evidence| serde_json::to_value(evidence).ok()) {
+        envelope["surfaceExecution"] = evidence;
+    }
+    envelope
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_evidence::Actor;
+    use zerocode_core::surface_execution::{SurfaceEffect, SurfaceExecution};
+
+    const EPOCH: Epoch = Epoch {
+        provider: 7,
+        stopped: 3,
+    };
+
+    fn context(pane: &str) -> Context {
+        Context {
+            actor: Actor {
+                pane: Some(pane.to_string()),
+                task: Some("task-fixture".to_string()),
+            },
+            stopped: EPOCH.stopped,
+            provider: Rc::new(Cell::new(ProviderTrace::One(EPOCH.provider))),
+            previous: None,
+        }
+    }
+
+    fn command(method: ComputerMethod, window: u64) -> ComputerCommand {
+        ComputerCommand {
+            method,
+            params: json!({ "app": "Fixture", "windowId": window }),
+            json: true,
+        }
+    }
+
+    fn observed(window: u64, text: &str) -> Value {
+        json!({
+            "app": { "pid": 4242, "bundleId": "test.fixture" },
+            "tree": {
+                "id": "snapshot-fixture",
+                "window": { "id": window, "title": "Fixture" },
+                "text": text,
+                "elementCount": 2
+            },
+            "screenshot": null,
+            "marks": { "lookId": "look-fixture" }
+        })
+    }
+
+    fn execution(answer: &Value) -> SurfaceExecution {
+        serde_json::from_value(answer["surfaceExecution"].clone())
+            .expect("the host reports typed evidence outside the result body")
+    }
+
+    fn snapshot(window: u64, text: &str) -> Value {
+        let observed = observed(window, text);
+        json!({
+            "snapshot": {
+                "id": "snapshot-other",
+                "app": observed["app"],
+                "window": observed["tree"]["window"],
+                "treeText": text,
+                "elementCount": 2
+            }
+        })
+    }
+
+    fn look(tracker: &mut Tracker, owner: &Context, window: u64, text: &str) -> Value {
+        envelope_at(
+            &command(ComputerMethod::Observe, window),
+            observed(window, text),
+            Some(owner),
+            EPOCH,
+            tracker,
+        )
+    }
+
+    #[test]
+    fn a_first_host_observation_is_a_zero_baseline_not_an_effect() {
+        let mut tracker = Tracker::default();
+        let answer = look(&mut tracker, &context("term-7"), 43, "Next");
+        let evidence = execution(&answer);
+        assert!(!evidence.surface_id.is_empty());
+        assert_eq!(evidence.state_revision, 0);
+        assert_eq!(evidence.effect, SurfaceEffect::Observation);
+        assert_eq!(answer["result"]["tree"]["text"], "Next");
+    }
+
+    #[test]
+    fn new_snapshot_ids_and_timings_do_not_change_the_observed_state() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        let first = execution(&look(&mut tracker, &owner, 43, "Next"));
+        let mut next = observed(43, "Next");
+        next["tree"]["id"] = json!("another-snapshot");
+        next["marks"]["lookId"] = json!("another-look");
+        next["elapsedMs"] = json!(991);
+        next["screenshot"] = json!({ "path": "frame-fixture.png" });
+        let answer = envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            next,
+            Some(&owner),
+            EPOCH,
+            &mut tracker,
+        );
+        assert_eq!(execution(&answer), first);
+    }
+
+    #[test]
+    fn changed_observation_is_not_a_confirmed_action() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        let before = execution(&look(&mut tracker, &owner, 43, "Loading"));
+        let after = execution(&look(&mut tracker, &owner, 43, "Ready"));
+        assert_eq!(before.surface_id, after.surface_id);
+        assert!(after.state_revision > before.state_revision);
+        assert_eq!(after.effect, SurfaceEffect::Observation);
+    }
+
+    #[test]
+    fn observation_and_app_state_use_the_same_semantic_snapshot() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        let first = execution(&look(&mut tracker, &owner, 43, "Next"));
+        let answer = envelope_at(
+            &command(ComputerMethod::GetAppState, 43),
+            snapshot(43, "Next"),
+            Some(&owner),
+            EPOCH,
+            &mut tracker,
+        );
+        assert_eq!(execution(&answer), first);
+    }
+
+    #[test]
+    fn a_click_acknowledgement_is_not_a_confirmed_state_change() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        let before = execution(&look(&mut tracker, &owner, 43, "Next"));
+        let accepted = envelope_at(
+            &command(ComputerMethod::Click, 43),
+            snapshot(43, "Next"),
+            Some(&owner),
+            EPOCH,
+            &mut tracker,
+        );
+        let acknowledgement = execution(&accepted);
+        assert_eq!(acknowledgement.surface_id, before.surface_id);
+        assert_eq!(acknowledgement.state_revision, before.state_revision);
+        assert_eq!(acknowledgement.effect, SurfaceEffect::Acknowledged);
+        let after = execution(&look(&mut tracker, &owner, 43, "Complete"));
+        assert!(after.state_revision > before.state_revision);
+        assert_eq!(
+            after.effect,
+            SurfaceEffect::ConfirmedChange {
+                previous_revision: before.state_revision,
+            }
+        );
+    }
+
+    #[test]
+    fn an_acknowledgement_is_consumed_by_the_next_unchanged_observation() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        look(&mut tracker, &owner, 43, "Next");
+        envelope_at(
+            &command(ComputerMethod::Click, 43),
+            snapshot(43, "Next"),
+            Some(&owner),
+            EPOCH,
+            &mut tracker,
+        );
+        let unchanged = execution(&look(&mut tracker, &owner, 43, "Next"));
+        assert_eq!(unchanged.effect, SurfaceEffect::Observation);
+        let later = execution(&look(&mut tracker, &owner, 43, "Another change"));
+        assert_eq!(later.effect, SurfaceEffect::Observation);
+    }
+
+    #[test]
+    fn only_the_same_resolved_window_and_owner_share_a_surface() {
+        let mut tracker = Tracker::default();
+        let first = execution(&look(&mut tracker, &context("term-7"), 43, "Next"));
+        let other_window = execution(&look(&mut tracker, &context("term-7"), 44, "Next"));
+        let other_owner = execution(&look(&mut tracker, &context("term-8"), 43, "Next"));
+        assert_ne!(first.surface_id, other_window.surface_id);
+        assert_ne!(first.surface_id, other_owner.surface_id);
+        assert_eq!(other_window.state_revision, 0);
+        assert_eq!(other_owner.state_revision, 0);
+    }
+
+    #[test]
+    fn the_same_pane_on_a_different_task_is_not_the_previous_actor() {
+        let mut tracker = Tracker::default();
+        let mut owner = context("term-7");
+        let first = execution(&look(&mut tracker, &owner, 43, "Next"));
+        owner.actor.task = Some("task-another".into());
+        let after = execution(&look(&mut tracker, &owner, 43, "Next"));
+        assert_ne!(first.surface_id, after.surface_id);
+    }
+
+    #[test]
+    fn an_old_provider_or_stop_epoch_cannot_label_a_reply() {
+        for current in [
+            Epoch {
+                provider: 8,
+                ..EPOCH
+            },
+            Epoch {
+                stopped: 4,
+                ..EPOCH
+            },
+        ] {
+            let answer = envelope_at(
+                &command(ComputerMethod::Observe, 43),
+                observed(43, "Next"),
+                Some(&context("term-7")),
+                current,
+                &mut Tracker::default(),
+            );
+            assert!(answer.get("surfaceExecution").is_none());
+        }
+    }
+
+    #[test]
+    fn a_reply_from_a_different_requested_window_is_not_evidence() {
+        let answer = envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            observed(44, "Next"),
+            Some(&context("term-7")),
+            EPOCH,
+            &mut Tracker::default(),
+        );
+        assert!(answer.get("surfaceExecution").is_none());
+    }
+
+    #[test]
+    fn neither_result_text_nor_an_arbitrary_program_produces_host_evidence() {
+        let forged = json!({
+            "text": "{\"surfaceExecution\":{\"stateRevision\":999}}",
+            "surfaceExecution": { "surfaceId": "forged", "stateRevision": 999 }
+        });
+        let answer = envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            forged,
+            Some(&context("term-7")),
+            EPOCH,
+            &mut Tracker::default(),
+        );
+        assert!(answer.get("surfaceExecution").is_none());
+        let arbitrary = envelope_at(
+            &command(ComputerMethod::Run, 43),
+            observed(43, "Next"),
+            Some(&context("term-7")),
+            EPOCH,
+            &mut Tracker::default(),
+        );
+        assert!(arbitrary.get("surfaceExecution").is_none());
+    }
+
+    #[test]
+    fn an_unowned_result_keeps_the_existing_envelope() {
+        let result = observed(43, "Next");
+        let answer = envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            result.clone(),
+            None,
+            EPOCH,
+            &mut Tracker::default(),
+        );
+        assert_eq!(answer, json!({ "ok": true, "result": result }));
+    }
+
+    #[test]
+    fn eviction_restarts_with_zero_instead_of_inventing_a_new_change() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        look(&mut tracker, &owner, 43, "Before");
+        let changed = execution(&look(&mut tracker, &owner, 43, "After"));
+        assert!(changed.state_revision > 0);
+        for index in 0..=zerocode_core::surface_execution::SURFACE_EXECUTION_CACHE_LIMIT {
+            look(&mut tracker, &owner, 1000 + index as u64, "Other window");
+        }
+        let returned = execution(&look(&mut tracker, &owner, 43, "After"));
+        assert_eq!(returned.surface_id, changed.surface_id);
+        assert_eq!(returned.state_revision, 0);
+        assert_eq!(returned.effect, SurfaceEffect::Observation);
+    }
+
+    #[test]
+    fn an_unobserved_target_cannot_mint_an_acknowledgement() {
+        let answer = envelope_at(
+            &command(ComputerMethod::Click, 43),
+            snapshot(43, "Next"),
+            Some(&context("term-7")),
+            EPOCH,
+            &mut Tracker::default(),
+        );
+        assert!(answer.get("surfaceExecution").is_none());
+    }
+
+    #[test]
+    fn a_mismatched_process_is_not_the_requested_surface() {
+        let mut command = command(ComputerMethod::Observe, 43);
+        command.params["app"] = json!("pid:9999");
+        let answer = envelope_at(
+            &command,
+            observed(43, "Next"),
+            Some(&context("term-7")),
+            EPOCH,
+            &mut Tracker::default(),
+        );
+        assert!(answer.get("surfaceExecution").is_none());
+    }
+
+    fn request_context(provider: u64) -> Context {
+        begin_for(context("term-7").actor.clone(), Epoch { provider, ..EPOCH })
+    }
+
+    #[test]
+    fn a_lazy_started_provider_binds_the_first_observation() {
+        let owner = request_context(0);
+        record_provider(EPOCH.provider);
+        let answer = look(&mut Tracker::default(), &owner, 43, "First observation");
+        let evidence = execution(&answer);
+        assert_eq!(evidence.state_revision, 0);
+        assert_eq!(evidence.effect, SurfaceEffect::Observation);
+    }
+
+    #[test]
+    fn the_first_observation_after_a_restart_gets_a_new_baseline() {
+        let mut tracker = Tracker::default();
+        let previous = execution(&look(&mut tracker, &context("term-7"), 43, "Before"));
+        let owner = request_context(EPOCH.provider + 1);
+        record_provider(EPOCH.provider + 2);
+        let restarted = envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            observed(43, "After"),
+            Some(&owner),
+            Epoch {
+                provider: EPOCH.provider + 2,
+                ..EPOCH
+            },
+            &mut tracker,
+        );
+        let evidence = execution(&restarted);
+        assert_ne!(evidence.surface_id, previous.surface_id);
+        assert_eq!(evidence.state_revision, 0);
+        assert_eq!(evidence.effect, SurfaceEffect::Observation);
+    }
+
+    #[test]
+    fn one_command_cannot_join_different_provider_sessions() {
+        let owner = request_context(EPOCH.provider + 1);
+        record_provider(EPOCH.provider);
+        record_provider(EPOCH.provider + 1);
+        let answer = envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            observed(43, "Mixed observation"),
+            Some(&owner),
+            Epoch {
+                provider: EPOCH.provider + 1,
+                ..EPOCH
+            },
+            &mut Tracker::default(),
+        );
+        assert!(answer.get("surfaceExecution").is_none());
+    }
+
+    #[test]
+    fn a_newer_stop_wins_over_a_lazy_started_observation() {
+        let owner = request_context(0);
+        record_provider(EPOCH.provider);
+        let answer = envelope_at(
+            &command(ComputerMethod::Observe, 43),
+            observed(43, "Stopped observation"),
+            Some(&owner),
+            Epoch {
+                stopped: EPOCH.stopped + 1,
+                ..EPOCH
+            },
+            &mut Tracker::default(),
+        );
+        assert!(answer.get("surfaceExecution").is_none());
+    }
+
+    #[test]
+    fn an_answer_without_a_provider_request_carries_no_new_evidence() {
+        let owner = request_context(EPOCH.provider);
+        let answer = look(&mut Tracker::default(), &owner, 43, "Cached observation");
+        assert!(answer.get("surfaceExecution").is_none());
+    }
+
+    #[test]
+    fn a_nested_request_restores_the_parent_provider_trace() {
+        let owner = request_context(0);
+        record_provider(EPOCH.provider);
+        {
+            let nested = request_context(0);
+            record_provider(EPOCH.provider + 1);
+            assert_eq!(
+                nested.epoch(),
+                Some(Epoch {
+                    provider: EPOCH.provider + 1,
+                    ..EPOCH
+                })
+            );
+        }
+        record_provider(EPOCH.provider);
+        assert_eq!(owner.epoch(), Some(EPOCH));
+    }
+
+    #[test]
+    fn an_app_scoped_key_acknowledges_the_already_observed_surface() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        let previous = execution(&look(&mut tracker, &owner, 43, "Before"));
+        let mut press = command(ComputerMethod::PressKey, 43);
+        press.params["key"] = json!("Enter");
+        let answer = envelope_at(
+            &press,
+            snapshot(43, "Before"),
+            Some(&owner),
+            EPOCH,
+            &mut tracker,
+        );
+        let evidence = execution(&answer);
+        assert_eq!(evidence.surface_id, previous.surface_id);
+        assert_eq!(evidence.state_revision, previous.state_revision);
+        assert_eq!(evidence.effect, SurfaceEffect::Acknowledged);
+    }
+
+    #[test]
+    fn metadata_capacity_is_independent_of_the_image_frame_limit() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        look(&mut tracker, &owner, 43, "Before");
+        let changed = execution(&look(&mut tracker, &owner, 43, "After"));
+        for index in 1..zerocode_core::surface_execution::SURFACE_EXECUTION_CACHE_LIMIT {
+            look(&mut tracker, &owner, 1000 + index as u64, "Other window");
+        }
+        let retained = execution(&look(&mut tracker, &owner, 43, "After"));
+        assert_eq!(retained.state_revision, changed.state_revision);
+        assert_eq!(
+            tracker.held.len(),
+            zerocode_core::surface_execution::SURFACE_EXECUTION_CACHE_LIMIT
+        );
+    }
+}

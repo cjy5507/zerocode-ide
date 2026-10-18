@@ -5410,6 +5410,7 @@ pub(super) fn answer_computer_command_with(
     if let Err(error) = input_policy.prepare(&mut command) {
         return computer_cli_error(command.json, &error.code, &error.message);
     }
+    let surface_context = computer_use::surface_execution::begin(command.method);
     let result = if command.method == ComputerMethod::Stop {
         Ok(computer_use::guard::stop(
             zerocode_core::computer_use::STOP_REASON_REQUEST,
@@ -5657,7 +5658,7 @@ pub(super) fn answer_computer_command_with(
                     png,
                 );
             }
-            said_envelope(&command, result)
+            said_envelope_at(&command, result, surface_context.as_ref())
         }
         Err(error) => {
             use zerocode_core::computer_use_protocol::{error_code, validate};
@@ -6419,7 +6420,15 @@ pub(super) fn said_envelope(
     command: &zerocode_core::computer_use::ComputerCommand,
     result: serde_json::Value,
 ) -> zerocode_hookd::TeamAnswer {
-    let envelope = serde_json::json!({ "ok": true, "result": result });
+    said_envelope_at(command, result, None)
+}
+
+fn said_envelope_at(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    result: serde_json::Value,
+    context: Option<&computer_use::surface_execution::Context>,
+) -> zerocode_hookd::TeamAnswer {
+    let envelope = computer_use::surface_execution::envelope(command, result, context);
     if command.json {
         computer_said(format!("{envelope}\n"))
     } else {
