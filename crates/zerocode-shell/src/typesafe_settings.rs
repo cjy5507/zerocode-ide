@@ -14,7 +14,7 @@
 //! the check execs `zo decision-shadow check --json`, which puts the shadow's
 //! own question through the same key road, request and answer check.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -954,18 +954,72 @@ pub struct ChoiceOption {
     pub means: String,
 }
 
+impl DecisionDraft {
+    /// The definition the draft writes under `id`, and the options a choice
+    /// names a second time: core's map holds a name once, so a second is
+    /// refused at its name as one already offered
+    /// ([`custom::Refusal::OptionName`]).
+    fn definition(self, id: String) -> (custom::Definition, Vec<custom::Refusal>) {
+        let mut twice = Vec::new();
+        let answer = match self.answer {
+            AnswerDraft::YesNo { yes, no } => custom::Answer::YesNo { yes, no },
+            AnswerDraft::Choice { options } => {
+                let mut named = BTreeMap::new();
+                for option in options {
+                    if named.contains_key(&option.name) {
+                        twice.push(custom::Refusal::OptionName(option.name));
+                    } else {
+                        named.insert(option.name, option.means);
+                    }
+                }
+                custom::Answer::Choice(named)
+            }
+            AnswerDraft::Score { levels } => custom::Answer::Score(levels),
+        };
+        let definition = custom::Definition {
+            id,
+            name: self.name,
+            question: self.question,
+            answer,
+            at: self.at,
+            reads: self.reads,
+            folders: self
+                .folders
+                .map_or(custom::Folders::Consented, custom::Folders::Chosen),
+            act_from: self.act_from,
+            max_per_hour: self.max_per_hour,
+        };
+        (definition, twice)
+    }
+}
+
 /// Keep `draft` in the person's store under `home`, zo's config home, at
-/// `now_ms`: a new decision when it has no id, else the newest version of
-/// the one with its id. Its version.
+/// `now_ms`: a new decision when it has no id, recording before anything
+/// acts on it, else the newest version of the one with its id. Its version.
 ///
 /// # Errors
 /// Whatever keeps it from the store.
 pub fn save_custom_decision_at(
-    _home: &Path,
-    _draft: DecisionDraft,
-    _now_ms: i64,
+    home: &Path,
+    draft: DecisionDraft,
+    now_ms: i64,
 ) -> Result<String, custom::store::Error> {
-    Ok(String::new())
+    let editing = draft.id.is_some();
+    let id = draft.id.clone().unwrap_or_else(custom::new_id);
+    let (definition, twice) = draft.definition(id);
+    if !twice.is_empty() {
+        return Err(custom::store::Error::Refused(
+            twice
+                .into_iter()
+                .chain(custom::check(&definition))
+                .collect(),
+        ));
+    }
+    if editing {
+        custom::store::edit(home, &definition, now_ms)
+    } else {
+        custom::store::create(home, &definition, JevMode::Shadow, now_ms)
+    }
 }
 
 #[cfg(test)]
