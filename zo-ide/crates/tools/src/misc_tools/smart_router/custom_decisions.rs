@@ -99,7 +99,7 @@ fn asking_at(cwd: &Path, point: Point) -> Vec<Asked> {
     }
     let workspace = PathBuf::from(door::resolved_path(cwd));
     store::asking_in(&runtime::default_config_home(), &workspace)
-        .expect("the decisions store")
+        .unwrap_or_default()
         .into_iter()
         .filter(|(_, definition)| definition.at == point)
         .map(|(entry, definition)| Asked { mode: standing(switch, entry.mode), entry, definition })
