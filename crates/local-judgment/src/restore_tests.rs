@@ -409,3 +409,72 @@ async fn restore_gate_skips_without_changing_state_and_has_a_live_control() {
     assert_eq!(ready.server.state, "ready");
     assert!(ready.server.checked);
 }
+
+#[tokio::test]
+async fn invalid_intents_skip_and_a_valid_intent_still_restores() {
+    for case in [
+        "missing",
+        "corrupt",
+        "oversized",
+        "unknown_field",
+        "version",
+        "model",
+        "revision",
+        "fingerprint",
+        "identity",
+        "port",
+    ] {
+        let fixture = Restoring::new();
+        fixture.seed();
+        let mut intent = fixture.intent();
+        match case {
+            "missing" => fs::remove_file(fixture.intent_path()).unwrap(),
+            "corrupt" => fs::write(fixture.intent_path(), b"{").unwrap(),
+            "oversized" => fs::write(fixture.intent_path(), vec![b' '; 1025]).unwrap(),
+            _ => {
+                match case {
+                    "unknown_field" => intent["unexpected"] = json!(true),
+                    "version" => intent["version"] = json!(2),
+                    "model" => intent["modelId"] = json!(fixture.models[1].id),
+                    "revision" => {
+                        intent["revision"] = json!(&fixture.models[0].files[0].sha256[..40])
+                    }
+                    "fingerprint" => {
+                        intent["manifestFingerprint"] =
+                            json!(fixture.models[1].fingerprint().unwrap())
+                    }
+                    "identity" => {
+                        intent["providerIdentity"] =
+                            json!(Provider::from_root(&json!({})).unwrap().identity())
+                    }
+                    "port" => intent["port"] = json!(0),
+                    _ => unreachable!(),
+                }
+                fs::write(fixture.intent_path(), serde_json::to_vec(&intent).unwrap()).unwrap();
+            }
+        }
+        let before = serde_json::to_value(fixture.manager.snapshot()).unwrap();
+        fixture.restore(true).unwrap();
+        let after = crate::tests::settled_snapshot(&fixture.manager).await;
+        assert_eq!(
+            fixture.starts(),
+            0,
+            "invalid {case} intent started a runtime"
+        );
+        assert!(
+            after.operation.is_none(),
+            "invalid {case} intent reserved an operation"
+        );
+        assert_eq!(serde_json::to_value(after).unwrap(), before);
+    }
+    let fixture = Restoring::new();
+    fixture.seed();
+    fixture.restore(true).unwrap();
+    let ready = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(
+        fixture.starts(),
+        1,
+        "valid intent after malformed controls must restore"
+    );
+    assert!(ready.server.checked);
+}
