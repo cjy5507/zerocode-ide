@@ -957,6 +957,20 @@ pub struct ChoiceOption {
     pub means: String,
 }
 
+impl AnswerDraft {
+    /// One empty answer of every kind, in the order the editor offers them.
+    const EVERY_KIND: [Self; 3] = [
+        Self::YesNo {
+            yes: String::new(),
+            no: String::new(),
+        },
+        Self::Choice {
+            options: Vec::new(),
+        },
+        Self::Score { levels: Vec::new() },
+    ];
+}
+
 impl DecisionDraft {
     /// The definition the draft writes under `id`, and the options a choice
     /// names a second time: core's map holds a name once, so a second is
@@ -1029,7 +1043,7 @@ pub fn save_custom_decision_at(
 /// listed (t-62170): the feature they stand under, every bound a definition
 /// keeps, the kinds of answer, where one may ask and what it may read there,
 /// and the modes one offers, each core's, so the page writes none.
-#[derive(Debug, Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomDecisionRules {
     /// The use the person's decisions stand under in the use table.
@@ -1057,7 +1071,7 @@ pub struct CustomDecisionRules {
 }
 
 /// The least and the most a bound allows, both allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Within<T> {
     pub least: T,
     pub most: T,
@@ -1071,8 +1085,47 @@ pub struct DecisionPoint {
 }
 
 impl CustomDecisionRules {
-    fn of(_document: &Value) -> Self {
-        Self::default()
+    fn of(document: &Value) -> Self {
+        Self {
+            feature: zerocode_core::jev::CUSTOM_DECISIONS.id,
+            decisions_max: custom::DECISIONS_MAX,
+            name_max_chars: custom::NAME_MAX_CHARS,
+            question_max_chars: custom::QUESTION_MAX_CHARS,
+            meaning_max_chars: custom::MEANING_MAX_CHARS,
+            options: Within::of(&custom::OPTIONS),
+            hourly: Within::of(&custom::HOURLY_REQUESTS),
+            hourly_default: custom::HOURLY_DEFAULT,
+            hourly_all: door::custom_hourly_requests(document),
+            act_from: Within::of(&custom::ACT_FROM),
+            act_from_default: custom::ACT_FROM_DEFAULT,
+            trash_kept_days: custom::store::TRASH_KEPT_DAYS,
+            kinds: AnswerDraft::EVERY_KIND
+                .iter()
+                .filter_map(|answer| {
+                    serde_json::to_value(answer)
+                        .ok()?
+                        .get("kind")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .collect(),
+            points: custom::Point::ALL
+                .map(|at| DecisionPoint {
+                    at,
+                    inputs: at.inputs(),
+                })
+                .to_vec(),
+            modes: custom::MODES.map(ModeChoice::of).to_vec(),
+        }
+    }
+}
+
+impl<T: Copy> Within<T> {
+    fn of(bound: &std::ops::RangeInclusive<T>) -> Self {
+        Self {
+            least: *bound.start(),
+            most: *bound.end(),
+        }
     }
 }
 
