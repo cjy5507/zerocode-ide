@@ -507,7 +507,14 @@ fn a_refused_request_keeps_the_servers_error_word_beside_its_status() {
     let held = MAX_REFUSAL_WAIT * 10;
     for (hold, within) in [(Duration::ZERO, None), (held, Some(held / 2))] {
         let started = std::time::Instant::now();
-        let asked = ask(&refusing_brokenly(busy, hold), Duration::from_secs(5));
+        let asked = ask(
+            &refusing_brokenly(
+                "HTTP/1.1 503 Service Unavailable",
+                json!({"error": busy}).to_string(),
+                hold,
+            ),
+            Duration::from_secs(5),
+        );
         assert_eq!(
             asked.answer,
             Err(token_for(503)),
@@ -590,20 +597,19 @@ fn a_restarting_servers_refusal_keeps_its_word_as_busy_does_and_an_unknown_word_
     );
 }
 
-/// A loopback server that answers its one request with a `503` whose body
-/// breaks off: the head promises a refusal naming `code`, half of it is sent,
-/// and the connection is held for `hold` and then dropped.
-fn refusing_brokenly(code: &str, hold: Duration) -> String {
+/// A loopback server that answers its one request with `status` and a `body`
+/// that breaks off: the head promises all of it, half of it is sent, and the
+/// connection is held for `hold` and then dropped.
+fn refusing_brokenly(status: &'static str, body: String, hold: Duration) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
     let addr = listener.local_addr().expect("its address");
-    let body = json!({"error": code}).to_string();
     thread::spawn(move || {
         let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
         read_request(&mut socket);
         let head = format!(
-            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             &body[..body.len() / 2]
         );

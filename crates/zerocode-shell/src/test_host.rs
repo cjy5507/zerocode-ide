@@ -125,6 +125,22 @@ pub(crate) fn fake_program(dir: &Path, name: &str, body: &str) -> PathBuf {
     }
 }
 
+/// [`fake_program`] for a fake CLI a test times against a wall. Its first run
+/// spends `first_start` seconds before its first line, as a new program's
+/// first run can on a loaded machine; no run after it does.
+pub(crate) fn fake_cli_program(dir: &Path, name: &str, body: &str, first_start: u32) -> PathBuf {
+    let started = dir.join(format!("{name}.started"));
+    let slow = if first_start > 0 {
+        format!(
+            "[ -e \"{started}\" ] || {{ sleep {first_start}; : > \"{started}\"; }}\n",
+            started = started.display()
+        )
+    } else {
+        String::new()
+    };
+    fake_program(dir, name, &format!("{slow}{body}"))
+}
+
 /// A line the project-script runner executes that leaves an empty file at
 /// `marker`: `touch` where the runner is bash, `type nul` where it is
 /// `cmd.exe`.

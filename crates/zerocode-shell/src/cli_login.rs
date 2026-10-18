@@ -2578,7 +2578,13 @@ mod tests {
     /// A fake CLI on disk: `body` is its shell, run with the row's home
     /// variable in the environment exactly as the runner hands it.
     fn fake_cli(root: &Path, name: &str, body: &str) -> String {
-        crate::test_host::fake_program(&root.join("bin"), name, body)
+        fake_cli_slow_to_start(root, name, body, 0)
+    }
+
+    /// [`fake_cli`] whose first run spends `first_start` seconds before its
+    /// first line ([`crate::test_host::fake_cli_program`]).
+    fn fake_cli_slow_to_start(root: &Path, name: &str, body: &str, first_start: u32) -> String {
+        crate::test_host::fake_cli_program(&root.join("bin"), name, body, first_start)
             .to_string_lossy()
             .into_owned()
     }
@@ -4243,6 +4249,25 @@ mod tests {
             began.elapsed()
         );
         assert!(person.join().expect("the shell").status.success());
+    }
+
+    /// A status CLI whose first run is slow, as a new program's first run is
+    /// on a loaded machine, is still answered inside its status wall: that
+    /// first run is spent before the wall starts.
+    #[cfg(unix)]
+    #[test]
+    fn a_fake_clis_slow_first_run_is_spent_before_its_status_wall() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let slow = fake_cli_slow_to_start(root.path(), "slow-first", "exit 0", 4);
+        assert_eq!(
+            ask_status(
+                &mut crate::proc::quiet_command(&slow),
+                Says::Exit0,
+                Duration::from_secs(3),
+            ),
+            Verdict::In,
+            "the fake's slow first run was left inside the status wall"
+        );
     }
 
     /// The card asks every status row at once, so the slowest CLI bounds the
