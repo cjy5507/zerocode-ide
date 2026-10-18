@@ -255,11 +255,19 @@ fn limits_hold() {
         refused(|d| d.folders = Folders::Chosen(BTreeSet::from(["/work/product".to_string()])))
             .is_empty()
     );
-    assert_eq!(refused(|d| d.id = "d-0000000A".to_string()), [Refusal::Id]);
-    assert_eq!(
-        refused(|d| d.id = "skill_suggest".to_string()),
-        [Refusal::Id]
-    );
+    for id in [
+        "d-0000000A",
+        "skill_suggest",
+        "..",
+        "/",
+        "/work/product",
+        "ａ",
+        "\0",
+    ] {
+        let mut invalid = yes_no("d-0000000a", "Release notes");
+        invalid.id = id.to_string();
+        assert_eq!(check(&invalid), [Refusal::Id], "invalid id: {id:?}");
+    }
     assert!(check(&yes_no(&new_id(), "Fresh")).is_empty());
     assert_ne!(new_id(), new_id());
 

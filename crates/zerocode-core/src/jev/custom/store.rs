@@ -619,6 +619,34 @@ mod tests {
         Folders::Chosen(BTreeSet::from([path.to_string_lossy().into_owned()]))
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn store_directories_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("config");
+        let decision = yes_no("d-0000000a", "Release notes");
+        create(&home, &decision, JevMode::On, NOW).unwrap();
+        delete(&home, &decision.id, NOW + 1).unwrap();
+        restore(&home, &decision.id).unwrap();
+        let store = root(&home);
+        for directory in [
+            home,
+            store.parent().unwrap().to_path_buf(),
+            store.join(DEFINITIONS),
+            store.join(TRASH),
+            store,
+        ] {
+            assert_eq!(
+                fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "only the owner may access {}",
+                directory.display(),
+            );
+        }
+    }
+
     /// A repository that ships a store of its own under its `.zo/` defines
     /// nothing: decisions are the person's, read from their home alone.
     #[test]
