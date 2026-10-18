@@ -5058,7 +5058,9 @@ function renderSidebarWindow(record) {
     // 같은 값이고, 시험대처럼 판이 아직 눕혀지지 않은 곳에서 행이 사라지는
     // 것보다 낫다).
     end = members.length;
-  } else if (members.length && viewEnd > 0 && viewStart < offsets[members.length]) {
+  } else if (members.length && viewEnd > -bounds.height && viewStart < offsets[members.length] + bounds.height) {
+    // 한 화면 안의 이웃 절도 뷰포트 쪽 가장자리에 overscan만큼 선다 — WebKit은 스크롤의 새 자리를 스크롤
+    // 이벤트보다 먼저 그리므로, 비어 있는 이웃 절은 그 한 프레임 동안 빈 스페이서로 비친다.
     while (start < members.length && offsets[start + 1] <= viewStart) start += 1;
     end = start;
     while (end < members.length && offsets[end] < viewEnd) end += 1;
