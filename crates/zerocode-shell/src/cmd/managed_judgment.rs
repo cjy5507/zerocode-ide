@@ -331,6 +331,8 @@ mod tests {
             "local enabled matching binding must permit restoration"
         );
         let mut legacy = enabled;
+        let feature = &zerocode_core::jev::JEV_USES[0];
+        legacy["smart"][feature.setting] = json!(feature.recommended.key());
         legacy["smart"]["jev"]
             .as_object_mut()
             .unwrap()
