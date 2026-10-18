@@ -1311,7 +1311,6 @@ where
     /// Mutable access to session metadata. Use the explicit rewind/replace
     /// methods when changing the conversation history.
     pub fn session_mut(&mut self) -> &mut Session {
-        self.resolved_tool_use_fingerprints.get_mut().clear();
         &mut self.session
     }
 

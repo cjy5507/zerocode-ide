@@ -335,6 +335,15 @@ pub(super) fn fingerprint_tool_call(tool_name: &str, input: &str) -> u64 {
     hasher.finish()
 }
 
+// A tool-use ID normally names immutable input. Check raw bytes as well so
+// explicit transcript edits cannot reuse an older resolved fingerprint.
+fn source_tool_fingerprint(tool_name: &str, input: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tool_name.hash(&mut hasher);
+    input.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Tools whose JSON object input should be key-order normalized for repetition
 /// detection. These tools often come from model-emitted JSON, so semantically
 /// identical calls may differ only by key order. Keep `offset`/`limit` intact:
@@ -1044,14 +1053,15 @@ where
                     ContentBlock::ToolUse { id, name, input } => {
                         let mut cache = self.resolved_tool_use_fingerprints.borrow_mut();
                         let generation = self.surface_repetition_state.generation;
-                        let cached = cache.entry(id.clone()).or_insert((u64::MAX, 0));
-                        if cached.0 != generation {
+                        let source = source_tool_fingerprint(name, input);
+                        let cached = cache.entry(id.clone()).or_insert((source, u64::MAX, 0));
+                        if cached.0 != source || cached.1 != generation {
                             let resolved = self.resolved_repetition_call(name, input);
                             let (name, input) = resolved.as_ref()
                                 .map_or((name.as_str(), input.as_str()), |call| (call.name.as_str(), call.input.as_str()));
-                            *cached = (generation, self.repetition_fingerprint(name, input));
+                            *cached = (source, generation, self.repetition_fingerprint(name, input));
                         }
-                        tool_use_fingerprints.insert(id.as_str(), cached.1);
+                        tool_use_fingerprints.insert(id.as_str(), cached.2);
                     }
                     ContentBlock::ToolResult {
                         tool_use_id,

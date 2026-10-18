@@ -803,7 +803,7 @@ pub struct ConversationRuntime<C, T> {
     concurrent_dispatch: Option<ConcurrentDispatchFn>,
     concurrent_result_dispatch: Option<ConcurrentResultDispatchFn>,
     surface_repetition_state: SurfaceRepetitionState,
-    resolved_tool_use_fingerprints: std::cell::RefCell<std::collections::HashMap<String, (u64, u64)>>,
+    resolved_tool_use_fingerprints: std::cell::RefCell<std::collections::HashMap<String, (u64, u64, u64)>>,
     /// User-facing auto-compaction gate. Emergency/request-building compaction
     /// remains available to avoid provider context-window failures.
     auto_compaction_enabled: bool,

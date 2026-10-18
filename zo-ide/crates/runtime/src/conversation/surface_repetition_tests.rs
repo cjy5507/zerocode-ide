@@ -1157,23 +1157,31 @@ async fn cancelled_late_confirmation_cannot_become_the_next_calls_effect() {
 
 #[test]
 fn unrecorded_calls_cannot_fill_the_surface_table_and_refuse_a_new_observation() {
+    assert_new_observation_after_six_hundred_calls(false);
+}
+
+#[test]
+fn attested_calls_past_the_binding_limit_do_not_refuse_a_new_observation() {
+    assert_new_observation_after_six_hundred_calls(true);
+}
+
+fn assert_new_observation_after_six_hundred_calls(records: bool) {
     use super::repetition::ToolBatchRepetitionHardStops;
-    for records in [false, true] {
-        let (mut runtime, _) = runtime_for(Vec::new());
-        let mut batch = ToolBatchRepetitionHardStops::default();
-        for index in 0..600 {
-            let input = json!({"action":"observe", "app":"Fixture", "window_id":index + 100}).to_string();
-            if records {
-                runtime.note_surface_execution("Computer", &input, Some(SurfaceExecution {
-                    surface_id: format!("fixture-surface-{index}"), state_revision:0,
-                    effect:SurfaceEffect::Observation,
-                }), false, &mut batch);
-            }
-            runtime.note_tool_repetition("Computer", &input, false);
+    let (mut runtime, _) = runtime_for(Vec::new());
+    let mut batch = ToolBatchRepetitionHardStops::default();
+    for index in 0..600 {
+        let input = json!({"action":"observe", "app":"Fixture", "window_id":index + 100}).to_string();
+        if records {
+            runtime.note_surface_execution("Computer", &input, Some(SurfaceExecution {
+                surface_id: format!("fixture-surface-{index}"), state_revision:0,
+                effect:SurfaceEffect::Observation,
+            }), false, &mut batch);
         }
-        assert!(runtime.tool_repetition_preflight("Computer", &observe(0).input, &mut batch).is_none(),
-            "600 distinct calls must not refuse a first observation; metadata={records}");
+        runtime.note_tool_repetition("Computer", &input, false);
     }
+    let admitted = runtime.tool_repetition_preflight("Computer", &observe(0).input, &mut batch).is_none();
+    eprintln!("SURFACE_BOUND_METRIC {}", json!({"distinctCalls":600,"hostRecords":records,"newObservationAdmitted":admitted}));
+    assert!(admitted, "600 distinct calls must not refuse a first observation; metadata={records}");
 }
 
 #[test]
@@ -1269,6 +1277,7 @@ fn a_second_repetition_check_reuses_parsed_tool_use_fingerprints() {
     let (mut runtime, executor) = long_repetition_transcript();
     let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
     runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
+    runtime.session_mut().name = Some("Fixture metadata rename".into());
     let before = executor.resolutions.load(Ordering::Relaxed);
     runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
     assert_eq!(executor.resolutions.load(Ordering::Relaxed) - before, 1,

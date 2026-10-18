@@ -133,7 +133,7 @@ mod tests {
     #[test]
     fn the_installed_browser_shim_returns_metadata_through_prepare_and_the_real_transport() {
         mod surface_host {
-            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../crates/zerocode-core/tests/support/surface_host.rs"));
+            include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/zerocode-core/tests/support/surface_host.rs"));
         }
         let directory = tempfile::tempdir().unwrap();
         let expected = SurfaceExecution { surface_id:"fixture-host/browser/1/lease-a".into(),

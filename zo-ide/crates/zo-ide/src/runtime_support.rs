@@ -3602,7 +3602,7 @@ mod oauth_refresh_tests {
 mod tests {
     #[cfg(unix)]
     mod surface_host {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../crates/zerocode-core/tests/support/surface_host.rs"));
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/zerocode-core/tests/support/surface_host.rs"));
     }
 
     use super::*;
@@ -3987,7 +3987,7 @@ mod tests {
         for streaming in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let trace = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
-                "/../../../../crates/zerocode-core/tests/fixtures/surface-host-trace.json"))).unwrap();
+                "/../../../crates/zerocode-core/tests/fixtures/surface-host-trace.json"))).unwrap();
             let host = surface_host::SurfaceHost::start(directory.path(), Some(trace), zerocode_core::agent_shims::SurfaceShim::Computer);
             let _host_environment = host.environment().into_iter().map(|(key, value)|
                 crate::support::EnvVarGuard::set(key, value.as_deref())).collect::<Vec<_>>();

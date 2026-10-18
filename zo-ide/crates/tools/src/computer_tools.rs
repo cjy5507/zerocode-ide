@@ -2156,7 +2156,7 @@ pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &Co
 mod tests {
     #[cfg(unix)]
     mod surface_host {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../../crates/zerocode-core/tests/support/surface_host.rs"));
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/zerocode-core/tests/support/surface_host.rs"));
     }
 
     use super::*;

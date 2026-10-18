@@ -625,7 +625,8 @@ mod tests {
     #[test]
     fn alternating_browser_views_keep_one_unchanged_surface_revision() {
         let mut tracker = Tracker::default();
-        let scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
+        let mut revisions = Vec::new();
         for _ in 0..4 {
             for (argv, text) in [
                 (vec!["read", "browser-1"], "Whole page including Next"),
@@ -644,18 +645,24 @@ mod tests {
                         &mut tracker,
                     )
                     .unwrap();
-                assert_eq!(
-                    evidence.state_revision, 0,
-                    "an unchanged view must not borrow another view's fingerprint"
-                );
+                revisions.push(evidence.state_revision);
             }
         }
+        let advances = revisions.iter().copied().max().unwrap_or(0);
+        eprintln!(
+            "SURFACE_VIEW_METRIC {}",
+            json!({"views":3,"reads":revisions.len(),"revisionAdvances":advances})
+        );
+        assert_eq!(
+            advances, 0,
+            "an unchanged view must not borrow another view's fingerprint"
+        );
     }
 
     #[test]
     fn a_browser_view_switch_after_an_action_is_not_a_confirmed_change() {
         let mut tracker = Tracker::default();
-        let scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
         scope
             .finish_at(
                 &["read".into(), "browser-1".into()],
@@ -694,7 +701,7 @@ mod tests {
     #[test]
     fn browser_eval_content_changes_do_not_confirm_an_action() {
         let mut tracker = Tracker::default();
-        let scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
         let read = ["read".into(), "browser-1".into()];
         scope
             .finish_at(
@@ -760,7 +767,8 @@ mod tests {
     #[test]
     fn browser_stop_and_resume_preserve_the_owned_surface_identity() {
         let mut tracker = Tracker::default();
-        let mut scope = BrowserContext::new(context("term-7").actor, "browser-1", 7).unwrap();
+        let mut scope =
+            BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
         let read = ["read".into(), "browser-1".into()];
         let before = scope
             .finish_at(
@@ -782,6 +790,37 @@ mod tests {
         assert_eq!(
             after, before,
             "an agent stop/resume cannot mint a new browser surface or revision"
+        );
+    }
+
+    #[test]
+    fn three_agent_stop_resume_cycles_cannot_mint_repeat_allowances() {
+        let mut tracker = Tracker::default();
+        let mut owner = context("term-7");
+        let mut identities = std::collections::HashSet::new();
+        identities.insert(execution(&look(&mut tracker, &owner, 43, "Ready")).surface_id);
+        for _ in 0..3 {
+            owner.stopped += 1;
+            let after = execution(&envelope_at(
+                &command(ComputerMethod::Observe, 43),
+                observed(43, "Ready"),
+                Some(&owner),
+                Epoch {
+                    stopped: owner.stopped,
+                    ..EPOCH
+                },
+                &mut tracker,
+            ));
+            identities.insert(after.surface_id);
+        }
+        let extra = identities.len() - 1;
+        eprintln!(
+            "SURFACE_STOP_METRIC {}",
+            json!({"stopResumeCycles":3,"newSurfaceIds":extra})
+        );
+        assert_eq!(
+            extra, 0,
+            "three agent stop/resume cycles must create zero extra surface identities"
         );
     }
 
