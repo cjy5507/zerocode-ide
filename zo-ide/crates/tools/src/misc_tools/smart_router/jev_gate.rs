@@ -244,18 +244,60 @@ impl JevDoor {
     pub fn pass(&self, row: &JevUse, key: bool, body: Value) -> Result<Cleared, Refused> {
         let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
         door::pass(
-            |asking| {
-                let cleared = door::may_send(row, asking, body)?;
-                if !self.seat_asks_now(row) { Err(Refused::Off) }
-                else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
-                else if self.resting(row) { Err(Refused::Resting) }
-                else { Ok(cleared) }
-            },
+            |asking| self.may_send_now(row, &settings, asking, body),
             key,
             &settings,
             self.workspace.as_deref(),
             &self.requests,
-        ).map(|cleared| match (&self.review_home, &self.workspace) {
+        ).map(|cleared| self.with_review(row, cleared))
+    }
+
+    /// [`Self::pass`] for one of a person's own decisions (t-62170), whose
+    /// requests count in two hours besides the day
+    /// ([`door::pass_within_the_hour`]): the decision's own hour file
+    /// `decision`, at most `decision_most`, and the file `every` decision
+    /// shares, at most what the person's settings hold
+    /// ([`door::custom_hourly_requests`]).
+    ///
+    /// # Errors
+    /// The door's refusal, `hourly_budget` among them.
+    pub fn pass_within_the_hour(
+        &self,
+        row: &JevUse,
+        key: bool,
+        body: Value,
+        decision: &Path,
+        decision_most: u64,
+        every: &Path,
+    ) -> Result<Cleared, Refused> {
+        let root = self.settings_file.as_deref().map_or(Value::Null, read_settings_root);
+        let settings = self.settings_file.as_ref().map_or_else(
+            || self.settings.clone(),
+            |_| JevSettings::from_root(&root).resolved(),
+        );
+        let hour = door::Hour { decision, decision_most, every, every_most: door::custom_hourly_requests(&root) };
+        door::pass_within_the_hour(
+            |asking| self.may_send_now(row, &settings, asking, body),
+            key,
+            &settings,
+            self.workspace.as_deref(),
+            &self.requests,
+            hour,
+        ).map(|cleared| self.with_review(row, cleared))
+    }
+
+    /// The door's own questions of a request, then this door's: the seat
+    /// still asks, the model pin has not moved, and the seat is not resting.
+    fn may_send_now(&self, row: &JevUse, settings: &JevSettings, asking: &door::Asking<'_>, body: Value) -> Result<Cleared, Refused> {
+        let cleared = door::may_send(row, asking, body)?;
+        if !self.seat_asks_now(row) { Err(Refused::Off) }
+        else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
+        else if self.resting(row) { Err(Refused::Resting) }
+        else { Ok(cleared) }
+    }
+
+    fn with_review(&self, row: &JevUse, cleared: Cleared) -> Cleared {
+        match (&self.review_home, &self.workspace) {
             (Some(home), Some(workspace)) => {
                 let cleared = cleared.with_review(home, row, workspace);
                 match &self.review_origin {
@@ -264,7 +306,7 @@ impl JevDoor {
                 }
             },
             _ => cleared,
-        })
+        }
     }
 
     /// Clear `body` as a request of `row`'s — the key, the switch, the

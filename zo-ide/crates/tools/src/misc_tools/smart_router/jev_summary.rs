@@ -314,6 +314,93 @@ fn custom_mode_in(config_home: &Path, configured: JevMode) -> JevMode {
     }
 }
 
+/// One of a person's own decisions (t-62170), counted off the one ledger
+/// every decision writes: the version it asks with now, and apart from it
+/// each earlier version a row names — a changed word is a new question, so
+/// its answers are not added to the old one's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionReport {
+    pub id: String,
+    pub name: String,
+    /// Its own mode, as the person set it.
+    pub mode: JevMode,
+    pub current: VersionReport,
+    /// Every earlier version a row names, the newest first.
+    pub earlier: Vec<VersionReport>,
+}
+
+/// One version of a decision, counted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionReport {
+    /// The version: its definition's hash.
+    pub definition: String,
+    /// Requests it sent today and over the week, retries included.
+    pub requests_today: u64,
+    pub requests_week: u64,
+    /// Its last request, when it made one.
+    pub latest: Option<Decision>,
+}
+
+/// Every decision zo's config home keeps ([`runtime::default_config_home`]),
+/// in the order they were made, each counted off the custom seat's ledger
+/// under `roots`.
+#[must_use]
+pub fn custom_decisions(roots: &[PathBuf], sessions: Option<&Path>, now_ms: i64, offset_s: i64) -> Vec<DecisionReport> {
+    custom_decisions_in(&runtime::default_config_home(), roots, sessions, now_ms, offset_s)
+}
+
+fn custom_decisions_in(
+    config_home: &Path,
+    roots: &[PathBuf],
+    sessions: Option<&Path>,
+    now_ms: i64,
+    offset_s: i64,
+) -> Vec<DecisionReport> {
+    let decisions = store::list(config_home).unwrap_or_default();
+    if decisions.is_empty() {
+        return Vec::new();
+    }
+    let (_, rows) = rows_of(&CUSTOM_DECISIONS, roots, sessions);
+    let today = start_of_day_ms(now_ms, offset_s);
+    let week = now_ms - WINDOW_DAYS * MS_PER_DAY;
+    decisions
+        .into_iter()
+        .map(|entry| {
+            let named: Vec<(&str, &Value)> = rows
+                .iter()
+                .filter_map(|row| {
+                    let (decision, version) = super::custom_decisions::named_by(row)?;
+                    (decision == entry.id).then_some((version, row))
+                })
+                .collect();
+            let count = |definition: &str| {
+                let held: Vec<&Value> =
+                    named.iter().filter(|(version, _)| *version == definition).map(|(_, row)| *row).collect();
+                let owned: Vec<Value> = held.iter().copied().cloned().collect();
+                VersionReport {
+                    definition: definition.to_string(),
+                    requests_today: summary::summarize_rows(held.iter().copied(), today).requests,
+                    requests_week: summary::summarize_rows(held.iter().copied(), week).requests,
+                    latest: recent::recent(&owned, 1).into_iter().next(),
+                }
+            };
+            let mut earlier: Vec<&str> = Vec::new();
+            for &(version, _) in named.iter().rev() {
+                if version != entry.definition && !earlier.contains(&version) {
+                    earlier.push(version);
+                }
+            }
+            DecisionReport {
+                current: count(&entry.definition),
+                earlier: earlier.into_iter().map(count).collect(),
+                id: entry.id,
+                name: entry.name,
+                mode: entry.mode,
+            }
+        })
+        .collect()
+}
+
 /// `seats` with each one's rest as the door for words from `cwd` reads it now
 /// (`JevDoor::resting_now`, t-58193), the one reading the
 /// door refuses a seat on: a seat whose words ask nothing rests for nothing.

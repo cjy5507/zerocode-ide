@@ -758,14 +758,21 @@ fn door_number(name: &str) -> i64 {
 /// after: after a failing `body` too, or the next test would read a folder
 /// that is gone.
 fn under_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
+    under_home_with(home, &[], body)
+}
+
+/// `body` as [`under_home`] runs it, with each of `also` set beside the home
+/// and put back the same way.
+fn under_home_with<T>(home: &Path, also: &[(&str, &std::ffi::OsStr)], body: impl FnOnce() -> T) -> T {
     let _env = crate::test_env_lock();
-    let names = ["ZO_CONFIG_HOME", core_types::paths::ZO_STATE_DIR_ENV];
-    let before: Vec<_> = names.iter().map(std::env::var_os).collect();
-    for name in names {
-        std::env::set_var(name, home);
+    let mut names = vec![("ZO_CONFIG_HOME", home.as_os_str()), (core_types::paths::ZO_STATE_DIR_ENV, home.as_os_str())];
+    names.extend_from_slice(also);
+    let before: Vec<_> = names.iter().map(|(name, _)| std::env::var_os(name)).collect();
+    for (name, value) in &names {
+        std::env::set_var(name, value);
     }
     let said = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-    for (name, value) in names.iter().zip(before) {
+    for ((name, _), value) in names.iter().zip(before) {
         match value {
             Some(value) => std::env::set_var(name, value),
             None => std::env::remove_var(name),
@@ -838,4 +845,56 @@ fn a_resting_seat_says_until_when_why_and_after_how_many() {
         timed_out(now - rest_ms - 60_000);
         assert_eq!(recall_of(&said_rests()), Some(Value::Null), "a rest that has passed");
     });
+}
+
+/// A stand-in for the judgment provider on this machine's loopback that
+/// answers every question a request asks with a yes as likely as `yes`: its
+/// origin, and how many requests it has answered.
+fn provider_answering(yes: f64) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read as _, Write as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a socket for the stand-in provider");
+    let origin = format!("http://{}", listener.local_addr().expect("its address"));
+    let answered = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&answered);
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut read = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let asked = loop {
+                let count = stream.read(&mut chunk).unwrap_or(0);
+                if count == 0 {
+                    break None;
+                }
+                read.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&read).into_owned();
+                let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+                let length = head
+                    .to_ascii_lowercase()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok()))
+                    .unwrap_or(0);
+                if body.len() >= length {
+                    break serde_json::from_str::<Value>(body).ok();
+                }
+            };
+            let Some(asked) = asked else { continue };
+            let answers: serde_json::Map<String, Value> = asked["questions"]
+                .as_object()
+                .into_iter()
+                .flat_map(serde_json::Map::keys)
+                .map(|id| (id.clone(), json!({"type": "noul", "noul": yes})))
+                .collect();
+            let body = json!({"model": "jev-test", "answers": answers, "usage": {"input_tokens": 20, "output_tokens": 0}})
+                .to_string();
+            counted.fetch_add(1, Ordering::SeqCst);
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    (origin, answered)
 }

@@ -445,11 +445,16 @@ impl ToolGuardJudge {
 
 impl ToolGuardSeat for ToolGuardJudge {
     fn command(&self, ask: CommandAsk) {
+        super::custom_decisions::before_command(&self.cwd, &ask);
         guard_command(&self.cwd, ask);
     }
 
     fn command_ran(&self, ran: CommandRan) -> BoxFuture<'_, Option<String>> {
-        Box::pin(command_ran(self.cwd.clone(), ran))
+        let decided = super::custom_decisions::after_command(self.cwd.clone(), ran.owner.clone(), ran.tool_use_id.clone());
+        Box::pin(async move {
+            let (note, lines) = futures_util::future::join(command_ran(self.cwd.clone(), ran), decided).await;
+            super::custom_decisions::beside(note, &lines)
+        })
     }
 
     fn text(&self, ask: TextAsk) -> BoxFuture<'_, TextGuard> {
