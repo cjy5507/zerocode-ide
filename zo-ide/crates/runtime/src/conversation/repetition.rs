@@ -535,14 +535,29 @@ where
     T: ToolExecutor,
 {
     fn resolved_repetition_call(&self, tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
-        match self.tool_executor.resolve_call(tool_name, input) {
+        let resolved = match self.tool_executor.resolve_call(tool_name, input) {
             Ok(resolved) => resolved,
             Err(_) if tool_name == "CapabilityInvoke" => Some(ResolvedToolCall {
                 name: tool_name.to_string(),
                 input: "invalid capability invocation".to_string(),
             }),
             Err(_) => None,
+        };
+        let (name, input) = resolved.as_ref()
+            .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
+        if name == BROWSER_CLI {
+            let argv: Vec<String> = serde_json::from_str(input).ok()?;
+            let mut command = agent_browser::parse_workspace_command(&argv, None).ok()?;
+            // Control admission still receives the original execution argv.
+            // Its spelling cannot give an unchanged observation a new count.
+            if !command.argv.first().is_some_and(|verb| agent_browser::observes(verb)) {
+                agent_browser::with_workspace_revision(&mut command.argv, command.workspace_revision);
+            }
+            return Some(ResolvedToolCall {
+                name: name.to_string(), input: serde_json::to_string(&command.argv).ok()?,
+            });
         }
+        resolved
     }
 
     fn repetition_fingerprint(&self, tool_name: &str, input: &str) -> u64 {

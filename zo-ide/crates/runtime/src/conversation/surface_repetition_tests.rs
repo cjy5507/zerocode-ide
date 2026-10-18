@@ -389,6 +389,39 @@ fn unchanged_surface_observations_remain_bounded() {
 }
 
 #[test]
+fn browser_control_revision_spelling_cannot_buy_unchanged_observations() {
+    let calls = (1..12)
+        .map(|width| PlannedCall {
+            name: zerocode_core::agent_browser::BROWSER_CLI.into(),
+            input: serde_json::to_string(&vec![
+                "read".to_string(),
+                "browser-1".to_string(),
+                "--workspace-revision".to_string(),
+                format!("{value:0width$}", value = 7),
+            ])
+            .unwrap(),
+            result: Ok(ToolExecutionResult {
+                text: "same owned browser page".into(),
+                surface: Some(SurfaceExecution {
+                    surface_id: "fixture-host/browser-1/interval-7".into(),
+                    state_revision: 0,
+                    effect: SurfaceEffect::Observation,
+                }),
+            }),
+        })
+        .collect();
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime
+        .run_turn("Keep observing the same selected browser", None)
+        .unwrap();
+    assert_eq!(
+        executor.state.lock().unwrap().executed.len(),
+        3,
+        "zero padding an unchanged control revision must not bypass the observation guard"
+    );
+}
+
+#[test]
 fn another_surface_cannot_forgive_repeated_observations() {
     let mut calls = Vec::new();
     for revision in 1..=6 {
