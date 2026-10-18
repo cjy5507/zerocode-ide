@@ -381,6 +381,14 @@ pub fn line(name: &str, option: &str, confidence: f64) -> String {
     format!("「{name}」 판단: {option} (확신 {percent:.0}%)")
 }
 
+/// How a score's level is shown to a person and to the agent it is handed
+/// to: counted from one, over the count of levels (`3/4`). A ledger row keeps
+/// the level counted from zero, as [`Answer::Score`] lists the levels.
+#[must_use]
+pub fn shown_level(level: usize, count: usize) -> String {
+    String::new()
+}
+
 /// Bytes that are not a definition this version reads: damaged, or of
 /// another shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

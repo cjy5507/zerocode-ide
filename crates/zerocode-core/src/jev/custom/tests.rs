@@ -514,3 +514,13 @@ fn the_longest_line_the_limits_allow_fits_the_cap() {
     definition.name.push('가');
     assert!(check(&definition).contains(&Refusal::NameLength));
 }
+
+/// A score's level is shown counted from one over its levels, the way a
+/// person numbers them; the most levels a score offers still read whole.
+#[test]
+fn a_level_is_shown_counted_from_one_over_the_levels() {
+    assert_eq!(shown_level(0, 4), "1/4");
+    assert_eq!(shown_level(2, 4), "3/4");
+    let most = *OPTIONS.end();
+    assert_eq!(shown_level(most - 1, most), format!("{most}/{most}"));
+}
