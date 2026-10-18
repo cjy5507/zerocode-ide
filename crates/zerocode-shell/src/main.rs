@@ -3205,6 +3205,7 @@ fn main() -> ExitCode {
             computer_stop,
             computer_resume,
             computer_guard_status,
+            cmd::settings::computer_progress_frame,
             set_skip_close_terminal_with_running_process_confirm,
             set_ctrl_tab_order_mode,
             patch_workspace_creation_prefs,
