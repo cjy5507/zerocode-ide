@@ -248,7 +248,7 @@ const managedJudgmentController = {
     if (this.visible()) this.render();
     if (snapshot.operation?.kind === "restore" && snapshot.operation.state === "done" && snapshot.providerIdentity &&
         snapshot.providerIdentity !== judgmentProviderController.state?.providerIdentity) {
-      const restored = `${snapshot.instanceId}:${snapshot.operation.id}:${snapshot.providerIdentity}`;
+      const restored = `${snapshot.instanceId}:${snapshot.operation.id}`;
       if (this.restoreRefresh !== restored) {
         this.restoreRefresh = restored;
         void refreshTypeSafe();
