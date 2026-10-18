@@ -1250,6 +1250,46 @@ fn a_shared_hour_write_failure_returns_the_decisions_place() {
 }
 
 #[test]
+fn a_day_write_failure_returns_both_hourly_places() {
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let decision = count::hour_path(home.path(), "d-0000000a", hour);
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    count::count_one_in_the_hour(&decision).unwrap();
+    count::count_one_in_the_hour(&every).unwrap();
+    let blocked = home.path().join("blocked");
+    std::fs::write(&blocked, b"a file").unwrap();
+    let today = count::requests_path(&blocked, "2026-10-17");
+
+    let result = pass_within_the_hour(
+        |asking| may_send(&ROUTING, asking, routing_body("rename a variable")),
+        true,
+        &settings(Some(HOURLY_DEFAULT)),
+        Some(APP),
+        &today,
+        Hour {
+            decision: &decision,
+            decision_most: HOURLY_DEFAULT,
+            every: &every,
+            every_most: ALL_HOURLY_DEFAULT,
+        },
+    );
+
+    assert_eq!(result.err(), Some(Refused::Budget));
+    assert_eq!(
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (1, 1, 0),
+        "a day that cannot be written spends no place in either hour",
+    );
+}
+
+#[test]
 fn a_row_without_the_doors_count_predates_the_door() {
     assert!(predates_the_door(
         r#"{"at":1,"task":"0000000000000001","outcome":"answered"}"#
