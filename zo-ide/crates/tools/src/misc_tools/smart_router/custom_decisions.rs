@@ -283,7 +283,7 @@ fn read(definition: &Definition, response: &SystemOneResponse) -> Result<Reading
 /// kind, the probabilities compared exactly as they were read.
 fn earns_its_line(definition: &Definition, reading: &Reading) -> bool {
     let at_the_top = reading.spread.iter().filter(|probability| **probability >= reading.top).count();
-    reading.confidence > definition.act_from && at_the_top == 1 && reading.shown != custom::NOT_APPLICABLE
+    reading.confidence >= definition.act_from && at_the_top == 1 && reading.shown != custom::NOT_APPLICABLE
 }
 
 /// The level nearest a score's reading, counted from the lowest at zero.
