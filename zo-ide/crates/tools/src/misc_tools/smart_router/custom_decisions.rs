@@ -239,7 +239,7 @@ fn read(definition: &Definition, response: &SystemOneResponse) -> Result<Reading
             } else {
                 (AGENT_TOOL_ASK_OPTIONS[0], yes)
             };
-            Ok(Reading { chosen: Value::from(word), shown: word.to_string(), confidence: top, spread: vec![top], top })
+            Ok(Reading { chosen: Value::from(word), shown: word.to_string(), confidence: top, spread: vec![yes, 1.0 - yes], top })
         }
         Answer::Choice(options) => {
             let offered: BTreeSet<String> =
