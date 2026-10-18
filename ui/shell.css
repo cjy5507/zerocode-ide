@@ -47812,16 +47812,35 @@ button.jev-token:hover {
  * the one hand must be in reach. It says a fact and asks nothing, so it stays
  * where it is; the questions the operator puts to the person (the last step,
  * the hand-over) stand in the ask popup in the middle of the window. Every
- * colour is a token; the stop is halt, the working dot breathes. */
-.computer-band {
+ * colour is a token; the stop is halt, the working dot breathes. The band and
+ * the work screen panel below it (t-59372) stand in one dock that takes no
+ * clicks itself, so the window beside them stays in reach. */
+.computer-dock {
   position: fixed;
   top: var(--space-3);
   left: 50%;
   transform: translateX(-50%);
   z-index: 60;
   display: flex;
+  flex-direction: column;
   align-items: center;
   gap: var(--space-2);
+  width: max-content;
+  max-width: calc(100vw - 2 * var(--space-3));
+  pointer-events: none;
+}
+
+.computer-dock > * {
+  pointer-events: auto;
+}
+
+.computer-band {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
   padding: var(--space-1) var(--space-3);
   border-radius: var(--radius-pill);
   background: var(--surface-raised);
@@ -47850,6 +47869,93 @@ button.jev-token:hover {
 
 .computer-band-stop {
   color: var(--signal-halt-ink);
+}
+
+.computer-band-note {
+  color: var(--ink-mist);
+  font-size: var(--text-xs);
+}
+
+/* The work screen panel: the newest look of one pane's assignment, small and
+ * under the band, never more than a little under half the window's height. The
+ * picture is shown whole and is not dragged out. */
+.computer-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: min(420px, calc(100vw - 2 * var(--space-3)));
+  max-height: 45vh;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  color: var(--ink-label);
+  font: var(--text-sm) var(--font-ui);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.computer-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.computer-progress-title {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.computer-progress-subject,
+.computer-progress-desk,
+.computer-progress-browser-hint,
+.computer-progress-note,
+.computer-progress-scope {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.computer-progress-browser-hint,
+.computer-progress-note,
+.computer-progress-scope {
+  color: var(--ink-mist);
+}
+
+/* Who holds control (t-62464): the desktop's line, then a row for each work
+ * browser the pane holds — its words, and a button to that browser's own bar
+ * that wraps under them on a narrow screen. */
+.computer-progress-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.computer-progress-browsers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+}
+
+.computer-progress-browsers > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.computer-progress-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 @keyframes computer-band-breathe {
