@@ -831,3 +831,20 @@ fn a_lone_decision_line_opens_with_the_skill_prefix_and_is_gone_next_turn() {
         assert_eq!(mock.requests().len(), 1, "the decision was asked in the first turn alone");
     });
 }
+
+/// A yes as likely as a no reaches a line of a half and hands nothing: its
+/// yes is the order a tie breaks in, which nothing decided. The row keeps the
+/// answer all the same.
+#[test]
+fn a_yes_or_no_tie_at_a_line_of_a_half_hands_nothing() {
+    let mock = replying(|_| a_noul(0.5));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let mut definition = yes_no("Even", Point::AgentAsks);
+        definition.act_from = *custom::ACT_FROM.start();
+        keep(&definition, JevMode::On);
+        let (verdict, row) = decided(cwd, &definition);
+        assert_eq!(verdict.line, None);
+        assert_eq!((&row["outcome"], &row["chosen"]), (&Value::from(door::ANSWERED_OUTCOME), &Value::from(AGENT_TOOL_ASK_OPTIONS[0])));
+        assert_eq!((&row["confidence"], &row["applied"]), (&Value::from(0.5), &Value::from(false)));
+    });
+}
