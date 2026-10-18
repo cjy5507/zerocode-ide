@@ -114,6 +114,7 @@ import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testSidebarTeam } from "./sidebar-team.mjs";
+import { testSidebarScroll } from "./sidebar-scroll.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
 import { testLandBatch } from "./land-batch.mjs";
@@ -362,6 +363,8 @@ suite("sidebar-roles", testSidebarRoles);
 suite("sidebar-task-fold", testSidebarTaskFold);
 // The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
 suite("sidebar-team", testSidebarTeam);
+// The sidebar holds its rows while the person scrolls it, and reaches row 0 in one go (t-63568).
+suite("sidebar-scroll", testSidebarScroll);
 suite("landing-alerts", testLandingAlerts);
 suite("land-check-letter", testLandCheckLetter);
 // The integration queue's batch card on the desk and its switch in the project settings (t-45315).
