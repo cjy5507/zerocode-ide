@@ -99,17 +99,22 @@ const ok = (name, pass, detail = "") => {
   console.log(`${held ? "PASS" : "FAIL"} ${name}`);
   if (!held) console.error("   detail:", detail);
 };
-/* 증명 회차의 손잡이 `KNOWLEDGE_MACHINE_PROOF`(t-62848). 기본은 꺼짐이고 레시피와 게이트는 켜지 않는다:
- * `purge`는 페인터를 갈아 끼우는 시험의 두 힙 읽기 사이에 모의 메모리 압박 하나를 보낸다(knowledge-performance.mjs). */
+/* 증명 회차의 손잡이 `KNOWLEDGE_MACHINE_PROOF`(t-62848). 기본은 꺼짐이고 레시피와 게이트는 켜지 않는다. 쉼표로 잇는다:
+ * - `purge` — 페인터를 갈아 끼우는 시험의 두 힙 읽기 사이에 모의 메모리 압박 하나를 더 보낸다
+ *   (knowledge-performance.mjs).
+ * - `close:<줄>` — 그 줄의 단계가 돌기 직전에 2D 브라우저를 닫는다(10-18의 재실행이 기계가 잠든 사이
+ *   브라우저를 잃은 일). */
 const MACHINE_PROOF = (process.env.KNOWLEDGE_MACHINE_PROOF ?? "").split(",").map((one) => one.trim())
   .filter(Boolean);
-if (MACHINE_PROOF.some((one) => one !== "purge")) {
-  ok("KNOWLEDGE_MACHINE_PROOF names only purge", false, MACHINE_PROOF.join(","));
+const closeAtStep = Number(MACHINE_PROOF.find((one) => /^close:\d+$/.test(one))?.slice("close:".length) ?? 0);
+if (MACHINE_PROOF.some((one) => one !== "purge" && !/^close:\d+$/.test(one))) {
+  ok("KNOWLEDGE_MACHINE_PROOF names only purge and close:<step line>", false, MACHINE_PROOF.join(","));
 }
 /* 최상위의 한 단계가 던지면 그 단계의 실패다: 줄 번호와 함께 기록되고 시험은 요약까지 간다(settings.mjs의
  * test()와 같은 꼴, t-34262). */
 const step = async (line, run) => {
   try {
+    if (line === closeAtStep) await browser.close();
     await run();
   } catch (error) {
     ok(`step at line ${line} threw`, false, String(error?.stack ?? error));
