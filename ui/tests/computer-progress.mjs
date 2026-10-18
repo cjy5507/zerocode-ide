@@ -280,11 +280,15 @@ const installWorkBrowsers = () => {
  * (t-62872): a mode change names the revision it saw and a moved one is
  * refused as stale; it moves the revision into `pausing`, waits for the
  * agent's input in flight, and moves it again into the mode asked. An agent's
- * input is admitted only in the agent's hands, one at a time. Every move is
- * told to the page the way the backend tells it (`browser:workspace`). */
+ * input is refused at the door while the person's stop stands — the backend
+ * reads its own stop there, granted by the stop's answer and lifted by the
+ * resume's — and is otherwise admitted only in the agent's hands, one at a
+ * time. Every move is told to the page the way the backend tells it
+ * (`browser:workspace`). */
 const installWorkBrowserModel = () => {
   const model = {
     states: new Map(), inputs: [], refused: [], asked: [], pauses: [], drains: new Map(), moving: new Map(), holds: new Map(),
+    selfPausing: new Set(), stops: [], personsStop: false,
   };
   window.__WORK_MODEL__ = model;
   window.__ANSWER__.open_browser_pane = (args) => args.label;
@@ -320,13 +324,25 @@ const installWorkBrowserModel = () => {
     model.states.set(state.label, state);
     tell(state);
   };
-  /* The agent's input, admitted as `begin_at` admits it: answers the input's
-   * end, or null when it was refused. */
+  /* The person's stop as the backend holds it: granted when the stop's answer
+   * leaves, lifted when the resume's does. */
+  model.stop = () => {
+    if (!model.personsStop) model.stops.push({ at: performance.now(), lifted: null });
+    model.personsStop = true;
+  };
+  model.lift = () => {
+    const standing = model.stops.at(-1);
+    if (model.personsStop && standing) standing.lifted = performance.now();
+    model.personsStop = false;
+  };
+  /* The agent's input, admitted as the backend's door admits it — refused
+   * while the person's stop stands, then as `begin_at` refuses: answers the
+   * input's end, or null when it was refused. */
   model.input = (label) => {
     const state = model.states.get(label);
     const at = performance.now();
-    if (!state || state.mode !== "agent" || state.inFlight !== 0) {
-      model.refused.push({ label, at, mode: state?.mode ?? null });
+    if (model.personsStop || !state || state.mode !== "agent" || state.inFlight !== 0) {
+      model.refused.push({ label, at, mode: state?.mode ?? null, stopped: model.personsStop });
       return null;
     }
     state.inFlight = 1;
@@ -354,6 +370,10 @@ const installWorkBrowserModel = () => {
    * each of the next `times` mode changes reaches it (a popup's navigation,
    * `with_agent_popup`), the page not yet told. */
   model.moveBefore = (label, times) => model.moving.set(label, times);
+  /* The backend pausing a browser on its own — an unfinished page change or
+   * actor's work, a failed popup navigation — just before the next mode change
+   * asked of it reaches it, the page not yet told. */
+  model.pauseBefore = (label) => model.selfPausing.add(label);
   /* The next mode change asked of `label` waits until the answer is let go. */
   model.hold = (label) => {
     let release = () => {};
@@ -373,6 +393,11 @@ const installWorkBrowserModel = () => {
       model.moving.set(label, moving - 1);
       state.revision += 1;
     }
+    if (model.selfPausing.delete(label)) {
+      state.revision += 1;
+      state.mode = "paused";
+      state.needsObservation = true;
+    }
     if (state.revision !== expectedRevision) throw new Error("workspace_stale: the work browser's state moved");
     state.revision += 1;
     state.mode = "pausing";
@@ -385,18 +410,11 @@ const installWorkBrowserModel = () => {
     tell(state);
     return copy(state);
   };
-  /* The agent's inputs that landed on `label` after a pause of it began and
-   * before the next mode change asked of it. */
-  model.landedWhilePaused = (label) => {
-    let landed = 0;
-    for (const [at, pause] of model.pauses.entries()) {
-      if (pause.label !== label || pause.mode !== "paused") continue;
-      const next = model.pauses.slice(at + 1).find((later) => later.label === label);
-      landed += model.inputs.filter((input) => input.label === label && input.at > pause.at &&
-        (!next || input.at < next.at)).length;
-    }
-    return landed;
-  };
+  /* The agent's inputs that landed on `label` while the person's stop stood:
+   * after the backend granted it and before it was lifted — whether or not the
+   * window's pause of that browser had reached the backend yet. */
+  model.landedWhileStopped = (label) => model.inputs.filter((input) => input.label === label &&
+    model.stops.some((stop) => input.at > stop.at && (stop.lifted === null || input.at < stop.lifted))).length;
 };
 
 const evaluateCase = (page, body, args) =>
@@ -1362,11 +1380,21 @@ async function testTheOneStop(browser, origin, ok) {
         const stopHammer = model.hammer(agents);
         await new Promise((done) => hands.census.native.setTimeout(done, 30));
         const landedBefore = model.inputs.length;
-        hands.recordCommand("computer_stop", () => ({
-          stopped: true, reason: "window", revision: 41, personsStop: true, helperSignalled: false,
-        }));
+        // The window's pause of each is held on its way to the backend, so the
+        // agent keeps trying in the moment between the stop and the pause.
+        const releases = agents.map((label) => model.hold(label));
+        hands.recordCommand("computer_stop", () => {
+          model.stop();
+          return { stopped: true, reason: "window", revision: 41, personsStop: true, helperSignalled: false };
+        });
         const pressed = performance.now();
         hands.pressBand("stop");
+        const asked = (label) => model.asked.some((one) => one.label === label);
+        while (performance.now() - pressed < 3000 && !agents.every(asked)) await tick();
+        const granted = model.stops.at(-1)?.at ?? null;
+        await new Promise((done) => hands.census.native.setTimeout(done, 30));
+        const refusedOnTheWay = model.refused.filter((one) => one.stopped && granted !== null && one.at > granted).length;
+        for (const release of releases) release();
         let pausedAt = null;
         while (performance.now() - pressed < 3000) {
           if (agents.every((label) => model.mode(label) === "paused")) {
@@ -1383,8 +1411,8 @@ async function testTheOneStop(browser, origin, ok) {
           asked: model.asked.map(({ label, mode, expectedRevision }) => ({ label, mode, expectedRevision })),
           modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
           landedBefore,
-          landedWhilePaused: agents.map((label) => model.landedWhilePaused(label)),
-          refusedAfter: model.refused.filter((one) => one.at > pressed).length,
+          landedWhileStopped: agents.map((label) => model.landedWhileStopped(label)),
+          refusedOnTheWay,
           reachedMs: reached.every(Boolean) ? Math.max(...reached.map((one) => one.at - pressed)) : null,
           pausedMs: pausedAt === null ? null : pausedAt - pressed,
           band: hands.readBand(),
@@ -1403,9 +1431,9 @@ async function testTheOneStop(browser, origin, ok) {
         JSON.stringify(stopped),
       );
       ok(
-        "once the person's stop reaches a work browser no agent input lands there, however fast the agent keeps trying",
+        "from the moment the backend grants the person's stop no agent input lands on a work browser, though the window's pause of it is still on its way to the backend, however fast the agent keeps trying",
         stopped.landedBefore > 0 && stopped.pausedMs !== null &&
-          stopped.landedWhilePaused?.every((landed) => landed === 0) && stopped.refusedAfter > 0,
+          stopped.landedWhileStopped?.every((landed) => landed === 0) && stopped.refusedOnTheWay > 0,
         JSON.stringify(stopped),
       );
       ok(
@@ -1439,9 +1467,10 @@ async function testTheOneStop(browser, origin, ok) {
         await hands.settle();
         const tookByHand = model.mode("browser-912");
         const askedBefore = model.asked.length;
-        hands.recordCommand("computer_resume", () => ({
-          resumed: true, revision: 42, stopped: null, personsStop: false, helper: "idle",
-        }));
+        hands.recordCommand("computer_resume", () => {
+          model.lift();
+          return { resumed: true, revision: 42, stopped: null, personsStop: false, helper: "idle" };
+        });
         hands.pressBand("resume");
         const pressed = performance.now();
         while (performance.now() - pressed < 3000 && model.mode("browser-911") !== "agent") await tick();
@@ -1471,18 +1500,44 @@ async function testTheOneStop(browser, origin, ok) {
       const agentsStop = await evaluateCase(page, async () => {
         const hands = window.__COMPUTER_HANDS__;
         const model = window.__WORK_MODEL__;
+        const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
         const askedBefore = model.asked.length;
         hands.announce("computer:activity", hands.operatorReport({ revision: 43, stopped: "request", personsStop: false }));
         await hands.settle();
         await hands.settle();
         const seen = { asked: model.asked.length - askedBefore, mode: model.mode("browser-911"), band: hands.readBand() };
-        hands.announce("computer:activity", hands.operatorReport({ revision: 44 }));
+        // The person's stop over the agent's own: the backend makes it the
+        // person's, and it reaches the work browsers.
+        hands.recordCommand("computer_stop", () => {
+          model.stop();
+          return { stopped: true, reason: "window", revision: 44, personsStop: true, helperSignalled: false };
+        });
+        hands.pressBand("stop");
+        const pressed = performance.now();
+        while (performance.now() - pressed < 3000 && model.mode("browser-911") !== "paused") await tick();
         await hands.settle();
-        return seen;
+        const over = { mode: model.mode("browser-911"), band: hands.readBand() };
+        hands.recordCommand("computer_resume", () => {
+          model.lift();
+          return { resumed: true, revision: 45, stopped: null, personsStop: false, helper: "idle" };
+        });
+        hands.pressBand("resume");
+        const lifted = performance.now();
+        while (performance.now() - lifted < 3000 && model.mode("browser-911") !== "agent") await tick();
+        await hands.settle();
+        hands.announce("computer:activity", hands.operatorReport({ revision: 46 }));
+        await hands.settle();
+        return { ...seen, over, back: model.mode("browser-911") };
       });
       ok(
         "an agent's own stop touches no work browser",
         agentsStop.asked === 0 && agentsStop.mode === "agent" && agentsStop.band?.browsers === null,
+        JSON.stringify(agentsStop),
+      );
+      ok(
+        "over an agent's own stop the band still offers the person's stop, and pressing it stops the work browsers too (t-62872)",
+        agentsStop.band?.offersStop === true && agentsStop.over?.mode === "paused" &&
+          agentsStop.over?.band?.showsStop === true && agentsStop.back === "agent",
         JSON.stringify(agentsStop),
       );
 
@@ -1502,9 +1557,10 @@ async function testTheOneStop(browser, origin, ok) {
           hands.announce("computer:activity", hands.operatorReport({ revision, active: true }));
           revision += 1;
           const stopRevision = revision;
-          hands.recordCommand("computer_stop", () => ({
-            stopped: true, reason: "window", revision: stopRevision, personsStop: true, helperSignalled: false,
-          }));
+          hands.recordCommand("computer_stop", () => {
+            model.stop();
+            return { stopped: true, reason: "window", revision: stopRevision, personsStop: true, helperSignalled: false };
+          });
           const pausesBefore = model.pauses.length;
           const pressed = performance.now();
           hands.pressBand("stop");
@@ -1515,9 +1571,10 @@ async function testTheOneStop(browser, origin, ok) {
           await hands.settle();
           revision += 1;
           const liftRevision = revision;
-          hands.recordCommand("computer_resume", () => ({
-            resumed: true, revision: liftRevision, stopped: null, personsStop: false, helper: "idle",
-          }));
+          hands.recordCommand("computer_resume", () => {
+            model.lift();
+            return { resumed: true, revision: liftRevision, stopped: null, personsStop: false, helper: "idle" };
+          });
           hands.pressBand("resume");
           const lifted = performance.now();
           while (performance.now() - lifted < 2000 && !agents.every((label) => model.mode(label) === "agent")) await tick();
@@ -1530,15 +1587,15 @@ async function testTheOneStop(browser, origin, ok) {
         };
         return {
           trials: painted.length,
-          landedWhilePaused: agents.reduce((sum, label) => sum + model.landedWhilePaused(label), 0),
+          landedWhileStopped: agents.reduce((sum, label) => sum + model.landedWhileStopped(label), 0),
           refused: model.refused.length,
           reachedBackendMs: { p50: quantile(reached, 0.5), p95: quantile(reached, 0.95) },
           pausedOnScreenMs: { p50: quantile(painted, 0.5), p95: quantile(painted, 0.95) },
         };
       }, { trials: STOP_TRIALS, otherTerm: OTHER_TERM });
       ok(
-        `over ${STOP_TRIALS} stops and resumes of two agents' work browsers under constant input, every stop pauses both and no input lands while they are paused (press-to-pause times in the detail)`,
-        rounds.trials === STOP_TRIALS && rounds.landedWhilePaused === 0 && rounds.refused > 0,
+        `over ${STOP_TRIALS} stops and resumes of two agents' work browsers under constant input, every stop pauses both and no input lands while the person's stop stands (press-to-pause times in the detail)`,
+        rounds.trials === STOP_TRIALS && rounds.landedWhileStopped === 0 && rounds.refused > 0,
         JSON.stringify(rounds),
       );
       ok("the one stop scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
@@ -1570,9 +1627,10 @@ async function testTheOneStop(browser, origin, ok) {
         model.moveBefore("browser-922", 1);
         model.moveBefore("browser-923", Number.MAX_SAFE_INTEGER);
         const release924 = model.hold("browser-924");
-        hands.recordCommand("computer_stop", () => ({
-          stopped: true, reason: "window", revision: 61, personsStop: true, helperSignalled: false,
-        }));
+        hands.recordCommand("computer_stop", () => {
+          model.stop();
+          return { stopped: true, reason: "window", revision: 61, personsStop: true, helperSignalled: false };
+        });
         hands.pressBand("stop");
         const pressed = performance.now();
         while (performance.now() - pressed < 3000 && !model.asked.some((one) => one.label === "browser-924")) await tick();
@@ -1600,7 +1658,7 @@ async function testTheOneStop(browser, origin, ok) {
           whilePausing,
           tries,
           afterInputLanded: model.input("browser-921") !== null,
-          landed921: model.landedWhilePaused("browser-921"),
+          landed921: model.landedWhileStopped("browser-921"),
           modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
           asked922: asked("browser-922"),
           asked923: asked("browser-923"),
@@ -1640,12 +1698,356 @@ async function testTheOneStop(browser, origin, ok) {
   }
 }
 
+/* What the person's stop leaves behind (t-62872): a work browser the backend
+ * paused on its own while the stop was reaching it is not the stop's to give
+ * back; one the stop paused that its resume must leave paused is counted on
+ * the band; a resume that failed after the backend lifted the stop lets the
+ * stop's record go; and the band's words agree with a count of one in every
+ * language. */
+async function testWhatTheStopLeaves(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    await page.evaluate(installWorkBrowserModel);
+    const selfPaused = await evaluateCase(page, async ({ subject, otherTerm }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const model = window.__WORK_MODEL__;
+      const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+      const all = ["browser-931", "browser-932", "browser-933"];
+      await model.open(all);
+      model.say({ label: "browser-931", mode: "agent", revision: 3, ownerTerm: String(subject.term) });
+      model.say({ label: "browser-932", mode: "agent", revision: 5, ownerTerm: String(otherTerm) });
+      model.say({ label: "browser-933", mode: "agent", revision: 7, ownerTerm: String(subject.term) });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 90, active: true }));
+      await hands.settle();
+      // The backend pauses 932 on its own just before the stop's pause of it
+      // arrives: an unfinished page change of its agent's.
+      model.pauseBefore("browser-932");
+      hands.recordCommand("computer_stop", () => {
+        model.stop();
+        return { stopped: true, reason: "window", revision: 91, personsStop: true, helperSignalled: false };
+      });
+      hands.pressBand("stop");
+      const pressed = performance.now();
+      const quiet = (label) => !model.tab(label)?.workspacePending && !model.tab(label)?.workspaceReading;
+      const still = () => all.every((label) => model.mode(label) === "paused" && quiet(label)) &&
+        hands.readBand().offersResume;
+      while (performance.now() - pressed < 3000 && !still()) await tick();
+      await hands.settle();
+      const whileStopped = {
+        modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
+        band: hands.readBand(),
+      };
+      // The person starts choosing another agent for 933 in its own bar.
+      const choosing = model.tab("browser-933");
+      if (choosing) choosing.workspaceOwnerChoice = String(otherTerm);
+      const askedBefore = model.asked.length;
+      hands.recordCommand("computer_resume", () => {
+        model.lift();
+        return { resumed: true, revision: 92, stopped: null, personsStop: false, helper: "idle" };
+      });
+      hands.pressBand("resume");
+      const lifted = performance.now();
+      while (performance.now() - lifted < 3000 && model.mode("browser-931") !== "agent") await tick();
+      await hands.settle();
+      const handedBack = model.asked.slice(askedBefore).filter((one) => one.mode === "agent").map((one) => one.label);
+      return {
+        whileStopped,
+        handedBack,
+        handedBackSelfPaused: handedBack.filter((label) => label === "browser-932").length,
+        modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
+        band: hands.readBand(),
+      };
+    }, { subject: SUBJECT, otherTerm: OTHER_TERM });
+    ok(
+      "a work browser the backend paused on its own while the person's stop was reaching it is not the stop's: the band's resume gives back only what the stop's own pause left, and that one stays paused (t-62872)",
+      selfPaused.whileStopped?.modes?.["browser-932"] === "paused" && selfPaused.handedBackSelfPaused === 0 &&
+        selfPaused.handedBack?.includes("browser-931") === true && selfPaused.modes?.["browser-931"] === "agent" &&
+        selfPaused.modes?.["browser-932"] === "paused",
+      JSON.stringify(selfPaused),
+    );
+    ok(
+      "a work browser the stop paused that its resume leaves paused, while the person chooses its agent, is counted on the band in one line (t-62872)",
+      selfPaused.modes?.["browser-933"] === "paused" && selfPaused.handedBack?.includes("browser-933") === false &&
+        selfPaused.band?.shown === true && Boolean(selfPaused.band?.browsers) && selfPaused.band.browsers.includes("1"),
+      JSON.stringify(selfPaused),
+    );
+
+    const words = await evaluateCase(page, async () => {
+      const saved = locale;
+      const shapes = {
+        pausing: { stopped: 0, failed: 0, pausing: 1, kept: 0 },
+        failed: { stopped: 1, failed: 1, pausing: 0, kept: 0 },
+        stopped: { stopped: 1, failed: 0, pausing: 0, kept: 0 },
+      };
+      const said = {};
+      for (const code of ["ko", "en", "ja", "zh", "es"]) {
+        locale = code;
+        said[code] = Object.fromEntries(Object.entries(shapes)
+          .map(([name, reach]) => [name, computerStopReachWords(reach)?.() ?? null]));
+      }
+      locale = saved;
+      return said;
+    });
+    const plural = /\b1 (task browsers|navegadores)\b/u;
+    ok(
+      "with one work browser the band's words agree with the count in every language: no plural stands beside a one (t-62872)",
+      ["ko", "en", "ja", "zh", "es"].every((code) => Object.values(words?.[code] ?? {}).length === 3 &&
+        Object.values(words[code]).every((text) => typeof text === "string" && text.includes("1") && !plural.test(text))),
+      JSON.stringify(words),
+    );
+
+    const failedResume = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const model = window.__WORK_MODEL__;
+      const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+      hands.recordCommand("computer_stop", () => {
+        model.stop();
+        return { stopped: true, reason: "window", revision: 95, personsStop: true, helperSignalled: false };
+      });
+      hands.pressBand("stop");
+      const pressed = performance.now();
+      while (performance.now() - pressed < 3000 &&
+        !(model.mode("browser-931") === "paused" && hands.readBand().offersResume)) await tick();
+      await hands.settle();
+      const resumes = hands.holdCommand("computer_resume");
+      hands.pressBand("resume");
+      await hands.settle();
+      // The backend lifted the stop and said so, but its answer to the band's
+      // resume never came back.
+      model.lift();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 96 }));
+      await hands.settle();
+      resumes.refuseOldest("the window lost the resume's answer");
+      await hands.settle();
+      const afterFailure = { band: hands.readBand() };
+      // An agent is handed a new work browser once the stop is over.
+      const askedBefore = model.asked.length;
+      await model.open(["browser-934"]);
+      model.say({ label: "browser-934", mode: "agent", revision: 2, ownerTerm: String(subject.term) });
+      await hands.settle();
+      await hands.settle();
+      hands.releaseCommands();
+      return {
+        afterFailure,
+        pausedAfterTheLift: model.asked.slice(askedBefore).filter((one) => one.label === "browser-934").length,
+        mode934: model.mode("browser-934"),
+        mode931: model.mode("browser-931"),
+      };
+    }, { subject: SUBJECT });
+    ok(
+      "when the band's resume fails after the backend already lifted the stop, the stop's record goes with the next report: a work browser an agent is handed afterwards is not paused, the band says no browser is stopped, and nothing was given back (t-62872)",
+      failedResume.pausedAfterTheLift === 0 && failedResume.mode934 === "agent" &&
+        failedResume.afterFailure?.band?.browsers === null && failedResume.mode931 === "paused",
+      JSON.stringify(failedResume),
+    );
+    ok("the scenario of what the stop leaves raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
+/* The panel when the backend let its look go, and the band in the board
+ * pop-out (t-62872): a door that answers nothing, or cannot tell the pane's
+ * work, takes the picture off the open panel; the pop-out's band offers the
+ * person's stop, which is safe from anywhere, and leaves the resume and the
+ * work screen view to the main window. */
+async function testThePanelAndThePopout(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    const gone = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const frames = hands.holdCommand("computer_progress_frame");
+      hands.openPanel(subject);
+      await hands.settle();
+      frames.answerOldest(hands.look(subject, 50));
+      await hands.settle();
+      const shown = hands.readPanel();
+      // The pane looked while the window could not tell its work: the backend
+      // let the older look go and told the window by a newer number.
+      hands.announce("computer:frame", { ...subject, seq: 51 });
+      await hands.settle();
+      frames.answerOldest(null);
+      await hands.settle();
+      const answeredNothing = hands.readPanel();
+      hands.announce("computer:frame", { ...subject, seq: 52 });
+      await hands.settle();
+      frames.answerOldest(hands.look(subject, 52));
+      await hands.settle();
+      const shownAgain = hands.readPanel();
+      hands.announce("computer:frame", { ...subject, seq: 53 });
+      await hands.settle();
+      frames.refuseOldest("computer_progress_scope_unknown: the window cannot tell the pane's work");
+      await hands.settle();
+      const refused = hands.readPanel();
+      hands.closePanel();
+      await hands.settle();
+      hands.releaseCommands();
+      return { shown, answeredNothing, shownAgain, refused };
+    }, { subject: SUBJECT });
+    ok(
+      "when the backend no longer has the look the open panel shows — its door answers nothing, or cannot tell the pane's work — the panel lets the picture go and says it is no longer kept (t-62872)",
+      Boolean(gone.shown?.picture) && !gone.answeredNothing?.picture && Boolean(gone.answeredNothing?.note) &&
+        Boolean(gone.shownAgain?.picture) && gone.shownAgain?.seq === "52" && !gone.refused?.picture &&
+        Boolean(gone.refused?.note),
+      JSON.stringify(gone),
+    );
+
+    const popout = await evaluateCase(page, async ({ subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const offered = (id) => {
+        const node = document.getElementById(id);
+        return !!node && !node.hidden && getComputedStyle(node).display !== "none";
+      };
+      hands.announce("computer:frame", { ...subject, seq: 60 });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 130, active: true }));
+      await hands.settle();
+      const main = { stop: offered("computer-band-stop"), view: offered("computer-band-view") };
+      document.documentElement.dataset.surface = "popout";
+      await hands.settle();
+      const acting = { stop: offered("computer-band-stop"), view: offered("computer-band-view") };
+      hands.announce("computer:activity", hands.operatorReport({ revision: 131, stopped: "window", personsStop: true }));
+      await hands.settle();
+      const stopped = {
+        shows: hands.readBand().showsStop,
+        resume: offered("computer-band-resume"),
+        view: offered("computer-band-view"),
+      };
+      delete document.documentElement.dataset.surface;
+      await hands.settle();
+      const inTheMain = { resume: offered("computer-band-resume") };
+      hands.recordCommand("computer_resume", () => ({
+        resumed: true, revision: 132, stopped: null, personsStop: false, helper: "idle",
+      }));
+      hands.pressBand("resume");
+      await hands.settle();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 132 }));
+      await hands.settle();
+      hands.releaseCommands();
+      return { main, acting, stopped, inTheMain };
+    }, { subject: SUBJECT });
+    ok(
+      "in the board pop-out the band offers the person's stop, which is safe from anywhere, and neither the resume nor the work screen view, which are the main window's (t-62872)",
+      popout.main?.stop === true && popout.main?.view === true && popout.acting?.stop === true &&
+        popout.acting?.view === false && popout.stopped?.shows === true && popout.stopped?.resume === false &&
+        popout.stopped?.view === false && popout.inTheMain?.resume === true,
+      JSON.stringify(popout),
+    );
+    ok("the panel and pop-out scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
+/* A reload of the window during the person's stop (t-62872): the band reads
+ * the backend's report once as the page loads — no clock — so the standing
+ * stop shows at once and walks the work browsers, and the stop's record,
+ * kept in the page's session under the stop's revision, lets the band's
+ * resume give back exactly what that stop paused. */
+async function testAReloadDuringTheStop(browser, origin, ok) {
+  const { page, faults } = await openComputerPage(browser, origin);
+  try {
+    await page.evaluate(installWorkBrowserModel);
+    const before = await evaluateCase(page, async ({ subject, otherTerm }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const model = window.__WORK_MODEL__;
+      const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+      await model.open(["browser-951", "browser-952", "browser-953"]);
+      model.say({ label: "browser-951", mode: "agent", revision: 3, ownerTerm: String(subject.term) });
+      model.say({ label: "browser-952", mode: "agent", revision: 5, ownerTerm: String(otherTerm) });
+      model.say({ label: "browser-953", mode: "paused", revision: 8, ownerTerm: String(otherTerm) });
+      hands.announce("computer:activity", hands.operatorReport({ revision: 80, active: true }));
+      await hands.settle();
+      hands.recordCommand("computer_stop", () => {
+        model.stop();
+        return { stopped: true, reason: "window", revision: 81, personsStop: true, helperSignalled: false };
+      });
+      hands.pressBand("stop");
+      const pressed = performance.now();
+      while (performance.now() - pressed < 3000 &&
+        !(model.mode("browser-951") === "paused" && model.mode("browser-952") === "paused")) await tick();
+      await hands.settle();
+      return { states: [...model.states.values()].map((state) => ({ ...state })), band: hands.readBand() };
+    }, { subject: SUBJECT, otherTerm: OTHER_TERM });
+    // The backend across the reload: the person's stop still stands at 81,
+    // and that is what the page's one read of the report is told.
+    await page.addInitScript(({ hotkey }) => {
+      window.__GUARD_READS__ = [];
+      window.__ANSWER__.computer_guard_status = () => {
+        window.__GUARD_READS__.push((new Error().stack ?? "").includes("/shell-computer"));
+        return { active: false, verb: null, actions: 3, at: 0, personsStop: true, stopped: "window", revision: 81, hotkey };
+      };
+    }, { hotkey: STOP_HOTKEY });
+    await page.reload();
+    await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+    await page.evaluate(installComputerHands, { hotkey: STOP_HOTKEY });
+    await page.evaluate(installWorkBrowserModel);
+    const after = await evaluateCase(page, async ({ states, subject }) => {
+      const hands = window.__COMPUTER_HANDS__;
+      const model = window.__WORK_MODEL__;
+      const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+      await hands.settle();
+      const onLoad = { band: hands.readBand(), reads: window.__GUARD_READS__.length };
+      model.stop();
+      // The window holds the same work browsers again, as the backend kept
+      // them, and an agent is handed one more meanwhile.
+      await model.open([...states.map((state) => state.label), "browser-954"]);
+      for (const state of states) model.say(state);
+      model.say({ label: "browser-954", mode: "agent", revision: 2, ownerTerm: String(subject.term) });
+      const arrived = performance.now();
+      while (performance.now() - arrived < 3000 &&
+        !(model.mode("browser-954") === "paused" && hands.readBand().offersResume)) await tick();
+      await hands.settle();
+      const reopened = { band: hands.readBand(), asked: model.asked.map(({ label, mode }) => ({ label, mode })) };
+      const askedBefore = model.asked.length;
+      hands.recordCommand("computer_resume", () => {
+        model.lift();
+        return { resumed: true, revision: 82, stopped: null, personsStop: false, helper: "idle" };
+      });
+      hands.pressBand("resume");
+      const pressed = performance.now();
+      const back = ["browser-951", "browser-952", "browser-954"];
+      while (performance.now() - pressed < 3000 && !back.every((label) => model.mode(label) === "agent")) await tick();
+      await hands.settle();
+      hands.releaseCommands();
+      return {
+        onLoad,
+        reopened,
+        handedBack: model.asked.slice(askedBefore).map(({ label, mode, expectedRevision }) => ({ label, mode, expectedRevision })),
+        modes: Object.fromEntries([...states.map((state) => state.label), "browser-954"]
+          .map((label) => [label, model.mode(label)])),
+        reads: window.__GUARD_READS__.length,
+        fromTheBand: window.__GUARD_READS__.every(Boolean),
+        census: hands.census.live(),
+      };
+    }, { states: before.states, subject: SUBJECT });
+    ok(
+      "a reload during the person's stop reads the backend's report once, from the band, shows the stop with its resume at once and pauses a work browser an agent is handed after it (t-62872)",
+      after.onLoad?.band?.showsStop === true && after.onLoad?.band?.offersResume === true && after.onLoad?.reads === 1 &&
+        after.reads === 1 && after.fromTheBand === true && after.reopened?.asked?.length === 1 &&
+        after.reopened.asked[0].label === "browser-954" && after.reopened.asked[0].mode === "paused",
+      JSON.stringify(after),
+    );
+    const revisionOf = (label) => before.states?.find((state) => state.label === label)?.revision;
+    const handedBack = (label) => after.handedBack?.filter((one) => one.label === label) ?? [];
+    ok(
+      "after a reload during the person's stop the band's resume gives back exactly what that stop paused, before the reload and after it, and the work browser paused before it stays paused (t-62872)",
+      after.handedBack?.length === 3 && after.handedBack.every((one) => one.mode === "agent") &&
+        handedBack("browser-951")[0]?.expectedRevision === revisionOf("browser-951") &&
+        handedBack("browser-952")[0]?.expectedRevision === revisionOf("browser-952") &&
+        handedBack("browser-954").length === 1 && handedBack("browser-953").length === 0 &&
+        after.modes?.["browser-953"] === "paused" && after.modes?.["browser-951"] === "agent" &&
+        after.modes?.["browser-952"] === "agent" && after.modes?.["browser-954"] === "agent",
+      JSON.stringify({ before, after }),
+    );
+    ok("the reload scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
+
 export async function testComputerProgress(browser, origin, ok) {
   await testTheBand(browser, origin, ok);
   await testTheProgressPanel(browser, origin, ok);
   await testTheBandWithThePanel(browser, origin, ok);
   await testThePanelReadsTheWorkBrowser(browser, origin, ok);
   await testTheOneStop(browser, origin, ok);
+  await testWhatTheStopLeaves(browser, origin, ok);
+  await testThePanelAndThePopout(browser, origin, ok);
+  await testAReloadDuringTheStop(browser, origin, ok);
 }
 
 if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {

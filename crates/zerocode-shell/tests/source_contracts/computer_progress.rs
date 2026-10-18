@@ -19,6 +19,7 @@ const MAIN: &str = include_str!("../../src/main.rs");
 const OBSERVE: &str = include_str!("../../src/computer_use/observe.rs");
 const MARKS: &str = include_str!("../../src/computer_use/marks.rs");
 const GUARD: &str = include_str!("../../src/computer_use/guard.rs");
+const WORKSPACES: &str = include_str!("../../src/browser_workspace.rs");
 
 /// A window file, read when the test runs: a missing one fails this contract
 /// alone, not the whole target it sits in.
@@ -198,13 +199,17 @@ fn the_persons_stop_reaches_the_work_browsers_only_through_their_bars_road() {
     let page = ui_file("shell-computer.js");
     let browser = ui_file("shell-browser.js");
     let take = block_after(&page, "function takeComputerBandStop(");
+    // The condition the stop reaches the work browsers under, read in the
+    // body: the signature names `persons` too, and a check of the whole block
+    // would pass with the condition gone (t-62872).
+    let (_, body) = take.split_once('\n').expect("the function has a body");
+    let reach = body
+        .lines()
+        .find(|line| line.contains("stopAgentBrowserWorkspaces("))
+        .unwrap_or_else(|| panic!("a granted stop reaches the work browsers: {take}"));
     assert!(
-        take.contains("stopAgentBrowserWorkspaces("),
-        "a granted stop reaches the work browsers: {take}"
-    );
-    assert!(
-        take.contains("persons"),
-        "only a stop the backend says is the person's: {take}"
+        reach.contains("&& persons"),
+        "only a stop the backend says is the person's reaches them: {reach}"
     );
     assert!(
         page.contains("resumeAgentBrowserWorkspaces("),
@@ -234,6 +239,157 @@ fn the_persons_stop_reaches_the_work_browsers_only_through_their_bars_road() {
             "{opens} goes by the bar's own road: {walk}"
         );
     }
+}
+
+/// The person's chord the helper heard (t-62872): the window takes it in
+/// whenever it hears the helper's stop — at a `status`, at a resume it
+/// refuses, at an action the helper refused — unless the person's stop
+/// already stands here, and tells the band, so the work browsers stop too
+/// once the window next hears from the helper. The signed helper telling the
+/// window by itself is t-62469's.
+#[test]
+fn the_window_takes_in_the_persons_chord_whenever_it_hears_the_helper() {
+    let runtime = strip_rust_comments(RUNTIME);
+    let adopt = block_after(&runtime, "fn adopt_helper_stop(");
+    let taken = adopt
+        .find("computer_use::guard::adopt(")
+        .unwrap_or_else(|| panic!("the window takes the helper's stop in: {adopt}"));
+    let told = adopt
+        .find("\"computer:activity\"")
+        .unwrap_or_else(|| panic!("a stop taken in is told to the band: {adopt}"));
+    assert!(taken < told, "told once taken in: {adopt}");
+    let refused = "if error.code == error_code::STOPPED";
+    let (at, _) = runtime
+        .match_indices(refused)
+        .find(|(at, _)| runtime[at + refused.len()..].trim_start().starts_with("&&"))
+        .expect("the refused action's road");
+    let road = &runtime[at..at
+        + runtime[at..]
+            .find("adopt_helper_stop(")
+            .expect("it takes in")];
+    assert!(
+        road.contains("!computer_use::guard::persons_stop_stands()")
+            && !road.contains("stopped_reason().is_none()"),
+        "a refused action takes in the helper's stop unless the person's stands: {road}"
+    );
+    let standing = block_after(&runtime, "fn persons_stop_standing(");
+    assert!(
+        standing.contains("adopt_helper_stop("),
+        "a refused resume takes in the stop it heard: {standing}"
+    );
+    let opens = "} else if command.method == ComputerMethod::Status {";
+    let status = &runtime[runtime.find(opens).expect("the status road") + opens.len()..];
+    let status = &status[..status.find("} else if").expect("the road ends")];
+    assert!(
+        status.contains("adopt_helper_stop(&helper, permission_window)"),
+        "a status tells the band of a stop it took in: {status}"
+    );
+}
+
+/// The person's stop at the work browsers' door (t-62872): while it stands
+/// the backend refuses an agent's `open` and every verb an agent sends to a
+/// work browser, reading the window's own stop — never asking the helper —
+/// first for its words, before any other refusal, and again where the door
+/// admits, under that stop's own lock. The window's walk paints the bars and
+/// records what the stop paused; the refusal does not wait for it.
+#[test]
+fn the_work_browsers_door_refuses_an_agent_while_the_persons_stop_stands() {
+    let runtime = strip_rust_comments(RUNTIME);
+    let answer = block_after(&runtime, "async fn answer_browser_command(");
+    let said = answer
+        .find("computer_use::guard::persons_stop_stands()")
+        .unwrap_or_else(|| panic!("the door reads the person's stop: {answer}"));
+    let actor = answer
+        .find(".check_actor(pane, verb)")
+        .expect("the door checks the actor");
+    assert!(
+        said < actor,
+        "the person's stop is said before any other refusal: {answer}"
+    );
+    assert!(
+        answer.contains(".begin_agents(") && !answer.contains(".begin_at("),
+        "an agent's verb goes in only by the door that reads the stop: {answer}"
+    );
+    let dispatch = block_after(&runtime, "async fn dispatch_browser_command(");
+    let open = &dispatch[dispatch.find("(\"open\", 2) =>").expect("the open arm")..];
+    let open = &open[..open.find("(\"close\", 2) =>").expect("the close arm")];
+    assert!(
+        open.contains(".register_agents(&label, pane)") && !open.contains(".register(&label"),
+        "an agent's open registers only by the door that reads the stop: {open}"
+    );
+    let workspaces = strip_rust_comments(WORKSPACES);
+    for door in [
+        "pub(crate) fn begin_agents(",
+        "pub(crate) fn register_agents(",
+    ] {
+        let body = block_after(&workspaces, door);
+        assert!(
+            body.contains("crate::computer_use::guard::unless_persons_stop("),
+            "{door} admits under the person's stop's own lock: {body}"
+        );
+    }
+    let guard = strip_rust_comments(GUARD);
+    let unless = block_after(&guard, "pub fn unless_persons_stop<");
+    assert!(
+        !unless.contains("call(") && !unless.contains("helper"),
+        "the door never asks the helper: {unless}"
+    );
+}
+
+/// The person lifts their stop from the main window's band alone (t-62872):
+/// the board pop-out's band offers the stop, which is safe from anywhere, and
+/// not the resume, and the backend refuses a resume another page sends. A
+/// stop pressed in the pop-out reaches the main window by its report, which
+/// every page hears.
+#[test]
+fn the_persons_resume_is_the_main_windows_alone() {
+    let settings = strip_rust_comments(SETTINGS);
+    let resume = block_after(&settings, "pub(crate) fn computer_resume(");
+    let checked = resume
+        .find("webview.label() != crate::MAIN_WINDOW_LABEL")
+        .unwrap_or_else(|| panic!("the resume checks which page asks: {resume}"));
+    let lifted = resume
+        .find("computer_use::guard::resume(")
+        .expect("the resume");
+    assert!(
+        checked < lifted,
+        "the page is checked before any stop is lifted: {resume}"
+    );
+    let stop = block_after(&settings, "pub(crate) fn computer_stop(");
+    assert!(
+        stop.contains("app.emit(") && !stop.contains("emit_to("),
+        "every page hears the stop, the main window too: {stop}"
+    );
+    let sheet = ui_file("shell.css");
+    for kept in [".computer-band-resume", ".computer-band-view"] {
+        assert!(
+            sheet.contains(&format!(":root[data-surface=\"popout\"] {kept},")),
+            "the pop-out folds {kept} away"
+        );
+    }
+}
+
+/// Turning shared desktop input off in Settings stops the operator with the
+/// window's own stop (t-62872): that is the person's stop, so it pauses every
+/// work browser an agent holds as well — the safe side, kept on purpose.
+#[test]
+fn turning_shared_desktop_input_off_is_the_persons_stop_and_reaches_the_work_browsers() {
+    use zerocode_core::computer_use::{STOP_REASON_WINDOW, persons_stop};
+    let settings = strip_rust_comments(SETTINGS);
+    let revoke = block_after(&settings, "pub(crate) fn set_computer_input_policy(");
+    let stopped = revoke
+        .find("computer_use::guard::stop(zerocode_core::computer_use::STOP_REASON_WINDOW)")
+        .unwrap_or_else(|| {
+            panic!("turning shared input off stops with the window's stop: {revoke}")
+        });
+    let told = revoke
+        .find("\"computer:activity\"")
+        .expect("and tells the band");
+    assert!(stopped < told, "the band hears the stop it made: {revoke}");
+    assert!(
+        persons_stop(STOP_REASON_WINDOW),
+        "the window's own stop is the person's"
+    );
 }
 
 /// The guard's product code stands before its first test-only line (t-63505

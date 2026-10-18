@@ -221,7 +221,9 @@ fn a_look_whose_picture_is_no_longer_kept_says_so_and_shows_no_other() {
 /// A pane that looks while the window cannot tell its assignment (t-63505
 /// ④): that look is nobody's, and the pane's older look goes with it — a late
 /// ask under the old assignment gets nothing rather than a look older than the
-/// pane's newest.
+/// pane's newest. The window is told the older look went (t-62872): under its
+/// assignment, by a number newer than the look's, so a panel still showing
+/// that look asks again, gets nothing, and lets its picture go.
 #[test]
 fn a_look_under_an_assignment_the_window_cannot_tell_lets_the_panes_older_look_go() {
     const PANE: &str = "term-6350541";
@@ -232,21 +234,31 @@ fn a_look_under_an_assignment_the_window_cannot_tell_lets_the_panes_older_look_g
         picture_look("owned-unknown-after-a");
     }
     let before = owned_look(PANE, "scope-a");
-    let told = heard_by(PANE).len();
+    let told = heard_by(PANE);
     {
         let _acting = acting_for(actor(PANE, None));
         picture_look("owned-unknown-after-none");
     }
     let after = owned_look(PANE, "scope-a");
-    assert!(before.is_some(), "the pane's look under its assignment");
+    let heard = heard_by(PANE);
+    let before = before.expect("the pane's look under its assignment");
     assert!(
         after.is_none(),
         "a look older than the pane's newest is never shown: {after:?}"
     );
     assert_eq!(
-        heard_by(PANE).len(),
-        told,
-        "the look nobody owns is told to nobody"
+        heard.len(),
+        told.len() + 1,
+        "the window is told the older look went: {heard:?}"
+    );
+    let (scope, seq) = heard.last().expect("told");
+    assert_eq!(
+        scope, "scope-a",
+        "told under the assignment whose look went"
+    );
+    assert!(
+        *seq > seq_of(&before),
+        "by a number newer than the look it showed: {seq} after {before}"
     );
 }
 

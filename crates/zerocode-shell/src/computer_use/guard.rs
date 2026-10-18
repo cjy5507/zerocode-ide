@@ -81,14 +81,16 @@ pub fn refusal(reason: &str) -> ComputerUseError {
 /// Take in a stop the helper made on its own — the person's chord heard on
 /// the desktop — so the window refuses at its door too and its band shows the
 /// stop and the resume the person lifts it with. The helper is already
-/// stopped: nothing is signalled.
-pub fn adopt(reason: &str) {
+/// stopped: nothing is signalled. Answers whether the window's stop moved.
+pub fn adopt(reason: &str) -> bool {
     let mut held = stopped();
-    if held.reason.is_none() {
+    let takes = held.reason.is_none();
+    if takes {
         STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
         held.reason = Some(reason.to_string());
         held.revision += 1;
     }
+    takes
 }
 
 /// Stop now: the window refuses every action from here on, and the helper is
@@ -324,7 +326,7 @@ pub fn lift() {
 mod tests {
     use super::*;
     use zerocode_core::computer_use::{
-        STOP_REASON_HOTKEY, STOP_REASON_REQUEST, STOP_REASON_WINDOW,
+        STOP_REASON_HOTKEY, STOP_REASON_REQUEST, STOP_REASON_SIGNAL, STOP_REASON_WINDOW,
     };
 
     fn one_hand() -> std::sync::MutexGuard<'static, ()> {
@@ -732,6 +734,52 @@ mod tests {
         assert_eq!(persons_report["personsStop"], true, "{persons_report}");
         assert_eq!(refused["personsStop"], true, "{refused}");
         assert_eq!(chord_report["personsStop"], true, "{chord_report}");
+    }
+
+    /// The person's chord the helper heard over an agent's own stop
+    /// (t-62872): taken in, it is the person's stop from then on — the band
+    /// reads `personsStop` and stops the work browsers too — while a word of
+    /// the helper's that is not the person's, or any word over the person's
+    /// stop, moves nothing: a helper that answers every `status` with its
+    /// stop never moves the revision the band's resume names.
+    #[test]
+    fn the_persons_chord_taken_in_over_an_agents_stop_is_the_persons_stop() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_REQUEST);
+        let agents = revision();
+        let signal = adopt(STOP_REASON_SIGNAL);
+        let after_signal = revision();
+        let chord = adopt(STOP_REASON_HOTKEY);
+        let report = activity_report(None);
+        let again = adopt(STOP_REASON_HOTKEY);
+        let window = adopt(STOP_REASON_WINDOW);
+        let after_again = revision();
+        lift();
+        assert!(
+            !signal && after_signal == agents,
+            "a word of the helper's that is not the person's moves nothing: {agents:?} → {after_signal:?}"
+        );
+        assert!(
+            chord,
+            "the person's chord over an agent's stop is taken in: {report}"
+        );
+        assert_eq!(report["personsStop"], true, "{report}");
+        assert_eq!(report["stopped"], STOP_REASON_HOTKEY, "{report}");
+        assert!(
+            report["revision"].as_u64() > agents,
+            "taking it in moves the revision: {report}"
+        );
+        assert!(
+            !again && !window,
+            "over the person's stop nothing more is taken in"
+        );
+        assert_eq!(
+            after_again,
+            report["revision"].as_u64(),
+            "nothing moved over the person's stop"
+        );
     }
 
     #[test]
