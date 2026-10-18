@@ -99,6 +99,13 @@ const ok = (name, pass, detail = "") => {
   console.log(`${held ? "PASS" : "FAIL"} ${name}`);
   if (!held) console.error("   detail:", detail);
 };
+/* 증명 회차의 손잡이 `KNOWLEDGE_MACHINE_PROOF`(t-62848). 기본은 꺼짐이고 레시피와 게이트는 켜지 않는다:
+ * `purge`는 페인터를 갈아 끼우는 시험의 두 힙 읽기 사이에 모의 메모리 압박 하나를 보낸다(knowledge-performance.mjs). */
+const MACHINE_PROOF = (process.env.KNOWLEDGE_MACHINE_PROOF ?? "").split(",").map((one) => one.trim())
+  .filter(Boolean);
+if (MACHINE_PROOF.some((one) => one !== "purge")) {
+  ok("KNOWLEDGE_MACHINE_PROOF names only purge", false, MACHINE_PROOF.join(","));
+}
 /* 최상위의 한 단계가 던지면 그 단계의 실패다: 줄 번호와 함께 기록되고 시험은 요약까지 간다(settings.mjs의
  * test()와 같은 꼴, t-34262). */
 const step = async (line, run) => {
@@ -4255,7 +4262,7 @@ ok("saved scenes live in the settings document: a reloaded window lists them and
   JSON.stringify(sceneReload));
 
 await step(4013, () => testKnowledgePerformance(page, ok));
-await step(4014, () => measureKnowledgePainterSwap(page, ok));
+await step(4014, () => measureKnowledgePainterSwap(page, ok, { purgeBetween: MACHINE_PROOF.includes("purge") }));
 const sweep = knowledgeSweepFor(process.env);
 await step(4016, () => measureKnowledgeScenes(page, ok, { frames: sweep.frames }));
 

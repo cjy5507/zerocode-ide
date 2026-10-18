@@ -1,4 +1,5 @@
 // Runs on the graph harness's existing backend fixture and real SVG renderer.
+import { memoryNote } from "./machine-load.mjs";
 export async function testKnowledgePerformance(page, ok) {
   const seen = await page.evaluate(async () => {
     knowledgeQuery = "";
@@ -492,8 +493,17 @@ export async function measureKnowledgeScenes(page, ok,
  * 수)와 **놓는가**(버퍼·요소·리스너). 아래 한 함수가 표의 페인터를 전부 돌며 그 둘을
  * 묻는다 — P1에서는 줄이 하나(SVG)이므로 「열 번 갈아 끼워도 판이 자란 자리가
  * 없다」를 묻고, P2에서 GL 줄이 들어오면 같은 물음이 두 손을 오간다. */
-export async function measureKnowledgePainterSwap(page, ok) {
-  const swap = await page.evaluate(async () => {
+export async function measureKnowledgePainterSwap(page, ok, { purgeBetween = false } = {}) {
+  /* 증명 회차의 `KNOWLEDGE_MACHINE_PROOF=purge`(t-62848)는 두 힙 읽기 사이에 모의 메모리 압박(위급) 하나를
+   * 보낸다(CDP `Memory.simulatePressureNotification`) — 10-18 02:33의 회차(스왑 4.75 / 6.14 GB)는 두 읽기
+   * 사이에 힙이 31.5 → 25.9 MB(−17.6%)로 줄었다. 압박은 Node의 CDP 세션만 보낼 수 있어서 페이지에는
+   * 함수 하나로 내어 준다. */
+  const cdp = purgeBetween ? await page.context().newCDPSession(page) : null;
+  if (cdp) {
+    await page.exposeFunction("__knowledgeMemoryPurge__",
+      () => cdp.send("Memory.simulatePressureNotification", { level: "critical" }));
+  }
+  const swap = await page.evaluate(async ({ purgeBetween }) => {
     const view = document.querySelector(".knowledge-view:not([hidden])");
     const frame = () => new Promise((done) => requestAnimationFrame(done));
     const kinds = KNOWLEDGE_PAINTERS.map((row) => row.id);
@@ -584,6 +594,11 @@ export async function measureKnowledgePainterSwap(page, ok) {
     await swapOnce();
     const before = await settle();
     const heapBefore = await heap();
+    if (purgeBetween) {
+      await window.__knowledgeMemoryPurge__();
+      /* 압박은 제 통로(자식 프로세스의 메모리 알림)로 렌더러에 닿는다 — 한 박자 기다린다. */
+      await new Promise((done) => setTimeout(done, 100));
+    }
     let emptied = 0;
     for (let round = 0; round < 10; round += 1) {
       if (await swapOnce()) emptied += 1;
@@ -595,7 +610,8 @@ export async function measureKnowledgePainterSwap(page, ok) {
       heapBefore, heapAfter,
       heapDrift: heapBefore === 0 ? 0
         : Math.round(((heapAfter - heapBefore) / heapBefore) * 1000) / 10 };
-  });
+  }, { purgeBetween });
+  await cdp?.detach();
   ok("every painter wears the same five-method shape, the projector lands on the ink the browser drew, and that spot picks its own seat",
     swap.interfaced && swap.probes.length > 0
       && swap.probes.every((row) => row.picked === row.seat && row.hit >= 0
@@ -612,7 +628,7 @@ export async function measureKnowledgePainterSwap(page, ok) {
     JSON.stringify(swap));
   console.log(`METRIC knowledge painter swap: ${JSON.stringify({ kinds: swap.kinds,
     elements: swap.before.elements, heapBefore: swap.heapBefore, heapAfter: swap.heapAfter,
-    heapDrift: `${swap.heapDrift}%` })}`);
+    heapDrift: `${swap.heapDrift}%`, memory: memoryNote(), ...(purgeBetween ? { proof: "purge" } : {}) })}`);
   return swap;
 }
 
