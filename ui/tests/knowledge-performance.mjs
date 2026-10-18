@@ -494,15 +494,15 @@ export async function measureKnowledgeScenes(page, ok,
  * 묻는다 — P1에서는 줄이 하나(SVG)이므로 「열 번 갈아 끼워도 판이 자란 자리가
  * 없다」를 묻고, P2에서 GL 줄이 들어오면 같은 물음이 두 손을 오간다. */
 export async function measureKnowledgePainterSwap(page, ok, { purgeBetween = false } = {}) {
-  /* 증명 회차의 `KNOWLEDGE_MACHINE_PROOF=purge`(t-62848)는 두 힙 읽기 사이에 모의 메모리 압박(위급) 하나를
-   * 보낸다(CDP `Memory.simulatePressureNotification`) — 10-18 02:33의 회차(스왑 4.75 / 6.14 GB)는 두 읽기
-   * 사이에 힙이 31.5 → 25.9 MB(−17.6%)로 줄었다. 압박은 Node의 CDP 세션만 보낼 수 있어서 페이지에는
-   * 함수 하나로 내어 준다. */
-  const cdp = purgeBetween ? await page.context().newCDPSession(page) : null;
-  if (cdp) {
-    await page.exposeFunction("__knowledgeMemoryPurge__",
-      () => cdp.send("Memory.simulatePressureNotification", { level: "critical" }));
-  }
+  /* 두 힙 읽기는 같은 모의 메모리 압박(위급, CDP `Memory.simulatePressureNotification`) 뒤에 선다(t-62848).
+   * 10-18 02:33의 회차(스왑 4.75 / 6.14 GB)는 두 읽기 사이에 힙이 31.5 → 25.9 MB(−17.6%)로 줄었다. 기계의
+   * 압박은 페이지가 버릴 수 있는 것(캐시 같은 것)을 버리게 하는데, 그것이 두 읽기 사이에 오면 뒤의
+   * 읽기만 줄어든다. 두 읽기가 모두 압박 뒤에 서면 사이에 온 압박이 버린 것은 뒤의 읽기도 어차피 버리고
+   * 읽으므로, 차에는 놓지 않은 것만 남는다. 증명 회차의 `KNOWLEDGE_MACHINE_PROOF=purge`는 사이에 압박
+   * 하나를 더 보낸다. 압박은 Node의 CDP 세션만 보낼 수 있어서 페이지에는 함수 하나로 내어 준다. */
+  const cdp = await page.context().newCDPSession(page);
+  await page.exposeFunction("__knowledgeMemoryPurge__",
+    () => cdp.send("Memory.simulatePressureNotification", { level: "critical" }));
   const swap = await page.evaluate(async ({ purgeBetween }) => {
     const view = document.querySelector(".knowledge-view:not([hidden])");
     const frame = () => new Promise((done) => requestAnimationFrame(done));
@@ -570,13 +570,19 @@ export async function measureKnowledgePainterSwap(page, ok, { purgeBetween = fal
         cached: knowledgeLayouts.get(view).nodeCache.size,
       };
     };
-    /* 수거를 두 번 돌리고 읽는다 — 한 번의 `gc()`는 방금 놓은 것을 아직 들고 있는
-     * 세대를 남긴다. 손잡이가 없는 판에서는 0을 돌려주고 판정은 요소 수만 본다. */
+    /* 압박 뒤에 수거를 두 번 돌리고 마지막 수거의 자리에서 읽는다 — 한 번의 `gc()`는 방금 놓은 것을
+     * 아직 들고 있는 세대를 남기고(그래서 두 수거 사이에 프레임 하나), 마지막 수거와 읽기 사이의 프레임은
+     * 제 쓰레기를 읽기에 얹는다. 압박은 제 통로(자식 프로세스의 메모리 알림)로 렌더러에 닿으므로 한
+     * 박자 기다린 뒤에 수거한다. 손잡이가 없는 판에서는 0을 돌려주고 판정은 요소 수만 본다. */
+    const purge = async () => {
+      await window.__knowledgeMemoryPurge__();
+      await new Promise((done) => setTimeout(done, 100));
+    };
     const heap = async () => {
-      for (let round = 0; round < 2; round += 1) {
-        if (typeof window.gc === "function") window.gc();
-        await frame();
-      }
+      await purge();
+      if (typeof window.gc === "function") window.gc();
+      await frame();
+      if (typeof window.gc === "function") window.gc();
       return performance.memory ? performance.memory.usedJSHeapSize : 0;
     };
     const swapOnce = async () => {
@@ -594,24 +600,22 @@ export async function measureKnowledgePainterSwap(page, ok, { purgeBetween = fal
     await swapOnce();
     const before = await settle();
     const heapBefore = await heap();
-    if (purgeBetween) {
-      await window.__knowledgeMemoryPurge__();
-      /* 압박은 제 통로(자식 프로세스의 메모리 알림)로 렌더러에 닿는다 — 한 박자 기다린다. */
-      await new Promise((done) => setTimeout(done, 100));
-    }
+    if (purgeBetween) await purge();
     let emptied = 0;
     for (let round = 0; round < 10; round += 1) {
       if (await swapOnce()) emptied += 1;
     }
     const after = await settle();
     const heapAfter = await heap();
+    /* 압박이 버린 것을 다음 장면이 치르지 않도록 판을 한 번 더 그린다. */
+    await settle();
     knowledgePainterKind = pinned;
     return { kinds, interfaced, probes, emptyPick, before, after, emptied,
       heapBefore, heapAfter,
       heapDrift: heapBefore === 0 ? 0
         : Math.round(((heapAfter - heapBefore) / heapBefore) * 1000) / 10 };
   }, { purgeBetween });
-  await cdp?.detach();
+  await cdp.detach();
   ok("every painter wears the same five-method shape, the projector lands on the ink the browser drew, and that spot picks its own seat",
     swap.interfaced && swap.probes.length > 0
       && swap.probes.every((row) => row.picked === row.seat && row.hit >= 0
