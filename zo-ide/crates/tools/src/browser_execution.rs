@@ -145,6 +145,7 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[cfg(unix)]
     use zerocode_core::surface_execution::{ExecutionEnvelope, SurfaceEffect, SurfaceExecution};
 
     #[test]

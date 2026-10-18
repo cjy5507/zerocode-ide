@@ -433,6 +433,25 @@ fn microcompacted_reread_advisory(tool_name: &str) -> String {
     )
 }
 
+fn per_turn_tool_repetition_advisory(tool_name: &str) -> String {
+    format!(
+        "<system-reminder>You have now called `{tool_name}` with identical input \
+         {TOOL_REPETITION_THRESHOLD} times this turn without verified progress. Repeating the same call may not \
+         produce a different result — change approach: vary the arguments, try a \
+         different tool, or if you are blocked, say so and ask the user. Do not repeat \
+         this exact call again.</system-reminder>"
+    )
+}
+
+fn cross_turn_tool_repetition_advisory(tool_name: &str, cross: usize) -> String {
+    format!(
+        "<system-reminder>You have now called `{tool_name}` with identical input across \
+         {cross} separate turns. The runtime has not confirmed progress from these requests and is \
+         making no progress — change approach, try a different tool, or ask the user what \
+         they need. Do not repeat this exact call again.</system-reminder>"
+    )
+}
+
 fn per_turn_tool_repetition_hard_stop_notice(tool_name: &str, count: usize) -> String {
     format!(
         "<system-reminder>Ending this turn: the same `{tool_name}` request or scoped observation has repeated {count} times without verified progress. Keep the original target when choosing another allowed way to verify it, or explain what is blocked.</system-reminder>"
@@ -844,21 +863,10 @@ where
             }
         } else if count == TOOL_REPETITION_THRESHOLD {
             self.tool_repetition_pending_hard_stop_fps.insert(fp);
-            ToolRepetition::Advise(format!(
-                "<system-reminder>You have now called `{tool_name}` with identical input \
-                 {TOOL_REPETITION_THRESHOLD} times this turn without verified progress. Repeating the same call may not \
-                 produce a different result — change approach: vary the arguments, try a \
-                 different tool, or if you are blocked, say so and ask the user. Do not repeat \
-                 this exact call again.</system-reminder>"
-            ))
+            ToolRepetition::Advise(per_turn_tool_repetition_advisory(tool_name))
         } else if cross == TOOL_REPETITION_CROSS_TURN_ADVISE {
             self.cross_turn_tool_repetition_pending_hard_stop_fps.insert(fp);
-            ToolRepetition::Advise(format!(
-                "<system-reminder>You have now called `{tool_name}` with identical input across \
-                 {cross} separate turns. The runtime has not confirmed progress from these requests and is \
-                 making no progress — change approach, try a different tool, or ask the user what \
-                 they need. Do not repeat this exact call again.</system-reminder>"
-            ))
+            ToolRepetition::Advise(cross_turn_tool_repetition_advisory(tool_name, cross))
         } else {
             ToolRepetition::Ok
         }

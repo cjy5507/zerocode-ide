@@ -63,6 +63,7 @@ pub fn command(source: &str) -> Result<String, String> {
     command_words(&words)
 }
 
+#[must_use]
 pub fn literal_argv(source: &str) -> Option<Vec<String>> {
     if source.len() > MAX_ANALYZED_COMMAND_LEN
         || source.contains(['$', '`', '\\', '\n', '\r', ';', '|', '&', '>', '<', '(', ')', '{', '}'])
