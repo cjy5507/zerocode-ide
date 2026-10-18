@@ -271,7 +271,12 @@ fn late_landings(
         {
             reasons.push((StallReason::NoMerge, verified_at));
         }
-        if !review.verified && now_ms.saturating_sub(done_ms) >= VERIFY_OVERDUE_MS {
+        // A review the coordinator wrote of this hand-in — `verified: false` with its reason too —
+        // answers "nobody looked"; a new attempt or commit clears it (`Run::review_of`).
+        if !review.verified
+            && !review.written
+            && now_ms.saturating_sub(done_ms) >= VERIFY_OVERDUE_MS
+        {
             reasons.push((StallReason::NoReview, done_ms));
         }
 
