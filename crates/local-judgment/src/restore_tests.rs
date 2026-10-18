@@ -882,3 +882,43 @@ async fn a_changed_port_restore_cannot_overwrite_newer_settings_without_a_notifi
         assert_eq!(fixture.starts(), 1);
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_exit_after_the_check_fails_restoration() {
+    let fixture = Restoring::new();
+    fixture.seed();
+    let guarded_manager = fixture.manager.clone();
+    let settings = fixture.settings.clone();
+    let ending = fixture.control.path().join("end-1");
+    fixture
+        .manager
+        .restore_guarded(
+            true,
+            (
+                move |provider, expected, binding| save(&settings, provider, expected, binding),
+                move |action: &mut dyn FnMut() -> crate::Result<()>| {
+                    fs::write(&ending, b"code 3").map_err(|_| Error::Storage)?;
+                    let began = Instant::now();
+                    while guarded_manager.snapshot().server.state != "failed" {
+                        assert!(began.elapsed() < SETTLE, "checked runtime did not end");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    action()
+                },
+            ),
+        )
+        .unwrap();
+    let failed = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(
+        failed.operation.as_ref().unwrap().state,
+        "failed",
+        "post-check runtime exit must fail restoration"
+    );
+    assert_eq!(failed.server.state, "failed");
+    assert_eq!(
+        failed.operation.as_ref().unwrap().error,
+        Some(Error::RuntimeFailed.token())
+    );
+    assert!(!fixture.intent_path().exists());
+    assert_eq!(fixture.starts(), 1);
+}
