@@ -7,6 +7,7 @@ mod beat_lock_order;
 mod browser_workspace;
 mod bundle_resources;
 mod cli_login;
+mod computer_progress;
 mod computer_use_mirrors;
 mod computer_use_tcc;
 mod continue_gate;

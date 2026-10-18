@@ -301,6 +301,12 @@ thread_local! {
 pub struct Actor {
     pub pane: Option<String>,
     pub task: Option<String>,
+    /// The assignment the pane held when the step was asked (t-59372): the
+    /// whole SHA-256 of what the window knows of it
+    /// (`agent_tools_runtime::computer_frame_scope`). Absent when the window
+    /// cannot tell one conversation in the pane from the next. Never laid on
+    /// a record.
+    pub scope: Option<String>,
 }
 
 impl Actor {
@@ -351,6 +357,10 @@ pub fn acting_for(actor: Actor) -> ActingFor {
 
 pub(crate) fn actor_pane() -> Option<String> {
     ACTOR.with(|held| held.borrow().as_ref().and_then(|actor| actor.pane.clone()))
+}
+
+pub(crate) fn actor() -> Option<Actor> {
+    ACTOR.with(|held| held.borrow().clone())
 }
 
 /// The synchronous recipe/goal road's measured context, with the thread's
@@ -802,6 +812,7 @@ mod tests {
             let _acting = acting_for(Actor {
                 pane: Some("term-3".into()),
                 task: Some("t-10".into()),
+                scope: None,
             });
             press(1);
             // A recipe's own observation replaces the thread's; the actor
@@ -814,6 +825,7 @@ mod tests {
                 let _other = acting_for(Actor {
                     pane: Some("term-4".into()),
                     task: None,
+                    scope: None,
                 });
                 press(3);
             }

@@ -2703,6 +2703,7 @@ pub(super) async fn computer_loop(
     mut requests: tokio::sync::mpsc::UnboundedReceiver<zerocode_hookd::ComputerRequest>,
 ) {
     install_confirm_asker(app.clone());
+    install_frame_notice(app.clone());
     let sequences = computer_use::sequence::SequenceGate::default();
     while let Some(request) = requests.recv().await {
         let steering = app.clone();
@@ -3134,16 +3135,79 @@ fn session_folder_adopted() -> Option<PathBuf> {
 /// Who a step asked from `pane` is taken for (t-36910): that pane, and the
 /// task of the worker the ledger seats in it — what the artifact catalog's
 /// own door says of the pane ([`crate::artifact_runtime::held_pane`]), so a
-/// step, a published page and a transcript's page name the same task. A door
-/// that names no pane, or a pane this window does not hold, is nobody: the
-/// step then carries what the thread's own actor says, or nothing.
+/// step, a published page and a transcript's page name the same task — and the
+/// assignment its looks belong to ([`computer_frame_scope`]). A door that
+/// names no pane, or a pane this window does not hold, is nobody: the step
+/// then carries what the thread's own actor says, or nothing.
 fn step_actor(app: &AppHandle, pane: Option<&str>) -> run_evidence::Actor {
     pane.and_then(|key| crate::artifact_runtime::held_pane(app, key))
         .map(|held| run_evidence::Actor {
+            scope: computer_frame_scope(app, &held),
             pane: Some(held.key),
             task: held.facts.task,
         })
         .unwrap_or_default()
+}
+
+/// The assignment a pane's Computer Use looks belong to (t-59372): the pane,
+/// the seat the ledger gives it — agent, run, worker, task and dispatch — and
+/// the provider conversation it holds, hashed whole. A new dispatch or a new
+/// conversation in the same pane is another assignment, so the work screen
+/// panel never shows a pane's earlier work as its current. `None` while the
+/// window knows neither the dispatch nor the conversation: it then cannot
+/// tell one assignment in the pane from the next, and shows none.
+pub(crate) fn computer_frame_scope(
+    app: &AppHandle,
+    held: &crate::artifact_runtime::HeldPane,
+) -> Option<String> {
+    let term = crate::hooks::term_of_pane_key(&held.key)?;
+    let facts = &held.facts;
+    let ledger = crate::orchestration::board_ledger_snapshot();
+    let dispatch = ledger
+        .agents
+        .iter()
+        .find(|row| row.term == Some(term))
+        .filter(|row| facts.agent.as_deref() == Some(row.agent.as_str()))
+        .map(|row| row.dispatch_id.clone());
+    let session = app
+        .state::<AppState>()
+        .pane_sessions()
+        .get(&term)
+        .map(|session| session.id.clone());
+    frame_scope_of(
+        [
+            Some(held.key.as_str()),
+            facts.agent.as_deref(),
+            facts.run.as_deref(),
+            facts.worker.as_deref(),
+            facts.task.as_deref(),
+        ],
+        dispatch.as_deref(),
+        session.as_deref(),
+    )
+}
+
+/// [`computer_frame_scope`]'s hash: every value with its length before it, so
+/// no two different seats write the same bytes, and the whole SHA-256 in
+/// lowercase hex.
+pub(crate) fn frame_scope_of(
+    seat: [Option<&str>; 5],
+    dispatch: Option<&str>,
+    session: Option<&str>,
+) -> Option<String> {
+    use sha2::{Digest as _, Sha256};
+    let dispatch = dispatch.filter(|id| !id.is_empty());
+    let session = session.filter(|id| !id.is_empty());
+    if dispatch.is_none() && session.is_none() {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    for value in seat.into_iter().chain([dispatch, session]) {
+        let bytes = value.unwrap_or_default().as_bytes();
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// The automation the operator's own evidence folders are catalogued under.
@@ -5422,18 +5486,17 @@ pub(super) fn answer_computer_command_with(
         // an agent's `resume`.
         Err(computer_use::guard::refusal(&reason))
     } else if command.method == ComputerMethod::Resume {
-        computer_use::guard::lift();
         let reset = command
             .params
             .get("resetBudget")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        if computer_use::session_stands() {
-            computer_use::call("resume", serde_json::json!({ "resetBudget": reset }))
-                .map(|helper| serde_json::json!({ "resumed": true, "helper": helper }))
-        } else {
-            Ok(serde_json::json!({ "resumed": true, "helper": "idle" }))
-        }
+        computer_use::guard::resume(
+            computer_use::guard::Lifter::Agent,
+            || computer_use::guard::helper_resume(reset),
+            computer_use::guard::stop_helper,
+        )
+        .agent_answer()
     } else if command.method == ComputerMethod::Status {
         let helper = if computer_use::session_stands() {
             computer_use::call("status", serde_json::json!({}))
@@ -6020,6 +6083,23 @@ pub(super) fn install_confirm_asker(app: AppHandle) {
             serde_json::json!({ "id": ask.id, "decision": decision }),
         );
         decision
+    }));
+}
+
+/// The work screen panel's notice (t-59372): a pane took a look under the
+/// assignment it holds. Only the window's own page hears it, and it carries
+/// the pane, the assignment and the look's number — the picture stays here
+/// until the page asks for it ([`crate::cmd::settings::computer_progress_frame`]).
+fn install_frame_notice(app: AppHandle) {
+    computer_use::observe::install_notice(Box::new(move |pane, scope, seq| {
+        let Some(term) = crate::hooks::term_of_pane_key(pane) else {
+            return;
+        };
+        let _ = app.emit_to(
+            MAIN_WINDOW_LABEL,
+            "computer:frame",
+            serde_json::json!({ "term": term, "scope": scope, "seq": seq }),
+        );
     }));
 }
 

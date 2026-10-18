@@ -21786,6 +21786,63 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(crate::computer_use::guard::stopped_reason(), None);
     }
 
+    #[test]
+    fn the_operators_report_moves_its_revision_with_every_stop_and_lift_and_claims_no_hand() {
+        use zerocode_core::computer_use::{
+            STOP_REASON_HOTKEY, STOP_REASON_REQUEST, STOP_REASON_WINDOW,
+        };
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let read_report = || crate::computer_use::guard::activity_report(None);
+        crate::computer_use::guard::lift();
+        let mut reports = vec![("lifted at the start", read_report())];
+        crate::computer_use::guard::stop(STOP_REASON_WINDOW);
+        reports.push(("the window's stop", read_report()));
+        crate::computer_use::guard::lift();
+        reports.push(("lifted after the window's stop", read_report()));
+        crate::computer_use::guard::adopt(STOP_REASON_HOTKEY);
+        reports.push(("the person's chord", read_report()));
+        crate::computer_use::guard::lift();
+        reports.push(("lifted after the chord", read_report()));
+        crate::computer_use::guard::stop(STOP_REASON_REQUEST);
+        reports.push(("an agent's requested stop", read_report()));
+        crate::computer_use::guard::lift();
+        reports.push(("lifted after the requested stop", read_report()));
+        let stops: Vec<Option<&str>> = reports
+            .iter()
+            .map(|(_, report)| report["stopped"].as_str())
+            .collect();
+        assert_eq!(
+            stops,
+            [
+                None,
+                Some(STOP_REASON_WINDOW),
+                None,
+                Some(STOP_REASON_HOTKEY),
+                None,
+                Some(STOP_REASON_REQUEST),
+                None,
+            ],
+            "{reports:?}"
+        );
+        for (moment, report) in &reports {
+            assert!(
+                report.get("owner").is_none_or(|owner| *owner == "unknown"),
+                "{moment}: a stop or a lift alone shows nobody's hand: {report}"
+            );
+        }
+        for ((earlier_moment, earlier), (later_moment, later)) in reports.iter().zip(&reports[1..])
+        {
+            let before = earlier["revision"].as_u64();
+            let after = later["revision"].as_u64();
+            assert!(
+                before.is_some() && after > before,
+                "{earlier_moment} → {later_moment}: the revision went {before:?} → {after:?}"
+            );
+        }
+    }
+
     /// A desk that sees nothing: the walk judges no landing and watches no
     /// hand, and says so.
     struct BlindDesk(std::time::Instant);
