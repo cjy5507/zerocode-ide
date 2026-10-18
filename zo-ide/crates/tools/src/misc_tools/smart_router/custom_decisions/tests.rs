@@ -522,3 +522,36 @@ fn secret_lines_never_leave() {
         }
     });
 }
+
+/// A decision past its own bound in the hour, or past the bound every
+/// decision shares, sends nothing and writes `hourly_budget`.
+#[test]
+fn hourly_bound_writes_hourly_budget_and_sends_nothing() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let mut once = yes_no("Once", Point::AgentAsks);
+        once.max_per_hour = *custom::HOURLY_REQUESTS.start();
+        keep(&once, JevMode::On);
+        let ask = |name: &str| decide(cwd, name, Some("the diff adds one test"), &[]).expect("a verdict");
+        assert_eq!(ask("Once").outcome, door::ANSWERED_OUTCOME);
+        let bounded = ask("Once");
+        assert_eq!((bounded.outcome.as_str(), bounded.line.as_deref()), (Refused::HourlyBudget.token(), None));
+        assert_eq!(mock.requests().len(), 1, "its own hour sent nothing more");
+        let path = runtime::default_config_home().join("settings.json");
+        let mut settings: Value = serde_json::from_str(&fs::read_to_string(&path).expect("the settings")).expect("JSON");
+        settings[SMART_SETTINGS_KEY][JEV_SETTINGS_KEY][CUSTOM_HOURLY_REQUESTS_SETTING] = Value::from(2);
+        fs::write(path, settings.to_string()).expect("the settings written");
+        for name in ["First", "Second"] {
+            keep(&yes_no(name, Point::AgentAsks), JevMode::On);
+        }
+        assert_eq!(ask("First").outcome, door::ANSWERED_OUTCOME);
+        let shared = ask("Second");
+        assert_eq!((shared.outcome.as_str(), shared.line.as_deref()), (Refused::HourlyBudget.token(), None));
+        assert_eq!(mock.requests().len(), 2, "the hour every decision shares sent nothing more");
+        let rows = rows_now(cwd);
+        let outcomes: Vec<&str> = rows.iter().filter_map(|row| row["outcome"].as_str()).collect();
+        let (answered, bound) = (door::ANSWERED_OUTCOME, Refused::HourlyBudget.token());
+        assert_eq!(outcomes, [answered, bound, answered, bound]);
+        assert!(rows.iter().filter(|row| row["outcome"] == bound).all(|row| row["requests"] == 0), "{rows:?}");
+    });
+}
