@@ -7,7 +7,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureKnowledgeGlParityStages,
-  measureKnowledgePainterSwap, measureKnowledgeScenes,
+  measureKnowledgePainterSwap, measureKnowledgeScenes, PAINTER_SWAP_PROOFS,
   testKnowledgePerformance } from "./knowledge-performance.mjs";
 import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
@@ -126,13 +126,18 @@ const ok = (name, pass, detail = "") => {
   if (!held) console.error("   detail:", detail);
 };
 /* 증명 회차의 손잡이 `KNOWLEDGE_MACHINE_PROOF`(t-62848). 기본은 꺼짐이고 레시피와 게이트는 켜지 않는다. 쉼표로 잇는다:
+ * - `frame` · `release` · `hold` — 페인터를 갈아 끼우는 시험의 두 힙 읽기에 덩어리 하나를 건다. 한 회차에
+ *   하나만(`PAINTER_SWAP_PROOFS`, knowledge-performance.mjs).
  * - `close:<줄>` — 그 줄의 단계가 돌기 직전에 2D 브라우저를 닫는다(10-18의 재실행이 기계가 잠든 사이
  *   브라우저를 잃은 일). */
 const MACHINE_PROOF = (process.env.KNOWLEDGE_MACHINE_PROOF ?? "").split(",").map((one) => one.trim())
   .filter(Boolean);
 const closeAtStep = Number(MACHINE_PROOF.find((one) => /^close:\d+$/.test(one))?.slice("close:".length) ?? 0);
-if (MACHINE_PROOF.some((one) => !/^close:\d+$/.test(one))) {
-  ok("KNOWLEDGE_MACHINE_PROOF names only close:<step line>", false, MACHINE_PROOF.join(","));
+const swapProofs = MACHINE_PROOF.filter((one) => PAINTER_SWAP_PROOFS.includes(one));
+if (swapProofs.length > 1
+  || MACHINE_PROOF.some((one) => !PAINTER_SWAP_PROOFS.includes(one) && !/^close:\d+$/.test(one))) {
+  ok("KNOWLEDGE_MACHINE_PROOF names at most one of frame, release and hold, and close:<step line>", false,
+    MACHINE_PROOF.join(","));
 }
 /* 최상위의 한 단계가 던지면 그 단계의 실패다: 줄 번호와 함께 기록되고 시험은 요약까지 간다(settings.mjs의
  * test()와 같은 꼴, t-34262). */
@@ -4295,7 +4300,7 @@ ok("saved scenes live in the settings document: a reloaded window lists them and
   JSON.stringify(sceneReload));
 
 await step(4013, () => testKnowledgePerformance(page, ok));
-await step(4014, () => measureKnowledgePainterSwap(page, ok));
+await step(4014, () => measureKnowledgePainterSwap(page, ok, { proof: swapProofs[0] ?? null }));
 const sweep = knowledgeSweepFor(process.env);
 await step(4016, () => measureKnowledgeScenes(page, ok, { frames: sweep.frames }));
 

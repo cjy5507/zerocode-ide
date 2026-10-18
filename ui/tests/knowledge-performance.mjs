@@ -493,8 +493,15 @@ export async function measureKnowledgeScenes(page, ok,
  * 수)와 **놓는가**(버퍼·요소·리스너). 아래 한 함수가 표의 페인터를 전부 돌며 그 둘을
  * 묻는다 — P1에서는 줄이 하나(SVG)이므로 「열 번 갈아 끼워도 판이 자란 자리가
  * 없다」를 묻고, P2에서 GL 줄이 들어오면 같은 물음이 두 손을 오간다. */
-export async function measureKnowledgePainterSwap(page, ok) {
-  const swap = await page.evaluate(async () => {
+/* 열 번 갈아 끼운 뒤의 JS 힙이 처음과 다를 수 있는 몫(%). 판정과 증명 회차의 덩어리가 같이 쓴다. */
+const HEAP_DRIFT_PERCENT = 5;
+/* 증명 회차(`KNOWLEDGE_MACHINE_PROOF`, t-62848)가 두 힙 읽기에 거는 것 — 덩어리는 셋 다 허용치의 두 배다.
+ * `frame`은 둘째 읽기의 프레임마다 덩어리를 짓고 그 프레임에서 놓는다(프레임이 남긴 쓰레기). `release`는
+ * 첫 읽기를 지나도록 쥐었다가 놓는다(10-18 02:33처럼 두 읽기 사이에 힙이 준다). `hold`는 첫 읽기 뒤에
+ * 쥐어 둘째 읽기까지 놓지 않는다(판이 놓지 않는 것). */
+export const PAINTER_SWAP_PROOFS = Object.freeze(["frame", "release", "hold"]);
+export async function measureKnowledgePainterSwap(page, ok, { proof = null } = {}) {
+  const swap = await page.evaluate(async ({ proof, share }) => {
     const view = document.querySelector(".knowledge-view:not([hidden])");
     const frame = () => new Promise((done) => requestAnimationFrame(done));
     const kinds = KNOWLEDGE_PAINTERS.map((row) => row.id);
@@ -570,6 +577,26 @@ export async function measureKnowledgePainterSwap(page, ok) {
       }
       return performance.memory ? performance.memory.usedJSHeapSize : 0;
     };
+    /* 증명 회차의 덩어리: 지금 힙의 `share`만큼 배열을 쥐고 돌려준다. 크기는 잰 힙에서 정하고, 쥔 채로
+     * 재므로 도중의 수거가 덩어리를 줄이지 않는다. 배열 하나가 적어도 칸마다 4바이트라서, 그 수에 닿으면
+     * 읽기가 늦더라도 멈춘다. */
+    const block = () => {
+      const held = [];
+      if (!performance.memory) return held;
+      const start = performance.memory.usedJSHeapSize;
+      const most = Math.ceil((start * share) / (4096 * 4));
+      while (held.length < most && performance.memory.usedJSHeapSize - start < start * share) {
+        held.push(new Array(4096).fill(0));
+      }
+      return held;
+    };
+    let spilling = false;
+    const spill = () => {
+      if (!spilling) return;
+      block();
+      requestAnimationFrame(spill);
+    };
+    const keep = { block: null };
     const swapOnce = async () => {
       const held = knowledgePainterFor(view);
       held.dispose();
@@ -584,19 +611,27 @@ export async function measureKnowledgePainterSwap(page, ok) {
      * 것인지 아닌지를 말한다. */
     await swapOnce();
     const before = await settle();
+    keep.block = proof === "release" ? block() : null;
     const heapBefore = await heap();
+    keep.block = proof === "hold" ? block() : null;
     let emptied = 0;
     for (let round = 0; round < 10; round += 1) {
       if (await swapOnce()) emptied += 1;
     }
     const after = await settle();
+    if (proof === "frame") {
+      spilling = true;
+      requestAnimationFrame(spill);
+    }
     const heapAfter = await heap();
+    spilling = false;
+    keep.block = null;
     knowledgePainterKind = pinned;
     return { kinds, interfaced, probes, emptyPick, before, after, emptied,
       heapBefore, heapAfter,
       heapDrift: heapBefore === 0 ? 0
         : Math.round(((heapAfter - heapBefore) / heapBefore) * 1000) / 10 };
-  });
+  }, { proof, share: (2 * HEAP_DRIFT_PERCENT) / 100 });
   ok("every painter wears the same five-method shape, the projector lands on the ink the browser drew, and that spot picks its own seat",
     swap.interfaced && swap.probes.length > 0
       && swap.probes.every((row) => row.picked === row.seat && row.hit >= 0
@@ -609,11 +644,11 @@ export async function measureKnowledgePainterSwap(page, ok) {
     swap.emptied === 10 && swap.after.elements === swap.before.elements
       && swap.after.nodeEls === swap.before.nodeEls
       && swap.after.cached === swap.before.cached
-      && Math.abs(swap.heapDrift) <= 5,
+      && Math.abs(swap.heapDrift) <= HEAP_DRIFT_PERCENT,
     JSON.stringify(swap));
   console.log(`METRIC knowledge painter swap: ${JSON.stringify({ kinds: swap.kinds,
     elements: swap.before.elements, heapBefore: swap.heapBefore, heapAfter: swap.heapAfter,
-    heapDrift: `${swap.heapDrift}%`, memory: memoryNote() })}`);
+    heapDrift: `${swap.heapDrift}%`, memory: memoryNote(), ...(proof ? { proof } : {}) })}`);
   return swap;
 }
 
