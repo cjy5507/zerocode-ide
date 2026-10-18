@@ -153,6 +153,59 @@ fn the_custom_row_reads_the_config_store_and_uses_the_lower_mode() {
     }
 }
 
+/// A person's decisions are counted off the one ledger every decision writes
+/// (t-62170): each by its id, the version it asks with now apart from each
+/// earlier version a row names — a changed question's answers are never
+/// added to the old one's — and another decision's rows not at all.
+#[test]
+fn each_decision_is_counted_apart_by_version() {
+    use zerocode_core::jev::custom::{Answer, Definition, Point, store};
+    use zerocode_core::jev::door::ANSWERED_OUTCOME;
+
+    let home = tempfile::tempdir().unwrap();
+    let ledgers = tempfile::tempdir().unwrap();
+    let mut decision = Definition::new(
+        "d-0000000b".to_string(),
+        "Release notes".to_string(),
+        "Did the product change?".to_string(),
+        Answer::YesNo {
+            yes: "A visible change.".to_string(),
+            no: "No visible change.".to_string(),
+        },
+        Point::TurnEnd,
+    );
+    let first = store::create(home.path(), &decision, JevMode::On, 1_000).unwrap();
+    decision.question = "Did what a person sees change?".to_string();
+    let second = store::edit(home.path(), &decision, 2_000).unwrap();
+    assert_ne!(first, second, "a changed question is a new version");
+    let now = 10 * MS_PER_DAY + MS_PER_DAY / 2;
+    let asked = |id: &str, version: &str, at: i64| {
+        asked_by(
+            &CUSTOM_DECISIONS,
+            json!({"at": at, "decision": id, "definition": version, "outcome": ANSWERED_OUTCOME, "requests": 1}),
+        )
+    };
+    write(
+        ledgers.path(),
+        CUSTOM_DECISIONS.ledger,
+        &[
+            asked(&decision.id, &first, now - 3 * MS_PER_DAY),
+            asked(&decision.id, &first, now - 2_000),
+            asked(&decision.id, &second, now - 1_000),
+            asked("d-0000000c", &second, now - 500),
+        ],
+    );
+    let reports = custom_decisions_in(home.path(), &[ledgers.path().to_path_buf()], None, now, 0);
+    let counted = |version: &VersionReport| {
+        (version.definition.clone(), version.requests_today, version.requests_week, version.latest.is_some())
+    };
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    let report = &reports[0];
+    assert_eq!((report.id.as_str(), report.name.as_str(), report.mode), (decision.id.as_str(), "Release notes", JevMode::On));
+    assert_eq!(counted(&report.current), (second, 1, 1, true), "the version it asks with now");
+    assert_eq!(report.earlier.iter().map(counted).collect::<Vec<_>>(), [(first, 1, 2, true)], "the one before it");
+}
+
 #[test]
 fn a_screen_seats_rows_are_counted_across_its_session_folders() {
     // The window's screen seats append beside each walk's evidence:
