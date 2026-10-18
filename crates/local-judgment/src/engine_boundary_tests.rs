@@ -77,6 +77,7 @@ async fn an_io_failure_closes_admission_before_its_supervisor_is_polled_again() 
         ticket,
         b"{}".to_vec(),
         None,
+        None,
     ));
     {
         let _io = lock(&state.engine.io);
@@ -143,7 +144,8 @@ async fn a_cancelled_deadline_owner_stops_inference_before_its_release_signal() 
     let listener = UnixListener::bind(root.path().join("release.sock")).unwrap();
     let program = r#"import json,socket,sys
 from pathlib import Path
-request=json.loads(sys.stdin.readline())
+frame=json.loads(sys.stdin.readline())
+request=frame.get('request',frame)
 release=socket.socket(socket.AF_UNIX)
 release.connect(str(Path(sys.argv[1])/'release.sock'))
 release.recv(1)

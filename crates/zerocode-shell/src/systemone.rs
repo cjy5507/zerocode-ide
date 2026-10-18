@@ -1268,6 +1268,14 @@ impl Wire {
             .timeout(remaining)
             .header("Content-Type", "application/json")
             .body(std::mem::take(&mut prepared.body));
+        let request = if provider.kind == ProviderKind::Local {
+            request.header(
+                judgment_provider::DEADLINE_HEADER,
+                remaining.as_millis().to_string(),
+            )
+        } else {
+            request
+        };
         let request = if let Some(key) = key {
             request.bearer_auth(key)
         } else {
