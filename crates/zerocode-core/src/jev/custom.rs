@@ -386,7 +386,7 @@ pub fn line(name: &str, option: &str, confidence: f64) -> String {
 /// the level counted from zero, as [`Answer::Score`] lists the levels.
 #[must_use]
 pub fn shown_level(level: usize, count: usize) -> String {
-    String::new()
+    format!("{}/{count}", level.saturating_add(1))
 }
 
 /// Bytes that are not a definition this version reads: damaged, or of
