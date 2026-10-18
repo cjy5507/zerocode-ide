@@ -140,6 +140,22 @@ enum Seen {
     Tree,
     /// A picture the window no longer keeps.
     Gone,
+    /// A picture past the budget every provider holds a screenshot to — only
+    /// a full-resolution shot gets there — which the window never kept
+    /// (t-63505 ③).
+    Oversize,
+}
+
+impl Seen {
+    /// The picture a look saw, kept for the panel while it is within the
+    /// screenshot budget.
+    fn picture(png: &[u8]) -> Self {
+        if png.len() > zerocode_core::computer_use_protocol::MAX_SCREENSHOT_PNG_BYTES {
+            Self::Oversize
+        } else {
+            Self::Picture(png.into())
+        }
+    }
 }
 
 /// A pane's newest look, under the assignment the pane held when it looked.
@@ -185,6 +201,7 @@ pub(crate) fn owned_look(pane: &str, scope: &str) -> Option<Value> {
             Seen::Picture(png) => ("screenshot", Some(png.clone())),
             Seen::Tree => ("accessibility", None),
             Seen::Gone => ("gone", None),
+            Seen::Oversize => ("oversize", None),
         };
         (look.seq, look.at, perception, picture)
     };
@@ -199,12 +216,18 @@ pub(crate) fn owned_look(pane: &str, scope: &str) -> Option<Value> {
 /// Keep a look as the newest of the pane this thread acts for, under the
 /// assignment the pane holds, and tell the window its number. A look taken
 /// for no pane, or for a pane whose assignment the window cannot tell, is
-/// nobody's.
+/// nobody's — and the pane's older look goes (t-63505 ④): it is no longer the
+/// pane's newest, so it is never shown as that.
 fn own(seen: impl FnOnce() -> Seen) {
     let Some(pane) = crate::run_evidence::actor_pane() else {
         return;
     };
     let Some(scope) = crate::run_evidence::actor().and_then(|actor| actor.scope) else {
+        OWNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .looks
+            .retain(|look| look.pane != pane);
         return;
     };
     let seen = seen();
@@ -435,7 +458,7 @@ fn changes_where_repainted(
 /// full-resolution shot is not the picture `observe` takes there, so it is
 /// not the one to diff.
 pub fn remember(params: &Map<String, Value>, answer: &Value, png: Vec<u8>) {
-    own(|| Seen::Picture(png.as_slice().into()));
+    own(|| Seen::picture(&png));
     if params.contains_key("app") || params.get("fullRes").and_then(Value::as_bool) == Some(true) {
         return;
     }
@@ -858,7 +881,7 @@ fn look(
     } else {
         held.and_then(|held| held.before(acts))
     };
-    own(|| Seen::Picture(png.as_slice().into()));
+    own(|| Seen::picture(&png));
     keep(
         key.clone(),
         LastFrame {

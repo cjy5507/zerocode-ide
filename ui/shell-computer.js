@@ -44,10 +44,54 @@ function computerBandNote(state) {
   return null;
 }
 
+/* How far the person's stop reached the work browsers (t-62872), said on the
+ * band and in the panel alike: still pausing, some it could not pause, or how
+ * many it paused; nothing when it reached none. */
+function computerStopReachWords(reach) {
+  if (!reach) return null;
+  if (reach.pausing > 0) {
+    return () => t("computer.band.browsersPausing", "작업 브라우저 {{count}}개를 멈추는 중…", { count: reach.pausing });
+  }
+  if (reach.failed > 0) {
+    return () => t("computer.band.browsersFailed", "작업 브라우저 {{failed}}개를 멈추지 못했습니다 · 멈춘 것 {{stopped}}개 · 그 탭의 막대에서 멈춰 주세요", {
+      failed: reach.failed, stopped: reach.stopped,
+    });
+  }
+  if (reach.stopped > 0) {
+    return () => t("computer.band.browsersStopped", "작업 브라우저 {{count}}개도 멈췄습니다", { count: reach.stopped });
+  }
+  return null;
+}
+
+function sayComputerStopReach(node, reach) {
+  const words = computerStopReachWords(reach);
+  say(node, words);
+  if (!words) node.textContent = "";
+  node.hidden = !words;
+  node.classList.toggle("is-failed", (reach?.failed ?? 0) > 0 && (reach?.pausing ?? 0) === 0);
+}
+
+/* The reach the band last painted, as one word: the work browsers' chrome
+ * repaints often, and the band repaints from it only when that word moved. */
+let computerBandReach = null;
+
+function computerStopReachKey(reach) {
+  return reach ? `${reach.stopped}/${reach.failed}/${reach.pausing}` : null;
+}
+
+/* What the work browsers' chrome asks of this file when it repaints: the
+ * band, when the person's stop reached further, and the panel's rows. */
+function paintComputerWorkBrowsers() {
+  if (computerStopReachKey(browserWorkspaceStopReach()) !== computerBandReach) paintComputerBand();
+  else paintComputerProgressControl();
+}
+
 function paintComputerBand() {
   const band = el("computer-band");
   const state = computerBandState;
   const stopped = state.stopped != null;
+  const reach = browserWorkspaceStopReach();
+  computerBandReach = computerStopReachKey(reach);
   const show = stopped || state.active || state.stopping || state.resuming;
   band.hidden = !show;
   band.classList.toggle("is-stopped", stopped);
@@ -62,15 +106,20 @@ function paintComputerBand() {
   say(note, words);
   if (!words) note.textContent = "";
   note.hidden = !words;
+  sayComputerStopReach(el("computer-band-browsers"), reach);
   // The stop stays in reach while a resume is out: the person's next stop
   // does not wait behind their last resume.
   el("computer-band-stop").hidden = state.stopping || (stopped && !state.resuming);
   // A resume names the stop it lifts; with no number from the backend there is
-  // nothing to name.
-  el("computer-band-resume").hidden = !stopped || state.revision == null || state.resuming || state.stopping;
+  // nothing to name. While the stop is still reaching a work browser there is
+  // nothing whole to lift yet (t-62872).
+  el("computer-band-resume").hidden = !stopped || state.revision == null || state.resuming || state.stopping ||
+    (reach?.pausing ?? 0) > 0;
   el("computer-band-view").hidden = computerBandLook == null;
   paintComputerProgressControl();
 }
+
+browserWorkspaceChromeReaders.add(paintComputerWorkBrowsers);
 
 function computerBandSlipAway() {
   clearTimeout(computerBandTimer);
@@ -82,8 +131,11 @@ function computerBandSlipAway() {
 
 /* Take in the stop the backend says stands at `revision` (`null`: a word with
  * no number). While the person's own stop is out, a newer word may show a stop
- * but not take one away: their last press was a stop. */
-function takeComputerBandStop(revision, stopped) {
+ * but not take one away: their last press was a stop. A stop the backend says
+ * is the person's (`persons`) reaches the work browsers too (t-62872); an
+ * agent's or a budget's does not, and a lift the band's own resume did not
+ * make gives nothing back. */
+function takeComputerBandStop(revision, stopped, persons = false) {
   const state = computerBandState;
   if (revision == null) {
     if (state.revision == null) computerBandState = { ...state, stopped };
@@ -92,13 +144,15 @@ function takeComputerBandStop(revision, stopped) {
   if (state.revision != null && revision <= state.revision) return;
   const kept = state.stopping && stopped == null ? state.stopped : stopped;
   computerBandState = { ...state, revision, stopped: kept, resumeFailed: false };
+  if (stopped != null && persons) stopAgentBrowserWorkspaces(revision);
+  else if (stopped == null && !state.resuming) forgetAgentBrowserWorkspaceStop();
 }
 
 listen("computer:activity", (event) => {
   const report = event.payload ?? {};
   const revision = typeof report.revision === "number" ? report.revision : null;
   if (revision != null && computerBandState.revision != null && revision < computerBandState.revision) return;
-  takeComputerBandStop(revision, report.stopped ?? null);
+  takeComputerBandStop(revision, report.stopped ?? null, report.personsStop === true);
   computerBandState = {
     ...computerBandState,
     active: report.active === true,
@@ -117,7 +171,7 @@ el("computer-band-stop").addEventListener("click", () => {
     .then((answer) => {
       if (answer?.stopped !== true) return;
       const revision = typeof answer.revision === "number" ? answer.revision : null;
-      takeComputerBandStop(revision, answer.reason ?? "window");
+      takeComputerBandStop(revision, answer.reason ?? "window", answer.personsStop === true);
     })
     .catch(() => {})
     .finally(() => {
@@ -133,7 +187,11 @@ el("computer-band-resume").addEventListener("click", () => {
   paintComputerBand();
   invoke("computer_resume", { reset: false, revision: state.revision })
     .then((answer) => {
-      if (typeof answer?.revision === "number") takeComputerBandStop(answer.revision, answer.stopped ?? null);
+      if (typeof answer?.revision === "number") {
+        takeComputerBandStop(answer.revision, answer.stopped ?? null, answer.personsStop === true);
+      }
+      // The resume lifted the stop it named: what that stop paused goes back.
+      if (answer?.resumed === true) resumeAgentBrowserWorkspaces(state.revision);
       if (answer?.resumed === false) {
         computerBandState = { ...computerBandState, resumeFailed: computerBandState.stopped != null };
       }
@@ -220,10 +278,15 @@ function forgetComputerProgressRows(list) {
 function paintComputerProgressControl() {
   const panel = computerProgress;
   if (!panel) return;
-  const stopped = computerBandState.stopped;
+  const { stopped, active } = computerBandState;
+  // The agent holds the desktop only while it acts (the band's own word for
+  // it); with no action going on nobody is said to (t-63505).
   say(el("computer-progress-desk"), () => stopped != null
     ? t("computer.progress.deskStopped", "데스크톱 · 정지됨({{reason}}) · 에이전트는 입력할 수 없습니다", { reason: stopped })
-    : t("computer.progress.deskAgent", "데스크톱 · 에이전트에게 제어권이 있습니다"));
+    : active
+      ? t("computer.progress.deskAgent", "데스크톱 · 에이전트에게 제어권이 있습니다")
+      : t("computer.progress.deskIdle", "데스크톱 · 지금 조작 중인 에이전트가 없습니다"));
+  sayComputerStopReach(el("computer-progress-stop-browsers"), browserWorkspaceStopReach());
   const held = computerProgressBrowsers(panel.term);
   const list = el("computer-progress-browsers");
   const signature = held.map((tab) => tab.id).join("\n");
@@ -251,7 +314,7 @@ function paintComputerProgressControl() {
   list.hidden = held.length === 0;
   const hint = el("computer-progress-browser-hint");
   say(hint, held.length === 0 ? null : () => t("computer.progress.browserHint",
-    "작업 브라우저의 제어권은 그 막대의 「{{human}}」·「{{agent}}」로 바꿉니다 · 띠의 정지는 데스크톱만 멈춥니다",
+    "작업 브라우저의 제어권은 그 막대의 「{{human}}」·「{{agent}}」로 바꿉니다 · 띠의 정지는 작업 브라우저도 함께 멈춥니다",
     { human: BROWSER_WORKSPACE_ACTION_WORDS.human(), agent: BROWSER_WORKSPACE_ACTION_WORDS.agent() }));
   if (held.length === 0) hint.textContent = "";
   hint.hidden = held.length === 0;
@@ -269,7 +332,9 @@ function paintComputerProgressLook(look) {
   frame.hidden = !picture;
   const words = picture ? null : look.perception === "accessibility"
     ? () => t("computer.progress.accessibility", "이 관측은 화면의 구조만 읽어 그림이 없습니다")
-    : () => t("computer.progress.gone", "이 관측의 그림은 더는 보관하지 않습니다");
+    : look.perception === "oversize"
+      ? () => t("computer.progress.oversize", "이 관측의 그림은 너무 커서 보관하지 않았습니다")
+      : () => t("computer.progress.gone", "이 관측의 그림은 더는 보관하지 않습니다");
   say(note, words);
   if (!words) note.textContent = "";
   note.hidden = !words;
@@ -301,7 +366,12 @@ function askComputerProgress() {
     });
 }
 
-function closeComputerProgress() {
+/* Where the keyboard was when the person opened the panel: closing it gives
+ * the keyboard back there, or to the band's view when that place is gone
+ * (t-63505). */
+let computerProgressReturn = null;
+
+function forgetComputerProgress() {
   computerProgress = null;
   el("computer-progress").hidden = true;
   const frame = el("computer-progress-frame");
@@ -315,6 +385,10 @@ function closeComputerProgress() {
   say(el("computer-progress-subject"), null);
   say(el("computer-progress-desk"), null);
   el("computer-progress-desk").textContent = "";
+  const reach = el("computer-progress-stop-browsers");
+  say(reach, null);
+  reach.textContent = "";
+  reach.hidden = true;
   forgetComputerProgressRows(el("computer-progress-browsers"));
   el("computer-progress-browsers").hidden = true;
   const hint = el("computer-progress-browser-hint");
@@ -323,9 +397,22 @@ function closeComputerProgress() {
   hint.hidden = true;
 }
 
+function closeComputerProgress() {
+  const giveBack = el("computer-progress").contains(document.activeElement)
+    ? [computerProgressReturn, el("computer-band-view")].find((node) => node?.isConnected && !node.closest("[hidden]"))
+    : null;
+  computerProgressReturn = null;
+  forgetComputerProgress();
+  giveBack?.focus({ preventScroll: true });
+}
+
 function openComputerProgress(subject) {
   if (computerProgressOwns(subject)) return;
-  closeComputerProgress();
+  const from = document.activeElement;
+  const returnTo = computerProgress ? computerProgressReturn
+    : from instanceof HTMLElement && from !== document.body && !el("computer-progress").contains(from) ? from : null;
+  forgetComputerProgress();
+  computerProgressReturn = returnTo;
   computerProgressSessions += 1;
   computerProgress = {
     session: computerProgressSessions,

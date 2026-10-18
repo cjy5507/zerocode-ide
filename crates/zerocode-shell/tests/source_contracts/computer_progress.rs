@@ -211,7 +211,9 @@ fn the_persons_stop_reaches_the_work_browsers_only_through_their_bars_road() {
         "the band's granted resume gives back what its stop paused"
     );
     assert_eq!(
-        browser.matches("invoke(\"set_browser_workspace_mode\"").count(),
+        browser
+            .matches("invoke(\"set_browser_workspace_mode\"")
+            .count(),
         1,
         "one place asks the backend to change a work browser's mode"
     );
