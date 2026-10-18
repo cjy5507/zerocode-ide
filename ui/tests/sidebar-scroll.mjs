@@ -24,7 +24,8 @@ import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
  *   home       where the first section and row 0 stand at rest with the scroll at 0, read once per page before any
  *              scroll. At the top, a list above its home stops short of row 0 (short); one below it leaves a gap.
  *   step       one wheel tick of −100 px moves the first fully visible row down by 100 px.
- *   mid-scroll write   a write by the window within 100 ms after a wheel or scroll event.
+ *   mid-scroll write   a write by the window within 100 ms after a wheel event, or after a scroll event that no write
+ *                      of the window fired.
  *   overlap    how far the cleanup entry's box runs into the list's, while it shows.
  *
  *   ① a cold first pass up from the bottom: 12 ticks one at a time, then a burst of 30 ticks 40 ms apart;
@@ -60,10 +61,11 @@ const LAST_ROW = `/sb/wt-${String(SB - 1).padStart(3, "0")}`;
 
 const round = (value) => (value === null || value === undefined ? value : Math.round(value * 10) / 10);
 
-async function standScrollScene(page) {
+// `active`: the workspace the catalog says is active, as the backend says it — a refresh sets the window's own.
+async function standScrollScene(page, { active = null } = {}) {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.waitForFunction(() => projectsRead);
-  await page.evaluate(async ({ sa, sb }) => {
+  await page.evaluate(async ({ sa, sb, active }) => {
     const tell = (name, payload) => {
       for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
     };
@@ -71,7 +73,7 @@ async function standScrollScene(page) {
       path: `/${name}/wt-${String(at).padStart(3, "0")}`,
       branch: at === 0 ? "main" : `f/${name}-${at}`,
       is_main: at === 0,
-      active: false,
+      active: `/${name}/wt-${String(at).padStart(3, "0")}` === active,
       is_folder: false,
     }));
     window.__ANSWER__.project_catalog = () => [
@@ -100,7 +102,7 @@ async function standScrollScene(page) {
     setEveryProjectClosed(false);
     await refreshWorktrees();
     for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
-  }, { sa: SA, sb: SB });
+  }, { sa: SA, sb: SB, active });
   await page.waitForTimeout(REST_MS);
 }
 
@@ -109,7 +111,7 @@ async function installScrollProbes(page) {
     const scroller = document.getElementById("sidebar-scroll");
     const own = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
     const read = () => own.get.call(scroller);
-    const probe = { writes: [], events: [], frames: [], renders: [], recording: false, setup: false, read };
+    const probe = { writes: [], events: [], frames: [], renders: [], recording: false, setup: false, writing: false, read };
     window.__PROBE__ = probe;
     const wrote = (before, via) => {
       if (!probe.setup) probe.writes.push({ at: performance.now(), before, after: read(), via });
@@ -120,16 +122,28 @@ async function installScrollProbes(page) {
         return own.get.call(this);
       },
       set(value) {
-        const before = own.get.call(this);
-        own.set.call(this, value);
+        probe.writing = true;
+        let before;
+        try {
+          before = own.get.call(this);
+          own.set.call(this, value);
+        } finally {
+          probe.writing = false;
+        }
         wrote(before, "scrollTop");
       },
     });
     for (const via of ["scrollTo", "scrollBy"]) {
       const held = scroller[via];
       scroller[via] = function spied(...args) {
-        const before = read();
-        held.apply(this, args);
+        probe.writing = true;
+        let before;
+        try {
+          before = read();
+          held.apply(this, args);
+        } finally {
+          probe.writing = false;
+        }
         wrote(before, via);
       };
     }
@@ -150,8 +164,10 @@ async function installScrollProbes(page) {
         probe.setup = false;
       }
     };
+    // A scroll event fired while the window writes is the window's, not the person's scroll: WebKit can fire it
+    // inside the write.
     for (const type of ["wheel", "scroll"]) {
-      scroller.addEventListener(type, () => probe.events.push({ type, at: performance.now() }), {
+      scroller.addEventListener(type, () => probe.events.push({ type, at: performance.now(), own: probe.writing }), {
         capture: true,
         passive: true,
       });
@@ -300,12 +316,15 @@ async function stepUp(page, count) {
   return steps;
 }
 
-// Wheel ticks TICK_MS apart; each of `during` runs once, after the tick its `after` names.
+// Wheel ticks TICK_MS apart; each of `during` runs once, after the tick its `after` names, given the scroll from
+// before that tick.
 async function burst(page, count, { dy = -STEP, during = [] } = {}) {
   const runs = [during].flat();
   for (let at = 0; at < count; at += 1) {
+    const due = runs.filter((one) => one.after === at);
+    const from = due.length ? await page.evaluate(() => window.__PROBE__.read()) : null;
     await page.mouse.wheel(0, dy);
-    for (const one of runs) if (one.after === at) await one.run();
+    for (const one of due) await one.run(from);
     await page.waitForTimeout(TICK_MS);
   }
 }
@@ -413,7 +432,7 @@ function rowsHeld(taken, from, to) {
 function writesInScroll(taken, from, to) {
   const writes = taken.writes.filter((write) => write.at >= from && write.at <= to);
   const inside = writes.filter((write) =>
-    taken.events.some((event) => write.at >= event.at && write.at - event.at < WRITE_WINDOW_MS));
+    taken.events.some((event) => !event.own && write.at >= event.at && write.at - event.at < WRITE_WINDOW_MS));
   return {
     writes: writes.length,
     inside: inside.length,
@@ -523,9 +542,9 @@ const stood = (held) => held.rows.worst <= 1 && held.writes.inside === 0;
 export async function testSidebarScroll({ browser, origin, ok, engine = "chromium" }) {
   const faults = [];
   const pages = [];
-  const stand = async () => {
+  const stand = async (scene = {}) => {
     const { page } = await openWindowTestPage(browser, origin, { faults });
-    await standScrollScene(page);
+    await standScrollScene(page, scene);
     await installScrollProbes(page);
     await overScroller(page);
     await page.evaluate(() => window.__PROBE__.start());
@@ -583,7 +602,9 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     await burst(page, 30, {
       during: {
         after: 14,
-        run: async () => {
+        run: async (from) => {
+          // The tick's scroll lands first: a row picked on the top edge before it lands is in view when it grows.
+          await calm(page, from);
           second.grown = await page.evaluate(() => {
             const bounds = document.getElementById("sidebar-scroll").getBoundingClientRect();
             const node = [...document.querySelectorAll("#worktrees .wt-node[data-row-key]")].find((one) => {
@@ -764,16 +785,16 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
   const past = await atTheTop(true);
   const fling = await atTheTop(false);
 
-  // ⑩ A cold list: the active workspace becomes a row never built, below rows never measured — every one of them
-  // taller than the estimate — and the sidebar reveals it, as its crosshair does.
+  // ⑩ A cold list whose catalog names as active a workspace the window never built, below rows never measured —
+  // every one of them taller than the estimate — and the sidebar reveals it, as its crosshair does.
   const revealed = await (async () => {
-    const cold = await stand();
+    const cold = await stand({ active: "/sa/wt-180" });
     try {
       return await cold.evaluate(async ({ key, restMs }) => {
         const seek = () =>
           [...document.querySelectorAll("#worktrees .wt-row")].find((one) => one.dataset.worktreePath === key) ?? null;
         const builtBefore = seek() !== null;
-        activeWorktreePath = key;
+        const named = activeWorktreePath === key;
         revealActiveWorktree();
         await new Promise((done) => setTimeout(done, restMs));
         await window.__PAINTED__();
@@ -781,6 +802,7 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
         const bounds = document.getElementById("sidebar-scroll").getBoundingClientRect();
         const box = row?.getBoundingClientRect() ?? null;
         return {
+          named,
           builtBefore,
           built: row !== null,
           shown: box !== null && box.top >= bounds.top - 0.5 && box.bottom <= bounds.bottom + 0.5,
@@ -864,7 +886,7 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
   );
   ok(
     "⑩ revealing the active workspace, a row never built below rows never measured, stands it built, fully visible and focused",
-    !revealed.builtBefore && revealed.built && revealed.shown && revealed.focused,
+    revealed.named && !revealed.builtBefore && revealed.built && revealed.shown && revealed.focused,
     JSON.stringify({ engine, ...revealed }),
   );
   const cases = { first, second, bottom, cleanup, past, fling };
