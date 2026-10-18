@@ -63,8 +63,8 @@ impl SurfaceRepetitionState {
     }
 
     fn identity(&self, tool_name: &str, input: &str, raw: u64) -> Option<&str> {
-        self.fingerprints.get(&raw).filter(|identity| !identity.is_empty()).map(String::as_str)
-            .or_else(|| surface_target_keys(tool_name, input).first().and_then(|target| self.targets.get(target)).map(String::as_str))
+        surface_target_keys(tool_name, input).first().and_then(|target| self.targets.get(target)).map(String::as_str)
+            .or_else(|| self.fingerprints.get(&raw).filter(|identity| !identity.is_empty()).map(String::as_str))
     }
 
     fn apply(&mut self, fingerprint: u64, execution: SurfaceExecution) -> SurfaceUpdate {
@@ -732,6 +732,8 @@ where
         let (previous_name, previous_input) = previous.as_ref()
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
         let original = self.repetition_fingerprint(previous_name, previous_input);
+        let migrate_original = self.surface_repetition_state.identity(previous_name, previous_input,
+            fingerprint_tool_call(previous_name, previous_input)).is_none();
         let resolved = self.resolved_surface_call(tool_name, input);
         let (tool_name, input) = resolved.as_ref()
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
@@ -749,9 +751,11 @@ where
         }
         self.surface_repetition_state.bind(raw, &identity);
         self.surface_repetition_state.bind_targets(tool_name, input, &identity);
-        self.move_repetition_fingerprint(original, fingerprint);
+        if migrate_original {
+            self.move_repetition_fingerprint(original, fingerprint);
+            batch_hard_stops.rekey(original, fingerprint);
+        }
         self.move_repetition_fingerprint(raw, fingerprint);
-        batch_hard_stops.rekey(original, fingerprint);
         batch_hard_stops.rekey(raw, fingerprint);
         if self.surface_repetition_state.fingerprints.contains_key(&fingerprint) {
             self.pathless_fingerprints.remove(&raw);

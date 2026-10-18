@@ -1389,3 +1389,37 @@ fn a_first_seen_browser_selector_spelling_cannot_run_past_an_attended_limit() {
     assert_eq!(executor.state.lock().unwrap().executed.len(), 3,
         "a first spelling of the same selector must not get a fourth execution");
 }
+
+
+#[test]
+fn a_new_authenticated_control_identity_does_not_inherit_the_previous_identity_count() {
+    let mut calls = vec![observe(0), observe(0)];
+    for _ in 0..6 {
+        let mut call = observe(0);
+        call.result.as_mut().unwrap().surface.as_mut().unwrap().surface_id = "fixture-new-host-control".into();
+        calls.push(call);
+    }
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
+    runtime.run_turn("Observe a new authenticated host control interval", None).unwrap();
+    assert_eq!(executor.observations(), 5,
+        "two old observations and exactly three new-control observations must keep separate counts");
+}
+
+#[test]
+fn the_last_attested_target_identity_replaces_stale_exact_input_aliases() {
+    let mut calls = vec![observe(0), observe(0), observe(0)];
+    let mut action = computer("left_click", 41, 0, SurfaceEffect::Acknowledged);
+    action.result.as_mut().unwrap().surface.as_mut().unwrap().surface_id = "fixture-new-host-control".into();
+    calls.push(action);
+    for _ in 0..6 {
+        let mut call = observe(0);
+        call.result.as_mut().unwrap().surface.as_mut().unwrap().surface_id = "fixture-new-host-control".into();
+        calls.push(call);
+    }
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
+    runtime.run_turn("Use the latest host-attested identity for this target", None).unwrap();
+    assert_eq!(executor.observations(), 6,
+        "three observations on each authorized identity must use the target's latest host binding before dispatch");
+}
