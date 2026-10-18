@@ -363,7 +363,7 @@ fn run_decide(request: &DecideRequest, items: &[String], cwd: &Path) -> Result<R
     let text = if request.json {
         serde_json::to_string_pretty(&verdict).unwrap_or_default()
     } else {
-        verdict.line.clone().unwrap_or_else(|| verdict.note.clone())
+        verdict.note.clone()
     };
     Ok(Report { text, exit })
 }

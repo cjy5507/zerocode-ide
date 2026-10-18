@@ -898,3 +898,57 @@ fn provider_answering(yes: f64) -> (String, std::sync::Arc<std::sync::atomic::At
     });
     (origin, answered)
 }
+
+/// `zo jev decide <name>` asks the person's own decision of that name
+/// (t-62170): one that is on prints its line and exits 0; one that records is
+/// asked all the same, prints no line — `null` in its JSON — and exits 2; and
+/// a name no decision has is refused with exit 2 before anything is asked.
+#[test]
+fn decide_prints_an_on_decisions_line_and_nothing_of_one_that_records() {
+    use std::ffi::OsStr;
+    use std::sync::atomic::Ordering;
+    use zerocode_core::jev::custom::{self, store, Answer, Definition, Point};
+    use zerocode_core::jev::{door, JevMode, AGENT_TOOL_ASK_OPTIONS, CUSTOM_DECISIONS, SMART_SETTINGS_KEY};
+    let home = tempfile::tempdir().expect("a config home");
+    let work = tempfile::tempdir().expect("a project");
+    let project = std::fs::canonicalize(work.path()).expect("the project resolved");
+    let (origin, answered) = provider_answering(0.9);
+    let also = [
+        ("HOME", home.path().as_os_str()),
+        ("ZO_HOME", home.path().as_os_str()),
+        (api::SYSTEMONE_API_KEY_ENV, OsStr::new("test-key")),
+        (api::SYSTEMONE_BASE_URL_ENV, OsStr::new(&origin)),
+    ];
+    under_home_with(home.path(), &also, || {
+        let consented = json!({door::ENABLED_SETTING: true, door::WORKSPACES_SETTING: [project.to_string_lossy()]});
+        let settings =
+            json!({SMART_SETTINGS_KEY: {CUSTOM_DECISIONS.setting: JevMode::On.key(), door::JEV_SETTINGS_KEY: consented}});
+        std::fs::write(home.path().join("settings.json"), settings.to_string()).expect("settings");
+        for (name, mode) in [("Ship", JevMode::On), ("Wait", JevMode::Shadow)] {
+            let answer = Answer::YesNo { yes: "It is ready.".to_string(), no: "It needs more work.".to_string() };
+            let question = "Is the change ready to ship?".to_string();
+            let definition = Definition::new(custom::new_id(), name.to_string(), question, answer, Point::AgentAsks);
+            store::create(home.path(), &definition, mode, 1).expect("the decision kept");
+        }
+        let decide = |name: &str, json: bool| {
+            let mut args = words(&["decide", name, "--context", "the diff adds one test"]);
+            if json {
+                args.push("--json".to_string());
+            }
+            run(&args, &project, 1, 0)
+        };
+        let yes = AGENT_TOOL_ASK_OPTIONS[0];
+        let on = decide("Ship", false).expect("a report");
+        assert_eq!(on, Report { text: custom::line("Ship", yes, 0.9), exit: HEADLESS_LOOP_EXIT_DONE });
+        let recording = decide("Wait", false).expect("a report");
+        assert_eq!(recording.exit, NO_ANSWER_EXIT);
+        assert!(!recording.text.contains(&custom::line("Wait", yes, 0.9)), "{}", recording.text);
+        let said: Value = serde_json::from_str(&decide("Wait", true).expect("a report").text).expect("json");
+        assert_eq!((&said["line"], &said["mode"]), (&Value::Null, &json!(JevMode::Shadow.key())), "{said}");
+        assert_eq!(answered.load(Ordering::SeqCst), 3, "each was asked");
+        let unknown = decide("Nobody", false).expect_err("no decision has the name");
+        assert_eq!(unknown.exit, NO_ANSWER_EXIT);
+        assert!(unknown.message.contains("Nobody"), "{}", unknown.message);
+        assert_eq!(answered.load(Ordering::SeqCst), 3, "an unknown name asks nothing");
+    });
+}
