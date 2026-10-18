@@ -952,3 +952,50 @@ fn decide_prints_an_on_decisions_line_and_nothing_of_one_that_records() {
         assert_eq!(answered.load(Ordering::SeqCst), 3, "an unknown name asks nothing");
     });
 }
+
+/// The summary's JSON carries the person's own decisions under
+/// `customDecisions` (t-62170): each with its id, name and mode, the version
+/// it asks with now, and every earlier version a row names counted apart.
+#[test]
+fn the_summary_names_each_decision_and_counts_its_versions_apart() {
+    use std::fmt::Write as _;
+    use zerocode_core::jev::custom::{self, store, Answer, Definition, Point};
+    use zerocode_core::jev::door::ANSWERED_OUTCOME;
+    use zerocode_core::jev::{JevMode, CUSTOM_DECISIONS};
+    let home = tempfile::tempdir().expect("a config home");
+    let project = tempfile::tempdir().expect("a project");
+    under_home(home.path(), || {
+        let answer = Answer::YesNo { yes: "A visible change.".to_string(), no: "No visible change.".to_string() };
+        let question = "Did the product change?".to_string();
+        let mut decision = Definition::new(custom::new_id(), "Release notes".to_string(), question, answer, Point::TurnEnd);
+        let first = store::create(home.path(), &decision, JevMode::Shadow, 1).expect("the decision kept");
+        decision.question = "Did what a person sees change?".to_string();
+        let second = store::edit(home.path(), &decision, 2).expect("the decision changed");
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        let now = i64::try_from(since.expect("after 1970").as_millis()).expect("a time");
+        let ledger = jev_summary::ledger_roots(project.path())[1].join(CUSTOM_DECISIONS.ledger);
+        let mut rows = String::new();
+        for (version, at) in [(&first, now - 2_000), (&first, now - 1_000), (&second, now - 500)] {
+            let row = json!({"at": at, "decision": decision.id, "definition": version, "outcome": ANSWERED_OUTCOME,
+                "requests": 1, "rubricVersion": CUSTOM_DECISIONS.rubric_version});
+            let _ = writeln!(rows, "{row}");
+        }
+        std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("the folder");
+        std::fs::write(&ledger, rows).expect("the ledger");
+        let request = SummaryRequest { cwd: None, sessions: None, recent: 0, act_lines: false, json: true };
+        let said: Value = serde_json::from_str(&run_summary(&request, project.path(), now, 0).text).expect("json");
+        let decisions = said["customDecisions"].as_array().expect("the person's decisions");
+        assert_eq!(decisions.len(), 1, "{said}");
+        let one = &decisions[0];
+        let named = (&one["id"], &one["name"], &one["mode"]);
+        assert_eq!(named, (&json!(decision.id), &json!("Release notes"), &json!(JevMode::Shadow.key())), "{one}");
+        assert_eq!((&one["definition"], &one["requestsWeek"]), (&json!(second), &json!(1)), "{one}");
+        let earlier: Vec<(&Value, &Value)> = one["earlier"]
+            .as_array()
+            .expect("its earlier versions")
+            .iter()
+            .map(|version| (&version["definition"], &version["requestsWeek"]))
+            .collect();
+        assert_eq!(earlier, [(&json!(first), &json!(2))], "{one}");
+    });
+}
