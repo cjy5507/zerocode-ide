@@ -21,7 +21,8 @@
 //
 // A frame that a slower machine slows along with everything else is judged against references measured in the same
 // run instead (referencesHold, t-63638): the paths frame at 1020 nodes read 84 ms and 121.8 ms on the same code nine
-// minutes apart on 10-18, both at loads under the core count. Power and memory pressure are noted beside such a
+// minutes apart on 10-18, both at loads under the core count. A GitHub-hosted runner records that verdict too until CI
+// runs show its margins (referencesNote says which way it went). Power and memory pressure are noted beside such a
 // verdict (powerNote, memoryNote) and never judge it.
 import { execFileSync } from "node:child_process";
 import { cpus, loadavg } from "node:os";
@@ -95,10 +96,23 @@ export function referenceMidpoint(lowMs, highMs) {
 
 /** A frame judged against two references measured in the same run, in the same moments, holds below their midpoint,
  * or when the machine cannot judge (see unjudgedBecause). A machine that slows the page slows the frame and both
- * references alike, so only the frame's own cost crosses the midpoint. Unlike an absolute budget it is still judged on
- * a hosted runner: the references ran on the same VM. */
+ * references alike, so only the frame's own cost crosses the midpoint. A GitHub-hosted runner records the verdict, as
+ * it records an absolute budget: the frame and its references are separate readings, and a shared VM's steal time can
+ * land on one of them (run-11955). */
 export function referencesHold(ms, lowMs, highMs, opts = {}) {
+  if (onHostedRunner(opts.env)) return true;
   return ms < referenceMidpoint(lowMs, highMs) || machineIsLoudNow(opts);
+}
+
+/** The margin of a frame judged against two references, midpoint minus frame in ms, for a METRIC line: `margin 8ms`.
+ * The midpoint is rounded as the line prints it, so the margin is the difference of two printed numbers. On a
+ * GitHub-hosted runner it also says which way the recorded verdict went:
+ * `margin -58ms, crossed (hosted runner — recorded)`. */
+export function referencesNote(ms, lowMs, highMs, opts = {}) {
+  const midpoint = Math.round(referenceMidpoint(lowMs, highMs) * 100) / 100;
+  const reading = `margin ${Math.round((midpoint - ms) * 100) / 100}ms`;
+  if (!onHostedRunner(opts.env)) return reading;
+  return `${reading}, ${ms < referenceMidpoint(lowMs, highMs) ? "held" : "crossed"} (hosted runner — recorded)`;
 }
 
 /** A command's output, or "" when it cannot run: a note then says unknown instead of failing the run. */

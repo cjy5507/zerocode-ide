@@ -1,7 +1,7 @@
 import { endRun } from "./end-run.mjs";
 import { createRequire } from "node:module";
 import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote, machineIsLoudNow, memoryNote, powerNote,
-  referenceMidpoint, referencesHold } from "./machine-load.mjs";
+  referenceMidpoint, referencesHold, referencesNote } from "./machine-load.mjs";
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
@@ -2192,7 +2192,7 @@ ok(
     && pathTest.refused.note.includes("없는 페이지") && pathTest.refused.list.length === 0
     && pathTest.node0Deselected
     /* 경로를 밝힌 프레임은 같은 회차의 두 기준(판 한 번, 점·선마다)의 가운데보다 싸다(`referencesHold`,
-     * machine-load.mjs — 시끄럽거나 부하를 읽을 수 없는 기계에서는 기록만). 판의 `is-path` 한 클래스가
+     * machine-load.mjs — 시끄럽거나 부하를 읽을 수 없는 기계와 GitHub이 호스팅한 러너에서는 기록만). 판의 `is-path` 한 클래스가
      * 점·선 전부의 옷을 바꾸므로 그 프레임은 스타일 재계산을 강제로 치른다 — 실측: 점·선마다 흐림
      * 클래스를 쓰던 판 102 ms → 판의 규칙으로 79 ms(09-22). 느린 기계는 프레임과 두 기준을 함께
      * 늦추므로(10-18의 121.8 ms) 가운데를 넘는 것은 경로 프레임 제 몫의 값뿐이다. 96 ms(`FRAME_BUDGET_MS`)는
@@ -2206,7 +2206,7 @@ const pathMidpointMs = Math.round(referenceMidpoint(pathTest.oneMs, pathTest.eac
 console.log(`METRIC knowledge path onto 1020 nodes: route ${pathTest.routeMs}ms; bare frame ${pathTest.frameMs}ms; `
   + `mark ${pathTest.markMs}ms; mark+frame ${pathTest.lightMs}ms; paths ${pathTest.paths1020}; ${loadNote()}; `
   + `one restyle ${pathTest.oneMs}ms; per element ${pathTest.eachMs}ms; midpoint ${pathMidpointMs}ms; `
-  + `margin ${Math.round((pathMidpointMs - pathTest.lightMs) * 100) / 100}ms; budget ${FRAME_BUDGET_MS}ms (recorded); `
+  + `${referencesNote(pathTest.lightMs, pathTest.oneMs, pathTest.eachMs)}; budget ${FRAME_BUDGET_MS}ms (recorded); `
   + `${powerNote()}; ${memoryNote()}${PATHS_PROOF.length > 0 ? `; proof ${PATHS_PROOF.join(",")}` : ""}`);
 
 /* Test 11b: 경로는 두 페이지의 열쇠로 든다(K21). 렌즈 하나가 점들을 새 자리에 앉히면
