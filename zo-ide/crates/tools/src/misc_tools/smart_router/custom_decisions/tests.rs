@@ -555,3 +555,31 @@ fn hourly_bound_writes_hourly_budget_and_sends_nothing() {
         assert!(rows.iter().filter(|row| row["outcome"] == bound).all(|row| row["requests"] == 0), "{rows:?}");
     });
 }
+
+/// What a command lends its decisions of the person's words is the first
+/// line with words, cut to the command guard's cap in characters.
+#[test]
+fn a_command_lends_the_first_line_of_the_task_cut_to_its_cap() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let mut decision = yes_no("Task", Point::BeforeCommand);
+        decision.reads = BTreeSet::from([Input::Task]);
+        keep(&decision, JevMode::On);
+        let guard = ToolGuardJudge::at(cwd);
+        let long = "가".repeat(COMMAND_GUARD_TASK_CHAR_CAP * 2);
+        let cases = [
+            ("long", format!("{long}\nthe second line"), "가".repeat(COMMAND_GUARD_TASK_CHAR_CAP)),
+            ("short", "  \nShip the docs\nthe second line".to_string(), "Ship the docs".to_string()),
+        ];
+        for (id, task, lent) in cases {
+            let mut ask = command_ask(cwd, id, "rm -rf build");
+            ask.task = task;
+            guard.command(ask);
+            assert!(run_blocking(guard.command_ran(finished(id))).is_some(), "{id}: the decision answered");
+            let requests = mock.requests();
+            let body: Value = serde_json::from_str(requests.last().expect("a request")).expect("a JSON body");
+            assert_eq!(body["state"][Input::Task.key()], Value::from(lent), "{id}");
+            assert_eq!(body["state"].as_object().map(Map::len), Some(1), "{id}: it reads the task alone");
+        }
+    });
+}

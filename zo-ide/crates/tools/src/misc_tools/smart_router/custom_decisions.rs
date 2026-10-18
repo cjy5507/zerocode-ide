@@ -598,7 +598,7 @@ pub(super) fn before_command(project: &Path, ask: &CommandAsk) {
     if asking.is_empty() {
         return;
     }
-    let task = door::cut(&task_line_of(&ask.task), Cap::Chars(COMMAND_GUARD_TASK_CHAR_CAP));
+    let task = ask.task.clone();
     let lent: Lent = [
         (Input::Command.key().to_string(), Value::from(ask.command.as_str())),
         (Input::Cwd.key().to_string(), Value::from(ask.cwd.to_string_lossy().into_owned())),
