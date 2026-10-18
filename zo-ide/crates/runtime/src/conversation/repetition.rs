@@ -1054,14 +1054,19 @@ where
                         let mut cache = self.resolved_tool_use_fingerprints.borrow_mut();
                         let generation = self.surface_repetition_state.generation;
                         let source = source_tool_fingerprint(name, input);
-                        let cached = cache.entry(id.clone()).or_insert((source, u64::MAX, 0));
-                        if cached.0 != source || cached.1 != generation {
+                        let cached = cache.get(id).copied()
+                            .filter(|cached| cached.0 == source && cached.1 == generation);
+                        let fingerprint = if let Some((_, _, fingerprint)) = cached {
+                            fingerprint
+                        } else {
                             let resolved = self.resolved_repetition_call(name, input);
                             let (name, input) = resolved.as_ref()
                                 .map_or((name.as_str(), input.as_str()), |call| (call.name.as_str(), call.input.as_str()));
-                            *cached = (source, generation, self.repetition_fingerprint(name, input));
-                        }
-                        tool_use_fingerprints.insert(id.as_str(), cached.2);
+                            let fingerprint = self.repetition_fingerprint(name, input);
+                            cache.insert(id.clone(), (source, generation, fingerprint));
+                            fingerprint
+                        };
+                        tool_use_fingerprints.insert(id.as_str(), fingerprint);
                     }
                     ContentBlock::ToolResult {
                         tool_use_id,

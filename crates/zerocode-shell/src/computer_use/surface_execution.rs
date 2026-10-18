@@ -1230,6 +1230,13 @@ mod tests {
             trace.push(json!({"verb":"observe", "answer":look(&mut tracker, &owner, 41, &text)}));
             trace.push(json!({"verb":"observe", "answer":look(&mut tracker, &owner, 41, &text)}));
         }
+        let identity = &trace[0]["answer"]["surfaceExecution"]["surfaceId"];
+        assert!(
+            trace
+                .iter()
+                .all(|row| &row["answer"]["surfaceExecution"]["surfaceId"] == identity),
+            "every response in the fixed producer trace must retain the same owned surface identity"
+        );
         let mut stable = trace.clone();
         for row in &mut stable {
             row["answer"]["surfaceExecution"]["surfaceId"] =
