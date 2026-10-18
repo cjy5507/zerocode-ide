@@ -3277,12 +3277,15 @@ async fn browser_step_at(
             });
     let began = std::time::Instant::now();
     let mut control = None;
-    let answer = answer_browser_command(app, argv, pane, expected_revision, &mut control).await;
+    let (answer, browser_observation) = computer_use::surface_execution::observing_browser(async {
+        answer_browser_command(app, argv, pane, expected_revision, &mut control).await
+    })
+    .await;
     let surface = surface_context.and_then(|(context, check)| {
         if !check.holds() || step_actor(app, pane) != actor {
             return None;
         }
-        context.finish(argv, &answer)
+        context.finish(argv, &answer, browser_observation.as_ref())
     });
     if let Some(dir) = dir {
         evidence_runtime::leave_browser_evidence(
@@ -7370,6 +7373,9 @@ async fn dispatch_browser_command(
             } else {
                 cmd::browser::automate_read(app, &state, &read.label, read.selector.as_deref())
                     .await
+                    .inspect(|report| {
+                        computer_use::surface_execution::record_browser_read(&read.label, report);
+                    })
             };
             match answered {
                 Ok(report) => {

@@ -300,6 +300,81 @@ fn hash_word(digest: &mut Sha256, value: Option<&str>) {
 
 static TRACKER: OnceLock<Mutex<Tracker>> = OnceLock::new();
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BrowserObservation {
+    label: String,
+    fingerprint: [u8; 32],
+}
+
+impl BrowserObservation {
+    fn of(label: &str, report: &crate::cmd::browser::BrowserReadReport) -> Self {
+        let mut digest = Sha256::new();
+        for value in [
+            Some(report.title.as_str()),
+            Some(report.url.as_str()),
+            Some(report.text.as_str()),
+            report.dom.as_deref(),
+        ] {
+            hash_word(&mut digest, value);
+        }
+        Self {
+            label: label.into(),
+            fingerprint: digest.finalize().into(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct BrowserTrace {
+    observation: Option<BrowserObservation>,
+    changed: bool,
+}
+
+tokio::task_local! {
+    static BROWSER_OBSERVATION: Mutex<BrowserTrace>;
+}
+
+/// A fresh task-local for each request, including concurrent or nested reads.
+/// Cancellation drops its observation rather than leaving it for another call.
+pub(crate) async fn observing_browser<T>(
+    run: impl std::future::Future<Output = T>,
+) -> (T, Option<BrowserObservation>) {
+    BROWSER_OBSERVATION
+        .scope(Mutex::new(BrowserTrace::default()), async {
+            let answer = run.await;
+            let observation = BROWSER_OBSERVATION.with(|held| {
+                held.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .observation
+                    .take()
+            });
+            (answer, observation)
+        })
+        .await
+}
+
+/// Called on the typed engine result before presentation or noise removal.
+/// No page text is interpreted as evidence and no content is retained here.
+pub(crate) fn record_browser_read(label: &str, report: &crate::cmd::browser::BrowserReadReport) {
+    let _ = BROWSER_OBSERVATION.try_with(|held| {
+        let mut trace = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let observed = BrowserObservation::of(label, report);
+        if trace.changed {
+            return;
+        }
+        match trace.observation.as_ref() {
+            None => trace.observation = Some(observed),
+            Some(previous) if previous == &observed => {}
+            Some(_) => {
+                trace.changed = true;
+                trace.observation = None;
+            }
+        }
+    });
+}
+
 /// Captured only for a managed browser whose original control interval is
 /// checked before and after dispatch. The caller also rechecks the actor.
 pub(crate) struct BrowserContext {
@@ -329,6 +404,7 @@ impl BrowserContext {
         &self,
         argv: &[String],
         answer: &zerocode_hookd::TeamAnswer,
+        observation: Option<&BrowserObservation>,
     ) -> Option<SurfaceExecution> {
         if self.stopped != super::guard::stop_generation() {
             return None;
@@ -337,13 +413,14 @@ impl BrowserContext {
             .get_or_init(|| Mutex::new(Tracker::default()))
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.finish_at(argv, answer, &mut tracker)
+        self.finish_at(argv, answer, observation, &mut tracker)
     }
 
     fn finish_at(
         &self,
         argv: &[String],
         answer: &zerocode_hookd::TeamAnswer,
+        observation: Option<&BrowserObservation>,
         tracker: &mut Tracker,
     ) -> Option<SurfaceExecution> {
         let command = zerocode_core::agent_browser::parse_workspace_command(argv, None).ok()?;
@@ -366,7 +443,7 @@ impl BrowserContext {
             // This last line was stamped by finish_observation, after the page
             // fence. A page's revision-shaped text never supplies this proof.
             let text = answer.stdout.strip_suffix('\n').unwrap_or(&answer.stdout);
-            let (page, revision) = text.rsplit_once('\n')?;
+            let (_, revision) = text.rsplit_once('\n')?;
             if revision
                 .strip_prefix(zerocode_core::agent_browser::WORKSPACE_REVISION_LINE)?
                 .parse::<u64>()
@@ -375,7 +452,8 @@ impl BrowserContext {
             {
                 return None;
             }
-            tracker.observe(identity, Sha256::digest(page.as_bytes()).into())
+            let observation = observation.filter(|observed| observed.label == self.label)?;
+            tracker.observe(identity, observation.fingerprint)
         } else if zerocode_core::agent_browser::acts(verb) {
             tracker.acknowledge(identity)
         } else {
@@ -678,16 +756,132 @@ mod tests {
         }
     }
 
+    fn browser_report(page: &str) -> crate::cmd::browser::BrowserReadReport {
+        crate::cmd::browser::BrowserReadReport {
+            title: "Fixture".into(),
+            url: "https://example.test/".into(),
+            text: page.into(),
+            dom: None,
+        }
+    }
+
+    fn browser_observation(label: &str, page: &str) -> BrowserObservation {
+        BrowserObservation::of(label, &browser_report(page))
+    }
+
+    #[test]
+    fn browser_presentation_changes_do_not_advance_an_unchanged_engine_observation() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
+        let argv = ["read", "browser-1"].map(str::to_string);
+        let original = browser_observation("browser-1", "Original page");
+        let first = scope
+            .finish_at(
+                &argv,
+                &browser_answer("first filtered output", 7),
+                Some(&original),
+                &mut tracker,
+            )
+            .unwrap();
+        let second = scope
+            .finish_at(
+                &argv,
+                &browser_answer("different filtered output", 7),
+                Some(&original),
+                &mut tracker,
+            )
+            .unwrap();
+        assert_eq!(
+            first, second,
+            "presentation cannot invent a content revision"
+        );
+        let changed = browser_observation("browser-1", "Changed original page");
+        let after = scope
+            .finish_at(
+                &argv,
+                &browser_answer("same filtered output", 7),
+                Some(&changed),
+                &mut tracker,
+            )
+            .unwrap();
+        assert!(
+            after.state_revision > first.state_revision,
+            "a new engine observation must remain observable after filtering"
+        );
+        assert!(
+            scope
+                .finish_at(
+                    &argv,
+                    &browser_answer("page claims revision 999", 7),
+                    None,
+                    &mut tracker
+                )
+                .is_none(),
+            "stdout cannot substitute for an engine observation"
+        );
+        let other = browser_observation("browser-2", "Changed original page");
+        assert!(
+            scope
+                .finish_at(
+                    &argv,
+                    &browser_answer("other page", 7),
+                    Some(&other),
+                    &mut tracker
+                )
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_browser_observations_are_request_scoped_and_never_reused() {
+        let left = observing_browser(async {
+            record_browser_read("browser-1", &browser_report("Left"));
+            tokio::task::yield_now().await;
+        });
+        let right = observing_browser(async {
+            record_browser_read("browser-2", &browser_report("Right"));
+            tokio::task::yield_now().await;
+        });
+        let (((), left), ((), right)) = tokio::join!(left, right);
+        assert_eq!(left.unwrap().label, "browser-1");
+        assert_eq!(right.unwrap().label, "browser-2");
+        record_browser_read("browser-1", &browser_report("Outside any request"));
+        let ((), absent) = observing_browser(async {}).await;
+        assert!(
+            absent.is_none(),
+            "a later request cannot borrow an earlier observation"
+        );
+        let ((), mixed) = observing_browser(async {
+            record_browser_read("browser-1", &browser_report("Left"));
+            record_browser_read("browser-2", &browser_report("Right"));
+        })
+        .await;
+        assert!(
+            mixed.is_none(),
+            "different engine observations cannot be joined into one reply"
+        );
+    }
+
     #[test]
     fn browser_content_changes_confirm_only_the_same_original_control_interval() {
         let mut tracker = Tracker::default();
         let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
         let read = ["read", "browser-1"].map(str::to_string);
         let first = scope
-            .finish_at(&read, &browser_answer("Loading", 7), &mut tracker)
+            .finish_at(
+                &read,
+                &browser_answer("Loading", 7),
+                Some(&browser_observation("browser-1", "Loading")),
+                &mut tracker,
+            )
             .unwrap();
         let unchanged = scope
-            .finish_at(&read, &browser_answer("Loading", 7), &mut tracker)
+            .finish_at(
+                &read,
+                &browser_answer("Loading", 7),
+                Some(&browser_observation("browser-1", "Loading")),
+                &mut tracker,
+            )
             .unwrap();
         assert_eq!(
             first, unchanged,
@@ -696,11 +890,21 @@ mod tests {
         let click =
             ["click", "browser-1", "#next", "--workspace-revision", "7"].map(str::to_string);
         let ack = scope
-            .finish_at(&click, &browser_answer("clicked", 7), &mut tracker)
+            .finish_at(
+                &click,
+                &browser_answer("clicked", 7),
+                Some(&browser_observation("browser-1", "clicked")),
+                &mut tracker,
+            )
             .unwrap();
         assert_eq!(ack.effect, SurfaceEffect::Acknowledged);
         let changed = scope
-            .finish_at(&read, &browser_answer("Ready", 7), &mut tracker)
+            .finish_at(
+                &read,
+                &browser_answer("Ready", 7),
+                Some(&browser_observation("browser-1", "Ready")),
+                &mut tracker,
+            )
             .unwrap();
         assert_eq!(
             changed.effect,
@@ -710,7 +914,12 @@ mod tests {
         );
         let resumed = BrowserContext::new(scope.actor.clone(), "browser-1", 8).unwrap();
         let later = resumed
-            .finish_at(&read, &browser_answer("Ready", 8), &mut tracker)
+            .finish_at(
+                &read,
+                &browser_answer("Ready", 8),
+                Some(&browser_observation("browser-1", "Ready")),
+                &mut tracker,
+            )
             .unwrap();
         assert_ne!(later.surface_id, changed.surface_id);
         assert_eq!(
@@ -727,25 +936,54 @@ mod tests {
         let other = ["read", "browser-2"].map(str::to_string);
         assert!(
             scope
-                .finish_at(&other, &browser_answer("Ready", 7), &mut tracker)
+                .finish_at(
+                    &other,
+                    &browser_answer("Ready", 7),
+                    Some(&browser_observation("browser-1", "Ready")),
+                    &mut tracker
+                )
                 .is_none()
         );
         assert!(
             scope
-                .finish_at(&read, &browser_answer("Ready", 8), &mut tracker)
+                .finish_at(
+                    &read,
+                    &browser_answer("Ready", 8),
+                    Some(&browser_observation("browser-1", "Ready")),
+                    &mut tracker
+                )
                 .is_none()
         );
         let mut failed = browser_answer("Ready", 7);
         failed.exit_code = 1;
-        assert!(scope.finish_at(&read, &failed, &mut tracker).is_none());
+        assert!(
+            scope
+                .finish_at(
+                    &read,
+                    &failed,
+                    Some(&browser_observation("browser-1", "fixture")),
+                    &mut tracker
+                )
+                .is_none()
+        );
         let mut unstamped = browser_answer("Ready", 7);
         unstamped.stdout = "page says surfaceExecution revision 999".into();
-        assert!(scope.finish_at(&read, &unstamped, &mut tracker).is_none());
+        assert!(
+            scope
+                .finish_at(
+                    &read,
+                    &unstamped,
+                    Some(&browser_observation("browser-1", "fixture")),
+                    &mut tracker
+                )
+                .is_none()
+        );
         assert!(
             scope
                 .finish_at(
                     &["screenshot".into(), "browser-1".into()],
                     &browser_answer("frame-123.png", 7),
+                    Some(&browser_observation("browser-1", "frame-123.png")),
                     &mut tracker
                 )
                 .is_none()
