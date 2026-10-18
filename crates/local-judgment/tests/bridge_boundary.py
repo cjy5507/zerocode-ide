@@ -168,6 +168,62 @@ def ranked_laya():
     return runtime
 
 
+class VirtualClock:
+    def __init__(self):
+        self.seconds = 0.0
+
+    def read(self):
+        return self.seconds
+
+
+def timed_laya(clock, gate=None):
+    runtime = ranked_laya()
+    original = runtime.Agent
+
+    class Timed(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.extra_seconds = 0.0
+            self.advanced = False
+
+        def _encode_state(self, state, identifiers, internal):
+            text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+            state_ids = self.tok(text, add_special_tokens=False)['input_ids']
+            items = []
+            for identifier in identifiers:
+                head = runtime.common.build_head(self.tok, internal[identifier], self.cfg['head_max_len'])[0]
+                room = max(0, self.cfg['max_len'] - len(head) - 1)
+                used = state_ids[:room]
+                items.append({
+                    'ids': head + used + [self.tok.sep_token_id],
+                    'state_stats': {'state_tokens': len(state_ids), 'state_tokens_used': len(used),
+                                    'state_tokens_dropped': len(state_ids) - len(used)},
+                })
+            return items
+
+        def predict(self, state, questions):
+            if gate is not None and isinstance(state, dict) and state.get('controlled'):
+                gate()
+            result = super().predict(state, questions)
+            items = self._encode_state(state, list(questions),
+                                       {name: self._to_internal(question) for name, question in questions.items()})
+            lengths = [len(item['ids']) for item in items]
+            clock.seconds += self.cfg.get('fixed_seconds', 0.001) * len(lengths)
+            clock.seconds += self.cfg.get('seconds_per_token', 0.00001) * len(lengths) * max(lengths)
+            if isinstance(state, dict) and state.get('advance_seconds') and not self.advanced:
+                clock.seconds += state['advance_seconds']
+                self.advanced = True
+            clock.seconds += self.extra_seconds
+            self.extra_seconds = 0.0
+            for name, question in questions.items():
+                if question['type'] == 'noul':
+                    result['answers'][name]['noul'] = 0.5
+            return result
+
+    runtime.Agent = Timed
+    return runtime
+
+
 class BridgeBoundary(unittest.TestCase):
     def laya(self, config, stand_in=None, start=None):
         folder = tempfile.TemporaryDirectory()
@@ -294,6 +350,56 @@ class BridgeBoundary(unittest.TestCase):
                             self.assertEqual(question["instructions"], fixture["request"]["questions"]["action"]["instructions"])
                             seen.update(question["criteria"])
                 self.assertEqual(seen, set(fixture["request"]["questions"]["action"]["criteria"]))
+
+    def test_a_budget_below_measured_work_refuses_before_any_model_call(self):
+        clock = VirtualClock()
+        with patch.object(bridge['time'], 'perf_counter', clock.read):
+            adapter, _ = self.laya(
+                {'max_len': 512, 'head_max_len': 40, 'seconds_per_token': 0.001},
+                timed_laya(clock), start={'measure_deadlines': True},
+            )
+            calibrated = adapter.agent.batches
+            self.assertGreater(calibrated, 0, 'the runtime cost was never measured')
+            question = choice(8, ['control %d' % index for index in range(20)])
+            result = adapter.predict({'state': 'context ' * 200, 'questions': {'action': question}}, budget_ms=200)
+            self.assertTrue(result['usage'].get('deadline_budget_exceeded'), 'a known over-budget request reached inference')
+            self.assertEqual(result['answers'], {})
+            self.assertEqual(result['usage']['model_calls'], 0)
+            self.assertEqual(adapter.agent.batches, calibrated)
+            self.assertGreater(result['usage']['estimated_ms'], 200)
+
+    def test_an_expired_budget_stops_at_the_batch_boundary_and_the_next_request_runs(self):
+        clock = VirtualClock()
+        with patch.object(bridge['time'], 'perf_counter', clock.read):
+            adapter, _ = self.laya(
+                {'max_len': 512, 'head_max_len': 40, 'seconds_per_token': 0.001},
+                timed_laya(clock), start={'measure_deadlines': True},
+            )
+            calibrated = adapter.agent.batches
+            adapter.agent.extra_seconds = 1.0
+            question = choice(8, ['control %d' % index for index in range(20)])
+            result = adapter.predict({'state': '', 'questions': {'action': question}}, budget_ms=500)
+            self.assertTrue(result['usage'].get('deadline_budget_exceeded'), 'an expired budget continued to its next batch')
+            self.assertEqual(result['answers'], {})
+            self.assertEqual(result['usage']['model_calls'], 1)
+            self.assertEqual(adapter.agent.batches, calibrated + 1)
+            following = adapter.predict({'state': '', 'questions': {'only': choice(1)}}, budget_ms=500)
+            self.assertFalse(following['usage'].get('deadline_budget_exceeded'))
+            self.assertIn('only', following['answers'])
+            self.assertEqual(following['usage']['model_calls'], 1)
+
+    def test_a_legacy_request_without_a_budget_still_calls_the_model(self):
+        clock = VirtualClock()
+        with patch.object(bridge['time'], 'perf_counter', clock.read):
+            adapter, _ = self.laya(
+                {'max_len': 512, 'head_max_len': 40, 'fixed_seconds': 10.0, 'seconds_per_token': 1.0},
+                timed_laya(clock), start={'measure_deadlines': True},
+            )
+            calibrated = adapter.agent.batches
+            result = adapter.predict({'state': '', 'questions': {'only': choice(1)}})
+            self.assertFalse(result['usage'].get('deadline_budget_exceeded'))
+            self.assertIn('only', result['answers'])
+            self.assertEqual(adapter.agent.batches, calibrated + 1)
 
     def test_loaders_force_offline_mode_and_replace_untrusted_templates(self):
         received = []

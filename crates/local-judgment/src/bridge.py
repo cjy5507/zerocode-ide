@@ -203,7 +203,7 @@ class LayaAdapter:
             "answer_confidence": min(clusters[winner]["answer_confidence"], answer_confidence, chance),
         }
 
-    def predict(self, request):
+    def predict(self, request, budget_ms=None):
         answers = {}
         usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0, "head_pages": {}}
         named = []
@@ -328,7 +328,7 @@ class TransformersSystemOneAdapter:
         self.model = runtime.D3(root, device="cpu", batch_size=2, max_length=1024, model_name=initial["modelId"])
         self.limits = declared_limits(initial, {"max_len": getattr(self.model, "max_length", None)})
 
-    def predict(self, request):
+    def predict(self, request, budget_ms=None):
         return self.model.system_one(state=request["state"], questions=request["questions"])
 
 

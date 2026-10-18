@@ -1179,3 +1179,254 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
         "the pinned runtime declared other limits than its model folder holds"
     );
 }
+
+const ECHO_DEADLINE_INPUT: &str = r#"import json,sys
+from pathlib import Path
+for line in sys.stdin:
+ frame=json.loads(line)
+ Path(sys.argv[1],'received.json').write_text(json.dumps(frame))
+ request=frame.get('request',frame)
+ answers={name:{'type':'noul','noul':0.5} for name in request['questions']}
+ print(json.dumps({'model':request['model'],'answers':answers,'usage':{'input_tokens':1,'output_tokens':0}}),flush=True)
+"#;
+
+#[tokio::test]
+async fn an_invalid_or_ambiguous_deadline_header_reaches_no_native_request() {
+    let invalid = vec![
+        vec![String::new()],
+        vec!["not-a-duration".to_string()],
+        vec!["-1".to_string()],
+        vec!["+1".to_string()],
+        vec!["1,2".to_string()],
+        vec![format!("{}0", u64::MAX)],
+        vec!["1".to_string(), "2".to_string()],
+    ];
+    for values in invalid {
+        let root = tempfile::tempdir().unwrap();
+        let (_running, state) = fixture(ECHO_DEADLINE_INPUT, root.path()).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            state
+                .provider
+                .base_url
+                .trim_start_matches("http://")
+                .parse()
+                .unwrap(),
+        );
+        for value in &values {
+            headers.append(judgment_provider::DEADLINE_HEADER, value.parse().unwrap());
+        }
+        let request = json!({
+            "model": state.provider.model, "state": "fixture",
+            "questions": {"only": {"type": "noul", "instructions": "fixture"}},
+        });
+        let response = predict(
+            State(state.clone()),
+            headers,
+            Bytes::from(serde_json::to_vec(&request).unwrap()),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "an invalid deadline header reached native inference: {values:?}"
+        );
+        assert!(state.engine.alive());
+        assert!(!root.path().join("received.json").exists());
+    }
+}
+
+#[tokio::test]
+async fn a_request_without_a_deadline_header_keeps_the_legacy_native_frame() {
+    let root = tempfile::tempdir().unwrap();
+    let (_running, state) = fixture(ECHO_DEADLINE_INPUT, root.path()).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::HOST,
+        state
+            .provider
+            .base_url
+            .trim_start_matches("http://")
+            .parse()
+            .unwrap(),
+    );
+    let request = json!({
+        "model": state.provider.model, "state": "fixture",
+        "questions": {"only": {"type": "noul", "instructions": "fixture"}},
+    });
+    let response = predict(
+        State(state.clone()),
+        headers,
+        Bytes::from(serde_json::to_vec(&request).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let native: Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("received.json")).unwrap()).unwrap();
+    assert_eq!(native, request);
+    assert!(state.engine.alive());
+}
+
+async fn deadline_runtime(
+    root: &Path,
+    config: &Value,
+) -> (tempfile::TempDir, Running, tokio::net::UnixStream) {
+    let listener = tokio::net::UnixListener::bind(root.join("release.sock")).unwrap();
+    let definitions = serde_json::to_string(include_str!("../tests/bridge_boundary.py")).unwrap();
+    let address = serde_json::to_string(&root.join("release.sock")).unwrap();
+    let program = format!(
+        r#"import json,socket,sys,types
+saved=sys.argv[:]
+definitions={definitions}
+namespace={{}}
+sys.argv=['boundary',json.dumps(saved[1])]
+exec(definitions.rsplit('unittest.main(',1)[0],namespace)
+sys.argv=saved
+release=socket.socket(socket.AF_UNIX)
+release.connect({address})
+def gate():
+ release.sendall(b'E')
+ if release.recv(1)!=b'G':
+  raise ValueError('release_signal')
+clock=namespace['VirtualClock']()
+namespace['bridge']['time'].perf_counter=clock.read
+laya=namespace['timed_laya'](clock,gate)
+torch=types.ModuleType('torch')
+torch.set_num_threads=torch.set_num_interop_threads=lambda count:None
+torch.jit=types.SimpleNamespace()
+transformers=types.ModuleType('transformers')
+transformers.AutoConfig=types.SimpleNamespace(from_pretrained=None)
+transformers.AutoTokenizer=types.SimpleNamespace(from_pretrained=None)
+sys.modules.update({{'laya':laya,'torch':torch,'transformers':transformers}})
+exec(compile(saved[1],'bridge','exec'),{{'__name__':'__main__'}})
+"#
+    );
+    let (folder, profile) = runtime_folder(&program, "deadline-fixture");
+    std::fs::write(
+        folder.path().join("model/rl_agent_config.json"),
+        config.to_string(),
+    )
+    .unwrap();
+    let running = started(folder.path(), &profile, &crate::tests::fixture_model()).await;
+    let (release, _) = listener.accept().await.unwrap();
+    (folder, running, release)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deadline_shorter_than_measured_cost_reaches_no_inference_and_legacy_still_runs() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_runtime, running, mut release) = deadline_runtime(
+        root.path(),
+        &json!({"max_len": 512, "head_max_len": 40, "fixed_seconds": 10.0, "seconds_per_token": 1.0}),
+    ).await;
+    let request = json!({
+        "model": running.provider.model, "state": {"controlled": true},
+        "questions": {"only": {"type": "noul", "instructions": "fixture", "criteria": {"false": "False", "true": "True"}}},
+    });
+    let budget = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let mut asking = Box::pin(
+        client()
+            .post(running.provider.request_url())
+            .header(judgment_provider::DEADLINE_HEADER, budget.to_string())
+            .json(&request)
+            .send(),
+    );
+    let (response, inferred) = tokio::select! {
+        response = &mut asking => (response.unwrap(), false),
+        entered = release.read_u8() => {
+            assert_eq!(entered.unwrap(), b'E');
+            release.write_all(b"G").await.unwrap();
+            (asking.as_mut().await.unwrap(), true)
+        }
+    };
+    assert!(
+        !inferred,
+        "a deadline shorter than measured cost entered native inference"
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let refusal: Value = response.json().await.unwrap();
+    assert_eq!(refusal["refusal"], "provider_deadline_budget");
+    assert_eq!(refusal["usage"]["model_calls"], 0);
+    assert!(refusal["usage"]["estimated_ms"].as_f64().unwrap() > budget as f64);
+    assert!(running.engine.alive());
+    let mut legacy = Box::pin(
+        client()
+            .post(running.provider.request_url())
+            .json(&request)
+            .send(),
+    );
+    tokio::select! {
+        response = &mut legacy => panic!("a legacy request skipped its native release signal: {:?}", response.unwrap().status()),
+        entered = release.read_u8() => assert_eq!(entered.unwrap(), b'E'),
+    }
+    release.write_all(b"G").await.unwrap();
+    assert_eq!(
+        legacy.as_mut().await.unwrap().status(),
+        reqwest::StatusCode::OK
+    );
+    assert!(running.engine.alive());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_budget_stops_between_native_batches_and_leaves_the_next_request_ready() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_runtime, running, mut release) = deadline_runtime(
+        root.path(),
+        &json!({"max_len": 512, "head_max_len": 40, "fixed_seconds": 0.001, "seconds_per_token": 0.001}),
+    ).await;
+    let budget = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let criteria: serde_json::Map<String, Value> = (0..20)
+        .map(|index| (format!("option-{index}"), json!(format!("control {index}"))))
+        .collect();
+    let request = json!({
+        "model": running.provider.model,
+        "state": {"controlled": true, "advance_seconds": budget as f64 / 1000.0 * 2.0},
+        "questions": {"choice": {"type": "choice", "instructions": "Choose the next visible control for this goal.", "criteria": criteria}},
+    });
+    let mut asking = Box::pin(
+        client()
+            .post(running.provider.request_url())
+            .header(judgment_provider::DEADLINE_HEADER, budget.to_string())
+            .json(&request)
+            .send(),
+    );
+    tokio::select! {
+        response = &mut asking => panic!("the first native batch never reached its release signal: {:?}", response.unwrap().status()),
+        entered = release.read_u8() => assert_eq!(entered.unwrap(), b'E'),
+    }
+    release.write_all(b"G").await.unwrap();
+    let (response, another_batch) = tokio::select! {
+        response = &mut asking => (response.unwrap(), false),
+        entered = release.read_u8() => {
+            assert_eq!(entered.unwrap(), b'E');
+            release.write_all(b"G").await.unwrap();
+            (asking.as_mut().await.unwrap(), true)
+        }
+    };
+    assert!(
+        !another_batch,
+        "an expired budget entered another native batch"
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let refused: Value = response.json().await.unwrap();
+    assert_eq!(refused["refusal"], "provider_deadline_budget");
+    assert_eq!(refused["usage"]["model_calls"], 1);
+    let following = json!({
+        "model": running.provider.model, "state": "short",
+        "questions": {"only": {"type": "noul", "instructions": "fixture", "criteria": {"false": "False", "true": "True"}}},
+    });
+    let response = client()
+        .post(running.provider.request_url())
+        .header(judgment_provider::DEADLINE_HEADER, budget.to_string())
+        .json(&following)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(running.engine.alive());
+}

@@ -296,3 +296,68 @@ fn a_real_local_provider_uses_the_window_wire() {
         "native wire failed"
     );
 }
+
+#[test]
+fn local_requests_carry_the_remaining_deadline_and_jev_requests_do_not() {
+    for kind in [ProviderKind::Local, ProviderKind::Jev] {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let path = home.path().join("settings.json");
+        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer(), 0);
+        let configured = provider(endpoint.base());
+        let mut root = settings(&configured, workspace.path());
+        if kind == ProviderKind::Jev {
+            root["smart"]
+                .as_object_mut()
+                .unwrap()
+                .remove("judgmentProvider");
+        }
+        std::fs::write(&path, root.to_string()).unwrap();
+        let wire = Wire::at(&endpoint.base(), "test-key", Some(path));
+        let mut spent = Vec::new();
+        for budget in [Duration::from_secs(5), Duration::from_secs(10)] {
+            let asked = wire.ask(
+                &zerocode_core::jev::BROWSER,
+                Some(workspace.path()),
+                request_body(&json!("Open help; routine and ready."), &questions()),
+                budget,
+            );
+            assert!(asked.answer.is_ok(), "{:?}", asked.answer);
+            spent.push((budget, asked.waited));
+        }
+        let requests = endpoint.asked();
+        assert_eq!(requests.len(), spent.len());
+        let mut previous_body = None;
+        for (request, (budget, elapsed)) in requests.iter().zip(spent) {
+            let (head, body) = request.split_once("\r\n\r\n").unwrap();
+            let header = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case(judgment_provider::DEADLINE_HEADER)
+                    .then(|| value.trim().parse::<u128>().ok())
+                    .flatten()
+            });
+            if kind == ProviderKind::Local {
+                assert!(
+                    header.is_some(),
+                    "a local request omitted its remaining deadline header"
+                );
+                let remaining = header.unwrap();
+                assert!(remaining > 0 && remaining < budget.as_millis());
+                assert!(remaining >= budget.saturating_sub(elapsed).as_millis());
+            } else {
+                assert!(
+                    header.is_none(),
+                    "a Jev request carried local deadline metadata"
+                );
+            }
+            let body: Value = serde_json::from_str(body).unwrap();
+            if let Some(previous) = &previous_body {
+                assert_eq!(
+                    &body, previous,
+                    "the deadline changed the model's request body"
+                );
+            }
+            previous_body = Some(body);
+        }
+    }
+}
