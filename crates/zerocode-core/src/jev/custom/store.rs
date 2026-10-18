@@ -14,6 +14,7 @@
 //! Every write is the project-rules store's (`super::super::project_rules`):
 //! under the lock, into a temporary file renamed over the old one; and a
 //! definition is read back only while its bytes still hash to its name.
+//! New directories and files are owner-only on Unix.
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -53,6 +54,10 @@ const LOCK_POLL: Duration = Duration::from_millis(1);
 /// Who may read and write the store's files: the person alone, whose words they are.
 #[cfg(unix)]
 const PRIVATE_MODE: u32 = 0o600;
+
+/// Who may enter the store's new directories: the person alone.
+#[cfg(unix)]
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 
 const INDEX: &str = "index.json";
 const DEFINITIONS: &str = "definitions";
@@ -276,7 +281,7 @@ pub fn delete(home: &Path, id: &str, now_ms: i64) -> Result<(), Error> {
     };
     let decision = index.remove(at);
     let trash = root.join(TRASH);
-    fs::create_dir_all(&trash)?;
+    private_directory(&trash)?;
     let from = root.join(DEFINITIONS).join(json(&decision.definition));
     let to = trash.join(json(&decision.definition));
     let row = TrashFile {
@@ -351,7 +356,7 @@ pub fn restore(home: &Path, id: &str) -> Result<(), Error> {
     let definitions = root.join(DEFINITIONS);
     let trashed = trash.join(json(&decision.definition));
     if trashed.exists() {
-        fs::create_dir_all(&definitions)?;
+        private_directory(&definitions)?;
         fs::rename(trashed, definitions.join(json(&decision.definition)))?;
     }
     read_definition(&definitions, &decision.definition)?;
@@ -467,7 +472,7 @@ fn read_definition(dir: &Path, version: &str) -> io::Result<Definition> {
 fn write_definition(root: &Path, bytes: &[u8]) -> io::Result<String> {
     let version = version_of(bytes);
     let dir = root.join(DEFINITIONS);
-    fs::create_dir_all(&dir)?;
+    private_directory(&dir)?;
     let path = dir.join(json(&version));
     if !path.exists() {
         replace(&path, bytes)?;
@@ -547,6 +552,17 @@ fn bounded(path: &Path, cap: usize) -> io::Result<Vec<u8>> {
     Ok(data)
 }
 
+fn private_directory(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(PRIVATE_DIRECTORY_MODE);
+    }
+    builder.create(path)
+}
+
 fn private_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -573,7 +589,7 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn lock(root: &Path) -> io::Result<File> {
-    fs::create_dir_all(root)?;
+    private_directory(root)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
