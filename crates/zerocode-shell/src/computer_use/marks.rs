@@ -54,6 +54,8 @@ pub(super) struct MarkTable {
     omitted: usize,
     frame: ShotFrame,
     made: Instant,
+    /// The stop the look began under (`guard::stop_generation`).
+    epoch: u64,
 }
 
 impl MarkTable {
@@ -122,13 +124,15 @@ pub(super) fn desktop_windows(
         .unwrap_or_default())
 }
 
-/// The picture a look was taken of, and where.
+/// The picture a look was taken of, and where; and the stop the look began
+/// under.
 pub(super) struct Picture<'a> {
     pub clean: &'a RgbaImage,
     pub fingerprint: u64,
     pub placed: ShotFrame,
     pub place: &'a str,
     pub text: Option<&'a Value>,
+    pub epoch: u64,
 }
 
 struct Layout<'a> {
@@ -136,6 +140,7 @@ struct Layout<'a> {
     fingerprint: Option<u64>,
     placed: ShotFrame,
     place: &'a str,
+    epoch: u64,
 }
 
 impl Picture<'_> {
@@ -145,6 +150,7 @@ impl Picture<'_> {
             fingerprint: Some(self.fingerprint),
             placed: self.placed,
             place: self.place,
+            epoch: self.epoch,
         }
     }
 }
@@ -152,6 +158,7 @@ impl Picture<'_> {
 pub(super) fn structured_marks(
     frame_answer: &Value,
     place: &str,
+    epoch: u64,
 ) -> Result<Option<Marked>, ComputerUseError> {
     let snapshot = frame_answer.get("snapshot").ok_or_else(|| {
         ComputerUseError::new(
@@ -178,6 +185,7 @@ pub(super) fn structured_marks(
         fingerprint: None,
         placed,
         place,
+        epoch,
     };
     let table = table(snapshot, window, &layout, Vec::new(), None)?;
     if !table.has_readable_controls() {
@@ -250,8 +258,10 @@ pub(super) fn mark_look(
     }
 }
 
-/// The newest fresh table made at this place from these very pixels; its
-/// clock starts again, since this look saw the same screen.
+/// The newest fresh table made at this place from these very pixels under the
+/// stop this look began under; its clock starts again, since this look saw
+/// the same screen. A table from before a stop is never served again: the
+/// look after it is walked anew.
 fn latest_at(picture: &Picture<'_>) -> Option<MarkTable> {
     let mut held = tables();
     let key = held
@@ -261,6 +271,7 @@ fn latest_at(picture: &Picture<'_>) -> Option<MarkTable> {
             table.place == picture.place
                 && table.picture == Some(picture.fingerprint)
                 && table.frame == picture.placed
+                && table.epoch == picture.epoch
                 && !cache::is_expired(table.made, Instant::now())
         })
         .map(|(key, _)| key.clone())?;
@@ -364,6 +375,7 @@ fn table(
         window_frame: window,
         frame: picture.placed,
         made: Instant::now(),
+        epoch: picture.epoch,
     })
 }
 
@@ -648,6 +660,12 @@ pub struct PinnedClick {
 /// Turn `click --mark N --look L` into the element click on the look's
 /// window, pinned by what the look saw.
 pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
+    pinned_click_at(params, super::guard::stop_generation())
+}
+
+/// [`pinned_click`] under the stop `epoch` stands at now: the only door a
+/// mark is pressed through.
+pub(super) fn pinned_click_at(params: &Value, epoch: u64) -> Result<PinnedClick, ComputerUseError> {
     let look = params
         .get("look")
         .and_then(Value::as_str)
@@ -670,6 +688,14 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
             format!(
                 "marked look {look} is older than {} s; look again with --marks",
                 cache::MAX_AGE.as_secs()
+            ),
+        ));
+    }
+    if table.epoch != epoch {
+        return Err(ComputerUseError::new(
+            error_code::ELEMENT_NOT_FOUND,
+            format!(
+                "marked look {look} was taken before the operator was stopped; look again with --marks"
             ),
         ));
     }

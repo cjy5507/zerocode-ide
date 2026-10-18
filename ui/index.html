@@ -1003,13 +1003,35 @@
 
     <!-- Computer Use's one hand and last step (docs/design/computer-use-full-operator.md
          §1.3, §1.5): a band while the operator acts, with the stop; a question
-         when a press lands on money or deletion, with the person's two buttons. -->
-    <div class="computer-band" id="computer-band" role="status" hidden>
-      <span class="computer-band-dot" aria-hidden="true"></span>
-      <span class="computer-band-word" id="computer-band-word">Computer Use 진행 중</span>
-      <span class="computer-band-count" id="computer-band-count"></span>
-      <button class="btn computer-band-stop" id="computer-band-stop" type="button" data-i18n="computer.band.stop">정지</button>
-      <button class="btn computer-band-resume" id="computer-band-resume" type="button" data-i18n="computer.band.resume" hidden>다시 시작</button>
+         when a press lands on money or deletion, with the person's two buttons.
+         Below the band, the work screen panel (t-59372): the newest look of one
+         pane's assignment, opened only from the band, and who holds the desktop
+         and that pane's work browsers (t-62464). -->
+    <div class="computer-dock">
+      <div class="computer-band" id="computer-band" role="status" hidden>
+        <span class="computer-band-dot" aria-hidden="true"></span>
+        <span class="computer-band-word" id="computer-band-word">Computer Use 진행 중</span>
+        <span class="computer-band-count" id="computer-band-count"></span>
+        <span class="computer-band-note" id="computer-band-note" hidden></span>
+        <button class="btn computer-band-stop" id="computer-band-stop" type="button" data-i18n="computer.band.stop" data-i18n-title="computer.band.stopTip" data-tip="데스크톱 조작만 멈춥니다 · 전용 브라우저 탭은 그 탭의 막대에서 멈춥니다">정지</button>
+        <button class="btn computer-band-resume" id="computer-band-resume" type="button" data-i18n="computer.band.resume" hidden>다시 시작</button>
+        <button class="btn computer-band-view" id="computer-band-view" type="button" data-i18n="computer.band.view" hidden>작업 화면 보기</button>
+      </div>
+      <section class="computer-progress" id="computer-progress" aria-labelledby="computer-progress-title" hidden>
+        <div class="computer-progress-head">
+          <span class="computer-progress-title" id="computer-progress-title" data-i18n="computer.progress.title">Computer Use 데스크톱 화면</span>
+          <button class="btn computer-progress-close" id="computer-progress-close" type="button" data-i18n="computer.progress.close">닫기</button>
+        </div>
+        <p class="computer-progress-subject" id="computer-progress-subject"></p>
+        <div class="computer-progress-control">
+          <p class="computer-progress-desk" id="computer-progress-desk"></p>
+          <ul class="computer-progress-browsers" id="computer-progress-browsers" hidden></ul>
+          <p class="computer-progress-browser-hint" id="computer-progress-browser-hint" hidden></p>
+        </div>
+        <p class="computer-progress-note" id="computer-progress-note" hidden></p>
+        <img class="computer-progress-frame" id="computer-progress-frame" alt="에이전트가 마지막으로 본 데스크톱 화면" data-i18n-aria="computer.progress.frame" aria-label="에이전트가 마지막으로 본 데스크톱 화면" draggable="false" hidden>
+        <p class="computer-progress-scope" data-i18n="computer.progress.desktopOnly">데스크톱 Computer Use만 보입니다 · 전용 브라우저 탭은 그 탭에서 봅니다</p>
+      </section>
     </div>
     <div class="computer-permission-recovery" id="computer-permission-recovery" role="status" hidden>
       <p id="computer-permission-recovery-text"></p>
