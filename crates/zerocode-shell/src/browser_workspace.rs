@@ -1669,6 +1669,64 @@ mod tests {
         assert!(workspaces.snapshots().unwrap().is_empty());
     }
 
+    /// The person's one stop pauses a work browser while its agent keeps
+    /// sending input from another thread (t-62872): an input is admitted
+    /// before the pause began — and the pause waits for it — or refused; none
+    /// is admitted once the pause began, and the pause leaves nothing in
+    /// flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pause_racing_an_agents_input_admits_none_once_it_began() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        const ROUNDS: usize = 200;
+        for _ in 0..ROUNDS {
+            let workspaces = Arc::new(opened());
+            observe(&workspaces);
+            let before = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+            let paused = Arc::new(AtomicBool::new(false));
+            let landed = Arc::new(AtomicUsize::new(0));
+            let agent = {
+                let workspaces = workspaces.clone();
+                let paused = paused.clone();
+                let landed = landed.clone();
+                std::thread::spawn(move || {
+                    let mut admitted = Vec::new();
+                    while !paused.load(Ordering::Acquire) {
+                        let seen = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+                        if let Ok(Some(operation)) =
+                            workspaces.begin_at("browser-1", Some("pane-a"), "click", Some(seen))
+                        {
+                            admitted.push(operation.revision);
+                            landed.fetch_add(1, Ordering::AcqRel);
+                            operation.finish(true);
+                        }
+                    }
+                    admitted
+                })
+            };
+            // The pause comes while the agent's input is already landing.
+            while landed.load(Ordering::Acquire) == 0 {
+                std::thread::yield_now();
+            }
+            let transition = workspaces
+                .transition("browser-1", Mode::Paused, before)
+                .unwrap();
+            transition.wait().await.unwrap();
+            let left = transition.finish().unwrap();
+            let again = Some(left.revision);
+            let after = workspaces.begin_at("browser-1", Some("pane-a"), "click", again);
+            paused.store(true, Ordering::Release);
+            let admitted = agent.join().unwrap();
+            assert!(!admitted.is_empty(), "the agent's input raced the pause");
+            assert!(
+                admitted.iter().all(|revision| *revision == before),
+                "an input was admitted after the pause began at {before}: {admitted:?}"
+            );
+            assert_eq!(left.mode, Mode::Paused);
+            assert_eq!(left.in_flight, 0, "the pause leaves nothing in flight");
+            assert!(after.is_err(), "nothing is admitted once paused");
+        }
+    }
+
     #[test]
     fn simultaneous_commands_do_not_overlap_on_one_workspace() {
         let workspaces = opened();

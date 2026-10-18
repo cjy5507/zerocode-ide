@@ -648,6 +648,78 @@ mod tests {
         }
     }
 
+    /// An agent's `stop` over the person's stop (t-62872): the stop stays the
+    /// person's and nothing moves, so the agent's `resume` after it reaches no
+    /// helper and lifts nothing — else stop-then-resume would be the agent's
+    /// own way past the person's hand.
+    #[test]
+    fn an_agents_stop_over_the_persons_stop_leaves_it_theirs_and_its_resume_lifts_nothing() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop(STOP_REASON_WINDOW);
+        let persons = revision();
+        let answer = stop(STOP_REASON_REQUEST);
+        let standing = stopped_reason();
+        let after_agents_stop = revision();
+        let mut asked = 0;
+        let resumed = resume(
+            Lifter::Agent,
+            || {
+                asked += 1;
+                Ok(Value::from("resumed"))
+            },
+            || true,
+        );
+        let after = stopped_reason();
+        lift();
+        assert_eq!(
+            standing.as_deref(),
+            Some(STOP_REASON_WINDOW),
+            "the person's stop stands over the agent's: {answer}"
+        );
+        assert_eq!(after_agents_stop, persons, "nothing moved: {answer}");
+        assert_eq!(answer["reason"], STOP_REASON_WINDOW, "{answer}");
+        assert_eq!(answer["revision"].as_u64(), persons, "{answer}");
+        assert_eq!(asked, 0, "the agent's resume never reaches the helper");
+        assert!(!resumed.lifted, "{resumed:?}");
+        assert_eq!(after.as_deref(), Some(STOP_REASON_WINDOW));
+    }
+
+    /// Whose stop stands is the backend's word (t-62872): the person's — the
+    /// band's own or the desktop chord — reaches the work browsers too, an
+    /// agent's does not. The report, the stop's answer and the resume's answer
+    /// say it beside the revision they name.
+    #[test]
+    fn the_report_the_stop_and_the_resume_say_whether_the_standing_stop_is_the_persons() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        let unstopped = activity_report(None);
+        let agents = stop(STOP_REASON_REQUEST);
+        let agents_report = activity_report(None);
+        lift();
+        let persons = stop(STOP_REASON_WINDOW);
+        let persons_report = activity_report(None);
+        let refused = resume(
+            Lifter::Person { revision: None },
+            || Ok(Value::from("idle")),
+            || true,
+        )
+        .answer();
+        lift();
+        adopt(STOP_REASON_HOTKEY);
+        let chord_report = activity_report(None);
+        lift();
+        assert_eq!(unstopped["personsStop"], false, "{unstopped}");
+        assert_eq!(agents["personsStop"], false, "{agents}");
+        assert_eq!(agents_report["personsStop"], false, "{agents_report}");
+        assert_eq!(persons["personsStop"], true, "{persons}");
+        assert_eq!(persons_report["personsStop"], true, "{persons_report}");
+        assert_eq!(refused["personsStop"], true, "{refused}");
+        assert_eq!(chord_report["personsStop"], true, "{chord_report}");
+    }
+
     #[test]
     fn an_agents_resume_lifts_the_stop_an_agent_asked_for() {
         let _hand = one_hand();

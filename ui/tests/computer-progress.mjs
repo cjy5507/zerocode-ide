@@ -10,6 +10,9 @@ const OTHER_SCOPE = "scope-b";
 const NEXT_SCOPE = "scope-next";
 const BURST_FRAMES = 8;
 const OPEN_CLOSE_CYCLES = 5;
+/* How many times the person's stop and resume are pressed over two agents'
+ * work browsers to time how long the stop takes to reach them (t-62872). */
+const STOP_TRIALS = 20;
 
 const installComputerSurfaceCensus = () => {
   const surfaceFiles = "/shell-computer";
@@ -115,6 +118,7 @@ const installComputerHands = ({ hotkey }) => {
       const band = document.getElementById("computer-band");
       const note = document.getElementById("computer-band-note");
       const view = document.getElementById("computer-band-view");
+      const browsers = document.getElementById("computer-band-browsers");
       return {
         shown: !band.hidden,
         showsStop: band.classList.contains("is-stopped"),
@@ -122,6 +126,7 @@ const installComputerHands = ({ hotkey }) => {
         offersResume: !document.getElementById("computer-band-resume").hidden,
         offersView: view !== null && !view.hidden,
         note: note && !note.hidden ? note.textContent : null,
+        browsers: browsers && !browsers.hidden ? browsers.textContent : null,
       };
     },
     pressBand: (button) => document.getElementById(`computer-band-${button}`).click(),
@@ -217,9 +222,11 @@ const installComputerHands = ({ hotkey }) => {
       const desk = document.getElementById("computer-progress-desk");
       const list = document.getElementById("computer-progress-browsers");
       const hint = document.getElementById("computer-progress-browser-hint");
+      const stopped = document.getElementById("computer-progress-stop-browsers");
       const rows = list && !list.hidden ? [...list.querySelectorAll("[data-tab]")] : [];
       return {
         desk: desk && !desk.hidden ? desk.textContent : null,
+        stopBrowsers: stopped && !stopped.hidden ? stopped.textContent : null,
         rows: rows.map((row) => {
           const button = row.querySelector("button");
           return {
@@ -265,6 +272,130 @@ const installWorkBrowsers = () => {
   work.words = (label) => {
     const tab = work.tab(label);
     return tab ? browserWorkspaceWords(tab) : null;
+  };
+};
+
+/* The dedicated work browser's control as the backend keeps it (t-62460,
+ * `browser_workspace.rs`), small enough to race the person's stop against
+ * (t-62872): a mode change names the revision it saw and a moved one is
+ * refused as stale; it moves the revision into `pausing`, waits for the
+ * agent's input in flight, and moves it again into the mode asked. An agent's
+ * input is admitted only in the agent's hands, one at a time. Every move is
+ * told to the page the way the backend tells it (`browser:workspace`). */
+const installWorkBrowserModel = () => {
+  const model = {
+    states: new Map(), inputs: [], refused: [], asked: [], pauses: [], drains: new Map(), moving: new Map(), holds: new Map(),
+  };
+  window.__WORK_MODEL__ = model;
+  window.__ANSWER__.open_browser_pane = (args) => args.label;
+  window.__ANSWER__.browser_place = () => null;
+  window.__ANSWER__.browser_zoom = () => null;
+  window.__ANSWER__.close_browser_pane = ({ label }) => {
+    model.states.delete(label);
+    return null;
+  };
+  window.__ANSWER__.set_browser_open_tabs = ({ tabs: records }) => ({ browser: { ...browserPrefs, open_tabs: records } });
+  const copy = (state) => ({
+    label: state.label, mode: state.mode, revision: state.revision, inFlight: state.inFlight,
+    needsObservation: state.needsObservation, ownerTerm: state.ownerTerm, snapshotSupported: false,
+  });
+  const tell = (state) => {
+    for (const hear of window.__LISTENERS__["browser:workspace"] ?? []) hear({ payload: copy(state) });
+  };
+  window.__ANSWER__.get_browser_workspaces = () => [...model.states.values()].map(copy);
+  model.open = async (labels) => {
+    for (const label of labels) {
+      for (const hear of window.__LISTENERS__["browser:agent-open"] ?? []) {
+        hear({ payload: { label, url: `https://example.com/${label}` } });
+      }
+    }
+    for (let round = 0; round < 50 && !labels.every((label) => model.tab(label)); round += 1) {
+      await window.__COMPUTER_HANDS__.settle();
+    }
+  };
+  model.tab = (label) => tabs.find((one) => one.kind === "browser" && one.label === label) ?? null;
+  model.mode = (label) => model.tab(label)?.workspace?.mode ?? null;
+  model.say = (fields) => {
+    const state = { inFlight: 0, needsObservation: false, ...fields };
+    model.states.set(state.label, state);
+    tell(state);
+  };
+  /* The agent's input, admitted as `begin_at` admits it: answers the input's
+   * end, or null when it was refused. */
+  model.input = (label) => {
+    const state = model.states.get(label);
+    const at = performance.now();
+    if (!state || state.mode !== "agent" || state.inFlight !== 0) {
+      model.refused.push({ label, at, mode: state?.mode ?? null });
+      return null;
+    }
+    state.inFlight = 1;
+    model.inputs.push({ label, at, revision: state.revision });
+    return () => {
+      state.inFlight = 0;
+      const drained = model.drains.get(label);
+      model.drains.delete(label);
+      drained?.();
+    };
+  };
+  /* An agent that keeps sending input as fast as the page's clock turns, each
+   * input ending at once; answers how to stop it. */
+  model.hammer = (labels) => {
+    let running = true;
+    const beat = () => {
+      if (!running) return;
+      for (const label of labels) model.input(label)?.();
+      window.__COMPUTER_HANDS__.census.native.setTimeout(beat, 1);
+    };
+    beat();
+    return () => { running = false; };
+  };
+  /* An agent whose own navigation moves its browser's revision just before
+   * each of the next `times` mode changes reaches it (a popup's navigation,
+   * `with_agent_popup`), the page not yet told. */
+  model.moveBefore = (label, times) => model.moving.set(label, times);
+  /* The next mode change asked of `label` waits until the answer is let go. */
+  model.hold = (label) => {
+    let release = () => {};
+    const held = new Promise((done) => { release = done; });
+    model.holds.set(label, held);
+    return release;
+  };
+  window.__ANSWER__.set_browser_workspace_mode = async ({ label, mode, expectedRevision }) => {
+    model.asked.push({ label, mode, expectedRevision, at: performance.now() });
+    const held = model.holds.get(label);
+    model.holds.delete(label);
+    if (held) await held;
+    const state = model.states.get(label);
+    if (!state) throw new Error("workspace_missing: no such work browser");
+    const moving = model.moving.get(label) ?? 0;
+    if (moving > 0) {
+      model.moving.set(label, moving - 1);
+      state.revision += 1;
+    }
+    if (state.revision !== expectedRevision) throw new Error("workspace_stale: the work browser's state moved");
+    state.revision += 1;
+    state.mode = "pausing";
+    model.pauses.push({ label, mode, at: performance.now() });
+    tell(state);
+    if (state.inFlight !== 0) await new Promise((drained) => model.drains.set(label, drained));
+    state.revision += 1;
+    state.mode = mode;
+    state.needsObservation = true;
+    tell(state);
+    return copy(state);
+  };
+  /* The agent's inputs that landed on `label` after a pause of it began and
+   * before the next mode change asked of it. */
+  model.landedWhilePaused = (label) => {
+    let landed = 0;
+    for (const [at, pause] of model.pauses.entries()) {
+      if (pause.label !== label || pause.mode !== "paused") continue;
+      const next = model.pauses.slice(at + 1).find((later) => later.label === label);
+      landed += model.inputs.filter((input) => input.label === label && input.at > pause.at &&
+        (!next || input.at < next.at)).length;
+    }
+    return landed;
   };
 };
 
@@ -855,10 +986,15 @@ async function testTheProgressPanel(browser, origin, ok) {
       frames.answerOldest(hands.look(subject, 42, { png: null, perception: "gone" }));
       await hands.settle();
       const gone = hands.readPanel();
+      hands.announce("computer:frame", { ...subject, seq: 43 });
+      await hands.settle();
+      frames.answerOldest(hands.look(subject, 43, { png: null, perception: "oversize" }));
+      await hands.settle();
+      const oversize = hands.readPanel();
       hands.closePanel();
       await hands.settle();
       hands.releaseCommands();
-      return { withPicture, treeOnly, gone, census: hands.census.live() };
+      return { withPicture, treeOnly, gone, oversize, census: hands.census.live() };
     }, { subject: SUBJECT });
     ok(
       "a newer look without a picture takes the older picture off the panel and says why, whether the look read the screen's structure or its picture is no longer kept",
@@ -866,6 +1002,12 @@ async function testTheProgressPanel(browser, origin, ok) {
         pictureless.treeOnly?.seq === "41" && !pictureless.treeOnly?.picture && Boolean(pictureless.treeOnly?.note) &&
         pictureless.gone?.seq === "42" && !pictureless.gone?.picture && Boolean(pictureless.gone?.note) &&
         pictureless.treeOnly?.note !== pictureless.gone?.note && censusIsEmpty(pictureless.census),
+      JSON.stringify(pictureless),
+    );
+    ok(
+      "a look whose picture was too large to keep shows no picture and says so in its own words (t-63505)",
+      pictureless.oversize?.seq === "43" && !pictureless.oversize?.picture && Boolean(pictureless.oversize?.note) &&
+        pictureless.oversize.note !== pictureless.gone?.note && pictureless.oversize.note !== pictureless.treeOnly?.note,
       JSON.stringify(pictureless),
     );
     ok("the progress panel scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
@@ -898,6 +1040,40 @@ async function testTheBandWithThePanel(browser, origin, ok) {
         viewing.fetchesBeforePress === 0 && viewing.fetches === 1 && asksFor(viewing.asked, SUBJECT) &&
         viewing.panel?.shown === true && viewing.panel?.seq === "4" && Boolean(viewing.panel?.picture),
       JSON.stringify(viewing),
+    );
+
+    const focusing = await evaluateCase(page, async () => {
+      const hands = window.__COMPUTER_HANDS__;
+      hands.closePanel();
+      await hands.settle();
+      hands.recordCommand("computer_progress_frame", () => null);
+      const view = document.getElementById("computer-band-view");
+      view.focus();
+      const before = document.activeElement === view;
+      hands.pressBand("view");
+      await hands.settle();
+      const close = document.getElementById("computer-progress-close");
+      close.focus();
+      const inside = document.activeElement === close;
+      close.click();
+      await hands.settle();
+      const seen = {
+        before,
+        inside,
+        shown: hands.readPanel().shown,
+        back: document.activeElement === view,
+        focused: document.activeElement?.id || document.activeElement?.tagName || null,
+      };
+      // Open again for the cases that follow.
+      hands.pressBand("view");
+      await hands.settle();
+      hands.releaseCommands();
+      return seen;
+    });
+    ok(
+      "closing the panel gives the keyboard back to where it was before the panel opened (t-63505)",
+      focusing.before === true && focusing.inside === true && focusing.shown === false && focusing.back === true,
+      JSON.stringify(focusing),
     );
 
     await page.setViewportSize({ width: 360, height: 640 });
@@ -978,8 +1154,10 @@ async function testThePanelReadsTheWorkBrowser(browser, origin, ok) {
     const desk = await evaluateCase(page, async ({ subject }) => {
       const hands = window.__COMPUTER_HANDS__;
       hands.recordCommand("computer_progress_frame", () => null);
-      hands.announce("computer:activity", hands.operatorReport({ revision: 30, active: true }));
       hands.openPanel(subject);
+      await hands.settle();
+      const quiet = hands.readControl();
+      hands.announce("computer:activity", hands.operatorReport({ revision: 30, active: true }));
       await hands.settle();
       const agents = hands.readControl();
       const stops = hands.holdCommand("computer_stop");
@@ -997,10 +1175,22 @@ async function testThePanelReadsTheWorkBrowser(browser, origin, ok) {
       hands.pressBand("resume");
       await hands.settle();
       const resumed = hands.readControl();
-      return { agents, whileStopWaits, granted, afterOlderReport, resumed };
+      hands.announce("computer:activity", hands.operatorReport({ revision: 32, active: true }));
+      await hands.settle();
+      const actingAgain = hands.readControl();
+      // Quiet again, so the band's own slip-away cannot change the line under
+      // the cases that follow.
+      hands.announce("computer:activity", hands.operatorReport({ revision: 32 }));
+      await hands.settle();
+      return { quiet, agents, whileStopWaits, granted, afterOlderReport, resumed, actingAgain };
     }, { subject: SUBJECT });
     ok(
-      "the open panel says in one line that the desktop is the agent's while no stop is granted, and a stop still waiting for the backend does not change it",
+      "with no Computer Use action going on the open panel does not say the agent holds the desktop, and says it once an action comes (t-63505)",
+      Boolean(desk.quiet?.desk) && Boolean(desk.agents?.desk) && desk.quiet.desk !== desk.agents.desk,
+      JSON.stringify(desk),
+    );
+    ok(
+      "the open panel says in one line that the desktop is the agent's while it acts and no stop is granted, and a stop still waiting for the backend does not change it",
       Boolean(desk.agents?.desk) && desk.whileStopWaits?.desk === desk.agents?.desk,
       JSON.stringify(desk),
     );
@@ -1011,8 +1201,9 @@ async function testThePanelReadsTheWorkBrowser(browser, origin, ok) {
       JSON.stringify(desk),
     );
     ok(
-      "a granted resume gives the desktop line back to the agent",
-      Boolean(desk.resumed?.desk) && desk.resumed?.desk === desk.agents?.desk,
+      "a granted resume takes the stop off the desktop line, which says the agent holds the desktop again only with its next action",
+      Boolean(desk.resumed?.desk) && desk.resumed.desk !== desk.granted?.desk && desk.resumed.desk !== desk.agents?.desk &&
+        desk.resumed.desk === desk.quiet?.desk && desk.actingAgain?.desk === desk.agents?.desk,
       JSON.stringify(desk),
     );
 
@@ -1142,11 +1333,319 @@ async function testThePanelReadsTheWorkBrowser(browser, origin, ok) {
   } finally { await page.close(); }
 }
 
+/* The person's one stop (t-62872): a stop the backend says is the person's
+ * reaches every work browser an agent holds in this window — each through its
+ * own bar's road, against the dedicated browser's control as the backend keeps
+ * it (`installWorkBrowserModel`) — and the band's resume gives back only what
+ * that stop paused. The band and the panel say how far the stop reached. */
+async function testTheOneStop(browser, origin, ok) {
+  const labelsOf = (asked, label) => (asked ?? []).filter((one) => one.label === label);
+  {
+    const { page, faults } = await openComputerPage(browser, origin);
+    try {
+      await page.evaluate(installWorkBrowserModel);
+      const stopped = await evaluateCase(page, async ({ subject, otherTerm }) => {
+        const hands = window.__COMPUTER_HANDS__;
+        const model = window.__WORK_MODEL__;
+        const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+        const all = ["browser-911", "browser-912", "browser-913", "browser-914"];
+        const agents = ["browser-911", "browser-912"];
+        await model.open(all);
+        model.say({ label: "browser-911", mode: "agent", revision: 3, ownerTerm: String(subject.term) });
+        model.say({ label: "browser-912", mode: "agent", revision: 5, ownerTerm: String(otherTerm) });
+        model.say({ label: "browser-913", mode: "human", revision: 4, ownerTerm: String(subject.term) });
+        model.say({ label: "browser-914", mode: "paused", revision: 6, ownerTerm: String(otherTerm) });
+        hands.recordCommand("computer_progress_frame", () => null);
+        hands.announce("computer:activity", hands.operatorReport({ revision: 40, active: true }));
+        hands.openPanel(subject);
+        await hands.settle();
+        const stopHammer = model.hammer(agents);
+        await new Promise((done) => hands.census.native.setTimeout(done, 30));
+        const landedBefore = model.inputs.length;
+        hands.recordCommand("computer_stop", () => ({
+          stopped: true, reason: "window", revision: 41, personsStop: true, helperSignalled: false,
+        }));
+        const pressed = performance.now();
+        hands.pressBand("stop");
+        let pausedAt = null;
+        while (performance.now() - pressed < 3000) {
+          if (agents.every((label) => model.mode(label) === "paused")) {
+            pausedAt = performance.now();
+            break;
+          }
+          await tick();
+        }
+        await new Promise((done) => hands.census.native.setTimeout(done, 30));
+        stopHammer();
+        await hands.settle();
+        const reached = agents.map((label) => model.pauses.find((one) => one.label === label && one.mode === "paused"));
+        return {
+          asked: model.asked.map(({ label, mode, expectedRevision }) => ({ label, mode, expectedRevision })),
+          modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
+          landedBefore,
+          landedWhilePaused: agents.map((label) => model.landedWhilePaused(label)),
+          refusedAfter: model.refused.filter((one) => one.at > pressed).length,
+          reachedMs: reached.every(Boolean) ? Math.max(...reached.map((one) => one.at - pressed)) : null,
+          pausedMs: pausedAt === null ? null : pausedAt - pressed,
+          band: hands.readBand(),
+          control: hands.readControl(),
+        };
+      }, { subject: SUBJECT, otherTerm: OTHER_TERM });
+      const askedOf = (label) => labelsOf(stopped.asked, label);
+      ok(
+        "the person's stop pauses every work browser an agent holds in this window, of every pane, through its own bar's road with the revision the window held, and leaves the one the person holds and the one already paused as they are",
+        askedOf("browser-911").length === 1 && askedOf("browser-911")[0].mode === "paused" &&
+          askedOf("browser-911")[0].expectedRevision === 3 && askedOf("browser-912").length === 1 &&
+          askedOf("browser-912")[0].mode === "paused" && askedOf("browser-912")[0].expectedRevision === 5 &&
+          askedOf("browser-913").length === 0 && askedOf("browser-914").length === 0 &&
+          stopped.modes?.["browser-911"] === "paused" && stopped.modes?.["browser-912"] === "paused" &&
+          stopped.modes?.["browser-913"] === "human" && stopped.modes?.["browser-914"] === "paused",
+        JSON.stringify(stopped),
+      );
+      ok(
+        "once the person's stop reaches a work browser no agent input lands there, however fast the agent keeps trying",
+        stopped.landedBefore > 0 && stopped.pausedMs !== null &&
+          stopped.landedWhilePaused?.every((landed) => landed === 0) && stopped.refusedAfter > 0,
+        JSON.stringify(stopped),
+      );
+      ok(
+        "the band and the panel say in one line how many work browsers the person's stop paused",
+        Boolean(stopped.band?.browsers) && stopped.band.browsers.includes("2") &&
+          stopped.control?.stopBrowsers === stopped.band.browsers,
+        JSON.stringify(stopped),
+      );
+
+      const idle = await evaluateCase(page, async () => {
+        const hands = window.__COMPUTER_HANDS__;
+        const watched = ["set_browser_workspace_mode", "get_browser_workspaces", "computer_progress_frame", "computer_stop", "computer_resume"];
+        const before = watched.map((name) => hands.sentCount(name));
+        await new Promise((done) => hands.census.native.setTimeout(done, 1500));
+        return { sent: watched.filter((name, at) => hands.sentCount(name) !== before[at]), census: hands.census.live() };
+      });
+      ok(
+        "with the person's stop standing over paused work browsers and the panel open, an idle second and a half asks nothing and leaves no timer, interval or animation frame of the Computer Use files",
+        idle.sent?.length === 0 && idle.census?.timeouts === 0 && idle.census?.intervals === 0 &&
+          idle.census?.animationFrames === 0,
+        JSON.stringify(idle),
+      );
+
+      const resumed = await evaluateCase(page, async () => {
+        const hands = window.__COMPUTER_HANDS__;
+        const model = window.__WORK_MODEL__;
+        const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+        const all = ["browser-911", "browser-912", "browser-913", "browser-914"];
+        // The person takes one of the stopped browsers by hand, in its bar.
+        await setBrowserWorkspaceMode(model.tab("browser-912"), "human");
+        await hands.settle();
+        const tookByHand = model.mode("browser-912");
+        const askedBefore = model.asked.length;
+        hands.recordCommand("computer_resume", () => ({
+          resumed: true, revision: 42, stopped: null, personsStop: false, helper: "idle",
+        }));
+        hands.pressBand("resume");
+        const pressed = performance.now();
+        while (performance.now() - pressed < 3000 && model.mode("browser-911") !== "agent") await tick();
+        await hands.settle();
+        return {
+          tookByHand,
+          asked: model.asked.slice(askedBefore).map(({ label, mode, expectedRevision }) => ({ label, mode, expectedRevision })),
+          modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
+          band: hands.readBand(),
+          control: hands.readControl(),
+        };
+      });
+      ok(
+        "the band's resume gives back to the agent only the work browsers its stop paused that still stand where it left them: the one the person took by hand meanwhile, the one they held and the one paused before stay as they are",
+        resumed.tookByHand === "human" && resumed.asked?.length === 1 && resumed.asked[0].label === "browser-911" &&
+          resumed.asked[0].mode === "agent" && resumed.modes?.["browser-911"] === "agent" &&
+          resumed.modes?.["browser-912"] === "human" && resumed.modes?.["browser-913"] === "human" &&
+          resumed.modes?.["browser-914"] === "paused",
+        JSON.stringify(resumed),
+      );
+      ok(
+        "once the person's stop is lifted the band and the panel no longer say that work browsers are stopped",
+        resumed.band?.browsers === null && resumed.control?.stopBrowsers === null,
+        JSON.stringify(resumed),
+      );
+
+      const agentsStop = await evaluateCase(page, async () => {
+        const hands = window.__COMPUTER_HANDS__;
+        const model = window.__WORK_MODEL__;
+        const askedBefore = model.asked.length;
+        hands.announce("computer:activity", hands.operatorReport({ revision: 43, stopped: "request", personsStop: false }));
+        await hands.settle();
+        await hands.settle();
+        const seen = { asked: model.asked.length - askedBefore, mode: model.mode("browser-911"), band: hands.readBand() };
+        hands.announce("computer:activity", hands.operatorReport({ revision: 44 }));
+        await hands.settle();
+        return seen;
+      });
+      ok(
+        "an agent's own stop touches no work browser",
+        agentsStop.asked === 0 && agentsStop.mode === "agent" && agentsStop.band?.browsers === null,
+        JSON.stringify(agentsStop),
+      );
+
+      const rounds = await evaluateCase(page, async ({ trials, otherTerm }) => {
+        const hands = window.__COMPUTER_HANDS__;
+        const model = window.__WORK_MODEL__;
+        const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+        const agents = ["browser-911", "browser-915"];
+        await model.open(["browser-915"]);
+        model.say({ label: "browser-915", mode: "agent", revision: 2, ownerTerm: String(otherTerm) });
+        await hands.settle();
+        const stopHammer = model.hammer(agents);
+        const reached = [];
+        const painted = [];
+        let revision = 50;
+        for (let trial = 0; trial < trials; trial += 1) {
+          hands.announce("computer:activity", hands.operatorReport({ revision, active: true }));
+          revision += 1;
+          const stopRevision = revision;
+          hands.recordCommand("computer_stop", () => ({
+            stopped: true, reason: "window", revision: stopRevision, personsStop: true, helperSignalled: false,
+          }));
+          const pausesBefore = model.pauses.length;
+          const pressed = performance.now();
+          hands.pressBand("stop");
+          while (performance.now() - pressed < 2000 && !agents.every((label) => model.mode(label) === "paused")) await tick();
+          if (!agents.every((label) => model.mode(label) === "paused")) break;
+          painted.push(performance.now() - pressed);
+          reached.push(Math.max(...model.pauses.slice(pausesBefore).filter((one) => one.mode === "paused").map((one) => one.at - pressed)));
+          await hands.settle();
+          revision += 1;
+          const liftRevision = revision;
+          hands.recordCommand("computer_resume", () => ({
+            resumed: true, revision: liftRevision, stopped: null, personsStop: false, helper: "idle",
+          }));
+          hands.pressBand("resume");
+          const lifted = performance.now();
+          while (performance.now() - lifted < 2000 && !agents.every((label) => model.mode(label) === "agent")) await tick();
+          await hands.settle();
+        }
+        stopHammer();
+        const quantile = (values, q) => {
+          const sorted = [...values].sort((a, b) => a - b);
+          return sorted.length === 0 ? null : Number(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))].toFixed(2));
+        };
+        return {
+          trials: painted.length,
+          landedWhilePaused: agents.reduce((sum, label) => sum + model.landedWhilePaused(label), 0),
+          refused: model.refused.length,
+          reachedBackendMs: { p50: quantile(reached, 0.5), p95: quantile(reached, 0.95) },
+          pausedOnScreenMs: { p50: quantile(painted, 0.5), p95: quantile(painted, 0.95) },
+        };
+      }, { trials: STOP_TRIALS, otherTerm: OTHER_TERM });
+      ok(
+        `over ${STOP_TRIALS} stops and resumes of two agents' work browsers under constant input, every stop pauses both and no input lands while they are paused (press-to-pause times in the detail)`,
+        rounds.trials === STOP_TRIALS && rounds.landedWhilePaused === 0 && rounds.refused > 0,
+        JSON.stringify(rounds),
+      );
+      ok("the one stop scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+  {
+    const { page, faults } = await openComputerPage(browser, origin);
+    try {
+      await page.evaluate(installWorkBrowserModel);
+      const raced = await evaluateCase(page, async ({ subject, otherTerm }) => {
+        const hands = window.__COMPUTER_HANDS__;
+        const model = window.__WORK_MODEL__;
+        const tick = () => new Promise((done) => hands.census.native.setTimeout(done, 0));
+        const all = ["browser-921", "browser-922", "browser-923", "browser-924"];
+        await model.open(all);
+        model.say({ label: "browser-921", mode: "agent", revision: 3, ownerTerm: String(subject.term) });
+        model.say({ label: "browser-922", mode: "agent", revision: 7, ownerTerm: String(otherTerm) });
+        model.say({ label: "browser-923", mode: "agent", revision: 9, ownerTerm: String(subject.term) });
+        model.say({ label: "browser-924", mode: "agent", revision: 2, ownerTerm: String(otherTerm) });
+        hands.recordCommand("computer_progress_frame", () => null);
+        hands.announce("computer:activity", hands.operatorReport({ revision: 60, active: true }));
+        hands.openPanel(subject);
+        await hands.settle();
+        // 921: the agent's input is in flight when the stop comes. 922: the
+        // agent moves the revision once, just before the pause reaches it.
+        // 923: the agent moves it before every pause. 924: the person closes
+        // it while the stop's pause of it is still out.
+        const inFlight = model.input("browser-921");
+        model.moveBefore("browser-922", 1);
+        model.moveBefore("browser-923", Number.MAX_SAFE_INTEGER);
+        const release924 = model.hold("browser-924");
+        hands.recordCommand("computer_stop", () => ({
+          stopped: true, reason: "window", revision: 61, personsStop: true, helperSignalled: false,
+        }));
+        hands.pressBand("stop");
+        const pressed = performance.now();
+        while (performance.now() - pressed < 3000 && !model.asked.some((one) => one.label === "browser-924")) await tick();
+        if (model.tab("browser-924")) closeTab(model.tab("browser-924").id);
+        release924();
+        while (performance.now() - pressed < 3000 && model.mode("browser-921") !== "pausing") await tick();
+        await hands.settle();
+        const whilePausing = {
+          mode: model.mode("browser-921"),
+          secondInputLanded: model.input("browser-921") !== null,
+          band: hands.readBand(),
+        };
+        inFlight?.();
+        const tries = typeof BROWSER_WORKSPACE_STOP_TRIES === "number" ? BROWSER_WORKSPACE_STOP_TRIES : null;
+        const quiet = (label) => !model.tab(label)?.workspacePending && !model.tab(label)?.workspaceReading;
+        const settled = () => model.mode("browser-921") === "paused" && model.mode("browser-922") === "paused" &&
+          tries !== null && model.asked.filter((one) => one.label === "browser-923").length >= tries &&
+          quiet("browser-923") && hands.readBand().offersResume;
+        const finished = performance.now();
+        while (performance.now() - finished < 3000 && !settled()) await tick();
+        await hands.settle();
+        const asked = (label) => model.asked.filter((one) => one.label === label)
+          .map(({ mode, expectedRevision }) => ({ mode, expectedRevision }));
+        return {
+          whilePausing,
+          tries,
+          afterInputLanded: model.input("browser-921") !== null,
+          landed921: model.landedWhilePaused("browser-921"),
+          modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
+          asked922: asked("browser-922"),
+          asked923: asked("browser-923"),
+          asked924: asked("browser-924"),
+          band: hands.readBand(),
+          control: hands.readControl(),
+        };
+      }, { subject: SUBJECT, otherTerm: OTHER_TERM });
+      ok(
+        "an agent input in flight when the person's stop comes still lands, the pause waits for it, and no input lands once the pause began",
+        raced.whilePausing?.mode === "pausing" && raced.whilePausing?.secondInputLanded === false &&
+          raced.modes?.["browser-921"] === "paused" && raced.afterInputLanded === false && raced.landed921 === 0,
+        JSON.stringify(raced),
+      );
+      ok(
+        "while a work browser is still being paused the band does not offer the resume yet, and says the stop is reaching the work browsers",
+        raced.whilePausing?.band?.offersResume === false && Boolean(raced.whilePausing?.band?.browsers),
+        JSON.stringify(raced),
+      );
+      ok(
+        "a pause the backend refuses because the agent moved the revision is read again and asked again with the revision read, and the work browser ends paused",
+        raced.asked922?.length === 2 && raced.asked922[0].expectedRevision === 7 &&
+          raced.asked922[1].expectedRevision === 8 && raced.asked922.every((one) => one.mode === "paused") &&
+          raced.modes?.["browser-922"] === "paused",
+        JSON.stringify(raced),
+      );
+      ok(
+        "a work browser the stop still cannot pause after its tries is left as it is, and the band and the panel say how many it paused and how many it could not, and a work browser closed meanwhile is skipped",
+        typeof raced.tries === "number" && raced.tries > 1 && raced.asked923?.length === raced.tries &&
+          raced.modes?.["browser-923"] === "agent" && raced.asked924?.length === 1 && raced.modes?.["browser-924"] === null &&
+          Boolean(raced.band?.browsers) && raced.band.browsers.includes("1") && raced.band.browsers.includes("2") &&
+          raced.control?.stopBrowsers === raced.band.browsers && raced.band?.offersResume === true,
+        JSON.stringify(raced),
+      );
+      ok("the stop's race scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+}
+
 export async function testComputerProgress(browser, origin, ok) {
   await testTheBand(browser, origin, ok);
   await testTheProgressPanel(browser, origin, ok);
   await testTheBandWithThePanel(browser, origin, ok);
   await testThePanelReadsTheWorkBrowser(browser, origin, ok);
+  await testTheOneStop(browser, origin, ok);
 }
 
 if (process.argv[1] && import.meta.url === (await import("node:url")).pathToFileURL(process.argv[1]).href) {

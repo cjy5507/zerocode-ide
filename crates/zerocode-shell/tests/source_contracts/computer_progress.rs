@@ -5,7 +5,9 @@
 //! picture leaves the window's process only for the window's own page, only
 //! about a pane the window holds and only for the assignment that pane still
 //! holds; the page keeps one picture and no copy of it; a stop is lifted on
-//! both roads by the one resume; and no mark is pressed past a stop.
+//! both roads by the one resume; no mark is pressed past a stop; and the
+//! person's stop reaches the work browsers only by their own bar's road
+//! (t-62872).
 
 use std::path::Path;
 
@@ -16,6 +18,7 @@ const RUNTIME: &str = include_str!("../../src/agent_tools_runtime.rs");
 const MAIN: &str = include_str!("../../src/main.rs");
 const OBSERVE: &str = include_str!("../../src/computer_use/observe.rs");
 const MARKS: &str = include_str!("../../src/computer_use/marks.rs");
+const GUARD: &str = include_str!("../../src/computer_use/guard.rs");
 
 /// A window file, read when the test runs: a missing one fails this contract
 /// alone, not the whole target it sits in.
@@ -138,9 +141,12 @@ fn the_panel_keeps_one_picture_no_copy_and_no_timer() {
 
 /// Who holds a work browser is the dedicated browser's own word (t-62464):
 /// the panel reads the state shell-browser.js took in, in its revision order,
-/// and leads to that browser's own bar. It asks the backend nothing about the
-/// work browser and changes no control of it — a second road there would be a
-/// second controller.
+/// and leads to that browser's own bar. The band's file asks the backend
+/// nothing about a work browser — a second road there would be a second
+/// controller; the person's stop moves one only through the browser's own
+/// file (the next contract). The chrome reads the panel's painter from where
+/// the band's file lays it when it loads (t-63505 ⑤), so the earlier file
+/// never names a function a later one defines, and needs no guard for it.
 #[test]
 fn the_panel_reads_who_holds_a_work_browser_and_moves_no_control_of_its_own() {
     let page = ui_file("shell-computer.js");
@@ -164,9 +170,90 @@ fn the_panel_reads_who_holds_a_work_browser_and_moves_no_control_of_its_own() {
     let browser = ui_file("shell-browser.js");
     assert!(
         block_after(&browser, "function paintBrowserWorkspaceChrome(")
-            .contains("paintComputerProgressControl();"),
-        "every repaint of the work browsers' chrome repaints the panel's control lines"
+            .contains("for (const read of browserWorkspaceChromeReaders) read();"),
+        "every repaint of the work browsers' chrome repaints what reads them"
     );
+    assert!(
+        page.contains("browserWorkspaceChromeReaders.add("),
+        "the band and the panel lay their painter where the chrome reads it"
+    );
+    for guarded in [
+        "typeof paintComputerProgressControl",
+        "typeof paintComputerBand",
+    ] {
+        assert!(
+            !browser.contains(guarded),
+            "shell-browser.js guards a call into a later file: {guarded}"
+        );
+    }
+}
+
+/// The person's one stop (t-62872): a stop the backend says is the person's
+/// reaches the work browsers too, and each is paused, and given back on the
+/// band's resume, by its own bar's road (`setBrowserWorkspaceMode`, which
+/// names the revision the window holds). There is no second road:
+/// shell-browser.js asks for a mode change in one place.
+#[test]
+fn the_persons_stop_reaches_the_work_browsers_only_through_their_bars_road() {
+    let page = ui_file("shell-computer.js");
+    let browser = ui_file("shell-browser.js");
+    let take = block_after(&page, "function takeComputerBandStop(");
+    assert!(
+        take.contains("stopAgentBrowserWorkspaces("),
+        "a granted stop reaches the work browsers: {take}"
+    );
+    assert!(
+        take.contains("persons"),
+        "only a stop the backend says is the person's: {take}"
+    );
+    assert!(
+        page.contains("resumeAgentBrowserWorkspaces("),
+        "the band's granted resume gives back what its stop paused"
+    );
+    assert_eq!(
+        browser.matches("invoke(\"set_browser_workspace_mode\"").count(),
+        1,
+        "one place asks the backend to change a work browser's mode"
+    );
+    for (opens, road) in [
+        (
+            "async function pauseBrowserWorkspaceForStop(",
+            "setBrowserWorkspaceMode(tab, \"paused\"",
+        ),
+        (
+            "function resumeAgentBrowserWorkspaces(",
+            "setBrowserWorkspaceMode(tab, \"agent\"",
+        ),
+    ] {
+        assert!(browser.contains(opens), "shell-browser.js has {opens}");
+        let walk = block_after(&browser, opens);
+        assert!(
+            walk.contains(road),
+            "{opens} goes by the bar's own road: {walk}"
+        );
+    }
+}
+
+/// The guard's product code stands before its first test-only line (t-63505
+/// ①): a reader that cuts a backend file at its first `#[cfg(test)]`, as
+/// `shipped_backend` does, sees the whole guard — the stop, the report and the
+/// one resume.
+#[test]
+fn the_guards_product_code_stands_before_its_first_test_only_line() {
+    let (product, tests) = GUARD
+        .split_once("#[cfg(test)]")
+        .expect("the guard has its tests");
+    for item in [
+        "pub fn stop(",
+        "pub fn activity_report(",
+        "pub enum Lifter",
+        "pub fn resume(",
+    ] {
+        assert!(
+            product.contains(item) && !tests.contains(item),
+            "{item} stands before the guard's first #[cfg(test)]"
+        );
+    }
 }
 
 #[test]
