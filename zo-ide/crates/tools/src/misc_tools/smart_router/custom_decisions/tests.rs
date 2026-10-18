@@ -352,6 +352,8 @@ fn shadow_asks_and_writes_but_hands_nothing() {
             assert_eq!(row["applied"], false, "{row}");
         }
         assert_eq!(rows.len(), Point::ALL.len(), "{rows:?}");
+        let ledger = fs::read_to_string(shadow_ledger_path(cwd, CUSTOM_DECISIONS.ledger)).expect("the ledger");
+        print!("{ledger}");
         assert_eq!(mock.requests().len(), Point::ALL.len());
         assert_eq!(pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP), None, "the next turn");
     });
