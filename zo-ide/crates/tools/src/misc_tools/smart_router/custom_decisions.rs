@@ -201,7 +201,7 @@ fn write(cwd: &Path, row: &DecisionRow) {
 /// else the word of the first rule it breaks, on the one row it writes. It is
 /// not asked: a definition the store would refuse today sends nothing.
 fn kept(cwd: &Path, asked: Asked) -> Result<Asked, &'static str> {
-    match custom::check(&asked.definition).iter().find(|refusal| !matches!(refusal, custom::Refusal::SecretLine { .. })) {
+    match custom::check(&asked.definition).first() {
         Some(refusal) => {
             write(cwd, &DecisionRow::of(&asked, refusal.word()));
             Err(refusal.word())
