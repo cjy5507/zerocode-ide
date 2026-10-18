@@ -219,6 +219,12 @@ impl Tracker {
         Some(evidence)
     }
 
+    fn cancel_confirmation(&mut self, identity: &str) {
+        if let Some(held) = self.held.iter_mut().find(|held| held.identity == identity) {
+            held.acknowledged = None;
+        }
+    }
+
     fn acknowledge(&mut self, identity: String, can_confirm: bool) -> Option<SurfaceExecution> {
         let held = self
             .held
@@ -441,8 +447,7 @@ impl BrowserContext {
     ) -> Option<SurfaceExecution> {
         let command = zerocode_core::agent_browser::parse_workspace_command(argv, None).ok()?;
         let verb = command.argv.first()?.as_str();
-        if answer.exit_code != 0 || !answer.stderr.is_empty() || command.argv.get(1)? != &self.label
-        {
+        if command.argv.get(1)? != &self.label {
             return None;
         }
         let mut digest = Sha256::new();
@@ -454,6 +459,14 @@ impl BrowserContext {
         hash_word(&mut digest, Some(&self.label));
         digest.update(self.control_revision.to_le_bytes());
         let identity = format!("{:x}", digest.finalize());
+        if verb == "eval" {
+            // A failed evaluation can still have changed the page before it
+            // failed. It cannot confirm an earlier acknowledged action.
+            tracker.cancel_confirmation(&identity);
+        }
+        if answer.exit_code != 0 || !answer.stderr.is_empty() {
+            return None;
+        }
         if verb == "read" {
             // This last line was stamped by finish_observation, after the page
             // fence. A page's revision-shaped text never supplies this proof.
@@ -739,6 +752,60 @@ mod tests {
             changed.effect,
             SurfaceEffect::Observation,
             "agent-authored eval changes cannot confirm progress"
+        );
+    }
+
+    #[test]
+    fn a_failed_browser_eval_cannot_confirm_a_preceding_action() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
+        let read = ["read".into(), "browser-1".into()];
+        scope
+            .finish_at(
+                &read,
+                &browser_answer("Before", 7),
+                Some(&browser_observation("browser-1", "Before")),
+                &mut tracker,
+            )
+            .unwrap();
+        scope
+            .finish_at(
+                &["click".into(), "browser-1".into(), "#next".into()],
+                &browser_answer("accepted", 7),
+                None,
+                &mut tracker,
+            )
+            .unwrap();
+        let mut failed = browser_answer("evaluation failed after a partial page change", 7);
+        failed.exit_code = 1;
+        failed.stderr = "fixture evaluation failure".into();
+        assert!(
+            scope
+                .finish_at(
+                    &[
+                        "eval".into(),
+                        "browser-1".into(),
+                        "fixture expression".into()
+                    ],
+                    &failed,
+                    None,
+                    &mut tracker
+                )
+                .is_none()
+        );
+        let after = scope
+            .finish_at(
+                &read,
+                &browser_answer("After", 7),
+                Some(&browser_observation("browser-1", "After")),
+                &mut tracker,
+            )
+            .unwrap();
+        assert!(after.state_revision > 0);
+        assert_eq!(
+            after.effect,
+            SurfaceEffect::Observation,
+            "a failed eval's content change cannot confirm a preceding acknowledged action"
         );
     }
 
