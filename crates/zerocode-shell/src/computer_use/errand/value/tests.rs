@@ -775,7 +775,11 @@ fn a_pausing_fake_starts_its_child_before_anything_else() {
     let dir = tempfile::tempdir().expect("a root");
     let claude = fake_cli(dir.path(), "claude", "{}", 0, 30);
     let script = std::fs::read_to_string(&claude).expect("the script");
-    let first = script.lines().nth(2).expect("the line after `here=`");
+    let first = script
+        .lines()
+        .skip_while(|line| !line.starts_with("here="))
+        .nth(1)
+        .expect("the line after `here=`");
     assert!(
         first.contains(".child"),
         "the child starts after other work: {first}"
