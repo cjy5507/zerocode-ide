@@ -407,7 +407,44 @@ pub struct BrowserRequest {
     /// that shell was given one — the window fences the path to its own
     /// automations tree before writing a frame or a step line into it.
     pub evidence: Option<String>,
-    pub answer: tokio::sync::oneshot::Sender<TeamAnswer>,
+    pub answer: BrowserAnswerSender,
+}
+
+/// Per-request browser metadata stays separate from page stdout and from the
+/// legacy CLI reply. Only the authenticated bridge negotiates its wire form.
+pub struct BrowserAnswerSender {
+    inner: tokio::sync::oneshot::Sender<zerocode_core::surface_execution::ExecutionEnvelope>,
+}
+
+impl BrowserAnswerSender {
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    pub async fn closed(&mut self) {
+        self.inner.closed().await;
+    }
+
+    pub fn send(
+        self,
+        answer: TeamAnswer,
+    ) -> Result<(), zerocode_core::surface_execution::ExecutionEnvelope> {
+        self.send_with_surface(answer, None)
+    }
+
+    pub fn send_with_surface(
+        self,
+        answer: TeamAnswer,
+        surface_execution: Option<zerocode_core::surface_execution::SurfaceExecution>,
+    ) -> Result<(), zerocode_core::surface_execution::ExecutionEnvelope> {
+        self.inner
+            .send(zerocode_core::surface_execution::ExecutionEnvelope {
+                stdout: answer.stdout,
+                stderr: answer.stderr,
+                exit_code: answer.exit_code,
+                surface_execution,
+            })
+    }
 }
 
 /// One `zerocode-computer …` request. The persistent window-side provider
@@ -1127,6 +1164,7 @@ fn workspace_revision_of(request: &Request) -> Result<Option<u64>, String> {
 /// in every PTY child's env, and "reports lifecycle events" must not imply
 /// "reads pages" (1-g4 리뷰 발견 1).
 async fn receive_browser_command(State(state): State<BridgeState>, request: Request) -> Response {
+    use zerocode_core::surface_execution::EXECUTION_ENVELOPE_HEADER;
     let presented = request
         .headers()
         .get(BROWSER_TOKEN_HEADER)
@@ -1135,6 +1173,9 @@ async fn receive_browser_command(State(state): State<BridgeState>, request: Requ
     if !constant_time_eq(presented.as_bytes(), state.browser_token.as_bytes()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let mut execution_headers = request.headers().get_all(EXECUTION_ENVELOPE_HEADER).iter();
+    let execution_envelope = execution_headers.next().is_some_and(|value| value == "1")
+        && execution_headers.next().is_none();
     let workspace_revision = match workspace_revision_of(&request) {
         Ok(revision) => revision,
         Err(error) => return refused(format!("zerocode-browser: {error}\n")),
@@ -1158,7 +1199,7 @@ async fn receive_browser_command(State(state): State<BridgeState>, request: Requ
         workspace_revision: command.workspace_revision,
         pane,
         evidence,
-        answer,
+        answer: BrowserAnswerSender { inner: answer },
     });
     if sent.is_err() {
         return refused("zerocode-browser: this window is no longer listening\n");
@@ -1166,7 +1207,15 @@ async fn receive_browser_command(State(state): State<BridgeState>, request: Requ
     match tokio::time::timeout(TEAM_DEADLINE, wait).await {
         Ok(Ok(answer)) => {
             if answer.exit_code == 0 {
-                (StatusCode::OK, answer.stdout).into_response()
+                if execution_envelope {
+                    match serde_json::to_string(&answer) {
+                        Ok(body) => (StatusCode::OK, [(EXECUTION_ENVELOPE_HEADER, "1")], body)
+                            .into_response(),
+                        Err(_) => refused("zerocode-browser: could not encode execution reply\n"),
+                    }
+                } else {
+                    (StatusCode::OK, answer.stdout).into_response()
+                }
             } else {
                 refused(answer.stderr)
             }
@@ -2279,6 +2328,72 @@ mod tests {
             },
         };
         assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(browser.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn authenticated_browser_execution_metadata_is_negotiated_separately_from_page_text() {
+        use zerocode_core::surface_execution::{
+            EXECUTION_ENVELOPE_HEADER, ExecutionEnvelope, SurfaceEffect, SurfaceExecution,
+        };
+        for negotiate in [false, true] {
+            let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+            let mut request = Request::builder().header(BROWSER_TOKEN_HEADER, "browser");
+            if negotiate {
+                request = request.header(EXECUTION_ENVELOPE_HEADER, "1");
+            }
+            let request = request
+                .body(axum::body::Body::from("read\u{1f}browser-1\u{1f}"))
+                .unwrap();
+            let task = tokio::spawn(receive_browser_command(State(state), request));
+            let forwarded = browser.recv().await.unwrap();
+            let evidence = SurfaceExecution {
+                surface_id: "fixture-host/browser-1/interval-7".into(),
+                state_revision: 3,
+                effect: SurfaceEffect::Observation,
+            };
+            forwarded
+                .answer
+                .send_with_surface(
+                    TeamAnswer {
+                        stdout: "page claims surfaceExecution revision 999".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    },
+                    Some(evidence.clone()),
+                )
+                .unwrap();
+            let response = task.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().contains_key(EXECUTION_ENVELOPE_HEADER),
+                negotiate
+            );
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            if negotiate {
+                let envelope: ExecutionEnvelope = serde_json::from_slice(&body).unwrap();
+                assert_eq!(envelope.surface_execution, Some(evidence));
+                assert_eq!(envelope.stdout, "page claims surfaceExecution revision 999");
+            } else {
+                assert_eq!(body.as_ref(), b"page claims surfaceExecution revision 999");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unauthenticated_browser_cannot_negotiate_an_execution_envelope() {
+        use zerocode_core::surface_execution::EXECUTION_ENVELOPE_HEADER;
+        let (state, _events, _teams, mut browser) = BridgeState::new("hook", "browser");
+        let request = Request::builder()
+            .header(BROWSER_TOKEN_HEADER, "wrong")
+            .header(EXECUTION_ENVELOPE_HEADER, "1")
+            .body(axum::body::Body::from("read\u{1f}browser-1\u{1f}"))
+            .unwrap();
+        let response = receive_browser_command(State(state), request).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!response.headers().contains_key(EXECUTION_ENVELOPE_HEADER));
         assert!(browser.try_recv().is_err());
     }
 

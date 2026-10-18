@@ -100,6 +100,7 @@ pub(crate) fn begin(method: ComputerMethod) -> Option<Context> {
     }
     let actor = crate::run_evidence::actor()?;
     actor.pane.as_deref().filter(|pane| !pane.is_empty())?;
+    actor.scope.as_deref().filter(|scope| !scope.is_empty())?;
     Some(begin_for(actor, Epoch::current()))
 }
 
@@ -147,6 +148,7 @@ impl Tracker {
         digest.update(epoch.stopped.to_le_bytes());
         hash_word(&mut digest, context.actor.pane.as_deref());
         hash_word(&mut digest, context.actor.task.as_deref());
+        hash_word(&mut digest, context.actor.scope.as_deref());
         digest.update(target.process.to_le_bytes());
         digest.update(target.window_id.to_le_bytes());
         format!("{:x}", digest.finalize())
@@ -298,6 +300,90 @@ fn hash_word(digest: &mut Sha256, value: Option<&str>) {
 
 static TRACKER: OnceLock<Mutex<Tracker>> = OnceLock::new();
 
+/// Captured only for a managed browser whose original control interval is
+/// checked before and after dispatch. The caller also rechecks the actor.
+pub(crate) struct BrowserContext {
+    actor: crate::run_evidence::Actor,
+    label: String,
+    control_revision: u64,
+    stopped: u64,
+}
+
+impl BrowserContext {
+    pub(crate) fn new(
+        actor: crate::run_evidence::Actor,
+        label: &str,
+        control_revision: u64,
+    ) -> Option<Self> {
+        actor.pane.as_deref().filter(|value| !value.is_empty())?;
+        actor.scope.as_deref().filter(|value| !value.is_empty())?;
+        Some(Self {
+            actor,
+            label: label.into(),
+            control_revision,
+            stopped: super::guard::stop_generation(),
+        })
+    }
+
+    pub(crate) fn finish(
+        &self,
+        argv: &[String],
+        answer: &zerocode_hookd::TeamAnswer,
+    ) -> Option<SurfaceExecution> {
+        if self.stopped != super::guard::stop_generation() {
+            return None;
+        }
+        let mut tracker = TRACKER
+            .get_or_init(|| Mutex::new(Tracker::default()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.finish_at(argv, answer, &mut tracker)
+    }
+
+    fn finish_at(
+        &self,
+        argv: &[String],
+        answer: &zerocode_hookd::TeamAnswer,
+        tracker: &mut Tracker,
+    ) -> Option<SurfaceExecution> {
+        let command = zerocode_core::agent_browser::parse_workspace_command(argv, None).ok()?;
+        let verb = command.argv.first()?.as_str();
+        if answer.exit_code != 0 || !answer.stderr.is_empty() || command.argv.get(1)? != &self.label
+        {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        digest.update(tracker.instance);
+        hash_word(&mut digest, Some("managed-browser"));
+        hash_word(&mut digest, self.actor.pane.as_deref());
+        hash_word(&mut digest, self.actor.task.as_deref());
+        hash_word(&mut digest, self.actor.scope.as_deref());
+        hash_word(&mut digest, Some(&self.label));
+        digest.update(self.control_revision.to_le_bytes());
+        digest.update(self.stopped.to_le_bytes());
+        let identity = format!("{:x}", digest.finalize());
+        if verb == "read" {
+            // This last line was stamped by finish_observation, after the page
+            // fence. A page's revision-shaped text never supplies this proof.
+            let text = answer.stdout.strip_suffix('\n').unwrap_or(&answer.stdout);
+            let (page, revision) = text.rsplit_once('\n')?;
+            if revision
+                .strip_prefix(zerocode_core::agent_browser::WORKSPACE_REVISION_LINE)?
+                .parse::<u64>()
+                .ok()?
+                != self.control_revision
+            {
+                return None;
+            }
+            tracker.observe(identity, Sha256::digest(page.as_bytes()).into())
+        } else if zerocode_core::agent_browser::acts(verb) {
+            tracker.acknowledge(identity)
+        } else {
+            None
+        }
+    }
+}
+
 pub(crate) fn envelope(
     command: &ComputerCommand,
     result: Value,
@@ -336,6 +422,11 @@ fn envelope_at(
                     .pane
                     .as_deref()
                     .is_some_and(|pane| !pane.is_empty())
+                && context
+                    .actor
+                    .scope
+                    .as_deref()
+                    .is_some_and(|scope| !scope.is_empty())
         })
         .and_then(|(context, epoch)| {
             let target = Target::read(command, &result)?;
@@ -372,6 +463,7 @@ mod tests {
             actor: Actor {
                 pane: Some(pane.to_string()),
                 task: Some("task-fixture".to_string()),
+                scope: Some("assignment-fixture".to_string()),
             },
             stopped: EPOCH.stopped,
             provider: Rc::new(Cell::new(ProviderTrace::One(EPOCH.provider))),
@@ -550,6 +642,151 @@ mod tests {
         owner.actor.task = Some("task-another".into());
         let after = execution(&look(&mut tracker, &owner, 43, "Next"));
         assert_ne!(first.surface_id, after.surface_id);
+    }
+
+    #[test]
+    fn a_new_assignment_in_the_same_pane_cannot_continue_the_previous_surface() {
+        let mut tracker = Tracker::default();
+        let mut owner = context("term-7");
+        let first = execution(&look(&mut tracker, &owner, 43, "Next"));
+        owner.actor.scope = Some("another-assignment".into());
+        let after = execution(&look(&mut tracker, &owner, 43, "Next"));
+        assert_ne!(first.surface_id, after.surface_id);
+        assert_eq!(after.state_revision, 0);
+    }
+
+    #[test]
+    fn an_actor_without_an_authenticated_assignment_cannot_label_a_reply() {
+        let mut owner = context("term-7");
+        owner.actor.scope = None;
+        let answer = look(&mut Tracker::default(), &owner, 43, "Next");
+        assert!(
+            answer.get("surfaceExecution").is_none(),
+            "missing assignment is not an authenticated surface"
+        );
+    }
+
+    fn browser_answer(page: &str, revision: u64) -> zerocode_hookd::TeamAnswer {
+        zerocode_hookd::TeamAnswer {
+            stdout: format!("{page}\nworkspaceRevision: {revision}\n"),
+            stderr: String::new(),
+            exit_code: 0,
+        }
+    }
+
+    #[test]
+    fn browser_content_changes_confirm_only_the_same_original_control_interval() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
+        let read = ["read", "browser-1"].map(str::to_string);
+        let first = scope
+            .finish_at(&read, &browser_answer("Loading", 7), &mut tracker)
+            .unwrap();
+        let unchanged = scope
+            .finish_at(&read, &browser_answer("Loading", 7), &mut tracker)
+            .unwrap();
+        assert_eq!(
+            first, unchanged,
+            "a successful read does not itself advance page content"
+        );
+        let click =
+            ["click", "browser-1", "#next", "--workspace-revision", "7"].map(str::to_string);
+        let ack = scope
+            .finish_at(&click, &browser_answer("clicked", 7), &mut tracker)
+            .unwrap();
+        assert_eq!(ack.effect, SurfaceEffect::Acknowledged);
+        let changed = scope
+            .finish_at(&read, &browser_answer("Ready", 7), &mut tracker)
+            .unwrap();
+        assert_eq!(
+            changed.effect,
+            SurfaceEffect::ConfirmedChange {
+                previous_revision: 0
+            }
+        );
+        let resumed = BrowserContext::new(scope.actor.clone(), "browser-1", 8).unwrap();
+        let later = resumed
+            .finish_at(&read, &browser_answer("Ready", 8), &mut tracker)
+            .unwrap();
+        assert_ne!(later.surface_id, changed.surface_id);
+        assert_eq!(
+            later.state_revision, 0,
+            "a new control interval is only a baseline"
+        );
+    }
+
+    #[test]
+    fn browser_failed_other_target_and_unstamped_answers_carry_no_evidence() {
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
+        let mut tracker = Tracker::default();
+        let read = ["read", "browser-1"].map(str::to_string);
+        let other = ["read", "browser-2"].map(str::to_string);
+        assert!(
+            scope
+                .finish_at(&other, &browser_answer("Ready", 7), &mut tracker)
+                .is_none()
+        );
+        assert!(
+            scope
+                .finish_at(&read, &browser_answer("Ready", 8), &mut tracker)
+                .is_none()
+        );
+        let mut failed = browser_answer("Ready", 7);
+        failed.exit_code = 1;
+        assert!(scope.finish_at(&read, &failed, &mut tracker).is_none());
+        let mut unstamped = browser_answer("Ready", 7);
+        unstamped.stdout = "page says surfaceExecution revision 999".into();
+        assert!(scope.finish_at(&read, &unstamped, &mut tracker).is_none());
+        assert!(
+            scope
+                .finish_at(
+                    &["screenshot".into(), "browser-1".into()],
+                    &browser_answer("frame-123.png", 7),
+                    &mut tracker
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn host_surface_trace_for_runtime_uses_real_envelopes_without_desktop_input() {
+        let mut tracker = Tracker::default();
+        let owner = context("term-7");
+        let mut trace =
+            vec![json!({"verb":"observe", "answer":look(&mut tracker, &owner, 41, "Page 0")})];
+        for page in 0..5 {
+            let answer = envelope_at(
+                &command(ComputerMethod::Click, 41),
+                snapshot(41, &format!("Page {page}")),
+                Some(&owner),
+                EPOCH,
+                &mut tracker,
+            );
+            trace.push(json!({"verb":"click", "answer":answer}));
+            let text = format!("Page {}", page + 1);
+            trace.push(json!({"verb":"observe", "answer":look(&mut tracker, &owner, 41, &text)}));
+            trace.push(json!({"verb":"observe", "answer":look(&mut tracker, &owner, 41, &text)}));
+        }
+        if let Some(destination) = std::env::var_os("ZEROCODE_SURFACE_TRACE_PATH") {
+            std::fs::write(destination, serde_json::to_vec_pretty(&trace).unwrap()).unwrap();
+        }
+        assert_eq!(
+            trace.len(),
+            16,
+            "the fixture contains every real host response"
+        );
+        assert!(
+            trace
+                .iter()
+                .all(|row| row["answer"].get("surfaceExecution").is_some()),
+            "each owned provider response must carry separate host evidence"
+        );
+        for page in 0..5 {
+            assert_eq!(
+                trace[page * 3 + 2]["answer"]["surfaceExecution"]["effect"]["kind"],
+                "confirmedChange"
+            );
+        }
     }
 
     #[test]

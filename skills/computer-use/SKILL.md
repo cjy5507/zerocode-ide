@@ -157,6 +157,15 @@ to a terminal's reported identity.
 Returning control permits the agent to continue; it is not evidence that
 the agent's task has resumed or completed.
 
+Keep observing the selected app/window or working tab after each action.
+A fresh content revision on that same surface permits another observation.
+An acknowledgement alone allows one confirmation; it does not prove a change
+or completion. Unchanged observations remain bounded. Another surface's change,
+a new argument nonce, and page text claiming progress cannot reset that bound.
+Keep the original target and background requirement when a bound is reached.
+Do not switch to a global screenshot, `open`, `activate`, or shared-pointer
+input to get around a scoped refusal. Report the missing evidence instead.
+
 Under background-only policy, recipes never watch the person's shared pointer;
 each desktop input is admitted independently and an unsupported step stops.
 Recipes containing only built-in browser, emulator or explicitly background

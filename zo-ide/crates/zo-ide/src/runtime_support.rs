@@ -3970,17 +3970,30 @@ mod tests {
         }
 
         let _environment = crate::test_env_lock();
+        let mut completed_modes = Vec::new();
         for streaming in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let shim = directory.path().join("zerocode-computer");
             std::fs::write(&shim, r#"#!/usr/bin/env python3
 import json
+import os
 import pathlib
 import sys
 root = pathlib.Path(__file__).parent
 verb = sys.argv[1]
 with (root / "calls.txt").open("a") as calls:
     calls.write(verb + "\n")
+trace_path = os.environ.get("ZEROCODE_SURFACE_TRACE_PATH")
+if trace_path:
+    trace = json.loads(pathlib.Path(trace_path).read_text())
+    cursor_path = root / "cursor.txt"
+    cursor = int(cursor_path.read_text()) if cursor_path.exists() else 0
+    if cursor >= len(trace) or trace[cursor]["verb"] != verb:
+        print(json.dumps({"ok": False, "error": {"code": "fixture_sequence_mismatch"}}))
+        sys.exit(0)
+    cursor_path.write_text(str(cursor + 1))
+    print(json.dumps(trace[cursor]["answer"]))
+    sys.exit(0)
 state_path = root / "state.txt"
 state = int(state_path.read_text()) if state_path.exists() else 0
 pending = root / "pending.txt"
@@ -4010,7 +4023,7 @@ print(json.dumps({"ok": True, "result": result,
             let mut batches = VecDeque::new();
             for index in 0..11 {
                 let action = if index % 2 == 0 { "observe" } else { "left_click" };
-                let mut inner = serde_json::json!({"action":action,"app":"Fixture","window_id":41});
+                let mut inner = serde_json::json!({"action":action,"app":"Fixture","window_id":41,"background":true});
                 if action == "left_click" { inner["label"] = serde_json::json!("Next"); }
                 batches.push_back(vec![AssistantEvent::ToolUse {
                     id:format!("native-loop-{index}"), name:"CapabilityInvoke".to_string(),
@@ -4040,10 +4053,23 @@ print(json.dumps({"ok": True, "result": result,
                 conversation.run_turn("Confirm each change on the selected window",None).unwrap();
             }
             let calls = std::fs::read_to_string(directory.path().join("calls.txt")).unwrap();
-            assert_eq!(calls.lines().filter(|verb| *verb == "observe").count(), 11,
-                "six model observations and five same-window confirmations must execute through production");
-            assert_eq!(calls.lines().filter(|verb| *verb == "click").count(), 5);
+            let observations = calls.lines().filter(|verb| *verb == "observe").count();
+            let clicks = calls.lines().filter(|verb| *verb == "click").count();
+            let fallbacks = calls.lines().filter(|verb| !matches!(*verb, "observe" | "click")).count();
+            eprintln!("SURFACE_LOOP_METRIC {}", serde_json::json!({
+                "streaming":streaming,
+                "hostProducerTrace":std::env::var_os("ZEROCODE_SURFACE_TRACE_PATH").is_some(),
+                "identicalModelObservations":observations.saturating_sub(clicks),
+                "hostObservations":observations, "backgroundClicks":clicks,
+                "fallbacks":fallbacks, "hostSteps":calls.lines().count(),
+                "completed":observations == 11 && clicks == 5,
+                "completionModelSteps":if observations == 11 && clicks == 5 { Some(11) } else { None },
+            }));
+            assert_eq!(fallbacks, 0, "the fixture must not escape to screenshot, open or activate");
+            completed_modes.push((streaming, observations, clicks));
         }
+        assert!(completed_modes.iter().all(|(_, observations, clicks)| *observations == 11 && *clicks == 5),
+            "six model observations and five same-window confirmations must execute through production in both modes: {completed_modes:?}");
     }
 
     #[test]

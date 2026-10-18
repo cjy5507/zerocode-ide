@@ -2689,7 +2689,7 @@ pub(super) async fn browser_loop(
             .or_else(|| computer_use::evidence::session_dir(now_epoch_ms()));
             let mut reply = request.answer;
             tokio::select! {
-                answer = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, request.workspace_revision) => { let _ = reply.send(answer); }
+                (answer, surface) = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, request.workspace_revision) => { let _ = reply.send_with_surface(answer, surface); }
                 _ = reply.closed() => {}
             }
         });
@@ -3238,7 +3238,7 @@ pub(super) async fn browser_step(
 ) -> zerocode_hookd::TeamAnswer {
     // Nested callers carry the selected observation in the same common
     // option as the CLI. Missing input stays missing until admission.
-    browser_step_at(app, pane, dir, argv, logged, None).await
+    browser_step_at(app, pane, dir, argv, logged, None).await.0
 }
 
 async fn browser_step_at(
@@ -3248,11 +3248,34 @@ async fn browser_step_at(
     argv: &[String],
     logged: &[String],
     expected_revision: Option<u64>,
-) -> zerocode_hookd::TeamAnswer {
-    let observation = step_actor(app, pane).on(run_evidence::observation());
+) -> (zerocode_hookd::TeamAnswer, Option<zerocode_core::surface_execution::SurfaceExecution>) {
+    let actor = step_actor(app, pane);
+    let observation = actor.on(run_evidence::observation());
+    let surface_context = zerocode_core::agent_browser::parse_workspace_command(argv, expected_revision)
+        .ok()
+        .and_then(|command| {
+            let label = command.argv.get(1)?;
+            let state = app.state::<AppState>();
+            let workspaces = &state.shell_runtime().browser_workspaces;
+            let check = workspaces.navigation_check(label, actor.pane.as_deref()).ok()?;
+            let snapshot = workspaces.snapshot(label).ok()??;
+            if !check.holds() {
+                return None;
+            }
+            let context = computer_use::surface_execution::BrowserContext::new(
+                actor.clone(), label, snapshot.revision,
+            )?;
+            Some((context, check))
+        });
     let began = std::time::Instant::now();
     let mut control = None;
     let answer = answer_browser_command(app, argv, pane, expected_revision, &mut control).await;
+    let surface = surface_context.and_then(|(context, check)| {
+        if !check.holds() || step_actor(app, pane) != actor {
+            return None;
+        }
+        context.finish(argv, &answer)
+    });
     if let Some(dir) = dir {
         evidence_runtime::leave_browser_evidence(
             app,
@@ -3263,7 +3286,7 @@ async fn browser_step_at(
             control,
         );
     }
-    answer
+    (answer, surface)
 }
 
 /// One command line answered down the emulator road, and its evidence after
