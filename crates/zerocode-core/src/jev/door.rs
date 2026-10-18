@@ -701,8 +701,8 @@ pub struct Hour<'a> {
 /// hours besides the day ([`Hour`]). The door's questions come first, the
 /// day's budget among them. One exclusive file lock beside the hour files
 /// covers every hour writer while both hours are checked, counted, and the
-/// day is taken last. Any refusal or write failure returns the hour counts
-/// to their prior values before releasing the lock. If a return fails, the
+/// day is taken last. A refused reservation returns the hour counts to
+/// their prior values before releasing the lock. If a return fails, the
 /// count stays high: later requests may be refused, and this request is never
 /// sent. The day keeps [`take_a_place`]'s rule: losing its last place to a
 /// concurrent request spends that daily place even though the request is refused.
