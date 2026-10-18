@@ -101,7 +101,7 @@ pub enum Error {
     /// No decision, or no deleted one, has this id.
     Missing,
     /// A file could not be read or written, a definition no longer hashes to
-    /// its name, or another writer held the store past [`LOCK_WAIT`]
+    /// its name, or another writer held the store past `LOCK_WAIT`
     /// (`WouldBlock`).
     Io(io::Error),
 }

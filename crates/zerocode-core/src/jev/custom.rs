@@ -82,7 +82,7 @@ pub const NOT_APPLICABLE_MEANS: &str =
 
 /// The key the hour count of all decisions together is kept under
 /// (`super::count::hour_path`) — never a decision's id, which starts with
-/// [`ID_PREFIX`].
+/// `ID_PREFIX`.
 pub const EVERY_DECISION: &str = "all";
 
 /// The wire's union tag for a score: the one place this crate spells it.
@@ -241,7 +241,7 @@ pub enum Folders {
 /// One version of a person's decision.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Definition {
-    /// [`ID_PREFIX`] and eight lowercase hex digits ([`new_id`]).
+    /// `ID_PREFIX` and eight lowercase hex digits ([`new_id`]).
     pub id: String,
     pub name: String,
     /// What the judgment is asked, in the person's words.
@@ -278,7 +278,7 @@ pub enum Field {
 /// A rule a definition breaks. Nothing that breaks one is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// The id is not [`ID_PREFIX`] and eight lowercase hex digits.
+    /// The id is not `ID_PREFIX` and eight lowercase hex digits.
     Id,
     /// A decision, or one in the trash, already has this id.
     IdTaken,
@@ -564,7 +564,7 @@ pub fn asks_in(definition: &Definition, workspace: &Path) -> bool {
     }
 }
 
-/// A new decision's id: [`ID_PREFIX`] and the head of a random UUID. The
+/// A new decision's id: `ID_PREFIX` and the head of a random UUID. The
 /// window makes it; the store refuses one already taken.
 #[must_use]
 pub fn new_id() -> String {

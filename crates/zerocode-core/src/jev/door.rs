@@ -704,7 +704,7 @@ pub struct Hour<'a> {
 /// day is taken last. A refused reservation returns the hour counts to
 /// their prior values before releasing the lock. If a return fails, the
 /// count stays high: later requests may be refused, and this request is never
-/// sent. The day keeps [`take_a_place`]'s rule: losing its last place to a
+/// sent. The day keeps `take_a_place`'s rule: losing its last place to a
 /// concurrent request spends that daily place even though the request is refused.
 ///
 /// # Errors
