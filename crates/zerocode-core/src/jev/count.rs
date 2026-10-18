@@ -26,6 +26,9 @@ const ONE_REQUEST: &[u8] = b".";
 /// What an hour file's name starts with, before its local hour and its key.
 const HOUR_FILE_PREFIX: &str = "hour-";
 
+/// The lock beside every hour file, shared across decisions and hours.
+pub(super) const HOURS_LOCK_FILE: &str = ".hours.lock";
+
 /// The local hour an hour file's name holds, in the shape [`hour_of`] writes.
 const HOUR_SHAPE: &str = "YYYY-MM-DDTHH";
 

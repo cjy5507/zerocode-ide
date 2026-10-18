@@ -1290,6 +1290,93 @@ fn a_day_write_failure_returns_both_hourly_places() {
 }
 
 #[test]
+fn the_shared_hour_is_locked_and_the_loser_spends_no_hourly_place() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    use crate::jev::custom::{ALL_HOURLY_DEFAULT, EVERY_DECISION, HOURLY_DEFAULT};
+
+    let home = tempfile::tempdir().unwrap();
+    let hour = "2026-10-17T10";
+    let first = count::hour_path(home.path(), "d-0000000a", hour);
+    let second = count::hour_path(home.path(), "d-0000000b", hour);
+    let every = count::hour_path(home.path(), EVERY_DECISION, hour);
+    let today = count::requests_path(home.path(), "2026-10-17");
+    for _ in 1..ALL_HOURLY_DEFAULT {
+        count::count_one_in_the_hour(&every).unwrap();
+    }
+    let open = settings(None);
+    let together = || {
+        let ready = Barrier::new(3);
+        let request = |decision: &std::path::Path| {
+            pass_within_the_hour(
+                |asking| {
+                    ready.wait();
+                    may_send(&ROUTING, asking, routing_body("rename a variable"))
+                },
+                true,
+                &open,
+                Some(APP),
+                &today,
+                Hour {
+                    decision,
+                    decision_most: HOURLY_DEFAULT,
+                    every: &every,
+                    every_most: ALL_HOURLY_DEFAULT,
+                },
+            )
+            .err()
+        };
+        thread::scope(|scope| {
+            let first_request = scope.spawn(|| request(&first));
+            let second_request = scope.spawn(|| request(&second));
+            ready.wait();
+            [
+                first_request.join().unwrap(),
+                second_request.join().unwrap(),
+            ]
+        })
+    };
+
+    let lock = std::fs::File::create(every.with_file_name(count::HOURS_LOCK_FILE)).unwrap();
+    lock.lock().unwrap();
+    assert_eq!(
+        together(),
+        [Some(Refused::HourlyBudget); 2],
+        "a held hourly lock refuses both requests before they spend anything",
+    );
+    assert_eq!(
+        (
+            count::sent(&first),
+            count::sent(&second),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (0, 0, ALL_HOURLY_DEFAULT - 1, 0),
+    );
+    drop(lock);
+
+    let refused = together();
+    assert_eq!(refused.iter().filter(|result| result.is_none()).count(), 1);
+    assert!(refused.contains(&Some(Refused::HourlyBudget)));
+    assert_eq!(
+        (
+            count::sent(&first),
+            count::sent(&second),
+            count::sent(&every),
+            count::sent(&today)
+        ),
+        (
+            u64::from(refused[0].is_none()),
+            u64::from(refused[1].is_none()),
+            ALL_HOURLY_DEFAULT,
+            1
+        ),
+        "only the winner takes an hourly place, and the day counts that request once",
+    );
+}
+
+#[test]
 fn a_row_without_the_doors_count_predates_the_door() {
     assert!(predates_the_door(
         r#"{"at":1,"task":"0000000000000001","outcome":"answered"}"#
