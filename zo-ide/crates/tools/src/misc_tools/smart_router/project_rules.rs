@@ -15,7 +15,7 @@ use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_
 
 /// What every advice for the next turn opens with, its key and `]` after it:
 /// how a host finds the advice again in the transcript, and how it clears it.
-const ADVICE_PREFIX: &str = "[zo:project-rules:";
+const ADVICE_PREFIX: &str = "[zo:custom-decisions:";
 
 #[derive(Debug)]
 struct Turn {
@@ -342,6 +342,21 @@ mod tests {
             let look = turn(workspace, &messages);
             assert!(look.evidence.len() <= 16 * 1024);
             assert!(look.evidence.contains("omitted"));
+        });
+    }
+
+    /// The advice a person's decisions hand the next turn opens as the
+    /// check's own advice does, `[zo:project-rules:<key>]`: the one form a
+    /// host delivers and clears.
+    #[test]
+    fn decided_advice_opens_as_the_checks_advice_does() {
+        let mock = Mock::serving(200, response());
+        machine(&PROJECT_RULES, "on", &mock.base_url, |workspace| {
+            let book = compile(workspace);
+            let answers = serde_json::from_str::<serde_json::Value>(&response()).unwrap()["answers"].clone();
+            let reading = rules::read(&answers, "shared_logic").unwrap();
+            let advice = rules::advice(&book, &[reading], "evidence", &[], 1, "turn").unwrap().unwrap();
+            assert!(advice.text.starts_with(&format!("{ADVICE_PREFIX}{}]\n", advice.key)), "{}", advice.text);
         });
     }
 }
