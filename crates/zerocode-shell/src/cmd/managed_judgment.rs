@@ -308,6 +308,14 @@ pub(crate) fn managed_judgment_remove(
         .map_err(|error| error.to_string())
 }
 
+fn boot_service<Service>(
+    _closing: &std::sync::atomic::AtomicBool,
+    open: impl FnOnce() -> Result<Service, String>,
+    _close: impl FnOnce(&Service),
+) -> Option<Service> {
+    open().ok()
+}
+
 fn restore_allowed(document: &serde_json::Value, intent_identity: &str) -> bool {
     let Ok(provider) = judgment_provider::Provider::from_root(document) else {
         return false;
@@ -327,6 +335,60 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::restore_allowed;
+
+    #[test]
+    fn boot_service_cannot_outlive_shutdown() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let closing = AtomicBool::new(true);
+        let opened = AtomicUsize::new(0);
+        let stopped = AtomicUsize::new(0);
+        let service = super::boot_service(
+            &closing,
+            || {
+                opened.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {
+                stopped.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        assert!(
+            service.is_none(),
+            "a boot service must not open after shutdown"
+        );
+        assert_eq!(opened.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped.load(Ordering::SeqCst), 0);
+        closing.store(false, Ordering::SeqCst);
+        let service = super::boot_service(
+            &closing,
+            || {
+                opened.fetch_add(1, Ordering::SeqCst);
+                closing.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {
+                stopped.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        assert!(service.is_none());
+        assert_eq!(opened.load(Ordering::SeqCst), 1);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        closing.store(false, Ordering::SeqCst);
+        let service = super::boot_service(
+            &closing,
+            || {
+                opened.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {
+                stopped.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        assert!(service.is_some());
+        assert_eq!(opened.load(Ordering::SeqCst), 2);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn restore_gate_uses_the_window_switch_and_matching_local_binding() {
