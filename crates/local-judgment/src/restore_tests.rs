@@ -137,6 +137,8 @@ struct Restoring {
     models: Vec<Model>,
     starts: Arc<AtomicUsize>,
     writes: Arc<AtomicUsize>,
+    swap_calls: Arc<AtomicUsize>,
+    before_swap: Arc<Mutex<Option<Vec<u8>>>>,
     transaction: Arc<Mutex<()>>,
     clock: Manual,
 }
@@ -177,6 +179,8 @@ impl Restoring {
             models,
             starts,
             writes: Arc::new(AtomicUsize::new(0)),
+            swap_calls: Arc::new(AtomicUsize::new(0)),
+            before_swap: Arc::new(Mutex::new(None)),
             transaction: Arc::new(Mutex::new(())),
             clock,
         }
@@ -265,6 +269,8 @@ impl Restoring {
     fn restore(&self, allowed: bool) -> crate::Result<Snapshot> {
         let path = self.settings.clone();
         let writes = self.writes.clone();
+        let swap_calls = self.swap_calls.clone();
+        let before_swap = self.before_swap.clone();
         let writer = self.transaction.clone();
         let guard = self.transaction.clone();
         self.manager.restore_guarded(
@@ -272,6 +278,10 @@ impl Restoring {
             (
                 move |provider, expected, binding| {
                     let _writing = writer.try_lock().map_err(|_| Error::Busy)?;
+                    swap_calls.fetch_add(1, Ordering::SeqCst);
+                    if let Some(newer) = before_swap.lock().unwrap().take() {
+                        fs::write(&path, newer).map_err(|_| Error::Storage)?;
+                    }
                     save(&path, provider, expected, binding)?;
                     writes.fetch_add(1, Ordering::SeqCst);
                     Ok(())
@@ -804,4 +814,71 @@ async fn failed_restore_keeps_its_reason_clears_intent_and_never_retries() {
         fixture.intent_path().is_file(),
         "person apply did not reopen restoration"
     );
+}
+
+#[tokio::test]
+async fn a_changed_port_restore_cannot_overwrite_newer_settings_without_a_notification() {
+    for when in ["loading", "swap"] {
+        let fixture = Restoring::new();
+        fixture.seed();
+        let recorded_port = u16::try_from(fixture.intent()["port"].as_u64().unwrap()).unwrap();
+        let occupant = TcpListener::bind((Ipv4Addr::LOCALHOST, recorded_port)).unwrap();
+        occupant.set_nonblocking(true).unwrap();
+        fixture.tell("hold", 1);
+        let starting = fixture.restore(true).unwrap();
+        assert!(
+            starting
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == "restore"),
+            "changed-port restore must expose its operation"
+        );
+        fixture.started(1).await;
+        let owned_port = test_support::held_port(&fixture.manager, &fixture.models[0].id).unwrap();
+        assert_ne!(owned_port, recorded_port);
+        let newer = br#"{"preserved":"newer"}"#.to_vec();
+        if when == "loading" {
+            fs::write(&fixture.settings, &newer).unwrap();
+        } else {
+            *fixture.before_swap.lock().unwrap() = Some(newer.clone());
+        }
+        fixture.tell("go", 1);
+        let refused = crate::tests::settled_snapshot(&fixture.manager).await;
+        assert_eq!(refused.operation.as_ref().unwrap().state, "failed");
+        assert_eq!(
+            refused.operation.as_ref().unwrap().error,
+            Some(Error::SettingsChanged.token())
+        );
+        assert_eq!(refused.server.state, "failed");
+        assert!(refused.server.provider.is_none());
+        assert!(!refused.server.checked);
+        assert_eq!(fs::read(&fixture.settings).unwrap(), newer);
+        assert!(!fixture.intent_path().exists());
+        assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            fixture.swap_calls.load(Ordering::SeqCst),
+            usize::from(when == "swap")
+        );
+        assert_eq!(test_support::held_listener_count(&fixture.manager), 0);
+        let began = Instant::now();
+        loop {
+            if TcpListener::bind((Ipv4Addr::LOCALHOST, owned_port)).is_ok() {
+                break;
+            }
+            assert!(
+                began.elapsed() < SETTLE,
+                "refused restore kept its listener"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            fixture.recorded().await[0]["result"],
+            Error::SettingsChanged.token()
+        );
+        assert!(
+            matches!(occupant.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        fixture.restore(true).unwrap();
+        assert_eq!(fixture.starts(), 1);
+    }
 }

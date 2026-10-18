@@ -2761,6 +2761,15 @@ pub(crate) mod test_support {
     }
 
     #[cfg(unix)]
+    pub fn held_port(manager: &Manager, model_id: &str) -> Option<u16> {
+        lock(&manager.inner)
+            .held_listeners
+            .get(model_id)
+            .and_then(|listener| listener.local_addr().ok())
+            .map(|address| address.port())
+    }
+
+    #[cfg(unix)]
     pub fn switching_manager(
         root: &Path,
         settings: &Path,
