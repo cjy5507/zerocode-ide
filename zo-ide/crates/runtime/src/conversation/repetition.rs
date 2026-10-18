@@ -673,6 +673,9 @@ where
         if original == canonical {
             return;
         }
+        if self.surface_tool_fingerprints.remove(&original) {
+            self.surface_tool_fingerprints.insert(canonical);
+        }
         if let Some(count) = self.tool_fingerprint_counts.remove(&original) {
             let current = self.tool_fingerprint_counts.entry(canonical).or_default();
             *current = current.saturating_add(count);
@@ -802,6 +805,9 @@ where
         let (tool_name, input) = resolved.as_ref()
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
         let fp = self.repetition_fingerprint(tool_name, input);
+        if matches!(tool_name, "Computer" | BROWSER_CLI) {
+            self.surface_tool_fingerprints.insert(fp);
+        }
         let is_mutation = is_edit_or_write_tool(tool_name);
         // A SUCCESSFUL file mutation is real progress: re-reading a just-edited
         // file is legitimate, so clear the cross-turn tally (which, unlike the
@@ -995,9 +1001,8 @@ where
     /// The pre-scoping behaviour, kept for a mutation whose target path is not
     /// recoverable from its input.
     fn forgive_all_repetition(&mut self) {
-        let protected = &self.surface_repetition_state.fingerprints;
-        let retain_every_fingerprint = protected.len() >= MAX_SURFACE_FINGERPRINTS;
-        let keep = |fingerprint: &u64| retain_every_fingerprint || protected.contains_key(fingerprint);
+        let protected = &self.surface_tool_fingerprints;
+        let keep = |fingerprint: &u64| protected.contains(fingerprint);
         self.tool_fingerprint_counts.retain(|fingerprint, _| keep(fingerprint));
         self.pathless_fingerprints.clear();
         self.tool_repetition_pending_hard_stop_fps.retain(keep);
@@ -1085,7 +1090,7 @@ where
                     } => {
                         let matching = tool_use_fingerprints.get(tool_use_id.as_str()) == Some(&fp);
                         if *is_error {
-                            if matching && self.surface_repetition_state.fingerprints.contains_key(&fp) {
+                            if matching && self.surface_tool_fingerprints.contains(&fp) {
                                 latest_match_was_cleared = Some(false);
                             }
                             continue;

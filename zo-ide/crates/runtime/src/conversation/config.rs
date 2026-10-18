@@ -1304,6 +1304,7 @@ where
     /// Invalidate host bindings after replacing or rewinding the session or
     /// restoring workspace files. Metadata edits and process notices keep them.
     pub fn reset_surface_repetition_state(&mut self) {
+        self.surface_tool_fingerprints.clear();
         self.resolved_tool_use_fingerprints.get_mut().clear();
         self.surface_repetition_state = super::SurfaceRepetitionState::default();
     }
