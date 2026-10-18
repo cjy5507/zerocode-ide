@@ -333,6 +333,18 @@ impl Restoring {
             .filter(|record| record["kind"] == "restore")
             .collect()
     }
+
+    async fn recorded(&self) -> Vec<Value> {
+        let began = Instant::now();
+        loop {
+            let records = self.attempts();
+            if !records.is_empty() {
+                return records;
+            }
+            assert!(began.elapsed() < SETTLE, "restore attempt was not recorded");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -523,5 +535,41 @@ async fn shutdown_restores_once_on_the_same_port_without_rewriting_settings() {
     assert_eq!(fixture.starts(), 2);
     assert_eq!(repeated.server.id, server);
     assert_eq!(repeated.operation.unwrap().id, operation);
-    assert_eq!(fixture.attempts().len(), 1);
+    assert_eq!(fixture.recorded().await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_occupied_port_is_replaced_without_contacting_its_listener() {
+    let mut fixture = Restoring::new();
+    let (_, previous) = fixture.press().await;
+    fixture.keep_intent(&previous);
+    fixture.reopen().await;
+    let occupant = TcpListener::bind((Ipv4Addr::LOCALHOST, port(&previous))).unwrap();
+    occupant.set_nonblocking(true).unwrap();
+    fixture.restore(true).unwrap();
+    let ready = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(
+        fixture.starts(),
+        2,
+        "occupied-port restore must start on a fresh owned listener"
+    );
+    assert_eq!(ready.server.state, "ready");
+    assert!(ready.server.checked);
+    let current = ready.server.provider.unwrap();
+    assert_ne!(port(&current), port(&previous));
+    assert_ne!(current.identity(), previous.identity());
+    let selected = crate::selection::read(&fixture.settings).unwrap();
+    assert_eq!(selected.provider.identity(), current.identity());
+    assert_eq!(
+        selected.binding.unwrap().provider_identity,
+        current.identity()
+    );
+    let intent = fixture.intent();
+    assert_eq!(intent["providerIdentity"], current.identity());
+    assert_eq!(intent["port"], port(&current));
+    assert_eq!(fixture.writes.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(occupant.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+        "restore contacted the occupied listener"
+    );
 }
