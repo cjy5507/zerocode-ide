@@ -812,10 +812,12 @@ function stopAgentBrowserWorkspaces(revision) {
   if (standing && revision <= standing.revision) return;
   browserWorkspaceStopKept = null;
   const stop = standing ?? {
-    revision, owed: new Map(), held: keptBrowserWorkspaceStop(revision), failed: new Set(), seen: new Set(),
+    revision, owed: new Map(), held: keptBrowserWorkspaceStop(revision), failed: new Set(), unread: new Set(),
+    seen: new Set(),
   };
   stop.revision = revision;
   stop.failed.clear();
+  stop.unread.clear();
   stop.seen.clear();
   browserWorkspaceStop = stop;
   for (const tab of tabs) {
@@ -832,7 +834,9 @@ function stopAgentBrowserWorkspaces(revision) {
  * bar's road; one already paused or in the person's hands is not the stop's to
  * name — the backend may have paused it on its own; one mid-transition is
  * walked again once its state comes in, and one whose state the window does
- * not hold is read again first. */
+ * not hold is read again first. One whose state could not be read is walked
+ * again once its state does come in — a browser that opens before the backend
+ * lists it, as after a reload. */
 function holdBrowserWorkspacesStopped() {
   const stop = browserWorkspaceStop;
   if (!stop || browserWorkspaceStopWalking) return;
@@ -841,6 +845,14 @@ function holdBrowserWorkspacesStopped() {
     for (const tab of tabs) {
       if (!browserWorkspaceManaged(tab) || stop.seen.has(tab)) continue;
       stop.seen.add(tab);
+      stop.owed.set(tab, { tries: 0, reads: 0, asking: false });
+    }
+    for (const tab of stop.unread) {
+      if (browserWorkspaceManaged(tab) && (!tab.workspace || tab.workspaceError || tab.workspacePending
+        || tab.workspaceReading)) continue;
+      stop.unread.delete(tab);
+      if (!browserWorkspaceManaged(tab)) continue;
+      stop.failed.delete(tab);
       stop.owed.set(tab, { tries: 0, reads: 0, asking: false });
     }
     for (const [tab, owed] of stop.owed) {
@@ -856,6 +868,7 @@ function holdBrowserWorkspacesStopped() {
       } else if (mode === "agent" ? owed.tries >= BROWSER_WORKSPACE_STOP_TRIES : owed.reads > owed.tries) {
         stop.owed.delete(tab);
         stop.failed.add(tab);
+        if (mode === null) stop.unread.add(tab);
       } else {
         owed.asking = true;
         if (mode === "agent") void pauseBrowserWorkspaceForStop(tab, stop, owed);
