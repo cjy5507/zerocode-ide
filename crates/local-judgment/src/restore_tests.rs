@@ -478,3 +478,50 @@ async fn invalid_intents_skip_and_a_valid_intent_still_restores() {
     );
     assert!(ready.server.checked);
 }
+
+#[tokio::test]
+async fn shutdown_restores_once_on_the_same_port_without_rewriting_settings() {
+    let mut fixture = Restoring::new();
+    let (_, provider) = fixture.press().await;
+    fixture.keep_intent(&provider);
+    let settings = fs::read(&fixture.settings).unwrap();
+    let intent = fs::read(fixture.intent_path()).unwrap();
+    fixture.reopen().await;
+    assert_eq!(fs::read(fixture.intent_path()).unwrap(), intent);
+    fixture.restore(true).unwrap();
+    let ready = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(
+        fixture.starts(),
+        2,
+        "shutdown intent must restore exactly one runtime"
+    );
+    assert_eq!(ready.server.state, "ready");
+    assert!(ready.server.checked);
+    assert_eq!(
+        ready.applied_model_id.as_deref(),
+        Some(fixture.models[0].id.as_str())
+    );
+    assert_eq!(
+        ready.server.provider.as_ref().unwrap().identity(),
+        provider.identity()
+    );
+    assert_eq!(
+        port(ready.server.provider.as_ref().unwrap()),
+        port(&provider)
+    );
+    assert_eq!(fs::read(&fixture.settings).unwrap(), settings);
+    assert_eq!(fs::read(fixture.intent_path()).unwrap(), intent);
+    assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+    assert!(
+        fs::read_to_string(fixture.control.path().join("requests-2"))
+            .is_ok_and(|requests| !requests.is_empty())
+    );
+    let server = ready.server.id.clone();
+    let operation = ready.operation.as_ref().unwrap().id.clone();
+    fixture.restore(true).unwrap();
+    let repeated = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(fixture.starts(), 2);
+    assert_eq!(repeated.server.id, server);
+    assert_eq!(repeated.operation.unwrap().id, operation);
+    assert_eq!(fixture.attempts().len(), 1);
+}
