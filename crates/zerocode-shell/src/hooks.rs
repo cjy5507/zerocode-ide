@@ -3078,6 +3078,8 @@ mod tests {
         assert_eq!(output.stdout, b"hook-secret/browser-secret");
     }
 
+    // Guarding test: shared producer equality prevents installer drift.
+    // It is not red/green evidence for the original POSIX consumer defect.
     #[test]
     fn installed_surface_shims_match_the_shared_consumer_bytes_on_both_platforms() {
         use zerocode_core::agent_shims::{SurfaceShim, installed_script};

@@ -554,7 +554,11 @@ pub(crate) struct ComputerRoad {
 impl ComputerRoad {
     pub(crate) fn from_path() -> Result<Self, ToolError> {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::split_paths(&path)
+        Self::from_search_path(&path, cfg!(windows))
+    }
+
+    fn from_search_path(path: &std::ffi::OsStr, _windows: bool) -> Result<Self, ToolError> {
+        std::env::split_paths(path)
             .map(|dir| dir.join(COMPUTER_SHIM))
             .find(|candidate| candidate.is_file())
             .map(|program| Self { program })
@@ -2154,6 +2158,17 @@ pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &Co
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_windows_computer_resolution_selects_the_installed_cmd_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let extensionless = dir.path().join("zerocode-computer");
+        let launcher = dir.path().join("zerocode-computer.cmd");
+        std::fs::write(&extensionless, "POSIX fixture").unwrap();
+        std::fs::write(&launcher, "Windows fixture").unwrap();
+        let road = ComputerRoad::from_search_path(dir.path().as_os_str(), true).unwrap();
+        assert_eq!(road.program, launcher, "Windows Computer resolution must select the installed .cmd launcher, not the POSIX file");
+    }
+
     #[cfg(unix)]
     mod surface_host {
         include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/zerocode-core/tests/support/surface_host.rs"));

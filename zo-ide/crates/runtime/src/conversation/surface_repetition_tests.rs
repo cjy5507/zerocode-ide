@@ -1284,6 +1284,8 @@ fn a_second_repetition_check_reuses_parsed_tool_use_fingerprints() {
         "the second check resolves its current call once and reuses all 2,000 transcript fingerprints");
 }
 
+// Measurement only: this emits timing samples, not a speed regression verdict.
+// The resolution-count test above supplies the fallible cache assertion.
 #[test]
 fn measure_repetition_check_for_two_thousand_ordinary_tool_calls() {
     let (mut runtime, _) = long_repetition_transcript();
@@ -1331,17 +1333,29 @@ fn armed_verification_preserves_the_progress_watermark_and_reprieve() {
 
 #[test]
 fn first_seen_computer_target_aliases_do_not_execute_past_an_attended_limit() {
-    for alias in [json!({"action":"observe","app":"Fixture"}),
-                  json!({"action":"observe","app":"pid:4242","window_id":41,"ocr":false})] {
+    for (alias, multiple_windows, expected) in [
+        (json!({"action":"observe","app":"Fixture"}), false, 3),
+        (json!({"action":"observe","app":"pid:4242","window_id":41,"ocr":false}), false, 3),
+        (json!({"action":"observe","app":"Fixture"}), true, 9),
+    ] {
         let mut calls = vec![observe(7), observe(7), observe(7)];
-        for _ in 0..3 { let mut call = observe(7); call.input = alias.to_string(); calls.push(call); }
+        if multiple_windows {
+            calls.extend((0..3).map(|_| computer("observe", 52, 7, SurfaceEffect::Observation)));
+        }
+        for _ in 0..6 {
+            let mut call = if multiple_windows { computer("observe", 63, 0, SurfaceEffect::Observation) } else { observe(7) };
+            call.input = alias.to_string();
+            calls.push(call);
+        }
         let (mut runtime, executor) = runtime_for(calls);
         runtime.set_attendance(Attendance::Attended);
-        runtime.run_turn("Keep the observed target bounded for each spelling", None).unwrap();
-        assert_eq!(executor.observations(), 3, "the first spelling of a known target must be stopped before dispatch: {alias}");
+        runtime.run_turn("Observe the target selected by this app-only call", None).unwrap();
+        assert_eq!(executor.observations(), expected,
+            "an app with multiple observed windows must let its host choose the target before applying that surface's limit: {alias}");
     }
 }
 
+// Guarding test: this protects runtime key separation; it also passes before this repair.
 #[test]
 fn a_new_window_of_the_same_app_is_not_the_previously_stopped_target() {
     let mut calls = vec![observe(7), observe(7), observe(7)];
@@ -1352,6 +1366,7 @@ fn a_new_window_of_the_same_app_is_not_the_previously_stopped_target() {
     assert_eq!(executor.observations(), 4, "an unknown explicit window must not borrow the app alias of another window");
 }
 
+// Guarding test: host view-revision tests supply the failing producer regression.
 #[test]
 fn alternating_unchanged_browser_views_each_stop_at_exactly_three_reads() {
     let mut calls = Vec::new();
@@ -1451,4 +1466,71 @@ fn an_untrackable_new_control_uses_plain_counts_instead_of_a_stale_surface_limit
     runtime.arm_tool_repetition_hard_stops();
     assert!(runtime.tool_repetition_preflight("Computer", &input, &mut batch).is_some(),
         "fallback must still stop the fourth ordinary identical call");
+}
+
+
+fn review_browser_call(command: &str, description: &str, effect: Option<SurfaceEffect>) -> PlannedCall {
+    PlannedCall {
+        name: "Bash".into(),
+        input: json!({"command":command, "description":description}).to_string(),
+        result: Ok(ToolExecutionResult {
+            text: "fixture browser result".into(),
+            surface: effect.map(|effect| SurfaceExecution {
+                surface_id: "review-browser-surface".into(), state_revision: 0, effect,
+            }),
+        }),
+    }
+}
+
+#[test]
+fn review_attested_browser_marks_and_edit_screenshots_keep_main_counting() {
+    let mut calls = vec![review_browser_call("zerocode-browser read browser-1", "initial read", Some(SurfaceEffect::Observation))];
+    for index in 0..4 {
+        calls.push(review_browser_call("zerocode-browser marks browser-1", &format!("marks after step {index}"), None));
+    }
+    for index in 0..4 {
+        calls.push(PlannedCall { name: "edit_file".into(),
+            input: json!({"path":"src/fixture.rs", "old":format!("old-{index}"), "new":format!("new-{index}")}).to_string(),
+            result: Ok("edited fixture".to_string().into()),
+        });
+        calls.push(review_browser_call("zerocode-browser screenshot browser-1", "confirm the edit", None));
+    }
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.run_turn("Use marks and edit/screenshot loops on an attested tab", None).unwrap();
+    let state = executor.state.lock().unwrap();
+    let count = state.executed.iter().filter(|call| call.name == "zerocode-browser"
+        && serde_json::from_str::<Vec<String>>(&call.input).is_ok_and(|argv| matches!(argv.first().map(String::as_str), Some("marks" | "screenshot")))).count();
+    assert_eq!(count, 8, "all four marks and four screenshots after successful edits must execute on an attested tab");
+}
+
+#[test]
+fn review_browser_acknowledgements_keep_identical_legacy_actions_bounded() {
+    let mut calls = vec![review_browser_call("zerocode-browser read browser-1", "initial read", Some(SurfaceEffect::Observation))];
+    calls.extend((0..6).map(|_| review_browser_call("zerocode-browser click browser-1 --mark 1 --settle-later", "retry unchanged click", Some(SurfaceEffect::Acknowledged))));
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
+    runtime.run_turn("Keep identical legacy action counts through host acknowledgements", None).unwrap();
+    let count = executor.state.lock().unwrap().executed.iter().filter(|call| call.name == "zerocode-browser"
+        && serde_json::from_str::<Vec<String>>(&call.input).is_ok_and(|argv| argv.first().map(String::as_str) == Some("click"))).count();
+    assert_eq!(count, 3, "a browser acknowledgement must not migrate and erase its legacy action count");
+}
+
+#[test]
+fn review_known_windows_of_one_app_keep_cached_transcript_fingerprints() {
+    use super::repetition::ToolBatchRepetitionHardStops;
+    let (mut runtime, executor) = long_repetition_transcript();
+    let mut batch = ToolBatchRepetitionHardStops::default();
+    let calls = [computer("observe", 41, 0, SurfaceEffect::Observation), computer("observe", 52, 0, SurfaceEffect::Observation)];
+    for call in &calls {
+        runtime.note_surface_execution(&call.name, &call.input, call.result.as_ref().unwrap().surface.clone(), false, &mut batch);
+    }
+    let input = json!({"command":"printf fixture-1999", "description":"ordinary Bash call"}).to_string();
+    runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
+    for call in &calls {
+        runtime.note_surface_execution(&call.name, &call.input, call.result.as_ref().unwrap().surface.clone(), false, &mut batch);
+    }
+    let before = executor.resolutions.as_ref().unwrap().load(Ordering::Relaxed);
+    runtime.next_tool_repetition_hard_stop_notice("Bash", &input);
+    assert_eq!(executor.resolutions.as_ref().unwrap().load(Ordering::Relaxed) - before, 1,
+        "records from known windows of one app must reuse all 2,000 cached transcript fingerprints");
 }
