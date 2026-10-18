@@ -583,3 +583,45 @@ fn a_command_lends_the_first_line_of_the_task_cut_to_its_cap() {
         }
     });
 }
+
+/// With no decision kept — Jev on and no word for the switch, or the switch
+/// on — or with every decision off, through the switch or its own mode,
+/// nothing is asked at any point, nothing under zo's config home changes, a
+/// turn's end is not even read, and what each point hands is what it hands
+/// with no decision at all.
+#[test]
+fn with_no_decision_or_every_one_off_nothing_changes() {
+    let (on, off, shadow) = (JevMode::On.key(), JevMode::Off.key(), JevMode::Shadow.key());
+    let cases =
+        [(None, None), (Some(on), None), (Some(on), Some(JevMode::Off)), (Some(off), Some(JevMode::On)), (Some(shadow), Some(JevMode::Off))];
+    for (switch, kept) in cases {
+        let mock = replying(|_| a_noul(0.9));
+        machine_words(&words(switch), &mock.base_url, |cwd| {
+            if let Some(mode) = kept {
+                for point in Point::ALL {
+                    keep(&yes_no(point.key(), point), mode);
+                }
+            }
+            let home = runtime::default_config_home();
+            let before = files_under(&home);
+            assert_eq!(run_blocking(SkillSuggestionJudge::at(cwd).suggest(TASK.to_string())), None);
+            let guard = ToolGuardJudge::at(cwd);
+            guard.command(command_ask(cwd, "clean", "rm -rf build"));
+            assert_eq!(run_blocking(guard.command_ran(finished("clean"))), None);
+            note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(TASK)]);
+            let mut read = false;
+            at_turn_end(cwd, "session", || {
+                read = true;
+                TurnEnd { task: TASK.to_string(), final_text: String::new(), evidence: String::new(), edited_paths: Vec::new() }
+            });
+            assert!(!read, "{switch:?} {kept:?}: the turn is not read");
+            assert_eq!(pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP), None);
+            match decide(cwd, Point::AgentAsks.key(), Some("the diff adds one test"), &[]) {
+                Ok(verdict) => assert_eq!((verdict.line, verdict.outcome.as_str()), (None, off), "{switch:?} {kept:?}"),
+                Err(error) => assert!(kept.is_none(), "{switch:?} {kept:?}: {error}"),
+            }
+            assert!(unasked(&mock), "{switch:?} {kept:?}: nothing was asked");
+            assert_eq!(files_under(&home), before, "{switch:?} {kept:?}: nothing under the config home changed");
+        });
+    }
+}
