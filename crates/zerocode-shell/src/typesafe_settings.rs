@@ -972,6 +972,34 @@ impl AnswerDraft {
 }
 
 impl DecisionDraft {
+    /// A kept definition as the editor writes it: a choice's options in
+    /// core's order, and no folders for every folder the person consented to.
+    fn of(definition: custom::Definition) -> Self {
+        Self {
+            id: Some(definition.id),
+            name: definition.name,
+            question: definition.question,
+            answer: match definition.answer {
+                custom::Answer::YesNo { yes, no } => AnswerDraft::YesNo { yes, no },
+                custom::Answer::Choice(options) => AnswerDraft::Choice {
+                    options: options
+                        .into_iter()
+                        .map(|(name, means)| ChoiceOption { name, means })
+                        .collect(),
+                },
+                custom::Answer::Score(levels) => AnswerDraft::Score { levels },
+            },
+            at: definition.at,
+            reads: definition.reads,
+            folders: match definition.folders {
+                custom::Folders::Consented => None,
+                custom::Folders::Chosen(folders) => Some(folders),
+            },
+            act_from: definition.act_from,
+            max_per_hour: definition.max_per_hour,
+        }
+    }
+
     /// The definition the draft writes under `id`, and the options a choice
     /// names a second time: core's map holds a name once, so a second is
     /// refused at its name as one already offered
@@ -1178,22 +1206,48 @@ pub struct DraftCheck {
 ///
 /// # Errors
 /// A store that cannot be read.
-pub fn custom_decisions_at(_home: &Path, _settings: &Value) -> std::io::Result<CustomDecisions> {
+pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<CustomDecisions> {
+    let decisions = custom::store::list(home)?
+        .into_iter()
+        .map(|entry| {
+            Ok(KeptDecision {
+                draft: DecisionDraft::of(custom::store::definition(home, &entry.definition)?),
+                mode: entry.mode.key(),
+                version: entry.definition,
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+            })
+        })
+        .collect::<std::io::Result<_>>()?;
+    let trash = custom::store::trash(home)?
+        .into_iter()
+        .map(|trashed| TrashedDecision {
+            id: trashed.decision.id,
+            name: trashed.decision.name,
+            deleted_at: trashed.deleted_at,
+        })
+        .collect();
+    let door = JevSettings::from_root(settings);
     Ok(CustomDecisions {
-        decisions: Vec::new(),
-        trash: Vec::new(),
-        folders: Vec::new(),
-        everywhere: false,
+        decisions,
+        trash,
+        folders: door.folders().map(str::to_string).collect(),
+        everywhere: door.everywhere(),
     })
 }
 
 /// Core's check of `draft`, with nothing kept.
 #[must_use]
-pub fn check_custom_decision(_draft: DecisionDraft) -> DraftCheck {
+pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
+    let id = draft.id.clone().unwrap_or_else(custom::new_id);
+    let (definition, twice) = draft.definition(id);
     DraftCheck {
-        refusals: Vec::new(),
-        version: String::new(),
-        questions: Value::Null,
+        refusals: twice
+            .into_iter()
+            .chain(custom::check(&definition))
+            .collect(),
+        version: definition.version().unwrap_or_default(),
+        questions: custom::questions(&definition),
     }
 }
 
@@ -1203,10 +1257,12 @@ pub fn check_custom_decision(_draft: DecisionDraft) -> DraftCheck {
 /// # Errors
 /// Whatever keeps the store from it.
 pub fn delete_custom_decision_at(
-    _home: &Path,
-    _id: &str,
-    _now_ms: i64,
+    home: &Path,
+    id: &str,
+    now_ms: i64,
 ) -> Result<(), custom::store::Error> {
+    custom::store::delete(home, id, now_ms)?;
+    custom::store::empty_trash(home, now_ms)?;
     Ok(())
 }
 
@@ -1215,12 +1271,18 @@ pub fn delete_custom_decision_at(
 /// # Errors
 /// A mode no decision offers, and whatever keeps the store from it.
 pub fn set_custom_decision_mode_at(
-    _home: &Path,
-    _id: &str,
-    _mode: &str,
-    _now_ms: i64,
+    home: &Path,
+    id: &str,
+    mode: &str,
+    now_ms: i64,
 ) -> Result<(), custom::store::Error> {
-    Ok(())
+    let Some(mode) = JevMode::ALL
+        .into_iter()
+        .find(|offered| offered.key() == mode)
+    else {
+        return Err(custom::store::Error::Refused(vec![custom::Refusal::Mode]));
+    };
+    custom::store::set_mode(home, id, mode, now_ms)
 }
 
 #[cfg(test)]
