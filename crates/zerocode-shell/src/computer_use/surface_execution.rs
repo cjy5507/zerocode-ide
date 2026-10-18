@@ -684,8 +684,8 @@ mod tests {
         let selectors = [
             "h1".to_string(),
             "h1\u{00a0}".to_string(),
-            format!("#tail{} ", char::from(92)),
-            format!("#tail{}\t", char::from(92)),
+            format!("#tail{} ", char::from(92_u8)),
+            format!("#tail{}\t", char::from(92_u8)),
         ];
         for _ in 0..3 {
             for (index, selector) in selectors.iter().enumerate() {
