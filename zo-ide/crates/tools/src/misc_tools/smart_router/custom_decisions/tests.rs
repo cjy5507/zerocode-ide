@@ -402,3 +402,45 @@ fn on_above_the_bar_hands_one_line_and_below_hands_none() {
         assert_eq!(rows_of(&rows, &scope.id)[0]["chosen"], custom::NOT_APPLICABLE);
     });
 }
+
+/// Whatever a decision asked before a command answers, the command runs —
+/// once, and as the model wrote it. A decision that is on adds its line to
+/// what the model reads of the result; one that records adds nothing.
+#[test]
+fn before_a_command_never_stops_it() {
+    let (yes, no) = (AGENT_TOOL_ASK_OPTIONS[0], AGENT_TOOL_ASK_OPTIONS[1]);
+    for (mode, answer, handed) in [(JevMode::On, 0.95, Some(yes)), (JevMode::On, 0.05, Some(no)), (JevMode::Shadow, 0.05, None)] {
+        let mock = replying(move |_| a_noul(answer));
+        machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+            keep(&yes_no("Cleanup", Point::BeforeCommand), mode);
+            let (shell_log, seen) = (Arc::new(Mutex::new(Vec::new())), Arc::new(Mutex::new(Vec::new())));
+            let shell = Arc::clone(&shell_log);
+            let mut turns = ConversationRuntime::new(
+                Session::new(),
+                RunsOnce { command: "rm -rf build".to_string(), asked: false, seen: Arc::clone(&seen) },
+                StaticToolExecutor::new().register(SHELL_TOOL, move |input| {
+                    shell.lock().expect("the shell's log").push(input.to_string());
+                    Ok("removed".to_string())
+                }),
+                PermissionPolicy::new(PermissionMode::DangerFullAccess),
+                vec!["system".to_string()],
+            );
+            turns.set_tool_guard_seat(Some(Arc::new(ToolGuardJudge::at(cwd)) as Arc<dyn ToolGuardSeat>));
+            turns.run_turn("clean the build folder", None).expect("the turn");
+            let ran = shell_log.lock().expect("the shell's log").clone();
+            assert_eq!(ran.len(), 1, "{mode:?} {answer}: the command ran once");
+            let input: Value = serde_json::from_str(&ran[0]).expect("the shell's input");
+            assert_eq!(input["command"], "rm -rf build", "{mode:?} {answer}: as the model wrote it");
+            let read = seen.lock().expect("what the model read").first().cloned().unwrap_or_default();
+            assert!(read.contains("removed"), "{mode:?} {answer}: {read}");
+            let sure = if answer < 0.5 { 1.0 - answer } else { answer };
+            for option in [yes, no] {
+                let line = custom::line("Cleanup", option, sure);
+                assert_eq!(read.contains(&line), handed == Some(option), "{mode:?} {answer}: {read}");
+            }
+            let rows = rows_in(cwd, 1);
+            assert_eq!(rows.len(), 1, "{rows:?}");
+            assert_eq!(rows[0]["outcome"], door::ANSWERED_OUTCOME);
+        });
+    }
+}
