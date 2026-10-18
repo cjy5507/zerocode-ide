@@ -373,7 +373,12 @@ pub const LINE_MAX_CHARS: usize = 200;
 /// here, so the line an agent reads is the same wherever it was asked.
 #[must_use]
 pub fn line(name: &str, option: &str, confidence: f64) -> String {
-    String::new()
+    let percent = if confidence.is_nan() {
+        0.0
+    } else {
+        (confidence.clamp(0.0, 1.0) * 100.0).round()
+    };
+    format!("「{name}」 판단: {option} (확신 {percent:.0}%)")
 }
 
 /// Bytes that are not a definition this version reads: damaged, or of
