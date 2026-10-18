@@ -9730,7 +9730,10 @@ mod tests {
     fn the_agents_browser_door_rides_the_guarded_roads() {
         let shell = shipped_backend();
         let guarded = block_after(shell, "async fn answer_browser_command(");
-        let admitted = guarded.find(".begin_at(").expect("workspace input guard");
+        // `begin_agents` is `begin_at` under the person's stop (t-62872).
+        let admitted = guarded
+            .find(".begin_agents(")
+            .expect("workspace input guard");
         let dispatched = guarded
             .find("dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await")
             .expect("dispatch");
