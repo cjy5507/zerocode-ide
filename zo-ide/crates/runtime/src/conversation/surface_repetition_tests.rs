@@ -1423,3 +1423,31 @@ fn the_last_attested_target_identity_replaces_stale_exact_input_aliases() {
     assert_eq!(executor.observations(), 6,
         "three observations on each authorized identity must use the target's latest host binding before dispatch");
 }
+
+
+#[test]
+fn an_untrackable_new_control_uses_plain_counts_instead_of_a_stale_surface_limit() {
+    use super::repetition::ToolBatchRepetitionHardStops;
+    use zerocode_core::surface_execution::SURFACE_EXECUTION_CACHE_LIMIT;
+    let (mut runtime, _) = runtime_for(Vec::new());
+    let input = computer("observe", 100, 0, SurfaceEffect::Observation).input;
+    retain_script_result(&mut runtime, "Computer", &input);
+    let mut batch = ToolBatchRepetitionHardStops::default();
+    for index in 0..SURFACE_EXECUTION_CACHE_LIMIT {
+        let window = u64::try_from(index).unwrap() + 100;
+        let call = computer("observe", window, 0, SurfaceEffect::Observation);
+        runtime.note_surface_execution(&call.name, &call.input, call.result.unwrap().surface, false, &mut batch);
+    }
+    for _ in 0..3 { runtime.note_tool_repetition("Computer", &input, false); }
+    runtime.arm_tool_repetition_hard_stops();
+    let action = computer("left_click", 100, 0, SurfaceEffect::Acknowledged);
+    runtime.note_surface_execution(&action.name, &action.input, Some(SurfaceExecution {
+        surface_id:"fixture-new-host-control".into(), state_revision:0, effect:SurfaceEffect::Acknowledged,
+    }), false, &mut batch);
+    assert!(runtime.tool_repetition_preflight("Computer", &input, &mut batch).is_none(),
+        "a valid new target record beyond the memory limit must use ordinary counts rather than a stale surface stop");
+    for _ in 0..3 { runtime.note_tool_repetition("Computer", &input, false); }
+    runtime.arm_tool_repetition_hard_stops();
+    assert!(runtime.tool_repetition_preflight("Computer", &input, &mut batch).is_some(),
+        "fallback must still stop the fourth ordinary identical call");
+}

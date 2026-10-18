@@ -25,7 +25,8 @@ const MAX_SURFACE_FINGERPRINTS: usize = 512;
 pub(super) struct SurfaceRepetitionState {
     surfaces: HashMap<String, SurfaceRevision>,
     fingerprints: HashMap<u64, String>,
-    targets: HashMap<String, String>,
+    // None marks a valid host record that exceeded evidence storage: use plain counts.
+    targets: HashMap<String, Option<String>>,
     generation: u64,
 }
 
@@ -52,19 +53,21 @@ impl SurfaceRepetitionState {
         }
     }
 
-    fn bind_targets(&mut self, tool_name: &str, input: &str, identity: &str) {
+    fn bind_targets(&mut self, tool_name: &str, input: &str, identity: Option<&str>) {
         for target in surface_target_keys(tool_name, input) {
             if (self.targets.contains_key(&target) || self.targets.len() < MAX_SURFACE_FINGERPRINTS)
-                && self.targets.get(&target).map(String::as_str) != Some(identity) {
-                self.targets.insert(target, identity.to_string());
+                && self.targets.get(&target).map(Option::as_deref) != Some(identity) {
+                self.targets.insert(target, identity.map(str::to_string));
                 self.generation = self.generation.wrapping_add(1);
             }
         }
     }
 
     fn identity(&self, tool_name: &str, input: &str, raw: u64) -> Option<&str> {
-        surface_target_keys(tool_name, input).first().and_then(|target| self.targets.get(target)).map(String::as_str)
-            .or_else(|| self.fingerprints.get(&raw).filter(|identity| !identity.is_empty()).map(String::as_str))
+        if let Some(identity) = surface_target_keys(tool_name, input).first().and_then(|target| self.targets.get(target)) {
+            return identity.as_deref();
+        }
+        self.fingerprints.get(&raw).filter(|identity| !identity.is_empty()).map(String::as_str)
     }
 
     fn apply(&mut self, fingerprint: u64, execution: SurfaceExecution) -> SurfaceUpdate {
@@ -725,7 +728,7 @@ where
         is_error: bool,
         batch_hard_stops: &mut ToolBatchRepetitionHardStops,
     ) {
-        let Some(surface) = surface.filter(|_| !is_error) else {
+        let Some(surface) = surface.filter(|surface| !is_error && surface.is_valid()) else {
             return;
         };
         let previous = self.resolved_repetition_call(tool_name, input);
@@ -742,15 +745,17 @@ where
         let needed = usize::from(!self.surface_repetition_state.fingerprints.contains_key(&raw))
             + usize::from(raw != fingerprint && !self.surface_repetition_state.fingerprints.contains_key(&fingerprint));
         if self.surface_repetition_state.fingerprints.len().saturating_add(needed) > MAX_SURFACE_FINGERPRINTS {
+            self.surface_repetition_state.bind_targets(tool_name, input, None);
             return;
         }
         let identity = surface.surface_id.clone();
         let update = self.surface_repetition_state.apply(fingerprint, surface);
         if !update.accepted {
+            self.surface_repetition_state.bind_targets(tool_name, input, None);
             return;
         }
         self.surface_repetition_state.bind(raw, &identity);
-        self.surface_repetition_state.bind_targets(tool_name, input, &identity);
+        self.surface_repetition_state.bind_targets(tool_name, input, Some(&identity));
         if migrate_original {
             self.move_repetition_fingerprint(original, fingerprint);
             batch_hard_stops.rekey(original, fingerprint);
