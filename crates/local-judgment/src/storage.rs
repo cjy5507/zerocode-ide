@@ -472,12 +472,40 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     io(file.sync_all())
 }
 
-pub fn replace(_path: &Path, _bytes: &[u8]) -> Result<()> {
-    Ok(())
+pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().ok_or(Error::UnsafePath)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Error::UnsafePath)?;
+    let destination = child(parent, name)?;
+    let partial = child(parent, &format!("{name}.partial"))?;
+    remove(&partial)?;
+    write_new(&partial, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        io(fs::set_permissions(
+            &partial,
+            fs::Permissions::from_mode(0o600),
+        ))?;
+    }
+    io(fs::rename(partial, destination))
 }
 
-pub fn remove(_path: &Path) -> Result<()> {
-    Ok(())
+pub fn remove(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            plain(path.parent().ok_or(Error::UnsafePath)?)?;
+            plain(path)?;
+            if !metadata.is_file() {
+                return Err(Error::UnsafePath);
+            }
+            io(fs::remove_file(path))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Error::Storage),
+    }
 }
 
 fn valid_receipt(path: &Path, expected: Result<String>) -> bool {

@@ -3,6 +3,7 @@ mod archive;
 mod catalog;
 mod engine;
 mod manager;
+mod run_intent;
 mod selection;
 mod source;
 mod storage;
