@@ -757,3 +757,51 @@ async fn concurrent_restores_share_one_operation_and_block_manual_start() {
     assert_eq!(fixture.starts(), 1);
     assert_eq!(fixture.recorded().await.len(), 1);
 }
+
+#[tokio::test]
+async fn failed_restore_keeps_its_reason_clears_intent_and_never_retries() {
+    let mut fixture = Restoring::new();
+    fixture.seed();
+    fixture.tell("fail", 1);
+    let starting = fixture.restore(true).unwrap();
+    assert!(
+        starting
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == "restore"),
+        "failed restore must be recorded as an operation"
+    );
+    let failed = crate::tests::settled_snapshot(&fixture.manager).await;
+    let operation = failed.operation.as_ref().unwrap();
+    assert_eq!(operation.state, "failed");
+    let reason = operation.error.expect("failed restore reason");
+    assert_eq!(failed.server.state, "failed");
+    assert_eq!(failed.server.error, Some(reason));
+    assert!(!failed.server.checked);
+    assert_eq!(fixture.starts(), 1);
+    assert!(!fixture.intent_path().exists());
+    let attempts = fixture.recorded().await;
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["result"], reason);
+    fixture.clock.advance(HOUR);
+    fixture.restore(true).unwrap();
+    assert_eq!(
+        fixture.starts(),
+        1,
+        "failed restore retried after the clock moved"
+    );
+    fixture.reopen().await;
+    fixture.restore(true).unwrap();
+    assert_eq!(
+        fixture.starts(),
+        1,
+        "failed restore retried on the next boot"
+    );
+    assert!(fixture.manager.snapshot().operation.is_none());
+    fixture.press().await;
+    assert_eq!(fixture.starts(), 2);
+    assert!(
+        fixture.intent_path().is_file(),
+        "person apply did not reopen restoration"
+    );
+}
