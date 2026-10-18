@@ -649,3 +649,50 @@ fn a_folders_own_store_is_never_read() {
         assert!(rows_now(cwd).is_empty());
     });
 }
+
+/// How a test damages the store in zo's config home.
+#[derive(Debug, Clone, Copy)]
+enum Damage {
+    /// The index is cut off mid-write.
+    TornIndex,
+    /// The definition's file holds another version's bytes, which no longer
+    /// hash to its name.
+    ChangedBytes,
+    /// The index names a definition one byte past the size the store reads.
+    TooLarge,
+}
+
+/// A store damaged as `damage` says asks nothing at a turn's start, writes
+/// nothing, and leaves the turn as it was.
+fn a_damaged_store_asks_nothing(damage: Damage) {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let decision = yes_no("Docs", Point::TurnStart);
+        let entry = keep(&decision, JevMode::On);
+        let root = store::root(&runtime::default_config_home());
+        match damage {
+            Damage::TornIndex => fs::write(index_of(&root), b"{").expect("a torn index"),
+            Damage::ChangedBytes => {
+                let mut changed = decision.clone();
+                changed.question = "Does this change what a person reads?".to_string();
+                let bytes = changed.to_bytes().expect("its bytes");
+                fs::write(file_named(&root, &entry.definition), bytes).expect("bytes of another version");
+            }
+            Damage::TooLarge => {
+                let mut bytes = decision.to_bytes().expect("its bytes");
+                bytes.resize(store::DEFINITION_MAX_BYTES + 1, b' ');
+                put_over(&entry, &bytes);
+            }
+        }
+        assert_eq!(run_blocking(SkillSuggestionJudge::at(cwd).suggest(TASK.to_string())), None, "{damage:?}");
+        assert!(run_blocking(at_turn_start(cwd.to_path_buf(), TASK.to_string())).is_empty(), "{damage:?}");
+        assert!(unasked(&mock), "{damage:?}: nothing was asked");
+        assert!(rows_now(cwd).is_empty(), "{damage:?}: nothing was written");
+    });
+}
+
+/// A torn index asks nothing, writes nothing, and leaves the turn as it was.
+#[test]
+fn a_torn_index_asks_nothing_and_leaves_the_turn_as_it_was() {
+    a_damaged_store_asks_nothing(Damage::TornIndex);
+}
