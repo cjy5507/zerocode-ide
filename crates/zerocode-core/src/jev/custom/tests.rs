@@ -498,3 +498,19 @@ fn a_line_reads_as_the_design_writes_it() {
         "「Release notes」 판단: yes (확신 50%)"
     );
 }
+
+/// The longest name and the longest option the check lets through, at the
+/// surest answer, fit [`LINE_MAX_CHARS`]: the cap holds by construction, and
+/// no line is cut when it is handed.
+#[test]
+fn the_longest_line_the_limits_allow_fits_the_cap() {
+    let longest = "가".repeat(NAME_MAX_CHARS);
+    let mut definition = yes_no("d-0000000a", &longest);
+    definition.answer = choice(&[(longest.as_str(), "It fits."), ("other", "It does not.")]);
+    assert_eq!(check(&definition), Vec::new());
+    let handed = line(&definition.name, &longest, 1.0);
+    let length = handed.chars().count();
+    assert!(length <= LINE_MAX_CHARS, "{length} characters: {handed}");
+    definition.name.push('가');
+    assert!(check(&definition).contains(&Refusal::NameLength));
+}
