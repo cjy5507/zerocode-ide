@@ -625,3 +625,27 @@ fn with_no_decision_or_every_one_off_nothing_changes() {
         });
     }
 }
+
+/// A store in the folder a turn runs in is never read: only zo's config
+/// home keeps the person's decisions.
+#[test]
+fn a_folders_own_store_is_never_read() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let own = cwd.join(".zo");
+        for point in Point::ALL {
+            store::create(&own, &yes_no(point.key(), point), JevMode::On, 0).expect("a store in the folder");
+        }
+        assert_eq!(store::list(&own).expect("the folder's store reads").len(), Point::ALL.len());
+        assert!(store::list(&runtime::default_config_home()).expect("zo's store reads").is_empty());
+        assert_eq!(run_blocking(SkillSuggestionJudge::at(cwd).suggest(TASK.to_string())), None);
+        assert!(run_blocking(at_turn_start(cwd.to_path_buf(), TASK.to_string())).is_empty());
+        let guard = ToolGuardJudge::at(cwd);
+        guard.command(command_ask(cwd, "clean", "rm -rf build"));
+        assert_eq!(run_blocking(guard.command_ran(finished("clean"))), None);
+        note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(TASK)]);
+        assert!(decide(cwd, Point::AgentAsks.key(), None, &[]).is_err(), "no decision of zo's has the name");
+        assert!(unasked(&mock), "the folder's store asked nothing");
+        assert!(rows_now(cwd).is_empty());
+    });
+}
