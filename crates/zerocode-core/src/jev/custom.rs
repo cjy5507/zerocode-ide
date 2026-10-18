@@ -281,7 +281,15 @@ impl Field {
     /// no level's number.
     #[must_use]
     pub const fn word(&self) -> &'static str {
-        ""
+        match self {
+            Self::Name => "name",
+            Self::Question => "question",
+            Self::Yes => "yes",
+            Self::No => "no",
+            Self::OptionName(_) => "option_name",
+            Self::Meaning(_) => "meaning",
+            Self::Level(_) => "level",
+        }
     }
 }
 
@@ -333,7 +341,24 @@ impl Refusal {
     /// holding a word the person wrote.
     #[must_use]
     pub const fn word(&self) -> &'static str {
-        ""
+        match self {
+            Self::Id => "id",
+            Self::IdTaken => "id_taken",
+            Self::NameLength => "name_length",
+            Self::NameTaken => "name_taken",
+            Self::QuestionLength => "question_length",
+            Self::OptionCount => "option_count",
+            Self::OptionName(_) => "option_name",
+            Self::MeaningLength(_) => "meaning_length",
+            Self::SecretLine { .. } => "secret_line",
+            Self::Reads => "reads",
+            Self::Folders => "folders",
+            Self::ActFrom => "act_from",
+            Self::MaxPerHour => "max_per_hour",
+            Self::Mode => "mode",
+            Self::TooMany => "too_many",
+            Self::TooLarge => "too_large",
+        }
     }
 }
 
