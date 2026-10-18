@@ -710,3 +710,37 @@ fn a_definition_that_no_longer_hashes_to_its_name_asks_nothing() {
 fn a_definition_past_the_size_the_store_reads_asks_nothing() {
     a_damaged_store_asks_nothing(Damage::TooLarge);
 }
+
+/// A definition the store would refuse today — here an option's name past
+/// its length — is not asked: it writes one row whose outcome is the word of
+/// the rule it breaks, and none of its words.
+#[test]
+fn a_definition_that_breaks_a_rule_writes_its_word_and_asks_nothing() {
+    let long_option = "release-every-change-to-every-customer-at-once";
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        for point in [Point::AgentAsks, Point::TurnStart] {
+            let mut definition = choosing(point.key(), point, &["ship", "wait"]);
+            let entry = keep(&definition, JevMode::On);
+            definition.answer = Answer::Choice(BTreeMap::from([
+                (long_option.to_string(), "Ship it all.".to_string()),
+                ("wait".to_string(), "Wait.".to_string()),
+            ]));
+            let broken = custom::check(&definition);
+            assert_eq!(broken, [Refusal::OptionName(long_option.to_string())], "the store would refuse it today");
+            written_over(&entry, &definition);
+        }
+        let verdict = decide(cwd, Point::AgentAsks.key(), Some("the diff adds one test"), &[]).expect("a verdict");
+        let word = Refusal::OptionName(String::new()).word();
+        assert_eq!((verdict.outcome.as_str(), verdict.line.as_deref()), (word, None));
+        assert!(run_blocking(at_turn_start(cwd.to_path_buf(), TASK.to_string())).is_empty());
+        let rows = rows_now(cwd);
+        assert_eq!(rows.len(), 2, "one row each: {rows:?}");
+        for row in &rows {
+            assert_eq!(row["outcome"], word, "{row}");
+            assert_eq!((row.get("chosen"), &row["requests"]), (None, &Value::from(0)), "{row}");
+            assert!(!row.to_string().contains(long_option), "the row keeps the rule's word, never the option: {row}");
+        }
+        assert!(unasked(&mock), "nothing was asked");
+    });
+}
