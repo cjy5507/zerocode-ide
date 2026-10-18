@@ -375,7 +375,7 @@ fn custom_decisions_in(
                 .collect();
             let count = |definition: &str| {
                 let held: Vec<&Value> =
-                    named.iter().map(|(_, row)| *row).collect();
+                    named.iter().filter(|(version, _)| *version == definition).map(|(_, row)| *row).collect();
                 let owned: Vec<Value> = held.iter().copied().cloned().collect();
                 VersionReport {
                     definition: definition.to_string(),
