@@ -494,6 +494,7 @@ pub const SEAT: &[(&str, Carry)] = &[
     ("id", Carry::Agreed),
     ("stand", Carry::Across),
     ("applies", Carry::Across),
+    ("mode", Carry::Agreed),
     ("verdict", Carry::Own),
     ("rowsToNextJudgment", Carry::Own),
     ("riseFloorPermille", Carry::Agreed),
@@ -1307,7 +1308,7 @@ mod tests {
         let marks = json!({ "compared": 1, "agreed": 1, "lowerBound": 0.2, "controlRows": 0, "baselineCompared": 1,
             "baselineAgreed": 1, "baselineShare": 1.0, "notCompared": 0, "notComparedBy": {} });
         let full: SeatNumbers = serde_json::from_value(json!({
-            "id": "routing", "stand": "recording", "applies": false,
+            "id": "routing", "stand": "recording", "applies": false, "mode": "auto",
             "verdict": { "verdict": "hold" }, "rowsToNextJudgment": 1, "riseFloorPermille": 950, "clearsRiseFloor": false,
             "today": window, "week": window,
             "judged": { "window": window, "windowWanted": 20, "agreement": marks },

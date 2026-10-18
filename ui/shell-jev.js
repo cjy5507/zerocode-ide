@@ -635,6 +635,15 @@ function jevSeatStatus(held, choice) {
   return (held ? held.applies : choice?.applies) ? "applying" : "recording";
 }
 
+/* Whether the mode zo names for a feature, for the folder it counted, asks:
+ * for a person's own decisions it is the lower of their switch and their own
+ * modes, which the settings answer cannot say. Read among the modes the
+ * feature offers; a zo that names none leaves the switch to say it. */
+function jevZoAsks(seat, held) {
+  const named = held?.mode ? seat.modes?.find((choice) => choice.mode === held.mode) : null;
+  return named?.asks !== false;
+}
+
 /* Whether a recording feature was measured and held under a line of its own
  * rather than still counting samples (`JEV_LINES`' `wants`). */
 function jevUnderBar(held) {
@@ -665,7 +674,7 @@ function paintJevStandings(root = document) {
   for (const seat of typesafeState.switches ?? []) {
     const choice = jevSeatChoice(typesafeState, seat.id);
     const held = heldOf.get(seat.id);
-    if (!choice?.asks || !held) continue;
+    if (!choice?.asks || !held || !jevZoAsks(seat, held)) continue;
     rows.push({ seat, held, status: jevSeatStatus(held, choice) });
   }
   rows.sort((a, b) => JEV_STANDING_ORDER.indexOf(a.status) - JEV_STANDING_ORDER.indexOf(b.status));

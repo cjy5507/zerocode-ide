@@ -2903,6 +2903,10 @@ pub struct SeatNumbers {
     /// Where the seat stands, and whether it acts right now.
     pub stand: String,
     pub applies: bool,
+    /// The mode zo asks the seat in for the folder it counted: for the
+    /// person's own decisions, the lower of their switch and their own modes.
+    #[serde(default)]
+    pub mode: Option<String>,
     #[serde(default)]
     pub verdict: Option<SeatVerdict>,
     #[serde(default)]
