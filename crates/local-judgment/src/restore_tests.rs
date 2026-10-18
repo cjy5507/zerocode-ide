@@ -573,3 +573,75 @@ async fn an_occupied_port_is_replaced_without_contacting_its_listener() {
         "restore contacted the occupied listener"
     );
 }
+
+#[tokio::test]
+async fn apply_persists_stop_clears_and_unapplied_start_leaves_intent_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut fixture = Restoring::new();
+    let first = fixture.start(&fixture.models[0]).await;
+    assert!(
+        !fixture.intent_path().exists(),
+        "unapplied start wrote an intent"
+    );
+    let provider = fixture.apply(first.server.id.as_deref().unwrap()).await;
+    assert!(
+        fixture.intent_path().is_file(),
+        "apply must create a private run intent"
+    );
+    let intent = fixture.intent();
+    assert_eq!(intent["version"], 1);
+    assert_eq!(intent["modelId"], fixture.models[0].id);
+    assert_eq!(intent["revision"], fixture.models[0].revision);
+    assert_eq!(
+        intent["manifestFingerprint"],
+        fixture.models[0].fingerprint().unwrap()
+    );
+    assert_eq!(intent["providerIdentity"], provider.identity());
+    assert_eq!(intent["port"], port(&provider));
+    assert!(intent["atMs"].as_u64().is_some_and(|value| value > 0));
+    assert_eq!(
+        fs::metadata(fixture.intent_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    if let Some(destination) = std::env::var_os("T62479_INTENT_EXAMPLE") {
+        fs::copy(fixture.intent_path(), destination).unwrap();
+    }
+    let bytes = fs::read(fixture.intent_path()).unwrap();
+    fixture.reopen().await;
+    assert_eq!(fs::read(fixture.intent_path()).unwrap(), bytes);
+    fixture.start(&fixture.models[1]).await;
+    assert_eq!(
+        fs::read(fixture.intent_path()).unwrap(),
+        bytes,
+        "unapplied start cleared or rewrote the previous intent"
+    );
+    fixture.reopen().await;
+    fixture.restore(true).unwrap();
+    let restored = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(fixture.starts(), 3);
+    assert_eq!(
+        restored.server.model_id.as_deref(),
+        Some(fixture.models[0].id.as_str())
+    );
+    fixture
+        .manager
+        .stop(restored.server.id.as_deref().unwrap())
+        .unwrap();
+    assert!(
+        !fixture.intent_path().exists(),
+        "person stop kept the intent"
+    );
+    fixture.reopen().await;
+    let before = serde_json::to_value(fixture.manager.snapshot()).unwrap();
+    fixture.restore(true).unwrap();
+    assert_eq!(fixture.starts(), 3);
+    assert_eq!(
+        serde_json::to_value(fixture.manager.snapshot()).unwrap(),
+        before
+    );
+}
