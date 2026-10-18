@@ -24,12 +24,14 @@ import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
  *   home       where the first section and row 0 stand at rest with the scroll at 0, read once per page before any
  *              scroll. At the top, a list above its home stops short of row 0 (short); one below it leaves a gap.
  *   step       one wheel tick of −100 px moves the first fully visible row down by 100 px.
- *   mid-scroll write   a write by the window within 100 ms after a wheel event, or after a scroll event that no write
- *                      of the window fired.
+ *   mid-scroll write   a write by the window within 100 ms after a wheel or scroll event the page saw before it (in
+ *                      the page's own order: WebKit's clock gives whole ms). A scroll event fired inside a write of
+ *                      the window is the window's own and does not count.
  *   overlap    how far the cleanup entry's box runs into the list's, while it shows.
  *
  *   ① a cold first pass up from the bottom: 12 ticks one at a time, then a burst of 30 ticks 40 ms apart;
- *   ② the same over the rows ① measured, with a second agent joining the row on the top edge mid-burst;
+ *   ② the same over the rows ① measured, with a second agent joining the row on the top edge mid-burst — while
+ *      the window counts the person as scrolling, and with no write from the growth until its frame is painted;
  *   ③ a cold list: one burst from row 150 that keeps ticking past the top stands row 0 while it still ticks,
  *      and a burst that ends exactly at the top, as a fling ends — how far the list stopped short or left a
  *      gap there, and for how long. Each arrival at the top may move the rows beyond the scroll once (the list
@@ -42,7 +44,8 @@ import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
  *   ⑨ mid-burst, after a row above the viewport grew, the cleanup entry appears and hides again: it never runs
  *      into the list, in any frame;
  *   ⑩ a cold list reveals its active workspace, a row never built below rows never measured: the row stands
- *      built, fully visible and focused.
+ *      built, fully visible and focused;
+ *   and, with no browser, two traces that show the mid-scroll classifier reads the page's order, not the clock.
  *
  *   node ui/tests/sidebar-scroll.mjs [--engine webkit] [--json <file>]   alone, with the frame trace
  */
@@ -111,10 +114,12 @@ async function installScrollProbes(page) {
     const scroller = document.getElementById("sidebar-scroll");
     const own = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
     const read = () => own.get.call(scroller);
-    const probe = { writes: [], events: [], frames: [], renders: [], recording: false, setup: false, writing: false, read };
+    const probe = {
+      writes: [], events: [], frames: [], renders: [], recording: false, setup: false, writing: false, seq: 0, read,
+    };
     window.__PROBE__ = probe;
     const wrote = (before, via) => {
-      if (!probe.setup) probe.writes.push({ at: performance.now(), before, after: read(), via });
+      if (!probe.setup) probe.writes.push({ at: performance.now(), seq: (probe.seq += 1), before, after: read(), via });
     };
     Object.defineProperty(scroller, "scrollTop", {
       configurable: true,
@@ -164,13 +169,12 @@ async function installScrollProbes(page) {
         probe.setup = false;
       }
     };
-    // A scroll event fired while the window writes is the window's, not the person's scroll: WebKit can fire it
-    // inside the write.
+    // A scroll event fired while the window writes is the window's, not the person's scroll. WebKit fires it after
+    // the write instead, at its next rendering update — often in the same whole ms its clock gives the write — so
+    // every write and event also takes its place in the page's own order (seq).
     for (const type of ["wheel", "scroll"]) {
-      scroller.addEventListener(type, () => probe.events.push({ type, at: performance.now(), own: probe.writing }), {
-        capture: true,
-        passive: true,
-      });
+      const note = () => probe.events.push({ type, at: performance.now(), seq: (probe.seq += 1), own: probe.writing });
+      scroller.addEventListener(type, note, { capture: true, passive: true });
     }
     const render = window.renderSidebarWindows;
     window.renderSidebarWindows = function timedRender(...args) {
@@ -329,6 +333,62 @@ async function burst(page, count, { dy = -STEP, during = [] } = {}) {
   }
 }
 
+// Mid-burst, once the tick's scroll has landed and been painted: a second agent joins the row on the top edge. The
+// growth is read in the frame that paints it — the row's height before and after, its top against the scroller's
+// (− above), the ms since the last wheel event, whether the window counts the person as scrolling (null where the
+// window keeps no such count), and the window's writes (px each) from the growth until that frame is painted. No
+// wheel comes until it returns, so the row stays on the edge until it grows.
+const growOnEdge = (page, from) => page.evaluate((from) => new Promise((done) => {
+  const probe = window.__PROBE__;
+  const bounds = document.getElementById("sidebar-scroll").getBoundingClientRect();
+  const tenth = (value) => Math.round(value * 10) / 10;
+  // A task queued from a frame's callback runs after that frame is painted.
+  const afterPaint = (then) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = then;
+    channel.port2.postMessage(0);
+  };
+  let frames = 0;
+  const pick = () => {
+    frames += 1;
+    if (probe.read() === from && frames < 20) {
+      requestAnimationFrame(() => afterPaint(pick));
+      return;
+    }
+    const node = [...document.querySelectorAll("#worktrees .wt-node[data-row-key]")].find((one) => {
+      const box = one.getBoundingClientRect();
+      return box.top < bounds.top && box.bottom > bounds.top;
+    });
+    if (!node) {
+      done(null);
+      return;
+    }
+    const before = node.getBoundingClientRect().height;
+    const mark = probe.writes.length;
+    window.__ADD_AGENT__(node.dataset.rowKey, "working");
+    // The agent paint asked for this frame first, so its callback has run: the row has grown, and the window has
+    // not seen it yet.
+    requestAnimationFrame(() => {
+      const at = performance.now();
+      const box = node.getBoundingClientRect();
+      const wheel = probe.events.filter((event) => event.type === "wheel").at(-1);
+      const grown = {
+        key: node.dataset.rowKey,
+        before: tenth(before),
+        grew: tenth(box.height),
+        edge: tenth(box.top - bounds.top),
+        sinceWheelMs: wheel ? tenth(at - wheel.at) : null,
+        scrolling: typeof sidebarScrolling === "function" ? sidebarScrolling() : null,
+      };
+      afterPaint(() => {
+        grown.writes = probe.writes.slice(mark).map((write) => tenth(write.after - write.before));
+        done(grown);
+      });
+    });
+  };
+  requestAnimationFrame(() => afterPaint(pick));
+}), from);
+
 // A second agent joins the row the window holds nearest above the viewport: it grows above all that shows.
 const growAbove = (page) => page.evaluate(() => {
   const bounds = document.getElementById("sidebar-scroll").getBoundingClientRect();
@@ -432,7 +492,7 @@ function rowsHeld(taken, from, to) {
 function writesInScroll(taken, from, to) {
   const writes = taken.writes.filter((write) => write.at >= from && write.at <= to);
   const inside = writes.filter((write) =>
-    taken.events.some((event) => !event.own && write.at >= event.at && write.at - event.at < WRITE_WINDOW_MS));
+    taken.events.some((event) => !event.own && event.seq < write.seq && write.at - event.at < WRITE_WINDOW_MS));
   return {
     writes: writes.length,
     inside: inside.length,
@@ -539,9 +599,46 @@ const stepsHold = (steps) =>
 
 const stood = (held) => held.rows.worst <= 1 && held.writes.inside === 0;
 
+// ②'s conditions, each printed: the four the other passes hold, and the growth as it must land — the row on the top
+// edge grew while the window counted the person as scrolling, and the window wrote nothing until that frame was
+// painted.
+const secondHolds = (second) => ({
+  steps: stepsHold(second.steps),
+  rows: second.held.rows.worst <= 1,
+  writes: second.held.writes.inside === 0,
+  blank: second.held.rows.blank <= 1,
+  grew: Boolean(second.grown) && second.grown.grew > second.grown.before,
+  edge: Boolean(second.grown) && second.grown.edge < 0,
+  scrolling: second.grown?.scrolling === true,
+  quiet: Boolean(second.grown) && second.grown.writes.length === 0,
+});
+
 export async function testSidebarScroll({ browser, origin, ok, engine = "chromium" }) {
   const faults = [];
   const pages = [];
+
+  // The classifier on two traces, with no browser. WebKit's clock gives whole ms: a write the page saw after a wheel
+  // event in the same ms is inside the person's scroll, and a settle write whose own scroll event follows it in the
+  // same ms, past the window's rest (150 ms) after the last wheel, is not. Timestamps alone fail one of the two.
+  const traced = (events, write) => writesInScroll({ writes: [write], events }, 0, Infinity).inside;
+  const afterWheel = traced(
+    [{ type: "wheel", at: 1000, seq: 1, own: false }],
+    { at: 1000, seq: 2, before: 500, after: 400 },
+  );
+  const beforeOwnScroll = traced(
+    [{ type: "wheel", at: 1000, seq: 1, own: false }, { type: "scroll", at: 1160, seq: 3, own: false }],
+    { at: 1160, seq: 2, before: 400, after: 433 },
+  );
+  ok(
+    "the mid-scroll classifier, with no browser: a write the page saw after a wheel event in the same ms is inside the person's scroll",
+    afterWheel === 1,
+    JSON.stringify({ inside: afterWheel }),
+  );
+  ok(
+    "the mid-scroll classifier, with no browser: a write its own scroll event follows in the same ms, 160 ms after the last wheel, is not",
+    beforeOwnScroll === 0,
+    JSON.stringify({ inside: beforeOwnScroll }),
+  );
   const stand = async (scene = {}) => {
     const { page } = await openWindowTestPage(browser, origin, { faults });
     await standScrollScene(page, scene);
@@ -600,23 +697,7 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     second.from = await clock(page);
     second.steps = await stepUp(page, 12);
     await burst(page, 30, {
-      during: {
-        after: 14,
-        run: async (from) => {
-          // The tick's scroll lands first: a row picked on the top edge before it lands is in view when it grows.
-          await calm(page, from);
-          second.grown = await page.evaluate(() => {
-            const bounds = document.getElementById("sidebar-scroll").getBoundingClientRect();
-            const node = [...document.querySelectorAll("#worktrees .wt-node[data-row-key]")].find((one) => {
-              const box = one.getBoundingClientRect();
-              return box.top < bounds.top && box.bottom > bounds.top;
-            });
-            if (!node) return null;
-            window.__ADD_AGENT__(node.dataset.rowKey, "working");
-            return { key: node.dataset.rowKey, before: Math.round(node.getBoundingClientRect().height * 10) / 10 };
-          });
-        },
-      },
+      during: { after: 14, run: async (from) => { second.grown = await growOnEdge(page, from); } },
     });
     await calm(page);
     await page.waitForTimeout(REST_MS);
@@ -824,10 +905,11 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     stepsHold(first.steps) && stood(first.held) && first.held.rows.blank <= 1,
     JSON.stringify({ engine, ...brief(first) }),
   );
+  const secondConditions = secondHolds(second);
   ok(
-    "② a second pass over measured rows, with the row on the top edge growing mid-burst: the same four hold",
-    stepsHold(second.steps) && stood(second.held) && second.held.rows.blank <= 1 && second.grown !== null,
-    JSON.stringify({ engine, ...brief(second), grown: second.grown }),
+    "② a second pass over measured rows, with the row on the top edge growing mid-burst: the same four hold, and the window took the growth while it counted the person as scrolling, with no write until that frame was painted",
+    Object.values(secondConditions).every(Boolean),
+    JSON.stringify({ engine, conditions: secondConditions, ...brief(second), grown: second.grown }),
   );
   ok(
     "③ a cold burst from row 150 that keeps ticking past the top stands row 0 fully visible while it still ticks, holds the rows everywhere else, and rests at the top with no gap",
