@@ -7528,6 +7528,56 @@ await test("Jev를 켜면 카드가 기능마다 적용 중인지, 기록 중이
   return `${rows.length} standings · ${rows.filter((row) => row.status === "applying").length} applying`;
 });
 
+await test("zo가 아무것도 묻지 않는다고 읽는 기능은 카드에 서지 않고, 내가 만든 결정은 결정이 묻기 시작해야 줄이 생긴다", async () => {
+  await openJudgmentSettings(pageA);
+  const said = (key, fallback) => pageA.evaluate(([one, words]) => t(one, words), [key, fallback]);
+  const tally = (rows) => ({
+    rows, answered: rows, refused: 0, applied: 0, called: rows, requests: rows, redactedLines: 0,
+    inputTokens: 0, p50Ms: rows ? 300 : null, p95Ms: rows ? 600 : null, failures: [],
+  });
+  const numbers = (id, extra) => ({
+    id, stand: "recording", applies: false, verdict: null, rowsToNextJudgment: null, judged: null,
+    today: tally(0), week: tally(2), days: [], recent: [], askersWeek: {}, ...extra,
+  });
+  const summaryBefore = backend.jevSummary;
+  backend.keychain.set(TYPESAFE_SERVICE, "apikey_fixture");
+  backend.zoSettings.smart = { [JEV_SETTINGS_KEY]: { enabled: true, workspaces: [JEV_EVERY_WORKSPACE] } };
+  const standingAt = async (mode, applies) => {
+    backend.jevSummary = {
+      scope: { scope: "workspace", workspace: "/Users/dev/project", workspaceName: "project", recorded: true, projects: [], windowDays: 7 },
+      seats: [numbers("routing", { mode: "auto" }), numbers("custom", { mode, applies })],
+    };
+    await pageA.evaluate(async () => {
+      jevNumbers = null;
+      await refreshApiRouters();
+      await jevNumbersAsking;
+    });
+    await pageA.waitForFunction(
+      () => document.querySelector('#typesafe-card [data-jev-standing="routing"]') !== null,
+      null, { timeout: UI_TIMEOUT },
+    );
+    return pageA.evaluate(() => {
+      const standing = document.querySelector('#typesafe-card [data-jev-standing="custom"] .settings-jev-standing');
+      return standing ? { said: standing.textContent, status: standing.dataset.status } : null;
+    });
+  };
+  try {
+    assertEqual(await standingAt("off", false), null, "a feature zo reads as asking nothing stands on the card");
+    assertEqual(await standingAt("shadow", false),
+      { said: await said("jev.status.recording", "기록 중"), status: "recording" },
+      "a decision that only records");
+    assertEqual(await standingAt("on", true),
+      { said: await said("jev.status.applying", "적용 중"), status: "applying" },
+      "a decision that acts");
+  } finally {
+    backend.jevSummary = summaryBefore;
+    delete backend.zoSettings.smart;
+    backend.keychain.delete(TYPESAFE_SERVICE);
+    await pageA.evaluate(() => refreshApiRouters());
+  }
+  return "off: no line · shadow: recording · on: applying";
+});
+
 // The key typing into a page's fields asks with (t-9537): the Computer Use
 // pane draws one slot per key a walk reads — today the chosen row's alone —
 // from the table the product reads, keeps a saved key in the item the walk's

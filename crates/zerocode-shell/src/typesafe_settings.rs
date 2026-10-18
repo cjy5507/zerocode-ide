@@ -2866,6 +2866,28 @@ mod tests {
         );
         assert_eq!(read_summary(br#"{"seats":[]}"#), Some(Vec::new()));
     }
+
+    /// zo names the mode it asks each seat in for the folder it counted —
+    /// for the person's own decisions the lower of their switch and their
+    /// own modes, which the settings file alone cannot say — and the card
+    /// reads that word, so the reader keeps it and hands it on.
+    #[test]
+    fn a_summary_keeps_the_mode_zo_reads_each_feature_at() {
+        let stdout = br#"{"seats":[
+          {"id":"custom","setting":"customDecisions","mode":"off","stand":"recording","applies":false,
+           "today":{"rows":0,"answered":0,"answeredShare":null,"answeredLowerBound":null,"called":0,
+                    "requests":0,"redactedLines":0,"inputTokens":0,"p50Ms":null,"p95Ms":null,"failures":[]},
+           "week":{"rows":0,"answered":0,"answeredShare":null,"answeredLowerBound":null,"called":0,
+                   "requests":0,"redactedLines":0,"inputTokens":0,"p50Ms":null,"p95Ms":null,"failures":[]}}
+        ]}"#;
+        let seats = read_summary(stdout).expect("a summary");
+        let sent = serde_json::to_value(&seats).expect("the seats, sent");
+        assert_eq!(
+            sent[0]["mode"],
+            serde_json::json!("off"),
+            "the mode zo read never reaches the card: {sent}"
+        );
+    }
 }
 
 /// One seat's numbers, as `zo jev summary --json` reports them and the card
