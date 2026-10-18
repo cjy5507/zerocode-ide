@@ -765,6 +765,40 @@ fn a_read_only_command_asks_nothing_and_writes_no_row() {
     });
 }
 
+/// Each point asks its decisions with the use already asking there off — the
+/// skill suggestion, the command guard, the project-rules check — and hands
+/// the line all the same: at a turn's start alone under the skill note's
+/// prefix, beside a command's result, and to the next turn as an advice of
+/// its own, once, that names no rule and leaves no rule's receipt.
+#[test]
+fn each_point_asks_with_the_use_already_there_off() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        for point in [Point::TurnStart, Point::BeforeCommand, Point::TurnEnd] {
+            keep(&yes_no(point.key(), point), JevMode::On);
+        }
+        let line = |point: Point| custom::line(point.key(), AGENT_TOOL_ASK_OPTIONS[0], 0.9);
+        let note = run_blocking(SkillSuggestionJudge::at(cwd).suggest(TASK.to_string()));
+        assert_eq!(note, Some(format!("{}\n{}", runtime::SKILL_RECOMMENDATION_REMINDER_PREFIX, line(Point::TurnStart))));
+        let guard = ToolGuardJudge::at(cwd);
+        guard.command(command_ask(cwd, "clean", "rm -rf build"));
+        assert_eq!(run_blocking(guard.command_ran(finished("clean"))), Some(line(Point::BeforeCommand)));
+        note_project_rule_turn(cwd, "session", "turn-1", &[ConversationMessage::user_text(TASK)]);
+        let advice =
+            waited(|| pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP)).expect("the next turn's advice");
+        let mut said = advice.text.lines();
+        assert!(said.next().is_some_and(|head| head.contains(&advice.key)), "{}", advice.text);
+        assert_eq!(said.collect::<Vec<&str>>(), [line(Point::TurnEnd).as_str()]);
+        assert!(advice.rules.is_empty(), "it names no rule");
+        project_rule_advice_delivered(cwd, "session", &advice);
+        assert_eq!(pending_project_rule_advice(cwd, "session", project_rules::ADVICE_CHAR_CAP), None, "it is handed once");
+        assert!(!shadow_ledger_path(cwd, PROJECT_RULES.ledger).exists(), "and leaves no rule's receipt");
+        let rows = rows_in(cwd, 3);
+        assert_eq!(rows.iter().filter(|row| row["applied"] == true).count(), 3, "{rows:?}");
+        assert_eq!(mock.requests().len(), 3);
+    });
+}
+
 /// A turn whose start has a decision's line and no skill suggestion carries
 /// the line under the skill note's prefix alone, so the next turn's start
 /// clears it like any skill note: the model reads it in its own turn only.

@@ -201,9 +201,8 @@ async fn check(workspace: PathBuf, recipient: String, turn_id: String, book: Boo
 pub fn pending_project_rule_advice(workspace: &Path, recipient: &str, room: usize) -> Option<rules::Advice> {
     let rules_on = mode(workspace) == JevMode::On && JevDoor::open(workspace).permits_application_now();
     rules_on
-        .then(|| store::pending(&runtime::default_config_home(), workspace, recipient, room).ok().flatten())
+        .then(|| store::pending(&runtime::default_config_home(), workspace, recipient, room).ok().flatten().or_else(|| decided_advice(workspace, recipient, room)))
         .flatten()
-        .or_else(|| decided_advice(workspace, recipient, room))
 }
 
 /// The lines the person's decisions handed this turn, as one advice whose
