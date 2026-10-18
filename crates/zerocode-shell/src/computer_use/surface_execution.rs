@@ -121,7 +121,7 @@ struct HeldSurface {
     identity: String,
     views: VecDeque<(String, [u8; 32])>,
     revision: u64,
-    acknowledged: Option<u64>,
+    acknowledged: Option<(u64, String)>,
 }
 
 struct Tracker {
@@ -181,7 +181,9 @@ impl Tracker {
                 };
                 self.revision = revision;
                 held.revision = revision;
-                if acknowledged == Some(previous) {
+                if acknowledged.is_some_and(|(revision, observed_view)| {
+                    revision == previous && observed_view == view
+                }) {
                     SurfaceEffect::ConfirmedChange {
                         previous_revision: previous,
                     }
@@ -230,7 +232,13 @@ impl Tracker {
             .held
             .iter_mut()
             .find(|held| held.identity == identity)?;
-        held.acknowledged = can_confirm.then_some(held.revision);
+        held.acknowledged = if can_confirm {
+            held.views
+                .back()
+                .map(|(view, _)| (held.revision, view.clone()))
+        } else {
+            None
+        };
         Some(SurfaceExecution {
             surface_id: identity,
             state_revision: held.revision,
@@ -743,6 +751,60 @@ mod tests {
         assert_eq!(
             switched.state_revision, 0,
             "a new view starts at the existing revision"
+        );
+    }
+
+    #[test]
+    fn a_changed_stale_view_cannot_confirm_an_action_observed_through_another_view() {
+        let mut tracker = Tracker::default();
+        let scope = BrowserContext::new(context("term-7").actor.clone(), "browser-1", 7).unwrap();
+        let whole = ["read".into(), "browser-1".into()];
+        let selected = ["read".into(), "browser-1".into(), "h1".into()];
+        scope
+            .finish_at(
+                &selected,
+                &browser_answer("Old heading", 7),
+                Some(&browser_observation("browser-1", "Old heading")),
+                &mut tracker,
+            )
+            .unwrap();
+        scope
+            .finish_at(
+                &whole,
+                &browser_answer("Old whole page", 7),
+                Some(&browser_observation("browser-1", "Old whole page")),
+                &mut tracker,
+            )
+            .unwrap();
+        let before = scope
+            .finish_at(
+                &whole,
+                &browser_answer("New whole page", 7),
+                Some(&browser_observation("browser-1", "New whole page")),
+                &mut tracker,
+            )
+            .unwrap();
+        scope
+            .finish_at(
+                &["click".into(), "browser-1".into(), "#next".into()],
+                &browser_answer("accepted", 7),
+                None,
+                &mut tracker,
+            )
+            .unwrap();
+        let after = scope
+            .finish_at(
+                &selected,
+                &browser_answer("New heading", 7),
+                Some(&browser_observation("browser-1", "New heading")),
+                &mut tracker,
+            )
+            .unwrap();
+        assert!(after.state_revision > before.state_revision);
+        assert_eq!(
+            after.effect,
+            SurfaceEffect::Observation,
+            "a changed stale view cannot confirm an action whose baseline used another view"
         );
     }
 
