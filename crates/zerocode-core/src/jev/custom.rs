@@ -363,7 +363,7 @@ impl Refusal {
 }
 
 /// The most characters the one line a decision hands an agent holds
-/// (DESIGN 2.4). [`line`] holds it by construction: a name and an option are
+/// (DESIGN 2.4). [`line()`] holds it by construction: a name and an option are
 /// each [`NAME_MAX_CHARS`] at most, so no line is ever cut.
 pub const LINE_MAX_CHARS: usize = 200;
 
