@@ -79,10 +79,24 @@ test("a machine that slows the page slows the frame and both references, so neit
   }
 });
 
-test("the reference verdict is recorded where the load cannot judge, and still judged on a hosted runner", () => {
+test("the reference verdict is recorded where the load cannot judge", () => {
   assert.equal(machineLoad.referencesHold(150, 80, 104, { platform: "darwin", load: 1e3, env: {} }), true);
   assert.equal(machineLoad.referencesHold(150, 80, 104, { platform: "win32", load: 0, env: {} }), true);
-  assert.equal(machineLoad.referencesHold(150, 80, 104, { platform: "darwin", load: 0, env: HOSTED }), false);
+});
+
+// A GitHub-hosted runner records the reference verdict as it records an absolute budget, until CI runs show the
+// margins (run-11955): the frame and its references are separate readings, and a shared VM's steal time can land on
+// one of them.
+test("a GitHub-hosted runner records a crossed midpoint and says so; the same numbers fail everywhere else", () => {
+  const crossed = [150, 80, 104];
+  assert.equal(machineLoad.referencesHold(...crossed, { platform: "darwin", load: 0, env: HOSTED }), true);
+  assert.equal(machineLoad.referencesHold(...crossed, { platform: "darwin", load: 0, env: {} }), false);
+  assert.equal(machineLoad.referencesHold(...crossed, { platform: "darwin", load: 0,
+    env: { GITHUB_ACTIONS: "true", RUNNER_ENVIRONMENT: "self-hosted" } }), false);
+  assert.equal(machineLoad.referencesNote(...crossed, { env: HOSTED }),
+    "margin -58ms, crossed (hosted runner — recorded)");
+  assert.equal(machineLoad.referencesNote(84, 80, 104, { env: HOSTED }), "margin 8ms, held (hosted runner — recorded)");
+  assert.equal(machineLoad.referencesNote(...crossed, { env: {} }), "margin -58ms");
 });
 
 test("the power note reads the source and the power mode in pmset's own words, and says what it cannot read", () => {
