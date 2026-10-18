@@ -638,19 +638,6 @@ pub fn pty_env(
     env
 }
 
-/// Add the runtime readers used by generated shims.
-///
-/// The endpoint source supplies the hook token from the already-private
-/// endpoint file. Each extra pair supplies a capability token from its own
-/// 0600 file. The generated script keeps the value only in the short-lived
-/// shim process and its intentional curl child; a normal child of the agent
-/// sees paths, not secrets.
-///
-/// A pane whose environment names no capability file — an agent typed into a
-/// plain shell — reads the window's after-the-fact grant for its pane instead
-/// (`grant_pane_capabilities`), from the endpoint's own directory and only
-/// for a pane key of the window's spelling. The environment still wins when
-/// it carries a path.
 /// The agent mirror wrapper's conditional loader.
 ///
 /// The wrapper must load credentials only on the mirror path. If the mirror is
@@ -681,12 +668,6 @@ exec "{real}" "$@"
     )
 }
 
-/// The same loader for the PowerShell companion of the orchestration shim.
-///
-/// The endpoint is written in the POSIX assignment form even on the current
-/// Windows-compatible path, so only the one hook-token line is read here. The
-/// capability files contain a bare token and are read without invoking a shell.
-#[cfg(any(windows, test))]
 /// Tell a launched agent's hook that its first prompt already carries the
 /// orchestration selection contract. Kept beside `pty_env`, because this is a
 /// hook transport bit — not an agent-specific launch argument — and both the
