@@ -70,7 +70,7 @@ import { testBrowserWorkspace } from "./browser-workspace.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
-import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
+import { testJevCustomDecisions, testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
 import { testTerminalSelection } from "./terminal-selection.mjs";
@@ -319,6 +319,7 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
   await testJevDashboardResting(browser, origin, ok);
   await testJevDashboardEvidence(browser, origin, ok);
 });
+suite("jev-custom-decisions", ({ browser, origin, ok }) => testJevCustomDecisions(browser, origin, ok));
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));
 suite("pane-follow", ({ browser, origin, ok }) => testPaneFollowsCwd(browser, origin, ok));
