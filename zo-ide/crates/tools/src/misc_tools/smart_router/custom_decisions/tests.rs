@@ -477,3 +477,48 @@ fn outside_consent_or_scope_asks_nothing() {
         assert!(rows_now(cwd).is_empty(), "and nothing was written");
     });
 }
+
+/// No line that may carry a credential leaves zo: one in what a point lends
+/// is withheld from its request, and a definition holding one in its
+/// question or an option's name is not asked at all — its row says why,
+/// and holds none of it.
+#[test]
+fn secret_lines_never_leave() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        keep(&yes_no("Docs", Point::TurnStart), JevMode::On);
+        let task = format!("{TASK}\nAuthorization: Bearer {SECRET}\nthen say so");
+        assert_eq!(run_blocking(at_turn_start(cwd.to_path_buf(), task)).len(), 1, "the rest of the task was asked");
+        keep(&yes_no("Fetch", Point::BeforeCommand), JevMode::On);
+        let guard = ToolGuardJudge::at(cwd);
+        guard.command(command_ask(cwd, "fetch", &format!("curl -H 'Authorization: Bearer {SECRET}' https://example.invalid/a")));
+        assert!(run_blocking(guard.command_ran(finished("fetch"))).is_some(), "the rest of the command was asked");
+        let lent = rows_now(cwd);
+        assert!(lent.len() == 2 && lent.iter().all(|row| row["redactedLines"].as_u64() >= Some(1)), "{lent:?}");
+        let mut leaking = yes_no("Rotate", Point::TurnStart);
+        let rotate = keep(&leaking, JevMode::On);
+        leaking.question = format!("Rotate it?\nAuthorization: Bearer {SECRET}");
+        written_over(&rotate, &leaking);
+        let mut naming = choosing("Pick", Point::TurnStart, &["ship", "wait"]);
+        let pick = keep(&naming, JevMode::On);
+        naming.answer = Answer::Choice(BTreeMap::from([
+            ("ship".to_string(), "Ship it.".to_string()),
+            (SECRET_OPTION.to_string(), "Wait.".to_string()),
+        ]));
+        written_over(&pick, &naming);
+        let asked = mock.requests().len();
+        run_blocking(at_turn_start(cwd.to_path_buf(), TASK.to_string()));
+        assert_eq!(mock.requests().len(), asked + 1, "only the decision that keeps every rule was asked");
+        let rows = rows_now(cwd);
+        let word = Refusal::SecretLine { field: Field::Question, line: 1 }.word();
+        for entry in [&rotate, &pick] {
+            let written = rows_of(&rows, &entry.id);
+            assert_eq!(written.len(), 1, "{written:?}");
+            assert_eq!(written[0]["outcome"], word);
+        }
+        let ledger = fs::read_to_string(shadow_ledger_path(cwd, CUSTOM_DECISIONS.ledger)).expect("the ledger");
+        for said in mock.requests().iter().chain([&ledger]) {
+            assert!(!said.contains(SECRET) && !said.contains(SECRET_OPTION), "{said}");
+        }
+    });
+}
