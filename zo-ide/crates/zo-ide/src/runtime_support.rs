@@ -3602,6 +3602,8 @@ mod oauth_refresh_tests {
 mod tests {
     use super::*;
     use std::io;
+    #[cfg(unix)]
+    use std::sync::Arc;
 
     /// 2026-09-08, 「타자칠때마다 이게 계속 나타남」: the same five alias moves
     /// were announced on every keystroke. The announcement was keyed on the
