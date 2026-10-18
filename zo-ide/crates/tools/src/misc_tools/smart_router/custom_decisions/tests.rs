@@ -703,3 +703,10 @@ fn a_torn_index_asks_nothing_and_leaves_the_turn_as_it_was() {
 fn a_definition_that_no_longer_hashes_to_its_name_asks_nothing() {
     a_damaged_store_asks_nothing(Damage::ChangedBytes);
 }
+
+/// A definition past the size the store reads back asks nothing, writes
+/// nothing, and leaves the turn as it was.
+#[test]
+fn a_definition_past_the_size_the_store_reads_asks_nothing() {
+    a_damaged_store_asks_nothing(Damage::TooLarge);
+}
