@@ -731,10 +731,21 @@ pub fn pass_within_the_hour(
     {
         return Err(Refused::HourlyBudget);
     }
-    take_an_hours_place(hour.decision, hour.decision_most)?;
-    take_an_hours_place(hour.every, hour.every_most)?;
+    let before = (count::sent(hour.decision), count::sent(hour.every));
+    if let Err(refused) = take_an_hours_place(hour.decision, hour.decision_most)
+        .and_then(|()| take_an_hours_place(hour.every, hour.every_most))
+    {
+        return_hours(hour, before)?;
+        return Err(refused);
+    }
     take_a_place(settings, requests)?;
     Ok(cleared)
+}
+
+fn return_hours(hour: Hour<'_>, before: (u64, u64)) -> Result<(), Refused> {
+    let decision = count::return_hour_to(hour.decision, before.0);
+    let every = count::return_hour_to(hour.every, before.1);
+    decision.and(every).map_err(|_| Refused::HourlyBudget)
 }
 
 /// Count one request in an hour file and answer whether the hour had room

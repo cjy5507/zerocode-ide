@@ -102,6 +102,20 @@ pub fn count_one_in_the_hour(path: &Path) -> io::Result<u64> {
     Ok(place)
 }
 
+/// Return an hour file to `before` after a refused reservation. The caller
+/// must exclude other hour writers until the reservation is kept or returned.
+/// A failed return leaves the count high and must never allow the request.
+pub(super) fn return_hour_to(path: &Path, before: u64) -> io::Result<()> {
+    let file = match OpenOptions::new().write(true).open(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound && before == 0 => return Ok(()),
+        result => result?,
+    };
+    if file.metadata()?.len() > before {
+        file.set_len(before)?;
+    }
+    Ok(())
+}
+
 /// Append one request's byte to `path`: the place it took, and whether it
 /// was the file's first.
 fn append_one(path: &Path) -> io::Result<(u64, bool)> {

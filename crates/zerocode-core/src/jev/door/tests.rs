@@ -1239,7 +1239,11 @@ fn a_shared_hour_write_failure_returns_the_decisions_place() {
 
     assert_eq!(result.err(), Some(Refused::HourlyBudget));
     assert_eq!(
-        (count::sent(&decision), count::sent(&every), count::sent(&today)),
+        (
+            count::sent(&decision),
+            count::sent(&every),
+            count::sent(&today)
+        ),
         (1, 0, 1),
         "a shared hour that cannot be written spends no hourly or daily place",
     );
