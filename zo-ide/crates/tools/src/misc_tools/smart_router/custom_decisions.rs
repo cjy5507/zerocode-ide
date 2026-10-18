@@ -352,7 +352,14 @@ async fn judged(
     let (decision_hour, every_hour) =
         (count::hour_path(&home, &asked.entry.id, &hour), count::hour_path(&home, custom::EVERY_DECISION, &hour));
     let body = body_of(asked, lent);
-    let passed = door.pass(&CUSTOM_DECISIONS, client.is_some(), body);
+    let passed = door.pass_within_the_hour(
+        &CUSTOM_DECISIONS,
+        client.is_some(),
+        body,
+        &decision_hour,
+        asked.definition.max_per_hour,
+        &every_hour,
+    );
     let (cleared, client) = match (passed, client) {
         (Ok(cleared), Some(client)) => (cleared, client),
         (passed, _) => {
