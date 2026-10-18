@@ -122,7 +122,112 @@ def declared_limits(initial, tokens):
     return {"model": model, "runtime": runtime, "tokens": tokens}
 
 
+class LatencyMeasure:
+    def __init__(self, agent, measure, fits, head_budget, batch_size):
+        self.agent = agent
+        self.measure = measure
+        self.fits = fits
+        self.head_budget = head_budget
+        self.batch_size = batch_size
+        self.maximum = agent.cfg['max_len']
+        self.fixed = 0.0
+        self.per_token = 0.0
+        self.samples = []
+        probe = {'type': 'noul', 'instructions': 'Calibration.',
+                 'criteria': {'false': 'False', 'true': 'True'}}
+        if not fits(probe) or type(self.maximum) is not int or self.maximum <= 0:
+            raise ValueError('deadline_unmeasured')
+        short = {'probe': probe}
+        lower, upper = 0, self.maximum
+        while lower < upper:
+            middle = (lower + upper + 1) // 2
+            items = self.items('calibration ' * middle, short)
+            if any(item['state_stats']['state_tokens_dropped'] for item in items):
+                upper = middle - 1
+            else:
+                lower = middle
+        states = (('', 'short'), ('calibration ' * lower, 'long'))
+        self.agent.predict('', short)
+        for state, label in states:
+            for count in (1, batch_size):
+                questions = {'probe:%d' % index: probe for index in range(count)}
+                lengths = [len(item['ids']) for item in self.items(state, questions)]
+                began = time.perf_counter()
+                native = self.agent.predict(state, questions)
+                elapsed = time.perf_counter() - began
+                if elapsed <= 0 or native['usage'].get('truncated'):
+                    raise ValueError('deadline_unmeasured')
+                self.samples.append({'state': label, 'questions': count,
+                                     'lengths': lengths, 'seconds': elapsed})
+                if label == 'short':
+                    self.fixed = max(self.fixed, elapsed / count)
+                else:
+                    self.per_token = max(self.per_token, elapsed / self.work(lengths))
+        record = EncodingRecord(agent.tok)
+        head = measure.build_head(record, agent._to_internal(probe), head_budget)
+        self.wrapping = len(head[0]) - sum(len(ids) for ids in record.whole) - len(head[1])
+        self.state_suffix = len(self.items('', short)[0]['ids']) - len(head[0])
+
+    def items(self, state, questions):
+        return self.agent._encode_state(
+            state, list(questions),
+            {name: self.agent._to_internal(question) for name, question in questions.items()},
+        )
+
+    def work(self, lengths):
+        return sum(len(lengths[start:start + self.batch_size]) * max(lengths[start:start + self.batch_size])
+                   for start in range(0, len(lengths), self.batch_size))
+
+    def estimate(self, lengths):
+        return self.fixed * len(lengths) + self.per_token * self.work(lengths)
+
+    def observe(self, lengths, elapsed):
+        variable = max(0.0, elapsed - self.fixed * len(lengths))
+        work = self.work(lengths)
+        if work:
+            self.per_token = max(self.per_token, variable / work)
+
+    def future_count(self, question, pages):
+        if len(pages) < 2:
+            return 0
+        internal = self.agent._to_internal(question)
+        record = EncodingRecord(self.agent.tok)
+        self.measure.build_head(record, internal, self.head_budget)
+        ordered = sorted(zip(internal['crit'].items(), record.whole[1:]),
+                         key=lambda item: len(item[1]), reverse=True)
+        capacity = 1
+        for size in range(2, len(ordered) + 1):
+            criteria = dict(pair for pair, tokens in ordered[:size])
+            if not self.fits(dict(question, criteria=criteria)):
+                break
+            capacity = size
+        remaining = len(pages)
+        if capacity < 2:
+            return remaining * (remaining - 1) // 2
+        future = 0
+        while remaining > 1:
+            remaining = (remaining + capacity - 1) // capacity
+            future += remaining
+        return future
+
+    def plan(self, state, questions, pages):
+        flattened = {}
+        future = 0
+        for name, question in questions.items():
+            groups = pages[name]
+            for index, group in enumerate(groups):
+                flattened[name + ':' + str(index)] = group
+            future += self.future_count(question, groups)
+        items = self.items(state, flattened)
+        lengths = [len(item['ids']) for item in items]
+        state_tokens = items[0]['state_stats']['state_tokens']
+        longest = min(self.maximum, self.head_budget + self.wrapping + state_tokens + self.state_suffix)
+        return self.estimate(lengths) + future * (self.fixed + self.per_token * longest)
+
+
 class LayaAdapter:
+    batch_size = 4
+
     def __init__(self, initial):
         from laya import Agent, common
 
@@ -135,6 +240,12 @@ class LayaAdapter:
         )
         budget = loaded.get("head_max_len")
         self.head_budget = budget if type(budget) is int and budget > 0 else None
+        self.latency = None
+        if initial.get("measure_deadlines") and hasattr(self.agent, "_encode_state"):
+            try:
+                self.latency = LatencyMeasure(self.agent, self.measure, self.fits, self.head_budget, self.batch_size)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                self.latency = None
 
     def fits(self, question):
         if self.head_budget is None:
@@ -203,7 +314,19 @@ class LayaAdapter:
             "answer_confidence": min(clusters[winner]["answer_confidence"], answer_confidence, chance),
         }
 
+    def budget_refusal(self, usage, budget_ms, reason, estimated=None):
+        usage["deadline_budget_exceeded"] = True
+        usage["deadline_budget_ms"] = budget_ms
+        usage["deadline_budget_reason"] = reason
+        if estimated is not None:
+            usage["estimated_ms"] = max(0.0, estimated * 1000)
+        return {"answers": {}, "usage": usage}
+
     def predict(self, request, budget_ms=None):
+        began = time.perf_counter()
+        if budget_ms is not None and (type(budget_ms) is not int or budget_ms < 0):
+            raise ValueError("deadline_budget")
+        deadline = None if budget_ms is None else began + budget_ms / 1000
         answers = {}
         usage = {"input_tokens": 0, "output_tokens": 0, "model_calls": 0, "head_pages": {}}
         named = []
@@ -218,11 +341,29 @@ class LayaAdapter:
                 "partitioned": False,
             }
             usage["head_pages"][name] = {"pages": 0, "rounds": 0, "partitioned": False}
+        estimated = None
+        if deadline is not None:
+            initial_pages = {name: self.pages(question) for name, question in request["questions"].items()}
+            for name, groups in initial_pages.items():
+                usage["head_pages"][name]["partitioned"] = len(groups) > 1
+                pending[name]["initial_pages"] = groups
+            if self.head_budget is not None:
+                cut = [name for name, groups in initial_pages.items() if not all(self.fits(question) for question in groups)]
+                if cut:
+                    usage["truncated_questions"] = cut
+                    return {"answers": {}, "usage": usage}
+            if self.latency is None:
+                return self.budget_refusal(usage, budget_ms, "unmeasured")
+            estimated = self.latency.plan(request["state"], request["questions"], initial_pages)
+            usage["estimated_ms"] = estimated * 1000
+            usage["deadline_budget_ms"] = budget_ms
+            if time.perf_counter() + estimated >= deadline:
+                return self.budget_refusal(usage, budget_ms, "estimated", estimated)
         while pending:
             tasks = []
             used = set(request["questions"])
             for name, progress in pending.items():
-                pages = self.pages(progress["question"])
+                pages = progress.pop("initial_pages", None) or self.pages(progress["question"])
                 progress["partitioned"] = progress["partitioned"] or len(pages) > 1
                 progress["results"] = []
                 details = usage["head_pages"][name]
@@ -237,11 +378,20 @@ class LayaAdapter:
                     used.add(identifier)
                     tasks.append((identifier, name, page))
             failed = set()
-            for start in range(0, len(tasks), 4):
-                group = tasks[start:start + 4]
+            for start in range(0, len(tasks), self.batch_size):
+                group = tasks[start:start + self.batch_size]
                 batch = {identifier: question for identifier, _, question in group}
+                lengths = [len(item["ids"]) for item in self.latency.items(request["state"], batch)] if self.latency is not None else None
+                if deadline is not None:
+                    estimated = self.latency.estimate(lengths)
+                    if time.perf_counter() + estimated >= deadline:
+                        return self.budget_refusal(usage, budget_ms, "estimated", estimated)
+                started = time.perf_counter()
                 native, heads = self.measure.during(lambda: self.agent.predict(request["state"], batch))
+                elapsed = time.perf_counter() - started
                 usage["model_calls"] += 1
+                if self.latency is not None:
+                    self.latency.observe(lengths, elapsed)
                 measured = native["usage"]
                 for key in ("input_tokens", "output_tokens", "state_tokens_dropped"):
                     if key in measured:
@@ -262,6 +412,8 @@ class LayaAdapter:
                     pending[name]["results"].append((question, native["answers"][identifier]))
                 if measured.get("options"):
                     usage.setdefault("options", {}).update(measured["options"])
+                if deadline is not None and time.perf_counter() >= deadline:
+                    return self.budget_refusal(usage, budget_ms, "elapsed", estimated)
             following = {}
             for name, progress in pending.items():
                 results = progress["results"]
@@ -395,13 +547,18 @@ except Exception:
     os._exit(1)
 
 while True:
-    request = messages.get()
+    envelope = messages.get()
     try:
+        request, budget_ms = envelope, None
+        if isinstance(envelope, dict) and set(envelope) == {"request", "budget_ms"}:
+            request, budget_ms = envelope["request"], envelope["budget_ms"]
         if adapter is None:
             raise ValueError("model_missing")
         if "images" in request or "videos" in request:
             raise ValueError("input_not_supported")
-        result = adapter.predict(request)
+        started = time.perf_counter()
+        result = adapter.predict(request, budget_ms=budget_ms)
+        result["usage"]["processing_ms"] = (time.perf_counter() - started) * 1000
         result["model"] = initial["modelId"]
         reply(result)
     except Exception:

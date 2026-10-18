@@ -61,6 +61,7 @@ pub enum Refusal {
     TooLarge,
     SettingsChanged,
     Truncated,
+    DeadlineBudget,
 }
 
 impl Refusal {
@@ -77,6 +78,7 @@ impl Refusal {
             Self::TooLarge => "provider_response_too_large",
             Self::SettingsChanged => "settings_changed",
             Self::Truncated => "provider_context_truncated",
+            Self::DeadlineBudget => "provider_deadline_budget",
         }
     }
 }
