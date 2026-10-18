@@ -3248,25 +3248,33 @@ async fn browser_step_at(
     argv: &[String],
     logged: &[String],
     expected_revision: Option<u64>,
-) -> (zerocode_hookd::TeamAnswer, Option<zerocode_core::surface_execution::SurfaceExecution>) {
+) -> (
+    zerocode_hookd::TeamAnswer,
+    Option<zerocode_core::surface_execution::SurfaceExecution>,
+) {
     let actor = step_actor(app, pane);
     let observation = actor.on(run_evidence::observation());
-    let surface_context = zerocode_core::agent_browser::parse_workspace_command(argv, expected_revision)
-        .ok()
-        .and_then(|command| {
-            let label = command.argv.get(1)?;
-            let state = app.state::<AppState>();
-            let workspaces = &state.shell_runtime().browser_workspaces;
-            let check = workspaces.navigation_check(label, actor.pane.as_deref()).ok()?;
-            let snapshot = workspaces.snapshot(label).ok()??;
-            if !check.holds() {
-                return None;
-            }
-            let context = computer_use::surface_execution::BrowserContext::new(
-                actor.clone(), label, snapshot.revision,
-            )?;
-            Some((context, check))
-        });
+    let surface_context =
+        zerocode_core::agent_browser::parse_workspace_command(argv, expected_revision)
+            .ok()
+            .and_then(|command| {
+                let label = command.argv.get(1)?;
+                let state = app.state::<AppState>();
+                let workspaces = &state.shell_runtime().browser_workspaces;
+                let check = workspaces
+                    .navigation_check(label, actor.pane.as_deref())
+                    .ok()?;
+                let snapshot = workspaces.snapshot(label).ok()??;
+                if !check.holds() {
+                    return None;
+                }
+                let context = computer_use::surface_execution::BrowserContext::new(
+                    actor.clone(),
+                    label,
+                    snapshot.revision,
+                )?;
+                Some((context, check))
+            });
     let began = std::time::Instant::now();
     let mut control = None;
     let answer = answer_browser_command(app, argv, pane, expected_revision, &mut control).await;
