@@ -16,6 +16,7 @@ definitions = [
 ]
 bridge = {}
 exec(compile(ast.Module(body=definitions, type_ignores=[]), "owned-bridge", "exec"), bridge)
+compiled_shapes = json.load(sys.stdin) if len(sys.argv) > 2 and sys.argv[2] == "--compiled" else None
 
 # A stand-in for the laya runtime, for the bridge's own logic only: it proves nothing about real
 # tokens, which the contract test against the manifest-pinned runtime measures. Its head keeps
@@ -31,8 +32,11 @@ class Words:
     mask_token = "[MASK]"
     cls_token_id, sep_token_id, mask_token_id = 1, 2, 3
 
+    def __init__(self):
+        self.vocabulary = {}
+
     def __call__(self, text, add_special_tokens=True, truncation=False, max_length=None):
-        ids = [10 + len(piece) for piece in self.pieces(text)]
+        ids = [self.vocabulary.setdefault(piece, 10 + len(self.vocabulary)) for piece in self.pieces(text)]
         return {"input_ids": ids[:max_length] if truncation else ids}
 
     def pieces(self, text):
@@ -84,8 +88,16 @@ def stand_in_laya(through_module=True):
             build_head = common.build_head if through_module else stand_in_build_head
             for question in questions.values():
                 build_head(self.tok, self._to_internal(question), self.cfg.get("head_max_len", 64))
+            answers = {name: {"type": question["type"]} for name, question in questions.items()}
+            for name, question in questions.items():
+                if question["type"] == "choice":
+                    labels = list(question["criteria"])
+                    answers[name].update(
+                        choice=labels[0], probabilities={label: 1 / len(labels) for label in labels},
+                        confidence=0.0, answer_confidence=1 / len(labels),
+                    )
             return {
-                "answers": {name: {"type": question["type"]} for name, question in questions.items()},
+                "answers": answers,
                 "usage": {"input_tokens": 1, "output_tokens": 0, "truncated": False, "truncated_questions": []},
             }
 
@@ -121,6 +133,97 @@ def sized(instruction, options):
     return choice(instruction - 2, [" ".join(["word"] * (size - 1)) for size in options])
 
 
+def ranked_laya():
+    runtime = stand_in_laya()
+    original = runtime.Agent
+
+    class Ranked(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.submitted = []
+            self.returned = []
+
+        def predict(self, state, questions):
+            self.submitted.append((state, questions))
+            native = super().predict(state, questions)
+            for name, question in questions.items():
+                labels = list(question["criteria"])
+                winner = max(labels)
+                weights = {label: (20 if label == winner else 1) for label in labels}
+                total = sum(weights.values())
+                chance = self.cfg.get("first_probability" if self.batches == 1 else "final_probability")
+                probabilities = {label: weight / total for label, weight in weights.items()}
+                if chance is not None and len(labels) > 1:
+                    probabilities = {label: chance if label == winner else (1 - chance) / (len(labels) - 1) for label in labels}
+                native["answers"][name].update(
+                    choice=winner,
+                    probabilities=probabilities,
+                    confidence=self.cfg.get("first_confidence", 0.95) if self.batches == 1 else 0.95,
+                    answer_confidence=self.cfg.get("first_confidence", 0.95) if self.batches == 1 else 0.95,
+                )
+            self.returned.append(json.loads(json.dumps(native)))
+            return native
+
+    runtime.Agent = Ranked
+    return runtime
+
+
+class VirtualClock:
+    def __init__(self):
+        self.seconds = 0.0
+
+    def read(self):
+        return self.seconds
+
+
+def timed_laya(clock, gate=None):
+    runtime = ranked_laya()
+    original = runtime.Agent
+
+    class Timed(original):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.extra_seconds = 0.0
+            self.advanced = False
+
+        def _encode_state(self, state, identifiers, internal):
+            text = state if isinstance(state, str) else json.dumps(state, ensure_ascii=False)
+            state_ids = self.tok(text, add_special_tokens=False)['input_ids']
+            items = []
+            for identifier in identifiers:
+                head = runtime.common.build_head(self.tok, internal[identifier], self.cfg['head_max_len'])[0]
+                room = max(0, self.cfg['max_len'] - len(head) - 1)
+                used = state_ids[:room]
+                items.append({
+                    'ids': head + used + [self.tok.sep_token_id],
+                    'state_stats': {'state_tokens': len(state_ids), 'state_tokens_used': len(used),
+                                    'state_tokens_dropped': len(state_ids) - len(used)},
+                })
+            return items
+
+        def predict(self, state, questions):
+            if gate is not None and isinstance(state, dict) and state.get('controlled'):
+                gate()
+            result = super().predict(state, questions)
+            items = self._encode_state(state, list(questions),
+                                       {name: self._to_internal(question) for name, question in questions.items()})
+            lengths = [len(item['ids']) for item in items]
+            clock.seconds += self.cfg.get('fixed_seconds', 0.001) * len(lengths)
+            clock.seconds += self.cfg.get('seconds_per_token', 0.00001) * len(lengths) * max(lengths)
+            if isinstance(state, dict) and state.get('advance_seconds') and not self.advanced:
+                clock.seconds += state['advance_seconds']
+                self.advanced = True
+            clock.seconds += self.extra_seconds
+            self.extra_seconds = 0.0
+            for name, question in questions.items():
+                if question['type'] == 'noul':
+                    result['answers'][name]['noul'] = 0.5
+            return result
+
+    runtime.Agent = Timed
+    return runtime
+
+
 class BridgeBoundary(unittest.TestCase):
     def laya(self, config, stand_in=None, start=None):
         folder = tempfile.TemporaryDirectory()
@@ -140,6 +243,163 @@ class BridgeBoundary(unittest.TestCase):
 
     def named(self, adapter, questions):
         return adapter.predict({"state": "fixture state", "questions": questions})["usage"].get("truncated_questions")
+
+    def test_crowded_choices_keep_every_word_and_offer_every_option(self):
+        for budget, tokenizer in ((40, "words"), (64, "words"), (96, "letters")):
+            with self.subTest(budget=budget, tokenizer=tokenizer):
+                adapter, _ = self.laya(
+                    {"max_len": 1024, "head_max_len": budget, "tokenizer": tokenizer}, ranked_laya()
+                )
+                question = choice(8, ["visible control %d" % index for index in range(20)])
+                result = adapter.predict({"state": {"goal": "open the final control"}, "questions": {"action": question}})
+                self.assertFalse(result["usage"].get("truncated_questions"), "a pageable head was still refused")
+                submitted = [asked for _, batch in adapter.agent.submitted for asked in batch.values()]
+                seen = set()
+                for asked in submitted:
+                    self.assertEqual(asked["instructions"], question["instructions"])
+                    _, whole = bridge["measured_head"](
+                        stand_in_build_head, adapter.agent.tok, adapter.agent._to_internal(asked), budget
+                    )
+                    self.assertTrue(whole, "inference received a cut head")
+                    seen.update(asked["criteria"])
+                self.assertEqual(seen, set(question["criteria"]))
+                self.assertGreater(adapter.agent.batches, 1)
+                self.assertEqual(result["usage"]["model_calls"], adapter.agent.batches)
+                answer = result["answers"]["action"]
+                self.assertEqual(set(answer["probabilities"]), set(question["criteria"]))
+                self.assertAlmostEqual(sum(answer["probabilities"].values()), 1.0)
+                self.assertEqual(answer["choice"], max(question["criteria"]))
+                self.assertLessEqual(answer["answer_confidence"], max(answer["probabilities"].values()))
+
+    def test_pages_that_cannot_compare_any_pair_keep_the_cut_refusal(self):
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 20}, ranked_laya())
+        question = choice(8, ["one two three four five six seven eight"] * 10)
+        self.assertEqual(self.named(adapter, {"action": question}), ["action"])
+        self.assertEqual(adapter.agent.batches, 1)
+
+    def test_pages_do_not_hide_identical_option_encodings_in_different_groups(self):
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 40}, ranked_laya())
+        descriptions = ["control %d" % index for index in range(20)]
+        descriptions[-1] = descriptions[0]
+        self.assertEqual(self.named(adapter, {"action": choice(8, descriptions)}), ["action"])
+
+    def test_a_page_winner_must_belong_to_the_page_it_was_asked(self):
+        runtime = ranked_laya()
+        original = runtime.Agent
+
+        class Unoffered(original):
+            def predict(self, state, questions):
+                native = super().predict(state, questions)
+                for answer in native["answers"].values():
+                    answer["choice"] = "unoffered"
+                return native
+
+        runtime.Agent = Unoffered
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 40}, runtime)
+        with self.assertRaisesRegex(ValueError, "page_answer"):
+            adapter.predict({"state": "same evidence", "questions": {"action": choice(8, ["control %d" % index for index in range(20)])}})
+
+    def test_a_choice_that_already_fits_keeps_the_native_answer(self):
+        adapter, _ = self.laya({"max_len": 1024, "head_max_len": 256}, ranked_laya())
+        question = choice(4)
+        result = adapter.predict({"state": "unchanged", "questions": {"action": question}})
+        self.assertEqual(adapter.agent.batches, 1)
+        self.assertEqual(adapter.agent.submitted[0][1], {"action": question})
+        self.assertEqual(result["answers"]["action"]["answer_confidence"], 0.95)
+
+    def test_a_final_round_cannot_raise_a_weak_winners_confidence(self):
+        adapter, _ = self.laya(
+            {"max_len": 1024, "head_max_len": 40, "first_confidence": 0.3,
+             "first_probability": 0.3, "final_probability": 0.9}, ranked_laya()
+        )
+        result = adapter.predict({"state": "same evidence", "questions": {"action": choice(8, ["control %d" % index for index in range(20)])}})
+        self.assertFalse(result["usage"].get("truncated_questions"), "a pageable head was still refused")
+        answer = result["answers"]["action"]
+        self.assertLessEqual(answer["confidence"], 0.3, "a smaller final choice inflated confidence")
+        self.assertLessEqual(answer["answer_confidence"], 0.3)
+        self.assertLessEqual(answer["probabilities"][answer["choice"]], 0.3)
+        self.assertLessEqual(answer["probabilities"][answer["choice"]], 0.9)
+        self.assertEqual(set(answer["probabilities"]), set(choice(8, ["control %d" % index for index in range(20)])["criteria"]))
+        self.assertAlmostEqual(sum(answer["probabilities"].values()), 1.0)
+        self.assertGreater(result["usage"]["head_pages"]["action"]["pages"], 1)
+
+    @unittest.skipUnless(compiled_shapes is not None, "the Rust boundary test supplies compiled questions")
+    def test_compiled_goal_shapes_keep_fixed_options_and_controls(self):
+        tokenizer = Words()
+        questions = [question for fixture in compiled_shapes for question in fixture["request"]["questions"].values()]
+        instructions = max(len(tokenizer(question["type"] + " question: " + question["instructions"])["input_ids"])
+                           for question in questions)
+        option_size = max(len(tokenizer(description)["input_ids"]) + 1
+                          for question in questions for description in question["criteria"].values())
+        budget = instructions + 2 * option_size
+        for fixture in compiled_shapes:
+            with self.subTest(shape=fixture["shape"]):
+                adapter, _ = self.laya({"max_len": budget * 8, "head_max_len": budget}, ranked_laya())
+                result = adapter.predict(fixture["request"])
+                self.assertFalse(result["usage"].get("truncated_questions"), "a compiled pageable head was still refused")
+                self.assertEqual(set(result["answers"]), set(fixture["request"]["questions"]))
+                seen = set()
+                for state, batch in adapter.agent.submitted:
+                    self.assertEqual(state, fixture["request"]["state"])
+                    for question in batch.values():
+                        _, whole = bridge["measured_head"](
+                            stand_in_build_head, adapter.agent.tok, adapter.agent._to_internal(question), budget
+                        )
+                        self.assertTrue(whole, "a compiled request submitted a cut head")
+                        if question["type"] == "choice":
+                            self.assertEqual(question["instructions"], fixture["request"]["questions"]["action"]["instructions"])
+                            seen.update(question["criteria"])
+                self.assertEqual(seen, set(fixture["request"]["questions"]["action"]["criteria"]))
+
+    def test_a_budget_below_measured_work_refuses_before_any_model_call(self):
+        clock = VirtualClock()
+        with patch.object(bridge['time'], 'perf_counter', clock.read):
+            adapter, _ = self.laya(
+                {'max_len': 512, 'head_max_len': 40, 'seconds_per_token': 0.001},
+                timed_laya(clock), start={'measure_deadlines': True},
+            )
+            calibrated = adapter.agent.batches
+            self.assertGreater(calibrated, 0, 'the runtime cost was never measured')
+            question = choice(8, ['control %d' % index for index in range(20)])
+            result = adapter.predict({'state': 'context ' * 200, 'questions': {'action': question}}, budget_ms=200)
+            self.assertTrue(result['usage'].get('deadline_budget_exceeded'), 'a known over-budget request reached inference')
+            self.assertEqual(result['answers'], {})
+            self.assertEqual(result['usage']['model_calls'], 0)
+            self.assertEqual(adapter.agent.batches, calibrated)
+            self.assertGreater(result['usage']['estimated_ms'], 200)
+
+    def test_an_expired_budget_stops_at_the_batch_boundary_and_the_next_request_runs(self):
+        clock = VirtualClock()
+        with patch.object(bridge['time'], 'perf_counter', clock.read):
+            adapter, _ = self.laya(
+                {'max_len': 512, 'head_max_len': 40, 'seconds_per_token': 0.001},
+                timed_laya(clock), start={'measure_deadlines': True},
+            )
+            calibrated = adapter.agent.batches
+            adapter.agent.extra_seconds = 1.0
+            question = choice(8, ['control %d' % index for index in range(20)])
+            result = adapter.predict({'state': '', 'questions': {'action': question}}, budget_ms=500)
+            self.assertTrue(result['usage'].get('deadline_budget_exceeded'), 'an expired budget continued to its next batch')
+            self.assertEqual(result['answers'], {})
+            self.assertEqual(result['usage']['model_calls'], 1)
+            self.assertEqual(adapter.agent.batches, calibrated + 1)
+            following = adapter.predict({'state': '', 'questions': {'only': choice(1)}}, budget_ms=500)
+            self.assertFalse(following['usage'].get('deadline_budget_exceeded'))
+            self.assertIn('only', following['answers'])
+            self.assertEqual(following['usage']['model_calls'], 1)
+
+    def test_a_legacy_request_without_a_budget_still_calls_the_model(self):
+        clock = VirtualClock()
+        with patch.object(bridge['time'], 'perf_counter', clock.read):
+            adapter, _ = self.laya(
+                {'max_len': 512, 'head_max_len': 40, 'fixed_seconds': 10.0, 'seconds_per_token': 1.0},
+                timed_laya(clock), start={'measure_deadlines': True},
+            )
+            calibrated = adapter.agent.batches
+            result = adapter.predict({'state': '', 'questions': {'only': choice(1)}})
+            self.assertFalse(result['usage'].get('deadline_budget_exceeded'))
+            self.assertIn('only', result['answers'])
+            self.assertEqual(adapter.agent.batches, calibrated + 1)
 
     def test_loaders_force_offline_mode_and_replace_untrusted_templates(self):
         received = []
@@ -233,13 +493,13 @@ class BridgeBoundary(unittest.TestCase):
             "an option the runtime capped was answered as whole",
         )
 
-    def test_a_question_whose_options_the_runtime_recuts_is_named(self):
+    def test_a_question_whose_options_the_runtime_recuts_is_paged(self):
         adapter, _ = self.laya({"max_len": 1024, "head_max_len": 40})
         crowded = choice(2, ("a b c d e f", "g h i j k l", "m n o p q r", "s t u v w x"))
         self.assertEqual(
             self.named(adapter, {"goal": crowded, "other": choice(2)}),
-            ["goal"],
-            "options the runtime re-cut were answered as whole",
+            None,
+            "options the runtime re-cut were not recovered by paging",
         )
 
     def test_the_named_questions_follow_the_loaded_budget_and_the_tokenizer(self):
@@ -421,4 +681,4 @@ class BridgeBoundary(unittest.TestCase):
         self.assertEqual(answered["answers"], refused["answers"])
 
 
-unittest.main(argv=["bridge-boundary"], verbosity=2)
+unittest.main(argv=["bridge-boundary"] + (["BridgeBoundary.test_compiled_goal_shapes_keep_fixed_options_and_controls"] if compiled_shapes is not None else []), verbosity=2)

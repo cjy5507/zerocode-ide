@@ -154,6 +154,9 @@ pub(super) struct LandingBase {
     pub(super) name: Option<String>,
     pub(super) oid: Option<String>,
     pub(super) updated_ms: Option<i64>,
+    /// The repository and pin this was asked for: what [`known_landing_base`] is asked again to
+    /// tell whether an answer that stood on `oid` is still today's (t-44451).
+    pub(super) asked_of: KnownRepo,
 }
 
 /// The one door the git of this module goes through, with `--no-optional-locks`
@@ -209,11 +212,16 @@ pub(super) fn resolve_landing_base(
                 }
             })
         });
+    let asked_of = KnownRepo {
+        root: repo_root.to_path_buf(),
+        pinned: pinned.map(str::to_string),
+    };
     let Some(name) = name else {
         return LandingBase {
             name: None,
             oid: None,
             updated_ms: None,
+            asked_of,
         };
     };
     let oid = landing_git_text(
@@ -239,6 +247,7 @@ pub(super) fn resolve_landing_base(
         name: Some(name),
         oid,
         updated_ms,
+        asked_of,
     }
 }
 
@@ -281,6 +290,8 @@ struct HeldLanding {
     /// `overlap`을 읽은 작업 폴더 변경의 지문([`changes_mark`]). 열쇠(머리·비교 ref·브랜치)와
     /// 이것이 같으면 겹침도 같다 — 겹침이 읽는 것은 그 셋과 바뀐 추적 파일의 목록뿐이다.
     changes: Option<u64>,
+    /// The repository and pin the compare ref was asked for, as [`LandingBase::asked_of`].
+    asked_of: Option<KnownRepo>,
     landing: WorktreeLanding,
 }
 
@@ -328,11 +339,20 @@ fn millis(ttl: Duration) -> i64 {
 /// compare ref's oid the classification stood on, what git said of the work, and whether a pane is in
 /// the folder now. Reads the cache only — no git, no process, no new loop — so a checkout the sidebar
 /// never classified has no witness and the ledger hears nothing of git for it.
+///
+/// A held answer outlives its folder, and nothing reads a removed checkout again: a folder that is
+/// gone is no witness, whatever was last said of it (t-44451). That costs one `stat`. Nor is an
+/// answer that stood on a compare oid the window no longer holds as today's: the window reads its
+/// catalog again only while it is shown, and this is asked every minute. Work that landed stays
+/// landed, as [`commit_stands`] holds it.
 pub(crate) fn witness_for(
     path: &Path,
     occupied: bool,
 ) -> Option<zerocode_core::orchestration::landing_watch::LandingWitness> {
     use zerocode_core::orchestration::landing_watch::{ConflictCell, GitSays, LandingWitness};
+    if !path.is_dir() {
+        return None;
+    }
     let held = held_landing(path)?;
     // The key is `head|compare oid|branch`; a failure is held under an empty key and is no witness.
     let mut parts = held.key.splitn(3, '|');
@@ -340,6 +360,18 @@ pub(crate) fn witness_for(
     let compare_oid = parts.next().unwrap_or("");
     let branch = parts.next().filter(|branch| !branch.is_empty());
     let landing = &held.landing;
+    // A repository whose `.git` is not a directory has its compare ref asked of git on every read
+    // (`landing_base`): no oid of today is held for it, and its answer keeps the rule it had.
+    let stale = held.asked_of.as_ref().is_some_and(|repo| {
+        repo.root.join(".git").is_dir()
+            && known_landing_base(&repo.root, repo.pinned.as_deref())
+                .and_then(|base| base.oid)
+                .as_deref()
+                != Some(compare_oid)
+    });
+    if landing.state != "landed" && stale {
+        return None;
+    }
     let git = match landing.state {
         "landed" => GitSays::Landed {
             at_ms: landing.landed_in.as_ref().map(|taken| taken.time_ms),
@@ -553,6 +585,7 @@ fn hold_failure(path: &Path, base: Option<&LandingBase>) {
         HeldLanding {
             key: String::new(),
             changes: None,
+            asked_of: base.map(|base| base.asked_of.clone()),
             landing: WorktreeLanding::failed(base),
         },
     );
@@ -651,6 +684,7 @@ fn worktree_landing_within(
         HeldLanding {
             key,
             changes: Some(changes),
+            asked_of: Some(base.asked_of.clone()),
             landing: landing.clone(),
         },
     );
@@ -2394,6 +2428,144 @@ mod tests {
                 .iter()
                 .all(|one| one.landing.as_ref().map(|landing| landing.state) == Some("no_commits"))
         );
+    }
+
+    /// The catalog reads one checkout and its job answers, as the sidebar does; then what the
+    /// ledger's watch is handed for it.
+    fn witnessed(
+        bench: &Bench,
+        wt: &Path,
+        branch: &str,
+    ) -> Option<zerocode_core::orchestration::landing_watch::LandingWitness> {
+        let head = git(wt, &["rev-parse", "HEAD"]);
+        let mut rows = [entry(wt, branch, &head)];
+        if let Some(job) = plan_landings(&mut rows, &bench.repo, None) {
+            noticed(&job);
+        }
+        witness_for(wt, false)
+    }
+
+    fn is_unlanded(
+        witness: Option<&zerocode_core::orchestration::landing_watch::LandingWitness>,
+    ) -> bool {
+        matches!(
+            witness.map(|held| &held.git),
+            Some(zerocode_core::orchestration::landing_watch::GitSays::Unlanded { .. })
+        )
+    }
+
+    /// A checkout that stands and holds work main does not have is told to the ledger, minute
+    /// after minute, with the head and the compare oid the answer stood on (t-44451).
+    #[test]
+    fn a_standing_unlanded_checkout_is_the_ledgers_witness() {
+        let bench = Bench::open();
+        let wt = bench.worktree("told");
+        bench.commit(&wt, "w.txt", "work\n");
+        let witness = witnessed(&bench, &wt, "wt/told").expect("a classified checkout");
+        assert!(is_unlanded(Some(&witness)));
+        assert_eq!(witness.head, git(&wt, &["rev-parse", "HEAD"]));
+        assert_eq!(
+            witness.compare_oid,
+            git(&bench.repo, &["rev-parse", "origin/main"])
+        );
+        assert_eq!(witness.branch.as_deref(), Some("wt/told"));
+        assert!(is_unlanded(witness_for(&wt, false).as_ref()));
+    }
+
+    /// The window's last answer for a checkout outlives the folder. Once the folder is gone that
+    /// answer is no fact of today: "unlanded" told the ledger merged work was not in main, and
+    /// "landed" told it nobody was in a folder that is not there (t-44451).
+    #[test]
+    fn a_removed_checkout_is_no_witness() {
+        let bench = Bench::open();
+        let unlanded = bench.worktree("gone-unlanded");
+        bench.commit(&unlanded, "u.txt", "work\n");
+        assert!(is_unlanded(
+            witnessed(&bench, &unlanded, "wt/gone-unlanded").as_ref()
+        ));
+        let landed = bench.worktree("gone-landed");
+        bench.commit(&landed, "l.txt", "work\n");
+        git(&bench.repo, &["merge", "--ff-only", "-q", "wt/gone-landed"]);
+        bench.publish();
+        assert!(matches!(
+            witnessed(&bench, &landed, "wt/gone-landed").map(|held| held.git),
+            Some(zerocode_core::orchestration::landing_watch::GitSays::Landed { .. })
+        ));
+        for wt in [&unlanded, &landed] {
+            git(
+                &bench.repo,
+                &["worktree", "remove", "--force", &wt.to_string_lossy()],
+            );
+            assert!(!wt.exists(), "the checkout is gone");
+            assert_eq!(
+                witness_for(wt, false),
+                None,
+                "a removed checkout is no witness"
+            );
+        }
+    }
+
+    /// An answer stands on the compare oid it was read at. The window reads its catalog again
+    /// only while it is shown, and the ledger's watch asks every minute: once main has moved,
+    /// an old "unlanded" is no fact of today. Here main took the work, and the old answer would
+    /// tell the ledger that merged work is not in main (t-44451). Work that landed stays landed.
+    #[test]
+    fn an_answer_read_before_the_compare_ref_moved_is_no_witness() {
+        let bench = Bench::open();
+        let wt = bench.worktree("moved");
+        bench.commit(&wt, "w.txt", "work\n");
+        assert!(is_unlanded(witnessed(&bench, &wt, "wt/moved").as_ref()));
+        git(
+            &bench.repo,
+            &["merge", "--no-ff", "-q", "-m", "merge it", "wt/moved"],
+        );
+        bench.publish();
+        assert_eq!(
+            witness_for(&wt, false),
+            None,
+            "nothing knows the compare oid of today yet"
+        );
+        // Another row's job reads the compare ref again; this row's answer is still the old one.
+        let host = Host::for_workspace(&bench.repo);
+        landing_base(&host, &bench.repo, None);
+        assert_eq!(
+            witness_for(&wt, false),
+            None,
+            "the answer stood on an oid the compare ref has left"
+        );
+        let landed = witnessed(&bench, &wt, "wt/moved").map(|held| held.git);
+        assert!(matches!(
+            landed,
+            Some(zerocode_core::orchestration::landing_watch::GitSays::Landed { .. })
+        ));
+        bench.commit(&bench.repo, "m.txt", "main moves on\n");
+        bench.publish();
+        assert_eq!(witness_for(&wt, false).map(|held| held.git), landed);
+    }
+
+    /// A project opened at a linked checkout has its compare ref asked of git on every read
+    /// ([`landing_base`]), so no oid of today is held to measure an answer against. Its checkouts
+    /// keep the rule they had: the answer of a folder that stands is the witness, and a folder that
+    /// is gone is none (t-44451).
+    #[test]
+    fn a_project_opened_at_a_linked_checkout_keeps_its_witness_while_the_folder_stands() {
+        let bench = Bench::open();
+        let home = bench.worktree("home");
+        let wt = bench.worktree("linked-told");
+        bench.commit(&wt, "w.txt", "work\n");
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let mut rows = [entry(&wt, "wt/linked-told", &head)];
+        let job = plan_landings(&mut rows, &home, None).expect("first read");
+        assert_eq!(noticed(&job), 1);
+        assert!(
+            is_unlanded(witness_for(&wt, false).as_ref()),
+            "unlanded work in a project opened at a linked checkout is told"
+        );
+        git(
+            &bench.repo,
+            &["worktree", "remove", "--force", &wt.to_string_lossy()],
+        );
+        assert_eq!(witness_for(&wt, false), None);
     }
 
     fn the_repo(bench: &Bench) -> Vec<KnownRepo> {

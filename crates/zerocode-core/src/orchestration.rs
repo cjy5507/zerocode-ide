@@ -18406,6 +18406,9 @@ fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
         (_, _, Some(Refused::Budget)) => {
             "No difficulty judgment: today's Jev request budget is spent.".to_string()
         }
+        (_, _, Some(Refused::HourlyBudget)) => {
+            "No difficulty judgment: this hour's Jev request limit is spent.".to_string()
+        }
         (_, _, Some(Refused::SettingsChanged)) => {
             "No difficulty judgment: the Jev settings changed while it was asked.".to_string()
         }

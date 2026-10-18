@@ -469,13 +469,44 @@ mod tests {
         let accepted = accepted_within(&listener, FIRST_ACCEPT_DEADLINE, SECOND_ACCEPT_QUIET);
         assert_eq!(accepted, 1, "the same channel was connected to again");
 
-        // Nobody listens on a port that was just released.
-        let closed = {
-            let gone = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-            gone.local_addr().expect("addr")
-        };
+        // Nobody answers on a port the test holds without listening.
+        let (_held, closed) = a_port_nobody_answers_on();
         assert!(!watch.hold_channel(closed));
         assert!(!watch.holds_channel(), "a refused channel replaced the held one with nothing held");
+    }
+
+    /// A loopback port nobody answers on while the returned socket lives. The
+    /// socket holds 127.0.0.1 at that port bound without listening: no other
+    /// socket can bind that address, and macOS answers no connect to it, even
+    /// beside a listener on the same port of every address, so the watch's
+    /// connect budget ends the attempt (t-47435).
+    fn a_port_nobody_answers_on() -> (std::os::fd::OwnedFd, std::net::SocketAddr) {
+        use std::os::fd::AsRawFd as _;
+
+        use nix::sys::socket::{
+            AddressFamily, SockFlag, SockType, SockaddrIn, bind, getsockname, socket,
+        };
+
+        let held = socket(AddressFamily::Inet, SockType::Stream, SockFlag::empty(), None)
+            .expect("socket");
+        bind(held.as_raw_fd(), &SockaddrIn::new(127, 0, 0, 1, 0)).expect("bind");
+        let bound: SockaddrIn = getsockname(held.as_raw_fd()).expect("bound address");
+        (held, std::net::SocketAddr::V4(bound.into()))
+    }
+
+    /// Under load another test binary can bind a released port before the
+    /// watch connects to it (t-47435). Here a neighbour takes it first: while
+    /// the port is the test's, nobody else can listen on it.
+    #[test]
+    fn a_neighbour_cannot_answer_on_the_port_nobody_answers_on() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mut watch = ChildWatch::open(directory.path()).expect("watch");
+        let (_held, closed) = a_port_nobody_answers_on();
+        let neighbour = std::net::TcpListener::bind(closed).ok();
+        assert!(
+            !watch.hold_channel(closed),
+            "a neighbour that bound the port answered for it: {neighbour:?}"
+        );
     }
 
     /// Another thread ends a rest at once, and the rest says nothing about the

@@ -68,5 +68,10 @@ session-corpus = { path = "../session-corpus" }
 # (t-19897). Only the test build of this crate turns the feature on.
 plugins = { path = "../plugins", features = ["order-trace"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+# A test holds a loopback port bound without listening, so no other test binary
+# can listen there (t-47435). Only the test build turns the feature on.
+nix = { version = "0.29", features = ["net"] }
+
 [lints]
 workspace = true

@@ -77,6 +77,7 @@ async fn an_io_failure_closes_admission_before_its_supervisor_is_polled_again() 
         ticket,
         b"{}".to_vec(),
         None,
+        None,
     ));
     {
         let _io = lock(&state.engine.io);
@@ -133,6 +134,71 @@ async fn a_prepared_frame_at_the_pipe_limit_is_refused_without_stopping_the_runt
     assert!(state.engine.alive());
     assert_eq!(running.admitted(), 0);
     assert!(!root.path().join("received").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_deadline_owner_stops_inference_before_its_release_signal() {
+    use std::os::unix::net::UnixListener;
+
+    let root = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(root.path().join("release.sock")).unwrap();
+    let program = r#"import json,socket,sys
+from pathlib import Path
+frame=json.loads(sys.stdin.readline())
+request=frame.get('request',frame)
+release=socket.socket(socket.AF_UNIX)
+release.connect(str(Path(sys.argv[1])/'release.sock'))
+release.recv(1)
+print(json.dumps({'model':request['model'],'answers':{'only':{'type':'noul','noul':0.5}},'usage':{'input_tokens':1,'output_tokens':0}}),flush=True)
+sys.stdin.read()
+"#;
+    let (_running, state) = fixture(program, root.path()).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::HOST,
+        state
+            .provider
+            .base_url
+            .trim_start_matches("http://")
+            .parse()
+            .unwrap(),
+    );
+    headers.insert(
+        judgment_provider::DEADLINE_HEADER,
+        zerocode_core::jev::BROWSER
+            .apply_deadline_ms
+            .unwrap()
+            .to_string()
+            .parse()
+            .unwrap(),
+    );
+    let body = serde_json::to_vec(&json!({
+        "model": state.provider.model,
+        "state": "fixture",
+        "questions": {"only": {"type": "noul", "instructions": "fixture"}},
+    }))
+    .unwrap();
+    let called = state.clone();
+    let owner =
+        tokio::spawn(async move { predict(State(called), headers, Bytes::from(body)).await });
+    let (mut release, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::task::spawn_blocking(move || listener.accept()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    let stopped_before_release = !state.engine.alive();
+    let closed_before_release = state.admission.turn.is_closed();
+    let _ = release.write_all(b"release");
+    state.engine.stop();
+    assert!(
+        stopped_before_release && closed_before_release,
+        "a cancelled deadline owner left native inference running before its release signal"
+    );
 }
 
 #[test]
@@ -463,6 +529,499 @@ async fn a_ready_frame_declares_limits_only_for_its_own_model_and_runtime() {
 /// model the contract test below runs. No other test reads it.
 const PINNED_ROOT: &str = "LOCAL_JUDGMENT_PINNED_ROOT";
 
+fn compiled_goal_head_shapes() -> Vec<Value> {
+    use zerocode_core::screen_action::{
+        ActionLook, Beside, Errand, MAX_ACTION_CANDIDATES, MORE_CONTROLS, Navigation, Where,
+        ask_with, mark_of,
+    };
+
+    let navigation_sets: [(&str, &[Navigation]); 5] = [
+        ("none", &[]),
+        ("wait", &[Navigation::Wait]),
+        ("page", &Navigation::PAGE),
+        ("desktop", &Navigation::DESKTOP),
+        ("all", &Navigation::ALL),
+    ];
+    let mut shapes = Vec::new();
+    for (legend, label) in [
+        ("short", "Open workspace"),
+        (
+            "long",
+            "Open the project workspace and review the latest completed test results, including the detailed status for each selected task",
+        ),
+    ] {
+        let items: Vec<Value> = (1..=MAX_ACTION_CANDIDATES + 1)
+            .map(|mark| {
+                json!({
+                    "mark": mark, "role": "button", "label": format!("{label} {mark}"),
+                    "centerX": 100 + mark * 20, "centerY": 200 + mark * 30,
+                })
+            })
+            .collect();
+        let look = ActionLook {
+            goal: "Open the task workspace, then confirm test completion.",
+            errand: Errand::Goal,
+            at: Where::Page {
+                host: "example.test",
+                path: "/start",
+            },
+            tried: &[],
+            items: &items,
+            pressed: &[],
+            shows: &[],
+        };
+        let crowded = ask_with(
+            &look,
+            &Beside {
+                navigation: &Navigation::ALL,
+                ..Beside::default()
+            },
+        )
+        .unwrap();
+        for (navigation_name, navigation) in navigation_sets {
+            for count in 0..=MAX_ACTION_CANDIDATES {
+                for more in [false, true] {
+                    let available = count.max(1);
+                    let mut asked = ask_with(
+                        &ActionLook {
+                            items: &items[..available],
+                            ..look
+                        },
+                        &Beside {
+                            navigation,
+                            ..Beside::default()
+                        },
+                    )
+                    .unwrap();
+                    if more {
+                        asked.questions["action"]["instructions"] =
+                            crowded.questions["action"]["instructions"].clone();
+                        asked.questions["action"]["criteria"][MORE_CONTROLS] =
+                            crowded.questions["action"]["criteria"][MORE_CONTROLS].clone();
+                    }
+                    asked.questions["action"]["criteria"]
+                        .as_object_mut()
+                        .unwrap()
+                        .retain(|option, _| mark_of(option).is_none_or(|mark| mark <= count));
+                    let candidates = asked.state["candidates"].as_array_mut().unwrap();
+                    candidates.truncate(count);
+                    shapes.push(json!({
+                        "shape": {"legend": legend, "navigation": navigation_name, "candidates": count, "more": more},
+                        "request": {"state": asked.state, "questions": asked.questions},
+                    }));
+                }
+            }
+        }
+    }
+    shapes
+}
+
+fn compiled_recorded_goal_heads() -> Vec<Value> {
+    use zerocode_core::screen_action::{ActionLook, Beside, Errand, Navigation, Where, ask_with};
+
+    let Some(root) = std::env::var_os("LOCAL_JUDGMENT_RECORDED_TRIAL") else {
+        return Vec::new();
+    };
+    let root = Path::new(&root);
+    let fixture: Value =
+        serde_json::from_slice(&std::fs::read(root.join("fixture.json")).unwrap()).unwrap();
+    let marks: Value =
+        serde_json::from_slice(&std::fs::read(root.join("marks.txt")).unwrap()).unwrap();
+    let address = url::Url::parse(fixture["url"].as_str().unwrap()).unwrap();
+    [false, true]
+        .into_iter()
+        .map(|navigation| {
+            let asked = ask_with(
+                &ActionLook {
+                    goal: fixture["goal"].as_str().unwrap(),
+                    errand: Errand::Goal,
+                    at: Where::Page {
+                        host: address.host_str().unwrap(),
+                        path: address.path(),
+                    },
+                    tried: &[],
+                    items: marks["items"].as_array().unwrap(),
+                    pressed: &[],
+                    shows: &[],
+                },
+                &Beside {
+                    navigation: if navigation { &Navigation::PAGE } else { &[] },
+                    ..Beside::default()
+                },
+            )
+            .unwrap();
+            json!({
+                "shape": {"legend": "recorded", "navigation": if navigation { "page" } else { "none" },
+                          "candidates": asked.marks().len(), "more": false},
+                "request": {"state": asked.state, "questions": asked.questions},
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn compiled_goal_shapes_fit_a_loaded_stand_in_budget() {
+    let payload = serde_json::to_vec(&compiled_goal_head_shapes()).unwrap();
+    let mut process = Command::new("python3")
+        .args([
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            include_str!("../tests/bridge_boundary.py"),
+        ])
+        .arg(serde_json::to_string(include_str!("bridge.py")).unwrap())
+        .arg("--compiled")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let writing = std::thread::spawn(move || input.write_all(&payload));
+    let output = process.wait_with_output().unwrap();
+    writing.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "contract: runs recorded compiled actions with the manifest-pinned model in PINNED_ROOT"]
+fn compiled_recorded_actions_run_on_the_manifest_pinned_model() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    for (place, fingerprint) in [
+        (&runtime, profile.fingerprint().unwrap()),
+        (&folder, model.fingerprint().unwrap()),
+    ] {
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(place.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(
+            receipt["fingerprint"], fingerprint,
+            "did not run: the clone is not manifest-pinned"
+        );
+    }
+    let mut shapes = Vec::new();
+    for mut fixture in compiled_recorded_goal_heads() {
+        fixture["shape"]["questions"] = json!("all");
+        shapes.push(fixture.clone());
+        fixture["shape"]["questions"] = json!("action");
+        fixture["request"]["questions"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|name, _| name == "action");
+        shapes.push(fixture);
+    }
+    assert_eq!(
+        shapes.len(),
+        4,
+        "did not run: no recorded trial was compiled"
+    );
+    if std::env::var("LOCAL_JUDGMENT_INFERENCE_EXTREMES").is_ok_and(|value| value == "1") {
+        shapes.extend(compiled_goal_head_shapes().into_iter().filter(|fixture| {
+            fixture["shape"]["navigation"] == "all"
+                && fixture["shape"]["candidates"] == zerocode_core::jev::SCREEN_CANDIDATE_CAP
+                && fixture["shape"]["more"] == true
+        }));
+        assert_eq!(shapes.len(), 6);
+    }
+    let packages: serde_json::Map<String, Value> = profile
+        .wheels
+        .iter()
+        .filter_map(|wheel| Some((wheel.package.clone()?, json!(wheel.version.as_ref()?))))
+        .collect();
+    let initial = json!({
+        "engine": "laya", "modelDirectory": folder, "modelId": model.id,
+        "runtime": profile.fingerprint().unwrap(), "packages": packages,
+    });
+    let source = std::env::var_os("LOCAL_JUDGMENT_BRIDGE_SOURCE")
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .unwrap_or_else(|| include_str!("bridge.py").to_string());
+    let payload = serde_json::to_vec(&shapes).unwrap();
+    let cache = runtime.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut process = Command::new(child(&runtime, &profile.executable).unwrap())
+        .args(["-I", "-B", "-c", include_str!("../tests/infer_compiled.py")])
+        .arg(source)
+        .arg(initial.to_string())
+        .env_clear()
+        .env("HOME", &cache)
+        .env("HF_HOME", &cache)
+        .env("TMPDIR", &cache)
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("OMP_NUM_THREADS", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env(
+            "LOCAL_JUDGMENT_BUILD_RUN",
+            std::env::var_os("LOCAL_JUDGMENT_BUILD_RUN").unwrap_or_default(),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let writing = std::thread::spawn(move || input.write_all(&payload));
+    let output = process.wait_with_output().unwrap();
+    writing.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let measured: Value = serde_json::from_slice(&output.stdout).unwrap();
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_INFERENCE_REPORT") {
+        std::fs::write(path, &output.stdout).unwrap();
+    }
+    let provider = Provider {
+        kind: ProviderKind::Local,
+        protocol: Protocol::SystemOne,
+        base_url: "http://127.0.0.1".to_string(),
+        model: model.id,
+        requires_auth: false,
+    };
+    let expected_refusal =
+        std::env::var("LOCAL_JUDGMENT_EXPECT_REFUSAL").is_ok_and(|value| value == "1");
+    let rows = measured["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), shapes.len() * 3);
+    for (index, row) in rows.iter().enumerate() {
+        let mut request = shapes[index / 3]["request"].clone();
+        request["model"] = json!(provider.identity());
+        let prepared = provider
+            .prepare(serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        let decoded = provider.decode(&prepared, serde_json::to_vec(&row["result"]).unwrap());
+        if expected_refusal && row["shape"]["navigation"] != "none" {
+            assert_eq!(decoded, Err(judgment_provider::Refusal::Truncated), "{row}");
+        } else {
+            let decoded: Value = serde_json::from_str(&decoded.unwrap()).unwrap();
+            assert_eq!(decoded["usage"], row["result"]["usage"]);
+            assert!(
+                row["result"]["usage"]["truncated_questions"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "contract: checks a client deadline against the manifest-pinned model in PINNED_ROOT"]
+async fn a_screen_client_deadline_does_not_leave_inference_ahead_of_the_next_request() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    let engine = Engine::spawn(&runtime, &profile, Some((folder.as_path(), &model))).unwrap();
+    let process = engine.clone();
+    tokio::time::timeout(
+        START_TIMEOUT,
+        tokio::task::spawn_blocking(move || process.ready()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let running = serve(&model, engine.clone(), Arc::new(|| {}))
+        .await
+        .unwrap();
+    let mut crowded = compiled_goal_head_shapes()
+        .into_iter()
+        .find(|fixture| {
+            fixture["shape"]["legend"] == "long"
+                && fixture["shape"]["navigation"] == "all"
+                && fixture["shape"]["candidates"] == zerocode_core::jev::SCREEN_CANDIDATE_CAP
+                && fixture["shape"]["more"] == true
+        })
+        .unwrap()["request"]
+        .clone();
+    crowded["model"] = json!(model.id);
+    let deadline = Duration::from_millis(zerocode_core::jev::SCREEN_APPLY_DEADLINE_MS);
+    let context = || {
+        let mut jobs = std::env::var_os("LOCAL_JUDGMENT_BUILD_RUN")
+            .and_then(|path| std::fs::read_dir(path).ok())
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        jobs.sort();
+        json!({
+            "at_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+            "running_jobs": jobs,
+        })
+    };
+    let first_context = context();
+    let began = Instant::now();
+    let first = client()
+        .post(running.provider.request_url())
+        .timeout(deadline)
+        .header(
+            judgment_provider::DEADLINE_HEADER,
+            deadline.as_millis().to_string(),
+        )
+        .json(&crowded)
+        .send()
+        .await;
+    let first_elapsed = began.elapsed();
+    let first_timed_out = first.as_ref().is_err_and(reqwest::Error::is_timeout);
+    let first_status = first
+        .as_ref()
+        .ok()
+        .map(|response| response.status().as_u16());
+    let first_body = match first {
+        Ok(response) => response.json::<Value>().await.unwrap(),
+        Err(_) => Value::Null,
+    };
+    let admitted_after_first = running.admitted();
+    let mut following = compiled_recorded_goal_heads()
+        .into_iter()
+        .find(|fixture| fixture["shape"]["navigation"] == "none")
+        .unwrap()["request"]
+        .clone();
+    following["model"] = json!(model.id);
+    let following_context = context();
+    let began = Instant::now();
+    let response = client()
+        .post(running.provider.request_url())
+        .timeout(REQUEST_TIMEOUT)
+        .header(
+            judgment_provider::DEADLINE_HEADER,
+            deadline.as_millis().to_string(),
+        )
+        .json(&following)
+        .send()
+        .await
+        .unwrap();
+    let following_elapsed = began.elapsed();
+    let following_status = response.status();
+    let following_body = response.json::<Value>().await.unwrap();
+    let report = json!({
+        "first_timed_out": first_timed_out,
+        "first_context": first_context,
+        "first_status": first_status,
+        "first_body": first_body,
+        "first_elapsed_ms": first_elapsed.as_secs_f64() * 1000.0,
+        "admitted_after_first": admitted_after_first,
+        "following_elapsed_ms": following_elapsed.as_secs_f64() * 1000.0,
+        "following_context": following_context,
+        "following_status": following_status.as_u16(),
+        "following_body": following_body,
+        "engine_alive_after_following": engine.alive(),
+    });
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_CANCELLATION_REPORT") {
+        std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+    }
+    assert_eq!(following_status, reqwest::StatusCode::OK, "{report}");
+    assert!(
+        !first_timed_out || admitted_after_first == 0,
+        "a client deadline left native inference ahead of the next request: {report}"
+    );
+    assert!(
+        following_elapsed <= deadline,
+        "a client deadline left native inference ahead of the next request: {report}"
+    );
+}
+
+#[test]
+#[ignore = "contract: measures compiled questions with the manifest-pinned tokenizer in PINNED_ROOT"]
+fn compiled_goal_heads_fit_the_manifest_pinned_tokenizer() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    for (place, fingerprint) in [
+        (&runtime, profile.fingerprint().unwrap()),
+        (&folder, model.fingerprint().unwrap()),
+    ] {
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(place.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(
+            receipt["fingerprint"], fingerprint,
+            "did not run: the clone is not manifest-pinned"
+        );
+    }
+    let mut shapes = compiled_goal_head_shapes();
+    assert_eq!(
+        shapes.len(),
+        5 * (zerocode_core::jev::SCREEN_CANDIDATE_CAP + 1) * 2 * 2
+    );
+    shapes.extend(compiled_recorded_goal_heads());
+    let payload = serde_json::to_vec(&shapes).unwrap();
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_COMPILED_REQUESTS") {
+        std::fs::write(path, &payload).unwrap();
+    }
+    let cache = runtime.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut process = Command::new(child(&runtime, &profile.executable).unwrap())
+        .args(["-I", "-B", "-c", include_str!("../tests/compiled_heads.py")])
+        .arg(include_str!("bridge.py"))
+        .arg(&folder)
+        .env_clear()
+        .env("HOME", &cache)
+        .env("HF_HOME", &cache)
+        .env("TMPDIR", &cache)
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("OMP_NUM_THREADS", "1")
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = process.stdin.take().unwrap();
+    let writing = std::thread::spawn(move || input.write_all(&payload));
+    let output = process.wait_with_output().unwrap();
+    writing.join().unwrap().unwrap();
+    assert!(
+        output.status.success(),
+        "the loaded tokenizer did not measure the compiled requests: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_HEAD_REPORT") {
+        std::fs::write(path, &output.stdout).unwrap();
+    }
+    let measured: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let rows = measured["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), shapes.len());
+    let failed: Vec<&Value> = rows.iter().filter(|row| row["pass"] != true).collect();
+    assert!(
+        failed.is_empty(),
+        "{} compiled request shapes submit cut heads or lose options against the loaded head budget of {} tokens; first: {}",
+        failed.len(),
+        measured["head_max_len"],
+        failed.first().unwrap_or(&&Value::Null)
+    );
+}
+
 /// Runs in the pinned runtime with the loaded agent's tokenizer and head
 /// budget. It grows a goal one sentence at a time until the instruction
 /// carrying it, the first text the runtime's own `build_head` encodes, is
@@ -553,7 +1112,7 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
     // longer than the loaded head budget, and the same question without it.
     let home = tempfile::tempdir().unwrap();
     let heads = Command::new(child(&runtime, &profile.executable).unwrap())
-        .args(["-I", "-c", PINNED_HEADS])
+        .args(["-I", "-B", "-c", PINNED_HEADS])
         .arg(include_str!("bridge.py"))
         .arg(&folder)
         .env_clear()
@@ -621,4 +1180,567 @@ async fn the_manifest_pinned_runtime_refuses_a_cut_head_and_declares_the_config_
         }),
         "the pinned runtime declared other limits than its model folder holds"
     );
+}
+
+const ECHO_DEADLINE_INPUT: &str = r#"import json,sys
+from pathlib import Path
+for line in sys.stdin:
+ frame=json.loads(line)
+ Path(sys.argv[1],'received.json').write_text(json.dumps(frame))
+ request=frame.get('request',frame)
+ answers={name:{'type':'noul','noul':0.5} for name in request['questions']}
+ print(json.dumps({'model':request['model'],'answers':answers,'usage':{'input_tokens':1,'output_tokens':0}}),flush=True)
+"#;
+
+#[tokio::test]
+async fn an_invalid_or_ambiguous_deadline_header_reaches_no_native_request() {
+    let invalid = vec![
+        vec![String::new()],
+        vec!["not-a-duration".to_string()],
+        vec!["-1".to_string()],
+        vec!["+1".to_string()],
+        vec!["1,2".to_string()],
+        vec![format!("{}0", u64::MAX)],
+        vec!["1".to_string(), "2".to_string()],
+    ];
+    for values in invalid {
+        let root = tempfile::tempdir().unwrap();
+        let (_running, state) = fixture(ECHO_DEADLINE_INPUT, root.path()).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::HOST,
+            state
+                .provider
+                .base_url
+                .trim_start_matches("http://")
+                .parse()
+                .unwrap(),
+        );
+        for value in &values {
+            headers.append(judgment_provider::DEADLINE_HEADER, value.parse().unwrap());
+        }
+        let request = json!({
+            "model": state.provider.model, "state": "fixture",
+            "questions": {"only": {"type": "noul", "instructions": "fixture"}},
+        });
+        let response = predict(
+            State(state.clone()),
+            headers,
+            Bytes::from(serde_json::to_vec(&request).unwrap()),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "an invalid deadline header reached native inference: {values:?}"
+        );
+        assert!(state.engine.alive());
+        assert!(!root.path().join("received.json").exists());
+    }
+}
+
+#[tokio::test]
+async fn a_request_without_a_deadline_header_keeps_the_legacy_native_frame() {
+    let root = tempfile::tempdir().unwrap();
+    let (_running, state) = fixture(ECHO_DEADLINE_INPUT, root.path()).await;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::HOST,
+        state
+            .provider
+            .base_url
+            .trim_start_matches("http://")
+            .parse()
+            .unwrap(),
+    );
+    let request = json!({
+        "model": state.provider.model, "state": "fixture",
+        "questions": {"only": {"type": "noul", "instructions": "fixture"}},
+    });
+    let response = predict(
+        State(state.clone()),
+        headers,
+        Bytes::from(serde_json::to_vec(&request).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let native: Value =
+        serde_json::from_slice(&std::fs::read(root.path().join("received.json")).unwrap()).unwrap();
+    assert_eq!(native, request);
+    assert!(state.engine.alive());
+}
+
+async fn deadline_runtime(
+    root: &Path,
+    config: &Value,
+) -> (tempfile::TempDir, Running, tokio::net::UnixStream) {
+    let listener = tokio::net::UnixListener::bind(root.join("release.sock")).unwrap();
+    let definitions = serde_json::to_string(include_str!("../tests/bridge_boundary.py")).unwrap();
+    let address = serde_json::to_string(&root.join("release.sock")).unwrap();
+    let program = format!(
+        r#"import json,socket,sys,types
+saved=sys.argv[:]
+definitions={definitions}
+namespace={{}}
+sys.argv=['boundary',json.dumps(saved[1])]
+exec(definitions.rsplit('unittest.main(',1)[0],namespace)
+sys.argv=saved
+release=socket.socket(socket.AF_UNIX)
+release.connect({address})
+def gate():
+ release.sendall(b'E')
+ if release.recv(1)!=b'G':
+  raise ValueError('release_signal')
+clock=namespace['VirtualClock']()
+namespace['bridge']['time'].perf_counter=clock.read
+laya=namespace['timed_laya'](clock,gate)
+torch=types.ModuleType('torch')
+torch.set_num_threads=torch.set_num_interop_threads=lambda count:None
+torch.jit=types.SimpleNamespace()
+transformers=types.ModuleType('transformers')
+transformers.AutoConfig=types.SimpleNamespace(from_pretrained=None)
+transformers.AutoTokenizer=types.SimpleNamespace(from_pretrained=None)
+sys.modules.update({{'laya':laya,'torch':torch,'transformers':transformers}})
+exec(compile(saved[1],'bridge','exec'),{{'__name__':'__main__'}})
+"#
+    );
+    let (folder, profile) = runtime_folder(&program, "deadline-fixture");
+    std::fs::write(
+        folder.path().join("model/rl_agent_config.json"),
+        config.to_string(),
+    )
+    .unwrap();
+    let running = started(folder.path(), &profile, &crate::tests::fixture_model()).await;
+    let (release, _) = listener.accept().await.unwrap();
+    (folder, running, release)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_deadline_shorter_than_measured_cost_reaches_no_inference_and_legacy_still_runs() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_runtime, running, mut release) = deadline_runtime(
+        root.path(),
+        &json!({"max_len": 512, "head_max_len": 40, "fixed_seconds": 10.0, "seconds_per_token": 1.0}),
+    ).await;
+    let request = json!({
+        "model": running.provider.model, "state": {"controlled": true},
+        "questions": {"only": {"type": "noul", "instructions": "fixture", "criteria": {"false": "False", "true": "True"}}},
+    });
+    let budget = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let mut asking = Box::pin(
+        client()
+            .post(running.provider.request_url())
+            .header(judgment_provider::DEADLINE_HEADER, budget.to_string())
+            .json(&request)
+            .send(),
+    );
+    let (response, inferred) = tokio::select! {
+        response = &mut asking => (response.unwrap(), false),
+        entered = release.read_u8() => {
+            assert_eq!(entered.unwrap(), b'E');
+            release.write_all(b"G").await.unwrap();
+            (asking.as_mut().await.unwrap(), true)
+        }
+    };
+    assert!(
+        !inferred,
+        "a deadline shorter than measured cost entered native inference"
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let refusal: Value = response.json().await.unwrap();
+    assert_eq!(refusal["refusal"], "provider_deadline_budget");
+    assert_eq!(refusal["usage"]["model_calls"], 0);
+    assert!(refusal["usage"]["estimated_ms"].as_f64().unwrap() > budget as f64);
+    assert!(running.engine.alive());
+    let mut legacy = Box::pin(
+        client()
+            .post(running.provider.request_url())
+            .json(&request)
+            .send(),
+    );
+    tokio::select! {
+        response = &mut legacy => panic!("a legacy request skipped its native release signal: {:?}", response.unwrap().status()),
+        entered = release.read_u8() => assert_eq!(entered.unwrap(), b'E'),
+    }
+    release.write_all(b"G").await.unwrap();
+    assert_eq!(
+        legacy.as_mut().await.unwrap().status(),
+        reqwest::StatusCode::OK
+    );
+    assert!(running.engine.alive());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_budget_stops_between_native_batches_and_leaves_the_next_request_ready() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_runtime, running, mut release) = deadline_runtime(
+        root.path(),
+        &json!({"max_len": 512, "head_max_len": 40, "fixed_seconds": 0.001, "seconds_per_token": 0.001}),
+    ).await;
+    let budget = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let criteria: serde_json::Map<String, Value> = (0..20)
+        .map(|index| (format!("option-{index}"), json!(format!("control {index}"))))
+        .collect();
+    let request = json!({
+        "model": running.provider.model,
+        "state": {"controlled": true, "advance_seconds": budget as f64 / 1000.0 * 2.0},
+        "questions": {"choice": {"type": "choice", "instructions": "Choose the next visible control for this goal.", "criteria": criteria}},
+    });
+    let mut asking = Box::pin(
+        client()
+            .post(running.provider.request_url())
+            .header(judgment_provider::DEADLINE_HEADER, budget.to_string())
+            .json(&request)
+            .send(),
+    );
+    tokio::select! {
+        response = &mut asking => panic!("the first native batch never reached its release signal: {:?}", response.unwrap().status()),
+        entered = release.read_u8() => assert_eq!(entered.unwrap(), b'E'),
+    }
+    release.write_all(b"G").await.unwrap();
+    let (response, another_batch) = tokio::select! {
+        response = &mut asking => (response.unwrap(), false),
+        entered = release.read_u8() => {
+            assert_eq!(entered.unwrap(), b'E');
+            release.write_all(b"G").await.unwrap();
+            (asking.as_mut().await.unwrap(), true)
+        }
+    };
+    assert!(
+        !another_batch,
+        "an expired budget entered another native batch"
+    );
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let refused: Value = response.json().await.unwrap();
+    assert_eq!(refused["refusal"], "provider_deadline_budget");
+    assert_eq!(refused["usage"]["model_calls"], 1);
+    let following = json!({
+        "model": running.provider.model, "state": "short",
+        "questions": {"only": {"type": "noul", "instructions": "fixture", "criteria": {"false": "False", "true": "True"}}},
+    });
+    let response = client()
+        .post(running.provider.request_url())
+        .header(judgment_provider::DEADLINE_HEADER, budget.to_string())
+        .json(&following)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(running.engine.alive());
+}
+
+fn observation_context() -> Value {
+    let mut jobs = std::env::var_os("LOCAL_JUDGMENT_BUILD_RUN")
+        .and_then(|path| std::fs::read_dir(path).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    jobs.sort();
+    json!({
+        "at_ms": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis(),
+        "running_jobs": jobs,
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "contract: runs every compiled screen shape against the pinned model with its caller deadline"]
+async fn every_compiled_screen_shape_finishes_or_refuses_before_its_caller_deadline() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let runtime = Path::new(&root).join("runtime").join(&profile.id);
+    let folder = Path::new(&root).join("models").join(&model.id);
+    for (place, fingerprint) in [
+        (&runtime, profile.fingerprint().unwrap()),
+        (&folder, model.fingerprint().unwrap()),
+    ] {
+        let receipt: Value =
+            serde_json::from_slice(&std::fs::read(place.join("receipt.json")).unwrap()).unwrap();
+        assert_eq!(
+            receipt["fingerprint"], fingerprint,
+            "did not run: the clone is not manifest-pinned"
+        );
+    }
+    let startup_context = observation_context();
+    let began = Instant::now();
+    let engine = Engine::spawn(&runtime, &profile, Some((folder.as_path(), &model))).unwrap();
+    let process = engine.clone();
+    tokio::time::timeout(
+        START_TIMEOUT,
+        tokio::task::spawn_blocking(move || process.ready()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    let running = serve(&model, engine, Arc::new(|| {})).await.unwrap();
+    let startup_ms = began.elapsed().as_secs_f64() * 1000.0;
+    let mut fixtures = compiled_goal_head_shapes();
+    for mut fixture in compiled_recorded_goal_heads() {
+        fixtures.push(fixture.clone());
+        fixture["shape"]["questions"] = json!("action");
+        fixture["request"]["questions"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|name, _| name == "action");
+        fixtures.push(fixture);
+    }
+    let budget_ms = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let deadline = Duration::from_millis(budget_ms);
+    let client = client();
+    let mut rows = Vec::new();
+    for fixture in fixtures {
+        let mut request = fixture["request"].clone();
+        request["model"] = json!(model.id);
+        let context = observation_context();
+        let began = Instant::now();
+        let response = client
+            .post(running.provider.request_url())
+            .header(judgment_provider::DEADLINE_HEADER, budget_ms.to_string())
+            .timeout(deadline)
+            .json(&request)
+            .send()
+            .await;
+        let (status, body, timed_out) = match response {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                let body = response.json::<Value>().await.unwrap_or(Value::Null);
+                (Some(status), body, false)
+            }
+            Err(error) => (None, Value::Null, error.is_timeout()),
+        };
+        let elapsed = began.elapsed();
+        let outcome = if status == Some(200) {
+            body["usage"]["truncated"] != true
+                && body["usage"]["state_tokens_dropped"]
+                    .as_u64()
+                    .is_none_or(|dropped| dropped == 0)
+                && body["usage"]["truncated_questions"]
+                    .as_array()
+                    .is_none_or(Vec::is_empty)
+                && body["answers"].as_object().is_some_and(|answers| {
+                    answers.len() == request["questions"].as_object().unwrap().len()
+                })
+        } else {
+            status == Some(502)
+                && body["refusal"] == "provider_deadline_budget"
+                && body["usage"]["model_calls"] == 0
+        };
+        rows.push(json!({
+            "shape": fixture["shape"], "context": context, "finished_context": observation_context(),
+            "elapsed_ms": elapsed.as_secs_f64() * 1000.0, "status": status, "body": body,
+            "timed_out": timed_out, "pass": outcome && !timed_out && elapsed <= deadline,
+        }));
+    }
+    let report = json!({"budget_ms":budget_ms,"startup_ms":startup_ms,"startup_context":startup_context,"rows":rows});
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_DEADLINE_REPORT") {
+        std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+    }
+    let failed: Vec<&Value> = report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["pass"] != true)
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{} compiled screen shapes missed their caller deadline or lacked a named preflight refusal; first: {}",
+        failed.len(),
+        failed.first().copied().unwrap_or(&Value::Null)
+    );
+}
+
+async fn snapshot_matching(
+    snapshots: &mut tokio::sync::mpsc::UnboundedReceiver<crate::Snapshot>,
+    predicate: impl Fn(&crate::Snapshot) -> bool,
+) -> crate::Snapshot {
+    tokio::time::timeout(START_TIMEOUT, async {
+        loop {
+            let snapshot = snapshots
+                .recv()
+                .await
+                .expect("the manager still reports its state");
+            if predicate(&snapshot) {
+                return snapshot;
+            }
+        }
+    })
+    .await
+    .expect("the manager reaches the requested state before its startup bound")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "contract: records native deadline restart cost and the persisted exit in PINNED_ROOT"]
+async fn a_deadline_stop_records_its_exit_and_the_cost_of_the_next_successful_question() {
+    let root = std::env::var_os(PINNED_ROOT)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| panic!("did not run: {PINNED_ROOT} names no folder"));
+    let profile = crate::catalog::runtime().unwrap().unwrap();
+    let model = crate::catalog::catalog()
+        .unwrap()
+        .models
+        .into_iter()
+        .find(|model| model.engine == EngineKind::Laya)
+        .unwrap();
+    let managed = root.join("managed-judgment");
+    std::fs::create_dir(&managed).unwrap();
+    std::fs::rename(root.join("runtime"), managed.join("runtime")).unwrap();
+    std::fs::rename(root.join("models"), managed.join("models")).unwrap();
+    let runtime = managed.join("runtime").join(&profile.id);
+    let folder = managed.join("models").join(&model.id);
+    let settings = root.join("fixture-settings.json");
+    std::fs::write(&settings, b"{}").unwrap();
+    let (notices, mut snapshots) = tokio::sync::mpsc::unbounded_channel();
+    let manager = crate::Manager::new(&root, &settings, move |snapshot| {
+        let _ = notices.send(snapshot);
+    })
+    .unwrap();
+    let spawned = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = spawned.clone();
+    crate::manager::test_support::replace_engine_factory(
+        &manager,
+        Arc::new(move |model| {
+            let engine = Engine::spawn(&runtime, &profile, Some((folder.as_path(), model)))?;
+            capture.lock().unwrap().push(engine.clone());
+            Ok(engine)
+        }),
+    );
+    let first_context = observation_context();
+    let began = Instant::now();
+    manager.start(&model.id, &model.revision).unwrap();
+    let ready = snapshot_matching(&mut snapshots, |snapshot| {
+        snapshot.server.state == "ready"
+            && snapshot
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.state == "done")
+    })
+    .await;
+    let first_start = began.elapsed();
+    let first_id = ready.server.id.unwrap();
+    manager.check(&first_id).unwrap();
+    snapshot_matching(&mut snapshots, |snapshot| {
+        snapshot.server.checked
+            && snapshot
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.state == "done")
+    })
+    .await;
+    let expected = Provider::read(&settings).unwrap().identity();
+    manager
+        .apply(&first_id, &expected, |provider, expected, binding| {
+            assert_eq!(Provider::read(&settings).unwrap().identity(), expected);
+            std::fs::write(
+                &settings,
+                serde_json::to_vec(&json!({"smart":{
+                    "judgmentProvider": provider, (crate::MANAGED_MODEL_KEY): binding,
+                }}))
+                .unwrap(),
+            )
+            .map_err(|_| Error::Storage)
+        })
+        .unwrap();
+    let configured = std::fs::read(&settings).unwrap();
+    let engine = spawned.lock().unwrap()[0].clone();
+    let stopped_context = observation_context();
+    let stopped = Instant::now();
+    engine.stop_for(Stop::Deadline(Some("deadline-contract".to_string())));
+    let recovering =
+        snapshot_matching(&mut snapshots, |snapshot| snapshot.server.exit.is_some()).await;
+    let provider = recovering.server.provider.clone().unwrap();
+    let mut request = compiled_recorded_goal_heads()
+        .into_iter()
+        .find(|fixture| fixture["shape"]["navigation"] == "none")
+        .unwrap()["request"]
+        .clone();
+    request["model"] = json!(model.id);
+    let deadline = zerocode_core::jev::BROWSER.apply_deadline_ms.unwrap();
+    let refused_context = observation_context();
+    let asking = Instant::now();
+    let refused = client()
+        .post(provider.request_url())
+        .header(judgment_provider::DEADLINE_HEADER, deadline.to_string())
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    let refused_ms = asking.elapsed().as_secs_f64() * 1000.0;
+    let refused_status = refused.status();
+    let refused_body: Value = refused.json().await.unwrap();
+    let restored = snapshot_matching(&mut snapshots, |snapshot| {
+        snapshot.server.state == "ready" && snapshot.server.id.as_deref() != Some(&first_id)
+    })
+    .await;
+    let restore_ms = stopped.elapsed().as_secs_f64() * 1000.0;
+    let provider = restored.server.provider.clone().unwrap();
+    let response_context = observation_context();
+    let asking = Instant::now();
+    let response = client()
+        .post(provider.request_url())
+        .header(judgment_provider::DEADLINE_HEADER, deadline.to_string())
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    let response_ms = asking.elapsed().as_secs_f64() * 1000.0;
+    let response_status = response.status();
+    let response_body: Value = response.json().await.unwrap();
+    let successful_ms = stopped.elapsed().as_secs_f64() * 1000.0;
+    let journal = managed.join("server-exits.jsonl");
+    let record = tokio::time::timeout(START_TIMEOUT, async {
+        loop {
+            let text = tokio::fs::read_to_string(&journal)
+                .await
+                .unwrap_or_default();
+            if let Some(record) = text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|record| record["serverId"] == first_id && record.get("kind").is_none())
+            {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let report = json!({
+        "first_context":first_context,"stopped_context":stopped_context,"refused_context":refused_context,"response_context":response_context,"finished_context":observation_context(),
+        "first_start_ready_ms": first_start.as_secs_f64() * 1000.0,
+        "immediate_following_ms": refused_ms, "immediate_following_status": refused_status.as_u16(),
+        "immediate_following_body": refused_body, "restart_ready_ms": restore_ms,
+        "successful_following_ms_including_restart": successful_ms,
+        "successful_request_ms": response_ms, "successful_request_status": response_status.as_u16(),
+        "successful_response": response_body, "exit_record": record,
+        "engine_loads": spawned.lock().unwrap().len(),
+    });
+    if let Some(path) = std::env::var_os("LOCAL_JUDGMENT_RESTART_REPORT") {
+        std::fs::write(path, serde_json::to_vec(&report).unwrap()).unwrap();
+    }
+    assert_eq!(
+        refused_status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "{report}"
+    );
+    assert_eq!(response_status, reqwest::StatusCode::OK, "{report}");
+    assert_eq!(record["cause"], Error::Timeout.token());
+    assert_eq!(record["recovery"], "restart");
+    assert_eq!(std::fs::read(&settings).unwrap(), configured);
+    assert_eq!(spawned.lock().unwrap().len(), 2);
+    manager
+        .stop(restored.server.id.as_deref().unwrap())
+        .unwrap();
 }

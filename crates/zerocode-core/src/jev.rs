@@ -34,6 +34,7 @@ pub mod choice;
 pub mod claim;
 pub mod count;
 pub mod cover;
+pub mod custom;
 pub mod door;
 pub mod file_pick;
 pub mod hedge;
@@ -2929,6 +2930,106 @@ pub const PROJECT_RULES: JevUse = JevUse {
     abstain: Abstain::Offered,
 };
 
+/// Characters of the agent's last answer a person's decision reads at a
+/// turn's end: what the project-rules check, asking at the same point, reads.
+pub const CUSTOM_FINAL_TEXT_CHAR_CAP: usize = 4_000;
+
+/// Bytes of what a turn's tools returned that a person's decision reads at a
+/// turn's end: what the project-rules check reads.
+pub const CUSTOM_EVIDENCE_BYTE_CAP: usize = 16 * 1024;
+
+/// Every decision a person made (t-62170, [`custom`]), as one row. A decision
+/// asks at one of zo's four points and reads only what that point lends, cut
+/// where the seat already asking there cuts it, so this row's door clears all
+/// of it — and the person's own words, the question and what each answer
+/// means, which no product code wrote. Nothing compares a decision's answers
+/// with another reader's or learns later whether they were right, so the row
+/// never rises and offers no `auto`: a decision acts only where its person
+/// says `on`. A decision's version is its definition's hash, which each of
+/// its request rows carries, so the row's own rubric is unversioned. Its
+/// setting is the switch over every decision: a decision stands at the lower
+/// of that word and its own mode, which the decisions' store keeps
+/// ([`custom::store`]).
+pub const CUSTOM_DECISIONS: JevUse = JevUse {
+    id: "custom",
+    setting: "customDecisions",
+    modes: &custom::MODES,
+    recommended: JevMode::On,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/final_text",
+            cap: Cap::Chars(CUSTOM_FINAL_TEXT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/evidence",
+            cap: Cap::Bytes(CUSTOM_EVIDENCE_BYTE_CAP),
+        },
+        Sent {
+            at: "/state/edited_paths",
+            cap: Cap::Items(project_rules::MAX_EDITED_PATHS),
+        },
+        Sent {
+            at: "/state/edited_paths/*",
+            cap: Cap::Chars(project_rules::MAX_PATH_CHARS),
+        },
+        Sent {
+            at: "/state/command",
+            cap: Cap::Chars(COMMAND_GUARD_COMMAND_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/cwd",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/context",
+            cap: Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/items",
+            cap: Cap::Items(SKILL_SHARD_TARGET),
+        },
+        Sent {
+            at: "/state/items/*",
+            cap: Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+        },
+        Sent {
+            at: "/questions/*/instructions",
+            cap: Cap::Chars(custom::INSTRUCTIONS_MAX_CHARS),
+        },
+        Sent {
+            at: "/questions/*/criteria/*",
+            cap: Cap::Chars(custom::MEANING_MAX_CHARS),
+        },
+    ],
+    ledger: "custom-decisions.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: None,
+    agreement_floor_permille: None,
+    apply_deadline_ms: None,
+    window_forgives: None,
+    agreement_rows_wanted: None,
+    agreement_kind: AgreementKind::Comparison,
+    baseline: Baseline::None,
+    current_side: CurrentSide::Rule,
+    negatives_wanted: None,
+    confidence_bands: None,
+    reads_act_line: false,
+    rubric_version: questions::UNVERSIONED_RUBRIC,
+    request_name: &[],
+    names: Naming::Request,
+    label_part: &[],
+    follows: None,
+    regrade: Regrade::AsWritten,
+    auto_starts: promote::Stand::Recording,
+    abstain: Abstain::Offered,
+};
+
 /// Characters of a page's title one browser-read question carries — the head
 /// of what the tab says the page is, which is what bands a block's words:
 /// "Sign in" under a title that is a product page is a chrome block, and the
@@ -4738,7 +4839,7 @@ pub const REFLEX_DECIDE: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 33] = [
+pub static JEV_USES: [JevUse; 34] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -4758,6 +4859,7 @@ pub static JEV_USES: [JevUse; 33] = [
     COMPACTION,
     AGENT_TOOL,
     PROJECT_RULES,
+    CUSTOM_DECISIONS,
     BROWSER_READ,
     NOTIFY,
     MENTION_RERANK,

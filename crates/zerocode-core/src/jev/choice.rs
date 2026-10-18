@@ -78,7 +78,7 @@ pub fn question(instructions: &str, criteria: &[(&str, &str)]) -> Value {
         criteria
             .iter()
             .map(|(word, meaning)| ((*word).to_string(), Value::from(*meaning)))
-            .collect(),
+            .collect::<Map<String, Value>>(),
     )
 }
 
@@ -88,14 +88,15 @@ const TAG_KEY: &str = "type";
 
 /// One question's object as the endpoint reads every primitive: the union
 /// tag naming its kind, what it asks, and what each answer means. The one
-/// spelling of the envelope — a closed choice ([`asked`]) and a Noul
-/// (`crate::jev::noul`, t-6187) both wear it, so a second primitive cannot
+/// spelling of the envelope — a closed choice ([`asked`]), a Noul
+/// (`crate::jev::noul`, t-6187) and a person's score, its levels a list
+/// (`crate::jev::custom`, t-62170), all wear it, so a second primitive cannot
 /// come to spell a key the endpoint reads differently.
-pub(super) fn envelope(tag: &str, instructions: &str, criteria: Map<String, Value>) -> Value {
+pub(super) fn envelope(tag: &str, instructions: &str, criteria: impl Into<Value>) -> Value {
     Value::Object(Map::from_iter([
         (TAG_KEY.to_string(), Value::from(tag)),
         ("instructions".to_string(), Value::from(instructions)),
-        ("criteria".to_string(), Value::Object(criteria)),
+        ("criteria".to_string(), criteria.into()),
     ]))
 }
 

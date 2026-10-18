@@ -66,6 +66,10 @@ pub const EVERY_WORKSPACE: &str = "*";
 /// every request is counted and none is refused for the count — a default is
 /// chosen from measured days, never written before there are any.
 pub const DAILY_REQUESTS_SETTING: &str = "dailyRequests";
+/// `smart.jev.customHourlyRequests`: the most requests every person's
+/// decision sends together in one local hour (t-62170), read by
+/// [`custom_hourly_requests`]. The day's budget still holds over it.
+pub const CUSTOM_HOURLY_REQUESTS_SETTING: &str = "customHourlyRequests";
 
 /// The key a ledger row keeps how many requests it sent under: `0` when the
 /// door refused it or a memo answered.
@@ -367,6 +371,9 @@ pub enum Refused {
     NotConsented,
     /// The day's budget is spent.
     Budget,
+    /// A person's decision has sent the most it sends in an hour, or every
+    /// decision together has ([`pass_within_the_hour`], t-62170).
+    HourlyBudget,
     /// The model pin changed after the caller prepared this batch.
     SettingsChanged,
     /// The seat rests, so asking now would hold the judgment server for
@@ -379,11 +386,12 @@ pub enum Refused {
 
 impl Refused {
     /// Every refusal, in the order the door asks.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::NoKey,
         Self::Off,
         Self::NotConsented,
         Self::Budget,
+        Self::HourlyBudget,
         Self::SettingsChanged,
         Self::Resting,
     ];
@@ -396,6 +404,7 @@ impl Refused {
             Self::Off => JevMode::Off.key(),
             Self::NotConsented => "not_consented",
             Self::Budget => "budget",
+            Self::HourlyBudget => "hourly_budget",
             Self::SettingsChanged => "settings_changed",
             Self::Resting => "resting",
         }
@@ -478,6 +487,23 @@ impl Cleared {
 #[must_use]
 pub fn within_budget(settings: &JevSettings, sent: u64) -> bool {
     settings.daily_requests.is_none_or(|most| sent < most)
+}
+
+/// The most requests every person's decision sends together in one local
+/// hour, as the person's settings hold it ([`CUSTOM_HOURLY_REQUESTS_SETTING`]):
+/// [`super::custom::ALL_HOURLY_DEFAULT`] unset, and none for a value that is
+/// not a whole number — a bound of the wrong shape never widens what is
+/// sent, as a day's budget of the wrong shape sends nothing.
+#[must_use]
+pub fn custom_hourly_requests(root: &Value) -> u64 {
+    match root
+        .get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(JEV_SETTINGS_KEY))
+        .and_then(|jev| jev.get(CUSTOM_HOURLY_REQUESTS_SETTING))
+    {
+        None | Some(Value::Null) => super::custom::ALL_HOURLY_DEFAULT,
+        Some(most) => most.as_u64().unwrap_or(0),
+    }
 }
 
 /// Ask the door about one request of `row`'s, its body built as the use
@@ -653,6 +679,85 @@ pub fn pass_remembering(
 /// [`Refused::Budget`] when the day has no place left for it.
 pub fn count_a_hedge(settings: &JevSettings, requests: &Path) -> Result<(), Refused> {
     take_a_place(settings, requests)
+}
+
+/// A person's decision's two hours (t-62170): the file its own requests are
+/// counted in this hour, with the most it sends in one, and the file every
+/// decision's requests are counted in together, with the most they send.
+#[derive(Debug, Clone, Copy)]
+pub struct Hour<'a> {
+    /// The decision's hour file: [`count::hour_path`] under its id.
+    pub decision: &'a Path,
+    /// The decision's own bound ([`super::custom::Definition::max_per_hour`]).
+    pub decision_most: u64,
+    /// The hour file every decision shares: [`count::hour_path`] under
+    /// [`super::custom::EVERY_DECISION`].
+    pub every: &'a Path,
+    /// The bound every decision shares ([`custom_hourly_requests`]).
+    pub every_most: u64,
+}
+
+/// [`pass`] for a person's decision (t-62170), whose requests count in two
+/// hours besides the day ([`Hour`]). The door's questions come first, the
+/// day's budget among them. One exclusive file lock beside the hour files
+/// covers every hour writer while both hours are checked, counted, and the
+/// day is taken last. A refused reservation returns the hour counts to
+/// their prior values before releasing the lock. If a return fails, the
+/// count stays high: later requests may be refused, and this request is never
+/// sent. The day keeps `take_a_place`'s rule: losing its last place to a
+/// concurrent request spends that daily place even though the request is refused.
+///
+/// # Errors
+/// As [`pass`], and [`Refused::HourlyBudget`] when the bounded lock wait
+/// expires, either hour is full, or an hour cannot be read, counted or
+/// returned: an hour's bound is always set, so a count the door cannot keep
+/// is one it may not send past.
+pub fn pass_within_the_hour(
+    ask: impl FnOnce(&Asking<'_>) -> Result<Cleared, Refused>,
+    key: bool,
+    settings: &JevSettings,
+    workspace: Option<&str>,
+    requests: &Path,
+    hour: Hour<'_>,
+) -> Result<Cleared, Refused> {
+    let asking = Asking {
+        key,
+        settings,
+        workspace,
+        sent_today: count::sent(requests),
+    };
+    let cleared = ask(&asking)?;
+    let _lock = count::lock_hours(hour.every).map_err(|_| Refused::HourlyBudget)?;
+    let before = (
+        count::sent_in_the_hour(hour.decision).map_err(|_| Refused::HourlyBudget)?,
+        count::sent_in_the_hour(hour.every).map_err(|_| Refused::HourlyBudget)?,
+    );
+    if before.0 >= hour.decision_most || before.1 >= hour.every_most {
+        return Err(Refused::HourlyBudget);
+    }
+    if let Err(refused) = take_an_hours_place(hour.decision, hour.decision_most)
+        .and_then(|()| take_an_hours_place(hour.every, hour.every_most))
+        .and_then(|()| take_a_place(settings, requests))
+    {
+        return_hours(hour, before)?;
+        return Err(refused);
+    }
+    Ok(cleared)
+}
+
+fn return_hours(hour: Hour<'_>, before: (u64, u64)) -> Result<(), Refused> {
+    let decision = count::return_hour_to(hour.decision, before.0);
+    let every = count::return_hour_to(hour.every, before.1);
+    decision.and(every).map_err(|_| Refused::HourlyBudget)
+}
+
+/// Count one request in an hour file and answer whether the hour had room
+/// for it, as [`take_a_place`] does the day's.
+fn take_an_hours_place(hour: &Path, most: u64) -> Result<(), Refused> {
+    match count::count_one_in_the_hour(hour) {
+        Ok(place) if place <= most => Ok(()),
+        _ => Err(Refused::HourlyBudget),
+    }
 }
 
 /// Count one request in the day and answer whether the day had room for it.

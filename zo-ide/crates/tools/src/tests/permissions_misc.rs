@@ -481,12 +481,50 @@ fn read_only_registry_outside_cwd_windows() -> crate::GlobalToolRegistry {
 #[test]
 fn given_read_only_enforcer_when_read_only_safe_bash_then_allowed() {
     let registry = read_only_registry_outside_cwd_windows();
-    let output = registry
-        .execute("bash", &json!({ "command": "echo zo-readonly-ok" }))
+    let output = run_read_only_safe_bash(&registry)
         .expect("read-only-safe bash must run in read-only mode");
     assert!(
         output.contains("zo-readonly-ok"),
         "command output should round-trip: {output}"
+    );
+}
+
+/// The read-only-safe bash call. It spawns from the process cwd, which the
+/// tests that move it change only while they hold `env_lock` (t-47231).
+fn run_read_only_safe_bash(registry: &crate::GlobalToolRegistry) -> Result<String, ToolError> {
+    let _guard = crate::tests::lock_env_announced();
+    registry.execute("bash", &json!({ "command": "echo zo-readonly-ok" }))
+}
+
+/// The bash call spawns from the process cwd, and other tests of this binary
+/// move that cwd into a temporary folder and delete the folder afterwards
+/// (t-47231). Here such a window is open, its folder already gone, when the
+/// call starts: the call must wait the window out, not spawn inside it.
+#[test]
+fn a_read_only_safe_bash_waits_out_another_tests_cwd_window() {
+    let registry = read_only_registry_outside_cwd_windows();
+    let window = crate::tests::env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::current_dir().expect("cwd");
+    let gone = temp_path("gone-cwd");
+    fs::create_dir_all(&gone).expect("window folder");
+    std::env::set_current_dir(&gone).expect("open the window");
+    fs::remove_dir(&gone).expect("remove the window's folder");
+
+    let call = thread::spawn(move || run_read_only_safe_bash(&registry));
+    while !call.is_finished() && !crate::tests::waits_for_env_lock(call.thread().id()) {
+        thread::yield_now();
+    }
+    std::env::set_current_dir(&previous).expect("restore cwd");
+    drop(window);
+
+    let output = call.join().expect("the bash call");
+    assert!(
+        output
+            .as_ref()
+            .is_ok_and(|text| text.contains("zo-readonly-ok")),
+        "the bash call ran inside another test's cwd window: {output:?}"
     );
 }
 
