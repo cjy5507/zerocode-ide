@@ -699,13 +699,12 @@ pub struct Hour<'a> {
 
 /// [`pass`] for a person's decision (t-62170), whose requests count in two
 /// hours besides the day ([`Hour`]). The door's questions come first, the
-/// day's budget among them, and both hours are read before anything is
-/// counted, so a request that its hour, the shared hour or the day refuses
-/// takes a place in none of them. A request all three have room for takes
-/// its place in its own hour, then in the shared hour, then in the day; one
-/// that loses a place to a request counted at the same moment is refused
-/// after all, the places before it spent, as a day's last place is
-/// ([`pass`]).
+/// day's budget among them. Both hours are checked and counted before the
+/// day. Any refusal or write failure returns the hour counts to their prior
+/// values. If a return fails, the count stays high: later requests may be
+/// refused, and this request is never sent. The day keeps [`take_a_place`]'s
+/// rule: losing its last place to a concurrent request spends that daily
+/// place even though the request is refused.
 ///
 /// # Errors
 /// As [`pass`], and [`Refused::HourlyBudget`] when either hour is full or
@@ -734,11 +733,11 @@ pub fn pass_within_the_hour(
     let before = (count::sent(hour.decision), count::sent(hour.every));
     if let Err(refused) = take_an_hours_place(hour.decision, hour.decision_most)
         .and_then(|()| take_an_hours_place(hour.every, hour.every_most))
+        .and_then(|()| take_a_place(settings, requests))
     {
         return_hours(hour, before)?;
         return Err(refused);
     }
-    take_a_place(settings, requests)?;
     Ok(cleared)
 }
 
