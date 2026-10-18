@@ -848,3 +848,19 @@ fn a_yes_or_no_tie_at_a_line_of_a_half_hands_nothing() {
         assert_eq!((&row["confidence"], &row["applied"]), (&Value::from(0.5), &Value::from(false)));
     });
 }
+
+/// An option alone at the top of three reaches a line of a half and hands its
+/// line, and its row says it was handed.
+#[test]
+fn a_choice_alone_at_the_top_at_a_line_of_a_half_hands_its_line() {
+    let spread = [("small", 0.5), ("medium", 0.3), ("large", 0.2), (custom::NOT_APPLICABLE, 0.0)];
+    let mock = replying(move |_| a_choice("small", &spread, 0.5));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        let mut definition = choosing("Size", Point::AgentAsks, &["small", "medium", "large"]);
+        definition.act_from = *custom::ACT_FROM.start();
+        keep(&definition, JevMode::On);
+        let (verdict, row) = decided(cwd, &definition);
+        assert_eq!(verdict.line, Some(custom::line("Size", "small", 0.5)));
+        assert_eq!((&row["chosen"], &row["applied"]), (&Value::from("small"), &Value::from(true)));
+    });
+}
