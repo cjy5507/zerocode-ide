@@ -709,3 +709,51 @@ async fn cancel_stop_selection_changes_and_shutdown_prevent_late_activation() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_restores_share_one_operation_and_block_manual_start() {
+    let fixture = Restoring::new();
+    fixture.seed();
+    fixture.tell("hold", 1);
+    let runtime = tokio::runtime::Handle::current();
+    let barrier = std::sync::Barrier::new(3);
+    let (first, second) = std::thread::scope(|threads| {
+        let first = threads.spawn(|| {
+            let _entered = runtime.enter();
+            barrier.wait();
+            fixture.restore(true).unwrap()
+        });
+        let second = threads.spawn(|| {
+            let _entered = runtime.enter();
+            barrier.wait();
+            fixture.restore(true).unwrap()
+        });
+        barrier.wait();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert!(
+        first
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == "restore"),
+        "concurrent restores must reserve one operation"
+    );
+    assert_eq!(first.operation.unwrap().id, second.operation.unwrap().id);
+    assert!(matches!(
+        fixture
+            .manager
+            .start(&fixture.models[0].id, &fixture.models[0].revision),
+        Err(Error::Busy)
+    ));
+    fixture.started(1).await;
+    assert_eq!(fixture.starts(), 1);
+    fixture.tell("go", 1);
+    let ready = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(ready.server.state, "ready");
+    assert!(ready.server.checked);
+    let server = ready.server.id;
+    fixture.restore(true).unwrap();
+    assert_eq!(fixture.manager.snapshot().server.id, server);
+    assert_eq!(fixture.starts(), 1);
+    assert_eq!(fixture.recorded().await.len(), 1);
+}
