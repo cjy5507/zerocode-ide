@@ -591,9 +591,6 @@ fn commands() -> &'static Mutex<Commands> {
 /// the seat none. The task lent is the first line of the person's words, cut
 /// to the command guard's cap ([`COMMAND_GUARD_TASK_CHAR_CAP`]).
 pub(super) fn before_command(project: &Path, ask: &CommandAsk) {
-    if !asks_about(&ask.command) {
-        return;
-    }
     let asking = asking_at(project, Point::BeforeCommand);
     if asking.is_empty() {
         return;

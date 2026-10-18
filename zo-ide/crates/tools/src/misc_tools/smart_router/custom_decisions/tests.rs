@@ -744,3 +744,23 @@ fn a_definition_that_breaks_a_rule_writes_its_word_and_asks_nothing() {
         assert!(unasked(&mock), "nothing was asked");
     });
 }
+
+/// A command today's read-only rule clears asks no decision, as the runtime
+/// asks the command seat about none, and writes no row.
+#[test]
+fn a_read_only_command_asks_nothing_and_writes_no_row() {
+    let mock = replying(|_| a_noul(0.9));
+    machine_words(&words(Some(JevMode::On.key())), &mock.base_url, |cwd| {
+        keep(&yes_no("Cleanup", Point::BeforeCommand), JevMode::On);
+        let guard = ToolGuardJudge::at(cwd);
+        let commands = ["git status", "ls -la crates && git log --oneline -3", "grep -rn guard zo-ide | head"];
+        for (id, command) in commands.iter().enumerate() {
+            assert!(!asks_about(command), "{command}: today's rule proves it read-only");
+            let id = id.to_string();
+            guard.command(command_ask(cwd, &id, command));
+            assert_eq!(run_blocking(guard.command_ran(finished(&id))), None, "{command}");
+        }
+        assert!(unasked(&mock), "a read-only command asked nothing");
+        assert!(rows_now(cwd).is_empty(), "and wrote no row");
+    });
+}
