@@ -342,7 +342,9 @@ fn run_summary(request: &SummaryRequest, cwd: &Path, now_ms: i64, offset_s: i64)
     let seats = jev_summary::with_rests(seats, &cwd);
     Report {
         text: if request.json {
-            let said = render_json(&seats, request.act_lines);
+            let mut said = render_json(&seats, request.act_lines);
+            let decisions = jev_summary::custom_decisions(&roots, request.sessions.as_deref(), now_ms, offset_s);
+            said["customDecisions"] = custom_decisions_json(&decisions);
             said.to_string()
         } else {
             render_text(&seats)
