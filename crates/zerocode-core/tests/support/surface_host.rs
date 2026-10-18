@@ -46,6 +46,14 @@ impl SurfaceHost {
         } else {
             ""
         };
+        let capability_header = match shim {
+            zerocode_core::agent_shims::SurfaceShim::Computer => {
+                "x-zerocode-computer-token: fixture-computer"
+            }
+            zerocode_core::agent_shims::SurfaceShim::Browser => {
+                "x-zerocode-browser-token: fixture-browser"
+            }
+        };
         let worker = std::thread::spawn(move || {
             let mut cursor = 0;
             while !done.load(Ordering::Acquire) {
@@ -57,6 +65,26 @@ impl SurfaceHost {
                             .0
                             .to_ascii_lowercase()
                             .contains("x-zerocode-hook-token: fixture-hook"));
+                        assert!(
+                            request.0.to_ascii_lowercase().contains(capability_header),
+                            "the installed shim must send its separate surface capability"
+                        );
+                        let words = request.1.split('\u{1f}').collect::<Vec<_>>();
+                        if matches!(shim, zerocode_core::agent_shims::SurfaceShim::Computer) {
+                            assert!(
+                                words.windows(2).any(|pair| pair == ["--app", "Fixture"]),
+                                "every Computer request must retain the selected app"
+                            );
+                            assert!(
+                                words.windows(2).any(|pair| pair == ["--window-id", "41"]),
+                                "every Computer request must retain the selected window"
+                            );
+                        } else {
+                            assert!(
+                                words.contains(&"browser-1"),
+                                "the Browser request must retain its working-tab label"
+                            );
+                        }
                         let verb = request
                             .1
                             .split('\u{1f}')
