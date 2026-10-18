@@ -472,6 +472,14 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     io(file.sync_all())
 }
 
+pub fn replace(_path: &Path, _bytes: &[u8]) -> Result<()> {
+    Ok(())
+}
+
+pub fn remove(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 fn valid_receipt(path: &Path, expected: Result<String>) -> bool {
     let Ok(expected) = expected else { return false };
     child(path, "receipt.json")
@@ -556,4 +564,33 @@ fn available_space(path: &Path) -> Result<u64> {
 #[cfg(not(any(unix, windows)))]
 fn available_space(_: &Path) -> Result<u64> {
     Err(Error::Unsupported)
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_overwrites_an_existing_file_and_remove_is_repeatable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("intent.json");
+        fs::write(&path, b"before").unwrap();
+        replace(&path, b"after").unwrap();
+        assert_eq!(
+            bounded_read(&path, 1024).unwrap(),
+            b"after",
+            "replace must publish replacement bytes"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        remove(&path).unwrap();
+        assert!(!path.exists());
+        remove(&path).unwrap();
+    }
 }
