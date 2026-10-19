@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::aliases::{normalize_tool_name, permission_mode_from_plugin, TOOL_NAME_ALIASES};
 use crate::context::{disabled_tool_error, ToolContext, TOOL_TOGGLE_DENIAL_REASON};
 use crate::dispatch::{
-    enforce_permission_check, execute_tool_with_context, finish_successful_tool_output, from_value,
+    enforce_permission_check, finish_successful_tool_output, from_value,
     to_pretty_json,
 };
 use crate::error::ToolError;
@@ -1072,11 +1072,35 @@ impl GlobalToolRegistry {
         self.enforcer = Some(enforcer);
     }
 
+    pub fn resolve_call(name: &str, input: &Value) -> Result<Option<runtime::ResolvedToolCall>, ToolError> {
+        let canonical = crate::aliases::canonical_tool_name(name);
+        if canonical == crate::capability::CAPABILITY_INVOKE {
+            let call = crate::capability::unwrap_capability_invoke(input).map_err(ToolError::InvalidInput)?;
+            let inner: Value = serde_json::from_str(&call.input)?;
+            return Ok(Self::resolve_call(&call.name, &inner)?.or_else(|| Some(runtime::ResolvedToolCall {
+                name: crate::aliases::canonical_tool_name(&call.name), input: call.input,
+            })));
+        }
+        if canonical == "bash" {
+            if let Some(call) = crate::browser_execution::canonical_call(input) {
+                return Ok(Some(call));
+            }
+        }
+        if canonical == "Computer" {
+            return crate::computer_tools::canonical_call(input).map(Some);
+        }
+        Ok((canonical != name).then(|| runtime::ResolvedToolCall { name:canonical, input:input.to_string() }))
+    }
+
+    pub fn execute(&self, name: &str, input: &Value) -> Result<String, ToolError> {
+        self.execute_result(name, input).map(|result| result.text)
+    }
+
     // The linear order of toggle, agent-only, plan-mode, builtin, and plugin
     // gates is security-significant; splitting it would hide early-return
     // precedence merely to meet a line-count heuristic.
     #[allow(clippy::too_many_lines)]
-    pub fn execute(&self, name: &str, input: &Value) -> Result<String, ToolError> {
+    pub fn execute_result(&self, name: &str, input: &Value) -> Result<runtime::ToolExecutionResult, ToolError> {
         // Accept PascalCase (`Read`, `Write`, ...) and short forms (`read`)
         // by resolving to the canonical handler name before lookup/dispatch.
         let canonical = crate::aliases::canonical_tool_name(name);
@@ -1089,7 +1113,7 @@ impl GlobalToolRegistry {
             let call = crate::capability::unwrap_capability_invoke(input)
                 .map_err(ToolError::InvalidInput)?;
             let inner_input: Value = serde_json::from_str(&call.input)?;
-            return self.execute(&call.name, &inner_input);
+            return self.execute_result(&call.name, &inner_input);
         }
         if self.is_tool_disabled(canonical_ref) {
             let invocation =
@@ -1139,7 +1163,7 @@ impl GlobalToolRegistry {
                 self.context.record_tool_invocation(
                     invocation.finish(successful_result(metadata), gateway::epoch_millis_now()),
                 );
-                return Ok(PLAN_ALREADY_ACTIVE_MESSAGE.to_owned());
+                return Ok(PLAN_ALREADY_ACTIVE_MESSAGE.to_owned().into());
             }
             let error = ToolError::PermissionDenied {
                 tool: canonical_ref.to_owned(),
@@ -1153,13 +1177,13 @@ impl GlobalToolRegistry {
             return Err(error);
         }
         if canonical_ref == "ToolSearch" {
-            return self.execute_tool_search(name, input);
+            return self.execute_tool_search(name, input).map(runtime::ToolExecutionResult::from);
         }
         if mvp_tool_specs()
             .iter()
             .any(|spec| spec.name == canonical_ref)
         {
-            return execute_tool_with_context(
+            return crate::dispatch::execute_tool_result_with_context(
                 &self.context,
                 self.enforcer.as_ref(),
                 canonical_ref,
@@ -1203,7 +1227,7 @@ impl GlobalToolRegistry {
                 self.context.record_tool_invocation(
                     invocation.finish(successful_result(metadata), gateway::epoch_millis_now()),
                 );
-                Ok(output)
+                Ok(output.into())
             }
             Err(error) => {
                 // This branch never enters `dispatch_tool_inner`, so it applies

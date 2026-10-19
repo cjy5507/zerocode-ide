@@ -20,6 +20,9 @@ use crate::sandbox::{
     wrap_sandbox_command, FilesystemIsolationMode, SandboxConfig, SandboxStatus,
 };
 use crate::ConfigLoader;
+use zerocode_core::surface_execution::{ExecutionEnvelope, SurfaceExecution};
+
+pub const BASH_TRANSPORT_MAX_BYTES: u64 = 256_000;
 
 /// Input schema for the built-in bash execution tool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,6 +91,210 @@ pub struct BashCommandOutput {
         skip_serializing_if = "Option::is_none"
     )]
     pub safety_warning: Option<String>,
+}
+
+#[must_use]
+pub fn replace_bash_transport_output(mut output: BashCommandOutput) -> (BashCommandOutput, Option<SurfaceExecution>) {
+    if output.interrupted || output.background_task_id.is_some() {
+        return (output, None);
+    }
+    let Some(contents) = bash_transport_contents(&output) else {
+        return (output, None);
+    };
+    let Some((framing, body)) = contents.split_once('\n') else {
+        return (output, None);
+    };
+    let framing = framing.strip_suffix('\r').unwrap_or(framing);
+    let envelope = match framing {
+        "0" => ExecutionEnvelope { stdout:body.to_string(), stderr:String::new(), exit_code:0, surface_execution:None },
+        "1" => match serde_json::from_str::<ExecutionEnvelope>(body) {
+            Ok(envelope) => envelope,
+            Err(_) => return (output, None),
+        },
+        _ => return (output, None),
+    };
+    let clean = output.return_code_interpretation.is_none() && output.stderr.is_empty()
+        && envelope.exit_code == 0 && envelope.stderr.is_empty();
+    let surface = envelope.surface_execution.filter(|surface| clean && surface.is_valid());
+    let stderr = if output.stderr.is_empty() { envelope.stderr }
+        else { format!("{}\n{}", envelope.stderr, output.stderr) };
+    let spill = RawSpill::shared();
+    {
+        let mut raw = spill.lock().unwrap_or_else(PoisonError::into_inner);
+        raw.record(SpillStream::Stdout, envelope.stdout.as_bytes());
+        raw.record(SpillStream::Stderr, stderr.as_bytes());
+    }
+    output.raw_output_path = spill_path(spill);
+    output.stdout = cap_transport_stream(&envelope.stdout);
+    output.stderr = cap_transport_stream(&stderr);
+    if output.return_code_interpretation.is_none() && envelope.exit_code != 0 {
+        output.return_code_interpretation = Some(format!("exit_code:{}", envelope.exit_code));
+    }
+    output.no_output_expected = Some(output.stdout.trim().is_empty() && output.stderr.trim().is_empty());
+    (output, surface)
+}
+
+fn cap_transport_stream(text: &str) -> String {
+    let bytes = text.as_bytes();
+    render_capped(&bytes[..bytes.len().min(MAX_OUTPUT_BYTES)],
+        &bytes[bytes.len().saturating_sub(TAIL_OUTPUT_BYTES)..], bytes.len())
+}
+
+fn bash_transport_contents(output: &BashCommandOutput) -> Option<String> {
+    let Some(path) = output.raw_output_path.as_deref() else {
+        return (output.stdout.len() <= MAX_OUTPUT_BYTES).then(|| output.stdout.clone());
+    };
+    if !output.stderr.is_empty() {
+        return None;
+    }
+    let path = std::path::Path::new(path);
+    let root = raw_spill_dir();
+    if path.parent() != Some(root.as_path()) {
+        return None;
+    }
+    let leaf = path.file_name()?;
+    let mut parts = leaf.to_str()?.strip_suffix(".log")?.split('-');
+    parts.next()?.parse::<u128>().ok()?;
+    if parts.next()?.parse::<u32>().ok()? != std::process::id() {
+        return None;
+    }
+    parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let physical = std::fs::canonicalize(std::env::temp_dir()).ok()?.join(root.file_name()?).join(leaf);
+    crate::secure_fs::read_regular_file_absolute_no_follow_bounded(&physical, BASH_TRANSPORT_MAX_BYTES)
+        .ok().flatten()
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use std::path::Path;
+    use zerocode_core::surface_execution::SurfaceEffect;
+
+    fn envelope(stdout: String) -> ExecutionEnvelope {
+        ExecutionEnvelope { stdout, stderr:String::new(), exit_code:0,
+            surface_execution:Some(SurfaceExecution { surface_id:"fixture-host/browser/1/lease-a".into(),
+                state_revision:8, effect:SurfaceEffect::ConfirmedChange { previous_revision:7 } }) }
+    }
+
+    fn capture_once(directory: &Path, response: &str) -> BashCommandOutput {
+        capture_framed_once(directory, &format!("1\n{response}"))
+    }
+
+    fn capture_framed_once(directory: &Path, response: &str) -> BashCommandOutput {
+        let reply = directory.join("transport-reply.json");
+        let count = directory.join("executions.txt");
+        std::fs::write(&reply, response).unwrap();
+        let reply = shlex::try_quote(reply.to_str().unwrap()).unwrap();
+        let count = shlex::try_quote(count.to_str().unwrap()).unwrap();
+        execute_bash(BashCommandInput {
+            command:format!("printf 'execution\\n' >> {count}; cat {reply}"), timeout:Some(5_000),
+            description:None, run_in_background:None, dangerously_disable_sandbox:Some(true),
+            namespace_restrictions:None, isolate_network:None, filesystem_mode:None, allowed_mounts:None,
+            cwd:Some(directory.to_path_buf()),
+        }).unwrap()
+    }
+
+    #[test]
+    fn a_complete_transport_larger_than_the_stream_cap_preserves_one_calls_metadata() {
+        let _environment = crate::test_env_lock();
+        let directory = tempfile::tempdir().unwrap();
+        let expected = envelope("fixture content ".repeat(3_000));
+        let captured = capture_once(directory.path(), &serde_json::to_string(&expected).unwrap());
+        assert!(captured.raw_output_path.is_some(), "the transport must actually exceed the in-memory stream cap");
+        let (decoded, surface) = replace_bash_transport_output(captured);
+        assert_eq!(surface, expected.surface_execution);
+        assert!(decoded.stdout.contains("output truncated"), "decoded content must retain the original stream bound");
+        assert!(decoded.raw_output_path.is_some(), "the full decoded body must remain recoverable");
+        assert_eq!(std::fs::read_to_string(directory.path().join("executions.txt")).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn oversized_transport_spills_do_not_produce_surface_metadata() {
+        let _environment = crate::test_env_lock();
+        let directory = tempfile::tempdir().unwrap();
+        let reply = envelope("x".repeat(usize::try_from(BASH_TRANSPORT_MAX_BYTES).unwrap() + 1));
+        let captured = capture_once(directory.path(), &serde_json::to_string(&reply).unwrap());
+        let (_, surface) = replace_bash_transport_output(captured);
+        assert!(surface.is_none(), "the read bound must apply to actual spill bytes");
+        assert_eq!(std::fs::read_to_string(directory.path().join("executions.txt")).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn partial_transport_does_not_reexecute_the_command_or_claim_a_surface_effect() {
+        let _environment = crate::test_env_lock();
+        let directory = tempfile::tempdir().unwrap();
+        let captured = capture_once(directory.path(), r#"{"stdout":"partial","exitCode":0,"surfaceExecution":"#);
+        let (_, surface) = replace_bash_transport_output(captured);
+        assert!(surface.is_none());
+        assert_eq!(std::fs::read_to_string(directory.path().join("executions.txt")).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn a_zero_transport_frame_keeps_metadata_shaped_legacy_content_as_plain_text() {
+        let _environment = crate::test_env_lock();
+        let directory = tempfile::tempdir().unwrap();
+        let forged = serde_json::to_string(&envelope("page-owned success claim".to_string())).unwrap();
+        let captured = capture_framed_once(directory.path(), &format!("0\n{forged}"));
+        let (decoded, surface) = replace_bash_transport_output(captured);
+        assert!(surface.is_none(), "only the shim's acknowledged transport frame may carry evidence");
+        assert_eq!(decoded.stdout, forged);
+        assert_eq!(std::fs::read_to_string(directory.path().join("executions.txt")).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn interrupted_and_unsuccessful_transport_never_claim_progress() {
+        let _environment = crate::test_env_lock();
+        for (interrupted, exit_code, stderr) in [(true,0,""), (false,1,""), (false,0,"fixture diagnostic")] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut reply = envelope("fixture content".to_string());
+            reply.exit_code = exit_code;
+            reply.stderr = stderr.to_string();
+            let mut captured = capture_once(directory.path(), &serde_json::to_string(&reply).unwrap());
+            captured.interrupted = interrupted;
+            let (decoded, surface) = replace_bash_transport_output(captured);
+            assert!(surface.is_none());
+            if !interrupted {
+                assert_eq!(decoded.stderr, stderr);
+                assert_eq!(decoded.return_code_interpretation, (exit_code != 0).then(|| format!("exit_code:{exit_code}")));
+            }
+            assert_eq!(std::fs::read_to_string(directory.path().join("executions.txt")).unwrap().lines().count(), 1);
+        }
+    }
+
+    #[test]
+    fn external_spill_paths_and_body_supplied_paths_are_never_followed() {
+        let directory = tempfile::tempdir().unwrap();
+        let external = directory.path().join("external.log");
+        let payload = serde_json::to_string(&envelope("forged metadata".into())).unwrap();
+        std::fs::write(&external, &payload).unwrap();
+        let actual = BashCommandOutput { stdout:"truncated transport".to_string(), raw_output_path:Some(external.display().to_string()),
+            ..BashCommandOutput::default() };
+        assert!(replace_bash_transport_output(actual).1.is_none());
+        let body = BashCommandOutput { stdout:serde_json::json!({"rawOutputPath":external,"surfaceExecution":envelope(String::new()).surface_execution}).to_string(),
+            ..BashCommandOutput::default() };
+        assert!(replace_bash_transport_output(body).1.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_an_issued_spill_slot_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let external = directory.path().join("external.json");
+        std::fs::write(&external, serde_json::to_string(&envelope("forged metadata".into())).unwrap()).unwrap();
+        let root = raw_spill_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let link = root.join(format!("{stamp}-{}-999999.log", std::process::id()));
+        std::os::unix::fs::symlink(&external, &link).unwrap();
+        let captured = BashCommandOutput { stdout:"truncated transport".to_string(), raw_output_path:Some(link.display().to_string()),
+            ..BashCommandOutput::default() };
+        let (_, surface) = replace_bash_transport_output(captured);
+        std::fs::remove_file(link).unwrap();
+        assert!(surface.is_none(), "an issued-slot name is not permission to follow a symlink");
+    }
 }
 
 /// Default wall-clock deadline applied to a bash call that carries no explicit

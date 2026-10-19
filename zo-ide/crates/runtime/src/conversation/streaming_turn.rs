@@ -23,7 +23,7 @@ use super::{
     is_refusal_stop_reason, is_truncation_stop_reason, is_verify_class_tool, merge_hook_context,
     merge_hook_feedback,
     normalize_empty_assistant_stream,
-    parallel_waves, pre_hook_denial_outcome, ConcurrentDispatchFn,
+    parallel_waves, pre_hook_denial_outcome, ConcurrentResultDispatchFn,
     overload_demotion_warn, quota_fallback_swap_warn, quota_wait_hold_warn,
     refusal_surfaced_message, surfaced_refusal_notice,
     sleep_tool_cut_short, sleep_tool_execution_input,
@@ -35,7 +35,7 @@ use super::{
     HookEvent, HookRunResult, PermissionContext, PermissionOutcome, PermissionPromptDecision,
     PromptCacheEvent, QuotaEscape, RefusalDecision, RenderBlock, RuntimeError, SteeringQueue,
     StreamingTurnError, SystemLevel,
-    TokenUsage, ToolBatchRepetitionHardStops, ToolCallId, ToolCallStatus, ToolExecutor,
+    TokenUsage, ToolBatchRepetitionHardStops, ToolCallId, ToolCallStatus, ToolExecutionResult, ToolExecutor,
     TurnContinuity, TurnSummary,
     DEFAULT_STREAMING_CHANNEL_CAPACITY,
     EMPTY_STREAM_CONTINUATION_REMINDER, EMPTY_STREAM_CONTINUATION_REMINDER_PREFIX,
@@ -48,7 +48,7 @@ use super::{
 use crate::message_stream::types::WireModel;
 use crate::conversation::error::ToolTextKind;
 use crate::message_stream::ToolResultBody;
-use crate::tool_cancel::{ToolCancelWatch, ToolDispatchOutcome};
+use crate::tool_cancel::{ToolCancelWatch, CANCELLED_TOOL_RESULT};
 
 /// Await one `spawn_blocking` tool dispatch, racing it against a user cancel
 /// (Esc once — "drop this tool, keep the turn").
@@ -74,22 +74,22 @@ use crate::tool_cancel::{ToolCancelWatch, ToolDispatchOutcome};
 /// committed by such a tool (a file written, a request sent) stand — the
 /// synthetic result says "cancelled", not "did nothing".
 async fn await_cancellable_tool_dispatch(
-    handle: tokio::task::JoinHandle<(String, ToolTextKind)>,
+    handle: tokio::task::JoinHandle<(ToolExecutionResult, ToolTextKind)>,
     watch: &mut ToolCancelWatch,
     owner_session: &str,
-) -> ToolDispatchOutcome {
+) -> (ToolExecutionResult, ToolTextKind, bool) {
     tokio::select! {
         // Biased so a dispatch that already completed settles as itself even if
         // a cancel lands in the same poll: a finished tool has a real answer and
         // reporting it as cancelled would throw away work already paid for.
         biased;
         joined = handle => match joined {
-            Ok(result) => ToolDispatchOutcome::Completed(result.0, result.1),
-            Err(join_error) => ToolDispatchOutcome::Completed(join_error.to_string(), ToolTextKind::Failure),
+            Ok(result) => (result.0, result.1, false),
+            Err(join_error) => (join_error.to_string().into(), ToolTextKind::Failure, false),
         },
         () = watch.cancelled() => {
             let _ = crate::bash::interrupt_foreground_bash(Some(owner_session));
-            ToolDispatchOutcome::Cancelled
+            (CANCELLED_TOOL_RESULT.to_string().into(), ToolTextKind::Failure, true)
         }
     }
 }
@@ -437,7 +437,7 @@ struct PreparedStreamingTool {
 }
 
 struct PrecomputedStreamingToolResult {
-    output: String,
+    output: ToolExecutionResult,
     kind: ToolTextKind,
     tool_start: std::time::Instant,
 }
@@ -2726,7 +2726,7 @@ where
             for (idx, p) in prepared.iter().enumerate() {
                 if waves.peek().is_some_and(|wave| wave[0] == idx) {
                     let wave = waves.next().unwrap_or_default();
-                    if let Some(dispatch) = self.concurrent_dispatch.as_ref().map(Arc::clone) {
+                    if let Some(dispatch) = self.result_dispatch() {
                         self.run_streaming_wave(
                             &wave,
                             &prepared,
@@ -2761,15 +2761,10 @@ where
                 } else {
                     match &p.permission_outcome {
                         PermissionOutcome::Allow => {
-                            let synthetic_output = batch_hard_stops.preflight_notice(
+                            let synthetic_output = self.tool_repetition_preflight(
                                 &p.tool_name,
                                 &p.effective_input,
-                                || {
-                                    self.next_tool_repetition_hard_stop_notice(
-                                        &p.tool_name,
-                                        &p.effective_input,
-                                    )
-                                },
+                                &mut batch_hard_stops,
                             );
                             if let Some((output, terminates)) = synthetic_output {
                                 if terminates {
@@ -2819,8 +2814,8 @@ where
                                 match ask_user_question_async(&p.effective_input, &render_tx, &id_gen)
                                     .await
                                 {
-                                    Ok(answer) => (answer, ToolTextKind::Answer),
-                                    Err(e) => (e, ToolTextKind::Failure),
+                                    Ok(answer) => (answer.into(), ToolTextKind::Answer),
+                                    Err(error) => (error.into(), ToolTextKind::Failure),
                                 }
                             } else {
                                 let execution_input = if let Some((delay, input)) =
@@ -2841,8 +2836,7 @@ where
                                 } else {
                                     Cow::Borrowed(p.effective_input.as_str())
                                 };
-                                if let Some(dispatch) = &self.concurrent_dispatch {
-                                    let dispatch = std::sync::Arc::clone(dispatch);
+                                if let Some(dispatch) = self.result_dispatch() {
                                     let name = p.tool_name.clone();
                                     let input = execution_input.into_owned();
                                     // Same bracket as the parallel wave: watch
@@ -2857,7 +2851,7 @@ where
                                         tokio::task::spawn_blocking(move || {
                                             match dispatch(&name, &input) {
                                                 Ok(output) => (output, ToolTextKind::Answer),
-                                                Err(e) => (e.to_string(), e.kind()),
+                                                Err(error) => (error.to_string().into(), error.kind()),
                                             }
                                         });
                                     let (output, kind, cancelled) =
@@ -2866,8 +2860,7 @@ where
                                             &mut watch,
                                             &owner_session,
                                         )
-                                        .await
-                                        .into_tool_result();
+                                        .await;
                                     if cancelled {
                                         tool_was_cancelled = true;
                                         self.mark_streaming_tool_cancelled(
@@ -3145,7 +3138,7 @@ where
         render_tx: &mpsc::Sender<RenderBlock>,
         id_gen: &BlockIdGen,
         message_count_before: usize,
-        dispatch: ConcurrentDispatchFn,
+        dispatch: ConcurrentResultDispatchFn,
     ) -> Result<(), StreamingTurnError> {
         for batch in wave.chunks(MAX_PARALLEL_SAFE_TOOL_DISPATCHES) {
             let mut handles = FuturesUnordered::new();
@@ -3167,7 +3160,7 @@ where
                 let owner_session = self.session.session_id.clone();
                 let handle = tokio::task::spawn_blocking(move || match dispatch(&name, &input) {
                     Ok(output) => (output, ToolTextKind::Answer),
-                    Err(e) => (e.to_string(), e.kind()),
+                    Err(error) => (error.to_string().into(), error.kind()),
                 });
                 handles.push(async move {
                     let outcome =
@@ -3176,7 +3169,7 @@ where
                 });
             }
             while let Some((idx, tool_start, outcome)) = handles.next().await {
-                let (output, kind, cancelled) = outcome.into_tool_result();
+                let (output, kind, cancelled) = outcome;
                 if cancelled {
                     self.mark_streaming_tool_cancelled(
                         iterations,
@@ -3196,7 +3189,7 @@ where
                 self.render_precomputed_streaming_tool_result(
                     iterations,
                     &prepared[idx],
-                    &output,
+                    &output.text,
                     kind,
                     StreamingToolRenderContext {
                         render_tx,
@@ -3366,12 +3359,13 @@ where
         &mut self,
         iterations: usize,
         p: &PreparedStreamingTool,
-        result: (String, ToolTextKind),
+        result: (ToolExecutionResult, ToolTextKind),
         render: StreamingToolRenderContext<'_>,
         options: StreamingToolFinalizeOptions,
         batch_hard_stops: &mut ToolBatchRepetitionHardStops,
     ) -> Result<ConversationMessage, StreamingTurnError> {
-        let (mut output, kind) = result;
+        let (execution, kind) = result;
+        let ToolExecutionResult { text: mut output, surface } = execution;
         let mut is_error = kind.is_error();
         // The patch review seat reads the tool's own envelope, so it is kept
         // before any hook merges text into it (t-6203).
@@ -3459,6 +3453,13 @@ where
         // Append (after rendering, so the user-facing body stays clean) only to
         // the model-facing result, nudging the agent out of a tight
         // identical-call loop.
+        self.note_surface_execution(
+            &p.tool_name,
+            &p.effective_input,
+            surface,
+            is_error,
+            batch_hard_stops,
+        );
         self.append_tool_repetition_notice(
             &mut output,
             &p.tool_name,

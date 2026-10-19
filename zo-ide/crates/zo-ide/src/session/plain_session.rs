@@ -1280,6 +1280,7 @@ impl PlainSession {
             }
         };
         if let Some((turn_index, changed)) = restored {
+            runtime.reset_surface_repetition_state();
             let text = crate::tui::strings::workspace_restored_reminder(turn_index, changed);
             let message = runtime::ConversationMessage {
                 role: runtime::MessageRole::System,

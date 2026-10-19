@@ -2689,7 +2689,7 @@ pub(super) async fn browser_loop(
             .or_else(|| computer_use::evidence::session_dir(now_epoch_ms()));
             let mut reply = request.answer;
             tokio::select! {
-                answer = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, request.workspace_revision) => { let _ = reply.send(answer); }
+                (answer, surface) = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, request.workspace_revision) => { let _ = reply.send_with_surface(answer, surface); }
                 _ = reply.closed() => {}
             }
         });
@@ -3238,7 +3238,7 @@ pub(super) async fn browser_step(
 ) -> zerocode_hookd::TeamAnswer {
     // Nested callers carry the selected observation in the same common
     // option as the CLI. Missing input stays missing until admission.
-    browser_step_at(app, pane, dir, argv, logged, None).await
+    browser_step_at(app, pane, dir, argv, logged, None).await.0
 }
 
 async fn browser_step_at(
@@ -3248,11 +3248,45 @@ async fn browser_step_at(
     argv: &[String],
     logged: &[String],
     expected_revision: Option<u64>,
-) -> zerocode_hookd::TeamAnswer {
-    let observation = step_actor(app, pane).on(run_evidence::observation());
+) -> (
+    zerocode_hookd::TeamAnswer,
+    Option<zerocode_core::surface_execution::SurfaceExecution>,
+) {
+    let actor = step_actor(app, pane);
+    let observation = actor.on(run_evidence::observation());
+    let surface_context =
+        zerocode_core::agent_browser::parse_workspace_command(argv, expected_revision)
+            .ok()
+            .and_then(|command| {
+                let label = command.argv.get(1)?;
+                let state = app.state::<AppState>();
+                let workspaces = &state.shell_runtime().browser_workspaces;
+                let check = workspaces
+                    .navigation_check(label, actor.pane.as_deref())
+                    .ok()?;
+                let snapshot = workspaces.snapshot(label).ok()??;
+                if !check.holds() {
+                    return None;
+                }
+                let context = computer_use::surface_execution::BrowserContext::new(
+                    actor.clone(),
+                    label,
+                    snapshot.revision,
+                )?;
+                Some((context, check))
+            });
     let began = std::time::Instant::now();
     let mut control = None;
-    let answer = answer_browser_command(app, argv, pane, expected_revision, &mut control).await;
+    let (answer, browser_observation) = computer_use::surface_execution::observing_browser(async {
+        answer_browser_command(app, argv, pane, expected_revision, &mut control).await
+    })
+    .await;
+    let surface = surface_context.and_then(|(context, check)| {
+        if !check.holds() || step_actor(app, pane) != actor {
+            return None;
+        }
+        context.finish(argv, &answer, browser_observation.as_ref())
+    });
     if let Some(dir) = dir {
         evidence_runtime::leave_browser_evidence(
             app,
@@ -3263,7 +3297,7 @@ async fn browser_step_at(
             control,
         );
     }
-    answer
+    (answer, surface)
 }
 
 /// One command line answered down the emulator road, and its evidence after
@@ -5568,6 +5602,7 @@ pub(super) fn answer_computer_command_with(
     if let Err(error) = input_policy.prepare(&mut command) {
         return computer_cli_error(command.json, &error.code, &error.message);
     }
+    let surface_context = computer_use::surface_execution::begin(command.method);
     let result = if command.method == ComputerMethod::Stop {
         Ok(agents_stop(&SessionHelper, permission_window))
     } else if command.method == ComputerMethod::Resume {
@@ -5800,7 +5835,7 @@ pub(super) fn answer_computer_command_with(
                     png,
                 );
             }
-            said_envelope(&command, result)
+            said_envelope_at(&command, result, surface_context.as_ref())
         }
         Err(error) => {
             use zerocode_core::computer_use_protocol::{error_code, validate};
@@ -6583,7 +6618,15 @@ pub(super) fn said_envelope(
     command: &zerocode_core::computer_use::ComputerCommand,
     result: serde_json::Value,
 ) -> zerocode_hookd::TeamAnswer {
-    let envelope = serde_json::json!({ "ok": true, "result": result });
+    said_envelope_at(command, result, None)
+}
+
+fn said_envelope_at(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    result: serde_json::Value,
+    context: Option<&computer_use::surface_execution::Context>,
+) -> zerocode_hookd::TeamAnswer {
+    let envelope = computer_use::surface_execution::envelope(command, result, context);
     if command.json {
         computer_said(format!("{envelope}\n"))
     } else {
@@ -7434,6 +7477,9 @@ async fn dispatch_browser_command(
             } else {
                 cmd::browser::automate_read(app, &state, &read.label, read.selector.as_deref())
                     .await
+                    .inspect(|report| {
+                        computer_use::surface_execution::record_browser_read(&read.label, report);
+                    })
             };
             match answered {
                 Ok(report) => {

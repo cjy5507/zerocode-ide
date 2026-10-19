@@ -10,6 +10,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use runtime::{ToolError, ToolExecutor};
+use runtime::{ResolvedToolCall, ToolExecutionResult};
 use tools::GlobalToolRegistry;
 
 use crate::cli_args::{AllowedToolSet, DisallowedToolSet};
@@ -260,6 +261,22 @@ impl ToolExecutor for CliToolExecutor {
     }
 
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError> {
+        self.execute_result(tool_name, input).map(|result| result.text)
+    }
+
+    fn resolve_call(&self, tool_name: &str, input: &str) -> Result<Option<ResolvedToolCall>, ToolError> {
+        let canonical = tools::canonical_tool_name(tool_name);
+        if canonical == tools::capability::CAPABILITY_INVOKE || matches!(canonical.as_str(), "bash" | "Computer") {
+            let value = parse_tool_input_json(tool_name, input)?;
+            return GlobalToolRegistry::resolve_call(tool_name, &value).map_err(ToolError::from);
+        }
+        Ok((canonical != tool_name).then(|| ResolvedToolCall {
+            name: canonical,
+            input: input.to_string(),
+        }))
+    }
+
+    fn execute_result(&mut self, tool_name: &str, input: &str) -> Result<ToolExecutionResult, ToolError> {
         // `CapabilityInvoke` is an address, not a privilege: unwrap it here, at
         // the very top, and re-enter this same function with the inner name.
         // Every gate below — the deny list, `--allowedTools`, the turn
@@ -270,12 +287,12 @@ impl ToolExecutor for CliToolExecutor {
         if tool_name == tools::capability::CAPABILITY_INVOKE {
             let value = parse_tool_input_json(tool_name, input)?;
             let call = tools::capability::unwrap_capability_invoke(&value).map_err(ToolError::new)?;
-            return self.execute(&call.name, &call.input);
+            return self.execute_result(&call.name, &call.input);
         }
         check_disallowed_tools(self.disallowed_tools.as_ref(), tool_name)?;
         if tool_name == crate::autonomy::wakeup::TOOL_NAME {
             let value = parse_tool_input_json(tool_name, input)?;
-            return crate::autonomy::wakeup::execute(value);
+            return crate::autonomy::wakeup::execute(value).map(ToolExecutionResult::from);
         }
         if self
             .allowed_tools
@@ -294,12 +311,12 @@ impl ToolExecutor for CliToolExecutor {
         };
         let value = parse_tool_input_json(tool_name, input)?;
         let result = if tool_name == "ToolSearch" {
-            self.execute_search_tool(value)
+            self.execute_search_tool(value).map(ToolExecutionResult::from)
         } else if self.tool_registry.has_runtime_tool(tool_name) {
-            self.execute_runtime_tool(tool_name, value)
+            self.execute_runtime_tool(tool_name, value).map(ToolExecutionResult::from)
         } else {
             self.tool_registry
-                .execute(tool_name, &value)
+                .execute_result(tool_name, &value)
                 .map_err(ToolError::from)
         };
         // While the TUI owns the terminal, suppress stdout markdown
@@ -310,7 +327,7 @@ impl ToolExecutor for CliToolExecutor {
         match result {
             Ok(output) => {
                 if should_emit {
-                    let markdown = format_tool_result(tool_name, &output, false);
+                    let markdown = format_tool_result(tool_name, &output.text, false);
                     self.renderer
                         .stream_markdown(&markdown, &mut io::stdout())
                         .map_err(|error| ToolError::new(error.to_string()))?;
