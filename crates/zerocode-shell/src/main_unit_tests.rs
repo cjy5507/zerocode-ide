@@ -21892,7 +21892,7 @@ pub(crate) mod computer_desktop_wait {
     /// have made.
     #[test]
     fn an_agents_stop_over_a_busy_helper_is_not_lifted_by_its_resume_but_by_the_bands() {
-        use crate::agent_tools_runtime::{agents_resume, agents_stop};
+        use crate::agent_tools_runtime::{agents_resume, agents_stop, HelperRoads};
         use crate::computer_use::guard;
         let _hand = ONE_HAND
             .lock()
@@ -21951,13 +21951,15 @@ pub(crate) mod computer_desktop_wait {
         };
         let click = zerocode_core::computer_use::parse_command(&[
             "click".to_string(),
+            "--app".to_string(),
+            "Fixture".to_string(),
             "--x".to_string(),
             "1".to_string(),
             "--y".to_string(),
             "1".to_string(),
         ])
         .expect("a click parses");
-        let let_in = usize::from(guard::door_refusal(&click).is_none());
+        let let_in = usize::from(crate::door_refusal(&click).is_none());
         running.join().unwrap();
         assert!(
             stood_after < std::time::Duration::from_millis(50),
