@@ -1121,6 +1121,10 @@ function usageSignIn(provider) {
 const USAGE_EXPIRED_RUN_WORD = { key: "usage.expiredRunOf", said: "{{provider}} 로그인 만료 — {{program}} 실행" };
 const USAGE_RELOGIN_WORD = { key: "usage.reloginOf", said: "{{provider}} 다시 로그인" };
 const USAGE_READ_FAILED_WORD = { key: "usage.readFailedOf", said: "{{provider}} 읽기 실패 — 다시 시도" };
+/* 「확인 불가」: Google이 이 요청을 거절했다(400·401·403). 실패의 종류가 아니라 답이라
+ * 다시 해 보라고 하지 않는다 — 같은 물음은 백엔드가 되풀이하지 않는다. */
+const USAGE_UNVERIFIED_WORD = { key: "usage.unverifiedOf", said: "{{provider}} 확인 불가" };
+const USAGE_REFUSED = "refused";
 const USAGE_SIGNED_OUT_WORD = { key: "usage.signedOutOf", said: "{{provider}} 로그인 필요" };
 const USAGE_DELEGATED_REFRESH = "delegated-refresh-required";
 const USAGE_FAILURE_WORDS = {
@@ -1163,7 +1167,11 @@ function usageSegmentWord(provider, usage, state) {
       return { said: word(USAGE_SIGNED_OUT_WORD), tip: usage.error ?? t("usage.signedOut", "로그인 필요") };
     case "error":
       return {
-        said: word(USAGE_FAILURE_WORDS[usage.failure_kind] ?? USAGE_READ_FAILED_WORD),
+        said: word(
+          usage.status === USAGE_REFUSED
+            ? USAGE_UNVERIFIED_WORD
+            : (USAGE_FAILURE_WORDS[usage.failure_kind] ?? USAGE_READ_FAILED_WORD),
+        ),
         tip: state.says,
       };
     default:
@@ -1246,7 +1254,9 @@ function paintProviderSegment(provider) {
   // 「없는 버그를 찾아 나서게 만드는 표시」가 아니라 「손이 필요하다」는 표시이고,
   // 여기서는 정말로 손이 필요하다(설정의 그 행이 「다시 로그인」을 들고 있다).
   const stale = usage && Date.now() - usage.updated_at > USAGE_STALE_MS && !fetching;
-  el(`${provider.prefix}-warn`).hidden = !(usage?.status === "error" || stale || signedOut);
+  el(`${provider.prefix}-warn`).hidden = !(
+    usage?.status === "error" || usage?.status === USAGE_REFUSED || stale || signedOut
+  );
   if (state.kind !== "usage") {
     const { said, tip } = usageSegmentWord(provider, usage, state);
     figure.textContent = said;

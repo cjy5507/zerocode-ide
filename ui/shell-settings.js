@@ -5890,7 +5890,9 @@ async function googleLogout() {
  * they answer, so by the time this runs the new login is on disk. */
 function googleLoginMoved() {
   paintGoogleAccount();
-  void refreshProviderUsage(usageProvider("antigravity"), true);
+  // The gauge is read again only while its status-bar item is on: with the item
+  // off, a sign-in sends Google nothing (the consent covers the status-bar gauge).
+  if (statusBarItemEnabled("antigravity")) void refreshProviderUsage(usageProvider("antigravity"), true);
 }
 
 /* ---- and the fourth: every CLI that signs itself in ----

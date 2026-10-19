@@ -11559,11 +11559,10 @@ await test("stale windows preserve disjoint status-bar item patches", async () =
 });
 
 await test("a stored status-bar id the catalog no longer offers is skipped, never painted", async () => {
-  // An install that saved its list while the Antigravity gauge existed
-  // (removed 2026-10-17, t-62187: the window sends nothing to Google's quota
-  // API) still boots, still shows every item it DOES know, and raises no
-  // error for the one it does not — the stored id is skipped, not offered.
-  const stale = ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
+  // An install that saved its list while a gauge the catalog has since retired
+  // still boots, still shows every item it DOES know, and raises no error for
+  // the one it does not — the stored id is skipped, not offered.
+  const stale = ["claude", "codex", "retired-gauge", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
   try {
     await backend.externalPatch(
       { status_bar_items: stale, status_bar_items_seen: stale },
@@ -11574,13 +11573,13 @@ await test("a stored status-bar id the catalog no longer offers is skipped, neve
       fields.map((field) => field.dataset.statusBarItem));
     assertEqual(
       controls,
-      stale.filter((item) => item !== "antigravity"),
+      stale.filter((item) => item !== "retired-gauge"),
       "Appearance offers a status-bar item no segment stands behind",
     );
     assertEqual(
       await pageA.evaluate(() => ({
-        enabled: statusBarItemEnabled("antigravity"),
-        segment: document.getElementById("sb-antigravity") !== null,
+        enabled: statusBarItemEnabled("retired-gauge"),
+        segment: document.getElementById("sb-retired-gauge") !== null,
         known: [...statusBarItems].sort(),
       })),
       { enabled: false, segment: false, known: [...controls].sort() },
@@ -13655,9 +13654,9 @@ await test("the Jev page is named for the decisions it shows — the tab, the ti
   return JSON.stringify(seen);
 });
 
-/* The Google card speaks of what uses the sign-in now (t-62187 removed the Antigravity gauge): zo alone.
- * Its signed-out line and its hint name no gauge in any language. */
-await test("the Google card names only zo as the sign-in's user — no gauge, in every language", async () => {
+/* The Google card names what uses the sign-in: zo, and the Antigravity gauge that reads the same login.
+ * Its signed-out line and its hint name both, in every language. */
+await test("the Google card names zo and the gauge as the sign-in's users — in every language", async () => {
   const gauge = /게이지|gauge|ゲージ|用量条|medidor/i;
   const seen = {};
   try {
@@ -13675,8 +13674,8 @@ await test("the Google card names only zo as the sign-in's user — no gauge, in
         }
       });
       seen[locale] = words;
-      assert(typeof words.none === "string" && words.none.includes("zo") && !gauge.test(words.none), `${locale}: the signed-out line names only zo`, words);
-      assert(typeof words.hint === "string" && words.hint.includes("zo") && !gauge.test(words.hint), `${locale}: the hint names only zo`, words);
+      assert(typeof words.none === "string" && words.none.includes("zo") && gauge.test(words.none), `${locale}: the signed-out line names zo and the gauge`, words);
+      assert(typeof words.hint === "string" && words.hint.includes("zo") && gauge.test(words.hint), `${locale}: the hint names zo and the gauge`, words);
     }
   } finally {
     await setQualityLocale(pageA, "ko");
