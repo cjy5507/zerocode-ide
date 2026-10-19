@@ -498,3 +498,6 @@ fn digest(value: &impl Serialize) -> Result<String> {
     let bytes = serde_json::to_vec(value).map_err(|_| Error::Manifest)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
+
+#[cfg(test)]
+mod native_tests;
