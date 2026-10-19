@@ -1534,3 +1534,18 @@ fn review_known_windows_of_one_app_keep_cached_transcript_fingerprints() {
     assert_eq!(executor.resolutions.as_ref().unwrap().load(Ordering::Relaxed) - before, 1,
         "records from known windows of one app must reuse all 2,000 cached transcript fingerprints");
 }
+
+
+#[test]
+fn review_one_host_chosen_app_window_bounds_new_input_spellings() {
+    let calls = (0..6).map(|index| {
+        let mut call = observe(7);
+        call.input = json!({"action":"observe", "app":"Fixture", "ocr":index >= 3}).to_string();
+        call
+    }).collect();
+    let (mut runtime, executor) = runtime_for(calls);
+    runtime.set_attendance(Attendance::Attended);
+    runtime.run_turn("Keep the sole host-chosen app window bounded across input spellings", None).unwrap();
+    assert_eq!(executor.observations(), 3,
+        "one host-chosen window must bind the app before a new input spelling gets a fourth observation");
+}

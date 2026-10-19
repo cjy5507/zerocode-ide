@@ -27,9 +27,14 @@ pub(super) struct SurfaceRepetitionState {
     fingerprints: HashMap<u64, String>,
     // None marks a valid host record that exceeded evidence storage: use plain counts.
     targets: HashMap<String, Option<String>>,
-    // None means this app has no unique recorded window. Exact calls still bind their replies.
-    computer_app_windows: HashMap<String, Option<String>>,
+    computer_app_windows: HashMap<String, ComputerAppWindow>,
     generation: u64,
+}
+
+enum ComputerAppWindow {
+    Window(String),
+    Host(String),
+    Ambiguous,
 }
 
 struct SurfaceRevision {
@@ -59,24 +64,34 @@ impl SurfaceRepetitionState {
         let keys = surface_target_keys(tool_name, input);
         let window = keys.first().filter(|key| key.starts_with("Computer/window/")).cloned();
         for target in keys {
-            if tool_name == "Computer" && target.starts_with("Computer/app/") && identity.is_some() {
-                if self.computer_app_windows.contains_key(&target)
-                    || self.computer_app_windows.len() < MAX_SURFACE_FINGERPRINTS {
-                    let known = self.computer_app_windows.entry(target.clone()).or_insert_with(|| window.clone());
-                    let same_window = match (known.as_deref(), window.as_deref()) {
-                        (Some(known), Some(current)) => known == current,
-                        (Some(known), None) => self.targets.get(known).and_then(Option::as_deref) == identity,
-                        _ => false,
-                    };
-                    if !same_window { *known = None; }
-                }
-                if self.computer_app_windows.get(&target).and_then(Option::as_ref).is_none() {
-                    // An app-only call must run before its reply identifies the selected window.
-                    // Do not replace its exact-call binding with another window's latest count.
-                    if self.targets.remove(&target).is_some() {
-                        self.generation = self.generation.wrapping_add(1);
+            if tool_name == "Computer" && target.starts_with("Computer/app/") {
+                if let Some(identity) = identity {
+                    let unique = if self.computer_app_windows.contains_key(&target)
+                        || self.computer_app_windows.len() < MAX_SURFACE_FINGERPRINTS {
+                        let known = self.computer_app_windows.entry(target.clone()).or_insert_with(|| {
+                            window.as_ref().map_or_else(|| ComputerAppWindow::Host(identity.to_string()),
+                                |window| ComputerAppWindow::Window(window.clone()))
+                        });
+                        let same_window = match known {
+                            ComputerAppWindow::Window(known) => window.as_ref().map_or_else(
+                                || self.targets.get(known.as_str()).and_then(Option::as_deref) == Some(identity),
+                                |window| known.as_str() == window.as_str()),
+                            ComputerAppWindow::Host(known_id) if known_id.as_str() == identity => {
+                                if let Some(window) = &window { *known = ComputerAppWindow::Window(window.clone()); }
+                                true
+                            }
+                            _ => false,
+                        };
+                        if !same_window { *known = ComputerAppWindow::Ambiguous; }
+                        same_window
+                    } else { false };
+                    if !unique {
+                        // Resolve an app-only call from its own reply when several windows are known.
+                        if self.targets.remove(&target).is_some() {
+                            self.generation = self.generation.wrapping_add(1);
+                        }
+                        continue;
                     }
-                    continue;
                 }
             }
             if (self.targets.contains_key(&target) || self.targets.len() < MAX_SURFACE_FINGERPRINTS)
