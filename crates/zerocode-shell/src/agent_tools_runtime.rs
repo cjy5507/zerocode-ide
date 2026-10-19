@@ -4148,7 +4148,7 @@ pub(super) trait HelperRoads {
 }
 
 /// The window's helper: the session's, when one stands — never started here.
-struct SessionHelper;
+pub(super) struct SessionHelper;
 
 impl HelperRoads for SessionHelper {
     fn status(&self) -> Option<serde_json::Value> {

@@ -869,6 +869,75 @@ mod tests {
         );
     }
 
+    /// A stop that may be the person's (t-62469 S2) is refused in words that
+    /// name the band's resume: an agent told that its `resume` lifts it would
+    /// only be refused again. An agent's stop the window heard the helper
+    /// for is still lifted by `resume`.
+    #[test]
+    fn a_stop_the_person_may_have_made_is_refused_in_words_that_name_the_bands_resume() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop_hearing(STOP_REASON_REQUEST, || false, || true);
+        let maybe = refusal(STOP_REASON_REQUEST).message;
+        lift();
+        stop_hearing(STOP_REASON_REQUEST, || true, || true);
+        let heard = refusal(STOP_REASON_REQUEST).message;
+        lift();
+        assert!(
+            maybe.contains("the person may have stopped it")
+                && maybe.contains("the band's resume")
+                && !maybe.contains("resume` lifts it"),
+            "a stop the person may have made names the band's resume: {maybe}"
+        );
+        assert!(
+            heard.contains("resume` lifts it"),
+            "an agent's stop the window heard the helper for names `resume`: {heard}"
+        );
+    }
+
+    /// An agent's stop over one the person may have made (t-62469 B1): the
+    /// helper heard now says nothing of the person's — the first stop's
+    /// signal overwrote their chord there — so the stop stays one they may
+    /// have made. Only the band's resume lifts it; an agent's never does.
+    #[test]
+    fn an_agents_stop_heard_over_a_stop_the_person_may_have_made_keeps_it_theirs_maybe() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop_hearing(STOP_REASON_REQUEST, || false, || true);
+        let again = stop_hearing(STOP_REASON_REQUEST, || true, || true);
+        let maybe = unconfirmed_stop_stands();
+        let mut asked = 0;
+        let agents = resume(
+            Lifter::Agent,
+            || {
+                asked += 1;
+                Ok(Value::from("resumed"))
+            },
+            || true,
+        );
+        let (_, revision) = snapshot();
+        let band = resume(
+            Lifter::Person {
+                revision: Some(revision),
+            },
+            || Ok(Value::from("resumed")),
+            || true,
+        );
+        let after = stopped_reason();
+        lift();
+        assert!(
+            maybe,
+            "the stop stays one the person may have made after the agent's second stop: {again}"
+        );
+        assert_eq!(again["maybePersonsStop"], true, "{again}");
+        assert_eq!(asked, 0, "the agent's resume never reaches the helper");
+        assert!(!agents.lifted, "{agents:?}");
+        assert!(band.lifted, "the band's resume lifts it: {band:?}");
+        assert_eq!(after, None);
+    }
+
     #[test]
     fn an_agents_resume_lifts_the_stop_an_agent_asked_for() {
         let _hand = one_hand();

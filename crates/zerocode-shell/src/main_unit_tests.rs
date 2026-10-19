@@ -21988,10 +21988,66 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(guard::stopped_reason(), None);
     }
 
+    /// The person's chord, an agent's `stop` while a helper request is in
+    /// flight — its signal then overwrites the chord in the helper — and a
+    /// second agent's `stop` once the helper answers again: a retry, another
+    /// agent, the coordinator (t-62469 B1). The helper now says only
+    /// `signal`, so the second stop hears nothing of the person's, and the
+    /// stop stays one the person may have made: the agent's resume lifts
+    /// nothing; the band's resume lifts it. Counted: how often the agent's
+    /// resume lifted it.
+    #[test]
+    fn a_second_agents_stop_keeps_a_stop_the_person_may_have_made_from_the_agents_resume() {
+        use crate::agent_tools_runtime::{agents_resume, agents_stop, HelperRoads};
+        use crate::computer_use::guard;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let busy = BusyHelper::new(std::time::Duration::ZERO);
+        let first = agents_stop(&busy, None);
+        let overwritten = *busy.reason.lock().unwrap();
+        let answering = ChordHelper::default();
+        answering.reason.set(overwritten);
+        let second = agents_stop(&answering, None);
+        let agent = agents_resume(&answering, false, None).map_err(|error| error.message);
+        let lifted_by_agent = usize::from(guard::stopped_reason().is_none());
+        let reached_by_agent = answering.resumed.get();
+        let (_, revision) = guard::snapshot();
+        let band = guard::resume(
+            guard::Lifter::Person { revision: Some(revision) },
+            || answering.resume(false),
+            || answering.signal(),
+        );
+        let after_band = guard::stopped_reason();
+        guard::lift();
+        assert_eq!(
+            overwritten,
+            Some(zerocode_core::computer_use::STOP_REASON_SIGNAL),
+            "the first stop's signal overwrote the person's chord in the helper: {first}"
+        );
+        assert_eq!(
+            lifted_by_agent, 0,
+            "times an agent's resume lifted a stop the person may have made, after a second agent's stop: {first} {second} {agent:?}"
+        );
+        assert_eq!(reached_by_agent, 0, "the agent's resume reached the helper");
+        assert!(
+            agent
+                .as_ref()
+                .is_err_and(|message| message.contains("the person may have stopped it")),
+            "the agent's resume says the person must confirm: {agent:?}"
+        );
+        assert_eq!(second["maybePersonsStop"], true, "{second}");
+        assert!(band.lifted, "the band's resume lifts it: {band:?}");
+        assert_eq!(after_band, None);
+    }
+
     /// A helper that lives but does not answer `status` (t-62469 F2): the
-    /// window's stop stands before the helper is asked, and in under 50 ms
-    /// though the answer would take 400 ms; no command the door judges
-    /// meanwhile is let in. Counted: the commands let in meanwhile.
+    /// helper is asked only once the window's stop stands — the stop it sees
+    /// at `status_now` is the agent's — and the stop stands in under 200 ms
+    /// though the answer would take 400 ms; a command the door judges once it
+    /// stands is refused. Measured: from the stop to the window's stop
+    /// standing.
     #[test]
     fn an_agents_stop_stands_in_the_window_before_a_silent_helper_is_asked() {
         use crate::agent_tools_runtime::agents_stop;
@@ -22025,17 +22081,96 @@ pub(crate) mod computer_desktop_wait {
         .expect("a click parses");
         let let_in = usize::from(crate::door_refusal(&click).is_none());
         running.join().unwrap();
-        assert!(
-            stood_after < std::time::Duration::from_millis(50),
-            "the window's stop stood after {stood_after:?} (the silent helper takes 400 ms)"
-        );
-        assert_eq!(let_in, 0, "commands let in while the helper was asked");
+        let asked_under = helper.window_stop_when_asked.lock().unwrap().clone();
+        guard::lift();
+        println!("measured: the window's stop stood after {stood_after:?}");
         assert_eq!(
-            *helper.window_stop_when_asked.lock().unwrap(),
+            asked_under,
             Some(Some(zerocode_core::computer_use::STOP_REASON_REQUEST.to_string())),
             "the helper is asked only once the window's stop stands"
         );
+        assert!(
+            stood_after < std::time::Duration::from_millis(200),
+            "the window's stop stood after {stood_after:?} (the silent helper takes 400 ms)"
+        );
+        assert_eq!(let_in, 0, "commands let in once the window's stop stood");
+    }
+
+    /// The window's own helper while a request holds its session (t-62469
+    /// B2): `call` holds the session's lock across a request, up to the
+    /// 60 s read limit, and an agent's `stop` signals the helper at once all
+    /// the same — the signal is what ends that request at its next event, so
+    /// it never waits for the request to end, and the stop may be the
+    /// person's. Measured: from the stop to its signal, beside a request
+    /// that holds the session for 1.5 s.
+    #[test]
+    fn an_agents_stop_signals_at_once_while_a_request_holds_the_session() {
+        use crate::agent_tools_runtime::{agents_stop, HelperRoads, SessionHelper};
+        use crate::computer_use::guard;
+        use std::time::{Duration, Instant};
+        const REQUEST_HOLDS: Duration = Duration::from_millis(1500);
+        // The window's helper roads, its signal counted rather than sent.
+        struct HeldSession {
+            signalled: std::sync::Mutex<Option<Instant>>,
+        }
+        impl HelperRoads for HeldSession {
+            fn status(&self) -> Option<serde_json::Value> {
+                None
+            }
+
+            fn status_now(&self) -> Option<serde_json::Value> {
+                SessionHelper.status_now()
+            }
+
+            fn resume(
+                &self,
+                _reset: bool,
+            ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
+                Ok(serde_json::Value::from("resumed"))
+            }
+
+            fn signal(&self) -> bool {
+                *self.signalled.lock().unwrap() = Some(Instant::now());
+                true
+            }
+
+            fn session_stands(&self) -> bool {
+                SessionHelper.session_stands()
+            }
+        }
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard::lift();
+        let (held, holds) = std::sync::mpsc::channel();
+        let (end, ends) = std::sync::mpsc::channel::<()>();
+        let request = std::thread::spawn(move || {
+            crate::computer_use::while_a_request_holds_the_session(|| {
+                held.send(()).unwrap();
+                let _ = ends.recv_timeout(REQUEST_HOLDS);
+            });
+        });
+        holds.recv().unwrap();
+        let helper = HeldSession {
+            signalled: std::sync::Mutex::new(None),
+        };
+        let began = Instant::now();
+        let stop = agents_stop(&helper, None);
+        let signalled = *helper.signalled.lock().unwrap();
+        let signalled_after = signalled.map(|at| at.duration_since(began));
+        let _ = end.send(());
+        request.join().unwrap();
+        guard::lift();
+        println!("measured: the stop's signal went out after {signalled_after:?}");
+        let signalled_after = signalled_after.expect("the stop signals the helper");
+        assert!(
+            signalled_after < Duration::from_millis(200),
+            "the stop's signal went out after {signalled_after:?} (the request holds the session for {REQUEST_HOLDS:?})"
+        );
+        assert_eq!(
+            stop["maybePersonsStop"], true,
+            "a request held the session, so the stop may be the person's: {stop}"
+        );
     }
 
     /// The person's chord the window has not heard yet, then an agent's

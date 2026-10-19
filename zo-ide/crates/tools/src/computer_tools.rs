@@ -2379,6 +2379,27 @@ mod tests {
         }
     }
 
+    /// A refused scroll's examples are sent as they stand and accepted (t-62469 S1): a model that copies one
+    /// meets no second refusal.
+    #[test]
+    fn a_refused_scrolls_examples_are_accepted_as_they_stand() {
+        let app_wheel = input(json!({"action": "scroll", "app": "Fixture", "window_id": 41, "scroll_direction": "down", "scroll_amount": 3}));
+        let desktop_pages = input(json!({"action": "scroll", "coordinate": [20, 40], "scroll_direction": "down", "scroll_pages": 1}));
+        for refused in [app_wheel, desktop_pages] {
+            let message = argv_for(&refused).unwrap_err().to_string();
+            let examples: Vec<Value> = message
+                .match_indices("e.g. ")
+                .filter_map(|(at, said)| serde_json::Deserializer::from_str(&message[at + said.len()..]).into_iter::<Value>().next()?.ok())
+                .collect();
+            assert_eq!(examples.len(), 2, "both shapes carry an example: {message}");
+            for mut example in examples {
+                example["action"] = json!("scroll");
+                let sent = serde_json::from_value::<ComputerInput>(example.clone()).map(|fields| argv_for(&fields));
+                assert!(matches!(sent, Ok(Ok(_))), "the refusal's example, sent as it stands, is refused: {example} -> {sent:?}");
+            }
+        }
+    }
+
     #[test]
     fn a_selected_app_coordinate_is_window_local_not_a_global_mouse_click() {
         let fields = input(json!({"action": "left_click", "app": "Fixture", "window_id": 41, "coordinate": [20, 40]}));
