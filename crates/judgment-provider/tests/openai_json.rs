@@ -328,3 +328,67 @@ fn unknown_media_or_stale_request_identity_reaches_no_chat_request() {
         Err(Refusal::SettingsChanged)
     ));
 }
+
+#[test]
+fn an_owned_server_accepts_only_the_schema_and_instructions_its_provider_prepared() {
+    let provider = provider();
+    let outgoing = provider
+        .prepare(request(&provider))
+        .expect("outgoing request");
+    let served = provider.prepare_served(outgoing.body.clone());
+    assert!(
+        served.is_ok(),
+        "the owned server rejected its own prepared request"
+    );
+    assert_eq!(served.expect("asserted request").body, outgoing.body);
+    for (pointer, value) in [
+        ("/messages/0/content", json!("different instructions")),
+        ("/stream", json!(true)),
+        (
+            "/response_format/json_schema/schema/additionalProperties",
+            json!(true),
+        ),
+        ("/max_tokens", json!(999_999)),
+    ] {
+        let mut tampered: Value = serde_json::from_slice(&outgoing.body).expect("request");
+        *tampered.pointer_mut(pointer).expect("field") = value;
+        assert!(
+            matches!(
+                provider.prepare_served(tampered.to_string().into_bytes()),
+                Err(Refusal::Request)
+            ),
+            "{pointer}"
+        );
+    }
+}
+
+#[test]
+fn the_owned_chat_route_refuses_ambiguous_user_data_and_preserves_context_refusals() {
+    let provider = provider();
+    let prepared = provider.prepare(request(&provider)).expect("request");
+    let mut incoming: Value = serde_json::from_slice(&prepared.body).expect("request");
+    incoming["messages"][1]["content"] = json!("{\"state\":1,\"state\":2,\"questions\":{}}");
+    assert!(matches!(
+        provider.prepare_served(incoming.to_string().into_bytes()),
+        Err(Refusal::Request)
+    ));
+    for (flag, value, expected) in [
+        ("truncated", json!(true), Refusal::Truncated),
+        ("truncated", json!("unknown"), Refusal::Response),
+        ("state_tokens_dropped", json!(1), Refusal::Truncated),
+        ("truncated_questions", json!(["ready"]), Refusal::Truncated),
+        (
+            "deadline_budget_exceeded",
+            json!(true),
+            Refusal::DeadlineBudget,
+        ),
+    ] {
+        let mut response = envelope(&answers().to_string());
+        response["usage"][flag] = value;
+        assert_eq!(
+            provider.decode(&prepared, response.to_string().into_bytes()),
+            Err(expected),
+            "{flag}"
+        );
+    }
+}

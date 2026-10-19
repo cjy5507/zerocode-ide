@@ -67,6 +67,10 @@ impl Provider {
         }
         serde_json::to_string(&response).map_err(|_| Refusal::Response)
     }
+
+    pub fn prepare_served(&self, body: Vec<u8>) -> Result<Prepared, Refusal> {
+        self.prepare(body)
+    }
 }
 
 fn labels(question: &Value) -> Result<Vec<String>, Refusal> {
