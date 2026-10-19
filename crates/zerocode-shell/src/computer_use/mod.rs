@@ -190,6 +190,28 @@ pub fn session_stands() -> bool {
         .is_some()
 }
 
+/// The helper's `status` now, or nothing: no session stands, a request holds
+/// the session, or the helper did not answer. Whoever asks never waits behind
+/// a request in flight, as the stop's signal never does (t-62872); a road that
+/// broke drops the session, as [`call`] does.
+pub fn status_unless_busy() -> Option<Value> {
+    input_policy::ensure_current().ok()?;
+    let mut held = match held_client().try_lock() {
+        Ok(held) => held,
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let session = held.as_mut()?;
+    match session.request("status", Value::Object(serde_json::Map::new())) {
+        Ok(answer) => Some(answer),
+        Err(SessionFailure::Provider(_)) => None,
+        Err(SessionFailure::Transport(error)) => {
+            discard(&mut held, error);
+            None
+        }
+    }
+}
+
 /// End the session, if one stands. The next `call` starts a fresh one.
 pub fn shutdown() {
     if let Some(client) = CLIENT.get() {

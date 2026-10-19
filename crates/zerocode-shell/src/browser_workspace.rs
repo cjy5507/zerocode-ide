@@ -325,6 +325,10 @@ fn busy() -> String {
     "workspace_busy: 작업 브라우저의 이전 요청이 끝나지 않았습니다".to_string()
 }
 
+/// What an agent is told at the work browsers' door while the person's stop
+/// stands (t-62872): the person stopped it, and only they start it again.
+pub(crate) const PERSONS_STOPPED: &str = "workspace_person_stopped: 사람이 정지했습니다 — 사람이 띠에서 다시 시작할 때까지 작업 브라우저를 열거나 쓰지 마세요. 어디까지 했는지 알리고 기다리세요";
+
 fn next_revision(state: &mut State) -> Result<(), String> {
     state.revision = state
         .revision
@@ -593,6 +597,40 @@ impl Workspaces {
             completed: false,
             notice: None,
         }))
+    }
+
+    /// An agent's `open`, at the door (t-62872): refused while the person's
+    /// stop stands, and registered under that stop's own lock, so no work
+    /// browser comes into an agent's hands after the person's stop.
+    pub(crate) fn register_agents(
+        &self,
+        label: &str,
+        owner: Option<&str>,
+    ) -> Result<Snapshot, String> {
+        crate::computer_use::guard::unless_persons_stop(|| self.register(label, owner, false))
+            .unwrap_or_else(|| Err(PERSONS_STOPPED.to_string()))
+    }
+
+    /// An agent's verb on a browser, at the door (t-62872): on a work browser
+    /// it is refused while the person's stop stands — the window's own stop,
+    /// the helper never asked — and admitted under that stop's own lock, so no
+    /// read or input an agent sends after the person's stop gets in while the
+    /// window is still on its way to pause the browser. A browser that is no
+    /// work browser is not the stop's.
+    pub(crate) fn begin_agents(
+        &self,
+        label: &str,
+        actor: Option<&str>,
+        verb: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<Option<Operation>, String> {
+        if self.get(label)?.is_none() {
+            return self.begin_at(label, actor, verb, expected_revision);
+        }
+        crate::computer_use::guard::unless_persons_stop(|| {
+            self.begin_at(label, actor, verb, expected_revision)
+        })
+        .unwrap_or_else(|| Err(PERSONS_STOPPED.to_string()))
     }
 
     pub(crate) fn begin_person(
@@ -1667,6 +1705,216 @@ mod tests {
         workspaces.remove("browser-1").unwrap();
         assert!(transition.wait().await.is_err());
         assert!(workspaces.snapshots().unwrap().is_empty());
+    }
+
+    /// The person's one stop pauses a work browser while its agent keeps
+    /// sending input from another thread (t-62872): an input is admitted
+    /// before the pause began — and the pause waits for it — or refused; none
+    /// is admitted once the pause began, and the pause leaves nothing in
+    /// flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pause_racing_an_agents_input_admits_none_once_it_began() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        const ROUNDS: usize = 200;
+        for _ in 0..ROUNDS {
+            let workspaces = Arc::new(opened());
+            observe(&workspaces);
+            let before = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+            let paused = Arc::new(AtomicBool::new(false));
+            let landed = Arc::new(AtomicUsize::new(0));
+            let agent = {
+                let workspaces = workspaces.clone();
+                let paused = paused.clone();
+                let landed = landed.clone();
+                std::thread::spawn(move || {
+                    let mut admitted = Vec::new();
+                    while !paused.load(Ordering::Acquire) {
+                        let seen = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+                        if let Ok(Some(operation)) =
+                            workspaces.begin_at("browser-1", Some("pane-a"), "click", Some(seen))
+                        {
+                            admitted.push(operation.revision);
+                            landed.fetch_add(1, Ordering::AcqRel);
+                            operation.finish(true);
+                        }
+                    }
+                    admitted
+                })
+            };
+            // The pause comes while the agent's input is already landing.
+            while landed.load(Ordering::Acquire) == 0 {
+                std::thread::yield_now();
+            }
+            let transition = workspaces
+                .transition("browser-1", Mode::Paused, before)
+                .unwrap();
+            transition.wait().await.unwrap();
+            let left = transition.finish().unwrap();
+            let again = Some(left.revision);
+            let after = workspaces.begin_at("browser-1", Some("pane-a"), "click", again);
+            paused.store(true, Ordering::Release);
+            let admitted = agent.join().unwrap();
+            assert!(!admitted.is_empty(), "the agent's input raced the pause");
+            assert!(
+                admitted.iter().all(|revision| *revision == before),
+                "an input was admitted after the pause began at {before}: {admitted:?}"
+            );
+            assert_eq!(left.mode, Mode::Paused);
+            assert_eq!(left.in_flight, 0, "the pause leaves nothing in flight");
+            assert!(after.is_err(), "nothing is admitted once paused");
+        }
+    }
+
+    /// The person's stop at the work browsers' door (t-62872): an agent that
+    /// keeps sending input from another thread gets none in once the person's
+    /// stop is made, though the window has not paused its browser yet — its
+    /// walk is still on the way — and the pause that follows finds nothing in
+    /// flight. The inputs admitted between the person's stop and the window's
+    /// pause, over every round, are what the stop holds at nought.
+    #[test]
+    fn no_agent_input_gets_in_between_the_persons_stop_and_the_windows_pause() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use zerocode_core::computer_use::STOP_REASON_WINDOW;
+        const ROUNDS: usize = 50;
+        const TRIES_AFTER: usize = 64;
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (mut between, mut tried) = (0, 0);
+        for _ in 0..ROUNDS {
+            crate::computer_use::guard::lift();
+            let workspaces = Arc::new(opened());
+            observe(&workspaces);
+            let stopped = Arc::new(AtomicBool::new(false));
+            let done = Arc::new(AtomicBool::new(false));
+            let landed = Arc::new(AtomicUsize::new(0));
+            let tries_after = Arc::new(AtomicUsize::new(0));
+            let agent = {
+                let (workspaces, stopped, done) =
+                    (workspaces.clone(), stopped.clone(), done.clone());
+                let (landed, tries_after) = (landed.clone(), tries_after.clone());
+                std::thread::spawn(move || {
+                    let mut after = 0;
+                    while !done.load(Ordering::Acquire) {
+                        let late = stopped.load(Ordering::Acquire);
+                        let seen = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+                        if let Ok(Some(operation)) = workspaces.begin_agents(
+                            "browser-1",
+                            Some("pane-a"),
+                            "click",
+                            Some(seen),
+                        ) {
+                            landed.fetch_add(1, Ordering::AcqRel);
+                            after += usize::from(late);
+                            operation.finish(true);
+                        }
+                        if late {
+                            tries_after.fetch_add(1, Ordering::AcqRel);
+                        }
+                    }
+                    after
+                })
+            };
+            while landed.load(Ordering::Acquire) == 0 {
+                std::thread::yield_now();
+            }
+            crate::computer_use::guard::stop(STOP_REASON_WINDOW);
+            stopped.store(true, Ordering::Release);
+            // The window's walk is still on the way: the agent keeps trying.
+            while tries_after.load(Ordering::Acquire) < TRIES_AFTER {
+                std::thread::yield_now();
+            }
+            let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+            let transition = workspaces
+                .transition("browser-1", Mode::Paused, revision)
+                .unwrap();
+            runtime.block_on(transition.wait()).unwrap();
+            let left = transition.finish().unwrap();
+            done.store(true, Ordering::Release);
+            between += agent.join().unwrap();
+            tried += tries_after.load(Ordering::Acquire);
+            crate::computer_use::guard::lift();
+            assert_eq!(left.mode, Mode::Paused);
+            assert_eq!(left.in_flight, 0, "the pause leaves nothing in flight");
+        }
+        assert!(
+            tried >= ROUNDS * TRIES_AFTER,
+            "the agent kept trying after every stop: {tried}"
+        );
+        assert_eq!(
+            between, 0,
+            "agent inputs admitted after the person's stop and before the window's pause, over {ROUNDS} rounds: {between}"
+        );
+    }
+
+    /// While the person's stop stands (t-62872) an agent's `open` registers no
+    /// work browser, and every verb an agent sends to a work browser — a read
+    /// as much as an input — is refused in words that say the person stopped
+    /// it. A browser that is no work browser is not the stop's, nor is an
+    /// agent's own stop the person's; once the person's stop is lifted, the
+    /// door opens again for a browser in the agent's hands.
+    #[test]
+    fn the_persons_stop_refuses_an_agents_open_and_every_verb_on_a_work_browser() {
+        use zerocode_core::computer_use::{STOP_REASON_HOTKEY, STOP_REASON_REQUEST};
+        fn person<T>(result: &Result<T, String>) -> bool {
+            result
+                .as_ref()
+                .is_err_and(|error| error.starts_with("workspace_person_stopped:"))
+        }
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admitted = |result: Result<Option<Operation>, String>| {
+            result.map(|operation| operation.map(|operation| operation.finish(true)).is_some())
+        };
+        crate::computer_use::guard::lift();
+        let workspaces = opened();
+        observe(&workspaces);
+        let revision = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        crate::computer_use::guard::adopt(STOP_REASON_HOTKEY);
+        let open = workspaces.register_agents("browser-2", Some("pane-a"));
+        let registered = workspaces.snapshot("browser-2").unwrap().is_some();
+        let read = workspaces.begin_agents("browser-1", Some("pane-a"), "read", None);
+        let read_refused = person(&read);
+        let read = admitted(read);
+        let click = workspaces.begin_agents("browser-1", Some("pane-a"), "click", Some(revision));
+        let click_refused = person(&click);
+        let click = admitted(click);
+        let ordinary = admitted(workspaces.begin_agents("ordinary", Some("pane-a"), "read", None));
+        crate::computer_use::guard::lift();
+        crate::computer_use::guard::stop(STOP_REASON_REQUEST);
+        let under_agents_stop =
+            admitted(workspaces.begin_agents("browser-1", Some("pane-a"), "read", None));
+        crate::computer_use::guard::lift();
+        let lifted = admitted(workspaces.begin_agents("browser-1", Some("pane-a"), "read", None));
+        let open_lifted = workspaces
+            .register_agents("browser-3", Some("pane-a"))
+            .map(|snapshot| snapshot.mode);
+        assert!(
+            person(&open) && !registered,
+            "an agent's open while the person's stop stands registers no work browser: {:?}",
+            open.map(|snapshot| snapshot.mode)
+        );
+        assert!(
+            read_refused && click_refused,
+            "a read and an input on a work browser are refused in the person's words: {read:?} {click:?}"
+        );
+        assert_eq!(
+            ordinary,
+            Ok(false),
+            "a browser that is no work browser is not the stop's"
+        );
+        assert_eq!(
+            under_agents_stop,
+            Ok(true),
+            "an agent's own stop is not the person's"
+        );
+        assert_eq!(lifted, Ok(true), "the lifted stop opens the door again");
+        assert_eq!(open_lifted, Ok(Mode::Agent), "and an agent may open again");
     }
 
     #[test]

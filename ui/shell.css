@@ -36330,6 +36330,11 @@ details.task-board-section > summary {
 /* The empty stage's invitation to open a terminal is the main window's — this
  * window's stage is never empty and has no `⌘T`. */
 :root[data-surface="popout"] .placeholder,
+/* The person's stop is safe from anywhere, so the band here offers it; the
+ * resume gives the work browsers back and the view opens the work screen
+ * panel, and both of those live in the main window (t-62872). */
+:root[data-surface="popout"] .computer-band-resume,
+:root[data-surface="popout"] .computer-band-view,
 /* Already this window — a button that opens it would open nothing. */
 :root[data-surface="popout"] .board-popout {
   display: none;
@@ -39971,6 +39976,7 @@ details.task-board-section > summary {
 }
 
 .browser-workspace-owner-error,
+.browser-workspace-stop-note,
 .browser-workspace-preview-note {
   flex: 1 1 100%;
   min-width: 0;
@@ -40043,6 +40049,7 @@ details.task-board-section > summary {
 .browser-workspace-owner-select[hidden],
 .browser-workspace-owner-change[hidden],
 .browser-workspace-owner-error[hidden],
+.browser-workspace-stop-note[hidden],
 .browser-workspace-preview-note[hidden],
 .browser-workspace-surface[hidden],
 .browser-workspace-frame[hidden],
@@ -47876,6 +47883,13 @@ button.jev-token:hover {
   font-size: var(--text-xs);
 }
 
+/* The person's stop could not pause a work browser (t-62872): the words say
+ * so, in the halt ink the stop itself wears, on the band and in the panel. */
+.computer-band-browsers.is-failed,
+.computer-progress-reach.is-failed {
+  color: var(--signal-halt-ink);
+}
+
 /* The work screen panel: the newest look of one pane's assignment, small and
  * under the band, never more than a little under half the window's height. The
  * picture is shown whole and is not dragged out. */
@@ -47908,6 +47922,7 @@ button.jev-token:hover {
 
 .computer-progress-subject,
 .computer-progress-desk,
+.computer-progress-reach,
 .computer-progress-browser-hint,
 .computer-progress-note,
 .computer-progress-scope {
