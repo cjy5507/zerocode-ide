@@ -135,7 +135,10 @@ fn the_antigravity_gauge_has_its_command_segment_and_setting() {
     );
 
     let window = super::support::window_source();
-    for spelled in ["command: \"antigravity_usage\",", "{ id: \"antigravity\" },"] {
+    for spelled in [
+        "command: \"antigravity_usage\",",
+        "{ id: \"antigravity\" },",
+    ] {
         assert!(
             window.contains(spelled),
             "the window lost the Antigravity gauge: {spelled}"

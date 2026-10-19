@@ -11562,7 +11562,7 @@ await test("a stored status-bar id the catalog no longer offers is skipped, neve
   // An install that saved its list while a gauge the catalog has since retired
   // still boots, still shows every item it DOES know, and raises no error for
   // the one it does not — the stored id is skipped, not offered.
-  const stale = ["claude", "codex", "retired-gauge", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
+  const stale = ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports", "retired-gauge"];
   try {
     await backend.externalPatch(
       { status_bar_items: stale, status_bar_items_seen: stale },

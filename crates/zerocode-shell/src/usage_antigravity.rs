@@ -719,11 +719,60 @@ mod tests {
                 held.failure_kind, None,
                 "a refusal named a failure kind, and the bar words that kind as a sign-in prompt"
             );
-            assert_eq!(wire.refreshes, 0, "a refused login was renewed to ask again");
+            assert_eq!(
+                wire.refreshes, 0,
+                "a refused login was renewed to ask again"
+            );
             assert_eq!(
                 wire.posts.len(),
                 asked,
                 "HTTP {status} from {refused} was sent again within one scan"
+            );
+        }
+    }
+
+    /// A refusal reaches the window's log as one line of closed words: the road,
+    /// the HTTP status and the call that was refused, then the time and the
+    /// answer. The body, the account and the token are not in it.
+    #[test]
+    fn a_refusal_is_one_log_line_of_its_status_and_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "google_code_assist_oauth": {
+    "accessToken": "live-access",
+    "refreshToken": "refresh-me",
+    "expiresAt": 9999999999
+  }
+}"#,
+        )
+        .expect("credentials");
+        let mut wire = FakeWire {
+            refusal: Some((LOAD_CODE_ASSIST_URL, 401)),
+            ..fake_wire()
+        };
+        let (held, refusal) = scan_with(Some(&path), 1_800_000_000_000, &mut wire);
+        let refusal = refusal.expect("the refusal was not named");
+        let line = crate::usage_runtime::usage_read_line(
+            "antigravity",
+            crate::usage_runtime::UsageRoad::Refused {
+                status: refusal.status,
+                call: refusal.call,
+            },
+            12,
+            Some(&held),
+            false,
+        );
+        assert_eq!(
+            line, "usage antigravity road=api http=401 call=loadCodeAssist ms=12 status=refused",
+            "a refusal wrote more than its status and its call to the log"
+        );
+        for secret in ["live-access", "refresh-me", "account"] {
+            assert!(
+                !line.contains(secret),
+                "the log line carries `{secret}`: {line}"
             );
         }
     }

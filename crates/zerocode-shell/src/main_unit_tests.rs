@@ -7194,44 +7194,6 @@ fn a_refused_gauge_waits_until_somebody_asks() {
     );
 }
 
-/// A refused read is one line of closed words: the road, the HTTP status and
-/// the call that was refused, then the time and the answer. No body, account or
-/// token reaches the window's log.
-#[test]
-fn a_refusal_is_one_log_line_of_status_and_call() {
-    let refused = usage::ProviderUsage {
-        provider: "antigravity".to_string(),
-        session: None,
-        weekly: None,
-        fable_weekly: None,
-        monthly: None,
-        buckets: None,
-        updated_at: 1_800_000_000_000,
-        error: Some("Antigravity 사용량을 확인할 수 없습니다 — Google이 요청을 거절했습니다".to_string()),
-        status: "refused".to_string(),
-        failure_kind: None,
-        retry_at_ms: None,
-        plan_type: None,
-        reset_credits: None,
-        account: None,
-    };
-    let line = usage_read_line(
-        "antigravity",
-        UsageRoad::Refused {
-            status: 401,
-            call: "loadCodeAssist",
-        },
-        12,
-        Some(&refused),
-        false,
-    );
-    assert_eq!(
-        line,
-        "usage antigravity road=api http=401 call=loadCodeAssist ms=12 status=refused",
-        "a refusal wrote more than its status and its call to the log"
-    );
-}
-
 /// The usage screen cuts what it already has, and says what it left out.
 ///
 /// Two claims hold this slice up and neither is visible in a screenshot.

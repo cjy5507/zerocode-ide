@@ -23813,6 +23813,8 @@ const refusedRead = await page.evaluate(async () => {
       said: said.textContent,
       warned: !warn.hidden,
       shown: !document.getElementById("sb-antigravity").hidden,
+      // The words of the page's own locale: the suite runs in English.
+      expected: t("usage.unverifiedOf", "{{provider}} 확인 불가", { provider: "Antigravity" }),
     };
   } finally {
     window.__ANSWER__.antigravity_usage = heldAnswer;
@@ -23822,7 +23824,7 @@ const refusedRead = await page.evaluate(async () => {
 });
 ok(
   "A refused Antigravity read says 확인 불가 and raises the warning triangle",
-  refusedRead.said === "Antigravity 확인 불가" && refusedRead.warned && refusedRead.shown,
+  refusedRead.said === refusedRead.expected && refusedRead.warned && refusedRead.shown,
   JSON.stringify(refusedRead),
 );
 
