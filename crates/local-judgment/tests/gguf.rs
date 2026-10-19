@@ -196,3 +196,66 @@ fn unknown_template_code_is_rejected_instead_of_guessed_as_chatml() {
         assert_eq!(gguf::builtin_template(template), None, "{template}");
     }
 }
+
+#[tokio::test]
+async fn a_selected_local_gguf_is_inspected_without_changing_the_active_provider() {
+    let home = tempfile::tempdir().expect("owned store");
+    let input = tempfile::tempdir().expect("owned input");
+    let file = input.path().join("selected.gguf");
+    let bytes = fixture(vec![field("tokenizer.chat_template", 8, string("chatml"))]);
+    fs::write(&file, &bytes).expect("model");
+    let manager =
+        local_judgment::Manager::new(home.path(), &home.path().join("settings.json"), |_| {})
+            .expect("manager");
+    let before = manager.snapshot().provider_identity;
+    let source = serde_json::from_value::<local_judgment::SourceInput>(
+        serde_json::json!({"kind":"local_file","file":file}),
+    );
+    assert!(source.is_ok(), "a GGUF file source was refused: {source:?}");
+    let inspected = manager
+        .inspect_source(source.expect("asserted source"))
+        .await;
+    assert!(
+        inspected.is_ok(),
+        "a selected GGUF was not inspected: {:?}",
+        inspected.as_ref().err()
+    );
+    let inspected = inspected.expect("asserted inspection");
+    let shown = serde_json::to_value(&inspected).expect("inspection");
+    assert_eq!(shown["model"]["engine"], "llama_cpp");
+    assert_eq!(shown["model"]["protocol"], "openai_json");
+    assert_eq!(shown["model"]["nativeFormat"], "gguf-v3");
+    assert_eq!(shown["model"]["downloadBytes"], bytes.len() as u64);
+    assert_eq!(manager.snapshot().provider_identity, before);
+    assert!(manager.snapshot().operation.is_none());
+    assert_eq!(fs::read(&file).expect("original"), bytes);
+    manager.shutdown();
+}
+
+#[tokio::test]
+async fn a_local_gguf_with_an_unknown_template_never_reaches_an_install_operation() {
+    let home = tempfile::tempdir().expect("owned store");
+    let file = home.path().join("selected.gguf");
+    fs::write(
+        &file,
+        fixture(vec![field(
+            "tokenizer.chat_template",
+            8,
+            string("unknown template"),
+        )]),
+    )
+    .expect("model");
+    let manager =
+        local_judgment::Manager::new(home.path(), &home.path().join("settings.json"), |_| {})
+            .expect("manager");
+    let source = serde_json::from_value::<local_judgment::SourceInput>(
+        serde_json::json!({"kind":"local_file","file":file}),
+    )
+    .expect("file source");
+    assert!(matches!(
+        manager.inspect_source(source).await,
+        Err(Error::ModelFormatUnsupported)
+    ));
+    assert!(manager.snapshot().operation.is_none());
+    manager.shutdown();
+}

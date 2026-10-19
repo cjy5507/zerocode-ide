@@ -34,6 +34,12 @@ pub enum SourceInput {
     LocalDirectory {
         directory: String,
     },
+    LocalFile {
+        file: String,
+    },
+    HuggingFaceFile {
+        url: String,
+    },
 }
 
 #[derive(Clone)]
@@ -518,6 +524,9 @@ pub(crate) async fn inspect(
     progress: Progress,
 ) -> Result<Inspected> {
     match input {
+        SourceInput::LocalFile { .. } | SourceInput::HuggingFaceFile { .. } => {
+            Err(Error::ModelFormatUnsupported)
+        }
         SourceInput::HuggingFace {
             repository,
             revision,
