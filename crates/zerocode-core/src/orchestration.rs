@@ -15265,9 +15265,9 @@ pub const QUOTA_POLICY: QuotaPolicy = QuotaPolicy {
 /// The gauge names are the window's own (`usage_runtime::*_usage_cache`), and
 /// an agent absent here has no gauge this window reads — which answers as
 /// "unknown", never as 0%. `zo` is absent on purpose: its quota is its
-/// MODEL's, see [`ZO_MODEL_GAUGE`]. `antigravity` is absent since 2026-10-17:
-/// the window's gauge behind it spent the shared Google login on a product
-/// API call and was removed (t-62187), so an agy worker's quota is unknown.
+/// MODEL's, see [`ZO_MODEL_GAUGE`]. `antigravity` is absent on purpose too:
+/// its gauge is read for the status bar alone (the person's consent of
+/// 2026-10-19, t-62187), so an agy worker's quota stays unknown to the beat.
 const QUOTA_GAUGE: &[(&str, &str)] = &[
     ("claude", "claude"),
     ("codex", "codex"),

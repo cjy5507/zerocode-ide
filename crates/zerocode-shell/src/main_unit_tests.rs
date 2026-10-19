@@ -2421,12 +2421,13 @@ fn status_bar_items_are_one_available_catalog_and_item_patch() {
             "unknown".to_string(),
             "claude".to_string(),
             "ports".to_string(),
-            // An id a stored list may still hold from an install that had the
-            // Antigravity gauge (removed 2026-10-17, t-62187): skipped like
-            // any other name the catalog does not know, never an error.
             "antigravity".to_string(),
+            // An id a stored list may still hold from an install that had a
+            // gauge the catalog no longer offers: skipped like any other name
+            // the catalog does not know, never an error.
+            "retired-gauge".to_string(),
         ]),
-        ["claude", "ports"]
+        ["claude", "antigravity", "ports"]
     );
 
     let markup = include_str!("../../../ui/index.html");
@@ -7094,7 +7095,7 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
     ];
     let mut seen = Vec::new();
     adopt_unseen_status_bar_items(&mut items, &mut seen);
-    for gauge in ["kimi", "grok", "opencode-go"] {
+    for gauge in ["antigravity", "kimi", "grok", "opencode-go"] {
         assert!(
             items.iter().any(|held| held == gauge),
             "`{gauge}` shipped after this list was written and still \
@@ -7127,6 +7128,69 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
         shuffled,
         vec!["claude".to_string(), "ports".to_string()],
         "adoption kept the arrival order instead of the catalog's"
+    );
+}
+
+/// A document normalised while the Antigravity gauge was withdrawn (v1.1.75 to
+/// v1.1.78) recorded its offer WITHOUT that name. The restored gauge is not new
+/// to such a document: its stored list decides, and a gauge the person never
+/// ticked does not start asking Google on the first run after the restore.
+#[test]
+fn a_gauge_restored_after_withdrawal_stays_as_the_stored_list_has_it() {
+    let mut items = vec![
+        "claude".to_string(),
+        "codex".to_string(),
+        "ports".to_string(),
+    ];
+    let mut seen: Vec<String> = [
+        "claude",
+        "codex",
+        "kimi",
+        "grok",
+        "opencode-go",
+        "resource-usage",
+        "ports",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
+    adopt_unseen_status_bar_items(&mut items, &mut seen);
+    assert!(
+        !items.iter().any(|held| held == "antigravity"),
+        "the restored gauge switched itself on for a document that had offered the \
+         catalog without it: {items:?}"
+    );
+}
+
+/// A refused gauge is an answer that waits for a person. The ordinary poll
+/// holds it, so the same two Google requests are not sent every floor; a
+/// refresh the person presses is not held back.
+#[test]
+fn a_refused_gauge_waits_until_somebody_asks() {
+    let now = 1_800_000_000_000;
+    let refused = usage::ProviderUsage {
+        provider: "antigravity".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: now - 2 * 60 * 60 * 1_000,
+        error: Some("Antigravity 사용량을 확인할 수 없습니다".to_string()),
+        status: "refused".to_string(),
+        failure_kind: None,
+        retry_at_ms: None,
+        plan_type: None,
+        reset_credits: None,
+        account: None,
+    };
+    assert!(
+        usage_scan_holds(Some(&refused), false, now),
+        "a refused gauge was asked of Google again on the ordinary poll"
+    );
+    assert!(
+        !usage_scan_holds(Some(&refused), true, now),
+        "a refresh the person pressed was held back by an earlier refusal"
     );
 }
 
@@ -27655,4 +27719,23 @@ fn the_second_brain_guide_reaches_the_windows_claude_home() {
         read.iter().all(|row| row.state == GuideState::Linked),
         "{read:?}"
     );
+}
+
+#[test]
+fn managed_judgment_boot_restore_has_one_setup_call() {
+    let source = include_str!("main.rs");
+    let call = "cmd::managed_judgment::restore_at_boot(app.handle());";
+    assert_eq!(
+        source.matches(call).count(),
+        1,
+        "setup must call managed restoration exactly once"
+    );
+    let setup = source.find(".setup(move |app| {").unwrap();
+    let managed = source[setup..].find("if !app.manage(state)").unwrap() + setup;
+    let restore = source.find(call).unwrap();
+    let warm = source.find("systemone::warm_for_walks();").unwrap();
+    assert!(managed < restore && restore < warm);
+    let backend = include_str!("cmd/managed_judgment.rs");
+    assert!(backend.contains("RESTORE_AT_BOOT.call_once("));
+    assert!(backend.contains("tauri::async_runtime::spawn(async move"));
 }

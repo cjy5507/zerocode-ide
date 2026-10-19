@@ -1242,6 +1242,15 @@ impl Running {
         self.reservation.take().ok_or(Error::RuntimeFailed)
     }
 
+    pub(crate) fn port(&self) -> Result<u16> {
+        self.reservation
+            .as_ref()
+            .ok_or(Error::RuntimeFailed)?
+            .local_addr()
+            .map(|address| address.port())
+            .map_err(|_| Error::RuntimeFailed)
+    }
+
     /// Answers every request from here on with `server_restarting` and the
     /// Retry-After `after` gives: this server's runtime ended, and its restart
     /// is planned or loading.

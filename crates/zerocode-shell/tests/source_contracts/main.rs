@@ -477,6 +477,9 @@ mod tests {
                             // the refusals, the option set it may not widen
                             // and the apply it cannot claim are all one file's.
                             | "cmd/worker_room.rs"
+                            // The boot restore gate and shutdown startup checks
+                            // are tested beside their command backend.
+                            | "cmd/managed_judgment.rs"
                             // t-21017: a provider's done report reaches the
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.
@@ -20005,16 +20008,22 @@ mod tests {
             1,
             "a second usage client was built outside the shared road"
         );
-        for (reader, source) in [
-            ("usage_oauth.rs", include_str!("../../src/usage_oauth.rs")),
-            ("google_login.rs", include_str!("../../src/google_login.rs")),
-        ] {
+        for reader in ["usage_oauth.rs", "usage_antigravity.rs"] {
+            let source = match reader {
+                "usage_oauth.rs" => include_str!("../../src/usage_oauth.rs"),
+                _ => include_str!("../../src/usage_antigravity.rs"),
+            };
             let (shipped, _) = source.split_once("#[cfg(test)]").unwrap_or((source, ""));
             assert!(
                 !shipped.contains("reqwest::Client::builder()"),
                 "{reader} builds its own client instead of taking the shared road"
             );
         }
+        let antigravity = include_str!("../../src/usage_antigravity.rs");
+        assert!(
+            !antigravity.contains(r#"contains("401")"#),
+            "the Antigravity refresh road reads a status back out of a sentence again"
+        );
 
         // And a named failure is ACTED on: when the API has already given the
         // user-visible answer, the terminal road is not walked. Before this,
@@ -25484,25 +25493,24 @@ mod tests {
             "a Codex login change re-reads the bar unforced:\n{moved}"
         );
         // And the third card in that pane, whose login this window MAKES.
-        // No gauge reads that login any more (t-62187: the window sends
-        // nothing to Google's quota API), so a login change repaints the
-        // card and asks the bar nothing — through the one hand every road
-        // through the card still ends in.
+        // Its gauge reads the credential file directly rather than a
+        // per-account snapshot, so the forced re-read is the only thing
+        // standing between a fresh sign-in and 「Antigravity 로그인 필요」
+        // sitting under it for fifteen minutes.
         let picking = block_after(window, "async function startGoogleLogin(");
         assert!(
             picking.contains("googleLoginMoved()"),
-            "signing in to Google no longer repaints the card:\n{picking}"
+            "signing in to Google no longer re-reads the bar's figure:\n{picking}"
         );
         let moved = block_after(window, "function googleLoginMoved(");
         assert!(
-            moved.contains("paintGoogleAccount()") && !moved.contains("refreshProviderUsage("),
-            "a Google login change asks a usage gauge to re-read, and no gauge \
-             stands behind that login:\n{moved}"
+            moved.contains(r#"refreshProviderUsage(usageProvider("antigravity"), true)"#),
+            "a Google login change re-reads the Antigravity gauge unforced:\n{moved}"
         );
         let leaving = block_after(window, "async function googleLogout(");
         assert!(
             leaving.contains("googleLoginMoved()"),
-            "logging out of Google leaves the card claiming a login:\n{leaving}"
+            "logging out of Google leaves the bar claiming a login:\n{leaving}"
         );
 
         // A scheduled run is the same agent as a typed one. This one fires when
@@ -26946,7 +26954,7 @@ mod tests {
         assert!(
             shipped.contains("scanning: &CODEX_USAGE_SCANNING")
                 && shipped.contains("scanning: &CLAUDE_USAGE_SCANNING")
-                && shipped.contains("scanning: &KIMI_USAGE_SCANNING"),
+                && shipped.contains("scanning: &ANTIGRAVITY_USAGE_SCANNING"),
             "a provider stopped bringing its own in-flight flag"
         );
 
@@ -26979,6 +26987,107 @@ mod tests {
             refreshing.contains("usageAskTimers.get(provider.id)"),
             "one follow-up timer is shared, so the faster scan cancels the \
              slower one's:\n{refreshing}"
+        );
+    }
+
+    /// Antigravity has one backend command and one status-bar surface, and
+    /// the login behind it is read from the ONE module that owns it.
+    #[test]
+    fn the_antigravity_gauge_reads_zo_google_credentials() {
+        let backend = shipped_backend();
+        let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
+        let fetcher = include_str!("../../src/usage_antigravity.rs");
+        let (fetching, _) = fetcher.split_once("#[cfg(test)]").unwrap_or((fetcher, ""));
+        let store = include_str!("../../src/google_login.rs");
+        let (storing, _) = store.split_once("#[cfg(test)]").unwrap_or((store, ""));
+        let window = window_source();
+        let markup = include_str!("../../../../ui/index.html");
+
+        assert!(
+            shipped.contains("\n            antigravity_usage,\n"),
+            "the Antigravity command fell out of registration"
+        );
+        // The path, the key and the client live in `google_login` — ONE copy,
+        // because the gauge refreshes the same token the settings card signs
+        // in with, and a second copy is a login that works and a refresh that
+        // does not.
+        assert!(
+            storing.contains("google_code_assist_oauth")
+                && storing.contains("ZO_CONFIG_HOME")
+                && storing.contains("home.join(\".zo\")"),
+            "the Google login store stopped naming zo's file"
+        );
+        assert!(
+            !fetching.contains("google_code_assist_oauth")
+                && !fetching.contains("ZO_CONFIG_HOME")
+                && !fetching.contains("apps.googleusercontent.com"),
+            "the gauge grew its own copy of the store or the OAuth client:\n{fetching}"
+        );
+        assert!(
+            fetching.contains("google_login::read(path)")
+                && fetching.contains("google_login::credentials_path()")
+                && fetching.contains("google_login::needs_refresh")
+                && fetching.contains("google_login::refreshed_access_token"),
+            "the gauge stopped reading this machine's Google login through \
+             the module that owns it"
+        );
+        // And the sentence it shows when there is no login points at the
+        // surface that MAKES one, rather than at a zo command in a terminal.
+        assert!(
+            fetching.contains("\"signed_out\"")
+                && fetching.contains("Antigravity 로그인 필요 — 설정 > AI 제공자 계정")
+                && !fetching.contains("zo login google"),
+            "the signed-out sentence no longer names the card that fixes it"
+        );
+        // The Code Assist calls present this client honestly: its own
+        // User-Agent, and no Antigravity or VS Code identity anywhere in the
+        // headers or the body the gauge sends.
+        assert!(
+            fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))")
+                && !fetching.contains("ANTIGRAVITY_CLIENT_METADATA")
+                && !fetching.contains("ANTIGRAVITY_API_CLIENT")
+                && !fetching.contains("ANTIGRAVITY_VERSION")
+                && !fetching.contains("antigravity/")
+                && !fetching.contains("\"ANTIGRAVITY\"")
+                && !fetching.contains("DARWIN_ARM64")
+                && !fetching.contains("vscode_cloudshelleditor"),
+            "the Code Assist calls still present Antigravity's or VS Code's identity"
+        );
+        for spelled in [
+            "command: \"antigravity_usage\",",
+            "{ id: \"antigravity\" },",
+        ] {
+            assert!(
+                window.contains(spelled),
+                "the window lost its Antigravity gauge: {spelled}"
+            );
+        }
+        // Its signed-out answer is known by the bar's ONE judgment of a
+        // reading (t-7170): the segment asks `usageRosterState`, as the
+        // roster beside it does, and that judgment is what reads `signed_out`.
+        let judging = block_after(window, "function usageRosterState(");
+        let painting = block_after(window, "function paintProviderSegment(provider) {");
+        assert!(
+            judging.contains("if (usage.status === USAGE_SIGNED_OUT) {")
+                && painting.contains("usageRosterState(usage, fetching, providerSections(usage))")
+                && painting.contains("state.kind === \"sign-in\""),
+            "the window no longer knows the Antigravity gauge's signed-out answer:\n{judging}\n{painting}"
+        );
+        assert!(
+            markup.contains(r#"id="sb-antigravity""#),
+            "the Antigravity surface fell out of the markup"
+        );
+    }
+
+    /// The card's sign-in re-reads the gauge only while the gauge is switched
+    /// on. With the status-bar item off, a sign-in sends Google nothing.
+    #[test]
+    fn the_card_rereads_the_gauge_only_while_the_gauge_is_switched_on() {
+        let window = window_source();
+        let moved = block_after(window, "function googleLoginMoved() {");
+        assert!(
+            moved.contains("statusBarItemEnabled(\"antigravity\")"),
+            "the card's sign-in asks Google for the gauge with the gauge switched off:\n{moved}"
         );
     }
 
@@ -27033,7 +27142,7 @@ mod tests {
         assert!(
             storing.contains("https://www.googleapis.com/auth/aicode")
                 && storing.contains("https://www.googleapis.com/auth/cloud-platform"),
-            "the scope set no longer covers the agent road zo runs on"
+            "the scope set no longer covers both the gauge and the agent road"
         );
         assert!(
             storing.contains("1071006060591-tmhssin2h21lcre235vtolojh4g403ep"),
@@ -27084,8 +27193,8 @@ mod tests {
             "the lock file is no longer the one zo takes"
         );
 
-        // The card: markup, the row, and the one repaint every login change in
-        // this pane goes through — no gauge is asked (t-62187).
+        // The card: markup, the row, and the forced gauge re-read that every
+        // login change in this pane goes through.
         assert!(
             markup.contains(r#"id="google-account-list""#)
                 && markup.contains(r#"data-i18n="settings.googleAccount.title""#),
@@ -27093,9 +27202,9 @@ mod tests {
         );
         let moved = block_after(window, "function googleLoginMoved(");
         assert!(
-            moved.contains("paintGoogleAccount()") && !moved.contains("refreshProviderUsage("),
-            "a Google login change asks a usage gauge to re-read, and no gauge \
-             stands behind that login:\n{moved}"
+            moved.contains(r#"refreshProviderUsage(usageProvider("antigravity"), true)"#),
+            "a Google login change no longer re-reads the Antigravity gauge \
+             forced, so the bar keeps the previous login's word:\n{moved}"
         );
         // Google's desktop OAuth refuses embedded user agents, so the consent
         // screen goes to the system browser while the loopback listener owns

@@ -472,6 +472,42 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     io(file.sync_all())
 }
 
+pub fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().ok_or(Error::UnsafePath)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Error::UnsafePath)?;
+    let destination = child(parent, name)?;
+    let partial = child(parent, &format!("{name}.partial"))?;
+    remove(&partial)?;
+    write_new(&partial, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        io(fs::set_permissions(
+            &partial,
+            fs::Permissions::from_mode(0o600),
+        ))?;
+    }
+    io(fs::rename(partial, destination))
+}
+
+pub fn remove(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            plain(path.parent().ok_or(Error::UnsafePath)?)?;
+            plain(path)?;
+            if !metadata.is_file() {
+                return Err(Error::UnsafePath);
+            }
+            io(fs::remove_file(path))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Error::Storage),
+    }
+}
+
 fn valid_receipt(path: &Path, expected: Result<String>) -> bool {
     let Ok(expected) = expected else { return false };
     child(path, "receipt.json")
@@ -556,4 +592,33 @@ fn available_space(path: &Path) -> Result<u64> {
 #[cfg(not(any(unix, windows)))]
 fn available_space(_: &Path) -> Result<u64> {
     Err(Error::Unsupported)
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_overwrites_an_existing_file_and_remove_is_repeatable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("intent.json");
+        fs::write(&path, b"before").unwrap();
+        replace(&path, b"after").unwrap();
+        assert_eq!(
+            bounded_read(&path, 1024).unwrap(),
+            b"after",
+            "replace must publish replacement bytes"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        remove(&path).unwrap();
+        assert!(!path.exists());
+        remove(&path).unwrap();
+    }
 }

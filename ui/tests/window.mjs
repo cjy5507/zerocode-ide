@@ -14609,6 +14609,7 @@ ok(
   JSON.stringify(statusBarChoices.offered) === JSON.stringify([
     { item: "claude", checked: true },
     { item: "codex", checked: true },
+    { item: "antigravity", checked: false },
     { item: "kimi", checked: false },
     { item: "grok", checked: false },
     { item: "opencode-go", checked: false },
@@ -23787,6 +23788,46 @@ ok(
   JSON.stringify(planFaces),
 );
 
+/* Google이 거절한 Antigravity 읽기는 「확인 불가」라고 말한다. 고정된 응답 모양
+ * (`status: "refused"`)으로 잰다: 수치는 서지 않고, 삼각형이 선다. 같은 물음을
+ * 되풀이하지 않는 것은 백엔드의 보류(`usage_scan_holds`)가 맡는다. */
+const refusedRead = await page.evaluate(async () => {
+  const heldAnswer = window.__ANSWER__.antigravity_usage;
+  const heldItems = statusBarItems;
+  statusBarItems = normalizedStatusBarItems([...statusBarItems, "antigravity"]);
+  window.__ANSWER__.antigravity_usage = () => ({
+    usage: {
+      provider: "antigravity", session: null, weekly: null, fable_weekly: null,
+      monthly: null, buckets: null, updated_at: Date.now(), status: "refused",
+      error: "Antigravity 사용량을 확인할 수 없습니다 — Google이 요청을 거절했습니다",
+      failure_kind: null, retry_at_ms: null, plan_type: null, reset_credits: null, account: null,
+    },
+    fetching: false,
+  });
+  try {
+    await refreshProviderUsage(usageProvider("antigravity"), true);
+    paintUsageSegments();
+    const said = document.getElementById("sb-antigravity-pct");
+    const warn = document.getElementById("sb-antigravity-warn");
+    return {
+      said: said.textContent,
+      warned: !warn.hidden,
+      shown: !document.getElementById("sb-antigravity").hidden,
+      // The words of the page's own locale: the suite runs in English.
+      expected: t("usage.unverifiedOf", "{{provider}} 확인 불가", { provider: "Antigravity" }),
+    };
+  } finally {
+    window.__ANSWER__.antigravity_usage = heldAnswer;
+    statusBarItems = heldItems;
+    paintUsageSegments();
+  }
+});
+ok(
+  "A refused Antigravity read says 확인 불가 and raises the warning triangle",
+  refusedRead.said === refusedRead.expected && refusedRead.warned && refusedRead.shown,
+  JSON.stringify(refusedRead),
+);
+
 /* 로그인이 풀린 공급자는 항상 보이는 표면에서 말한다.
  *
  * 백엔드는 「여기 로그인이 없다」를 `unavailable`(애초에 세운 적 없는 공급자)과
@@ -24187,7 +24228,7 @@ const settingsUsage = await page.evaluate(async () => {
 ok(
   "Stats & Usage reuses the provider read model and refresh action without a setting write",
   JSON.stringify(settingsUsage.options)
-    === JSON.stringify(["claude", "codex", "kimi", "grok", "opencode-go"]) &&
+    === JSON.stringify(["claude", "codex", "antigravity", "kimi", "grok", "opencode-go"]) &&
     settingsUsage.rows === 2 && settingsUsage.refreshed === 1,
   JSON.stringify(settingsUsage),
 );
@@ -30674,7 +30715,7 @@ const googleCard = await page.evaluate(async () => {
   }
 });
 ok(
-  "the Google card signs in through the system browser and re-reads no gauge — the Antigravity gauge is gone (t-62187)",
+  "the Google card signs in through the system browser and re-reads no gauge while the gauge is switched off (t-62187)",
   googleCard.out.count === 1 &&
     googleCard.noRadio &&
     googleCard.out.who === googleCard.words.signedOut &&
@@ -30692,7 +30733,7 @@ ok(
     googleCard.waitingNote === googleCard.expectSystemBrowserNote &&
     googleCard.systemUrl === googleCard.systemUrlAtStart &&
     googleCard.forcedWhileWaiting === 0 &&
-    // 끝난 뒤: 이름, 두 버튼. 다시 읽을 게이지는 없다(t-62187이 Antigravity 게이지를 없앰).
+    // 끝난 뒤: 이름, 두 버튼. 게이지 스위치가 꺼져 있어 다시 읽을 것이 없다(t-62187).
     googleCard.signedIn.who === "me@example.com" &&
     googleCard.signedIn.under === "/h/.zo/credentials.json" &&
     JSON.stringify(googleCard.signedIn.buttons) ===
@@ -51178,10 +51219,10 @@ const kimiGauge = await page.evaluate(async () => {
   // 카탈로그와 창의 프로바이더 표가 같은 이름을 안다.
   seen.inCatalog = STATUS_BAR_ITEM_CATALOG.some((item) => item.id === "kimi");
   seen.inProviders = USAGE_PROVIDERS.some((one) => one.id === "kimi" && one.command === "kimi_usage");
-  // 그리고 Orca 의 바 순서: codex 다음(Antigravity 게이지가 빠진 자리, t-62187), resource-usage 앞.
+  // 그리고 Orca 의 바 순서: antigravity 다음, resource-usage 앞.
   const order = STATUS_BAR_ITEM_CATALOG.map((item) => item.id);
   seen.ordered =
-    order.indexOf("kimi") === order.indexOf("codex") + 1 &&
+    order.indexOf("kimi") === order.indexOf("antigravity") + 1 &&
     order.indexOf("kimi") < order.indexOf("resource-usage");
   const provider = USAGE_PROVIDERS.find((one) => one.id === "kimi");
   const button = el("sb-kimi");

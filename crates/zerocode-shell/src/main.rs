@@ -214,6 +214,7 @@ mod ui_source;
 mod update_runtime;
 mod update_store;
 mod usage;
+mod usage_antigravity;
 mod usage_grok;
 mod usage_http;
 mod usage_kimi;
@@ -252,30 +253,31 @@ use cmd::note_term_detached;
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
-    answer_secret, api_router_keys_kept, api_router_presets, api_router_providers,
-    apply_ghostty_import, apply_ui_zoom, archive_trust_standing, automation_born_worktrees,
-    board_columns, board_desk, board_snapshot, boot_report, browse_dir, browse_places,
-    browser_click, browser_console, browser_devtools, browser_diagnose, browser_eval, browser_find,
-    browser_find_clear, browser_grab_arm, browser_grab_disarm, browser_grab_take, browser_history,
-    browser_menu_take, browser_navigate, browser_network, browser_place, browser_profiles,
-    browser_read, browser_reload, browser_scroll, browser_snapshot, browser_stop, browser_type,
-    browser_wait, browser_zoom, build_stamp, busy_census, cancel_folder_panel, cancel_google_login,
-    check_typesafe_key, choose_paths, choose_project, claude_account_usage, claude_accounts,
-    claude_autoswitch_apply, claude_autoswitch_mode, claude_token_usage, claude_usage,
-    claude_usage_stats, clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark,
-    cli_login_list, cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness,
-    cli_login_witness_drop, clipboard_has_image, clone_repository, clone_target_name,
-    close_browser_pane, close_lane, close_onboarding, close_term, codex_account_list,
-    codex_token_usage, codex_usage, codex_usage_stats, commit_failure_card, commit_file_diff,
-    commit_files, commit_landings, commit_staged, computer_awake_status, computer_confirm_answer,
-    computer_guard_status, computer_handoff_code, computer_live_reflex_check, computer_resume,
-    computer_stop, computer_use_capabilities, computer_use_permission_status,
-    computer_use_skill_report, computer_use_tcc_row_action, conflict_card, continuation_source,
-    cookie_sources, crash_bundle, crash_open_log, create_browser_profile, create_project,
-    create_pull_request, create_untitled_markdown, create_worktree, default_project_parent,
-    default_tabs, delete_automation, delete_browser_profile, delete_diff_note,
-    delete_quick_command, delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts,
-    desk_reply, developer_permission_statuses, discard_paths, dismiss_external_worktree_prompt,
+    answer_secret, antigravity_usage, api_router_keys_kept, api_router_presets,
+    api_router_providers, apply_ghostty_import, apply_ui_zoom, archive_trust_standing,
+    automation_born_worktrees, board_columns, board_desk, board_snapshot, boot_report, browse_dir,
+    browse_places, browser_click, browser_console, browser_devtools, browser_diagnose,
+    browser_eval, browser_find, browser_find_clear, browser_grab_arm, browser_grab_disarm,
+    browser_grab_take, browser_history, browser_menu_take, browser_navigate, browser_network,
+    browser_place, browser_profiles, browser_read, browser_reload, browser_scroll,
+    browser_snapshot, browser_stop, browser_type, browser_wait, browser_zoom, build_stamp,
+    busy_census, cancel_folder_panel, cancel_google_login, check_typesafe_key, choose_paths,
+    choose_project, claude_account_usage, claude_accounts, claude_autoswitch_apply,
+    claude_autoswitch_mode, claude_token_usage, claude_usage, claude_usage_stats,
+    clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark, cli_login_list,
+    cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
+    clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
+    close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
+    codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_landings,
+    commit_staged, computer_awake_status, computer_confirm_answer, computer_guard_status,
+    computer_handoff_code, computer_live_reflex_check, computer_resume, computer_stop,
+    computer_use_capabilities, computer_use_permission_status, computer_use_skill_report,
+    computer_use_tcc_row_action, conflict_card, continuation_source, cookie_sources, crash_bundle,
+    crash_open_log, create_browser_profile, create_project, create_pull_request,
+    create_untitled_markdown, create_worktree, default_project_parent, default_tabs,
+    delete_automation, delete_browser_profile, delete_diff_note, delete_quick_command,
+    delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts, desk_reply,
+    developer_permission_statuses, discard_paths, dismiss_external_worktree_prompt,
     enable_automation, end_all_terminal_sessions, end_terminal_session, file_diff, file_version,
     floating_workspace_seat, flow_list, flow_set, focus_lane, focus_main, fs_create, fs_duplicate,
     fs_move, fs_open_default, fs_redo, fs_rename, fs_reveal, fs_trash, fs_undo, gate_lane,
@@ -2899,6 +2901,7 @@ fn main() -> ExitCode {
             opencode_usage,
             set_opencode_cookie,
             set_opencode_workspace,
+            antigravity_usage,
             google_account,
             google_login_start,
             google_login_finish,
@@ -3552,6 +3555,7 @@ fn main() -> ExitCode {
             // agents' roads are open above, so a walk can now be asked for;
             // the handshake it would otherwise pay is opened here instead, on
             // the helper's own thread — nothing on the boot path waits for it.
+            cmd::managed_judgment::restore_at_boot(app.handle());
             systemone::warm_for_walks();
             // The Jira sync outbox the last window enqueued but never finished:
             // a crash between enqueue and the network leaves Pending rows behind.

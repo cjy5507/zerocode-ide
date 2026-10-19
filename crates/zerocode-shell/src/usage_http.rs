@@ -45,6 +45,10 @@ pub(crate) struct Failure {
     /// second — the CLI would spawn an agent process only to be told the same
     /// thing (`claude-oauth-usage-error.ts:19-21`).
     pub(crate) skip_cli_fallback: bool,
+    /// The status the server answered with, when it answered at all. A caller
+    /// that must tell a refusal (400, 401, 403) from the rest reads this, never
+    /// the sentence in `message`.
+    pub(crate) http_status: Option<u16>,
 }
 
 impl Failure {
@@ -55,6 +59,7 @@ impl Failure {
             retry_at_ms: None,
             message: "no credentials on file".to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 
@@ -70,6 +75,7 @@ impl Failure {
             retry_at_ms: None,
             message: "no plan figures in the response".to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 
@@ -80,6 +86,7 @@ impl Failure {
             retry_at_ms: None,
             message: message.to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 
@@ -90,6 +97,7 @@ impl Failure {
             retry_at_ms: None,
             message: message.to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 }
@@ -193,6 +201,7 @@ fn send_reading<T>(
                 .map(|wait| now_ms + wait),
                 message: format!("HTTP {status}"),
                 skip_cli_fallback: usage_limit::skips_pty_fallback(status),
+                http_status: Some(status),
             });
         }
         Ok(response)
@@ -222,11 +231,31 @@ pub(crate) fn get_json(
     send(request, now_ms)
 }
 
+/// POST a JSON body as a bearer, answering JSON.
+///
+/// The second verb this road needs: quota is asked for rather than looked up,
+/// and the project it is billed to is asked for the same way.
+pub(crate) fn post_json_bearer(
+    url: &str,
+    access_token: &str,
+    headers: &[(&str, &str)],
+    body: &serde_json::Value,
+    now_ms: i64,
+) -> Result<serde_json::Value, Failure> {
+    let mut request = client()?
+        .post(url)
+        .header("Authorization", format!("Bearer {access_token}"));
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let request = request.json(body);
+    send(request, now_ms)
+}
+
 /// POST a form-encoded body, answering JSON.
 ///
-/// The second shape this area needs, and not a bearer asking a product API
-/// (the one that was — the Antigravity gauge's quota POST — went 2026-10-17,
-/// t-62187): OAuth token endpoints speak
+/// The third shape this area needs and the only one that is not a bearer
+/// asking a product API: OAuth token endpoints speak
 /// `application/x-www-form-urlencoded`, so a refresh comes through here.
 pub(crate) fn post_form(
     url: &str,
