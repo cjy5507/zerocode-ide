@@ -211,7 +211,7 @@ fn runtime_python(root: &Path, depth: usize) -> Option<PathBuf> {
 }
 
 fn owned_runtime_python(root: &Path) -> Option<PathBuf> {
-    runtime_python(&root.join("runtimes"), 5)
+    runtime_python(&root.join("managed-judgment/runtime"), 5)
 }
 
 async fn prove(options: &Options, manager: &Arc<Manager>, report: &mut Value) -> Result<()> {

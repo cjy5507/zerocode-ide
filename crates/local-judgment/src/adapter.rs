@@ -82,7 +82,7 @@ pub fn verify_model(directory: &Path, model: &Model, cancel: &AtomicBool) -> Res
         }
     }
     if model.engine == EngineKind::LlamaCpp {
-        crate::llama::model_info(directory, model)?;
+        crate::llama::model_info_with_cancel(directory, model, cancel)?;
     }
     Ok(())
 }

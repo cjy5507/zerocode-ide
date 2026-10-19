@@ -101,11 +101,19 @@ pub(crate) fn model_info(
     directory: &Path,
     model: &Model,
 ) -> Result<(PathBuf, gguf::Info, &'static str)> {
+    model_info_with_cancel(directory, model, &AtomicBool::new(false))
+}
+
+pub(crate) fn model_info_with_cancel(
+    directory: &Path,
+    model: &Model,
+    cancel: &AtomicBool,
+) -> Result<(PathBuf, gguf::Info, &'static str)> {
     if model.files.len() != 1 || !model.files[0].path.to_ascii_lowercase().ends_with(".gguf") {
         return Err(Error::ModelFormatUnsupported);
     }
     let path = storage::child(directory, &model.files[0].path)?;
-    let info = gguf::inspect(&path, &AtomicBool::new(false))?;
+    let info = gguf::inspect(&path, cancel)?;
     let template = info
         .template
         .as_deref()
