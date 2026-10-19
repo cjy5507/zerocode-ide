@@ -91,6 +91,53 @@ async fn native_inspection_reports_the_detected_template_without_claiming_valida
     assert_eq!(value["local"]["reason"], "engine_unverified");
 }
 
+#[tokio::test]
+async fn an_installed_native_template_is_kept_without_reading_weights_for_status() {
+    let (_root, manager, inspection) = inspected().await;
+    let id = inspection.model.id.clone();
+    manager
+        .install_source(
+            &inspection.inspection_id,
+            &inspection.instance_id,
+            &inspection.catalog_fingerprint,
+            None,
+        )
+        .unwrap();
+    let settled = crate::tests::settled_snapshot(&manager).await;
+    assert_eq!(settled.operation.as_ref().unwrap().state, "done");
+    let model = settled
+        .models
+        .into_iter()
+        .find(|model| model.id == id)
+        .unwrap();
+    let directory = std::path::PathBuf::from(model.installed_directory.unwrap());
+    let gguf = fs::read_dir(&directory)
+        .unwrap()
+        .flatten()
+        .find(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "gguf")
+        })
+        .unwrap()
+        .path();
+    fs::set_permissions(&gguf, fs::Permissions::from_mode(0o000)).unwrap();
+    let snapshot = manager.snapshot();
+    fs::set_permissions(gguf, fs::Permissions::from_mode(0o600)).unwrap();
+    manager.shutdown();
+    let model = snapshot
+        .models
+        .into_iter()
+        .find(|model| model.id == id)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(model).unwrap()["inputTemplate"],
+        "chatml",
+        "installed_native_template_was_not_kept"
+    );
+}
+
 #[test]
 fn a_native_runtime_receipt_does_not_replace_its_pinned_files() {
     let root = tempfile::tempdir().unwrap();
