@@ -23792,6 +23792,8 @@ ok(
  * 되풀이하지 않는 것은 백엔드의 보류(`usage_scan_holds`)가 맡는다. */
 const refusedRead = await page.evaluate(async () => {
   const heldAnswer = window.__ANSWER__.antigravity_usage;
+  const heldItems = statusBarItems;
+  statusBarItems = normalizedStatusBarItems([...statusBarItems, "antigravity"]);
   window.__ANSWER__.antigravity_usage = () => ({
     usage: {
       provider: "antigravity", session: null, weekly: null, fable_weekly: null,
@@ -23801,16 +23803,25 @@ const refusedRead = await page.evaluate(async () => {
     },
     fetching: false,
   });
-  await refreshProviderUsage(usageProvider("antigravity"), true);
-  const said = document.getElementById("sb-antigravity-pct");
-  const warn = document.getElementById("sb-antigravity-warn");
-  const seen = { said: said.textContent, warned: !warn.hidden };
-  window.__ANSWER__.antigravity_usage = heldAnswer;
-  return seen;
+  try {
+    await refreshProviderUsage(usageProvider("antigravity"), true);
+    paintUsageSegments();
+    const said = document.getElementById("sb-antigravity-pct");
+    const warn = document.getElementById("sb-antigravity-warn");
+    return {
+      said: said.textContent,
+      warned: !warn.hidden,
+      shown: !document.getElementById("sb-antigravity").hidden,
+    };
+  } finally {
+    window.__ANSWER__.antigravity_usage = heldAnswer;
+    statusBarItems = heldItems;
+    paintUsageSegments();
+  }
 });
 ok(
   "A refused Antigravity read says 확인 불가 and raises the warning triangle",
-  refusedRead.said === "Antigravity 확인 불가" && refusedRead.warned,
+  refusedRead.said === "Antigravity 확인 불가" && refusedRead.warned && refusedRead.shown,
   JSON.stringify(refusedRead),
 );
 
