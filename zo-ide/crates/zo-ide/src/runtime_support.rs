@@ -3686,7 +3686,9 @@ mod tests {
     #[test]
     fn only_a_connection_spawns_a_discovery_refresh() {
         let source = include_str!("runtime_support.rs");
-        let (shipped, _) = source.split_once("#[cfg(test)]").expect("a test boundary");
+        // A test-only adapter can stand before production functions. Stop at
+        // a test module, rather than at the first test-only item.
+        let (shipped, _) = source.split_once("\n#[cfg(test)]\nmod ").expect("a test module boundary");
         let body_of = |name: &str| {
             let start = shipped.find(name).unwrap_or_else(|| panic!("missing {name}"));
             let rest = &shipped[start..];

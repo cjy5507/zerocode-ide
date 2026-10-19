@@ -167,6 +167,13 @@ counters, rotating banners, and content changed by the agent's `eval`.
 An `eval` acknowledgement and its following content change do not confirm progress.
 Different read views retain separate fingerprints. Changing the selector or
 `--full` view alone does not advance a revision or confirm an action.
+Views compare selector syntax after outer CSS whitespace is removed: `h1`,
+`H1`, and `body h1` are distinct views, even if they select the same content.
+Each unchanged view has its own three-read allowance.
+Surface evidence retains up to 128 surfaces and 512 call/view keys per session.
+It does not evict old entries. New surfaces or views beyond either limit use
+ordinary repetition counting until session replacement or rewind resets it.
+Retained views continue to use their host records.
 An agent's stop/resume does not create a fresh surface or repeat allowance.
 Keep the original target and background requirement when a bound is reached.
 Do not switch to a global screenshot, `open`, `activate`, or shared-pointer

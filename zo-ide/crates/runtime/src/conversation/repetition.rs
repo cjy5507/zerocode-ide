@@ -27,6 +27,8 @@ pub(super) struct SurfaceRepetitionState {
     fingerprints: HashMap<u64, String>,
     // None marks a valid host record that exceeded evidence storage: use plain counts.
     targets: HashMap<String, Option<String>>,
+    // None means this app has no unique recorded window. Exact calls still bind their replies.
+    computer_app_windows: HashMap<String, Option<String>>,
     generation: u64,
 }
 
@@ -54,7 +56,29 @@ impl SurfaceRepetitionState {
     }
 
     fn bind_targets(&mut self, tool_name: &str, input: &str, identity: Option<&str>) {
-        for target in surface_target_keys(tool_name, input) {
+        let keys = surface_target_keys(tool_name, input);
+        let window = keys.first().filter(|key| key.starts_with("Computer/window/")).cloned();
+        for target in keys {
+            if tool_name == "Computer" && target.starts_with("Computer/app/") && identity.is_some() {
+                if self.computer_app_windows.contains_key(&target)
+                    || self.computer_app_windows.len() < MAX_SURFACE_FINGERPRINTS {
+                    let known = self.computer_app_windows.entry(target.clone()).or_insert_with(|| window.clone());
+                    let same_window = match (known.as_deref(), window.as_deref()) {
+                        (Some(known), Some(current)) => known == current,
+                        (Some(known), None) => self.targets.get(known).and_then(Option::as_deref) == identity,
+                        _ => false,
+                    };
+                    if !same_window { *known = None; }
+                }
+                if self.computer_app_windows.get(&target).and_then(Option::as_ref).is_none() {
+                    // An app-only call must run before its reply identifies the selected window.
+                    // Do not replace its exact-call binding with another window's latest count.
+                    if self.targets.remove(&target).is_some() {
+                        self.generation = self.generation.wrapping_add(1);
+                    }
+                    continue;
+                }
+            }
             if (self.targets.contains_key(&target) || self.targets.len() < MAX_SURFACE_FINGERPRINTS)
                 && self.targets.get(&target).map(Option::as_deref) != Some(identity) {
                 self.targets.insert(target, identity.map(str::to_string));
@@ -652,10 +676,11 @@ where
     fn resolved_repetition_call(&self, tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
         let resolved = self.resolved_surface_call(tool_name, input);
         if let Some(call) = &resolved {
-            if call.name == BROWSER_CLI && self.surface_repetition_state.identity(&call.name, &call.input,
-                fingerprint_tool_call(&call.name, &call.input)).is_none() {
-                // Legacy hosts have no attested content revision. Preserve the
-                // original Bash description and control revision, as on main.
+            if call.name == BROWSER_CLI && (!is_surface_observation(&call.name, &call.input)
+                || self.surface_repetition_state.identity(&call.name, &call.input,
+                    fingerprint_tool_call(&call.name, &call.input)).is_none()) {
+                // Only attested reads use surface/view counts. Other verbs and
+                // legacy reads keep main's Bash description and control revision.
                 return legacy_repetition_call(tool_name, input);
             }
         }
@@ -759,13 +784,14 @@ where
         }
         self.surface_repetition_state.bind(raw, &identity);
         self.surface_repetition_state.bind_targets(tool_name, input, Some(&identity));
-        if migrate_original {
+        let surface_count = tool_name != BROWSER_CLI || is_surface_observation(tool_name, input);
+        if migrate_original && surface_count {
             self.move_repetition_fingerprint(original, fingerprint);
             batch_hard_stops.rekey(original, fingerprint);
         }
         self.move_repetition_fingerprint(raw, fingerprint);
         batch_hard_stops.rekey(raw, fingerprint);
-        if self.surface_repetition_state.fingerprints.contains_key(&fingerprint) {
+        if surface_count && self.surface_repetition_state.fingerprints.contains_key(&fingerprint) {
             self.pathless_fingerprints.remove(&raw);
             self.pathless_fingerprints.remove(&fingerprint);
         }
@@ -805,7 +831,8 @@ where
         let (tool_name, input) = resolved.as_ref()
             .map_or((tool_name, input), |call| (call.name.as_str(), call.input.as_str()));
         let fp = self.repetition_fingerprint(tool_name, input);
-        if matches!(tool_name, "Computer" | BROWSER_CLI) {
+        let keeps_surface_limit = tool_name == "Computer" || is_surface_observation(tool_name, input);
+        if keeps_surface_limit {
             self.surface_tool_fingerprints.insert(fp);
         }
         let is_mutation = is_edit_or_write_tool(tool_name);
@@ -837,9 +864,7 @@ where
             }
         }
         let count = record_tool_fingerprint(&mut self.tool_fingerprint_counts, fp);
-        if !is_mutation && !matches!(tool_name, "Computer" | BROWSER_CLI)
-            && !self.surface_repetition_state.fingerprints.contains_key(&fp)
-        {
+        if !is_mutation && !keeps_surface_limit {
             self.index_read_fingerprint(input, fp);
         }
         let recovering_microcompacted_result = !is_mutation
