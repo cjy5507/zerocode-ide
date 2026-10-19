@@ -75,6 +75,35 @@ export async function runSettingsGguf({ test, assert, assertEqual, backend, with
       return "owned copy · selected runtime · verified response · explicit unverified model";
     }));
 
+    await test("GGUF 파일 여러 개를 고르면 임의의 첫 파일을 검사하지 않는다", () => fixture(async (page, active) => {
+      await page.evaluate(() => { window.openPathBrowser = async () => ["/models/first.gguf", "/models/second.gguf"]; });
+      const before = backend.calls.length;
+      assertEqual(await page.locator("#judgment-source-gguf").count(), 1, "the model loader has no GGUF file action");
+      await page.click("#judgment-source-gguf");
+      await page.waitForFunction(() => !judgmentModelSourceController.working && judgmentModelSourceController.kind === "local_file");
+      assertEqual(await page.evaluate(() => judgmentModelSourceController.source()), null, "a multiple selection kept an arbitrary file");
+      assert(!backend.calls.slice(before).some((call) => call.command === "managed_judgment_inspect_source"), "multiple GGUF files reached inspection");
+      assertEqual(backend.typesafeSettings().provider, active);
+      return "multiple files refused · no arbitrary selection · active provider kept";
+    }));
+
+    await test("실행 검증 전 GGUF는 파일만 복사하고 실행 환경을 설치하지 않는다", () => fixture(async (page, active) => {
+      const inspection = backend.managedSourceResult;
+      Object.assign(inspection.local, { supported: false, downloadOnly: true, reason: "engine_unverified" });
+      inspection.readyForInstall = false;
+      inspection.model.runtime.state = "unverified";
+      inspection.model.runtime.reason = "engine_unverified";
+      await chooseFile(page);
+      assert(!(await page.locator("#judgment-source-model-support").textContent()).includes("CPython"), "download-only selection suggests runtime preparation");
+      const before = backend.calls.length;
+      await page.click("#judgment-source-use");
+      await page.waitForFunction(() => judgmentModelSourceController.flow?.done || judgmentModelSourceController.flow?.failed);
+      assert(await page.evaluate(() => judgmentModelSourceController.flow.done), "download-only GGUF copy failed");
+      assert(!backend.calls.slice(before).some((call) => /^managed_judgment_(prepare|start|apply|switch|check)/.test(call.command)), "an unverified runtime was prepared or started");
+      assertEqual(backend.typesafeSettings().provider, active);
+      return "owned copy only · no runtime action · active provider kept";
+    }));
+
     await test("지원하지 않는 GGUF 입력 형식은 현재 모델을 바꾸거나 실행하지 않는다", () => fixture(async (page, active) => {
       backend.managedSourceError = "model_format_not_supported";
       const before = backend.calls.length;
