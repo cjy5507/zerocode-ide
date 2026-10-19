@@ -45,6 +45,7 @@ pub enum SourceInput {
 #[derive(Clone)]
 pub(crate) struct Inspected {
     pub kind: &'static str,
+    pub input_template: Option<String>,
     pub model: Model,
     pub directory: Option<PathBuf>,
     stamps: Vec<Stamp>,
@@ -701,6 +702,7 @@ async fn inspect_hub(
     let source_url = hub_url(&source, &metadata.sha, "tree", None)?.to_string();
     Ok(Inspected {
         kind: "hugging_face",
+        input_template: None,
         model: model(
             artifacts,
             Description {
@@ -817,6 +819,7 @@ pub(crate) fn inspect_local(
     }
     Ok(Inspected {
         kind: "local_directory",
+        input_template: None,
         model: model(
             artifacts,
             Description {
@@ -1105,6 +1108,7 @@ async fn inspect_hub_gguf(
     };
     Ok(Inspected {
         kind: "hugging_face_file",
+        input_template: None,
         model: model(
             vec![artifact],
             Description {
@@ -1144,14 +1148,11 @@ fn inspect_local_gguf(
     }
     let before = fs::metadata(&path).map_err(|_| Error::Storage)?;
     let info = crate::gguf::inspect(&path, &std::sync::atomic::AtomicBool::new(false))?;
-    if info
+    let input_template = info
         .template
         .as_deref()
         .and_then(crate::gguf::builtin_template)
-        .is_none()
-    {
-        return Err(Error::ModelFormatUnsupported);
-    }
+        .ok_or(Error::ModelFormatUnsupported)?;
     check(cancelled)?;
     let mut input = File::open(&path).map_err(|_| Error::Storage)?;
     let opened = input.metadata().map_err(|_| Error::Storage)?;
@@ -1188,6 +1189,7 @@ fn inspect_local_gguf(
         .collect();
     Ok(Inspected {
         kind: "local_file",
+        input_template: Some(input_template.to_owned()),
         model: model(
             vec![Artifact {
                 path: name.clone(),
