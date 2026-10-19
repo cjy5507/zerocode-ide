@@ -127,8 +127,14 @@ const judgmentModelSourceController = {
     let inspectFile = false;
     try {
       const file = !destination && this.kind === "local_file";
-      const chosen = await openPathBrowser({ mode: file ? "file" : "folder", start: destination ? this.destination : file ? null : this.directory });
+      const chosen = await openPathBrowser({ mode: file ? "attach" : "folder", multiple: false, system: true, start: destination ? this.destination : file ? null : this.directory });
       if (!chosen.length) return;
+      if (file && chosen.length !== 1) {
+        this.file = null;
+        this.invalidate();
+        this.say(t("settings.gguf.pickHint", "GGUF 파일 하나를 고르세요. 원본은 그대로 두고 앱 전용 폴더에 복사합니다."));
+        return;
+      }
       if (destination) this.destination = chosen[0];
       else {
         if (file) this.file = chosen[0]; else this.directory = chosen[0];
