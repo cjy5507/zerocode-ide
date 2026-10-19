@@ -11,6 +11,7 @@ const managedJudgmentController = {
   importModel: null,
   importAttempt: null,
   ownedOperation: null,
+  restoreRefresh: null,
   subscription: null,
   query: "",
   filter: "all",
@@ -245,6 +246,14 @@ const managedJudgmentController = {
     }
     for (const notify of this.waiters) notify();
     if (this.visible()) this.render();
+    if (snapshot.operation?.kind === "restore" && snapshot.operation.state === "done" && snapshot.providerIdentity &&
+        snapshot.providerIdentity !== judgmentProviderController.state?.providerIdentity) {
+      const restored = `${snapshot.instanceId}:${snapshot.operation.id}`;
+      if (this.restoreRefresh !== restored) {
+        this.restoreRefresh = restored;
+        void refreshTypeSafe();
+      }
+    }
     return true;
   },
 
@@ -435,6 +444,11 @@ const managedJudgmentController = {
 
   modelState(model) {
     const snapshot = this.snapshot;
+    const operation = snapshot.operation;
+    if (operation?.kind === "restore" && operation.modelId === model.id) {
+      if (["running", "cancelling"].includes(operation.state)) return t("settings.managed.restoring", "이전에 실행하던 모델을 복원하는 중…");
+      if (operation.state === "failed") return t("settings.managed.restoreFailed", "복원 실패 · {{reason}}", { reason: this.failure(operation.error) });
+    }
     if (this.appliedModel(model)) return t("settings.managed.inUse", "실행 중 · 현재 적용됨");
     if ((this.statusError || snapshot.providerIdentity !== judgmentProviderController.state?.providerIdentity) &&
         [snapshot.appliedModelId, snapshot.configuredModelId].includes(model.id)) return t("settings.judgment.modelStateUnknown", "현재 설정과 실행 상태를 함께 확인해야 합니다.");
@@ -527,12 +541,16 @@ const managedJudgmentController = {
     }
     el("managed-judgment-progress-label").textContent = operation?.state === "cancelling"
       ? t("settings.managed.cancelling", "취소하고 임시 파일을 정리하는 중…")
-      : operation && operation.totalBytes > 0
+      : operation?.kind === "restore"
+        ? t("settings.managed.restoreWorking", "이전에 실행하던 판단 모델을 복원하는 중…")
+        : operation && operation.totalBytes > 0
         ? t("settings.managed.progress", "{{received}} / {{total}}", { received: bytesLabel(operation.receivedBytes), total: bytesLabel(operation.totalBytes) })
         : t("settings.managed.working", "작업 중… 완료될 때까지 현재 모델을 유지합니다.");
     el("managed-judgment-cancel").disabled = operation?.state !== "running";
     if (["failed", "cancelled"].includes(operation?.state) && !this.busy && operation.kind !== "inspect") {
-      const words = this.failure(operation.state === "cancelled" ? "cancelled" : operation.error);
+      const reason = this.failure(operation.state === "cancelled" ? "cancelled" : operation.error);
+      const words = operation.kind === "restore" && operation.state === "failed"
+        ? t("settings.managed.restoreFailed", "복원 실패 · {{reason}}", { reason }) : reason;
       if (operation.id === this.importAttempt?.operationId) {
         if (this.importAttempt.key === this.importKey()) this.sayImport(words);
       } else this.say(words);
@@ -553,8 +571,9 @@ const managedJudgmentController = {
       const running = snapshot.server.modelId === model.id && snapshot.server.state !== "stopped" && snapshot.server.state !== "failed";
       const applied = this.appliedModel(model);
       const configured = snapshot.configuredModelId === model.id;
+      const restoring = operation?.kind === "restore" && operation.modelId === model.id && ["running", "cancelling"].includes(operation.state);
       const signature = JSON.stringify([model, busy, running, applied, configured, snapshot.server.state, snapshot.server.exit, snapshot.runtime.state,
-        snapshot.providerIdentity, judgmentProviderController.state?.providerIdentity, this.statusError, t("settings.managed.download", "다운로드")]);
+        operation?.kind, operation?.state, operation?.error, snapshot.providerIdentity, judgmentProviderController.state?.providerIdentity, this.statusError, t("settings.managed.download", "다운로드")]);
       if (row.signature === signature) continue;
       row.signature = signature;
       row.title.textContent = model.label;
@@ -593,7 +612,7 @@ const managedJudgmentController = {
       row.buttons.connect.hidden = !serverModel;
       row.buttons["inspect-source"].hidden = !this.downloadOnly(model) || model.installed || row.source.hidden;
       row.buttons.activate.disabled ||= applied || !["ready", "missing"].includes(this.runtimeFor(model)?.state);
-      row.buttons.stop.hidden = !running;
+      row.buttons.stop.hidden = !running || restoring;
       row.buttons.remove.hidden = !model.installed;
       row.buttons.remove.disabled ||= configured || running;
     }
