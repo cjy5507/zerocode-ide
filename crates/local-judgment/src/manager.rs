@@ -1938,7 +1938,7 @@ impl Manager {
                         .map_err(|_| Error::RuntimeFailed)?;
                     let bound = loopback.bind((Ipv4Addr::LOCALHOST, port).into());
                     drop(probes);
-                    match bound.and_then(|()| loopback.listen(1024)) {
+                    match bound.and_then(|()| loopback.listen(128)) {
                         Ok(listener) => Some(listener),
                         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
                         Err(_) => return Err(Error::RuntimeFailed),
