@@ -31,6 +31,8 @@ print('{"ready":true}',flush=True)
 for line in sys.stdin:
  request=json.loads(line);answers={}
  with open(at('requests'),'a') as receipt: receipt.write(line)
+ if os.path.exists(at('hold-check')):
+  while not os.path.exists(at('go-check')): time.sleep(0.005)
  for name,question in request['questions'].items():
   if question['type']=='noul': answers[name]={'type':'noul','noul':0.9}
   elif question['type']=='choice':
@@ -321,6 +323,25 @@ impl Restoring {
         let server = self.start(&self.models[0]).await.server.id.unwrap();
         let provider = self.apply(&server).await;
         (server, provider)
+    }
+
+    async fn checking(&self, server: &str) -> String {
+        let number = self.starts();
+        let requests = self.control.path().join(format!("requests-{number}"));
+        let previous = fs::read_to_string(&requests).unwrap().lines().count();
+        self.tell("hold-check", number);
+        let checking = self.manager.check(server).unwrap();
+        let operation = checking.operation.unwrap();
+        assert_eq!(operation.kind, "check");
+        let began = Instant::now();
+        while fs::read_to_string(&requests).unwrap().lines().count() <= previous {
+            assert!(
+                began.elapsed() < SETTLE,
+                "held check did not reach the runtime"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        operation.id
     }
 
     fn tell(&self, name: &str, number: usize) {
@@ -716,6 +737,53 @@ async fn an_owned_time_wait_keeps_the_restore_port_without_settings_writes() {
     assert_eq!(fs::read(fixture.intent_path()).unwrap(), intent);
     assert_eq!(fixture.swap_calls.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_person_cancelled_check_clears_intent_and_cannot_restore() {
+    let mut fixture = Restoring::new();
+    let (server, _) = fixture.press().await;
+    assert!(fixture.intent_path().is_file());
+    let operation = fixture.checking(&server).await;
+    assert_eq!(fixture.manager.stop(&server).err(), Some(Error::Busy));
+    fixture.manager.cancel(&operation).unwrap();
+    let stopped = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(stopped.server.state, "stopped");
+    assert_eq!(stopped.operation.unwrap().state, "cancelled");
+    fixture.reopen().await;
+    assert!(
+        !fixture.intent_path().exists(),
+        "person-cancelled check must remove its run intent before restart"
+    );
+    fixture.restore(true).unwrap();
+    fixture.clock.advance(HOUR);
+    let skipped = fixture.manager.snapshot();
+    assert!(skipped.operation.is_none());
+    assert_eq!(skipped.server.state, "stopped");
+    assert_eq!(fixture.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_check_ended_by_shutdown_keeps_its_intent_for_restore() {
+    let mut fixture = Restoring::new();
+    let (server, _) = fixture.press().await;
+    let intent = fs::read(fixture.intent_path()).unwrap();
+    fixture.checking(&server).await;
+    fixture.manager.shutdown();
+    let stopped = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(stopped.server.state, "stopped");
+    assert_eq!(stopped.operation.unwrap().state, "cancelled");
+    assert_eq!(
+        fs::read(fixture.intent_path()).unwrap(),
+        intent,
+        "shutdown during a check must preserve the run intent"
+    );
+    fixture.reopen().await;
+    fixture.restore(true).unwrap();
+    let restored = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(restored.server.state, "ready");
+    assert!(restored.server.checked);
+    assert_eq!(fixture.starts(), 2);
 }
 
 #[tokio::test]
