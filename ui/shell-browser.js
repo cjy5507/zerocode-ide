@@ -834,13 +834,14 @@ function stopAgentBrowserWorkspaces(revision) {
 }
 
 /* The bar of each work browser in front of its pane says whether the person's
- * stop stands: painted again when the stop comes or goes, but for one whose
- * change is still out — its own road paints it when the change ends. */
+ * stop stands: what the stop changes on it is painted again when the stop
+ * comes or goes, but for one whose change is still out — its own road paints
+ * it when the change ends. */
 function paintBrowserWorkspaceBars() {
   for (const tab of tabs) {
     if (!browserWorkspaceManaged(tab) || tab.workspacePending) continue;
     const host = groups.get(tab.pane)?.browserView;
-    if (host?._browserTab === tab && !host.hidden) paintBrowserWorkspace(host, tab);
+    if (host?._browserTab === tab && !host.hidden) paintBrowserWorkspaceStopHold(host, tab);
   }
 }
 
@@ -1115,6 +1116,34 @@ function buildBrowserWorkspaceSurface() {
   return surface;
 }
 
+/* Whether a work browser's state leaves its bar nothing to change now: a
+ * change of it still out, its state unknown or in error, or its pause still
+ * waiting for an input to end. */
+function browserWorkspaceBlocked(tab) {
+  return !!tab.workspacePending || !tab.workspace || !!tab.workspaceError || tab.workspace.mode === "pausing";
+}
+
+/* Whether a work browser's bar may hand it to an agent now: not while it is
+ * blocked or already in an agent's hands, not without an agent to hand it
+ * to, and not while the person's stop stands — the backend refuses the agent
+ * until the band's resume (t-62872). */
+function browserWorkspaceHandsToAgent(tab) {
+  return !browserWorkspaceBlocked(tab) && tab.workspace?.mode !== "agent" && browserWorkspaceStop === null
+    && browserWorkspaceAgentOwner(tab) !== null;
+}
+
+/* The person's stop on a work browser's bar (t-62872): while it stands the
+ * bar offers no hand-back to an agent and says, in one line, that the agent
+ * waits for the band's resume. Pausing it and taking it by hand stay the
+ * person's. Painted with the bar, and alone when the stop comes or goes — two
+ * writes, so the stop's pauses never wait behind a whole bar's paint. */
+function paintBrowserWorkspaceStopHold(host, tab) {
+  host.querySelector(".browser-workspace-agent").disabled = !browserWorkspaceHandsToAgent(tab);
+  const note = host.querySelector(".browser-workspace-stop-note");
+  note.hidden = browserWorkspaceStop === null;
+  writeTextContent(note, t("browser.workspace.personsStop", "Computer Use 정지 중 · 에이전트는 ‘다시 시작’을 누를 때까지 기다립니다"));
+}
+
 function paintBrowserWorkspace(host, tab) {
   const managed = tab.agentWorkspace === true;
   const control = browserWorkspaceCanControl(tab);
@@ -1145,23 +1174,17 @@ function paintBrowserWorkspace(host, tab) {
   host.querySelector(".browser-workspace-bar").setAttribute("aria-busy", String(!!tab.workspacePending));
   host.querySelector(".browser-workspace-watch").hidden = tab.workspaceViewing === true;
   host.querySelector(".browser-workspace-collapse").hidden = tab.workspaceViewing !== true;
-  const blocked = !!tab.workspacePending || !tab.workspace || !!tab.workspaceError || tab.workspace.mode === "pausing";
+  const blocked = browserWorkspaceBlocked(tab);
   for (const name of BROWSER_WORKSPACE_ACTIONS) {
     writeTextContent(host.querySelector(`.browser-workspace-${name}`), BROWSER_WORKSPACE_ACTION_WORDS[name]());
   }
-  // While the person's stop stands the bar hands its browser to no agent: the
-  // backend refuses the agent until the band's resume, and the bar says so
-  // (t-62872). Pausing it and taking it by hand stay the person's.
-  const personsStop = browserWorkspaceStop !== null;
   for (const [name, mode] of [["pause", "paused"], ["human", "human"], ["agent", "agent"]]) {
     const button = host.querySelector(`.browser-workspace-${name}`);
-    button.disabled = blocked || tab.workspace?.mode === mode
-      || (mode === "agent" && (personsStop || browserWorkspaceAgentOwner(tab) === null));
+    // The hand-back to an agent is the stop's painter's, below.
+    if (mode !== "agent") button.disabled = blocked || tab.workspace?.mode === mode;
     button.setAttribute("aria-pressed", String(tab.workspace?.mode === mode));
   }
-  const stopNote = host.querySelector(".browser-workspace-stop-note");
-  stopNote.hidden = !personsStop;
-  writeTextContent(stopNote, t("browser.workspace.personsStop", "Computer Use 정지 중 · 에이전트는 ‘다시 시작’을 누를 때까지 기다립니다"));
+  paintBrowserWorkspaceStopHold(host, tab);
   const refresh = host.querySelector(".browser-workspace-refresh");
   refresh.hidden = !!tab.workspace && !tab.workspaceError && tab.workspace.mode !== "pausing";
   refresh.disabled = !!tab.workspacePending || !!tab.workspaceReading;
