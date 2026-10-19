@@ -14,6 +14,10 @@ pub(crate) struct Info {
     pub file_bytes: u64,
 }
 
+pub(crate) fn builtin_template(_template: &str) -> Option<&'static str> {
+    None
+}
+
 pub(crate) fn inspect(path: &Path, cancel: &AtomicBool) -> Result<Info> {
     if cancel.load(Ordering::Acquire) {
         return Err(Error::Cancelled);

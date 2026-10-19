@@ -162,3 +162,37 @@ fn a_model_symlink_is_not_followed() {
     std::os::unix::fs::symlink(&target, &link).expect("symlink");
     assert!(gguf::inspect(&link, &AtomicBool::new(false)).is_err());
 }
+
+#[test]
+fn native_template_detection_keeps_distinct_model_families_and_does_not_evaluate_jinja() {
+    for (template, expected) in [
+        ("chatml", "chatml"),
+        ("<|im_start|> {{ untrusted_expression() }}", "chatml"),
+        ("<|im_start|> <|im_sep|>", "phi4"),
+        ("<|im_start|> <end_of_utterance>", "smolvlm"),
+        ("<|start_header_id|> <|end_header_id|>", "llama3"),
+        ("<start_of_turn>", "gemma"),
+        ("<|assistant|> <|end|>", "phi3"),
+        ("[INST] [SYSTEM_PROMPT]", "mistral-v7"),
+        (" [INST] [AVAILABLE_TOOLS]", "mistral-v1"),
+        ("[INST] <<SYS>>", "llama2-sys"),
+    ] {
+        assert_eq!(
+            gguf::builtin_template(template),
+            Some(expected),
+            "{template}"
+        );
+    }
+}
+
+#[test]
+fn unknown_template_code_is_rejected_instead_of_guessed_as_chatml() {
+    for template in [
+        "",
+        "unknown prompt layout",
+        "{{ arbitrary_function() }}",
+        "{%- for message in messages -%}{{ message }}{%- endfor -%}",
+    ] {
+        assert_eq!(gguf::builtin_template(template), None, "{template}");
+    }
+}
