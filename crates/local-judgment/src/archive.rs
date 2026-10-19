@@ -1,8 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-#[cfg(test)]
-use std::path::PathBuf;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::catalog::relative;
@@ -12,6 +10,32 @@ use crate::{Error, Result};
 pub struct Budget {
     bytes: u64,
     entries: u32,
+}
+
+pub(crate) fn native(
+    archive: &Path,
+    root: &Path,
+    runtime: &crate::llama::Runtime,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let _ = (archive, root, runtime, cancel);
+    Err(Error::RuntimeMissing)
+}
+
+fn set_native_mode(path: &Path, name: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if name.ends_with("/LICENSE") {
+            0o600
+        } else {
+            0o700
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|_| Error::Storage)?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, name);
+    Ok(())
 }
 
 impl Budget {
