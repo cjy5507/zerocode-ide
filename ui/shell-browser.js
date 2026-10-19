@@ -830,7 +830,7 @@ function stopAgentBrowserWorkspaces(revision) {
   }
   keepBrowserWorkspaceStop(stop);
   paintBrowserWorkspaceChrome();
-  paintBrowserWorkspaceBars();
+  paintBrowserWorkspaceBarsAfterPlacing();
 }
 
 /* The bar of each work browser in front of its pane says whether the person's
@@ -843,6 +843,14 @@ function paintBrowserWorkspaceBars() {
     const host = groups.get(tab.pane)?.browserView;
     if (host?._browserTab === tab && !host.hidden) paintBrowserWorkspaceStopHold(host, tab);
   }
+}
+
+/* The same, once the browsers' placement in hand has gone: the stop's pauses
+ * and the resume's hand-backs wait for it and then leave, and a bar painted
+ * before them would make that placement measure the window again — the stop
+ * would reach its work browsers later for it. */
+function paintBrowserWorkspaceBarsAfterPlacing() {
+  void browserPlacing.then(paintBrowserWorkspaceBars, paintBrowserWorkspaceBars);
 }
 
 /* Walk what the stop still owes: a browser in an agent's hands is paused by its
@@ -973,7 +981,7 @@ function resumeAgentBrowserWorkspaces(revision) {
   }
   const pausing = [...stop.owed.values()].some((owed) => owed.asking);
   browserWorkspaceStopKept = kept.size > 0 || pausing ? { stop, held: kept } : null;
-  paintBrowserWorkspaceBars();
+  paintBrowserWorkspaceBarsAfterPlacing();
   paintBrowserWorkspaceChrome();
 }
 
