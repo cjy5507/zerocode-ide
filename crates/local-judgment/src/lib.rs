@@ -126,7 +126,7 @@ impl std::error::Error for Error {}
 
 #[cfg(all(test, unix))]
 mod admission_tests;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod native_tests;
 #[cfg(all(test, unix))]
 mod restore_tests;

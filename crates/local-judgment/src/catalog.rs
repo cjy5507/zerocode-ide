@@ -354,7 +354,11 @@ pub fn runtime_profiles() -> Result<Vec<RuntimeProfile>> {
             native.validate()?;
         }
         validate_files(&profile.wheels)?;
-        validate_files(&profile.runtime_files)?;
+        // Native files have their own required, bounded list, checked above.
+        // Python extensions still require their pinned runtime source files.
+        if profile.native.is_none() || !profile.runtime_files.is_empty() {
+            validate_files(&profile.runtime_files)?;
+        }
         profiles.push(profile);
     }
     Ok(profiles)
