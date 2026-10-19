@@ -583,7 +583,11 @@ async fn an_occupied_port_is_replaced_without_contacting_its_listener() {
     fixture.reopen().await;
     let occupant = TcpListener::bind((Ipv4Addr::LOCALHOST, port(&previous))).unwrap();
     occupant.set_nonblocking(true).unwrap();
-    fixture.restore(true).unwrap();
+    let starting = fixture.restore(true).unwrap();
+    assert!(
+        starting.operation.is_some(),
+        "occupied-port intent must reserve one restore operation"
+    );
     let ready = crate::tests::settled_snapshot(&fixture.manager).await;
     assert_eq!(
         fixture.starts(),
