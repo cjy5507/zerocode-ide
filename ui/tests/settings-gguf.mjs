@@ -49,7 +49,7 @@ export async function runSettingsGguf({ test, assert, assertEqual, backend, with
     await test("GGUF 파일 선택은 파일 한 개만 검사하고 원래 판단 모델을 유지한다", () => fixture(async (page, active) => {
       const before = backend.calls.length;
       await chooseFile(page);
-      assertEqual(await page.evaluate(() => window.__GGUF_PICKER_OPTIONS__.mode), "file", "GGUF used a folder selector");
+      assertEqual(await page.evaluate(() => ({ mode: window.__GGUF_PICKER_OPTIONS__.mode, multiple: window.__GGUF_PICKER_OPTIONS__.multiple, system: window.__GGUF_PICKER_OPTIONS__.system })), { mode: "attach", multiple: false, system: true }, "GGUF did not request the existing single-file picker");
       const inspected = backend.calls.slice(before).find((call) => call.command === "managed_judgment_inspect_source");
       assertEqual(inspected.args.source, { kind: "local_file", file: "/models/selected.gguf" }, "the chosen file was converted into a directory import");
       assertEqual(backend.typesafeSettings().provider, active, "inspection changed the active model");
