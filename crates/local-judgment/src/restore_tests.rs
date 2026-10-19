@@ -415,8 +415,11 @@ async fn restore_gate_skips_without_changing_state_and_has_a_live_control() {
             _ => {}
         }
         let before = serde_json::to_value(fixture.manager.snapshot()).unwrap();
-        fixture.restore(case != "off").unwrap();
-        let after = crate::tests::settled_snapshot(&fixture.manager).await;
+        let after = fixture.restore(case != "off").unwrap();
+        assert_eq!(serde_json::to_value(after).unwrap(), before);
+        fixture.clock.advance(HOUR);
+        tokio::task::yield_now().await;
+        let after = fixture.manager.snapshot();
         assert_eq!(fixture.starts(), 0, "excluded restore started for {case}");
         assert!(
             after.operation.is_none(),
@@ -430,7 +433,11 @@ async fn restore_gate_skips_without_changing_state_and_has_a_live_control() {
     }
     let fixture = Restoring::new();
     fixture.seed();
-    fixture.restore(true).unwrap();
+    let starting = fixture.restore(true).unwrap();
+    assert!(
+        starting.operation.is_some(),
+        "valid intent must reserve a restore operation"
+    );
     let ready = crate::tests::settled_snapshot(&fixture.manager).await;
     assert_eq!(fixture.starts(), 1, "valid intent must start one runtime");
     assert_eq!(ready.server.state, "ready");
