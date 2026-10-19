@@ -787,6 +787,43 @@ async fn a_check_ended_by_shutdown_keeps_its_intent_for_restore() {
 }
 
 #[tokio::test]
+async fn a_person_cancelled_check_reports_intent_removal_errors() {
+    let fixture = Restoring::new();
+    let (server, _) = fixture.press().await;
+    let operation = fixture.checking(&server).await;
+    fs::remove_file(fixture.intent_path()).unwrap();
+    fs::create_dir(fixture.intent_path()).unwrap();
+    assert_eq!(
+        fixture.manager.cancel(&operation).err(),
+        Some(Error::UnsafePath),
+        "person-cancelled check must report run intent removal errors"
+    );
+    let stopped = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(stopped.server.state, "stopped");
+    assert!(fixture.intent_path().is_dir());
+    assert_eq!(fixture.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_cancel_after_check_completion_keeps_the_run_intent() {
+    let fixture = Restoring::new();
+    let (server, _) = fixture.press().await;
+    let intent = fs::read(fixture.intent_path()).unwrap();
+    fixture.manager.check(&server).unwrap();
+    let checked = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(checked.operation.as_ref().unwrap().state, "done");
+    fixture
+        .manager
+        .cancel(&checked.operation.unwrap().id)
+        .unwrap();
+    let unchanged = fixture.manager.snapshot();
+    assert_eq!(unchanged.server.state, "ready");
+    assert!(unchanged.server.checked);
+    assert_eq!(fs::read(fixture.intent_path()).unwrap(), intent);
+    assert_eq!(fixture.starts(), 1);
+}
+
+#[tokio::test]
 async fn apply_persists_stop_clears_and_unapplied_start_leaves_intent_alone() {
     use std::os::unix::fs::PermissionsExt;
 
