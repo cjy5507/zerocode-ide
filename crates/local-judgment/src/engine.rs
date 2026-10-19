@@ -596,6 +596,13 @@ impl Engine {
         };
         Self::from_child(child, None).unwrap()
     }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn from_native_command(command: &mut Command) -> Arc<Self> {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        Self::from_command(command)
+    }
 }
 
 /// The code or the signal a process ended with.
@@ -1147,6 +1154,7 @@ async fn serve_with(
     }));
     match model.engine {
         EngineKind::Laya | EngineKind::TransformersSystemOne => {}
+        EngineKind::LlamaCpp => return Err(Error::EngineUnverified),
         EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
     }
     let listener = match listener {
