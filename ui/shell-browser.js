@@ -746,10 +746,12 @@ async function setBrowserWorkspaceMode(tab, mode, { view = true } = {}) {
  * it is, and one the resume must leave paused — a change of its bar still out,
  * an error, an agent being chosen for it — is counted on the band. A work
  * browser that comes into an agent's hands while the stop stands is paused
- * too; one the person hands back from its bar was theirs to hand. An agent's
- * own stop, or a budget's, touches no work browser, and the board pop-out
- * holds none. Nothing here runs on a clock: the stop walks again whenever a
- * work browser's state is painted (`paintBrowserWorkspaceChrome`). */
+ * too, and no bar hands one to an agent meanwhile: the backend refuses the
+ * agent until the band's resume, so the bar offers no hand-back and says the
+ * agent waits (`paintBrowserWorkspace`). An agent's own stop, or a budget's,
+ * touches no work browser, and the board pop-out holds none. Nothing here runs
+ * on a clock: the stop walks again whenever a work browser's state is painted
+ * (`paintBrowserWorkspaceChrome`). */
 const BROWSER_WORKSPACE_STOP_TRIES = 3;
 /* Where the stop's record waits out a reload of this page: one entry, the
  * stop's revision beside what it paused, taken back only by the stop of that
@@ -828,6 +830,18 @@ function stopAgentBrowserWorkspaces(revision) {
   }
   keepBrowserWorkspaceStop(stop);
   paintBrowserWorkspaceChrome();
+  paintBrowserWorkspaceBars();
+}
+
+/* The bar of each work browser in front of its pane says whether the person's
+ * stop stands: painted again when the stop comes or goes, but for one whose
+ * change is still out — its own road paints it when the change ends. */
+function paintBrowserWorkspaceBars() {
+  for (const tab of tabs) {
+    if (!browserWorkspaceManaged(tab) || tab.workspacePending) continue;
+    const host = groups.get(tab.pane)?.browserView;
+    if (host?._browserTab === tab && !host.hidden) paintBrowserWorkspace(host, tab);
+  }
 }
 
 /* Walk what the stop still owes: a browser in an agent's hands is paused by its
@@ -958,6 +972,7 @@ function resumeAgentBrowserWorkspaces(revision) {
   }
   const pausing = [...stop.owed.values()].some((owed) => owed.asking);
   browserWorkspaceStopKept = kept.size > 0 || pausing ? { stop, held: kept } : null;
+  paintBrowserWorkspaceBars();
   paintBrowserWorkspaceChrome();
 }
 
@@ -966,6 +981,7 @@ function forgetAgentBrowserWorkspaceStop() {
   if (!browserWorkspaceStop) return;
   browserWorkspaceStop = null;
   keepBrowserWorkspaceStop(null);
+  paintBrowserWorkspaceBars();
   paintBrowserWorkspaceChrome();
 }
 
@@ -1046,6 +1062,11 @@ function buildBrowserWorkspaceBar() {
   status.className = "browser-workspace-status";
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
+  // What the bar says while the person's stop stands (t-62872).
+  const stopNote = document.createElement("span");
+  stopNote.className = "browser-workspace-stop-note";
+  stopNote.setAttribute("role", "status");
+  stopNote.hidden = true;
   const actions = document.createElement("div");
   actions.className = "browser-workspace-actions";
   for (const name of BROWSER_WORKSPACE_ACTIONS) {
@@ -1076,7 +1097,7 @@ function buildBrowserWorkspaceBar() {
   retry.type = "button";
   retry.className = "btn browser-workspace-retry";
   actions.appendChild(retry);
-  bar.append(heading, status, owner, previewNote, actions);
+  bar.append(heading, status, stopNote, owner, previewNote, actions);
   return bar;
 }
 
@@ -1128,11 +1149,19 @@ function paintBrowserWorkspace(host, tab) {
   for (const name of BROWSER_WORKSPACE_ACTIONS) {
     writeTextContent(host.querySelector(`.browser-workspace-${name}`), BROWSER_WORKSPACE_ACTION_WORDS[name]());
   }
+  // While the person's stop stands the bar hands its browser to no agent: the
+  // backend refuses the agent until the band's resume, and the bar says so
+  // (t-62872). Pausing it and taking it by hand stay the person's.
+  const personsStop = browserWorkspaceStop !== null;
   for (const [name, mode] of [["pause", "paused"], ["human", "human"], ["agent", "agent"]]) {
     const button = host.querySelector(`.browser-workspace-${name}`);
-    button.disabled = blocked || tab.workspace?.mode === mode || (mode === "agent" && browserWorkspaceAgentOwner(tab) === null);
+    button.disabled = blocked || tab.workspace?.mode === mode
+      || (mode === "agent" && (personsStop || browserWorkspaceAgentOwner(tab) === null));
     button.setAttribute("aria-pressed", String(tab.workspace?.mode === mode));
   }
+  const stopNote = host.querySelector(".browser-workspace-stop-note");
+  stopNote.hidden = !personsStop;
+  writeTextContent(stopNote, t("browser.workspace.personsStop", "Computer Use 정지 중 · 에이전트는 ‘다시 시작’을 누를 때까지 기다립니다"));
   const refresh = host.querySelector(".browser-workspace-refresh");
   refresh.hidden = !!tab.workspace && !tab.workspaceError && tab.workspace.mode !== "pausing";
   refresh.disabled = !!tab.workspacePending || !!tab.workspaceReading;

@@ -1596,12 +1596,9 @@ pub(crate) fn computer_resume(
     reset: bool,
     revision: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    if webview.label() != crate::MAIN_WINDOW_LABEL {
-        return Err(
-            "computer_resume_main_window_only: 정지는 메인 창의 띠에서만 다시 시작합니다"
-                .to_string(),
-        );
-    }
+    from_the_main_webview(&webview).map_err(|_| {
+        "computer_resume_main_window_only: 정지는 메인 창의 띠에서만 다시 시작합니다".to_string()
+    })?;
     let resumed = computer_use::guard::resume(
         computer_use::guard::Lifter::Person { revision },
         || computer_use::guard::helper_resume(reset),

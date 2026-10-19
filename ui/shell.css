@@ -39976,6 +39976,7 @@ details.task-board-section > summary {
 }
 
 .browser-workspace-owner-error,
+.browser-workspace-stop-note,
 .browser-workspace-preview-note {
   flex: 1 1 100%;
   min-width: 0;
@@ -40048,6 +40049,7 @@ details.task-board-section > summary {
 .browser-workspace-owner-select[hidden],
 .browser-workspace-owner-change[hidden],
 .browser-workspace-owner-error[hidden],
+.browser-workspace-stop-note[hidden],
 .browser-workspace-preview-note[hidden],
 .browser-workspace-surface[hidden],
 .browser-workspace-frame[hidden],

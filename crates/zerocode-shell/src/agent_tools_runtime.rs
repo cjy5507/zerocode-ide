@@ -4151,8 +4151,20 @@ fn persons_stop_standing(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> O
         })
 }
 
-/// An agent's `stop`: the window stops, and signals the helper.
-pub(super) fn agents_stop(helper: &dyn HelperRoads, _app: Option<&AppHandle>) -> serde_json::Value {
+/// An agent's `stop` (t-62872): the window hears the helper first and takes
+/// in the person's chord it may hold, so the stop that follows keeps the stop
+/// the person's — the signal it sends then overwrites the helper's reason, and
+/// an agent's `resume` after it would otherwise lift the person's stop. It
+/// hears the helper only when no request is in flight: the signal must not
+/// wait behind one, for it is what ends that request at its next event. A
+/// chord the helper heard just then, or between that `status` and the signal,
+/// is the helper's to keep (t-62469).
+pub(super) fn agents_stop(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> serde_json::Value {
+    if !computer_use::guard::persons_stop_stands()
+        && let Some(heard) = helper.status_now()
+    {
+        adopt_helper_stop(&heard, app);
+    }
     computer_use::guard::stop_with(zerocode_core::computer_use::STOP_REASON_REQUEST, || {
         helper.signal()
     })
@@ -5797,10 +5809,12 @@ pub(super) fn answer_computer_command_with(
             {
                 let _ = window.emit("computer:permission-denied", serde_json::json!({}));
             }
-            // A stop the helper made on its own (the person's chord): the
-            // window takes it in, so its band shows it and the resume — over
-            // a stop of an agent's too, which it then is the person's
-            // (t-62872).
+            // A stop the helper made on its own (the person's chord), heard
+            // as it refused an action: the window takes it in, so its band
+            // shows it and the resume. Under an agent's own stop the door
+            // refuses an action before it reaches the helper, so this road
+            // hears the chord there only in a race; the agent's `status`,
+            // `stop` and `resume` hear it (t-62872).
             if error.code == error_code::STOPPED
                 && !computer_use::guard::persons_stop_stands()
                 && computer_use::session_stands()
@@ -7122,12 +7136,15 @@ async fn dispatch_browser_command(
                 if browser_pane_of(app, &state, &label).is_err() {
                     continue;
                 }
+                // By the door that reads the person's stop, here and in `tabs`
+                // (t-62872): while it stands a work browser is skipped, as
+                // one its stop paused is.
                 let operation = match state
                     .shell_runtime()
                     .browser_workspaces
                     .snapshot(&label)
                     .and_then(|snapshot| {
-                        state.shell_runtime().browser_workspaces.begin_at(
+                        state.shell_runtime().browser_workspaces.begin_agents(
                             &label,
                             pane,
                             "list",
@@ -7545,7 +7562,7 @@ async fn dispatch_browser_command(
                         .browser_workspaces
                         .snapshot(&label)
                         .and_then(|snapshot| {
-                            state.shell_runtime().browser_workspaces.begin_at(
+                            state.shell_runtime().browser_workspaces.begin_agents(
                                 &label,
                                 pane,
                                 "tabs",
