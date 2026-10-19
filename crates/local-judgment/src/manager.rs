@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener as StdListener};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpListener as StdListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -1427,12 +1427,18 @@ impl Manager {
                 .operation
                 .as_ref()
                 .is_some_and(|operation| operation.kind == "restore");
+        let checking = inner
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == "check");
         let mut cleared = Ok(());
         let pending = if let Some(cancel) = &inner.cancel {
             cancel.stop();
             let pending = inner.pending_engine.clone();
             if restoring {
                 drop(Self::forget(&mut inner));
+            }
+            if restoring || (checking && !self.closed.load(Ordering::Acquire)) {
                 cleared = storage::remove(&self.run_intent_path);
             }
             if let Some(operation) = &mut inner.operation {
@@ -1910,19 +1916,44 @@ impl Manager {
         if require_existing {
             return Err(Error::ServerStopped);
         }
-        let listener = match tokio::net::TcpListener::bind((
-            Ipv4Addr::LOCALHOST,
-            preferred.unwrap_or(0),
-        ))
-        .await
-        {
-            Ok(listener) => listener,
-            Err(error) if preferred.is_some() && error.kind() == std::io::ErrorKind::AddrInUse => {
-                tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-                    .await
-                    .map_err(|_| Error::RuntimeFailed)?
+        let preferred_listener = if let Some(port) = preferred {
+            let probes = (|| {
+                let ipv4_probe = tokio::net::TcpSocket::new_v4()?;
+                #[cfg(unix)]
+                ipv4_probe.set_reuseaddr(true)?;
+                ipv4_probe.bind((Ipv4Addr::UNSPECIFIED, port).into())?;
+                let ipv6_probe = tokio::net::TcpSocket::new_v6()?;
+                #[cfg(unix)]
+                ipv6_probe.set_reuseaddr(true)?;
+                ipv6_probe.bind((Ipv6Addr::UNSPECIFIED, port).into())?;
+                Ok::<_, std::io::Error>((ipv4_probe, ipv6_probe))
+            })();
+            match probes {
+                Ok(probes) => {
+                    let loopback =
+                        tokio::net::TcpSocket::new_v4().map_err(|_| Error::RuntimeFailed)?;
+                    #[cfg(unix)]
+                    loopback
+                        .set_reuseaddr(true)
+                        .map_err(|_| Error::RuntimeFailed)?;
+                    let bound = loopback.bind((Ipv4Addr::LOCALHOST, port).into());
+                    drop(probes);
+                    match bound.and_then(|()| loopback.listen(1024)) {
+                        Ok(listener) => Some(listener),
+                        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
+                        Err(_) => return Err(Error::RuntimeFailed),
+                    }
+                }
+                Err(_) => None,
             }
-            Err(_) => return Err(Error::RuntimeFailed),
+        } else {
+            None
+        };
+        let listener = match preferred_listener {
+            Some(listener) => listener,
+            None => tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(|_| Error::RuntimeFailed)?,
         }
         .into_std()
         .map_err(|_| Error::RuntimeFailed)?;
