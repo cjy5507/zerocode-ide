@@ -3552,6 +3552,7 @@ fn main() -> ExitCode {
             // agents' roads are open above, so a walk can now be asked for;
             // the handshake it would otherwise pay is opened here instead, on
             // the helper's own thread — nothing on the boot path waits for it.
+            cmd::managed_judgment::restore_at_boot(app.handle());
             systemone::warm_for_walks();
             // The Jira sync outbox the last window enqueued but never finished:
             // a crash between enqueue and the network leaves Pending rows behind.

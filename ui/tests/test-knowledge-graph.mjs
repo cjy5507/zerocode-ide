@@ -7,7 +7,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureKnowledgeGlParityStages,
-  measureKnowledgePainterSwap, measureKnowledgeScenes,
+  measureKnowledgePainterSwap, measureKnowledgeScenes, PAINTER_SWAP_PROOFS,
   testKnowledgePerformance } from "./knowledge-performance.mjs";
 import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
@@ -83,9 +83,35 @@ await page.goto(`${origin}/index.html`);
 await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
 
 const results = [];
+/* 브라우저가 회차 도중에 닫히면 회차는 그 자리에서 멈춘다(t-62848) — 뒤의 검사가 닫힌 판을 하나씩 두드리며
+ * 실패를 쌓지 않는다. 10-18의 재실행은 덮개가 닫힌 채 배터리로 잠든 사이 브라우저를 잃고, 빌드 줄의 상한이
+ * 벽시계로 3094 s를 셀 때까지 남았다. 멈춤은 FAIL 한 줄에 그 단계와 기계가 잔 시간(벽시계에서 단조 시계를
+ * 뺀 값 — 단조 시계는 기계가 자는 동안 서 있다)을 적고, 그 줄이 다 나간 뒤 1로 끝난다. 끝에서 닫는 것
+ * (`closing`)은 멈춤이 아니다. */
+let stepAt = 0;
+let stepOpen = false;
+let closing = false;
+let stopped = false;
+const browsers = [["2D", browser]];
+const stopAtClosedBrowser = (which) => {
+  if (closing || stopped) return;
+  stopped = true;
+  const ranMs = Date.now() - performance.timeOrigin;
+  const where = stepAt === 0 ? "before the first step" : `${stepOpen ? "during" : "after"} the step at line ${stepAt}`;
+  process.stdout.write(`FAIL the ${which} browser closed ${where} (${results.length} cases ran); the machine slept `
+    + `${Math.round((ranMs - performance.now()) / 1000)} s of the run's ${Math.round(ranMs / 1000)} s\n`,
+  () => process.exit(1));
+};
+browser.on("disconnected", () => stopAtClosedBrowser("2D"));
 /* `pass`가 함수면 검사는 여기서 돈다. 던지는 검사(실패한 장면이 채우지 못한 칸을 읽는 것)는 그 검사의
- * 실패이고, 스택이 detail이 된다. */
+ * 실패이고, 스택이 detail이 된다. 멈춘 회차는 더 적지 않는다. */
 const ok = (name, pass, detail = "") => {
+  if (stopped) return;
+  const closed = closing ? undefined : browsers.find(([, one]) => !one.isConnected());
+  if (closed) {
+    stopAtClosedBrowser(closed[0]);
+    return;
+  }
   let held = pass;
   if (typeof pass === "function") {
     try {
@@ -99,19 +125,38 @@ const ok = (name, pass, detail = "") => {
   console.log(`${held ? "PASS" : "FAIL"} ${name}`);
   if (!held) console.error("   detail:", detail);
 };
+/* 증명 회차의 손잡이 `KNOWLEDGE_MACHINE_PROOF`(t-62848). 기본은 꺼짐이고 레시피와 게이트는 켜지 않는다. 쉼표로 잇는다:
+ * - `frame` · `release` · `hold` — 페인터를 갈아 끼우는 시험의 두 힙 읽기에 덩어리 하나를 건다. 한 회차에
+ *   하나만(`PAINTER_SWAP_PROOFS`, knowledge-performance.mjs).
+ * - `close:<줄>` — 그 줄의 단계가 돌기 직전에 2D 브라우저를 닫는다(10-18의 재실행이 기계가 잠든 사이
+ *   브라우저를 잃은 일). */
+const MACHINE_PROOF = (process.env.KNOWLEDGE_MACHINE_PROOF ?? "").split(",").map((one) => one.trim())
+  .filter(Boolean);
+const closeAtStep = Number(MACHINE_PROOF.find((one) => /^close:\d+$/.test(one))?.slice("close:".length) ?? 0);
+const swapProofs = MACHINE_PROOF.filter((one) => PAINTER_SWAP_PROOFS.includes(one));
+if (swapProofs.length > 1
+  || MACHINE_PROOF.some((one) => !PAINTER_SWAP_PROOFS.includes(one) && !/^close:\d+$/.test(one))) {
+  ok("KNOWLEDGE_MACHINE_PROOF names at most one of frame, release and hold, and close:<step line>", false,
+    MACHINE_PROOF.join(","));
+}
 /* 최상위의 한 단계가 던지면 그 단계의 실패다: 줄 번호와 함께 기록되고 시험은 요약까지 간다(settings.mjs의
  * test()와 같은 꼴, t-34262). */
 const step = async (line, run) => {
+  stepAt = line;
+  stepOpen = true;
   try {
+    if (line === closeAtStep) await browser.close();
     await run();
   } catch (error) {
     ok(`step at line ${line} threw`, false, String(error?.stack ?? error));
   }
+  stepOpen = false;
 };
 /* 어느 단계에도 속하지 않은 오류(예: 페이지가 뜨지 않음)도 요약과 실패 종료 코드로 끝난다 — 맨 스택만 남고
  * `N / M` 줄이 없는 종료는 없다. */
 process.on("uncaughtException", (error) => {
   ok("the run stopped at an error outside every step", false, String(error?.stack ?? error));
+  if (stopped) return;
   console.error(`\nFAILED ${results.filter((r) => !r.pass).length} / ${results.length} tests`);
   endRun(1);
 });
@@ -4255,7 +4300,7 @@ ok("saved scenes live in the settings document: a reloaded window lists them and
   JSON.stringify(sceneReload));
 
 await step(4013, () => testKnowledgePerformance(page, ok));
-await step(4014, () => measureKnowledgePainterSwap(page, ok));
+await step(4014, () => measureKnowledgePainterSwap(page, ok, { proof: swapProofs[0] ?? null }));
 const sweep = knowledgeSweepFor(process.env);
 await step(4016, () => measureKnowledgeScenes(page, ok, { frames: sweep.frames }));
 
@@ -4542,6 +4587,8 @@ await step(4295, () => testKnowledgeUniverseUnable(page, ok));
  * 것이므로 훑는 프레임을 짧게 잡는다 — 여기서 세는 것은 드로우와 자리이지 ms가
  * 아니다. */
 const glBrowser = await chromium.launch({ args: GL_ARGS });
+browsers.push(["GL", glBrowser]);
+glBrowser.on("disconnected", () => stopAtClosedBrowser("GL"));
 const glPage = survivable(await glBrowser.newPage({ viewport: { width: 1280, height: 860 } }));
 glPage.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
 await seedKnowledgeWindow(glPage);
@@ -6406,6 +6453,7 @@ await step(6129, () => testKnowledgeUniverseFocus(glPage, ok));
 await step(6130, () => testKnowledgeUniverseInspector(glPage, ok));
 await step(6131, () => testKnowledgeUniverseLabels(glPage, ok));
 await step(6132, () => testKnowledgeUniverseMotion(glPage, ok));
+closing = true;
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `
@@ -6417,11 +6465,14 @@ console.log(`PIXEL ${pixelShots.map((shot) => shot.path).join(" ")}`);
 await browser.close();
 files.close();
 
-const failed = results.filter((r) => !r.pass);
-if (failed.length > 0) {
-  console.error(`\nFAILED ${failed.length} / ${results.length} tests`);
-  endRun(1);
-} else {
-  console.log(`\nALL ${results.length} TESTS PASSED!`);
-  endRun(0);
+/* 멈춘 회차는 제 FAIL 줄을 이미 냈고, 그 줄이 나가면 1로 끝난다(`stopAtClosedBrowser`). */
+if (!stopped) {
+  const failed = results.filter((r) => !r.pass);
+  if (failed.length > 0) {
+    console.error(`\nFAILED ${failed.length} / ${results.length} tests`);
+    endRun(1);
+  } else {
+    console.log(`\nALL ${results.length} TESTS PASSED!`);
+    endRun(0);
+  }
 }

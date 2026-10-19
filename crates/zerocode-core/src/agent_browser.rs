@@ -575,6 +575,31 @@ pub fn parse_read(argv: &[String]) -> Result<ReadCommand, String> {
     }
 }
 
+/// The selector part of an observation view. Remove only ignored outer CSS
+/// whitespace; escaped whitespace and non-ASCII identifier characters remain.
+#[must_use]
+pub fn read_selector_view(selector: &str) -> &str {
+    let selector = selector.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']);
+    let mut end = selector.len();
+    while end > 0
+        && matches!(
+            selector.as_bytes()[end - 1],
+            b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'
+        )
+    {
+        let slashes = selector.as_bytes()[..end - 1]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if !slashes.is_multiple_of(2) {
+            break;
+        }
+        end -= 1;
+    }
+    &selector[..end]
+}
+
 /// One control the `marks` page script saw: where it is (CSS pixels, viewport
 /// relative), what a person calls it (`role`, `label`), how the page finds it
 /// again (`selector`), and whether a person could hit it — `elementFromPoint`
@@ -1456,6 +1481,32 @@ pub fn shim_script(port_var: &str, browser_token_var: &str, hook_token_var: &str
     bridge_shim(port_var, browser_token_var, hook_token_var).render_posix()
 }
 
+pub(crate) fn execution_shim_posix() -> [String; 4] {
+    use crate::surface_execution::{EXECUTION_ENVELOPE_ENV, EXECUTION_ENVELOPE_HEADER};
+    [
+        "response_headers=$(mktemp) || exit 1\nchmod 600 \"$response_headers\"\ntrap 'rm -f \"$headers\" \"$response_headers\"' EXIT\n".into(),
+        format!("if [ \"${{{EXECUTION_ENVELOPE_ENV}:-}}\" = 1 ]; then\n  printf 'header = \"{EXECUTION_ENVELOPE_HEADER}: 1\"\\n' >> \"$headers\"\nfi\n"),
+        "-D \"$response_headers\" ".into(),
+        format!(r#"if [ "${{{EXECUTION_ENVELOPE_ENV}:-}}" = 1 ]; then
+  framed=$(awk 'BEGIN {{ n=0; good=0 }} {{ sub(/\r$/, ""); if (tolower($1) == "{EXECUTION_ENVELOPE_HEADER}:") {{ n++; if ($2 == "1" && NF == 2) good=1 }} }} END {{ if (n == 1 && good) print 1; else print 0 }}' "$response_headers")
+  printf '%s\n' "$framed"
+fi
+"#),
+    ]
+}
+
+pub(crate) fn execution_shim_powershell() -> [String; 2] {
+    use crate::surface_execution::{EXECUTION_ENVELOPE_ENV, EXECUTION_ENVELOPE_HEADER};
+    [
+        format!(
+            "  if ($env:{EXECUTION_ENVELOPE_ENV} -ceq '1') {{ $request.Headers.Add('{EXECUTION_ENVELOPE_HEADER}', '1') }}\n"
+        ),
+        format!(
+            "  if ($env:{EXECUTION_ENVELOPE_ENV} -ceq '1') {{\n    if ($response.Headers['{EXECUTION_ENVELOPE_HEADER}'] -ceq '1') {{ [Console]::Out.Write(\"1`n\") }} else {{ [Console]::Out.Write(\"0`n\") }}\n  }}\n"
+        ),
+    ]
+}
+
 /// The shared shim inserts these stages around argument packing and header
 /// generation. No observation is remembered between CLI processes.
 pub(crate) fn revision_shim_posix() -> [String; 4] {
@@ -1632,6 +1683,82 @@ mod tests {
             assert!(script.contains("x-zerocode-workspace-revision"));
             assert!(script.contains("18446744073709551615"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn browser_execution_framing_requires_the_response_header_and_preserves_legacy_stdout() {
+        use crate::surface_execution::{EXECUTION_ENVELOPE_ENV, EXECUTION_ENVELOPE_HEADER};
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let shim = directory.path().join("browser.sh");
+        let curl = directory.path().join("curl");
+        std::fs::write(&shim, shim_script("P", "B", "H")).unwrap();
+        std::fs::write(
+            &curl,
+            r#"#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -D) printf '%s\r\n' "$FIXTURE_RESPONSE_HEADER" > "$2"; shift 2 ;;
+    -K) cp "$2" "$FIXTURE_REQUEST_HEADERS"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat >/dev/null
+printf '%s\n200' '{"surfaceExecution":"page-owned-words"}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        for (negotiate, response, frame) in [
+            (true, "x-zerocode-execution: 1", "1\n"),
+            (true, "X-ZeroCode-Execution: 1", "1\n"),
+            (true, "x-zerocode-execution: 0", "0\n"),
+            (true, "content-type: text/plain", "0\n"),
+            (
+                true,
+                "x-zerocode-execution: 1\nx-zerocode-execution: 1",
+                "0\n",
+            ),
+            (false, "x-zerocode-execution: 1", ""),
+        ] {
+            let headers = directory.path().join("request-headers");
+            let output = std::process::Command::new("sh")
+                .arg(&shim)
+                .args(["read", "browser-1"])
+                .env("PATH", &path)
+                .env("P", "9")
+                .env("B", "fixture")
+                .env("H", "fixture")
+                .env(EXECUTION_ENVELOPE_ENV, if negotiate { "1" } else { "0" })
+                .env("FIXTURE_RESPONSE_HEADER", response)
+                .env("FIXTURE_REQUEST_HEADERS", &headers)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                format!("{frame}{{\"surfaceExecution\":\"page-owned-words\"}}"),
+                "only a negotiated host response header enables typed decoding"
+            );
+            assert_eq!(
+                std::fs::read_to_string(headers)
+                    .unwrap()
+                    .contains(EXECUTION_ENVELOPE_HEADER),
+                negotiate
+            );
+        }
+        let powershell = shim_script_powershell("P", "B", "H");
+        assert!(powershell.contains(EXECUTION_ENVELOPE_ENV));
+        assert!(powershell.contains("$response.Headers['x-zerocode-execution'] -ceq '1'"));
     }
 
     #[cfg(unix)]

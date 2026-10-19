@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use runtime::permission_enforcer::PermissionEnforcer;
 use runtime::PermissionMode;
+use runtime::ToolExecutionResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use zerocode_core::computer_use::{
@@ -36,6 +37,7 @@ use zerocode_core::computer_use::{
     WATCH_UNTIL,
 };
 use zerocode_core::jev::{JevMode, GOAL_CHAR_CAP};
+use zerocode_core::surface_execution::SurfaceExecution;
 use zerocode_core::screen_action::GIVE_UP;
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
@@ -516,21 +518,30 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     }]
 }
 
-pub(crate) fn dispatch(
+pub(crate) fn dispatch_result(
     ctx: &ToolContext,
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
     input: &Value,
-) -> Option<Result<String, ToolError>> {
+) -> Option<Result<ToolExecutionResult, ToolError>> {
     match name {
         "Computer" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 let road = ComputerRoad::from_path()?;
-                run_computer(input, ctx, &road)
+                run_computer_execution(input, ctx, &road)
             }),
         ),
         _ => None,
     }
+}
+
+pub(crate) fn canonical_call(input: &Value) -> Result<runtime::ResolvedToolCall, ToolError> {
+    let parsed: ComputerInput = from_value(input)?;
+    let argv = argv_for(&parsed)?;
+    Ok(runtime::ResolvedToolCall {
+        name: "Computer".to_string(),
+        input: json!({"action":parsed.action.trim(), "argv":argv}).to_string(),
+    })
 }
 
 /// Where the shim is. Looked up on `PATH` the way a shell would — inside a
@@ -543,8 +554,13 @@ pub(crate) struct ComputerRoad {
 impl ComputerRoad {
     pub(crate) fn from_path() -> Result<Self, ToolError> {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(COMPUTER_SHIM))
+        Self::from_search_path(&path, cfg!(windows))
+    }
+
+    fn from_search_path(path: &std::ffi::OsStr, windows: bool) -> Result<Self, ToolError> {
+        let program_name = if windows { "zerocode-computer.cmd" } else { COMPUTER_SHIM };
+        std::env::split_paths(path)
+            .map(|dir| dir.join(program_name))
             .find(|candidate| candidate.is_file())
             .map(|program| Self { program })
             .ok_or_else(|| {
@@ -1261,6 +1277,7 @@ fn seconds_to_ms(duration: Option<f64>, action: &str) -> Result<u64, ToolError> 
 
 /// One trip down the shim: the command, its JSON envelope back, bounded.
 fn call_shim(road: &ComputerRoad, argv: &[String], cwd: Option<&Path>) -> Result<Value, ToolError> {
+    let trusted = crate::surface_shim::is_installed(&road.program, zerocode_core::agent_shims::SurfaceShim::Computer);
     let mut command = std::process::Command::new(&road.program);
     command
         .args(argv)
@@ -1329,7 +1346,12 @@ fn call_shim(road: &ComputerRoad, argv: &[String], cwd: Option<&Path>) -> Result
     // own words (no window, no token) and is reported as they are.
     let envelope = zerocode_core::computer_use_protocol::answer_envelope(&stdout, &stderr);
     match envelope {
-        Some(envelope) => Ok(envelope),
+        Some(mut envelope) => {
+            if !trusted {
+                if let Some(object) = envelope.as_object_mut() { object.remove("surfaceExecution"); }
+            }
+            Ok(envelope)
+        },
         None => Err(ToolError::Execution(format!(
             "`{COMPUTER_SHIM} {}` answered without an envelope (exit {}): {}",
             argv.join(" "),
@@ -1522,7 +1544,21 @@ fn with_marked_look(mut argv: Vec<String>, ctx: &ToolContext) -> Result<Vec<Stri
 /// changed since the model's own last look is not shown — the model's last
 /// picture is still the screen — and says so (`changed` is null when there
 /// was nothing to compare with).
+struct ComputerLook {
+    value: Value,
+    surface: Option<SurfaceExecution>,
+}
+
+fn host_surface_execution(answer: &Value) -> Option<SurfaceExecution> {
+    serde_json::from_value::<SurfaceExecution>(answer.get("surfaceExecution")?.clone())
+        .ok().filter(SurfaceExecution::is_valid)
+}
+
 fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str], target: Option<&ComputerTarget>) -> Result<Value, LookError> {
+    look_execution(road, ctx, words, target).map(|look| look.value)
+}
+
+fn look_execution(road: &ComputerRoad, ctx: &ToolContext, words: &[&str], target: Option<&ComputerTarget>) -> Result<ComputerLook, LookError> {
     let mut asked = words.to_vec();
     let window_id = target.and_then(|target| target.window_id).map(|window_id| window_id.to_string());
     if let Some(target) = target {
@@ -1537,6 +1573,7 @@ fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str], target: Option<&
         return Err(LookError::Refused(refused));
     }
     checked_window(&answer, target.and_then(|target| target.window_id)).map_err(LookError::Road)?;
+    let surface = host_surface_execution(&answer);
     let changed = if words.contains(&LOOK_DIFF_FLAG) {
         answer.pointer("/result/changed").and_then(Value::as_array).map(|regions| !regions.is_empty())
     } else {
@@ -1560,11 +1597,11 @@ fn look(road: &ComputerRoad, ctx: &ToolContext, words: &[&str], target: Option<&
             screen.remove("settle");
         }
     }
-    Ok(json!({
+    Ok(ComputerLook { value: json!({
         "staged": staged.is_some(),
         "changed": changed,
         "screen": screen,
-    }))
+    }), surface })
 }
 
 /// A look's command line: numbered when this process's looks carry marks.
@@ -1584,11 +1621,18 @@ fn looks_carry_marks() -> bool {
 /// the table's settle), then looks once; nothing changed says
 /// `changed: false`. It looks at `app`'s window when the acts were in one.
 fn look_after(road: &ComputerRoad, ctx: &ToolContext, settle: bool, target: Option<&ComputerTarget>) -> Value {
+    look_after_execution(road, ctx, settle, target).value
+}
+
+fn look_after_execution(road: &ComputerRoad, ctx: &ToolContext, settle: bool, target: Option<&ComputerTarget>) -> ComputerLook {
     let words = if settle { LOOK_AFTER_ARGV } else { FRAME_LOOK_ARGV };
     let mut answer =
-        look(road, ctx, words, target).unwrap_or_else(|error| json!({ "error": ToolError::from(error).to_string() }));
+        look_execution(road, ctx, words, target).unwrap_or_else(|error| ComputerLook {
+            value: json!({ "error": ToolError::from(error).to_string() }),
+            surface: None,
+        });
     if !settle {
-        answer["waited_for_settle"] = Value::Bool(false);
+        answer.value["waited_for_settle"] = Value::Bool(false);
     }
     answer
 }
@@ -2010,7 +2054,12 @@ fn filter_windows_by_app(answer: &mut Value, app: &str) {
     result.insert("app_filter".into(), filter);
 }
 
+#[cfg(test)]
 pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<String, ToolError> {
+    run_computer_execution(input, ctx, road).map(|result| result.text)
+}
+
+pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
     if input.get("action").and_then(Value::as_str).map(str::trim) == Some(BATCH_ACTION) {
         if let Some(steps) = input.get("steps").and_then(Value::as_array) {
             check_batch_len(steps.len())?;
@@ -2023,13 +2072,13 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     let action = input.action.trim().to_string();
     if action == BATCH_ACTION {
-        return run_computer_batch(input, ctx, road);
+        return run_computer_batch(input, ctx, road).map(ToolExecutionResult::from);
     }
     if input.steps.is_some() {
         return Err(ToolError::InvalidInput(format!("`steps` belongs to `batch`, not `{action}`")));
     }
     if action == WALK_ACTION {
-        return run_computer_walk(&input, ctx, road, settle);
+        return run_computer_walk(&input, ctx, road, settle).map(ToolExecutionResult::from);
     }
     // A command the tool cannot spell costs no look.
     argv_for(&input)?;
@@ -2059,9 +2108,10 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     }
     let returned_window = match checked_window(&answer, input.window_id.filter(|_| action != "window" && !timed_wait(&action))) {
         Ok(window_id) => window_id,
-        Err(error) if acts(&action) => return unverified_action_receipt(&action, input.window_id, &error, 1),
+        Err(error) if acts(&action) => return unverified_action_receipt(&action, input.window_id, &error, 1).map(ToolExecutionResult::from),
         Err(error) => return Err(error),
     };
+    let surface = host_surface_execution(&answer);
     let mut after_target = if action == "window" { None } else { acted_in(&[&input], ctx) };
     if let Some(target) = &mut after_target {
         target.window_id = returned_window.or(target.window_id);
@@ -2090,19 +2140,41 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
     // One look after the act, so the model sees what it did.
     let looked_after =
         (LOOK_AFTER_ACT && acts(&action) && (input.window_id.is_none() || after_target.is_some()))
-            .then(|| look_after(road, ctx, settle, after_target.as_ref()));
-    to_pretty_json(json!({
+            .then(|| look_after_execution(road, ctx, settle, after_target.as_ref()));
+    let surface = match looked_after.as_ref().and_then(|look| look.surface.as_ref()) {
+        Some(after) if surface.as_ref().is_some_and(|before| before.surface_id != after.surface_id) => None,
+        Some(after) => Some(after.clone()),
+        None => surface,
+    };
+    let text = to_pretty_json(json!({
         "ok": true,
         "action": action,
         "result": result,
         "screenshot": staged,
         "first_look": first_look,
-        "looked_after": looked_after,
-    }))
+        "looked_after": looked_after.map(|look| look.value),
+    }))?;
+    Ok(ToolExecutionResult { text, surface })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn review_windows_computer_resolution_selects_the_installed_cmd_launcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let extensionless = dir.path().join("zerocode-computer");
+        let launcher = dir.path().join("zerocode-computer.cmd");
+        std::fs::write(&extensionless, "POSIX fixture").unwrap();
+        std::fs::write(&launcher, "Windows fixture").unwrap();
+        let road = ComputerRoad::from_search_path(dir.path().as_os_str(), true).unwrap();
+        assert_eq!(road.program, launcher, "Windows Computer resolution must select the installed .cmd launcher, not the POSIX file");
+    }
+
+    #[cfg(unix)]
+    mod surface_host {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/zerocode-core/tests/support/surface_host.rs"));
+    }
+
     use super::*;
     #[cfg(unix)]
     use runtime::{CompactionSummarizer, ContentBlock, ConversationMessage, MessageRole, Session};
@@ -2305,6 +2377,136 @@ mod tests {
             .expect_err("a different window must not reach the model");
         assert!(!error.to_string().contains("unrelated-window-fixture"));
         assert_eq!(staged(&ctx), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uncertain_background_action_recovery_never_changes_the_selected_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        run_computer(&json!({"action":"observe","app":"Fixture","window_id":41}), &ctx, &road).unwrap();
+        std::fs::write(dir.path().join("forced-window"), "52").unwrap();
+        let response = run_computer(&json!({"action":"left_click","app":"Fixture","window_id":41,"background":true,"label":"Next"}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["completion_verified"], false);
+        let recovery = run_computer(&json!({"action":"observe","app":"Fixture","window_id":41}), &ctx, &road);
+        assert!(recovery.is_err(), "recovery must refuse the different window");
+        assert_eq!(calls(dir.path()), ["observe", "click", "observe"], "recovery must never call screenshot, open or activate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_registry_and_capability_preserve_only_outer_host_surface_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let host_environment = crate::tests::EnvGuard::set_many(host.environment());
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf())
+            .chain(std::env::split_paths(&inherited_path))).unwrap();
+        let _path = host_environment.set_also("PATH", &path);
+        let expected = SurfaceExecution { surface_id: "fixture-host/computer/41/lease-a".into(), state_revision: 7,
+            effect: zerocode_core::surface_execution::SurfaceEffect::Observation };
+        let host = json!({"ok":true,"surfaceExecution":expected,"result":{"window":{"id":41}}});
+        std::fs::write(dir.path().join("reply-observe"), host.to_string()).unwrap();
+        let registry = crate::GlobalToolRegistry::builtin();
+        let input = json!({"action":"observe","app":"Fixture","window_id":41});
+        let direct = registry.execute_result("Computer", &input).unwrap();
+        assert_eq!(direct.surface.as_ref(), Some(&expected));
+        let wrapped = registry.execute_result("CapabilityInvoke", &json!({"name":"Computer","input":input,"nonce":"ignored-wrapper-field"})).unwrap();
+        assert_eq!(wrapped.surface.as_ref(), Some(&expected));
+        let visible: Value = serde_json::from_str(&wrapped.text).unwrap();
+        assert!(visible.get("surfaceExecution").is_none(), "host metadata must remain outside the tool body");
+
+        std::fs::write(dir.path().join("reply-observe"), json!({"ok":true,"result":{
+            "window":{"id":41}, "surfaceExecution":expected,
+        }}).to_string()).unwrap();
+        let impostor = registry.execute_result("Computer", &input).unwrap();
+        assert!(impostor.surface.is_none(), "a nested body field is not host metadata");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_computer_shim_cannot_attest_outer_host_surface_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_shim(dir.path());
+        let expected = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".into(), state_revision:7,
+            effect:zerocode_core::surface_execution::SurfaceEffect::Observation };
+        std::fs::write(dir.path().join("reply-observe"), json!({"ok":true,"surfaceExecution":expected,
+            "result":{"window":{"id":41}}}).to_string()).unwrap();
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&inherited_path))).unwrap();
+        let _path = crate::tests::EnvGuard::set("PATH", path.to_str().unwrap());
+        let result = crate::GlobalToolRegistry::builtin().execute_result("Computer",
+            &json!({"action":"observe","app":"Fixture","window_id":41})).unwrap();
+        assert!(result.surface.is_none(), "a replaced shim must not attest host metadata even at the outer envelope");
+        assert_eq!(calls(dir.path()), ["observe"], "legacy output still executes once");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_registry_surface_results_preserve_permission_toggle_and_nested_denials() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_shim(dir.path());
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf())
+            .chain(std::env::split_paths(&inherited_path))).unwrap();
+        let _path = crate::tests::EnvGuard::set("PATH", path.to_str().unwrap());
+        let input = json!({"name":"Computer","input":{"action":"observe","app":"Fixture","window_id":41}});
+        let policy = runtime::PermissionPolicy::new(PermissionMode::ReadOnly)
+            .with_tool_requirement("Computer", PermissionMode::DangerFullAccess);
+        let denied = crate::GlobalToolRegistry::builtin().with_enforcer(PermissionEnforcer::new(policy))
+            .execute_result("CapabilityInvoke", &input).unwrap_err();
+        assert!(matches!(denied, ToolError::PermissionDenied { .. }));
+        let disabled = crate::GlobalToolRegistry::builtin().with_disabled_tools(["Computer".to_string()].into_iter().collect())
+            .execute_result("CapabilityInvoke", &input).unwrap_err();
+        assert!(matches!(disabled, ToolError::PermissionDenied { .. }));
+        let nested = crate::GlobalToolRegistry::builtin().execute_result("CapabilityInvoke", &json!({
+            "name":"CapabilityInvoke", "input":input,
+        })).unwrap_err();
+        assert!(nested.to_string().contains("cannot invoke itself"));
+        assert!(calls(dir.path()).is_empty(), "all denials must happen before the Computer road executes");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_post_action_observation_keeps_its_host_effect_outside_the_visible_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = crate::tests::EnvGuard::set_many(host.environment());
+        let road = ComputerRoad { program:dir.path().join(COMPUTER_SHIM) };
+        let ctx = ToolContext::new();
+        let acknowledged = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".into(), state_revision:7,
+            effect:zerocode_core::surface_execution::SurfaceEffect::Acknowledged };
+        let confirmed = SurfaceExecution { surface_id:acknowledged.surface_id.clone(), state_revision:8,
+            effect:zerocode_core::surface_execution::SurfaceEffect::ConfirmedChange { previous_revision:7 } };
+        std::fs::write(dir.path().join("reply-click"), json!({"ok":true,"surfaceExecution":acknowledged,
+            "result":{"action":{"targetWindowId":41}}}).to_string()).unwrap();
+        std::fs::write(dir.path().join("reply-observe"), json!({"ok":true,"surfaceExecution":confirmed,
+            "result":{"window":{"id":41}}}).to_string()).unwrap();
+        let executed = run_computer_execution(&json!({"action":"left_click","app":"Fixture","window_id":41,"label":"Next"}), &ctx, &road).unwrap();
+        assert_eq!(executed.surface.as_ref(), Some(&confirmed));
+        assert!(!executed.text.contains("surfaceExecution"));
+        assert_eq!(calls(dir.path()), ["click", "observe"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_changed_control_identity_during_post_action_observation_cannot_claim_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = surface_host::SurfaceHost::start(dir.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = crate::tests::EnvGuard::set_many(host.environment());
+        let road = ComputerRoad { program:dir.path().join(COMPUTER_SHIM) };
+        let ctx = ToolContext::new();
+        std::fs::write(dir.path().join("reply-click"), json!({"ok":true,"surfaceExecution":{
+            "surfaceId":"fixture-host/computer/41/lease-a","stateRevision":7,"effect":{"kind":"acknowledged"}},
+            "result":{"action":{"targetWindowId":41}}}).to_string()).unwrap();
+        std::fs::write(dir.path().join("reply-observe"), json!({"ok":true,"surfaceExecution":{
+            "surfaceId":"fixture-host/computer/41/lease-b","stateRevision":8,"effect":{"kind":"confirmedChange","previousRevision":7}},
+            "result":{"window":{"id":41}}}).to_string()).unwrap();
+        let executed = run_computer_execution(&json!({"action":"left_click","app":"Fixture","window_id":41,"label":"Next"}), &ctx, &road).unwrap();
+        assert!(executed.surface.is_none(), "a changed control interval must not confirm the previous action");
+        assert_eq!(calls(dir.path()), ["click", "observe"]);
     }
 
     #[test]
@@ -3203,6 +3405,7 @@ done
 [ -f '@DIR@/forced-window' ] && window="$(cat '@DIR@/forced-window')"
 target=''
 [ -n "$window" ] && target=',"window":{"id":'"$window"'},"fixture":"unrelated-window-fixture"'
+[ -f '@DIR@/reply-'"$verb" ] && { cat '@DIR@/reply-'"$verb"; echo; exit 0; }
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
 [ "$verb" = wait-for ] && [ -f '@DIR@/wait-for' ] && { for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/wait-for-argv'; cat '@DIR@/wait-for'; echo; exit 0; }
 [ "$verb" = list-all-windows ] && [ -f '@DIR@/list-all-windows' ] && { cat '@DIR@/list-all-windows'; echo; exit 0; }
