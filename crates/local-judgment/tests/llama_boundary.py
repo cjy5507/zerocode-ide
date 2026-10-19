@@ -41,6 +41,7 @@ class NativeBoundary(unittest.TestCase):
         bridge["native_command"] = None
         bridge["native_cwd"] = None
         bridge["native_spawn_allowed"] = False
+        bridge["native_lock"] = bridge["threading"].RLock()
 
     def arguments(self, initial):
         build = bridge.get("native_arguments")
@@ -133,6 +134,71 @@ class NativeBoundary(unittest.TestCase):
                 bridge["memory_guard"](process, 25)
         self.assertTrue(child.killed)
         self.assertEqual(exited, [75])
+
+    def test_spawn_publication_is_held_until_the_owned_child_is_recorded(self):
+        child = Child()
+        active = []
+        case = self
+
+        class Guard:
+            def __enter__(self):
+                active.append(True)
+
+            def __exit__(self, *args):
+                case.assertIs(bridge["native_process"], child, "spawn ownership was published after releasing the exit guard")
+                active.clear()
+
+        bridge["native_lock"] = Guard()
+
+        def spawn(*args, **kwargs):
+            self.assertTrue(active, "the native child was spawned outside the exit guard")
+            return child
+
+        with patch.object(bridge["subprocess"], "Popen", spawn):
+            self.assertIs(bridge["launch_native"]({"nativeExecutable": "/runtime/llama-server", "mode": "verify"}), child)
+
+    def test_exit_observes_a_child_published_while_waiting_for_the_spawn_guard(self):
+        child = Child()
+
+        class Guard:
+            def __enter__(self):
+                bridge["native_process"] = child
+
+            def __exit__(self, *args):
+                pass
+
+        bridge["native_lock"] = Guard()
+
+        def finish(code):
+            raise Ended()
+
+        with patch.object(bridge["os"], "_exit", finish):
+            with self.assertRaises(Ended):
+                bridge["finish_process"](0)
+        self.assertTrue(child.killed, "the exit missed a child created by the pending spawn")
+        self.assertTrue(child.waited)
+
+    def test_only_the_private_native_alias_is_forwarded_and_the_public_identity_is_restored(self):
+        adapter = bridge["LlamaCppAdapter"].__new__(bridge["LlamaCppAdapter"])
+        adapter.model_id = "fixture"
+        adapter.native_alias = "fixture-native"
+        seen = []
+
+        def exchange(method, resource, body, timeout):
+            seen.append((resource, body))
+            if resource == "/apply-template":
+                return {"prompt": "fixture"}
+            if resource == "/tokenize":
+                return {"tokens": [1]}
+            self.assertEqual(body["model"], adapter.native_alias, "the stable public identity was used as native ownership proof")
+            return {"model": adapter.native_alias, "choices": [], "usage": {}}
+
+        adapter.exchange = exchange
+        request = {"model": "fixture", "messages": [], "response_format": {"type": "json_schema"}, "temperature": 0, "max_tokens": 10, "stream": False}
+        answer = adapter.predict(request)
+        self.assertEqual(answer["model"], adapter.model_id)
+        self.assertEqual(request["model"], adapter.model_id, "forwarding mutated the caller's request")
+        self.assertEqual(len(seen), 3)
 
 
 unittest.main(argv=["native-boundary"], verbosity=2)
