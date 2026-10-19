@@ -492,8 +492,11 @@ async fn invalid_intents_skip_and_a_valid_intent_still_restores() {
             }
         }
         let before = serde_json::to_value(fixture.manager.snapshot()).unwrap();
-        fixture.restore(true).unwrap();
-        let after = crate::tests::settled_snapshot(&fixture.manager).await;
+        let after = fixture.restore(true).unwrap();
+        assert_eq!(serde_json::to_value(after).unwrap(), before);
+        fixture.clock.advance(HOUR);
+        tokio::task::yield_now().await;
+        let after = fixture.manager.snapshot();
         assert_eq!(
             fixture.starts(),
             0,
@@ -507,7 +510,11 @@ async fn invalid_intents_skip_and_a_valid_intent_still_restores() {
     }
     let fixture = Restoring::new();
     fixture.seed();
-    fixture.restore(true).unwrap();
+    let starting = fixture.restore(true).unwrap();
+    assert!(
+        starting.operation.is_some(),
+        "valid intent after malformed controls must reserve an operation"
+    );
     let ready = crate::tests::settled_snapshot(&fixture.manager).await;
     assert_eq!(
         fixture.starts(),
