@@ -210,6 +210,10 @@ fn runtime_python(root: &Path, depth: usize) -> Option<PathBuf> {
     None
 }
 
+fn owned_runtime_python(root: &Path) -> Option<PathBuf> {
+    runtime_python(&root.join("runtimes"), 5)
+}
+
 async fn prove(options: &Options, manager: &Arc<Manager>, report: &mut Value) -> Result<()> {
     let before = manager.snapshot();
     report["before"] = serde_json::to_value(&before)?;
@@ -313,7 +317,7 @@ async fn prove(options: &Options, manager: &Arc<Manager>, report: &mut Value) ->
     report["model"] = serde_json::to_value(&model)?;
     phase(
         "runtime_ready",
-        json!({"python":runtime_python(&options.root.join("runtimes"), 5),"modelId":model_id}),
+        json!({"python":owned_runtime_python(&options.root),"modelId":model_id}),
     )?;
     driver(options, "ready")?;
 
@@ -458,4 +462,24 @@ async fn main() -> Result<()> {
     }
     manager.shutdown();
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_observer_receives_python_from_the_owned_managed_store() {
+        let root = tempfile::tempdir().unwrap();
+        let python = root
+            .path()
+            .join("managed-judgment/runtime/fixture/python/bin/python3.12");
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        fs::write(&python, b"synthetic interpreter, never executed").unwrap();
+        assert_eq!(
+            owned_runtime_python(root.path()),
+            Some(python),
+            "owned_runtime_python_was_not_found"
+        );
+    }
 }
