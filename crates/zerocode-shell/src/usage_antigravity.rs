@@ -12,18 +12,18 @@ use crate::google_login;
 use crate::usage::{NamedWindow, ProviderUsage, UsageWindow};
 use crate::usage_http;
 use zerocode_core::civil::epoch_ms_of_iso;
-use zerocode_core::usage_limit;
 
 const LOAD_CODE_ASSIST_URL: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 const RETRIEVE_QUOTA_URL: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
-const ANTIGRAVITY_VERSION: &str = "2.1.4";
-const ANTIGRAVITY_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
-const ANTIGRAVITY_CLIENT_METADATA: &str =
-    r#"{"ideType":"ANTIGRAVITY","platform":"DARWIN_ARM64","pluginType":"GEMINI"}"#;
+/// The two method names, as a refusal names the call it came back from.
+const LOAD_CODE_ASSIST: &str = "loadCodeAssist";
+const RETRIEVE_USER_QUOTA: &str = "retrieveUserQuota";
 const BUCKET_WINDOW_MINUTES: u32 = 60;
 
+/// The headers of every Code Assist call. They name this client and nothing
+/// else: its own User-Agent, and no Antigravity, VS Code or Cloud Shell identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AntigravityHeaders {
     user_agent: String,
@@ -32,25 +32,21 @@ struct AntigravityHeaders {
 impl AntigravityHeaders {
     fn new() -> Self {
         Self {
-            user_agent: format!("antigravity/{ANTIGRAVITY_VERSION} darwin/arm64"),
+            user_agent: concat!("zerocode/", env!("CARGO_PKG_VERSION")).to_string(),
         }
     }
 
-    fn pairs(&self) -> [(&str, &str); 3] {
-        [
-            ("User-Agent", &self.user_agent),
-            ("X-Goog-Api-Client", ANTIGRAVITY_API_CLIENT),
-            ("Client-Metadata", ANTIGRAVITY_CLIENT_METADATA),
-        ]
+    fn pairs(&self) -> [(&str, &str); 1] {
+        [("User-Agent", &self.user_agent)]
     }
 }
 
 /// The seam the tests replace: everything this reader says to a server.
 ///
 /// A refresh is named here rather than called inline because the fake wire is
-/// how the 60-second margin and the retry-once rule are measured without a
-/// network — the refresh itself is [`google_login::refreshed_access_token`],
-/// which is also what the settings card renews with.
+/// how the 60-second margin is measured without a network — the refresh itself
+/// is [`google_login::refreshed_access_token`], which is also what the settings
+/// card renews with.
 trait Wire {
     fn refresh(&mut self, refresh_token: &str, now: i64) -> Option<String>;
 
@@ -83,13 +79,61 @@ impl Wire for LiveWire {
     }
 }
 
-/// The Code Assist project this login's quota is billed to.
+/// The closed words of a refusal, for the window's log: the status Google
+/// answered with and the call it refused. Never its body, never a token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Refusal {
+    pub(crate) status: u16,
+    pub(crate) call: &'static str,
+}
+
+/// Google refuses a call it will not serve with 400, 401 or 403. Anything else
+/// is a failure with a sentence, not a refusal.
+fn refusal_of(failure: &usage_http::Failure, call: &'static str) -> Option<Refusal> {
+    match failure.http_status {
+        Some(status @ (400 | 401 | 403)) => Some(Refusal { status, call }),
+        _ => None,
+    }
+}
+
+/// Where a read stopped short of its figures.
+enum Stop {
+    /// Google refused a call. The gauge says it could not verify the quota.
+    Refused(Refusal),
+    /// The call failed for another reason, and this is the answer that says so.
+    Failed(Box<ProviderUsage>),
+}
+
+impl Stop {
+    fn into_read(self, now: i64) -> (ProviderUsage, Option<Refusal>) {
+        match self {
+            Self::Refused(refusal) => (refused_answer(now), Some(refusal)),
+            Self::Failed(usage) => (*usage, None),
+        }
+    }
+}
+
+/// Google refused a call this client made. The figures cannot be verified, and
+/// no sentence names a fix a person can make, so the window does not ask again.
+fn refused_answer(now: i64) -> ProviderUsage {
+    answer(
+        "refused",
+        Some("Antigravity 사용량을 확인할 수 없습니다 — Google이 요청을 거절했습니다".to_string()),
+        now,
+    )
+}
+
+/// The Code Assist project this login's quota is billed to. The client metadata
+/// names no IDE and no platform: every field is optional in Google's public
+/// schema, and the unspecified values are the ones its own CLI sends outside an
+/// IDE. `pluginType` is left out, because it names the Gemini plugin and this
+/// client is not that plugin.
 fn load_project_id(
     wire: &mut impl Wire,
     access_token: &str,
     headers: &AntigravityHeaders,
     now: i64,
-) -> Result<String, String> {
+) -> Result<String, Stop> {
     let body = wire
         .post_json(
             LOAD_CODE_ASSIST_URL,
@@ -97,23 +141,33 @@ fn load_project_id(
             headers,
             &serde_json::json!({
                 "metadata": {
-                    "ideType": "ANTIGRAVITY",
-                    "platform": "DARWIN_ARM64",
-                    "pluginType": "GEMINI"
+                    "ideType": "IDE_UNSPECIFIED",
+                    "platform": "PLATFORM_UNSPECIFIED"
                 }
             }),
             now,
         )
-        .map_err(|failure| {
-            format!(
-                "Antigravity 프로젝트 ID를 읽지 못했습니다 ({})",
-                failure.message
-            )
+        .map_err(|failure| match refusal_of(&failure, LOAD_CODE_ASSIST) {
+            Some(refusal) => Stop::Refused(refusal),
+            None => Stop::Failed(Box::new(answer(
+                "error",
+                Some(format!(
+                    "Antigravity 프로젝트 ID를 읽지 못했습니다 ({})",
+                    failure.message
+                )),
+                now,
+            ))),
         })?;
     body.get("cloudaicompanionProject")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| "Antigravity 프로젝트 ID가 응답에 없습니다".to_string())
+        .ok_or_else(|| {
+            Stop::Failed(Box::new(answer(
+                "error",
+                Some("Antigravity 프로젝트 ID가 응답에 없습니다".to_string()),
+                now,
+            )))
+        })
 }
 
 /// One quota bucket as the API speaks it, shape-checked the way Orca
@@ -273,7 +327,7 @@ fn fetch_quota(
     project_id: &str,
     headers: &AntigravityHeaders,
     now: i64,
-) -> ProviderUsage {
+) -> Result<ProviderUsage, Stop> {
     match wire.post_json(
         RETRIEVE_QUOTA_URL,
         access_token,
@@ -281,18 +335,19 @@ fn fetch_quota(
         &serde_json::json!({ "project": project_id }),
         now,
     ) {
-        // The KIND rides back on the answer. The refresh road below used to
-        // find its 401 by reading `"HTTP 401"` back out of this sentence —
-        // control flow through a formatted string, which stops working the
-        // day the sentence is translated or a server puts a 401 in its prose.
-        Err(failure) => ProviderUsage {
-            failure_kind: Some(failure.recovery.kind),
-            retry_at_ms: failure.retry_at_ms,
-            ..answer(
-                "error",
-                Some(format!("Quota fetch failed ({})", failure.message)),
-                now,
-            )
+        // The KIND rides back on the answer, so the bar words it without
+        // reading a sentence. A refusal is not a kind: it ends the read.
+        Err(failure) => match refusal_of(&failure, RETRIEVE_USER_QUOTA) {
+            Some(refusal) => Err(Stop::Refused(refusal)),
+            None => Ok(ProviderUsage {
+                failure_kind: Some(failure.recovery.kind),
+                retry_at_ms: failure.retry_at_ms,
+                ..answer(
+                    "error",
+                    Some(format!("Quota fetch failed ({})", failure.message)),
+                    now,
+                )
+            }),
         },
         Ok(body) => {
             let buckets = deduplicate_buckets(
@@ -301,7 +356,7 @@ fn fetch_quota(
                     .map(|bucket| (build_bucket(bucket), bucket.model_id.clone()))
                     .collect(),
             );
-            ProviderUsage {
+            Ok(ProviderUsage {
                 provider: "antigravity".to_string(),
                 session: session_summary(&buckets),
                 weekly: None,
@@ -316,39 +371,9 @@ fn fetch_quota(
                 plan_type: None,
                 reset_credits: None,
                 account: None,
-            }
+            })
         }
     }
-}
-
-/// A 401 out of the quota call means the token died between the read and the
-/// ask: refresh once and ask once more, exactly once.
-fn retry_after_refresh(
-    wire: &mut impl Wire,
-    result: ProviderUsage,
-    refresh_token: Option<&str>,
-    fallback_project: &str,
-    headers: &AntigravityHeaders,
-    now: i64,
-) -> ProviderUsage {
-    // A dead token, said as a kind rather than sniffed out of a sentence.
-    let unauthorized = result.status == "error"
-        && result.failure_kind == Some(usage_limit::FailureKind::StaleToken);
-    if !unauthorized {
-        return result;
-    }
-    let Some(refresh_token) = refresh_token.filter(|token| !token.is_empty()) else {
-        return result;
-    };
-    let Some(refreshed) = wire.refresh(refresh_token, now) else {
-        return result;
-    };
-    let project = load_project_id(wire, &refreshed, headers, now)
-        .unwrap_or_else(|_| fallback_project.to_string());
-    if project.is_empty() {
-        return result;
-    }
-    fetch_quota(wire, &refreshed, &project, headers, now)
 }
 
 /// No login on file at all.
@@ -379,41 +404,46 @@ fn access_token(
     wire.refresh(credentials.refresh_token.as_deref()?, now)
 }
 
-fn scan_with(path: Option<&Path>, now: i64, wire: &mut impl Wire) -> ProviderUsage {
+/// One read: the reading, and the refusal behind it when Google refused a call.
+/// A refused login is not renewed and the refused call is not sent again.
+fn scan_with(
+    path: Option<&Path>,
+    now: i64,
+    wire: &mut impl Wire,
+) -> (ProviderUsage, Option<Refusal>) {
     let Some(path) = path else {
-        return signed_out(now);
+        return (signed_out(now), None);
     };
     let credentials = match google_login::read(path) {
         Ok(Some(credentials)) => credentials,
-        Ok(None) => return signed_out(now),
-        Err(error) => return answer("error", Some(error), now),
+        Ok(None) => return (signed_out(now), None),
+        Err(error) => return (answer("error", Some(error), now), None),
     };
     let Some(access_token) = access_token(wire, &credentials, now) else {
-        return answer(
-            "error",
-            Some("Antigravity Google 토큰을 갱신하지 못했습니다".to_string()),
-            now,
+        return (
+            answer(
+                "error",
+                Some("Antigravity Google 토큰을 갱신하지 못했습니다".to_string()),
+                now,
+            ),
+            None,
         );
     };
     let headers = AntigravityHeaders::new();
     let project = match load_project_id(wire, &access_token, &headers, now) {
         Ok(project) => project,
-        Err(error) => return answer("error", Some(error), now),
+        Err(stop) => return stop.into_read(now),
     };
-    let result = fetch_quota(wire, &access_token, &project, &headers, now);
-    retry_after_refresh(
-        wire,
-        result,
-        credentials.refresh_token.as_deref(),
-        &project,
-        &headers,
-        now,
-    )
+    match fetch_quota(wire, &access_token, &project, &headers, now) {
+        Ok(usage) => (usage, None),
+        Err(stop) => stop.into_read(now),
+    }
 }
 
 /// Read this machine's Google login and fetch Antigravity quota on the
-/// caller's clock.
-pub fn scan(now: i64) -> ProviderUsage {
+/// caller's clock. A refused read names the call and the status it was refused
+/// with, for the window's log and nothing else.
+pub(crate) fn scan(now: i64) -> (ProviderUsage, Option<Refusal>) {
     let path = google_login::credentials_path();
     scan_with(path.as_deref(), now, &mut LiveWire)
 }
@@ -421,6 +451,7 @@ pub fn scan(now: i64) -> ProviderUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zerocode_core::usage_limit;
 
     /// The bucket arithmetic, Orca's own: percent from the remaining
     /// fraction (rounded, clamped), an hour-wide window, the reset off the
@@ -576,7 +607,7 @@ mod tests {
     fn missing_zo_google_login_is_signed_out() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut wire = fake_wire();
-        let held = scan_with(Some(&dir.path().join("credentials.json")), 7, &mut wire);
+        let (held, _) = scan_with(Some(&dir.path().join("credentials.json")), 7, &mut wire);
         assert_eq!(held.provider, "antigravity");
         assert_eq!(held.status, "signed_out");
         // And the sentence points at the surface that fixes it, because this
@@ -604,7 +635,7 @@ mod tests {
         std::fs::write(&path, original).expect("credentials");
         let mut wire = fake_wire();
 
-        let held = scan_with(Some(&path), 1_800_000_000_000, &mut wire);
+        let (held, _) = scan_with(Some(&path), 1_800_000_000_000, &mut wire);
 
         assert_eq!(held.status, "ok", "{:?}", held.error);
         assert_eq!(wire.refreshes, 1, "the 60-second refresh margin moved");
@@ -662,18 +693,23 @@ mod tests {
         )
         .expect("credentials");
         let now = 1_800_000_000_000;
-        for (refused, status, asked) in [
-            (LOAD_CODE_ASSIST_URL, 400, 1),
-            (LOAD_CODE_ASSIST_URL, 401, 1),
-            (LOAD_CODE_ASSIST_URL, 403, 1),
-            (RETRIEVE_QUOTA_URL, 401, 2),
-            (RETRIEVE_QUOTA_URL, 403, 2),
+        for (refused, call, status, asked) in [
+            (LOAD_CODE_ASSIST_URL, LOAD_CODE_ASSIST, 400, 1),
+            (LOAD_CODE_ASSIST_URL, LOAD_CODE_ASSIST, 401, 1),
+            (LOAD_CODE_ASSIST_URL, LOAD_CODE_ASSIST, 403, 1),
+            (RETRIEVE_QUOTA_URL, RETRIEVE_USER_QUOTA, 401, 2),
+            (RETRIEVE_QUOTA_URL, RETRIEVE_USER_QUOTA, 403, 2),
         ] {
             let mut wire = FakeWire {
                 refusal: Some((refused, status)),
                 ..fake_wire()
             };
-            let held = scan_with(Some(&path), now, &mut wire);
+            let (held, refusal) = scan_with(Some(&path), now, &mut wire);
+            assert_eq!(
+                refusal,
+                Some(Refusal { status, call }),
+                "HTTP {status} from {refused} was not named as the refusal it is"
+            );
             assert_eq!(
                 held.status, "refused",
                 "HTTP {status} from {refused} was read as {}",

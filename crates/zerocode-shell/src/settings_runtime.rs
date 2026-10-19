@@ -186,6 +186,11 @@ pub(super) const STATUS_BAR_ITEMS: &[&str] = &[
     "resource-usage",
     "ports",
 ];
+/// The names the catalog took back and then restored (t-62187: withdrawn on
+/// 2026-10-17, restored on 2026-10-19). A document normalised while one of them
+/// was withdrawn recorded its offer WITHOUT that name, so the name's absence from
+/// `seen` says nothing about a choice: the stored list decides.
+const WITHDRAWN_THEN_RESTORED: &[&str] = &["antigravity"];
 pub(super) const DEFAULT_APP_FONT_FAMILY: &str = "Geist";
 
 pub(super) fn default_status_bar_items() -> Vec<String> {
@@ -230,6 +235,11 @@ pub(super) fn normalize_status_bar_items(items: Vec<String>) -> Vec<String> {
 pub(super) fn adopt_unseen_status_bar_items(items: &mut Vec<String>, seen: &mut Vec<String>) {
     for name in STATUS_BAR_ITEMS {
         if seen.iter().any(|held| held == name) {
+            continue;
+        }
+        // An offer recorded without a withdrawn-then-restored name is not a
+        // first offer of it: the stored list says whether it is on.
+        if !seen.is_empty() && WITHDRAWN_THEN_RESTORED.contains(name) {
             continue;
         }
         if !items.iter().any(|held| held == name) {

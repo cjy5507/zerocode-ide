@@ -360,13 +360,12 @@ type AskUsage = for<'a> fn(State<'a, AppState>, bool) -> UsageReport;
 /// (`zerocode_core::orchestration::quota_gauge_for`), and the command the
 /// status bar asks it through — one table, so the beat's re-read and the
 /// cache it reads name the same gauges (t-6427).
-pub(crate) const USAGE_ASKS: [(&str, AskUsage); 6] = [
+pub(crate) const USAGE_ASKS: [(&str, AskUsage); 5] = [
     ("claude", claude_usage),
     ("codex", codex_usage),
     ("opencode", opencode_usage),
     ("grok", grok_usage),
     ("kimi", kimi_usage),
-    ("antigravity", antigravity_usage),
 ];
 
 /// Ask one gauge to read its provider again, never forced: the refetch
