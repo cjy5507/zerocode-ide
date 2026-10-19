@@ -1013,7 +1013,8 @@
         <span class="computer-band-word" id="computer-band-word">Computer Use 진행 중</span>
         <span class="computer-band-count" id="computer-band-count"></span>
         <span class="computer-band-note" id="computer-band-note" hidden></span>
-        <button class="btn computer-band-stop" id="computer-band-stop" type="button" data-i18n="computer.band.stop" data-i18n-title="computer.band.stopTip" data-tip="데스크톱 조작만 멈춥니다 · 전용 브라우저 탭은 그 탭의 막대에서 멈춥니다">정지</button>
+        <span class="computer-band-note computer-band-browsers" id="computer-band-browsers" hidden></span>
+        <button class="btn computer-band-stop" id="computer-band-stop" type="button" data-i18n="computer.band.stop" data-i18n-title="computer.band.stopTip" data-tip="데스크톱 조작과 에이전트가 쥔 작업 브라우저를 함께 멈춥니다">정지</button>
         <button class="btn computer-band-resume" id="computer-band-resume" type="button" data-i18n="computer.band.resume" hidden>다시 시작</button>
         <button class="btn computer-band-view" id="computer-band-view" type="button" data-i18n="computer.band.view" hidden>작업 화면 보기</button>
       </div>
@@ -1025,6 +1026,7 @@
         <p class="computer-progress-subject" id="computer-progress-subject"></p>
         <div class="computer-progress-control">
           <p class="computer-progress-desk" id="computer-progress-desk"></p>
+          <p class="computer-progress-reach" id="computer-progress-stop-browsers" hidden></p>
           <ul class="computer-progress-browsers" id="computer-progress-browsers" hidden></ul>
           <p class="computer-progress-browser-hint" id="computer-progress-browser-hint" hidden></p>
         </div>
