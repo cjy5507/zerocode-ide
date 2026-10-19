@@ -1,12 +1,13 @@
 import { endRun } from "./end-run.mjs";
 import { createRequire } from "node:module";
-import { frameBudgetHolds, loadNote, machineIsLoudNow } from "./machine-load.mjs";
+import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote, machineIsLoudNow, memoryNote, powerNote,
+  referenceMidpoint, referencesHold, referencesNote } from "./machine-load.mjs";
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureKnowledgeGlParityStages,
-  measureKnowledgePainterSwap, measureKnowledgeScenes,
+  measureKnowledgePainterSwap, measureKnowledgeScenes, PAINTER_SWAP_PROOFS,
   testKnowledgePerformance } from "./knowledge-performance.mjs";
 import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
@@ -82,9 +83,35 @@ await page.goto(`${origin}/index.html`);
 await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
 
 const results = [];
+/* 브라우저가 회차 도중에 닫히면 회차는 그 자리에서 멈춘다(t-62848) — 뒤의 검사가 닫힌 판을 하나씩 두드리며
+ * 실패를 쌓지 않는다. 10-18의 재실행은 덮개가 닫힌 채 배터리로 잠든 사이 브라우저를 잃고, 빌드 줄의 상한이
+ * 벽시계로 3094 s를 셀 때까지 남았다. 멈춤은 FAIL 한 줄에 그 단계와 기계가 잔 시간(벽시계에서 단조 시계를
+ * 뺀 값 — 단조 시계는 기계가 자는 동안 서 있다)을 적고, 그 줄이 다 나간 뒤 1로 끝난다. 끝에서 닫는 것
+ * (`closing`)은 멈춤이 아니다. */
+let stepAt = 0;
+let stepOpen = false;
+let closing = false;
+let stopped = false;
+const browsers = [["2D", browser]];
+const stopAtClosedBrowser = (which) => {
+  if (closing || stopped) return;
+  stopped = true;
+  const ranMs = Date.now() - performance.timeOrigin;
+  const where = stepAt === 0 ? "before the first step" : `${stepOpen ? "during" : "after"} the step at line ${stepAt}`;
+  process.stdout.write(`FAIL the ${which} browser closed ${where} (${results.length} cases ran); the machine slept `
+    + `${Math.round((ranMs - performance.now()) / 1000)} s of the run's ${Math.round(ranMs / 1000)} s\n`,
+  () => process.exit(1));
+};
+browser.on("disconnected", () => stopAtClosedBrowser("2D"));
 /* `pass`가 함수면 검사는 여기서 돈다. 던지는 검사(실패한 장면이 채우지 못한 칸을 읽는 것)는 그 검사의
- * 실패이고, 스택이 detail이 된다. */
+ * 실패이고, 스택이 detail이 된다. 멈춘 회차는 더 적지 않는다. */
 const ok = (name, pass, detail = "") => {
+  if (stopped) return;
+  const closed = closing ? undefined : browsers.find(([, one]) => !one.isConnected());
+  if (closed) {
+    stopAtClosedBrowser(closed[0]);
+    return;
+  }
   let held = pass;
   if (typeof pass === "function") {
     try {
@@ -98,19 +125,38 @@ const ok = (name, pass, detail = "") => {
   console.log(`${held ? "PASS" : "FAIL"} ${name}`);
   if (!held) console.error("   detail:", detail);
 };
+/* 증명 회차의 손잡이 `KNOWLEDGE_MACHINE_PROOF`(t-62848). 기본은 꺼짐이고 레시피와 게이트는 켜지 않는다. 쉼표로 잇는다:
+ * - `frame` · `release` · `hold` — 페인터를 갈아 끼우는 시험의 두 힙 읽기에 덩어리 하나를 건다. 한 회차에
+ *   하나만(`PAINTER_SWAP_PROOFS`, knowledge-performance.mjs).
+ * - `close:<줄>` — 그 줄의 단계가 돌기 직전에 2D 브라우저를 닫는다(10-18의 재실행이 기계가 잠든 사이
+ *   브라우저를 잃은 일). */
+const MACHINE_PROOF = (process.env.KNOWLEDGE_MACHINE_PROOF ?? "").split(",").map((one) => one.trim())
+  .filter(Boolean);
+const closeAtStep = Number(MACHINE_PROOF.find((one) => /^close:\d+$/.test(one))?.slice("close:".length) ?? 0);
+const swapProofs = MACHINE_PROOF.filter((one) => PAINTER_SWAP_PROOFS.includes(one));
+if (swapProofs.length > 1
+  || MACHINE_PROOF.some((one) => !PAINTER_SWAP_PROOFS.includes(one) && !/^close:\d+$/.test(one))) {
+  ok("KNOWLEDGE_MACHINE_PROOF names at most one of frame, release and hold, and close:<step line>", false,
+    MACHINE_PROOF.join(","));
+}
 /* 최상위의 한 단계가 던지면 그 단계의 실패다: 줄 번호와 함께 기록되고 시험은 요약까지 간다(settings.mjs의
  * test()와 같은 꼴, t-34262). */
 const step = async (line, run) => {
+  stepAt = line;
+  stepOpen = true;
   try {
+    if (line === closeAtStep) await browser.close();
     await run();
   } catch (error) {
     ok(`step at line ${line} threw`, false, String(error?.stack ?? error));
   }
+  stepOpen = false;
 };
 /* 어느 단계에도 속하지 않은 오류(예: 페이지가 뜨지 않음)도 요약과 실패 종료 코드로 끝난다 — 맨 스택만 남고
  * `N / M` 줄이 없는 종료는 없다. */
 process.on("uncaughtException", (error) => {
   ok("the run stopped at an error outside every step", false, String(error?.stack ?? error));
+  if (stopped) return;
   console.error(`\nFAILED ${results.filter((r) => !r.pass).length} / ${results.length} tests`);
   endRun(1);
 });
@@ -1912,39 +1958,122 @@ console.log(`   slicer worst drag gap at 1020 nodes: ${slicerScale.worstDragGap}
 // the two page keys and the vault, the answer's first path (fewest bare mentions at the shortest length) lights
 // the picture, the card lists every path with its hops' kind and road, picking another re-lights, Esc clears,
 // the ask form reaches the same door by a typed name — and putting an answer onto the 1020-page picture
-// (route + highlight + frame) stays inside the frame budget.
-const pathTest = await page.evaluate(async () => {
-  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+// (route + highlight + frame) costs less than the midpoint of two references measured beside it.
+/* 경로 칸만 읽는 시험의 손잡이(t-63638). 기본은 꺼짐이고 레시피와 게이트는 켜지 않는다 — 증명 회차만
+ * 쉼표로 이어 켠다:
+ * - `slow:<배>` — 이 칸의 천 쪽 측정만 CDP `Emulation.setCPUThrottlingRate`로 늦춘다(느린 기계).
+ *   `WINDOW_CPU_THROTTLE`은 페이지 전체를 늦춰 다른 칸의 예산까지 움직인다.
+ * - `per-element` — 경로 프레임이 점·선마다 흐림도 쓴다(09-22 전의 설계로 돌아간 회귀).
+ * - `second-restyle` — 경로 프레임이 스타일 재계산을 한 번 더 치른다(주입한 회귀). */
+const PATHS_PROOF = (process.env.KNOWLEDGE_PATHS_PROOF ?? "").split(",").map((one) => one.trim()).filter(Boolean);
+const pathsSlow = Number(PATHS_PROOF.find((one) => one.startsWith("slow:"))?.slice("slow:".length) ?? 1);
+const pathsProofStray = PATHS_PROOF.filter((one) => !/^slow:\d+(\.\d+)?$/.test(one)
+  && one !== "per-element" && one !== "second-restyle");
+if (pathsProofStray.length > 0 || !(pathsSlow >= 1)) {
+  ok("KNOWLEDGE_PATHS_PROOF names only slow:<rate of 1 or more>, per-element and second-restyle", false,
+    PATHS_PROOF.join(","));
+}
+const pathsCdp = pathsSlow > 1 ? await page.context().newCDPSession(page) : null;
+await pathsCdp?.send("Emulation.setCPUThrottlingRate", { rate: pathsSlow });
+const pathFrames = await page.evaluate(async ({ perElement, secondRestyle }) => {
   const view1020 = document.querySelector(".knowledge-view:not([hidden])");
   const layout1020 = knowledgeLayouts.get(view1020);
   const keys1020 = layout1020.model.keys;
   /* 픽스처의 천 쪽은 가까운 뒤 쪽으로만 잇는다(`nearest`) — 여섯 홉 안에 닿는 짝을 묻는다. */
   const answer1020 = await window.__ANSWER__.second_brain_paths({ from: keys1020[0], to: keys1020[12] });
-  /* 경로가 프레임에 더하는 값: 같은 판의 맨 프레임(경로 없음)과 경로를 밝힌 프레임을 번갈아 재고
-   * 둘의 최솟값의 차를 본다 — 한 프레임 전체는 기계와 부하의 것이고, 경로의 몫은 그 차다. */
+  /* 경로를 밝힌 프레임(mark+frame)은 같은 판에서 같은 회차에 잰 두 기준과 견준다(t-63638): 한 프레임
+   * 전체는 기계의 것이라 같은 코드가 10-18에 84 ms와 121.8 ms를 읽었다. 두 기준은 경로와 같은 흐림을
+   * 점·선 전부에 입히고 같은 프레임을 그리되, 경로 코드는 돌리지 않는다.
+   * - 판 한 번: 판에 시험의 클래스 하나(`is-reference-dim`) — 경로가 치를 값이다.
+   * - 점·선마다: 점과 선의 <g>마다 클래스 하나(`is-reference-each`) — `is-path`가 09-22에 바꾼 설계다
+   *   (점·선마다 `is-path-dim`, 102 ms → 79 ms). 선의 <path>는 프레임이 클래스를 다시 쓰므로 <g>에 단다.
+   * 셋은 다섯 회차를 번갈아(회차마다 차례를 돌려) 재고 각각의 최솟값을 쓴다. 잰 것마다 판을 비우고
+   * 재지 않는 프레임으로 그 되돌림을 치르므로, 맨 프레임(경로 없음)과 셋은 모두 빈 판에서 시작한다. */
+  const picture = view1020.querySelector(".knowledge-picture");
+  const canvas = view1020.querySelector(".knowledge-canvas");
+  const referenceStyle = document.createElement("style");
+  referenceStyle.textContent = ".knowledge-picture.is-reference-dim .knowledge-node:not(.is-path-lit),"
+    + " .knowledge-picture .knowledge-node.is-reference-each:not(.is-path-lit)"
+    + " { opacity: var(--knowledge-dim-opacity); }"
+    + " .knowledge-picture.is-reference-dim .knowledge-edge:not(.is-path-lit),"
+    + " .knowledge-picture .knowledge-edges > g.is-reference-each > .knowledge-edge:not(.is-path-lit)"
+    + " { opacity: var(--knowledge-dim-edge-opacity); }";
+  document.head.append(referenceStyle);
+  const settle = () => {
+    highlightKnowledgePath(view1020, layout1020, null);
+    picture.classList.remove("is-reference-dim");
+    for (const one of view1020.querySelectorAll(".is-reference-each")) one.classList.remove("is-reference-each");
+    paintKnowledgeFrame(view1020, layout1020);
+  };
+  let each = [];
+  const dimEach = () => {
+    for (const one of each) one.classList.add("is-reference-each");
+  };
   let routeMs = Infinity;
   let frameMs = Infinity;
   let markMs = Infinity;
   let lightMs = Infinity;
+  let oneMs = Infinity;
+  let eachMs = Infinity;
+  const measured = [
+    () => {
+      const t0 = performance.now();
+      const route = knowledgeRoute(layout1020.model, { report: answer1020, picked: 0 });
+      const t1 = performance.now();
+      highlightKnowledgePath(view1020, layout1020, route);
+      if (perElement) dimEach();
+      const t2 = performance.now();
+      if (secondRestyle) {
+        void canvas.clientWidth;
+        picture.classList.add("is-reference-dim");
+      }
+      paintKnowledgeFrame(view1020, layout1020);
+      const t3 = performance.now();
+      routeMs = Math.min(routeMs, t1 - t0);
+      markMs = Math.min(markMs, t2 - t1);
+      lightMs = Math.min(lightMs, t3 - t1);
+    },
+    () => {
+      const t0 = performance.now();
+      picture.classList.add("is-reference-dim");
+      paintKnowledgeFrame(view1020, layout1020);
+      oneMs = Math.min(oneMs, performance.now() - t0);
+    },
+    () => {
+      const t0 = performance.now();
+      dimEach();
+      paintKnowledgeFrame(view1020, layout1020);
+      eachMs = Math.min(eachMs, performance.now() - t0);
+    },
+  ];
   for (let run = 0; run < 5; run += 1) {
-    highlightKnowledgePath(view1020, layout1020, null);
+    settle();
+    each = [...view1020.querySelectorAll(".knowledge-node, .knowledge-edges > g")];
     const b0 = performance.now();
     paintKnowledgeFrame(view1020, layout1020);
     frameMs = Math.min(frameMs, performance.now() - b0);
-    const t0 = performance.now();
-    const route = knowledgeRoute(layout1020.model, { report: answer1020, picked: 0 });
-    const t1 = performance.now();
-    highlightKnowledgePath(view1020, layout1020, route);
-    const t2 = performance.now();
-    paintKnowledgeFrame(view1020, layout1020);
-    const t3 = performance.now();
-    routeMs = Math.min(routeMs, t1 - t0);
-    markMs = Math.min(markMs, t2 - t1);
-    lightMs = Math.min(lightMs, t3 - t1);
+    for (let at = 0; at < measured.length; at += 1) {
+      measured[(run + at) % measured.length]();
+      settle();
+    }
   }
-  highlightKnowledgePath(view1020, layout1020, null);
+  referenceStyle.remove();
   paintKnowledgeFrame(view1020, layout1020);
-  const paths1020 = answer1020.paths.length;
+  const round = (ms) => Math.round(ms * 100) / 100;
+  return {
+    routeMs: round(routeMs),
+    frameMs: round(frameMs),
+    markMs: round(markMs),
+    lightMs: round(lightMs),
+    oneMs: round(oneMs),
+    eachMs: round(eachMs),
+    paths1020: answer1020.paths.length,
+  };
+}, { perElement: PATHS_PROOF.includes("per-element"), secondRestyle: PATHS_PROOF.includes("second-restyle") });
+await pathsCdp?.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+await pathsCdp?.detach();
+const pathFlow = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
 
   // Setup custom graph with 6 pages:
   // Node 0 -> Node 1 (mentions), Node 1 -> Node 3 (mentions)  [bare path: 0 -> 1 -> 3]
@@ -2060,11 +2189,6 @@ const pathTest = await page.evaluate(async () => {
   const node0Deselected = !(nodes[0]?.classList.contains("is-selected") ?? false);
 
   return {
-    routeMs: Math.round(routeMs * 100) / 100,
-    frameMs: Math.round(frameMs * 100) / 100,
-    markMs: Math.round(markMs * 100) / 100,
-    lightMs: Math.round(lightMs * 100) / 100,
-    paths1020,
     node0Selected,
     asked,
     first,
@@ -2083,6 +2207,7 @@ const pathTest = await page.evaluate(async () => {
     node0Deselected,
   };
 });
+const pathTest = { ...pathFrames, ...pathFlow };
 
 ok(
   "paths: Shift-click asks the backend's one calculator, its first path lights the picture, the card lists every path with kind and road, picking re-lights, the ask form resolves a name, a refusal is said, and Esc clears",
@@ -2111,15 +2236,23 @@ ok(
     && !pathTest.refused.pathed && pathTest.refused.lit.length === 0 && !pathTest.refused.sectionHidden
     && pathTest.refused.note.includes("없는 페이지") && pathTest.refused.list.length === 0
     && pathTest.node0Deselected
-    /* 경로를 밝힌 프레임은 이 판의 최악 프레임 예산(`FRAME_BUDGET_MS`, 조용한 기계에서만 판정 — machine-load.mjs, 천 쪽의 앉는 프레임과 같은 자) 안이다.
-     * 판의 `is-path` 한 클래스가 점·선 전부의 옷을 바꾸므로 그 프레임은 스타일 재계산을 강제로
-     * 치른다 — 실측: 점·선마다 흐림 클래스를 쓰던 판 102 ms → 판의 규칙으로 79 ms(09-22). */
+    /* 경로를 밝힌 프레임은 같은 회차의 두 기준(판 한 번, 점·선마다)의 가운데보다 싸다(`referencesHold`,
+     * machine-load.mjs — 시끄럽거나 부하를 읽을 수 없는 기계와 GitHub이 호스팅한 러너에서는 기록만). 판의 `is-path` 한 클래스가
+     * 점·선 전부의 옷을 바꾸므로 그 프레임은 스타일 재계산을 강제로 치른다 — 실측: 점·선마다 흐림
+     * 클래스를 쓰던 판 102 ms → 판의 규칙으로 79 ms(09-22). 느린 기계는 프레임과 두 기준을 함께
+     * 늦추므로(10-18의 121.8 ms) 가운데를 넘는 것은 경로 프레임 제 몫의 값뿐이다. 96 ms(`FRAME_BUDGET_MS`)는
+     * METRIC 줄에 기록만 한다. */
     /* 경로 계산 시간도 벽시계다 — 시끄러운 기계에서는 기록만(machine-load.mjs). */
-    && pathTest.paths1020 > 0 && (pathTest.routeMs < 2 || machineIsLoudNow()) && frameBudgetHolds(pathTest.lightMs),
+    && pathTest.paths1020 > 0 && (pathTest.routeMs < 2 || machineIsLoudNow())
+    && referencesHold(pathTest.lightMs, pathTest.oneMs, pathTest.eachMs),
   JSON.stringify(pathTest),
 );
+const pathMidpointMs = Math.round(referenceMidpoint(pathTest.oneMs, pathTest.eachMs) * 100) / 100;
 console.log(`METRIC knowledge path onto 1020 nodes: route ${pathTest.routeMs}ms; bare frame ${pathTest.frameMs}ms; `
-  + `mark ${pathTest.markMs}ms; mark+frame ${pathTest.lightMs}ms; paths ${pathTest.paths1020}; ${loadNote()}`);
+  + `mark ${pathTest.markMs}ms; mark+frame ${pathTest.lightMs}ms; paths ${pathTest.paths1020}; ${loadNote()}; `
+  + `one restyle ${pathTest.oneMs}ms; per element ${pathTest.eachMs}ms; midpoint ${pathMidpointMs}ms; `
+  + `${referencesNote(pathTest.lightMs, pathTest.oneMs, pathTest.eachMs)}; budget ${FRAME_BUDGET_MS}ms (recorded); `
+  + `${powerNote()}; ${memoryNote()}${PATHS_PROOF.length > 0 ? `; proof ${PATHS_PROOF.join(",")}` : ""}`);
 
 /* Test 11b: 경로는 두 페이지의 열쇠로 든다(K21). 렌즈 하나가 점들을 새 자리에 앉히면
  * 옛 자리 번호는 다른 페이지를 가리킨다 — 그때 밝는 것은 엉뚱한 점이고 인스펙터의
@@ -4167,7 +4300,7 @@ ok("saved scenes live in the settings document: a reloaded window lists them and
   JSON.stringify(sceneReload));
 
 await step(4013, () => testKnowledgePerformance(page, ok));
-await step(4014, () => measureKnowledgePainterSwap(page, ok));
+await step(4014, () => measureKnowledgePainterSwap(page, ok, { proof: swapProofs[0] ?? null }));
 const sweep = knowledgeSweepFor(process.env);
 await step(4016, () => measureKnowledgeScenes(page, ok, { frames: sweep.frames }));
 
@@ -4454,6 +4587,8 @@ await step(4295, () => testKnowledgeUniverseUnable(page, ok));
  * 것이므로 훑는 프레임을 짧게 잡는다 — 여기서 세는 것은 드로우와 자리이지 ms가
  * 아니다. */
 const glBrowser = await chromium.launch({ args: GL_ARGS });
+browsers.push(["GL", glBrowser]);
+glBrowser.on("disconnected", () => stopAtClosedBrowser("GL"));
 const glPage = survivable(await glBrowser.newPage({ viewport: { width: 1280, height: 860 } }));
 glPage.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
 await seedKnowledgeWindow(glPage);
@@ -6318,6 +6453,7 @@ await step(6129, () => testKnowledgeUniverseFocus(glPage, ok));
 await step(6130, () => testKnowledgeUniverseInspector(glPage, ok));
 await step(6131, () => testKnowledgeUniverseLabels(glPage, ok));
 await step(6132, () => testKnowledgeUniverseMotion(glPage, ok));
+closing = true;
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `
@@ -6329,11 +6465,14 @@ console.log(`PIXEL ${pixelShots.map((shot) => shot.path).join(" ")}`);
 await browser.close();
 files.close();
 
-const failed = results.filter((r) => !r.pass);
-if (failed.length > 0) {
-  console.error(`\nFAILED ${failed.length} / ${results.length} tests`);
-  endRun(1);
-} else {
-  console.log(`\nALL ${results.length} TESTS PASSED!`);
-  endRun(0);
+/* 멈춘 회차는 제 FAIL 줄을 이미 냈고, 그 줄이 나가면 1로 끝난다(`stopAtClosedBrowser`). */
+if (!stopped) {
+  const failed = results.filter((r) => !r.pass);
+  if (failed.length > 0) {
+    console.error(`\nFAILED ${failed.length} / ${results.length} tests`);
+    endRun(1);
+  } else {
+    console.log(`\nALL ${results.length} TESTS PASSED!`);
+    endRun(0);
+  }
 }
