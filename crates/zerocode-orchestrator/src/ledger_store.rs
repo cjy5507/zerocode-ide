@@ -32,8 +32,8 @@ use sha2::{Digest, Sha256};
 use zerocode_core::orchestration::{
     AckedRow, AttachmentRow, Auto, BoundRow, CHECK_RENDERER, CheckV1, Closure, CoordinatorSeat,
     Delivery, DispatchRow, GateRow, HandoverPolicy, InboxRow, LedgerProjectionV1, MessageRow,
-    Pinned, ResultAuthor, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text, VerbTally,
-    WorkerRow,
+    Pinned, ResultAuthor, RunProject, RunRow, RunSummary, ServedAnswer, ServedRow, TaskRow, Text,
+    VerbTally, WorkerRow,
 };
 
 use crate::effect_journal::{EffectJournalError, from_sql_u64, to_sql_u64};
@@ -89,6 +89,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         summary TEXT,
         coordinator TEXT,
         handover TEXT,
+        project TEXT,
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -501,6 +502,11 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * JSON document like the summons' alternative, NULL for every row
          * written before it — a worker nobody holds. */
         ("ledger_workers", "exit_unconfirmed", "TEXT"),
+        /* The project a run belongs to (t-65286), one JSON document like the
+         * seat — a root, how it was learned, when and from which seat, read
+         * and written together — and NULL for every run written before
+         * projects were recorded, which the window infers one for. */
+        ("ledger_runs", "project", "TEXT"),
     ];
     /* Unversioned digest rows were written by format generation one. Derive
      * the migration default from the format's single named constant so the
@@ -644,6 +650,12 @@ fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
                         .flatten()
                         .map(pinned_bytes)
                         .sum::<u64>()
+                })
+                // The project's root and seat count for the seat's reason
+                // (t-65286).
+                + row.project.as_ref().map_or(0, |project| {
+                    project.root.len() as u64
+                        + project.seat.as_ref().map_or(0, |seat| seat.len() as u64)
                 })
         })
         .sum();
@@ -1523,8 +1535,9 @@ fn write_rows(
             connection
                 .execute(
                     "INSERT INTO ledger_runs (
-                        ledger_id, ordinal, id, name, created_ms, summary, coordinator, handover
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        ledger_id, ordinal, id, name, created_ms, summary, coordinator, handover,
+                        project
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         ledger_id,
                         at,
@@ -1542,6 +1555,11 @@ fn write_rows(
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
                         row.handover
+                            .as_ref()
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|_| EffectJournalError::Corrupt)?,
+                        row.project
                             .as_ref()
                             .map(serde_json::to_string)
                             .transpose()
@@ -2267,8 +2285,8 @@ fn read_repairable_from_head(
     let mut runs = Vec::new();
     each(
         connection,
-        "SELECT ordinal, id, name, created_ms, summary, coordinator, handover FROM ledger_runs
-          WHERE ledger_id = ?1 ORDER BY ordinal",
+        "SELECT ordinal, id, name, created_ms, summary, coordinator, handover, project
+           FROM ledger_runs WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
             let at: i64 = row.get(0)?;
@@ -2298,6 +2316,14 @@ fn read_repairable_from_head(
                 .map(|held| serde_json::from_str::<HandoverPolicy>(&held))
                 .transpose()
                 .map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
+            // A project that will not parse is a corrupt row for the seat's
+            // reason: read as `None` it would say the run's project was never
+            // written down, and the window would infer one over the pane's.
+            let project = row
+                .get::<_, Option<String>>(7)?
+                .map(|held| serde_json::from_str::<RunProject>(&held))
+                .transpose()
+                .map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
             runs.push(RunRow {
                 id: row.get(1)?,
                 name: Text::from(row.get::<_, String>(2)?),
@@ -2306,6 +2332,7 @@ fn read_repairable_from_head(
                 summary,
                 coordinator,
                 handover,
+                project,
             });
             Ok(())
         },
@@ -2976,6 +3003,7 @@ mod tests {
                      * `a_coordinator_seat_and_an_adoption_survive_the_round_trip`. */
                     coordinator: None,
                     handover: None,
+                    project: None,
                 },
                 RunRow {
                     id: "run-1".to_string(),
@@ -3005,6 +3033,7 @@ mod tests {
                     }),
                     coordinator: None,
                     handover: None,
+                    project: None,
                 },
             ],
             tasks: vec![TaskRow {
@@ -3958,6 +3987,7 @@ mod tests {
                  ALTER TABLE ledger_workers DROP COLUMN on_quota_wall;
                  ALTER TABLE ledger_workers DROP COLUMN quota_wait;
                  ALTER TABLE ledger_workers DROP COLUMN exit_unconfirmed;
+                 ALTER TABLE ledger_runs DROP COLUMN project;
                  UPDATE orchestration_ledger_heads SET bytes_held = {};",
                 bytes_held(&expected)
             ))
@@ -4023,6 +4053,42 @@ mod tests {
             expected as u64,
             "provider-session text is invisible to bytes_held"
         );
+    }
+
+    /// A run's project rides the round trip whole — the root, how it was
+    /// learned, when and from which seat — and its root and seat count toward
+    /// the head's byte total, for the seat's reason (t-65286).
+    #[test]
+    fn a_run_project_round_trips_and_its_text_is_part_of_the_head_integrity_count() {
+        use zerocode_core::orchestration::ProjectSource;
+        let store = a_store();
+        let mut projection = a_ledger_where_order_is_load_bearing();
+        let without = bytes_held(&projection);
+        let stated = RunProject {
+            root: "/Users/dev/a/.git".to_string(),
+            source: ProjectSource::Created,
+            at_ms: 4,
+            seat: Some("blue/%1".to_string()),
+        };
+        let inferred = RunProject {
+            root: "/Users/dev/b".to_string(),
+            source: ProjectSource::Workers,
+            at_ms: 5,
+            seat: None,
+        };
+        let expected = stated.root.len() + "blue/%1".len() + inferred.root.len();
+        projection.runs[0].project = Some(stated);
+        projection.runs[1].project = Some(inferred);
+        assert_eq!(
+            bytes_held(&projection) - without,
+            expected as u64,
+            "project text is invisible to bytes_held"
+        );
+        write(&store, "projects", 0, 1, &projection, 10).expect("write projects");
+        let reopened = read(&store, "projects", projection.schema)
+            .expect("read projects")
+            .expect("stored projects");
+        assert_eq!(reopened.projection, projection);
     }
 
     /// The coordinator seat's names count toward the head's byte total, for
