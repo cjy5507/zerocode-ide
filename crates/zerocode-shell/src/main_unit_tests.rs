@@ -14696,7 +14696,7 @@ fn a_wake_is_told_to_go_on_only_by_the_goodbyes_word() {
     // sleeper and was written down before, worded apart from a worker's, and
     // owed under its run's address in the same note (t-11537).
     let coordinating = resuming
-        .find("let coordinating = (reseating.is_none() && !fresh)\n        .then(|| crate::orchestration::coordinator_awaiting(&data_root, agent, &session))")
+        .find("let coordinating = (reseating.is_none() && !fresh)\n        .then(|| crate::orchestration::coordinator_awaiting(&data_root, agent, &session, &root))")
         .expect("the coordinator is asked some other way");
     let worded = resuming
         .find(".and_then(restart_nudge_runtime::coordinator_nudge)")

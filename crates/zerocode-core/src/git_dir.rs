@@ -87,6 +87,25 @@ pub fn common_of(root: &Path) -> Option<PathBuf> {
     Some(own.join(target))
 }
 
+/// The project a folder belongs to, as the orchestration ledger keys a run
+/// (t-65286): the git directory every worktree of the folder's repository
+/// SHARES ([`common_of`], canonical) when a checkout holds the folder, and
+/// the folder's own canonical path when none does.
+///
+/// Asked of any folder, not only of a checkout's root: a session opened in
+/// `crates/` is the project a session opened at the root is, and a worker's
+/// linked worktree is the project of the checkout it was cut from — the reason
+/// the key is the shared directory and not the checkout. This is
+/// `git rev-parse --git-common-dir` without the process, for a path that
+/// may sit below the checkout's root. [`None`] for a folder that cannot be
+/// made canonical, which is a folder that is not there.
+#[must_use]
+pub fn project_root(path: &Path) -> Option<PathBuf> {
+    let folder = path.canonicalize().ok()?;
+    let shared = folder.ancestors().find_map(common_of);
+    Some(shared.map_or(folder, normalized))
+}
+
 /// The checkout that owns the repository `path` belongs to: the nearest
 /// checkout at or above `path`, and then — when that one is a linked worktree
 /// — the checkout it was cut from.
@@ -325,6 +344,52 @@ mod tests {
         // 체크아웃이 아무 데도 없으면 답이 없다.
         let nowhere = tempfile::tempdir().expect("tempdir");
         assert_eq!(owning_checkout_of(nowhere.path()), None);
+    }
+
+    #[test]
+    fn a_projects_checkouts_share_one_root_and_a_plain_folder_is_its_own() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("main");
+        let shared = main.join(".git");
+        let own = shared.join("worktrees").join("linked");
+        std::fs::create_dir_all(&own).expect("git dirs");
+        std::fs::create_dir_all(main.join("crates").join("core")).expect("a folder inside");
+        let linked = dir.path().join("linked");
+        std::fs::create_dir_all(linked.join("ui")).expect("linked checkout");
+        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", own.display()))
+            .expect("pointer");
+        std::fs::write(own.join("commondir"), "../..\n").expect("common pointer");
+
+        // 본체, 그 안의 폴더, 거기서 잘라 낸 워크트리와 그 안의 폴더 — 넷 다
+        // 한 프로젝트다: 공유 git 디렉터리의 정규 경로.
+        let root = normalized(shared.clone());
+        for asked in [
+            main.clone(),
+            main.join("crates").join("core"),
+            linked.clone(),
+            linked.join("ui"),
+        ] {
+            assert_eq!(
+                project_root(&asked).as_deref(),
+                Some(root.as_path()),
+                "{}",
+                asked.display()
+            );
+        }
+
+        // 다른 저장소는 다른 프로젝트다.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(other.join(".git")).expect("another repository");
+        assert_eq!(project_root(&other), Some(normalized(other.join(".git"))));
+        assert_ne!(project_root(&other), project_root(&main));
+
+        // 체크아웃이 없는 폴더는 그 폴더 자신이 프로젝트이고, 없는 폴더는 답이
+        // 없다.
+        let plain = tempfile::tempdir().expect("a folder no checkout holds");
+        let inside = plain.path().join("notes");
+        std::fs::create_dir_all(&inside).expect("mkdir");
+        assert_eq!(project_root(&inside), Some(normalized(inside.clone())));
+        assert_eq!(project_root(&plain.path().join("gone")), None);
     }
 
     #[test]

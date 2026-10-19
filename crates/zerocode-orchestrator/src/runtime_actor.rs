@@ -97,6 +97,9 @@ pub struct PlanCommand {
     /// before the actor is asked and judged by the plan (t-26587). Empty for
     /// every verb that names none.
     receipts: zerocode_core::orchestration::evidence::ReceiptFiles,
+    /// The project the caller's pane works in, as the window recorded the
+    /// pane's checkout (t-65286): a `run-create` writes it on its run.
+    project: Option<String>,
 }
 
 impl std::fmt::Debug for PlanCommand {
@@ -136,6 +139,7 @@ impl PlanCommand {
             gate_context: None,
             now_ms,
             receipts: Default::default(),
+            project: None,
         };
         if held.argv.is_empty()
             || held.argv.len() > MAX_COMMAND_WORDS
@@ -172,6 +176,30 @@ impl PlanCommand {
         &self.receipts
     }
 
+    /// The same command, carrying the project the caller's pane works in
+    /// (t-65286). A root no run could hold is refused here, at the door,
+    /// rather than dropped by the plan.
+    pub fn with_project(mut self, project: Option<String>) -> Result<Self, RuntimeError> {
+        use zerocode_core::orchestration::project_scope::PROJECT_ROOT_MAX;
+        if project
+            .as_ref()
+            .is_some_and(|root| root.is_empty() || root.len() > PROJECT_ROOT_MAX)
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        self.project = project;
+        if self.bytes() > MAX_COMMAND_BYTES {
+            return Err(RuntimeError::InvalidInput);
+        }
+        Ok(self)
+    }
+
+    /// The project the caller's pane works in, when the window knows it.
+    #[must_use]
+    pub fn project(&self) -> Option<&str> {
+        self.project.as_deref()
+    }
+
     /// Internal standing-order fence, carried through the ordinary verb door.
     pub fn for_handover(
         mut self,
@@ -194,6 +222,7 @@ impl PlanCommand {
             + self.pane.len()
             + self.presented.len()
             + self.actor.as_ref().map_or(0, String::len)
+            + self.project.as_ref().map_or(0, String::len)
             + self.handover.as_ref().map_or(0, |plan| plan.bytes_held())
             + self
                 .worker_incarnation
@@ -652,6 +681,29 @@ pub enum RuntimeRequest {
         from: String,
         reason: String,
         now_ms: i64,
+    },
+    /// The project a run belongs to, as the window read it (t-65286): an
+    /// INFERRED one for a run made before projects were recorded, read off
+    /// its own rows, or a STATED one its live coordinator confirmed from a
+    /// pane of that project. A run whose project is stated keeps it.
+    RunProjectNoted {
+        run: String,
+        root: String,
+        source: zerocode_core::orchestration::project_scope::ProjectSource,
+        seat: Option<String>,
+        now_ms: i64,
+    },
+    /// Where a verb from the pane `team/pane`, working in the project `root`,
+    /// reaches (t-65286): the run it answers in and that run's project,
+    /// whether the caller holds the run's live seat, and the runs of another
+    /// project a window verb reaches. A read: nothing moves, and no copy of
+    /// the ledger is made for it.
+    ProjectReach {
+        argv: Vec<String>,
+        team: String,
+        pane: String,
+        actor: Option<String>,
+        root: String,
     },
     /// Build a sleeping worker's replacement split under the coordinator
     /// team's live pane-table borrow. This plans only; no ledger row moves
@@ -1152,6 +1204,35 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("reason", &reason.len())
                 .field("now_ms", now_ms)
                 .finish(),
+            Self::RunProjectNoted {
+                run,
+                root,
+                source,
+                seat,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::RunProjectNoted")
+                .field("run", run)
+                .field("root", &root.len())
+                .field("source", source)
+                .field("seat", &seat.as_ref().map(String::len))
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::ProjectReach {
+                argv,
+                team,
+                pane,
+                actor,
+                root,
+            } => formatter
+                .debug_struct("RuntimeRequest::ProjectReach")
+                .field("verb", &argv.first().map_or("<none>", String::as_str))
+                .field("words", &argv.len())
+                .field("team_bytes", &team.len())
+                .field("pane_bytes", &pane.len())
+                .field("named_actor", &actor.is_some())
+                .field("root_bytes", &root.len())
+                .finish(),
             Self::PrepareWorkerReseat {
                 run,
                 worker,
@@ -1476,6 +1557,12 @@ pub enum RuntimeReply {
     /// What a retention sweep gave up, beside the revision it speaks for.
     /// Counts only — a sweep never carries a word anybody wrote.
     Retention { swept: Sweep, revision: u64 },
+    /// Where a verb reaches across projects, beside the revision it was read
+    /// at (t-65286).
+    ProjectReach {
+        reach: zerocode_core::orchestration::project_scope::Reach,
+        revision: u64,
+    },
 }
 
 impl RuntimeReply {
@@ -1494,7 +1581,8 @@ impl RuntimeReply {
             | Self::Federation { revision, .. }
             | Self::Retention { revision, .. }
             | Self::Reserved { revision, .. }
-            | Self::Witnessed { revision, .. } => *revision,
+            | Self::Witnessed { revision, .. }
+            | Self::ProjectReach { revision, .. } => *revision,
             Self::View(image) => image.revision,
         }
     }
@@ -2635,6 +2723,69 @@ impl RuntimeActor {
         }
     }
 
+    /// The window says which project a run belongs to (t-65286): one read
+    /// off a run made before projects were recorded — off its workers'
+    /// checkouts or its coordinator's pane, `seat` naming that pane — or an
+    /// inferred one its live coordinator confirmed from `seat`. Answers
+    /// whether the run moved — `false` for a run whose project this note may
+    /// not write — and the revision that speaks for.
+    pub fn note_run_project(
+        &self,
+        run: impl Into<String>,
+        root: impl Into<String>,
+        source: zerocode_core::orchestration::project_scope::ProjectSource,
+        seat: Option<String>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::RunProjectNoted {
+            run: run.into(),
+            root: root.into(),
+            source,
+            seat,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// Where a verb from the pane `team/pane`, working in the project `root`,
+    /// reaches (t-65286) — read by this actor off the ledger it holds, so the
+    /// window's door asks one question per verb rather than copying the
+    /// ledger to answer it.
+    pub fn project_reach(
+        &self,
+        argv: &[String],
+        team: &str,
+        pane: &str,
+        actor: Option<&str>,
+        root: &str,
+    ) -> Result<zerocode_core::orchestration::project_scope::Reach, RuntimeError> {
+        use zerocode_core::orchestration::project_scope::PROJECT_ROOT_MAX;
+        if argv.is_empty()
+            || argv.len() > MAX_COMMAND_WORDS
+            || argv.iter().map(String::len).sum::<usize>() > MAX_COMMAND_BYTES
+            || team.is_empty()
+            || team.len() > MAX_NAME
+            || pane.len() > MAX_NAME
+            || actor.is_some_and(|actor| actor.len() > MAX_NAME)
+            || root.is_empty()
+            || root.len() > PROJECT_ROOT_MAX
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        match self.request(RuntimeRequest::ProjectReach {
+            argv: argv.to_vec(),
+            team: team.to_string(),
+            pane: pane.to_string(),
+            actor: actor.map(str::to_string),
+            root: root.to_string(),
+        })? {
+            RuntimeReply::ProjectReach { reach, .. } => Ok(reach),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// Plan one sleeping worker's replacement pane under its coordinator's
     /// current team table.
     #[allow(clippy::too_many_arguments)]
@@ -3629,6 +3780,30 @@ impl RuntimeState {
                 &reason,
                 now_ms,
             ),
+            RuntimeRequest::RunProjectNoted {
+                run,
+                root,
+                source,
+                seat,
+                now_ms,
+            } => self.run_project_noted(&run, &root, source, seat.as_deref(), now_ms),
+            RuntimeRequest::ProjectReach {
+                argv,
+                team,
+                pane,
+                actor,
+                root,
+            } => Ok(RuntimeReply::ProjectReach {
+                reach: zerocode_core::orchestration::project_scope::reach(
+                    &self.ledger,
+                    &argv,
+                    &team,
+                    &pane,
+                    actor.as_deref(),
+                    &root,
+                ),
+                revision: self.revision,
+            }),
             RuntimeRequest::PrepareWorkerReseat {
                 run,
                 worker,
@@ -4361,6 +4536,56 @@ impl RuntimeState {
         }
         let seat = format!("{team}/{pane}");
         if !self.ledger.coordinator_returned(run, &seat, actor, now_ms) {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// A run's project, as the window read it (t-65286). The same shape as
+    /// the seat report: `moved: false` is an ordinary answer — the run holds
+    /// a project this note may not write, or the seat that confirms is not
+    /// the run's live coordinator. A project is `created` only by the
+    /// `run-create` that makes the run, never by a note.
+    fn run_project_noted(
+        &mut self,
+        run: &str,
+        root: &str,
+        source: zerocode_core::orchestration::project_scope::ProjectSource,
+        seat: Option<&str>,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        use zerocode_core::orchestration::project_scope::{PROJECT_ROOT_MAX, ProjectSource};
+        if now_ms < 0
+            || run.is_empty()
+            || run.len() > MAX_NAME
+            || root.is_empty()
+            || root.len() > PROJECT_ROOT_MAX
+            || seat.is_some_and(|seat| seat.is_empty() || seat.len() > MAX_NAME)
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let moved = match (source, seat) {
+            (ProjectSource::Workers | ProjectSource::Seat, seat) => self
+                .ledger
+                .infer_run_project(run, root, source, seat, now_ms),
+            (ProjectSource::Confirmed, Some(seat)) => {
+                self.ledger.confirm_run_project(run, root, seat, now_ms)
+            }
+            (ProjectSource::Confirmed, None) | (ProjectSource::Created, _) => {
+                return Err(RuntimeError::InvalidInput);
+            }
+        };
+        if !moved {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,
@@ -6019,7 +6244,7 @@ impl RuntimeState {
                         gate_refusal = Some(reason);
                         return;
                     }
-                    planned = Some(zerocode_core::orchestration::plan_with_gate_job(
+                    planned = Some(zerocode_core::orchestration::plan_in_project(
                         ledger,
                         team,
                         launcher,
@@ -6029,6 +6254,7 @@ impl RuntimeState {
                         command.actor(),
                         command.receipts(),
                         command.gate_context.as_ref(),
+                        command.project(),
                     ));
                 }
             },
@@ -10162,6 +10388,7 @@ mod tests {
             summary: None,
             coordinator: None,
             handover: None,
+            project: None,
         });
         projection.messages.push(MessageRow {
             run: "run-1".to_string(),

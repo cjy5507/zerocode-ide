@@ -45,10 +45,12 @@ pub mod land_batch;
 pub mod land_check;
 pub mod landing_watch;
 mod progress;
+pub mod project_scope;
 mod session_history;
 pub mod task_cost;
 
 pub use progress::{WorkProgress, WorkStage};
+pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
 pub use session_history::SessionHistory;
 
 use std::collections::VecDeque;
@@ -2453,6 +2455,12 @@ pub struct Run {
     /// pane is the coordinator) until somebody sits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<CoordinatorSeat>,
+    /// The project this run belongs to (t-65286, [`project_scope`]): stated
+    /// by the pane that made the run, or inferred from the run's own rows.
+    /// `default`, so every run written before projects were recorded reads
+    /// back with none, and the window infers one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<RunProject>,
 }
 
 /// Who coordinates a run, and since when.
@@ -7061,6 +7069,7 @@ impl Ledger {
             attachments: Vec::new(),
             summary: None,
             coordinator: None,
+            project: None,
         });
         id
     }
@@ -8969,6 +8978,7 @@ impl Ledger {
             difficulty_shadow: None,
             model_shadow: None,
             placement_shadow: None,
+            project: run.project.clone(),
             prior_binding,
             prior_binding_revision,
             binding_revision,
@@ -13479,6 +13489,7 @@ impl Ledger {
             attachments: Vec::new(),
             summary: None,
             coordinator: None,
+            project: None,
         });
         id
     }
@@ -19272,6 +19283,9 @@ pub struct PreparedWorkerStart {
     pub difficulty_shadow: Option<crate::summon_difficulty::Shadow>,
     /// The model question's receipt, recorded the same way (t-14437).
     pub model_shadow: Option<crate::summon_model::Shadow>,
+    /// The run's project as the reservation found it (t-65286): the window
+    /// opens the worker's checkout only inside it.
+    pub project: Option<RunProject>,
     prior_binding: Option<String>,
     prior_binding_revision: Option<u64>,
     binding_revision: u64,
@@ -20727,8 +20741,31 @@ pub fn plan_with_gate_job(
     receipts: &evidence::ReceiptFiles,
     job: Option<&gate_reuse::JobContext>,
 ) -> Decided {
+    plan_in_project(
+        ledger, team, launcher, argv, pane, now_ms, actor, receipts, job, None,
+    )
+}
+
+/// [`plan_with_gate_job`], with the project the caller's pane works in
+/// (t-65286) — the window's record of the pane's checkout, read through
+/// [`crate::git_dir::project_root`]. A `run-create` writes it on the run it
+/// makes; `None` is a pane in no folder the window knows, and its run is left
+/// for the window to infer.
+#[allow(clippy::too_many_arguments)] // Each argument is one fact the decision rests on.
+pub fn plan_in_project(
+    ledger: &mut Ledger,
+    team: &mut Team,
+    launcher: &dyn Launcher,
+    argv: &[String],
+    pane: &str,
+    now_ms: i64,
+    actor: Option<&str>,
+    receipts: &evidence::ReceiptFiles,
+    job: Option<&gate_reuse::JobContext>,
+    project: Option<&str>,
+) -> Decided {
     match plan_inner(
-        ledger, team, launcher, argv, pane, now_ms, actor, receipts, job,
+        ledger, team, launcher, argv, pane, now_ms, actor, receipts, job, project,
     ) {
         Ok(decided) => decided,
         Err(why) => Decided {
@@ -20948,6 +20985,7 @@ fn plan_inner(
     actor: Option<&str>,
     receipts: &evidence::ReceiptFiles,
     job: Option<&gate_reuse::JobContext>,
+    project: Option<&str>,
 ) -> Result<Decided, String> {
     let (verb, rest) = argv
         .split_first()
@@ -21235,12 +21273,25 @@ fn plan_inner(
                 .seat_coordinator(&id, &seat, (!actor.is_empty()).then_some(actor), now_ms)
                 .ok()
                 .map(|seated| seated.generation);
-            said(serde_json::json!({
+            /* The project is the author's (t-65286): the run is made where
+             * its coordinator works, and every boundary the window keeps is
+             * read from what is written here. Said in the answer only when
+             * there is one, so the shape a pane in no known folder reads is
+             * the one it always read. */
+            let stated = match project {
+                Some(root) if ledger.state_run_project(&id, root, &seat, now_ms) => Some(root),
+                _ => None,
+            };
+            let mut answer = serde_json::json!({
                 "runId": id,
                 "name": name,
                 "seated": seated.is_some(),
                 "generation": seated,
-            }))
+            });
+            if let Some(root) = stated {
+                answer["project"] = serde_json::Value::String(project_scope::label(root));
+            }
+            said(answer)
         }
 
         "run-use" => {
@@ -21381,6 +21432,9 @@ fn plan_inner(
                 "createdMs": run.created_ms,
                 "address": run.address(),
                 "coordinator": run.coordinator.as_ref().map(CoordinatorSeat::json),
+                // Where the run belongs and why (t-65286): how its project was
+                // learned, when, and from which seat.
+                "project": run.project.as_ref().map(RunProject::json),
                 "auto": run.auto.as_ref().map(|auto| serde_json::json!({
                     "agent": auto.agent,
                     "max": auto.max,
@@ -25089,6 +25143,10 @@ pub struct RunRow {
     /// written before seats existed, read back as none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<CoordinatorSeat>,
+    /// The run's project (t-65286), on the seat's posture: absent from every
+    /// store written before projects were recorded, read back as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<RunProject>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -25477,6 +25535,7 @@ impl Ledger {
                 handover: run.handover.clone(),
                 summary: run.summary.clone(),
                 coordinator: run.coordinator.clone(),
+                project: run.project.clone(),
             });
             for task in &run.tasks {
                 projected.tasks.push(TaskRow {
@@ -25675,6 +25734,7 @@ impl Ledger {
                 attachments: Vec::new(),
                 summary: row.summary,
                 coordinator: row.coordinator,
+                project: row.project,
             });
         }
 

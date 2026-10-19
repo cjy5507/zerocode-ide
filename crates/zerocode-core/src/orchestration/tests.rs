@@ -20176,6 +20176,7 @@ fn a_ledger_with_one_inbox() -> LedgerProjectionV1 {
             handover: None,
             summary: None,
             coordinator: None,
+            project: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -21960,6 +21961,7 @@ fn a_large_healthy_ledger_still_loads() {
             handover: None,
             summary: None,
             coordinator: None,
+            project: None,
         }],
         tasks: Vec::new(),
         dispatches: Vec::new(),
@@ -22057,6 +22059,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
             handover: None,
             summary: None,
             coordinator: None,
+            project: None,
         });
         let mut carried = Vec::with_capacity(3);
         for _ in 0..3 {
@@ -25276,6 +25279,9 @@ mod landing_watch;
 mod letter_answers;
 /// t-47538: one reading of where a task's work stands (`tests/progress.rs`).
 mod progress;
+/// t-65286: which project a run belongs to, and the run a verb answers in
+/// (`tests/project_scope.rs`).
+mod project_scope;
 /// t-59383 r2: a question nobody waits on any more — three days unanswered,
 /// or a day after the chair it was asked from emptied — is closed for every
 /// count (`tests/question_expiry.rs`).
