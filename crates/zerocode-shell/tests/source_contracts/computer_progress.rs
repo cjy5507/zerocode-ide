@@ -19,6 +19,7 @@ const MAIN: &str = include_str!("../../src/main.rs");
 const OBSERVE: &str = include_str!("../../src/computer_use/observe.rs");
 const MARKS: &str = include_str!("../../src/computer_use/marks.rs");
 const GUARD: &str = include_str!("../../src/computer_use/guard.rs");
+const COMPUTER_USE: &str = include_str!("../../src/computer_use/mod.rs");
 const WORKSPACES: &str = include_str!("../../src/browser_workspace.rs");
 
 /// A window file, read when the test runs: a missing one fails this contract
@@ -242,11 +243,12 @@ fn the_persons_stop_reaches_the_work_browsers_only_through_their_bars_road() {
 }
 
 /// The person's chord the helper heard (t-62872): the window takes it in
-/// whenever it hears the helper's stop — at a `status`, at a resume it
-/// refuses, at an action the helper refused — unless the person's stop
-/// already stands here, and tells the band, so the work browsers stop too
-/// once the window next hears from the helper. The signed helper telling the
-/// window by itself is t-62469's.
+/// whenever it hears the helper's stop — at a `status`, at an agent's `stop`
+/// before it stops, at a resume it refuses, at an action the helper refused —
+/// unless the person's stop already stands here, and tells the band, so the
+/// work browsers stop too once the window next hears from the helper. The
+/// signed helper keeping the chord over a signal, and telling the window by
+/// itself, is t-62469's.
 #[test]
 fn the_window_takes_in_the_persons_chord_whenever_it_hears_the_helper() {
     let runtime = strip_rust_comments(RUNTIME);
@@ -283,6 +285,65 @@ fn the_window_takes_in_the_persons_chord_whenever_it_hears_the_helper() {
     assert!(
         status.contains("adopt_helper_stop(&helper, permission_window)"),
         "a status tells the band of a stop it took in: {status}"
+    );
+    // An agent's `stop` hears the helper before it stops (t-62872 r3): a
+    // chord the window has not heard yet is taken in, so the stop that
+    // follows keeps it the person's though its signal then overwrites the
+    // helper's reason. It never waits behind a request in flight to hear
+    // it: its signal is what ends that request at its next event. Both of
+    // an agent's roads run on the window's helper.
+    let stop = block_after(&runtime, "fn agents_stop(");
+    let heard = stop
+        .find("helper.status_now()")
+        .unwrap_or_else(|| panic!("an agent's stop hears the helper before it stops: {stop}"));
+    let stopped = stop
+        .find("computer_use::guard::stop_with(")
+        .expect("an agent's stop stops the window");
+    assert!(
+        heard < stopped && stop.contains("adopt_helper_stop(&heard, app)"),
+        "the helper's stop is heard and taken in first: {stop}"
+    );
+    let session = block_after(&runtime, "impl HelperRoads for SessionHelper {");
+    assert!(
+        block_after(session, "fn status_now(").contains("computer_use::status_unless_busy()"),
+        "the window's helper is heard now or not at all: {session}"
+    );
+    let busy = strip_rust_comments(COMPUTER_USE);
+    let busy = block_after(&busy, "pub fn status_unless_busy(");
+    assert!(
+        busy.contains("held_client().try_lock()")
+            && busy.contains("TryLockError::WouldBlock) => return None"),
+        "a request in flight is not waited for: {busy}"
+    );
+    for road in [
+        "Ok(agents_stop(&SessionHelper, permission_window))",
+        "agents_resume(&SessionHelper, reset, permission_window)",
+    ] {
+        assert!(
+            runtime.contains(road),
+            "an agent's stop and resume take their one road: {road}"
+        );
+    }
+}
+
+/// `list` and `tabs` read each work browser by the door that reads the
+/// person's stop (t-62872 r3): while it stands they skip a work browser, as
+/// they skip one its stop paused, though they read only the window's own
+/// records of it. No road of an agent's admits by `begin_at` alone.
+#[test]
+fn list_and_tabs_read_a_work_browser_only_by_the_door_that_reads_the_persons_stop() {
+    let runtime = strip_rust_comments(RUNTIME);
+    let dispatch = block_after(&runtime, "async fn dispatch_browser_command(");
+    for arm in ["(\"list\", 1) => {", "(\"tabs\", 1) => {"] {
+        let read = block_after(dispatch, arm);
+        assert!(
+            read.contains(".begin_agents(") && !read.contains(".begin_at("),
+            "{arm} admits a work browser by the door that reads the person's stop: {read}"
+        );
+    }
+    assert!(
+        !runtime.contains(".begin_at("),
+        "no road of an agent's admits by begin_at alone"
     );
 }
 
@@ -345,8 +406,10 @@ fn the_work_browsers_door_refuses_an_agent_while_the_persons_stop_stands() {
 fn the_persons_resume_is_the_main_windows_alone() {
     let settings = strip_rust_comments(SETTINGS);
     let resume = block_after(&settings, "pub(crate) fn computer_resume(");
+    // The window's one check of which page asks (t-62872 r3), as its other
+    // doors read it.
     let checked = resume
-        .find("webview.label() != crate::MAIN_WINDOW_LABEL")
+        .find("from_the_main_webview(&webview)")
         .unwrap_or_else(|| panic!("the resume checks which page asks: {resume}"));
     let lifted = resume
         .find("computer_use::guard::resume(")

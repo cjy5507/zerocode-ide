@@ -21786,6 +21786,108 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(crate::computer_use::guard::stopped_reason(), None);
     }
 
+    /// The signed helper as an agent's `stop` and `resume` reach it
+    /// (t-62872): a stop of its own and its reason — the person's chord, or
+    /// `signal` once the window's signal reached it, which overwrites the
+    /// reason as the helper does — answered at `status`, with no request in
+    /// flight, and lifted by its `resume`, which it counts.
+    #[derive(Default)]
+    struct ChordHelper {
+        reason: std::cell::Cell<Option<&'static str>>,
+        resumed: std::cell::Cell<usize>,
+    }
+
+    impl crate::agent_tools_runtime::HelperRoads for ChordHelper {
+        fn status(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "stopped": self.reason.get().is_some(),
+                "reason": self.reason.get(),
+            }))
+        }
+
+        fn status_now(&self) -> Option<serde_json::Value> {
+            self.status()
+        }
+
+        fn resume(
+            &self,
+            _reset: bool,
+        ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
+            self.resumed.set(self.resumed.get() + 1);
+            self.reason.set(None);
+            Ok(serde_json::Value::from("resumed"))
+        }
+
+        fn signal(&self) -> bool {
+            self.reason
+                .set(Some(zerocode_core::computer_use::STOP_REASON_SIGNAL));
+            true
+        }
+    }
+
+    /// The person's chord the window has not heard yet, then an agent's
+    /// `stop` and its `resume` (t-62872): the agent's stop hears the helper
+    /// first and takes the chord in, so the stop stays the person's though
+    /// the window's signal then overwrites the helper's reason — the agent's
+    /// `resume` reaches no helper and lifts nothing, the band's report says
+    /// the stop is the person's, and a work browser refuses the agent. The
+    /// chord over an agent's own stop, and the agent's stop sent again,
+    /// come to the same. Counted: how often the person's stop was lifted.
+    #[test]
+    fn an_agents_stop_after_the_persons_chord_keeps_the_stop_theirs_and_its_resume_lifts_nothing() {
+        use crate::agent_tools_runtime::{agents_resume, agents_stop};
+        use zerocode_core::computer_use::STOP_REASON_HOTKEY;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut lifted, mut seen) = (Vec::new(), Vec::new());
+        for over_an_agents_stop in [false, true] {
+            crate::computer_use::guard::lift();
+            let helper = ChordHelper::default();
+            if over_an_agents_stop {
+                agents_stop(&helper, None);
+            }
+            helper.reason.set(Some(STOP_REASON_HOTKEY));
+            let stop = agents_stop(&helper, None);
+            let resumed = agents_resume(&helper, false, None).map_err(|error| error.message);
+            let report = crate::computer_use::guard::activity_report(None);
+            let workspaces = crate::browser_workspace::Workspaces::default();
+            let door = workspaces
+                .register("browser-1", Some("pane-a"), false)
+                .and_then(|_| workspaces.begin_agents("browser-1", Some("pane-a"), "read", None))
+                .map(|operation| operation.map(|operation| operation.finish(true)).is_some());
+            crate::computer_use::guard::lift();
+            lifted.push(helper.resumed.get());
+            seen.push((over_an_agents_stop, stop, resumed, report, door));
+        }
+        assert_eq!(
+            lifted,
+            [0, 0],
+            "times an agent's resume lifted the person's stop, for the chord then an agent's stop and for the chord over an agent's stop: {lifted:?} {seen:?}"
+        );
+        for (over, stop, resumed, report, door) in &seen {
+            assert_eq!(
+                stop["personsStop"], true,
+                "the agent's stop keeps the stop the person's ({over}): {stop}"
+            );
+            assert!(
+                resumed
+                    .as_ref()
+                    .is_err_and(|message| message.contains("only they lift it")),
+                "the agent's resume is refused in the person's words ({over}): {resumed:?}"
+            );
+            assert_eq!(
+                report["personsStop"], true,
+                "the band hears the person's stop ({over}): {report}"
+            );
+            assert!(
+                door.as_ref()
+                    .is_err_and(|error| error.starts_with("workspace_person_stopped:")),
+                "a work browser refuses the agent ({over}): {door:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_operators_report_moves_its_revision_with_every_stop_and_lift_and_claims_no_hand() {
         use zerocode_core::computer_use::{

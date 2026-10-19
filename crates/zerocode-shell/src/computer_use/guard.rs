@@ -125,6 +125,13 @@ pub fn unless_persons_stop<T>(admit: impl FnOnce() -> T) -> Option<T> {
 /// person's, moves nothing (t-62872): the stop stays theirs, or an agent's
 /// stop and then its resume would lift it.
 pub fn stop(reason: &str) -> Value {
+    stop_with(reason, stop_helper)
+}
+
+/// [`stop`] with the signal to the helper handed in (t-62872): an agent's
+/// stop signals the helper it heard first, and a test's helper keeps a stop
+/// of its own.
+pub fn stop_with(reason: &str, signal: impl FnOnce() -> bool) -> Value {
     let (reason, revision) = {
         let mut held = stopped();
         if !persons(held.reason.as_deref()) || persons(Some(reason)) {
@@ -134,7 +141,7 @@ pub fn stop(reason: &str) -> Value {
         }
         (held.reason.clone().unwrap_or_default(), held.revision)
     };
-    let signalled = stop_helper();
+    let signalled = signal();
     serde_json::json!({
         "stopped": true,
         "personsStop": persons(Some(reason.as_str())),

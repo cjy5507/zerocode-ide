@@ -238,6 +238,21 @@ const installComputerHands = ({ hotkey }) => {
         hint: hint && !hint.hidden ? hint.textContent : null,
       };
     },
+    /* A work browser's own bar as the person sees it, while it stands in front
+     * of its pane: its mode, whether it offers to hand the browser to an agent,
+     * and what it says of the person's stop (t-62872 r3). */
+    readWorkBar: (label) => {
+      const tab = tabs.find((one) => one.kind === "browser" && one.label === label);
+      const host = tab ? groupOf(tab.pane)?.browserView : null;
+      if (!host || host._browserTab !== tab) return null;
+      const agent = host.querySelector(".browser-workspace-agent");
+      const note = host.querySelector(".browser-workspace-stop-note");
+      return {
+        mode: tab.workspace?.mode ?? null,
+        offersAgent: !!agent && !agent.hidden && !agent.disabled,
+        says: note && !note.hidden ? note.textContent : null,
+      };
+    },
   };
 };
 
@@ -284,11 +299,15 @@ const installWorkBrowsers = () => {
  * reads its own stop there, granted by the stop's answer and lifted by the
  * resume's — and is otherwise admitted only in the agent's hands, one at a
  * time. Every move is told to the page the way the backend tells it
- * (`browser:workspace`). */
+ * (`browser:workspace`). What the door refuses is this model's own doing, so
+ * the suite claims nothing of it (t-62872 r3): the window's walk and words are
+ * what it proves. That no agent input lands once the person's stop stands is
+ * the backend's door, and the Rust race test proves it
+ * (`browser_workspace::tests::no_agent_input_gets_in_between_the_persons_stop_and_the_windows_pause`). */
 const installWorkBrowserModel = () => {
   const model = {
-    states: new Map(), inputs: [], refused: [], asked: [], pauses: [], drains: new Map(), moving: new Map(), holds: new Map(),
-    selfPausing: new Set(), stops: [], personsStop: false,
+    states: new Map(), inputs: [], asked: [], pauses: [], drains: new Map(), moving: new Map(), holds: new Map(),
+    selfPausing: new Set(), personsStop: false,
   };
   window.__WORK_MODEL__ = model;
   window.__ANSWER__.open_browser_pane = (args) => args.label;
@@ -327,12 +346,9 @@ const installWorkBrowserModel = () => {
   /* The person's stop as the backend holds it: granted when the stop's answer
    * leaves, lifted when the resume's does. */
   model.stop = () => {
-    if (!model.personsStop) model.stops.push({ at: performance.now(), lifted: null });
     model.personsStop = true;
   };
   model.lift = () => {
-    const standing = model.stops.at(-1);
-    if (model.personsStop && standing) standing.lifted = performance.now();
     model.personsStop = false;
   };
   /* The agent's input, admitted as the backend's door admits it — refused
@@ -340,13 +356,11 @@ const installWorkBrowserModel = () => {
    * input's end, or null when it was refused. */
   model.input = (label) => {
     const state = model.states.get(label);
-    const at = performance.now();
     if (model.personsStop || !state || state.mode !== "agent" || state.inFlight !== 0) {
-      model.refused.push({ label, at, mode: state?.mode ?? null, stopped: model.personsStop });
       return null;
     }
     state.inFlight = 1;
-    model.inputs.push({ label, at, revision: state.revision });
+    model.inputs.push({ label, at: performance.now(), revision: state.revision });
     return () => {
       state.inFlight = 0;
       const drained = model.drains.get(label);
@@ -410,11 +424,6 @@ const installWorkBrowserModel = () => {
     tell(state);
     return copy(state);
   };
-  /* The agent's inputs that landed on `label` while the person's stop stood:
-   * after the backend granted it and before it was lifted — whether or not the
-   * window's pause of that browser had reached the backend yet. */
-  model.landedWhileStopped = (label) => model.inputs.filter((input) => input.label === label &&
-    model.stops.some((stop) => input.at > stop.at && (stop.lifted === null || input.at < stop.lifted))).length;
 };
 
 const evaluateCase = (page, body, args) =>
@@ -1376,6 +1385,10 @@ async function testTheOneStop(browser, origin, ok) {
         hands.recordCommand("computer_progress_frame", () => null);
         hands.announce("computer:activity", hands.operatorReport({ revision: 40, active: true }));
         hands.openPanel(subject);
+        // The work browser the person holds stands in front of its pane: its
+        // bar is the one in view when the stop comes (t-62872 r3).
+        const inView = model.tab("browser-913");
+        if (inView) setActiveTab(inView.id);
         await hands.settle();
         const stopHammer = model.hammer(agents);
         await new Promise((done) => hands.census.native.setTimeout(done, 30));
@@ -1391,9 +1404,7 @@ async function testTheOneStop(browser, origin, ok) {
         hands.pressBand("stop");
         const asked = (label) => model.asked.some((one) => one.label === label);
         while (performance.now() - pressed < 3000 && !agents.every(asked)) await tick();
-        const granted = model.stops.at(-1)?.at ?? null;
         await new Promise((done) => hands.census.native.setTimeout(done, 30));
-        const refusedOnTheWay = model.refused.filter((one) => one.stopped && granted !== null && one.at > granted).length;
         for (const release of releases) release();
         let pausedAt = null;
         while (performance.now() - pressed < 3000) {
@@ -1411,8 +1422,6 @@ async function testTheOneStop(browser, origin, ok) {
           asked: model.asked.map(({ label, mode, expectedRevision }) => ({ label, mode, expectedRevision })),
           modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
           landedBefore,
-          landedWhileStopped: agents.map((label) => model.landedWhileStopped(label)),
-          refusedOnTheWay,
           reachedMs: reached.every(Boolean) ? Math.max(...reached.map((one) => one.at - pressed)) : null,
           pausedMs: pausedAt === null ? null : pausedAt - pressed,
           band: hands.readBand(),
@@ -1430,10 +1439,14 @@ async function testTheOneStop(browser, origin, ok) {
           stopped.modes?.["browser-913"] === "human" && stopped.modes?.["browser-914"] === "paused",
         JSON.stringify(stopped),
       );
+      // What the window does while its agents keep trying: its pauses reach
+      // the backend and its bars stand paused. That none of their input lands
+      // meanwhile is the backend door's, which the model here only stands in
+      // for — the Rust race test proves it (t-62872 r3).
       ok(
-        "from the moment the backend grants the person's stop no agent input lands on a work browser, though the window's pause of it is still on its way to the backend, however fast the agent keeps trying",
-        stopped.landedBefore > 0 && stopped.pausedMs !== null &&
-          stopped.landedWhileStopped?.every((landed) => landed === 0) && stopped.refusedOnTheWay > 0,
+        "while two agents keep sending input and the stop's pauses are held on their way, the person's stop pauses both work browsers once its pauses reach the backend (press-to-pause time in the detail)",
+        stopped.landedBefore > 0 && stopped.reachedMs !== null && stopped.pausedMs !== null &&
+          stopped.modes?.["browser-911"] === "paused" && stopped.modes?.["browser-912"] === "paused",
         JSON.stringify(stopped),
       );
       ok(
@@ -1456,6 +1469,23 @@ async function testTheOneStop(browser, origin, ok) {
           idle.census?.animationFrames === 0,
         JSON.stringify(idle),
       );
+
+      // The bars while the stop stands: the one in view when it came, read as
+      // it stands, and the one of a work browser the stop paused, brought to
+      // the front; the one in view is put back in front for the resume.
+      const bars = await evaluateCase(page, async () => {
+        const hands = window.__COMPUTER_HANDS__;
+        const model = window.__WORK_MODEL__;
+        const inView = hands.readWorkBar("browser-913");
+        const paused = model.tab("browser-911");
+        if (paused) setActiveTab(paused.id);
+        await hands.settle();
+        const pausedBar = hands.readWorkBar("browser-911");
+        const held = model.tab("browser-913");
+        if (held) setActiveTab(held.id);
+        await hands.settle();
+        return { inView, paused: pausedBar };
+      });
 
       const resumed = await evaluateCase(page, async () => {
         const hands = window.__COMPUTER_HANDS__;
@@ -1495,6 +1525,14 @@ async function testTheOneStop(browser, origin, ok) {
         "once the person's stop is lifted the band and the panel no longer say that work browsers are stopped",
         resumed.band?.browsers === null && resumed.control?.stopBrowsers === null,
         JSON.stringify(resumed),
+      );
+      const barAfter = await evaluateCase(page, async () => window.__COMPUTER_HANDS__.readWorkBar("browser-913"));
+      ok(
+        "while the person's stop stands a work browser's bar hands it to no agent, whose input waits for the band's resume, and says so — the bar in view when the stop came and the bar of one the stop paused alike — and once the resume ends the stop the bar in view offers the agent its browser again and says nothing of a stop (t-62872)",
+        bars.inView?.mode === "human" && bars.inView.offersAgent === false && Boolean(bars.inView.says) &&
+          bars.paused?.mode === "paused" && bars.paused.offersAgent === false && bars.paused.says === bars.inView.says &&
+          barAfter?.mode === "human" && barAfter.offersAgent === true && barAfter.says === null,
+        JSON.stringify({ bars, barAfter }),
       );
 
       const agentsStop = await evaluateCase(page, async () => {
@@ -1552,6 +1590,7 @@ async function testTheOneStop(browser, origin, ok) {
         const stopHammer = model.hammer(agents);
         const reached = [];
         const painted = [];
+        let resumed = 0;
         let revision = 50;
         for (let trial = 0; trial < trials; trial += 1) {
           hands.announce("computer:activity", hands.operatorReport({ revision, active: true }));
@@ -1578,6 +1617,7 @@ async function testTheOneStop(browser, origin, ok) {
           hands.pressBand("resume");
           const lifted = performance.now();
           while (performance.now() - lifted < 2000 && !agents.every((label) => model.mode(label) === "agent")) await tick();
+          if (agents.every((label) => model.mode(label) === "agent")) resumed += 1;
           await hands.settle();
         }
         stopHammer();
@@ -1587,15 +1627,14 @@ async function testTheOneStop(browser, origin, ok) {
         };
         return {
           trials: painted.length,
-          landedWhileStopped: agents.reduce((sum, label) => sum + model.landedWhileStopped(label), 0),
-          refused: model.refused.length,
+          resumed,
           reachedBackendMs: { p50: quantile(reached, 0.5), p95: quantile(reached, 0.95) },
           pausedOnScreenMs: { p50: quantile(painted, 0.5), p95: quantile(painted, 0.95) },
         };
       }, { trials: STOP_TRIALS, otherTerm: OTHER_TERM });
       ok(
-        `over ${STOP_TRIALS} stops and resumes of two agents' work browsers under constant input, every stop pauses both and no input lands while the person's stop stands (press-to-pause times in the detail)`,
-        rounds.trials === STOP_TRIALS && rounds.landedWhileStopped === 0 && rounds.refused > 0,
+        `over ${STOP_TRIALS} stops and resumes of two agents' work browsers under constant input, every stop pauses both and every resume gives both back (press-to-pause times in the detail)`,
+        rounds.trials === STOP_TRIALS && rounds.resumed === STOP_TRIALS,
         JSON.stringify(rounds),
       );
       ok("the one stop scenario raised no renderer errors", faults.length === 0, faults.join("\n"));
@@ -1640,7 +1679,6 @@ async function testTheOneStop(browser, origin, ok) {
         await hands.settle();
         const whilePausing = {
           mode: model.mode("browser-921"),
-          secondInputLanded: model.input("browser-921") !== null,
           band: hands.readBand(),
         };
         inFlight?.();
@@ -1657,8 +1695,6 @@ async function testTheOneStop(browser, origin, ok) {
         return {
           whilePausing,
           tries,
-          afterInputLanded: model.input("browser-921") !== null,
-          landed921: model.landedWhileStopped("browser-921"),
           modes: Object.fromEntries(all.map((label) => [label, model.mode(label)])),
           asked922: asked("browser-922"),
           asked923: asked("browser-923"),
@@ -1668,9 +1704,8 @@ async function testTheOneStop(browser, origin, ok) {
         };
       }, { subject: SUBJECT, otherTerm: OTHER_TERM });
       ok(
-        "an agent input in flight when the person's stop comes still lands, the pause waits for it, and no input lands once the pause began",
-        raced.whilePausing?.mode === "pausing" && raced.whilePausing?.secondInputLanded === false &&
-          raced.modes?.["browser-921"] === "paused" && raced.afterInputLanded === false && raced.landed921 === 0,
+        "a work browser whose agent input is in flight when the person's stop comes stands pausing under the stop's pause until that input ends, and then paused",
+        raced.whilePausing?.mode === "pausing" && raced.modes?.["browser-921"] === "paused",
         JSON.stringify(raced),
       );
       ok(

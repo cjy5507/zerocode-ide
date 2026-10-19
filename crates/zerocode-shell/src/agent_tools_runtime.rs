@@ -4094,24 +4094,88 @@ fn adopt_helper_stop(helper: &serde_json::Value, app: Option<&AppHandle>) -> boo
     took
 }
 
+/// The helper as an agent's `stop` and `resume` reach it (t-62872): its
+/// `status`, its `resume` and the signal that stops it without waiting behind
+/// a request in flight. The window's is the session's (`SessionHelper`); a
+/// test's keeps a stop of its own, as the signed helper does.
+pub(super) trait HelperRoads {
+    /// The helper's `status`, when a session stands and it answers.
+    fn status(&self) -> Option<serde_json::Value>;
+    /// The helper's `status` unless a request is in flight: a stop never
+    /// waits behind one.
+    fn status_now(&self) -> Option<serde_json::Value>;
+    /// The helper's `resume`.
+    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError>;
+    /// The signal that stops the helper: false when there is none to tell.
+    fn signal(&self) -> bool;
+}
+
+/// The window's helper: the session's, when one stands — never started here.
+struct SessionHelper;
+
+impl HelperRoads for SessionHelper {
+    fn status(&self) -> Option<serde_json::Value> {
+        computer_use::session_stands()
+            .then(|| computer_use::call("status", serde_json::json!({})).ok())
+            .flatten()
+    }
+
+    fn status_now(&self) -> Option<serde_json::Value> {
+        computer_use::status_unless_busy()
+    }
+
+    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+        computer_use::guard::helper_resume(reset)
+    }
+
+    fn signal(&self) -> bool {
+        computer_use::guard::stop_helper()
+    }
+}
+
 /// The person's stop, when one stands — the window's own (its button, or a
 /// chord it took in) or the helper's chord, which the window takes in once it
 /// hears it.
-fn persons_stop_standing(app: Option<&AppHandle>) -> Option<String> {
+fn persons_stop_standing(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> Option<String> {
     let persons = |reason: &String| zerocode_core::computer_use::persons_stop(reason);
     computer_use::guard::stopped_reason()
         .filter(persons)
         .or_else(|| {
-            let helper = computer_use::session_stands()
-                .then(|| computer_use::call("status", serde_json::json!({})).ok())
-                .flatten()?;
-            adopt_helper_stop(&helper, app);
-            helper
+            let heard = helper.status()?;
+            adopt_helper_stop(&heard, app);
+            heard
                 .get("reason")?
                 .as_str()
                 .map(str::to_string)
                 .filter(persons)
         })
+}
+
+/// An agent's `stop`: the window stops, and signals the helper.
+pub(super) fn agents_stop(helper: &dyn HelperRoads, _app: Option<&AppHandle>) -> serde_json::Value {
+    computer_use::guard::stop_with(zerocode_core::computer_use::STOP_REASON_REQUEST, || {
+        helper.signal()
+    })
+}
+
+/// An agent's `resume`: never the person's stop — the window's resume lifts
+/// that one — and otherwise the one resume (`guard::resume`).
+pub(super) fn agents_resume(
+    helper: &dyn HelperRoads,
+    reset: bool,
+    app: Option<&AppHandle>,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    if let Some(reason) = persons_stop_standing(helper, app) {
+        // The person's stop is theirs: the window's resume lifts it, never
+        // an agent's `resume`.
+        return Err(computer_use::guard::refusal(&reason));
+    }
+    computer_use::guard::resume(
+        computer_use::guard::Lifter::Agent,
+        || helper.resume(reset),
+        || helper.signal(),
+    )
+    .agent_answer()
 }
 
 /// Where the recipes live is the window's to say; before it has, no recipe
@@ -5493,28 +5557,14 @@ pub(super) fn answer_computer_command_with(
         return computer_cli_error(command.json, &error.code, &error.message);
     }
     let result = if command.method == ComputerMethod::Stop {
-        Ok(computer_use::guard::stop(
-            zerocode_core::computer_use::STOP_REASON_REQUEST,
-        ))
-    } else if let Some(reason) = (command.method == ComputerMethod::Resume)
-        .then(|| persons_stop_standing(permission_window))
-        .flatten()
-    {
-        // The person's stop is theirs: the window's resume lifts it, never
-        // an agent's `resume`.
-        Err(computer_use::guard::refusal(&reason))
+        Ok(agents_stop(&SessionHelper, permission_window))
     } else if command.method == ComputerMethod::Resume {
         let reset = command
             .params
             .get("resetBudget")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        computer_use::guard::resume(
-            computer_use::guard::Lifter::Agent,
-            || computer_use::guard::helper_resume(reset),
-            computer_use::guard::stop_helper,
-        )
-        .agent_answer()
+        agents_resume(&SessionHelper, reset, permission_window)
     } else if command.method == ComputerMethod::Status {
         let helper = if computer_use::session_stands() {
             computer_use::call("status", serde_json::json!({}))
