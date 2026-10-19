@@ -45,6 +45,10 @@ pub(crate) struct Failure {
     /// second — the CLI would spawn an agent process only to be told the same
     /// thing (`claude-oauth-usage-error.ts:19-21`).
     pub(crate) skip_cli_fallback: bool,
+    /// The status the server answered with, when it answered at all. A caller
+    /// that must tell a refusal (400, 401, 403) from the rest reads this, never
+    /// the sentence in `message`.
+    pub(crate) http_status: Option<u16>,
 }
 
 impl Failure {
@@ -55,6 +59,7 @@ impl Failure {
             retry_at_ms: None,
             message: "no credentials on file".to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 
@@ -70,6 +75,7 @@ impl Failure {
             retry_at_ms: None,
             message: "no plan figures in the response".to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 
@@ -80,6 +86,7 @@ impl Failure {
             retry_at_ms: None,
             message: message.to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 
@@ -90,6 +97,7 @@ impl Failure {
             retry_at_ms: None,
             message: message.to_string(),
             skip_cli_fallback: false,
+            http_status: None,
         }
     }
 }
@@ -193,6 +201,7 @@ fn send_reading<T>(
                 .map(|wait| now_ms + wait),
                 message: format!("HTTP {status}"),
                 skip_cli_fallback: usage_limit::skips_pty_fallback(status),
+                http_status: Some(status),
             });
         }
         Ok(response)

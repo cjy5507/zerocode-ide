@@ -27033,10 +27033,19 @@ mod tests {
                 && !fetching.contains("zo login google"),
             "the signed-out sentence no longer names the card that fixes it"
         );
+        // The Code Assist calls present this client honestly: its own
+        // User-Agent, and no Antigravity or VS Code identity anywhere in the
+        // headers or the body the gauge sends.
         assert!(
-            fetching.contains("ANTIGRAVITY_CLIENT_METADATA")
-                && fetching.contains("ANTIGRAVITY_API_CLIENT"),
-            "the Code Assist calls lost Antigravity's identity headers"
+            fetching.contains("concat!(\"zerocode/\", env!(\"CARGO_PKG_VERSION\"))")
+                && !fetching.contains("ANTIGRAVITY_CLIENT_METADATA")
+                && !fetching.contains("ANTIGRAVITY_API_CLIENT")
+                && !fetching.contains("ANTIGRAVITY_VERSION")
+                && !fetching.contains("antigravity/")
+                && !fetching.contains("\"ANTIGRAVITY\"")
+                && !fetching.contains("DARWIN_ARM64")
+                && !fetching.contains("vscode_cloudshelleditor"),
+            "the Code Assist calls still present Antigravity's or VS Code's identity"
         );
         for spelled in [
             "command: \"antigravity_usage\",",
@@ -27061,6 +27070,18 @@ mod tests {
         assert!(
             markup.contains(r#"id="sb-antigravity""#),
             "the Antigravity surface fell out of the markup"
+        );
+    }
+
+    /// The card's sign-in re-reads the gauge only while the gauge is switched
+    /// on. With the status-bar item off, a sign-in sends Google nothing.
+    #[test]
+    fn the_card_rereads_the_gauge_only_while_the_gauge_is_switched_on() {
+        let window = window_source();
+        let moved = block_after(window, "function googleLoginMoved() {");
+        assert!(
+            moved.contains("statusBarItemEnabled(\"antigravity\")"),
+            "the card's sign-in asks Google for the gauge with the gauge switched off:\n{moved}"
         );
     }
 

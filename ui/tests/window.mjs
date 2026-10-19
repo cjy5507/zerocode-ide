@@ -23787,6 +23787,33 @@ ok(
   JSON.stringify(planFaces),
 );
 
+/* Google이 거절한 Antigravity 읽기는 「확인 불가」라고 말한다. 고정된 응답 모양
+ * (`status: "refused"`)으로 잰다: 수치는 서지 않고, 삼각형이 선다. 같은 물음을
+ * 되풀이하지 않는 것은 백엔드의 보류(`usage_scan_holds`)가 맡는다. */
+const refusedRead = await page.evaluate(async () => {
+  const heldAnswer = window.__ANSWER__.antigravity_usage;
+  window.__ANSWER__.antigravity_usage = () => ({
+    usage: {
+      provider: "antigravity", session: null, weekly: null, fable_weekly: null,
+      monthly: null, buckets: null, updated_at: Date.now(), status: "refused",
+      error: "Antigravity 사용량을 확인할 수 없습니다 — Google이 요청을 거절했습니다",
+      failure_kind: null, retry_at_ms: null, plan_type: null, reset_credits: null, account: null,
+    },
+    fetching: false,
+  });
+  await refreshProviderUsage(usageProvider("antigravity"), true);
+  const said = document.getElementById("sb-antigravity-pct");
+  const warn = document.getElementById("sb-antigravity-warn");
+  const seen = { said: said.textContent, warned: !warn.hidden };
+  window.__ANSWER__.antigravity_usage = heldAnswer;
+  return seen;
+});
+ok(
+  "A refused Antigravity read says 확인 불가 and raises the warning triangle",
+  refusedRead.said === "Antigravity 확인 불가" && refusedRead.warned,
+  JSON.stringify(refusedRead),
+);
+
 /* 로그인이 풀린 공급자는 항상 보이는 표면에서 말한다.
  *
  * 백엔드는 「여기 로그인이 없다」를 `unavailable`(애초에 세운 적 없는 공급자)과

@@ -509,11 +509,14 @@ mod tests {
         url: String,
         access_token: String,
         headers: Vec<(String, String)>,
+        body: serde_json::Value,
     }
 
     struct FakeWire {
         refreshes: usize,
         posts: Vec<PostedCall>,
+        /// The call the server refuses, and the status it refuses with.
+        refusal: Option<(&'static str, u16)>,
     }
 
     impl Wire for FakeWire {
@@ -527,7 +530,7 @@ mod tests {
             url: &str,
             access_token: &str,
             headers: &AntigravityHeaders,
-            _body: &serde_json::Value,
+            body: &serde_json::Value,
             _now: i64,
         ) -> Result<serde_json::Value, usage_http::Failure> {
             self.posts.push(PostedCall {
@@ -538,7 +541,17 @@ mod tests {
                     .into_iter()
                     .map(|(name, value)| (name.to_string(), value.to_string()))
                     .collect(),
+                body: body.clone(),
             });
+            if let Some((_, status)) = self.refusal.filter(|(refused, _)| *refused == url) {
+                return Err(usage_http::Failure {
+                    recovery: usage_limit::classify_http(status, ""),
+                    retry_at_ms: None,
+                    message: format!("HTTP {status}"),
+                    skip_cli_fallback: usage_limit::skips_pty_fallback(status),
+                    http_status: Some(status),
+                });
+            }
             if url == LOAD_CODE_ASSIST_URL {
                 Ok(serde_json::json!({ "cloudaicompanionProject": "project-a" }))
             } else {
@@ -555,6 +568,7 @@ mod tests {
         FakeWire {
             refreshes: 0,
             posts: Vec::new(),
+            refusal: None,
         }
     }
 
@@ -576,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn an_expiring_token_refreshes_with_antigravity_headers_without_writing_zo() {
+    fn an_expiring_token_refreshes_with_zerocode_headers_without_writing_zo() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("credentials.json");
         let original = r#"{
@@ -600,20 +614,12 @@ mod tests {
                 .iter()
                 .all(|request| request.access_token == "fresh-access")
         );
-        let expected_headers = vec![
-            (
-                "User-Agent".to_string(),
-                format!("antigravity/{ANTIGRAVITY_VERSION} darwin/arm64"),
-            ),
-            (
-                "X-Goog-Api-Client".to_string(),
-                ANTIGRAVITY_API_CLIENT.to_string(),
-            ),
-            (
-                "Client-Metadata".to_string(),
-                ANTIGRAVITY_CLIENT_METADATA.to_string(),
-            ),
-        ];
+        // Honest identity: this client's own User-Agent and nothing else, no
+        // Antigravity or VS Code headers.
+        let expected_headers = vec![(
+            "User-Agent".to_string(),
+            format!("zerocode/{}", env!("CARGO_PKG_VERSION")),
+        )];
         assert!(
             wire.posts
                 .iter()
@@ -622,10 +628,68 @@ mod tests {
         assert_eq!(wire.posts[0].url, LOAD_CODE_ASSIST_URL);
         assert_eq!(wire.posts[1].url, RETRIEVE_QUOTA_URL);
         assert_eq!(
+            wire.posts[0].body,
+            serde_json::json!({ "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED"
+            } }),
+            "the loadCodeAssist body names an IDE and a platform that are not this client's"
+        );
+        assert_eq!(
             std::fs::read_to_string(path).expect("credentials after scan"),
             original,
             "the window wrote its refreshed access token into zo's store"
         );
+    }
+
+    /// A refusal from Google is an answer, not a reason to ask again. The gauge
+    /// says it could not verify the quota, the refused request is not sent a
+    /// second time in this scan, and the login is not renewed to try again. The
+    /// old retry-once road did both, so every poll of a refused login renewed it.
+    #[test]
+    fn a_refused_read_is_unverified_and_is_not_asked_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "google_code_assist_oauth": {
+    "accessToken": "live-access",
+    "refreshToken": "refresh-me",
+    "expiresAt": 9999999999
+  }
+}"#,
+        )
+        .expect("credentials");
+        let now = 1_800_000_000_000;
+        for (refused, status, asked) in [
+            (LOAD_CODE_ASSIST_URL, 400, 1),
+            (LOAD_CODE_ASSIST_URL, 401, 1),
+            (LOAD_CODE_ASSIST_URL, 403, 1),
+            (RETRIEVE_QUOTA_URL, 401, 2),
+            (RETRIEVE_QUOTA_URL, 403, 2),
+        ] {
+            let mut wire = FakeWire {
+                refusal: Some((refused, status)),
+                ..fake_wire()
+            };
+            let held = scan_with(Some(&path), now, &mut wire);
+            assert_eq!(
+                held.status, "refused",
+                "HTTP {status} from {refused} was read as {}",
+                held.status
+            );
+            assert_eq!(
+                held.failure_kind, None,
+                "a refusal named a failure kind, and the bar words that kind as a sign-in prompt"
+            );
+            assert_eq!(wire.refreshes, 0, "a refused login was renewed to ask again");
+            assert_eq!(
+                wire.posts.len(),
+                asked,
+                "HTTP {status} from {refused} was sent again within one scan"
+            );
+        }
     }
 
     /// The quota response reader takes both shapes the API answers with and

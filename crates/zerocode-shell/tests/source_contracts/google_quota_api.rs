@@ -112,3 +112,46 @@ fn the_antigravity_gauge_has_no_command_segment_or_setting() {
         );
     }
 }
+
+/// The text from `opening` up to the first `closing` after it.
+fn between<'a>(text: &'a str, opening: &str, closing: &str) -> &'a str {
+    let start = text
+        .find(opening)
+        .unwrap_or_else(|| panic!("no `{opening}` in the source"));
+    let rest = &text[start..];
+    let end = rest
+        .find(closing)
+        .unwrap_or_else(|| panic!("`{opening}` never reaches `{closing}`"));
+    &rest[..end]
+}
+
+/// The orchestration beat asks no Antigravity quota: the quota table the
+/// coordinator reads, the table the window asks through, and the cache the
+/// beat reads all leave the gauge out, so an agy worker at a quota wall reads
+/// "unknown", as it does on main.
+#[test]
+fn the_orchestration_beat_and_its_ask_table_name_no_antigravity_gauge() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let core = std::fs::read_to_string(root.join("../zerocode-core/src/orchestration.rs"))
+        .expect("the core orchestration source");
+    let quota = between(&core, "const QUOTA_GAUGE: &[(&str, &str)] = &[", "];");
+    assert!(
+        !quota.contains("antigravity"),
+        "the coordinator's quota table reads the Antigravity gauge:\n{quota}"
+    );
+
+    let usage = std::fs::read_to_string(root.join("src/cmd/usage.rs")).expect("the usage commands");
+    let asks = between(&usage, "pub(crate) const USAGE_ASKS", "];");
+    assert!(
+        !asks.contains("antigravity"),
+        "the beat's ask table asks the Antigravity gauge:\n{asks}"
+    );
+
+    let orchestration = std::fs::read_to_string(root.join("src/orchestration.rs"))
+        .expect("the shell orchestration source");
+    let cache = between(&orchestration, "fn cached_usage(", "_ => return None");
+    assert!(
+        !cache.contains("antigravity"),
+        "the beat reads the Antigravity cache:\n{cache}"
+    );
+}

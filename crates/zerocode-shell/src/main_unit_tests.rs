@@ -7130,6 +7130,69 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
     );
 }
 
+/// A document normalised while the Antigravity gauge was withdrawn (v1.1.75 to
+/// v1.1.78) recorded its offer WITHOUT that name. The restored gauge is not new
+/// to such a document: its stored list decides, and a gauge the person never
+/// ticked does not start asking Google on the first run after the restore.
+#[test]
+fn a_gauge_restored_after_withdrawal_stays_as_the_stored_list_has_it() {
+    let mut items = vec![
+        "claude".to_string(),
+        "codex".to_string(),
+        "ports".to_string(),
+    ];
+    let mut seen: Vec<String> = [
+        "claude",
+        "codex",
+        "kimi",
+        "grok",
+        "opencode-go",
+        "resource-usage",
+        "ports",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
+    adopt_unseen_status_bar_items(&mut items, &mut seen);
+    assert!(
+        !items.iter().any(|held| held == "antigravity"),
+        "the restored gauge switched itself on for a document that had offered the \
+         catalog without it: {items:?}"
+    );
+}
+
+/// A refused gauge is an answer that waits for a person. The ordinary poll
+/// holds it, so the same two Google requests are not sent every floor; a
+/// refresh the person presses is not held back.
+#[test]
+fn a_refused_gauge_waits_until_somebody_asks() {
+    let now = 1_800_000_000_000;
+    let refused = usage::ProviderUsage {
+        provider: "antigravity".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: now - 2 * 60 * 60 * 1_000,
+        error: Some("Antigravity 사용량을 확인할 수 없습니다".to_string()),
+        status: "refused".to_string(),
+        failure_kind: None,
+        retry_at_ms: None,
+        plan_type: None,
+        reset_credits: None,
+        account: None,
+    };
+    assert!(
+        usage_scan_holds(Some(&refused), false, now),
+        "a refused gauge was asked of Google again on the ordinary poll"
+    );
+    assert!(
+        !usage_scan_holds(Some(&refused), true, now),
+        "a refresh the person pressed was held back by an earlier refusal"
+    );
+}
+
 /// The usage screen cuts what it already has, and says what it left out.
 ///
 /// Two claims hold this slice up and neither is visible in a screenshot.
