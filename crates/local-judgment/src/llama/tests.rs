@@ -153,3 +153,22 @@ fn a_cancelled_native_archive_does_not_create_runtime_files() {
     );
     assert!(!home.path().join("native/package/llama-server").exists());
 }
+
+#[test]
+fn the_python_supervisor_owns_only_its_pinned_native_child_and_connection() {
+    let source = serde_json::to_string(include_str!("../bridge.py")).expect("bridge source");
+    let output = std::process::Command::new("python3")
+        .args([
+            "-B",
+            "-c",
+            include_str!("../../tests/llama_boundary.py"),
+            &source,
+        ])
+        .output()
+        .expect("supervisor boundary suite");
+    assert!(
+        output.status.success(),
+        "native supervisor boundary failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
