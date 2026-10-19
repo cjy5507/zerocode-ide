@@ -5719,7 +5719,7 @@ function googleLoginUnder() {
   }
   if (googleAccount.error) return googleAccount.error;
   if (!googleAccount.signed_in) {
-    return t("settings.googleAccount.none", "zo가 쓸 로그인이 없습니다");
+    return t("settings.googleAccount.none", "zo와 Antigravity 게이지가 쓸 로그인이 없습니다");
   }
   if (!googleAccount.renewable) {
     return t(
@@ -5785,7 +5785,7 @@ function googleAccountNote() {
   }
   return `${t(
     "settings.googleAccount.hint",
-    "zo와 이 창이 같은 파일의 같은 로그인을 씁니다 — 여기서 로그인하면 zo가 그 로그인을 씁니다.",
+    "zo와 이 창이 같은 파일의 같은 로그인을 씁니다 — 여기서 로그인하면 zo도, Antigravity 사용량 게이지도 그 로그인을 씁니다.",
   )} ${t(
     "settings.googleAccount.agyDiffers",
     "터미널의 agy는 자기 로그인을 따로 가지므로 다른 계정일 수 있습니다.",
@@ -5882,14 +5882,17 @@ async function googleLogout() {
 }
 
 /* The Claude and Codex pair are `claudeLoginMoved` and `codexLoginMoved`, and
- * this is the same hand: every road through the card ends here. It repaints
- * the card and asks the bar nothing — the Antigravity gauge that re-read this
- * login forced is gone (t-62187: the window sends nothing to Google's quota
- * API, 「구독 OAuth로 제품 호출 금지」). The verbs above all wait for the
- * backend to finish writing before they answer, so by the time this runs the
- * new login is on disk. */
+ * this is the same hand for the same reason: the bar's Antigravity figure is
+ * a fact about THIS login, and without a forced re-read the segment keeps the
+ * previous one's word — 「Antigravity 로그인 필요」 standing under an account
+ * that just signed in — until an agent stirs or the fifteen-minute poll comes
+ * round. The verbs above all wait for the backend to finish writing before
+ * they answer, so by the time this runs the new login is on disk. */
 function googleLoginMoved() {
   paintGoogleAccount();
+  // The gauge is read again only while its status-bar item is on: with the item
+  // off, a sign-in sends Google nothing (the consent covers the status-bar gauge).
+  if (statusBarItemEnabled("antigravity")) void refreshProviderUsage(usageProvider("antigravity"), true);
 }
 
 /* ---- and the fourth: every CLI that signs itself in ----

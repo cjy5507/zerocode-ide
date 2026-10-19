@@ -1687,6 +1687,11 @@ pub(super) fn usage_scan_holds_for(
     let Some(snapshot) = held else {
         return false;
     };
+    // A refusal waits for a person. The ordinary poll would send the same
+    // questions again every floor, to a server that has already answered them.
+    if snapshot.status == "refused" {
+        return true;
+    }
     if now_ms - snapshot.updated_at < usage::MIN_REFETCH.as_millis() as i64 {
         return true;
     }
@@ -1888,6 +1893,9 @@ pub(super) enum UsageRoad {
     },
     /// A provider's own web API — the gauges with no terminal behind them.
     Api,
+    /// The web API refused a call. The status and the method name are the
+    /// whole of it: the log keeps no body, no account and no token.
+    Refused { status: u16, call: &'static str },
     /// Answered without asking anybody: no login on disk, or the account's
     /// store refused before a request could go.
     Local,
@@ -1902,7 +1910,7 @@ impl UsageRoad {
         match self {
             Self::Oauth { .. } => "oauth",
             Self::Terminal { .. } => "terminal",
-            Self::Api => "api",
+            Self::Api | Self::Refused { .. } => "api",
             Self::Local => "local",
             Self::Cache => "cache",
         }
@@ -1961,6 +1969,9 @@ pub(super) fn usage_read_line(
         }
         UsageRoad::Terminal { oauth: Some(kind) } => {
             let _ = write!(line, " oauth={}", failure_word(kind));
+        }
+        UsageRoad::Refused { status, call } => {
+            let _ = write!(line, " http={status} call={call}");
         }
         _ => {}
     }
@@ -2366,6 +2377,55 @@ pub(super) fn kimi_usage_cache(
 
 pub(super) static KIMI_USAGE_SCANNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+
+pub(super) fn antigravity_usage_file(local_data_root: &Path) -> PathBuf {
+    local_data_root.join(artifact_file::ANTIGRAVITY_USAGE)
+}
+
+pub(super) fn antigravity_usage_cache(
+    local_data_root: &Path,
+) -> &'static Mutex<Option<usage::ProviderUsage>> {
+    static CACHE: std::sync::OnceLock<Mutex<Option<usage::ProviderUsage>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(
+            std::fs::read_to_string(antigravity_usage_file(local_data_root))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok()),
+        )
+    })
+}
+
+pub(super) static ANTIGRAVITY_USAGE_SCANNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The same never-block contract as [`claude_usage`] and [`codex_usage`],
+/// against Google's quota API — no hidden terminal at all, but the same
+/// cache file, in-flight flag and refetch floor, so all gauges age by one rule.
+pub(super) fn antigravity_usage_report(state: &State<'_, AppState>, force: bool) -> UsageReport {
+    let local_data_root = state.local_data_root().to_path_buf();
+    usage_report(
+        UsageGauge {
+            provider: "antigravity",
+            cache: antigravity_usage_cache(&local_data_root),
+            file: antigravity_usage_file(&local_data_root),
+            scanning: &ANTIGRAVITY_USAGE_SCANNING,
+            log_root: local_data_root,
+        },
+        |_| true,
+        force,
+        move || {
+            let (usage, refusal) = usage_antigravity::scan(epoch_ms_now());
+            Scanned {
+                usage,
+                road: refusal.map_or(UsageRoad::Api, |refused| UsageRoad::Refused {
+                    status: refused.status,
+                    call: refused.call,
+                }),
+            }
+        },
+    )
+}
 
 /* ---- CI checks --------------------------------------------------------------
  *
