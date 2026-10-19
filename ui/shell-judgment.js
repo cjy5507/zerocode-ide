@@ -163,15 +163,12 @@ const judgmentProviderController = {
   },
 
   failure(token) {
-    if (this.draft?.protocol === "openai_json" && token === "transport") {
-      return t("settings.openai.serverUnavailable", "서버에 연결하지 못했습니다. LM Studio나 Ollama에서 서버를 직접 켠 뒤 주소를 확인하세요. 앱은 서버를 설치하거나 시작하지 않습니다.");
-    }
     const row = jevTokenRow(token ?? "");
     return row?.saidKey ? t(row.saidKey, row.said) : null;
   },
 
   providerName(provider) {
-    if (provider.kind === "local" && provider.protocol === "openai_json") return t("settings.openai.unverified", "검증 안 된 사람 지정 모델");
+    if (provider.kind === "local" && provider.protocol === "openai_json") return t("settings.gguf.unverified", "사람이 지정한 검증 안 된 모델");
     if (provider.kind === "local") return t("settings.judgment.local", "로컬 판단 모델");
     if (provider.kind === "remote") return t("settings.judgment.remote", "다른 판단 서버");
     return "Jev · TypeSafe";
@@ -183,9 +180,6 @@ const judgmentProviderController = {
     }
     if (!this.draft?.baseUrl) {
       return ["connection", t("settings.judgment.nextConnection", "먼저 연결할 판단 서버 주소를 입력하세요. 모델을 고르기 전까지 현재 설정은 유지됩니다.")];
-    }
-    if (this.draft.protocol === "openai_json" && !this.listedSelection()) {
-      return ["model", t("settings.openai.modelRequired", "이 서버에서 모델 목록을 읽고 사용할 모델을 고르세요.")];
     }
     const sameServer = this.state?.provider && this.serverKey(this.draft) === this.serverKey(this.state.provider);
     if (sameServer && this.draft.requiresAuth && !this.state.keySaved) {
@@ -208,9 +202,11 @@ const judgmentProviderController = {
       if (managedJudgmentController.visible()) void refreshTypeSafe();
     });
     el("judgment-provider-kind")?.addEventListener("change", () => this.changeKind());
-    for (const mode of ["managed", "manual", "openai"]) {
+    for (const mode of ["managed", "manual"]) {
       el(`judgment-local-${mode}`)?.addEventListener("click", () => {
-        this.chooseLocalMode(mode);
+        if (mode === "manual" && this.draft?.protocol === "openai_json") this.reset({ kind: "local", protocol: "system_one", baseUrl: "", model: "", requiresAuth: false });
+        this.localMode = mode;
+        this.render();
       });
     }
     for (const name of ["judgment-endpoint", "typesafe-model-input", "judgment-requires-auth"]) {
@@ -234,8 +230,6 @@ const judgmentProviderController = {
   reset(provider) {
     const changedServer = !this.draft || this.serverKey(this.draft) !== this.serverKey(provider);
     this.draft = this.copy(provider);
-    if (provider.protocol === "openai_json") this.localMode = "openai";
-    else if (this.localMode === "openai") this.localMode = "manual";
     if (changedServer) this.forgetList();
   },
 
@@ -262,33 +256,6 @@ const judgmentProviderController = {
     this.render();
   },
 
-  connectOpenAi() {
-    if (typesafeBusy || !this.state || managedJudgmentController.activating) return;
-    el("judgment-connection-settings").open = true;
-    if (this.draft?.kind !== "local") {
-      el("judgment-provider-kind").value = "local";
-      this.changeKind();
-    }
-    this.chooseLocalMode("openai");
-    el("judgment-endpoint").focus();
-  },
-
-  chooseLocalMode(mode) {
-    if (typesafeBusy || !this.draft || this.draft.kind !== "local") return;
-    if (mode !== "managed") {
-      const protocol = mode === "openai" ? "openai_json" : "system_one";
-      if (this.draft.protocol !== protocol) {
-        this.reset({ kind: "local", protocol, baseUrl: mode === "openai" ? "http://127.0.0.1:1234" : "", model: "", requiresAuth: false });
-      }
-    }
-    this.localMode = mode;
-    this.render();
-  },
-
-  listedSelection() {
-    return Boolean(this.draft && this.listedServer === this.serverKey(this.draft) && this.modelIds.includes(this.draft.model));
-  },
-
   connectModel(model) {
     const modelId = managedJudgmentController.serverModel(model);
     if (!modelId || typesafeBusy || managedJudgmentController.busy || managedJudgmentController.operating()) return;
@@ -296,11 +263,7 @@ const judgmentProviderController = {
     const previous = this.draft?.kind === kind ? this.draft : this.drafts.get(kind);
     const provider = previous ? this.copy(previous)
       : { kind, protocol: "system_one", baseUrl: "", model: "", requiresAuth: kind === "remote" };
-    if (provider.protocol !== "system_one") {
-      provider.protocol = "system_one";
-      provider.baseUrl = "";
-      provider.requiresAuth = kind === "remote";
-    }
+    if (provider.protocol !== "system_one") { provider.protocol = "system_one"; provider.baseUrl = ""; provider.requiresAuth = kind === "remote"; }
     provider.model = modelId;
     el("judgment-connection-settings").open = true;
     this.localMode = "manual";
@@ -346,7 +309,7 @@ const judgmentProviderController = {
     el("judgment-local-mode").hidden = !local;
     el("managed-judgment-panel").hidden = false;
     el("judgment-manual-fields").hidden = managed;
-    for (const mode of ["managed", "manual", "openai"]) {
+    for (const mode of ["managed", "manual"]) {
       el(`judgment-local-${mode}`).setAttribute("aria-pressed", String(this.localMode === mode));
     }
     el("judgment-provider-kind").value = this.draft.kind;
@@ -356,16 +319,6 @@ const judgmentProviderController = {
     el("judgment-requires-auth").checked = this.draft.requiresAuth;
     el("judgment-endpoint-field").hidden = this.draft.kind === "jev";
     el("judgment-auth-field").hidden = this.draft.kind === "jev";
-    const openai = this.draft.protocol === "openai_json";
-    el("typesafe-model-input").readOnly = openai;
-    say(el("judgment-endpoint-hint"), () => this.draft?.protocol === "openai_json"
-      ? t("settings.openai.protocolHint", "이미 켜 둔 로컬 OpenAI 호환 서버에 JSON 스키마로 요청합니다. 이 컴퓨터의 주소만 허용합니다.")
-      : t("settings.judgment.endpointHint", "System One 호환 판단 인터페이스를 사용합니다. 로컬은 이 컴퓨터의 주소만, 원격은 HTTPS만 허용합니다."));
-    const notice = el("judgment-openai-notice");
-    notice.hidden = !openai && this.state?.provider?.protocol !== "openai_json";
-    say(notice, () => t("settings.openai.about", "{{status}} · 응답 확인은 정확도 검증이 아닙니다. 서버는 직접 켜야 합니다. 로컬 주소여도 서버의 외부 통신은 별도입니다.", {
-      status: t("settings.openai.unverified", "검증 안 된 사람 지정 모델"),
-    }));
     const scope = this.draft.kind === "local"
       ? t("settings.judgment.localScope", "이 컴퓨터의 판단 서버에 연결합니다. Jev 키는 보내지 않습니다. 서버 자체의 외부 통신 설정도 확인하세요.")
       : t("settings.judgment.remoteScope", "동의한 프로젝트의 내용이 선택한 판단 서비스로 전송됩니다. 모델을 바꿔도 승인·정지·결과 검증은 유지합니다.");
@@ -396,7 +349,6 @@ const judgmentProviderController = {
     if (apply) {
       apply.hidden = managed;
       apply.disabled = busy || !dirty || !this.draft.baseUrl || (!this.draft.model && this.draft.kind !== "jev");
-      apply.disabled ||= this.draft?.protocol === "openai_json" && !this.listedSelection();
     }
     const revert = el("judgment-revert-provider");
     if (revert) revert.disabled = busy || !dirty;
@@ -422,15 +374,13 @@ const judgmentProviderController = {
     if (check) {
       check.hidden = managed;
       check.disabled = busy || !this.draft?.baseUrl || (!this.draft?.model && this.draft?.kind !== "jev") || (!dirty && this.state?.provider?.requiresAuth && !this.state.keySaved);
-      check.disabled ||= this.draft?.protocol === "openai_json" && !this.listedSelection();
     }
     const listed = el("judgment-listed-model");
     if (listed) {
       listed.disabled = busy || this.loading;
       listed.value = this.modelIds.includes(this.draft?.model) ? this.draft.model : "";
     }
-    for (const mode of ["managed", "manual", "openai"]) el(`judgment-local-${mode}`).disabled = busy;
-    el("judgment-openai-source").disabled = busy;
+    for (const mode of ["managed", "manual"]) el(`judgment-local-${mode}`).disabled = busy;
     paintTypeSafeSave();
   },
 
@@ -461,7 +411,6 @@ const judgmentProviderController = {
   },
 
   async probe(provider, expectedProviderIdentity, draftIdentity) {
-    if (provider.protocol === "openai_json" && !this.listedSelection()) throw "provider_model";
     const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity });
     if (this.state?.providerIdentity !== expectedProviderIdentity || JSON.stringify(this.current()) !== draftIdentity || check.activeProviderIdentity !== expectedProviderIdentity) throw "settings_changed";
     if (typeof check.candidateIdentity !== "string" || !check.candidateIdentity || typeof check.answered !== "boolean") throw "schema";
@@ -527,9 +476,7 @@ const judgmentProviderController = {
       el("judgment-model-status").textContent = t("settings.judgment.modelsRead", "모델 {{count}}개를 읽었습니다. 선택한 ID는 그대로 유지합니다.", { count: this.modelIds.length });
     } catch (error) {
       if (sequence !== this.sequence) return;
-      el("judgment-model-status").textContent = provider.protocol === "openai_json" && String(error) === "transport"
-        ? t("settings.openai.serverUnavailable", "서버에 연결하지 못했습니다. LM Studio나 Ollama에서 서버를 직접 켠 뒤 주소를 확인하세요. 앱은 서버를 설치하거나 시작하지 않습니다.")
-        : t("settings.judgment.modelsUnavailable", "목록을 읽지 못했습니다. 서버와 키를 확인하거나 모델 ID를 직접 입력하세요. {{reason}}", { reason: typesafeRefusal(error) });
+      el("judgment-model-status").textContent = t("settings.judgment.modelsUnavailable", "목록을 읽지 못했습니다. 서버와 키를 확인하거나 모델 ID를 직접 입력하세요. {{reason}}", { reason: typesafeRefusal(error) });
     } finally {
       if (sequence === this.sequence) {
         this.loading = false;

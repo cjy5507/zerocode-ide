@@ -4286,9 +4286,11 @@
             <h4 id="judgment-source-title" data-i18n="settings.models.add">모델 불러오기</h4>
             <div class="settings-action-row judgment-source-choices">
               <button type="button" class="btn" id="judgment-source-hub" aria-pressed="true" data-i18n="settings.models.fromHub">Hugging Face에서 받기</button>
+              <button type="button" class="btn" id="judgment-source-gguf" aria-pressed="false" data-i18n="settings.gguf.fromFile">GGUF 파일 불러오기</button>
               <button type="button" class="btn" id="judgment-source-local" aria-pressed="false" data-i18n="settings.models.fromFolder">내 모델 불러오기</button>
               <button type="button" class="btn" id="judgment-source-jev" data-i18n="settings.models.useJev">Jev 사용하기</button>
             </div>
+            <p class="settings-row-desc" data-i18n="settings.gguf.sourceHint">GGUF는 파일 하나를 고르거나 Hugging Face의 특정 .gguf 파일 주소를 붙여 넣으세요. 모델이 함께 보낸 코드는 실행하지 않습니다.</p>
             <div id="judgment-source-hub-fields">
               <label class="settings-field" data-field="full" for="judgment-source-repository">
                 <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.models.address">Hugging Face 모델 주소 또는 ID</span></span>
@@ -4391,9 +4393,6 @@
               </details>
               <p class="settings-status" id="managed-judgment-status" role="status" aria-live="polite"></p>
             </section>
-          <div class="settings-action-row">
-            <button type="button" class="btn" id="judgment-openai-source" data-i18n="settings.openai.connect">LM Studio·Ollama 연결</button>
-          </div>
           <details class="settings-fold judgment-connection-settings" id="judgment-connection-settings">
             <summary data-i18n="settings.models.advancedConnection">Jev · 기존 서버 연결 설정</summary>
           <section id="judgment-provider-editor" aria-label="판단 모델 연결">
@@ -4412,9 +4411,7 @@
             <div id="judgment-local-mode" class="settings-action-row" hidden>
               <button type="button" class="btn" id="judgment-local-managed" aria-pressed="true" data-i18n="settings.managed.manage">모델 다운로드·관리</button>
               <button type="button" class="btn" id="judgment-local-manual" aria-pressed="false" data-i18n="settings.managed.manual">이미 실행 중인 서버 연결</button>
-              <button type="button" class="btn" id="judgment-local-openai" aria-pressed="false" data-i18n="settings.openai.connect">LM Studio·Ollama 연결</button>
             </div>
-            <p class="settings-notice" id="judgment-openai-notice" role="status" aria-live="polite" hidden></p>
             <div id="judgment-manual-fields">
             <ol class="settings-steps">
               <li data-i18n="settings.judgment.stepServer">서버 주소와 필요한 API 키를 입력합니다.</li>
@@ -4424,7 +4421,7 @@
             <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
-                <span class="settings-row-desc" id="judgment-endpoint-hint">System One 호환 판단 인터페이스를 사용합니다. 로컬은 이 컴퓨터의 주소만, 원격은 HTTPS만 허용합니다.</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">System One 호환 판단 인터페이스를 사용합니다. 로컬은 이 컴퓨터의 주소만, 원격은 HTTPS만 허용합니다.</span>
               </span>
               <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
             </label>
