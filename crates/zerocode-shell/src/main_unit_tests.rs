@@ -27507,3 +27507,22 @@ fn the_second_brain_guide_reaches_the_windows_claude_home() {
         "{read:?}"
     );
 }
+
+#[test]
+fn managed_judgment_boot_restore_has_one_setup_call() {
+    let source = include_str!("main.rs");
+    let call = "cmd::managed_judgment::restore_at_boot(app.handle());";
+    assert_eq!(
+        source.matches(call).count(),
+        1,
+        "setup must call managed restoration exactly once"
+    );
+    let setup = source.find(".setup(move |app| {").unwrap();
+    let managed = source[setup..].find("if !app.manage(state)").unwrap() + setup;
+    let restore = source.find(call).unwrap();
+    let warm = source.find("systemone::warm_for_walks();").unwrap();
+    assert!(managed < restore && restore < warm);
+    let backend = include_str!("cmd/managed_judgment.rs");
+    assert!(backend.contains("RESTORE_AT_BOOT.call_once("));
+    assert!(backend.contains("tauri::async_runtime::spawn(async move"));
+}
