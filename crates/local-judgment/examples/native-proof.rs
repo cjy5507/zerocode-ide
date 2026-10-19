@@ -319,6 +319,8 @@ async fn prove(options: &Options, manager: &Arc<Manager>, report: &mut Value) ->
 
     let loading = manager.start(&model.id, &model.revision)?;
     report["loadCancellation"] = cancelled(manager, loading, options, "load_cancel_window").await?;
+    phase("load_cancel_complete", json!({}))?;
+    driver(options, "cancelled")?;
     let started = settled(manager, manager.start(&model.id, &model.revision)?).await?;
     let id = started.server.id.clone().ok_or("server_not_ready")?;
     let duplicate = manager.start(&model.id, &model.revision)?;
@@ -386,6 +388,8 @@ async fn prove(options: &Options, manager: &Arc<Manager>, report: &mut Value) ->
     let pending = manager.check(&id)?;
     report["requestCancellation"] =
         cancelled(manager, pending, options, "check_cancel_window").await?;
+    phase("check_cancel_complete", json!({}))?;
+    driver(options, "cancelled")?;
     let restarted = settled(manager, manager.start(&model.id, &model.revision)?).await?;
     let id = restarted.server.id.as_deref().ok_or("server_not_ready")?;
     settled(manager, manager.check(id)?).await?;
@@ -400,6 +404,8 @@ async fn prove(options: &Options, manager: &Arc<Manager>, report: &mut Value) ->
         return Err("stop_failed".into());
     }
     report["stopElapsedMs"] = json!(began.elapsed().as_secs_f64() * 1000.0);
+    phase("stop_complete", json!({}))?;
+    driver(options, "stopped")?;
     let last = settled(manager, manager.start(&model.id, &model.revision)?).await?;
     report["parentExitArmed"] = json!(true);
     report["last"] = serde_json::to_value(last)?;
