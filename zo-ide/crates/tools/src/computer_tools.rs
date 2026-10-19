@@ -708,6 +708,9 @@ fn background_neutral_action(action: &str) -> bool {
     !app_scoped_action(action) && methods(action).any(|method| method.batches() && !method.acts())
 }
 
+/// Both shapes of a scroll, each with an example a model can send as it stands (t-62469 S1).
+const SCROLL_SHAPES: &str = "app-scoped scroll takes scroll_pages, e.g. {\"app\":\"Notes\",\"window_id\":41,\"coordinate\":[20,40],\"scroll_direction\":\"down\",\"scroll_pages\":1}; desktop scroll (no app) takes scroll_amount, e.g. {\"coordinate\":[790,450],\"scroll_direction\":\"down\",\"scroll_amount\":3}; both need a coordinate";
+
 fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
     let action = input.action.trim();
     let timer = timed_wait(action);
@@ -750,10 +753,10 @@ fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
         }
     }
     if input.scroll_pages.is_some() && (action != "scroll" || input.app.is_none()) {
-        return Err(ToolError::InvalidInput("scroll_pages belongs to app-scoped scrolling, e.g. {\"app\":\"Notes\",\"window_id\":41,\"scroll_direction\":\"down\",\"scroll_pages\":1}; desktop scroll (no app) takes scroll_amount with a coordinate, e.g. {\"coordinate\":[790,450],\"scroll_direction\":\"down\",\"scroll_amount\":3}".into()));
+        return Err(ToolError::InvalidInput(format!("scroll_pages belongs to app-scoped scrolling: {SCROLL_SHAPES}")));
     }
     if input.app.is_some() && action == "scroll" && input.scroll_amount.is_some() {
-        return Err(ToolError::InvalidInput("app-scoped scroll takes scroll_pages, e.g. {\"app\":\"Notes\",\"window_id\":41,\"scroll_direction\":\"down\",\"scroll_pages\":1}; desktop scroll (no app) takes scroll_amount with a coordinate, e.g. {\"coordinate\":[790,450],\"scroll_direction\":\"down\",\"scroll_amount\":3}".into()));
+        return Err(ToolError::InvalidInput(format!("scroll_amount belongs to desktop scrolling: {SCROLL_SHAPES}")));
     }
     if input.app.is_some() && (input.coordinate.is_some() || input.start_coordinate.is_some()) && input.window_id.is_none() {
         return Err(ToolError::InvalidInput("app coordinates require the window_id from an observation of that window".into()));

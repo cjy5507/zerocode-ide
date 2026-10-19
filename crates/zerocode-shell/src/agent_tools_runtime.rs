@@ -4143,7 +4143,9 @@ pub(super) trait HelperRoads {
     /// The signal that stops the helper: false when there is none to tell.
     fn signal(&self) -> bool;
     /// Whether a helper session stands: one that did not answer `status_now`
-    /// is then busy, and a person's chord may be waiting in it unheard.
+    /// is then busy, and a person's chord may be waiting in it unheard. It
+    /// never waits behind a request in flight either (t-62469 B2): a request
+    /// that holds the session is a session standing.
     fn session_stands(&self) -> bool;
 }
 
@@ -4170,7 +4172,7 @@ impl HelperRoads for SessionHelper {
     }
 
     fn session_stands(&self) -> bool {
-        computer_use::session_stands()
+        computer_use::session_stands_now()
     }
 }
 
@@ -4216,7 +4218,8 @@ pub(super) fn agents_stop(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> 
                 }
                 // No session: no helper to have heard a chord. A session
                 // that did not answer is busy, and the stop may be the
-                // person's.
+                // person's. Asked without waiting (t-62469 B2): the signal
+                // that ends a request in flight never waits for it to end.
                 None => !helper.session_stands(),
             }
         },
@@ -4237,13 +4240,9 @@ pub(super) fn agents_resume(
         return Err(computer_use::guard::refusal(&reason));
     }
     if computer_use::guard::unconfirmed_stop_stands() {
+        // A stop the person may have made: the band's resume lifts it.
         let reason = computer_use::guard::stopped_reason().unwrap_or_default();
-        return Err(computer_use::ComputerUseError::new(
-            zerocode_core::computer_use_protocol::error_code::STOPPED,
-            format!(
-                "the operator is stopped ({reason}); the helper was busy when this stop came, so the person may have stopped it — only they lift it, from the band's resume; report where you were and wait"
-            ),
-        ));
+        return Err(computer_use::guard::refusal(&reason));
     }
     computer_use::guard::resume(
         computer_use::guard::Lifter::Agent,
