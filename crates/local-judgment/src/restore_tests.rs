@@ -700,7 +700,8 @@ async fn an_ipv6_wildcard_occupant_forces_a_fresh_restore_port() {
 
 #[tokio::test]
 async fn an_owned_time_wait_keeps_the_restore_port_without_settings_writes() {
-    use tokio::io::AsyncReadExt;
+    use std::io::Read;
+    use std::net::{Shutdown, TcpStream};
 
     let mut fixture = Restoring::new();
     fixture.seed();
@@ -710,14 +711,20 @@ async fn an_owned_time_wait_keeps_the_restore_port_without_settings_writes() {
     let intent = fs::read(fixture.intent_path()).unwrap();
     let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port(&previous)))
         .await
+        .unwrap()
+        .into_std()
         .unwrap();
-    let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
-        .await
-        .unwrap();
-    let (connection, _) = listener.accept().await.unwrap();
-    drop(connection);
-    assert_eq!(client.read(&mut [0_u8; 1]).await.unwrap(), 0);
+    listener.set_nonblocking(false).unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client.set_read_timeout(Some(SETTLE)).unwrap();
+    let (mut connection, _) = listener.accept().unwrap();
+    connection.set_read_timeout(Some(SETTLE)).unwrap();
+    connection.shutdown(Shutdown::Write).unwrap();
+    assert_eq!(client.read(&mut [0_u8; 1]).unwrap(), 0);
+    client.shutdown(Shutdown::Write).unwrap();
+    assert_eq!(connection.read(&mut [0_u8; 1]).unwrap(), 0);
     drop(client);
+    drop(connection);
     drop(listener);
     assert!(
         matches!(TcpListener::bind((Ipv4Addr::LOCALHOST, port(&previous))), Err(error) if error.kind() == std::io::ErrorKind::AddrInUse),
