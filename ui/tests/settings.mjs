@@ -13678,6 +13678,7 @@ await test("the Google card names only zo as the sign-in's user — no gauge, in
   return JSON.stringify(seen);
 });
 
+await (await import("./settings-openai.mjs")).runSettingsOpenAi({ test, assert, assertEqual, backend, withJudgmentStatus, setQualityLocale });
 await test("the stateful backend refused every command the fixture did not define", async () => {
   assertEqual(backend.unknown, [], "unknown IPC was treated as success");
 });

@@ -989,6 +989,7 @@ impl SystemOneClient {
 
 #[cfg(test)]
 mod tests {
+    mod openai_json;
     use std::sync::{Arc, Mutex};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
