@@ -3993,8 +3993,8 @@
         <p class="settings-hint" id="codex-account-note"></p>
 
         <!-- And Google, which has no CLI of its own on this machine: zo signs
-             in with `zo login google` and this window reads the same file to say
-             who is signed in, so it runs the OAuth flow ITSELF
+             in with `zo login google` and the Antigravity gauge reads the same
+             file, so this window runs the OAuth flow ITSELF
              (`crates/zerocode-shell/src/google_login.rs`) and writes the
              result where zo will find it. One machine, ONE Google login — a
              picker here would be a choice with one option in it — so the list
@@ -6130,7 +6130,7 @@
              locale; anything a person would type in their own language is
              already written on the page. -->
         <section class="settings-pane" data-pane="stats"
-                 data-keywords="claude codex opencode grok anthropic openai xai kimi token tokens cache subscription credits" hidden>
+                 data-keywords="claude codex opencode grok antigravity anthropic openai xai kimi token tokens cache subscription credits" hidden>
         <header class="settings-section-head">
           <h2 class="settings-section-title" data-i18n="settings.stats.title">통계 및 사용량</h2>
           <p class="settings-section-desc" data-i18n="settings.stats.about">
@@ -6889,6 +6889,17 @@
           </label>
         </div>
         <div class="settings-option-row settings-option-row--copy">
+          <label class="settings-check" for="status-bar-antigravity">
+            <input type="checkbox" id="status-bar-antigravity" data-status-bar-item="antigravity" />
+            <span>
+              <span class="settings-label" data-i18n="settings.statusBar.antigravity">Antigravity 사용량</span>
+              <span class="settings-row-desc" data-i18n="settings.statusBar.antigravityHint">
+                zo의 Google 로그인으로 Antigravity 모델별 쿼터를 표시합니다.
+              </span>
+            </span>
+          </label>
+        </div>
+        <div class="settings-option-row settings-option-row--copy">
           <label class="settings-check" for="status-bar-kimi">
             <input type="checkbox" id="status-bar-kimi" data-status-bar-item="kimi" />
             <span>
@@ -7544,9 +7555,15 @@
         <span class="sb-figure sb-claude-pct" id="sb-codex-pct" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-codex-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>
-      <!-- Kimi after Codex — Orca's own bar order (`status-bar-defaults.ts:3-15`)
-           less its Antigravity slot: that gauge spent the shared Google login
-           on a quota API and went 2026-10-17 (t-62187). Hidden until it has something to
+      <!-- Antigravity reads the Google login saved by zo. -->
+      <span class="sb-claude" id="sb-antigravity" hidden>
+        <span class="sb-claude-ico" id="sb-antigravity-ico"></span>
+        <span class="sb-usage-bar" id="sb-antigravity-bar" hidden><span class="sb-usage-fill" id="sb-antigravity-fill"></span></span>
+        <span class="sb-figure sb-claude-pct" id="sb-antigravity-pct" hidden></span>
+        <svg class="icon sb-claude-warn" id="sb-antigravity-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
+      </span>
+      <!-- Kimi after Antigravity, still Orca's own bar order
+           (`status-bar-defaults.ts:3-15`). Hidden until it has something to
            say: a machine with no Kimi CLI on it should not carry an empty
            segment. -->
       <span class="sb-claude" id="sb-kimi" hidden>

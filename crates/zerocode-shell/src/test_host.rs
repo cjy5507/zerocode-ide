@@ -125,6 +125,48 @@ pub(crate) fn fake_program(dir: &Path, name: &str, body: &str) -> PathBuf {
     }
 }
 
+/// The one argument [`fake_cli_program`]'s own run of a fake hands it: the
+/// fake marks that it ran and does nothing else.
+const FIRST_RUN: &str = "zerocode-first-run";
+
+/// [`fake_program`] for a fake CLI a test times against a wall. A new
+/// program's first run can be slow on a loaded machine — here it spends
+/// `first_start` seconds more, to stand for that — so the first run is made
+/// here, before any wall starts, and the program comes back only once that
+/// run has finished: every run a test times is a later one.
+pub(crate) fn fake_cli_program(dir: &Path, name: &str, body: &str, first_start: u32) -> PathBuf {
+    let started = dir.join(format!("{name}.started"));
+    let finished = dir.join(format!("{name}.first-run"));
+    let slow = if first_start > 0 {
+        format!(
+            "[ -e \"{started}\" ] || {{ sleep {first_start}; : > \"{started}\"; }}\n",
+            started = started.display()
+        )
+    } else {
+        String::new()
+    };
+    let program = fake_program(
+        dir,
+        name,
+        &format!(
+            "{slow}[ \"$1\" != {FIRST_RUN} ] || {{ : > \"{finished}\"; exit 0; }}\n{body}",
+            finished = finished.display()
+        ),
+    );
+    let first = crate::proc::quiet_command(&program)
+        .arg(FIRST_RUN)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    assert!(
+        first.as_ref().is_ok_and(std::process::ExitStatus::success) && finished.exists(),
+        "the fake `{name}` did not finish its first run: {first:?}"
+    );
+    std::fs::remove_file(&finished).expect("the first run's mark");
+    program
+}
+
 /// A line the project-script runner executes that leaves an empty file at
 /// `marker`: `touch` where the runner is bash, `type nul` where it is
 /// `cmd.exe`.

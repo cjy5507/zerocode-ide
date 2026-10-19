@@ -2852,6 +2852,7 @@ mod tests {
                     retry_at_ms: None,
                     message: "HTTP 401".to_string(),
                     skip_cli_fallback: true,
+                    http_status: Some(401),
                 })
             },
         );
@@ -3201,6 +3202,7 @@ mod tests {
                     retry_at_ms: None,
                     message: "HTTP 401".to_string(),
                     skip_cli_fallback: true,
+                    http_status: Some(401),
                 })
             }
         }

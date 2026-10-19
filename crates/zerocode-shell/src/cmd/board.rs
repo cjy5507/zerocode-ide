@@ -1584,7 +1584,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     // says what the run holds now. The words ride the worker's road below,
     // owed and spent the same way.
     let coordinating = (reseating.is_none() && !fresh)
-        .then(|| crate::orchestration::coordinator_awaiting(&data_root, agent, &session))
+        .then(|| crate::orchestration::coordinator_awaiting(&data_root, agent, &session, &root))
         .flatten();
     let nudge = nudge.or_else(|| {
         coordinating

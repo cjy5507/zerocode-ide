@@ -34,6 +34,7 @@ mod gate_meter;
 mod gate_snapshot;
 pub(crate) mod hand_in_keep;
 mod mail_triage;
+mod project_scope;
 pub(crate) mod restart_census;
 mod stall_cause;
 mod step_effort;
@@ -919,14 +920,19 @@ pub(crate) fn coordinator_awaiting(
     root: &Path,
     agent: &str,
     session: &zerocode_core::ProviderSession,
+    folder: &Path,
 ) -> Option<CoordinatorStanding> {
     let actor = zerocode_core::orchestration::receipt_actor(agent, session.key, &session.id);
     let held = runtime()?;
     let image = held.actor.view().ok()?;
     let ledger = cached_ledger(&held, &image).ok()?;
+    // The project the conversation comes back in (t-65286): a run whose
+    // project was stated elsewhere is not this pane's to be told about.
+    let project = project_scope::folder_root(folder);
     ledger
         .runs()
         .iter()
+        .filter(|run| !run.scope(project.as_deref()).holds())
         .filter_map(|run| {
             let seat = run
                 .coordinator
@@ -5362,6 +5368,9 @@ enum Unpointed {
     PaneTaken,
     /// This window holds no pane for the address — a restart left it unbound.
     NoSeat,
+    /// The only pane holding the address works in another project than the
+    /// run's (t-65286): nothing is typed there, and the pane is not told.
+    OtherProject,
 }
 
 impl Unpointed {
@@ -5372,6 +5381,7 @@ impl Unpointed {
             Self::Guard(why) => why.token(),
             Self::PaneTaken => "pane_taken",
             Self::NoSeat => "no_seat",
+            Self::OtherProject => "other_project",
         }
     }
 
@@ -5404,6 +5414,10 @@ impl Unpointed {
             Self::NoSeat => {
                 "this window holds no pane for it — it restarted and the pane has not bound \
                  to the run again"
+            }
+            Self::OtherProject => {
+                "the pane that holds its seat works in another project than the run's, and a \
+                 run's mail is pointed only at panes of its own project"
             }
         }
     }
@@ -8373,6 +8387,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     // chair: the run, the chair's holder, this pane's terminal, and the
     // holder's terminal when the holder is this same conversation.
     let mut held_chairs: Vec<(String, String, u32, Option<u32>)> = Vec::new();
+    // The project each pane works in, read once a beat (t-65286).
+    let mut roots: std::collections::HashMap<u32, Option<String>> =
+        std::collections::HashMap::new();
     {
         let tables = crate::agent_teams::teams();
         let mut marks = pointed().lock().unwrap_or_else(|held| held.into_inner());
@@ -8406,6 +8423,11 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
              * seat's own `check` would be handed. */
             let mut seats: Vec<(String, u32, String)> = Vec::new();
             let mut leader_seated = false;
+            /* A bound leader pane of another project than the run's
+             * (t-65286): not seated, so the run's mail is told as held there
+             * rather than as seatless. */
+            let mut held_leader: Option<(u32, &zerocode_core::orchestration::RunProject, String)> =
+                None;
             for (id, team) in tables.iter() {
                 /* A leaderless team — its leader exited, its orphans still
                  * work in it — has no leader pane to point at; and where the
@@ -8434,15 +8456,35 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         (bound_here, conversation.as_deref(), run.coordinator_live())
                     {
                         match chair_for(host, &tables, holder, actor, team.leader_term) {
-                            Chair::Follows(left) => following.push(Following {
-                                run: run.id.clone(),
-                                team: id.clone(),
-                                pane: team.leader_pane.clone(),
-                                actor: conversation.clone(),
-                                from: holder.seat.clone(),
-                                leader_term: team.leader_term,
-                                left,
-                            }),
+                            /* Not into a pane of another project than the
+                             * run's (t-65286): the chair stays where it is,
+                             * and the window says why once. */
+                            Chair::Follows(left) => match project_scope::pane_scope(
+                                host,
+                                &mut roots,
+                                run,
+                                &run.address(),
+                                team.leader_term,
+                            ) {
+                                project_scope::PaneScope::Held(project, root) => {
+                                    project_scope::note_chair_held(
+                                        &run.id,
+                                        team.leader_term,
+                                        project,
+                                        &root,
+                                    );
+                                }
+                                project_scope::PaneScope::Noted
+                                | project_scope::PaneScope::Pass => following.push(Following {
+                                    run: run.id.clone(),
+                                    team: id.clone(),
+                                    pane: team.leader_pane.clone(),
+                                    actor: conversation.clone(),
+                                    from: holder.seat.clone(),
+                                    leader_term: team.leader_term,
+                                    left,
+                                }),
+                            },
                             Chair::Twin(open) => held_chairs.push((
                                 run.id.clone(),
                                 holder.seat.clone(),
@@ -8474,6 +8516,29 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * has cut no panes yet skips the seat, and the next beat
                  * recovers it. */
                 let leader_bound = bound_here || cut_panes_in.contains(id.as_str());
+                /* A leader pane that works in another project than the run's
+                 * is no seat for its mail and sits in none of its chairs
+                 * (t-65286): the run's project was stated where it was made,
+                 * and a letter for its coordinator typed here would be read by
+                 * another project's agent. A run whose project was only
+                 * inferred is written down and pointed as before. */
+                if leader_bound
+                    && let project_scope::PaneScope::Held(project, root) = project_scope::pane_scope(
+                        host,
+                        &mut roots,
+                        run,
+                        &run.address(),
+                        team.leader_term,
+                    )
+                {
+                    if bound_here && run.coordinator_live().is_none() {
+                        project_scope::note_chair_held(&run.id, team.leader_term, project, &root);
+                    }
+                    if held_leader.is_none() {
+                        held_leader = Some((team.leader_term, project, root));
+                    }
+                    continue;
+                }
                 if leader_bound {
                     leader_seated = true;
                     seats.push((run.address(), team.leader_term, chair.clone()));
@@ -8505,8 +8570,21 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
             let mut seatless: Vec<String> = Vec::new();
             // Live workers whose pane the person took over, and the pane.
             let mut taken: Vec<(String, u32)> = Vec::new();
+            /* Addresses whose only pane works in another project than the
+             * run's (t-65286): the pane, the run's project, the pane's. */
+            let mut crossed: Vec<(
+                String,
+                u32,
+                &zerocode_core::orchestration::RunProject,
+                String,
+            )> = Vec::new();
             if !leader_seated {
-                seatless.push(run.address());
+                match held_leader.take() {
+                    Some((term, project, root)) => {
+                        crossed.push((run.address(), term, project, root));
+                    }
+                    None => seatless.push(run.address()),
+                }
             }
             for worker in &run.workers {
                 if !worker.state.is_live() {
@@ -8539,11 +8617,21 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     .get(&worker.team)
                     .and_then(|team| team.term_of(&worker.pane))
                 {
-                    Some(term) => seats.push((
-                        zerocode_core::orchestration::worker_address(&worker.id),
-                        term,
-                        format!("{}/{}", worker.team, worker.pane),
-                    )),
+                    Some(term) => {
+                        let address = zerocode_core::orchestration::worker_address(&worker.id);
+                        match project_scope::pane_scope(host, &mut roots, run, &address, term) {
+                            project_scope::PaneScope::Held(project, root) => {
+                                crossed.push((address, term, project, root));
+                            }
+                            project_scope::PaneScope::Noted | project_scope::PaneScope::Pass => {
+                                seats.push((
+                                    address,
+                                    term,
+                                    format!("{}/{}", worker.team, worker.pane),
+                                ));
+                            }
+                        }
+                    }
                     // The plan wrote this worker and its first letter before the window opened its pane
                     // (t-34501): not seatless, only not seated yet.
                     None if delegate_is_seating(&worker.id) => {}
@@ -8582,6 +8670,45 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     Pointed {
                         newest: newest.to_string(),
                         term: None,
+                        standing: Standing::Seatless,
+                    },
+                );
+            }
+            /* Held, not seatless: a pane holds this address, and it works in
+             * another project than the run's (t-65286). Nothing is typed
+             * there and the pane is not told; the black box hears it once,
+             * and the mail's sender once per message — the same posture as a
+             * seat this window does not hold, under the mark that keeps it
+             * from being said twice. */
+            for (address, term, project, root) in crossed {
+                let key = (run.id.clone(), address.clone());
+                let Some(newest) = run.newest_pending(&address) else {
+                    marks.remove(&key);
+                    continue;
+                };
+                let said = marks.get(&key).is_some_and(|stood| {
+                    stood.newest == newest
+                        && stood.term == Some(term)
+                        && stood.standing == Standing::Seatless
+                });
+                if said {
+                    continue;
+                }
+                project_scope::note_pointer_held(&run.id, &address, term, project, &root);
+                if is_news(run, newest, now_ms) {
+                    unsaid.push(Unsaid {
+                        run: run.id.clone(),
+                        address: address.clone(),
+                        term: None,
+                        newest: newest.to_string(),
+                        why: Unpointed::OtherProject,
+                    });
+                }
+                marks.insert(
+                    key,
+                    Pointed {
+                        newest: newest.to_string(),
+                        term: Some(term),
                         standing: Standing::Seatless,
                     },
                 );
@@ -9153,6 +9280,10 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 },
             );
     }
+    /* The runs made before projects were recorded are read for one
+     * (t-65286), with every lock above let go: the ledger is written through
+     * the actor, and the team table is taken one lookup at a time. */
+    project_scope::infer_projects(host, &held, &rows, now_ms);
 }
 
 /* ---- the handover walk (§2.3) ------------------------------------------ */
@@ -10486,8 +10617,19 @@ fn run_seated(
         .get(team_id)
         .and_then(|team| team.term_of(pane))
         .and_then(|term| host.actor_for(term));
+    /* The project boundary (t-65286), asked before the plan for the reason
+     * the capability is: a refusal written after it would come after the
+     * effect. What comes back is the project the caller's pane works in,
+     * which a `run-create` writes on the run it makes. */
+    let gate = match project_scope::verb_gate(host, team_id, pane, argv, caller.as_deref(), now_ms)
+    {
+        Ok(gate) => gate,
+        Err(why) => return refused(why),
+    };
     let command =
-        match PlanCommand::checked(argv.to_vec(), team_id, pane, pane_token, caller, now_ms) {
+        match PlanCommand::checked(argv.to_vec(), team_id, pane, pane_token, caller, now_ms)
+            .and_then(|command| command.with_project(gate.root.clone()))
+        {
             Ok(command) => command.with_receipts(read_receipts(argv)),
             Err(why) => return refused_by_runtime(why),
         };
@@ -10570,6 +10712,7 @@ fn run_seated(
     rang(decided.requires_durability);
     let mut answered = carried(host, actor, decided, team_id, pane, pane_token, now_ms);
     drop(flight);
+    project_scope::listing(team_id, pane, argv, &gate, &mut answered);
     // The window's own half of a worker observation, laid over the answer on
     // the way out. `seat` first — it resolves a foreign row's terminal, which
     // `agentWait` then reads — and `agentWait` is a hook fact no ledger row
@@ -10969,6 +11112,30 @@ fn carried(
                 .is_none()
                 .then(|| worker_named(&decided.reply.stdout))
                 .flatten();
+            /* A summoned worker's checkout is opened only in its run's project
+             * (t-65286). The pane opens in the checkout the summons named, or
+             * in its leader's — a fresh worktree is cut from the leader's
+             * repository — so a leader of another project, or a summons naming
+             * another project's tree, gets no worker for a run whose project
+             * was stated: the reservation goes back, with the reason. A
+             * restart's reseat puts a worker back where it already was. */
+            if let Some(prepared) = decided.prepared_worker_start.as_ref() {
+                let leader = crate::agent_teams::teams()
+                    .get(team_id)
+                    .map(|team| team.leader_term);
+                let checkout = match prepared.inherit_checkout.as_deref() {
+                    Some(path) => Some(PathBuf::from(path)),
+                    None => leader.and_then(|leader| host.worktree_of(leader)),
+                };
+                if let Err(why) = project_scope::worker_checkout(
+                    prepared.project.as_ref(),
+                    &prepared.run,
+                    &prepared.worker,
+                    checkout.as_deref(),
+                ) {
+                    return roll_back_the_seat(actor, minted.as_deref(), now_ms, &why);
+                }
+            }
             let Some(epoch) = host_epoch() else {
                 return roll_back_the_seat(
                     actor,

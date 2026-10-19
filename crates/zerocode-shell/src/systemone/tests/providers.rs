@@ -1,6 +1,7 @@
 use super::*;
-use judgment_provider::{Protocol, Provider, ProviderKind};
-use zerocode_core::jev::JEV_USES;
+use crate::systemone::latest;
+use judgment_provider::{Protocol, Provider, ProviderKind, Refusal};
+use zerocode_core::jev::{JEV_USES, STALL};
 
 fn provider(base: String) -> Provider {
     Provider {
@@ -360,4 +361,173 @@ fn local_requests_carry_the_remaining_deadline_and_jev_requests_do_not() {
             previous_body = Some(body);
         }
     }
+}
+
+/// The words judgment-provider names its refusals by (`Refusal::token`), read
+/// off its source, so a refusal it gains is one these cases ask about.
+fn refusal_words() -> Vec<&'static str> {
+    include_str!("../../../../judgment-provider/src/lib.rs")
+        .split_once("pub const fn token(self)")
+        .and_then(|(_, rest)| rest.split_once("\n    }"))
+        .map_or("", |(table, _)| table)
+        .lines()
+        .filter_map(|line| line.split_once("=> \""))
+        .filter_map(|(_, rest)| rest.split('"').next())
+        .collect()
+}
+
+/// What local-judgment answers a question it refused with (`engine.rs`): its
+/// protocol error and the refusal's word, and beside the deadline's refusal
+/// the largest usage it can name.
+fn local_refusal(word: &str) -> String {
+    let mut said = json!({"error": local_judgment::Error::Protocol.token(), "refusal": word});
+    if word == Refusal::DeadlineBudget.token() {
+        said["usage"] = json!({
+            "model_calls": u64::MAX,
+            "deadline_budget_ms": u64::MAX,
+            "estimated_ms": f64::MAX,
+            "deadline_budget_reason": "unmeasured",
+        });
+    }
+    said.to_string()
+}
+
+/// The stall seat's one question, asked through a local provider at `base`.
+fn ask_locally(base: String, home: &Path, workspace: &Path) -> (Wire, Asked) {
+    let path = home.join("settings.json");
+    std::fs::write(&path, settings(&provider(base), workspace).to_string()).expect("settings");
+    let wire = Wire::at("http://127.0.0.1:1", "", Some(path));
+    let asked = wire.ask(
+        &STALL,
+        Some(workspace),
+        request_body(&json!("Open help; routine and ready."), &questions()),
+        Duration::from_secs(5),
+    );
+    (wire, asked)
+}
+
+/// A local server that turns a question away with a refusal judgment-provider
+/// names, in a `502` whose body is local-judgment's protocol error and that
+/// refusal's word, is told by the word rather than by its status: the
+/// question fails with the word, and the last request read back off the row
+/// its seat writes says it.
+#[test]
+fn a_local_refusal_is_told_by_its_word_up_to_the_last_request() {
+    let words = refusal_words();
+    assert!(
+        words.contains(&Refusal::DeadlineBudget.token()),
+        "judgment-provider's refusal words were not read: {words:?}"
+    );
+    let mut lost = Vec::new();
+    for word in words {
+        let home = tempfile::tempdir().expect("a zo home");
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let said = local_refusal(word);
+        assert!(
+            said.len() <= MAX_REFUSAL_BYTES,
+            "`{word}`'s refusal is past the bound: {said}"
+        );
+        let endpoint = Endpoint::serving("HTTP/1.1 502 Bad Gateway", said, 0);
+        let (wire, asked) = ask_locally(endpoint.base(), home.path(), workspace.path());
+        let mut row = json!({"at": 42, "outcome": asked.answer.as_ref().err()});
+        asked.spent.stamp(&mut row);
+        record_rows(
+            &STALL,
+            &ledger_of(&wire, &STALL).expect("the record"),
+            &[row],
+            42,
+        );
+        let last = latest::read(&wire, 43)
+            .last_request
+            .map(|last| last.outcome);
+        if asked.answer != Err(word.to_string()) || last.as_deref() != Some(word) {
+            lost.push((word, asked.answer, last));
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "a local refusal's word was lost before the last request: {lost:?}"
+    );
+}
+
+/// A local `502` keeps its status word unless its body, whole and in time, is
+/// local-judgment's protocol error naming a refusal judgment-provider names:
+/// an unknown word, free text, the protocol error alone, another error, no
+/// error, a page that is not JSON and a body past the bound all stay
+/// `http_502`, as does a body that breaks off, which is not waited out.
+#[test]
+fn a_local_502_that_names_no_known_refusal_keeps_its_status() {
+    let home = tempfile::tempdir().expect("a zo home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let deadline = Refusal::DeadlineBudget.token();
+    let protocol = local_judgment::Error::Protocol.token();
+    let mut told = Vec::new();
+    for said in [
+        json!({"error": protocol, "refusal": format!("{deadline}_spent")}).to_string(),
+        json!({"error": protocol, "refusal": "The model ran out of time."}).to_string(),
+        json!({"error": protocol}).to_string(),
+        json!({"error": local_judgment::Error::Busy.token(), "refusal": deadline}).to_string(),
+        json!({"refusal": deadline}).to_string(),
+        "<html><body>502 Bad Gateway</body></html>".to_string(),
+        json!({"error": protocol, "refusal": deadline, "pad": "x".repeat(MAX_REFUSAL_BYTES)})
+            .to_string(),
+    ] {
+        let endpoint = Endpoint::serving("HTTP/1.1 502 Bad Gateway", said.clone(), 0);
+        let (_, asked) = ask_locally(endpoint.base(), home.path(), workspace.path());
+        if asked.answer != Err(token_for(502)) {
+            told.push((said, asked.answer));
+        }
+    }
+    assert!(
+        told.is_empty(),
+        "a local 502 was told by a word it does not carry: {told:?}"
+    );
+
+    let held = MAX_REFUSAL_WAIT * 10;
+    for (hold, within) in [(Duration::ZERO, None), (held, Some(held / 2))] {
+        let started = std::time::Instant::now();
+        let (_, asked) = ask_locally(
+            refusing_brokenly("HTTP/1.1 502 Bad Gateway", local_refusal(deadline), hold),
+            home.path(),
+            workspace.path(),
+        );
+        assert_eq!(
+            asked.answer,
+            Err(token_for(502)),
+            "a body held {hold:?} and broken off keeps its status"
+        );
+        if let Some(within) = within {
+            assert!(
+                started.elapsed() < within,
+                "a refusal's body held {hold:?} is not waited out"
+            );
+        }
+    }
+}
+
+/// The same refusal from the Jev endpoint keeps its status: only a local
+/// server's refusal is told by its word.
+#[test]
+fn a_jev_502_keeps_its_status_whatever_its_body_names() {
+    let home = tempfile::tempdir().expect("a zo home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let path = home.path().join("settings.json");
+    let endpoint = Endpoint::serving(
+        "HTTP/1.1 502 Bad Gateway",
+        local_refusal(Refusal::DeadlineBudget.token()),
+        0,
+    );
+    let mut root = settings(&provider(endpoint.base()), workspace.path());
+    root["smart"]
+        .as_object_mut()
+        .expect("the smart settings")
+        .remove("judgmentProvider");
+    std::fs::write(&path, root.to_string()).expect("settings");
+    let asked = Wire::at(&endpoint.base(), "test-key", Some(path)).ask(
+        &STALL,
+        Some(workspace.path()),
+        request_body(&json!("Open help; routine and ready."), &questions()),
+        Duration::from_secs(5),
+    );
+    assert_eq!(asked.answer, Err(token_for(502)));
 }

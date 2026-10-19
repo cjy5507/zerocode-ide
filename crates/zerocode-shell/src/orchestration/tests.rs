@@ -23259,6 +23259,10 @@ fn a_late_turn_end_is_never_the_next_occupants_sound() {
     drop(window);
 }
 
+/// t-65286: a run is one project's — its mail is not pointed at a pane of
+/// another, its workers do not open there, and a verb from one is written
+/// down, then refused once the boundary is on (`tests/project_scope.rs`).
+mod project_scope;
 /// t-7812: the window restart restore roads, driven through the production
 /// doors of a private window (`tests/restore.rs`).
 mod restore;
