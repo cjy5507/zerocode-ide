@@ -11,7 +11,7 @@ use crate::{Error, Result, gguf, storage};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct Runtime {
+pub struct Runtime {
     pub archive: Artifact,
     pub executable: String,
     pub files: Vec<Artifact>,
@@ -44,7 +44,7 @@ impl Runtime {
                 .and_then(|name| name.to_str())
                 .ok_or(Error::Manifest)?;
             total = total.checked_add(artifact.bytes).ok_or(Error::TooLarge)?;
-            if !paths.insert(&artifact.path)
+            if !paths.insert(artifact.path.as_str())
                 || artifact.bytes == 0
                 || artifact.sha256.len() != 64
                 || !artifact.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -54,7 +54,7 @@ impl Runtime {
                 return Err(Error::Manifest);
             }
         }
-        if total > 256 * 1024 * 1024 || !paths.contains(&self.executable) {
+        if total > 256 * 1024 * 1024 || !paths.contains(self.executable.as_str()) {
             return Err(Error::Manifest);
         }
         Ok(())
@@ -90,6 +90,8 @@ impl Runtime {
             initial["nativeModelFile"] = json!(path);
             initial["inputTemplate"] = json!(template);
             initial["architecture"] = json!(info.architecture);
+            initial["tensorCount"] = json!(info.tensors);
+            initial["modelFileBytes"] = json!(info.file_bytes);
         }
         Ok(initial)
     }

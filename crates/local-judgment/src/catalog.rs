@@ -29,6 +29,7 @@ pub struct Artifact {
 pub enum EngineKind {
     Laya,
     TransformersSystemOne,
+    LlamaCpp,
     SystemOneServer,
 }
 
@@ -75,6 +76,8 @@ pub struct RuntimeProfile {
     pub validated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_rss_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<crate::llama::Runtime>,
 }
 
 fn validated() -> bool {
@@ -97,6 +100,8 @@ struct RuntimeExtension {
     runtime_files: Vec<Artifact>,
     validated_platforms: Vec<String>,
     max_rss_bytes: u64,
+    #[serde(default)]
+    native: Option<crate::llama::Runtime>,
 }
 
 #[derive(Deserialize)]
@@ -341,6 +346,13 @@ pub fn runtime_profiles() -> Result<Vec<RuntimeProfile>> {
         profile.runtime_files = extension.runtime_files;
         profile.validated = extension.validated_platforms.contains(&base.id);
         profile.max_rss_bytes = Some(extension.max_rss_bytes);
+        profile.native = extension.native;
+        if (profile.engine == EngineKind::LlamaCpp) != profile.native.is_some() {
+            return Err(Error::Manifest);
+        }
+        if let Some(native) = &profile.native {
+            native.validate()?;
+        }
         validate_files(&profile.wheels)?;
         validate_files(&profile.runtime_files)?;
         profiles.push(profile);
@@ -361,7 +373,12 @@ impl Model {
             || !text(&self.quality, 80)
             || self.source.len() > 2048
             || (!https(&self.source) && !local_source(&self.source))
-            || self.protocol != judgment_provider::Protocol::SystemOne
+            || self.protocol
+                != if self.engine == EngineKind::LlamaCpp {
+                    judgment_provider::Protocol::OpenaiJson
+                } else {
+                    judgment_provider::Protocol::SystemOne
+                }
             || self
                 .server_model_id
                 .as_ref()
@@ -383,7 +400,11 @@ impl Model {
         let weights_bytes: u64 = self
             .files
             .iter()
-            .filter(|file| file.path.ends_with(".safetensors"))
+            .filter(|file| {
+                file.path.ends_with(".safetensors")
+                    || (self.engine == EngineKind::LlamaCpp
+                        && file.path.to_ascii_lowercase().ends_with(".gguf"))
+            })
             .map(|file| file.bytes)
             .sum();
         if weights_bytes != 0
@@ -393,9 +414,17 @@ impl Model {
         {
             return Err(Error::Manifest);
         }
+        if self.engine == EngineKind::LlamaCpp
+            && (self.files.len() != 1 || self.native_format.as_deref() != Some("gguf-v3"))
+        {
+            return Err(Error::Manifest);
+        }
         for file in &self.files {
-            if (!file.path.ends_with(".json") && !file.path.ends_with(".safetensors"))
-                || file.path.eq_ignore_ascii_case("receipt.json")
+            if (if self.engine == EngineKind::LlamaCpp {
+                !file.path.to_ascii_lowercase().ends_with(".gguf")
+            } else {
+                !file.path.ends_with(".json") && !file.path.ends_with(".safetensors")
+            }) || file.path.eq_ignore_ascii_case("receipt.json")
                 || file.path.eq_ignore_ascii_case("ownership.json")
                 || file.url.len() > 2048
                 || file.package.is_some()
@@ -413,7 +442,11 @@ impl Model {
         self.weights_bytes.unwrap_or_else(|| {
             self.files
                 .iter()
-                .filter(|file| file.path.ends_with(".safetensors"))
+                .filter(|file| {
+                    file.path.ends_with(".safetensors")
+                        || (self.engine == EngineKind::LlamaCpp
+                            && file.path.to_ascii_lowercase().ends_with(".gguf"))
+                })
                 .map(|file| file.bytes)
                 .sum()
         })
@@ -442,6 +475,10 @@ fn text(value: &str, limit: usize) -> bool {
 impl RuntimeProfile {
     pub fn download_bytes(&self) -> u64 {
         self.python.bytes
+            + self
+                .native
+                .as_ref()
+                .map_or(0, |native| native.archive.bytes)
             + self
                 .wheels
                 .iter()
