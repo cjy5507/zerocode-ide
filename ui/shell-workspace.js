@@ -4941,38 +4941,71 @@ function makeWorktreeNode(worktree, held) {
  * 것은 접힌 저장소가 행을 짓지 않는 것과 같은 이유로. */
 
 /* 아직 재지 못한 행의 키. 원본의 카드 추정치는 116(virtual-rows.ts:101)이지만
- * 그것은 그쪽 카드의 해부학이고, 이 목록의 두 줄 행은 44에 선다 — 추정치는
- * 첫 프레임의 스페이서만 정하고 실측이 곧 갈아 끼운다. */
+ * 그것은 그쪽 카드의 해부학이고, 이 목록의 두 줄 행은 44에 선다 — 아무 행도
+ * 재지 못한 동안의 셈이다. 무엇이든 재고 나면 재지 못한 행은 쉴 때 정한
+ * 셈(guessSidebarRows)에 선다. */
 const SIDEBAR_ROW_ESTIMATE = 44;
 const SIDEBAR_OVERSCAN = 10;
+/* 사람이 스크롤하는 중: 이 스크롤러에 스크롤이나 휠 이벤트가 온 지 이만큼이 안
+ * 됐다 — 원본 isScrollingResetDelay의 기본값. 그동안 창은 scrollTop을 쓰지 않는다. */
+const SIDEBAR_REST_MS = 150;
 const sidebarRowHeights = new Map();
+// 잰 행이 잴 때 무슨 꼴이었나(sidebarRowKind) — 같은 꼴의 실측이 재지 못한 행의 셈이 된다.
+const sidebarRowKinds = new Map();
+const sidebarRowGuesses = new Map();
+let sidebarGuessesStale = false;
 const sidebarScroller = el("sidebar-scroll");
+// 빚이 서는 자리(setSidebarDebt): 스크롤러의 맨 앞.
+const sidebarDebtLead = document.createElement("div");
+sidebarScroller.prepend(sidebarDebtLead);
 let sidebarWindows = [];
 let sidebarWindowFrame = 0;
+// 스크롤 중에 앵커 위에서 생긴 높이의 차(setSidebarDebt).
+let sidebarDebt = 0;
+let sidebarScrolledAt = -Infinity;
+let sidebarSettleTimer = 0;
+let sidebarCarry = null;
 
-/* 행 높이가 움직이면(에이전트 줄이 서고 눕는다) 캐시를 고치고 스페이서를
- * 다시 잰다. 뷰포트 위에서 자란 행은 그 차이만큼 스크롤을 밀어 보이는 행이
- * 제자리에 남는다 — 원본의 shouldAdjustScrollPositionOnItemSizeChange가
- * 지키는 앵커. (원본은 사용자 스크롤 중의 보정을 벽시계로 억제하지만, 이
- * 목록의 행은 휠 중에 재측정되는 리치 카드가 아니라 훅이 올 때만 자라므로
- * 억제 없이 보정한다 — 기록된 이탈.) */
+/* 행 높이가 움직이면(에이전트 줄이 서고 눕는다) 캐시를 고친다. 움직이기 전에
+ * 위 가장자리가 뷰포트 위에 있던 행(걸친 행도)은 그 차만큼 보이는 행을 민다.
+ * 쉴 때는 그만큼 스크롤을 밀어 보이는 행이 제자리에 남는다 — 원본의
+ * shouldAdjustScrollPositionOnItemSizeChange가 지키는 앵커. 사람이 스크롤하는
+ * 중에는 쓰지 않고 빚으로 진다: 원본처럼 사용자 스크롤 중의 보정은 누른다.
+ * 그 쓰기가 위로 올리는 손 밑에서 목록을 아래로 밀었다
+ * (「한번에 안올라가고 내려갓다 버벅거림」, t-63568). 항목은 위에서부터 본다 —
+ * 앞의 행이 자란 만큼 뒤의 행은 이미 밀려 있으니 자라기 전의 자리로 가른다. */
 const sidebarRowResize = new ResizeObserver((entries) => {
   const bounds = sidebarScroller.getBoundingClientRect();
+  const resting = !sidebarScrolling();
+  const boxes = entries
+    .map((entry) => ({ entry, box: entry.target.getBoundingClientRect() }))
+    .sort((a, b) => a.box.top - b.box.top);
+  let grown = 0;
   let moved = false;
-  for (const entry of entries) {
+  for (const { entry, box } of boxes) {
     const path = entry.target.dataset.rowKey;
     if (!path) continue;
-    const box = entry.target.getBoundingClientRect();
     if (box.height <= 0) continue;
     const was = sidebarRowHeights.get(path);
     if (was === box.height) continue;
     sidebarRowHeights.set(path, box.height);
+    sidebarRowKinds.set(path, sidebarRowKind(path));
     moved = true;
-    if (was !== undefined && box.bottom < bounds.top) {
-      sidebarScroller.scrollTop += box.height - was;
+    if (was === undefined) continue;
+    if (box.top - grown < bounds.top) {
+      if (resting) {
+        sidebarScroller.scrollTop += box.height - was;
+      } else {
+        oweSidebarDrift(box.height - was);
+      }
     }
+    grown += box.height - was;
   }
-  if (moved) scheduleSidebarWindows();
+  if (moved) {
+    sidebarGuessesStale = true;
+    armSidebarSettle();
+    scheduleSidebarWindows();
+  }
 });
 
 /* 한 절의 행 목록 — 창이 실체화 범위를 정하고, 나머지는 스페이서가 선다.
@@ -4984,7 +5017,12 @@ function windowedWorktreeList(members, held) {
   top.className = "wt-window-pad";
   const bottom = document.createElement("div");
   bottom.className = "wt-window-pad";
+  // 첫 그리기 전에도 절은 제 높이로 선다 — 빈 절로 리플로되면 브라우저가
+  // scrollTop을 잘라 손 밑의 자리를 잃는다.
+  bottom.style.height = `${members.reduce((sum, worktree) => sum + sidebarRowHeight(worktree.path), 0)}px`;
   list.append(top, bottom);
+  // 재빌드가 데려온 행에는 아직 셈이 없을 수 있다.
+  if (members.length) sidebarGuessesStale = true;
   sidebarWindows.push({
     list,
     top,
@@ -4993,18 +5031,20 @@ function windowedWorktreeList(members, held) {
     held,
     index: new Map(members.map((worktree, at) => [worktree.path, at])),
     live: new Map(),
+    start: 0,
+    end: 0,
   });
   return list;
 }
 
 function renderSidebarWindow(record) {
   const { members } = record;
-  // 접두 합 — 실측이 있으면 실측, 없으면 추정치. 수백 행에 O(n)은 스크롤
+  // 접두 합 — 실측이 있으면 실측, 없으면 쉴 때 정한 셈. 수백 행에 O(n)은 스크롤
   // 프레임의 소음 밑이다.
   const offsets = new Array(members.length + 1);
   offsets[0] = 0;
   for (let i = 0; i < members.length; i += 1) {
-    offsets[i + 1] = offsets[i] + (sidebarRowHeights.get(members[i].path) ?? SIDEBAR_ROW_ESTIMATE);
+    offsets[i + 1] = offsets[i] + sidebarRowHeight(members[i].path);
   }
   const bounds = sidebarScroller.getBoundingClientRect();
   // 스페이서 위 가장자리가 곧 0번 행의 자리다 — 스크롤 좌표를 셈할 것 없이
@@ -5018,7 +5058,9 @@ function renderSidebarWindow(record) {
     // 같은 값이고, 시험대처럼 판이 아직 눕혀지지 않은 곳에서 행이 사라지는
     // 것보다 낫다).
     end = members.length;
-  } else if (members.length && viewEnd > 0 && viewStart < offsets[members.length]) {
+  } else if (members.length && viewEnd > -bounds.height && viewStart < offsets[members.length] + bounds.height) {
+    // 한 화면 안의 이웃 절도 뷰포트 쪽 가장자리에 overscan만큼 선다 — WebKit은 스크롤의 새 자리를 스크롤
+    // 이벤트보다 먼저 그리므로, 비어 있는 이웃 절은 그 한 프레임 동안 빈 스페이서로 비친다.
     while (start < members.length && offsets[start + 1] <= viewStart) start += 1;
     end = start;
     while (end < members.length && offsets[end] < viewEnd) end += 1;
@@ -5058,23 +5100,30 @@ function renderSidebarWindow(record) {
       record.list.insertBefore(node, cursor);
     }
   }
-  if (built) {
-    // 방금 세운 행을 한 번의 리플로로 재고, 스페이서는 실측으로 다시 셈한다.
-    for (const [path, node] of record.live) {
-      const height = node.getBoundingClientRect().height;
-      if (height > 0) sidebarRowHeights.set(path, height);
-    }
-    for (let i = 0; i < members.length; i += 1) {
-      offsets[i + 1] = offsets[i] + (sidebarRowHeights.get(members[i].path) ?? SIDEBAR_ROW_ESTIMATE);
-    }
-  }
   record.top.style.height = `${offsets[start]}px`;
   record.bottom.style.height = `${offsets[members.length] - offsets[end]}px`;
+  record.start = start;
+  record.end = end;
   return built;
 }
 
+/* 한 번의 그리기. 앵커를 먼저 읽고, 창을 옮겨 새 행이 다 입은 뒤에 산 행을
+ * 모두 잰다. 앵커가 사람의 스크롤 말고 움직인 만큼은 되돌린다 — 쉴 때는
+ * scrollTop으로, 스크롤 중에는 빚으로. 쉴 때는 창을 옮기기 전에 정산한다
+ * (settleSidebarWindows). 꼭대기에서는 빚을 쓰기 없이 바로 갚는다 — 더 오를
+ * 데가 없으니 끊을 스크롤도 없고, 목록이 빚만큼 내려앉아 0번 행이 제자리에
+ * 선다. 재빌드가 넘긴 빚은 창을 재기 전에 다시 진다 — 새 창이 옛 판과 같은
+ * 자리에서 선다. */
 function renderSidebarWindows() {
   if (!sidebarWindows.length) return;
+  const carried = sidebarCarry;
+  sidebarCarry = null;
+  if (carried) setSidebarDebt(carried.debt);
+  const resting = !sidebarScrolling();
+  const atTop = sidebarScroller.scrollTop <= 0;
+  const anchor = atTop ? null : carried ? carried.anchor : readSidebarAnchor();
+  if (atTop) setSidebarDebt(0);
+  if (resting) settleSidebarWindows(anchor);
   let built = false;
   for (const record of sidebarWindows) built = renderSidebarWindow(record) || built;
   // 스크롤이 새로 세운 행은 지은 자리에서 다 입는다(makeWorktreeNode) —
@@ -5084,6 +5133,184 @@ function renderSidebarWindows() {
     paintWorktreeAgents();
     paintWorktreePortPins();
   }
+  measureSidebarRows();
+  const top = anchor ? sidebarAnchorTop(anchor) : null;
+  if (top !== null && top !== anchor.top) {
+    if (resting) {
+      sidebarScroller.scrollTop += top - anchor.top;
+    } else {
+      oweSidebarDrift(top - anchor.top);
+    }
+  }
+  if (sidebarDebt || sidebarGuessesStale) armSidebarSettle();
+}
+
+/* 쉴 때의 정산, 창을 옮기기 전에: 빚을 갚고, 재지 못한 행을 새 셈으로 다시
+ * 깔되 선 행은 그대로 두고, 앵커를 한 번의 쓰기로 제자리에 돌린다. 창은
+ * 그다음, 사람이 선 자리에서 옮긴다 — 셈을 바꾼 채 창부터 옮기면 바뀐 만큼
+ * 엉뚱한 자리에 창이 서고, 앵커가 창 밖으로 밀려 붙들 것이 없어진다. 재빌드가
+ * 넘긴 앵커는 아직 서지 않아 새 셈을 가로질러 붙들 수 없으니, 셈은 다음
+ * 정산으로 미룬다. */
+function settleSidebarWindows(anchor) {
+  const owed = sidebarDebt;
+  setSidebarDebt(0);
+  const standing = anchor !== null && sidebarAnchorTop(anchor) !== null;
+  if (sidebarGuessesStale && (standing || anchor === null)) {
+    guessSidebarRows();
+    for (const record of sidebarWindows) padSidebarWindow(record);
+  }
+  const back = standing ? sidebarAnchorTop(anchor) - anchor.top : owed;
+  if (back) sidebarScroller.scrollTop += back;
+}
+
+// 선 행은 그대로, 스페이서만 지금의 셈으로 — 정산이 창을 옮기기 전에 깐다.
+function padSidebarWindow(record) {
+  let above = 0;
+  let below = 0;
+  record.members.forEach((worktree, at) => {
+    if (at < record.start) above += sidebarRowHeight(worktree.path);
+    else if (at >= record.end) below += sidebarRowHeight(worktree.path);
+  });
+  record.top.style.height = `${above}px`;
+  record.bottom.style.height = `${below}px`;
+}
+
+/* 앵커: 위 가장자리가 뷰포트 안에 선 첫 행과 그 자리. 그 위의 산 행이 캐시와
+ * 다르면(ResizeObserver가 아직 알리지 않은 변화) 이번 측정이 그 차를 캐시에
+ * 들여 관찰자는 그 행을 지나간다 — 그래서 그 차를 뺀 자리, 사람이 마지막으로
+ * 본 자리를 든다. 뷰포트에 선 행이 없으면(접힌 절만 보인다) 위 가장자리가
+ * 뷰포트 안에 선 첫 절을 든다. */
+function readSidebarAnchor() {
+  const bounds = sidebarScroller.getBoundingClientRect();
+  let pending = 0;
+  for (const record of sidebarWindows) {
+    for (let node = record.top.nextElementSibling; node && node !== record.bottom; node = node.nextElementSibling) {
+      const path = node.dataset.rowKey;
+      if (!path) continue;
+      const box = node.getBoundingClientRect();
+      if (box.top >= bounds.top && box.top < bounds.bottom) return { path, node, top: box.top - pending };
+      const was = sidebarRowHeights.get(path);
+      if (was !== undefined && box.height > 0) pending += box.height - was;
+    }
+  }
+  for (const node of worktreeList.children) {
+    const { top } = node.getBoundingClientRect();
+    if (top >= bounds.top && top < bounds.bottom) return { path: null, node, top: top - pending };
+  }
+  return null;
+}
+
+// 앵커의 지금 자리. 행은 경로로 다시 찾는다 — 재빌드 뒤에는 노드가 새것이다.
+function sidebarAnchorTop(anchor) {
+  if (anchor.path === null) return anchor.node.isConnected ? anchor.node.getBoundingClientRect().top : null;
+  for (const record of sidebarWindows) {
+    const node = record.live.get(anchor.path);
+    if (node) return node.getBoundingClientRect().top;
+  }
+  return null;
+}
+
+/* 산 행을 모두 한 번의 리플로로 잰다 — 에이전트 줄과 포트 핀을 입은 뒤라 이것이
+ * 행의 높이다. 그 전에 재면 줄이 서기 전의 높이가 캐시에 들고, 관찰자가 줄의 높이를
+ * 다시 민다. */
+function measureSidebarRows() {
+  for (const record of sidebarWindows) {
+    for (const [path, node] of record.live) {
+      const height = node.getBoundingClientRect().height;
+      if (height <= 0 || sidebarRowHeights.get(path) === height) continue;
+      sidebarRowHeights.set(path, height);
+      sidebarRowKinds.set(path, sidebarRowKind(path));
+      sidebarGuessesStale = true;
+    }
+  }
+}
+
+// 행의 꼴: 에이전트 줄의 수와 그중 일하는 줄의 수 — 행의 높이를 가르는 것이 그 둘이다.
+function sidebarRowKind(path) {
+  const rows = worktreeAgentRows(path);
+  let live = 0;
+  for (const row of rows) if (LIVE_HOOK_STATES.has(row.state)) live += 1;
+  return `${rows.length}/${live}`;
+}
+
+function sidebarRowHeight(path) {
+  return sidebarRowHeights.get(path) ?? sidebarRowGuesses.get(path) ?? SIDEBAR_ROW_ESTIMATE;
+}
+
+/* 재지 못한 행의 셈: 같은 꼴로 잰 행들의 평균, 없으면 그 절에서 잰 행들의 평균,
+ * 없으면 잰 행 전부의 평균, 아무것도 재지 못했으면 추정치. 쉴 때의 그리기만
+ * 부른다 — 몸짓 중에 셈이 바뀌면 스페이서가 손 밑에서 움직인다. */
+function guessSidebarRows() {
+  sidebarGuessesStale = false;
+  sidebarRowGuesses.clear();
+  const kinds = new Map();
+  let sum = 0;
+  for (const [path, height] of sidebarRowHeights) {
+    const kind = sidebarRowKinds.get(path);
+    const like = kinds.get(kind) ?? { sum: 0, count: 0 };
+    like.sum += height;
+    like.count += 1;
+    kinds.set(kind, like);
+    sum += height;
+  }
+  const mean = sidebarRowHeights.size ? sum / sidebarRowHeights.size : SIDEBAR_ROW_ESTIMATE;
+  for (const record of sidebarWindows) {
+    let sectionSum = 0;
+    let sectionCount = 0;
+    for (const worktree of record.members) {
+      const height = sidebarRowHeights.get(worktree.path);
+      if (height === undefined) continue;
+      sectionSum += height;
+      sectionCount += 1;
+    }
+    const section = sectionCount ? sectionSum / sectionCount : mean;
+    for (const worktree of record.members) {
+      if (sidebarRowHeights.has(worktree.path)) continue;
+      const like = kinds.get(sidebarRowKind(worktree.path));
+      sidebarRowGuesses.set(worktree.path, like ? like.sum / like.count : section);
+    }
+  }
+}
+
+function sidebarScrolling() {
+  return performance.now() - sidebarScrolledAt < SIDEBAR_REST_MS;
+}
+
+function markSidebarScroll() {
+  sidebarScrolledAt = performance.now();
+}
+
+/* 쉼을 기다린다: 마지막 스크롤이나 휠에서 SIDEBAR_REST_MS가 지나면, 갚을 빚이나
+ * 다시 정할 셈이 있을 때 그리기 한 번이 정산한다. 제 쓰기가 낸 스크롤 이벤트는
+ * 다음 정산을 늦출 뿐이다. */
+function armSidebarSettle() {
+  if (!sidebarSettleTimer) sidebarSettleTimer = setTimeout(settleSidebar, SIDEBAR_REST_MS);
+}
+
+function settleSidebar() {
+  sidebarSettleTimer = 0;
+  const quiet = performance.now() - sidebarScrolledAt;
+  if (quiet < SIDEBAR_REST_MS) {
+    sidebarSettleTimer = setTimeout(settleSidebar, SIDEBAR_REST_MS - quiet);
+  } else if (sidebarDebt || sidebarGuessesStale) {
+    renderSidebarWindows();
+  }
+}
+
+/* 빚은 스크롤러 맨 앞의 빈 블록이 음수 margin-top으로 진다: 앵커 위가 자란 만큼
+ * 내용 전체를 끌어올려 보이는 행도 scrollHeight도 그대로 두므로 브라우저가 스크롤을
+ * 자를 일이 없고, 스페이서는 언제나 제 행들의 셈과 같다. 절마다 스페이서에 지우면
+ * 꼭대기 절의 스페이서가 빚보다 작아질 때 갈 곳이 없고, 목록(#worktrees)에 지우면
+ * 그 위의 정리 문(#wsclean-entry)을 덮는다 — 맨 앞에서 지면 그 둘이 한 몸으로 움직여,
+ * 정리 문이 나고 들어도 서로 겹치지 않는다. */
+function setSidebarDebt(debt) {
+  if (debt === sidebarDebt) return;
+  sidebarDebt = debt;
+  sidebarDebtLead.style.marginTop = debt ? `${-debt}px` : "";
+}
+
+function oweSidebarDrift(drift) {
+  setSidebarDebt(sidebarDebt + drift);
 }
 
 function scheduleSidebarWindows() {
@@ -5095,30 +5322,50 @@ function scheduleSidebarWindows() {
 }
 
 sidebarScroller.addEventListener("scroll", scheduleSidebarWindows, { passive: true });
+// 꼭대기에서 더 오르려는 휠은 스크롤 이벤트를 내지 않는다 — 그래도 스크롤하는 중이다.
+sidebarScroller.addEventListener("scroll", markSidebarScroll, { passive: true });
+sidebarScroller.addEventListener("wheel", markSidebarScroll, { passive: true });
 window.addEventListener("resize", scheduleSidebarWindows);
 
 /* 재빌드는 창을 전부 버린다 — 목록 노드가 통째로 갈리므로 관찰도 기록도
- * 옛 DOM의 것이다. 실측 캐시만 산다: 경로가 키라서 다음 판에서도 참이다. */
+ * 옛 DOM의 것이다. 실측 캐시만 산다: 경로가 키라서 다음 판에서도 참이다. 손 밑의
+ * 행과 빚은 다음 그리기로 넘긴다 — 새 창이 같은 빚 아래 같은 자리에서 그 행을
+ * 세운다. 빚은 여기서 내려놓으므로, 팀 판이 목록을 대신하면 그 판은 빚 없이
+ * 선다. 모든 재빌드가 지기 전에 여기를 지나므로, 넘긴 것이 다음 판보다 오래
+ * 살지 않는다. */
 function dropSidebarWindows() {
+  sidebarCarry = { anchor: readSidebarAnchor(), debt: sidebarDebt };
+  setSidebarDebt(0);
   sidebarRowResize.disconnect();
   sidebarWindows = [];
 }
 
 /* 창 밖의 행으로 스크롤을 데려간다 — scrollIntoView는 실체화된 행에만 있으므로
- * 접두 합으로 자리를 셈해 스크롤을 놓고, 같은 숨에 창을 다시 그려 행을 세운다. */
+ * 접두 합으로 자리를 셈해 스크롤을 놓고, 같은 숨에 창을 다시 그려 행을 세운다.
+ * 데려가기는 사람의 스크롤이 아니라 빚은 먼저 내려놓는다. 쉴 때의 그리기가 그
+ * 사이 셈을 다시 정해 행이 서지 않았으면 새 셈으로 한 번 더 놓고, 세운 행이 셈과
+ * 다른 자리에 서면(재지 못한 행이 셈과 다른 높이로 섰다) 그 차만큼 더 놓는다. */
 function scrollSidebarToPath(path) {
   for (const record of sidebarWindows) {
     const at = record.index.get(path);
     if (at === undefined) continue;
-    let offset = 0;
-    for (let i = 0; i < at; i += 1) {
-      offset += sidebarRowHeights.get(record.members[i].path) ?? SIDEBAR_ROW_ESTIMATE;
-    }
+    setSidebarDebt(0);
     const bounds = sidebarScroller.getBoundingClientRect();
-    const rowsTop = record.top.getBoundingClientRect().top;
-    sidebarScroller.scrollTop +=
-      rowsTop + offset - bounds.top - Math.max(0, (bounds.height - SIDEBAR_ROW_ESTIMATE) / 2);
-    renderSidebarWindows();
+    const want = bounds.top + Math.max(0, (bounds.height - SIDEBAR_ROW_ESTIMATE) / 2);
+    for (let tries = 0; tries < 2 && !record.live.has(path); tries += 1) {
+      let offset = 0;
+      for (let i = 0; i < at; i += 1) {
+        offset += sidebarRowHeight(record.members[i].path);
+      }
+      sidebarScroller.scrollTop += record.top.getBoundingClientRect().top + offset - want;
+      renderSidebarWindows();
+    }
+    const node = record.live.get(path);
+    const off = node ? node.getBoundingClientRect().top - want : 0;
+    if (off) {
+      sidebarScroller.scrollTop += off;
+      renderSidebarWindows();
+    }
     return;
   }
 }
