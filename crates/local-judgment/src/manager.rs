@@ -1998,7 +1998,56 @@ impl Manager {
         Apply: FnOnce(&Provider, &str, &Binding) -> Result<()> + Send + 'static,
         Guard: Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync + 'static,
     {
-        let _ = (allowed, callbacks);
+        if !allowed {
+            return Ok(self.snapshot());
+        }
+        let Some(intent) = RunIntent::read(&self.run_intent_path) else {
+            return Ok(self.snapshot());
+        };
+        let Ok(selected) = selection::read(&self.settings) else {
+            return Ok(self.snapshot());
+        };
+        if !intent.matches(&selected) {
+            return Ok(self.snapshot());
+        }
+        let Ok(model) = self.model(&intent.model_id, &intent.revision) else {
+            return Ok(self.snapshot());
+        };
+        let Ok(profile) = self.model_profile(&model).cloned() else {
+            return Ok(self.snapshot());
+        };
+        if !self.store.installed(&model)
+            || !self.store.runtime_ready(&profile)
+            || model.fingerprint().ok().as_ref() != Some(&intent.manifest_fingerprint)
+        {
+            return Ok(self.snapshot());
+        }
+        let mut inner = lock(&self.inner);
+        if inner.restore_tried {
+            drop(inner);
+            return Ok(self.snapshot());
+        }
+        if inner.running.is_some() || inner.recovering.is_some() {
+            return Err(Error::Busy);
+        }
+        let (operation, cancel) = self.reserve(&mut inner, "restore", Some(&model), 0)?;
+        inner.restore_tried = true;
+        inner.boot_restore = Some(intent.clone());
+        inner.server = ServerInfo {
+            state: "starting",
+            model_id: Some(model.id.clone()),
+            ..ServerInfo::default()
+        };
+        let request = RestoreRequest {
+            model,
+            profile,
+            intent,
+            generation: inner.generation,
+        };
+        drop(inner);
+        self.emit();
+        let manager = self.clone();
+        tokio::spawn(manager.restore_run(operation, cancel, request, callbacks));
         Ok(self.snapshot())
     }
 
