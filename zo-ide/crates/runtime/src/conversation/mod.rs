@@ -79,7 +79,10 @@ pub use reminders::{
     build_design_guidance_reminder, DESIGN_GUIDANCE_REMINDER_PREFIX, PRELUDE_FANNED_OUT_REMINDER,
     ROUTE_HINT_REMINDER_PREFIX,
 };
-pub use tool::{is_fan_out_tool, ConcurrentDispatchFn, LongRunningPredicate, StaticToolExecutor, ToolExecutor};
+pub use tool::{
+    is_fan_out_tool, ConcurrentDispatchFn, ConcurrentResultDispatchFn, LongRunningPredicate,
+    ResolvedToolCall, StaticToolExecutor, ToolExecutionResult, ToolExecutor,
+};
 use tool::rides_a_wave;
 
 use helpers::{
@@ -95,7 +98,7 @@ use tool::{
     is_concurrency_safe, is_long_running, sleep_tool_cut_short, sleep_tool_execution_input,
     tool_execution_input, unblock_tool_execute,
 };
-use repetition::{ReadFileRange, ToolBatchRepetitionHardStops};
+use repetition::{ReadFileRange, SurfaceRepetitionState, ToolBatchRepetitionHardStops};
 // Turn-stop policy (cost breaker vs behavior heuristic). Shared with the
 // benchmark harness through `decision-core`, so the live loops cannot drift into
 // a second copy of the rule. Child modules reach these through `super::`.
@@ -798,6 +801,12 @@ pub struct ConversationRuntime<C, T> {
     /// When set, concurrency-safe tools (Read, Glob, Grep, etc.) are
     /// executed in parallel via `spawn_blocking` instead of sequentially.
     concurrent_dispatch: Option<ConcurrentDispatchFn>,
+    concurrent_result_dispatch: Option<ConcurrentResultDispatchFn>,
+    surface_repetition_state: SurfaceRepetitionState,
+    // Call classification belongs to the ordinary repetition counters, not
+    // to the bounded table of attested host records.
+    surface_tool_fingerprints: std::collections::HashSet<u64>,
+    resolved_tool_use_fingerprints: std::cell::RefCell<std::collections::HashMap<String, (u64, u64, u64)>>,
     /// User-facing auto-compaction gate. Emergency/request-building compaction
     /// remains available to avoid provider context-window failures.
     auto_compaction_enabled: bool,
@@ -1816,6 +1825,10 @@ where
             session_tracer: None,
             async_api_client: None,
             concurrent_dispatch: None,
+            concurrent_result_dispatch: None,
+            surface_repetition_state: SurfaceRepetitionState::default(),
+            surface_tool_fingerprints: std::collections::HashSet::new(),
+            resolved_tool_use_fingerprints: std::cell::RefCell::default(),
             auto_compaction_enabled: feature_config.auto_compact_enabled(),
             team_inbox_digest_enabled: feature_config.team_inbox_digest_enabled(),
             team_inbox_digest_max_updates: feature_config.team_inbox_digest_max_updates(),
@@ -3024,7 +3037,7 @@ where
                 });
             }
 
-            let mut precomputed: HashMap<usize, (String, bool)> = HashMap::new();
+            let mut precomputed: HashMap<usize, (ToolExecutionResult, bool)> = HashMap::new();
             // The waves: consecutive reads and spawns run side by side when the
             // serial pass below reaches them (`parallel_waves`). This sync path
             // spawns a raw OS thread per tool, so each wave is capped at
@@ -3048,25 +3061,25 @@ where
             for (idx, p) in prepared.iter().enumerate() {
                 if waves.peek().is_some_and(|wave| wave[0] == idx) {
                     let wave = waves.next().unwrap_or_default();
-                    if let Some(dispatch) = &self.concurrent_dispatch {
+                    if let Some(dispatch) = self.result_dispatch() {
                         for batch in wave.chunks(MAX_PARALLEL_SAFE_TOOL_DISPATCHES) {
                             let mut handles = Vec::with_capacity(batch.len());
                             for &idx in batch {
                                 let p = &prepared[idx];
-                                let dispatch = Arc::clone(dispatch);
+                                let dispatch = Arc::clone(&dispatch);
                                 let name = p.tool_name.clone();
                                 let input = p.effective_input.to_string();
                                 handles.push((
                                     idx,
                                     std::thread::spawn(move || match dispatch(&name, &input) {
                                         Ok(output) => (output, false),
-                                        Err(e) => (e.to_string(), true),
+                                        Err(error) => (error.to_string().into(), true),
                                     }),
                                 ));
                             }
                             for (idx, handle) in handles {
                                 let result = handle.join().unwrap_or_else(|_| {
-                                    ("parallel tool execution panicked".to_string(), true)
+                                    ("parallel tool execution panicked".to_string().into(), true)
                                 });
                                 precomputed.insert(idx, result);
                             }
@@ -3075,15 +3088,10 @@ where
                 }
                 let result_message = match &p.permission_outcome {
                     PermissionOutcome::Allow => {
-                        let synthetic_output = batch_hard_stops.preflight_notice(
+                        let synthetic_output = self.tool_repetition_preflight(
                             &p.tool_name,
                             p.effective_input.as_ref(),
-                            || {
-                                self.next_tool_repetition_hard_stop_notice(
-                                    &p.tool_name,
-                                    p.effective_input.as_ref(),
-                                )
-                            },
+                            &mut batch_hard_stops,
                         );
                         if let Some((output, terminates)) = synthetic_output {
                             if terminates {
@@ -3105,18 +3113,19 @@ where
                             self.guard_command(&p.tool_use_id, &p.tool_name, p.effective_input.as_ref());
                             self.record_tool_started(iterations, &p.tool_name);
                         let tool_start = std::time::Instant::now();
-                        let (mut output, mut is_error) =
+                        let (execution, mut is_error) =
                             if let Some(result) = precomputed.remove(&idx) {
                                 result
                             } else {
                                 match self
                                     .tool_executor
-                                    .execute(&p.tool_name, p.effective_input.as_ref())
+                                    .execute_result(&p.tool_name, p.effective_input.as_ref())
                                 {
                                     Ok(output) => (output, false),
-                                    Err(error) => (error.to_string(), true),
+                                    Err(error) => (error.to_string().into(), true),
                                 }
                             };
+                        let ToolExecutionResult { text: mut output, surface } = execution;
                         crate::notifications::notify_if_slow(
                             &p.tool_name,
                             tool_start,
@@ -3173,6 +3182,13 @@ where
                         if is_error {
                             output = self.fold_repeated_mode_denial(&p.tool_name, output);
                         }
+                        self.note_surface_execution(
+                            &p.tool_name,
+                            p.effective_input.as_ref(),
+                            surface,
+                            is_error,
+                            &mut batch_hard_stops,
+                        );
                         self.append_tool_repetition_notice(
                             &mut output,
                             &p.tool_name,
@@ -3360,3 +3376,6 @@ where
 mod tests;
 #[cfg(test)]
 mod refusal_repeat_tests;
+
+#[cfg(test)]
+mod surface_repetition_tests;

@@ -10,7 +10,7 @@ use api::{
     resolve_startup_auth_source,
 };
 use runtime::{
-    ApiClient, ApiRequest, AssistantEvent, ConcurrentDispatchFn, ConfigLoader, ConversationRuntime,
+    ApiClient, ApiRequest, AssistantEvent, ConfigLoader, ConversationRuntime,
     PermissionMode, ProviderStateBlob, RuntimeError, Session, TokenUsage,
 };
 use tools::GlobalToolRegistry;
@@ -194,6 +194,7 @@ fn profile_mcp_inventory(
 /// installed. Executor-level tests must exercise the production seam, not the
 /// fallback beside it.
 #[allow(clippy::too_many_arguments)] // one gate per argument, in the order the serial executor checks them
+#[cfg(test)]
 fn dispatch_concurrent_tool(
     tool_registry: &GlobalToolRegistry,
     allowed_tools: Option<&AllowedToolSet>,
@@ -204,6 +205,23 @@ fn dispatch_concurrent_tool(
     tool_name: &str,
     input: &str,
 ) -> Result<String, runtime::ToolError> {
+    dispatch_concurrent_tool_result(
+        tool_registry, allowed_tools, disallowed_tools, turn_allowed_tools,
+        mcp_state, remote_mcp, tool_name, input,
+    ).map(|result| result.text)
+}
+
+#[expect(clippy::too_many_arguments, reason = "matches the existing guarded dispatcher boundary")]
+fn dispatch_concurrent_tool_result(
+    tool_registry: &GlobalToolRegistry,
+    allowed_tools: Option<&AllowedToolSet>,
+    disallowed_tools: Option<&DisallowedToolSet>,
+    turn_allowed_tools: &SharedTurnAllowedTools,
+    mcp_state: Option<&std::sync::Arc<std::sync::Mutex<crate::session::RuntimeMcpState>>>,
+    remote_mcp: Option<&crate::remote_mcp::RemoteMcp>,
+    tool_name: &str,
+    input: &str,
+) -> Result<runtime::ToolExecutionResult, runtime::ToolError> {
     // `CapabilityInvoke` is an address, not a privilege. Unwrap before every
     // session/turn gate and re-enter this production dispatcher with the inner
     // name, exactly like the serial fallback does. The live runtime routes all
@@ -214,7 +232,7 @@ fn dispatch_concurrent_tool(
         let value = parse_tool_input_json(tool_name, input)?;
         let call = tools::capability::unwrap_capability_invoke(&value)
             .map_err(runtime::ToolError::new)?;
-        return dispatch_concurrent_tool(
+        return dispatch_concurrent_tool_result(
             tool_registry,
             allowed_tools,
             disallowed_tools,
@@ -228,7 +246,7 @@ fn dispatch_concurrent_tool(
     check_disallowed_tools(disallowed_tools, tool_name)?;
     if tool_name == crate::autonomy::wakeup::TOOL_NAME {
         let value = parse_tool_input_json(tool_name, input)?;
-        return crate::autonomy::wakeup::execute(value);
+        return crate::autonomy::wakeup::execute(value).map(runtime::ToolExecutionResult::from);
     }
     if let Some(allowed) = allowed_tools {
         if !allowed.contains(tool_name) {
@@ -248,7 +266,7 @@ fn dispatch_concurrent_tool(
         // A pane child's parent answers first (t-2513 §2.1): its MCP tools
         // are the parent's, and the parent's runtime is where they live.
         if let Some(remote) = remote_mcp {
-            return remote.dispatch(tool_name, value);
+            return remote.dispatch(tool_name, value).map(runtime::ToolExecutionResult::from);
         }
         let Some(mcp_state) = mcp_state else {
             return Err(runtime::ToolError::new(format!(
@@ -261,10 +279,10 @@ fn dispatch_concurrent_tool(
         // Same meta-tool handling as the serial CliToolExecutor path, so
         // `ListMcpResourcesTool` & friends don't hit `call_tool` and fail as
         // "unknown MCP tool" when dispatched concurrently/long-running.
-        state.dispatch_runtime_tool(tool_name, value)
+        state.dispatch_runtime_tool(tool_name, value).map(runtime::ToolExecutionResult::from)
     } else {
         tool_registry
-            .execute(tool_name, &value)
+            .execute_result(tool_name, &value)
             .map_err(runtime::ToolError::from)
     }
 }
@@ -506,9 +524,9 @@ pub(crate) fn build_runtime_with_plugin_state(
     let dispatch_disallowed = disallowed_tools;
     let dispatch_mcp = mcp_state.clone();
     let dispatch_remote_mcp = remote_mcp;
-    let concurrent_dispatch: ConcurrentDispatchFn =
+    let concurrent_dispatch: runtime::ConcurrentResultDispatchFn =
         std::sync::Arc::new(move |tool_name: &str, input: &str| {
-            dispatch_concurrent_tool(
+            dispatch_concurrent_tool_result(
                 &dispatch_registry,
                 dispatch_allowed.as_ref(),
                 dispatch_disallowed.as_ref(),
@@ -519,7 +537,7 @@ pub(crate) fn build_runtime_with_plugin_state(
                 input,
             )
         });
-    runtime.set_concurrent_dispatch(concurrent_dispatch);
+    runtime.set_concurrent_result_dispatch(concurrent_dispatch);
     install_subagent_mcp_passthrough(&tool_registry, mcp_state.clone());
     // Plugin tools spawn a blocking subprocess; mark them long-running so they
     // dispatch via spawn_blocking and never freeze the TUI render loop.
@@ -3582,8 +3600,15 @@ mod oauth_refresh_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod surface_host {
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../crates/zerocode-core/tests/support/surface_host.rs"));
+    }
+
     use super::*;
     use std::io;
+    #[cfg(unix)]
+    use std::sync::Arc;
 
     /// 2026-09-08, 「타자칠때마다 이게 계속 나타남」: the same five alias moves
     /// were announced on every keystroke. The announcement was keyed on the
@@ -3661,7 +3686,9 @@ mod tests {
     #[test]
     fn only_a_connection_spawns_a_discovery_refresh() {
         let source = include_str!("runtime_support.rs");
-        let (shipped, _) = source.split_once("#[cfg(test)]").expect("a test boundary");
+        // A test-only adapter can stand before production functions. Stop at
+        // a test module, rather than at the first test-only item.
+        let (shipped, _) = source.split_once("\n#[cfg(test)]\nmod ").expect("a test module boundary");
         let body_of = |name: &str| {
             let start = shipped.find(name).unwrap_or_else(|| panic!("missing {name}"));
             let rest = &shipped[start..];
@@ -3868,6 +3895,161 @@ mod tests {
                 && denied.to_string().contains("--allowedTools"),
             "the inner name must re-enter session gates: {denied}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn production_result_dispatch_and_cli_executor_share_computer_metadata_and_gates() {
+        use runtime::ToolExecutor;
+        use zerocode_core::surface_execution::{SurfaceEffect, SurfaceExecution};
+
+        let _environment = crate::test_env_lock();
+        let directory = tempfile::tempdir().unwrap();
+        let expected = SurfaceExecution { surface_id:"fixture-host/computer/41/lease-a".to_string(),
+            state_revision:7, effect:SurfaceEffect::Observation };
+        std::fs::write(directory.path().join("reply-observe"), serde_json::json!({"ok":true,
+            "surfaceExecution":expected,"result":{"window":{"id":41}}}).to_string()).unwrap();
+        let host = surface_host::SurfaceHost::start(directory.path(), None, zerocode_core::agent_shims::SurfaceShim::Computer);
+        let _host_environment = host.environment().into_iter().map(|(key, value)|
+            crate::support::EnvVarGuard::set(key, value.as_deref())).collect::<Vec<_>>();
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf())
+            .chain(std::env::split_paths(&inherited_path))).unwrap();
+        let _path = crate::support::EnvVarGuard::set("PATH", Some(path.to_str().unwrap()));
+        let registry = GlobalToolRegistry::builtin();
+        let turn_allowed = Arc::new(Mutex::new(None));
+        let input = r#"{"name":"Computer","input":{"action":"observe","app":"Fixture","window_id":41},"nonce":"wrapper-only"}"#;
+
+
+        let concurrent = dispatch_concurrent_tool_result(&registry, None, None, &turn_allowed, None, None, "CapabilityInvoke", input).unwrap();
+        assert_eq!(concurrent.surface.as_ref(), Some(&expected));
+        let mut serial = crate::CliToolExecutor::new(None, None, false, registry.clone(), None);
+        let resolved = serial.resolve_call("CapabilityInvoke", input).unwrap().unwrap();
+        assert_eq!(resolved.name, "Computer");
+        assert!(!resolved.input.contains("nonce"));
+        let first = serial.resolve_call("Computer", r#"{"action":"observe","app":"Fixture","window_id":41,"text":"ignored-first"}"#).unwrap();
+        let second = serial.resolve_call("Computer", r#"{"action":"observe","app":"Fixture","window_id":41,"text":"ignored-second"}"#).unwrap();
+        assert_eq!(first, second, "the production argv boundary must ignore fields the observation does not execute");
+        let fallback = serial.execute_result("CapabilityInvoke", input).unwrap();
+        assert_eq!(fallback.surface.as_ref(), Some(&expected));
+
+        let wrapper_only: AllowedToolSet = ["CapabilityInvoke".to_string()].into_iter().collect();
+        let denied = dispatch_concurrent_tool_result(&registry, Some(&wrapper_only), None, &turn_allowed, None, None, "CapabilityInvoke", input).unwrap_err();
+        assert!(denied.to_string().contains("--allowedTools"));
+        let mut denied_serial = crate::CliToolExecutor::new(Some(wrapper_only), None, false, registry, None);
+        assert!(denied_serial.execute_result("CapabilityInvoke", input).unwrap_err().to_string().contains("--allowedTools"));
+        assert!(denied_serial.resolve_call("CapabilityInvoke", r#"{"name":"CapabilityInvoke"}"#).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "covers the production synchronous and streaming execution boundary")]
+    fn production_computer_capability_loop_confirms_the_same_surface_in_sync_and_streaming() {
+        use std::collections::VecDeque;
+        use std::future::Future;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::pin::Pin;
+        use runtime::{AsyncApiClient, AssistantEvent, Session};
+        use runtime::message_stream::types::{BlockId, RenderBlock};
+
+        #[derive(Clone)]
+        struct LoopApi {
+            batches: Arc<Mutex<VecDeque<Vec<AssistantEvent>>>>,
+            requests: Arc<AtomicUsize>,
+        }
+        impl LoopApi {
+            fn next(&self) -> Vec<AssistantEvent> {
+                self.requests.fetch_add(1, Ordering::Relaxed);
+                self.batches.lock().unwrap().pop_front().unwrap_or_else(|| vec![
+                    AssistantEvent::TextDelta("finished".to_string()), AssistantEvent::MessageStop,
+                ])
+            }
+        }
+        impl runtime::ApiClient for LoopApi {
+            fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+                Ok(self.next())
+            }
+        }
+        impl AsyncApiClient for LoopApi {
+            fn stream_async<'a>(&'a self, _request: ApiRequest, _render_tx: tokio::sync::mpsc::Sender<RenderBlock>, _text_block_id: BlockId)
+                -> Pin<Box<dyn Future<Output=Result<Vec<AssistantEvent>,RuntimeError>> + Send + 'a>> {
+                Box::pin(async { Ok(self.next()) })
+            }
+        }
+        struct AllowLoopPrompt;
+        impl runtime::permission::PermissionPrompter for AllowLoopPrompt {
+            fn decide<'a>(&'a self, _request: runtime::permission::PermissionRequest)
+                -> Pin<Box<dyn Future<Output=Result<runtime::permission::PermissionDecision,runtime::permission::PermissionError>> + Send + 'a>> {
+                Box::pin(async { Ok(runtime::permission::PermissionDecision::Allow) })
+            }
+        }
+
+        let _environment = crate::test_env_lock();
+        let mut completed_modes = Vec::new();
+        for streaming in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let trace = serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"),
+                "/../../../crates/zerocode-core/tests/fixtures/surface-host-trace.json"))).unwrap();
+            let host = surface_host::SurfaceHost::start(directory.path(), Some(trace), zerocode_core::agent_shims::SurfaceShim::Computer);
+            let _host_environment = host.environment().into_iter().map(|(key, value)|
+                crate::support::EnvVarGuard::set(key, value.as_deref())).collect::<Vec<_>>();
+            let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+            let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf())
+                .chain(std::env::split_paths(&inherited_path))).unwrap();
+            let _path = crate::support::EnvVarGuard::set("PATH", Some(path.to_str().unwrap()));
+            let mut batches = VecDeque::new();
+            for index in 0..11 {
+                let action = if index % 2 == 0 { "observe" } else { "left_click" };
+                let mut inner = serde_json::json!({"action":action,"app":"Fixture","window_id":41,"background":true});
+                if action == "left_click" { inner["label"] = serde_json::json!("Next"); }
+                batches.push_back(vec![AssistantEvent::ToolUse {
+                    id:format!("native-loop-{index}"), name:"CapabilityInvoke".to_string(),
+                    input:serde_json::json!({"name":"Computer","input":inner}).to_string(),
+                }, AssistantEvent::MessageStop]);
+            }
+            let model_requests = Arc::new(AtomicUsize::new(0));
+            let api = LoopApi { batches:Arc::new(Mutex::new(batches)), requests:Arc::clone(&model_requests) };
+            let registry = GlobalToolRegistry::builtin();
+            let executor = crate::CliToolExecutor::new(None, None, false, registry.clone(), None);
+            let mut conversation = ConversationRuntime::new(Session::new(), api.clone(), executor,
+                runtime::PermissionPolicy::new(runtime::PermissionMode::DangerFullAccess),
+                vec!["system".to_string()]).with_max_iterations(32);
+            conversation.set_max_tool_calls(64);
+            if streaming {
+                conversation.set_async_api_client(Arc::new(api));
+                let allowed = Arc::new(Mutex::new(None));
+                conversation.set_concurrent_result_dispatch(Arc::new(move |name,input| {
+                    dispatch_concurrent_tool_result(&registry,None,None,&allowed,None,None,name,input)
+                }));
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+                    let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(256);
+                    let drain = tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+                    conversation.run_turn_streaming("Confirm each change on the selected window",render_tx,Arc::new(AllowLoopPrompt)).await.unwrap();
+                    drain.await.unwrap();
+                });
+            } else {
+                conversation.run_turn("Confirm each change on the selected window",None).unwrap();
+            }
+            let calls = std::fs::read_to_string(directory.path().join("calls")).unwrap();
+            let observations = calls.lines().filter(|verb| *verb == "observe").count();
+            let clicks = calls.lines().filter(|verb| *verb == "click").count();
+            let fallbacks = calls.lines().filter(|verb| !matches!(*verb, "observe" | "click")).count();
+            eprintln!("SURFACE_LOOP_METRIC {}", serde_json::json!({
+                "streaming":streaming,
+                "hostProducerTrace":true,
+                "identicalModelObservations":observations.saturating_sub(clicks),
+                "hostObservations":observations, "backgroundClicks":clicks,
+                "additionalHostCalls":fallbacks, "hostSteps":calls.lines().count(),
+                "modelRequests":model_requests.load(Ordering::Relaxed),
+                "completed":observations == 11 && clicks == 5,
+                "completionModelRequests":if observations == 11 && clicks == 5 { Some(model_requests.load(Ordering::Relaxed)) } else { None },
+            }));
+            assert_eq!(fallbacks, 0, "the tool layer must add no other host calls to the scripted scene");
+            assert_eq!(model_requests.load(Ordering::Relaxed), 12, "eleven tool batches and the final finish must issue twelve actual model requests");
+            completed_modes.push((streaming, observations, clicks));
+        }
+        assert!(completed_modes.iter().all(|(_, observations, clicks)| *observations == 11 && *clicks == 5),
+            "six model observations and five same-window confirmations must execute through production in both modes: {completed_modes:?}");
     }
 
     #[test]

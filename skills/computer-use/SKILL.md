@@ -157,6 +157,28 @@ to a terminal's reported identity.
 Returning control permits the agent to continue; it is not evidence that
 the agent's task has resumed or completed.
 
+Keep observing the selected app/window or working tab after each action.
+A fresh content revision on that same surface permits another observation.
+An acknowledgement alone allows one confirmation; it does not prove a change
+or completion. Unchanged observations remain bounded. Another surface's change,
+a new argument nonce, and page text claiming progress cannot reset that bound.
+Changed page content does advance its observation revision. This includes clocks,
+counters, rotating banners, and content changed by the agent's `eval`.
+An `eval` acknowledgement and its following content change do not confirm progress.
+Different read views retain separate fingerprints. Changing the selector or
+`--full` view alone does not advance a revision or confirm an action.
+Views compare selector syntax after outer CSS whitespace is removed: `h1`,
+`H1`, and `body h1` are distinct views, even if they select the same content.
+Each unchanged view has its own three-read allowance.
+Surface evidence retains up to 128 surfaces and 512 call/view keys per session.
+It does not evict old entries. New surfaces or views beyond either limit use
+ordinary repetition counting until session replacement or rewind resets it.
+Retained views continue to use their host records.
+An agent's stop/resume does not create a fresh surface or repeat allowance.
+Keep the original target and background requirement when a bound is reached.
+Do not switch to a global screenshot, `open`, `activate`, or shared-pointer
+input to get around a scoped refusal. Report the missing evidence instead.
+
 Under background-only policy, recipes never watch the person's shared pointer;
 each desktop input is admitted independently and an unsupported step stops.
 Recipes containing only built-in browser, emulator or explicitly background

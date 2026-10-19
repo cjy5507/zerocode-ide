@@ -23,6 +23,7 @@ use runtime::{
     permission_enforcer::{EnforcementResult, PermissionEnforcer},
     truncate_tool_output, TruncationConfig,
 };
+use runtime::ToolExecutionResult;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -45,11 +46,9 @@ type BuiltinDispatcher = fn(
 ) -> Option<Result<String, ToolError>>;
 
 const BUILTIN_DISPATCHERS: &[BuiltinDispatcher] = &[
-    bash_tools::dispatch,
     codegraph_tools::dispatch,
     file_tools::dispatch,
     image_tools::dispatch,
-    computer_tools::dispatch,
     artifact_tools::dispatch,
     web_tools::dispatch,
     task_tools::dispatch,
@@ -263,6 +262,15 @@ pub(crate) fn execute_tool_with_context(
     execute_tool_with_context_and_artifact_dir(ctx, enforcer, name, input, None)
 }
 
+pub(crate) fn execute_tool_result_with_context(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    name: &str,
+    input: &Value,
+) -> Result<ToolExecutionResult, ToolError> {
+    execute_tool_result_with_context_and_artifact_dir(ctx, enforcer, name, input, None)
+}
+
 fn execute_tool_with_context_and_artifact_dir(
     ctx: &ToolContext,
     enforcer: Option<&PermissionEnforcer>,
@@ -270,6 +278,17 @@ fn execute_tool_with_context_and_artifact_dir(
     input: &Value,
     artifact_dir: Option<&Path>,
 ) -> Result<String, ToolError> {
+    execute_tool_result_with_context_and_artifact_dir(ctx, enforcer, name, input, artifact_dir)
+        .map(|result| result.text)
+}
+
+fn execute_tool_result_with_context_and_artifact_dir(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    name: &str,
+    input: &Value,
+    artifact_dir: Option<&Path>,
+) -> Result<ToolExecutionResult, ToolError> {
     let canonical = canonical_tool_name(name);
     let canonical_ref = canonical.as_str();
     let invocation = gateway::begin_tool_invocation(name, canonical_ref, input, enforcer);
@@ -282,7 +301,8 @@ fn execute_tool_with_context_and_artifact_dir(
         );
         return Err(error);
     }
-    let raw = match dispatch_tool_inner(ctx, enforcer, canonical_ref, input) {
+    let dispatched = dispatch_tool_inner(ctx, enforcer, canonical_ref, input);
+    let raw = match dispatched {
         Ok(raw) => raw,
         Err(error) => {
             // Bound BEFORE the audit record, so the invocation log does not
@@ -295,14 +315,15 @@ fn execute_tool_with_context_and_artifact_dir(
         }
     };
 
-    Ok(finish_successful_tool_output(
+    let text = finish_successful_tool_output(
         ctx,
         invocation,
         canonical_ref,
         input,
-        raw,
+        raw.text,
         artifact_dir,
-    ))
+    );
+    Ok(ToolExecutionResult { text, surface: raw.surface })
 }
 
 pub(crate) fn finish_successful_tool_output(
@@ -589,17 +610,25 @@ fn dispatch_tool_inner(
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
     input: &Value,
-) -> Result<String, ToolError> {
+) -> Result<ToolExecutionResult, ToolError> {
     if let Some(mcp) = ctx.mcp_passthrough() {
         if mcp.covers(name) {
             maybe_enforce_permission_check(enforcer, name, input)?;
-            return mcp.dispatch(name, input).map_err(ToolError::Execution);
+            return mcp.dispatch(name, input).map(ToolExecutionResult::from).map_err(ToolError::Execution);
         }
+    }
+
+    if let Some(result) = computer_tools::dispatch_result(ctx, enforcer, name, input) {
+        return result;
+    }
+
+    if let Some(result) = bash_tools::dispatch_result(ctx, enforcer, name, input) {
+        return result;
     }
 
     for dispatch in BUILTIN_DISPATCHERS {
         if let Some(result) = dispatch(ctx, enforcer, name, input) {
-            return result;
+            return result.map(ToolExecutionResult::from);
         }
     }
     Err(ToolError::NotFound(name.to_owned()))

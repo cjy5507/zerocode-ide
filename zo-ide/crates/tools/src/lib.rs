@@ -23,6 +23,8 @@
 #![recursion_limit = "256"]
 
 mod aliases;
+mod browser_execution;
+mod surface_shim;
 mod artifacts;
 mod bash_redirect;
 mod bash_tools;

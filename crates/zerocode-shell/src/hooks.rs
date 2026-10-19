@@ -15,6 +15,10 @@ use std::sync::{LazyLock, Mutex, OnceLock};
 
 use serde::Serialize;
 use zerocode_core::AgentKind;
+#[cfg(any(windows, test))]
+pub(crate) use zerocode_core::agent_shims::powershell_shim_script_with_private_tokens;
+pub(crate) use zerocode_core::agent_shims::shim_script_with_private_tokens;
+use zerocode_core::agent_shims::{SurfaceShim, installed_script};
 use zerocode_hookd::install::{HookStatus, InstallPaths, MANAGED_TARGETS};
 use zerocode_hookd::plugin::PLUGIN_TARGETS;
 
@@ -634,77 +638,6 @@ pub fn pty_env(
     env
 }
 
-/// Add the runtime readers used by generated shims.
-///
-/// The endpoint source supplies the hook token from the already-private
-/// endpoint file. Each extra pair supplies a capability token from its own
-/// 0600 file. The generated script keeps the value only in the short-lived
-/// shim process and its intentional curl child; a normal child of the agent
-/// sees paths, not secrets.
-///
-/// A pane whose environment names no capability file — an agent typed into a
-/// plain shell — reads the window's after-the-fact grant for its pane instead
-/// (`grant_pane_capabilities`), from the endpoint's own directory and only
-/// for a pane key of the window's spelling. The environment still wins when
-/// it carries a path.
-pub(crate) fn shim_script_with_private_tokens(
-    script: String,
-    private_tokens: &[(&str, &str)],
-) -> String {
-    let endpoint = zerocode_hookd::env_var::ENDPOINT;
-    let pane_key = zerocode_hookd::env_var::PANE_KEY;
-    // A Windows window spells the endpoint path with backslashes; Git Bash
-    // reads such a path but `${endpoint%/*}` below cannot cut a directory
-    // off it. One spelling before anything looks at it.
-    let mut loader = format!(
-        r#"case "${{{endpoint}:-}}" in
-  *\\*) {endpoint}=$(printf '%s' "${{{endpoint}}}" | tr '\\' '/') ;;
-esac
-if [ -n "${{{endpoint}:-}}" ] && [ -r "${{{endpoint}}}" ]; then
-  . "${{{endpoint}}}" 2>/dev/null || :
-fi
-"#
-    );
-    let missing = private_tokens
-        .iter()
-        .map(|(_, file_var)| format!(r#"[ -z "${{{file_var}:-}}" ]"#))
-        .collect::<Vec<_>>()
-        .join(" || ");
-    if !missing.is_empty() {
-        loader.push_str(&format!(
-            r#"if {{ {missing}; }} && [ -n "${{{endpoint}:-}}" ] && [ -n "${{{pane_key}:-}}" ]; then
-  case "${{{pane_key}}}" in
-    term-[0-9]*)
-      grant="${{{endpoint}%/*}}/{PANE_GRANTS_DIR_NAME}/${{{pane_key}}}.env"
-      if [ -r "$grant" ]; then
-        . "$grant" 2>/dev/null || :
-      fi
-      ;;
-  esac
-fi
-"#
-        ));
-    }
-    for (token_var, file_var) in private_tokens {
-        loader.push_str(&format!(
-            r#"if [ -n "${{{file_var}:-}}" ] && [ -r "${{{file_var}}}" ]; then
-  {token_var}=$({{ command -p cat "${{{file_var}}}" 2>/dev/null || cat "${{{file_var}}}"; }}) || :
-  export {token_var}
-fi
-"#
-        ));
-    }
-    let Some((_, rest)) = script.split_once('\n') else {
-        return script;
-    };
-    format!(
-        "{}\n{}{}",
-        script.lines().next().unwrap_or_default(),
-        loader,
-        rest
-    )
-}
-
 /// The agent mirror wrapper's conditional loader.
 ///
 /// The wrapper must load credentials only on the mirror path. If the mirror is
@@ -733,41 +666,6 @@ exec "{real}" "$@"
         mirror = mirror.display(),
         real = real.display(),
     )
-}
-
-/// The same loader for the PowerShell companion of the orchestration shim.
-///
-/// The endpoint is written in the POSIX assignment form even on the current
-/// Windows-compatible path, so only the one hook-token line is read here. The
-/// capability files contain a bare token and are read without invoking a shell.
-#[cfg(any(windows, test))]
-pub(crate) fn powershell_shim_script_with_private_tokens(
-    script: String,
-    private_tokens: &[(&str, &str)],
-) -> String {
-    let endpoint = zerocode_hookd::env_var::ENDPOINT;
-    let hook_token = zerocode_hookd::env_var::TOKEN;
-    let mut loader = format!(
-        r#"$endpoint = $env:{endpoint}
-if ($endpoint -and (Test-Path -LiteralPath $endpoint -PathType Leaf)) {{
-  foreach ($line in (Get-Content -LiteralPath $endpoint -ErrorAction SilentlyContinue)) {{
-    if ($line.StartsWith('{hook_token}=')) {{
-      $env:{hook_token} = $line.Substring('{hook_token}='.Length)
-    }}
-  }}
-}}
-"#
-    );
-    for (token_var, file_var) in private_tokens {
-        loader.push_str(&format!(
-            r#"$tokenFile = $env:{file_var}
-if ($tokenFile -and (Test-Path -LiteralPath $tokenFile -PathType Leaf)) {{
-  try {{ $env:{token_var} = [System.IO.File]::ReadAllText($tokenFile).Trim() }} catch {{}}
-}}
-"#
-        ));
-    }
-    format!("{loader}{script}")
 }
 
 /// Tell a launched agent's hook that its first prompt already carries the
@@ -915,20 +813,7 @@ fn write_shim_dir(
     // file and the browser capability from its own private file; neither value
     // needs to be present in every pane's environment.
     let browser = dir.join("zerocode-browser");
-    std::fs::write(
-        &browser,
-        shim_script_with_private_tokens(
-            zerocode_core::agent_browser::shim_script(
-                zerocode_hookd::env_var::PORT,
-                zerocode_hookd::env_var::BROWSER_TOKEN,
-                zerocode_hookd::env_var::TOKEN,
-            ),
-            &[(
-                zerocode_hookd::env_var::BROWSER_TOKEN,
-                zerocode_hookd::env_var::BROWSER_TOKEN_FILE,
-            )],
-        ),
-    )?;
+    std::fs::write(&browser, installed_script(SurfaceShim::Browser, false))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -970,20 +855,7 @@ fn write_shim_dir(
         std::fs::set_permissions(&find, std::fs::Permissions::from_mode(0o755))?;
     }
     let computer = dir.join(zerocode_core::computer_use::COMPUTER_CLI);
-    std::fs::write(
-        &computer,
-        shim_script_with_private_tokens(
-            zerocode_core::computer_use::shim_script(
-                zerocode_hookd::env_var::PORT,
-                zerocode_hookd::env_var::COMPUTER_TOKEN,
-                zerocode_hookd::env_var::TOKEN,
-            ),
-            &[(
-                zerocode_hookd::env_var::COMPUTER_TOKEN,
-                zerocode_hookd::env_var::COMPUTER_TOKEN_FILE,
-            )],
-        ),
-    )?;
+    std::fs::write(&computer, installed_script(SurfaceShim::Computer, false))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1127,16 +999,24 @@ fn windows_door_scripts() -> Vec<(String, String)> {
         .into_iter()
         .flat_map(|(name, script, (token_var, file_var))| {
             let powershell = door_implementation_name(name);
-            let body = format!(
-                "{UTF8_BOM}{}",
-                powershell_shim_script_with_private_tokens(
-                    script,
-                    &[(token_var, file_var)]
-                        .into_iter()
-                        .filter(|(_, path)| !path.is_empty())
-                        .collect::<Vec<_>>()
-                )
-            );
+            let body = match name {
+                zerocode_core::agent_browser::BROWSER_CLI => {
+                    installed_script(SurfaceShim::Browser, true)
+                }
+                zerocode_core::computer_use::COMPUTER_CLI => {
+                    installed_script(SurfaceShim::Computer, true)
+                }
+                _ => format!(
+                    "{UTF8_BOM}{}",
+                    powershell_shim_script_with_private_tokens(
+                        script,
+                        &[(token_var, file_var)]
+                            .into_iter()
+                            .filter(|(_, path)| !path.is_empty())
+                            .collect::<Vec<_>>()
+                    )
+                ),
+            };
             let wrapper = zerocode_core::agent_teams::shim_cmd(&powershell);
             [(powershell, body), (format!("{name}.cmd"), wrapper)]
         })
@@ -3196,6 +3076,30 @@ mod tests {
             .expect("run loader");
         assert!(output.status.success());
         assert_eq!(output.stdout, b"hook-secret/browser-secret");
+    }
+
+    // Guarding test: shared producer equality prevents installer drift.
+    // It is not red/green evidence for the original POSIX consumer defect.
+    #[test]
+    fn installed_surface_shims_match_the_shared_consumer_bytes_on_both_platforms() {
+        use zerocode_core::agent_shims::{SurfaceShim, installed_script};
+        let dir = tempfile::tempdir().unwrap();
+        write_shim_dir(dir.path(), &dir.path().join("fixture-mirror"), &[]).unwrap();
+        for shim in [SurfaceShim::Browser, SurfaceShim::Computer] {
+            #[cfg(not(windows))]
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(shim.name())).unwrap(),
+                installed_script(shim, false),
+                "the installer and metadata verifier must share the complete POSIX bytes"
+            );
+            let scripts = windows_door_scripts();
+            let name = format!("{}.impl.ps1", shim.name());
+            assert_eq!(
+                scripts.iter().find(|(file, _)| file == &name).unwrap().1,
+                installed_script(shim, true),
+                "the installer and metadata verifier must share the PowerShell loader and BOM"
+            );
+        }
     }
 
     #[test]
