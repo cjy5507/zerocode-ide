@@ -2423,9 +2423,12 @@ mod tests {
 
     /// Every outcome token a feature's week can carry has its words in the
     /// one table the dashboard's chips and the card's key check both read
-    /// (`JEV_TOKENS`, t-6243 D5): each of zo's wire failures, and each of the
+    /// (`JEV_TOKENS`, t-6243 D5): each of zo's wire failures, each of the
     /// door's refusals but `off`, which is a mode word the dashboard never
-    /// spells. A token zo or the door gains turns this red until it is worded.
+    /// spells, and each refusal judgment-provider names, which a local
+    /// server's `502` carries to the row with a word in each of the four
+    /// catalogs. A token zo, the door or judgment-provider gains turns this
+    /// red until it is worded.
     #[test]
     fn the_failures_the_pane_words_are_zos_tokens() {
         fn between<'a>(source: &'a str, from: &str, to: &str) -> &'a str {
@@ -2450,15 +2453,46 @@ mod tests {
             .into_iter()
             .filter(|refused| *refused != zerocode_core::jev::door::Refused::Off)
             .map(zerocode_core::jev::door::Refused::token);
+        let refusals: Vec<&str> = between(
+            include_str!("../../judgment-provider/src/lib.rs"),
+            "pub const fn token(self)",
+            "\n    }",
+        )
+        .lines()
+        .filter_map(|line| line.split_once("=> \""))
+        .filter_map(|(_, rest)| rest.split('"').next())
+        .collect();
+        assert!(
+            refusals.contains(&judgment_provider::Refusal::DeadlineBudget.token()),
+            "judgment-provider's refusal words were not read: {refusals:?}"
+        );
         let table = between(
             include_str!("../../../ui/shell-jev.js"),
             "const JEV_TOKENS = Object.freeze({",
             "\n});",
         );
-        for token in wire.iter().copied().chain(door) {
+        for token in wire
+            .iter()
+            .copied()
+            .chain(door)
+            .chain(refusals.iter().copied())
+        {
             assert!(
                 table.contains(&format!("\n  {token}: {{")),
                 "the dashboard's token table does not word `{token}`"
+            );
+        }
+        let catalogs = include_str!("../../../ui/shell-i18n.js");
+        for refusal in &refusals {
+            let key = table
+                .split_once(&format!("\n  {refusal}: {{"))
+                .and_then(|(_, row)| row.split_once("key: \""))
+                .and_then(|(_, rest)| rest.split('"').next())
+                .unwrap_or_default();
+            assert_eq!(
+                catalogs.matches(&format!("\"{key}\":")).count(),
+                4,
+                "`{refusal}`'s words `{key}` are not in each of the four catalogs"
             );
         }
         // The card's key check says its failures from the same rows.

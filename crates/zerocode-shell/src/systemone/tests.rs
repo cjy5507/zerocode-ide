@@ -507,7 +507,14 @@ fn a_refused_request_keeps_the_servers_error_word_beside_its_status() {
     let held = MAX_REFUSAL_WAIT * 10;
     for (hold, within) in [(Duration::ZERO, None), (held, Some(held / 2))] {
         let started = std::time::Instant::now();
-        let asked = ask(&refusing_brokenly(busy, hold), Duration::from_secs(5));
+        let asked = ask(
+            &refusing_brokenly(
+                "HTTP/1.1 503 Service Unavailable",
+                json!({"error": busy}).to_string(),
+                hold,
+            ),
+            Duration::from_secs(5),
+        );
         assert_eq!(
             asked.answer,
             Err(token_for(503)),
@@ -590,20 +597,19 @@ fn a_restarting_servers_refusal_keeps_its_word_as_busy_does_and_an_unknown_word_
     );
 }
 
-/// A loopback server that answers its one request with a `503` whose body
-/// breaks off: the head promises a refusal naming `code`, half of it is sent,
-/// and the connection is held for `hold` and then dropped.
-fn refusing_brokenly(code: &str, hold: Duration) -> String {
+/// A loopback server that answers its one request with `status` and a `body`
+/// that breaks off: the head promises all of it, half of it is sent, and the
+/// connection is held for `hold` and then dropped.
+fn refusing_brokenly(status: &'static str, body: String, hold: Duration) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
     let addr = listener.local_addr().expect("its address");
-    let body = json!({"error": code}).to_string();
     thread::spawn(move || {
         let Ok((mut socket, _)) = listener.accept() else {
             return;
         };
         read_request(&mut socket);
         let head = format!(
-            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
             &body[..body.len() / 2]
         );
@@ -615,38 +621,61 @@ fn refusing_brokenly(code: &str, hold: Duration) -> String {
 }
 
 /// A refusal's body is read only while its request's deadline lasts: with
-/// time left the whole of a managed server's refusal is read and its code
-/// named; with the deadline already passed not a byte is read and no code is
-/// named — however promptly the body came.
+/// time left the whole of a managed server's refusal is read and its code or
+/// refusal named; with the deadline already passed not a byte is read and
+/// nothing is named — however promptly the body came.
 #[test]
 fn a_refused_body_is_read_only_while_the_deadline_lasts() {
-    let said = json!({"error": local_judgment::Error::Busy.token()}).to_string();
-    for (left, read) in [
+    let busy = local_judgment::Error::Busy.token();
+    let out_of_time = judgment_provider::Refusal::DeadlineBudget.token();
+    for (status, code, said, in_time) in [
         (
-            Some(Duration::from_secs(5)),
+            "HTTP/1.1 503 Service Unavailable",
+            503,
+            json!({"error": busy}).to_string(),
             RefusalRead {
-                code: Some(local_judgment::Error::Busy.token()),
-                read: said.len(),
+                code: Some(busy),
+                ..RefusalRead::default()
             },
         ),
-        (None, RefusalRead::default()),
+        (
+            "HTTP/1.1 502 Bad Gateway",
+            502,
+            json!({"error": local_judgment::Error::Protocol.token(), "refusal": out_of_time})
+                .to_string(),
+            RefusalRead {
+                refusal: Some(out_of_time),
+                ..RefusalRead::default()
+            },
+        ),
     ] {
-        let endpoint = Endpoint::serving("HTTP/1.1 503 Service Unavailable", said.clone(), 0);
-        let found = tauri::async_runtime::block_on(async {
-            let answer = reqwest::Client::builder()
-                .no_proxy()
-                .build()
-                .expect("a loopback client")
-                .post(endpoint.base())
-                .body("{}")
-                .send()
-                .await
-                .expect("the endpoint answers");
-            assert_eq!(answer.status().as_u16(), 503);
-            let deadline = std::time::Instant::now() + left.unwrap_or_default();
-            refusal_read(answer, deadline).await
-        });
-        assert_eq!(found, read, "{left:?} left");
+        for (left, read) in [
+            (
+                Some(Duration::from_secs(5)),
+                RefusalRead {
+                    read: said.len(),
+                    ..in_time
+                },
+            ),
+            (None, RefusalRead::default()),
+        ] {
+            let endpoint = Endpoint::serving(status, said.clone(), 0);
+            let found = tauri::async_runtime::block_on(async {
+                let answer = reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .expect("a loopback client")
+                    .post(endpoint.base())
+                    .body("{}")
+                    .send()
+                    .await
+                    .expect("the endpoint answers");
+                assert_eq!(answer.status().as_u16(), code);
+                let deadline = std::time::Instant::now() + left.unwrap_or_default();
+                refusal_read(answer, deadline).await
+            });
+            assert_eq!(found, read, "{status}: {left:?} left");
+        }
     }
 }
 

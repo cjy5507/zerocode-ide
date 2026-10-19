@@ -30,7 +30,7 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use jev_socket::{Lent, Socket};
-use judgment_provider::{MAX_RESPONSE_BYTES, Prepared, Provider, ProviderKind};
+use judgment_provider::{MAX_RESPONSE_BYTES, Prepared, Provider, ProviderKind, Refusal};
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{
     self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
@@ -108,17 +108,19 @@ pub fn token_for(status: u16) -> String {
 }
 
 /// What reading a refused request's body found (t-55423): the code its server
-/// named, when it was one a managed server uses, and how many of the body's
-/// bytes were read to find it.
+/// named, when it was one a managed server uses; the refusal it named, when it
+/// was local-judgment's protocol error naming one judgment-provider names; and
+/// how many of the body's bytes were read to find them.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RefusalRead {
     code: Option<&'static str>,
+    refusal: Option<&'static str>,
     read: usize,
 }
 
-/// Reads `answer`, a refused request's response, for the code its server
-/// named: at most [`MAX_REFUSAL_BYTES`] of its body, for no longer than
-/// [`MAX_REFUSAL_WAIT`] or what is left until `deadline`, whichever ends
+/// Reads `answer`, a refused request's response, for the code or the refusal
+/// its server named: at most [`MAX_REFUSAL_BYTES`] of its body, for no longer
+/// than [`MAX_REFUSAL_WAIT`] or what is left until `deadline`, whichever ends
 /// first. A deadline already passed reads nothing.
 async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> RefusalRead {
     let Some(left) = deadline
@@ -138,8 +140,13 @@ async fn refusal_read(mut answer: reqwest::Response, deadline: Instant) -> Refus
         Some(())
     })
     .await;
+    let said = whole
+        .ok()
+        .flatten()
+        .and_then(|()| serde_json::from_slice::<Value>(&body).ok());
     RefusalRead {
-        code: whole.ok().flatten().and_then(|()| refusal_code(&body)),
+        code: said.as_ref().and_then(refusal_code),
+        refusal: said.as_ref().and_then(provider_refusal),
         read: body.len(),
     }
 }
@@ -155,10 +162,38 @@ const REFUSAL_CODES: [&str; 3] = [
 ];
 
 /// The code a refused body names, when it is one of [`REFUSAL_CODES`].
-fn refusal_code(body: &[u8]) -> Option<&'static str> {
-    let said = serde_json::from_slice::<Value>(body).ok()?;
+fn refusal_code(said: &Value) -> Option<&'static str> {
     let word = said.get("error")?.as_str()?;
     REFUSAL_CODES.into_iter().find(|code| *code == word)
+}
+
+/// The refusals judgment-provider names (`Refusal::token`): a local server's
+/// `502` that says local-judgment's protocol error beside one of them is told
+/// by that word, and no other word a refused body says is kept.
+const PROVIDER_REFUSALS: [&str; 11] = [
+    Refusal::Settings.token(),
+    Refusal::Address.token(),
+    Refusal::LocalAddress.token(),
+    Refusal::RemoteAddress.token(),
+    Refusal::Model.token(),
+    Refusal::Request.token(),
+    Refusal::Response.token(),
+    Refusal::TooLarge.token(),
+    Refusal::SettingsChanged.token(),
+    Refusal::Truncated.token(),
+    Refusal::DeadlineBudget.token(),
+];
+
+/// The refusal a refused body names, when it is local-judgment's protocol
+/// error naming one of [`PROVIDER_REFUSALS`].
+fn provider_refusal(said: &Value) -> Option<&'static str> {
+    if said.get("error")?.as_str()? != local_judgment::Error::Protocol.token() {
+        return None;
+    }
+    let word = said.get("refusal")?.as_str()?;
+    PROVIDER_REFUSALS
+        .into_iter()
+        .find(|refusal| *refusal == word)
 }
 
 /// A question's request body, as the endpoint takes it.
@@ -1291,6 +1326,11 @@ impl Wire {
         if !status.is_success() {
             if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
                 *server_error_code = refusal_read(answer, deadline).await.code;
+            } else if status == reqwest::StatusCode::BAD_GATEWAY
+                && provider.kind == ProviderKind::Local
+                && let Some(refusal) = refusal_read(answer, deadline).await.refusal
+            {
+                return (Err(refusal.to_string()), version, true);
             }
             return (Err(token_for(status.as_u16())), version, true);
         }

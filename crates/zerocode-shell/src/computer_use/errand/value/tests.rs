@@ -355,6 +355,19 @@ pub(in crate::computer_use::errand) fn fake_cli(
     rc: i32,
     pause: u32,
 ) -> String {
+    fake_cli_slow_to_start(dir, name, answer, rc, pause, 0)
+}
+
+/// [`fake_cli`] whose first run spends `first_start` seconds before its first
+/// line ([`crate::test_host::fake_cli_program`]).
+fn fake_cli_slow_to_start(
+    dir: &Path,
+    name: &str,
+    answer: &str,
+    rc: i32,
+    pause: u32,
+    first_start: u32,
+) -> String {
     let at = dir.join(name);
     std::fs::write(at.with_extension("answer"), answer).expect("the answer");
     let script = format!(
@@ -368,7 +381,7 @@ pub(in crate::computer_use::errand) fn fake_cli(
          exit {rc}",
         here = at.display(),
     );
-    crate::test_host::fake_program(dir, name, &script)
+    crate::test_host::fake_cli_program(dir, name, &script, first_start)
         .to_string_lossy()
         .into_owned()
 }
@@ -762,7 +775,11 @@ fn a_pausing_fake_starts_its_child_before_anything_else() {
     let dir = tempfile::tempdir().expect("a root");
     let claude = fake_cli(dir.path(), "claude", "{}", 0, 30);
     let script = std::fs::read_to_string(&claude).expect("the script");
-    let first = script.lines().nth(2).expect("the line after `here=`");
+    let first = script
+        .lines()
+        .skip_while(|line| !line.starts_with("here="))
+        .nth(1)
+        .expect("the line after `here=`");
     assert!(
         first.contains(".child"),
         "the child starts after other work: {first}"
@@ -806,6 +823,26 @@ fn a_cli_that_outlives_its_wall_is_ended_with_everything_it_started() {
         return;
     }
     panic!("the fake CLI never got to start its child within the wall, five times running");
+}
+
+/// A fake CLI whose first run is slow, as a new program's first run is on a
+/// loaded machine, still answers inside its road's wall: that first run is
+/// spent before any wall starts, so the wall times only the run the road asks
+/// for.
+#[cfg(unix)]
+#[test]
+fn a_fake_clis_slow_first_run_is_spent_before_its_wall() {
+    let dir = tempfile::tempdir().expect("a root");
+    let claude =
+        fake_cli_slow_to_start(dir.path(), "claude", &claude_said("London", false), 0, 0, 4);
+    let writer = login_writer(dir.path(), GeneratorRoad::ClaudeLogin, &claude, "/nowhere");
+    assert_eq!(
+        writer
+            .ask_text("S", "U", 10, Duration::from_secs(3))
+            .map(|said| said.text),
+        Ok("London".to_string()),
+        "the fake's slow first run was left inside the wall"
+    );
 }
 
 /// The window's memory keeps a value per identity, as many as the longest

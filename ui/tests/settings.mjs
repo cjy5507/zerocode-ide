@@ -6336,6 +6336,32 @@ await test("실제 요청의 성공·실패·적용 결과는 응답 점검과 �
   return "real source time and feature · explicit application · HTTP failure is not server shutdown · newer history gap disclosed";
 }));
 
+await test("로컬 판단 서버가 거절한 이유는 카드에 그대로 보이고 HTTP 상태로 바뀌지 않는다", async () => withJudgmentStatus(async (page) => {
+  const library = await readFile(resolve(UI, "..", "crates", "judgment-provider", "src", "lib.rs"), "utf8");
+  const tokens = library.slice(library.indexOf("pub const fn token(self)"));
+  const refusals = new Map([...tokens.slice(0, tokens.indexOf("\n    }")).matchAll(/Self::(\w+) => "(\w+)"/g)].map(([, variant, word]) => [variant, word]));
+  assert(refusals.has("DeadlineBudget") && refusals.has("SettingsChanged"), "judgment-provider's refusal words were not read", [...refusals]);
+  const words = (key, fallback) => page.evaluate(([name, said]) => t(name, said), [key, fallback]);
+  const failed = await words("settings.judgment.usageFailed", "요청 실패");
+  const discarded = await words("settings.judgment.usageDiscarded", "설정 변경으로 응답 미사용");
+  const unsaid = [];
+  for (const outcome of refusals.values()) {
+    backend.judgmentUsage = {
+      providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
+      state: "observed", reason: null, unattributedNewer: false,
+      lastRequest: { feature: "stall", atMs: Date.parse("2026-10-01T10:20:30Z"), outcome, elapsedMs: 41, applied: false },
+    };
+    await page.click("#judgment-status-refresh");
+    await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
+    const used = await page.locator("#judgment-current-usage").textContent();
+    const reason = await page.evaluate((token) => { const row = jevTokenRow(token); return row ? t(row.key, row.word) : null; }, outcome);
+    const said = outcome === refusals.get("SettingsChanged") ? used.includes(discarded) : reason !== null && used.includes(`${failed} · ${reason}`);
+    if (!said || used.includes("(HTTP")) unsaid.push({ outcome, used });
+  }
+  assertEqual(unsaid, [], "a local server's refusal reached the card without its reason, or as an HTTP status");
+  return `${refusals.size} refusal words read from judgment-provider · each shown with its reason · none as an HTTP status`;
+}));
+
 await test("실제 사용은 최근 미관측·출처 부족·다른 제공자·지원 없는 명령을 구분한다", async () => withJudgmentStatus(async (page) => {
   backend.judgmentUsage = {
     providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
