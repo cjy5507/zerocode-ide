@@ -14,8 +14,204 @@ pub(crate) struct Info {
     pub file_bytes: u64,
 }
 
-pub(crate) fn builtin_template(_template: &str) -> Option<&'static str> {
-    None
+pub(crate) fn builtin_template(template: &str) -> Option<&'static str> {
+    const BUILTINS: &[&str] = &[
+        "chatml",
+        "llama2",
+        "llama2-sys",
+        "llama2-sys-bos",
+        "llama2-sys-strip",
+        "mistral-v1",
+        "mistral-v3",
+        "mistral-v3-tekken",
+        "mistral-v7",
+        "mistral-v7-tekken",
+        "phi3",
+        "phi4",
+        "falcon3",
+        "zephyr",
+        "monarch",
+        "gemma",
+        "orion",
+        "openchat",
+        "vicuna",
+        "vicuna-orca",
+        "deepseek",
+        "deepseek2",
+        "deepseek3",
+        "deepseek-ocr",
+        "command-r",
+        "llama3",
+        "chatglm3",
+        "chatglm4",
+        "glmedge",
+        "minicpm",
+        "exaone3",
+        "exaone4",
+        "exaone-moe",
+        "rwkv-world",
+        "granite",
+        "granite-4.0",
+        "granite-4.1",
+        "gigachat",
+        "megrez",
+        "yandex",
+        "bailing",
+        "bailing-think",
+        "bailing2",
+        "llama4",
+        "smolvlm",
+        "hunyuan-moe",
+        "gpt-oss",
+        "hunyuan-dense",
+        "hunyuan-vl",
+        "kimi-k2",
+        "seed_oss",
+        "grok-2",
+        "pangu-embedded",
+        "solar-open",
+    ];
+    if let Some(name) = BUILTINS.iter().copied().find(|name| *name == template) {
+        return Some(name);
+    }
+    let contains = |text: &str| template.contains(text);
+    Some(if contains("<|im_start|>") {
+        if contains("<|im_sep|>") {
+            "phi4"
+        } else if contains("<end_of_utterance>") {
+            "smolvlm"
+        } else {
+            "chatml"
+        }
+    } else if template.starts_with("mistral") || contains("[INST]") {
+        if contains("[SYSTEM_PROMPT]") {
+            "mistral-v7"
+        } else if contains("' [INST] ' + system_message") || contains("[AVAILABLE_TOOLS]") {
+            if contains(" [INST]") {
+                "mistral-v1"
+            } else if contains("\"[INST]\"") {
+                "mistral-v3-tekken"
+            } else {
+                "mistral-v3"
+            }
+        } else if contains("content.strip()") {
+            "llama2-sys-strip"
+        } else if contains("bos_token + '[INST]") {
+            "llama2-sys-bos"
+        } else if contains("<<SYS>>") {
+            "llama2-sys"
+        } else {
+            "llama2"
+        }
+    } else if contains("<|assistant|>") && contains("<|end|>") {
+        "phi3"
+    } else if contains("[gMASK]<sop>") {
+        "chatglm4"
+    } else if contains("<|assistant|>") && contains("<|user|>") {
+        if contains("<|tool_declare|>") {
+            "exaone-moe"
+        } else if contains("</s>") {
+            "falcon3"
+        } else {
+            "glmedge"
+        }
+    } else if contains("<|{{ item['role'] }}|>") && contains("<|begin_of_image|>") {
+        "glmedge"
+    } else if contains("<|user|>") && contains("<|endoftext|>") {
+        "zephyr"
+    } else if contains("bos_token + message['role']") {
+        "monarch"
+    } else if contains("<start_of_turn>") {
+        "gemma"
+    } else if contains("'\\n\\nAssistant: ' + eos_token") {
+        "orion"
+    } else if contains("GPT4 Correct ") {
+        "openchat"
+    } else if contains("USER: ") && contains("ASSISTANT: ") {
+        if contains("SYSTEM: ") {
+            "vicuna-orca"
+        } else {
+            "vicuna"
+        }
+    } else if contains("### Instruction:") && contains("<|EOT|>") {
+        "deepseek"
+    } else if contains("<|START_OF_TURN_TOKEN|>") && contains("<|USER_TOKEN|>") {
+        "command-r"
+    } else if contains("<|start_header_id|>") && contains("<|end_header_id|>") {
+        "llama3"
+    } else if contains("[gMASK]sop") {
+        "chatglm3"
+    } else if contains("<用户>") {
+        "minicpm"
+    } else if contains("'Assistant: ' + message['content'] + eos_token") {
+        "deepseek2"
+    } else if contains("<｜Assistant｜>")
+        && contains("<｜User｜>")
+        && contains("<｜end▁of▁sentence｜>")
+    {
+        "deepseek3"
+    } else if contains("[|system|]") && contains("[|assistant|]") && contains("[|endofturn|]") {
+        if contains("[|tool|]") {
+            "exaone4"
+        } else {
+            "exaone3"
+        }
+    } else if contains("rwkv-world")
+        || contains("{{- 'User: ' + message['content']|trim + '\\n\\n' -}}")
+    {
+        "rwkv-world"
+    } else if contains("<|start_of_role|>") {
+        if contains("<tool_call>") || contains("<tools>") {
+            if contains("g4_default_system_message") {
+                "granite-4.0"
+            } else {
+                "granite-4.1"
+            }
+        } else {
+            "granite"
+        }
+    } else if contains(
+        "message['role'] + additional_special_tokens[0] + message['content'] + additional_special_tokens[1]",
+    ) {
+        "gigachat"
+    } else if contains("<|role_start|>") {
+        "megrez"
+    } else if contains(" Ассистент:") {
+        "yandex"
+    } else if contains("<role>ASSISTANT</role>") && contains("'HUMAN'") {
+        "bailing"
+    } else if contains("<role>ASSISTANT</role>") && contains("\"HUMAN\"") && contains("<think>") {
+        "bailing-think"
+    } else if contains("<role>ASSISTANT</role>")
+        && contains("<role>HUMAN</role>")
+        && contains("<|role_end|>")
+    {
+        "bailing2"
+    } else if contains("<|header_start|>") && contains("<|header_end|>") {
+        "llama4"
+    } else if contains("<|endofuserprompt|>") {
+        "dots1"
+    } else if contains("<|extra_0|>") && contains("<|extra_4|>") {
+        "hunyuan-moe"
+    } else if contains("<|start|>") && contains("<|channel|>") {
+        "gpt-oss"
+    } else if contains("<｜hy_Assistant｜>") && contains("<｜hy_begin▁of▁sentence｜>") {
+        "hunyuan-vl"
+    } else if contains("<｜hy_Assistant｜>") && contains("<｜hy_place▁holder▁no▁3｜>") {
+        "hunyuan-dense"
+    } else if contains("<|im_assistant|>assistant<|im_middle|>") {
+        "kimi-k2"
+    } else if contains("<seed:bos>") {
+        "seed_oss"
+    } else if contains("'Assistant: '  + message['content'] + '<|separator|>") {
+        "grok-2"
+    } else if contains("[unused9]系统：[unused10]") {
+        "pangu-embedded"
+    } else if contains("<|begin|>") && contains("<|end|>") && contains("<|content|>") {
+        "solar-open"
+    } else {
+        return None;
+    })
 }
 
 pub(crate) fn inspect(path: &Path, cancel: &AtomicBool) -> Result<Info> {
