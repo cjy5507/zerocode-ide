@@ -1,5 +1,5 @@
 use std::fs;
-use std::net::{Ipv4Addr, TcpListener};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -355,6 +355,26 @@ impl Restoring {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     }
+
+    fn relocated(&self, previous: &Provider, current: &Provider, occupant: &TcpListener) {
+        assert_eq!(self.starts(), 1);
+        assert_ne!(current.identity(), previous.identity());
+        let selected = crate::selection::read(&self.settings).unwrap();
+        assert_eq!(selected.provider.identity(), current.identity());
+        assert_eq!(
+            selected.binding.unwrap().provider_identity,
+            current.identity()
+        );
+        let intent = self.intent();
+        assert_eq!(intent["providerIdentity"], current.identity());
+        assert_eq!(intent["port"], port(current));
+        assert_eq!(self.swap_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(self.writes.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(occupant.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+            "wildcard occupant must accept no restore connection"
+        );
+    }
 }
 
 #[tokio::test]
@@ -613,6 +633,89 @@ async fn an_occupied_port_is_replaced_without_contacting_its_listener() {
         matches!(occupant.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
         "restore contacted the occupied listener"
     );
+}
+
+#[tokio::test]
+async fn an_ipv4_wildcard_occupant_forces_a_fresh_restore_port() {
+    let mut fixture = Restoring::new();
+    fixture.seed();
+    fixture.reopen_with_runtime(true);
+    let previous = Provider::read(&fixture.settings).unwrap();
+    let occupant = TcpListener::bind((Ipv4Addr::UNSPECIFIED, port(&previous))).unwrap();
+    occupant.set_nonblocking(true).unwrap();
+    fixture.restore(true).unwrap();
+    let ready = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(ready.server.state, "ready");
+    assert!(ready.server.checked);
+    let current = ready.server.provider.unwrap();
+    assert_ne!(
+        port(&current),
+        port(&previous),
+        "IPv4 wildcard occupant must force a fresh restore port"
+    );
+    fixture.relocated(&previous, &current, &occupant);
+}
+
+#[tokio::test]
+async fn an_ipv6_wildcard_occupant_forces_a_fresh_restore_port() {
+    let mut fixture = Restoring::new();
+    fixture.seed();
+    fixture.reopen_with_runtime(true);
+    let previous = Provider::read(&fixture.settings).unwrap();
+    let occupant = TcpListener::bind((Ipv6Addr::UNSPECIFIED, port(&previous))).unwrap();
+    occupant.set_nonblocking(true).unwrap();
+    fixture.restore(true).unwrap();
+    let ready = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(ready.server.state, "ready");
+    assert!(ready.server.checked);
+    let current = ready.server.provider.unwrap();
+    assert_ne!(
+        port(&current),
+        port(&previous),
+        "IPv6 wildcard occupant must force a fresh restore port"
+    );
+    fixture.relocated(&previous, &current, &occupant);
+}
+
+#[tokio::test]
+async fn an_owned_time_wait_keeps_the_restore_port_without_settings_writes() {
+    use tokio::io::AsyncReadExt;
+
+    let mut fixture = Restoring::new();
+    fixture.seed();
+    fixture.reopen_with_runtime(true);
+    let previous = Provider::read(&fixture.settings).unwrap();
+    let settings = fs::read(&fixture.settings).unwrap();
+    let intent = fs::read(fixture.intent_path()).unwrap();
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port(&previous)))
+        .await
+        .unwrap();
+    let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (connection, _) = listener.accept().await.unwrap();
+    drop(connection);
+    assert_eq!(client.read(&mut [0_u8; 1]).await.unwrap(), 0);
+    drop(client);
+    drop(listener);
+    assert!(
+        matches!(TcpListener::bind((Ipv4Addr::LOCALHOST, port(&previous))), Err(error) if error.kind() == std::io::ErrorKind::AddrInUse),
+        "TIME_WAIT guard must leave the recorded server port in use"
+    );
+    fixture.restore(true).unwrap();
+    let ready = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(fixture.starts(), 1);
+    assert_eq!(ready.server.state, "ready");
+    assert!(ready.server.checked);
+    assert_eq!(
+        port(ready.server.provider.as_ref().unwrap()),
+        port(&previous),
+        "owned TIME_WAIT must keep the recorded restore port"
+    );
+    assert_eq!(fs::read(&fixture.settings).unwrap(), settings);
+    assert_eq!(fs::read(fixture.intent_path()).unwrap(), intent);
+    assert_eq!(fixture.swap_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
