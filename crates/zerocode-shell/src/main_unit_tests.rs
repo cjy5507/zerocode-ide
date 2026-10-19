@@ -7094,7 +7094,7 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
     ];
     let mut seen = Vec::new();
     adopt_unseen_status_bar_items(&mut items, &mut seen);
-    for gauge in ["kimi", "grok", "opencode-go"] {
+    for gauge in ["antigravity", "kimi", "grok", "opencode-go"] {
         assert!(
             items.iter().any(|held| held == gauge),
             "`{gauge}` shipped after this list was written and still \

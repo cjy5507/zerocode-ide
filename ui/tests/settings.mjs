@@ -230,8 +230,8 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "theme": "system",
   "ui_zoom_level": 0.0,
   "app_font_family": "Geist",
-  "status_bar_items": ["claude", "codex", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
-  "status_bar_items_seen": ["claude", "codex", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
+  "status_bar_items": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
+  "status_bar_items_seen": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
   "usage_percentage_display": "used",
   "status_bar_usage_mode": "verbose",
   "usage_analytics_off": [],
@@ -1161,7 +1161,7 @@ class StatefulBackend {
         break;
       }
       case "set_status_bar_item": {
-        const available = ["claude", "codex", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
+        const available = ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
         if (!available.includes(args.item)) throw new Error(`unknown status-bar item: ${args.item}`);
         const enabled = new Set(this.settings.status_bar_items);
         if (args.enabled === true) enabled.add(args.item);
@@ -2083,6 +2083,7 @@ class StatefulBackend {
       // 뒤에. 넷만 정의해 두면 나머지가 "정의되지 않은 IPC"로 잡힌다.
       case "claude_usage":
       case "codex_usage":
+      case "antigravity_usage":
       case "kimi_usage":
       case "grok_usage":
         return this.grokUsage ? clone(this.grokUsage) : { usage: null, fetching: false };
@@ -4756,9 +4757,11 @@ await test("the provider accounts pane carries a Google card whose login the win
     note: document.getElementById("google-account-note")?.textContent ?? "",
     differs: t("settings.googleAccount.agyDiffers", "터미널의 agy는 자기 로그인을 따로 가지므로 다른 계정일 수 있습니다."),
     shared: t("settings.googleAccount.about", "zo와 창이 함께 쓰는 Google 로그인(credentials.json)입니다."),
+    gauge: t("usage.antigravityTip", "zo와 창이 함께 쓰는 Google 로그인(credentials.json)으로 읽습니다 — 터미널의 agy는 다른 계정일 수 있습니다."),
   }));
   assertEqual(loginWords.about.trim(), loginWords.shared, "the Google card does not say whose login it shows");
   assert(loginWords.note.includes(loginWords.differs), "the Google card does not say agy may use another login");
+  assert(loginWords.gauge.includes("credentials.json"), "the Antigravity gauge tip does not name its login");
   // There is one Google login per machine, so there is nothing to choose —
   // and a pressed-state control here would be a radio with one option.
   assertEqual(
@@ -4788,6 +4791,9 @@ await test("the provider accounts pane carries a Google card whose login the win
   await backend.waitForCall("A", "google_login_start", signingIn);
   const consentOpened = await backend.waitForCall("A", "open_url", signingIn);
   await backend.waitForCall("A", "google_login_finish", signingIn);
+  // The forced Antigravity re-read is what keeps the status bar from standing
+  // under a fresh login saying 「Antigravity 로그인 필요」.
+  await backend.waitForCall("A", "antigravity_usage", signingIn);
   await renderSettled(pageA);
   assertEqual(
     consentOpened.args.url,
@@ -11404,7 +11410,7 @@ await test("available Orca status-bar indicators persist as item patches", async
   // re-defaulted on.
   const stored = ["claude", "codex", "resource-usage", "ports"];
   await backend.externalPatch({ status_bar_items: stored }, ["status_bar_items"]);
-  const controls = ["claude", "codex", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
+  const controls = ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
   assertEqual(
     await pageA.$$eval("[data-status-bar-item]", (fields) =>
       fields.map((field) => ({ item: field.dataset.statusBarItem, checked: field.checked }))),
@@ -11545,10 +11551,10 @@ await test("stale windows preserve disjoint status-bar item patches", async () =
     "canonical status visibility did not survive a settings reopen",
   );
 
-  // Back to the fresh-install document the suite booted with — seven items,
+  // Back to the fresh-install document the suite booted with — six items,
   // the serialized Rust default.
   await backend.externalPatch({
-    status_bar_items: ["claude", "codex", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
+    status_bar_items: ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
   }, ["status_bar_items"]);
 });
 

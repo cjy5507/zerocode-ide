@@ -3969,6 +3969,7 @@ fn cached_usage(
         "opencode" => caches::opencode_usage_cache(local_data_root),
         "grok" => caches::grok_usage_cache(local_data_root),
         "kimi" => caches::kimi_usage_cache(local_data_root),
+        "antigravity" => caches::antigravity_usage_cache(local_data_root),
         _ => return None,
     })
 }

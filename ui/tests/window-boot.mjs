@@ -1625,6 +1625,12 @@ const stubBackend = ({ boot, pollers }) => {
       window.__GOOGLE__ = GOOGLE_SIGNED_OUT;
       return window.__GOOGLE__;
     },
+    // Counted forced, like the other two gauges: a login that moved has to be
+    // re-read past the backend's own floor.
+    antigravity_usage: (args) => {
+      if (args?.force) window.__ANTIGRAVITY_FORCED__ = (window.__ANTIGRAVITY_FORCED__ ?? 0) + 1;
+      return { usage: window.__ANTIGRAVITY_USAGE__ ?? null, fetching: false };
+    },
     // The checks panel's two reads. A fixture rather than a fetch: `gh` is not
     // on a test machine, and what is being checked here is the panel — how it
     // sorts, folds, tallies and opens — not GitHub.
