@@ -59,12 +59,21 @@ const DENIAL: &str = "Inspection Bash permits one local read-only query; writes,
 /// helpers, lazy network fetching, pager and optional index writes disabled.
 /// This is a host constraint; no tool input can switch it off.
 pub fn command(source: &str) -> Result<String, String> {
+    let words = literal_argv(source).ok_or_else(|| DENIAL.to_string())?;
+    command_words(&words)
+}
+
+#[must_use]
+pub fn literal_argv(source: &str) -> Option<Vec<String>> {
     if source.len() > MAX_ANALYZED_COMMAND_LEN
         || source.contains(['$', '`', '\\', '\n', '\r', ';', '|', '&', '>', '<', '(', ')', '{', '}'])
     {
-        return Err(DENIAL.to_string());
+        return None;
     }
-    let words = shlex::split(source).ok_or_else(|| DENIAL.to_string())?;
+    shlex::split(source)
+}
+
+fn command_words(words: &[String]) -> Result<String, String> {
     let Some(program) = words.first() else { return Err(DENIAL.to_string()); };
     let mut offset = 1;
     // -C is the only accepted global Git option, and its operand is quoted.

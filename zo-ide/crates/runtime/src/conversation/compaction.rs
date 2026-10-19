@@ -1528,6 +1528,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
         let retained = result.cleared_tool_results > 0;
         let before = estimate_session_tokens(&self.session);
+        self.resolved_tool_use_fingerprints.get_mut().clear();
         self.session = result.compacted_session;
         // Recompute recall dedup against the compacted transcript. The summary
         // erased the bodies it evicted, so those entries must be free to reseed

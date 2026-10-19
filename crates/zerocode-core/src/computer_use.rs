@@ -4910,6 +4910,16 @@ impl PowerShellBridgeShim<'_> {
         } else {
             std::array::from_fn(|_| String::new())
         };
+        let [
+            execution_setup,
+            execution_header,
+            execution_capture,
+            execution_frame,
+        ] = if *route == "/browser" {
+            crate::agent_browser::execution_shim_posix()
+        } else {
+            std::array::from_fn(|_| String::new())
+        };
         let cwd_args = self.cwd_flag.map_or(String::new(), |flag| {
             format!("set -- \"$@\" '{flag}' \"$PWD\"\n")
         });
@@ -4993,13 +5003,13 @@ fi
 headers=$(mktemp) || exit 1
 trap 'rm -f "$headers"' EXIT
 chmod 600 "$headers"
-printf 'header = "x-zerocode-hook-token: %s"\nheader = "{capability_header}: %s"\n' \
+{execution_setup}printf 'header = "x-zerocode-hook-token: %s"\nheader = "{capability_header}: %s"\n' \
   "$hook_token" "$capability" > "$headers"
 if [ -n "${{{RUN_EVIDENCE_DIR_ENV}:-}}" ]; then
   printf 'header = "{RUN_EVIDENCE_HEADER}: %s"\n' "${RUN_EVIDENCE_DIR_ENV}" >> "$headers"
 fi
-{pane_lines}{cwd_lines}{revision_header}out=$(printf '%s' "$body" | curl -q -sS --noproxy '*' --proto =http \
-  --max-time {deadline_seconds} -w '\n%{{http_code}}' \
+{pane_lines}{cwd_lines}{revision_header}{execution_header}out=$(printf '%s' "$body" | curl -q -sS --noproxy '*' --proto =http \
+  {execution_capture}--max-time {deadline_seconds} -w '\n%{{http_code}}' \
   -K "$headers" -H "content-type: application/octet-stream" --data-binary @- \
   "http://127.0.0.1:$port{route}" 2>/dev/null) || {{
   echo "{command}: could not reach the window" >&2
@@ -5013,7 +5023,7 @@ if [ "$code" != "200" ]; then
   printf '%s' "$said" >&2
   exit 1
 fi
-printf '%s' "$said"
+{execution_frame}printf '%s' "$said"
 "#
         )
     }
@@ -5036,6 +5046,11 @@ printf '%s' "$said"
             cwd_flag,
             pane_flag,
         } = self;
+        let [execution_header, execution_frame] = if *route == "/browser" {
+            crate::agent_browser::execution_shim_powershell()
+        } else {
+            std::array::from_fn(|_| String::new())
+        };
         let [revision_init, revision_arg, revision_end, revision_header] = if *route == "/browser" {
             crate::agent_browser::revision_shim_powershell()
         } else {
@@ -5133,13 +5148,13 @@ try {{
   $request.Headers.Add('{capability_header}', $capability)
   $evidence = $env:{RUN_EVIDENCE_DIR_ENV}
   if ($evidence) {{ $request.Headers.Add('{RUN_EVIDENCE_HEADER}', $evidence) }}
-{pane_lines}{cwd_lines}{revision_header}  $asking = $request.GetRequestStream()
+{pane_lines}{cwd_lines}{revision_header}{execution_header}  $asking = $request.GetRequestStream()
   $asking.Write($bytes, 0, $bytes.Length)
   $asking.Close()
   $response = $request.GetResponse()
   $reader = New-Object System.IO.StreamReader($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
   $said = $reader.ReadToEnd()
-  $response.Close()
+{execution_frame}  $response.Close()
   [Console]::Out.Write($said)
   exit 0
 }} catch {{

@@ -387,6 +387,7 @@ pub(crate) async fn read_judged(
     mode: JevMode,
 ) -> Result<crate::cmd::browser::BrowserReadReport, String> {
     let page = crate::cmd::browser::automate_read_blocks(app, state, label).await?;
+    crate::computer_use::surface_execution::record_browser_read(label, &page.report);
     let label = label.to_string();
     let now_ms = crate::project_runtime::now_epoch_ms();
     let judged = tauri::async_runtime::spawn_blocking(move || {

@@ -181,6 +181,26 @@ impl EnvGuard {
         }
     }
 
+    /// Apply one fixture's overrides while acquiring the process environment lock once.
+    #[cfg(unix)]
+    pub(crate) fn set_many(values: impl IntoIterator<Item = (&'static str, Option<String>)>) -> Self {
+        let mut values = values.into_iter();
+        let (key, value) = values.next().expect("a fixture environment must contain at least one override");
+        let mut guard = match value {
+            Some(value) => Self::set(key, &value),
+            None => Self::clear(key),
+        };
+        for (key, value) in values {
+            let previous = std::env::var_os(key);
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+            guard.extra.push((key, previous));
+        }
+        guard
+    }
+
     pub(crate) fn set_also(mut self, key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
         let previous = std::env::var_os(key);
         std::env::set_var(key, value);

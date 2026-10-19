@@ -2689,7 +2689,7 @@ pub(super) async fn browser_loop(
             .or_else(|| computer_use::evidence::session_dir(now_epoch_ms()));
             let mut reply = request.answer;
             tokio::select! {
-                answer = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, request.workspace_revision) => { let _ = reply.send(answer); }
+                (answer, surface) = browser_step_at(&steering, request.pane.as_deref(), evidence.as_deref(), &request.argv, &request.argv, request.workspace_revision) => { let _ = reply.send_with_surface(answer, surface); }
                 _ = reply.closed() => {}
             }
         });
@@ -3238,7 +3238,7 @@ pub(super) async fn browser_step(
 ) -> zerocode_hookd::TeamAnswer {
     // Nested callers carry the selected observation in the same common
     // option as the CLI. Missing input stays missing until admission.
-    browser_step_at(app, pane, dir, argv, logged, None).await
+    browser_step_at(app, pane, dir, argv, logged, None).await.0
 }
 
 async fn browser_step_at(
@@ -3248,11 +3248,45 @@ async fn browser_step_at(
     argv: &[String],
     logged: &[String],
     expected_revision: Option<u64>,
-) -> zerocode_hookd::TeamAnswer {
-    let observation = step_actor(app, pane).on(run_evidence::observation());
+) -> (
+    zerocode_hookd::TeamAnswer,
+    Option<zerocode_core::surface_execution::SurfaceExecution>,
+) {
+    let actor = step_actor(app, pane);
+    let observation = actor.on(run_evidence::observation());
+    let surface_context =
+        zerocode_core::agent_browser::parse_workspace_command(argv, expected_revision)
+            .ok()
+            .and_then(|command| {
+                let label = command.argv.get(1)?;
+                let state = app.state::<AppState>();
+                let workspaces = &state.shell_runtime().browser_workspaces;
+                let check = workspaces
+                    .navigation_check(label, actor.pane.as_deref())
+                    .ok()?;
+                let snapshot = workspaces.snapshot(label).ok()??;
+                if !check.holds() {
+                    return None;
+                }
+                let context = computer_use::surface_execution::BrowserContext::new(
+                    actor.clone(),
+                    label,
+                    snapshot.revision,
+                )?;
+                Some((context, check))
+            });
     let began = std::time::Instant::now();
     let mut control = None;
-    let answer = answer_browser_command(app, argv, pane, expected_revision, &mut control).await;
+    let (answer, browser_observation) = computer_use::surface_execution::observing_browser(async {
+        answer_browser_command(app, argv, pane, expected_revision, &mut control).await
+    })
+    .await;
+    let surface = surface_context.and_then(|(context, check)| {
+        if !check.holds() || step_actor(app, pane) != actor {
+            return None;
+        }
+        context.finish(argv, &answer, browser_observation.as_ref())
+    });
     if let Some(dir) = dir {
         evidence_runtime::leave_browser_evidence(
             app,
@@ -3263,7 +3297,7 @@ async fn browser_step_at(
             control,
         );
     }
-    answer
+    (answer, surface)
 }
 
 /// One command line answered down the emulator road, and its evidence after
@@ -4072,28 +4106,122 @@ fn repeat_answer(
     }
 }
 
-/// A stop the helper answers with, taken in by the window (`guard::adopt`).
-fn adopt_helper_stop(helper: &serde_json::Value) {
-    if helper.get("stopped").and_then(serde_json::Value::as_bool) == Some(true)
+/// A stop the helper answers with, taken in by the window (`guard::adopt`),
+/// and told to the band when it moved the window's stop (t-62872): the
+/// person's chord heard over an agent's stop is the person's from then on,
+/// and the work browsers stop too once the band hears it. Answers whether it
+/// moved the stop.
+fn adopt_helper_stop(helper: &serde_json::Value, app: Option<&AppHandle>) -> bool {
+    let took = if helper.get("stopped").and_then(serde_json::Value::as_bool) == Some(true)
         && let Some(reason) = helper.get("reason").and_then(serde_json::Value::as_str)
     {
-        computer_use::guard::adopt(reason);
+        computer_use::guard::adopt(reason)
+    } else {
+        false
+    };
+    if took && let Some(app) = app {
+        let _ = app.emit(
+            "computer:activity",
+            computer_use::guard::activity_report(None),
+        );
+    }
+    took
+}
+
+/// The helper as an agent's `stop` and `resume` reach it (t-62872): its
+/// `status`, its `resume` and the signal that stops it without waiting behind
+/// a request in flight. The window's is the session's (`SessionHelper`); a
+/// test's keeps a stop of its own, as the signed helper does.
+pub(super) trait HelperRoads {
+    /// The helper's `status`, when a session stands and it answers.
+    fn status(&self) -> Option<serde_json::Value>;
+    /// The helper's `status` unless a request is in flight: a stop never
+    /// waits behind one.
+    fn status_now(&self) -> Option<serde_json::Value>;
+    /// The helper's `resume`.
+    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError>;
+    /// The signal that stops the helper: false when there is none to tell.
+    fn signal(&self) -> bool;
+}
+
+/// The window's helper: the session's, when one stands — never started here.
+struct SessionHelper;
+
+impl HelperRoads for SessionHelper {
+    fn status(&self) -> Option<serde_json::Value> {
+        computer_use::session_stands()
+            .then(|| computer_use::call("status", serde_json::json!({})).ok())
+            .flatten()
+    }
+
+    fn status_now(&self) -> Option<serde_json::Value> {
+        computer_use::status_unless_busy()
+    }
+
+    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+        computer_use::guard::helper_resume(reset)
+    }
+
+    fn signal(&self) -> bool {
+        computer_use::guard::stop_helper()
     }
 }
 
 /// The person's stop, when one stands — the window's own (its button, or a
-/// chord it took in) or the helper's chord.
-fn persons_stop_standing() -> Option<String> {
+/// chord it took in) or the helper's chord, which the window takes in once it
+/// hears it.
+fn persons_stop_standing(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> Option<String> {
     let persons = |reason: &String| zerocode_core::computer_use::persons_stop(reason);
     computer_use::guard::stopped_reason()
         .filter(persons)
         .or_else(|| {
-            computer_use::session_stands()
-                .then(|| computer_use::call("status", serde_json::json!({})).ok())
-                .flatten()
-                .and_then(|helper| helper.get("reason")?.as_str().map(str::to_string))
+            let heard = helper.status()?;
+            adopt_helper_stop(&heard, app);
+            heard
+                .get("reason")?
+                .as_str()
+                .map(str::to_string)
                 .filter(persons)
         })
+}
+
+/// An agent's `stop` (t-62872): the window hears the helper first and takes
+/// in the person's chord it may hold, so the stop that follows keeps the stop
+/// the person's — the signal it sends then overwrites the helper's reason, and
+/// an agent's `resume` after it would otherwise lift the person's stop. It
+/// hears the helper only when no request is in flight: the signal must not
+/// wait behind one, for it is what ends that request at its next event. A
+/// chord the helper heard just then, or between that `status` and the signal,
+/// is the helper's to keep (t-62469).
+pub(super) fn agents_stop(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> serde_json::Value {
+    if !computer_use::guard::persons_stop_stands()
+        && let Some(heard) = helper.status_now()
+    {
+        adopt_helper_stop(&heard, app);
+    }
+    computer_use::guard::stop_with(zerocode_core::computer_use::STOP_REASON_REQUEST, || {
+        helper.signal()
+    })
+}
+
+/// An agent's `resume`: never the person's stop — the window's resume lifts
+/// that one — and otherwise the one resume (`guard::resume`).
+pub(super) fn agents_resume(
+    helper: &dyn HelperRoads,
+    reset: bool,
+    app: Option<&AppHandle>,
+) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+    if let Some(reason) = persons_stop_standing(helper, app) {
+        // The person's stop is theirs: the window's resume lifts it, never
+        // an agent's `resume`.
+        return Err(computer_use::guard::refusal(&reason));
+    }
+    computer_use::guard::resume(
+        computer_use::guard::Lifter::Agent,
+        || helper.resume(reset),
+        || helper.signal(),
+    )
+    .agent_answer()
 }
 
 /// Where the recipes live is the window's to say; before it has, no recipe
@@ -5474,29 +5602,16 @@ pub(super) fn answer_computer_command_with(
     if let Err(error) = input_policy.prepare(&mut command) {
         return computer_cli_error(command.json, &error.code, &error.message);
     }
+    let surface_context = computer_use::surface_execution::begin(command.method);
     let result = if command.method == ComputerMethod::Stop {
-        Ok(computer_use::guard::stop(
-            zerocode_core::computer_use::STOP_REASON_REQUEST,
-        ))
-    } else if let Some(reason) = (command.method == ComputerMethod::Resume)
-        .then(persons_stop_standing)
-        .flatten()
-    {
-        // The person's stop is theirs: the window's resume lifts it, never
-        // an agent's `resume`.
-        Err(computer_use::guard::refusal(&reason))
+        Ok(agents_stop(&SessionHelper, permission_window))
     } else if command.method == ComputerMethod::Resume {
         let reset = command
             .params
             .get("resetBudget")
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        computer_use::guard::resume(
-            computer_use::guard::Lifter::Agent,
-            || computer_use::guard::helper_resume(reset),
-            computer_use::guard::stop_helper,
-        )
-        .agent_answer()
+        agents_resume(&SessionHelper, reset, permission_window)
     } else if command.method == ComputerMethod::Status {
         let helper = if computer_use::session_stands() {
             computer_use::call("status", serde_json::json!({}))
@@ -5504,7 +5619,7 @@ pub(super) fn answer_computer_command_with(
         } else {
             serde_json::Value::String("idle".into())
         };
-        adopt_helper_stop(&helper);
+        adopt_helper_stop(&helper, permission_window);
         // The pace is the window's table, answered whether or not a helper
         // session stands — a caller spacing its actions needs it before the
         // first one starts a session. Unlimited says so (`mode`), with no
@@ -5720,7 +5835,7 @@ pub(super) fn answer_computer_command_with(
                     png,
                 );
             }
-            said_envelope(&command, result)
+            said_envelope_at(&command, result, surface_context.as_ref())
         }
         Err(error) => {
             use zerocode_core::computer_use_protocol::{error_code, validate};
@@ -5729,14 +5844,18 @@ pub(super) fn answer_computer_command_with(
             {
                 let _ = window.emit("computer:permission-denied", serde_json::json!({}));
             }
-            // A stop the helper made on its own (the person's chord): the
-            // window takes it in, so its band shows it and the resume.
+            // A stop the helper made on its own (the person's chord), heard
+            // as it refused an action: the window takes it in, so its band
+            // shows it and the resume. Under an agent's own stop the door
+            // refuses an action before it reaches the helper, so this road
+            // hears the chord there only in a race; the agent's `status`,
+            // `stop` and `resume` hear it (t-62872).
             if error.code == error_code::STOPPED
-                && computer_use::guard::stopped_reason().is_none()
+                && !computer_use::guard::persons_stop_stands()
                 && computer_use::session_stands()
                 && let Ok(helper) = computer_use::call("status", serde_json::json!({}))
             {
-                adopt_helper_stop(&helper);
+                adopt_helper_stop(&helper, permission_window);
             }
             // A password field refused the keys, or a line break would have
             // pressed: the helper's terse words as the model reads them. A
@@ -6499,7 +6618,15 @@ pub(super) fn said_envelope(
     command: &zerocode_core::computer_use::ComputerCommand,
     result: serde_json::Value,
 ) -> zerocode_hookd::TeamAnswer {
-    let envelope = serde_json::json!({ "ok": true, "result": result });
+    said_envelope_at(command, result, None)
+}
+
+fn said_envelope_at(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    result: serde_json::Value,
+    context: Option<&computer_use::surface_execution::Context>,
+) -> zerocode_hookd::TeamAnswer {
+    let envelope = computer_use::surface_execution::envelope(command, result, context);
     if command.json {
         computer_said(format!("{envelope}\n"))
     } else {
@@ -6877,6 +7004,23 @@ pub(super) async fn answer_browser_command(
     if label.is_some_and(|label| !state.browser_panes().contains(label)) {
         return browser_refused("zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n");
     }
+    // The person's stop holds every work browser and every agent's `open`
+    // (t-62872): said here, before any other refusal, and read again where
+    // the door admits, under that stop's own lock.
+    if computer_use::guard::persons_stop_stands()
+        && label.map_or(verb == "open", |label| {
+            state
+                .shell_runtime()
+                .browser_workspaces
+                .snapshot(label)
+                .is_ok_and(|held| held.is_some())
+        })
+    {
+        return browser_refused(format!(
+            "zerocode-browser: {}\n",
+            crate::browser_workspace::PERSONS_STOPPED
+        ));
+    }
     if let Err(error) = state
         .shell_runtime()
         .browser_workspaces
@@ -6899,7 +7043,7 @@ pub(super) async fn answer_browser_command(
     }
     let notify_app = app.clone();
     let operation = match label {
-        Some(label) => match state.shell_runtime().browser_workspaces.begin_at(
+        Some(label) => match state.shell_runtime().browser_workspaces.begin_agents(
             label,
             pane,
             verb,
@@ -7035,12 +7179,15 @@ async fn dispatch_browser_command(
                 if browser_pane_of(app, &state, &label).is_err() {
                     continue;
                 }
+                // By the door that reads the person's stop, here and in `tabs`
+                // (t-62872): while it stands a work browser is skipped, as
+                // one its stop paused is.
                 let operation = match state
                     .shell_runtime()
                     .browser_workspaces
                     .snapshot(&label)
                     .and_then(|snapshot| {
-                        state.shell_runtime().browser_workspaces.begin_at(
+                        state.shell_runtime().browser_workspaces.begin_agents(
                             &label,
                             pane,
                             "list",
@@ -7090,7 +7237,7 @@ async fn dispatch_browser_command(
             let creation = match state
                 .shell_runtime()
                 .browser_workspaces
-                .register(&label, pane, false)
+                .register_agents(&label, pane)
             {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -7330,6 +7477,9 @@ async fn dispatch_browser_command(
             } else {
                 cmd::browser::automate_read(app, &state, &read.label, read.selector.as_deref())
                     .await
+                    .inspect(|report| {
+                        computer_use::surface_execution::record_browser_read(&read.label, report);
+                    })
             };
             match answered {
                 Ok(report) => {
@@ -7458,7 +7608,7 @@ async fn dispatch_browser_command(
                         .browser_workspaces
                         .snapshot(&label)
                         .and_then(|snapshot| {
-                            state.shell_runtime().browser_workspaces.begin_at(
+                            state.shell_runtime().browser_workspaces.begin_agents(
                                 &label,
                                 pane,
                                 "tabs",
