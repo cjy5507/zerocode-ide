@@ -669,14 +669,18 @@ async function refreshBrowserWorkspace(tab, { keepError = false } = {}) {
   }
 }
 
-async function setBrowserWorkspaceMode(tab, mode) {
+/* Answers the state the change left, or null when it did not take — the
+ * person's stop reads it to name what it paused (t-62872). `view: false`
+ * leaves whether the person watches the browser as it was: the stop's pause
+ * and the band's resume are not the person opening its bar. */
+async function setBrowserWorkspaceMode(tab, mode, { view = true } = {}) {
   if (!browserWorkspaceLive(tab) || !tab.agentWorkspace || !tab.workspace
-    || tab.workspacePending || tab.workspaceError || !["agent", "paused", "human"].includes(mode)) return;
+    || tab.workspacePending || tab.workspaceError || !["agent", "paused", "human"].includes(mode)) return null;
   const owner = mode === "agent" ? browserWorkspaceAgentOwner(tab) : {};
   if (owner === null) {
     tab.workspaceOwnerError = true;
     paintBrowserWorkspaceTab(tab);
-    return;
+    return null;
   }
   const label = tab.label;
   const token = { revision: tab.workspace.revision, viewEpoch: tab.workspaceViewEpoch ?? 0, owner };
@@ -686,20 +690,20 @@ async function setBrowserWorkspaceMode(tab, mode) {
   paintBrowserWorkspaceTab(tab);
   try {
     await browserPlacing;
-    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return;
+    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return null;
     if (owner.ownerTerm && !browserWorkspaceOwnerCandidates(tab).some((one) => one.value === owner.ownerTerm)) {
       tab.workspaceOwnerError = true;
-      return;
+      return null;
     }
     const said = await invoke("set_browser_workspace_mode", {
       label, mode, expectedRevision: token.revision, ...owner,
     });
-    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return;
+    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return null;
     const applied = applyBrowserWorkspaceState(tab, said);
     if (!applied || tab.workspace?.mode !== mode || tab.workspace.inFlight !== 0
       || (owner.ownerTerm && tab.workspace.ownerTerm !== owner.ownerTerm)) {
       tab.workspaceError = "transition";
-    } else if ((tab.workspaceViewEpoch ?? 0) === token.viewEpoch && mode !== "paused") {
+    } else if (view && (tab.workspaceViewEpoch ?? 0) === token.viewEpoch && mode !== "paused") {
       tab.workspaceViewing = true;
     }
     if (applied && mode === "agent" && !tab.workspaceError) {
@@ -707,17 +711,294 @@ async function setBrowserWorkspaceMode(tab, mode) {
       tab.workspaceOwnerEditing = false;
       tab.workspaceOwnerError = false;
     }
+    return tab.workspaceError ? null : tab.workspace;
   } catch {
-    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return;
+    if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return null;
     tab.workspace = null;
     tab.workspaceError = "transition";
     void refreshBrowserWorkspace(tab, { keepError: true });
+    return null;
   } finally {
     if (browserWorkspaceLive(tab, label) && tab.workspacePending === token) {
       tab.workspacePending = null;
       paintBrowserWorkspaceTab(tab);
     }
   }
+}
+
+/* The person's one stop (t-62872). A stop the backend says is the person's —
+ * the band's own, the desktop chord it took in, or shared desktop input
+ * turned off in Settings — pauses the desktop and every work browser an agent
+ * holds in this window, each by its own bar's road (`setBrowserWorkspaceMode`,
+ * naming the revision the window holds), never a road of its own. While that
+ * stop stands the backend refuses the agents at the work browsers' door, so
+ * this walk does not race their input: it brings each bar to paused and names
+ * what the stop paused. A pause the backend refuses — its revision moved under
+ * it — is read again and asked again, up to `BROWSER_WORKSPACE_STOP_TRIES`
+ * asks; one still in an agent's hands after them is said on the band and in
+ * the panel (`browserWorkspaceStopReach`), and a closed one is let go. The
+ * stop names only what its own pauses answered — each browser's label and the
+ * revision its pause left, never a pause the backend made on its own meanwhile
+ * — and keeps that record in the page's session under the stop's revision, so
+ * a reload during the stop still knows it. The band's resume, once the
+ * backend lifted the stop, gives back to the agent only those still standing
+ * exactly there; one the person took by hand, or that moved since, stays as
+ * it is, and one the resume must leave paused — a change of its bar still out,
+ * an error, an agent being chosen for it — is counted on the band. A work
+ * browser that comes into an agent's hands while the stop stands is paused
+ * too, and no bar hands one to an agent meanwhile: the backend refuses the
+ * agent until the band's resume, so the bar offers no hand-back and says the
+ * agent waits (`paintBrowserWorkspace`). An agent's own stop, or a budget's,
+ * touches no work browser, and the board pop-out holds none. Nothing here runs
+ * on a clock: the stop walks again whenever a work browser's state is painted
+ * (`paintBrowserWorkspaceChrome`). */
+const BROWSER_WORKSPACE_STOP_TRIES = 3;
+/* Where the stop's record waits out a reload of this page: one entry, the
+ * stop's revision beside what it paused, taken back only by the stop of that
+ * very revision. A session that keeps nothing leaves the record in memory. */
+const BROWSER_WORKSPACE_STOP_KEY = "zerocode.computerStop.browsers";
+let browserWorkspaceStop = null;
+let browserWorkspaceStopWalking = false;
+/* What the band's last resume had to leave paused of what its stop paused,
+ * by label and the revision each stands at, until the next stop or the band
+ * slips away. */
+let browserWorkspaceStopKept = null;
+
+function browserWorkspaceManaged(tab) {
+  return tab?.kind === "browser" && tab.agentWorkspace === true && browserWorkspaceLive(tab);
+}
+
+function browserWorkspaceTabOf(label) {
+  return tabs.find((tab) => browserWorkspaceManaged(tab) && tab.label === label) ?? null;
+}
+
+function browserWorkspaceHeldByStop(tab, revision) {
+  return Number.isSafeInteger(revision) && browserWorkspaceManaged(tab) && tab.workspace?.mode === "paused"
+    && tab.workspace.revision === revision;
+}
+
+/* The stop's record in the page's session: written whenever it moves, and
+ * gone with the stop. */
+function keepBrowserWorkspaceStop(stop) {
+  try {
+    if (stop) {
+      sessionStorage.setItem(BROWSER_WORKSPACE_STOP_KEY, JSON.stringify({ revision: stop.revision, held: [...stop.held] }));
+    } else {
+      sessionStorage.removeItem(BROWSER_WORKSPACE_STOP_KEY);
+    }
+  } catch {
+    // A page that keeps nothing: the record stands in memory alone.
+  }
+}
+
+/* What a reload kept for the stop at `revision`: nothing for another stop. */
+function keptBrowserWorkspaceStop(revision) {
+  try {
+    const kept = JSON.parse(sessionStorage.getItem(BROWSER_WORKSPACE_STOP_KEY) ?? "null");
+    if (kept?.revision !== revision || !Array.isArray(kept.held)) return new Map();
+    return new Map(kept.held.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string"
+      && Number.isSafeInteger(entry[1])).map(([label, paused]) => [label, paused]));
+  } catch {
+    return new Map();
+  }
+}
+
+/* A stop of the person's, granted at the backend's `revision`. A newer stop
+ * over a standing one asks again of every work browser it does not hold
+ * paused — one the person handed back meanwhile included — and keeps what it
+ * holds; the first stop this page hears of takes back what a reload kept of
+ * it. */
+function stopAgentBrowserWorkspaces(revision) {
+  if (isPopout || !Number.isSafeInteger(revision)) return;
+  const standing = browserWorkspaceStop;
+  if (standing && revision <= standing.revision) return;
+  browserWorkspaceStopKept = null;
+  const stop = standing ?? {
+    revision, owed: new Map(), held: keptBrowserWorkspaceStop(revision), failed: new Set(), unread: new Set(),
+    seen: new Set(),
+  };
+  stop.revision = revision;
+  stop.failed.clear();
+  stop.unread.clear();
+  stop.seen.clear();
+  browserWorkspaceStop = stop;
+  for (const tab of tabs) {
+    if (!browserWorkspaceManaged(tab)) continue;
+    stop.seen.add(tab);
+    if (browserWorkspaceHeldByStop(tab, stop.held.get(tab.label))) continue;
+    if (!stop.owed.has(tab)) stop.owed.set(tab, { tries: 0, reads: 0, asking: false });
+  }
+  keepBrowserWorkspaceStop(stop);
+  paintBrowserWorkspaceChrome();
+  paintBrowserWorkspaceBarsAfterPlacing();
+}
+
+/* The bar of each work browser in front of its pane says whether the person's
+ * stop stands: what the stop changes on it is painted again when the stop
+ * comes or goes, but for one whose change is still out — its own road paints
+ * it when the change ends. */
+function paintBrowserWorkspaceBars() {
+  for (const tab of tabs) {
+    if (!browserWorkspaceManaged(tab) || tab.workspacePending) continue;
+    const host = groups.get(tab.pane)?.browserView;
+    if (host?._browserTab === tab && !host.hidden) paintBrowserWorkspaceStopHold(host, tab);
+  }
+}
+
+/* The same, once the browsers' placement in hand has gone: the stop's pauses
+ * and the resume's hand-backs wait for it and then leave, and a bar painted
+ * before them would make that placement measure the window again — the stop
+ * would reach its work browsers later for it. */
+function paintBrowserWorkspaceBarsAfterPlacing() {
+  void browserPlacing.then(paintBrowserWorkspaceBars, paintBrowserWorkspaceBars);
+}
+
+/* Walk what the stop still owes: a browser in an agent's hands is paused by its
+ * bar's road; one already paused or in the person's hands is not the stop's to
+ * name — the backend may have paused it on its own; one mid-transition is
+ * walked again once its state comes in, and one whose state the window does
+ * not hold is read again first. One whose state could not be read is walked
+ * again once its state does come in — a browser that opens before the backend
+ * lists it, as after a reload. */
+function holdBrowserWorkspacesStopped() {
+  const stop = browserWorkspaceStop;
+  if (!stop || browserWorkspaceStopWalking) return;
+  browserWorkspaceStopWalking = true;
+  try {
+    for (const tab of tabs) {
+      if (!browserWorkspaceManaged(tab) || stop.seen.has(tab)) continue;
+      stop.seen.add(tab);
+      stop.owed.set(tab, { tries: 0, reads: 0, asking: false });
+    }
+    for (const tab of stop.unread) {
+      if (browserWorkspaceManaged(tab) && (!tab.workspace || tab.workspaceError || tab.workspacePending
+        || tab.workspaceReading)) continue;
+      stop.unread.delete(tab);
+      if (!browserWorkspaceManaged(tab)) continue;
+      stop.failed.delete(tab);
+      stop.owed.set(tab, { tries: 0, reads: 0, asking: false });
+    }
+    for (const [tab, owed] of stop.owed) {
+      if (owed.asking) continue;
+      if (!browserWorkspaceManaged(tab)) {
+        stop.owed.delete(tab);
+        continue;
+      }
+      if (tab.workspacePending || tab.workspaceReading || tab.workspace?.mode === "pausing") continue;
+      const mode = tab.workspaceError ? null : tab.workspace?.mode ?? null;
+      if (mode === "paused" || mode === "human") {
+        stop.owed.delete(tab);
+      } else if (mode === "agent" ? owed.tries >= BROWSER_WORKSPACE_STOP_TRIES : owed.reads > owed.tries) {
+        stop.owed.delete(tab);
+        stop.failed.add(tab);
+        if (mode === null) stop.unread.add(tab);
+      } else {
+        owed.asking = true;
+        if (mode === "agent") void pauseBrowserWorkspaceForStop(tab, stop, owed);
+        else void readBrowserWorkspaceForStop(tab, owed);
+      }
+    }
+  } finally {
+    browserWorkspaceStopWalking = false;
+  }
+}
+
+/* One pause of the stop's own: what it answers paused is the stop's to name.
+ * One that answers after the band's resume ended its stop stays paused, and
+ * the band counts it. */
+async function pauseBrowserWorkspaceForStop(tab, stop, owed) {
+  const label = tab.label;
+  owed.tries += 1;
+  const said = await setBrowserWorkspaceMode(tab, "paused", { view: false });
+  owed.asking = false;
+  if (said?.mode === "paused" && browserWorkspaceLive(tab, label)) {
+    if (browserWorkspaceStop === stop && stop.owed.get(tab) === owed) {
+      stop.owed.delete(tab);
+      stop.held.set(label, said.revision);
+      keepBrowserWorkspaceStop(stop);
+    } else if (browserWorkspaceStopKept?.stop === stop) {
+      browserWorkspaceStopKept.held.set(label, said.revision);
+    }
+  }
+  paintBrowserWorkspaceChrome();
+}
+
+async function readBrowserWorkspaceForStop(tab, owed) {
+  owed.reads += 1;
+  await refreshBrowserWorkspace(tab);
+  owed.asking = false;
+  paintBrowserWorkspaceChrome();
+}
+
+/* How many of `held` — labels and the revisions the stop's pauses left —
+ * still stand paused exactly there. */
+function browserWorkspaceStillHeld(held) {
+  let still = 0;
+  for (const [label, revision] of held ?? []) {
+    if (browserWorkspaceHeldByStop(browserWorkspaceTabOf(label), revision)) still += 1;
+  }
+  return still;
+}
+
+/* How far the person's stop reached, for the band and the panel: the work
+ * browsers it holds paused now, those it could not pause that are still not
+ * paused, and those it is still pausing — or, once the band's resume ended
+ * it, those the resume had to leave paused. Null when there is nothing to
+ * say. */
+function browserWorkspaceStopReach() {
+  const stop = browserWorkspaceStop;
+  if (!stop) {
+    const kept = browserWorkspaceStillHeld(browserWorkspaceStopKept?.held);
+    return kept > 0 ? { stopped: 0, failed: 0, pausing: 0, kept } : null;
+  }
+  let failed = 0;
+  for (const tab of stop.failed) {
+    if (browserWorkspaceManaged(tab) && !["paused", "human"].includes(tab.workspace?.mode)) failed += 1;
+  }
+  let pausing = 0;
+  for (const tab of stop.owed.keys()) if (browserWorkspaceManaged(tab)) pausing += 1;
+  return { stopped: browserWorkspaceStillHeld(stop.held), failed, pausing, kept: 0 };
+}
+
+/* The band's resume of the stop at `revision`, granted: what that stop paused
+ * goes back to the agent — each work browser still paused at the revision the
+ * stop left, by its bar's road, keeping whether the person watches it — and
+ * the stop is over. One the person took by hand or that moved since stays as
+ * it is; one with a change of its bar still out, an error, or an agent being
+ * chosen for it stays paused and is counted; a newer stop of the person's
+ * keeps everything. */
+function resumeAgentBrowserWorkspaces(revision) {
+  const stop = browserWorkspaceStop;
+  if (!stop || !Number.isSafeInteger(revision) || stop.revision > revision) return;
+  browserWorkspaceStop = null;
+  keepBrowserWorkspaceStop(null);
+  const kept = new Map();
+  for (const [label, paused] of stop.held) {
+    const tab = browserWorkspaceTabOf(label);
+    if (!browserWorkspaceHeldByStop(tab, paused)) continue;
+    if (tab.workspacePending || tab.workspaceError || tab.workspaceOwnerChoice) kept.set(label, paused);
+    else void setBrowserWorkspaceMode(tab, "agent", { view: false });
+  }
+  const pausing = [...stop.owed.values()].some((owed) => owed.asking);
+  browserWorkspaceStopKept = kept.size > 0 || pausing ? { stop, held: kept } : null;
+  paintBrowserWorkspaceBarsAfterPlacing();
+  paintBrowserWorkspaceChrome();
+}
+
+/* The person's stop is over without the band's resume: nothing is given back. */
+function forgetAgentBrowserWorkspaceStop() {
+  if (!browserWorkspaceStop) return;
+  browserWorkspaceStop = null;
+  keepBrowserWorkspaceStop(null);
+  paintBrowserWorkspaceBars();
+  paintBrowserWorkspaceChrome();
+}
+
+/* The band slipped away: what its resume left paused is said no more. */
+function forgetAgentBrowserWorkspacesKept() {
+  if (!browserWorkspaceStopKept) return;
+  browserWorkspaceStopKept = null;
+  paintBrowserWorkspaceChrome();
 }
 
 function watchBrowserWorkspace(tab, { beside = false } = {}) {
@@ -790,6 +1071,11 @@ function buildBrowserWorkspaceBar() {
   status.className = "browser-workspace-status";
   status.setAttribute("role", "status");
   status.setAttribute("aria-live", "polite");
+  // What the bar says while the person's stop stands (t-62872).
+  const stopNote = document.createElement("span");
+  stopNote.className = "browser-workspace-stop-note";
+  stopNote.setAttribute("role", "status");
+  stopNote.hidden = true;
   const actions = document.createElement("div");
   actions.className = "browser-workspace-actions";
   for (const name of BROWSER_WORKSPACE_ACTIONS) {
@@ -820,7 +1106,7 @@ function buildBrowserWorkspaceBar() {
   retry.type = "button";
   retry.className = "btn browser-workspace-retry";
   actions.appendChild(retry);
-  bar.append(heading, status, owner, previewNote, actions);
+  bar.append(heading, status, stopNote, owner, previewNote, actions);
   return bar;
 }
 
@@ -836,6 +1122,34 @@ function buildBrowserWorkspaceSurface() {
   caption.className = "browser-workspace-caption";
   surface.append(frame, caption);
   return surface;
+}
+
+/* Whether a work browser's state leaves its bar nothing to change now: a
+ * change of it still out, its state unknown or in error, or its pause still
+ * waiting for an input to end. */
+function browserWorkspaceBlocked(tab) {
+  return !!tab.workspacePending || !tab.workspace || !!tab.workspaceError || tab.workspace.mode === "pausing";
+}
+
+/* Whether a work browser's bar may hand it to an agent now: not while it is
+ * blocked or already in an agent's hands, not without an agent to hand it
+ * to, and not while the person's stop stands — the backend refuses the agent
+ * until the band's resume (t-62872). */
+function browserWorkspaceHandsToAgent(tab) {
+  return !browserWorkspaceBlocked(tab) && tab.workspace?.mode !== "agent" && browserWorkspaceStop === null
+    && browserWorkspaceAgentOwner(tab) !== null;
+}
+
+/* The person's stop on a work browser's bar (t-62872): while it stands the
+ * bar offers no hand-back to an agent and says, in one line, that the agent
+ * waits for the band's resume. Pausing it and taking it by hand stay the
+ * person's. Painted with the bar, and alone when the stop comes or goes — two
+ * writes, so the stop's pauses never wait behind a whole bar's paint. */
+function paintBrowserWorkspaceStopHold(host, tab) {
+  host.querySelector(".browser-workspace-agent").disabled = !browserWorkspaceHandsToAgent(tab);
+  const note = host.querySelector(".browser-workspace-stop-note");
+  note.hidden = browserWorkspaceStop === null;
+  writeTextContent(note, t("browser.workspace.personsStop", "Computer Use 정지 중 · 에이전트는 ‘다시 시작’을 누를 때까지 기다립니다"));
 }
 
 function paintBrowserWorkspace(host, tab) {
@@ -868,15 +1182,17 @@ function paintBrowserWorkspace(host, tab) {
   host.querySelector(".browser-workspace-bar").setAttribute("aria-busy", String(!!tab.workspacePending));
   host.querySelector(".browser-workspace-watch").hidden = tab.workspaceViewing === true;
   host.querySelector(".browser-workspace-collapse").hidden = tab.workspaceViewing !== true;
-  const blocked = !!tab.workspacePending || !tab.workspace || !!tab.workspaceError || tab.workspace.mode === "pausing";
+  const blocked = browserWorkspaceBlocked(tab);
   for (const name of BROWSER_WORKSPACE_ACTIONS) {
     writeTextContent(host.querySelector(`.browser-workspace-${name}`), BROWSER_WORKSPACE_ACTION_WORDS[name]());
   }
   for (const [name, mode] of [["pause", "paused"], ["human", "human"], ["agent", "agent"]]) {
     const button = host.querySelector(`.browser-workspace-${name}`);
-    button.disabled = blocked || tab.workspace?.mode === mode || (mode === "agent" && browserWorkspaceAgentOwner(tab) === null);
+    // The hand-back to an agent is the stop's painter's, below.
+    if (mode !== "agent") button.disabled = blocked || tab.workspace?.mode === mode;
     button.setAttribute("aria-pressed", String(tab.workspace?.mode === mode));
   }
+  paintBrowserWorkspaceStopHold(host, tab);
   const refresh = host.querySelector(".browser-workspace-refresh");
   refresh.hidden = !!tab.workspace && !tab.workspaceError && tab.workspace.mode !== "pausing";
   refresh.disabled = !!tab.workspacePending || !!tab.workspaceReading;
@@ -965,6 +1281,12 @@ async function captureBrowserWorkspace(tab, epoch) {
   }
 }
 
+/* What else reads the work browsers' state when their chrome repaints: the
+ * band and the work screen panel (t-62464, t-62872) lay their painter here
+ * when their file loads, so this file never names a function a later file
+ * defines (t-63505). */
+const browserWorkspaceChromeReaders = new Set();
+
 function paintBrowserWorkspaceChrome() {
   const managed = tabs.filter((tab) => tab.kind === "browser" && tab.agentWorkspace && tab.worktree === activeWorktreePath);
   const run = el("run-command");
@@ -1001,9 +1323,11 @@ function paintBrowserWorkspaceChrome() {
       writeTextContent(badge, t("browser.workspace.badge", "작업"));
     }
   }
-  // The work screen panel says who holds each of these (t-62464); it reads
-  // them here, where every change of theirs is painted.
-  if (typeof paintComputerProgressControl === "function") paintComputerProgressControl();
+  // Every change of theirs is painted here: the person's stop walks what it
+  // still owes them (t-62872), and the band and the work screen panel say
+  // who holds each and how far the stop reached (t-62464).
+  holdBrowserWorkspacesStopped();
+  for (const read of browserWorkspaceChromeReaders) read();
 }
 
 /* 좁은 판의 주소창(실측 browser-address-bar-expansion.ts): 다른 툴바

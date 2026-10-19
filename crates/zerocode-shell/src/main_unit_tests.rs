@@ -2421,12 +2421,13 @@ fn status_bar_items_are_one_available_catalog_and_item_patch() {
             "unknown".to_string(),
             "claude".to_string(),
             "ports".to_string(),
-            // An id a stored list may still hold from an install that had the
-            // Antigravity gauge (removed 2026-10-17, t-62187): skipped like
-            // any other name the catalog does not know, never an error.
             "antigravity".to_string(),
+            // An id a stored list may still hold from an install that had a
+            // gauge the catalog no longer offers: skipped like any other name
+            // the catalog does not know, never an error.
+            "retired-gauge".to_string(),
         ]),
-        ["claude", "ports"]
+        ["claude", "antigravity", "ports"]
     );
 
     let markup = include_str!("../../../ui/index.html");
@@ -7094,7 +7095,7 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
     ];
     let mut seen = Vec::new();
     adopt_unseen_status_bar_items(&mut items, &mut seen);
-    for gauge in ["kimi", "grok", "opencode-go"] {
+    for gauge in ["antigravity", "kimi", "grok", "opencode-go"] {
         assert!(
             items.iter().any(|held| held == gauge),
             "`{gauge}` shipped after this list was written and still \
@@ -7127,6 +7128,69 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
         shuffled,
         vec!["claude".to_string(), "ports".to_string()],
         "adoption kept the arrival order instead of the catalog's"
+    );
+}
+
+/// A document normalised while the Antigravity gauge was withdrawn (v1.1.75 to
+/// v1.1.78) recorded its offer WITHOUT that name. The restored gauge is not new
+/// to such a document: its stored list decides, and a gauge the person never
+/// ticked does not start asking Google on the first run after the restore.
+#[test]
+fn a_gauge_restored_after_withdrawal_stays_as_the_stored_list_has_it() {
+    let mut items = vec![
+        "claude".to_string(),
+        "codex".to_string(),
+        "ports".to_string(),
+    ];
+    let mut seen: Vec<String> = [
+        "claude",
+        "codex",
+        "kimi",
+        "grok",
+        "opencode-go",
+        "resource-usage",
+        "ports",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
+    adopt_unseen_status_bar_items(&mut items, &mut seen);
+    assert!(
+        !items.iter().any(|held| held == "antigravity"),
+        "the restored gauge switched itself on for a document that had offered the \
+         catalog without it: {items:?}"
+    );
+}
+
+/// A refused gauge is an answer that waits for a person. The ordinary poll
+/// holds it, so the same two Google requests are not sent every floor; a
+/// refresh the person presses is not held back.
+#[test]
+fn a_refused_gauge_waits_until_somebody_asks() {
+    let now = 1_800_000_000_000;
+    let refused = usage::ProviderUsage {
+        provider: "antigravity".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: now - 2 * 60 * 60 * 1_000,
+        error: Some("Antigravity 사용량을 확인할 수 없습니다".to_string()),
+        status: "refused".to_string(),
+        failure_kind: None,
+        retry_at_ms: None,
+        plan_type: None,
+        reset_credits: None,
+        account: None,
+    };
+    assert!(
+        usage_scan_holds(Some(&refused), false, now),
+        "a refused gauge was asked of Google again on the ordinary poll"
+    );
+    assert!(
+        !usage_scan_holds(Some(&refused), true, now),
+        "a refresh the person pressed was held back by an earlier refusal"
     );
 }
 
@@ -21786,6 +21850,108 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(crate::computer_use::guard::stopped_reason(), None);
     }
 
+    /// The signed helper as an agent's `stop` and `resume` reach it
+    /// (t-62872): a stop of its own and its reason — the person's chord, or
+    /// `signal` once the window's signal reached it, which overwrites the
+    /// reason as the helper does — answered at `status`, with no request in
+    /// flight, and lifted by its `resume`, which it counts.
+    #[derive(Default)]
+    struct ChordHelper {
+        reason: std::cell::Cell<Option<&'static str>>,
+        resumed: std::cell::Cell<usize>,
+    }
+
+    impl crate::agent_tools_runtime::HelperRoads for ChordHelper {
+        fn status(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!({
+                "stopped": self.reason.get().is_some(),
+                "reason": self.reason.get(),
+            }))
+        }
+
+        fn status_now(&self) -> Option<serde_json::Value> {
+            self.status()
+        }
+
+        fn resume(
+            &self,
+            _reset: bool,
+        ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
+            self.resumed.set(self.resumed.get() + 1);
+            self.reason.set(None);
+            Ok(serde_json::Value::from("resumed"))
+        }
+
+        fn signal(&self) -> bool {
+            self.reason
+                .set(Some(zerocode_core::computer_use::STOP_REASON_SIGNAL));
+            true
+        }
+    }
+
+    /// The person's chord the window has not heard yet, then an agent's
+    /// `stop` and its `resume` (t-62872): the agent's stop hears the helper
+    /// first and takes the chord in, so the stop stays the person's though
+    /// the window's signal then overwrites the helper's reason — the agent's
+    /// `resume` reaches no helper and lifts nothing, the band's report says
+    /// the stop is the person's, and a work browser refuses the agent. The
+    /// chord over an agent's own stop, and the agent's stop sent again,
+    /// come to the same. Counted: how often the person's stop was lifted.
+    #[test]
+    fn an_agents_stop_after_the_persons_chord_keeps_the_stop_theirs_and_its_resume_lifts_nothing() {
+        use crate::agent_tools_runtime::{agents_resume, agents_stop};
+        use zerocode_core::computer_use::STOP_REASON_HOTKEY;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (mut lifted, mut seen) = (Vec::new(), Vec::new());
+        for over_an_agents_stop in [false, true] {
+            crate::computer_use::guard::lift();
+            let helper = ChordHelper::default();
+            if over_an_agents_stop {
+                agents_stop(&helper, None);
+            }
+            helper.reason.set(Some(STOP_REASON_HOTKEY));
+            let stop = agents_stop(&helper, None);
+            let resumed = agents_resume(&helper, false, None).map_err(|error| error.message);
+            let report = crate::computer_use::guard::activity_report(None);
+            let workspaces = crate::browser_workspace::Workspaces::default();
+            let door = workspaces
+                .register("browser-1", Some("pane-a"), false)
+                .and_then(|_| workspaces.begin_agents("browser-1", Some("pane-a"), "read", None))
+                .map(|operation| operation.map(|operation| operation.finish(true)).is_some());
+            crate::computer_use::guard::lift();
+            lifted.push(helper.resumed.get());
+            seen.push((over_an_agents_stop, stop, resumed, report, door));
+        }
+        assert_eq!(
+            lifted,
+            [0, 0],
+            "times an agent's resume lifted the person's stop, for the chord then an agent's stop and for the chord over an agent's stop: {lifted:?} {seen:?}"
+        );
+        for (over, stop, resumed, report, door) in &seen {
+            assert_eq!(
+                stop["personsStop"], true,
+                "the agent's stop keeps the stop the person's ({over}): {stop}"
+            );
+            assert!(
+                resumed
+                    .as_ref()
+                    .is_err_and(|message| message.contains("only they lift it")),
+                "the agent's resume is refused in the person's words ({over}): {resumed:?}"
+            );
+            assert_eq!(
+                report["personsStop"], true,
+                "the band hears the person's stop ({over}): {report}"
+            );
+            assert!(
+                door.as_ref()
+                    .is_err_and(|error| error.starts_with("workspace_person_stopped:")),
+                "a work browser refuses the agent ({over}): {door:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_operators_report_moves_its_revision_with_every_stop_and_lift_and_claims_no_hand() {
         use zerocode_core::computer_use::{
@@ -27404,4 +27570,23 @@ fn the_second_brain_guide_reaches_the_windows_claude_home() {
         read.iter().all(|row| row.state == GuideState::Linked),
         "{read:?}"
     );
+}
+
+#[test]
+fn managed_judgment_boot_restore_has_one_setup_call() {
+    let source = include_str!("main.rs");
+    let call = "cmd::managed_judgment::restore_at_boot(app.handle());";
+    assert_eq!(
+        source.matches(call).count(),
+        1,
+        "setup must call managed restoration exactly once"
+    );
+    let setup = source.find(".setup(move |app| {").unwrap();
+    let managed = source[setup..].find("if !app.manage(state)").unwrap() + setup;
+    let restore = source.find(call).unwrap();
+    let warm = source.find("systemone::warm_for_walks();").unwrap();
+    assert!(managed < restore && restore < warm);
+    let backend = include_str!("cmd/managed_judgment.rs");
+    assert!(backend.contains("RESTORE_AT_BOOT.call_once("));
+    assert!(backend.contains("tauri::async_runtime::spawn(async move"));
 }

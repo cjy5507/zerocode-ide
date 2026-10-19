@@ -143,20 +143,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_resume_cannot_revive_a_revoked_shared_request_or_its_children() {
-        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+    fn one_hand() -> std::sync::MutexGuard<'static, ()> {
+        crate::tests::computer_desktop_wait::ONE_HAND
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The revocation tests below. Each lifts the stop it finds first: an
+    /// agent's stop over a person's stop another test left moves nothing, and
+    /// the revocation would never move the count (t-62872).
+    fn a_revoked_shared_request_stays_revoked() {
+        super::super::guard::lift();
         let _scope = enter(InputPolicy::SharedDesktop);
         let captured = capture();
         super::super::guard::stop("fixture policy change");
         super::super::guard::lift();
-        assert_eq!(current(), InputPolicy::Background);
-        assert!(ensure_current().is_err());
+        assert_eq!(
+            current(),
+            InputPolicy::Background,
+            "the revoked request reads background"
+        );
+        assert!(ensure_current().is_err(), "the revoked request is refused");
         {
             let _nested = enter(InputPolicy::SharedDesktop);
-            assert!(ensure_current().is_err());
+            assert!(ensure_current().is_err(), "and so is a request inside it");
         }
         assert!(
             std::thread::spawn(move || {
@@ -164,35 +174,72 @@ mod tests {
                 ensure_current().is_err()
             })
             .join()
-            .unwrap()
+            .unwrap(),
+            "and so is the request carried to another thread"
         );
     }
 
-    #[test]
-    fn a_policy_read_racing_a_revocation_does_not_grant_a_new_shared_request() {
-        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fn a_racing_policy_read_grants_nothing() {
+        super::super::guard::lift();
         let _scope = enter_with(|| {
             super::super::guard::stop("fixture policy change");
             super::super::guard::lift();
             InputPolicy::SharedDesktop
         });
-        assert!(ensure_current().is_err());
+        assert!(
+            ensure_current().is_err(),
+            "a read that raced the revocation is refused"
+        );
     }
 
-    #[test]
-    fn a_new_request_reads_the_new_grant_after_an_older_one_was_revoked() {
-        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    fn a_new_request_reads_the_new_grant() {
+        super::super::guard::lift();
         {
             let _old = enter(InputPolicy::SharedDesktop);
             super::super::guard::stop("fixture policy change");
             super::super::guard::lift();
-            assert!(ensure_current().is_err());
+            assert!(ensure_current().is_err(), "the older request is revoked");
         }
         let _new = enter(InputPolicy::SharedDesktop);
-        assert!(ensure_current().is_ok());
+        assert!(
+            ensure_current().is_ok(),
+            "the new request reads the new grant"
+        );
+    }
+
+    #[test]
+    fn a_resume_cannot_revive_a_revoked_shared_request_or_its_children() {
+        let _hand = one_hand();
+        a_revoked_shared_request_stays_revoked();
+    }
+
+    #[test]
+    fn a_policy_read_racing_a_revocation_does_not_grant_a_new_shared_request() {
+        let _hand = one_hand();
+        a_racing_policy_read_grants_nothing();
+    }
+
+    #[test]
+    fn a_new_request_reads_the_new_grant_after_an_older_one_was_revoked() {
+        let _hand = one_hand();
+        a_new_request_reads_the_new_grant();
+    }
+
+    /// The person's stop another test left standing (t-62872): an agent's
+    /// stop over it moves nothing, so each revocation test above lifts what
+    /// it finds before its own stop — else its revocation would never move
+    /// the count, and it would fail for another test's sake.
+    #[test]
+    fn the_revocation_tests_hold_over_a_persons_stop_another_test_left_standing() {
+        let _hand = one_hand();
+        for revocation in [
+            a_revoked_shared_request_stays_revoked as fn(),
+            a_racing_policy_read_grants_nothing,
+            a_new_request_reads_the_new_grant,
+        ] {
+            super::super::guard::stop(zerocode_core::computer_use::STOP_REASON_WINDOW);
+            revocation();
+        }
+        super::super::guard::lift();
     }
 }

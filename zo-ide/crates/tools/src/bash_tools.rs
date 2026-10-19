@@ -13,6 +13,7 @@ use runtime::{
     permission_enforcer::PermissionEnforcer, resolve_sandbox_status, BashCommandInput,
     BashCommandOutput, ConfigLoader, PermissionMode, SandboxConfig, SandboxStatus,
 };
+use runtime::ToolExecutionResult;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReplInput {
@@ -106,12 +107,22 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     ]
 }
 
+#[cfg(test)]
 pub(crate) fn dispatch(
     ctx: &ToolContext,
     enforcer: Option<&PermissionEnforcer>,
     name: &str,
     input: &Value,
 ) -> Option<Result<String, ToolError>> {
+    dispatch_result(ctx, enforcer, name, input).map(|result| result.map(|result| result.text))
+}
+
+pub(crate) fn dispatch_result(
+    ctx: &ToolContext,
+    enforcer: Option<&PermissionEnforcer>,
+    name: &str,
+    input: &Value,
+) -> Option<Result<ToolExecutionResult, ToolError>> {
     // A per-agent context can pin the working directory (worktree isolation);
     // `None` leaves every exec tool on the process cwd, the historical default.
     let cwd = ctx.cwd.as_deref();
@@ -150,16 +161,20 @@ pub(crate) fn dispatch(
                         // A shell command that IS a plain read goes through the
                         // tool built for it — see `bash_redirect`.
                         if let Some(read) = crate::bash_redirect::dedicated_read_for(&inp.command) {
-                            return run_bash_as_dedicated_read(&read, &inp.command, ctx, enforcer, cwd);
+                            return run_bash_as_dedicated_read(&read, &inp.command, ctx, enforcer, cwd)
+                                .map(ToolExecutionResult::from);
                         }
                         mark_shell_checkpoint_if_write_intent(ctx, &inp.command);
+                        if let Some(browser) = crate::browser_execution::BrowserExecution::prepare(&inp) {
+                            return browser.run(inp, ctx, session_id.as_deref(), polls_start_detached(ctx));
+                        }
                         run_bash(
                             inp,
                             cwd,
                             Some(&ctx.tasks),
                             session_id.as_deref(),
                             polls_start_detached(ctx),
-                        )
+                        ).map(ToolExecutionResult::from)
                     })
                 })
             }),
@@ -176,6 +191,7 @@ pub(crate) fn dispatch(
                 let bridge = super::misc_tools::dispatch::DispatchKernelBridge { ctx, enforcer };
                 from_value::<ReplInput>(input)
                     .and_then(|inp| run_repl(inp, cwd, session_id.as_deref(), Some(&bridge)))
+                    .map(ToolExecutionResult::from)
             }),
         ),
         "PowerShell" => Some(
@@ -184,7 +200,7 @@ pub(crate) fn dispatch(
                     mark_shell_checkpoint_if_write_intent(ctx, &inp.command);
                     let session_id = ctx.session_id();
                     run_powershell(&inp, cwd, Some(&ctx.tasks), session_id.as_deref())
-                })
+                }).map(ToolExecutionResult::from)
             }),
         ),
         _ => None,
@@ -256,12 +272,23 @@ fn polls_start_detached(ctx: &ToolContext) -> bool {
 /// Run one `bash` call. `detach_polls` says whether a poll starts in the
 /// background ([`polls_start_detached`]).
 pub(crate) fn run_bash(
-    mut input: BashCommandInput,
+    input: BashCommandInput,
     cwd: Option<&Path>,
     tasks: Option<&runtime::task_registry::TaskRegistry>,
     session_id: Option<&str>,
     detach_polls: bool,
 ) -> Result<String, ToolError> {
+    run_bash_output(input, cwd, tasks, session_id, detach_polls)
+        .and_then(|output| serde_json::to_string_pretty(&output).map_err(ToolError::from))
+}
+
+pub(crate) fn run_bash_output(
+    mut input: BashCommandInput,
+    cwd: Option<&Path>,
+    tasks: Option<&runtime::task_registry::TaskRegistry>,
+    session_id: Option<&str>,
+    detach_polls: bool,
+) -> Result<BashCommandOutput, ToolError> {
     // A wait on other agents is started in the background whether or not the
     // model asked: in the foreground it blocks the whole turn for as long as
     // they take (seen live: nineteen minutes in `check --wait`, the person's
@@ -285,7 +312,7 @@ pub(crate) fn run_bash(
         input.cwd = cwd.map(Path::to_path_buf);
     }
     if let Some(output) = workspace_test_branch_preflight(&input.command) {
-        return Ok(serde_json::to_string_pretty(&output)?);
+        return Ok(output);
     }
     // Shared-working-tree scope guard (track 4-1): when opt-in via
     // `ZO_WORKSPACE_GUARD`, block broad mutating commands (`cargo fmt`,
@@ -294,7 +321,7 @@ pub(crate) fn run_bash(
     // a server-injected `ctx.cwd` makes the command look artificially isolated.
     if !had_explicit_cwd && workspace_guard_enabled() {
         if let Some(output) = workspace_scope_guard(&input.command) {
-            return Ok(serde_json::to_string_pretty(&output)?);
+            return Ok(output);
         }
     }
     // Surface a non-blocking advisory for known destructive patterns
@@ -320,7 +347,7 @@ pub(crate) fn run_bash(
             output.stdout
         );
     }
-    Ok(serde_json::to_string_pretty(&output)?)
+    Ok(output)
 }
 
 pub(crate) fn run_repl(

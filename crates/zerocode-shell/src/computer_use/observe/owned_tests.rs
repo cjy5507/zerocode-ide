@@ -218,6 +218,76 @@ fn a_look_whose_picture_is_no_longer_kept_says_so_and_shows_no_other() {
     );
 }
 
+/// A pane that looks while the window cannot tell its assignment (t-63505
+/// ④): that look is nobody's, and the pane's older look goes with it — a late
+/// ask under the old assignment gets nothing rather than a look older than the
+/// pane's newest. The window is told the older look went (t-62872): under its
+/// assignment, by a number newer than the look's, so a panel still showing
+/// that look asks again, gets nothing, and lets its picture go.
+#[test]
+fn a_look_under_an_assignment_the_window_cannot_tell_lets_the_panes_older_look_go() {
+    const PANE: &str = "term-6350541";
+    let _hand = one_hand();
+    listen();
+    {
+        let _acting = acting_for(actor(PANE, Some("scope-a")));
+        picture_look("owned-unknown-after-a");
+    }
+    let before = owned_look(PANE, "scope-a");
+    let told = heard_by(PANE);
+    {
+        let _acting = acting_for(actor(PANE, None));
+        picture_look("owned-unknown-after-none");
+    }
+    let after = owned_look(PANE, "scope-a");
+    let heard = heard_by(PANE);
+    let before = before.expect("the pane's look under its assignment");
+    assert!(
+        after.is_none(),
+        "a look older than the pane's newest is never shown: {after:?}"
+    );
+    assert_eq!(
+        heard.len(),
+        told.len() + 1,
+        "the window is told the older look went: {heard:?}"
+    );
+    let (scope, seq) = heard.last().expect("told");
+    assert_eq!(
+        scope, "scope-a",
+        "told under the assignment whose look went"
+    );
+    assert!(
+        *seq > seq_of(&before),
+        "by a number newer than the look it showed: {seq} after {before}"
+    );
+}
+
+/// A picture past the budget every provider holds a screenshot to — only a
+/// full-resolution shot gets there — is not kept for the panel (t-63505 ③):
+/// the look is still the pane's newest and numbered, and says its picture was
+/// too large; one within the budget is kept as it was.
+#[test]
+fn a_picture_past_the_screenshot_budget_is_numbered_but_not_kept() {
+    use zerocode_core::computer_use_protocol::MAX_SCREENSHOT_PNG_BYTES;
+    const PANE: &str = "term-6350531";
+    let _hand = one_hand();
+    listen();
+    let full = request(json!({"viewer": "owned-oversize", "fullRes": true}));
+    let _acting = acting_for(actor(PANE, Some("scope-a")));
+    remember(&full, &json!({}), vec![7; MAX_SCREENSHOT_PNG_BYTES]);
+    let kept = owned_look(PANE, "scope-a").expect("the look within the budget");
+    remember(&full, &json!({}), vec![7; MAX_SCREENSHOT_PNG_BYTES + 1]);
+    let past = owned_look(PANE, "scope-a").expect("the look past the budget");
+    assert_eq!(kept["perception"], "screenshot", "{}", kept["perception"]);
+    assert!(kept["png"].is_string(), "the picture within it is kept");
+    assert_eq!(past["perception"], "oversize", "{}", past["perception"]);
+    assert!(
+        past["png"].is_null(),
+        "no picture past the budget is kept or sent"
+    );
+    assert!(seq_of(&past) > seq_of(&kept), "the pane's newest look");
+}
+
 /// The screenshot verb's picture is a look its pane took.
 #[test]
 fn a_screenshot_is_a_look_its_pane_owns() {

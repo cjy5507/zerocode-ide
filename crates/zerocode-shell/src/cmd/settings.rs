@@ -1586,13 +1586,19 @@ pub(crate) fn computer_stop(app: AppHandle) -> serde_json::Value {
 }
 
 /// The window's resume button: the person lifts the stop whose revision the
-/// band showed (`guard::resume`).
+/// band showed (`guard::resume`) — from the main window's band alone
+/// (t-62872): the board pop-out's band offers the stop, safe from anywhere,
+/// and not the resume, whose work browsers only the main window holds.
 #[tauri::command(async)]
 pub(crate) fn computer_resume(
     app: AppHandle,
+    webview: tauri::Webview,
     reset: bool,
     revision: Option<u64>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
+    from_the_main_webview(&webview).map_err(|_| {
+        "computer_resume_main_window_only: 정지는 메인 창의 띠에서만 다시 시작합니다".to_string()
+    })?;
     let resumed = computer_use::guard::resume(
         computer_use::guard::Lifter::Person { revision },
         || computer_use::guard::helper_resume(reset),
@@ -1602,7 +1608,7 @@ pub(crate) fn computer_resume(
         "computer:activity",
         computer_use::guard::activity_report(None),
     );
-    resumed.answer()
+    Ok(resumed.answer())
 }
 
 /// The work screen panel's look (t-59372): the newest look the pane `term`

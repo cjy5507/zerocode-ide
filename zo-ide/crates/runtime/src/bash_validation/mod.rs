@@ -16,6 +16,7 @@ use std::path::Path;
 use crate::permissions::PermissionMode;
 
 pub mod inspection;
+pub use inspection::literal_argv;
 
 pub use zerocode_core::shell_rule::{
     check_destructive, classify_command, git_worktree_escape_reason, path_within_root,

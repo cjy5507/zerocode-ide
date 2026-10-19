@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener as StdListener};
+use std::net::{Ipv4Addr, Ipv6Addr, TcpListener as StdListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::adapter;
 use crate::catalog::{self, Artifact, Catalog, EngineKind, Model, RuntimeProfile};
 use crate::engine::{self, Engine, Running};
+use crate::run_intent::RunIntent;
 use crate::selection::{self, Binding};
 use crate::source::{self, Inspected, SourceInput};
 use crate::storage::{self, Store};
@@ -124,6 +125,13 @@ struct StartOptions {
     state: &'static str,
     check_before_listen: bool,
     require_listener: bool,
+}
+
+struct RestoreRequest {
+    model: Model,
+    profile: RuntimeProfile,
+    intent: RunIntent,
+    generation: u64,
 }
 
 /// When a planned restart's wait ends: the app waits on tokio's clock, and a
@@ -353,6 +361,8 @@ struct Inner {
     inspection: Option<PendingInspection>,
     model_switch: Option<ModelSwitchInfo>,
     restoring: bool,
+    restore_tried: bool,
+    boot_restore: Option<RunIntent>,
     held_listeners: BTreeMap<String, StdListener>,
     intent: Option<Intent>,
     /// Raised whenever the person's press is recorded or ends: a restart
@@ -370,6 +380,7 @@ pub struct Manager {
     this: Weak<Manager>,
     store: Store,
     exits: PathBuf,
+    run_intent_path: PathBuf,
     catalog: Mutex<Catalog>,
     bundled_ids: BTreeSet<String>,
     profile: Option<RuntimeProfile>,
@@ -481,6 +492,7 @@ impl Manager {
     ) -> Result<Arc<Self>> {
         let store = Store::open(root)?;
         let exits = storage::child(root, "managed-judgment/server-exits.jsonl")?;
+        let run_intent_path = storage::child(root, "managed-judgment/run-intent.json")?;
         let bundled_ids = catalog
             .models
             .iter()
@@ -494,6 +506,7 @@ impl Manager {
             this: this.clone(),
             store,
             exits,
+            run_intent_path,
             catalog: Mutex::new(catalog),
             bundled_ids,
             profile: profiles.first().cloned(),
@@ -516,6 +529,8 @@ impl Manager {
                 inspection: None,
                 model_switch: None,
                 restoring: false,
+                restore_tried: false,
+                boot_restore: None,
                 held_listeners: BTreeMap::new(),
                 intent: None,
                 generation: 0,
@@ -1010,6 +1025,17 @@ impl Manager {
         });
     }
 
+    fn keep_run_intent(&self, inner: &Inner, model: &Model) -> Result<()> {
+        let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+        RunIntent::new(
+            model,
+            &running.provider.identity(),
+            running.port()?,
+            now_ms(),
+        )?
+        .write(&self.run_intent_path)
+    }
+
     /// Ends the person's press: no restart it planned runs, and the ended
     /// server that waited for one is handed back to be let go.
     fn forget(inner: &mut Inner) -> Option<Running> {
@@ -1157,7 +1183,34 @@ impl Manager {
     }
 
     pub fn notify_settings_changed(&self) {
-        lock(&self.inner).revision += 1;
+        let mut inner = lock(&self.inner);
+        let changed = !self.closed.load(Ordering::Acquire)
+            && inner.cancel.is_some()
+            && inner
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == "restore")
+            && inner.boot_restore.as_ref().is_some_and(|intent| {
+                !selection::read(&self.settings).is_ok_and(|selected| intent.matches(&selected))
+            });
+        let pending = if changed {
+            if let Some(cancel) = &inner.cancel {
+                cancel.stop();
+            }
+            drop(Self::forget(&mut inner));
+            let _ = storage::remove(&self.run_intent_path);
+            if let Some(operation) = &mut inner.operation {
+                operation.state = "cancelling";
+            }
+            inner.pending_engine.clone()
+        } else {
+            None
+        };
+        inner.revision += 1;
+        drop(inner);
+        if let Some(engine) = pending {
+            engine.stop();
+        }
         self.emit();
     }
 
@@ -1250,6 +1303,7 @@ impl Manager {
         }
         inner.model_switch = None;
         inner.restoring = false;
+        inner.boot_restore = None;
         let id = uuid::Uuid::new_v4().to_string();
         let cancel = Arc::new(Cancel::new());
         inner.operation = Some(Operation {
@@ -1299,7 +1353,7 @@ impl Manager {
             };
             operation.error = result.err().map(Error::token);
             if let Err(error) = result
-                && operation.kind == "start"
+                && matches!(operation.kind, "start" | "restore")
             {
                 inner.server.state = if error == Error::Cancelled {
                     "stopped"
@@ -1368,9 +1422,25 @@ impl Manager {
         {
             return Err(Error::RevisionChanged);
         }
+        let restoring = inner.cancel.is_some()
+            && inner
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == "restore");
+        let checking = inner
+            .operation
+            .as_ref()
+            .is_some_and(|operation| operation.kind == "check");
+        let mut cleared = Ok(());
         let pending = if let Some(cancel) = &inner.cancel {
             cancel.stop();
             let pending = inner.pending_engine.clone();
+            if restoring {
+                drop(Self::forget(&mut inner));
+            }
+            if restoring || (checking && !self.closed.load(Ordering::Acquire)) {
+                cleared = storage::remove(&self.run_intent_path);
+            }
             if let Some(operation) = &mut inner.operation {
                 operation.state = "cancelling";
             }
@@ -1384,6 +1454,7 @@ impl Manager {
             engine.stop();
         }
         self.emit();
+        cleared?;
         Ok(self.snapshot())
     }
 
@@ -1684,10 +1755,21 @@ impl Manager {
         if !self.store.installed(&model) {
             return Err(Error::ModelMissing);
         }
-        let existing = lock(&self.inner)
-            .running
-            .as_ref()
-            .map(|running| running.model_id == model.id && running.engine.alive());
+        let existing = {
+            let inner = lock(&self.inner);
+            if inner.cancel.is_some()
+                && inner
+                    .operation
+                    .as_ref()
+                    .is_some_and(|operation| operation.kind == "restore")
+            {
+                return Err(Error::Busy);
+            }
+            inner
+                .running
+                .as_ref()
+                .map(|running| running.model_id == model.id && running.engine.alive())
+        };
         if let Some(same) = existing {
             return if same {
                 Ok(self.snapshot())
@@ -1824,20 +1906,57 @@ impl Manager {
     }
 
     async fn model_listener(&self, model_id: &str, require_existing: bool) -> Result<StdListener> {
-        {
+        let preferred = {
             let inner = lock(&self.inner);
             if let Some(listener) = inner.held_listeners.get(model_id) {
                 return listener.try_clone().map_err(|_| Error::RuntimeFailed);
             }
-        }
+            inner.boot_restore.as_ref().map(|intent| intent.port)
+        };
         if require_existing {
             return Err(Error::ServerStopped);
         }
-        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|_| Error::RuntimeFailed)?
-            .into_std()
-            .map_err(|_| Error::RuntimeFailed)?;
+        let preferred_listener = if let Some(port) = preferred {
+            let probes = (|| {
+                let ipv4_probe = tokio::net::TcpSocket::new_v4()?;
+                #[cfg(unix)]
+                ipv4_probe.set_reuseaddr(true)?;
+                ipv4_probe.bind((Ipv4Addr::UNSPECIFIED, port).into())?;
+                let ipv6_probe = tokio::net::TcpSocket::new_v6()?;
+                #[cfg(unix)]
+                ipv6_probe.set_reuseaddr(true)?;
+                ipv6_probe.bind((Ipv6Addr::UNSPECIFIED, port).into())?;
+                Ok::<_, std::io::Error>((ipv4_probe, ipv6_probe))
+            })();
+            match probes {
+                Ok(probes) => {
+                    let loopback =
+                        tokio::net::TcpSocket::new_v4().map_err(|_| Error::RuntimeFailed)?;
+                    #[cfg(unix)]
+                    loopback
+                        .set_reuseaddr(true)
+                        .map_err(|_| Error::RuntimeFailed)?;
+                    let bound = loopback.bind((Ipv4Addr::LOCALHOST, port).into());
+                    drop(probes);
+                    match bound.and_then(|()| loopback.listen(128)) {
+                        Ok(listener) => Some(listener),
+                        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
+                        Err(_) => return Err(Error::RuntimeFailed),
+                    }
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+        let listener = match preferred_listener {
+            Some(listener) => listener,
+            None => tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(|_| Error::RuntimeFailed)?,
+        }
+        .into_std()
+        .map_err(|_| Error::RuntimeFailed)?;
         let duplicate = listener.try_clone().map_err(|_| Error::RuntimeFailed)?;
         let mut inner = lock(&self.inner);
         if self.closed.load(Ordering::Acquire) {
@@ -1895,6 +2014,203 @@ impl Manager {
             instance_id,
             (apply, |action: &mut dyn FnMut() -> Result<()>| action()),
         )
+    }
+
+    pub fn restore_provider_identity(&self) -> Option<String> {
+        RunIntent::read(&self.run_intent_path).map(|intent| intent.provider_identity)
+    }
+
+    pub fn restore_guarded<Apply, Guard>(
+        self: &Arc<Self>,
+        allowed: bool,
+        callbacks: (Apply, Guard),
+    ) -> Result<Snapshot>
+    where
+        Apply: FnOnce(&Provider, &str, &Binding) -> Result<()> + Send + 'static,
+        Guard: Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync + 'static,
+    {
+        if !allowed {
+            return Ok(self.snapshot());
+        }
+        let Some(intent) = RunIntent::read(&self.run_intent_path) else {
+            return Ok(self.snapshot());
+        };
+        let Ok(selected) = selection::read(&self.settings) else {
+            return Ok(self.snapshot());
+        };
+        if !intent.matches(&selected) {
+            return Ok(self.snapshot());
+        }
+        let Ok(model) = self.model(&intent.model_id, &intent.revision) else {
+            return Ok(self.snapshot());
+        };
+        let Ok(profile) = self.model_profile(&model).cloned() else {
+            return Ok(self.snapshot());
+        };
+        if !self.store.installed(&model)
+            || !self.store.runtime_ready(&profile)
+            || model.fingerprint().ok().as_ref() != Some(&intent.manifest_fingerprint)
+        {
+            return Ok(self.snapshot());
+        }
+        let mut inner = lock(&self.inner);
+        if inner.restore_tried {
+            drop(inner);
+            return Ok(self.snapshot());
+        }
+        if inner.running.is_some() || inner.recovering.is_some() {
+            return Err(Error::Busy);
+        }
+        let (operation, cancel) = self.reserve(&mut inner, "restore", Some(&model), 0)?;
+        inner.restore_tried = true;
+        inner.boot_restore = Some(intent.clone());
+        inner.server = ServerInfo {
+            state: "starting",
+            model_id: Some(model.id.clone()),
+            ..ServerInfo::default()
+        };
+        let request = RestoreRequest {
+            model,
+            profile,
+            intent,
+            generation: inner.generation,
+        };
+        drop(inner);
+        self.emit();
+        let manager = self.clone();
+        tokio::spawn(manager.restore_run(operation, cancel, request, callbacks));
+        Ok(self.snapshot())
+    }
+
+    fn restore_current(
+        &self,
+        inner: &Inner,
+        request: &RestoreRequest,
+        cancel: &Cancel,
+        server_id: &str,
+    ) -> Result<Provider> {
+        cancel.check()?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        if inner.generation != request.generation {
+            return Err(Error::RuntimeFailed);
+        }
+        let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+        if running.id != server_id {
+            return Err(Error::ServerChanged);
+        }
+        if !running.engine.alive() {
+            return Err(Error::RuntimeFailed);
+        }
+        if Provider::read(&self.settings)
+            .map_err(|_| Error::SettingsChanged)?
+            .identity()
+            != request.intent.provider_identity
+            || !selection::read(&self.settings)
+                .is_ok_and(|selected| request.intent.matches(&selected))
+        {
+            return Err(Error::SettingsChanged);
+        }
+        Ok(running.provider.clone())
+    }
+
+    async fn restore_run<Apply, Guard>(
+        self: Arc<Self>,
+        operation: String,
+        cancel: Arc<Cancel>,
+        request: RestoreRequest,
+        callbacks: (Apply, Guard),
+    ) where
+        Apply: FnOnce(&Provider, &str, &Binding) -> Result<()> + Send + 'static,
+        Guard: Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync + 'static,
+    {
+        let (apply, guard) = callbacks;
+        let mut result = async {
+            self.start_model(
+                &request.model,
+                &request.profile,
+                &cancel,
+                StartOptions {
+                    complete: false,
+                    state: "ready",
+                    check_before_listen: true,
+                    require_listener: false,
+                },
+            )
+            .await?;
+            let (server_id, same_port) = {
+                let inner = lock(&self.inner);
+                let running = inner.running.as_ref().ok_or(Error::ServerStopped)?;
+                (running.id.clone(), running.port()? == request.intent.port)
+            };
+            if same_port {
+                guard(&mut || {
+                    let mut inner = lock(&self.inner);
+                    let provider = self.restore_current(&inner, &request, &cancel, &server_id)?;
+                    if provider.identity() != request.intent.provider_identity {
+                        return Err(Error::SettingsChanged);
+                    }
+                    Self::intend(&mut inner, &request.model, provider.identity());
+                    inner.boot_restore = None;
+                    Self::complete(&mut inner);
+                    Ok(())
+                })?;
+            } else {
+                let mut inner = lock(&self.inner);
+                let provider = self.restore_current(&inner, &request, &cancel, &server_id)?;
+                let binding = Binding {
+                    model_id: request.model.id.clone(),
+                    revision: request.model.revision.clone(),
+                    provider_identity: provider.identity(),
+                };
+                apply(&provider, &request.intent.provider_identity, &binding)?;
+                self.keep_run_intent(&inner, &request.model)?;
+                Self::intend(&mut inner, &request.model, binding.provider_identity);
+                inner.boot_restore = None;
+                Self::complete(&mut inner);
+            }
+            Ok(())
+        }
+        .await;
+        if cancel.flag.load(Ordering::Acquire) {
+            result = Err(Error::Cancelled);
+        }
+        if result.is_err() {
+            let (running, pending, waiting) = {
+                let mut inner = lock(&self.inner);
+                let running = inner.running.take();
+                let pending = inner.pending_engine.take();
+                inner.held_listeners.remove(&request.model.id);
+                let waiting = Self::forget(&mut inner);
+                inner.boot_restore = None;
+                if !self.closed.load(Ordering::Acquire)
+                    && let Err(error) = storage::remove(&self.run_intent_path)
+                {
+                    result = Err(error);
+                }
+                (running, pending, waiting)
+            };
+            if let Some(engine) = pending {
+                engine.stop();
+            }
+            if let Some(running) = running {
+                running.retire().await;
+            }
+            drop(waiting);
+        }
+        let _ = keep_exit(
+            &self.exits,
+            &json!({
+                "atMs": now_ms(),
+                "kind": "restore",
+                "modelId": request.model.id,
+                "generation": request.generation,
+                "port": request.intent.port,
+                "result": result.map_or_else(Error::token, |()| "ready"),
+            }),
+        );
+        self.finish(&operation, result);
     }
 
     pub fn switch_model_guarded<Apply, Guard>(
@@ -2100,6 +2416,7 @@ impl Manager {
                 return Err(Error::SettingsChanged);
             }
             apply(&provider, &request.expected, &binding)?;
+            self.keep_run_intent(&inner, &request.model)?;
             Self::intend(&mut inner, &request.model, binding.provider_identity);
             if let Some(switch) = &mut inner.model_switch {
                 switch.state = "applied";
@@ -2357,6 +2674,7 @@ impl Manager {
             provider_identity: provider.identity(),
         };
         apply(&provider, expected, &binding)?;
+        self.keep_run_intent(&inner, model)?;
         Self::intend(&mut inner, model, binding.provider_identity);
         drop(catalog);
         inner.revision += 1;
@@ -2373,7 +2691,12 @@ impl Manager {
             .recovering
             .as_ref()
             .is_some_and(|ended| ended.id == server_id);
-        if !restarting {
+        let restoring = inner.cancel.is_some()
+            && inner
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.kind == "restore");
+        if !restarting && !restoring {
             if inner.cancel.is_some() {
                 return Err(Error::Busy);
             }
@@ -2383,12 +2706,12 @@ impl Manager {
             }
         }
         let mut pending = None;
-        if restarting
+        if (restarting || restoring)
             && let Some(cancel) = inner.cancel.clone()
             && inner
                 .operation
                 .as_ref()
-                .is_some_and(|operation| operation.kind == "start")
+                .is_some_and(|operation| matches!(operation.kind, "start" | "restore"))
         {
             cancel.stop();
             pending = inner.pending_engine.clone();
@@ -2396,6 +2719,7 @@ impl Manager {
                 operation.state = "cancelling";
             }
         }
+        let cleared = storage::remove(&self.run_intent_path);
         let waiting = Self::forget(&mut inner);
         if let Some(ended) = &waiting {
             inner.held_listeners.remove(&ended.model_id);
@@ -2413,6 +2737,7 @@ impl Manager {
         drop(waiting);
         drop(running);
         self.emit();
+        cleared?;
         Ok(self.snapshot())
     }
 
@@ -2446,6 +2771,10 @@ impl Manager {
             }
             self.store.remove(&model)
         })?;
+        if RunIntent::read(&self.run_intent_path).is_some_and(|intent| intent.model_id == model_id)
+        {
+            storage::remove(&self.run_intent_path)?;
+        }
         inner.held_listeners.remove(model_id);
         inner.revision += 1;
         drop(inner);
@@ -2749,6 +3078,15 @@ pub(crate) mod test_support {
     }
 
     #[cfg(unix)]
+    pub fn held_port(manager: &Manager, model_id: &str) -> Option<u16> {
+        lock(&manager.inner)
+            .held_listeners
+            .get(model_id)
+            .and_then(|listener| listener.local_addr().ok())
+            .map(|address| address.port())
+    }
+
+    #[cfg(unix)]
     pub fn switching_manager(
         root: &Path,
         settings: &Path,
@@ -2801,6 +3139,32 @@ pub(crate) mod test_support {
         storage::private_dir(executable.parent().unwrap()).unwrap();
         fs::write(executable, b"fixture").unwrap();
         manager.store.commit_runtime(&mut stage, &profile).unwrap();
+        manager
+    }
+
+    #[cfg(unix)]
+    pub fn reopened_manager(
+        root: &Path,
+        settings: &Path,
+        models: Vec<Model>,
+        factory: EngineFactory,
+        sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
+        runtime_verified: bool,
+    ) -> Arc<Manager> {
+        let runtimes: serde_json::Value =
+            serde_json::from_str(include_str!("../manifests/runtime.json")).unwrap();
+        let mut profile: RuntimeProfile =
+            serde_json::from_value(runtimes["profiles"][0].clone()).unwrap();
+        profile.validated = runtime_verified;
+        let manager = Manager::with_catalog(
+            root,
+            settings,
+            Catalog { version: 1, models },
+            Some(profile),
+            sink,
+        )
+        .unwrap();
+        *lock(&manager.engine_factory) = Some(factory);
         manager
     }
 

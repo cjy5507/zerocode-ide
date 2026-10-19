@@ -55,6 +55,7 @@ pub mod report;
 pub(crate) mod screenshot_png;
 pub mod sequence;
 pub mod state;
+pub(crate) mod surface_execution;
 #[cfg(any(target_os = "windows", test))]
 mod thread;
 #[cfg(any(target_os = "windows", test))]
@@ -76,6 +77,7 @@ mod unsupported;
 use unsupported as platform;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
@@ -93,6 +95,11 @@ use session::{ProviderSession as _, SessionFailure};
 
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 static CLIENT: OnceLock<Mutex<Option<platform::Session>>> = OnceLock::new();
+static SESSION_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn session_epoch() -> u64 {
+    SESSION_EPOCH.load(Ordering::Acquire)
+}
 
 /// Where the bundled resources are, when the app knows.
 pub fn initialize(resource_dir: Option<PathBuf>) {
@@ -126,6 +133,7 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     if held.is_none() {
         let session = platform::Session::start()?;
         guard::remember_helper(session.helper_pid());
+        SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
         *held = Some(session);
     }
     let session = held.as_mut().expect("session stood");
@@ -135,6 +143,7 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
             params,
         )?;
     }
+    surface_execution::record_provider(session_epoch());
     // ZeroCode's own window under a point the request presses at — or a
     // point whose window cannot be read — is refused here first: the helper
     // reads the pointer's own picture, where the window server lists one, as
@@ -176,6 +185,7 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
 /// clean one, and the break is the answer.
 fn discard(held: &mut Option<platform::Session>, error: ComputerUseError) -> ComputerUseError {
     *held = None;
+    SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
     guard::remember_helper(None);
     evidence::end_session();
     error
@@ -190,12 +200,37 @@ pub fn session_stands() -> bool {
         .is_some()
 }
 
+/// The helper's `status` now, or nothing: no session stands, a request holds
+/// the session, or the helper did not answer. Whoever asks never waits behind
+/// a request in flight, as the stop's signal never does (t-62872); a road that
+/// broke drops the session, as [`call`] does.
+pub fn status_unless_busy() -> Option<Value> {
+    input_policy::ensure_current().ok()?;
+    let mut held = match held_client().try_lock() {
+        Ok(held) => held,
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let session = held.as_mut()?;
+    match session.request("status", Value::Object(serde_json::Map::new())) {
+        Ok(answer) => Some(answer),
+        Err(SessionFailure::Provider(_)) => None,
+        Err(SessionFailure::Transport(error)) => {
+            discard(&mut held, error);
+            None
+        }
+    }
+}
+
 /// End the session, if one stands. The next `call` starts a fresh one.
 pub fn shutdown() {
     if let Some(client) = CLIENT.get() {
-        *client
+        let mut held = client
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.take().is_some() {
+            SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
+        }
     }
     guard::remember_helper(None);
     evidence::end_session();
