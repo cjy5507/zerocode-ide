@@ -533,7 +533,11 @@ async fn shutdown_restores_once_on_the_same_port_without_rewriting_settings() {
     let intent = fs::read(fixture.intent_path()).unwrap();
     fixture.reopen().await;
     assert_eq!(fs::read(fixture.intent_path()).unwrap(), intent);
-    fixture.restore(true).unwrap();
+    let starting = fixture.restore(true).unwrap();
+    assert!(
+        starting.operation.is_some(),
+        "shutdown intent must reserve one restore operation"
+    );
     let ready = crate::tests::settled_snapshot(&fixture.manager).await;
     assert_eq!(
         fixture.starts(),
