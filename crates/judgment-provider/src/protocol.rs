@@ -69,7 +69,21 @@ impl Provider {
     }
 
     pub fn prepare_served(&self, body: Vec<u8>) -> Result<Prepared, Refusal> {
-        self.prepare(body)
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(Refusal::TooLarge);
+        }
+        if self.kind != ProviderKind::Local {
+            return Err(Refusal::Settings);
+        }
+        if self.protocol == Protocol::OpenaiJson {
+            return crate::openai::prepare_served(self, &body);
+        }
+        let mut request: Value = serde_json::from_slice(&body).map_err(|_| Refusal::Request)?;
+        if request["model"].as_str() != Some(&self.model) {
+            return Err(Refusal::SettingsChanged);
+        }
+        request["model"] = json!(self.identity());
+        self.prepare(serde_json::to_vec(&request).map_err(|_| Refusal::Request)?)
     }
 }
 
