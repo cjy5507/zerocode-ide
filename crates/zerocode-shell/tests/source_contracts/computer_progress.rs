@@ -293,15 +293,17 @@ fn the_window_takes_in_the_persons_chord_whenever_it_hears_the_helper() {
     // it: its signal is what ends that request at its next event. Both of
     // an agent's roads run on the window's helper.
     let stop = block_after(&runtime, "fn agents_stop(");
+    // t-62469 F2: the window's stop stands first; the helper is heard by the
+    // closure `stop_hearing` runs after it, and before the signal.
     let heard = stop
         .find("helper.status_now()")
-        .unwrap_or_else(|| panic!("an agent's stop hears the helper before it stops: {stop}"));
+        .unwrap_or_else(|| panic!("an agent's stop hears the helper: {stop}"));
     let stopped = stop
-        .find("computer_use::guard::stop_with(")
+        .find("computer_use::guard::stop_hearing(")
         .expect("an agent's stop stops the window");
     assert!(
-        heard < stopped && stop.contains("adopt_helper_stop(&heard, app)"),
-        "the helper's stop is heard and taken in first: {stop}"
+        stopped < heard && stop.contains("adopt_helper_stop(&heard, app)"),
+        "the window's stop stands, then the helper's stop is heard and taken in: {stop}"
     );
     let session = block_after(&runtime, "impl HelperRoads for SessionHelper {");
     assert!(

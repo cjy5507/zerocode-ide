@@ -18,11 +18,17 @@ use super::ComputerUseError;
 struct Stop {
     reason: Option<String>,
     revision: u64,
+    /// An agent's stop made while a helper request was in flight, so the
+    /// window could not hear whether the person's chord came just before it
+    /// (t-62469): the stop may be the person's. An agent's `resume` leaves
+    /// it standing; the band's resume (the person) lifts it.
+    unconfirmed: bool,
 }
 
 static STOPPED: Mutex<Stop> = Mutex::new(Stop {
     reason: None,
     revision: 0,
+    unconfirmed: false,
 });
 static STOP_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -95,8 +101,17 @@ pub fn adopt(reason: &str) -> bool {
         STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
         held.reason = Some(reason.to_string());
         held.revision += 1;
+        held.unconfirmed = false;
     }
     takes
+}
+
+/// Whether the standing stop may be the person's though it carries an
+/// agent's reason (t-62469): see [`Stop::unconfirmed`].
+#[must_use]
+pub fn unconfirmed_stop_stands() -> bool {
+    let held = stopped();
+    held.reason.is_some() && held.unconfirmed
 }
 
 /// Whether the person's stop stands in the window — the stop the work
@@ -132,23 +147,58 @@ pub fn stop(reason: &str) -> Value {
 /// stop signals the helper it heard first, and a test's helper keeps a stop
 /// of its own.
 pub fn stop_with(reason: &str, signal: impl FnOnce() -> bool) -> Value {
-    let (reason, revision) = {
+    stop_hearing(reason, || true, signal)
+}
+
+/// [`stop_with`] with the helper heard after the window's stop stands and
+/// before the signal (t-62469): the stop is up at once, so nothing the door
+/// lets in meanwhile starts after it, and a helper slow to answer delays only
+/// the signal. `hear` takes in the person's chord the helper holds
+/// ([`adopt`]) and answers whether it could read the helper; when it could
+/// not, the stop is marked unconfirmed — it may be the person's — until the
+/// band's resume lifts it.
+pub fn stop_hearing(
+    reason: &str,
+    hear: impl FnOnce() -> bool,
+    signal: impl FnOnce() -> bool,
+) -> Value {
+    let (reason, revision, made_here) = {
         let mut held = stopped();
-        if !persons(held.reason.as_deref()) || persons(Some(reason)) {
+        let made = !persons(held.reason.as_deref()) || persons(Some(reason));
+        if made {
             STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
             held.reason = Some(reason.to_string());
             held.revision += 1;
+            held.unconfirmed = !persons(Some(reason));
         }
-        (held.reason.clone().unwrap_or_default(), held.revision)
+        (held.reason.clone().unwrap_or_default(), held.revision, made)
     };
+    if made_here && hear() {
+        let mut held = stopped();
+        if held.revision == revision {
+            held.unconfirmed = false;
+        }
+    }
     let signalled = signal();
+    let (reason, revision) = snapshot_reason(&reason, revision);
     serde_json::json!({
         "stopped": true,
         "personsStop": persons(Some(reason.as_str())),
+        "maybePersonsStop": unconfirmed_stop_stands(),
         "reason": reason,
         "revision": revision,
         "helperSignalled": signalled,
     })
+}
+
+/// The stop as it stands after the helper was heard: the person's chord taken
+/// in meanwhile has moved the reason and the revision.
+fn snapshot_reason(made: &str, made_revision: u64) -> (String, u64) {
+    let held = stopped();
+    match &held.reason {
+        Some(standing) if held.revision >= made_revision => (standing.clone(), held.revision),
+        _ => (made.to_string(), made_revision),
+    }
 }
 
 /// Tell the remembered helper to stop, by signal; false when there is none.
@@ -312,9 +362,12 @@ pub fn resume(
     let (reason, before) = snapshot();
     let named = match lifter {
         Lifter::Person { revision } => revision == Some(before),
-        Lifter::Agent => !reason
-            .as_deref()
-            .is_some_and(zerocode_core::computer_use::persons_stop),
+        Lifter::Agent => {
+            !reason
+                .as_deref()
+                .is_some_and(zerocode_core::computer_use::persons_stop)
+                && !unconfirmed_stop_stands()
+        }
     };
     if !named {
         return Resumed {
@@ -329,6 +382,7 @@ pub fn resume(
         let mut held = stopped();
         if helper.is_ok() && held.revision == before && held.reason.take().is_some() {
             held.revision += 1;
+            held.unconfirmed = false;
         }
         (held.reason.clone(), held.revision)
     };
@@ -352,6 +406,7 @@ pub fn lift() {
     if held.reason.take().is_some() {
         held.revision += 1;
     }
+    held.unconfirmed = false;
 }
 
 #[cfg(test)]

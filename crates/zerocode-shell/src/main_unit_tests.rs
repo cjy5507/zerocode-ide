@@ -21823,6 +21823,153 @@ pub(crate) mod computer_desktop_wait {
                 .set(Some(zerocode_core::computer_use::STOP_REASON_SIGNAL));
             true
         }
+
+        fn session_stands(&self) -> bool {
+            true
+        }
+    }
+
+    /// A helper with a request in flight (t-62469): it answers no `status`
+    /// now, its `status` waits for the request to end, and the person's chord
+    /// it heard just before is held in its reason. `signal` overwrites that
+    /// reason as the signed helper does. `now_takes` is how long `status_now`
+    /// takes to answer nothing — 0 for the busy lock, long for a helper that
+    /// lives but does not answer.
+    struct BusyHelper {
+        reason: std::sync::Mutex<Option<&'static str>>,
+        resumed: std::sync::atomic::AtomicUsize,
+        now_takes: std::time::Duration,
+        window_stop_when_asked: std::sync::Mutex<Option<Option<String>>>,
+    }
+
+    impl BusyHelper {
+        fn new(now_takes: std::time::Duration) -> Self {
+            Self {
+                reason: std::sync::Mutex::new(Some(zerocode_core::computer_use::STOP_REASON_HOTKEY)),
+                resumed: std::sync::atomic::AtomicUsize::new(0),
+                now_takes,
+                window_stop_when_asked: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    impl crate::agent_tools_runtime::HelperRoads for BusyHelper {
+        fn status(&self) -> Option<serde_json::Value> {
+            None
+        }
+
+        fn status_now(&self) -> Option<serde_json::Value> {
+            *self.window_stop_when_asked.lock().unwrap() =
+                Some(crate::computer_use::guard::stopped_reason());
+            std::thread::sleep(self.now_takes);
+            None
+        }
+
+        fn resume(
+            &self,
+            _reset: bool,
+        ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
+            self.resumed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.reason.lock().unwrap() = None;
+            Ok(serde_json::Value::from("resumed"))
+        }
+
+        fn signal(&self) -> bool {
+            *self.reason.lock().unwrap() = Some(zerocode_core::computer_use::STOP_REASON_SIGNAL);
+            true
+        }
+
+        fn session_stands(&self) -> bool {
+            true
+        }
+    }
+
+    /// The person's chord, an agent's `stop` while a helper request is in
+    /// flight, then the agent's `resume` (t-62469 F1): the helper cannot be
+    /// heard, so the stop may be the person's. The agent's resume lifts
+    /// nothing and says the person must confirm; the band's resume lifts it.
+    /// Counted: how often the agent's resume lifted a stop the person may
+    /// have made.
+    #[test]
+    fn an_agents_stop_over_a_busy_helper_is_not_lifted_by_its_resume_but_by_the_bands() {
+        use crate::agent_tools_runtime::{agents_resume, agents_stop};
+        use crate::computer_use::guard;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let helper = BusyHelper::new(std::time::Duration::ZERO);
+        let stop = agents_stop(&helper, None);
+        let agent = agents_resume(&helper, false, None).map_err(|error| error.message);
+        let lifted_by_agent = usize::from(guard::stopped_reason().is_none());
+        assert_eq!(
+            lifted_by_agent, 0,
+            "times an agent's resume lifted a stop the person may have made: {stop} {agent:?}"
+        );
+        assert!(
+            agent
+                .as_ref()
+                .is_err_and(|message| message.contains("the person may have stopped it")),
+            "the agent's resume says the person must confirm: {agent:?}"
+        );
+        assert_eq!(helper.resumed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(stop["maybePersonsStop"], true, "{stop}");
+        let (_, revision) = guard::snapshot();
+        let band = guard::resume(
+            guard::Lifter::Person { revision: Some(revision) },
+            || helper.resume(false),
+            || helper.signal(),
+        );
+        assert!(band.lifted, "the band's resume lifts it: {band:?}");
+        assert_eq!(guard::stopped_reason(), None);
+    }
+
+    /// A helper that lives but does not answer `status` (t-62469 F2): the
+    /// window's stop stands before the helper is asked, and in under 50 ms
+    /// though the answer would take 400 ms; no command the door judges
+    /// meanwhile is let in. Counted: the commands let in meanwhile.
+    #[test]
+    fn an_agents_stop_stands_in_the_window_before_a_silent_helper_is_asked() {
+        use crate::agent_tools_runtime::agents_stop;
+        use crate::computer_use::guard;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let helper = std::sync::Arc::new(BusyHelper::new(std::time::Duration::from_millis(400)));
+        let began = std::time::Instant::now();
+        let running = {
+            let helper = std::sync::Arc::clone(&helper);
+            std::thread::spawn(move || agents_stop(&*helper, None))
+        };
+        let stood_after = loop {
+            if guard::stopped_reason().is_some() {
+                break began.elapsed();
+            }
+            assert!(began.elapsed() < std::time::Duration::from_secs(5), "the stop never stood");
+            std::thread::yield_now();
+        };
+        let click = zerocode_core::computer_use::parse_command(&[
+            "click".to_string(),
+            "--x".to_string(),
+            "1".to_string(),
+            "--y".to_string(),
+            "1".to_string(),
+        ])
+        .expect("a click parses");
+        let let_in = usize::from(guard::door_refusal(&click).is_none());
+        running.join().unwrap();
+        assert!(
+            stood_after < std::time::Duration::from_millis(50),
+            "the window's stop stood after {stood_after:?} (the silent helper takes 400 ms)"
+        );
+        assert_eq!(let_in, 0, "commands let in while the helper was asked");
+        assert_eq!(
+            *helper.window_stop_when_asked.lock().unwrap(),
+            Some(Some(zerocode_core::computer_use::STOP_REASON_REQUEST.to_string())),
+            "the helper is asked only once the window's stop stands"
+        );
+        guard::lift();
     }
 
     /// The person's chord the window has not heard yet, then an agent's
