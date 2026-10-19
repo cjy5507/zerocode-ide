@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 
 parsed = ast.parse(json.loads(sys.argv[1]))
-definitions = [node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))]
+definitions = [node for node in parsed.body if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))
+               or (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "MAX_FRAME")]
 bridge = {}
 exec(compile(ast.Module(body=definitions, type_ignores=[]), "owned-native-bridge", "exec"), bridge)
 
@@ -46,6 +47,12 @@ class NativeBoundary(unittest.TestCase):
         self.assertTrue(callable(build), "the pinned native command policy is missing")
         return build(initial, 32101, "fixture-capability")
 
+    def permitted(self, event, arguments):
+        try:
+            bridge["offline_process"](event, arguments)
+        except ValueError:
+            self.fail("the owned native operation was refused: " + event)
+
     def test_native_command_disables_jinja_and_does_not_override_template_detection(self):
         initial = {"nativeExecutable": "/runtime/llama-server", "nativeModelFile": "/models/selected.gguf", "modelId": "fixture", "mode": "model"}
         command = self.arguments(initial)
@@ -73,8 +80,8 @@ class NativeBoundary(unittest.TestCase):
 
     def test_only_the_owned_loopback_connection_is_permitted(self):
         bridge["native_address"] = ("127.0.0.1", 32101)
-        bridge["offline_process"]("socket.connect", (object(), ("127.0.0.1", 32101)))
-        bridge["offline_process"]("socket.getaddrinfo", ("127.0.0.1", 32101, 0, 0, 0))
+        self.permitted("socket.connect", (object(), ("127.0.0.1", 32101)))
+        self.permitted("socket.getaddrinfo", ("127.0.0.1", 32101, 0, 0, 0))
         for address in [("127.0.0.1", 32102), ("192.0.2.1", 32101)]:
             with self.assertRaises(ValueError):
                 bridge["offline_process"]("socket.connect", (object(), address))
@@ -86,7 +93,7 @@ class NativeBoundary(unittest.TestCase):
         bridge["native_command"] = command
         bridge["native_cwd"] = "/runtime"
         bridge["native_spawn_allowed"] = True
-        bridge["offline_process"]("subprocess.Popen", (command[0], command, "/runtime", {}))
+        self.permitted("subprocess.Popen", (command[0], command, "/runtime", {}))
         with self.assertRaises(ValueError):
             bridge["offline_process"]("subprocess.Popen", (command[0], command, "/runtime", {}))
         bridge["native_spawn_allowed"] = True
