@@ -51,6 +51,7 @@ const judgmentModelSourceController = {
       judgmentProviderController.changeKind();
       el("typesafe-key-input").focus();
     });
+    el("judgment-openai-source").addEventListener("click", () => judgmentProviderController.connectOpenAi());
   },
 
   choose(kind) {

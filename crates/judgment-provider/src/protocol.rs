@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-use crate::{MAX_RESPONSE_BYTES, Provider, ProviderKind, Refusal, valid_model};
+use crate::{MAX_RESPONSE_BYTES, Protocol, Provider, ProviderKind, Refusal, valid_model};
 
 pub struct Prepared {
     pub body: Vec<u8>,
@@ -24,7 +24,12 @@ impl Provider {
         }
         validate_request(&request)?;
         request["model"] = json!(self.model);
-        let body = serde_json::to_vec(&request).map_err(|_| Refusal::Request)?;
+        let body = if self.protocol == Protocol::OpenaiJson {
+            self.clone().endpoint_validated()?;
+            crate::openai::prepare(&request)?
+        } else {
+            serde_json::to_vec(&request).map_err(|_| Refusal::Request)?
+        };
         let questions = request.get_mut("questions").map(Value::take);
         Ok(Prepared { body, questions })
     }
@@ -36,7 +41,11 @@ impl Provider {
         let Some(questions) = &prepared.questions else {
             return String::from_utf8(body).map_err(|_| Refusal::Response);
         };
-        let mut response: Value = serde_json::from_slice(&body).map_err(|_| Refusal::Response)?;
+        let mut response: Value = if self.protocol == Protocol::OpenaiJson {
+            crate::openai::decode(questions, &body)?
+        } else {
+            serde_json::from_slice(&body).map_err(|_| Refusal::Response)?
+        };
         validate_answers(questions, &response)?;
         let model = response
             .get("model")
@@ -51,8 +60,11 @@ impl Provider {
             "kind":self.kind,
             "protocol":self.protocol,
             "model":self.model,
-            "confidenceSource":"provider_reported",
+            "confidenceSource":if self.protocol == Protocol::OpenaiJson { "model_self_reported" } else { "provider_reported" },
         });
+        if self.protocol == Protocol::OpenaiJson {
+            response["judgmentProvider"]["verification"] = json!("user_selected_unverified");
+        }
         serde_json::to_string(&response).map_err(|_| Refusal::Response)
     }
 }
