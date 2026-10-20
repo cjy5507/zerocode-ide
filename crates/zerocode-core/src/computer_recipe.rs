@@ -741,6 +741,13 @@ pub fn recipe_command_words(command: &str) -> Result<(RecipeTool, Vec<String>), 
     if argv.is_empty() {
         return Err(format!("its code span has no words after {}", doors()));
     }
+    // A desktop line reads one spelling (t-66753 C2): a saved number or a
+    // pid joined to its flag stops a replay as it does standing apart.
+    let argv = if tool == RecipeTool::Computer {
+        crate::computer_use::flags_apart(&argv)?
+    } else {
+        argv
+    };
     Ok((tool, argv))
 }
 

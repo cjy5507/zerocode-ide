@@ -22712,8 +22712,8 @@ pub(crate) mod computer_desktop_wait {
         use crate::agent_tools_runtime::{agents_resume, HelperRoads};
         use crate::computer_use::guard;
         use crate::computer_use::stand_in::{Connected, Shape, StandIn};
-        /// The window's helper roads over a stand-in's connection: a resume
-        /// asked exactly as the window asks it (`guard::resume_request`).
+        // The window's helper roads over a stand-in's connection: a resume
+        // asked exactly as the window asks it (`guard::resume_request`).
         struct StandInRoads(std::cell::RefCell<Connected>);
         impl HelperRoads for StandInRoads {
             fn status(&self) -> Option<serde_json::Value> {

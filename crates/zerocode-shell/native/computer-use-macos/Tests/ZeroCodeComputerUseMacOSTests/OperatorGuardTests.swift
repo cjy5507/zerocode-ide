@@ -164,6 +164,30 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertEqual(over.stoppedReason, StopReason.hotkey)
     }
 
+    /// The stop's count moves when a stop is made, changed or lifted, and not
+    /// when a stop leaves the one standing as it is (t-66753 B); the person's
+    /// stop is lifted by the person alone, any other by anyone (t-66753 A).
+    func test_the_stops_count_moves_with_the_stop_and_only_the_person_lifts_theirs() throws {
+        var ledger = OperatorLedger(budget: try windowBudget())
+        XCTAssertEqual(ledger.stopRevision, 0)
+        XCTAssertTrue(ledger.liftable(by: .agent), "nothing stands")
+        ledger.stop(reason: StopReason.request)
+        XCTAssertEqual(ledger.stopRevision, 1)
+        ledger.stop(reason: StopReason.request)
+        XCTAssertEqual(ledger.stopRevision, 1, "the same stop again moves nothing")
+        XCTAssertTrue(ledger.liftable(by: .agent), "an agent's stop is anyone's to lift")
+        ledger.stop(reason: StopReason.hotkey)
+        XCTAssertEqual(ledger.stopRevision, 2, "the chord over an agent's stop moves it")
+        ledger.stop(reason: StopReason.signal)
+        XCTAssertEqual(ledger.stopRevision, 2, "a stop that leaves the person's moves nothing")
+        XCTAssertFalse(ledger.liftable(by: .agent))
+        XCTAssertTrue(ledger.liftable(by: .person))
+        ledger.resume(resetBudget: false)
+        XCTAssertEqual(ledger.stopRevision, 3, "the lift moves it")
+        XCTAssertEqual(StopLifter(rawValue: "person"), .person)
+        XCTAssertNil(StopLifter(rawValue: "anyone"))
+    }
+
     func testTheStopChordIsControlOptionEscapeWithoutCommand() {
         XCTAssertTrue(isStopHotkey(keyCode: 53, control: true, option: true, command: false))
         XCTAssertFalse(isStopHotkey(keyCode: 53, control: true, option: true, command: true), "force quit is the system's")

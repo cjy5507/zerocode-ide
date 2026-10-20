@@ -99,12 +99,37 @@ public enum WindowList {
         }
     }
 
-    /// The windows a read of the app `pid` may look at.
+    /// The windows a read of the app `pid` may look at (t-66753 C1): the
+    /// ones the window server lists, else — when it lists none of the app's,
+    /// as it may without Screen Recording — the app's own accessibility
+    /// windows, asked for only then: that process's alone, seen and big
+    /// enough, the best first. They stand in for a read, never for an action,
+    /// whose checks ask the window server; a window the app publishes no
+    /// number for stands in as window 0.
     public static func forReading(
         listed: [WindowCandidate],
         pid: pid_t,
         accessibility: () -> [AccessibilityWindow]
     ) -> [WindowCandidate] {
-        listed
+        guard listed.isEmpty else { return listed }
+        return accessibility()
+            .filter { $0.pid == pid && !$0.minimized }
+            .compactMap { window in
+                guard let frame = window.frame, frame.width >= minimumSide, frame.height >= minimumSide else {
+                    return nil
+                }
+                return WindowCandidate(
+                    windowId: window.number ?? 0,
+                    layer: 0,
+                    bounds: frame,
+                    title: window.title,
+                    alpha: 1,
+                    isOnScreen: true,
+                    sharingState: nil
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.score > rhs.score
+            }
     }
 }

@@ -54,9 +54,21 @@ const PERMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+/// How long the window's waiting request (t-66753 B) waits for the helper's
+/// stop to change before it is asked again: well inside the read limit every
+/// answer has (`REQUEST_TIMEOUT`), so a quiet helper is asked again rather
+/// than taken for a dead one.
+const STOP_WATCH_WAIT: Duration = Duration::from_secs(20);
+/// The helper's road for that request (`OperatorGuardHost.watch`).
+const STOP_WATCH_METHOD: &str = "stopWatch";
+// Every waiting request is answered inside the limit every answer has.
+const _: () = assert!(STOP_WATCH_WAIT.as_secs() < REQUEST_TIMEOUT.as_secs());
 
 pub(super) struct Session {
     wire: Wire,
+    /// The window's waiting request (t-66753 B): its own connection, shut
+    /// when the session ends, and the thread that waits on it.
+    watching: Option<StopWatch>,
     /// The helper's pid, read off the socket once it answered
     /// (`LOCAL_PEERPID`). Not a `Child`: LaunchServices launched it, so it is
     /// nobody's child here — see the module comment.
@@ -174,6 +186,60 @@ impl Wire {
                 .and_then(Value::as_str)
                 .unwrap_or("Computer Use helper refused the request"),
         )))
+    }
+}
+
+/// The connection the window's waiting request rides, and its thread.
+struct StopWatch {
+    stream: std::os::unix::net::UnixStream,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl StopWatch {
+    /// One waiting request to the helper at a time, on a connection of its
+    /// own: never the session's lock, so it waits behind no request in
+    /// flight and none waits behind it (t-62469 B2). Each answer goes to the
+    /// guard, which takes in the person's chord at once; then it asks again
+    /// after the stop it heard. A helper that cannot answer one — or a
+    /// connection that broke — ends it; the session goes on without it.
+    fn start(socket: &Path, token: &str) -> Option<Self> {
+        let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+        let kept = stream.try_clone().ok()?;
+        let mut wire = Wire::new(stream, token.to_string()).ok()?;
+        let wait = u64::try_from(STOP_WATCH_WAIT.as_millis()).unwrap_or(u64::MAX);
+        let thread = std::thread::Builder::new()
+            .name("computer-use-stop-watch".into())
+            .spawn(move || {
+                let mut after: Option<u64> = None;
+                loop {
+                    let mut asked = serde_json::Map::new();
+                    asked.insert("ms".into(), wait.into());
+                    if let Some(after) = after {
+                        asked.insert("after".into(), after.into());
+                    }
+                    let Ok(heard) = wire.request(STOP_WATCH_METHOD, Value::Object(asked)) else {
+                        return;
+                    };
+                    super::guard::hear_watched(&heard);
+                    // An answer with no count to ask after is not this road's.
+                    let Some(revision) = heard.get("stopRevision").and_then(Value::as_u64) else {
+                        return;
+                    };
+                    after = Some(revision);
+                }
+            })
+            .ok()?;
+        Some(Self {
+            stream: kept,
+            thread,
+        })
+    }
+
+    /// Shut its connection, which ends the request waiting on it, and wait
+    /// for its thread to end: nothing it heard is taken in after the session.
+    fn end(self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        let _ = self.thread.join();
     }
 }
 
@@ -306,6 +372,7 @@ impl Session {
         let _ = std::fs::remove_file(&token_file);
         let mut client = Self {
             wire: Wire::new(stream, token)?,
+            watching: None,
             helper_pid,
             directory,
             supports_background: false,
@@ -328,6 +395,9 @@ impl Session {
         validate_guard_budget(&handshake)?;
         client.supports_background =
             handshake.pointer("/supports/actions/background") == Some(&Value::Bool(true));
+        // The person's chord reaches the window as the helper hears it
+        // (t-66753 B), not at the window's next command.
+        client.watching = StopWatch::start(&socket, &client.wire.token);
         Ok(client)
     }
 }
@@ -342,6 +412,9 @@ impl SessionFailure {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if let Some(watching) = self.watching.take() {
+            watching.end();
+        }
         let id = self.wire.next_id;
         if let Ok(line) = serde_json::to_vec(&json!({
             "id": id,
@@ -1139,6 +1212,25 @@ mod tests {
             said,
             ["Self::connect(launch()?)"],
             "start is the launch, then the connection"
+        );
+    }
+
+    /// The window's waiting request is a road the helper answers outside
+    /// its provider lock (t-66753 B): beside an action in flight, as the
+    /// stop and the status are.
+    #[test]
+    fn the_waiting_request_is_one_of_the_helpers_unlocked_roads() {
+        let helper = include_str!(
+            "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOS/main.swift"
+        );
+        let roads = helper
+            .split("func unlockedRoad(")
+            .nth(1)
+            .expect("the helper's unlocked roads");
+        let roads = &roads[..roads.find("\n}\n").expect("their end")];
+        assert!(
+            roads.contains(&format!("case \"{STOP_WATCH_METHOD}\":")),
+            "the helper answers the window's waiting request outside its provider lock"
         );
     }
 
