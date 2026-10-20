@@ -68,6 +68,7 @@ import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testBrowserWorkspace } from "./browser-workspace.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
+import { testSshSeat } from "./ssh-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
 import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
@@ -307,6 +308,8 @@ suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(brows
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("browser-workspace", ({ browser, origin, ok }) => testBrowserWorkspace(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));
+// An agent's terminal is seated in the asking pane's project, not on the stage in front (t-66346).
+suite("ssh-seat", ({ browser, origin, ok }) => testSshSeat(browser, origin, ok));
 suite("artifact-beside", ({ browser, origin, ok }) => testArtifactBeside(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("artifact-band", ({ browser, origin, ok }) => testArtifactBand(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("artifact-followed", ({ browser, origin, ok }) => testArtifactFollowed(browser, origin, ok, join(UI, "..", "output/playwright")));

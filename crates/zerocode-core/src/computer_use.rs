@@ -5306,6 +5306,10 @@ mod windows_shim_tests {
         );
         assert!(ssh.contains("zerocode-ssh — use the terminals, SSH hosts"));
         assert!(ssh.contains("http://127.0.0.1:$port/computer"));
+        assert!(
+            ssh.contains("$env:ZEROCODE_PANE_KEY") && ssh.contains("'x-zerocode-pane', $pane"),
+            "the ssh door seats the tab it opens in the asking pane's project:\n{ssh}"
+        );
     }
 
     /// The manual is a here-string, so an apostrophe in the prose is not a
@@ -7334,6 +7338,78 @@ mod tests {
             powershell.contains(&format!("'{PANE_HEADER}', $pane")),
             "{powershell}"
         );
+    }
+
+    /// The terminal door names the pane that asked (t-66346), as the emulator
+    /// door does: the tab an agent's `zerocode-ssh open` stands is seated in
+    /// that pane's project, and a local shell starts in its checkout — not on
+    /// the stage the person happens to be reading (10-20 15:58: one project's
+    /// agent opened an SSH terminal and its tab stood in the other project, the
+    /// one on screen). The name is the shell's own, from the environment its
+    /// pane gave it; a pane spelled as an argument rides the command, which the
+    /// window refuses (`open` takes no pane), and never becomes the header.
+    #[cfg(unix)]
+    #[test]
+    fn the_ssh_door_names_the_pane_that_asked_and_no_argument_names_another() {
+        use crate::agent_browser::PANE_HEADER;
+        let rig = DoorRig::new();
+        let door = rig.install(
+            "zerocode-ssh",
+            &ssh_shim_script("PORT_V", "COMPUTER_V", "HOOK_V"),
+        );
+        let asked = [(crate::hook::PANE_KEY_ENV, "term-7")];
+        let named = format!("header = \"{PANE_HEADER}: term-7\"");
+
+        let seated = rig.headers(&door, rig.path(), &["open", "--local", "--json"], &asked);
+        assert!(
+            seated.lines().any(|line| line == named),
+            "the ssh door did not name the pane that asked:\n{seated}"
+        );
+        let forged = rig.headers(
+            &door,
+            rig.path(),
+            &["open", "--local", "--pane", "term-9", "--json"],
+            &asked,
+        );
+        let said: Vec<&str> = forged
+            .lines()
+            .filter(|line| line.contains(PANE_HEADER))
+            .collect();
+        assert_eq!(
+            said,
+            [named.as_str()],
+            "an argument changed the pane the ssh door said asked:\n{forged}"
+        );
+        let nameless = rig.headers(&door, rig.path(), &["open", "--local", "--json"], &[]);
+        assert!(!nameless.contains(PANE_HEADER), "{nameless}");
+        // And the command cannot name one either: `open` takes no pane, by
+        // either spelling, so the window never reads an asking pane off it.
+        for forged in [
+            ["open", "--local", "--pane", "term-9"],
+            ["open", "--local", "--from", "9"],
+        ] {
+            assert!(
+                parse_ssh_command(&words(&forged)).is_err(),
+                "`zerocode-ssh {}` was taken: an argument named the asking pane",
+                forged.join(" ")
+            );
+        }
+    }
+
+    /// `open`'s answer says where the window seated the tab — its checkout and
+    /// its stage group, `seatedIn` — so the agent can tell the person it is on
+    /// their project's stage (t-66346), and the manual says a group is not a
+    /// pane: every later verb takes `--pane`, and a group number read as one
+    /// addresses somebody else's terminal.
+    #[test]
+    fn the_ssh_manual_says_where_open_seats_and_that_a_group_is_not_a_pane() {
+        let manual = ssh_usage();
+        for said in ["seatedIn", "checkout", "group", "not a pane"] {
+            assert!(
+                manual.contains(said),
+                "the ssh manual does not say `{said}` about where `open` seats:\n{manual}"
+            );
+        }
     }
 
     /// A door run as what it is: `sh` against a `curl` that keeps the header

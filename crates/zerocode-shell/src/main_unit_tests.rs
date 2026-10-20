@@ -15931,6 +15931,71 @@ fn a_terminal_born_an_agent_is_recorded_and_forgotten() {
     assert_eq!(agent_for_program("zsh"), None);
 }
 
+/// An agent's local shell starts in, and is fenced to, the checkout of the
+/// pane that asked (t-66346): a pane of project B asking for a `--cwd`
+/// inside B gets its shell there while the person has another project in
+/// front, and a path in the project in front is refused, the refusal
+/// naming B — the checkout it was judged against. A pane this process
+/// cannot place, or none, falls back to the one in front, as before. The
+/// asking pane is the door's header, never an argument: `open` takes no
+/// pane (pinned beside the core parser).
+#[test]
+fn an_agents_local_shell_stands_in_the_asking_panes_checkout_and_is_fenced_to_it() {
+    let in_front = tempfile::tempdir().expect("the checkout in front");
+    let asking = tempfile::tempdir().expect("the asking pane's checkout");
+    let inside = asking.path().join("sub");
+    std::fs::create_dir_all(&inside).expect("a folder inside it");
+    let elsewhere = in_front.path().join("sub");
+    std::fs::create_dir_all(&elsewhere).expect("a folder in the project in front");
+    let checkout_of = |term: TermId| (term == 7).then(|| asking.path().to_path_buf());
+
+    let root = agent_shell_root(Some(7), checkout_of, in_front.path().to_path_buf());
+    assert_eq!(
+        fenced_seat(&root, Some(inside.display().to_string())),
+        Ok(inside.clone()),
+        "a `--cwd` inside the asking pane's own checkout was refused"
+    );
+    assert_eq!(
+        fenced_seat(&root, None),
+        Ok(asking.path().to_path_buf()),
+        "without `--cwd` the shell did not start in the asking pane's checkout"
+    );
+    let refused = fenced_seat(&root, Some(elsewhere.display().to_string()))
+        .expect_err("a path in the project in front was taken for the asking pane's shell");
+    assert!(
+        refused.contains(&asking.path().display().to_string()),
+        "the refusal does not say which checkout it was judged against: {refused}"
+    );
+    for unplaced in [Some(9), None] {
+        assert_eq!(
+            agent_shell_root(unplaced, checkout_of, in_front.path().to_path_buf()),
+            in_front.path().to_path_buf(),
+            "a pane this process cannot place ({unplaced:?}) did not fall back to the checkout in front"
+        );
+    }
+}
+
+/// `zerocode-ssh open` says where the window seated the tab it stood
+/// (t-66346): the checkout and the stage group, so the agent can tell the
+/// person the terminal is on their project's stage. A group is said as a
+/// group, never as the pane number every later verb takes; and an open the
+/// window did not answer for in time says only its pane.
+#[test]
+fn an_ssh_open_says_where_the_window_seated_it() {
+    use zerocode_core::computer_use::SshMethod;
+    let seated = json!({
+        "pane": 12,
+        "seatedIn": { "worktree": "/Users/dev/project-b", "group": 2 },
+    });
+    assert_eq!(
+        ssh_pretty(SshMethod::Open, &seated),
+        "Opened pane 12 — seated in /Users/dev/project-b, stage group 2.",
+        "the open's answer does not say where the window seated the tab"
+    );
+    let unanswered = json!({ "pane": 12, "seatedIn": null });
+    assert_eq!(ssh_pretty(SshMethod::Open, &unanswered), "Opened pane 12.");
+}
+
 /// A default nobody chose is no default, and an id this window cannot
 /// resolve is refused rather than stored.
 #[test]
