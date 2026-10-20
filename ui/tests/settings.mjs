@@ -5641,6 +5641,48 @@ await test("라우터 추가→연결 시험→모델 셋 켬→settings.json pr
   return "stub models endpoint, fake keychain, 3 models enabled, providers upsert verified; AgentRouter alone carries the client identity";
 });
 
+await test("라우터 모델 표의 머리칸 하나로 전체 선택·전체 해제", async () => {
+  await openSettings(pageA, "api-routers");
+  await pageA.selectOption("#router-preset-select", "custom");
+  await pageA.fill("#router-name-input", "pick-all");
+  await pageA.fill("#router-base-url-input", origin);
+  await pageA.click("#router-test-btn");
+  await pageA.waitForSelector("#router-models-section:not([hidden])", { timeout: UI_TIMEOUT });
+  const all = pageA.locator("#router-models-all");
+  const rows = pageA.locator(".router-model-check");
+  assertEqual(await rows.count(), 4, "stub returned 4 models");
+  // The header's one box: what it shows, what it would do next, how many rows are on.
+  const state = () => pageA.evaluate(() => {
+    const box = document.getElementById("router-models-all");
+    return {
+      checked: box?.checked ?? null,
+      indeterminate: box?.indeterminate ?? null,
+      label: box?.getAttribute("aria-label") ?? null,
+      on: document.querySelectorAll(".router-model-check:checked").length,
+    };
+  });
+  assertEqual(await state(), { checked: true, indeterminate: false, label: "전체 해제", on: 4 },
+    "after the probe every model is on and the header box says so");
+  await all.click();
+  assertEqual(await state(), { checked: false, indeterminate: false, label: "전체 선택", on: 0 },
+    "one click on the header box clears every model");
+  assert(await pageA.locator("#router-save-btn").isDisabled(), "with no model chosen there is nothing to save");
+  await all.click();
+  assertEqual(await state(), { checked: true, indeterminate: false, label: "전체 해제", on: 4 },
+    "one click on the header box selects every model");
+  assert(!await pageA.locator("#router-save-btn").isDisabled(), "every model chosen can be saved");
+  await rows.nth(1).uncheck();
+  assertEqual(await state(), { checked: false, indeterminate: true, label: "전체 선택", on: 3 },
+    "a partial pick shows on the header box as indeterminate");
+  await all.click();
+  assertEqual(await state(), { checked: true, indeterminate: false, label: "전체 해제", on: 4 },
+    "a click on a partial pick selects the rest");
+  await pageA.fill("#router-key-input", "changed-credential");
+  assertEqual(await state(), { checked: false, indeterminate: false, label: "전체 선택", on: 0 },
+    "an invalidated probe clears the header box with the rows");
+  return "header box: all → none → all → partial (indeterminate) → all; cleared with the rows";
+});
+
 await test("라우터 연결 변경은 이전 모델 목록과 늦게 도착한 응답을 무효화한다", async () => {
   await openSettings(pageA, "api-routers");
   await pageA.selectOption("#router-preset-select", "custom");
