@@ -2784,6 +2784,15 @@ pub(super) async fn computer_loop(
                             app.state::<AppState>().settings(),
                         )
                     });
+                    let _browser_route = match computer_use::browser_route::command(&command) {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            let answer = computer_cli_error(command.json, &error.code, &error.message);
+                            leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
+                            let _ = reply.send(answer);
+                            return;
+                        }
+                    };
                     if let Err(error) = computer_use::input_policy::current().prepare(&mut command)
                     {
                         let answer = computer_cli_error(command.json, &error.code, &error.message);
