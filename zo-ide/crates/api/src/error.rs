@@ -713,6 +713,66 @@ fn classify_provider_error_text<'a>(
 const PROVIDER_CAPACITY_HINT_BODY: &str = "Provider capacity issue — the PROVIDER shed this request. This is NOT your account's rate limit (it fires with the window nearly empty) and NOT a local permission or workspace-trust failure.
   zo already re-opened the stream and, when a fallback model is configured, tried escaping to it. The fastest way through is a lighter model (/model sonnet, or a lower effort in its picker); capacity usually frees up within seconds to minutes.";
 
+/// Explanation appended when the provider routed the request to no endpoint
+/// because of this account's own settings. Read from the error's structure —
+/// `error.metadata.ineligibility_reasons[]` (`reason`, `configure_url`) and
+/// `error.metadata.failed_routing_step` — never from a provider, model or
+/// reason name. A `configure_url` is shown only when it is an https URL.
+fn account_settings_hint(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    let metadata = value.get("error")?.get("metadata")?;
+    let reasons = metadata
+        .get("ineligibility_reasons")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let step = metadata
+        .get("failed_routing_step")
+        .and_then(serde_json::Value::as_str);
+    if reasons.is_empty() && step.is_none() {
+        return None;
+    }
+    let printable = |text: &str| text.chars().filter(|c| !c.is_control()).collect::<String>();
+    let mut details = Vec::new();
+    let codes = reasons
+        .iter()
+        .filter_map(|reason| reason.get("reason")?.as_str())
+        .map(printable)
+        .collect::<Vec<_>>();
+    if !codes.is_empty() {
+        details.push(format!("reason: {}", codes.join(", ")));
+    }
+    if let Some(step) = step {
+        details.push(format!("routing step: {}", printable(step)));
+    }
+    let mut urls = Vec::<String>::new();
+    for url in reasons
+        .iter()
+        .filter_map(|reason| reqwest::Url::parse(reason.get("configure_url")?.as_str()?).ok())
+        .filter(|url| url.scheme() == "https" && url.host_str().is_some())
+    {
+        let url = String::from(url);
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    let mut hint = "The provider excluded every endpoint for this model because of this \
+                    account's settings"
+        .to_string();
+    if !details.is_empty() {
+        hint.push_str(&format!(" ({})", details.join("; ")));
+    }
+    if urls.is_empty() {
+        hint.push_str(". Change it in the provider's account settings or pick another model.");
+    } else {
+        hint.push_str(&format!(
+            ". Its setting is at {} — change it there or pick another model.",
+            urls.join(", ")
+        ));
+    }
+    Some(hint)
+}
+
 /// Explanation appended to a usage-limit refusal (ChatGPT `usage_limit_reached`
 /// and its kin): what the wall is, when it lifts in clock words, and the two
 /// ways through. Emitted **after** [`HINT_SEPARATOR`] — the seconds the retry
@@ -866,6 +926,9 @@ impl Display for ApiError {
                 if self.is_unsupported_vision() {
                     write!(f, "{HINT_SEPARATOR}{UNSUPPORTED_VISION_HINT_BODY}")?;
                 }
+                if let Some(hint) = account_settings_hint(body) {
+                    write!(f, "{HINT_SEPARATOR}{hint}")?;
+                }
                 Ok(())
             }
             Self::StreamApi {
@@ -888,6 +951,9 @@ impl Display for ApiError {
                 }
                 if self.is_unsupported_vision() {
                     write!(f, "{HINT_SEPARATOR}{UNSUPPORTED_VISION_HINT_BODY}")?;
+                }
+                if let Some(hint) = account_settings_hint(body) {
+                    write!(f, "{HINT_SEPARATOR}{hint}")?;
                 }
                 Ok(())
             }
