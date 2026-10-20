@@ -48263,6 +48263,15 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   z-index: 1;
 }
 
+/* The header's select-all box and the column word stay on one line. */
+.router-models-all {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .router-models-table tr:last-child td {
   border-bottom: none;
 }
