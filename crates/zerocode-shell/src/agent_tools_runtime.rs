@@ -4156,8 +4156,13 @@ pub(super) trait HelperRoads {
     /// The helper's `status` unless a request is in flight: a stop never
     /// waits behind one.
     fn status_now(&self) -> Option<serde_json::Value>;
-    /// The helper's `resume`.
-    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError>;
+    /// The helper's `resume`, saying who lifts (t-66753 A): an agent's road
+    /// says an agent, whatever its words carried.
+    fn resume(
+        &self,
+        reset: bool,
+        lifter: computer_use::guard::Lifter,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError>;
     /// The signal that stops the helper: false when there is none to tell.
     fn signal(&self) -> bool;
     /// Whether a helper session stands: one that did not answer `status_now`
@@ -4181,8 +4186,12 @@ impl HelperRoads for SessionHelper {
         computer_use::status_unless_busy()
     }
 
-    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError> {
-        computer_use::guard::helper_resume(reset)
+    fn resume(
+        &self,
+        reset: bool,
+        lifter: computer_use::guard::Lifter,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+        computer_use::guard::helper_resume(reset, lifter)
     }
 
     fn signal(&self) -> bool {
@@ -4264,7 +4273,7 @@ pub(super) fn agents_resume(
     }
     computer_use::guard::resume(
         computer_use::guard::Lifter::Agent,
-        || helper.resume(reset),
+        || helper.resume(reset, computer_use::guard::Lifter::Agent),
         || helper.signal(),
     )
     .agent_answer()

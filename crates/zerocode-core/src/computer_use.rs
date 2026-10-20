@@ -5557,6 +5557,108 @@ mod tests {
         input.iter().map(|word| (*word).to_string()).collect()
     }
 
+    /// A screen left of or above the main one has negative coordinates
+    /// (t-66753 C2): a region there is taken in both spellings of its flag —
+    /// `--region -2560,-38,560,1340` and `--region=-2560,-38,560,1340` — as
+    /// the same region, as every flag with a value is, while a flag that
+    /// takes none refuses a value after `=`. The picture's top-left is the
+    /// region's corner, so a pixel read off it names the same point. A batch
+    /// step and a recipe line read `=` the same way, so what they refuse or
+    /// stop for in one spelling they refuse or stop for in the other.
+    #[test]
+    fn a_value_may_follow_its_flag_after_an_equals_sign_and_a_region_may_lie_left_of_the_main_screen()
+     {
+        use crate::computer_recipe::{RecipeStop, recipe_lines, recipe_step_stop};
+        use crate::computer_use_protocol::frame::ShotFrame;
+        let spaced = parse_command(&words(&[
+            "screenshot",
+            "--region",
+            "-2560,-38,560,1340",
+            "--json",
+        ]));
+        let joined = parse_command(&words(&[
+            "screenshot",
+            "--region=-2560,-38,560,1340",
+            "--json",
+        ]));
+        assert_eq!(
+            joined, spaced,
+            "the two spellings of a region are one region"
+        );
+        assert_eq!(
+            spaced.expect("a region left of the main screen").params["region"],
+            json!({ "x": -2560.0, "y": -38.0, "width": 560.0, "height": 1340.0 })
+        );
+        assert_eq!(
+            parse_command(&words(&["zoom", "--region=100,-1000,300,200"]))
+                .map(|command| command.params["region"]["y"].clone()),
+            Ok(json!(-1000.0)),
+            "a region above the main screen"
+        );
+        assert_eq!(
+            parse_command(&words(&["mouse-move", "--x=-1200", "--y=300"])),
+            parse_command(&words(&["mouse-move", "--x", "-1200", "--y", "300"])),
+            "every flag with a value reads `=`"
+        );
+        let boolean = parse_command(&words(&["screenshot", "--full-res=true"]));
+        assert!(
+            boolean
+                .as_ref()
+                .is_err_and(|error| error.contains("--full-res takes no value")),
+            "a flag that takes no value refuses one: {boolean:?}"
+        );
+        let frame = ShotFrame::from_answer(&json!({
+            "origin": { "x": -2560.0, "y": -38.0 },
+            "screenshot": { "scale": 2.0 },
+        }))
+        .expect("the region's picture");
+        assert_eq!(frame.to_point([0.0, 0.0]), [-2560.0, -38.0], "its corner");
+        assert_eq!(frame.to_point([1120.0, 2680.0]), [-2000.0, 1302.0]);
+        assert_eq!(frame.to_pixel([-2000.0, 1302.0]), [1120.0, 2680.0]);
+        let batch = parse_command(&words(&[
+            "batch",
+            "--commands",
+            r#"[["mouse-move","--x=-1200","--y=300"]]"#,
+        ]));
+        assert_eq!(
+            batch.as_ref().map(batch_steps),
+            Ok(vec![words(&[
+                "mouse-move",
+                "--x",
+                "-1200",
+                "--y",
+                "300",
+                "--json"
+            ])]),
+            "a batch step reads `=`: {batch:?}"
+        );
+        let stale = parse_command(&words(&[
+            "batch",
+            "--commands",
+            r#"[["click","--app","Fixture","--element-index","1"],["click","--app","Fixture","--element-index=2"]]"#,
+        ]));
+        assert!(
+            stale
+                .as_ref()
+                .is_err_and(|error| error.contains("element indexes change after every action")),
+            "a stale index after an action is refused in either spelling: {stale:?}"
+        );
+        let recipe = recipe_lines(
+            "## Steps\n\n1. `zerocode-computer click --app=Fixture --element-index=3`\n",
+        )
+        .expect("a recipe line");
+        assert_eq!(
+            recipe[0].argv,
+            words(&["click", "--app", "Fixture", "--element-index", "3"]),
+            "a recipe line reads `=`"
+        );
+        assert_eq!(
+            recipe_step_stop(&recipe[0].argv),
+            Some(RecipeStop::NeedsALook),
+            "a saved number stops the replay in either spelling"
+        );
+    }
+
     /// `reflex-auto` names the sentence its plan is written for, the app the
     /// run may act in — the plan's scope, the person's to name — the display
     /// and the seconds a run policy takes, and, for a bench, the decision's

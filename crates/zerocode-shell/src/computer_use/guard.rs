@@ -328,13 +328,20 @@ impl Resumed {
     }
 }
 
-/// The helper's own `resume`, when a session stands.
-pub fn helper_resume(reset: bool) -> Result<Value, ComputerUseError> {
+/// The helper's own `resume`, when a session stands, saying who lifts
+/// (t-66753 A).
+pub fn helper_resume(reset: bool, lifter: Lifter) -> Result<Value, ComputerUseError> {
     if super::session_stands() {
-        super::call("resume", serde_json::json!({ "resetBudget": reset }))
+        super::call("resume", resume_request(reset, lifter))
     } else {
         Ok(Value::String("idle".into()))
     }
+}
+
+/// What the window asks the helper's `resume` with.
+#[must_use]
+pub fn resume_request(reset: bool, _lifter: Lifter) -> Value {
+    serde_json::json!({ "resetBudget": reset })
 }
 
 /// Held through one resume, from the check of the stop it names to stopping

@@ -3464,25 +3464,6 @@ private func jsonNullable<T>(_ value: T?) -> Any {
     value ?? NSNull()
 }
 
-private struct WindowCandidate {
-    let windowId: CGWindowID
-    let layer: Int
-    let bounds: CGRect
-    let title: String?
-    let alpha: CGFloat
-    let isOnScreen: Bool
-    let sharingState: Int?
-
-    var score: Int {
-        var value = Int(bounds.width * bounds.height)
-        if layer == 0 { value += 1_000_000_000 }
-        if title != nil && title?.isEmpty == false { value += 10_000_000 }
-        if isOnScreen { value += 1_000_000 }
-        if alpha >= 0.99 { value += 100_000 }
-        return value
-    }
-}
-
 private struct WindowCapture {
     let windowId: CGWindowID
     let layer: Int
@@ -3550,35 +3531,7 @@ private struct WindowCapture {
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
-        return infos.compactMap { info in
-            guard let ownerPid = info[kCGWindowOwnerPID as String] as? pid_t, ownerPid == pid,
-                  let number = info[kCGWindowNumber as String] as? NSNumber,
-                  let layer = info[kCGWindowLayer as String] as? Int,
-                  let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
-                  bounds.width >= 48,
-                  bounds.height >= 48
-            else {
-                return nil
-            }
-            let alpha = info[kCGWindowAlpha as String] as? CGFloat ?? 1
-            guard alpha > 0.01 else { return nil }
-            let sharing = (info[kCGWindowSharingState as String] as? NSNumber).map { $0.intValue }
-            if sharing == 0 { return nil }
-            let isOnScreen = (info[kCGWindowIsOnscreen as String] as? Bool) ?? true
-            return WindowCandidate(
-                windowId: CGWindowID(number.uint32Value),
-                layer: layer,
-                bounds: bounds,
-                title: info[kCGWindowName as String] as? String,
-                alpha: alpha,
-                isOnScreen: isOnScreen,
-                sharingState: sharing
-            )
-        }
-        .sorted { lhs, rhs in
-            lhs.score > rhs.score
-        }
+        return WindowList.candidates(infos: infos, pid: pid)
     }
 
     func screenshotPayload() -> ScreenshotPayload? {
@@ -5772,15 +5725,8 @@ enum DesktopScreen {
                 throw ProviderError.coded("invalid_argument", "display \(index) is not one of the \(all.count) active displays")
             }
             chosen = all[index]
-        } else if let region,
-                  let showing = all.first(where: { $0.bounds.contains(CGPoint(x: region.midX, y: region.midY)) })
-                      ?? all.first(where: { $0.bounds.intersects(region) }) {
-            // The display that shows the region's centre — a box about a
-            // point near an edge belongs to the point's display, not to the
-            // first one it grazes.
-            chosen = showing
         } else {
-            chosen = all[0]
+            chosen = all[desktopDisplayIndex(showing: region, among: all.map(\.bounds))]
         }
         // Only a request that names pointScale is planned; the rest keeps the
         // whole-display capture below, cropped, as it was (t-10424).
