@@ -4204,7 +4204,13 @@
               <table class="router-models-table" id="router-models-table" aria-label="모델 목록">
                 <thead>
                   <tr>
-                    <th scope="col" style="width: 56px;" data-i18n="settings.apiRouters.colSelect">선택</th>
+                    <th scope="col" style="width: 56px;">
+                      <!-- One box for every row: all on, all off, or some (indeterminate). -->
+                      <label class="router-models-all">
+                        <input type="checkbox" id="router-models-all" aria-label="전체 선택" data-i18n-title="settings.apiRouters.selectAll" data-tip="전체 선택" disabled />
+                        <span data-i18n="settings.apiRouters.colSelect">선택</span>
+                      </label>
+                    </th>
                     <th scope="col" data-i18n="settings.apiRouters.colModelId">모델 ID</th>
                     <th scope="col" style="width: 120px;" data-i18n="settings.apiRouters.colContext">컨텍스트</th>
                   </tr>
