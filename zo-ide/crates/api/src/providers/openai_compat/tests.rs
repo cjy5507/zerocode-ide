@@ -1266,6 +1266,31 @@ fn parse_sse_frame_surfaces_an_error_frame_with_a_numeric_code() {
     );
 }
 
+async fn refusal(status: u16, body: &str) -> ApiError {
+    let response = http::Response::builder()
+        .status(status)
+        .body(body.to_string())
+        .expect("a test response builds");
+    super::expect_success(reqwest::Response::from(response))
+        .await
+        .expect_err("a non-2xx answer is an error")
+}
+
+#[tokio::test]
+async fn expect_success_shows_the_message_of_an_error_with_a_numeric_code() {
+    let body = r#"{"error":{"message":"No endpoints found for this model.","code":404}}"#;
+    let error = refusal(404, body).await;
+    assert_eq!(
+        error.to_string(),
+        "api returned 404 Not Found: No endpoints found for this model."
+    );
+    assert!(
+        matches!(&error, ApiError::Api { body: kept, .. } if kept == body),
+        "the raw body stays in the error for logs, got {error:?}"
+    );
+    assert!(!error.is_retryable());
+}
+
 #[test]
 fn sse_parser_large_frame_split_across_many_chunks_parses_once() {
     let big = "x".repeat(512 * 1024);
