@@ -99,7 +99,7 @@ impl Tally {
             if code == ROUTE_REFUSAL { self.browser_route_refusals = self.browser_route_refusals.saturating_add(1); }
         }
         if declares_chrome(input) { self.browser_chrome_calls = self.browser_chrome_calls.saturating_add(1); }
-        if receipt.unknown_classification && input.get("action").and_then(Value::as_str).is_some_and(super::computer_tools::acts) {
+        if receipt.unknown_classification && input.get("action").and_then(Value::as_str).map(str::trim).is_some_and(super::computer_tools::acts) {
             self.browser_classification_unknown = self.browser_classification_unknown.saturating_add(1);
         }
     }

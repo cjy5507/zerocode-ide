@@ -6823,8 +6823,9 @@ pub(super) fn computer_cli_error(
 ) -> zerocode_hookd::TeamAnswer {
     if json {
         computer_refused(
-            serde_json::json!({ "ok": false, "error": { "code": code, "message": message } })
-                .to_string(),
+            computer_use::browser_route::annotate(serde_json::json!({
+                "ok": false, "error": { "code": code, "message": message }
+            })).to_string(),
         )
     } else {
         computer_refused(format!(

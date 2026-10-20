@@ -58,7 +58,7 @@ pub(crate) fn command(command: &ComputerCommand) -> Result<Scope, ComputerUseErr
     Ok(scope)
 }
 
-/// Only successful input answers carry this optional fact; reads keep their existing shape.
+/// Attach only the unknown-classification fact; classified requests keep their existing shape.
 pub(crate) fn annotate(mut result: Value) -> Value {
     if REQUEST.with(|active| active.get().is_some_and(|request| request.unknown))
         && let Some(result) = result.as_object_mut()
@@ -89,8 +89,8 @@ fn check(method: ComputerMethod, params: &Value) -> Result<(), ComputerUseError>
                 | ComputerMethod::Batch
                 | ComputerMethod::RecipeRun
         )
-        || params.get("pane").is_some()
-        || params.get("platform").is_some()
+        || (method == ComputerMethod::Walk
+            && (params.get("pane").is_some() || params.get("platform").is_some()))
         || params.get("browserChrome") == Some(&Value::Bool(true))
         || REQUEST.with(|active| active.get().is_some_and(|request| request.chrome))
     {
