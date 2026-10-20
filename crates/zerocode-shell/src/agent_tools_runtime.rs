@@ -6825,7 +6825,8 @@ pub(super) fn computer_cli_error(
         computer_refused(
             computer_use::browser_route::annotate(serde_json::json!({
                 "ok": false, "error": { "code": code, "message": message }
-            })).to_string(),
+            }))
+            .to_string(),
         )
     } else {
         computer_refused(format!(
