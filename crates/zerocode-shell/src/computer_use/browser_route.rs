@@ -13,31 +13,48 @@ use super::ComputerUseError;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[derive(Clone, Copy)]
+struct Request {
+    chrome: bool,
+    unknown: bool,
+}
+
 thread_local! {
-    static CHROME: Cell<bool> = const { Cell::new(false) };
+    static REQUEST: Cell<Option<Request>> = const { Cell::new(None) };
 }
 
 /// The explicit claim belongs to this request, including generated OCR and mark input.
 pub(crate) struct Scope {
-    previous: bool,
+    previous: Option<Request>,
     thread_bound: PhantomData<Rc<()>>,
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
-        CHROME.with(|active| active.set(self.previous));
+        REQUEST.with(|active| active.set(self.previous));
     }
 }
 
 pub(crate) fn command(command: &ComputerCommand) -> Result<Scope, ComputerUseError> {
-    let previous = CHROME.with(|active| {
+    let previous = REQUEST.with(|active| {
         let previous = active.get();
-        active.set(previous || command.params.get("browserChrome") == Some(&Value::Bool(true)));
+        active.set(Some(Request {
+            chrome: previous.is_some_and(|request| request.chrome) || command.params.get("browserChrome") == Some(&Value::Bool(true)),
+            unknown: false,
+        }));
         previous
     });
     let scope = Scope { previous, thread_bound: PhantomData };
     check(command.method, &command.params)?;
     Ok(scope)
+}
+
+/// Only successful input answers carry this optional fact; reads keep their existing shape.
+pub(crate) fn annotate(mut result: Value) -> Value {
+    if REQUEST.with(|active| active.get().is_some_and(|request| request.unknown)) {
+        if let Some(result) = result.as_object_mut() { result.insert("browserClassificationUnknown".into(), true.into()); }
+    }
+    result
 }
 
 /// Reflex input can call the provider without passing through the CLI command handler.
@@ -54,14 +71,20 @@ fn check(method: ComputerMethod, params: &Value) -> Result<(), ComputerUseError>
         || params.get("pane").is_some()
         || params.get("platform").is_some()
         || params.get("browserChrome") == Some(&Value::Bool(true))
-        || CHROME.with(Cell::get)
+        || REQUEST.with(|active| active.get().is_some_and(|request| request.chrome))
     {
         return Ok(());
     }
     // A mark already stores its app identity; resolving it reads memory, not the helper.
     let marked = params.get("mark").and_then(|_| super::marks::pinned_click(params).ok()).map(|mark| Value::Object(mark.params));
     let target = marked.as_ref().unwrap_or(params);
-    if classify(method, target) == Some(true) {
+    let classified = classify(method, target);
+    if classified.is_none() {
+        REQUEST.with(|active| {
+            if let Some(mut request) = active.get() { request.unknown = true; active.set(Some(request)); }
+        });
+    }
+    if classified == Some(true) {
         return Err(ComputerUseError::new(
             error_code::BROWSER_REQUIRES_WORK_BROWSER,
             "Web-page input belongs in the window's work browser: use zerocode-browser open <url>, then read, marks, click, type, and fields/fill. A working tab does not carry the person's external browser login; the person can take the tab over to sign in. Only when the person explicitly requested the browser application's own menus, tabs or extension UI, set browser_chrome: true (CLI --browser-chrome).",
