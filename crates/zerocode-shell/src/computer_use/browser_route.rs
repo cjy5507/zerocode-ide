@@ -36,7 +36,11 @@ impl Drop for Scope {
 }
 
 pub(crate) fn command(command: &ComputerCommand) -> Result<Scope, ComputerUseError> {
-    if let Some(refused) = crate::agent_tools_runtime::door_refusal(command) { return Err(refused); }
+    if command.method.acts()
+        && let Some(refused) = crate::agent_tools_runtime::door_refusal(command)
+    {
+        return Err(refused);
+    }
     let previous = REQUEST.with(|active| {
         let previous = active.get();
         active.set(Some(Request {
