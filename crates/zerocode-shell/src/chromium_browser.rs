@@ -5,6 +5,7 @@
 //! label in the thread-local native registry.
 
 mod macos_app;
+pub(crate) mod shield;
 
 use base64::Engine as _;
 use cef::*;
@@ -656,10 +657,15 @@ impl BrowserPane {
         })
     }
 
+    /// Place the pane where the window says, shown only as its tab's state
+    /// allows at this very operation: for the person's hand, or — when they
+    /// watch it (`watch`, the shield's dress) — for their eyes only, under the
+    /// shield (t-66513). Only a pane in their hands keeps the keyboard.
     pub(crate) fn place(
         &self,
         bounds: [f64; 4],
         shown: bool,
+        watch: Option<shield::Dress>,
         revision: Option<u64>,
         main_webview: tauri::Webview,
     ) -> Result<(), String> {
@@ -669,25 +675,29 @@ impl BrowserPane {
             let view = pane.native_view()?;
             let owned = unsafe { crate::browser_runtime::browser_view_owns_first_responder(view) };
             pane.set_hidden(true)?;
-            let mut displayed = false;
-            let result =
-                app.state::<AppState>()
-                    .shell_runtime()
-                    .browser_workspaces
-                    .with_placement(&label, revision, |allowed| {
-                        let visible = shown && allowed;
-                        displayed = visible;
-                        pane.set_bounds(bounds[0], bounds[1], bounds[2], bounds[3])?;
-                        if visible {
-                            pane.set_hidden(false)?;
-                        }
-                        if shown && !allowed {
-                            return Err("workspace_paused: 직접 조작은 제어권 전환 후 가능합니다"
-                                .to_string());
-                        }
-                        Ok(())
-                    });
-            if (!displayed || result.is_err()) && owned {
+            let mut displayed = None;
+            let watching = watch.is_some();
+            let result = app
+                .state::<AppState>()
+                .shell_runtime()
+                .browser_workspaces
+                .with_placement(&label, revision, watching, |placement| {
+                    let mut stage = Staged {
+                        pane,
+                        dress: watch.as_ref(),
+                    };
+                    if crate::browser_workspace::stage_pane(&mut stage, placement, bounds, shown)? {
+                        displayed = Some(placement);
+                    } else if shown {
+                        return Err(
+                            "workspace_paused: 직접 조작은 제어권 전환 후 가능합니다".to_string()
+                        );
+                    }
+                    Ok(())
+                });
+            if (displayed != Some(crate::browser_workspace::Placement::Control) || result.is_err())
+                && owned
+            {
                 let _ = main_webview.set_focus();
             }
             result
@@ -699,11 +709,29 @@ impl BrowserPane {
             let view = pane.native_view()?;
             let owned = unsafe { crate::browser_runtime::browser_view_owns_first_responder(view) };
             pane.set_hidden(true)?;
+            pane.shield.lower();
             if owned {
                 let _ = main_webview.set_focus();
             }
             Ok(())
         })
+    }
+
+    /// The agent pressed in this pane (t-66513): the shield moves its mark to
+    /// the pressed element's centre — a hop to the main thread nobody waits
+    /// for, so a press never waits on a drawing.
+    pub(crate) fn mark_press(&self, rect: [f64; 4], dpr: f64) {
+        let label = self.label.clone();
+        let _ = self.app.run_on_main_thread(move || {
+            let _scope = crate::crumbs::MainScope::enter(SCOPE_OPERATION);
+            PANES.with(|panes| {
+                if let Ok(mut panes) = panes.try_borrow_mut()
+                    && let Some(pane) = panes.get_mut(&label)
+                {
+                    pane.shield.pressed(rect, dpr);
+                }
+            });
+        });
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {
@@ -954,6 +982,43 @@ struct NativePane {
     _observer: Registration,
     pending: Rc<RefCell<HashMap<i32, PendingCall>>>,
     navigations: Navigations,
+    /// The view the window stands over the pane while the person watches it
+    /// (t-66513); it goes with the pane.
+    shield: shield::Shield,
+}
+
+/// A Chromium pane's native moves for one placement (t-66513), in the order
+/// `stage_pane` makes them.
+struct Staged<'a> {
+    pane: &'a mut NativePane,
+    dress: Option<&'a shield::Dress>,
+}
+
+impl crate::browser_workspace::PaneStage for Staged<'_> {
+    fn bounds(&mut self, bounds: [f64; 4]) -> Result<(), String> {
+        self.pane
+            .set_bounds(bounds[0], bounds[1], bounds[2], bounds[3])
+    }
+
+    fn shield(&mut self, raised: bool) -> Result<(), String> {
+        let dress = match (raised, self.dress) {
+            (false, _) => {
+                self.pane.shield.lower();
+                return Ok(());
+            }
+            (true, Some(dress)) => dress,
+            (true, None) => return Err(crate::cmd::browser::WATCH_UNSUPPORTED.to_string()),
+        };
+        let view = self.pane.native_view()?;
+        // SAFETY: the pane's native view is a live NSView on this, the main,
+        // thread for the length of this operation.
+        let view = unsafe { &*view.cast::<objc2_app_kit::NSView>() };
+        self.pane.shield.raise(view, dress)
+    }
+
+    fn show(&mut self) -> Result<(), String> {
+        self.pane.set_hidden(false)
+    }
 }
 
 impl NativePane {
@@ -1310,6 +1375,7 @@ fn finish_create_pane(
         _observer: registration,
         pending,
         navigations,
+        shield: shield::Shield::default(),
     };
     let prepared = (|| {
         pane.set_hidden(options.hidden)?;

@@ -1,6 +1,10 @@
 import { openWindowTestPage, PRIMARY_EVENT } from "./window-boot.mjs";
 
 const FRAME = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jr1sAAAAASUVORK5CYII=";
+/* A second frame, told apart from the first by its bytes (t-66513). */
+const FRAME_TWO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgaPgPAAIDAYAkYfWXAAAAAElFTkSuQmCC";
+/* What the backend says when a watch frame meets another capture's lease. */
+const SNAPSHOT_BUSY = "workspace_snapshot_busy: 관전 화면은 초당 한 번만 요청할 수 있습니다";
 
 async function standWorkspace(browser, origin, { holdState = false, actorName = "codex" } = {}) {
   const opened = await openWindowTestPage(browser, origin);
@@ -61,6 +65,7 @@ async function standWorkspace(browser, origin, { holdState = false, actorName = 
         inFlight: 0, needsObservation: args.mode === "agent",
         ownerTerm: args.ownerTerm ?? mock.state[0]?.ownerTerm ?? mock.actorTerm,
         snapshotSupported: mock.state[0]?.snapshotSupported ?? true,
+        liveSupported: mock.state[0]?.liveSupported,
       };
       mock.state = [next];
       return next;
@@ -854,7 +859,10 @@ export async function testBrowserWorkspace(browser, origin, ok) {
           && failed.humanDisabled === false && failed.pauseDisabled === false, JSON.stringify(failed));
       await page.waitForTimeout(1100);
       const bounded = await page.evaluate(() => window.__WORKSPACE__.snapshots.length);
-      ok("a failed capture stops automatic retries until an explicit retry", bounded === failed.count && bounded === 1, String(bounded));
+      // A miss no longer stops the watch (t-66513): it tries again on its own a
+      // second later, and one second is all it has had.
+      ok("a failed capture tries again on its own a second later instead of stopping",
+        failed.count === 1 && bounded === 2, JSON.stringify({ first: failed.count, bounded }));
       await page.evaluate((label) => window.__workspaceClick(label, "pause"), label);
       await page.waitForTimeout(50);
       await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
@@ -1370,6 +1378,326 @@ export async function testBrowserWorkspace(browser, origin, ok) {
         ended.calls?.length === 1 && ended.calls[0]?.label === label && ended.hidden === true && ended.regrant === false
           && !/새로 본 뒤/.test(ended.status ?? ""), JSON.stringify(ended));
       ok("workspace session regrant raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  // t-66513 — the watch the person keeps on an agent's work browser stays lit:
+  // live under the backend's shield where it stands, and by snapshots that
+  // keep their last frame and try again on their own everywhere else.
+
+  {
+    // (다) A capture that meets another capture's lease does not end the watch.
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate(({ label, frames, busy }) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 200, inFlight: 0, needsObservation: false });
+        window.__FRAME_TWO__ = frames[1];
+        const answers = [frames[0], "busy", frames[1]];
+        window.__ANSWER__.browser_snapshot = () => {
+          const answer = answers.length > 1 ? answers.shift() : answers[0];
+          window.__WORKSPACE__.snapshots.push({ label, at: performance.now(), answer: answer === "busy" ? "busy" : "frame" });
+          if (answer === "busy") throw new Error(busy);
+          return answer;
+        };
+      }, { label, frames: [FRAME, FRAME_TWO], busy: SNAPSHOT_BUSY });
+      await observe(page, label);
+      // Three captures, a second apart, or six seconds: the base stops at two.
+      for (let waited = 0; waited < 60; waited += 1) {
+        if (await page.evaluate(() => window.__WORKSPACE__.snapshots.length >= 3)) break;
+        await page.waitForTimeout(100);
+      }
+      await page.waitForTimeout(150);
+      const after = await page.evaluate((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        const image = host?.querySelector(".browser-workspace-frame");
+        return {
+          answers: window.__WORKSPACE__.snapshots.map((one) => one.answer).slice(0, 3),
+          second: image?.getAttribute("src") === window.__FRAME_TWO__,
+          shown: !!image && !image.hidden,
+          noteHidden: host?.querySelector(".browser-workspace-preview-note")?.hidden,
+          retryHidden: host?.querySelector(".browser-workspace-retry")?.hidden,
+        };
+      }, label).catch((error) => ({ error: String(error) }));
+      ok("(다) a capture between two frames that meets a busy lease keeps the watch: the second frame is drawn and no note stands",
+        after.answers?.join(",") === "frame,busy,frame" && after.second === true && after.shown === true
+          && after.noteHidden === true && after.retryHidden === true, JSON.stringify(after));
+      ok("a busy capture between frames raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    // (라) Misses that run five seconds raise the note; the watch goes on trying
+    // on its own, a second, two, then four apart, and the frame that lands takes
+    // the note down.
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate(({ label, frames, busy }) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 210, inFlight: 0, needsObservation: false });
+        window.__FRAME_TWO__ = frames[1];
+        const misses = window.__MISSES__ = { from: null, until: null };
+        window.__ANSWER__.browser_snapshot = () => {
+          const now = performance.now();
+          const failing = misses.from !== null && now >= misses.from && now < misses.until;
+          window.__WORKSPACE__.snapshots.push({ label, at: now, answer: failing ? "busy" : "frame" });
+          if (failing) throw new Error(busy);
+          return misses.until !== null && now >= misses.until ? frames[1] : frames[0];
+        };
+      }, { label, frames: [FRAME, FRAME_TWO], busy: SNAPSHOT_BUSY });
+      await observe(page, label);
+      await page.waitForTimeout(200);
+      await page.evaluate(() => {
+        window.__MISSES__.from = performance.now();
+        window.__MISSES__.until = window.__MISSES__.from + 7000;
+      });
+      const read = (label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        const image = host?.querySelector(".browser-workspace-frame");
+        const at = window.__WORKSPACE__.snapshots.map((one) => one.at);
+        const firstMiss = window.__WORKSPACE__.snapshots.find((one) => one.answer === "busy")?.at ?? null;
+        return {
+          answers: window.__WORKSPACE__.snapshots.map((one) => one.answer),
+          gaps: at.slice(1).map((one, index) => Math.round(one - at[index])),
+          sinceFirstMiss: firstMiss === null ? null : Math.round(performance.now() - firstMiss),
+          src: image?.getAttribute("src") === window.__FRAME_TWO__ ? "second" : image?.getAttribute("src") ? "first" : "none",
+          shown: !!image && !image.hidden,
+          noteHidden: host?.querySelector(".browser-workspace-preview-note")?.hidden,
+          retryHidden: host?.querySelector(".browser-workspace-retry")?.hidden,
+          humanDisabled: host?.querySelector(".browser-workspace-human")?.disabled,
+        };
+      };
+      // The note, or nine seconds: it stands once the misses have run five.
+      for (let waited = 0; waited < 90; waited += 1) {
+        if ((await page.evaluate(read, label)).noteHidden === false) break;
+        await page.waitForTimeout(100);
+      }
+      const failing = await page.evaluate(read, label);
+      ok("(라) a watch whose captures miss for five seconds keeps its last frame and says so with a retry beside it",
+        failing.src === "first" && failing.shown === true && failing.noteHidden === false && failing.retryHidden === false
+          && failing.humanDisabled === false, JSON.stringify(failing));
+      ok("(라) the note waits for five seconds of misses",
+        failing.sinceFirstMiss >= 4900 && failing.sinceFirstMiss < 7000, JSON.stringify(failing));
+      ok("(라) the misses are tried again on their own a second, a second and two seconds apart",
+        failing.answers.slice(0, 4).join(",") === "frame,busy,busy,busy"
+          && failing.gaps[1] >= 900 && failing.gaps[1] < 1700 && failing.gaps[2] >= 1900 && failing.gaps[2] < 2900,
+        JSON.stringify(failing));
+      // The frame after the misses, or seven more seconds.
+      for (let waited = 0; waited < 70; waited += 1) {
+        if ((await page.evaluate(read, label)).src === "second") break;
+        await page.waitForTimeout(100);
+      }
+      const resumed = await page.evaluate(read, label);
+      const back = resumed.answers.indexOf("frame", 1);
+      ok("(라) the frame that lands after the misses takes the note down by itself, four seconds after the last miss",
+        resumed.src === "second" && resumed.noteHidden === true && resumed.retryHidden === true
+          && back > 1 && resumed.gaps[back - 1] >= 3900 && resumed.gaps[back - 1] < 5000, JSON.stringify(resumed));
+      ok("misses and their recovery raise no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    // (가) (나) Where the backend stands the shield, the person watches the pane
+    // itself: no snapshot, the tag in their words and the token's colour; their
+    // own hand takes the shield away; a shield that cannot stand leaves the
+    // watch to snapshots and the bar to the person.
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => window.__workspaceEmit({
+        label, mode: "agent", revision: 300, inFlight: 0, needsObservation: false, liveSupported: true,
+      }), label);
+      await observe(page, label);
+      await page.waitForTimeout(1150);
+      const live = await page.evaluate((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        return {
+          last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+          captures: window.__WORKSPACE__.snapshots.length,
+          token: getComputedStyle(document.documentElement).getPropertyValue("--signal-ready").trim(),
+          addressReadOnly: host?.querySelector(".browser-address")?.readOnly,
+          backDisabled: host?.querySelector(".browser-back")?.disabled,
+          words: ["en", "ja", "zh", "es"].map((code) => CATALOG[code]?.["browser.workspace.watchShield"]),
+        };
+      }, label);
+      const tint = /^#[0-9a-f]{6}$/i.test(live.token ?? "")
+        ? [1, 3, 5].map((at) => parseInt(live.token.slice(at, at + 2), 16)) : null;
+      ok("(가) watching an agent's tab live places the pane itself under the shield, in the person's words and the working token's colour, and takes no snapshot",
+        live.last?.shown === true && live.last?.watch?.says === "에이전트 조작 중 · 보기만"
+          && JSON.stringify(live.last?.watch?.tint) === JSON.stringify(tint) && live.last?.watch?.ink?.length === 3
+          && live.captures === 0, JSON.stringify(live));
+      ok("(가) the live pane leaves the page's controls out of the person's hands", live.addressReadOnly === true
+        && live.backDisabled === true, JSON.stringify(live));
+      ok("the shield's tag is said in all four other languages", live.words.every((one) => typeof one === "string" && one.length > 0),
+        JSON.stringify(live.words));
+      await page.evaluate((label) => window.__workspaceClick(label, "human"), label);
+      await page.waitForTimeout(150);
+      const human = await page.evaluate((label) => window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1), label);
+      ok("(나) taking the tab by hand places the pane for the person's hand, without the shield",
+        human?.shown === true && !Object.hasOwn(human ?? {}, "watch"), JSON.stringify(human));
+      await page.evaluate((label) => window.__workspaceClick(label, "agent"), label);
+      await page.waitForTimeout(150);
+      const back = await page.evaluate((label) => window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1), label);
+      ok("handed back while watched, the pane stands under the shield again", back?.shown === true && !!back?.watch,
+        JSON.stringify(back));
+      await page.evaluate((label) => {
+        const place = window.__ANSWER__.browser_place;
+        window.__ANSWER__.browser_place = (args) => {
+          if (args.shown && args.watch) {
+            window.__WORKSPACE__.placed.push(args);
+            throw new Error("workspace_watch_unsupported: 이 브라우저 판은 실시간 관전을 지원하지 않습니다");
+          }
+          return place(args);
+        };
+        window.__workspaceEmit({ label, mode: "agent", revision: 320, inFlight: 0, needsObservation: false, liveSupported: true });
+        // The pane stands where it stood: the next placement is the window's
+        // next sync, asked for here.
+        browserSaid.delete(label);
+        syncBrowserPanes();
+      }, label);
+      await page.waitForTimeout(1300);
+      const fallback = await page.evaluate((label) => {
+        const tab = tabs.find((one) => one.label === label);
+        const host = groupOf(tab.pane)?.browserView;
+        return {
+          last: window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1),
+          captures: window.__WORKSPACE__.snapshots.length,
+          frames: document.querySelectorAll(".browser-workspace-frame[src]").length,
+          error: tab.workspaceError, mode: tab.workspace?.mode,
+          pauseDisabled: host?.querySelector(".browser-workspace-pause")?.disabled,
+        };
+      }, label);
+      ok("a shield that cannot stand leaves the watch to snapshots and the bar to the person",
+        fallback.last?.shown === false && fallback.captures >= 1 && fallback.frames === 1 && fallback.error === null
+          && fallback.mode === "agent" && fallback.pauseDisabled === false, JSON.stringify(fallback));
+      ok("live watching raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  /* How many times the watched screen went dark while the person kept watching:
+   * a live pane put away, or a drawn frame taken off. */
+  const meterDarkness = (page, label) => page.evaluate((label) => {
+    const meter = window.__DARK__ = { dark: 0, lit: false };
+    const look = () => {
+      const tab = tabs.find((one) => one.label === label);
+      const image = tab ? groupOf(tab.pane)?.browserView?.querySelector(".browser-workspace-frame") : null;
+      const last = window.__WORKSPACE__.placed.filter((one) => one.label === label).at(-1);
+      const lit = (last?.shown === true && !!last.watch) || (!!image && image.hasAttribute("src") && !image.hidden);
+      if (meter.lit && !lit) meter.dark += 1;
+      meter.lit = lit;
+    };
+    new MutationObserver(look).observe(document.body, { subtree: true, attributes: true, attributeFilter: ["src", "hidden"] });
+    const place = window.__ANSWER__.browser_place;
+    window.__ANSWER__.browser_place = (args) => {
+      const said = place(args);
+      look();
+      return said;
+    };
+    look();
+    return meter.lit;
+  }, label);
+
+  {
+    // (바) The scene: ten agent steps while the person watches, each step's
+    // evidence capture holding the lease. The screen goes dark 0 times.
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate(({ label, frame, busy }) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 400, inFlight: 0, needsObservation: false, liveSupported: true });
+        const scene = window.__SCENE__ = { busy: false, steps: 0 };
+        window.__ANSWER__.browser_snapshot = () => {
+          window.__WORKSPACE__.snapshots.push({ label, at: performance.now() });
+          if (scene.busy) throw new Error(busy);
+          return frame;
+        };
+      }, { label, frame: FRAME, busy: SNAPSHOT_BUSY });
+      await observe(page, label);
+      await page.waitForTimeout(300);
+      const litBefore = await meterDarkness(page, label);
+      for (let step = 0; step < 10; step += 1) {
+        await page.evaluate((label) => {
+          window.__SCENE__.busy = true;
+          window.__workspaceEmit({ label, mode: "agent", revision: 400, inFlight: 1, needsObservation: false, liveSupported: true });
+        }, label);
+        await page.waitForTimeout(260);
+        await page.evaluate((label) => {
+          window.__SCENE__.steps += 1;
+          window.__workspaceEmit({ label, mode: "agent", revision: 400, inFlight: 0, needsObservation: false, liveSupported: true });
+        }, label);
+      }
+      await page.evaluate(() => { window.__SCENE__.busy = false; });
+      await page.waitForTimeout(1200);
+      const scene = await page.evaluate(() => ({
+        steps: window.__SCENE__.steps, dark: window.__DARK__.dark, lit: window.__DARK__.lit,
+        captures: window.__WORKSPACE__.snapshots.length,
+      }));
+      ok("(바) ten agent steps while the person watches live leave the screen dark 0 times",
+        litBefore === true && scene.steps === 10 && scene.dark === 0 && scene.lit === true, JSON.stringify({ litBefore, ...scene }));
+      ok("(바) the live watch asks for no snapshot while the agent works", scene.captures === 0, JSON.stringify(scene));
+      ok("the live scene raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
+
+  {
+    // (바) The same scene where the watch is the snapshots': ten steps, every
+    // second one's evidence capture meeting the watch's tick. The screen goes
+    // dark 0 times and every frame after a busy one is drawn.
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate(({ label, frames, busy }) => {
+        window.__workspaceEmit({ label, mode: "agent", revision: 410, inFlight: 0, needsObservation: false });
+        const scene = window.__SCENE__ = { busy: false, steps: 0, collisions: 0, drawn: 0 };
+        const step = (quick) => {
+          if (scene.steps >= 10) return;
+          scene.steps += 1;
+          scene.busy = !quick;
+          window.__workspaceEmit({ label, mode: "agent", revision: 410, inFlight: 1, needsObservation: false });
+          if (quick) setTimeout(() => window.__workspaceEmit({ label, mode: "agent", revision: 410, inFlight: 0, needsObservation: false }), 200);
+        };
+        window.__ANSWER__.browser_snapshot = () => {
+          window.__WORKSPACE__.snapshots.push({ label, at: performance.now() });
+          if (scene.busy) {
+            scene.busy = false;
+            scene.collisions += 1;
+            window.__workspaceEmit({ label, mode: "agent", revision: 410, inFlight: 0, needsObservation: false });
+            throw new Error(busy);
+          }
+          scene.drawn += 1;
+          // Two steps before the next tick: a quick one, and one whose evidence
+          // capture still holds the lease when the tick comes.
+          setTimeout(() => step(true), 200);
+          setTimeout(() => step(false), 500);
+          return frames[scene.drawn % 2];
+        };
+      }, { label, frames: [FRAME, FRAME_TWO], busy: SNAPSHOT_BUSY });
+      await observe(page, label);
+      await page.waitForTimeout(300);
+      const litBefore = await meterDarkness(page, label);
+      for (let waited = 0; waited < 140; waited += 1) {
+        const done = await page.evaluate(() => window.__SCENE__.steps >= 10 && window.__SCENE__.collisions >= 5
+          && window.__SCENE__.drawn >= 6);
+        if (done) break;
+        await page.waitForTimeout(100);
+      }
+      const scene = await page.evaluate((label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        return {
+          steps: window.__SCENE__.steps, collisions: window.__SCENE__.collisions, drawn: window.__SCENE__.drawn,
+          dark: window.__DARK__.dark, lit: window.__DARK__.lit,
+          noteHidden: host?.querySelector(".browser-workspace-preview-note")?.hidden,
+        };
+      }, label);
+      ok("(바) ten agent steps beside a watch by snapshots leave the screen dark 0 times",
+        litBefore === true && scene.steps === 10 && scene.collisions === 5 && scene.dark === 0 && scene.lit === true,
+        JSON.stringify({ litBefore, ...scene }));
+      ok("(바) every frame after a busy tick is drawn and no note stands", scene.drawn >= 6 && scene.noteHidden === true,
+        JSON.stringify(scene));
+      ok("the snapshot scene raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
 }

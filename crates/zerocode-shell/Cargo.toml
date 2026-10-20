@@ -240,6 +240,11 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     # The print job is run modal for a window of its own, never the person's:
     # `NSWindow`'s initializer and `NSBackingStoreType` live behind `NSGraphics`.
     "NSGraphics",
+    # The shield over a watched Chromium pane (t-66513) swallows the events it
+    # is sent and draws in the window's token colours; both classes are
+    # compiled into this binary through tao already.
+    "NSEvent",
+    "NSColor",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",

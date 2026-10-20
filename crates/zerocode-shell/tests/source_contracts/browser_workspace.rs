@@ -100,16 +100,45 @@ fn visibility_decision_and_bounds_run_together_on_the_native_ui_thread() {
     );
     let wry = block_after(BROWSER, "fn place_native_browser(");
     assert!(wry.contains("pane.with_webview(move |platform|"));
-    assert!(wry.contains(".with_placement(&label, revision, |allowed|"));
+    assert!(wry.contains(".with_placement(&label, revision, watching, |placement|"));
     assert!(wry.find("setHidden: true").unwrap() < wry.find(".with_placement(").unwrap());
     assert!(wry.find("SetIsVisible(false)").unwrap() < wry.find(".with_placement(").unwrap());
     assert!(wry.contains("SetBounds("));
     assert!(wry.contains("setFrame: frame"));
+    // No shield stands over a WebKit or WebView2 pane (t-66513): it is shown
+    // for the person's hand alone, and a watch is refused to the snapshots.
+    assert!(
+        wry.contains("let allowed = placement == crate::browser_workspace::Placement::Control;")
+    );
+    assert!(wry.contains("return Err(WATCH_UNSUPPORTED.to_string());"));
     let cef = block_after(CEF, "fn place(");
     assert!(cef.contains("on_ui(&self.app, &self.label"));
-    assert!(cef.contains(".with_placement(&label, revision, |allowed|"));
+    assert!(cef.contains(".with_placement(&label, revision, watching, |placement|"));
     assert!(cef.find("pane.set_hidden(true)").unwrap() < cef.find(".with_placement(").unwrap());
-    assert!(cef.contains("pane.set_bounds("));
+    // The decision and the pane's frame, shield and showing are one native
+    // operation (t-66513): the moves are staged inside the decision.
+    assert!(
+        cef.find(".with_placement(").unwrap()
+            < cef
+                .find("crate::browser_workspace::stage_pane(&mut stage, placement, bounds, shown)")
+                .unwrap()
+    );
+    let staged = block_after(
+        CEF,
+        "impl crate::browser_workspace::PaneStage for Staged<'_> {",
+    );
+    assert!(staged.contains(".set_bounds(bounds[0], bounds[1], bounds[2], bounds[3])"));
+    assert!(staged.contains("self.pane.shield.raise(view, dress)"));
+    assert!(staged.contains("self.pane.shield.lower();"));
+    assert!(staged.contains("self.pane.set_hidden(false)"));
+    let source = include_str!("../../src/browser_workspace.rs");
+    let stage = block_after(source, "pub(crate) fn stage_pane(");
+    let bounds = stage.find("stage.bounds(bounds)?").unwrap();
+    let shield = stage
+        .find("stage.shield(shown && placement == Placement::Watch)?")
+        .unwrap();
+    let shown = stage.find("stage.show()?").unwrap();
+    assert!(bounds < shield && shield < shown);
 }
 
 #[test]
@@ -189,9 +218,7 @@ fn capture_limits_survive_caller_cancellation_until_the_native_callback_complete
     );
     let capture = block_after(SNAPSHOT, "async fn browser_snapshot_png_for(");
     assert!(
-        capture
-            .find(".begin_snapshot_for(label, spectator)")
-            .unwrap()
+        capture.find(".lease_frame(label, spectator)").unwrap()
             < capture
                 .find("snapshot_leased(pane, frame, Default::default())")
                 .unwrap()
