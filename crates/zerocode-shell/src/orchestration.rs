@@ -1943,16 +1943,18 @@ pub(crate) fn tell_seat_of_term(term: u32, body: &str, receipt: &str, now_ms: i6
 /// [`seated_coordinators`] read them.
 fn seat_of_term(term: u32) -> Option<(String, String)> {
     with_ledger_seats(|ledger, seats| {
-        let at =
-            |team: &str, pane: &str| seats.get(team).and_then(|panes| panes.get(pane)).copied();
-        ledger
-            .runs()
-            .iter()
+        let runs = ledger.runs();
+        runs.iter()
             .find_map(|run| {
                 run.workers
                     .iter()
                     .filter(|worker| worker.state.is_live() && worker.state.may_occupy_pane())
-                    .find(|worker| at(&worker.team, &worker.pane) == Some(term))
+                    .find(|worker| {
+                        seats
+                            .get(worker.team.as_str())
+                            .and_then(|panes| panes.get(worker.pane.as_str()))
+                            == Some(&term)
+                    })
                     .map(|worker| {
                         (
                             run.id.clone(),
@@ -1961,9 +1963,9 @@ fn seat_of_term(term: u32) -> Option<(String, String)> {
                     })
             })
             .or_else(|| {
-                ledger.runs().iter().find_map(|run| {
-                    let (team, pane) = run.coordinator_live()?.seat.split_once('/')?;
-                    (at(team, pane) == Some(term)).then(|| (run.id.clone(), run.address()))
+                runs.iter().find_map(|run| {
+                    (seat_term(seats, &run.coordinator_live()?.seat) == Some(term))
+                        .then(|| (run.id.clone(), run.address()))
                 })
             })
     })?
