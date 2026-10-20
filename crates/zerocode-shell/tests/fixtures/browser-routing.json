@@ -1,0 +1,52 @@
+{
+  "handlers": [
+    [
+      "com.google.Chrome",
+      "org.example.webviewer",
+      "com.googlecode.iterm2",
+      "com.openai.codex"
+    ],
+    [
+      "com.google.Chrome",
+      "org.example.webviewer",
+      "com.googlecode.iterm2",
+      "com.openai.codex"
+    ],
+    [
+      "com.google.Chrome",
+      "org.example.webviewer",
+      "com.googlecode.iterm2"
+    ],
+    [
+      "com.google.Chrome",
+      "org.example.webviewer"
+    ]
+  ],
+  "apps": [
+    {
+      "app": "Google Chrome",
+      "bundleId": "com.google.Chrome",
+      "browser": true
+    },
+    {
+      "app": "Novel Viewer",
+      "bundleId": "org.example.webviewer",
+      "browser": true
+    },
+    {
+      "app": "iTerm2",
+      "bundleId": "com.googlecode.iterm2",
+      "browser": false
+    },
+    {
+      "app": "Codex",
+      "bundleId": "com.openai.codex",
+      "browser": false
+    },
+    {
+      "app": "Calculator",
+      "bundleId": "com.apple.calculator",
+      "browser": false
+    }
+  ]
+}

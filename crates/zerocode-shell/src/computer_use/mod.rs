@@ -22,6 +22,7 @@
 //! on a provider refusal so the snapshots survive.
 
 pub mod arena;
+pub(crate) mod browser_route;
 mod permissions;
 pub mod repeat;
 mod screenshot_export;
@@ -122,9 +123,14 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// later request gets one clean restart; provider refusals keep its snapshots.
 pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     input_policy::ensure_current()?;
+    browser_route::provider(method, &params)?;
     let params = input_policy::current().prepare_provider(method, params)?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::validate(method, params)?;
+    }
+    #[cfg(test)]
+    if let Some(answer) = browser_route::tests::helper(method, &params) {
+        return answer;
     }
     let mut held = held_client()
         .lock()
@@ -198,6 +204,29 @@ pub fn session_stands() -> bool {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .is_some()
+}
+
+/// Whether a provider session stands, never waiting behind a request in
+/// flight (t-62469 B2): a request that holds the session is a session
+/// standing. An agent's stop asks it before its signal, and the signal is
+/// what ends that request.
+#[must_use]
+pub fn session_stands_now() -> bool {
+    match held_client().try_lock() {
+        Ok(held) => held.is_some(),
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner().is_some(),
+        Err(std::sync::TryLockError::WouldBlock) => true,
+    }
+}
+
+/// Hold the session's lock for as long as `hold` runs, as [`call`] holds it
+/// across a request in flight — a test's request that reaches no helper.
+#[cfg(test)]
+pub(crate) fn while_a_request_holds_the_session<T>(hold: impl FnOnce() -> T) -> T {
+    let _held = held_client()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    hold()
 }
 
 /// The helper's `status` now, or nothing: no session stands, a request holds

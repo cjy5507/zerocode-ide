@@ -211,6 +211,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSImageRep",
     "NSBitmapImageRep",
     "NSRunningApplication",
+    "NSWorkspace",
     "NSPasteboard",
     "objc2-core-graphics",
     # The `zerocode-pick` helper asks to be the active application before its
@@ -254,6 +255,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSError",
     "NSString",
+    "NSBundle",
     "NSValue",
     # The page renderer (t-18558): the PDF's paper and print view are `NSSize`
     # and `NSRect`, and its temp file is an `NSURL`.
@@ -271,6 +273,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
     "CGWindow",
+    "CGEvent",
+    "CGEventTypes",
     "CGImage",
     "CGGeometry",
     # The hang watchdog asks whether any screen is awake before it judges
@@ -301,7 +305,7 @@ arboard = { version = "=3.6.1", default-features = false, features = ["wayland-d
 # durable stores use MoveFileExW to keep replacement atomic there as well.
 # `Win32_System_Power` carries SetThreadExecutionState — the Windows half of
 # keeping the machine awake while agents run (`awake.rs`).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Power"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Power", "Win32_System_Registry"] }
 windows-native-keyring-store = "=1.1.0"
 # A handoff's known navigation (t-53155): `Page.navigate` over WebView2's own
 # DevTools call and its NavigationStarting/NavigationCompleted, paired by
