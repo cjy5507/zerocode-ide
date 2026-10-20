@@ -1231,7 +1231,7 @@ fn parse_sse_frame_keeps_content_deltas_that_mention_error() {
     assert_eq!(parsed.choices.len(), 1);
 }
 
-/// The body of an OpenRouter 404 whose account settings excluded every
+/// The body of an `OpenRouter` 404 whose account settings excluded every
 /// endpoint for the model: `code` is a number, and `metadata` names the reason.
 const ACCOUNT_SETTINGS_404_BODY: &str = r#"{"error":{"message":"0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. ZDR violation (account settings): 1 endpoint excluded","code":404,"metadata":{"ineligibility_reasons":[{"reason":"zdr-violation-by-account","configure_url":"https://openrouter.ai/settings/privacy"}],"failed_routing_step":"Filter by Guardrails"}}}"#;
 

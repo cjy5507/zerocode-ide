@@ -756,21 +756,23 @@ fn account_settings_hint(body: &str) -> Option<String> {
             urls.push(url);
         }
     }
-    let mut hint = "The provider excluded every endpoint for this model because of this \
-                    account's settings"
-        .to_string();
-    if !details.is_empty() {
-        hint.push_str(&format!(" ({})", details.join("; ")));
-    }
-    if urls.is_empty() {
-        hint.push_str(". Change it in the provider's account settings or pick another model.");
+    let details = if details.is_empty() {
+        String::new()
     } else {
-        hint.push_str(&format!(
-            ". Its setting is at {} — change it there or pick another model.",
+        format!(" ({})", details.join("; "))
+    };
+    let fix = if urls.is_empty() {
+        "Change it in the provider's account settings or pick another model.".to_string()
+    } else {
+        format!(
+            "Its setting is at {} — change it there or pick another model.",
             urls.join(", ")
-        ));
-    }
-    Some(hint)
+        )
+    };
+    Some(format!(
+        "The provider excluded every endpoint for this model because of this account's \
+         settings{details}. {fix}"
+    ))
 }
 
 /// Explanation appended to a usage-limit refusal (ChatGPT `usage_limit_reached`
