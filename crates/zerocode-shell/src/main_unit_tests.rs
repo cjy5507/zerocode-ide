@@ -1862,7 +1862,7 @@ fn the_pump_sleeps_when_nothing_is_moving() {
     // moment it starts and nobody typed to earn a wake. Both spawn paths,
     // because the floating panel is as much a shell as a tab is — left
     // out, its first prompt waits out a whole idle nap.
-    for spawn in ["fn open_terminal(", "fn open_term_tab("] {
+    for spawn in ["fn open_terminal(", "fn open_term_tab_in("] {
         let body = block_after(backend, spawn);
         assert!(
             body.contains("cadence().wake()"),
@@ -16168,7 +16168,7 @@ fn a_delivered_note_leaves_only_if_it_still_says_what_was_sent() {
 #[test]
 fn a_terminal_born_an_agent_is_recorded_and_forgotten() {
     let backend = shipped_backend();
-    let opening = block_after(backend, "fn open_term_tab(");
+    let opening = block_after(backend, "fn open_term_tab_in(");
     assert!(
         opening.contains("agent_for_program(&program)"),
         "a terminal whose command is an agent is not recorded:\n{opening}"
@@ -16184,6 +16184,137 @@ fn a_terminal_born_an_agent_is_recorded_and_forgotten() {
     // The resolver reads the name as spawned, aliases included.
     assert_eq!(agent_for_program("/usr/local/bin/claude"), Some("claude"));
     assert_eq!(agent_for_program("zsh"), None);
+}
+
+/// An agent's local shell starts in, and is fenced to, the checkout of the
+/// pane that asked (t-66346): a pane of project B asking for a `--cwd`
+/// inside B gets its shell there while the person has another project in
+/// front, and a path in the project in front is refused, the refusal
+/// naming B — the checkout it was judged against. A pane this process
+/// cannot place, or none, falls back to the one in front, as before. The
+/// asking pane is the door's header, never an argument: `open` takes no
+/// pane (pinned beside the core parser).
+#[test]
+fn an_agents_local_shell_stands_in_the_asking_panes_checkout_and_is_fenced_to_it() {
+    let in_front = tempfile::tempdir().expect("the checkout in front");
+    let asking = tempfile::tempdir().expect("the asking pane's checkout");
+    let inside = asking.path().join("sub");
+    std::fs::create_dir_all(&inside).expect("a folder inside it");
+    let elsewhere = in_front.path().join("sub");
+    std::fs::create_dir_all(&elsewhere).expect("a folder in the project in front");
+    let checkout_of = |term: TermId| (term == 7).then(|| asking.path().to_path_buf());
+
+    let root = agent_shell_root(Some(7), checkout_of, in_front.path().to_path_buf());
+    assert_eq!(
+        fenced_seat(&root, Some(inside.display().to_string())),
+        Ok(inside.clone()),
+        "a `--cwd` inside the asking pane's own checkout was refused"
+    );
+    assert_eq!(
+        fenced_seat(&root, None),
+        Ok(asking.path().to_path_buf()),
+        "without `--cwd` the shell did not start in the asking pane's checkout"
+    );
+    let refused = fenced_seat(&root, Some(elsewhere.display().to_string()))
+        .expect_err("a path in the project in front was taken for the asking pane's shell");
+    assert!(
+        refused.contains(&asking.path().display().to_string()),
+        "the refusal does not say which checkout it was judged against: {refused}"
+    );
+    for unplaced in [Some(9), None] {
+        assert_eq!(
+            agent_shell_root(unplaced, checkout_of, in_front.path().to_path_buf()),
+            in_front.path().to_path_buf(),
+            "a pane this process cannot place ({unplaced:?}) did not fall back to the checkout in front"
+        );
+    }
+}
+
+/// `zerocode-ssh open` says where the window seated the tab it stood
+/// (t-66346): the checkout and the stage group, so the agent can tell the
+/// person the terminal is on their project's stage. A group is said as a
+/// group, never as the pane number every later verb takes; and an open the
+/// window did not answer for in time says only its pane.
+#[test]
+fn an_ssh_open_says_where_the_window_seated_it() {
+    use zerocode_core::computer_use::SshMethod;
+    let seated = json!({
+        "pane": 12,
+        "seatedIn": { "worktree": "/Users/dev/project-b", "group": 2 },
+    });
+    assert_eq!(
+        ssh_pretty(SshMethod::Open, &seated),
+        "Opened pane 12 — seated in /Users/dev/project-b, stage group 2.",
+        "the open's answer does not say where the window seated the tab"
+    );
+    let unanswered = json!({ "pane": 12, "seatedIn": null });
+    assert_eq!(ssh_pretty(SshMethod::Open, &unanswered), "Opened pane 12.");
+}
+
+/// An agent's `zerocode-ssh open` names the terminal that asked, read off the
+/// pane key its door presented (t-66346) — and nothing it cannot read: a door
+/// that named no pane, or named something that is not a pane key, asks from
+/// nowhere the window knows, and the payload carries no `from` at all. The
+/// rest of the wire is what it always was.
+#[test]
+fn an_ssh_open_names_the_terminal_that_asked_and_nothing_it_cannot_read() {
+    let wire = |open: SshAgentOpen| serde_json::to_value(open).expect("serializes");
+    let asking = |pane: Option<&str>| pane.and_then(hooks::term_of_pane_key);
+    let named = hooks::pane_key_of(7);
+    assert_eq!(
+        wire(SshAgentOpen::asked(
+            12,
+            Some("build-box".into()),
+            Some("host-1".into()),
+            asking(Some(named.as_str())),
+        )),
+        json!({ "term": 12, "label": "build-box", "remoteHost": "host-1", "from": 7 })
+    );
+    for unread in [None, Some("tab-1/leaf-2")] {
+        assert_eq!(
+            wire(SshAgentOpen::asked(13, None, None, asking(unread))),
+            json!({ "term": 13, "label": null, "remoteHost": null }),
+            "{unread:?}"
+        );
+    }
+}
+
+/// The window's word on where it seated an agent's terminal reaches the open
+/// waiting for it (t-66346), and nothing else stays: a word about a pane no
+/// open waits on is dropped, an open that stops waiting takes its slot away
+/// whether or not the window said, and a word after that lands nowhere. The
+/// answer carries it as a checkout and a group.
+#[test]
+fn the_seat_the_window_gave_reaches_the_open_waiting_for_it_and_nothing_stays() {
+    let seats = AgentTermSeats::default();
+    let seat = AgentTermSeat {
+        worktree: Some("/Users/dev/project-b".into()),
+        group: Some(0),
+    };
+    assert!(
+        !seats.note(21, seat.clone()),
+        "a word about a pane no open waits on was kept"
+    );
+    seats.expect(21);
+    assert!(!seats.seated(21));
+    assert!(seats.note(21, seat.clone()));
+    assert!(seats.seated(21));
+    assert_eq!(seats.take(21), Some(seat.clone()));
+    assert_eq!(seats.take(21), None, "the slot outlived its open");
+    assert!(
+        !seats.note(21, seat.clone()),
+        "a late word found the slot of an open that stopped waiting"
+    );
+    seats.expect(22);
+    assert_eq!(
+        seats.take(22),
+        None,
+        "an open the window never answered got a seat"
+    );
+    assert_eq!(
+        serde_json::to_value(&seat).expect("serializes"),
+        json!({ "worktree": "/Users/dev/project-b", "group": 0 })
+    );
 }
 
 /// A default nobody chose is no default, and an id this window cannot

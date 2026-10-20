@@ -43,6 +43,7 @@ pub(crate) fn open_terminal(
         rows,
         cols,
         ShellStartup::Plain,
+        state.active_root(),
         Some(seat),
     )?;
     state.hold_terminal(FLOAT_TERM, pty);
@@ -85,6 +86,9 @@ pub(crate) fn notice_bytes(words: &str) -> Vec<u8> {
 /// (docs/reverse/orca-ui-inventory.md 1-e). The id comes back because the view
 /// has to address frames and keystrokes to this shell and no other — several
 /// are alive at once, which is the whole point.
+///
+/// The window's door: a terminal the person opens belongs to the checkout in
+/// front ([`open_term_tab_in`]).
 #[tauri::command(async)]
 pub(crate) fn open_term_tab(
     state: State<'_, AppState>,
@@ -101,21 +105,29 @@ pub(crate) fn open_term_tab(
     // webview. Drawn on the pane's screen, never typed at the shell.
     notice: Option<String>,
 ) -> Result<TermId, String> {
+    let root = state.active_root();
+    open_term_tab_in(state, root, rows, cols, plain, cwd, restore, notice)
+}
+
+/// A terminal tab's shell, belonging to `root`: the checkout its hook
+/// coordinates and history name, where it starts, and what `cwd` is fenced to
+/// ([`fenced_seat`]). The person's door passes the checkout in front; an
+/// agent's `zerocode-ssh open --local` passes the one [`agent_shell_root`]
+/// reads off the pane that asked.
+#[allow(clippy::too_many_arguments)] // The tab's words, and the checkout it belongs to.
+pub(crate) fn open_term_tab_in(
+    state: State<'_, AppState>,
+    root: PathBuf,
+    rows: u16,
+    cols: u16,
+    plain: Option<bool>,
+    cwd: Option<String>,
+    restore: Option<super::settings::StoredScreen>,
+    notice: Option<String>,
+) -> Result<TermId, String> {
     // 트리의 "Open in Terminal"(Orca :204-212)이 앉힐 자리 — 담장 안의
-    // 디렉터리만. 인자가 없으면 지금까지처럼 활성 루트에 앉는다.
-    let seat = match cwd {
-        Some(asked) => {
-            let seat = PathBuf::from(&asked);
-            if !file_tree_ops::inside_root(&state.active_root(), &seat) {
-                return Err("워크스페이스 밖의 경로입니다".into());
-            }
-            if !seat.is_dir() {
-                return Err("디렉터리가 아닙니다".into());
-            }
-            Some(seat)
-        }
-        None => None,
-    };
+    // 디렉터리만. 인자가 없으면 그 체크아웃의 루트에 앉는다.
+    let seat = fenced_seat(&root, cwd)?;
     // The id is taken BEFORE the spawn: the shell's own environment has to
     // carry the pane key it will report under, and a key minted after the child
     // exists is a key the child never saw.
@@ -125,7 +137,7 @@ pub(crate) fn open_term_tab(
     } else {
         ShellStartup::Configured
     };
-    let (mut pty, program) = spawn_shell(&state, id, rows, cols, startup, seat)?;
+    let (mut pty, program) = spawn_shell(&state, id, rows, cols, startup, root, Some(seat))?;
     if let Some(screen) = &restore {
         super::settings::replay_stored_screen(state.config_root(), screen, pty.terminal_mut());
     }
@@ -143,6 +155,22 @@ pub(crate) fn open_term_tab(
     // the one a person is waiting on.
     state.cadence().wake();
     Ok(id)
+}
+
+/// The window's word on where it seated a terminal an agent opened
+/// (t-66346): the checkout and the stage group, for the open's answer
+/// (`seatedIn`). Kept only for a pane an open is waiting on, and said by the
+/// main window alone.
+#[tauri::command]
+pub(crate) fn ssh_agent_seated(
+    webview: tauri::Webview,
+    term: TermId,
+    worktree: Option<String>,
+    group: Option<u32>,
+) -> Result<bool, String> {
+    let _crumb = crate::crumbs::Command::enter("ssh_agent_seated");
+    from_the_main_webview(&webview)?;
+    Ok(agent_term_seats().note(term, AgentTermSeat { worktree, group }))
 }
 
 /// A helper's conversation, from `after` onward.

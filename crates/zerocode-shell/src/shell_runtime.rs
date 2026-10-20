@@ -2155,6 +2155,28 @@ pub(super) fn fenced_path(state: &State<'_, AppState>, path: &str) -> Result<Pat
     Ok(asked)
 }
 
+/// Where a new tab's shell stands inside the checkout it belongs to: the
+/// directory asked for when it is one inside `root`, `root` itself when none
+/// was. A refusal names the checkout it was judged against (t-66346) — an
+/// agent's shell is fenced to the asking pane's checkout, not the one in
+/// front, and an agent told only 「outside the workspace」 cannot tell which.
+pub(super) fn fenced_seat(root: &Path, asked: Option<String>) -> Result<PathBuf, String> {
+    let Some(asked) = asked else {
+        return Ok(root.to_path_buf());
+    };
+    let seat = PathBuf::from(&asked);
+    if !file_tree_ops::inside_root(root, &seat) {
+        return Err(format!(
+            "워크스페이스 밖의 경로입니다 (기준: {})",
+            root.display()
+        ));
+    }
+    if !seat.is_dir() {
+        return Err("디렉터리가 아닙니다".into());
+    }
+    Ok(seat)
+}
+
 /// How many paths one probe will answer for.
 ///
 /// The list comes from whatever a program printed on a screen, so its length
@@ -2541,12 +2563,13 @@ pub(super) fn spawn_shell(
     rows: u16,
     cols: u16,
     startup: ShellStartup,
+    root: PathBuf,
     seat: Option<PathBuf>,
 ) -> Result<(PtyLane, String), String> {
-    let root = state.active_root();
     // 앉을 자리와 소속은 다른 질문이다 (P0-15 "Open in Terminal"): seat는
-    // 셸의 cwd만 바꾸고, 훅 좌표·계정 env가 말하는 워크트리 문맥은 활성
-    // 루트 그대로다 — Orca의 폴더-우클릭 터미널도 그 워크트리의 탭이다.
+    // 셸의 cwd만 바꾸고, 훅 좌표·계정 env가 말하는 워크트리 문맥은 `root` —
+    // 그 셸의 탭이 속한 체크아웃 — 그대로다. Orca의 폴더-우클릭 터미널도 그
+    // 워크트리의 탭이다.
     let seat = seat.unwrap_or_else(|| root.clone());
     // The hook coordinates go to EVERY shell, not only to launched agents. An
     // agent somebody starts by hand in a plain terminal is the same agent, and

@@ -4061,7 +4061,19 @@ if (!isPopout) refreshEmulatorLoans();
  * payload naming a term this window never made simply finds no screen —
  * `mountTermTab` builds the view, and the backend is the only thing that can
  * feed it. Same revalidation as the emulator door: emitted payloads are data,
- * never instructions. */
+ * never instructions.
+ *
+ * Seated where it was asked for (t-66346), by the emulator door's rule:
+ * `from` is the terminal whose door asked, read off the pane key the door
+ * presented — never a word of the command — and the tab goes into that
+ * terminal's checkout and group. Asked from another checkout, it stands there
+ * and the person's screen stays as it was (10-20 15:58: an SSH tab another
+ * project's agent opened stood on the stage the person was reading, and took
+ * it); asked from the checkout in front, it stands beside the pane that asked
+ * and takes the keyboard, as before; asked from a terminal this window cannot
+ * name, it is added to the current group without taking anything, and a line
+ * says why. Then the window says where it seated it, for the agent's answer
+ * (`seatedIn`). */
 listen("ssh:agent-open", (event) => {
   if (isPopout) return;
   const payload = event?.payload ?? {};
@@ -4073,10 +4085,26 @@ listen("ssh:agent-open", (event) => {
   const remoteHost = typeof payload.remoteHost === "string" && payload.remoteHost.trim()
     ? payload.remoteHost.slice(0, 512)
     : undefined;
+  const from = Number.isInteger(payload.from) && payload.from >= 0 ? payload.from : null;
+  const caller = from === null ? null : tabOfTerm(from);
+  if (caller === null) {
+    toast(t(
+      "ssh.agentOpenUnseated",
+      "에이전트가 터미널을 열었지만 요청한 터미널을 알 수 없어, 현재 그룹에 비활성 탭으로 추가했습니다.",
+    ));
+  }
+  const focus = caller !== null && caller.worktree === activeWorktreePath;
   mountTermTab(term, {
     ...(label === undefined ? {} : { label }),
     ...(remoteHost === undefined ? {} : { remoteHost }),
-  }, { placement: "tab" });
+    ...(caller === null ? {} : { worktree: caller.worktree, pane: caller.pane }),
+  }, { placement: "tab", focus });
+  const seated = tabOfTerm(term);
+  void invoke("ssh_agent_seated", {
+    term,
+    worktree: seated?.worktree ?? null,
+    group: seated?.pane ?? null,
+  }).catch(() => {});
 });
 
 /* ---- 스크린샷 마크업 (B02 ②) --------------------------------------------
