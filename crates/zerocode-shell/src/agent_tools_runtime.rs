@@ -6042,6 +6042,21 @@ pub(super) fn answer_computer_command_with(
     };
     match result {
         Ok(mut result) => {
+            // A wait answered under a stop — a look, asked while the stop
+            // stood — says the stop stands, who stopped it and who lifts it,
+            // so its caller does not wait again for it (t-66760).
+            if command.method.waits()
+                && let Some((by, stop)) = standing_stop()
+                && let Some(answered) = result.as_object_mut()
+            {
+                answered.insert(
+                    "stopped".into(),
+                    serde_json::json!({
+                        zerocode_core::computer_use::STOPPED_BY_KEY: by,
+                        "message": stop.message,
+                    }),
+                );
+            }
             let png = computer_use::export_screenshot(&mut result);
             if command.method == ComputerMethod::Screenshot
                 && let Some(png) = png
@@ -7079,12 +7094,12 @@ impl Drop for Walking {
     }
 }
 
-/// A wait's refusal by the stop standing, if one stands (t-66760): in the
-/// window's one sentence for the stop's reason, naming who stopped it — the
-/// person (their chord, their band, or a stop they may have made) or an
-/// agent's `stop`.
-fn stopped_wait(json: bool) -> Option<zerocode_hookd::TeamAnswer> {
-    use zerocode_core::computer_use::{STOPPED_BY_AGENT, STOPPED_BY_KEY, STOPPED_BY_PERSON};
+/// The stop standing, if one stands, as a wait names it (t-66760): who
+/// stopped it — the person (their chord, their band, or a stop they may have
+/// made) or an agent's `stop` — and the window's one sentence for its reason
+/// and who lifts it.
+fn standing_stop() -> Option<(&'static str, computer_use::ComputerUseError)> {
+    use zerocode_core::computer_use::{STOPPED_BY_AGENT, STOPPED_BY_PERSON};
     let reason = computer_use::guard::stopped_reason()?;
     let by = if zerocode_core::computer_use::persons_stop(&reason)
         || computer_use::guard::unconfirmed_stop_stands()
@@ -7093,12 +7108,18 @@ fn stopped_wait(json: bool) -> Option<zerocode_hookd::TeamAnswer> {
     } else {
         STOPPED_BY_AGENT
     };
-    let refusal = computer_use::guard::refusal(&reason);
+    Some((by, computer_use::guard::refusal(&reason)))
+}
+
+/// A wait's refusal by the stop that ended it (t-66760), naming who stopped
+/// it.
+fn stopped_wait(json: bool) -> Option<zerocode_hookd::TeamAnswer> {
+    let (by, refusal) = standing_stop()?;
     Some(computer_cli_error_with(
         json,
         &refusal.code,
         &refusal.message,
-        Some((STOPPED_BY_KEY, by)),
+        Some((zerocode_core::computer_use::STOPPED_BY_KEY, by)),
     ))
 }
 
