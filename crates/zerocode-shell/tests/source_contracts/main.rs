@@ -9654,7 +9654,7 @@ mod tests {
         for owned in [
             "open_ssh_terminal(app.clone()",
             "ssh_open_remote_term(state,",
-            "open_term_tab(state, rows, cols, Some(true), cwd, None, None)",
+            "open_term_tab_in(state, root, rows, cols, Some(true), cwd, None, None)",
             r#"emit_to("main", "ssh:agent-open""#,
         ] {
             assert!(opening.contains(owned), "the remote open road lost {owned}");
@@ -28907,7 +28907,7 @@ mod tests {
         // (2026-09-17). All three roads a restored leaf takes.
         for (road, file) in [
             (
-                "fn open_term_tab(",
+                "fn open_term_tab_in(",
                 include_str!("../../src/cmd/terminal.rs"),
             ),
             (

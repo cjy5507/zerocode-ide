@@ -680,6 +680,17 @@ pub(super) fn pane_worktree(env: &[(String, String)]) -> Option<PathBuf> {
         .map(|(_, value)| PathBuf::from(value))
 }
 
+/// The checkout a pane works in, as this process knows it: the tree its
+/// launch environment names while that tree still stands, else the worktree
+/// the ledger seated its news under. `None` for a pane that said neither — a
+/// shell this window did not launch and nothing ever reported from.
+pub(super) fn pane_checkout(state: &AppState, term: TermId) -> Option<PathBuf> {
+    let env = state.team_envs().get(&term).cloned();
+    env.as_deref()
+        .and_then(leader_worktree)
+        .or_else(|| seated_worktree(state, term).map(PathBuf::from))
+}
+
 /// The stall probe and the retirement fence use the same PTY quiet rule.
 pub(crate) fn quiet_since_output(
     last_output_ms: Option<i64>,
@@ -2447,12 +2458,7 @@ pub(super) fn answer_team_command(
         };
         let state = app.state::<AppState>();
         let actor = term.and_then(|term| receipt_actor_of(&state, term));
-        let caller_worktree = term.and_then(|term| {
-            let env = state.team_envs().get(&term).cloned();
-            env.as_deref()
-                .and_then(leader_worktree)
-                .or_else(|| seated_worktree(&state, term).map(PathBuf::from))
-        });
+        let caller_worktree = term.and_then(|term| pane_checkout(&state, term));
         let caller_identity = caller_worktree
             .as_deref()
             .and_then(zerocode_core::git_dir::identity);
@@ -2985,7 +2991,9 @@ pub(super) async fn computer_loop(
                 )
                 .await
             } else if argv.first().is_some_and(|word| word == "ssh") {
-                let answer = answer_ssh_command(&steering, &argv[1..]).await;
+                // The pane its door named, as for the emulator's: an `open`
+                // is seated in that pane's project (t-66346).
+                let answer = answer_ssh_command(&steering, pane.as_deref(), &argv[1..]).await;
                 leave_step(
                     &steering,
                     &local_data_root,
@@ -4769,8 +4777,12 @@ pub(super) fn android_mark_target(
 /// surface ZeroCode owns — and nothing an agent does on a remote machine
 /// happens anywhere the person cannot watch it, scroll it and kill it. No
 /// desktop click is used to drive this window's own chrome.
+///
+/// `pane` is the pane key the door presented — the shell that asked, read off
+/// the request rather than the command.
 pub(super) async fn answer_ssh_command(
     app: &AppHandle,
+    pane: Option<&str>,
     argv: &[String],
 ) -> zerocode_hookd::TeamAnswer {
     use zerocode_core::computer_use::{SshMethod, parse_ssh_command, ssh_usage};
@@ -4788,7 +4800,7 @@ pub(super) async fn answer_ssh_command(
     };
     let result = match command.method {
         SshMethod::List => ssh_agent_list(app).await,
-        SshMethod::Open => ssh_agent_open(app, &command).await,
+        SshMethod::Open => ssh_agent_open(app, &command, pane).await,
         SshMethod::Send => ssh_agent_send(app, &command).await,
         SshMethod::Read => ssh_agent_read(app, &command),
     };
@@ -4877,26 +4889,46 @@ pub(super) async fn ssh_agent_list(app: &AppHandle) -> Result<serde_json::Value,
     }))
 }
 
+/// The checkout an agent's local shell belongs to: where it starts, and what
+/// its `--cwd` is fenced to. The one in front, whichever pane asked.
+pub(super) fn agent_shell_root(
+    _asking: Option<TermId>,
+    _checkout_of: impl FnOnce(TermId) -> Option<PathBuf>,
+    in_front: PathBuf,
+) -> PathBuf {
+    in_front
+}
+
 /// Stand a terminal on the asked-for machine and hand back the pane it became.
 ///
 /// The connection is made HERE rather than in the frontend, because that is
 /// what makes `open` able to answer with a pane id at all — the window is then
 /// only asked to mount a shell that already exists, which is the same order
 /// the emulator door uses and the reason neither leaves an empty tab standing.
+///
+/// `pane` is the pane key the asking shell's door presented: a local shell
+/// belongs to the checkout [`agent_shell_root`] reads off it.
 pub(super) async fn ssh_agent_open(
     app: &AppHandle,
     command: &zerocode_core::computer_use::SshCommand,
+    pane: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    let asking = pane.and_then(hooks::term_of_pane_key);
     let (rows, cols) = command.grid();
     let (term, label, remote) = if command.local {
         let cwd = command.cwd.clone();
         let term = {
             let state = app.state::<AppState>();
+            let root = agent_shell_root(
+                asking,
+                |term| pane_checkout(&state, term),
+                state.active_root(),
+            );
             // PLAIN, deliberately: the configured startup is how a person's new
             // terminal becomes an agent, and an agent that opened one would be
             // launching a second agent instead of getting the shell it asked
-            // for. `--cwd` is still fenced to the workspace by `open_term_tab`.
-            open_term_tab(state, rows, cols, Some(true), cwd, None, None)?
+            // for. `--cwd` is still fenced, to that checkout, by `open_term_tab_in`.
+            open_term_tab_in(state, root, rows, cols, Some(true), cwd, None, None)?
         };
         (term, None, None)
     } else {

@@ -1862,7 +1862,7 @@ fn the_pump_sleeps_when_nothing_is_moving() {
     // moment it starts and nobody typed to earn a wake. Both spawn paths,
     // because the floating panel is as much a shell as a tab is — left
     // out, its first prompt waits out a whole idle nap.
-    for spawn in ["fn open_terminal(", "fn open_term_tab("] {
+    for spawn in ["fn open_terminal(", "fn open_term_tab_in("] {
         let body = block_after(backend, spawn);
         assert!(
             body.contains("cadence().wake()"),
@@ -15913,7 +15913,7 @@ fn a_delivered_note_leaves_only_if_it_still_says_what_was_sent() {
 #[test]
 fn a_terminal_born_an_agent_is_recorded_and_forgotten() {
     let backend = shipped_backend();
-    let opening = block_after(backend, "fn open_term_tab(");
+    let opening = block_after(backend, "fn open_term_tab_in(");
     assert!(
         opening.contains("agent_for_program(&program)"),
         "a terminal whose command is an agent is not recorded:\n{opening}"
