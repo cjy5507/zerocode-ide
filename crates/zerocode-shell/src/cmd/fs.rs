@@ -582,6 +582,9 @@ pub(crate) async fn browser_snapshot_png(
     browser_snapshot_png_for(app, state, label, false).await
 }
 
+/// A capture waits its turn at the tab's lease instead of being refused
+/// (t-66513): a watch frame that meets an agent's capture follows it, and an
+/// agent's capture that meets a watch frame goes before the next one.
 async fn browser_snapshot_png_for(
     app: &AppHandle,
     state: &AppState,
@@ -592,7 +595,8 @@ async fn browser_snapshot_png_for(
     let frame = state
         .shell_runtime()
         .browser_workspaces
-        .begin_snapshot_for(label, spectator)?;
+        .lease_frame(label, spectator)
+        .await?;
     snapshot_leased(pane, frame, Default::default()).await
 }
 
@@ -603,11 +607,13 @@ pub(crate) async fn browser_evidence_png(
     control: Option<&crate::browser_workspace::StepControl>,
 ) -> Result<Option<Vec<u8>>, String> {
     let pane = browser_pane_of(app, state, label)?;
-    let Some((frame, check)) = state
-        .shell_runtime()
-        .browser_workspaces
-        .admit_evidence(label, control)?
-    else {
+    let workspaces = &state.shell_runtime().browser_workspaces;
+    // The step's evidence takes its turn before the next watch frame
+    // (t-66513), then its own admission takes the lease.
+    let turn = workspaces.agent_turn(label).await?;
+    let admitted = workspaces.admit_evidence(label, control)?;
+    drop(turn);
+    let Some((frame, check)) = admitted else {
         return Ok(None);
     };
     let bytes = snapshot_leased(pane, frame, check.clone()).await;

@@ -275,6 +275,7 @@ pub(crate) async fn ssh_open_remote_term(
         rows,
         cols,
         ShellStartup::Remote(ssh_link::remote_term_args(&target)),
+        state.active_root(),
         None,
     )?;
     state.hold_terminal(term, pty);

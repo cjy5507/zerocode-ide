@@ -68,6 +68,7 @@ import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testBrowserWorkspace } from "./browser-workspace.mjs";
 import { testEmulatorSeat } from "./emulator-seat.mjs";
+import { testSshSeat } from "./ssh-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
 import { testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
@@ -115,6 +116,7 @@ import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testSidebarTeam } from "./sidebar-team.mjs";
+import { testSidebarTeamSettled } from "./sidebar-team-settled.mjs";
 import { testSidebarScroll } from "./sidebar-scroll.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
 import { testLandCheckLetter } from "./land-check-letter.mjs";
@@ -307,6 +309,8 @@ suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(brows
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("browser-workspace", ({ browser, origin, ok }) => testBrowserWorkspace(browser, origin, ok));
 suite("emulator-seat", ({ browser, origin, ok }) => testEmulatorSeat(browser, origin, ok));
+// An agent's terminal is seated in the asking pane's project, not on the stage in front (t-66346).
+suite("ssh-seat", ({ browser, origin, ok }) => testSshSeat(browser, origin, ok));
 suite("artifact-beside", ({ browser, origin, ok }) => testArtifactBeside(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("artifact-band", ({ browser, origin, ok }) => testArtifactBand(browser, origin, ok, join(UI, "..", "output/playwright")));
 suite("artifact-followed", ({ browser, origin, ok }) => testArtifactFollowed(browser, origin, ok, join(UI, "..", "output/playwright")));
@@ -365,6 +369,8 @@ suite("sidebar-roles", testSidebarRoles);
 suite("sidebar-task-fold", testSidebarTaskFold);
 // The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
 suite("sidebar-team", testSidebarTeam);
+// A coordinator's finished sub-agents stand under it in the branch list, whatever the run or the agent (t-66539).
+suite("sidebar-team-settled", testSidebarTeamSettled);
 // The sidebar holds its rows while the person scrolls it, and reaches row 0 in one go (t-63568).
 suite("sidebar-scroll", testSidebarScroll);
 suite("landing-alerts", testLandingAlerts);

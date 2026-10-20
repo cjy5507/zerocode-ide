@@ -1890,6 +1890,7 @@ fn open_webkit_browser_pane(
             &label,
             [x, y, width.max(1.0), height.max(1.0)],
             false,
+            None,
             Some(workspace.revision),
         ) {
             let _ = pane.close();
@@ -2390,10 +2391,25 @@ pub(crate) fn browser_stop(
     super::browser_workspace::finish_person_control(operation, result)
 }
 
+/// What a watch placement dresses the shield in (t-66513): the shield's own
+/// dress where it stands — a Chromium pane on macOS — and elsewhere anything
+/// at all, since a pane without a shield only hears that the person watches,
+/// and refuses it: watching there is the snapshots'.
+#[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+type WatchDress = crate::chromium_browser::shield::Dress;
+#[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+type WatchDress = serde::de::IgnoredAny;
+
+/// A watch placement on a pane no shield can stand over (t-66513).
+pub(crate) const WATCH_UNSUPPORTED: &str =
+    "workspace_watch_unsupported: 이 브라우저 판은 실시간 관전을 지원하지 않습니다";
+
 /// Where the pane sits and whether it may be seen — ONE command, because the
 /// two answers race as two: a hide that lost the queue to an older show put
 /// the page back on top of a dialog (gpt-sol review of 1-fy, finding 8). A
 /// native view does not follow CSS, so this command IS its layout engine.
+/// `watch` asks to show the pane for the person's eyes only, under the shield
+/// it dresses (t-66513).
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
 pub(crate) fn browser_place(
@@ -2406,6 +2422,7 @@ pub(crate) fn browser_place(
     width: f64,
     height: f64,
     shown: bool,
+    watch: Option<WatchDress>,
 ) -> Result<(), String> {
     from_the_main_webview(&webview)?;
     let pane = browser_pane_of(&app, &state, &label)?;
@@ -2419,6 +2436,14 @@ pub(crate) fn browser_place(
     if !shown {
         return hide_browser_pane(&pane, &webview);
     }
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    let watch = match watch.map(WatchDress::checked).transpose() {
+        Ok(watch) => watch,
+        Err(error) => {
+            hide_browser_pane(&pane, &webview)?;
+            return Err(error);
+        }
+    };
     place_native_browser(
         &app,
         &pane,
@@ -2426,10 +2451,12 @@ pub(crate) fn browser_place(
         &label,
         [x, y, width, height],
         shown,
+        watch,
         revision,
     )
 }
 
+#[allow(clippy::too_many_arguments)] // The placement's whole question, in one native operation.
 fn place_native_browser(
     app: &AppHandle,
     pane: &BrowserPane,
@@ -2437,6 +2464,7 @@ fn place_native_browser(
     label: &str,
     bounds: [f64; 4],
     shown: bool,
+    watch: Option<WatchDress>,
     revision: Option<u64>,
 ) -> Result<(), String> {
     let size_limit = f64::from(zerocode_core::agent_browser::VIEWPORT_MAX);
@@ -2457,14 +2485,19 @@ fn place_native_browser(
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     {
         let _ = (app, label);
-        pane.place(bounds, shown, revision, main_webview.clone())
+        pane.place(bounds, shown, watch, revision, main_webview.clone())
     }
     #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
     {
+        let watching = watch.is_some();
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let state = app.state::<AppState>();
             let _ = (main_webview, revision);
+            if watching {
+                let _ = pane.hide();
+                return Err(WATCH_UNSUPPORTED.to_string());
+            }
             if state
                 .shell_runtime()
                 .browser_workspaces
@@ -2538,7 +2571,10 @@ fn place_native_browser(
                         .state::<AppState>()
                         .shell_runtime()
                         .browser_workspaces
-                        .with_placement(&label, revision, |allowed| {
+                        .with_placement(&label, revision, watching, |placement| {
+                            // No shield stands over this engine's pane: it is
+                            // shown for the person's hand alone.
+                            let allowed = placement == crate::browser_workspace::Placement::Control;
                             let visible = shown && allowed;
                             #[cfg(target_os = "macos")]
                             unsafe {
@@ -2592,6 +2628,9 @@ fn place_native_browser(
                                         .SetIsVisible(true)
                                         .map_err(|error| error.to_string())?;
                                 }
+                            }
+                            if shown && placement == crate::browser_workspace::Placement::Watch {
+                                return Err(WATCH_UNSUPPORTED.to_string());
                             }
                             if shown && !allowed {
                                 return Err(
@@ -3726,7 +3765,8 @@ pub(crate) async fn automate_click(
 /// door's report. A press by number hands it what its look read (`expect`:
 /// the document, the value's digest, the settle's watch), for the page to
 /// prove at the moment of the press. A refusal the page made before the
-/// press's first event is `Unsent` (t-66200).
+/// press's first event is `Unsent` (t-66200). A press the page measured moves
+/// the shield's mark there, for the person watching the pane (t-66513).
 async fn press(
     pane: &BrowserPane,
     selector: &str,
@@ -3747,7 +3787,13 @@ async fn press(
         BROWSER_CALLBACK_DEADLINE,
     )
     .await?;
-    input_report(input_value(reply)?, &["dom-activation"]).map_err(BrowserRefusal::Sent)
+    let report =
+        input_report(input_value(reply)?, &["dom-activation"]).map_err(BrowserRefusal::Sent)?;
+    #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
+    if let (Some(rect), Some(dpr)) = (report.rect, report.dpr) {
+        pane.mark_press(rect, dpr);
+    }
+    Ok(report)
 }
 
 /// The click's page script: the first element the selector names that a
