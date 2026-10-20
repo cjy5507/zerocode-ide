@@ -5332,6 +5332,19 @@ pub struct ComputerErrorBody<'a> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn browser_chrome_is_a_boolean_cli_claim_for_desktop_input() {
+        for words in [
+            vec!["click", "--app", "Google Chrome", "--element-index", "194", "--browser-chrome"],
+            vec!["key", "--key", "ctrl+l", "--browser-chrome"],
+        ] {
+            let words = words.iter().map(|word| (*word).to_string()).collect::<Vec<_>>();
+            let parsed = parse_command(&words);
+            assert!(parsed.is_ok(), "the explicit browser-chrome claim must parse: {parsed:?}");
+            assert_eq!(parsed.unwrap().params["browserChrome"], true);
+        }
+    }
+
+    #[test]
     fn background_input_is_explicit_and_never_accepts_a_restore_or_global_surface() {
         let parse = |words: &[&str]| {
             parse_command(

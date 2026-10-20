@@ -2160,6 +2160,27 @@ pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &Co
 #[cfg(test)]
 mod tests {
     #[test]
+    fn browser_chrome_is_an_explicit_tool_claim_and_cli_flag() {
+        let parsed = serde_json::from_value::<ComputerInput>(json!({
+            "action": "left_click", "app": "Google Chrome", "element_index": 194,
+            "browser_chrome": true
+        }));
+        assert!(parsed.is_ok(), "Computer must accept the explicit browser_chrome claim: {parsed:?}");
+        let argv = argv_for(&parsed.unwrap()).unwrap();
+        assert!(argv.iter().any(|word| word == "--browser-chrome"), "the claim must reach the window: {argv:?}");
+        let plain = argv_for(&input(json!({"action": "left_click", "app": "Google Chrome", "element_index": 194}))).unwrap();
+        assert!(!plain.iter().any(|word| word == "--browser-chrome"), "ordinary page input never declares browser chrome");
+        assert_eq!(tool_specs()[0].input_schema["properties"]["browser_chrome"]["type"], "boolean");
+    }
+
+    #[test]
+    fn the_computer_description_routes_web_pages_and_names_the_browser_chrome_claim() {
+        let description = tool_specs()[0].description;
+        assert!(description.contains("For web pages use zerocode-browser open <url>"), "the Computer description must name the work browser");
+        assert!(description.contains("browser_chrome") && description.contains("menus, tabs or extension UI"), "the exception must claim browser chrome");
+    }
+
+    #[test]
     fn review_windows_computer_resolution_selects_the_installed_cmd_launcher() {
         let dir = tempfile::tempdir().unwrap();
         let extensionless = dir.path().join("zerocode-computer");
