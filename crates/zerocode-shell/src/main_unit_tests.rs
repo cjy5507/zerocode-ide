@@ -23480,6 +23480,54 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(said["result"]["steps"][1]["clipped"]["givenMs"], given, "{said}");
     }
 
+    /// A wait asked while a stop stands is a look and answers — and says the
+    /// stop stands, who stopped it and who lifts it, so a caller does not
+    /// wait again for it (t-66760 b2): a plain wait, and a wait-for whose
+    /// words show.
+    #[test]
+    fn a_wait_asked_under_a_stop_says_the_stop_stands_and_who_lifts_it() {
+        use zerocode_core::computer_use::{STOP_REASON_REQUEST, STOP_REASON_WINDOW};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _helper = crate::computer_use::test_helper::stand(|method, _| {
+            Ok(if method == "findElements" {
+                serde_json::json!({
+                    "snapshotId": "fixture-snapshot-3",
+                    "app": "Fixture",
+                    "window": { "id": 41, "title": "Fixture document" },
+                    "matches": [{ "index": 7, "role": "AXButton", "label": "Continue" }],
+                })
+            } else {
+                serde_json::json!({ "stopped": false })
+            })
+        });
+        let wait_for = words(&[
+            "wait-for", "--app", "Fixture", "--window-id", "41", "--label", "Continue",
+            "--timeout-ms", "600", "--json",
+        ]);
+        for (reason, by) in [(STOP_REASON_WINDOW, "person"), (STOP_REASON_REQUEST, "agent")] {
+            for argv in [words(&["wait", "--ms", "1", "--json"]), wait_for.clone()] {
+                crate::computer_use::guard::lift();
+                crate::computer_use::guard::stop_with(reason, || true);
+                let answer = answer_computer_command(&argv);
+                crate::computer_use::guard::lift();
+                assert_eq!(answer.exit_code, 0, "{argv:?} under a stop is a look: {}", answer.stderr);
+                let said = envelope(&answer);
+                assert_eq!(
+                    said["result"]["stopped"]["stoppedBy"], by,
+                    "{argv:?} under the {reason} stop names who stopped it: {said}"
+                );
+                assert!(
+                    said["result"]["stopped"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(&format!("({reason})"))),
+                    "{argv:?} under the {reason} stop says it stands and who lifts it: {said}"
+                );
+            }
+        }
+    }
+
     /// A stop made during a batch ends it at its next wait, as at its next
     /// act (t-66760 b2): the wait is not waited out under the stop, and its
     /// refusal names who stopped it.
