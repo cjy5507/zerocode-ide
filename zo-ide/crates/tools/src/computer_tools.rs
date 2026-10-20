@@ -161,6 +161,7 @@ const STEP_FIELDS: &[&str] = &[
     "scroll_amount",
     "scroll_pages",
     "background",
+    "browser_chrome",
     "duration",
     "region",
     "app",
@@ -272,6 +273,9 @@ pub(crate) struct ComputerInput {
     pub action: String,
     #[serde(default, deserialize_with = "loose::boolean")]
     pub background: Option<bool>,
+    /// The person explicitly requested the browser application's menus, tabs or extension UI.
+    #[serde(default, deserialize_with = "loose::boolean")]
+    pub browser_chrome: Option<bool>,
     /// `[x, y]` in the pixels of the last screenshot, the Anthropic way.
     #[serde(default, deserialize_with = "loose::point")]
     pub coordinate: Option<[f64; 2]>,
@@ -413,6 +417,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "duration": { "type": "number", "minimum": 0 },
         "region": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4,
             "description": "[x0, y0, x1, y1] corners in last screenshot pixels" },
+        "browser_chrome": { "type": "boolean", "description": "The person explicitly requested browser menus, tabs or extension UI" },
         "app": { "type": "string" },
         "url": { "type": "string" },
         "path": { "type": "string" },
@@ -486,6 +491,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         name: "Computer",
         description: "Drive desktop apps inside a ZeroCode pane: screenshots/zoom, mouse moves/clicks/drags/scroll, \
             keys/text/waits, app/window management, element/OCR reads, clipboard read/write and programs. \
+            For web pages use zerocode-browser open <url>, then read, marks, click, type and fill; set \
+            browser_chrome only when the person explicitly requests browser menus, tabs or extension UI. \
             For background work, observe {app}, retain \
             app/window_id and set background: true. Never fall back to activation or global input. \
             Unverified keyboard receiver: use a verified writable-field capability or handoff. \
@@ -841,6 +848,9 @@ pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> 
         if let Some(kind) = input.confirming.as_deref() {
             push(&mut argv, &["--confirming", kind]);
         }
+    }
+    if input.browser_chrome == Some(true) {
+        argv.push("--browser-chrome".into());
     }
     argv.push("--json".into());
     Ok(argv)
@@ -1382,6 +1392,7 @@ fn call_shim(road: &ComputerRoad, argv: &[String], cwd: Option<&Path>) -> Result
             if !trusted {
                 if let Some(object) = envelope.as_object_mut() { object.remove("surfaceExecution"); }
             }
+            super::computer_tally::receipt(&envelope);
             Ok(envelope)
         },
         None => Err(ToolError::Execution(format!(
@@ -1778,6 +1789,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
     };
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     for (at, step) in steps.iter_mut().enumerate() {
+        step.browser_chrome = step.browser_chrome.or(input.browser_chrome);
         if let Some(target) = &default_target {
             if step.app.as_deref().is_some_and(|app| app != target.app.as_str())
                 || step.window_id.is_some_and(|window_id| Some(window_id) != target.window_id)
@@ -2092,6 +2104,10 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
 }
 
 pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
+    super::computer_tally::run(input, ctx, || run_computer_inner(input, ctx, road))
+}
+
+fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
     if input.get("action").and_then(Value::as_str).map(str::trim) == Some(BATCH_ACTION) {
         if let Some(steps) = input.get("steps").and_then(Value::as_array) {
             check_batch_len(steps.len())?;
@@ -2191,6 +2207,27 @@ pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &Co
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_chrome_is_an_explicit_tool_claim_and_cli_flag() {
+        let parsed = serde_json::from_value::<ComputerInput>(json!({
+            "action": "left_click", "app": "Google Chrome", "element_index": 194,
+            "browser_chrome": true
+        }));
+        assert!(parsed.is_ok(), "Computer must accept the explicit browser_chrome claim: {parsed:?}");
+        let argv = argv_for(&parsed.unwrap()).unwrap();
+        assert!(argv.iter().any(|word| word == "--browser-chrome"), "the claim must reach the window: {argv:?}");
+        let plain = argv_for(&input(json!({"action": "left_click", "app": "Google Chrome", "element_index": 194}))).unwrap();
+        assert!(!plain.iter().any(|word| word == "--browser-chrome"), "ordinary page input never declares browser chrome");
+        assert_eq!(tool_specs()[0].input_schema["properties"]["browser_chrome"]["type"], "boolean");
+    }
+
+    #[test]
+    fn the_computer_description_routes_web_pages_and_names_the_browser_chrome_claim() {
+        let description = tool_specs()[0].description;
+        assert!(description.contains("For web pages use zerocode-browser open <url>"), "the Computer description must name the work browser");
+        assert!(description.contains("browser_chrome") && description.contains("menus, tabs or extension UI"), "the exception must claim browser chrome");
+    }
+
     #[test]
     fn review_windows_computer_resolution_selects_the_installed_cmd_launcher() {
         let dir = tempfile::tempdir().unwrap();
@@ -4286,7 +4323,7 @@ printf '%s
                 "ocr": true, "window": "w", "window_id": 7, "kind": "move", "x": 5, "y": 6, "width": 7, "height": 8,
                 "timeout_ms": 100, "absent": true, "confirming": "payment", "force": true, "reset_budget": true,
                 "last": 3, "after": 2, "min_confidence": 0.5, "until": "quiet", "after_text": "f",
-                "offset": [1, 2], "scroll_pages": 0.5, "background": true
+                "offset": [1, 2], "scroll_pages": 0.5, "background": true, "browser_chrome": true
             })
         };
         let argv = |fields: &Value| argv_for(&input(fields.clone())).map_err(|error| error.to_string());

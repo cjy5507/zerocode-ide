@@ -103,6 +103,8 @@ pub mod error_code {
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
     pub const APP_NOT_FOUND: &str = "app_not_found";
     pub const APP_BLOCKED: &str = "app_blocked";
+    /// Desktop browser page input must use the window's work browser.
+    pub const BROWSER_REQUIRES_WORK_BROWSER: &str = "browser_requires_work_browser";
     pub const WINDOW_NOT_FOUND: &str = "window_not_found";
     pub const WINDOW_STALE: &str = "window_stale";
     pub const WINDOW_NOT_FOCUSED: &str = "window_not_focused";

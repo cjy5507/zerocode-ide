@@ -29,6 +29,7 @@ mod artifacts;
 mod bash_redirect;
 mod bash_tools;
 mod codegraph_tools;
+mod computer_tally;
 mod computer_tools;
 mod artifact_tools;
 mod context;

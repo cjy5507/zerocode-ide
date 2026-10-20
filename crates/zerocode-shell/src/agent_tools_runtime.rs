@@ -2784,6 +2784,16 @@ pub(super) async fn computer_loop(
                             app.state::<AppState>().settings(),
                         )
                     });
+                    let _browser_route = match computer_use::browser_route::command(&command) {
+                        Ok(scope) => scope,
+                        Err(error) => {
+                            let answer =
+                                computer_cli_error(command.json, &error.code, &error.message);
+                            leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
+                            let _ = reply.send(answer);
+                            return;
+                        }
+                    };
                     if let Err(error) = computer_use::input_policy::current().prepare(&mut command)
                     {
                         let answer = computer_cli_error(command.json, &error.code, &error.message);
@@ -5613,6 +5623,10 @@ pub(super) fn answer_computer_command_with(
     if let Some(refusal) = refused_at_the_door(&command) {
         return refusal;
     }
+    let _browser_route = match computer_use::browser_route::command(&command) {
+        Ok(scope) => scope,
+        Err(error) => return computer_cli_error(command.json, &error.code, &error.message),
+    };
     let _input_policy = permission_window.map_or_else(
         || computer_use::input_policy::enter_captured(computer_use::input_policy::capture()),
         |window| {
@@ -6654,7 +6668,11 @@ fn said_envelope_at(
     result: serde_json::Value,
     context: Option<&computer_use::surface_execution::Context>,
 ) -> zerocode_hookd::TeamAnswer {
-    let envelope = computer_use::surface_execution::envelope(command, result, context);
+    let envelope = computer_use::surface_execution::envelope(
+        command,
+        computer_use::browser_route::annotate(result),
+        context,
+    );
     if command.json {
         computer_said(format!("{envelope}\n"))
     } else {
@@ -6805,8 +6823,10 @@ pub(super) fn computer_cli_error(
 ) -> zerocode_hookd::TeamAnswer {
     if json {
         computer_refused(
-            serde_json::json!({ "ok": false, "error": { "code": code, "message": message } })
-                .to_string(),
+            computer_use::browser_route::annotate(serde_json::json!({
+                "ok": false, "error": { "code": code, "message": message }
+            }))
+            .to_string(),
         )
     } else {
         computer_refused(format!(
