@@ -1459,6 +1459,10 @@ pub fn usage() -> String {
         "작업 탭의 read·marks·fields·agent screenshot 응답이 이 번호를 발급합니다. plain 응답은 페이지 울타리 밖의 workspaceRevision: 줄입니다.",
         "작업 탭 변경은 번호가 없거나 오래되면 거절합니다. 현재 번호를 조회해 대신 넣지 마세요. 일반 탭은 생략할 수 있습니다.",
         "예: zerocode-browser click <label> <css> --workspace-revision <원관측 번호>",
+        format!(
+            "작업 탭의 {WORKSPACE_PAUSED}[resume={RESUME_OBSERVE}] 거절은 read·marks·fields·screenshot으로 새로 본 뒤 이어 가고, [resume={RESUME_PERSON}]은 멈추고 사람에게 알립니다(--json 답은 error.resume). 자동으로 재시도하지 마세요."
+        )
+        .as_str(),
         "",
         "라벨은 `list`가 말해 줍니다. 주소는 http(s)·file·about:blank만 —",
         "창의 주소창과 같은 규칙입니다.",

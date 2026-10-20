@@ -524,6 +524,11 @@ function browserWorkspaceStateOf(said, label) {
     label, mode: said.mode, revision: said.revision,
     inFlight: said.inFlight, needsObservation: said.needsObservation,
     ownerTerm: said.ownerTerm, snapshotSupported: said.snapshotSupported,
+    // The session's regrant and who lifts a pause (t-66200). A state that
+    // does not say reads as off and as the person's: the bar never promises
+    // that a look lifts what the backend did not say it would.
+    regrant: said.regrant === true,
+    resume: said.mode === "agent" ? null : said.resume === "observe" ? "observe" : "person",
   };
 }
 
@@ -672,8 +677,10 @@ async function refreshBrowserWorkspace(tab, { keepError = false } = {}) {
 /* Answers the state the change left, or null when it did not take — the
  * person's stop reads it to name what it paused (t-62872). `view: false`
  * leaves whether the person watches the browser as it was: the stop's pause
- * and the band's resume are not the person opening its bar. */
-async function setBrowserWorkspaceMode(tab, mode, { view = true } = {}) {
+ * and the band's resume are not the person opening its bar. `regrant: true`
+ * is the bar's own 「다시 맡기기」 (t-66200): handing the tab back, it turns
+ * the session's regrant on; the band's resume hands back without it. */
+async function setBrowserWorkspaceMode(tab, mode, { view = true, regrant = false } = {}) {
   if (!browserWorkspaceLive(tab) || !tab.agentWorkspace || !tab.workspace
     || tab.workspacePending || tab.workspaceError || !["agent", "paused", "human"].includes(mode)) return null;
   const owner = mode === "agent" ? browserWorkspaceAgentOwner(tab) : {};
@@ -697,6 +704,7 @@ async function setBrowserWorkspaceMode(tab, mode, { view = true } = {}) {
     }
     const said = await invoke("set_browser_workspace_mode", {
       label, mode, expectedRevision: token.revision, ...owner,
+      ...(regrant && mode === "agent" ? { regrant: true } : {}),
     });
     if (!browserWorkspaceLive(tab, label) || tab.workspacePending !== token) return null;
     const applied = applyBrowserWorkspaceState(tab, said);
@@ -1054,7 +1062,9 @@ function browserWorkspaceWords(tab) {
     ? t("browser.workspace.checking", "작업 브라우저 상태를 확인하는 중입니다…")
     : t("browser.workspace.stateError", "상태를 확인할 수 없어 페이지를 숨겼습니다. 다시 확인해 주세요.");
   if (tab.workspace.mode === "pausing") return t("browser.workspace.pausing", "진행 중인 입력을 마칠 때까지 기다립니다…");
-  if (tab.workspace.mode === "paused") return t("browser.workspace.paused", "작업 일시정지");
+  if (tab.workspace.mode === "paused") return tab.workspace.resume === "observe"
+    ? t("browser.workspace.pausedObserve", "작업 일시정지 · 에이전트가 새로 본 뒤 이어 갑니다")
+    : t("browser.workspace.paused", "작업 일시정지");
   if (tab.workspace.mode === "human") return t("browser.workspace.human", "직접 제어 · 에이전트 입력 차단");
   return tab.workspace.needsObservation
     ? t("browser.workspace.observation", "에이전트 제어 · 새 화면 확인 후 입력 가능")
@@ -1076,6 +1086,18 @@ function buildBrowserWorkspaceBar() {
   stopNote.className = "browser-workspace-stop-note";
   stopNote.setAttribute("role", "status");
   stopNote.hidden = true;
+  // The session's regrant (t-66200): what the person's one 「다시 맡기기」
+  // turned on, said in words, with its off switch beside it.
+  const regrant = document.createElement("div");
+  regrant.className = "browser-workspace-regrant";
+  regrant.setAttribute("role", "status");
+  regrant.hidden = true;
+  const regrantChip = document.createElement("span");
+  regrantChip.className = "browser-workspace-regrant-chip";
+  const regrantOff = document.createElement("button");
+  regrantOff.type = "button";
+  regrantOff.className = "btn browser-workspace-regrant-off";
+  regrant.append(regrantChip, regrantOff);
   const actions = document.createElement("div");
   actions.className = "browser-workspace-actions";
   for (const name of BROWSER_WORKSPACE_ACTIONS) {
@@ -1106,7 +1128,7 @@ function buildBrowserWorkspaceBar() {
   retry.type = "button";
   retry.className = "btn browser-workspace-retry";
   actions.appendChild(retry);
-  bar.append(heading, status, stopNote, owner, previewNote, actions);
+  bar.append(heading, status, stopNote, regrant, owner, previewNote, actions);
   return bar;
 }
 
@@ -1152,6 +1174,43 @@ function paintBrowserWorkspaceStopHold(host, tab) {
   writeTextContent(note, t("browser.workspace.personsStop", "Computer Use 정지 중 · 에이전트는 ‘다시 시작’을 누를 때까지 기다립니다"));
 }
 
+/* The session's regrant on a work browser's bar (t-66200): shown while the
+ * backend says it is on — the person's one 「다시 맡기기」 turned it on —
+ * with its own off switch. Nothing keeps it: it ends with the tab, with the
+ * person's ‘내가 조작’, or here. */
+function paintBrowserWorkspaceRegrant(host, tab) {
+  const row = host.querySelector(".browser-workspace-regrant");
+  row.hidden = tab.workspace?.regrant !== true;
+  const chip = row.querySelector(".browser-workspace-regrant-chip");
+  writeTextContent(chip, t("browser.workspace.regrant", "자동 재위임 · 이 세션"));
+  chip.dataset.tip = t("browser.workspace.regrantHint", "결과를 모르는 변경 뒤에도 에이전트가 새로 보면 이어 갑니다. 탭을 닫거나 ‘내가 조작’을 누르면 꺼집니다.");
+  const off = row.querySelector(".browser-workspace-regrant-off");
+  writeTextContent(off, t("browser.workspace.regrantOff", "끄기"));
+  off.setAttribute("aria-label", t("browser.workspace.regrantOffName", "자동 재위임 끄기"));
+  off.disabled = !!tab.workspacePending || !!tab.workspaceRegrantEnding;
+}
+
+/* The person turns the session's regrant off on the bar (t-66200): the
+ * backend answers the tab's state, which the bar takes like any other. */
+async function endBrowserWorkspaceRegrant(tab) {
+  if (!browserWorkspaceLive(tab) || !tab.agentWorkspace || tab.workspace?.regrant !== true
+    || tab.workspaceRegrantEnding) return;
+  const label = tab.label;
+  tab.workspaceRegrantEnding = true;
+  paintBrowserWorkspaceTab(tab);
+  try {
+    const said = await invoke("end_browser_workspace_regrant", { label });
+    if (browserWorkspaceLive(tab, label)) applyBrowserWorkspaceState(tab, said);
+  } catch {
+    if (browserWorkspaceLive(tab, label)) void refreshBrowserWorkspace(tab);
+  } finally {
+    if (browserWorkspaceLive(tab, label)) {
+      tab.workspaceRegrantEnding = false;
+      paintBrowserWorkspaceTab(tab);
+    }
+  }
+}
+
 function paintBrowserWorkspace(host, tab) {
   const managed = tab.agentWorkspace === true;
   const control = browserWorkspaceCanControl(tab);
@@ -1193,6 +1252,7 @@ function paintBrowserWorkspace(host, tab) {
     button.setAttribute("aria-pressed", String(tab.workspace?.mode === mode));
   }
   paintBrowserWorkspaceStopHold(host, tab);
+  paintBrowserWorkspaceRegrant(host, tab);
   const refresh = host.querySelector(".browser-workspace-refresh");
   refresh.hidden = !!tab.workspace && !tab.workspaceError && tab.workspace.mode !== "pausing";
   refresh.disabled = !!tab.workspacePending || !!tab.workspaceReading;
@@ -1610,9 +1670,14 @@ function wireBrowserHost(host) {
       if (name === "watch") watchBrowserWorkspace(tab);
       else if (name === "collapse") collapseBrowserWorkspace(tab);
       else if (name === "refresh") void refreshBrowserWorkspace(tab);
-      else void setBrowserWorkspaceMode(tab, name === "pause" ? "paused" : name);
+      // The bar's 「다시 맡기기」 is the press that turns the session's
+      // regrant on (t-66200).
+      else void setBrowserWorkspaceMode(tab, name === "pause" ? "paused" : name, { regrant: name === "agent" });
     });
   }
+  host.querySelector(".browser-workspace-regrant-off").addEventListener("click", () => {
+    void endBrowserWorkspaceRegrant(held());
+  });
   const surface = host.querySelector(".browser-workspace-surface");
   for (const type of ["pointerdown", "pointerup", "click", "dblclick", "contextmenu", "wheel", "keydown", "keyup", "dragstart", "touchstart"]) {
     surface.addEventListener(type, (event) => {

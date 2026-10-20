@@ -925,9 +925,21 @@ pub(crate) const UNSENT_PAGE_CODES: [&str; 12] = [
     "value_changed",
 ];
 
-/// RED scaffold (t-66200): the base calls every page refusal `Sent`.
+/// An input script's answer: its value, or its refusal — `Unsent` for a
+/// code it answers before its first event ([`UNSENT_PAGE_CODES`]), `Sent`
+/// for any other (t-66200).
 pub(crate) fn input_value(reply: serde_json::Value) -> Result<serde_json::Value, BrowserRefusal> {
-    page_value(reply).map_err(BrowserRefusal::Sent)
+    let unsent = reply
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|code| UNSENT_PAGE_CODES.contains(&code));
+    page_value(reply).map_err(|why| {
+        if unsent {
+            BrowserRefusal::Unsent(why)
+        } else {
+            BrowserRefusal::Sent(why)
+        }
+    })
 }
 
 pub(crate) fn input_report(
@@ -1018,9 +1030,10 @@ pub(crate) fn typed_report(
             secure_input_by_receiver: false,
             focus_read: true,
         });
-        // RED scaffold (t-66200): the base calls the held keys `Sent`.
+        // The keys road held its keys at a password field and said so before
+        // its first event: the page was sent nothing (t-66200).
         if verdict == SecretEntryVerdict::PersonsEntry {
-            return Err(BrowserRefusal::Sent(page_failure(
+            return Err(BrowserRefusal::Unsent(page_failure(
                 &serde_json::json!({ "code": verdict.as_str() }),
             )));
         }
@@ -2884,14 +2897,14 @@ pub(crate) async fn automate_scroll(
         |request, pane| async move {
             let script = automation_script(&request, BROWSER_SCROLL_BODY);
             let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-            let value = page_value(reply)?;
+            let value = input_value(reply)?;
             let axis = |name: &str| {
                 value
                     .get(name)
                     .and_then(serde_json::Value::as_i64)
                     .ok_or_else(|| "스크롤 좌표를 읽을 수 없습니다".to_string())
             };
-            Ok::<_, String>((axis("x")?, axis("y")?))
+            Ok::<_, BrowserRefusal>((axis("x")?, axis("y")?))
         },
     )
     .await
@@ -3712,13 +3725,14 @@ pub(crate) async fn automate_click(
 /// The one press: the click's page script by a selector, answered as the
 /// door's report. A press by number hands it what its look read (`expect`:
 /// the document, the value's digest, the settle's watch), for the page to
-/// prove at the moment of the press.
+/// prove at the moment of the press. A refusal the page made before the
+/// press's first event is `Unsent` (t-66200).
 async fn press(
     pane: &BrowserPane,
     selector: &str,
     expect: Option<serde_json::Value>,
-) -> Result<BrowserInputReport, String> {
-    checked_selector(selector)?;
+) -> Result<BrowserInputReport, BrowserRefusal> {
+    checked_selector(selector).map_err(BrowserRefusal::Unsent)?;
     let mut request = serde_json::json!({ "selector": selector, "blockRoots": block_roots() });
     let body = match expect {
         Some(expect) => {
@@ -3733,7 +3747,7 @@ async fn press(
         BROWSER_CALLBACK_DEADLINE,
     )
     .await?;
-    input_report(page_value(reply)?, &["dom-activation"])
+    input_report(input_value(reply)?, &["dom-activation"]).map_err(BrowserRefusal::Sent)
 }
 
 /// The click's page script: the first element the selector names that a
@@ -4679,14 +4693,17 @@ async fn press_mark(
                 .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
             let context: BrowserRemeasureContext = serde_json::from_value(value)
                 .map_err(|_| "재측정 결과를 읽을 수 없습니다".to_string())?;
-            look_still_holds(&mark, &pin, &now, &context).map_err(|error| error.message)?;
+            // The pin refused on a read-only re-measure: nothing was pressed
+            // (t-66200).
+            look_still_holds(&mark, &pin, &now, &context)
+                .map_err(|error| BrowserRefusal::Unsent(error.message))?;
             let expect = serde_json::json!({
                 "epoch": pin.document_epoch,
                 "value": pin.value_digest,
                 "watch": settle_watch(),
             });
             let report = press(&pane, &mark.selector, Some(expect)).await?;
-            Ok::<_, String>(PressedMark {
+            Ok::<_, BrowserRefusal>(PressedMark {
                 pane,
                 pin,
                 marks,
@@ -4961,7 +4978,7 @@ pub(crate) async fn automate_type(
             }
             let script = form::form_script(&held, TYPE_BODY);
             let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-            typed_report(page_value(reply)?, road)
+            typed_report(input_value(reply)?, road)
         },
     )
     .await

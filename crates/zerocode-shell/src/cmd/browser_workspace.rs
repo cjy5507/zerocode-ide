@@ -31,6 +31,13 @@ fn owner_actor(app: &AppHandle, owner_term: &str) -> Result<String, String> {
         })
 }
 
+/// `regrant`: the person's 「다시 맡기기」 on the tab's bar, which turns the
+/// session's regrant on as it hands the tab back (t-66200); the band's resume
+/// sends none.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri command arguments are the IPC contract"
+)]
 #[tauri::command]
 pub(crate) async fn set_browser_workspace_mode(
     app: AppHandle,
@@ -40,6 +47,7 @@ pub(crate) async fn set_browser_workspace_mode(
     mode: Mode,
     expected_revision: u64,
     owner_term: Option<String>,
+    regrant: Option<bool>,
 ) -> Result<Snapshot, String> {
     from_the_main_webview(&webview)?;
     let pane = browser_pane_of(&app, &state, &label)?;
@@ -62,6 +70,7 @@ pub(crate) async fn set_browser_workspace_mode(
         .shell_runtime()
         .browser_workspaces
         .transition_owned(&label, mode, expected_revision, owner.as_deref())?
+        .regranting(regrant == Some(true))
         .notifying(move |snapshot| {
             let _ = notify_app.emit_to("main", "browser:workspace", snapshot);
         });
@@ -94,6 +103,25 @@ pub(crate) async fn set_browser_workspace_mode(
     }
     super::browser::forget_workspace_observation(&label);
     transition.finish()
+}
+
+/// The person turns the session's regrant off on a work browser's bar
+/// (t-66200): its owner's changes of unknown outcome wait for the person
+/// again.
+#[tauri::command(async)]
+pub(crate) fn end_browser_workspace_regrant(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    label: String,
+) -> Result<Snapshot, String> {
+    from_the_main_webview(&webview)?;
+    let snapshot = state
+        .shell_runtime()
+        .browser_workspaces
+        .end_regrant(&label)?;
+    let _ = app.emit_to("main", "browser:workspace", snapshot.clone());
+    Ok(snapshot)
 }
 
 pub(crate) fn begin_person_control(
