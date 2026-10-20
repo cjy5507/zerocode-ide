@@ -1909,6 +1909,12 @@ pub(crate) fn post_observation_once(
     }
 }
 
+/// Tell the agent seated at `term` a fact the window observed for it alone
+/// (t-67064): the person handed back a work browser it holds. Not yet told.
+pub(crate) fn tell_seat_of_term(_term: u32, _body: &str, _receipt: &str, _now_ms: i64) -> bool {
+    false
+}
+
 /// Every checkout a worker of this ledger sat in, once each: the folders the beat looks up in the
 /// landing cache to hold the ledger's record against git's (t-34501 stage 2).
 pub(crate) fn watched_checkouts() -> Vec<String> {

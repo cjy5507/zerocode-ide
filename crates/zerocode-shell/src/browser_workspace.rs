@@ -158,6 +158,199 @@ mod original_observation_regressions {
     }
 }
 
+/// The agent goes on by its own look (t-67064): a change sent without
+/// `--workspace-revision` is judged at the revision its own agent's last look
+/// at that tab issued, and a tab the person holds answers at once, by name.
+#[cfg(test)]
+mod own_look_regressions {
+    use super::*;
+    use crate::computer_use::guard;
+
+    const AGENT: &str = "term-21";
+    const TAB: &str = "browser-4";
+
+    /// One command sent without `--workspace-revision` down the door's own
+    /// admission road, the page answering every one: what
+    /// `answer_browser_command` asks of the work browsers — `open` registers
+    /// by the door that reads the person's stop, every other verb is checked,
+    /// admitted and settled. The refusal, when the door refused it.
+    fn door(workspaces: &Workspaces, verb: &str, label: &str) -> Option<String> {
+        if verb == "open" {
+            return workspaces.register_agents(label, Some(AGENT)).err();
+        }
+        if let Err(error) = workspaces.check_actor(Some(AGENT), verb) {
+            return Some(error);
+        }
+        let operation = match workspaces.begin_agents(label, Some(AGENT), verb, None) {
+            Ok(operation) => operation,
+            Err(error) => return Some(error),
+        };
+        let actor = match workspaces.begin_actor_target(Some(AGENT), verb, Some(label)) {
+            Ok(actor) => actor,
+            Err(error) => {
+                if let Some(operation) = operation {
+                    operation.settle(Dispatch::NotSent);
+                }
+                return Some(error);
+            }
+        };
+        let looked = match operation {
+            Some(operation) if zerocode_core::agent_browser::observes(verb) => {
+                operation.finish_observation().err()
+            }
+            Some(operation) => {
+                operation.settle(Dispatch::Completed);
+                None
+            }
+            None => None,
+        };
+        if let Some(actor) = actor {
+            actor.settle(Dispatch::Completed);
+        }
+        looked
+    }
+
+    /// Every command of `verbs` on the one tab, in order, by one agent: the
+    /// refusals the door gave.
+    fn walk(verbs: &[&str]) -> Vec<String> {
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = Workspaces::default();
+        verbs
+            .iter()
+            .filter_map(|verb| door(&workspaces, verb, TAB))
+            .collect()
+    }
+
+    fn changes(verbs: &[&str]) -> usize {
+        verbs
+            .iter()
+            .filter(|verb| {
+                **verb != "open"
+                    && zerocode_core::agent_browser::browser_verb(verb)
+                        .is_some_and(|row| row.changes_page)
+            })
+            .count()
+    }
+
+    /// The briefing's sequence, no `--workspace-revision` anywhere: every one
+    /// of its eleven changes is taken on the agent's one look.
+    #[test]
+    fn the_briefings_sequence_without_a_revision_is_taken_whole() {
+        const SENT: [&str; 13] = [
+            "open", "read", "fill", "click", "scroll", "scroll", "scroll", "click", "scroll",
+            "scroll", "goto", "fill", "click",
+        ];
+        let refused = walk(&SENT);
+        assert_eq!(changes(&SENT), 11);
+        assert!(
+            refused.is_empty(),
+            "{} of the sequence's 11 changes were refused: {refused:#?}",
+            refused.len()
+        );
+    }
+
+    /// The coordinator's own scene of 10-21 05:13–05:15 (the session's step
+    /// log, steps 1–26 but the two with a mistaken label): the stretch it sent
+    /// before it learnt the flag, with the plain `read` it sent after `wait`,
+    /// which the step log keeps no line for. Its 16 changes were all refused
+    /// `workspace_revision_required`; every one is taken.
+    #[test]
+    fn the_flagless_stretch_of_the_coordinators_scene_is_taken_whole() {
+        const SENT: [&str; 25] = [
+            "open", "wait", "read", "type", "click", "scroll", "scroll", "scroll", "scroll",
+            "marks", "fill", "marks", "marks", "scroll", "scroll", "marks", "click", "scroll",
+            "scroll", "scroll", "click", "goto", "marks", "scroll", "marks",
+        ];
+        let refused = walk(&SENT);
+        assert_eq!(changes(&SENT), 16);
+        assert!(
+            refused.is_empty(),
+            "{} of the scene's 16 changes were refused: {refused:#?}",
+            refused.len()
+        );
+    }
+
+    /// Without a look first, the changes before the agent's first look are
+    /// refused — `wait` shows the agent nothing — each naming the look to
+    /// send; from the look on, every change is taken.
+    #[test]
+    fn only_the_changes_before_the_first_look_are_refused_and_each_names_the_look() {
+        const SENT: [&str; 10] = [
+            "open", "wait", "type", "click", "scroll", "scroll", "marks", "fill", "scroll",
+            "click",
+        ];
+        let refused = walk(&SENT);
+        assert_eq!(
+            refused.len(),
+            4,
+            "the four changes before the first look, and none after it: {refused:#?}"
+        );
+        for refusal in &refused {
+            assert!(
+                refusal.starts_with("workspace_observation_required: ")
+                    && refusal.contains(&format!("zerocode-browser marks {TAB}")),
+                "{refusal}"
+            );
+        }
+    }
+
+    /// A tab the person holds answers every agent verb at once and by name
+    /// (t-67064) — a look as much as a change — and the agent's `open` beside
+    /// it names that tab and the person's 「다시 맡기기」.
+    #[test]
+    fn a_tab_the_person_holds_answers_the_agent_at_once_by_name() {
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = Workspaces::default();
+        workspaces.register(TAB, Some(AGENT), false).unwrap();
+        let at = workspaces.snapshot(TAB).unwrap().unwrap().revision;
+        let mut transition = workspaces.transition(TAB, Mode::Human, at).unwrap();
+        transition.confirm_fence().unwrap();
+        transition.finish().unwrap();
+        let held = format!("workspace_person_controlled: 작업 브라우저 {TAB}: ");
+        for verb in [
+            "marks",
+            "fields",
+            "click",
+            "read",
+            "screenshot",
+            "scroll",
+            "type",
+            "fill",
+            "goto",
+            "find",
+            "close",
+        ] {
+            let began = Instant::now();
+            let said = workspaces.check_actor(Some(AGENT), verb).and_then(|()| {
+                workspaces
+                    .begin_agents(TAB, Some(AGENT), verb, None)
+                    .map(|_| ())
+            });
+            let took = began.elapsed();
+            assert!(took < Duration::from_secs(1), "{verb} took {took:?}");
+            assert!(
+                said.as_ref()
+                    .is_err_and(|error| error.starts_with(&held) && error.contains("「다시 맡기기」")),
+                "{verb}: {said:?}"
+            );
+        }
+        let opened = workspaces.register_agents("browser-5", Some(AGENT));
+        assert!(
+            opened
+                .as_ref()
+                .is_err_and(|error| error.starts_with(&held) && error.contains("「다시 맡기기」")),
+            "{:?}",
+            opened.map(|snapshot| snapshot.mode)
+        );
+    }
+}
+
 const WORKSPACE_CAP: usize = 128;
 const FRAME_INTERVAL: Duration = Duration::from_secs(1);
 type Notice = Box<dyn Fn(Snapshot) + Send + Sync>;
