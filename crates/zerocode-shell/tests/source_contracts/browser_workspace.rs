@@ -316,7 +316,9 @@ fn original_revision_admission_and_observation_completion_share_backend_state() 
     ] {
         assert!(refused.contains(guard), "completion must check {guard}");
     }
-    assert!(block_after(source, "async fn taken(").contains("self.refused(&state, self.lifts(&state))"));
+    assert!(
+        block_after(source, "async fn taken(").contains("self.refused(&state, self.lifts(&state))")
+    );
     let answer = block_after(RUNTIME, "async fn answer_browser_command(");
     assert!(answer.contains("parse_workspace_command("));
     assert!(answer.contains("finish_observation("));

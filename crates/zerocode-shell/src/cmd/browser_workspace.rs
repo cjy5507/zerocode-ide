@@ -121,8 +121,7 @@ fn tell_handed_back(snapshot: &Snapshot) {
     else {
         return;
     };
-    let (body, receipt) =
-        crate::browser_workspace::handed_back(&snapshot.label, snapshot.revision);
+    let (body, receipt) = crate::browser_workspace::handed_back(&snapshot.label, snapshot.revision);
     tauri::async_runtime::spawn_blocking(move || {
         crate::orchestration::tell_seat_of_term(term, &body, &receipt, crate::now_epoch_ms());
     });

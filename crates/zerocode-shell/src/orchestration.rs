@@ -1923,13 +1923,10 @@ pub(crate) fn tell_seat_of_term(term: u32, body: &str, receipt: &str, now_ms: i6
     let Some((run, address)) = seat_of_term(term) else {
         return false;
     };
-    match held.actor.seat_observation(
-        run,
-        address,
-        body.to_string(),
-        receipt.to_string(),
-        now_ms,
-    ) {
+    match held
+        .actor
+        .seat_observation(run, address, body.to_string(), receipt.to_string(), now_ms)
+    {
         Ok((moved, _)) => {
             rang(moved);
             true
@@ -1946,12 +1943,8 @@ pub(crate) fn tell_seat_of_term(term: u32, body: &str, receipt: &str, now_ms: i6
 /// [`seated_coordinators`] read them.
 fn seat_of_term(term: u32) -> Option<(String, String)> {
     with_ledger_seats(|ledger, seats| {
-        let at = |team: &str, pane: &str| {
-            seats
-                .get(team)
-                .and_then(|panes| panes.get(pane))
-                .copied()
-        };
+        let at =
+            |team: &str, pane: &str| seats.get(team).and_then(|panes| panes.get(pane)).copied();
         ledger
             .runs()
             .iter()

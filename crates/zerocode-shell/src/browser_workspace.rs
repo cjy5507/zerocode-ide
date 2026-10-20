@@ -317,8 +317,7 @@ mod own_look_regressions {
     #[test]
     fn only_the_changes_before_the_first_look_are_refused_and_each_names_the_look() {
         const SENT: [&str; 10] = [
-            "open", "wait", "type", "click", "scroll", "scroll", "marks", "fill", "scroll",
-            "click",
+            "open", "wait", "type", "click", "scroll", "scroll", "marks", "fill", "scroll", "click",
         ];
         let refused = walk(&SENT);
         assert_eq!(
@@ -373,8 +372,9 @@ mod own_look_regressions {
             let took = began.elapsed();
             assert!(took < Duration::from_secs(1), "{verb} took {took:?}");
             assert!(
-                said.as_ref()
-                    .is_err_and(|error| error.starts_with(&held) && error.contains("「다시 맡기기」")),
+                said.as_ref().is_err_and(
+                    |error| error.starts_with(&held) && error.contains("「다시 맡기기」")
+                ),
                 "{verb}: {said:?}"
             );
         }
@@ -515,7 +515,9 @@ mod own_look_regressions {
         for label in ["browser-4", "browser-5", "browser-6"] {
             workspaces.register(label, Some(AGENT), false).unwrap();
         }
-        workspaces.register("browser-7", Some("term-22"), false).unwrap();
+        workspaces
+            .register("browser-7", Some("term-22"), false)
+            .unwrap();
         let seen = workspaces
             .begin_at("browser-4", Some(AGENT), "marks", None)
             .unwrap()
@@ -593,9 +595,9 @@ mod own_look_regressions {
             "{loading:?}"
         );
         assert!(
-            idle.as_deref().is_some_and(
-                |next| next.starts_with("workspace_look_unanswered: 페이지가 답하지 않았습니다 — ")
-            ),
+            idle.as_deref()
+                .is_some_and(|next| next
+                    .starts_with("workspace_look_unanswered: 페이지가 답하지 않았습니다 — ")),
             "{idle:?}"
         );
         assert_eq!(theirs, None);
@@ -661,14 +663,22 @@ mod own_look_regressions {
             missing(),
             owner_required(),
         ];
-        let code = |text: &str| text.split([':', '[']).next().unwrap_or_default().to_string();
+        let code = |text: &str| {
+            text.split([':', '['])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
         let listed: BTreeSet<String> = refusals
             .iter()
             .map(|refusal| code(refusal.as_str()))
             .collect();
         for (at, _) in block.match_indices("\"workspace_") {
             let written = code(&block[at + 1..]);
-            assert!(listed.contains(&written), "`{written}` is missing from this list");
+            assert!(
+                listed.contains(&written),
+                "`{written}` is missing from this list"
+            );
         }
         for refusal in &refusals {
             let (code, next) = refusal
@@ -979,9 +989,7 @@ struct FrameSlot {
 
 impl FrameSlot {
     fn lock(&self) -> Result<MutexGuard<'_, FrameState>, String> {
-        self.state
-            .lock()
-            .map_err(|_| unavailable(WATCH_UNREADABLE))
+        self.state.lock().map_err(|_| unavailable(WATCH_UNREADABLE))
     }
 }
 
@@ -1253,7 +1261,8 @@ fn mode_invalid() -> String {
 }
 
 fn missing() -> String {
-    "workspace_missing: 이 탭은 전용 작업 브라우저가 아닙니다 — 작업 탭의 띠에서 다시 고르세요".to_string()
+    "workspace_missing: 이 탭은 전용 작업 브라우저가 아닙니다 — 작업 탭의 띠에서 다시 고르세요"
+        .to_string()
 }
 
 fn owner_required() -> String {
@@ -1287,8 +1296,7 @@ pub(crate) fn person_controlled_words(error: &str) -> Option<&str> {
 /// Whether the person holds the tab by hand, or a handoff under way is
 /// putting it into their hands (t-67064).
 fn persons_hand(state: &State) -> bool {
-    state.mode == Mode::Human
-        || (state.mode == Mode::Pausing && state.handing == Some(Mode::Human))
+    state.mode == Mode::Human || (state.mode == Mode::Pausing && state.handing == Some(Mode::Human))
 }
 
 /// Why a tab is out of its agent's hands, as its agent hears it (t-67064):

@@ -7194,7 +7194,9 @@ pub(super) fn say_next(answer: &mut zerocode_hookd::TeamAnswer, next: &str) {
     if !answer.stderr.is_empty() && !answer.stderr.ends_with('\n') {
         answer.stderr.push('\n');
     }
-    answer.stderr.push_str(&format!("zerocode-browser: {next}\n"));
+    answer
+        .stderr
+        .push_str(&format!("zerocode-browser: {next}\n"));
 }
 
 /// Whether a pane's main document is loading, by the window's own record
@@ -7208,8 +7210,7 @@ fn page_loading(state: &AppState, label: &str) -> bool {
 
 /// A label this window did not make: the one list an agent reads its labels
 /// from is the next step (t-67064).
-const NOT_A_PANE: &str =
-    "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다 — zerocode-browser tabs로 라벨을 확인하세요\n";
+const NOT_A_PANE: &str = "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다 — zerocode-browser tabs로 라벨을 확인하세요\n";
 
 /// A read's words — the page's title and address, then its text, then a
 /// selector read's reduced DOM. The one formatter both read roads print

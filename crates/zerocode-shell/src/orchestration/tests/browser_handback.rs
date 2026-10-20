@@ -66,7 +66,12 @@ fn a_work_browser_handed_back_tells_its_worker_once_with_its_task_and_points_at_
         first && again,
         "the seat at the worker's terminal is told: {first} {again}"
     );
-    assert_eq!(letters.len(), 1, "one hand-back, one letter: {:?}", letters.len());
+    assert_eq!(
+        letters.len(),
+        1,
+        "one hand-back, one letter: {:?}",
+        letters.len()
+    );
     let letter = &letters[0];
     assert_eq!(
         (
@@ -115,7 +120,12 @@ fn a_work_browser_handed_back_tells_a_coordinator_without_a_task_and_points_at_i
     crate::agent_teams::forget_term(LEADER);
 
     assert!(said, "the coordinator's seat is told");
-    assert_eq!(letters.len(), 1, "one hand-back, one letter: {:?}", letters.len());
+    assert_eq!(
+        letters.len(),
+        1,
+        "one hand-back, one letter: {:?}",
+        letters.len()
+    );
     let letter = &letters[0];
     assert_eq!(
         (
