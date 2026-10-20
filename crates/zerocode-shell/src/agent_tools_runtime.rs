@@ -6983,6 +6983,35 @@ pub(super) fn browser_refused(stderr: impl Into<String>) -> zerocode_hookd::Team
     }
 }
 
+/// Whether a call asks for its answer as JSON: a `--json` after the label,
+/// on any verb but `read`, whose second word is a selector.
+fn answers_json(argv: &[String]) -> bool {
+    argv.first().is_some_and(|verb| verb != "read")
+        && argv.iter().skip(2).any(|word| word == "--json")
+}
+
+/// A work browser's refusal at its door, in the shape the call asked for
+/// (t-66200): a paused tab answers a `--json` call with who lifts the pause
+/// in a field — `{"ok":false,"error":{"code":"workspace_paused","resume":…}}`
+/// — and any other call with the line that carries it as a token
+/// (`workspace_paused[resume=…]: …`).
+pub(super) fn door_refused(argv: &[String], error: &str) -> zerocode_hookd::TeamAnswer {
+    match crate::browser_workspace::paused_resume(error) {
+        Some((resume, message)) if answers_json(argv) => browser_refused(format!(
+            "{}\n",
+            json!({
+                "ok": false,
+                "error": {
+                    "code": zerocode_core::agent_browser::WORKSPACE_PAUSED,
+                    "resume": resume,
+                    "message": message,
+                },
+            })
+        )),
+        _ => browser_refused(format!("zerocode-browser: {error}\n")),
+    }
+}
+
 /// A read's words — the page's title and address, then its text, then a
 /// selector read's reduced DOM. The one formatter both read roads print
 /// through, inside the read arm's one fence: the plain read's and the read
@@ -7074,7 +7103,7 @@ pub(super) async fn answer_browser_command(
         .browser_workspaces
         .check_actor(pane, verb)
     {
-        return browser_refused(format!("zerocode-browser: {error}\n"));
+        return door_refused(argv, &error);
     }
     if verb == "viewport"
         && let Some(label) = label
@@ -7102,7 +7131,7 @@ pub(super) async fn answer_browser_command(
                     let _ = notify_app.emit_to("main", "browser:workspace", snapshot);
                 })
             }),
-            Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
+            Err(error) => return door_refused(argv, &error),
         },
         None => None,
     };
@@ -7124,7 +7153,7 @@ pub(super) async fn answer_browser_command(
             if let Some(operation) = operation {
                 operation.settle(crate::browser_workspace::Dispatch::NotSent);
             }
-            return browser_refused(format!("zerocode-browser: {error}\n"));
+            return door_refused(argv, &error);
         }
     };
     let mut dispatched = crate::browser_workspace::Dispatch::Uncertain;
@@ -7147,7 +7176,7 @@ pub(super) async fn answer_browser_command(
                             answer = browser_refused(format!("zerocode-browser: {error}\n"));
                         }
                     }
-                    Err(error) => answer = browser_refused(format!("zerocode-browser: {error}\n")),
+                    Err(error) => answer = door_refused(argv, &error),
                 }
             }
         } else {
@@ -7168,9 +7197,7 @@ pub(super) fn stamp_browser_observation(
     revision: u64,
 ) -> Result<(), String> {
     use zerocode_core::agent_browser::{WORKSPACE_REVISION_KEY, WORKSPACE_REVISION_LINE};
-    let json = argv.first().is_some_and(|verb| verb != "read")
-        && argv.iter().skip(2).any(|word| word == "--json");
-    if json {
+    if answers_json(argv) {
         let mut value: serde_json::Value = serde_json::from_str(&answer.stdout)
             .map_err(|_| "workspace_observation_invalid: 관측 JSON을 확인할 수 없습니다")?;
         let object = value
@@ -7769,11 +7796,6 @@ async fn dispatch_browser_command(
             match cmd::browser::automate_fill(app, &state, &label, command.entries).await {
                 Ok(report) => {
                     let words = zerocode_core::browser_form::fill_lines(&report);
-                    // A form other than the one read: the host's own words,
-                    // nothing of the page's, and nothing written.
-                    if report.stale {
-                        return browser_refused(format!("zerocode-browser: {words}"));
-                    }
                     if report.all_took() {
                         page_said(&label, words)
                     } else {

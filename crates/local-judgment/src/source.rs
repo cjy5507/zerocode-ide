@@ -34,10 +34,18 @@ pub enum SourceInput {
     LocalDirectory {
         directory: String,
     },
+    LocalFile {
+        file: String,
+    },
+    HuggingFaceFile {
+        url: String,
+    },
 }
 
 #[derive(Clone)]
 pub(crate) struct Inspected {
+    pub kind: &'static str,
+    pub input_template: Option<String>,
     pub model: Model,
     pub directory: Option<PathBuf>,
     stamps: Vec<Stamp>,
@@ -421,7 +429,7 @@ fn data_files(engine: EngineKind, configs: &BTreeMap<String, Value>) -> Result<V
         .into_iter()
         .map(str::to_owned)
         .collect(),
-        EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
+        EngineKind::LlamaCpp | EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
     };
     if engine == EngineKind::TransformersSystemOne {
         if let Some(index) = configs.get("model.safetensors.index.json") {
@@ -494,7 +502,11 @@ fn model(mut files: Vec<Artifact>, description: Description) -> Result<Model> {
         id: format!("native-{}", &identity[..24]),
         label,
         engine,
-        protocol: judgment_provider::Protocol::SystemOne,
+        protocol: if engine == EngineKind::LlamaCpp {
+            judgment_provider::Protocol::OpenaiJson
+        } else {
+            judgment_provider::Protocol::SystemOne
+        },
         revision,
         license,
         source,
@@ -518,6 +530,17 @@ pub(crate) async fn inspect(
     progress: Progress,
 ) -> Result<Inspected> {
     match input {
+        SourceInput::LocalFile { file } => {
+            if file.len() > 4096 {
+                return Err(Error::SourceInvalid);
+            }
+            tokio::task::spawn_blocking(move || {
+                inspect_local_gguf(Path::new(&file), &cancelled, &progress)
+            })
+            .await
+            .map_err(|_| Error::Storage)?
+        }
+        SourceInput::HuggingFaceFile { url } => inspect_hub_gguf(&url, &cancelled, &progress).await,
         SourceInput::HuggingFace {
             repository,
             revision,
@@ -678,6 +701,8 @@ async fn inspect_hub(
         .to_owned();
     let source_url = hub_url(&source, &metadata.sha, "tree", None)?.to_string();
     Ok(Inspected {
+        kind: "hugging_face",
+        input_template: None,
         model: model(
             artifacts,
             Description {
@@ -793,6 +818,8 @@ pub(crate) fn inspect_local(
         });
     }
     Ok(Inspected {
+        kind: "local_directory",
+        input_template: None,
         model: model(
             artifacts,
             Description {
@@ -918,6 +945,231 @@ impl Inspected {
         }
         Ok(())
     }
+}
+
+fn gguf_hub_source(address: &str) -> Result<(HubSource, String)> {
+    if address.len() > 2048
+        || address.contains('\\')
+        || address.to_ascii_lowercase().contains("%2e")
+        || address.to_ascii_lowercase().contains("%2f")
+        || address.to_ascii_lowercase().contains("%5c")
+    {
+        return Err(Error::SourceInvalid);
+    }
+    let parsed = url::Url::parse(address).map_err(|_| Error::SourceInvalid)?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("huggingface.co")
+        || parsed.port().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(Error::SourceInvalid);
+    }
+    let parts: Vec<_> = parsed
+        .path_segments()
+        .ok_or(Error::SourceInvalid)?
+        .collect();
+    if parts.len() < 5
+        || parts.len() > 20
+        || !matches!(parts[2], "blob" | "resolve")
+        || parts
+            .iter()
+            .enumerate()
+            .any(|(index, part)| index != 2 && !segment(part))
+    {
+        return Err(Error::SourceInvalid);
+    }
+    let name = parts.last().ok_or(Error::SourceInvalid)?.to_string();
+    if !name.to_ascii_lowercase().ends_with(".gguf") {
+        return Err(Error::ModelFormatUnsupported);
+    }
+    Ok((
+        HubSource {
+            repository: format!("{}/{}", parts[0], parts[1]),
+            revision: parts[3].to_owned(),
+            subfolder: (parts.len() > 5).then(|| parts[4..parts.len() - 1].join("/")),
+        },
+        name,
+    ))
+}
+
+async fn inspect_hub_gguf(
+    address: &str,
+    cancelled: &Cancelled,
+    progress: &Progress,
+) -> Result<Inspected> {
+    let (source, name) = gguf_hub_source(address)?;
+    let client = client()?;
+    let bytes = fetch(
+        &client,
+        hub_url(&source, &source.revision, "api", None)?,
+        MAX_METADATA_BYTES,
+        cancelled,
+        progress,
+    )
+    .await?;
+    let metadata: HubMetadata =
+        serde_json::from_slice(&bytes).map_err(|_| Error::SourceUnavailable)?;
+    if !hex(&metadata.sha, 40) || metadata.siblings.len() > 2048 {
+        return Err(Error::Manifest);
+    }
+    if hex(&source.revision, 40) && metadata.sha != source.revision {
+        return Err(Error::SourceChanged);
+    }
+    let selected = match &source.subfolder {
+        Some(folder) => format!("{folder}/{name}"),
+        None => name.clone(),
+    };
+    let matching: Vec<_> = metadata
+        .siblings
+        .iter()
+        .filter(|entry| entry.rfilename == selected)
+        .collect();
+    if matching.len() != 1 {
+        return Err(Error::ModelManifestMissing);
+    }
+    let file = matching[0];
+    let lfs = file.lfs.as_ref().ok_or(Error::SourceHashUnavailable)?;
+    if !hex(&lfs.sha256, 64)
+        || !(24..=MAX_DATA_BYTES).contains(&lfs.size)
+        || file.size.is_some_and(|size| size != lfs.size)
+    {
+        return Err(Error::SourceHashUnavailable);
+    }
+    let label: String = format!("{} / {name}", source.repository)
+        .chars()
+        .take(160)
+        .collect();
+    let license = metadata
+        .card
+        .as_ref()
+        .and_then(|card| card.get("license"))
+        .and_then(Value::as_str)
+        .filter(|license| text_label(license))
+        .unwrap_or("License metadata unavailable")
+        .to_owned();
+    let artifact = Artifact {
+        path: name.clone(),
+        bytes: lfs.size,
+        sha256: lfs.sha256.clone(),
+        url: hub_url(&source, &metadata.sha, "resolve", Some(&name))?.to_string(),
+        package: None,
+        version: None,
+        license: None,
+    };
+    Ok(Inspected {
+        kind: "hugging_face_file",
+        input_template: None,
+        model: model(
+            vec![artifact],
+            Description {
+                engine: EngineKind::LlamaCpp,
+                native_format: Some("gguf-v3".to_owned()),
+                revision: Some(metadata.sha.clone()),
+                source: Some(hub_url(&source, &metadata.sha, "blob", Some(&name))?.to_string()),
+                label,
+                server_model_id: None,
+                license,
+            },
+        )?,
+        directory: None,
+        stamps: Vec::new(),
+    })
+}
+
+fn text_label(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 160 && !value.chars().any(char::is_control)
+}
+
+fn inspect_local_gguf(
+    path: &Path,
+    cancelled: &Cancelled,
+    progress: &Progress,
+) -> Result<Inspected> {
+    check(cancelled)?;
+    storage::plain(path)?;
+    let path = fs::canonicalize(path).map_err(|_| Error::Storage)?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Error::SourceInvalid)?
+        .to_owned();
+    if !name.to_ascii_lowercase().ends_with(".gguf") {
+        return Err(Error::ModelFormatUnsupported);
+    }
+    let before = fs::metadata(&path).map_err(|_| Error::Storage)?;
+    let info = crate::gguf::inspect(&path, &std::sync::atomic::AtomicBool::new(false))?;
+    let input_template = info
+        .template
+        .as_deref()
+        .and_then(crate::gguf::builtin_template)
+        .ok_or(Error::ModelFormatUnsupported)?;
+    check(cancelled)?;
+    let mut input = File::open(&path).map_err(|_| Error::Storage)?;
+    let opened = input.metadata().map_err(|_| Error::Storage)?;
+    if opened.len() != before.len() || opened.modified().ok() != before.modified().ok() {
+        return Err(Error::SourceChanged);
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 65536];
+    let mut count = 0_u64;
+    loop {
+        check(cancelled)?;
+        let read = input.read(&mut buffer).map_err(|_| Error::Storage)?;
+        if read == 0 {
+            break;
+        }
+        count = count.checked_add(read as u64).ok_or(Error::TooLarge)?;
+        if count > before.len() {
+            return Err(Error::SourceChanged);
+        }
+        digest.update(&buffer[..read]);
+        progress(read as u64);
+    }
+    let after = input.metadata().map_err(|_| Error::Storage)?;
+    if count != before.len()
+        || before.len() != after.len()
+        || before.modified().ok() != after.modified().ok()
+    {
+        return Err(Error::SourceChanged);
+    }
+    let label: String = name
+        .chars()
+        .filter(|letter| !letter.is_control())
+        .take(160)
+        .collect();
+    Ok(Inspected {
+        kind: "local_file",
+        input_template: Some(input_template.to_owned()),
+        model: model(
+            vec![Artifact {
+                path: name.clone(),
+                bytes: count,
+                sha256: format!("{:x}", digest.finalize()),
+                url: String::new(),
+                package: None,
+                version: None,
+                license: None,
+            }],
+            Description {
+                engine: EngineKind::LlamaCpp,
+                native_format: Some("gguf-v3".to_owned()),
+                revision: None,
+                source: None,
+                label,
+                server_model_id: None,
+                license: "License not inspected locally".to_owned(),
+            },
+        )?,
+        directory: Some(path.parent().ok_or(Error::UnsafePath)?.to_owned()),
+        stamps: vec![Stamp {
+            path: name,
+            bytes: before.len(),
+            modified: before.modified().ok(),
+        }],
+    })
 }
 
 #[cfg(test)]

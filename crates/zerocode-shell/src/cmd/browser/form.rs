@@ -2364,22 +2364,23 @@ pub(crate) struct PressedAfter {
 /// One press in a known form on the window's clock: the page's text and watch
 /// before it, the press, the settle the one road gives it, then the read of the
 /// form with what stood before. A press the page refuses ends there, unsettled
-/// and unread.
-pub(crate) async fn pressed_after<B, BF, P, PF, S, SF, R, RF>(
+/// and unread — with the press's own refusal, `Unsent` when the page refused
+/// it before its first event (t-66200).
+pub(crate) async fn pressed_after<B, BF, P, PF, S, SF, R, RF, E>(
     before: B,
     press: P,
     settle: S,
     read: R,
-) -> Result<PressedAfter, String>
+) -> Result<PressedAfter, E>
 where
     B: FnOnce() -> BF,
-    BF: std::future::Future<Output = Result<PressBefore, String>>,
+    BF: std::future::Future<Output = Result<PressBefore, E>>,
     P: FnOnce() -> PF,
-    PF: std::future::Future<Output = Result<BrowserInputReport, String>>,
+    PF: std::future::Future<Output = Result<BrowserInputReport, E>>,
     S: FnOnce(String, Option<f64>) -> SF,
     SF: std::future::Future<Output = SettleReport>,
     R: FnOnce(serde_json::Value) -> RF,
-    RF: std::future::Future<Output = Result<PressRead, String>>,
+    RF: std::future::Future<Output = Result<PressRead, E>>,
 {
     let stood = before().await?;
     let report = press().await?;
@@ -2403,8 +2404,9 @@ pub(crate) async fn press_in_form(
     label: &str,
     selector: &str,
     known: String,
-) -> Result<BrowserInputReport, String> {
-    let unreadable = |_| "브라우저 판의 누름 뒤 양식 읽기를 읽을 수 없습니다".to_string();
+) -> Result<BrowserInputReport, BrowserRefusal> {
+    let unreadable =
+        |_| BrowserRefusal::Sent("브라우저 판의 누름 뒤 양식 읽기를 읽을 수 없습니다".to_string());
     let buttons = known_buttons(label);
     let done = pressed_after(
         || async move {
@@ -2499,13 +2501,16 @@ pub(crate) async fn automate_fill(
                 },
             )
             .await?;
+            // A form other than the one read: the page said so before it wrote
+            // anything, so the fill was sent nothing (t-66200).
             if report.stale {
-                return Ok(report);
+                let words = zerocode_core::browser_form::fill_lines(&report);
+                return Err(BrowserRefusal::Unsent(words.trim_end().to_string()));
             }
             let report = report.against(known.as_deref(), &buttons);
             remember_form(label, &report.fingerprint);
             remember_buttons(label, &report.actions);
-            Ok::<_, String>(report)
+            Ok::<_, BrowserRefusal>(report)
         },
     )
     .await

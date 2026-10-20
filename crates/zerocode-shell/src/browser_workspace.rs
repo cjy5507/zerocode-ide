@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use zerocode_core::agent_browser::WORKSPACE_PAUSED;
 
 #[cfg(test)]
 mod original_observation_regressions {
@@ -170,6 +171,32 @@ pub(crate) enum Mode {
     Human,
 }
 
+/// Who lifts a work browser's pause (t-66200) — the word every
+/// `workspace_paused` refusal and the bar carry. `observe`: its owner's own
+/// fresh look (`read`, `marks`, `fields`, `screenshot`) lifts it — a pause
+/// the owner's change of unknown outcome left, on a tab the person handed
+/// back on its bar in this window's session. `person`: only the person does.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Resume {
+    Observe,
+    Person,
+}
+
+impl Resume {
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Observe => zerocode_core::agent_browser::RESUME_OBSERVE,
+            Self::Person => zerocode_core::agent_browser::RESUME_PERSON,
+        }
+    }
+}
+
+impl Serialize for Resume {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.word())
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Snapshot {
@@ -180,6 +207,11 @@ pub(crate) struct Snapshot {
     pub(crate) needs_observation: bool,
     pub(crate) owner_term: Option<String>,
     pub(crate) snapshot_supported: bool,
+    /// The session's regrant ([`State::regrant`]).
+    pub(crate) regrant: bool,
+    /// Who lifts the tab's pause while it is out of its agent's hands; none
+    /// while an agent holds it.
+    pub(crate) resume: Option<Resume>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -255,6 +287,17 @@ struct State {
     popup_pending: bool,
     closed: bool,
     person_controlled: bool,
+    /// The person's 「다시 맡기기」 on this tab's bar turned the session's
+    /// regrant on (t-66200): a pause its owner's own change of unknown outcome
+    /// leaves is lifted by that owner's next fresh look. Off at birth, off
+    /// again when the person takes the tab by hand or turns it off on the bar,
+    /// gone with the tab — never kept past this window's session.
+    regrant: bool,
+    /// The revision the pause of the owner's own change of unknown outcome
+    /// left (t-66200), the one pause a look may lift: any later move of the
+    /// revision — the person's pause or stop, a handoff, a close, a popup —
+    /// leaves it behind.
+    uncertain_at: Option<u64>,
 }
 
 struct Workspace {
@@ -283,6 +326,8 @@ impl Workspace {
                 .and_then(crate::hooks::term_of_pane_key)
                 .map(|term| term.to_string()),
             snapshot_supported: cfg!(target_os = "macos"),
+            regrant: state.regrant,
+            resume: (state.mode != Mode::Agent).then(|| resume_of(state)),
         }
     }
 }
@@ -317,8 +362,55 @@ fn changed() -> String {
     "workspace_stale: 작업 브라우저 상태가 바뀌었습니다 — 새 상태를 확인하세요".to_string()
 }
 
-fn paused() -> String {
-    "workspace_paused: 작업 브라우저가 일시정지 또는 직접 조작 중입니다 — 자동으로 재시도하지 마세요".to_string()
+/// A paused tab's refusal (t-66200): the word, who lifts the pause — the
+/// token `[resume=observe]` or `[resume=person]` a program reads off the
+/// line — the tab, and what its agent does next.
+fn paused(label: &str, resume: Resume) -> String {
+    let (why, next) = match resume {
+        Resume::Observe => (
+            "결과를 모르는 변경 뒤 일시정지됐습니다",
+            "read·marks·fields·screenshot으로 새로 본 뒤 이어 가세요",
+        ),
+        Resume::Person => (
+            "일시정지 또는 직접 조작 중입니다",
+            "사람이 풀 때까지 멈추세요",
+        ),
+    };
+    format!(
+        "{WORKSPACE_PAUSED}[resume={}]: 작업 브라우저 {label}: {why} — 자동으로 재시도하지 마세요. {next}",
+        resume.word()
+    )
+}
+
+/// A refusal's resume word and the words after its token, when the refusal
+/// is a paused work browser's ([`paused`]).
+pub(crate) fn paused_resume(error: &str) -> Option<(Resume, &str)> {
+    let (word, message) = error
+        .strip_prefix(WORKSPACE_PAUSED)?
+        .strip_prefix("[resume=")?
+        .split_once("]: ")?;
+    [Resume::Observe, Resume::Person]
+        .into_iter()
+        .find(|resume| resume.word() == word)
+        .map(|resume| (resume, message))
+}
+
+/// Who lifts a tab's pause (t-66200): its owner's look only for the pause
+/// its own change of unknown outcome left, still standing at that revision,
+/// with the session's regrant on and no popup waiting; the person for every
+/// other — their pause or stop, their hand, a handoff, a navigation or a
+/// popup the window did not finish.
+fn resume_of(state: &State) -> Resume {
+    if state.mode == Mode::Paused
+        && !state.closed
+        && state.regrant
+        && !state.popup_pending
+        && state.uncertain_at == Some(state.revision)
+    {
+        Resume::Observe
+    } else {
+        Resume::Person
+    }
 }
 
 fn busy() -> String {
@@ -337,14 +429,23 @@ fn next_revision(state: &mut State) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `actor` may change a page: not while a tab it owns is out of its
+/// hands. The refusal names that tab and who lifts it (t-66200) — a tab only
+/// the person can lift before one the actor's own look can.
 fn owner_ready(held: &BTreeMap<String, Arc<Workspace>>, actor: &str) -> Result<(), String> {
-    for workspace in held.values() {
+    let mut looks = None;
+    for (label, workspace) in held {
         let state = workspace.lock()?;
-        if state.owner.as_deref() == Some(actor) && state.mode != Mode::Agent {
-            return Err(paused());
+        if state.owner.as_deref() != Some(actor) || state.mode == Mode::Agent {
+            continue;
+        }
+        match resume_of(&state) {
+            Resume::Person => return Err(paused(label, Resume::Person)),
+            Resume::Observe if looks.is_none() => looks = Some(paused(label, Resume::Observe)),
+            Resume::Observe => {}
         }
     }
-    Ok(())
+    looks.map_or(Ok(()), Err)
 }
 
 fn agent_holds(state: &State, control: &StepControl) -> bool {
@@ -393,6 +494,8 @@ impl Workspaces {
                 popup_pending: false,
                 closed: false,
                 person_controlled: false,
+                regrant: false,
+                uncertain_at: None,
             }),
             drained: Notify::new(),
         });
@@ -566,9 +669,23 @@ impl Workspaces {
         if state.owner.as_deref() != Some(actor) {
             return Err("workspace_owner_mismatch: 다른 에이전트의 작업 브라우저입니다 — 자신의 작업 탭을 여세요".to_string());
         }
-        if state.mode != Mode::Agent {
-            return Err(paused());
+        let observes = zerocode_core::agent_browser::observes(verb);
+        // The owner's look at a tab its own change of unknown outcome paused,
+        // under the session's regrant, is the one verb such a tab admits: it
+        // lifts the pause when it completes (t-66200).
+        let resumes = state.mode != Mode::Agent && observes && resume_of(&state) == Resume::Observe;
+        if state.mode != Mode::Agent && !resumes {
+            return Err(paused(label, resume_of(&state)));
         }
+        let activity = if resumes {
+            self.actors
+                .lock()
+                .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                .get(actor)
+                .cloned()
+        } else {
+            None
+        };
         if verb == "eval" {
             return Err("workspace_eval_refused: 전용 작업 브라우저는 임의 eval을 받지 않습니다 — read, fields, fill을 사용하세요".to_string());
         }
@@ -593,7 +710,10 @@ impl Workspaces {
             revision,
             owner: Some(actor.to_string()),
             changes_page: row.changes_page,
-            observes: zerocode_core::agent_browser::observes(verb),
+            observes,
+            navigates: zerocode_core::agent_browser::navigates(verb),
+            resumes,
+            activity,
             completed: false,
             notice: None,
         }))
@@ -650,7 +770,7 @@ impl Workspaces {
             return Err(changed());
         }
         if state.mode != Mode::Human {
-            return Err(paused());
+            return Err(paused(label, Resume::Person));
         }
         if state.in_flight != 0 {
             return Err(busy());
@@ -664,6 +784,9 @@ impl Workspaces {
             owner: None,
             changes_page: true,
             observes: false,
+            navigates: false,
+            resumes: false,
+            activity: None,
             completed: false,
             notice: None,
         }))
@@ -740,9 +863,22 @@ impl Workspaces {
             revision,
             target,
             fenced: target == Mode::Paused,
+            regrant: false,
             completed: false,
             notice: None,
         })
+    }
+
+    /// The person turns the session's regrant off on a tab's bar (t-66200):
+    /// a pause its owner's change of unknown outcome leaves waits for the
+    /// person again, the one standing now included.
+    pub(crate) fn end_regrant(&self, label: &str) -> Result<Snapshot, String> {
+        let workspace = self
+            .get(label)?
+            .ok_or("workspace_missing: 이 탭은 전용 작업 브라우저가 아닙니다")?;
+        let mut state = workspace.lock()?;
+        state.regrant = false;
+        Ok(workspace.snapshot(&state))
     }
 
     pub(crate) fn reserve_popup(
@@ -1076,13 +1212,26 @@ impl Drop for ActorOperation {
             }
         }
         if !self.completed {
+            // A change of unknown outcome on one of the actor's own work
+            // browsers (t-66200): a look may lift each pause it leaves on a tab
+            // that stood in the actor's hands — or under the pause its own tab
+            // left — and none it leaves after a change on any other tab.
+            let own = self.label.as_ref().is_some_and(|label| {
+                self.workspaces
+                    .iter()
+                    .any(|workspace| workspace.label == *label)
+            });
             for workspace in &self.workspaces {
                 if let Ok(mut state) = workspace.lock()
                     && !state.closed
                 {
+                    let agents = own
+                        && (state.mode == Mode::Agent
+                            || state.uncertain_at == Some(state.revision));
                     state.mode = Mode::Paused;
                     state.needs_observation = true;
                     state.revision = state.revision.saturating_add(1);
+                    state.uncertain_at = agents.then_some(state.revision);
                     let snapshot = workspace.snapshot(&state);
                     drop(state);
                     workspace.drained.notify_waiters();
@@ -1111,6 +1260,15 @@ pub(crate) struct Operation {
     owner: Option<String>,
     changes_page: bool,
     observes: bool,
+    /// A navigation the window must see settle before the tab changes hands
+    /// (`navigates`): a pause it leaves is the person's to lift (t-66200).
+    navigates: bool,
+    /// The owner's look at a tab its own uncertain change paused, under the
+    /// session's regrant: completing, it lifts the pause (t-66200).
+    resumes: bool,
+    /// The owner's requests, whose record of uncertain targets a lifting look
+    /// clears of its own tab.
+    activity: Option<Arc<ActorActivity>>,
     completed: bool,
     notice: Option<Notice>,
 }
@@ -1132,20 +1290,49 @@ impl Operation {
     /// Issue the read's captured revision only while the same actor still
     /// owns the same Agent control interval. A transition during the await
     /// makes the whole observation unusable, including an otherwise good PNG.
-    pub(crate) fn finish_observation(mut self) -> Result<u64, String> {
+    /// A look that lifts a pause (t-66200) issues the revision it lifts the
+    /// tab to — after the change it settles — and does so under the person's
+    /// stop's own lock, so no tab comes back into an agent's hands after the
+    /// person stopped.
+    pub(crate) fn finish_observation(self) -> Result<u64, String> {
+        if self.resumes {
+            return crate::computer_use::guard::unless_persons_stop(|| self.observed())
+                .unwrap_or_else(|| Err(PERSONS_STOPPED.to_string()));
+        }
+        self.observed()
+    }
+
+    fn observed(mut self) -> Result<u64, String> {
         let mut state = self.workspace.lock()?;
+        let lifts =
+            self.resumes && state.mode == Mode::Paused && resume_of(&state) == Resume::Observe;
         if !self.observes
             || state.closed
             || state.revision != self.revision
-            || state.mode != Mode::Agent
             || state.owner != self.owner
             || self.owner.is_none()
         {
             return Err(changed());
         }
+        if state.mode != Mode::Agent && !lifts {
+            return Err(paused(&self.workspace.label, resume_of(&state)));
+        }
+        if lifts {
+            if let Some(activity) = &self.activity {
+                activity
+                    .state
+                    .lock()
+                    .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                    .uncertain
+                    .remove(&self.workspace.label);
+            }
+            next_revision(&mut state)?;
+            state.mode = Mode::Agent;
+            state.uncertain_at = None;
+        }
         state.needs_observation = false;
         self.completed = true;
-        Ok(self.revision)
+        Ok(state.revision)
     }
 
     pub(crate) fn finish(self, succeeded: bool) {
@@ -1180,9 +1367,15 @@ impl Drop for Operation {
                 state.needs_observation = true;
             }
             if !state.closed && !self.completed && self.changes_page {
+                // The owner's own change of unknown outcome (t-66200): a look
+                // may lift the pause it leaves — unless the person's handoff
+                // was already on its way, the change was a navigation, or the
+                // change was the person's own.
+                let agents = self.owner.is_some() && state.mode == Mode::Agent && !self.navigates;
                 state.mode = Mode::Paused;
                 state.needs_observation = true;
                 state.revision = state.revision.saturating_add(1);
+                state.uncertain_at = agents.then_some(state.revision);
             }
             Some(self.workspace.snapshot(&state))
         } else {
@@ -1202,6 +1395,9 @@ pub(crate) struct Transition {
     revision: u64,
     target: Mode,
     fenced: bool,
+    /// The person's 「다시 맡기기」 on the bar (t-66200): handing the tab
+    /// back turns the session's regrant on.
+    regrant: bool,
     completed: bool,
     notice: Option<Notice>,
 }
@@ -1209,6 +1405,14 @@ pub(crate) struct Transition {
 impl Transition {
     pub(crate) fn notifying(mut self, notice: impl Fn(Snapshot) + Send + Sync + 'static) -> Self {
         self.notice = Some(Box::new(notice));
+        self
+    }
+
+    /// Whether this handoff is the person's 「다시 맡기기」 on the tab's bar —
+    /// the one press that turns the session's regrant on (t-66200). Another
+    /// road back to the agent (the band's resume) leaves it as it stood.
+    pub(crate) fn regranting(mut self, regrant: bool) -> Self {
+        self.regrant = regrant;
         self
     }
 
@@ -1322,6 +1526,13 @@ impl Transition {
             next_revision(&mut state)?;
             state.mode = self.target;
             state.person_controlled |= self.target == Mode::Human;
+            // The person's 「다시 맡기기」 turns the session's regrant on, their
+            // hand turns it off (t-66200).
+            match self.target {
+                Mode::Agent => state.regrant |= self.regrant,
+                Mode::Human => state.regrant = false,
+                Mode::Paused | Mode::Pausing => {}
+            }
             if let Some(owner) = self.owner.take() {
                 state.owner = Some(owner);
             }
@@ -3181,5 +3392,428 @@ mod capture_start_regressions {
                 .is_ok_and(|seen| seen == 1)
         );
         drop(workspaces.begin_snapshot_for("browser-1", false).unwrap());
+    }
+}
+
+/// The session's regrant (t-66200): the person's one 「다시 맡기기」 on a
+/// work browser's bar lets its agent's own fresh look lift the pause the
+/// agent's change of unknown outcome left; every pause the person made — or
+/// that a navigation, a popup or the person's hand stands behind — stays
+/// theirs; and every refusal says, in its token, who lifts it.
+#[cfg(test)]
+mod session_regrant_tests {
+    use super::*;
+    use crate::computer_use::guard;
+
+    const TAB: &str = "browser-1";
+    const OTHER: &str = "browser-2";
+    const AGENT: &str = "term-1";
+
+    fn state(workspaces: &Workspaces, label: &str) -> Snapshot {
+        workspaces.snapshot(label).unwrap().unwrap()
+    }
+
+    /// The agent's look: a read begun at the tab's revision and completed.
+    fn look(workspaces: &Workspaces, label: &str) -> Result<u64, String> {
+        let at = state(workspaces, label).revision;
+        workspaces
+            .begin_at(label, Some(AGENT), "read", Some(at))?
+            .expect("a work browser")
+            .finish_observation()
+    }
+
+    /// The agent's change at the revision its look issued, settled as its
+    /// dispatch says — the two operations a door request holds.
+    fn input(
+        workspaces: &Workspaces,
+        label: &str,
+        verb: &str,
+        at: u64,
+        dispatch: Dispatch,
+    ) -> Result<(), String> {
+        let operation = workspaces
+            .begin_at(label, Some(AGENT), verb, Some(at))?
+            .expect("a work browser");
+        let actor = workspaces
+            .begin_actor_target(Some(AGENT), verb, Some(label))?
+            .expect("a page change");
+        operation.settle(dispatch);
+        actor.settle(dispatch);
+        Ok(())
+    }
+
+    /// The person hands the tab back: the bar's 「다시 맡기기」 (`regrant`),
+    /// or another road back — the band's resume — without it.
+    fn hand_back(workspaces: &Workspaces, label: &str, regrant: bool) -> Snapshot {
+        let mut transition = workspaces
+            .transition(label, Mode::Agent, state(workspaces, label).revision)
+            .unwrap()
+            .regranting(regrant);
+        transition.confirm_fence().unwrap();
+        transition.finish().unwrap()
+    }
+
+    /// The person's own pause or hand, by the bar's road.
+    fn person(workspaces: &Workspaces, label: &str, mode: Mode) -> Snapshot {
+        let mut transition = workspaces
+            .transition(label, mode, state(workspaces, label).revision)
+            .unwrap();
+        if mode != Mode::Paused {
+            transition.confirm_fence().unwrap();
+        }
+        transition.finish().unwrap()
+    }
+
+    /// Work browsers whose session regrant the person turned on: the agent's
+    /// first change of unknown outcome paused every one, and the person
+    /// pressed 「다시 맡기기」 on each.
+    fn regranted_on(labels: &[&str]) -> Workspaces {
+        let workspaces = Workspaces::default();
+        for label in labels {
+            workspaces.register(label, Some(AGENT), false).unwrap();
+        }
+        let seen = look(&workspaces, labels[0]).unwrap();
+        input(&workspaces, labels[0], "click", seen, Dispatch::Uncertain).unwrap();
+        for label in labels {
+            hand_back(&workspaces, label, true);
+        }
+        workspaces
+    }
+
+    fn regranted() -> Workspaces {
+        regranted_on(&[TAB])
+    }
+
+    fn says<T>(result: &Result<T, String>, token: &str) -> bool {
+        result.as_ref().is_err_and(|error| error.starts_with(token))
+    }
+
+    const OBSERVE: &str = "workspace_paused[resume=observe]: ";
+    const PERSON: &str = "workspace_paused[resume=person]: ";
+
+    /// The login scene's second half: after the person's one 「다시 맡기기」,
+    /// a click of unknown outcome still pauses the tab, and the agent's next
+    /// input is refused saying a look lifts it; the agent's own read lifts it
+    /// at a revision after that change, and the next click quoting it is
+    /// taken — no second press of the person's.
+    #[test]
+    fn under_the_sessions_regrant_the_agents_own_look_lifts_its_uncertain_changes_pause() {
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = regranted();
+        let granted = state(&workspaces, TAB);
+        assert!(
+            granted.regrant,
+            "the person's 「다시 맡기기」 turned the session's regrant on: {granted:?}"
+        );
+        let seen = look(&workspaces, TAB).expect("the handed-back tab is looked at");
+        input(&workspaces, TAB, "click", seen, Dispatch::Uncertain).unwrap();
+        let paused = state(&workspaces, TAB);
+        assert_eq!(
+            (paused.mode, paused.resume),
+            (Mode::Paused, Some(Resume::Observe)),
+            "a change of unknown outcome still pauses the tab, and a look lifts it"
+        );
+        let early = input(
+            &workspaces,
+            TAB,
+            "click",
+            paused.revision,
+            Dispatch::Completed,
+        );
+        assert!(
+            says(&early, OBSERVE),
+            "an input before the look is refused, saying a look lifts the pause: {early:?}"
+        );
+        let lifted = look(&workspaces, TAB);
+        assert!(
+            lifted.as_ref().is_ok_and(|at| *at > paused.revision),
+            "the agent's own look lifts the pause at a revision after the change {}: {lifted:?}",
+            paused.revision
+        );
+        let resumed = state(&workspaces, TAB);
+        assert_eq!(
+            (resumed.mode, resumed.needs_observation, resumed.resume),
+            (Mode::Agent, false, None)
+        );
+        let next = input(
+            &workspaces,
+            TAB,
+            "click",
+            lifted.unwrap(),
+            Dispatch::Completed,
+        );
+        assert!(
+            next.is_ok(),
+            "the next click at the look's revision is taken: {next:?}"
+        );
+    }
+
+    /// Off by default: with no 「다시 맡기기」 on its bar, the pause of the
+    /// agent's change of unknown outcome stays the person's — the agent's look
+    /// is refused, saying so — and a hand-back by another road leaves the
+    /// regrant off.
+    #[test]
+    fn without_the_sessions_regrant_an_uncertain_changes_pause_stays_the_persons() {
+        let workspaces = Workspaces::default();
+        workspaces.register(TAB, Some(AGENT), false).unwrap();
+        let seen = look(&workspaces, TAB).unwrap();
+        input(&workspaces, TAB, "click", seen, Dispatch::Uncertain).unwrap();
+        let paused = state(&workspaces, TAB);
+        let looked = look(&workspaces, TAB);
+        let band = hand_back(&workspaces, TAB, false);
+        assert_eq!(
+            (paused.mode, paused.regrant, paused.resume),
+            (Mode::Paused, false, Some(Resume::Person)),
+            "off by default, the pause is the person's"
+        );
+        assert!(
+            says(&looked, PERSON),
+            "the agent's look is refused, saying the person lifts the pause: {looked:?}"
+        );
+        assert_eq!(
+            (band.mode, band.regrant),
+            (Mode::Agent, false),
+            "a hand-back other than the bar's 「다시 맡기기」 leaves the regrant off"
+        );
+    }
+
+    /// The person's stop stands over the session's regrant (t-62872): while
+    /// it stands the door refuses the agent's look in the person's words; its
+    /// walk pauses the tab by the bar's road; and once the stop is lifted,
+    /// the agent's look does not lift that pause — the person's press does.
+    #[test]
+    fn the_persons_stop_is_lifted_by_the_person_alone_under_the_sessions_regrant() {
+        use zerocode_core::computer_use::STOP_REASON_HOTKEY;
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = regranted();
+        look(&workspaces, TAB).unwrap();
+        guard::adopt(STOP_REASON_HOTKEY);
+        let at = state(&workspaces, TAB).revision;
+        let door = workspaces
+            .begin_agents(TAB, Some(AGENT), "read", Some(at))
+            .map(|operation| operation.is_some());
+        person(&workspaces, TAB, Mode::Paused);
+        guard::lift();
+        let stopped = state(&workspaces, TAB);
+        let looked = look(&workspaces, TAB);
+        assert!(
+            says(&door, "workspace_person_stopped:"),
+            "while the person's stop stands the door refuses the look: {door:?}"
+        );
+        assert_eq!(
+            (stopped.mode, stopped.regrant, stopped.resume),
+            (Mode::Paused, true, Some(Resume::Person)),
+            "the stop's pause is the person's, the regrant on or not"
+        );
+        assert!(
+            says(&looked, PERSON),
+            "the agent's look does not lift the person's stop: {looked:?}"
+        );
+    }
+
+    /// The person's hand ends the session's regrant: 「내가 조작」 turns it
+    /// off, and after the band hands the tab back the next change of unknown
+    /// outcome is the person's to lift again.
+    #[test]
+    fn taking_the_tab_by_hand_ends_the_sessions_regrant() {
+        let workspaces = regranted();
+        let human = person(&workspaces, TAB, Mode::Human);
+        let back = hand_back(&workspaces, TAB, false);
+        let seen = look(&workspaces, TAB).unwrap();
+        input(&workspaces, TAB, "click", seen, Dispatch::Uncertain).unwrap();
+        let paused = state(&workspaces, TAB);
+        assert!(
+            !human.regrant && !back.regrant,
+            "the person's hand turned the regrant off: {human:?} {back:?}"
+        );
+        assert_eq!(
+            paused.resume,
+            Some(Resume::Person),
+            "the next uncertain change waits for the person again"
+        );
+    }
+
+    /// A popup waiting on the tab keeps its pause the person's.
+    #[test]
+    fn a_waiting_popup_keeps_the_pause_the_persons_under_the_sessions_regrant() {
+        let workspaces = regranted();
+        let seen = look(&workspaces, TAB).unwrap();
+        assert!(
+            workspaces.reserve_popup(TAB, seen).unwrap(),
+            "a popup waits"
+        );
+        input(&workspaces, TAB, "click", seen, Dispatch::Uncertain).unwrap();
+        let paused = state(&workspaces, TAB);
+        let looked = look(&workspaces, TAB);
+        assert_eq!(
+            paused.resume,
+            Some(Resume::Person),
+            "a waiting popup is the person's to settle"
+        );
+        assert!(says(&looked, PERSON), "{looked:?}");
+    }
+
+    /// A navigation of unknown outcome is the person's to lift: their handoff
+    /// waits for it to settle, and a look does not.
+    #[test]
+    fn a_navigation_of_unknown_outcome_is_the_persons_to_lift_under_the_sessions_regrant() {
+        let workspaces = regranted();
+        let seen = look(&workspaces, TAB).unwrap();
+        input(&workspaces, TAB, "goto", seen, Dispatch::Uncertain).unwrap();
+        let paused = state(&workspaces, TAB);
+        let looked = look(&workspaces, TAB);
+        assert_eq!(
+            (paused.mode, paused.resume),
+            (Mode::Paused, Some(Resume::Person)),
+            "an unfinished navigation is the person's to lift"
+        );
+        assert!(says(&looked, PERSON), "{looked:?}");
+    }
+
+    /// The person's own pause is theirs to lift, the regrant on or not.
+    #[test]
+    fn the_persons_pause_is_theirs_to_lift_under_the_sessions_regrant() {
+        let workspaces = regranted();
+        let paused = person(&workspaces, TAB, Mode::Paused);
+        let looked = look(&workspaces, TAB);
+        assert_eq!(
+            (paused.regrant, paused.resume),
+            (true, Some(Resume::Person))
+        );
+        assert!(says(&looked, PERSON), "{looked:?}");
+    }
+
+    /// The look must come after the change it settles: a read in flight on
+    /// the agent's other tab when the change paused it, or one quoting a
+    /// revision from before the change, does not lift the pause; the next
+    /// look does.
+    #[test]
+    fn a_look_from_before_the_change_does_not_lift_its_pause() {
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = regranted_on(&[TAB, OTHER]);
+        let seen = look(&workspaces, TAB).unwrap();
+        let before = state(&workspaces, OTHER).revision;
+        let early = workspaces
+            .begin_at(OTHER, Some(AGENT), "read", Some(before))
+            .unwrap()
+            .unwrap();
+        input(&workspaces, TAB, "click", seen, Dispatch::Uncertain).unwrap();
+        let paused = state(&workspaces, OTHER);
+        let early = early.finish_observation();
+        let quoted = workspaces
+            .begin_at(OTHER, Some(AGENT), "read", Some(before))
+            .map(|operation| operation.is_some());
+        let lifted = look(&workspaces, OTHER);
+        assert_eq!(
+            (paused.mode, paused.resume),
+            (Mode::Paused, Some(Resume::Observe)),
+            "the change on the agent's one tab paused its other tab too, a look to lift it"
+        );
+        assert!(
+            says(&early, "workspace_stale:"),
+            "a look begun before the change does not lift its pause: {early:?}"
+        );
+        assert!(
+            says(&quoted, "workspace_stale:"),
+            "nor does one quoting a revision from before it: {quoted:?}"
+        );
+        assert!(
+            lifted.as_ref().is_ok_and(|at| *at > paused.revision),
+            "a look after the change lifts it: {lifted:?}"
+        );
+    }
+
+    /// The bar's off switch ends the session's regrant: the pause standing
+    /// now, at the same revision, and every later one wait for the person.
+    #[test]
+    fn turning_the_regrant_off_returns_its_pauses_to_the_person() {
+        let workspaces = regranted();
+        let seen = look(&workspaces, TAB).unwrap();
+        input(&workspaces, TAB, "click", seen, Dispatch::Uncertain).unwrap();
+        let before = state(&workspaces, TAB);
+        let ended = workspaces.end_regrant(TAB).unwrap();
+        let looked = look(&workspaces, TAB);
+        assert_eq!(
+            before.resume,
+            Some(Resume::Observe),
+            "a look lifted it before the switch"
+        );
+        assert_eq!(
+            (ended.regrant, ended.resume, ended.revision),
+            (false, Some(Resume::Person), before.revision),
+            "the switch turns the regrant off and leaves the standing pause the person's"
+        );
+        assert!(says(&looked, PERSON), "{looked:?}");
+    }
+
+    /// An input waits for every tab its agent owns, and its refusal names the
+    /// tab still paused and who lifts it: the agent's look at that tab, or —
+    /// once the person's pause stands there — the person.
+    #[test]
+    fn an_input_waits_for_the_agents_every_tab_and_names_the_one_to_look_at() {
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = regranted_on(&[TAB, OTHER]);
+        let seen = look(&workspaces, TAB).unwrap();
+        input(&workspaces, TAB, "click", seen, Dispatch::Uncertain).unwrap();
+        let lifted = look(&workspaces, TAB);
+        assert!(
+            lifted.is_ok(),
+            "the agent's own look lifts the pause its change left on that tab: {lifted:?}"
+        );
+        let lifted = lifted.unwrap();
+        let waiting = input(&workspaces, TAB, "click", lifted, Dispatch::Completed);
+        person(&workspaces, OTHER, Mode::Paused);
+        let persons = input(&workspaces, TAB, "click", lifted, Dispatch::Completed);
+        hand_back(&workspaces, OTHER, false);
+        let freed = input(&workspaces, TAB, "click", lifted, Dispatch::Completed);
+        assert!(
+            says(&waiting, &format!("{OBSERVE}작업 브라우저 {OTHER}: ")),
+            "the input waits for the other tab a look lifts, and names it: {waiting:?}"
+        );
+        assert!(
+            says(&persons, &format!("{PERSON}작업 브라우저 {OTHER}: ")),
+            "and for the person once their pause stands there: {persons:?}"
+        );
+        assert!(freed.is_ok(), "{freed:?}");
+    }
+
+    /// The refusal's words: the token, the tab, 「자동으로 재시도하지
+    /// 마세요」 kept, and what to do — look again, or stop for the person —
+    /// read back by the one parser the door's JSON answer uses.
+    #[test]
+    fn a_paused_refusal_says_who_lifts_it_and_what_to_do() {
+        for (resume, next) in [
+            (Resume::Observe, "새로 본 뒤 이어 가세요"),
+            (Resume::Person, "사람이 풀 때까지 멈추세요"),
+        ] {
+            let said = paused(TAB, resume);
+            assert!(
+                said.starts_with(&format!(
+                    "workspace_paused[resume={}]: 작업 브라우저 {TAB}: ",
+                    resume.word()
+                )) && said.contains("자동으로 재시도하지 마세요")
+                    && said.ends_with(next),
+                "{said}"
+            );
+            assert_eq!(
+                paused_resume(&said).map(|(read, _)| read),
+                Some(resume),
+                "{said}"
+            );
+            assert_eq!(serde_json::to_value(resume).unwrap(), resume.word());
+        }
+        assert_eq!(paused_resume(&changed()), None);
     }
 }

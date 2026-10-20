@@ -1290,4 +1290,86 @@ export async function testBrowserWorkspace(browser, origin, ok) {
       ok("workspace unknown-open-epoch handling raises no page errors", faults.length === 0, faults.join("\n"));
     } finally { await page.close(); }
   }
+
+  // The session's regrant (t-66200): the bar's own 「다시 맡기기」 asks for it,
+  // another road back does not; the bar says it in words with its off switch,
+  // says when the agent's look lifts a pause, and the switch asks the backend
+  // once and the chip leaves with the regrant.
+  {
+    const { page, faults } = await standWorkspace(browser, origin);
+    try {
+      const label = await openManaged(page);
+      await page.evaluate((label) => {
+        const mock = window.__WORKSPACE__;
+        mock.ended = [];
+        window.__ANSWER__.end_browser_workspace_regrant = (args) => {
+          mock.ended.push(args);
+          const held = mock.state[0];
+          const state = { ...held, regrant: false, resume: held.mode === "agent" ? null : "person" };
+          mock.state = [state];
+          return state;
+        };
+        window.__workspaceEmit({ label, mode: "paused", revision: 120, inFlight: 0, needsObservation: true, resume: "person" });
+      }, label);
+      await observe(page, label);
+      const bar = (label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        const row = host?.querySelector(".browser-workspace-regrant");
+        const off = row?.querySelector(".browser-workspace-regrant-off");
+        return {
+          status: host?.querySelector(".browser-workspace-status")?.textContent,
+          hidden: row?.hidden, chip: row?.querySelector(".browser-workspace-regrant-chip")?.textContent,
+          off: off?.textContent, name: off?.getAttribute("aria-label"), regrant: tabs.find((one) => one.label === label)?.workspace?.regrant,
+        };
+      };
+      const before = await page.evaluate(bar, label);
+      await page.evaluate((label) => window.__workspaceClick(label, "agent"), label);
+      await page.waitForTimeout(80);
+      const handed = await page.evaluate(() => window.__WORKSPACE__.modes.at(-1));
+      ok("the bar's 「다시 맡기기」 asks for the session's regrant as it hands the tab back",
+        before.hidden === true && handed?.mode === "agent" && handed?.expectedRevision === 120 && handed?.regrant === true,
+        JSON.stringify({ before, handed }));
+      const band = await page.evaluate(async (label) => {
+        const tab = tabs.find((one) => one.label === label);
+        window.__workspaceEmit({ label, mode: "paused", revision: 130, inFlight: 0, needsObservation: true, resume: "person" });
+        await setBrowserWorkspaceMode(tab, "agent", { view: false });
+        return window.__WORKSPACE__.modes.at(-1);
+      }, label);
+      ok("another road back to the agent asks for no regrant",
+        band?.mode === "agent" && band?.expectedRevision === 130 && !Object.hasOwn(band ?? {}, "regrant"), JSON.stringify(band));
+      await page.evaluate((label) => window.__workspaceEmit({
+        label, mode: "agent", revision: 140, inFlight: 0, needsObservation: true, regrant: true, resume: null,
+      }), label);
+      await page.waitForTimeout(40);
+      const shown = await page.evaluate(bar, label);
+      ok("the bar says the session's regrant in words with its off switch beside it",
+        shown.hidden === false && /자동 재위임 · 이 세션/.test(shown.chip ?? "") && shown.off === "끄기"
+          && /자동 재위임 끄기/.test(shown.name ?? "") && shown.regrant === true, JSON.stringify(shown));
+      await page.evaluate((label) => window.__workspaceEmit({
+        label, mode: "paused", revision: 141, inFlight: 0, needsObservation: true, regrant: true, resume: "observe",
+      }), label);
+      await page.waitForTimeout(40);
+      const lifting = await page.evaluate(bar, label);
+      ok("a pause the agent's own look lifts says so on the bar",
+        /작업 일시정지 · 에이전트가 새로 본 뒤 이어 갑니다/.test(lifting.status ?? "") && lifting.hidden === false,
+        JSON.stringify(lifting));
+      await page.evaluate((label) => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        host?.querySelector(".browser-workspace-regrant-off")?.click();
+      }, label);
+      await page.waitForTimeout(80);
+      const ended = await page.evaluate((label) => ({ calls: window.__WORKSPACE__.ended, ...(() => {
+        const host = groupOf(tabs.find((one) => one.label === label).pane)?.browserView;
+        return {
+          hidden: host?.querySelector(".browser-workspace-regrant")?.hidden,
+          status: host?.querySelector(".browser-workspace-status")?.textContent,
+          regrant: tabs.find((one) => one.label === label)?.workspace?.regrant,
+        };
+      })() }), label);
+      ok("the off switch asks the backend once and the chip leaves with the regrant",
+        ended.calls?.length === 1 && ended.calls[0]?.label === label && ended.hidden === true && ended.regrant === false
+          && !/새로 본 뒤/.test(ended.status ?? ""), JSON.stringify(ended));
+      ok("workspace session regrant raises no page errors", faults.length === 0, faults.join("\n"));
+    } finally { await page.close(); }
+  }
 }

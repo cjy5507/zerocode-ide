@@ -225,6 +225,11 @@ def timed_laya(clock, gate=None):
 
 
 class BridgeBoundary(unittest.TestCase):
+    def setUp(self):
+        # The AST fixture omits module initializers, including the owned exit lock.
+        bridge["native_process"] = None
+        bridge["native_lock"] = bridge["threading"].RLock()
+
     def laya(self, config, stand_in=None, start=None):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
