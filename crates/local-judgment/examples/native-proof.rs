@@ -201,10 +201,11 @@ fn runtime_python(root: &Path, depth: usize) -> Option<PathBuf> {
         if entry.file_name() == "python3.12" && path.is_file() {
             return Some(path);
         }
-        if path.is_dir() && !entry.file_type().ok()?.is_symlink() {
-            if let Some(found) = runtime_python(&path, depth - 1) {
-                return Some(found);
-            }
+        if path.is_dir()
+            && !entry.file_type().ok()?.is_symlink()
+            && let Some(found) = runtime_python(&path, depth - 1)
+        {
+            return Some(found);
         }
     }
     None
@@ -422,10 +423,10 @@ async fn main() -> Result<()> {
     let events = Arc::new(Mutex::new(Vec::<Value>::new()));
     let capture = events.clone();
     let sink = move |snapshot: Snapshot| {
-        if let Ok(mut events) = capture.lock() {
-            if events.len() < 1024 {
-                events.push(json!({"operation":snapshot.operation,"server":snapshot.server}));
-            }
+        if let Ok(mut events) = capture.lock()
+            && events.len() < 1024
+        {
+            events.push(json!({"operation":snapshot.operation,"server":snapshot.server}));
         }
     };
     let manager = if options.phase == "candidate" {

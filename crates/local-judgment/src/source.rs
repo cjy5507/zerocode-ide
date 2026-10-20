@@ -947,53 +947,6 @@ impl Inspected {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hub_json_requires_the_pinned_git_blob_and_exact_size() {
-        let bytes = br#"{"model_type":"qwen3_5"}"#;
-        let file: HubFile = serde_json::from_value(serde_json::json!({"rfilename":"config.json","blobId":"05c6e9dfec32e8fee1aaaa5c0a94ad2c9736f878","size":bytes.len()})).unwrap();
-        assert_eq!(verify_hub_json(&file, bytes), Ok(()));
-        assert_eq!(
-            verify_hub_json(&file, br#"{"model_type":"qwen3_6"}"#),
-            Err(Error::Integrity)
-        );
-        assert_eq!(verify_hub_json(&file, b"{}"), Err(Error::Integrity));
-    }
-
-    #[test]
-    fn hub_json_refuses_missing_hashes_and_unverified_lfs_bytes() {
-        let missing: HubFile =
-            serde_json::from_value(serde_json::json!({"rfilename":"config.json","size":2}))
-                .unwrap();
-        assert_eq!(
-            verify_hub_json(&missing, b"{}"),
-            Err(Error::SourceHashUnavailable)
-        );
-        let lfs: HubFile = serde_json::from_value(serde_json::json!({"rfilename":"config.json","size":2,"lfs":{"sha256":"a".repeat(64),"size":2}})).unwrap();
-        assert_eq!(verify_hub_json(&lfs, b"{}"), Err(Error::Integrity));
-    }
-
-    #[test]
-    fn hub_file_urls_use_the_resolved_commit_and_selected_subfolder() {
-        let source = hub_source("acme/native", None, Some("checkpoint")).unwrap();
-        let commit = "a".repeat(40);
-        let address = hub_url(&source, &commit, "resolve", Some("model.safetensors")).unwrap();
-        assert_eq!(
-            address.as_str(),
-            format!(
-                "https://huggingface.co/acme/native/resolve/{commit}/checkpoint/model.safetensors"
-            )
-        );
-        assert_eq!(
-            hub_url(&source, "main", "api", None).unwrap().as_str(),
-            "https://huggingface.co/api/models/acme/native/revision/main?blobs=true"
-        );
-    }
-}
-
 fn gguf_hub_source(address: &str) -> Result<(HubSource, String)> {
     if address.len() > 2048
         || address.contains('\\')
@@ -1217,4 +1170,51 @@ fn inspect_local_gguf(
             modified: before.modified().ok(),
         }],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hub_json_requires_the_pinned_git_blob_and_exact_size() {
+        let bytes = br#"{"model_type":"qwen3_5"}"#;
+        let file: HubFile = serde_json::from_value(serde_json::json!({"rfilename":"config.json","blobId":"05c6e9dfec32e8fee1aaaa5c0a94ad2c9736f878","size":bytes.len()})).unwrap();
+        assert_eq!(verify_hub_json(&file, bytes), Ok(()));
+        assert_eq!(
+            verify_hub_json(&file, br#"{"model_type":"qwen3_6"}"#),
+            Err(Error::Integrity)
+        );
+        assert_eq!(verify_hub_json(&file, b"{}"), Err(Error::Integrity));
+    }
+
+    #[test]
+    fn hub_json_refuses_missing_hashes_and_unverified_lfs_bytes() {
+        let missing: HubFile =
+            serde_json::from_value(serde_json::json!({"rfilename":"config.json","size":2}))
+                .unwrap();
+        assert_eq!(
+            verify_hub_json(&missing, b"{}"),
+            Err(Error::SourceHashUnavailable)
+        );
+        let lfs: HubFile = serde_json::from_value(serde_json::json!({"rfilename":"config.json","size":2,"lfs":{"sha256":"a".repeat(64),"size":2}})).unwrap();
+        assert_eq!(verify_hub_json(&lfs, b"{}"), Err(Error::Integrity));
+    }
+
+    #[test]
+    fn hub_file_urls_use_the_resolved_commit_and_selected_subfolder() {
+        let source = hub_source("acme/native", None, Some("checkpoint")).unwrap();
+        let commit = "a".repeat(40);
+        let address = hub_url(&source, &commit, "resolve", Some("model.safetensors")).unwrap();
+        assert_eq!(
+            address.as_str(),
+            format!(
+                "https://huggingface.co/acme/native/resolve/{commit}/checkpoint/model.safetensors"
+            )
+        );
+        assert_eq!(
+            hub_url(&source, "main", "api", None).unwrap().as_str(),
+            "https://huggingface.co/api/models/acme/native/revision/main?blobs=true"
+        );
+    }
 }
