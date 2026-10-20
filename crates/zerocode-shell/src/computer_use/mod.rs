@@ -22,6 +22,8 @@
 //! on a provider refusal so the snapshots survive.
 
 pub mod arena;
+#[cfg(test)]
+mod browser_route;
 mod permissions;
 pub mod repeat;
 mod screenshot_export;
@@ -125,6 +127,10 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     let params = input_policy::current().prepare_provider(method, params)?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::validate(method, params)?;
+    }
+    #[cfg(test)]
+    if let Some(answer) = browser_route::tests::helper(method, &params) {
+        return answer;
     }
     let mut held = held_client()
         .lock()
