@@ -80,17 +80,18 @@ fn bundle_for_query(query: &str) -> Option<String> {
     })
 }
 
-fn value<'a>(row: &'a CFDictionary, key: &str) -> Option<&'a c_void> {
+fn value(row: &CFDictionary, key: &str) -> *const c_void {
     let key = CFString::from_str(key);
-    // SAFETY: the dictionary remains alive while the borrowed value is read.
-    unsafe { CFDictionary::value(row, (&*key as *const CFString).cast()).as_ref() }
+    // SAFETY: the dictionary remains alive while the returned value is read.
+    unsafe { CFDictionary::value(row, (&*key as *const CFString).cast()) }
 }
 
 fn number(row: &CFDictionary, key: &str) -> Option<i64> {
-    let value = value(row, key)?;
+    let value = value(row, key).cast::<CFNumber>();
+    if value.is_null() { return None; }
     let mut number = 0i64;
     // SAFETY: these WindowServer keys contain CFNumbers; the output is an i64.
-    unsafe { CFNumber::value(&*(value as *const c_void).cast::<CFNumber>(), CFNumberType::SInt64Type, (&mut number as *mut i64).cast()) }.then_some(number)
+    unsafe { CFNumber::value(&*value, CFNumberType::SInt64Type, (&mut number as *mut i64).cast()) }.then_some(number)
 }
 
 fn window_pid(window_id: Option<u64>, point: Option<(f64, f64)>) -> Option<i32> {
@@ -102,11 +103,13 @@ fn window_pid(window_id: Option<u64>, point: Option<(f64, f64)>) -> Option<i32> 
         if let Some(wanted) = window_id {
             if number(row, "kCGWindowNumber").and_then(|id| u64::try_from(id).ok()) != Some(wanted) { continue; }
         } else if let Some((x, y)) = point {
-            let bounds = value(row, "kCGWindowBounds")?;
+            let bounds = value(row, "kCGWindowBounds").cast::<CFDictionary>();
+            if bounds.is_null() { continue; }
             let mut rect = CGRect::default();
             // SAFETY: the bounds key is a CGRect dictionary; `rect` outlives the call.
-            if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&*(bounds as *const c_void).cast::<CFDictionary>()), &mut rect) } { continue; }
-            let owner = value(row, "kCGWindowOwnerName").map(|owner| unsafe { &*(owner as *const c_void).cast::<CFString>() }.to_string()).unwrap_or_default();
+            if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&*bounds), &mut rect) } { continue; }
+            let owner = value(row, "kCGWindowOwnerName").cast::<CFString>();
+            let owner = unsafe { owner.as_ref() }.map(ToString::to_string).unwrap_or_default();
             if is_pointer_picture(number(row, "kCGWindowLayer").unwrap_or_default(), &owner, rect.size.width, rect.size.height)
                 || x < rect.origin.x || y < rect.origin.y || x >= rect.origin.x + rect.size.width || y >= rect.origin.y + rect.size.height { continue; }
         }
