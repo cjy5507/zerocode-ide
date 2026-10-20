@@ -2787,7 +2787,8 @@ pub(super) async fn computer_loop(
                     let _browser_route = match computer_use::browser_route::command(&command) {
                         Ok(scope) => scope,
                         Err(error) => {
-                            let answer = computer_cli_error(command.json, &error.code, &error.message);
+                            let answer =
+                                computer_cli_error(command.json, &error.code, &error.message);
                             leave_step(&app, &root, evidence.as_deref(), &argv, &argv, &answer);
                             let _ = reply.send(answer);
                             return;

@@ -314,27 +314,51 @@ fn macos_registration_needs_both_web_schemes_and_both_viewer_types() {
 #[test]
 fn windows_browser_registration_matches_the_executable_instead_of_the_app_name() {
     let commands = vec![r#""C:\Program Files\Example\viewer.exe" "%1""#.to_string()];
-    assert_eq!(super::registered_executable(r"c:\program files\example\VIEWER.EXE", Some(&commands)), Some(true));
-    assert_eq!(super::registered_executable(r"C:\Windows\System32\calc.exe", Some(&commands)), Some(false));
-    assert_eq!(super::registered_executable(r"C:\Example\viewer.exe", Some(&["unreadable command".to_string()])), None);
-    assert_eq!(super::registered_executable(r"C:\Example\viewer.exe", None), None);
+    assert_eq!(
+        super::registered_executable(r"c:\program files\example\VIEWER.EXE", Some(&commands)),
+        Some(true)
+    );
+    assert_eq!(
+        super::registered_executable(r"C:\Windows\System32\calc.exe", Some(&commands)),
+        Some(false)
+    );
+    assert_eq!(
+        super::registered_executable(
+            r"C:\Example\viewer.exe",
+            Some(&["unreadable command".to_string()])
+        ),
+        None
+    );
+    assert_eq!(
+        super::registered_executable(r"C:\Example\viewer.exe", None),
+        None
+    );
 }
 
 #[test]
 fn a_composite_chrome_claim_scopes_its_steps_and_does_not_leak() {
     let _hand = one_hand();
-    let _policy = computer_use::input_policy::enter(computer_use::input_policy::InputPolicy::SharedDesktop);
+    let _policy =
+        computer_use::input_policy::enter(computer_use::input_policy::InputPolicy::SharedDesktop);
     let _fixture = Installed::new(Some(true), false);
     let outer = super::command(&ComputerCommand {
         method: zerocode_core::computer_use::ComputerMethod::Walk,
-        params: json!({"app":"Google Chrome", "browserChrome":true}), json: true,
-    }).unwrap();
+        params: json!({"app":"Google Chrome", "browserChrome":true}),
+        json: true,
+    })
+    .unwrap();
     let accepted = answer(&["click", "--app", "Google Chrome", "--element-index", "194"]);
-    assert_eq!(accepted["ok"], true, "a generated step inherits the outer chrome claim: {accepted}");
+    assert_eq!(
+        accepted["ok"], true,
+        "a generated step inherits the outer chrome claim: {accepted}"
+    );
     assert_eq!(calls(), 1);
     drop(outer);
     let refused = answer(&["click", "--app", "Google Chrome", "--element-index", "194"]);
-    assert_eq!(refused.pointer("/error/code").and_then(Value::as_str), Some(ROUTE_REFUSAL));
+    assert_eq!(
+        refused.pointer("/error/code").and_then(Value::as_str),
+        Some(ROUTE_REFUSAL)
+    );
     assert_eq!(calls(), 1, "the claim ends with the composite request");
 }
 
@@ -345,9 +369,16 @@ fn a_composite_preflight_preserves_the_persons_stop() {
     computer_use::guard::stop_with(zerocode_core::computer_use::STOP_REASON_WINDOW, || false);
     let refused = super::command(&ComputerCommand {
         method: zerocode_core::computer_use::ComputerMethod::Walk,
-        params: json!({"app":"Google Chrome"}), json: true,
-    }).err().map(|error| error.code);
+        params: json!({"app":"Google Chrome"}),
+        json: true,
+    })
+    .err()
+    .map(|error| error.code);
     computer_use::guard::lift();
-    assert_eq!(refused.as_deref(), Some(error_code::STOPPED), "the existing stop keeps its refusal before browser routing");
+    assert_eq!(
+        refused.as_deref(),
+        Some(error_code::STOPPED),
+        "the existing stop keeps its refusal before browser routing"
+    );
     assert_eq!(calls(), 0);
 }
