@@ -83,15 +83,14 @@ fn bundle_for_query(query: &str) -> Option<String> {
             .unwrap_or_default();
         let bundle_id = app.bundleIdentifier().map(|id| id.to_string());
         let mut others = Vec::new();
-        if let Some(url) = app.bundleURL() {
-            if let Some(bundle) = NSBundle::bundleWithURL(&url) {
-                for key in MACOS_BUNDLE_NAME_KEYS {
-                    if let Some(value) = bundle.objectForInfoDictionaryKey(&NSString::from_str(key))
-                    {
-                        if let Some(name) = value.downcast_ref::<NSString>() {
-                            others.push(name.to_string());
-                        }
-                    }
+        if let Some(url) = app.bundleURL()
+            && let Some(bundle) = NSBundle::bundleWithURL(&url)
+        {
+            for key in MACOS_BUNDLE_NAME_KEYS {
+                if let Some(value) = bundle.objectForInfoDictionaryKey(&NSString::from_str(key))
+                    && let Some(name) = value.downcast_ref::<NSString>()
+                {
+                    others.push(name.to_string());
                 }
             }
         }
@@ -99,10 +98,9 @@ fn bundle_for_query(query: &str) -> Option<String> {
             .executableURL()
             .and_then(|url| url.path())
             .map(|path| path.to_string())
+            && let Some(stem) = Path::new(&path).file_stem().and_then(|stem| stem.to_str())
         {
-            if let Some(stem) = Path::new(&path).file_stem().and_then(|stem| stem.to_str()) {
-                others.push(stem.to_string());
-            }
+            others.push(stem.to_string());
         }
         if matches_any(
             &query,

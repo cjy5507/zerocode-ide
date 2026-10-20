@@ -56,10 +56,10 @@ pub(crate) fn command(command: &ComputerCommand) -> Result<Scope, ComputerUseErr
 
 /// Only successful input answers carry this optional fact; reads keep their existing shape.
 pub(crate) fn annotate(mut result: Value) -> Value {
-    if REQUEST.with(|active| active.get().is_some_and(|request| request.unknown)) {
-        if let Some(result) = result.as_object_mut() {
-            result.insert("browserClassificationUnknown".into(), true.into());
-        }
+    if REQUEST.with(|active| active.get().is_some_and(|request| request.unknown))
+        && let Some(result) = result.as_object_mut()
+    {
+        result.insert("browserClassificationUnknown".into(), true.into());
     }
     result
 }
