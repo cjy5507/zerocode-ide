@@ -9889,7 +9889,7 @@ mod tests {
                 && leased.contains(
                     "snapshot_webview_png_held(pane, None, Some((Box::new(frame), check)))"
                 )
-                && snapshot.contains(".begin_snapshot_for(label, spectator)")
+                && snapshot.contains(".lease_frame(label, spectator)")
                 && snapshot.contains("snapshot_leased(pane, frame, Default::default())"),
             "snapshot must select Chromium without losing the existing native fallback or deadline"
         );
