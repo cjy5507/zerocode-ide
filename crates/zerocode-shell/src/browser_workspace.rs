@@ -379,8 +379,7 @@ impl Workspace {
                 .and_then(crate::hooks::term_of_pane_key)
                 .map(|term| term.to_string()),
             snapshot_supported: cfg!(target_os = "macos"),
-            // RED scaffold (t-66513): the base shows no tab live.
-            live_supported: false,
+            live_supported: cfg!(all(target_os = "macos", feature = "chromium-browser")),
             regrant: state.regrant,
             resume: (state.mode != Mode::Agent).then(|| resume_of(state)),
         }
@@ -957,15 +956,11 @@ impl Workspaces {
         watching: bool,
         operation: impl FnOnce(Placement) -> Result<T, String>,
     ) -> Result<T, String> {
-        // RED scaffold (t-66513): the base shows a pane for the person's hand
-        // alone, watched or not.
-        let _ = watching;
-        let shown = |current: bool, persons: bool| {
-            if current && persons {
-                Placement::Control
-            } else {
-                Placement::Hidden
-            }
+        let shown = |current: bool, persons: bool| match (current, watching, persons) {
+            (false, _, _) => Placement::Hidden,
+            (true, true, _) => Placement::Watch,
+            (true, false, true) => Placement::Control,
+            (true, false, false) => Placement::Hidden,
         };
         let Some(workspace) = self.get(label)? else {
             return operation(shown(expected_revision.is_none(), true));
@@ -1137,9 +1132,26 @@ impl Workspaces {
     /// capture waiting beside it; one watch frame waits at a time. An agent
     /// capture waits the same at most for the capture in flight.
     pub(crate) async fn lease_frame(&self, label: &str, spectator: bool) -> Result<Frame, String> {
-        // RED scaffold (t-66513): the base refuses a capture that meets
-        // another one, or its own second, at once.
-        self.begin_snapshot_for(label, spectator)
+        let slot = self.frame_slot(label)?;
+        let _waiting = Waiting::enter(slot.clone(), spectator)?;
+        let deadline = Instant::now() + FRAME_INTERVAL;
+        loop {
+            let released = slot.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            let wake = match take_frame(&slot, spectator)? {
+                Ok(frame) => return Ok(frame),
+                Err(Turn::Released) => deadline,
+                Err(Turn::At(at)) => at.min(deadline),
+            };
+            if Instant::now() >= deadline {
+                return Err(snapshot_busy());
+            }
+            tokio::select! {
+                () = released => {}
+                () = tokio::time::sleep_until(wake.into()) => {}
+            }
+        }
     }
 
     /// An agent capture's turn at the tab's lease (t-66513): it waits — at
@@ -1149,10 +1161,18 @@ impl Workspaces {
     /// out its bound is given all the same: the admission then meets the busy
     /// lease, as it did before any waiting.
     pub(crate) async fn agent_turn(&self, label: &str) -> Result<FrameTurn, String> {
-        // RED scaffold (t-66513): the base's evidence waits for nothing.
-        Ok(FrameTurn {
-            _waiting: Waiting::enter(self.frame_slot(label)?, false)?,
-        })
+        let slot = self.frame_slot(label)?;
+        let waiting = Waiting::enter(slot.clone(), false)?;
+        let deadline = tokio::time::Instant::now() + FRAME_INTERVAL;
+        loop {
+            let released = slot.released.notified();
+            tokio::pin!(released);
+            released.as_mut().enable();
+            let in_flight = slot.lock()?.in_flight;
+            if !in_flight || tokio::time::timeout_at(deadline, released).await.is_err() {
+                return Ok(FrameTurn { _waiting: waiting });
+            }
+        }
     }
 
     pub(crate) fn navigation_check(
