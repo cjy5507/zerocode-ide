@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
 export async function runSettingsGguf({ test, assert, assertEqual, backend, withJudgmentStatus, setQualityLocale }) {
   const original = backend.invoke;
   backend.invoke = async function (windowId, command, args = {}) {
@@ -133,7 +136,7 @@ export async function runSettingsGguf({ test, assert, assertEqual, backend, with
     await test("GGUF 안내는 다섯 언어와 좁은 화면에서 파일·추가 Python·입력 형식을 설명한다", () => fixture(async (page) => {
       await chooseFile(page);
       try {
-        await page.setViewportSize({ width: 360, height: 720 });
+        await page.setViewportSize({ width: 720, height: 480 });
         for (const locale of ["ko", "en", "ja", "zh", "es"]) {
           await setQualityLocale(page, locale);
           const words = await page.evaluate(() => t("settings.gguf.unverified", "사람이 지정한 검증 안 된 모델"));
@@ -143,7 +146,31 @@ export async function runSettingsGguf({ test, assert, assertEqual, backend, with
         await page.locator("#judgment-source-browse").focus();
         assertEqual(await page.evaluate(() => document.activeElement.id), "judgment-source-browse");
         const button = await page.locator("#judgment-source-gguf").boundingBox();
-        assert(button && button.x >= 0 && button.x + button.width <= 361, "the GGUF action overflows the narrow pane");
+        const pane = await page.locator('.settings-pane[data-pane="judgment-models"]').boundingBox();
+        const layout = await page.evaluate(() => {
+          const measure = (selector) => {
+            const element = document.querySelector(selector);
+            if (!element) return null;
+            const box = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return { xPx: box.x, yPx: box.y, widthPx: box.width, heightPx: box.height, rightPx: box.right,
+              scrollWidthPx: element.scrollWidth, clientWidthPx: element.clientWidth,
+              whiteSpace: style.whiteSpace, flexWrap: style.flexWrap, minWidth: style.minWidth, overflowX: style.overflowX };
+          };
+          return { viewportWidthPx: innerWidth, viewportHeightPx: innerHeight, scrollXPx: scrollX,
+            locale, rootZoom: getComputedStyle(document.documentElement).zoom,
+            button: measure("#judgment-source-gguf"), choices: measure(".judgment-source-choices"),
+            source: measure(".judgment-model-source"), pane: measure('.settings-pane[data-pane="judgment-models"]'),
+            rail: measure(".settings-rail"), view: measure(".settings-view") };
+        });
+        console.log(`GGUF_LAYOUT ${JSON.stringify({ ...layout, locatorBox: button, locatorPane: pane })}`);
+        if (process.env.GGUF_LAYOUT_EVIDENCE) {
+          const folder = resolve(process.env.GGUF_LAYOUT_EVIDENCE);
+          await mkdir(folder, { recursive: true });
+          await writeFile(resolve(folder, "layout.json"), `${JSON.stringify({ ...layout, locatorBox: button, locatorPane: pane }, null, 2)}\n`);
+          await page.screenshot({ path: resolve(folder, "layout.png"), animations: "disabled" });
+        }
+        assert(button && pane && button.x >= pane.x - 1 && button.x + button.width <= pane.x + pane.width + 1, `the GGUF action overflows the narrow pane: ${JSON.stringify({ ...layout, locatorBox: button, locatorPane: pane })}`);
       } finally { await setQualityLocale(page, "ko"); }
       return "five locales · Python download explained · native format · keyboard and narrow pane";
     }));

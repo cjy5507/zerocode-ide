@@ -207,7 +207,7 @@ async fn a_selected_local_gguf_is_inspected_without_changing_the_active_provider
     let manager =
         local_judgment::Manager::new(home.path(), &home.path().join("settings.json"), |_| {})
             .expect("manager");
-    let before = manager.snapshot().provider_identity;
+    let before = manager.snapshot();
     let source = serde_json::from_value::<local_judgment::SourceInput>(
         serde_json::json!({"kind":"local_file","file":file}),
     );
@@ -226,8 +226,31 @@ async fn a_selected_local_gguf_is_inspected_without_changing_the_active_provider
     assert_eq!(shown["model"]["protocol"], "openai_json");
     assert_eq!(shown["model"]["nativeFormat"], "gguf-v3");
     assert_eq!(shown["model"]["downloadBytes"], bytes.len() as u64);
-    assert_eq!(manager.snapshot().provider_identity, before);
-    assert!(manager.snapshot().operation.is_none());
+    let after = manager.snapshot();
+    assert_eq!(after.provider_identity, before.provider_identity);
+    let operation = after.operation.as_ref().expect("inspection record");
+    assert_eq!(
+        (operation.kind, operation.state, operation.error),
+        ("inspect", "done", None),
+        "inspection_did_not_finish: kind={} state={} error={:?}",
+        operation.kind,
+        operation.state,
+        operation.error
+    );
+    assert_eq!(after.models.len(), before.models.len());
+    assert!(
+        after.models.iter().all(|model| !model.installed),
+        "inspection_installed_model_data"
+    );
+    assert_eq!(
+        after.runtime.state, before.runtime.state,
+        "inspection_prepared_a_runtime"
+    );
+    assert_eq!(
+        serde_json::to_value(&after.server).unwrap(),
+        serde_json::to_value(&before.server).unwrap(),
+        "inspection_started_a_server"
+    );
     assert_eq!(fs::read(&file).expect("original"), bytes);
     manager.shutdown();
 }
@@ -248,6 +271,7 @@ async fn a_local_gguf_with_an_unknown_template_never_reaches_an_install_operatio
     let manager =
         local_judgment::Manager::new(home.path(), &home.path().join("settings.json"), |_| {})
             .expect("manager");
+    let before = manager.snapshot();
     let source = serde_json::from_value::<local_judgment::SourceInput>(
         serde_json::json!({"kind":"local_file","file":file}),
     )
@@ -256,6 +280,38 @@ async fn a_local_gguf_with_an_unknown_template_never_reaches_an_install_operatio
         manager.inspect_source(source).await,
         Err(Error::ModelFormatUnsupported)
     ));
-    assert!(manager.snapshot().operation.is_none());
+    let after = manager.snapshot();
+    let operation = after.operation.as_ref().expect("refused inspection record");
+    assert_eq!(
+        (operation.kind, operation.state, operation.error),
+        (
+            "inspect",
+            "failed",
+            Some(Error::ModelFormatUnsupported.token())
+        ),
+        "unsupported_template_was_not_refused: kind={} state={} error={:?}",
+        operation.kind,
+        operation.state,
+        operation.error
+    );
+    assert_eq!(
+        after.provider_identity, before.provider_identity,
+        "unsupported_template_changed_the_provider"
+    );
+    assert_eq!(after.models.len(), before.models.len());
+    assert!(
+        after.models.iter().all(|model| !model.installed),
+        "unsupported_template_installed_model_data"
+    );
+    assert!(after.source_inspection.is_none());
+    assert_eq!(
+        after.runtime.state, before.runtime.state,
+        "unsupported_template_prepared_a_runtime"
+    );
+    assert_eq!(
+        serde_json::to_value(&after.server).unwrap(),
+        serde_json::to_value(&before.server).unwrap(),
+        "unsupported_template_started_a_server"
+    );
     manager.shutdown();
 }
