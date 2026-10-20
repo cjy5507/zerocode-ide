@@ -39986,6 +39986,30 @@ details.task-board-section > summary {
   color: var(--ink-label);
 }
 
+/* 세션 자동 재위임(t-66200): 사람의 「다시 맡기기」 한 번이 켠 것을 말로 세우고,
+ * 끄기 단추를 곁에 둔다. 상태는 색이 아니라 글로 — 테두리는 읽히는 선(edge-mark). */
+.browser-workspace-regrant {
+  display: flex;
+  flex: 1 1 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--ink-label);
+}
+
+.browser-workspace-regrant-chip {
+  min-width: 0;
+  padding: var(--space-1) var(--space-2);
+  border: var(--rule-width) solid var(--edge-mark);
+  border-radius: var(--radius-sm);
+  line-height: 1.6;
+  color: var(--ink-chalk);
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
 .is-browser-workspace:not(.is-browser-workspace-human) .browser-toolbar .browser-btn {
   display: none;
 }
@@ -40050,6 +40074,7 @@ details.task-board-section > summary {
 .browser-workspace-owner-change[hidden],
 .browser-workspace-owner-error[hidden],
 .browser-workspace-stop-note[hidden],
+.browser-workspace-regrant[hidden],
 .browser-workspace-preview-note[hidden],
 .browser-workspace-surface[hidden],
 .browser-workspace-frame[hidden],

@@ -5810,6 +5810,259 @@ mod browser_dispatch_outcome_tests {
         assert_eq!(dispatched, Dispatch::Completed);
         assert_eq!(modes(&workspaces), [Mode::Agent; 2]);
     }
+
+    /// A press the page refused before its first event (t-66200) — the login
+    /// button covered, a control hidden, disabled or gone, a look the page
+    /// moved on from — was sent nothing: the tab and the agent's other tab
+    /// stay in its hands at the same revision, and the bar hears the state it
+    /// already shows.
+    #[tokio::test]
+    async fn a_page_refusal_before_its_first_event_keeps_every_owned_tab() {
+        for code in cmd::browser::UNSENT_PAGE_CODES {
+            let workspaces = owned_tabs();
+            let before = workspaces.snapshot("browser-1").unwrap().unwrap();
+            let refusal = cmd::browser::send_after_checks(
+                Ok(()),
+                || Ok::<_, String>(()),
+                |(), ()| async move {
+                    cmd::browser::input_value(json!({ "ok": false, "code": code })).map(|_| ())
+                },
+            )
+            .await
+            .unwrap_err();
+            let (answer, dispatched) = settled(&workspaces, "click", "browser-1", |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            let after = workspaces.snapshot("browser-1").unwrap().unwrap();
+            assert_eq!(answer.exit_code, 1, "{code}");
+            assert_eq!(
+                dispatched,
+                Dispatch::NotSent,
+                "{code}: a refusal before the page's first event was sent nothing"
+            );
+            assert_eq!(
+                modes(&workspaces),
+                [Mode::Agent; 2],
+                "{code}: the agent keeps every tab"
+            );
+            assert_eq!(
+                (after.revision, after.needs_observation),
+                (before.revision, before.needs_observation),
+                "{code}: the bar hears the state it already shows"
+            );
+        }
+    }
+
+    /// A page's failure that may follow its first event (t-66200) — the
+    /// script's own throw, an option missing after the focus, an input the
+    /// page cancelled — stays uncertain and pauses the owner, as before.
+    #[tokio::test]
+    async fn a_page_failure_after_its_first_event_still_pauses_the_owner() {
+        for code in [
+            "evaluation_failed",
+            "no_option",
+            "input_cancelled",
+            "result_too_large",
+        ] {
+            let workspaces = owned_tabs();
+            let refusal = cmd::browser::send_after_checks(
+                Ok(()),
+                || Ok::<_, String>(()),
+                |(), ()| async move {
+                    cmd::browser::input_value(json!({ "ok": false, "code": code })).map(|_| ())
+                },
+            )
+            .await
+            .unwrap_err();
+            let (_, dispatched) = settled(&workspaces, "click", "browser-1", |dispatched| {
+                executor_refused(dispatched, refusal)
+            });
+            assert!(!cmd::browser::UNSENT_PAGE_CODES.contains(&code), "{code}");
+            assert_eq!(dispatched, Dispatch::Uncertain, "{code}");
+            assert_eq!(modes(&workspaces), [Mode::Paused; 2], "{code}");
+        }
+    }
+
+    /// The keys road holds its keys at a password field before its first
+    /// event (t-66200): refused, it was sent nothing.
+    #[test]
+    fn a_password_field_the_keys_road_refuses_keeps_every_owned_tab() {
+        let workspaces = owned_tabs();
+        let refusal = cmd::browser::typed_report(
+            json!({ "method": "held", "secureField": true }),
+            cmd::browser::TypeRoad::Keys,
+        )
+        .expect_err("a secret is the person's to type");
+        let (answer, dispatched) = settled(&workspaces, "type", "browser-1", |dispatched| {
+            executor_refused(dispatched, refusal)
+        });
+        assert_eq!(answer.exit_code, 1);
+        assert_eq!(
+            dispatched,
+            Dispatch::NotSent,
+            "the keys held at a password field were sent nothing"
+        );
+        assert_eq!(modes(&workspaces), [Mode::Agent; 2]);
+    }
+
+    /// A paused tab's refusal says who lifts it in both shapes (t-66200): a
+    /// `--json` call hears it in `error.resume`, any other call as the line's
+    /// token — `read` included, whose second word is a selector.
+    #[test]
+    fn a_paused_tabs_refusal_says_who_lifts_it_in_both_shapes() {
+        let words =
+            |list: &[&str]| -> Vec<String> { list.iter().map(|word| (*word).to_string()).collect() };
+        let workspaces = owned_tabs();
+        let at = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        workspaces
+            .transition("browser-1", Mode::Paused, at)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let person = workspaces
+            .begin_at("browser-1", Some("term-1"), "marks", None)
+            .err()
+            .expect("the person's pause refuses the agent's look");
+        // A tab whose session regrant the person turned on, paused again by a
+        // click of unknown outcome: a look lifts that pause.
+        let lifting = Workspaces::default();
+        lifting.register("browser-1", Some("term-1"), false).unwrap();
+        let timed_out = |workspaces: &Workspaces| {
+            let at = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+            workspaces
+                .begin_at("browser-1", Some("term-1"), "read", Some(at))
+                .unwrap()
+                .unwrap()
+                .finish_observation()
+                .unwrap();
+            settled(workspaces, "click", "browser-1", |_| {
+                browser_refused("zerocode-browser: timed out\n")
+            });
+        };
+        timed_out(&lifting);
+        let at = lifting.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut back = lifting
+            .transition("browser-1", Mode::Agent, at)
+            .unwrap()
+            .regranting(true);
+        back.confirm_fence().unwrap();
+        back.finish().unwrap();
+        timed_out(&lifting);
+        let at = lifting.snapshot("browser-1").unwrap().unwrap().revision;
+        let observe = lifting
+            .begin_at("browser-1", Some("term-1"), "click", Some(at))
+            .err()
+            .expect("a paused tab refuses the agent's input");
+        for (error, resume) in [(&person, "person"), (&observe, "observe")] {
+            let json = door_refused(&words(&["marks", "browser-1", "--json"]), error);
+            let value: Option<serde_json::Value> = serde_json::from_str(json.stderr.trim_end()).ok();
+            assert!(
+                value.as_ref().is_some_and(|value| value["ok"] == false
+                    && value["error"]["code"] == "workspace_paused"
+                    && value["error"]["resume"] == resume
+                    && value["error"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("자동으로 재시도하지 마세요"))),
+                "a --json call hears who lifts the pause in error.resume: {}",
+                json.stderr
+            );
+            assert_eq!(json.exit_code, 1);
+            for plain in [
+                words(&["click", "browser-1", "#login"]),
+                words(&["read", "browser-1", "--json"]),
+            ] {
+                let said = door_refused(&plain, error);
+                assert!(
+                    said.stderr
+                        .starts_with(&format!("zerocode-browser: workspace_paused[resume={resume}]: ")),
+                    "{plain:?} hears the line's token: {}",
+                    said.stderr
+                );
+            }
+        }
+    }
+
+    /// The person's login scene (t-66200), counted in the person's presses:
+    /// the page refuses a covered login button five times — none; the first
+    /// click of unknown outcome — one, the 「다시 맡기기」 that turns the
+    /// session's regrant on; the next — none, the agent's one look lifts it;
+    /// the person's stop — the person's one press, the agent's look or not.
+    #[test]
+    fn the_login_scene_asks_the_person_once_and_after_their_own_stop() {
+        use zerocode_core::computer_use::STOP_REASON_HOTKEY;
+        const COVERED: usize = 5;
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let workspaces = Workspaces::default();
+        workspaces
+            .register("browser-1", Some("term-1"), false)
+            .unwrap();
+        let revision =
+            |workspaces: &Workspaces| workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        // After each answer the agent looks; while only the person lifts the
+        // pause, the person presses the bar's 「다시 맡기기」 once and the agent
+        // looks again. Answers the presses and the looks it took.
+        let go_on = |workspaces: &Workspaces| -> (usize, usize) {
+            let (mut presses, mut looks) = (0, 0);
+            loop {
+                looks += 1;
+                let looked = workspaces
+                    .begin_at("browser-1", Some("term-1"), "read", Some(revision(workspaces)))
+                    .and_then(|operation| operation.expect("a work browser").finish_observation());
+                if looked.is_ok() || presses > 0 {
+                    return (presses, looks);
+                }
+                presses += 1;
+                let mut back = workspaces
+                    .transition("browser-1", Mode::Agent, revision(workspaces))
+                    .unwrap()
+                    .regranting(true);
+                back.confirm_fence().unwrap();
+                back.finish().unwrap();
+            }
+        };
+        let timed_out = |workspaces: &Workspaces| {
+            settled(workspaces, "click", "browser-1", |dispatched| {
+                executor_refused(
+                    dispatched,
+                    cmd::browser::BrowserRefusal::Sent(cmd::browser::PAGE_TIMED_OUT.to_string()),
+                )
+            });
+        };
+        go_on(&workspaces);
+        let covered = (0..COVERED)
+            .map(|_| {
+                let refusal = cmd::browser::input_value(
+                    json!({ "ok": false, "code": "element_obscured" }),
+                )
+                .unwrap_err();
+                settled(&workspaces, "click", "browser-1", |dispatched| {
+                    executor_refused(dispatched, refusal)
+                });
+                go_on(&workspaces).0
+            })
+            .sum::<usize>();
+        timed_out(&workspaces);
+        let first = go_on(&workspaces);
+        timed_out(&workspaces);
+        let regranted = go_on(&workspaces);
+        crate::computer_use::guard::adopt(STOP_REASON_HOTKEY);
+        workspaces
+            .transition("browser-1", Mode::Paused, revision(&workspaces))
+            .unwrap()
+            .finish()
+            .unwrap();
+        crate::computer_use::guard::lift();
+        let stopped = go_on(&workspaces);
+        assert_eq!(
+            (covered, first.0, regranted, stopped.0),
+            (0, 1, (0, 1), 1),
+            "the person's presses after {COVERED} covered refusals, after the first click of unknown outcome, \
+             after the next one under the regrant (with the agent's looks), and after the person's stop"
+        );
+    }
 }
 
 mod browser_observation_stamp_tests {
@@ -6256,11 +6509,13 @@ fn browser_type_refuses_a_password_field_and_value_stdin_uses_the_setter_only() 
     use zerocode_core::computer_use_protocol::validate::SecretEntryVerdict;
     let words =
         |list: &[&str]| -> Vec<String> { list.iter().map(|word| (*word).to_string()).collect() };
-    let refused = typed_report(
-        serde_json::json!({ "method": "held", "secureField": true }),
-        TypeRoad::Keys,
-    )
-    .expect_err("a secret is the person's to type");
+    let refused = String::from(
+        typed_report(
+            serde_json::json!({ "method": "held", "secureField": true }),
+            TypeRoad::Keys,
+        )
+        .expect_err("a secret is the person's to type"),
+    );
     assert_eq!(
         refused,
         page_failure(&serde_json::json!({ "code": SecretEntryVerdict::PersonsEntry.as_str() })),

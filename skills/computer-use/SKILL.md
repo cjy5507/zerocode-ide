@@ -121,15 +121,24 @@ paused, and asking again stays paused until it ends or the tab is closed.
 On Windows a working tab's loading state is unknown until one navigation
 seen from its start has ended; until then a handoff stays paused.
 A mutation the command refused before anything was sent (its arguments,
-URL, selector, mark, text length, scroll target, expression or pane)
-leaves control as it was. A mutation that was sent and then failed, timed
-out or was canceled, including the page's own error answer, an unreadable
-`eval` or `find` result and a `fill` that wrote only some fields, pauses
-that tab and the owner's other writes. Control returns only when the person hands it back, after the
-affected page answers a bounded confirmation request. Never bypass a refusal
-with another surface. Once control returns, read the page again before
-acting, including navigation; previous form and numbered-element
-observations have been discarded. After a person has controlled a working
+URL, selector, mark, text length, scroll target, expression or pane), or
+that the page refused before its first event (a control it cannot find,
+or one hidden, covered or disabled, a password field typed by keys, a form
+other than the one read), leaves control as it was. A mutation that was
+sent and then failed, timed out or was canceled, including the page's own
+error answer after its first event, an unreadable `eval` or `find` result
+and a `fill` that wrote only some fields, pauses that tab and the owner's
+other writes. A `workspace_paused` refusal says who lifts the pause:
+with `resume=observe` (JSON: `error.resume`), look at that tab again with
+`read`, `marks`, `fields` or `screenshot` and continue from what you see;
+with `resume=person`, stop and tell the person: control returns only when
+the person hands it back, after the affected page answers a bounded
+confirmation request. A `workspace_paused` refusal without that word (an
+older window's wording) reads as `resume=person`. Never bypass a refusal
+with another surface.
+When the person hands control back, read the page again before acting,
+including navigation; previous form and numbered-element observations
+have been discarded. After a person has controlled a working
 tab, `console`, `network` and `diagnose` refuse that tab for the rest of its
 life (`workspace_history_unsupported`); open a new working tab when you need
 them. A working tab's step frame is taken and kept only while the same

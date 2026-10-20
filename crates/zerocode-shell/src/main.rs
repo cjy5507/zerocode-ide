@@ -2919,6 +2919,7 @@ fn main() -> ExitCode {
             open_browser_pane,
             get_browser_workspaces,
             set_browser_workspace_mode,
+            cmd::browser_workspace::end_browser_workspace_regrant,
             browser_profiles,
             create_browser_profile,
             delete_browser_profile,
