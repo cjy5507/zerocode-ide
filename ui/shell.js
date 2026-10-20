@@ -274,8 +274,9 @@ async function refreshPaneLedger() {
       };
       if (typeof row?.term === "number") next.set(row.term, facts);
       else if (row?.settled === true && row.checkout) {
+        // And what the ledger kept of its hand-in (t-66539): the report its row under the coordinator opens.
         settled.set(checkoutKey(row.checkout), {
-          ...facts, agent: row.agent ?? "", session: row.session ?? null, at: Number(row.at) || 0,
+          ...facts, agent: row.agent ?? "", session: row.session ?? null, at: Number(row.at) || 0, kept: row.kept ?? null,
         });
       }
     }
@@ -9654,6 +9655,45 @@ listen("hook:subagent", (event) => {
   scheduleAgentPaint(["cards", "board"]);
 });
 
+/* The work a released worker left in this checkout, when the pane at `term` sits in that worker's run's coordinator
+ * seat (t-66539). A zo delegation worker works in its coordinator's own project folder and is released when it hands
+ * in: its pane goes, and what it handed in is the ledger's finished-work row for the folder (`checkoutLedger`, the
+ * newest a checkout holds). A card draws that row only when no live row stands on it (`paintWorktreeAgents`), and the
+ * coordinator's pane is one — so the work stood on the card's line and nowhere under the coordinator that owes it a
+ * review (the person, 10-20 21:3x, over the branch list: 「왜 애는 서브에이전트가 안보여?」). One a checkout, so a
+ * coordinator stands at most one such row a folder. `null` where there is none, or where it is another run's. */
+function coordinatorWorkIn(term, path) {
+  const work = checkoutLedger.get(checkoutKey(path)) ?? null;
+  if (!work?.reported) return null;
+  return coordinatorSeats.some((seat) => seat.term === term && seat.run === work.run) ? work : null;
+}
+
+/* That work's row: no pane, no tab and no term of its own — what it says is the ledger's (`row.work`). */
+function settledWorkRow(lead, work, depth) {
+  return {
+    term: null, tab: null, worktree: lead.worktree, agent: work.agent || null, state: "done", depth, work,
+    kids: 0, kidsShown: false,
+  };
+}
+
+/* What it says after the dash: where the work stands, in the words the checkout's own line says it in
+ * (`landingStageWord`), the reason the ledger told its coordinator it is late, and why it was closed. */
+function settledWorkWords(work) {
+  const stage = ledgerLandingStage(work);
+  return [landingStageWord(stage), seatStallWord(work, stage), ledgerClosedReason(work.closed)].filter(Boolean).join(" · ");
+}
+
+/* And what its press opens: the task's artifacts, with the report the ledger kept chosen — the desk's own door for a
+ * kept hand-in (`paintDeskKept`). Read at the press, since the ledger may keep the report after the row was drawn. */
+function openSettledWork(path, worker) {
+  const work = checkoutLedger.get(checkoutKey(path));
+  if (work?.worker !== worker || !work.taskId) return;
+  openArtifacts({
+    origin: { field: "task", value: work.taskId, label: work.task || work.taskId },
+    select: work.kept?.report ?? null,
+  });
+}
+
 /* The agents to draw under one workspace, parents first and children under
  * them.
  *
@@ -9761,7 +9801,9 @@ function worktreeAgentRows(path) {
     // 이 행 밑에 몇이 사는가 — 셰브론이 세는 그 수(실측: childAgentCount).
     // 접힌 한 쌍은 판으로 한 번만 센다.
     const subs = (paneSubagents.get(row.term) ?? []).filter((sub) => !folded.has(sub.id));
-    const kids = subs.length + children.length;
+    // 판이 떠난 워커의 일도 그 코디의 자식으로 센다(t-66539, `coordinatorWorkIn`).
+    const work = coordinatorWorkIn(row.term, path);
+    const kids = subs.length + children.length + (work === null ? 0 : 1);
     // 접힌 부모의 후손은 화면에서 빠지되 소비된다(seen) — 고아 패스가 되살려
     // 루트인 척 세우는 길을 막는다. 기본은 펼침(실측:
     // `expanded = !collapsedLineageParents.has(paneKey)`) — 접은 손만 기억한다.
@@ -9813,12 +9855,18 @@ function worktreeAgentRows(path) {
     const standing = dressed.filter((child) => !settled(child));
     const finished = dressed.filter(settled);
     for (const child of standing) walk(child, depth + 1, hideBelow);
-    const history = done.length + finished.length;
+    // 판이 떠난 워커의 일은 코디가 아직 할 일이 남았으면 기다리는 자식들 곁에 선다 — 넘김 끝·검토 중·착지 대기·실패,
+    // 팀 보기가 released 워커의 행을 남기는 그 단계들(`TEAM_SETTLED_STAGES`). 착지했거나 착지할 것이 없거나 닫힌
+    // 일은 「완료 N개」로 간다.
+    const owed = work !== null && TEAM_SETTLED_STAGES.has(ledgerLandingStage(work));
+    if (owed && !hideBelow) ordered.push(settledWorkRow(row, work, depth + 1));
+    const history = done.length + finished.length + (work !== null && !owed ? 1 : 0);
     const historyShown = agentHistoryShown.has(row.term);
     if (!hideBelow && historyShown) {
       for (const sub of done) {
         ordered.push({ ...row, depth: depth + 1, sub, kids: 0, kidsShown: false });
       }
+      if (work !== null && !owed) ordered.push(settledWorkRow(row, work, depth + 1));
     }
     // 접힌 자식 판도 소비는 된다(seen) — 고아 패스가 되살려 루트로 세우지 않게.
     for (const child of finished) walk(child, depth + 1, hideBelow || !historyShown);
@@ -9889,7 +9937,9 @@ function agentRowsSaid(rows) {
         // What the row waits for is what it says too: the answer, the wall and the review come from the ledger.
         `:${row.sub ? "" : agentWaitWordOf(row, agentRowState(row))}` +
         // And who it is (t-45938): a seat that moves or a pane the person takes over changes the row's chip.
-        `:${agentRowRoleSaid(row)}`,
+        `:${agentRowRoleSaid(row)}` +
+        // A released worker's work (t-66539) says what the ledger holds of it, which no pane carries.
+        `:${row.work ? `${row.work.worker}|${row.work.task}|${settledWorkWords(row.work)}|${ledgerReviewWord(row.work)}|${row.work.at}` : ""}`,
     )
     .join(",");
 }
@@ -9916,10 +9966,13 @@ function agentRowPane(row) {
  * (t-15625). Spelled once for the two roads that draw a row: the builder and
  * the re-dress. */
 function agentRowModelWords(row) {
+  // A released worker's work (t-66539) wears the model its summons ran, the ledger's word, in the same catalog's words.
+  if (row.work) return helperModelWords(row.work, row.agent);
   return row.sub ? helperModelWords(row.sub, row.agent) : paneModelWords(row.term).text;
 }
 
 function agentRowModelTip(row) {
+  if (row.work) return helperModelTip(row.work) || agentRowModelWords(row);
   return row.sub ? (helperModelTip(row.sub) || agentRowModelWords(row)) : paneModelWords(row.term).tip;
 }
 
@@ -9991,7 +10044,7 @@ function paintStatusModel() {
  * census). A helper rides its parent's pane and says nothing of it; a pane
  * the plan does not count — not Claude's — wears none. */
 function agentRowAccount(row) {
-  if (row.sub || typeof paneAccountWords !== "function") return null;
+  if (row.sub || row.work || typeof paneAccountWords !== "function") return null;
   return paneAccountWords(row.term);
 }
 
@@ -10001,9 +10054,12 @@ function agentRowAccount(row) {
  * 행은 좁아서 activity 줄을 말줄임으로 자르지만 툴팁은 자르지 않는다: 잘린
  * 나머지를 읽을 곳이 여기 하나뿐이다. 세우는 길(`makeAgentRow`)과 갈아입히는
  * 길(`redressAgentRows`)이 같은 문장을 두 번 적으면, 다시 그리지 않은 행만
- * 다른 말을 하게 된다. */
-function agentRowTip(primary, secondary, uses) {
-  return `${primary}${secondary ? ` - ${secondary}` : ""}${uses ? ` · ${uses}` : ""}`;
+ * 다른 말을 하게 된다. 판이 떠난 워커의 일(t-66539)은 판이 없으므로 누르면
+ * 어디로 가는지를 한 줄 더 말한다. */
+function agentRowTip(primary, secondary, uses, row = null) {
+  const said = `${primary}${secondary ? ` - ${secondary}` : ""}${uses ? ` · ${uses}` : ""}`;
+  if (!row?.work) return said;
+  return `${said}\n${t("agent.settledWorkTip", "판이 닫힌 워커가 넘긴 일 — 누르면 이 과업의 보고서와 증거를 아티팩트에서 엽니다")}`;
 }
 
 /* And what the row says to a screen reader — its role, the tooltip's words,
@@ -10073,6 +10129,8 @@ function workerRoleWords(role) {
  * neither wears one. */
 function agentRowRole(row) {
   if (row.history || (row.sub && row.subHost === undefined)) return null;
+  // A released worker's work (t-66539) has no pane to ask — and a null term would read a vacant seat's.
+  if (row.work) return ledgerWorkerRole(row.work);
   return paneRole(row.term);
 }
 
@@ -10122,7 +10180,8 @@ function stepAgentRows(event) {
  * opens from. Spelled once because the shape, the words and the clock all
  * have to agree about it. */
 function agentRowState(row) {
-  if (row.history) return "done";
+  // A released worker's work (t-66539) is what a finished turn left: its pane is gone.
+  if (row.history || row.work) return "done";
   // 헬퍼를 접어 입은 판(t-3024)은 판이다 — 상태는 제 훅의 것.
   if (!row.sub || row.subHost !== undefined) return autonomousPaneState(row.term, row.state);
   return row.sub.state === "done" ? "done" : "working";
@@ -10154,6 +10213,8 @@ function shortAgo(at, now) {
  * one — two clocks would let the card hold a row printing `2d` while a `now`
  * sat in the hidden half. */
 function agentRowAt(row, now = Date.now()) {
+  // A released worker's work (t-66539) counts from when its attempt ended, the ledger's clock for it.
+  if (row.work) return row.work.at || now;
   return agentRowState(row) === "done"
     ? (hookStamps.get(row.term) ?? paneBorn.get(row.term) ?? now)
     : (paneBorn.get(row.term) ?? hookStamps.get(row.term) ?? now);
@@ -10282,6 +10343,8 @@ function agentRowPrimary(row, state) {
   if (row.history) {
     return t("board.historyCount", "완료 {{count}}개", { count: row.history });
   }
+  // A released worker's work (t-66539) is named by its task, as the worker's own row was.
+  if (row.work) return row.work.task?.trim() || row.work.taskId || row.work.worker;
   if (row.sub) return row.sub.name;
   // 과업명이 첫 자리다(설계: navigator-active-history — 「Claude」가 여럿
   // 서는 목록은 목록이 아니다). 원장이 이 판에 과업을 앉혔으면 그 제목,
@@ -10325,6 +10388,8 @@ function agentWaitWordOf(row, state) {
  * repeated primary adds no information — generalized past helper rows,
  * because a vendor label under a vendor-labelled primary lies the same way. */
 function agentRowSecondary(row, state, primary) {
+  // A released worker's work (t-66539) says where it stands: no pane has said anything of it since.
+  if (row.work) return settledWorkWords(row.work);
   const restored = row.sub ? null : restoredWorkers.get(row.term);
   if (restored === "session") return t("board.restored", "이어서");
   if (restored === "fresh") return t("board.restoredFresh", "이어서 (새 대화)");
@@ -10355,7 +10420,7 @@ function agentRowSecondary(row, state, primary) {
  * vocabulary for one fact. */
 function agentRowStatusWord(row, state) {
   if (row.history) return "";
-  const ledgerWord = row.sub ? "" : paneLedgerWord(row.term);
+  const ledgerWord = row.sub ? "" : row.work ? ledgerReviewWord(row.work) : paneLedgerWord(row.term);
   if (ledgerWord && !LIVE_HOOK_STATES.has(state)) return ledgerWord;
   // A turn that ended before the ledger's task was handed in is at rest, not
   // done — the same reading the workspace's dot takes of it (`agentRowPhase`).
@@ -10368,7 +10433,7 @@ function agentRowStatusWord(row, state) {
  * green; a turn that merely ended keeps a quiet check. */
 function agentRowVerified(row) {
   if (row.sub || row.history) return false;
-  return ledgerVouched(paneLedger.get(row.term));
+  return ledgerVouched(row.work ?? paneLedger.get(row.term));
 }
 
 /* And the other half of that distinction: where the ledger says the work of a
@@ -10391,7 +10456,7 @@ function agentRowVerified(row) {
  * workspace dot's (`worktreeReviewPhase`), for one seat. */
 function agentRowPhase(row, state) {
   if (row.sub || row.history || (state !== "done" && state !== "idle")) return "";
-  const facts = paneLedger.get(row.term);
+  const facts = row.work ?? paneLedger.get(row.term);
   if (!facts) return "";
   const said = ledgerReviewPhaseOf(facts);
   if (said !== "") return said === "review" ? "review" : "";
@@ -10803,6 +10868,7 @@ function fittedAgentRowWords(node, row) {
   if (
     node.dataset.term !== String(row.term) ||
     (node.dataset.sub ?? "") !== (row.sub?.id ?? "") ||
+    (node.dataset.work ?? "") !== (row.work?.worker ?? "") ||
     (node.dataset.agent ?? "") !== (row.agent ?? "") ||
     (node.dataset.role ?? "") !== (role?.kind ?? "") ||
     (node.dataset.history ?? "") !== (row.history ? String(row.history) : "") ||
@@ -10895,7 +10961,7 @@ function redressAgentRows(host, rows) {
     }
     writeTextContent(fit.stateNode, fit.status);
     writeTextContent(node.querySelector(".wt-agent-when"), agentRowAgo(row));
-    const tip = agentRowTip(fit.primary, fit.secondary, fit.uses);
+    const tip = agentRowTip(fit.primary, fit.secondary, fit.uses, row);
     if (node.dataset.tip !== tip) node.dataset.tip = tip;
     writeAttribute(node, "aria-label", agentRowSpoken(tip, fit.status, agentRowAgo(row), fit.role));
   }
@@ -11001,6 +11067,8 @@ function makeAgentRow(row, gutter = false) {
   node.dataset.role = role?.kind ?? "";
   node.dataset.depth = String(row.depth ?? 0);
   if (row.sub) node.dataset.sub = row.sub.id;
+  // A released worker's work (t-66539), by its worker: the re-dress reads it back as the row's shape.
+  if (row.work) node.dataset.work = row.work.worker;
   if (row.depth > 0) node.style.setProperty("--card-depth", String(row.depth));
   // Orca's AgentStateDot is only a dot for the states that have no better
   // shape: a spinning ring while it works (drawn by CSS on the bare span), a
@@ -11051,6 +11119,11 @@ function makeAgentRow(row, gutter = false) {
   }
   node.addEventListener("click", (event) => {
     event.stopPropagation();
+    // A released worker's work has no pane to go to (t-66539): its row opens what the work handed in.
+    if (row.work) {
+      openSettledWork(row.worktree, row.work.worker);
+      return;
+    }
     // A helper WITH a pane of its own — the seat said which (`paneHelpers`)
     // — goes to that pane, even while its row is still the roster's and not
     // yet folded onto the pane's (the pane has not spoken its first hook).
@@ -11194,7 +11267,7 @@ function makeAgentRow(row, gutter = false) {
     : [fold, dot, chip, face, body, wears, runsAs, uses, status, when, peek]
   ).filter(Boolean);
   node.append(...parts, activityBorder);
-  node.dataset.tip = agentRowTip(primary, secondary, usesWords);
+  node.dataset.tip = agentRowTip(primary, secondary, usesWords, row);
   node.setAttribute("aria-label", agentRowSpoken(node.dataset.tip, status.textContent, when.textContent, role));
   return node;
 }
