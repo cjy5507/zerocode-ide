@@ -145,12 +145,19 @@ pub(super) fn target_is_browser(method: ComputerMethod, params: &Value) -> Optio
                     else { let event = CGEvent::new(None)?; let point = CGEvent::location(Some(&event)); (point.x, point.y) };
                 points.push(point);
             }
-            let mut any_browser = false;
+            let mut unknown = false;
             for point in points {
-                let app = NSRunningApplication::runningApplicationWithProcessIdentifier(window_pid(None, Some(point))?)?;
-                any_browser |= browser_bundle(&app_bundle(app)?)?;
+                let browser = window_pid(None, Some(point))
+                    .and_then(NSRunningApplication::runningApplicationWithProcessIdentifier)
+                    .and_then(app_bundle)
+                    .and_then(|bundle| browser_bundle(&bundle));
+                match browser {
+                    Some(true) => return Some(true),
+                    Some(false) => {},
+                    None => unknown = true,
+                }
             }
-            return Some(any_browser);
+            return (!unknown).then_some(false);
         }
         browser_bundle(&app_bundle(NSWorkspace::sharedWorkspace().frontmostApplication()?)?)
     })

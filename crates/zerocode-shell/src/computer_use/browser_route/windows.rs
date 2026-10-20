@@ -88,12 +88,18 @@ pub(in crate::computer_use) fn target_is_browser(method: ComputerMethod, params:
                 else { let mut point = POINT::default(); unsafe { GetCursorPos(&mut point) }.ok()?; (f64::from(point.x), f64::from(point.y)) };
             points.push(point);
         }
-        let mut any_browser = false;
+        let mut unknown = false;
         for (x, y) in points {
-            let (pid, _) = desktop_windows::root_at(x, y)?;
-            any_browser |= classify(&executable_for_pid(&mut catalog, pid)?)?;
+            let browser = desktop_windows::root_at(x, y)
+                .and_then(|(pid, _)| executable_for_pid(&mut catalog, pid))
+                .and_then(|path| classify(&path));
+            match browser {
+                Some(true) => return Some(true),
+                Some(false) => {},
+                None => unknown = true,
+            }
         }
-        return Some(any_browser);
+        return (!unknown).then_some(false);
     }
     let (pid, _) = desktop_windows::foreground()?;
     classify(&executable_for_pid(&mut catalog, pid)?)
