@@ -2289,6 +2289,7 @@ fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &Com
     if let Some(refused) = refusal(&pressed) {
         return Err(refused.into());
     }
+    super::computer_tally::note(super::computer_tally::REPICKED);
     Ok((pressed, json!({ "label": only.get("label"), "role": only.get("role"), "element_index": index })))
 }
 

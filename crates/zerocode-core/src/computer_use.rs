@@ -692,6 +692,17 @@ pub const PERSONS_STOP_REASONS: &[&str] = &[STOP_REASON_HOTKEY, STOP_REASON_WIND
 pub fn persons_stop(reason: &str) -> bool {
     PERSONS_STOP_REASONS.contains(&reason)
 }
+/// A wait a stop ended (t-66760): its `stopped` refusal names who stopped it
+/// in its error, beside the reason its message gives — the person (their
+/// chord, the window's button, or a stop they may have made) or an agent's
+/// `stop` — so a caller counts the two apart without reading words.
+pub const STOPPED_BY_KEY: &str = "stoppedBy";
+pub const STOPPED_BY_PERSON: &str = "person";
+pub const STOPPED_BY_AGENT: &str = "agent";
+/// What a walked step's report carries when the walk shortened its wait to
+/// the time its call had left (t-66760): the milliseconds it asked for
+/// (`askedMs`) and the milliseconds it was given (`givenMs`).
+pub const CLIPPED_KEY: &str = "clipped";
 /// How fast the hand may go (§1.4), in the one shape every reader takes —
 /// the helper that counts, `status`, the usage and the skill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
