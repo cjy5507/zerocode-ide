@@ -6630,7 +6630,11 @@ fn said_envelope_at(
     result: serde_json::Value,
     context: Option<&computer_use::surface_execution::Context>,
 ) -> zerocode_hookd::TeamAnswer {
-    let envelope = computer_use::surface_execution::envelope(command, computer_use::browser_route::annotate(result), context);
+    let envelope = computer_use::surface_execution::envelope(
+        command,
+        computer_use::browser_route::annotate(result),
+        context,
+    );
     if command.json {
         computer_said(format!("{envelope}\n"))
     } else {
