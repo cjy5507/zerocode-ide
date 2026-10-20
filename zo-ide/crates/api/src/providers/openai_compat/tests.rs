@@ -1231,6 +1231,41 @@ fn parse_sse_frame_keeps_content_deltas_that_mention_error() {
     assert_eq!(parsed.choices.len(), 1);
 }
 
+/// The body of an OpenRouter 404 whose account settings excluded every
+/// endpoint for the model: `code` is a number, and `metadata` names the reason.
+const ACCOUNT_SETTINGS_404_BODY: &str = r#"{"error":{"message":"0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. ZDR violation (account settings): 1 endpoint excluded","code":404,"metadata":{"ineligibility_reasons":[{"reason":"zdr-violation-by-account","configure_url":"https://openrouter.ai/settings/privacy"}],"failed_routing_step":"Filter by Guardrails"}}}"#;
+
+const ACCOUNT_SETTINGS_404_MESSAGE: &str = "0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. ZDR violation (account settings): 1 endpoint excluded";
+
+#[test]
+fn error_envelope_reads_a_numeric_code() {
+    let envelope = serde_json::from_str::<super::ErrorEnvelope>(
+        r#"{"error":{"message":"No endpoints found for this model.","code":404}}"#,
+    )
+    .ok();
+    assert!(
+        envelope.as_ref().is_some_and(|envelope| {
+            envelope.error.message.as_deref() == Some("No endpoints found for this model.")
+                && envelope.error.code.as_deref() == Some("404")
+        }),
+        "a numeric code must not lose the envelope, got {envelope:?}"
+    );
+}
+
+#[test]
+fn parse_sse_frame_surfaces_an_error_frame_with_a_numeric_code() {
+    let frame = format!("data: {ACCOUNT_SETTINGS_404_BODY}\n");
+    let outcome = parse_sse_frame(&frame);
+    assert!(
+        matches!(
+            &outcome,
+            Err(ApiError::StreamApi { message, retryable, .. })
+                if message.as_deref() == Some(ACCOUNT_SETTINGS_404_MESSAGE) && !*retryable
+        ),
+        "an error frame with a numeric code must fail the stream with its message, got {outcome:?}"
+    );
+}
+
 #[test]
 fn sse_parser_large_frame_split_across_many_chunks_parses_once() {
     let big = "x".repeat(512 * 1024);
