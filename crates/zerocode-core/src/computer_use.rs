@@ -6727,6 +6727,24 @@ mod tests {
         );
     }
 
+    /// A wait holds a turn at most 20 s (t-66760 b2): the condition waits
+    /// keep their minute, and a Flow's verify line keeps its three replayed
+    /// checks — a wait's cap is not theirs.
+    #[test]
+    fn a_wait_holds_a_turn_at_most_twenty_seconds() {
+        assert_eq!(
+            desktop_wait_ms(30_000),
+            (20_000, true),
+            "a wait asked for 30 s is held 20 s, and says the table cut it"
+        );
+        assert_eq!(desktop_wait_for_ms(Some(60_000)), (60_000, false));
+        assert_eq!(
+            FLOW_VERIFY_MS,
+            3 * crate::computer_recipe::RECIPE_CHECK_MS,
+            "a Flow's verify line keeps its 30 s"
+        );
+    }
+
     /// The desktop verbs a person has and an app-scoped verb does not: the
     /// whole screen, the mouse and the keys at screen coordinates, a wait,
     /// the displays (docs/design/computer-use-full-operator.md §2.1). Each
