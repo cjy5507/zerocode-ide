@@ -4,6 +4,7 @@ mod answer_door;
 mod artifact_export;
 mod ask_popup;
 mod beat_lock_order;
+mod browser_route;
 mod browser_workspace;
 mod bundle_resources;
 mod cli_login;

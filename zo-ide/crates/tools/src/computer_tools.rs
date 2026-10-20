@@ -4240,7 +4240,7 @@ printf '%s
                 "ocr": true, "window": "w", "window_id": 7, "kind": "move", "x": 5, "y": 6, "width": 7, "height": 8,
                 "timeout_ms": 100, "absent": true, "confirming": "payment", "force": true, "reset_budget": true,
                 "last": 3, "after": 2, "min_confidence": 0.5, "until": "quiet", "after_text": "f",
-                "offset": [1, 2], "scroll_pages": 0.5, "background": true
+                "offset": [1, 2], "scroll_pages": 0.5, "background": true, "browser_chrome": true
             })
         };
         let argv = |fields: &Value| argv_for(&input(fields.clone())).map_err(|error| error.to_string());

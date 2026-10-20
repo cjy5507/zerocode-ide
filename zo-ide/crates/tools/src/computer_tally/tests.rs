@@ -46,12 +46,14 @@ fn the_photo_refusal_and_the_explicit_chrome_call_are_counted_once_each() {
         Some("browser_requires_work_browser: use zerocode-browser open <url>"));
     assert!(refused.is_err());
     let after_refusal = root.read();
+    eprintln!("photo tally fixture: {after_refusal}");
     assert_eq!(after_refusal["browserRouteRefusals"], 1, "the photo's route refusal is counted once");
     assert_eq!(after_refusal["refusals"]["browser_requires_work_browser"], 1);
     let accepted = call(json!({"action":"left_click", "browser_chrome":true}),
         json!({"ok":true,"result":{"snapshot":{"app":{"bundleId":"org.example.browser"}}}}), None);
     assert!(accepted.is_ok());
     let tally = root.read();
+    eprintln!("chrome tally fixture: {tally}");
     assert_eq!(tally["calls"], 2);
     assert_eq!(tally["browserChromeCalls"], 1);
     assert_eq!(tally["byBundle"]["unknown"]["calls"], 1);
