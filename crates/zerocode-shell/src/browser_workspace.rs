@@ -2383,9 +2383,10 @@ impl Operation {
         state.needs_observation = false;
         // The look its agent's next change without a revision is judged at
         // (t-67064).
-        state.seen = self.owner.clone().map(|owner| (owner, state.revision));
+        let revision = state.revision;
+        state.seen = self.owner.clone().map(|owner| (owner, revision));
         self.completed = true;
-        Ok(state.revision)
+        Ok(revision)
     }
 
     /// Whether this look lifts the pause it was let in under (t-66200).
