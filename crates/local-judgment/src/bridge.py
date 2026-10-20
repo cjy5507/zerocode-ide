@@ -11,6 +11,10 @@ import queue
 import sys
 import threading
 import time
+import http.client
+import secrets
+import socket
+import subprocess
 
 sys.dont_write_bytecode = True
 
@@ -18,19 +22,38 @@ MAX_FRAME = 2 * 1024 * 1024
 wire = sys.stdout.buffer
 sys.stdout = sys.stderr
 messages = queue.Queue(maxsize=2)
+native_process = None
+native_address = None
+native_command = None
+native_cwd = None
+native_spawn_allowed = False
+native_lock = threading.RLock()
+
+
+def finish_process(code):
+    with native_lock:
+        process = globals().get("native_process")
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=2)
+            except Exception:
+                code = code or 1
+        os._exit(code)
 
 
 def read_parent():
     while True:
         line = sys.stdin.buffer.readline(MAX_FRAME + 1)
         if not line:
-            os._exit(0)
+            finish_process(0)
         if len(line) > MAX_FRAME or not line.endswith(b"\n"):
-            os._exit(1)
+            finish_process(1)
         try:
             messages.put(json.loads(line), block=False)
         except (ValueError, queue.Full):
-            os._exit(1)
+            finish_process(1)
 
 
 def reply(value):
@@ -42,6 +65,20 @@ def reply(value):
 
 
 def offline_process(event, arguments):
+    if event == "subprocess.Popen":
+        global native_spawn_allowed
+        command = globals().get("native_command")
+        if (globals().get("native_spawn_allowed") and command
+                and arguments[0] == command[0] and arguments[1] == command
+                and str(arguments[2]) == globals().get("native_cwd")):
+            native_spawn_allowed = False
+            return
+    address = globals().get("native_address")
+    if address is not None:
+        if event == "socket.connect" and arguments[1] == address:
+            return
+        if event == "socket.getaddrinfo" and arguments[:2] == address:
+            return
     if event in ("socket.connect", "socket.getaddrinfo", "subprocess.Popen", "os.system", "os.posix_spawn"):
         raise ValueError("offline_process")
 
@@ -57,12 +94,20 @@ def refuse_dynamic_code(*args, **kwargs):
 def memory_guard(process, limit):
     while True:
         try:
-            over_limit = process.memory_info().rss > limit
+            resident = process.memory_info().rss
+            if globals().get("native_process") is not None:
+                for child in process.children(recursive=True):
+                    try:
+                        resident += child.memory_info().rss
+                    except Exception as error:
+                        if type(error).__name__ not in ("NoSuchProcess", "ProcessLookupError"):
+                            raise
+            over_limit = resident > limit
         except Exception:
-            os._exit(1)
+            finish_process(1)
         if over_limit:
             # engine.rs MEMORY_LIMIT_EXIT: the parent keeps this end as the guard's stop.
-            os._exit(75)
+            finish_process(75)
         time.sleep(0.25)
 
 
@@ -505,7 +550,154 @@ def configure_loaders(initial):
     AutoTokenizer.from_pretrained = offline_tokenizer
 
 
-ADAPTERS = {"laya": LayaAdapter, "transformers_system_one": TransformersSystemOneAdapter}
+def native_arguments(initial, port, capability):
+    executable = initial["nativeExecutable"]
+    if not isinstance(executable, str) or not Path(executable).is_absolute() or Path(executable).name != "llama-server":
+        raise ValueError("native_executable")
+    if initial["mode"] == "verify":
+        return [executable, "--version"]
+    if (type(port) is not int or not 1 <= port <= 65535
+            or not isinstance(initial.get("nativeModelFile"), str)
+            or not Path(initial["nativeModelFile"]).is_absolute()):
+        raise ValueError("native_arguments")
+    model = initial["modelId"]
+    if not isinstance(model, str) or not model or len(model) > 96 or not model[0].isalnum() or any(not (letter.isascii() and (letter.isalnum() or letter in "_-")) for letter in model):
+        raise ValueError("native_model_id")
+    return [executable, "--model", initial["nativeModelFile"], "--alias", model,
+            "--host", "127.0.0.1", "--port", str(port), "--api-key", capability,
+            "--threads", "2", "--threads-batch", "2", "--parallel", "1",
+            "--ctx-size", "4096", "--n-predict", "1024", "--n-gpu-layers", "0",
+            "--no-jinja", "--offline", "--no-webui", "--no-context-shift", "--log-disable"]
+
+
+def launch_native(initial, port=0, capability=""):
+    global native_process, native_command, native_cwd, native_spawn_allowed
+    with native_lock:
+        policy = "(version 1)(allow default)(deny network-outbound)"
+        native_command = ["/usr/bin/sandbox-exec", "-p", policy] + native_arguments(initial, port, capability)
+        native_cwd = str(Path(initial["nativeExecutable"]).parent)
+        native_spawn_allowed = True
+        verifying = initial["mode"] == "verify"
+        try:
+            native_process = subprocess.Popen(native_command, stdin=subprocess.DEVNULL,
+                                              stdout=subprocess.PIPE if verifying else subprocess.DEVNULL,
+                                              stderr=subprocess.PIPE if verifying else subprocess.DEVNULL,
+                                              cwd=native_cwd, env=dict(os.environ))
+        finally:
+            native_spawn_allowed = False
+        return native_process
+
+
+def verify_native_runtime(initial):
+    process = launch_native(initial)
+    output, errors = process.communicate(timeout=30)
+    if process.returncode != 0 or len(output) + len(errors) > 65536:
+        raise ValueError("native_runtime_failed")
+
+
+def verify_native_model(initial):
+    artifacts = initial["modelFiles"]
+    if len(artifacts) != 1:
+        raise ValueError("native_model_files")
+    artifact = artifacts[0]
+    relative = Path(artifact["path"])
+    if relative.is_absolute() or ".." in relative.parts or not str(relative).lower().endswith(".gguf"):
+        raise ValueError("native_model_path")
+    root = Path(initial["modelDirectory"]).resolve(strict=True)
+    path = root / relative
+    if path.is_symlink() or path != Path(initial["nativeModelFile"]):
+        raise ValueError("native_model_path")
+    before = path.stat()
+    if before.st_size != artifact["bytes"]:
+        raise ValueError("integrity_failed")
+    digest = hashlib.sha256()
+    with path.open("rb") as model:
+        while block := model.read(65536):
+            digest.update(block)
+    after = path.stat()
+    if (digest.hexdigest() != artifact["sha256"] or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns):
+        raise ValueError("integrity_failed")
+
+
+class LlamaCppAdapter:
+    def __init__(self, initial):
+        global native_address
+        verify_native_model(initial)
+        self.model_id = initial["modelId"]
+        self.native_alias = self.model_id + "-" + secrets.token_hex(8)
+        self.template = initial["inputTemplate"]
+        self.capability = secrets.token_hex(32)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        native_address = ("127.0.0.1", port)
+        self.process = launch_native({**initial, "modelId": self.native_alias}, port, self.capability)
+        threading.Thread(target=self.watch, daemon=True).start()
+        until = time.monotonic() + 110
+        while time.monotonic() < until:
+            if self.process.poll() is not None:
+                raise ValueError("native_runtime_failed")
+            try:
+                self.exchange("GET", "/health", None, 1)
+                models = self.exchange("GET", "/v1/models", None, 1)
+                if not any(model.get("id") == self.native_alias for model in models.get("data", [])):
+                    raise ValueError("native_server_identity")
+                break
+            except (OSError, ValueError):
+                time.sleep(0.1)
+        else:
+            raise ValueError("native_start_timeout")
+        self.limits = declared_limits(initial, {"max_len": 3008})
+
+    def watch(self):
+        while True:
+            if self.process.poll() is not None:
+                finish_process(1)
+            time.sleep(0.1)
+
+    def exchange(self, method, resource, body, timeout):
+        connection = http.client.HTTPConnection(*native_address, timeout=max(0.001, timeout))
+        try:
+            connection.request(method, resource, body=None if body is None else json.dumps(body, allow_nan=False).encode("utf-8"),
+                               headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.capability})
+            response = connection.getresponse()
+            data = response.read(MAX_FRAME + 1)
+            if response.status != 200 or len(data) > MAX_FRAME:
+                raise ValueError("native_http_refused")
+            return json.loads(data)
+        finally:
+            connection.close()
+
+    def predict(self, request, budget_ms=None):
+        if (set(request) != {"model", "messages", "response_format", "temperature", "max_tokens", "stream"}
+                or request["model"] != self.model_id or request["stream"] is not False
+                or request["temperature"] != 0 or type(request["max_tokens"]) is not int
+                or not 1 <= request["max_tokens"] <= 1024
+                or request["response_format"].get("type") != "json_schema"):
+            raise ValueError("native_request")
+        began = time.monotonic()
+        budget = min(30.0, budget_ms / 1000) if budget_ms is not None else 30.0
+
+        def remaining():
+            left = budget - (time.monotonic() - began)
+            if left <= 0:
+                raise ValueError("deadline_budget")
+            return left
+
+        rendered = self.exchange("POST", "/apply-template", {"messages": request["messages"], "add_generation_prompt": True}, remaining())
+        tokens = self.exchange("POST", "/tokenize", {"content": rendered["prompt"], "add_special": False, "parse_special": True}, remaining())["tokens"]
+        if not isinstance(tokens, list) or len(tokens) + request["max_tokens"] + 64 > 4096:
+            return {"model": self.model_id, "choices": [{"index": 0, "finish_reason": "length", "message": {"role": "assistant", "content": ""}}],
+                    "usage": {"prompt_tokens": len(tokens), "completion_tokens": 0, "model_calls": 0}}
+        answer = self.exchange("POST", "/v1/chat/completions", {**request, "model": self.native_alias}, remaining())
+        if answer.get("model") != self.native_alias:
+            raise ValueError("native_server_identity")
+        answer["model"] = self.model_id
+        return answer
+
+
+ADAPTERS = {"laya": LayaAdapter, "transformers_system_one": TransformersSystemOneAdapter, "llama_cpp": LlamaCppAdapter}
 
 
 threading.Thread(target=read_parent, daemon=True).start()
@@ -523,28 +715,36 @@ try:
 
         threading.Thread(target=memory_guard, args=(psutil.Process(), initial["rssLimitBytes"]), daemon=True).start()
 
-    import torch
-    configure_loaders(initial)
-
-    torch.set_num_threads(2)
-    torch.set_num_interop_threads(1)
-
-    torch.load = refuse_pickle
-    torch.jit.load = refuse_pickle
     pickle.load = refuse_pickle
     pickle.loads = refuse_pickle
     adapter = None
-    if initial["mode"] == "model":
-        adapter = ADAPTERS[initial["engine"]](initial)
-    elif initial["engine"] == "transformers_system_one":
-        reviewed_system_one_runtime()
+    if initial["engine"] == "llama_cpp":
+        if initial["mode"] == "model":
+            adapter = LlamaCppAdapter(initial)
+        else:
+            verify_native_runtime(initial)
+    else:
+        import torch
+        configure_loaders(initial)
+
+        torch.set_num_threads(2)
+        torch.set_num_interop_threads(1)
+
+        torch.load = refuse_pickle
+        torch.jit.load = refuse_pickle
+        if initial["mode"] == "model":
+            adapter = ADAPTERS[initial["engine"]](initial)
+        elif initial["engine"] == "transformers_system_one":
+            reviewed_system_one_runtime()
     ready = {"ready": True}
     if getattr(adapter, "limits", None):
         ready["limits"] = adapter.limits
+    if isinstance(adapter, LlamaCppAdapter):
+        ready["input_template"] = adapter.template
     reply(ready)
 except Exception:
     reply({"error": "runtime_failed"})
-    os._exit(1)
+    finish_process(1)
 
 while True:
     envelope = messages.get()

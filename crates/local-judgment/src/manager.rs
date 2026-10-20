@@ -56,6 +56,8 @@ pub struct ModelInfo {
     pub origin: &'static str,
     pub server_model_id: Option<String>,
     pub native_format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_template: Option<String>,
     pub local: LocalSupport,
     pub existing_server: ExistingServerSupport,
     pub runtime: RuntimeInfo,
@@ -99,6 +101,8 @@ pub struct SourceInspection {
     pub default_destination_directory: String,
     pub allows_destination_selection: bool,
     pub source_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_template: Option<String>,
     pub download_bytes: u64,
     pub copy_bytes: u64,
     pub runtime_download_bytes: u64,
@@ -638,6 +642,11 @@ impl Manager {
             origin,
             server_model_id: model.server_model_id.clone(),
             native_format: model.native_format.clone(),
+            input_template: if installed {
+                self.store.model_template(model)
+            } else {
+                None
+            },
             local: LocalSupport {
                 supported: local_error.is_none(),
                 download_only: local_error.is_some() && data_accepted,
@@ -671,7 +680,10 @@ impl Manager {
     }
 
     fn inspection_info(&self, pending: &PendingInspection) -> SourceInspection {
-        let model = self.model_info(&pending.inspected.model, "inspection");
+        let mut model = self.model_info(&pending.inspected.model, "inspection");
+        if let Some(template) = &pending.inspected.input_template {
+            model.input_template = Some(template.clone());
+        }
         let local_source = pending.inspected.directory.is_some();
         SourceInspection {
             inspection_id: pending.id.clone(),
@@ -697,11 +709,8 @@ impl Manager {
             } else {
                 model.runtime.download_bytes
             },
-            source_kind: if local_source {
-                "local_directory"
-            } else {
-                "hugging_face"
-            },
+            source_kind: pending.inspected.kind,
+            input_template: model.input_template.clone(),
             model,
             default_destination_directory: self
                 .store
@@ -1501,6 +1510,7 @@ impl Manager {
         for artifact in std::iter::once(&profile.python)
             .chain(&profile.wheels)
             .chain(&profile.runtime_files)
+            .chain(profile.native.iter().map(|native| &native.archive))
         {
             self.download(artifact, &downloads, id, cancel).await?;
         }
@@ -1532,6 +1542,14 @@ impl Manager {
                 )?;
                 storage::private_dir(destination.parent().ok_or(Error::UnsafePath)?)?;
                 fs::rename(source, destination).map_err(|_| Error::Storage)?;
+            }
+            if let Some(native) = &unpack_profile.native {
+                crate::archive::native(
+                    &downloads.join(&native.archive.path),
+                    &unpack_root,
+                    native,
+                    &unpack_cancel.flag,
+                )?;
             }
             fs::remove_dir_all(downloads).map_err(|_| Error::Storage)
         })
@@ -1633,7 +1651,8 @@ impl Manager {
         let verify_path = stage.path().to_owned();
         let verify_cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
-            adapter::verify_model(&verify_path, &verify_model, &verify_cancel.flag)
+            adapter::verify_model(&verify_path, &verify_model, &verify_cancel.flag)?;
+            Store::prepare_model_metadata(&verify_path, &verify_model, &verify_cancel.flag)
         })
         .await
         .map_err(|_| Error::Storage)??;
@@ -1841,7 +1860,7 @@ impl Manager {
         let address = listener.local_addr().map_err(|_| Error::RuntimeFailed)?;
         let provider = Provider {
             kind: judgment_provider::ProviderKind::Local,
-            protocol: judgment_provider::Protocol::SystemOne,
+            protocol: model.protocol,
             base_url: format!("http://127.0.0.1:{}", address.port()),
             model: model.id.clone(),
             requires_auth: false,

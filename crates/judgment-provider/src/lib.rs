@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
+mod openai;
 mod protocol;
 pub use protocol::Prepared;
 
@@ -37,6 +38,7 @@ pub enum ProviderKind {
 pub enum Protocol {
     #[default]
     SystemOne,
+    OpenaiJson,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,6 +170,9 @@ impl Provider {
     }
 
     pub fn endpoint_validated(mut self) -> Result<Self, Refusal> {
+        if self.protocol == Protocol::OpenaiJson && self.kind != ProviderKind::Local {
+            return Err(Refusal::Settings);
+        }
         if self.kind == ProviderKind::Jev
             && (self.protocol != Protocol::SystemOne
                 || self.base_url != JEV_BASE_URL
@@ -230,7 +235,10 @@ impl Provider {
 
     #[must_use]
     pub fn request_url(&self) -> String {
-        self.api_url("systemone")
+        self.api_url(match self.protocol {
+            Protocol::SystemOne => "systemone",
+            Protocol::OpenaiJson => "chat/completions",
+        })
     }
 
     #[must_use]

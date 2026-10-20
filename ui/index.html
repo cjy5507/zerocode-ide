@@ -4286,9 +4286,11 @@
             <h4 id="judgment-source-title" data-i18n="settings.models.add">모델 불러오기</h4>
             <div class="settings-action-row judgment-source-choices">
               <button type="button" class="btn" id="judgment-source-hub" aria-pressed="true" data-i18n="settings.models.fromHub">Hugging Face에서 받기</button>
+              <button type="button" class="btn" id="judgment-source-gguf" aria-pressed="false" data-i18n="settings.gguf.fromFile">GGUF 파일 불러오기</button>
               <button type="button" class="btn" id="judgment-source-local" aria-pressed="false" data-i18n="settings.models.fromFolder">내 모델 불러오기</button>
               <button type="button" class="btn" id="judgment-source-jev" data-i18n="settings.models.useJev">Jev 사용하기</button>
             </div>
+            <p class="settings-row-desc" data-i18n="settings.gguf.sourceHint">GGUF는 파일 하나를 고르거나 Hugging Face의 특정 .gguf 파일 주소를 붙여 넣으세요. 모델이 함께 보낸 코드는 실행하지 않습니다.</p>
             <div id="judgment-source-hub-fields">
               <label class="settings-field" data-field="full" for="judgment-source-repository">
                 <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.models.address">Hugging Face 모델 주소 또는 ID</span></span>

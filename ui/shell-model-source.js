@@ -2,6 +2,7 @@ const judgmentModelSourceController = {
   initialized: false,
   kind: "hugging_face",
   directory: null,
+  file: null,
   destination: null,
   inspection: null,
   problem: null,
@@ -20,7 +21,7 @@ const judgmentModelSourceController = {
   init() {
     if (this.initialized) return;
     this.initialized = true;
-    for (const [name, kind] of [["hub", "hugging_face"], ["local", "local_directory"]]) {
+    for (const [name, kind] of [["hub", "hugging_face"], ["local", "local_directory"], ["gguf", "local_file"]]) {
       el(`judgment-source-${name}`).addEventListener("click", () => this.choose(kind));
     }
     el("judgment-source-repository").addEventListener("input", (event) => {
@@ -57,7 +58,7 @@ const judgmentModelSourceController = {
     if (this.locked()) return;
     this.kind = kind;
     this.invalidate();
-    if (kind === "local_directory" && !this.directory) void this.chooseFolder(false);
+    if ((kind === "local_directory" && !this.directory) || (kind === "local_file" && !this.file)) void this.chooseFolder(false);
   },
 
   inspectAddress(address) {
@@ -71,8 +72,14 @@ const judgmentModelSourceController = {
 
   source() {
     if (this.kind === "local_directory") return this.directory ? { kind: this.kind, directory: this.directory } : null;
+    if (this.kind === "local_file") return this.file ? { kind: this.kind, file: this.file } : null;
     const repository = el("judgment-source-repository").value.trim();
-    return repository ? { kind: this.kind, repository } : null;
+    if (!repository) return null;
+    try {
+      const address = new URL(repository);
+      if (/\.gguf$/i.test(address.pathname)) return { kind: "hugging_face_file", url: repository };
+    } catch {}
+    return { kind: this.kind, repository };
   },
 
   locked() {
@@ -117,13 +124,22 @@ const judgmentModelSourceController = {
     if (this.locked()) return;
     this.working = true;
     managedJudgmentController.render();
+    let inspectFile = false;
     try {
-      const chosen = await openPathBrowser({ mode: "folder", start: destination ? this.destination : this.directory });
+      const file = !destination && this.kind === "local_file";
+      const chosen = await openPathBrowser({ mode: file ? "attach" : "folder", multiple: false, system: true, start: destination ? this.destination : file ? null : this.directory });
       if (!chosen.length) return;
+      if (file && chosen.length !== 1) {
+        this.file = null;
+        this.invalidate();
+        this.say(t("settings.gguf.pickHint", "GGUF 파일 하나를 고르세요. 원본은 그대로 두고 앱 전용 폴더에 복사합니다."));
+        return;
+      }
       if (destination) this.destination = chosen[0];
       else {
-        this.directory = chosen[0];
+        if (file) this.file = chosen[0]; else this.directory = chosen[0];
         this.invalidate();
+        inspectFile = file;
       }
     } catch (error) {
       this.say(managedJudgmentController.failure(error));
@@ -131,6 +147,7 @@ const judgmentModelSourceController = {
       this.working = false;
       managedJudgmentController.render();
     }
+    if (inspectFile) void this.inspect();
   },
 
   currentInspection() {
@@ -352,7 +369,7 @@ const judgmentModelSourceController = {
   stepLabel(step) {
     switch (step) {
       case "inspect": return t("settings.models.step.inspect", "확인");
-      case "download": return this.inspection?.sourceKind === "local_directory" ? t("settings.models.step.copy", "복사") : t("settings.models.step.download", "받기");
+      case "download": return this.inspection?.sourceKind?.startsWith("local_") ? t("settings.models.step.copy", "복사") : t("settings.models.step.download", "받기");
       case "verify": return t("settings.models.step.verify", "검증");
       case "keep": return t("settings.models.step.keep", "보관");
       case "runtime": return t("settings.models.step.runtime", "실행 환경");
@@ -408,7 +425,7 @@ const judgmentModelSourceController = {
       : !inspection ? (this.problem === "cancelled" ? "cancelled" : "unsupported")
         : current ? "current" : usable ? "ready" : keepable ? (installed ? "kept" : "download-only") : "unsupported";
     el("judgment-source-model-name").textContent = inspection?.model.label
-      ?? (this.kind === "local_directory" ? this.directory : el("judgment-source-repository").value.trim()) ?? "";
+      ?? (this.kind === "local_directory" ? this.directory : this.kind === "local_file" ? this.file : el("judgment-source-repository").value.trim()) ?? "";
     const currentBadge = el("judgment-source-badge-current");
     currentBadge.hidden = !current && !selected;
     currentBadge.dataset.badge = current ? "current" : "selected";
@@ -427,14 +444,17 @@ const judgmentModelSourceController = {
     el("judgment-source-model-support").hidden = !inspection;
     if (inspection) {
       const model = inspection.model;
-      const size = inspection.sourceKind === "local_directory"
+      const size = inspection.sourceKind?.startsWith("local_")
         ? t("settings.models.copySize", "원본에서 {{size}} 복사", { size: bytesLabel(inspection.copyBytes ?? 0) })
         : t("settings.models.downloadSize", "다운로드 {{size}}", { size: bytesLabel(inspection.downloadBytes ?? model.downloadBytes ?? 0) });
       const runtime = keepable ? "" : t("settings.models.runtimeSize", "실행 환경 {{size}}", { size: bytesLabel(inspection.runtimeDownloadBytes ?? 0) });
       el("judgment-source-model-info").textContent = [size, runtime, model.license].filter(Boolean).join(" · ");
       const inputs = managedJudgmentController.inputSupport(this.modelOf(inspection));
-      const support = usable ? t("settings.models.ready", "지원되는 판단 모델 형식입니다. 설치 뒤 실행과 응답을 확인합니다.") : "";
-      el("judgment-source-model-support").textContent = [support, inputs].filter(Boolean).join(" · ");
+      const support = model.engine === "llama_cpp" ? t("settings.gguf.unverified", "사람이 지정한 검증 안 된 모델") : usable ? t("settings.models.ready", "지원되는 판단 모델 형식입니다. 설치 뒤 실행과 응답을 확인합니다.") : "";
+      const template = model.inputTemplate ?? this.libraryModel(inspection)?.inputTemplate;
+      const format = template ? t("settings.gguf.template", "입력 형식: {{template}}", { template }) : "";
+      const preparation = usable && model.engine === "llama_cpp" && (inspection.runtimeDownloadBytes ?? 0) > 0 ? t("settings.gguf.python", "새 실행 환경에는 CPython 압축 25 MB가 포함됩니다. 앱 전용 폴더에 설치하며 전역 Python은 바꾸지 않습니다.") : "";
+      el("judgment-source-model-support").textContent = [support, format, preparation, inputs].filter(Boolean).join(" · ");
       el("judgment-source-model-support").hidden = !support && !inputs;
     }
     const operation = this.flowOperation();
@@ -456,7 +476,7 @@ const judgmentModelSourceController = {
     use.classList.toggle("btn--primary", offered);
     say(use, () => this.keepable(this.inspection) ? t("settings.models.downloadOnly", "파일만 받기")
       : this.runnable(this.inspection) ? t("settings.models.runUse", "실행하고 사용")
-        : this.kind === "local_directory" || this.installed(this.inspection) ? t("settings.models.loadUse", "불러와서 사용")
+        : this.kind.startsWith("local_") || this.installed(this.inspection) ? t("settings.models.loadUse", "불러와서 사용")
           : t("settings.models.downloadUse", "다운로드하고 사용"));
     const cancel = el("judgment-source-cancel");
     cancel.hidden = !this.inspecting && !running;
@@ -475,16 +495,18 @@ const judgmentModelSourceController = {
     const locked = this.locked();
     const snapshot = managedJudgmentController.snapshot;
     const inspection = this.currentInspection();
-    const local = this.kind === "local_directory";
+    const local = this.kind.startsWith("local_");
     el("judgment-source-hub-fields").hidden = local;
     el("judgment-source-local-fields").hidden = !local;
     el("judgment-source-hub").setAttribute("aria-pressed", String(!local));
-    el("judgment-source-local").setAttribute("aria-pressed", String(local));
-    for (const name of ["hub", "local", "jev", "repository", "browse", "change-destination", "default-destination"]) {
+    el("judgment-source-local").setAttribute("aria-pressed", String(this.kind === "local_directory"));
+    el("judgment-source-gguf").setAttribute("aria-pressed", String(this.kind === "local_file"));
+    for (const name of ["hub", "local", "gguf", "jev", "repository", "browse", "change-destination", "default-destination"]) {
       el(`judgment-source-${name}`).disabled = locked;
     }
     el("judgment-source-jev").disabled ||= !judgmentProviderController.state;
-    say(el("judgment-source-directory"), () => this.directory ?? t("settings.models.pickHint", "이미 받은 모델의 폴더를 선택하세요. 원본 파일은 그대로 둡니다."));
+    say(el("judgment-source-directory"), () => this.kind === "local_file" ? this.file ?? t("settings.gguf.pickHint", "GGUF 파일 하나를 고르세요. 원본은 그대로 두고 앱 전용 폴더에 복사합니다.") : this.directory ?? t("settings.models.pickHint", "이미 받은 모델의 폴더를 선택하세요. 원본 파일은 그대로 둡니다."));
+    say(el("judgment-source-browse"), () => this.kind === "local_file" ? t("settings.gguf.pickFile", "GGUF 파일 선택") : t("settings.models.pickFolder", "모델 폴더 선택"));
     el("judgment-source-default-destination").hidden = !this.destination;
     el("judgment-source-change-destination").disabled ||= inspection?.allowsDestinationSelection === false;
     const location = el("judgment-source-destination");

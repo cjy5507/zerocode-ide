@@ -1,8 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-#[cfg(test)]
-use std::path::PathBuf;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::catalog::relative;
@@ -12,6 +10,124 @@ use crate::{Error, Result};
 pub struct Budget {
     bytes: u64,
     entries: u32,
+}
+
+pub(crate) fn native(
+    archive: &Path,
+    root: &Path,
+    runtime: &crate::llama::Runtime,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    runtime.validate()?;
+    plain(archive)?;
+    let mut package = tar::Archive::new(flate2::read::GzDecoder::new(
+        File::open(archive).map_err(|_| Error::Storage)?,
+    ));
+    let target = child(root, "native")?;
+    private_dir(&target)?;
+    let mut budget = Budget {
+        bytes: 256 * 1024 * 1024,
+        entries: 256,
+    };
+    let declared: BTreeMap<_, _> = runtime
+        .files
+        .iter()
+        .map(|artifact| (PathBuf::from(&artifact.path), artifact))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut copied = BTreeSet::new();
+    let mut links = BTreeMap::new();
+    for entry in package.entries().map_err(|_| Error::Integrity)? {
+        if cancel.load(Ordering::Acquire) {
+            return Err(Error::Cancelled);
+        }
+        let mut entry = entry.map_err(|_| Error::Integrity)?;
+        let path = entry.path().map_err(|_| Error::UnsafePath)?.into_owned();
+        let name = path.to_str().ok_or(Error::UnsafePath)?;
+        relative(name)?;
+        if !seen.insert(path.clone()) {
+            return Err(Error::UnsafePath);
+        }
+        let size = entry.size();
+        budget.take(size)?;
+        let kind = entry.header().entry_type();
+        if kind.is_dir() {
+            continue;
+        }
+        if kind.is_symlink() {
+            let link = entry
+                .link_name()
+                .map_err(|_| Error::UnsafePath)?
+                .ok_or(Error::UnsafePath)?;
+            let link = relative(link.to_str().ok_or(Error::UnsafePath)?)?;
+            links.insert(
+                path.clone(),
+                path.parent().ok_or(Error::UnsafePath)?.join(link),
+            );
+        } else if kind.is_file() {
+            if let Some(artifact) = declared.get(&path) {
+                if size != artifact.bytes {
+                    return Err(Error::Integrity);
+                }
+                let destination = child(&target, name)?;
+                copy(&mut entry, &destination, size, cancel)?;
+                set_native_mode(&destination, name)?;
+                copied.insert(path);
+            }
+        } else {
+            return Err(Error::UnsafePath);
+        }
+    }
+    for (path, artifact) in &declared {
+        if copied.contains(path) {
+            continue;
+        }
+        let mut source = path.clone();
+        let mut chain = BTreeSet::new();
+        while let Some(next) = links.get(&source) {
+            if !chain.insert(source.clone()) || chain.len() > 16 {
+                return Err(Error::UnsafePath);
+            }
+            source = next.clone();
+        }
+        if !copied.contains(&source) || !declared.contains_key(&source) {
+            return Err(Error::Integrity);
+        }
+        let source = child(&target, source.to_str().ok_or(Error::UnsafePath)?)?;
+        plain(&source)?;
+        budget.take(artifact.bytes)?;
+        let name = path.to_str().ok_or(Error::UnsafePath)?;
+        let destination = child(&target, name)?;
+        copy(
+            File::open(source).map_err(|_| Error::Storage)?,
+            &destination,
+            artifact.bytes,
+            cancel,
+        )?;
+        set_native_mode(&destination, name)?;
+    }
+    for artifact in &runtime.files {
+        crate::storage::verify(&child(&target, &artifact.path)?, artifact, cancel)?;
+    }
+    Ok(())
+}
+
+fn set_native_mode(path: &Path, name: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if name.ends_with("/LICENSE") {
+            0o600
+        } else {
+            0o700
+        };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|_| Error::Storage)?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, name);
+    Ok(())
 }
 
 impl Budget {

@@ -135,6 +135,301 @@
       ],
       "validatedPlatforms": [],
       "maxRssBytes": 4294967296
+    },
+    {
+      "id": "llama-cpp-cpu",
+      "engine": "llama_cpp",
+      "baseProfiles": [
+        "macos-aarch64"
+      ],
+      "removePackages": [
+        "annotated-doc",
+        "anyio",
+        "click",
+        "filelock",
+        "fsspec",
+        "h11",
+        "hf-xet",
+        "httpcore2",
+        "httpx2",
+        "huggingface-hub",
+        "idna",
+        "jinja2",
+        "laya",
+        "markdown-it-py",
+        "markupsafe",
+        "mdurl",
+        "mpmath",
+        "networkx",
+        "numpy",
+        "packaging",
+        "pygments",
+        "pyyaml",
+        "regex",
+        "rich",
+        "safetensors",
+        "setuptools",
+        "shellingham",
+        "sympy",
+        "tokenizers",
+        "torch",
+        "tqdm",
+        "transformers",
+        "truststore",
+        "typer",
+        "typing-extensions"
+      ],
+      "wheels": [],
+      "platformWheels": {
+        "macos-aarch64": [
+          {
+            "path": "psutil-7.2.2-cp36-abi3-macosx_11_0_arm64.whl",
+            "bytes": 129859,
+            "sha256": "1a7b04c10f32cc88ab39cbf606e117fd74721c831c98a27dc04578deb0c16979",
+            "url": "https://files.pythonhosted.org/packages/80/c4/f5af4c1ca8c1eeb2e92ccca14ce8effdeec651d5ab6053c589b074eda6e1/psutil-7.2.2-cp36-abi3-macosx_11_0_arm64.whl",
+            "package": "psutil",
+            "version": "7.2.2",
+            "license": "BSD-3-Clause"
+          }
+        ]
+      },
+      "runtimeFiles": [],
+      "validatedPlatforms": [],
+      "maxRssBytes": 4294967296,
+      "native": {
+        "archive": {
+          "path": "llama-runtime.tar.gz",
+          "bytes": 12191582,
+          "sha256": "dbed55493d72bc1ba2babc8770d669c2289b5bc4ee9fb2a4dfc158d45b7d13fd",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz",
+          "license": "MIT"
+        },
+        "executable": "llama-b11669/llama-server",
+        "files": [
+          {
+            "path": "llama-b11669/LICENSE",
+            "bytes": 1078,
+            "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-base.0.27.0.dylib",
+            "bytes": 751240,
+            "sha256": "35851d2f742b8bdda2ea9707ae4f9b8a8970d38b387ccdeb09fce518c64fda54",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-base.0.dylib",
+            "bytes": 751240,
+            "sha256": "35851d2f742b8bdda2ea9707ae4f9b8a8970d38b387ccdeb09fce518c64fda54",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-base.dylib",
+            "bytes": 751240,
+            "sha256": "35851d2f742b8bdda2ea9707ae4f9b8a8970d38b387ccdeb09fce518c64fda54",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-blas.0.27.0.dylib",
+            "bytes": 58776,
+            "sha256": "12aefdc8dd4873d69554dc85a0dd09fffef9828e1fc9ecf6b48913ef2106b33a",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-blas.0.dylib",
+            "bytes": 58776,
+            "sha256": "12aefdc8dd4873d69554dc85a0dd09fffef9828e1fc9ecf6b48913ef2106b33a",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-blas.dylib",
+            "bytes": 58776,
+            "sha256": "12aefdc8dd4873d69554dc85a0dd09fffef9828e1fc9ecf6b48913ef2106b33a",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-cpu.0.27.0.dylib",
+            "bytes": 957408,
+            "sha256": "f29b0322166bc9ea2a1f2482f9cd034959013228831f5bfd06aa770b75dd4d12",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-cpu.0.dylib",
+            "bytes": 957408,
+            "sha256": "f29b0322166bc9ea2a1f2482f9cd034959013228831f5bfd06aa770b75dd4d12",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-cpu.dylib",
+            "bytes": 957408,
+            "sha256": "f29b0322166bc9ea2a1f2482f9cd034959013228831f5bfd06aa770b75dd4d12",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-metal.0.27.0.dylib",
+            "bytes": 5587704,
+            "sha256": "448d7eafb7906c4bbd445cac28fad15ae9311b4315461283742a2fb1af2a5653",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-metal.0.dylib",
+            "bytes": 5587704,
+            "sha256": "448d7eafb7906c4bbd445cac28fad15ae9311b4315461283742a2fb1af2a5653",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-metal.dylib",
+            "bytes": 5587704,
+            "sha256": "448d7eafb7906c4bbd445cac28fad15ae9311b4315461283742a2fb1af2a5653",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-rpc.0.27.0.dylib",
+            "bytes": 242800,
+            "sha256": "547ac08b705a96e82ddb9fcfc2529472f97f5da1957984b3a7652cd5875d452d",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-rpc.0.dylib",
+            "bytes": 242800,
+            "sha256": "547ac08b705a96e82ddb9fcfc2529472f97f5da1957984b3a7652cd5875d452d",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml-rpc.dylib",
+            "bytes": 242800,
+            "sha256": "547ac08b705a96e82ddb9fcfc2529472f97f5da1957984b3a7652cd5875d452d",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml.0.27.0.dylib",
+            "bytes": 60016,
+            "sha256": "a97bc40525aea78834fdf28197b5b21f149b6d5ac2d3b615b95b86f775a69477",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml.0.dylib",
+            "bytes": 60016,
+            "sha256": "a97bc40525aea78834fdf28197b5b21f149b6d5ac2d3b615b95b86f775a69477",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libggml.dylib",
+            "bytes": 60016,
+            "sha256": "a97bc40525aea78834fdf28197b5b21f149b6d5ac2d3b615b95b86f775a69477",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-batched-bench-impl.dylib",
+            "bytes": 56576,
+            "sha256": "55883543101b508dd945509c55860f7badd4286d669283e13afdfc2f54dbf623",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-bench-impl.dylib",
+            "bytes": 323016,
+            "sha256": "698a7614525fae1a2d854bf4dba05f23d127b9916d156694775467904fac647d",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-cli-impl.dylib",
+            "bytes": 237864,
+            "sha256": "e9abe35a81bd5346fcd53160c25836447b8d7b566cf8673aee661b4e7a278bf6",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-common.0.7.0.dylib",
+            "bytes": 7785704,
+            "sha256": "725c24d32d0abd5fd6d2baf589d5294bfea90c072ed4db99cb62fe88d4ed7f42",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-common.0.dylib",
+            "bytes": 7785704,
+            "sha256": "725c24d32d0abd5fd6d2baf589d5294bfea90c072ed4db99cb62fe88d4ed7f42",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-common.dylib",
+            "bytes": 7785704,
+            "sha256": "725c24d32d0abd5fd6d2baf589d5294bfea90c072ed4db99cb62fe88d4ed7f42",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-completion-impl.dylib",
+            "bytes": 121744,
+            "sha256": "49f60dda87db4094b98141a5c7adc4321400ee957a12736765176cdca275eabb",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-fit-params-impl.dylib",
+            "bytes": 55264,
+            "sha256": "14b8f4a2858391b0f576a8fc5439fb6b9aa69eb36c82e9bfcdb28fd0df23a3ac",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-perplexity-impl.dylib",
+            "bytes": 156384,
+            "sha256": "743af2c79af7d04bfc4676ff0587a339a3792e2452041db84f44d050e8e6de92",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-quantize-impl.dylib",
+            "bytes": 96496,
+            "sha256": "582dadbf515289d7a5dd5aa27be5fdcbe58cad0a2eb4eaa72a15087ad9d26864",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama-server-impl.dylib",
+            "bytes": 9250520,
+            "sha256": "f1fb36acea8df4eefd90aafe30af16a1a87d7f8b45da3576a3d64100cf18a435",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama.0.7.0.dylib",
+            "bytes": 3506144,
+            "sha256": "7d461aace0a3ace6d5733bde2ec2d03b54f00ef620a6f3bbedb735eb1cbb5035",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama.0.dylib",
+            "bytes": 3506144,
+            "sha256": "7d461aace0a3ace6d5733bde2ec2d03b54f00ef620a6f3bbedb735eb1cbb5035",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libllama.dylib",
+            "bytes": 3506144,
+            "sha256": "7d461aace0a3ace6d5733bde2ec2d03b54f00ef620a6f3bbedb735eb1cbb5035",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libmtmd.0.7.0.dylib",
+            "bytes": 1419856,
+            "sha256": "b59316a5d3ad780edfe98df05bf4a3f24fd17eb9cc4d5c53324d5ef6882465b2",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libmtmd.0.dylib",
+            "bytes": 1419856,
+            "sha256": "b59316a5d3ad780edfe98df05bf4a3f24fd17eb9cc4d5c53324d5ef6882465b2",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/libmtmd.dylib",
+            "bytes": 1419856,
+            "sha256": "b59316a5d3ad780edfe98df05bf4a3f24fd17eb9cc4d5c53324d5ef6882465b2",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          },
+          {
+            "path": "llama-b11669/llama-server",
+            "bytes": 49984,
+            "sha256": "981b460a278e9a0c880cef32d6fab42785a119084456b16845304cf38c32cf69",
+            "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11669/llama-b11669-bin-macos-arm64.tar.gz"
+          }
+        ]
+      }
     }
   ]
 }

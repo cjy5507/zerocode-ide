@@ -44,6 +44,13 @@ struct Receipt {
     fingerprint: String,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeMetadata {
+    fingerprint: String,
+    input_template: String,
+}
+
 fn io<T>(result: std::io::Result<T>) -> Result<T> {
     result.map_err(|_| Error::Storage)
 }
@@ -324,7 +331,52 @@ impl Store {
         self.runtime_path(profile).is_ok_and(|path| {
             valid_receipt(&path, profile.fingerprint())
                 && child(&path, &profile.executable).is_ok_and(|executable| executable.is_file())
+                && profile.native.as_ref().is_none_or(|native| {
+                    native.files.iter().all(|artifact| {
+                        native.file_path(&path, &artifact.path).is_ok_and(|file| {
+                            fs::metadata(file)
+                                .is_ok_and(|info| info.is_file() && info.len() == artifact.bytes)
+                        })
+                    })
+                })
         })
+    }
+
+    pub fn model_template(&self, model: &Model) -> Option<String> {
+        if model.engine != crate::catalog::EngineKind::LlamaCpp {
+            return None;
+        }
+        let directory = self.model_path(model).ok()?;
+        if !valid_receipt(&directory, model.fingerprint()) {
+            return None;
+        }
+        let file = child(&directory, "native-facts.json").ok()?;
+        let metadata: NativeMetadata =
+            serde_json::from_slice(&bounded_read(&file, 4096).ok()?).ok()?;
+        if metadata.fingerprint != model.fingerprint().ok()?
+            || crate::gguf::builtin_template(&metadata.input_template)
+                != Some(metadata.input_template.as_str())
+        {
+            return None;
+        }
+        Some(metadata.input_template)
+    }
+
+    pub fn prepare_model_metadata(
+        directory: &Path,
+        model: &Model,
+        cancel: &AtomicBool,
+    ) -> Result<()> {
+        if model.engine == crate::catalog::EngineKind::LlamaCpp {
+            let (_, _, template) = crate::llama::model_info_with_cancel(directory, model, cancel)?;
+            let metadata = NativeMetadata {
+                fingerprint: model.fingerprint()?,
+                input_template: template.to_owned(),
+            };
+            let bytes = serde_json::to_vec(&metadata).map_err(|_| Error::Storage)?;
+            write_new(&child(directory, "native-facts.json")?, &bytes)?;
+        }
+        Ok(())
     }
 
     pub fn commit_model(&self, stage: &mut Stage, model: &Model) -> Result<()> {

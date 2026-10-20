@@ -168,6 +168,7 @@ const judgmentProviderController = {
   },
 
   providerName(provider) {
+    if (provider.kind === "local" && provider.protocol === "openai_json") return t("settings.gguf.unverified", "사람이 지정한 검증 안 된 모델");
     if (provider.kind === "local") return t("settings.judgment.local", "로컬 판단 모델");
     if (provider.kind === "remote") return t("settings.judgment.remote", "다른 판단 서버");
     return "Jev · TypeSafe";
@@ -203,6 +204,7 @@ const judgmentProviderController = {
     el("judgment-provider-kind")?.addEventListener("change", () => this.changeKind());
     for (const mode of ["managed", "manual"]) {
       el(`judgment-local-${mode}`)?.addEventListener("click", () => {
+        if (mode === "manual" && this.draft?.protocol === "openai_json") this.reset({ kind: "local", protocol: "system_one", baseUrl: "", model: "", requiresAuth: false });
         this.localMode = mode;
         this.render();
       });
@@ -261,6 +263,7 @@ const judgmentProviderController = {
     const previous = this.draft?.kind === kind ? this.draft : this.drafts.get(kind);
     const provider = previous ? this.copy(previous)
       : { kind, protocol: "system_one", baseUrl: "", model: "", requiresAuth: kind === "remote" };
+    if (provider.protocol !== "system_one") { provider.protocol = "system_one"; provider.baseUrl = ""; provider.requiresAuth = kind === "remote"; }
     provider.model = modelId;
     el("judgment-connection-settings").open = true;
     this.localMode = "manual";

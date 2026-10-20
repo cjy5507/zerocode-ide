@@ -13,6 +13,7 @@ use std::time::Duration;
 use super::*;
 
 mod latest_request;
+mod openai_json;
 mod providers;
 
 /// The version a fake endpoint's answers name as the one that answered: what

@@ -6681,6 +6681,15 @@ const CATALOG = {
     "zoom.reset": "Actual Size",
     "zoom.editor": "Editor Zoom",
     "zoom.terminal": "Terminal Zoom",
+
+    /* GGUF import. */
+    "settings.gguf.fromFile": "Load a GGUF file",
+    "settings.gguf.sourceHint": "Choose one GGUF file or paste a specific .gguf file URL from Hugging Face. Code shipped with a model is not executed.",
+    "settings.gguf.pickHint": "Choose one GGUF file. The original is preserved and copied into app-owned storage.",
+    "settings.gguf.pickFile": "Choose a GGUF file",
+    "settings.gguf.unverified": "Unverified model selected by you",
+    "settings.gguf.template": "Input format: {{template}}",
+    "settings.gguf.python": "The new runtime includes a 25 MB CPython archive. It is installed in app-owned storage and leaves global Python unchanged.",
   },
   ja: {
     "secret.title.password": "パスワードを入力してください",
@@ -13001,6 +13010,15 @@ const CATALOG = {
     "zoom.reset": "実際のサイズ",
     "zoom.editor": "エディタズーム",
     "zoom.terminal": "ターミナルズーム",
+
+    /* GGUF import. */
+    "settings.gguf.fromFile": "GGUF ファイルを読み込む",
+    "settings.gguf.sourceHint": "GGUF ファイルを一つ選ぶか、Hugging Face の特定の .gguf ファイルの URL を貼り付けてください。モデルに付属するコードは実行しません。",
+    "settings.gguf.pickHint": "GGUF ファイルを一つ選んでください。元のファイルを保持し、アプリ専用フォルダーにコピーします。",
+    "settings.gguf.pickFile": "GGUF ファイルを選択",
+    "settings.gguf.unverified": "ユーザーが指定した未検証モデル",
+    "settings.gguf.template": "入力形式: {{template}}",
+    "settings.gguf.python": "新しい実行環境には 25 MB の CPython アーカイブが含まれます。アプリ専用フォルダーにインストールし、グローバルの Python は変更しません。",
   },
   zh: {
     "secret.title.password": "请输入密码",
@@ -19320,6 +19338,15 @@ const CATALOG = {
     "zoom.reset": "实际大小",
     "zoom.editor": "编辑器缩放",
     "zoom.terminal": "终端缩放",
+
+    /* GGUF import. */
+    "settings.gguf.fromFile": "加载 GGUF 文件",
+    "settings.gguf.sourceHint": "选择一个 GGUF 文件，或粘贴 Hugging Face 中具体 .gguf 文件的地址。不会执行模型附带的代码。",
+    "settings.gguf.pickHint": "请选择一个 GGUF 文件。保留原始文件，并复制到应用专用文件夹。",
+    "settings.gguf.pickFile": "选择 GGUF 文件",
+    "settings.gguf.unverified": "用户指定的未经验证的模型",
+    "settings.gguf.template": "输入格式：{{template}}",
+    "settings.gguf.python": "新的运行环境包含 25 MB 的 CPython 压缩包。安装到应用专用文件夹，不更改全局 Python。",
   },
   es: {
     "secret.title.password": "Escribe la contraseña",
@@ -25647,6 +25674,15 @@ const CATALOG = {
     "zoom.reset": "Tamaño real",
     "zoom.editor": "Zoom del editor",
     "zoom.terminal": "Zoom del terminal",
+
+    /* GGUF import. */
+    "settings.gguf.fromFile": "Cargar un archivo GGUF",
+    "settings.gguf.sourceHint": "Elija un archivo GGUF o pegue la URL de un archivo .gguf concreto de Hugging Face. No se ejecuta el código incluido con un modelo.",
+    "settings.gguf.pickHint": "Elija un archivo GGUF. Se conserva el original y se copia en la carpeta de la aplicación.",
+    "settings.gguf.pickFile": "Elegir un archivo GGUF",
+    "settings.gguf.unverified": "Modelo sin verificar elegido por el usuario",
+    "settings.gguf.template": "Formato de entrada: {{template}}",
+    "settings.gguf.python": "El entorno incluye un archivo CPython de 25 MB. Se instala en la carpeta de la aplicación y no cambia Python global.",
   },
 };
 

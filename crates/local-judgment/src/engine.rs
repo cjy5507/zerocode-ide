@@ -162,6 +162,7 @@ fn deadline_usage(bytes: &[u8]) -> Value {
 
 pub struct Engine {
     child: Mutex<Child>,
+    owns_group: bool,
     io: Mutex<Pipe>,
     exited: AtomicBool,
     told: AtomicBool,
@@ -279,6 +280,17 @@ impl Engine {
             crate::storage::verify(&path, artifact, &AtomicBool::new(false))?;
         }
         let fingerprint = profile.fingerprint()?;
+        let native_initial = if profile.engine == EngineKind::LlamaCpp {
+            Some(
+                profile
+                    .native
+                    .as_ref()
+                    .ok_or(Error::Manifest)?
+                    .initial(runtime, model)?,
+            )
+        } else {
+            None
+        };
         let executable = child(runtime, &profile.executable)?;
         let cache = child(runtime, "cache")?;
         crate::storage::private_dir(&cache)?;
@@ -318,12 +330,18 @@ impl Engine {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000);
         }
+        let owns_group = cfg!(target_os = "macos") && profile.engine == EngineKind::LlamaCpp;
+        #[cfg(target_os = "macos")]
+        if owns_group {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let process = command.spawn().map_err(|_| Error::RuntimeFailed)?;
         let started = model.map(|(_, model)| Started {
             model: model.id.clone(),
             runtime: fingerprint.clone(),
         });
-        let engine = Self::from_child(process, started)?;
+        let engine = Self::from_child(process, started, owns_group)?;
         let packages: serde_json::Map<String, Value> = profile
             .wheels
             .iter()
@@ -332,6 +350,12 @@ impl Engine {
         let mut initial = json!({"engine":profile.engine,"mode":"verify","packages":packages});
         initial["measure_deadlines"] = json!(true);
         initial["rssLimitBytes"] = json!(profile.max_rss_bytes);
+        if let Some(native) = native_initial {
+            initial
+                .as_object_mut()
+                .ok_or(Error::Manifest)?
+                .extend(native.as_object().ok_or(Error::Manifest)?.clone());
+        }
         if profile.engine == EngineKind::TransformersSystemOne {
             let template = profile
                 .runtime_files
@@ -357,7 +381,11 @@ impl Engine {
         Ok(engine)
     }
 
-    fn from_child(mut process: Child, started: Option<Started>) -> Result<Arc<Self>> {
+    fn from_child(
+        mut process: Child,
+        started: Option<Started>,
+        owns_group: bool,
+    ) -> Result<Arc<Self>> {
         let Some(input) = process.stdin.take() else {
             let _ = process.kill();
             let _ = process.wait();
@@ -372,6 +400,7 @@ impl Engine {
         let (sender, receiver) = sync_channel(2);
         let engine = Arc::new(Self {
             child: Mutex::new(process),
+            owns_group,
             io: Mutex::new(Pipe {
                 input,
                 output: receiver,
@@ -548,7 +577,7 @@ impl Engine {
         let mut child = lock(&self.child);
         if child.try_wait().is_ok_and(|status| status.is_none()) {
             lock(&self.stopped).get_or_insert(stop);
-            let _ = child.kill();
+            kill_owned(&mut child, self.owns_group);
         }
         let _ = child.wait();
     }
@@ -582,6 +611,11 @@ impl Engine {
 
     #[cfg(all(test, unix))]
     pub(crate) fn from_command(command: &mut Command) -> Arc<Self> {
+        Self::from_command_kind(command, false)
+    }
+
+    #[cfg(all(test, unix))]
+    fn from_command_kind(command: &mut Command, owns_group: bool) -> Arc<Self> {
         // std on macOS marks a new pipe close-on-exec only after making it, so a
         // fixture spawned beside another could keep that one's pipe open.
         static SPAWNING: Mutex<()> = Mutex::new(());
@@ -594,8 +628,31 @@ impl Engine {
                 .spawn()
                 .unwrap()
         };
-        Self::from_child(child, None).unwrap()
+        Self::from_child(child, None, owns_group).unwrap()
     }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn from_native_command(command: &mut Command) -> Arc<Self> {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        Self::from_command_kind(command, true)
+    }
+}
+
+fn kill_owned(child: &mut Child, owns_group: bool) {
+    #[cfg(target_os = "macos")]
+    if owns_group && let Ok(pid) = i32::try_from(child.id()) {
+        // The caller holds the live Child. Only the group created for this
+        // supervisor may include the native subprocess it must retire.
+        unsafe {
+            if libc::getpgid(pid) == pid {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = owns_group;
+    let _ = child.kill();
 }
 
 /// The code or the signal a process ended with.
@@ -914,11 +971,15 @@ async fn predict(State(state): State<HttpState>, headers: HeaderMap, body: Bytes
     {
         return failure(StatusCode::PAYLOAD_TOO_LARGE, Error::TooLarge);
     }
-    request["model"] = json!(state.provider.identity());
-    let prepared = match serde_json::to_vec(&request)
-        .ok()
-        .and_then(|bytes| state.provider.prepare(bytes).ok())
-    {
+    let prepared = match match state.provider.protocol {
+        Protocol::SystemOne => {
+            request["model"] = json!(state.provider.identity());
+            serde_json::to_vec(&request)
+                .ok()
+                .and_then(|bytes| state.provider.prepare(bytes).ok())
+        }
+        Protocol::OpenaiJson => state.provider.prepare_served(body.to_vec()).ok(),
+    } {
         Some(prepared) => prepared,
         None => return failure(StatusCode::BAD_REQUEST, Error::Protocol),
     };
@@ -1146,7 +1207,7 @@ async fn serve_with(
         exited();
     }));
     match model.engine {
-        EngineKind::Laya | EngineKind::TransformersSystemOne => {}
+        EngineKind::Laya | EngineKind::TransformersSystemOne | EngineKind::LlamaCpp => {}
         EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
     }
     let listener = match listener {
@@ -1179,7 +1240,7 @@ async fn serve_with(
         .port();
     let provider = Provider {
         kind: ProviderKind::Local,
-        protocol: Protocol::SystemOne,
+        protocol: model.protocol,
         base_url: format!("http://127.0.0.1:{port}"),
         model: model.id.clone(),
         requires_auth: false,
@@ -1200,9 +1261,13 @@ async fn serve_with(
         failed,
         declared,
     };
+    let route = match provider.protocol {
+        Protocol::SystemOne => "/v1/systemone",
+        Protocol::OpenaiJson => "/v1/chat/completions",
+    };
     let router = axum::Router::new()
         .route("/v1/models", get(models))
-        .route("/v1/systemone", post(predict))
+        .route(route, post(predict))
         .layer(DefaultBodyLimit::max(MAX_FRAME))
         .with_state(state);
     let task = tokio::spawn(async move {

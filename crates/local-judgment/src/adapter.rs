@@ -29,6 +29,15 @@ pub fn data_profile<'profile>(
                 return Err(Error::ModelFormatUnsupported);
             }
         }
+        EngineKind::LlamaCpp => {
+            if model.native_format.as_deref() != Some("gguf-v3")
+                || model.protocol != judgment_provider::Protocol::OpenaiJson
+                || model.files.len() != 1
+                || !model.files[0].path.to_ascii_lowercase().ends_with(".gguf")
+            {
+                return Err(Error::ModelFormatUnsupported);
+            }
+        }
         EngineKind::SystemOneServer => return Err(Error::EngineUnsupported),
     }
     if model.files.is_empty() {
@@ -71,6 +80,9 @@ pub fn verify_model(directory: &Path, model: &Model, cancel: &AtomicBool) -> Res
                 }
             }
         }
+    }
+    if model.engine == EngineKind::LlamaCpp {
+        crate::llama::model_info_with_cancel(directory, model, cancel)?;
     }
     Ok(())
 }
