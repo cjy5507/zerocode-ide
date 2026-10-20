@@ -6983,6 +6983,12 @@ pub(super) fn browser_refused(stderr: impl Into<String>) -> zerocode_hookd::Team
     }
 }
 
+/// RED scaffold (t-66200): the base answers every door refusal as its line.
+pub(super) fn door_refused(argv: &[String], error: &str) -> zerocode_hookd::TeamAnswer {
+    let _ = argv;
+    browser_refused(format!("zerocode-browser: {error}\n"))
+}
+
 /// A read's words — the page's title and address, then its text, then a
 /// selector read's reduced DOM. The one formatter both read roads print
 /// through, inside the read arm's one fence: the plain read's and the read

@@ -42,6 +42,16 @@ pub const WORKSPACE_REVISION_KEY: &str = "workspaceRevision";
 /// A backend line outside the page's untrusted-content fence.
 pub const WORKSPACE_REVISION_LINE: &str = "workspaceRevision: ";
 
+/// The word of a work browser that refuses its agent while the tab is out of
+/// the agent's hands (t-66200), said with who lifts the pause: a text answer
+/// carries `workspace_paused[resume=<word>]: …`, a `--json` one the word in
+/// `error.resume`.
+pub const WORKSPACE_PAUSED: &str = "workspace_paused";
+/// The agent's own fresh look lifts the pause.
+pub const RESUME_OBSERVE: &str = "observe";
+/// Only the person lifts it.
+pub const RESUME_PERSON: &str = "person";
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct WorkspaceCommand {
     pub argv: Vec<String>,
@@ -120,6 +130,14 @@ pub fn observes(verb: &str) -> bool {
 #[must_use]
 pub fn reads_history(verb: &str) -> bool {
     matches!(verb, "console" | "network" | "diagnose")
+}
+
+/// Whether a verb sends its tab a navigation the window must see settle
+/// before the tab changes hands (t-66200): a work browser's pause after one
+/// of unknown outcome is the person's to lift.
+#[must_use]
+pub fn navigates(verb: &str) -> bool {
+    matches!(verb, "goto")
 }
 
 /// Bind a selected action to an already completed observation. Missing

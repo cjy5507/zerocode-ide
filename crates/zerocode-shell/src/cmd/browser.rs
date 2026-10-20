@@ -339,18 +339,28 @@ impl From<BrowserRefusal> for String {
     }
 }
 
-pub(crate) async fn send_after_checks<C, P, T, F, Fut>(
+/// A send's failure said only in words may have come after the page was sent
+/// something: it is `Sent`. Only a refusal that names itself `Unsent` keeps
+/// the tab in its agent's hands (t-66200).
+impl From<String> for BrowserRefusal {
+    fn from(why: String) -> Self {
+        Self::Sent(why)
+    }
+}
+
+pub(crate) async fn send_after_checks<C, P, T, E, F, Fut>(
     checked: Result<C, String>,
     pane: impl FnOnce() -> Result<P, String>,
     send: F,
 ) -> Result<T, BrowserRefusal>
 where
     F: FnOnce(C, P) -> Fut,
-    Fut: std::future::Future<Output = Result<T, String>>,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: Into<BrowserRefusal>,
 {
     let checked = checked.map_err(BrowserRefusal::Unsent)?;
     let pane = pane().map_err(BrowserRefusal::Unsent)?;
-    send(checked, pane).await.map_err(BrowserRefusal::Sent)
+    send(checked, pane).await.map_err(Into::into)
 }
 
 pub(crate) const NAVIGATION_SUPERSEDED: &str =
@@ -892,6 +902,34 @@ pub(crate) fn page_value(reply: serde_json::Value) -> Result<serde_json::Value, 
         .unwrap_or(serde_json::Value::Null))
 }
 
+/// The codes an input script answers before it sends the page any event
+/// (t-66200): a selector or a frame it cannot use, a control hidden,
+/// covered, disabled or not one to write in, a text too long for it, a look
+/// the page has moved on from. Every body that answers one returns it before
+/// its first event — a source contract holds `CLICK_BODY`, `TYPE_BODY` and
+/// `BROWSER_SCROLL_BODY` to that; any other failure (the script's own throw,
+/// an option missing after the focus, an input the page cancelled) may come
+/// after an event the page already heard.
+pub(crate) const UNSENT_PAGE_CODES: [&str; 12] = [
+    "invalid_selector",
+    "selector_not_found",
+    "element_not_visible",
+    "element_obscured",
+    "element_disabled",
+    "element_read_only",
+    "element_not_editable",
+    "text_too_long",
+    "frame_sealed",
+    "form_stale",
+    "document_replaced",
+    "value_changed",
+];
+
+/// RED scaffold (t-66200): the base calls every page refusal `Sent`.
+pub(crate) fn input_value(reply: serde_json::Value) -> Result<serde_json::Value, BrowserRefusal> {
+    page_value(reply).map_err(BrowserRefusal::Sent)
+}
+
 pub(crate) fn input_report(
     value: serde_json::Value,
     expected: &[&str],
@@ -963,7 +1001,7 @@ pub(crate) fn input_report(
 pub(crate) fn typed_report(
     value: serde_json::Value,
     road: TypeRoad,
-) -> Result<BrowserInputReport, String> {
+) -> Result<BrowserInputReport, BrowserRefusal> {
     use zerocode_core::computer_use_protocol::validate::{
         SecretEntryFacts, SecretEntryVerdict, secret_entry,
     };
@@ -980,13 +1018,14 @@ pub(crate) fn typed_report(
             secure_input_by_receiver: false,
             focus_read: true,
         });
+        // RED scaffold (t-66200): the base calls the held keys `Sent`.
         if verdict == SecretEntryVerdict::PersonsEntry {
-            return Err(page_failure(
+            return Err(BrowserRefusal::Sent(page_failure(
                 &serde_json::json!({ "code": verdict.as_str() }),
-            ));
+            )));
         }
     }
-    input_report(value, road.methods())
+    input_report(value, road.methods()).map_err(BrowserRefusal::Sent)
 }
 
 pub(crate) fn checked_selector(selector: &str) -> Result<(), String> {
