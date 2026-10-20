@@ -1212,7 +1212,7 @@ fn busy(label: &str) -> String {
 
 fn actor_required() -> String {
     format!(
-        "workspace_actor_required: 현재 창이 보유한 에이전트 판이 필요합니다 — 이 창이 띄운 에이전트 판에서 {BROWSER_CLI}를 실행하세요"
+        "workspace_actor_required: 현재 창이 보유한 에이전트 판이 필요합니다 — 이 창이 띄운 에이전트 판에서 {BROWSER_CLI} 명령을 다시 보내세요"
     )
 }
 
