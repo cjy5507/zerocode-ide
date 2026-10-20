@@ -775,13 +775,25 @@ fn target_of(input: &ComputerInput) -> Option<ComputerTarget> {
     input.app.as_ref().map(|app| ComputerTarget { app: app.clone(), window_id: input.window_id })
 }
 
+/// Where an answer names the one window it is of, within its result or at
+/// its top: the window's `id`, and its `title` — the document it shows.
+const ANSWER_ROOTS: &[&str] = &["/result/", "/"];
+const WINDOW_OBJECTS: &[&str] = &["snapshot/window", "tree/window", "window"];
+
+fn window_pointers(field: &'static str) -> impl Iterator<Item = String> {
+    ANSWER_ROOTS.iter().flat_map(move |root| WINDOW_OBJECTS.iter().map(move |object| format!("{root}{object}/{field}")))
+}
+
+/// The title of the window an answer is of: the document it shows.
+fn window_title(answer: &Value) -> Option<String> {
+    window_pointers("title").find_map(|pointer| answer.pointer(&pointer)?.as_str().map(str::to_string))
+}
+
 fn checked_window(answer: &Value, expected: Option<u64>) -> Result<Option<u64>, ToolError> {
     let mut found = None;
-    for pointer in [
-        "/result/action/targetWindowId", "/result/snapshot/window/id", "/result/tree/window/id", "/result/window/id",
-        "/action/targetWindowId", "/snapshot/window/id", "/tree/window/id", "/window/id",
-    ] {
-        if let Some(window_id) = answer.pointer(pointer).and_then(Value::as_u64).filter(|window_id| *window_id > 0) {
+    let acted_on = ANSWER_ROOTS.iter().map(|root| format!("{root}action/targetWindowId"));
+    for pointer in acted_on.chain(window_pointers("id")) {
+        if let Some(window_id) = answer.pointer(&pointer).and_then(Value::as_u64).filter(|window_id| *window_id > 0) {
             if expected.is_some_and(|expected| expected != window_id) || found.is_some_and(|found| found != window_id) {
                 return Err(ToolError::Execution("window_scope_mismatch: the selected window did not answer; its contents were not returned".into()));
             }
@@ -1457,6 +1469,7 @@ fn present_observation(
         window_id,
         frame,
         marked_look: answer.pointer(&format!("/result/marks/{LOOK_ID_KEY}")).and_then(Value::as_str).map(str::to_string),
+        title: window_title(answer),
     });
     let unchanged = diff && answer.pointer("/result/changed").and_then(Value::as_array).is_some_and(Vec::is_empty);
     if unchanged && observation.as_ref().is_some_and(|seen| ctx.has_computer_observation(seen)) {
@@ -2146,8 +2159,11 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
         argv = as_viewer(argv, ctx);
     }
     let mut answer = call_shim(road, &argv, ctx.cwd.as_deref())?;
+    let mut repicked = None;
     if let Some(refused) = refusal(&answer) {
-        return Err(refused.into());
+        let (pressed, picked) = repick(&input, refused, ctx, road)?;
+        answer = pressed;
+        repicked = Some(picked);
     }
     if action == LIST_WINDOWS_ACTION {
         if let Some(app) = input.app.as_deref() {
@@ -2194,15 +2210,96 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
         Some(after) => Some(after.clone()),
         None => surface,
     };
-    let text = to_pretty_json(json!({
+    let mut said = json!({
         "ok": true,
         "action": action,
         "result": result,
         "screenshot": staged,
         "first_look": first_look,
         "looked_after": looked_after.map(|look| look.value),
-    }))?;
+    });
+    if let Some(picked) = repicked {
+        said["repicked"] = picked;
+    }
+    let text = to_pretty_json(said)?;
     Ok(ToolExecutionResult { text, surface })
+}
+
+/// A lone click by reading that the window refused `element_not_found` —
+/// no control read its words, refused before any input, since the helper
+/// chooses the control before it presses — on a page that moved on (t-66760
+/// b1): the same window is read again for the same words and, while it shows
+/// the document the model's last look at it showed, the one control that
+/// reads them is pressed once, by its index on that read. No look at the
+/// window, another document, no control or several: the refusal stands, with
+/// the candidates named when there are several. One read, one press — never
+/// a loop.
+fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &ComputerRoad) -> Result<(Value, Value), ToolError> {
+    let reading = (input.label.is_some() || input.role.is_some()) && input.ocr != Some(true);
+    let (Some(app), Some(window_id)) = (input.app.as_deref(), input.window_id) else {
+        return Err(refused.into());
+    };
+    if !reading || input.action.trim() != ELEMENT_CLICK || refused.code != error_code::ELEMENT_NOT_FOUND {
+        return Err(refused.into());
+    }
+    let Some(looked_at) = ctx.computer_window_title(window_id) else {
+        return Err(refused.into());
+    };
+    let read = ComputerInput {
+        action: "find".into(),
+        app: Some(app.to_string()),
+        window_id: Some(window_id),
+        label: input.label.clone(),
+        role: input.role.clone(),
+        background: input.background,
+        ..ComputerInput::default()
+    };
+    let Some(found) = argv_for(&read)
+        .ok()
+        .and_then(|argv| call_shim(road, &argv, ctx.cwd.as_deref()).ok())
+        .filter(|found| refusal(found).is_none() && checked_window(found, Some(window_id)).is_ok())
+    else {
+        return Err(refused.into());
+    };
+    if window_title(&found).as_deref() != Some(looked_at.as_str()) {
+        let message = format!("{}; the window's document changed since your last look at it, so no other control was chosen — observe it again", refused.message);
+        return Err(Refusal { message, ..refused }.into());
+    }
+    let matches = found.pointer("/result/matches").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let more = found.pointer("/result/truncated") == Some(&Value::Bool(true));
+    let only = match matches {
+        [only] if !more => only,
+        [] => return Err(refused.into()),
+        several => {
+            let named = several.iter().map(candidate).collect::<Vec<_>>().join("; ");
+            let message = format!(
+                "{}; {}{} controls read these words in the window now: {named} — add role or label, or press one by element_index",
+                refused.message,
+                several.len(),
+                if more { " or more" } else { "" }
+            );
+            return Err(Refusal { message, ..refused }.into());
+        }
+    };
+    let Some(index) = only.get("index").and_then(Value::as_u64) else {
+        return Err(refused.into());
+    };
+    let press = ComputerInput { element_index: Some(index), label: None, role: None, ..input.clone() };
+    let pressed = call_shim(road, &argv_for(&press)?, ctx.cwd.as_deref())?;
+    if let Some(refused) = refusal(&pressed) {
+        return Err(refused.into());
+    }
+    Ok((pressed, json!({ "label": only.get("label"), "role": only.get("role"), "element_index": index })))
+}
+
+/// A control a read found, as a refusal names it: `12 AXButton «Save»`.
+fn candidate(found: &Value) -> String {
+    let index = found.get("index").map_or_else(|| "?".to_string(), Value::to_string);
+    let role = found.get("role").and_then(Value::as_str).unwrap_or("?");
+    let reads = ["label", "value", "description"]
+        .into_iter()
+        .find_map(|key| found.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty()));
+    reads.map_or_else(|| format!("{index} {role}"), |reads| format!("{index} {role} «{reads}»"))
 }
 
 #[cfg(test)]
@@ -2306,6 +2403,7 @@ pub(crate) mod tests {
                 window_id: case["input"]["window_id"].as_u64(),
                 frame: ShotFrame::UNIT,
                 marked_look: None,
+                title: None,
             }));
             std::fs::write(dir.path().join("wait-for"), json!({"ok":true,"result":case["result"]}).to_string()).unwrap();
             let response = run_computer(&case["input"], &ctx, &road).unwrap();
@@ -2334,6 +2432,7 @@ pub(crate) mod tests {
                 window_id: case["input"]["window_id"].as_u64(),
                 frame: ShotFrame::UNIT,
                 marked_look: None,
+                title: None,
             }));
             let mut wait = case["input"].clone();
             for key in ["app", "window_id", "background"] { wait.as_object_mut().unwrap().remove(key); }
