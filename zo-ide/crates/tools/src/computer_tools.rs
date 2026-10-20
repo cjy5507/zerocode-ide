@@ -227,6 +227,31 @@ mod loose {
         }
     }
 
+    /// `[790, 450]` as a JSON array or as the JSON text of one (`"[790, 450]"`):
+    /// the one shape of a point, offset or region, said once on a refusal (t-62469).
+    pub(super) fn point<'de, D: Deserializer<'de>, const N: usize>(deserializer: D) -> Result<Option<[f64; N]>, D::Error> {
+        let shape = || format!("expected {N} numbers like {}, as an array or its JSON text", example::<N>());
+        let value = match Option::<Value>::deserialize(deserializer)? {
+            None | Some(Value::Null) => return Ok(None),
+            Some(Value::String(text)) => serde_json::from_str::<Value>(text.trim())
+                .map_err(|_| D::Error::custom(format!("invalid value {text:?}, {}", shape())))?,
+            Some(other) => other,
+        };
+        let Value::Array(items) = &value else {
+            return Err(D::Error::custom(format!("invalid value {value}, {}", shape())));
+        };
+        let numbers: Vec<f64> = items.iter().filter_map(Value::as_f64).collect();
+        <[f64; N]>::try_from(numbers)
+            .ok()
+            .filter(|_| items.len() == N)
+            .map(Some)
+            .ok_or_else(|| D::Error::custom(format!("invalid value {value}, {}", shape())))
+    }
+
+    fn example<const N: usize>() -> &'static str {
+        if N == 2 { "[790, 450]" } else { "[100, 200, 700, 500]" }
+    }
+
     pub(super) fn number<'de, D: Deserializer<'de>, T: DeserializeOwned>(deserializer: D) -> Result<Option<T>, D::Error> {
         let number = match Option::<Value>::deserialize(deserializer)? {
             None | Some(Value::Null) => return Ok(None),
@@ -248,7 +273,9 @@ pub(crate) struct ComputerInput {
     #[serde(default, deserialize_with = "loose::boolean")]
     pub background: Option<bool>,
     /// `[x, y]` in the pixels of the last screenshot, the Anthropic way.
+    #[serde(default, deserialize_with = "loose::point")]
     pub coordinate: Option<[f64; 2]>,
+    #[serde(default, deserialize_with = "loose::point")]
     pub start_coordinate: Option<[f64; 2]>,
     /// The key chord for `key`/`hold_key`, the text for `type`, the modifiers
     /// held during a click, the text to find/wait for, the clipboard text.
@@ -263,6 +290,7 @@ pub(crate) struct ComputerInput {
     pub duration: Option<f64>,
     /// `[x0, y0, x1, y1]` — two corners, the Anthropic way — in the last
     /// screenshot's pixels, for `zoom`/`find --ocr`/`read --ocr`.
+    #[serde(default, deserialize_with = "loose::point")]
     pub region: Option<[f64; 4]>,
     pub app: Option<String>,
     pub url: Option<String>,
@@ -359,6 +387,7 @@ pub(crate) struct ComputerInput {
     pub after_text: Option<String>,
     /// A `left_click` by words: `[dx, dy]` from the words' centre, in the
     /// last screenshot's pixels.
+    #[serde(default, deserialize_with = "loose::point")]
     pub offset: Option<[f64; 2]>,
     /// Whether the look after an action waits for quiet. Continuous motion
     /// can be sampled immediately, while ordinary UI actions wait by default.
@@ -679,6 +708,9 @@ fn background_neutral_action(action: &str) -> bool {
     !app_scoped_action(action) && methods(action).any(|method| method.batches() && !method.acts())
 }
 
+/// Both shapes of a scroll, each with an example a model can send as it stands (t-62469 S1).
+const SCROLL_SHAPES: &str = "app-scoped scroll takes scroll_pages, e.g. {\"app\":\"Notes\",\"window_id\":41,\"coordinate\":[20,40],\"scroll_direction\":\"down\",\"scroll_pages\":1}; desktop scroll (no app) takes scroll_amount, e.g. {\"coordinate\":[790,450],\"scroll_direction\":\"down\",\"scroll_amount\":3}; both need a coordinate";
+
 fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
     let action = input.action.trim();
     let timer = timed_wait(action);
@@ -721,10 +753,10 @@ fn validate_scope(input: &ComputerInput) -> Result<(), ToolError> {
         }
     }
     if input.scroll_pages.is_some() && (action != "scroll" || input.app.is_none()) {
-        return Err(ToolError::InvalidInput("scroll_pages belongs to app-scoped scrolling".into()));
+        return Err(ToolError::InvalidInput(format!("scroll_pages belongs to app-scoped scrolling: {SCROLL_SHAPES}")));
     }
     if input.app.is_some() && action == "scroll" && input.scroll_amount.is_some() {
-        return Err(ToolError::InvalidInput("app-scoped scroll uses scroll_pages, not desktop wheel scroll_amount".into()));
+        return Err(ToolError::InvalidInput(format!("scroll_amount belongs to desktop scrolling: {SCROLL_SHAPES}")));
     }
     if input.app.is_some() && (input.coordinate.is_some() || input.start_coordinate.is_some()) && input.window_id.is_none() {
         return Err(ToolError::InvalidInput("app coordinates require the window_id from an observation of that window".into()));
@@ -2317,6 +2349,57 @@ mod tests {
             assert_eq!(command.params.get("windowId"), Some(&json!(41)));
             assert_eq!(command.params.get("background"), Some(&json!(true)));
             assert_eq!(command.params.get("noScreenshot"), Some(&json!(true)));
+        }
+    }
+
+    #[test]
+    fn a_point_written_as_json_text_is_read_like_the_array() {
+        let fields = input(json!({"action": "left_click", "coordinate": "[790, 450]", "start_coordinate": " [1, 2.5] "}));
+        assert_eq!(fields.coordinate, Some([790.0, 450.0]));
+        assert_eq!(fields.start_coordinate, Some([1.0, 2.5]));
+        let offset = input(json!({"action": "left_click", "app": "Fixture", "label": "Save", "offset": "[3, -4]"}));
+        assert_eq!(offset.offset, Some([3.0, -4.0]));
+    }
+
+    #[test]
+    fn a_point_of_another_shape_is_refused_once_with_the_accepted_shape() {
+        for bad in [json!("790,450"), json!("[1, 2, 3]"), json!([1]), json!(["a", "b"]), json!(7)] {
+            let message = serde_json::from_value::<ComputerInput>(json!({"action": "left_click", "coordinate": bad}))
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains("expected 2 numbers like [790, 450]"), "{bad}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_refused_scroll_names_both_shapes_with_examples() {
+        let app_wheel = input(json!({"action": "scroll", "app": "Fixture", "window_id": 41, "scroll_direction": "down", "scroll_amount": 3}));
+        let desktop_pages = input(json!({"action": "scroll", "coordinate": [20, 40], "scroll_direction": "down", "scroll_pages": 1}));
+        for refused in [app_wheel, desktop_pages] {
+            let message = argv_for(&refused).unwrap_err().to_string();
+            assert!(message.contains("scroll_pages") && message.contains("scroll_amount"), "{message}");
+            assert!(message.contains("\"scroll_pages\":1") && message.contains("\"scroll_amount\":3"), "{message}");
+        }
+    }
+
+    /// A refused scroll's examples are sent as they stand and accepted (t-62469 S1): a model that copies one
+    /// meets no second refusal.
+    #[test]
+    fn a_refused_scrolls_examples_are_accepted_as_they_stand() {
+        let app_wheel = input(json!({"action": "scroll", "app": "Fixture", "window_id": 41, "scroll_direction": "down", "scroll_amount": 3}));
+        let desktop_pages = input(json!({"action": "scroll", "coordinate": [20, 40], "scroll_direction": "down", "scroll_pages": 1}));
+        for refused in [app_wheel, desktop_pages] {
+            let message = argv_for(&refused).unwrap_err().to_string();
+            let examples: Vec<Value> = message
+                .match_indices("e.g. ")
+                .filter_map(|(at, said)| serde_json::Deserializer::from_str(&message[at + said.len()..]).into_iter::<Value>().next()?.ok())
+                .collect();
+            assert_eq!(examples.len(), 2, "both shapes carry an example: {message}");
+            for mut example in examples {
+                example["action"] = json!("scroll");
+                let sent = serde_json::from_value::<ComputerInput>(example.clone()).map(|fields| argv_for(&fields));
+                assert!(matches!(sent, Ok(Ok(_))), "the refusal's example, sent as it stands, is refused: {example} -> {sent:?}");
+            }
         }
     }
 

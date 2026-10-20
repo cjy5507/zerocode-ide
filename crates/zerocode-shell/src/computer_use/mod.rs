@@ -200,6 +200,29 @@ pub fn session_stands() -> bool {
         .is_some()
 }
 
+/// Whether a provider session stands, never waiting behind a request in
+/// flight (t-62469 B2): a request that holds the session is a session
+/// standing. An agent's stop asks it before its signal, and the signal is
+/// what ends that request.
+#[must_use]
+pub fn session_stands_now() -> bool {
+    match held_client().try_lock() {
+        Ok(held) => held.is_some(),
+        Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner().is_some(),
+        Err(std::sync::TryLockError::WouldBlock) => true,
+    }
+}
+
+/// Hold the session's lock for as long as `hold` runs, as [`call`] holds it
+/// across a request in flight — a test's request that reaches no helper.
+#[cfg(test)]
+pub(crate) fn while_a_request_holds_the_session<T>(hold: impl FnOnce() -> T) -> T {
+    let _held = held_client()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    hold()
+}
+
 /// The helper's `status` now, or nothing: no session stands, a request holds
 /// the session, or the helper did not answer. Whoever asks never waits behind
 /// a request in flight, as the stop's signal never does (t-62872); a road that

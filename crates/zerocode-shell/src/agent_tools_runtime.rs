@@ -4142,10 +4142,15 @@ pub(super) trait HelperRoads {
     fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError>;
     /// The signal that stops the helper: false when there is none to tell.
     fn signal(&self) -> bool;
+    /// Whether a helper session stands: one that did not answer `status_now`
+    /// is then busy, and a person's chord may be waiting in it unheard. It
+    /// never waits behind a request in flight either (t-62469 B2): a request
+    /// that holds the session is a session standing.
+    fn session_stands(&self) -> bool;
 }
 
 /// The window's helper: the session's, when one stands — never started here.
-struct SessionHelper;
+pub(super) struct SessionHelper;
 
 impl HelperRoads for SessionHelper {
     fn status(&self) -> Option<serde_json::Value> {
@@ -4164,6 +4169,10 @@ impl HelperRoads for SessionHelper {
 
     fn signal(&self) -> bool {
         computer_use::guard::stop_helper()
+    }
+
+    fn session_stands(&self) -> bool {
+        computer_use::session_stands_now()
     }
 }
 
@@ -4194,14 +4203,28 @@ fn persons_stop_standing(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> O
 /// chord the helper heard just then, or between that `status` and the signal,
 /// is the helper's to keep (t-62469).
 pub(super) fn agents_stop(helper: &dyn HelperRoads, app: Option<&AppHandle>) -> serde_json::Value {
-    if !computer_use::guard::persons_stop_stands()
-        && let Some(heard) = helper.status_now()
-    {
-        adopt_helper_stop(&heard, app);
-    }
-    computer_use::guard::stop_with(zerocode_core::computer_use::STOP_REASON_REQUEST, || {
-        helper.signal()
-    })
+    // The window's stop stands first (t-62469): a helper slow to answer
+    // delays the signal, never the stop the door reads.
+    computer_use::guard::stop_hearing(
+        zerocode_core::computer_use::STOP_REASON_REQUEST,
+        || {
+            if computer_use::guard::persons_stop_stands() {
+                return true;
+            }
+            match helper.status_now() {
+                Some(heard) => {
+                    adopt_helper_stop(&heard, app);
+                    true
+                }
+                // No session: no helper to have heard a chord. A session
+                // that did not answer is busy, and the stop may be the
+                // person's. Asked without waiting (t-62469 B2): the signal
+                // that ends a request in flight never waits for it to end.
+                None => !helper.session_stands(),
+            }
+        },
+        || helper.signal(),
+    )
 }
 
 /// An agent's `resume`: never the person's stop — the window's resume lifts
@@ -4214,6 +4237,11 @@ pub(super) fn agents_resume(
     if let Some(reason) = persons_stop_standing(helper, app) {
         // The person's stop is theirs: the window's resume lifts it, never
         // an agent's `resume`.
+        return Err(computer_use::guard::refusal(&reason));
+    }
+    if computer_use::guard::unconfirmed_stop_stands() {
+        // A stop the person may have made: the band's resume lifts it.
+        let reason = computer_use::guard::stopped_reason().unwrap_or_default();
         return Err(computer_use::guard::refusal(&reason));
     }
     computer_use::guard::resume(
