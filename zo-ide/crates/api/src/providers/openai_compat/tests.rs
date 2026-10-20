@@ -1291,6 +1291,66 @@ async fn expect_success_shows_the_message_of_an_error_with_a_numeric_code() {
     assert!(!error.is_retryable());
 }
 
+#[tokio::test]
+async fn expect_success_turns_an_account_settings_404_into_its_message_and_a_settings_hint() {
+    let error = refusal(404, ACCOUNT_SETTINGS_404_BODY).await;
+    let text = error.to_string();
+    assert!(!text.contains("{\"error\""), "no raw JSON in the line, got {text}");
+    assert_eq!(
+        text,
+        format!(
+            "api returned 404 Not Found: {ACCOUNT_SETTINGS_404_MESSAGE}{}The provider excluded \
+             every endpoint for this model because of this account's settings (reason: \
+             zdr-violation-by-account; routing step: Filter by Guardrails). Its setting is at \
+             https://openrouter.ai/settings/privacy — change it there or pick another model.",
+            core_types::retry_signal::HINT_SEPARATOR
+        )
+    );
+    assert!(!error.is_retryable());
+    let signal = core_types::retry_signal::classify_error_text(&text);
+    assert!(!signal.is_retryable() && !signal.is_capacity(), "{signal:?}");
+}
+
+#[test]
+fn parse_sse_frame_adds_the_settings_hint_to_an_account_settings_frame() {
+    let frame = format!("data: {ACCOUNT_SETTINGS_404_BODY}\n");
+    let text = parse_sse_frame(&frame)
+        .expect_err("an error frame must fail the stream")
+        .to_string();
+    assert!(
+        text.contains(ACCOUNT_SETTINGS_404_MESSAGE)
+            && text.contains("https://openrouter.ai/settings/privacy — change it there")
+            && !text.contains("{\"error\""),
+        "got {text}"
+    );
+}
+
+#[tokio::test]
+async fn the_settings_hint_reads_any_reason_and_https_url_as_given() {
+    let body = r#"{"error":{"message":"No allowed endpoint.","code":404,"metadata":{"ineligibility_reasons":[{"reason":"region-not-allowed","configure_url":"https://example.com/account/regions"}]}}}"#;
+    let text = refusal(404, body).await.to_string();
+    assert!(
+        text.ends_with(
+            "(reason: region-not-allowed). Its setting is at \
+             https://example.com/account/regions — change it there or pick another model."
+        ),
+        "got {text}"
+    );
+}
+
+#[tokio::test]
+async fn the_settings_hint_leaves_out_a_url_that_is_not_https() {
+    let body = r#"{"error":{"message":"No allowed endpoint.","code":404,"metadata":{"ineligibility_reasons":[{"reason":"region-not-allowed","configure_url":"http://example.com/account/regions"}]}}}"#;
+    let text = refusal(404, body).await.to_string();
+    assert!(
+        text.ends_with(
+            "(reason: region-not-allowed). Change it in the provider's account settings \
+             or pick another model."
+        ) && !text.contains("example.com"),
+        "got {text}"
+    );
+}
+
 #[test]
 fn sse_parser_large_frame_split_across_many_chunks_parses_once() {
     let big = "x".repeat(512 * 1024);
