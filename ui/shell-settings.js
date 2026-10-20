@@ -6591,7 +6591,7 @@ function syncRouterModelsAll() {
     ? t("settings.apiRouters.clearAll", "전체 해제")
     : t("settings.apiRouters.selectAll", "전체 선택");
   box.setAttribute("aria-label", next);
-  box.title = next;
+  box.dataset.tip = next;
 }
 
 /* Setting a box by script fires no change event, so the draft is told here. */
