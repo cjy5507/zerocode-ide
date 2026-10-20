@@ -157,6 +157,22 @@ pub(crate) fn open_term_tab_in(
     Ok(id)
 }
 
+/// The window's word on where it seated a terminal an agent opened
+/// (t-66346): the checkout and the stage group, for the open's answer
+/// (`seatedIn`). Kept only for a pane an open is waiting on, and said by the
+/// main window alone.
+#[tauri::command]
+pub(crate) fn ssh_agent_seated(
+    webview: tauri::Webview,
+    term: TermId,
+    worktree: Option<String>,
+    group: Option<u32>,
+) -> Result<bool, String> {
+    let _crumb = crate::crumbs::Command::enter("ssh_agent_seated");
+    from_the_main_webview(&webview)?;
+    Ok(agent_term_seats().note(term, AgentTermSeat { worktree, group }))
+}
+
 /// A helper's conversation, from `after` onward.
 ///
 /// The page a person opens on a helper row. Orca has no such page — its

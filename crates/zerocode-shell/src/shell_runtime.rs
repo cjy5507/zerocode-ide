@@ -2157,14 +2157,19 @@ pub(super) fn fenced_path(state: &State<'_, AppState>, path: &str) -> Result<Pat
 
 /// Where a new tab's shell stands inside the checkout it belongs to: the
 /// directory asked for when it is one inside `root`, `root` itself when none
-/// was.
+/// was. A refusal names the checkout it was judged against (t-66346) — an
+/// agent's shell is fenced to the asking pane's checkout, not the one in
+/// front, and an agent told only 「outside the workspace」 cannot tell which.
 pub(super) fn fenced_seat(root: &Path, asked: Option<String>) -> Result<PathBuf, String> {
     let Some(asked) = asked else {
         return Ok(root.to_path_buf());
     };
     let seat = PathBuf::from(&asked);
     if !file_tree_ops::inside_root(root, &seat) {
-        return Err("워크스페이스 밖의 경로입니다".into());
+        return Err(format!(
+            "워크스페이스 밖의 경로입니다 (기준: {})",
+            root.display()
+        ));
     }
     if !seat.is_dir() {
         return Err("디렉터리가 아닙니다".into());

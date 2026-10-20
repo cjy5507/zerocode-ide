@@ -2948,6 +2948,11 @@ pub fn ssh_usage() -> String {
         "stands a terminal tab in the window and answers with its pane id; every",
         "later verb addresses that id. Remote work stays in a pane the person can",
         "see and stop.",
+        "",
+        "The tab is seated in the asking pane's project, and a local shell starts",
+        "in that pane's checkout (`--cwd` must lie inside it). `open`'s answer",
+        "names that checkout and stage group as `seatedIn` — a group is a place",
+        "on the screen, not a pane id.",
     ]
     .join("\n")
 }
@@ -4806,8 +4811,7 @@ fn emulator_door<'a>(
 /// already owns must not be reached by clicking ZeroCode.
 pub fn ssh_shim_script(port_var: &str, computer_token_var: &str, hook_token_var: &str) -> String {
     let (manual, prefix) = (ssh_usage(), format!("ssh{ARGV_SEPARATOR}"));
-    computer_route_shim(
-        "zerocode-ssh",
+    ssh_door(
         &manual,
         &prefix,
         port_var,
@@ -4815,6 +4819,32 @@ pub fn ssh_shim_script(port_var: &str, computer_token_var: &str, hook_token_var:
         hook_token_var,
     )
     .render_posix()
+}
+
+/// The terminal door on the shared chassis: it names the pane that asked, in
+/// the browser door's own header, so the tab an agent opens is seated in that
+/// pane's project and a local shell starts in its checkout — not beside
+/// whatever the person happens to be looking at (t-66346). The name is read
+/// off the shell the door runs in, never off the command: `open` takes no
+/// pane, so an argument cannot say another one.
+fn ssh_door<'a>(
+    manual: &'a str,
+    prefix: &'a str,
+    port_var: &'a str,
+    computer_token_var: &'a str,
+    hook_token_var: &'a str,
+) -> PowerShellBridgeShim<'a> {
+    PowerShellBridgeShim {
+        pane_header: Some(crate::agent_browser::PANE_HEADER),
+        ..computer_route_shim(
+            "zerocode-ssh",
+            manual,
+            prefix,
+            port_var,
+            computer_token_var,
+            hook_token_var,
+        )
+    }
 }
 
 /// The chassis every `/computer` door shares — the Computer Use route and
@@ -5216,8 +5246,7 @@ pub fn ssh_shim_script_powershell(
     hook_token_var: &str,
 ) -> String {
     let (manual, prefix) = (ssh_usage(), format!("ssh{ARGV_SEPARATOR}"));
-    computer_route_shim(
-        "zerocode-ssh",
+    ssh_door(
         &manual,
         &prefix,
         port_var,

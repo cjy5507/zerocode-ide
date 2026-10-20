@@ -208,9 +208,9 @@ pub(crate) use terminal::{
     end_all_terminal_sessions, end_terminal_session, focus_lane, key_input, lane_fold, lane_lines,
     lane_scroll, launch_agent_tab, mirror_ready, mouse_input, open_mirror_term, open_term_tab,
     open_term_tab_in, open_terminal, pane_image, pane_log, paste_input, resize_lane, send_prompt,
-    subagent_log, term_focus, term_fold, term_has_running_process, term_key, term_lines,
-    term_mouse, term_paste, term_resize, term_scroll, term_search, term_text, term_view_to_line,
-    terminal_sessions, text_input,
+    ssh_agent_seated, subagent_log, term_focus, term_fold, term_has_running_process, term_key,
+    term_lines, term_mouse, term_paste, term_resize, term_scroll, term_search, term_text,
+    term_view_to_line, terminal_sessions, text_input,
 };
 
 pub(crate) use scm::{

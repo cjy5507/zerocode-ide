@@ -15996,6 +15996,72 @@ fn an_ssh_open_says_where_the_window_seated_it() {
     assert_eq!(ssh_pretty(SshMethod::Open, &unanswered), "Opened pane 12.");
 }
 
+/// An agent's `zerocode-ssh open` names the terminal that asked, read off the
+/// pane key its door presented (t-66346) — and nothing it cannot read: a door
+/// that named no pane, or named something that is not a pane key, asks from
+/// nowhere the window knows, and the payload carries no `from` at all. The
+/// rest of the wire is what it always was.
+#[test]
+fn an_ssh_open_names_the_terminal_that_asked_and_nothing_it_cannot_read() {
+    let wire = |open: SshAgentOpen| serde_json::to_value(open).expect("serializes");
+    let asking = |pane: Option<&str>| pane.and_then(hooks::term_of_pane_key);
+    let named = hooks::pane_key_of(7);
+    assert_eq!(
+        wire(SshAgentOpen::asked(
+            12,
+            Some("build-box".into()),
+            Some("host-1".into()),
+            asking(Some(named.as_str())),
+        )),
+        json!({ "term": 12, "label": "build-box", "remoteHost": "host-1", "from": 7 })
+    );
+    for unread in [None, Some("tab-1/leaf-2")] {
+        assert_eq!(
+            wire(SshAgentOpen::asked(13, None, None, asking(unread))),
+            json!({ "term": 13, "label": null, "remoteHost": null }),
+            "{unread:?}"
+        );
+    }
+}
+
+/// The window's word on where it seated an agent's terminal reaches the open
+/// waiting for it (t-66346), and nothing else stays: a word about a pane no
+/// open waits on is dropped, an open that stops waiting takes its slot away
+/// whether or not the window said, and a word after that lands nowhere. The
+/// answer carries it as a checkout and a group.
+#[test]
+fn the_seat_the_window_gave_reaches_the_open_waiting_for_it_and_nothing_stays() {
+    let seats = AgentTermSeats::default();
+    let seat = AgentTermSeat {
+        worktree: Some("/Users/dev/project-b".into()),
+        group: Some(0),
+    };
+    assert!(
+        !seats.note(21, seat.clone()),
+        "a word about a pane no open waits on was kept"
+    );
+    seats.expect(21);
+    assert!(!seats.seated(21));
+    assert!(seats.note(21, seat.clone()));
+    assert!(seats.seated(21));
+    assert_eq!(seats.take(21), Some(seat.clone()));
+    assert_eq!(seats.take(21), None, "the slot outlived its open");
+    assert!(
+        !seats.note(21, seat.clone()),
+        "a late word found the slot of an open that stopped waiting"
+    );
+    seats.expect(22);
+    assert_eq!(
+        seats.take(22),
+        None,
+        "an open the window never answered got a seat"
+    );
+    assert_eq!(
+        serde_json::to_value(&seat).expect("serializes"),
+        json!({ "worktree": "/Users/dev/project-b", "group": 0 })
+    );
+}
+
 /// A default nobody chose is no default, and an id this window cannot
 /// resolve is refused rather than stored.
 #[test]

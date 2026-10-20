@@ -4889,14 +4889,108 @@ pub(super) async fn ssh_agent_list(app: &AppHandle) -> Result<serde_json::Value,
     }))
 }
 
+/// What the window hears when an agent's `zerocode-ssh open` stood a terminal
+/// (`ssh:agent-open`): the pane it became, the host's name and id when it is a
+/// remote one, and the terminal whose agent asked — read off the pane key its
+/// door presented, never off the command (t-66346). The window seats the tab
+/// in that terminal's checkout and group, the way an emulator mirror is seated
+/// (`emulator::AgentOpen`, t-6379); a door that named no pane carries no
+/// `from`, and the window opens the tab where the person is looking and says
+/// why.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SshAgentOpen {
+    term: TermId,
+    label: Option<String>,
+    remote_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<TermId>,
+}
+
+impl SshAgentOpen {
+    pub(super) fn asked(
+        term: TermId,
+        label: Option<String>,
+        remote_host: Option<String>,
+        asking: Option<TermId>,
+    ) -> Self {
+        Self {
+            term,
+            label,
+            remote_host,
+            from: asking,
+        }
+    }
+}
+
+/// Where the window seated a terminal an agent opened: the checkout whose
+/// stage the tab stands on, and its group there — a place on the screen,
+/// never a pane. The open's answer carries it as `seatedIn` (t-66346).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct AgentTermSeat {
+    pub(super) worktree: Option<String>,
+    pub(super) group: Option<u32>,
+}
+
+/// The seats the window gave the terminals agents' opens stood, each kept
+/// only while its open waits for it: the open asks for one before it tells
+/// the window and takes it — seated or not — when it stops waiting, so a word
+/// that comes late, or about a pane no open is waiting on, lands nowhere and
+/// nothing stays behind.
+#[derive(Default)]
+pub(super) struct AgentTermSeats(Mutex<HashMap<TermId, Option<AgentTermSeat>>>);
+
+impl AgentTermSeats {
+    /// An open is about to tell the window about `term`, and will wait.
+    pub(super) fn expect(&self, term: TermId) {
+        self.lock().insert(term, None);
+    }
+
+    /// The window's word; `false` when no open is waiting on `term`.
+    pub(super) fn note(&self, term: TermId, seat: AgentTermSeat) -> bool {
+        match self.lock().get_mut(&term) {
+            Some(slot) => {
+                *slot = Some(seat);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn seated(&self, term: TermId) -> bool {
+        self.lock().get(&term).is_some_and(Option::is_some)
+    }
+
+    /// The open stops waiting: its slot goes, with the seat if one came.
+    pub(super) fn take(&self, term: TermId) -> Option<AgentTermSeat> {
+        self.lock().remove(&term).flatten()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<TermId, Option<AgentTermSeat>>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// This window's one book of the seats agents' terminals were given.
+pub(super) fn agent_term_seats() -> &'static AgentTermSeats {
+    static SEATS: OnceLock<AgentTermSeats> = OnceLock::new();
+    SEATS.get_or_init(AgentTermSeats::default)
+}
+
 /// The checkout an agent's local shell belongs to: where it starts, and what
-/// its `--cwd` is fenced to. The one in front, whichever pane asked.
+/// its `--cwd` is fenced to (t-66346). The asking pane's, when this process
+/// can place it, so a shell asked for from another project's pane starts in
+/// that project — where its tab is seated — and not in the one the person
+/// has in front; the one in front only for a pane it cannot place. `asking`
+/// is the door's header, never a word of the command.
 pub(super) fn agent_shell_root(
-    _asking: Option<TermId>,
-    _checkout_of: impl FnOnce(TermId) -> Option<PathBuf>,
+    asking: Option<TermId>,
+    checkout_of: impl FnOnce(TermId) -> Option<PathBuf>,
     in_front: PathBuf,
 ) -> PathBuf {
-    in_front
+    asking.and_then(checkout_of).unwrap_or(in_front)
 }
 
 /// Stand a terminal on the asked-for machine and hand back the pane it became.
@@ -4974,11 +5068,28 @@ pub(super) async fn ssh_agent_open(
             }
         }
     };
-    // The tab is the window's to place, the same as the emulator's. Revalidated
+    // The tab is the window's to place, the same as the emulator's: in the
+    // asking pane's project and group, by the window's own rule. Revalidated
     // on the other side: this payload is data, never an instruction.
-    let seat = json!({ "term": term, "label": label, "remoteHost": remote });
-    app.emit_to("main", "ssh:agent-open", seat)
-        .map_err(|error| error.to_string())?;
+    let seat = SshAgentOpen::asked(term, label.clone(), remote.clone(), asking);
+    let seats = agent_term_seats();
+    seats.expect(term);
+    if let Err(error) = app.emit_to("main", "ssh:agent-open", seat) {
+        seats.take(term);
+        return Err(error.to_string());
+    }
+    // Where it went is the window's word (`ssh_agent_seated`), awaited inside
+    // the door's budget the way the browser door waits for its pane, so the
+    // agent can tell the person the terminal is on their project's stage. A
+    // window that did not say in time leaves `seatedIn` null; the pane is
+    // open either way.
+    cmd::browser::wait_until(
+        cmd::browser::BROWSER_DOOR_BUDGET,
+        cmd::browser::BROWSER_WAIT_POLL,
+        || seats.seated(term),
+    )
+    .await;
+    let seated = seats.take(term);
     Ok(json!({
         "surface": "zerocode-built-in",
         "pane": term,
@@ -4986,6 +5097,7 @@ pub(super) async fn ssh_agent_open(
         "cols": cols,
         "label": label,
         "host": remote,
+        "seatedIn": seated,
     }))
 }
 
@@ -5402,13 +5514,24 @@ pub(super) fn ssh_pretty(
         SshMethod::List => {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         }
-        SshMethod::Open => value
-            .get("pane")
-            .and_then(serde_json::Value::as_u64)
-            .map_or_else(
-                || "Opened.".to_string(),
-                |pane| format!("Opened pane {pane}."),
-            ),
+        SshMethod::Open => {
+            let opened = value
+                .get("pane")
+                .and_then(serde_json::Value::as_u64)
+                .map_or_else(
+                    || "Opened".to_string(),
+                    |pane| format!("Opened pane {pane}"),
+                );
+            // Where the window seated it (t-66346), said as a checkout and a
+            // stage group — never as a pane, which is what `--pane` takes.
+            let seat = &value["seatedIn"];
+            match (seat["worktree"].as_str(), seat["group"].as_u64()) {
+                (Some(worktree), Some(group)) => {
+                    format!("{opened} — seated in {worktree}, stage group {group}.")
+                }
+                _ => format!("{opened}."),
+            }
+        }
         SshMethod::Send => "Done.".into(),
     }
 }
