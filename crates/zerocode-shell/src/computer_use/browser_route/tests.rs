@@ -157,6 +157,7 @@ fn an_unreadable_browser_registration_preserves_the_existing_path() {
     let said = answer(&["click", "--app", "Google Chrome", "--element-index", "194"]);
     assert_eq!(said["ok"], true, "a missing platform signal must preserve the previous behavior: {said}");
     assert_eq!(calls(), 1);
+    assert_eq!(said["result"]["browserClassificationUnknown"], true, "the successful answer carries only the unknown-classification fact");
 }
 
 #[test]

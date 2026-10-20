@@ -1360,6 +1360,7 @@ fn call_shim(road: &ComputerRoad, argv: &[String], cwd: Option<&Path>) -> Result
             if !trusted {
                 if let Some(object) = envelope.as_object_mut() { object.remove("surfaceExecution"); }
             }
+            super::computer_tally::receipt(&envelope);
             Ok(envelope)
         },
         None => Err(ToolError::Execution(format!(
@@ -2071,6 +2072,10 @@ pub(crate) fn run_computer(input: &Value, ctx: &ToolContext, road: &ComputerRoad
 }
 
 pub(crate) fn run_computer_execution(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
+    super::computer_tally::run(input, ctx, || run_computer_inner(input, ctx, road))
+}
+
+fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> Result<ToolExecutionResult, ToolError> {
     if input.get("action").and_then(Value::as_str).map(str::trim) == Some(BATCH_ACTION) {
         if let Some(steps) = input.get("steps").and_then(Value::as_array) {
             check_batch_len(steps.len())?;
