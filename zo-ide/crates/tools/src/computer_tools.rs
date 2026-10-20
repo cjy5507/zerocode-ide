@@ -161,6 +161,7 @@ const STEP_FIELDS: &[&str] = &[
     "scroll_amount",
     "scroll_pages",
     "background",
+    "browser_chrome",
     "duration",
     "region",
     "app",
@@ -247,6 +248,9 @@ pub(crate) struct ComputerInput {
     pub action: String,
     #[serde(default, deserialize_with = "loose::boolean")]
     pub background: Option<bool>,
+    /// The person explicitly requested the browser application's menus, tabs or extension UI.
+    #[serde(default, deserialize_with = "loose::boolean")]
+    pub browser_chrome: Option<bool>,
     /// `[x, y]` in the pixels of the last screenshot, the Anthropic way.
     pub coordinate: Option<[f64; 2]>,
     pub start_coordinate: Option<[f64; 2]>,
@@ -384,6 +388,7 @@ fn action_properties(actions: &[&str], kinds: &[&str], fields: Option<&[&str]>, 
         "duration": { "type": "number", "minimum": 0 },
         "region": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4,
             "description": "[x0, y0, x1, y1] corners in last screenshot pixels" },
+        "browser_chrome": { "type": "boolean", "description": "The person explicitly requested browser menus, tabs or extension UI" },
         "app": { "type": "string" },
         "url": { "type": "string" },
         "path": { "type": "string" },
@@ -457,6 +462,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         name: "Computer",
         description: "Drive desktop apps inside a ZeroCode pane: screenshots/zoom, mouse moves/clicks/drags/scroll, \
             keys/text/waits, app/window management, element/OCR reads, clipboard read/write and programs. \
+            For web pages use zerocode-browser open <url>, then read, marks, click, type and fill; set \
+            browser_chrome only when the person explicitly requests browser menus, tabs or extension UI. \
             For background work, observe {app}, retain \
             app/window_id and set background: true. Never fall back to activation or global input. \
             Unverified keyboard receiver: use a verified writable-field capability or handoff. \
@@ -809,6 +816,9 @@ pub(crate) fn argv_for(input: &ComputerInput) -> Result<Vec<String>, ToolError> 
         if let Some(kind) = input.confirming.as_deref() {
             push(&mut argv, &["--confirming", kind]);
         }
+    }
+    if input.browser_chrome == Some(true) {
+        argv.push("--browser-chrome".into());
     }
     argv.push("--json".into());
     Ok(argv)
@@ -1746,6 +1756,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
     };
     let settle = input.settle.unwrap_or(SETTLE_AFTER_ACT);
     for (at, step) in steps.iter_mut().enumerate() {
+        step.browser_chrome = step.browser_chrome.or(input.browser_chrome);
         if let Some(target) = &default_target {
             if step.app.as_deref().is_some_and(|app| app != target.app.as_str())
                 || step.window_id.is_some_and(|window_id| Some(window_id) != target.window_id)

@@ -3360,6 +3360,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
     for (flag, key) in [
         ("restore-window", "restoreWindow"),
         ("background", "background"),
+        ("browser-chrome", "browserChrome"),
         ("no-screenshot", "noScreenshot"),
         ("full-res", "fullRes"),
         ("force", "force"),
@@ -3478,6 +3479,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "reset-budget"
                 | "reset"
                 | "allow-self"
+                | "browser-chrome"
                 | "instant"
                 | "pass"
                 | "fail"
@@ -3816,7 +3818,7 @@ fn reject_unknown(
     flags: &BTreeMap<String, Option<String>>,
 ) -> Result<(), String> {
     for name in flags.keys() {
-        if !allowed(method).contains(&name.as_str()) {
+        if name != "browser-chrome" && !allowed(method).contains(&name.as_str()) {
             return Err(format!("unknown flag --{name}"));
         }
     }
