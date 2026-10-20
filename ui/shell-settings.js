@@ -6564,6 +6564,7 @@ function invalidateRouterProbe() {
   routerProbeInFlight = null;
   testedModels = [];
   el("router-models-tbody")?.replaceChildren();
+  syncRouterModelsAll();
   const section = el("router-models-section");
   if (section) section.hidden = true;
   clearRouterStatus();
@@ -6573,6 +6574,31 @@ function invalidateRouterProbe() {
     test.textContent = t("settings.apiRouters.testConnection", "연결 시험");
   }
   updateRouterSaveButtonState();
+}
+
+/* The header's one box stands for every row of the models table: on when
+ * every model is checked, off when none is, indeterminate in between — and it
+ * names what one click would do next, for the tooltip and a screen reader. */
+function syncRouterModelsAll() {
+  const box = el("router-models-all");
+  if (!box) return;
+  const rows = document.querySelectorAll(".router-model-check").length;
+  const on = document.querySelectorAll(".router-model-check:checked").length;
+  box.disabled = rows === 0;
+  box.checked = rows > 0 && on === rows;
+  box.indeterminate = on > 0 && on < rows;
+  const next = box.checked
+    ? t("settings.apiRouters.clearAll", "전체 해제")
+    : t("settings.apiRouters.selectAll", "전체 선택");
+  box.setAttribute("aria-label", next);
+  box.dataset.tip = next;
+}
+
+/* Setting a box by script fires no change event, so the draft is told here. */
+function setEveryRouterModel(on) {
+  for (const box of document.querySelectorAll(".router-model-check")) box.checked = on;
+  syncRouterModelsAll();
+  routerDraftChanged();
 }
 
 /* One function for OpenAI-compatible GET /models fetch */
@@ -6617,9 +6643,13 @@ function initApiRoutersEvents() {
   const tbody = el("router-models-tbody");
   if (tbody) {
     tbody.addEventListener("change", () => {
+      syncRouterModelsAll();
       routerDraftChanged();
     });
   }
+  el("router-models-all")?.addEventListener("change", (event) => {
+    setEveryRouterModel(event.currentTarget.checked);
+  });
   for (const id of ["router-base-url-input", "router-key-input"]) {
     el(id)?.addEventListener("input", invalidateRouterProbe);
   }
@@ -7302,6 +7332,7 @@ async function runRouterTestConnection() {
 
       if (tbody) tbody.appendChild(tr);
     }
+    syncRouterModelsAll();
 
     if (modelsSection) modelsSection.hidden = false;
     paintSettingsStatus(
