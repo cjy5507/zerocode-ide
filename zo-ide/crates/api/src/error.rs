@@ -798,6 +798,7 @@ impl Display for ApiError {
                     (Some(error_type), Some(message)) => {
                         write!(f, "api returned {status} ({error_type}): {message}")?;
                     }
+                    (None, Some(message)) => write!(f, "api returned {status}: {message}")?,
                     _ => write!(f, "api returned {status}: {body}")?,
                 }
                 if let Some(delay) = retry_after {
