@@ -18,11 +18,19 @@ use super::ComputerUseError;
 struct Stop {
     reason: Option<String>,
     revision: u64,
+    /// An agent's stop made while a helper request was in flight, so the
+    /// window could not hear whether the person's chord came just before it
+    /// (t-62469): the stop may be the person's. An agent's `resume` leaves
+    /// it standing; the band's resume (the person) lifts it. An agent's stop
+    /// over it keeps the mark (B1); only the band's resume and the person's
+    /// chord taken in ([`adopt`]) clear it.
+    unconfirmed: bool,
 }
 
 static STOPPED: Mutex<Stop> = Mutex::new(Stop {
     reason: None,
     revision: 0,
+    unconfirmed: false,
 });
 static STOP_GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -61,11 +69,14 @@ pub fn snapshot() -> (Option<String>, u64) {
 }
 
 /// The refusal an action gets while stopped: a stop the person made is
-/// theirs to lift; any other is lifted by `resume`.
+/// theirs to lift, and so is one they may have made (t-62469 S2) — the
+/// band's resume lifts it; any other is lifted by `resume`.
 #[must_use]
 pub fn refusal(reason: &str) -> ComputerUseError {
     let lifted = if zerocode_core::computer_use::persons_stop(reason) {
         "the person stopped it — only they lift it; report where you were and wait".to_string()
+    } else if unconfirmed_stop_stands() {
+        "the helper was busy when this stop came, so the person may have stopped it — only they lift it, from the band's resume; report where you were and wait".to_string()
     } else {
         format!(
             "`{} resume` lifts it",
@@ -95,8 +106,17 @@ pub fn adopt(reason: &str) -> bool {
         STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
         held.reason = Some(reason.to_string());
         held.revision += 1;
+        held.unconfirmed = false;
     }
     takes
+}
+
+/// Whether the standing stop may be the person's though it carries an
+/// agent's reason (t-62469): see [`Stop::unconfirmed`].
+#[must_use]
+pub fn unconfirmed_stop_stands() -> bool {
+    let held = stopped();
+    held.reason.is_some() && !persons(held.reason.as_deref()) && held.unconfirmed
 }
 
 /// Whether the person's stop stands in the window — the stop the work
@@ -132,23 +152,66 @@ pub fn stop(reason: &str) -> Value {
 /// stop signals the helper it heard first, and a test's helper keeps a stop
 /// of its own.
 pub fn stop_with(reason: &str, signal: impl FnOnce() -> bool) -> Value {
-    let (reason, revision) = {
+    stop_hearing(reason, || true, signal)
+}
+
+/// [`stop_with`] with the helper heard after the window's stop stands and
+/// before the signal (t-62469): the stop is up at once, so nothing the door
+/// lets in meanwhile starts after it, and a helper slow to answer delays only
+/// the signal. `hear` takes in the person's chord the helper holds
+/// ([`adopt`]) and answers whether it could read the helper; when it could
+/// not, the stop is marked unconfirmed — it may be the person's — until the
+/// band's resume lifts it. A stop made over a marked one keeps the mark
+/// though the helper is heard then (B1): the first stop's signal may have
+/// overwritten the person's chord in the helper, which now says only
+/// `signal`.
+pub fn stop_hearing(
+    reason: &str,
+    hear: impl FnOnce() -> bool,
+    signal: impl FnOnce() -> bool,
+) -> Value {
+    let (reason, revision, made_here, marked_before) = {
         let mut held = stopped();
-        if !persons(held.reason.as_deref()) || persons(Some(reason)) {
+        let made = !persons(held.reason.as_deref()) || persons(Some(reason));
+        let marked_before = held.reason.is_some() && held.unconfirmed;
+        if made {
             STOP_GENERATION.fetch_add(1, Ordering::AcqRel);
             held.reason = Some(reason.to_string());
             held.revision += 1;
+            held.unconfirmed = marked_before || !persons(Some(reason));
         }
-        (held.reason.clone().unwrap_or_default(), held.revision)
+        let standing = held.reason.clone().unwrap_or_default();
+        (standing, held.revision, made, marked_before)
     };
+    // The helper is heard whenever the stop was made here — it may hold the
+    // person's chord to take in — and only an unmarked stop is confirmed.
+    let heard = made_here && hear();
+    if heard && !marked_before {
+        let mut held = stopped();
+        if held.revision == revision {
+            held.unconfirmed = false;
+        }
+    }
     let signalled = signal();
+    let (reason, revision) = snapshot_reason(&reason, revision);
     serde_json::json!({
         "stopped": true,
         "personsStop": persons(Some(reason.as_str())),
+        "maybePersonsStop": unconfirmed_stop_stands(),
         "reason": reason,
         "revision": revision,
         "helperSignalled": signalled,
     })
+}
+
+/// The stop as it stands after the helper was heard: the person's chord taken
+/// in meanwhile has moved the reason and the revision.
+fn snapshot_reason(made: &str, made_revision: u64) -> (String, u64) {
+    let held = stopped();
+    match &held.reason {
+        Some(standing) if held.revision >= made_revision => (standing.clone(), held.revision),
+        _ => (made.to_string(), made_revision),
+    }
 }
 
 /// Tell the remembered helper to stop, by signal; false when there is none.
@@ -312,9 +375,12 @@ pub fn resume(
     let (reason, before) = snapshot();
     let named = match lifter {
         Lifter::Person { revision } => revision == Some(before),
-        Lifter::Agent => !reason
-            .as_deref()
-            .is_some_and(zerocode_core::computer_use::persons_stop),
+        Lifter::Agent => {
+            !reason
+                .as_deref()
+                .is_some_and(zerocode_core::computer_use::persons_stop)
+                && !unconfirmed_stop_stands()
+        }
     };
     if !named {
         return Resumed {
@@ -329,6 +395,7 @@ pub fn resume(
         let mut held = stopped();
         if helper.is_ok() && held.revision == before && held.reason.take().is_some() {
             held.revision += 1;
+            held.unconfirmed = false;
         }
         (held.reason.clone(), held.revision)
     };
@@ -352,6 +419,7 @@ pub fn lift() {
     if held.reason.take().is_some() {
         held.revision += 1;
     }
+    held.unconfirmed = false;
 }
 
 #[cfg(test)]
@@ -812,6 +880,75 @@ mod tests {
             report["revision"].as_u64(),
             "nothing moved over the person's stop"
         );
+    }
+
+    /// A stop that may be the person's (t-62469 S2) is refused in words that
+    /// name the band's resume: an agent told that its `resume` lifts it would
+    /// only be refused again. An agent's stop the window heard the helper
+    /// for is still lifted by `resume`.
+    #[test]
+    fn a_stop_the_person_may_have_made_is_refused_in_words_that_name_the_bands_resume() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop_hearing(STOP_REASON_REQUEST, || false, || true);
+        let maybe = refusal(STOP_REASON_REQUEST).message;
+        lift();
+        stop_hearing(STOP_REASON_REQUEST, || true, || true);
+        let heard = refusal(STOP_REASON_REQUEST).message;
+        lift();
+        assert!(
+            maybe.contains("the person may have stopped it")
+                && maybe.contains("the band's resume")
+                && !maybe.contains("resume` lifts it"),
+            "a stop the person may have made names the band's resume: {maybe}"
+        );
+        assert!(
+            heard.contains("resume` lifts it"),
+            "an agent's stop the window heard the helper for names `resume`: {heard}"
+        );
+    }
+
+    /// An agent's stop over one the person may have made (t-62469 B1): the
+    /// helper heard now says nothing of the person's — the first stop's
+    /// signal overwrote their chord there — so the stop stays one they may
+    /// have made. Only the band's resume lifts it; an agent's never does.
+    #[test]
+    fn an_agents_stop_heard_over_a_stop_the_person_may_have_made_keeps_it_theirs_maybe() {
+        let _hand = one_hand();
+        remember_helper(None);
+        lift();
+        stop_hearing(STOP_REASON_REQUEST, || false, || true);
+        let again = stop_hearing(STOP_REASON_REQUEST, || true, || true);
+        let maybe = unconfirmed_stop_stands();
+        let mut asked = 0;
+        let agents = resume(
+            Lifter::Agent,
+            || {
+                asked += 1;
+                Ok(Value::from("resumed"))
+            },
+            || true,
+        );
+        let (_, revision) = snapshot();
+        let band = resume(
+            Lifter::Person {
+                revision: Some(revision),
+            },
+            || Ok(Value::from("resumed")),
+            || true,
+        );
+        let after = stopped_reason();
+        lift();
+        assert!(
+            maybe,
+            "the stop stays one the person may have made after the agent's second stop: {again}"
+        );
+        assert_eq!(again["maybePersonsStop"], true, "{again}");
+        assert_eq!(asked, 0, "the agent's resume never reaches the helper");
+        assert!(!agents.lifted, "{agents:?}");
+        assert!(band.lifted, "the band's resume lifts it: {band:?}");
+        assert_eq!(after, None);
     }
 
     #[test]
