@@ -125,3 +125,42 @@ fn a_tally_symlink_does_not_change_the_call_or_its_target() {
     assert!(result.is_ok(), "tally failures cannot change the Computer result");
     assert_eq!(std::fs::read_to_string(target).unwrap(), "unchanged");
 }
+
+#[test]
+fn normalized_input_actions_keep_the_unknown_classification_count() {
+    let root = Root::new();
+    let answer = json!({"ok":true,"result":{"browserClassificationUnknown":true}});
+    assert!(call(&json!({"action":"left_click"}), &answer, None).is_ok());
+    assert!(call(&json!({"action":" left_click "}), &answer, None).is_ok());
+    assert_eq!(root.read()["browserClassificationUnknown"], 2, "the tally uses the same normalized action as Computer execution");
+}
+
+#[cfg(unix)]
+#[test]
+fn error_envelopes_with_or_without_the_optional_fact_keep_the_same_tool_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = Root::new();
+    let shim = root.0.path().join("zerocode-computer");
+    let road = crate::computer_tools::ComputerRoad { program: shim.clone() };
+    let ctx = crate::tests::tool_context_outside_cwd_windows();
+    let old = r#"#!/bin/sh
+printf '%s\n' '{"ok":false,"error":{"code":"element_not_found","message":"fixture helper refusal"}}'
+exit 1
+"#;
+    let new = r#"#!/bin/sh
+printf '%s\n' '{"ok":false,"error":{"code":"element_not_found","message":"fixture helper refusal"},"browserClassificationUnknown":true}'
+exit 1
+"#;
+    for body in [old, new] {
+        std::fs::write(&shim, body).unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = crate::computer_tools::run_computer_execution(
+            &json!({"action":"left_click", "app":"Fixture", "element_index":194}), &ctx, &road);
+        assert!(matches!(&result, Err(ToolError::Execution(message)) if message == "element_not_found: fixture helper refusal"),
+            "the optional reply field must not change parsing or the original refusal");
+    }
+    let tally = root.read();
+    assert_eq!(tally["calls"], 2);
+    assert_eq!(tally["refusals"]["element_not_found"], 2);
+    assert_eq!(tally["browserClassificationUnknown"], 1, "the failed input counts the fact once, before the tool converts its error");
+}

@@ -110,20 +110,24 @@ impl computer_use::enter::Typer for NoHandoff {
     }
 }
 
-fn answer(argv: &[&str]) -> Value {
+fn raw_answer(argv: &[&str]) -> zerocode_hookd::TeamAnswer {
     let argv = argv
         .iter()
         .copied()
         .chain(["--json"])
         .map(str::to_string)
         .collect::<Vec<_>>();
-    let answer = crate::agent_tools_runtime::answer_computer_command_with(
+    crate::agent_tools_runtime::answer_computer_command_with(
         &argv,
         None,
         computer_use::confirm::Asking::Person,
         None,
         &mut NoHandoff,
-    );
+    )
+}
+
+fn answer(argv: &[&str]) -> Value {
+    let answer = raw_answer(argv);
     answer_envelope(&answer.stdout, &answer.stderr).unwrap_or(Value::Null)
 }
 
@@ -381,4 +385,44 @@ fn a_composite_preflight_preserves_the_persons_stop() {
         "the existing stop keeps its refusal before browser routing"
     );
     assert_eq!(calls(), 0);
+}
+
+#[test]
+fn primitive_app_input_keeps_its_target_with_extra_surface_metadata() {
+    let _hand = one_hand();
+    let _policy = computer_use::input_policy::enter(computer_use::input_policy::InputPolicy::SharedDesktop);
+    for extra in [json!({"pane":"browser-fixture"}), json!({"platform":"ios"})] {
+        let _fixture = Installed::new(Some(true), false);
+        let mut params = json!({"app":"Google Chrome", "elementIndex":194});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let result = computer_use::call("click", params);
+        assert_eq!(calls(), 0, "extra surface metadata cannot change a desktop input's app target: {result:?}");
+        assert_eq!(result.err().map(|error| error.code), Some(ROUTE_REFUSAL.to_string()));
+    }
+}
+
+#[test]
+fn an_unknown_classification_keeps_the_helpers_refusal_and_marks_the_error_envelope() {
+    let _hand = one_hand();
+    let _policy = computer_use::input_policy::enter(computer_use::input_policy::InputPolicy::SharedDesktop);
+    let _fixture = Installed::new(None, true);
+    let said = answer(&["click", "--app", "Google Chrome", "--element-index", "194"]);
+    assert_eq!(said["error"]["code"], error_code::ELEMENT_NOT_FOUND);
+    assert_eq!(said["error"]["message"], "element 194 changed since the last snapshot");
+    assert_eq!(calls(), 1);
+    assert_eq!(said["browserClassificationUnknown"], true, "a failed input also carries the one unknown-classification fact");
+}
+
+#[test]
+fn a_classified_calls_error_envelope_keeps_its_exact_bytes() {
+    let _hand = one_hand();
+    let _policy = computer_use::input_policy::enter(computer_use::input_policy::InputPolicy::SharedDesktop);
+    let _fixture = Installed::new(Some(false), true);
+    let said = raw_answer(&["click", "--app", "Calculator", "--element-index", "194"]);
+    let original = crate::agent_tools_runtime::computer_cli_error(true, error_code::ELEMENT_NOT_FOUND,
+        "element 194 changed since the last snapshot");
+    assert_eq!(said.exit_code, original.exit_code);
+    assert_eq!(said.stdout, original.stdout);
+    assert_eq!(said.stderr, original.stderr, "a classified call retains the original error bytes");
+    assert!(!said.stderr.contains("browserClassificationUnknown"));
 }
