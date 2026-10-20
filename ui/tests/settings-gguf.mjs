@@ -124,8 +124,8 @@ export async function runSettingsGguf({ test, assert, assertEqual, backend, with
       const before = backend.calls.length;
       await page.click("#judgment-source-inspect");
       await page.waitForFunction(() => judgmentModelSourceController.inspection?.sourceKind === "hugging_face_file");
-      assertEqual(backend.calls.slice(before).find((call) => call.command === "managed_judgment_inspect_source").args.source, { kind: "hugging_face_file", url: address });
-      assertEqual(backend.typesafeSettings().provider, active);
+      assertEqual(backend.calls.slice(before).find((call) => call.command === "managed_judgment_inspect_source").args.source, { kind: "hugging_face_file", url: address }, "the address was not pinned as one file");
+      assertEqual(backend.typesafeSettings().provider, active, "inspecting an address replaced the active provider");
       assert(!backend.calls.slice(before).some((call) => call.command === "managed_judgment_install_source"), "address inspection started the weight download");
       return "specific file URL · metadata only · no implicit download";
     }));
