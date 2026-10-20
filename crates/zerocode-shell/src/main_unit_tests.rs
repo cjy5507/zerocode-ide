@@ -23127,6 +23127,10 @@ pub(crate) mod computer_desktop_wait {
 
     #[test]
     fn a_wait_is_answered_by_the_window_and_capped_by_the_table() {
+        // A stop made while it waits ends it (t-66760): no other test's stop.
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let started = std::time::Instant::now();
         let answer = answer_computer_command(&words(&["wait", "--ms", "40", "--json"]));
         assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
@@ -28203,6 +28207,7 @@ mod desktop_wait_for_tests {
             &core::WalkBudget {
                 deadline_ms: core::batch_deadline_ms(&steps),
                 out_of_time: (),
+                clips_waits: false,
             },
             |_, argv| core::held_ms(&core::parse_command(argv).unwrap()),
             |_, argv| core::Next::Run(argv.clone()),
