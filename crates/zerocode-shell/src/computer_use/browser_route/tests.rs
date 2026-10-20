@@ -35,8 +35,17 @@ impl Drop for Installed {
     }
 }
 
-pub(super) fn classification() -> Option<Option<bool>> {
-    FIXTURE.with(|fixture| fixture.borrow().as_ref().map(|fixture| fixture.browser))
+pub(super) fn classification(params: &Value) -> Option<Option<bool>> {
+    FIXTURE.with(|installed| {
+        let installed = installed.borrow();
+        let installed = installed.as_ref()?;
+        let Some(default_browser) = installed.browser else { return Some(None); };
+        let fixture: Value = serde_json::from_str(include_str!("../../../tests/fixtures/browser-routing.json")).unwrap();
+        let handlers: [Vec<String>; 4] = serde_json::from_value(fixture["handlers"].clone()).unwrap();
+        let name = params.get("app").and_then(Value::as_str).unwrap_or(if default_browser { "Google Chrome" } else { "Calculator" });
+        let app = fixture["apps"].as_array().unwrap().iter().find(|app| app["app"].as_str() == Some(name) || app["bundleId"].as_str() == Some(name));
+        Some(app.and_then(|app| super::registered_browser(app["bundleId"].as_str().unwrap(), &handlers)))
+    })
 }
 
 pub(crate) fn helper(method: &str, _params: &Value) -> Option<Result<Value, ComputerUseError>> {
@@ -88,7 +97,7 @@ fn the_photo_scene_routes_once_before_either_helper_failure() {
     let _hand = one_hand();
     let _policy = computer_use::input_policy::enter(computer_use::input_policy::InputPolicy::SharedDesktop);
     let _fixture = Installed::new(Some(true), true);
-    assert_eq!(classification(), Some(Some(true)));
+    assert_eq!(classification(&json!({"app":"Google Chrome"})), Some(Some(true)));
     let mut road_refusals = 0;
     let mut said = Value::Null;
     for _ in 0..2 {

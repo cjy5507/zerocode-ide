@@ -22,8 +22,7 @@
 //! on a provider refusal so the snapshots survive.
 
 pub mod arena;
-#[cfg(test)]
-mod browser_route;
+pub(crate) mod browser_route;
 mod permissions;
 pub mod repeat;
 mod screenshot_export;
@@ -124,6 +123,7 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// later request gets one clean restart; provider refusals keep its snapshots.
 pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     input_policy::ensure_current()?;
+    browser_route::provider(method, &params)?;
     let params = input_policy::current().prepare_provider(method, params)?;
     if let Some(params) = params.as_object() {
         zerocode_core::computer_use_protocol::execution::validate(method, params)?;

@@ -5585,6 +5585,10 @@ pub(super) fn answer_computer_command_with(
     if let Some(refusal) = refused_at_the_door(&command) {
         return refusal;
     }
+    let _browser_route = match computer_use::browser_route::command(&command) {
+        Ok(scope) => scope,
+        Err(error) => return computer_cli_error(command.json, &error.code, &error.message),
+    };
     let _input_policy = permission_window.map_or_else(
         || computer_use::input_policy::enter_captured(computer_use::input_policy::capture()),
         |window| {

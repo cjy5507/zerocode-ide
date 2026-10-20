@@ -17,6 +17,10 @@
 //! `permission_denied` at call time (UIPI), which is the only refusal the
 //! platform actually makes.
 
+#[path = "../browser_route/windows.rs"]
+mod browser_route;
+pub(super) use browser_route::target_is_browser;
+
 mod actions;
 mod apps;
 mod capture;
