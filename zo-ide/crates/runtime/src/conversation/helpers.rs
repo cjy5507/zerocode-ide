@@ -254,8 +254,37 @@ pub(super) struct AskInput {
     /// When `true` the user may check several options and the answer comes back
     /// as an array. Accepts the canonical `camelCase` `multiSelect` and a
     /// `snake_case` alias; missing defaults to single-select.
-    #[serde(default, rename = "multiSelect", alias = "multi_select")]
+    #[serde(
+        default,
+        rename = "multiSelect",
+        alias = "multi_select",
+        deserialize_with = "lenient_multi_select"
+    )]
     multi_select: bool,
+}
+
+/// `multiSelect` as the tools crate's road reads it: a JSON boolean, or the
+/// words `true`/`false` a model sends when the tool's schema never reached the
+/// provider (t-68770). `AskUserQuestion` is deferred, and this streaming road
+/// answers it before the tools crate's dispatch seam could put the type back.
+/// Any other value fails as the type error it is.
+fn lenient_multi_select<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    use serde::de::Error as _;
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(text) => match text.trim() {
+            word if word.eq_ignore_ascii_case("true") => Ok(true),
+            word if word.eq_ignore_ascii_case("false") => Ok(false),
+            _ => Err(D::Error::invalid_type(
+                serde::de::Unexpected::Str(&text),
+                &"a boolean",
+            )),
+        },
+        other => bool::deserialize(other).map_err(D::Error::custom),
+    }
 }
 
 fn lenient_question_options<'de, D>(
