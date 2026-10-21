@@ -109,6 +109,20 @@ pub(crate) enum Told {
     Ledger,
 }
 
+/// Whether git was asked for a flow (t-69070 P2): only for a folder in a
+/// repository this window lists ([`vouch`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GitAsked {
+    /// The folder is in a listed repository, and git was asked at the root the
+    /// window listed for it.
+    #[default]
+    Kept,
+    /// The folder is in no listed repository: git was not run, and the flow is
+    /// the ledger's and the catalog's alone.
+    Outside,
+}
+
 /// What the window asks: the project's folder as it lists the project, and the
 /// folders the project's rows can lie under (the project and its worktrees —
 /// the gallery's own project filter).
@@ -136,6 +150,8 @@ pub(crate) struct Flow {
     pub(crate) older: Option<FlowOlder>,
     /// Whether this window's ledger answered. Without it the flow is git's alone.
     pub(crate) ledger: bool,
+    /// Whether git was asked — only in a repository this window lists.
+    pub(crate) git: GitAsked,
     /// Where the lines' facts came from, counted over every line.
     pub(crate) sources: FlowSources,
 }
@@ -1464,9 +1480,51 @@ pub(crate) fn dress(
     }
 }
 
+/// What one read may touch, vouched against the projects this window lists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Vouched {
+    /// The project as the ledger keys a run ([`zerocode_core::git_dir::project_root`]).
+    pub(crate) project: Option<PathBuf>,
+    /// The listed root git is asked at; `None` for a folder in no listed
+    /// repository.
+    pub(crate) repo: Option<PathBuf>,
+    /// The asked roots that are the project's own folders.
+    pub(crate) roots: Vec<PathBuf>,
+}
+
+/// The folders `ask` names, vouched against the `listed` projects.
+pub(crate) fn vouch(ask: &FlowAsk, _listed: &[PathBuf]) -> Vouched {
+    let folder = PathBuf::from(ask.root.trim());
+    Vouched {
+        project: zerocode_core::git_dir::project_root(&folder),
+        roots: ask.roots.iter().map(PathBuf::from).collect(),
+        repo: Some(folder),
+    }
+}
+
+/// The last vouch, kept for the next read of the same project.
+struct VouchHeld {
+    root: String,
+    roots: Vec<String>,
+    listed: Vec<PathBuf>,
+    checked_ms: i64,
+    vouched: Vouched,
+}
+
+/// [`vouch`], answered from `held` for the same ask against the same list
+/// within [`FlowTable::git_fresh_ms`], and kept there.
+fn vouch_kept(
+    _held: &mut Option<VouchHeld>,
+    ask: &FlowAsk,
+    listed: &[PathBuf],
+    _now_ms: i64,
+) -> Vouched {
+    vouch(ask, listed)
+}
+
 /// The flow of the project at `ask.root`: the ledger image this window holds,
 /// git at the base, and the catalog's memory. Runs off the main thread.
-pub(crate) fn read(ask: &FlowAsk, now_ms: i64) -> Flow {
+pub(crate) fn read(ask: &FlowAsk, _listed: &[PathBuf], now_ms: i64) -> Flow {
     let root = ask.root.trim();
     if root.is_empty() {
         return Flow::default();

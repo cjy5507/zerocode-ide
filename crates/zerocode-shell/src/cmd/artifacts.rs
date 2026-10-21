@@ -145,7 +145,7 @@ pub(crate) fn artifact_bundle(task: String) -> Result<Option<artifact_runtime::B
 /// here, and without the store when it has not opened yet.
 #[tauri::command(async)]
 pub(crate) fn artifact_flow(ask: crate::artifact_flow::FlowAsk) -> crate::artifact_flow::Flow {
-    crate::artifact_flow::read(&ask, now_epoch_ms())
+    crate::artifact_flow::read(&ask, &[], now_epoch_ms())
 }
 
 fn path_of(id: &str) -> Result<PathBuf, String> {

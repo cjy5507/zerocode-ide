@@ -819,6 +819,182 @@ fn the_flow_serializes_the_words_the_window_reads() {
     }
 }
 
+/// git in `at`, for a test's own repository; a failure is the test's.
+fn git_in(at: &Path, args: &[&str]) {
+    Host::for_workspace(at)
+        .vcs()
+        .text(at, args)
+        .unwrap_or_else(|why| panic!("git {args:?}: {why}"));
+}
+
+/// A repository of its own — `main` with one commit — in a temporary folder
+/// that holds it while the test runs.
+fn repository() -> (tempfile::TempDir, PathBuf) {
+    let held = tempfile::tempdir().expect("a folder");
+    let repo = held.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("the repository's folder");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    git_in(
+        &repo,
+        &[
+            "-c",
+            "user.name=ZeroCode Test",
+            "-c",
+            "user.email=test@zerocode",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "first",
+        ],
+    );
+    (held, repo)
+}
+
+fn ask_for(root: &Path, roots: &[&Path]) -> FlowAsk {
+    FlowAsk {
+        root: root.to_string_lossy().into_owned(),
+        roots: roots
+            .iter()
+            .map(|one| one.to_string_lossy().into_owned())
+            .collect(),
+    }
+}
+
+/// Whether git's answer is held for any of `roots`, as given or made canonical.
+fn git_held_for(roots: &[&Path]) -> bool {
+    let held = git_held().lock().unwrap_or_else(PoisonError::into_inner);
+    roots.iter().any(|root| {
+        let canonical = root.canonicalize().ok();
+        held.iter()
+            .any(|one| one.root == *root || Some(&one.root) == canonical.as_ref())
+    })
+}
+
+/// A folder outside every repository this window lists is a request git is
+/// never run for (t-69070 P2), though git could read it: the read answers from
+/// the ledger and the catalog alone and says so, and no listed repository is
+/// asked on its behalf either.
+#[test]
+fn a_folder_outside_the_listed_repositories_asks_git_nothing() {
+    let (_listed_folder, listed) = repository();
+    let (_outside_folder, outside) = repository();
+    let ask = ask_for(&outside, &[&outside]);
+    let flow = read(&ask, std::slice::from_ref(&listed), at(0));
+    assert!(
+        !git_held_for(&[&outside, &listed]),
+        "git was asked for the read"
+    );
+    assert_eq!(flow.base, None, "git answered for the folder outside");
+    assert_eq!(flow.git, GitAsked::Outside);
+    let json = serde_json::to_value(&flow).expect("the flow serializes");
+    assert_eq!(json["git"], "outside");
+    assert_eq!(
+        vouch(&ask, std::slice::from_ref(&listed)).repo,
+        None,
+        "git would be asked for a folder no listed repository holds"
+    );
+}
+
+/// A listed repository answers for its own folders — its root, a folder
+/// inside it, a linked worktree — and git is asked at the root the window
+/// listed, never in the folder the webview named. A listed folder no checkout
+/// holds answers for none, and the roots a read's records may lie under are
+/// the project's own folders and nothing wider.
+#[test]
+fn a_listed_repository_is_asked_at_its_listed_root_for_its_own_folders() {
+    let (held, listed) = repository();
+    let worktree = held.path().join("wt-feature");
+    git_in(
+        &listed,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature",
+            &worktree.to_string_lossy(),
+        ],
+    );
+    let inside = listed.join("crates");
+    std::fs::create_dir_all(&inside).expect("a folder inside");
+    let (_other_folder, other) = repository();
+    let plain = tempfile::tempdir().expect("a plain folder");
+    let projects = [plain.path().to_path_buf(), listed.clone()];
+    for asked in [&listed, &inside, &worktree] {
+        assert_eq!(
+            vouch(&ask_for(asked, &[]), &projects).repo.as_ref(),
+            Some(&listed),
+            "{asked:?} is not asked at the root the window listed"
+        );
+    }
+    assert_eq!(
+        vouch(&ask_for(plain.path(), &[plain.path()]), &projects).repo,
+        None,
+        "a listed folder no checkout holds has git asked for it"
+    );
+    let ask = ask_for(
+        &worktree,
+        &[&listed, &worktree, &other, plain.path(), Path::new("/")],
+    );
+    assert_eq!(
+        vouch(&ask, &projects).roots,
+        [listed.clone(), worktree.clone()],
+        "the records may lie under folders that are not the project's"
+    );
+    let flow = read(&ask, &projects, at(0));
+    assert_eq!(flow.git, GitAsked::Kept);
+    assert_eq!(flow.base.as_deref(), Some("main"));
+    assert!(
+        git_held_for(&[&listed]) && !git_held_for(&[&worktree]),
+        "git was asked in the folder the webview named, not at the listed root"
+    );
+}
+
+/// A read's vouch is kept for the same folder, roots and list for as long as
+/// git's answer stands — the window asks again on every ledger change — and
+/// asked again when that time is up or the list moves: a repository whose
+/// `.git` went away is vouched from the kept answer until then, and a kept
+/// answer is the one the next read of the same ask gets.
+#[test]
+fn a_vouch_is_kept_for_the_same_ask_until_its_time_is_up_or_its_list_moves() {
+    let (_held, listed) = repository();
+    let ask = ask_for(&listed, &[&listed]);
+    let projects = [listed.clone()];
+    let mut kept = None;
+    let repo = |kept: &mut Option<VouchHeld>, projects: &[PathBuf], now_ms: i64| {
+        vouch_kept(kept, &ask, projects, now_ms).repo
+    };
+    assert_eq!(repo(&mut kept, &projects, at(0)), Some(listed.clone()));
+    let gone = listed.join("git-gone");
+    std::fs::rename(listed.join(".git"), &gone).expect("the .git goes away");
+    assert_eq!(
+        repo(&mut kept, &projects, at(0) + FLOW.git_fresh_ms - 1),
+        Some(listed.clone()),
+        "the same ask was vouched again within the time git's answer stands"
+    );
+    assert_eq!(
+        repo(&mut kept, &projects, at(0) + FLOW.git_fresh_ms),
+        None,
+        "the time was up and the answer was kept"
+    );
+    std::fs::rename(&gone, listed.join(".git")).expect("the .git comes back");
+    let later = at(0) + FLOW.git_fresh_ms + 1;
+    assert_eq!(
+        repo(&mut kept, &projects, later),
+        None,
+        "the kept answer is not the next read's"
+    );
+    let more = [listed.clone(), PathBuf::from("/a/project/listed/since")];
+    assert_eq!(
+        repo(&mut kept, &more, later),
+        Some(listed.clone()),
+        "the list moved and the answer was kept"
+    );
+}
+
 /// What a read costs on this repository's own history with thirty tasks in the
 /// ledger — the briefing's budget is 50 ms: git asked cold and the flow
 /// assembled, five times over and judged by the middle one (one busy moment of
@@ -910,11 +1086,52 @@ fn a_read_of_thirty_tasks_and_twelve_releases_costs_at_most_fifty_ms() {
     let started = Instant::now();
     let checked = git_facts(&repo, now + FLOW.git_fresh_ms + 1);
     let rechecked = ms(started.elapsed());
+    // The vouch every read now begins with (t-69070 P2): this repository
+    // listed, and as roots the repository and its worktrees, as the window
+    // sends them.
+    let listing = Host::for_workspace(&repo)
+        .vcs()
+        .text(&repo, &["worktree", "list", "--porcelain"])
+        .expect("the worktree list");
+    let ask = FlowAsk {
+        root: repo.to_string_lossy().into_owned(),
+        roots: listing
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(str::to_string)
+            .collect(),
+    };
+    let listed = [repo.clone()];
+    let vouches: Vec<f64> = (0..ROUNDS * 3)
+        .map(|_| {
+            let started = Instant::now();
+            let vouched = vouch(&ask, &listed);
+            let spent = ms(started.elapsed());
+            assert_eq!(vouched.repo.as_ref(), Some(&repo), "this repository");
+            spent
+        })
+        .collect();
+    // And the vouch kept for the next read of the same ask.
+    let mut kept_vouch = None;
+    vouch_kept(&mut kept_vouch, &ask, &listed, now);
+    let kept_vouches: Vec<f64> = (0..ROUNDS * 3)
+        .map(|_| {
+            let started = Instant::now();
+            let vouched = vouch_kept(&mut kept_vouch, &ask, &listed, now + 1);
+            let spent = ms(started.elapsed());
+            assert_eq!(vouched.repo.as_ref(), Some(&repo), "this repository");
+            spent
+        })
+        .collect();
     println!(
         "FLOW-COST git cold p50 {cold:.1} ms ({}) · assemble p50 {assembled:.2} ms ({}) · \
-         kept {held:.3} ms · base checked {rechecked:.1} ms · releases {} · lines {}",
+         kept {held:.3} ms · base checked {rechecked:.1} ms · vouch p50 {:.3} ms ({} roots), \
+         kept {:.4} ms · releases {} · lines {}",
         said(&colds),
         said(&assembles),
+        middle(&vouches),
+        ask.roots.len(),
+        middle(&kept_vouches),
         git.releases.len(),
         flow.task_ids().len()
     );

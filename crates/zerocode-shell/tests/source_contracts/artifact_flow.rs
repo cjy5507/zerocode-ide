@@ -180,6 +180,56 @@ fn the_flow_is_read_off_the_main_thread_and_kept_by_the_bases_commit() {
     }
 }
 
+/// git runs only in a repository this window lists (t-69070 P2). The command
+/// hands the read the projects the window lists — the stored ones and the one
+/// it stands in, as `project_catalog` lists them — and the read vouches the
+/// asked folder before git is asked: made canonical and keyed as the ledger
+/// keys a project, matched to a listed checkout's shared git directory, and
+/// git asked at that listed root, never in the folder the webview named. A
+/// vouch is kept only for the same ask against the same list, and only for as
+/// long as git's answer stands.
+#[test]
+fn git_is_asked_only_at_a_repository_the_window_lists() {
+    let commands = shell_source("cmd/artifacts.rs");
+    let command = block_after(&commands, "pub(crate) fn artifact_flow(");
+    assert!(
+        command.contains("stored_projects(state.config_root())")
+            && command.contains("state.active_project_context().repo_root"),
+        "the flow command does not hand the read the projects the window lists:\n{command}"
+    );
+    let flow = shell_source("artifact_flow.rs");
+    let vouch = block_after(&flow, "pub(crate) fn vouch(");
+    assert!(
+        vouch.contains("project_root(")
+            && vouch.contains("common_of(")
+            && vouch.contains(".canonicalize()"),
+        "the asked folder is not matched to a listed repository:\n{vouch}"
+    );
+    let kept = block_after(&flow, "fn vouch_kept(");
+    assert!(
+        kept.contains("one.root == ask.root")
+            && kept.contains("one.roots == ask.roots")
+            && kept.contains("one.listed == listed")
+            && kept.contains("FLOW.git_fresh_ms")
+            && kept.contains("vouch(ask, listed)"),
+        "a kept vouch answers for another ask, another list or a later time:\n{kept}"
+    );
+    let read = block_after(&flow, "pub(crate) fn read(");
+    let vouched = read
+        .find("vouch_kept(")
+        .unwrap_or_else(|| panic!("the read does not vouch the asked folder:\n{read}"));
+    let asked = read
+        .find("git_facts(")
+        .unwrap_or_else(|| panic!("the read no longer asks git:\n{read}"));
+    assert!(
+        vouched < asked
+            && read.contains("git_facts(repo, now_ms)")
+            && read.contains("GitAsked::Outside"),
+        "git is asked before the folder is vouched, somewhere other than the listed root, \
+         or the flow does not say it was not:\n{read}"
+    );
+}
+
 /// The flow's buttons speak through `data-tip`, never a native `title`; its
 /// words go through `t()` in all four catalogs; the module is one of the
 /// window's parts; and its classes stay apart from the flow console's.

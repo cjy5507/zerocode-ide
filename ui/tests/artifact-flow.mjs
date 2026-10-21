@@ -8,10 +8,10 @@
  * The draft's own measure, by the draft's own rules (reports/t-68338/src/measure.js), on the 1440×900
  * first screen at the tab's real width: sentence lines ≥ 6, figures ≤ 4, groups 3, type sizes ≤ 4, and
  * one press — opening the tab — to read what t-501 did and where it stands. Then the unfolded steps, the
- * reader's head, a release unfolded, the records with no task, a search, an empty project, a repaint that
- * writes nothing, thirty tasks and twelve releases within 400 elements and 3 ms a paint with the CPU
- * slowed four times, the screen rules (12 px text, 28 px presses), axe and 4.5:1 in both themes, the four
- * catalogs.
+ * reader's head, a release unfolded, the records with no task, a search, an empty project, a folder in no
+ * repository the window lists, a repaint that writes nothing, thirty tasks and twelve releases within 400
+ * elements and 3 ms a paint with the CPU slowed four times, the screen rules (12 px text, 28 px presses),
+ * axe and 4.5:1 in both themes, the four catalogs.
  *
  * The scene is the draft's (reports/t-68338/src/data.js), laid over the synthetic catalog and tasks of
  * `artifact-cards.mjs` and `artifact-tasks.mjs`. Every read of the page is defensive: on a tree that has
@@ -54,9 +54,10 @@ const SETTLED_MS = 300;
 /* The flow the runtime answers for the project in view — the draft's scene, in the catalog's own task
  * ids, so a chip opens the rows `standCatalog` and `standTasks` stand, and its records are the catalog's
  * rows no task is linked to. `heavy` lays thirty tasks over twelve releases instead; `empty` is a project
- * with nothing in it. A page function: no closure. */
-export function standFlow(page, { heavy = null, empty = false } = {}) {
-  return page.evaluate(({ heavy, empty }) => {
+ * with nothing in it, and `outside` a folder in no repository the window lists, which the runtime asked
+ * git nothing for (t-69070 P2). A page function: no closure. */
+export function standFlow(page, { heavy = null, empty = false, outside = false } = {}) {
+  return page.evaluate(({ heavy, empty, outside }) => {
     const now = Date.now();
     const minute = 60 * 1000;
     const ago = (minutes) => now - minutes * minute;
@@ -180,13 +181,16 @@ export function standFlow(page, { heavy = null, empty = false } = {}) {
         ledger: true, sources: { said: { summary: 22 }, land: { git: 20, ledger: 1 }, ship: { git: 15 } },
       };
     }
+    // Whether the runtime asked git: only for a folder in a repository the window lists (t-69070 P2).
+    flow.git = outside ? "outside" : "kept";
+    if (outside) flow.base = null;
     const seen = (window.__FLOW__ = { asks: [], flow });
     window.__ANSWER__.artifact_flow = (args) => {
       seen.asks.push(JSON.parse(JSON.stringify(args?.ask ?? null)));
       return JSON.parse(JSON.stringify(seen.flow));
     };
     return { lines: [flow.now, flow.next, ...flow.releases].reduce((sum, one) => sum + one.tasks.length, 0), releases: flow.releases.length };
-  }, { heavy, empty });
+  }, { heavy, empty, outside });
 }
 
 /* Open the tab fresh, as a person does from the sidebar: nothing picked, nothing unfolded. */
@@ -327,6 +331,7 @@ export async function testArtifactFlow(browser, origin, ok) {
         hereWord: shown(view?.querySelector(".artifacts-here")) ? view.querySelector(".artifacts-here").textContent : "",
         counts: [...(view?.querySelectorAll(".artifacts-tab-count") ?? [])].filter(shown).length,
         gallery: artifactFilter.project,
+        outside: shown(view?.querySelector(".artifact-flow-outside")),
       };
     });
     ok("the tab opens on the flow — the flow's tab chosen, the cards and the task list away, no reader yet",
@@ -339,6 +344,7 @@ export async function testArtifactFlow(browser, origin, ok) {
     ok("the full list keeps its own filters: the gallery's project stays 「전체」 while the flow stands on the one in view",
       opened.gallery === null, JSON.stringify(opened));
     ok("no tab carries a count while the flow stands — the first screen's numbers are the groups'", opened.counts === 0, JSON.stringify(opened));
+    ok("a project in a listed repository says nothing of git not being asked", !opened.outside, JSON.stringify(opened));
 
     /* ---- the first screen: the draft's lines, and t-501 read in one press -------------------------- */
     const first = await page.evaluate(flowFirstScreen);
@@ -629,6 +635,35 @@ export async function testArtifactFlow(browser, origin, ok) {
       return seen;
     }, SETTLED_MS);
     ok("「전체 목록 보기」 opens the full list on a tab that has rows", all.tab === "pages" && all.grid && !all.flow, JSON.stringify(all));
+
+    /* ---- a folder in no listed repository says git was not asked there (t-69070 P2) ------------------ */
+    await standFlow(page, { empty: true, outside: true });
+    const outside = await page.evaluate(async (settled) => {
+      const view = artifactsView();
+      await refreshArtifactFlow(view);
+      await new Promise((done) => setTimeout(done, settled));
+      const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+      const line = view?.querySelector(".artifact-flow-outside");
+      return {
+        tab: artifactFilter.tab,
+        shown: shown(line),
+        word: line?.textContent ?? "",
+        size: line ? parseFloat(getComputedStyle(line).fontSize) : 0,
+        empty: shown(view?.querySelector(".artifact-flow-empty")),
+      };
+    }, SETTLED_MS);
+    ok("a folder in no repository the window lists says so in one line — git was not asked there — above what the flow holds",
+      outside.tab === "flow" && outside.shown && outside.word === "등록된 저장소 밖 폴더 — git 기록 없음" && outside.size >= TEXT_MIN_PX
+        && outside.empty,
+      JSON.stringify(outside));
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate((next) => document.documentElement.setAttribute("data-theme", next), theme);
+      await settle();
+      const rows = await contrastTable(page, AxeBuilder, ".artifacts-view .artifact-flow-outside").catch((error) => [{ error: String(error) }]);
+      const low = rows.filter((row) => row.error || (row.verdict !== "hidden" && (row.ratio === null || row.ratio < CONTRAST_MIN)));
+      ok(`that line keeps ${CONTRAST_MIN}:1 in ${theme}`, rows.length > 0 && low.length === 0, JSON.stringify(rows.slice(0, 4)));
+    }
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
 
     /* ---- thirty tasks over twelve releases: 400 elements, 3 ms a paint with the CPU slowed ----------- */
     const weight = await standFlow(page, { heavy: HEAVY });
