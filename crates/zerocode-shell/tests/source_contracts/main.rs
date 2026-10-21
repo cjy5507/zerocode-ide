@@ -21696,8 +21696,9 @@ mod tests {
              somebody is reading:\n{staging}"
         );
 
-        // The keyboard follows the screen it is looking at.
-        let routing = block_after(window, "function keyboardTarget() {");
+        // The keyboard follows the screen it is looking at — the screen's own
+        // answer, which a run of typing only ever holds back from (t-69526).
+        let routing = block_after(window, "function frontKeyboardTarget() {");
         assert!(
             routing.contains(
                 r#"if (peekTerm !== null && !el("peek-scrim").hidden) return { kind: "term", term: peekTerm };"#

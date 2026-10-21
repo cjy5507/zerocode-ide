@@ -14790,6 +14790,32 @@ fn concurrent_automation_mutations_merge_and_a_delete_tombstones_stale_runs() {
     );
 }
 
+/// A declaration's black-box line names why the stage moved when the window
+/// said (t-69526: the switch at 19:46:01 left `watch main: [6]` and nothing
+/// to say what moved it). The line before the road is the one the label
+/// audit reads (`tools/label-audit/seed.py`), unchanged; the road keeps to
+/// the window's own vocabulary and its length, whatever arrives.
+#[test]
+fn a_watch_line_says_why_the_stage_moved_in_the_windows_own_words() {
+    use crate::cmd::board::watch_line;
+    assert_eq!(watch_line("main", &[12, 6], None), "watch main: [6, 12]");
+    assert_eq!(watch_line("main", &[], Some("")), "watch main: []");
+    assert_eq!(
+        watch_line("main", &[6], Some("program notify:activate under typing")),
+        "watch main: [6] by program notify:activate under typing"
+    );
+    assert_eq!(
+        watch_line("main", &[6], Some("person keydown ArrowDown +120ms")),
+        "watch main: [6] by person keydown ArrowDown +120ms"
+    );
+    let crafted = format!("person click\nwatch main: [1] by {}", "x".repeat(200));
+    let line = watch_line("main", &[6], Some(&crafted));
+    assert!(
+        !line.contains('\n') && line.len() <= "watch main: [6] by ".len() + 80,
+        "a road carried a second line or ran unbounded: {line:?}"
+    );
+}
+
 /// A Claude pane that started and never spoke is recorded like any other,
 /// and its wake was `claude --resume <id>` over a transcript that was never
 /// written: exit 1 a second after every restart, thirteen times for one pane

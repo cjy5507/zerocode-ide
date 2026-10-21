@@ -4220,7 +4220,7 @@ impl RuntimeState {
     fn pane_taken(
         &mut self,
         term: u32,
-        _hand: &str,
+        hand: &str,
         now_ms: i64,
     ) -> Result<RuntimeReply, RuntimeError> {
         if now_ms < 0 {
@@ -4234,6 +4234,10 @@ impl RuntimeState {
         self.panes.with_seat_of_term(term, &mut |seat| {
             if let Some((team, pane)) = seat {
                 let taken = ledger.worker_taken_over((team, pane));
+                // The run hears it in the same write as the mark (t-69526).
+                if taken {
+                    tell_run_taken_over(ledger, (team, pane), term, hand, now_ms);
+                }
                 let told = ledger.receivers_told_taken_over((team, pane), now_ms) > 0;
                 moved = taken || told;
             }
@@ -6553,6 +6557,66 @@ impl RuntimeState {
         self.poison = None;
         Ok(())
     }
+}
+
+/// The run of a worker whose pane just became the person's hears it at once
+/// (t-69526): one `status` from the ledger to the run's coordinator seat,
+/// filed in the same write as the mark, under a receipt naming the worker
+/// and the moment so a replay of that one takeover is not a second letter.
+///
+/// Before it the run learned of a takeover only when its next letter came
+/// back unpointed, and a pane a stage switch had put under the person's
+/// typing stood as theirs for five hours (w-68712, 2026-10-21). Answers how
+/// many letters were filed: none when no worker of a run sits at the seat.
+fn tell_run_taken_over(
+    ledger: &mut Ledger,
+    seat: (&str, &str),
+    term: u32,
+    hand: &str,
+    now_ms: i64,
+) -> usize {
+    let (team, pane) = seat;
+    let Some((run, worker)) = ledger.runs().iter().find_map(|run| {
+        run.workers
+            .iter()
+            .find(|worker| {
+                worker.team == team
+                    && worker.pane == pane
+                    && worker.taken_over
+                    && worker.state.may_occupy_pane()
+            })
+            .map(|worker| (run.id.clone(), worker.id.clone()))
+    }) else {
+        return 0;
+    };
+    let letter = taken_over_letter(&worker, term, seat, hand, now_ms);
+    ledger.post_observation_once(
+        Some(&run),
+        &format!("run:{run}"),
+        &letter,
+        Some(&format!("taken-over:{worker}:{now_ms}")),
+        now_ms,
+    )
+}
+
+/// What the run is told of a takeover: who, where, when and by which kind of
+/// hand — `key <Name>`, `words`, `paste`, `ime`, never what it typed — and
+/// the one verb that gives the pane back (t-17644: a worker's own letters do
+/// not).
+fn taken_over_letter(
+    worker: &str,
+    term: u32,
+    (team, pane): (&str, &str),
+    hand: &str,
+    now_ms: i64,
+) -> String {
+    format!(
+        "worker {worker}'s pane, terminal {term} (seat {team}/{pane}), became the person's \
+         at {} by {hand}: the window types no mail pointer there from now on, and the \
+         worker's letters wait in its inbox. If no person meant to type there, give the \
+         pane back: zerocode-orc worker-return --worker {worker}",
+        zerocode_core::civil::iso_utc_of(now_ms)
+    )
 }
 
 fn actor_main(
