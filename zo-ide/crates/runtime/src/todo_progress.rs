@@ -81,16 +81,15 @@ impl TodoStatus {
     }
 }
 
-/// Resolve the todo store path for `cwd`, honoring the same overrides the
-/// writer uses: an explicit (non-empty) `ZO_TODO_STORE`, else
-/// `zo_state_base(cwd)/.zo-todos.json` (which itself honors
-/// `ZO_STATE_DIR`). Centralizing this keeps reader and writer in lockstep.
-/// Read the current todo list from the store, best-effort. A missing store,
-/// unreadable file, or malformed JSON all yield an empty list -- re-injection
-/// degrades to a no-op rather than ever failing the enclosing turn.
+/// Read session `session_id`'s current todo list from its store, best-effort.
+/// A missing store, unreadable file, or malformed JSON all yield an empty list
+/// -- re-injection degrades to a no-op rather than ever failing the enclosing
+/// turn.
 #[must_use]
-pub fn current_todos(cwd: &Path) -> Vec<TodoSnapshot> {
-    let path = crate::todo_store::resolve_readable_store(cwd);
+pub fn current_todos(cwd: &Path, session_id: &str) -> Vec<TodoSnapshot> {
+    let Some(path) = crate::todo_store::resolve_readable_store(cwd, Some(session_id)) else {
+        return Vec::new();
+    };
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -165,6 +164,59 @@ mod tests {
             active_form: active.to_string(),
             status,
         }
+    }
+
+    /// Two sessions in one folder each read back only the plan they wrote; a
+    /// third, new one reads none -- not even the file every session shared
+    /// before, which stays as it was (t-68408).
+    #[test]
+    fn each_session_reads_only_its_own_plan() {
+        let _lock = crate::test_env_lock();
+        let prior_todo = std::env::var_os("ZO_TODO_STORE");
+        let prior_state = std::env::var_os("ZO_STATE_DIR");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("zo-todo-progress-sessions-{nanos}"));
+        std::env::remove_var("ZO_TODO_STORE");
+        std::env::set_var("ZO_STATE_DIR", root.join("state-root"));
+        let cwd = root.join("workspace");
+        let write = |path: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("store dir");
+            std::fs::write(path, body).expect("write plan");
+        };
+        let store = |session: &str| {
+            crate::todo_store::primary_store(&cwd, Some(session)).expect("a session's store")
+        };
+        let shared = crate::zo_project_state_dir(&cwd).join(".zo-todos.json");
+        let shared_plan = r#"[{"content":"old shared step","activeForm":"doing the old shared step","status":"in_progress"}]"#;
+        write(&shared, shared_plan);
+        write(&store("session-a"), r#"[{"content":"north step","activeForm":"doing the north step","status":"in_progress"}]"#);
+        write(&store("session-b"), r#"[{"content":"south step","activeForm":"doing the south step","status":"pending"}]"#);
+
+        let read = |session: &str| {
+            super::current_todos(&cwd, session)
+                .into_iter()
+                .map(|todo| todo.content)
+                .collect::<Vec<_>>()
+        };
+        let (north, south, fresh) = (read("session-a"), read("session-b"), read("session-c"));
+        let shared_after = std::fs::read_to_string(&shared);
+        match prior_todo {
+            Some(value) => std::env::set_var("ZO_TODO_STORE", value),
+            None => std::env::remove_var("ZO_TODO_STORE"),
+        }
+        match prior_state {
+            Some(value) => std::env::set_var("ZO_STATE_DIR", value),
+            None => std::env::remove_var("ZO_STATE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(north, ["north step"], "a session reads its own plan");
+        assert_eq!(south, ["south step"], "its neighbour reads its own plan");
+        assert_eq!(fresh, Vec::<String>::new(), "a new session starts with no plan");
+        assert_eq!(shared_after.ok().as_deref(), Some(shared_plan), "the old shared file is left as it was");
     }
 
     #[test]

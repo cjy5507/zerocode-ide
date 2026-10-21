@@ -1019,4 +1019,69 @@ mod tests {
 
         assert_eq!(executor.context.spawn_parent_model(), None);
     }
+
+    /// A helper runs its own conversation beside its parent's in one process
+    /// (t-68408): its `TodoWrite` keeps that conversation's plan, so it is
+    /// never handed its parent's plan nor rewrites it, while its context stays
+    /// stamped with the parent's session for manifests.
+    #[test]
+    fn a_helpers_plan_is_its_own_conversations_not_its_parents() {
+        struct Silent;
+        impl runtime::ApiClient for Silent {
+            fn stream(&mut self, _request: runtime::ApiRequest) -> Result<Vec<runtime::AssistantEvent>, runtime::RuntimeError> {
+                Ok(vec![runtime::AssistantEvent::MessageStop])
+            }
+        }
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().expect("temp root");
+        let prior_state = std::env::var_os("ZO_STATE_DIR");
+        let prior_store = std::env::var_os("ZO_TODO_STORE");
+        std::env::set_var("ZO_STATE_DIR", root.path().join("state"));
+        std::env::remove_var("ZO_TODO_STORE");
+        let plan = |ctx: &ToolContext, step: &str| -> Vec<String> {
+            let todos = json!({ "todos": [{ "content": step, "activeForm": format!("doing {step}"), "status": "in_progress" }] });
+            let output = crate::execute_tool(ctx, "TodoWrite", &todos).expect("TodoWrite should succeed");
+            let output: serde_json::Value = serde_json::from_str(&output).expect("TodoWrite json");
+            output["oldTodos"]
+                .as_array()
+                .expect("oldTodos array")
+                .iter()
+                .map(|todo| todo["content"].as_str().expect("content").to_string())
+                .collect()
+        };
+
+        let parent = ToolContext::new();
+        parent.set_session_id("session-parent");
+        let job = job_with_parent_session(Some("session-parent"));
+        let helper = build_agent_runtime_on(&job, |_, _, _| Ok(Silent)).expect("a helper runtime");
+        let helper_session = helper.session().session_id.clone();
+        let helper_context = &helper.tool_executor().context;
+        let parent_first = plan(&parent, "plan the parent's work");
+        let helper_first = plan(helper_context, "plan the helper's work");
+        let parent_again = plan(&parent, "carry on with the parent's work");
+        let helper_seen: Vec<String> =
+            runtime::todo_progress::current_todos(&std::env::current_dir().expect("cwd"), &helper_session)
+                .into_iter()
+                .map(|todo| todo.content)
+                .collect();
+        let stamped = helper_context.session_id();
+        let plan_owner = helper_context.plan_session_id();
+        match prior_state {
+            Some(value) => std::env::set_var("ZO_STATE_DIR", value),
+            None => std::env::remove_var("ZO_STATE_DIR"),
+        }
+        match prior_store {
+            Some(value) => std::env::set_var("ZO_TODO_STORE", value),
+            None => std::env::remove_var("ZO_TODO_STORE"),
+        }
+
+        assert_eq!(stamped.as_deref(), Some("session-parent"), "manifests stay stamped with the parent");
+        assert_eq!(plan_owner, Some(helper_session), "the plan is the helper conversation's own");
+        assert_eq!(parent_first, Vec::<String>::new());
+        assert_eq!(helper_first, Vec::<String>::new(), "a helper is never handed its parent's plan");
+        assert_eq!(parent_again, ["plan the parent's work"], "a helper never rewrites its parent's plan");
+        assert_eq!(helper_seen, ["plan the helper's work"], "the helper's runtime re-reads its own plan");
+    }
 }
