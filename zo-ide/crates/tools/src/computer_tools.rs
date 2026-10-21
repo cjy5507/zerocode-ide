@@ -2245,7 +2245,7 @@ fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &Com
     let Some(looked_at) = ctx.computer_window_title(window_id) else {
         return Err(refused.into());
     };
-    let read = ComputerInput {
+    let lookup = ComputerInput {
         action: "find".into(),
         app: Some(app.to_string()),
         window_id: Some(window_id),
@@ -2254,7 +2254,7 @@ fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &Com
         background: input.background,
         ..ComputerInput::default()
     };
-    let Some(found) = argv_for(&read)
+    let Some(found) = argv_for(&lookup)
         .ok()
         .and_then(|argv| call_shim(road, &argv, ctx.cwd.as_deref()).ok())
         .filter(|found| refusal(found).is_none() && checked_window(found, Some(window_id)).is_ok())
@@ -2679,10 +2679,10 @@ pub(crate) mod tests {
         );
         assert_eq!(calls(dir.path()), ["observe", "click", "find", "click", "observe"], "photo scene (a): one read of the window, one press, one look after");
         let window = PHOTO_WINDOW.to_string();
-        let read = shim_words(dir.path(), "find", 1);
+        let reread = shim_words(dir.path(), "find", 1);
         assert!(
-            names(&read, "--label", "Continue") && names(&read, "--role", "AXButton") && names(&read, "--window-id", &window),
-            "photo scene (a): the same window is read for the same words: {read:?}"
+            names(&reread, "--label", "Continue") && names(&reread, "--role", "AXButton") && names(&reread, "--window-id", &window),
+            "photo scene (a): the same window is read for the same words: {reread:?}"
         );
         let pressed = shim_words(dir.path(), "click", 2);
         assert!(
