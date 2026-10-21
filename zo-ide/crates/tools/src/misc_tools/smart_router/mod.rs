@@ -3,6 +3,7 @@ mod apply;
 mod canonical;
 mod challenger;
 mod compaction_seat;
+mod custom_decisions;
 mod decision_report;
 mod decision_shadow;
 mod evidence;
@@ -58,6 +59,7 @@ pub use agent_tool::{
     agent_tool_path, decide as jev_decide, AgentToolRow, JevAnswer, JevCaller, JevInvalid,
     JevQuestion, JevShape, JevVerdict, ScoredItem, AGENT_TOOL_FILE, AGENT_TOOL_OUTCOME_ANSWERED,
 };
+pub use custom_decisions::{decide as custom_decide, CustomVerdict};
 pub(crate) use apply::{
     apply_smart_models_to_spawn_input_with_auto_types, route_source_label, smart_parent_model_for_agent,
     smart_parent_model_for_agent_with_auto_type,

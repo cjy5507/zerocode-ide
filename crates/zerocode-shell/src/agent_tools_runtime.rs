@@ -680,6 +680,17 @@ pub(super) fn pane_worktree(env: &[(String, String)]) -> Option<PathBuf> {
         .map(|(_, value)| PathBuf::from(value))
 }
 
+/// The checkout a pane works in, as this process knows it: the tree its
+/// launch environment names while that tree still stands, else the worktree
+/// the ledger seated its news under. `None` for a pane that said neither — a
+/// shell this window did not launch and nothing ever reported from.
+pub(super) fn pane_checkout(state: &AppState, term: TermId) -> Option<PathBuf> {
+    let env = state.team_envs().get(&term).cloned();
+    env.as_deref()
+        .and_then(leader_worktree)
+        .or_else(|| seated_worktree(state, term).map(PathBuf::from))
+}
+
 /// The stall probe and the retirement fence use the same PTY quiet rule.
 pub(crate) fn quiet_since_output(
     last_output_ms: Option<i64>,
@@ -2447,12 +2458,7 @@ pub(super) fn answer_team_command(
         };
         let state = app.state::<AppState>();
         let actor = term.and_then(|term| receipt_actor_of(&state, term));
-        let caller_worktree = term.and_then(|term| {
-            let env = state.team_envs().get(&term).cloned();
-            env.as_deref()
-                .and_then(leader_worktree)
-                .or_else(|| seated_worktree(&state, term).map(PathBuf::from))
-        });
+        let caller_worktree = term.and_then(|term| pane_checkout(&state, term));
         let caller_identity = caller_worktree
             .as_deref()
             .and_then(zerocode_core::git_dir::identity);
@@ -2985,7 +2991,9 @@ pub(super) async fn computer_loop(
                 )
                 .await
             } else if argv.first().is_some_and(|word| word == "ssh") {
-                let answer = answer_ssh_command(&steering, &argv[1..]).await;
+                // The pane its door named, as for the emulator's: an `open`
+                // is seated in that pane's project (t-66346).
+                let answer = answer_ssh_command(&steering, pane.as_deref(), &argv[1..]).await;
                 leave_step(
                     &steering,
                     &local_data_root,
@@ -4769,8 +4777,12 @@ pub(super) fn android_mark_target(
 /// surface ZeroCode owns — and nothing an agent does on a remote machine
 /// happens anywhere the person cannot watch it, scroll it and kill it. No
 /// desktop click is used to drive this window's own chrome.
+///
+/// `pane` is the pane key the door presented — the shell that asked, read off
+/// the request rather than the command.
 pub(super) async fn answer_ssh_command(
     app: &AppHandle,
+    pane: Option<&str>,
     argv: &[String],
 ) -> zerocode_hookd::TeamAnswer {
     use zerocode_core::computer_use::{SshMethod, parse_ssh_command, ssh_usage};
@@ -4788,7 +4800,7 @@ pub(super) async fn answer_ssh_command(
     };
     let result = match command.method {
         SshMethod::List => ssh_agent_list(app).await,
-        SshMethod::Open => ssh_agent_open(app, &command).await,
+        SshMethod::Open => ssh_agent_open(app, &command, pane).await,
         SshMethod::Send => ssh_agent_send(app, &command).await,
         SshMethod::Read => ssh_agent_read(app, &command),
     };
@@ -4877,26 +4889,140 @@ pub(super) async fn ssh_agent_list(app: &AppHandle) -> Result<serde_json::Value,
     }))
 }
 
+/// What the window hears when an agent's `zerocode-ssh open` stood a terminal
+/// (`ssh:agent-open`): the pane it became, the host's name and id when it is a
+/// remote one, and the terminal whose agent asked — read off the pane key its
+/// door presented, never off the command (t-66346). The window seats the tab
+/// in that terminal's checkout and group, the way an emulator mirror is seated
+/// (`emulator::AgentOpen`, t-6379); a door that named no pane carries no
+/// `from`, and the window opens the tab where the person is looking and says
+/// why.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SshAgentOpen {
+    term: TermId,
+    label: Option<String>,
+    remote_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    from: Option<TermId>,
+}
+
+impl SshAgentOpen {
+    pub(super) fn asked(
+        term: TermId,
+        label: Option<String>,
+        remote_host: Option<String>,
+        asking: Option<TermId>,
+    ) -> Self {
+        Self {
+            term,
+            label,
+            remote_host,
+            from: asking,
+        }
+    }
+}
+
+/// Where the window seated a terminal an agent opened: the checkout whose
+/// stage the tab stands on, and its group there — a place on the screen,
+/// never a pane. The open's answer carries it as `seatedIn` (t-66346).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct AgentTermSeat {
+    pub(super) worktree: Option<String>,
+    pub(super) group: Option<u32>,
+}
+
+/// The seats the window gave the terminals agents' opens stood, each kept
+/// only while its open waits for it: the open asks for one before it tells
+/// the window and takes it — seated or not — when it stops waiting, so a word
+/// that comes late, or about a pane no open is waiting on, lands nowhere and
+/// nothing stays behind.
+#[derive(Default)]
+pub(super) struct AgentTermSeats(Mutex<HashMap<TermId, Option<AgentTermSeat>>>);
+
+impl AgentTermSeats {
+    /// An open is about to tell the window about `term`, and will wait.
+    pub(super) fn expect(&self, term: TermId) {
+        self.lock().insert(term, None);
+    }
+
+    /// The window's word; `false` when no open is waiting on `term`.
+    pub(super) fn note(&self, term: TermId, seat: AgentTermSeat) -> bool {
+        match self.lock().get_mut(&term) {
+            Some(slot) => {
+                *slot = Some(seat);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub(super) fn seated(&self, term: TermId) -> bool {
+        self.lock().get(&term).is_some_and(Option::is_some)
+    }
+
+    /// The open stops waiting: its slot goes, with the seat if one came.
+    pub(super) fn take(&self, term: TermId) -> Option<AgentTermSeat> {
+        self.lock().remove(&term).flatten()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<TermId, Option<AgentTermSeat>>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// This window's one book of the seats agents' terminals were given.
+pub(super) fn agent_term_seats() -> &'static AgentTermSeats {
+    static SEATS: OnceLock<AgentTermSeats> = OnceLock::new();
+    SEATS.get_or_init(AgentTermSeats::default)
+}
+
+/// The checkout an agent's local shell belongs to: where it starts, and what
+/// its `--cwd` is fenced to (t-66346). The asking pane's, when this process
+/// can place it, so a shell asked for from another project's pane starts in
+/// that project — where its tab is seated — and not in the one the person
+/// has in front; the one in front only for a pane it cannot place. `asking`
+/// is the door's header, never a word of the command.
+pub(super) fn agent_shell_root(
+    asking: Option<TermId>,
+    checkout_of: impl FnOnce(TermId) -> Option<PathBuf>,
+    in_front: PathBuf,
+) -> PathBuf {
+    asking.and_then(checkout_of).unwrap_or(in_front)
+}
+
 /// Stand a terminal on the asked-for machine and hand back the pane it became.
 ///
 /// The connection is made HERE rather than in the frontend, because that is
 /// what makes `open` able to answer with a pane id at all — the window is then
 /// only asked to mount a shell that already exists, which is the same order
 /// the emulator door uses and the reason neither leaves an empty tab standing.
+///
+/// `pane` is the pane key the asking shell's door presented: a local shell
+/// belongs to the checkout [`agent_shell_root`] reads off it.
 pub(super) async fn ssh_agent_open(
     app: &AppHandle,
     command: &zerocode_core::computer_use::SshCommand,
+    pane: Option<&str>,
 ) -> Result<serde_json::Value, String> {
+    let asking = pane.and_then(hooks::term_of_pane_key);
     let (rows, cols) = command.grid();
     let (term, label, remote) = if command.local {
         let cwd = command.cwd.clone();
         let term = {
             let state = app.state::<AppState>();
+            let root = agent_shell_root(
+                asking,
+                |term| pane_checkout(&state, term),
+                state.active_root(),
+            );
             // PLAIN, deliberately: the configured startup is how a person's new
             // terminal becomes an agent, and an agent that opened one would be
             // launching a second agent instead of getting the shell it asked
-            // for. `--cwd` is still fenced to the workspace by `open_term_tab`.
-            open_term_tab(state, rows, cols, Some(true), cwd, None, None)?
+            // for. `--cwd` is still fenced, to that checkout, by `open_term_tab_in`.
+            open_term_tab_in(state, root, rows, cols, Some(true), cwd, None, None)?
         };
         (term, None, None)
     } else {
@@ -4942,11 +5068,28 @@ pub(super) async fn ssh_agent_open(
             }
         }
     };
-    // The tab is the window's to place, the same as the emulator's. Revalidated
+    // The tab is the window's to place, the same as the emulator's: in the
+    // asking pane's project and group, by the window's own rule. Revalidated
     // on the other side: this payload is data, never an instruction.
-    let seat = json!({ "term": term, "label": label, "remoteHost": remote });
-    app.emit_to("main", "ssh:agent-open", seat)
-        .map_err(|error| error.to_string())?;
+    let seat = SshAgentOpen::asked(term, label.clone(), remote.clone(), asking);
+    let seats = agent_term_seats();
+    seats.expect(term);
+    if let Err(error) = app.emit_to("main", "ssh:agent-open", seat) {
+        seats.take(term);
+        return Err(error.to_string());
+    }
+    // Where it went is the window's word (`ssh_agent_seated`), awaited inside
+    // the door's budget the way the browser door waits for its pane, so the
+    // agent can tell the person the terminal is on their project's stage. A
+    // window that did not say in time leaves `seatedIn` null; the pane is
+    // open either way.
+    cmd::browser::wait_until(
+        cmd::browser::BROWSER_DOOR_BUDGET,
+        cmd::browser::BROWSER_WAIT_POLL,
+        || seats.seated(term),
+    )
+    .await;
+    let seated = seats.take(term);
     Ok(json!({
         "surface": "zerocode-built-in",
         "pane": term,
@@ -4954,6 +5097,7 @@ pub(super) async fn ssh_agent_open(
         "cols": cols,
         "label": label,
         "host": remote,
+        "seatedIn": seated,
     }))
 }
 
@@ -5370,13 +5514,24 @@ pub(super) fn ssh_pretty(
         SshMethod::List => {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         }
-        SshMethod::Open => value
-            .get("pane")
-            .and_then(serde_json::Value::as_u64)
-            .map_or_else(
-                || "Opened.".to_string(),
-                |pane| format!("Opened pane {pane}."),
-            ),
+        SshMethod::Open => {
+            let opened = value
+                .get("pane")
+                .and_then(serde_json::Value::as_u64)
+                .map_or_else(
+                    || "Opened".to_string(),
+                    |pane| format!("Opened pane {pane}"),
+                );
+            // Where the window seated it (t-66346), said as a checkout and a
+            // stage group — never as a pane, which is what `--pane` takes.
+            let seat = &value["seatedIn"];
+            match (seat["worktree"].as_str(), seat["group"].as_u64()) {
+                (Some(worktree), Some(group)) => {
+                    format!("{opened} — seated in {worktree}, stage group {group}.")
+                }
+                _ => format!("{opened}."),
+            }
+        }
         SshMethod::Send => "Done.".into(),
     }
 }
@@ -6994,15 +7149,28 @@ fn answers_json(argv: &[String]) -> bool {
 /// (t-66200): a paused tab answers a `--json` call with who lifts the pause
 /// in a field — `{"ok":false,"error":{"code":"workspace_paused","resume":…}}`
 /// — and any other call with the line that carries it as a token
-/// (`workspace_paused[resume=…]: …`).
+/// (`workspace_paused[resume=…]: …`). A tab the person holds answers the
+/// same way under its own code, `resume` the person (t-67064).
 pub(super) fn door_refused(argv: &[String], error: &str) -> zerocode_hookd::TeamAnswer {
-    match crate::browser_workspace::paused_resume(error) {
-        Some((resume, message)) if answers_json(argv) => browser_refused(format!(
+    use zerocode_core::agent_browser::{WORKSPACE_PAUSED, WORKSPACE_PERSON_CONTROLLED};
+    let held = crate::browser_workspace::paused_resume(error)
+        .map(|(resume, message)| (WORKSPACE_PAUSED, resume, message))
+        .or_else(|| {
+            crate::browser_workspace::person_controlled_words(error).map(|message| {
+                (
+                    WORKSPACE_PERSON_CONTROLLED,
+                    crate::browser_workspace::Resume::Person,
+                    message,
+                )
+            })
+        });
+    match held {
+        Some((code, resume, message)) if answers_json(argv) => browser_refused(format!(
             "{}\n",
             json!({
                 "ok": false,
                 "error": {
-                    "code": zerocode_core::agent_browser::WORKSPACE_PAUSED,
+                    "code": code,
                     "resume": resume,
                     "message": message,
                 },
@@ -7011,6 +7179,38 @@ pub(super) fn door_refused(argv: &[String], error: &str) -> zerocode_hookd::Team
         _ => browser_refused(format!("zerocode-browser: {error}\n")),
     }
 }
+
+/// A failed look's answer, ended with what to do next (t-67064): a line
+/// after its refusal, or `error.next` of a refusal that is one JSON object.
+pub(super) fn say_next(answer: &mut zerocode_hookd::TeamAnswer, next: &str) {
+    if let Ok(serde_json::Value::Object(mut object)) =
+        serde_json::from_str::<serde_json::Value>(&answer.stderr)
+        && let Some(serde_json::Value::Object(error)) = object.get_mut("error")
+    {
+        error.insert("next".into(), json!(next));
+        answer.stderr = format!("{}\n", serde_json::Value::Object(object));
+        return;
+    }
+    if !answer.stderr.is_empty() && !answer.stderr.ends_with('\n') {
+        answer.stderr.push('\n');
+    }
+    answer
+        .stderr
+        .push_str(&format!("zerocode-browser: {next}\n"));
+}
+
+/// Whether a pane's main document is loading, by the window's own record
+/// of it — what a look that went unanswered tells its agent (t-67064).
+fn page_loading(state: &AppState, label: &str) -> bool {
+    state
+        .browser_records()
+        .get(label)
+        .is_some_and(|record| record.nav.observed(std::time::Instant::now()) == NavState::Loading)
+}
+
+/// A label this window did not make: the one list an agent reads its labels
+/// from is the next step (t-67064).
+const NOT_A_PANE: &str = "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다 — zerocode-browser tabs로 라벨을 확인하세요\n";
 
 /// A read's words — the page's title and address, then its text, then a
 /// selector read's reduced DOM. The one formatter both read roads print
@@ -7079,7 +7279,7 @@ pub(super) async fn answer_browser_command(
         .then(|| argv.get(1))
         .flatten();
     if label.is_some_and(|label| !state.browser_panes().contains(label)) {
-        return browser_refused("zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n");
+        return browser_refused(NOT_A_PANE);
     }
     // The person's stop holds every work browser and every agent's `open`
     // (t-62872): said here, before any other refusal, and read again where
@@ -7110,9 +7310,9 @@ pub(super) async fn answer_browser_command(
     {
         match state.shell_runtime().browser_workspaces.snapshot(label) {
             Ok(Some(_)) => {
-                return browser_refused(
-                    "zerocode-browser: workspace_viewport_unconfirmed: 전용 작업 브라우저의 viewport는 적용 확인을 지원하지 않습니다\n",
-                );
+                return browser_refused(format!(
+                    "zerocode-browser: workspace_viewport_unconfirmed: 전용 작업 브라우저의 viewport는 적용 확인을 지원하지 않습니다 — 크기는 그대로 두고 zerocode-browser marks {label}로 보세요\n"
+                ));
             }
             Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
             Ok(None) => {}
@@ -7157,8 +7357,17 @@ pub(super) async fn answer_browser_command(
         }
     };
     let mut dispatched = crate::browser_workspace::Dispatch::Uncertain;
-    let mut answer =
-        dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await;
+    // A look whose tab leaves its agent's hands while its page is still asked
+    // — the person takes it, a pause or their stop holds it — is answered at
+    // once with who holds the tab (t-67064); a change is waited for whole.
+    let dispatching = async {
+        dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await
+    };
+    let (mut answer, answered) =
+        match crate::browser_workspace::unless_taken(operation.as_ref(), dispatching).await {
+            Ok(answer) => (answer, true),
+            Err(error) => (door_refused(argv, &error), false),
+        };
     if answer.exit_code == 0 {
         dispatched = crate::browser_workspace::Dispatch::Completed;
     }
@@ -7167,7 +7376,7 @@ pub(super) async fn answer_browser_command(
             if step_actor(app, pane).pane.as_deref() != pane {
                 operation.finish(false);
                 answer = browser_refused(
-                    "zerocode-browser: workspace_actor_required: 관측을 요청한 에이전트 판이 더 이상 없습니다\n",
+                    "zerocode-browser: workspace_actor_required: 관측을 요청한 에이전트 판이 더 이상 없습니다 — 이 창의 에이전트 판에서 다시 보세요\n",
                 );
             } else {
                 match operation.finish_observation() {
@@ -7179,14 +7388,48 @@ pub(super) async fn answer_browser_command(
                     Err(error) => answer = door_refused(argv, &error),
                 }
             }
-        } else {
-            operation.settle(dispatched);
+        } else if let Some(revision) = operation.settle(dispatched) {
+            // A change that left the tab in the agent's hands says the
+            // revision its next change goes on at (t-67064).
+            stamp_browser_change(&mut answer, revision);
+        } else if answered
+            && zerocode_core::agent_browser::observes(verb)
+            && let Some(label) = label
+            && let Some(next) = state.shell_runtime().browser_workspaces.after_failed_look(
+                label,
+                pane,
+                page_loading(&state, label),
+            )
+        {
+            // A look its page did not answer says what to do next (t-67064).
+            say_next(&mut answer, &next);
         }
     }
     if let Some(operation) = actor_operation {
         operation.settle(dispatched);
     }
     answer
+}
+
+/// A change's answer, ended with the revision the agent's next change may
+/// name (t-67064) — a line after every page fence, as a look's answer ends,
+/// or the root key of an answer that is one JSON object — so the agent goes
+/// on without looking again.
+pub(super) fn stamp_browser_change(answer: &mut zerocode_hookd::TeamAnswer, revision: u64) {
+    use zerocode_core::agent_browser::{WORKSPACE_REVISION_KEY, WORKSPACE_REVISION_LINE};
+    if let Ok(serde_json::Value::Object(mut object)) =
+        serde_json::from_str::<serde_json::Value>(&answer.stdout)
+    {
+        object.insert(WORKSPACE_REVISION_KEY.into(), json!(revision));
+        answer.stdout = format!("{}\n", serde_json::Value::Object(object));
+        return;
+    }
+    if !answer.stdout.is_empty() && !answer.stdout.ends_with('\n') {
+        answer.stdout.push('\n');
+    }
+    answer
+        .stdout
+        .push_str(&format!("{WORKSPACE_REVISION_LINE}{revision}\n"));
 }
 
 /// Add only the backend's checked read-completion revision. Page words stay
@@ -7198,11 +7441,12 @@ pub(super) fn stamp_browser_observation(
 ) -> Result<(), String> {
     use zerocode_core::agent_browser::{WORKSPACE_REVISION_KEY, WORKSPACE_REVISION_LINE};
     if answers_json(argv) {
-        let mut value: serde_json::Value = serde_json::from_str(&answer.stdout)
-            .map_err(|_| "workspace_observation_invalid: 관측 JSON을 확인할 수 없습니다")?;
-        let object = value
-            .as_object_mut()
-            .ok_or("workspace_observation_invalid: 관측 JSON 객체가 필요합니다")?;
+        let mut value: serde_json::Value = serde_json::from_str(&answer.stdout).map_err(|_| {
+            "workspace_observation_invalid: 관측 JSON을 확인할 수 없습니다 — --json 없이 다시 보세요"
+        })?;
+        let object = value.as_object_mut().ok_or(
+            "workspace_observation_invalid: 관측 JSON 객체가 필요합니다 — --json 없이 다시 보세요",
+        )?;
         object.insert(WORKSPACE_REVISION_KEY.into(), json!(revision));
         answer.stdout = format!("{value}\n");
     } else {
@@ -7357,7 +7601,7 @@ async fn dispatch_browser_command(
                 cmd::browser::cancel_workspace_open(app, &state, &label, creation.revision);
                 pending.completed = true;
                 return browser_refused(
-                    "zerocode-browser: workspace_open_timeout: 작업 브라우저를 열지 못했습니다\n",
+                    "zerocode-browser: workspace_open_timeout: 작업 브라우저를 열지 못했습니다 — zerocode-browser tabs로 남은 탭을 확인한 뒤 다시 여세요\n",
                 );
             }
             pending.completed = true;
@@ -7366,10 +7610,7 @@ async fn dispatch_browser_command(
         ("close", 2) => {
             let label = argv[1].clone();
             if !state.browser_panes().contains(&label) {
-                return refused_unsent(
-                    dispatched,
-                    "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n",
-                );
+                return refused_unsent(dispatched, NOT_A_PANE);
             }
             let revision = match expected_revision
                 .map_or_else(|| cmd::browser::close_revision(&state, &label), Ok)
@@ -7401,7 +7642,7 @@ async fn dispatch_browser_command(
             .await;
             if !closed {
                 return browser_refused(
-                    "zerocode-browser: workspace_close_timeout: 브라우저 닫기를 확인하지 못했습니다\n",
+                    "zerocode-browser: workspace_close_timeout: 브라우저 닫기를 확인하지 못했습니다 — zerocode-browser tabs로 탭이 남았는지 확인하세요\n",
                 );
             }
             browser_said(cmd::browser::close_answer(&label, closed))
@@ -7414,10 +7655,7 @@ async fn dispatch_browser_command(
                 }
             };
             if !state.browser_panes().contains(&argv[1]) {
-                return refused_unsent(
-                    dispatched,
-                    "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n",
-                );
+                return refused_unsent(dispatched, NOT_A_PANE);
             }
             // A size is the window's to apply — the pane is placed by the
             // window's own preset road (`viewportBox`), so the box the agent
@@ -7678,6 +7916,16 @@ async fn dispatch_browser_command(
                     if browser_pane_of(app, &state, &label).is_err() {
                         return None;
                     }
+                    // Who holds a work browser, the revision of this agent's
+                    // own last look and the tab's own (t-67064), read by the
+                    // door that reads the person's stop: another agent's tab,
+                    // and every work browser while that stop stands, is left
+                    // off.
+                    let standing = state
+                        .shell_runtime()
+                        .browser_workspaces
+                        .standing_agents(&label, pane)
+                        .ok()?;
                     let operation = state
                         .shell_runtime()
                         .browser_workspaces
@@ -7689,12 +7937,20 @@ async fn dispatch_browser_command(
                                 "tabs",
                                 snapshot.map(|snapshot| snapshot.revision),
                             )
-                        })
-                        .ok()?;
+                        });
+                    // A tab out of the agent's hands — or busy with its own
+                    // request — keeps its line and says who holds it, with
+                    // none of its page's words.
+                    let (operation, shown) = match operation {
+                        Ok(operation) => (operation, true),
+                        Err(_) if standing.is_some() => (None, false),
+                        Err(_) => return None,
+                    };
                     let record = state.browser_records().get(&label).cloned();
                     let url = state
                         .browser_urls()
                         .get(&label)
+                        .filter(|_| shown)
                         .map(|url| cmd::browser::scrub_url_credentials(url))
                         .unwrap_or_default();
                     let row = TabRow {
@@ -7704,11 +7960,13 @@ async fn dispatch_browser_command(
                             .map_or(NavState::Loading, |record| record.nav.observed(now)),
                         title: record
                             .as_ref()
+                            .filter(|_| shown)
                             .map(|record| record.title.clone())
                             .unwrap_or_default(),
                         url,
                         profile: record.as_ref().and_then(|record| record.profile.clone()),
                         reader: record.and_then(|record| record.reader),
+                        standing,
                     };
                     if let Some(operation) = operation {
                         operation.finish(true);

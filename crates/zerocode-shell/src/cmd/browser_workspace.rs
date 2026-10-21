@@ -102,7 +102,29 @@ pub(crate) async fn set_browser_workspace_mode(
         transition.confirm_fence()?;
     }
     super::browser::forget_workspace_observation(&label);
-    transition.finish()
+    let snapshot = transition.finish()?;
+    tell_handed_back(&snapshot);
+    Ok(snapshot)
+}
+
+/// The person handed a work browser to its agent (t-67064) — 「다시 맡기기」,
+/// an unpause, the band's resume: the agent holding it hears so by one
+/// ledger letter its pane's pointer reads, written off this command's
+/// thread — the tab, its mode and new revision, nothing the person did on
+/// the page. A pane no run seats hears nothing.
+fn tell_handed_back(snapshot: &Snapshot) {
+    let Some(term) = snapshot
+        .owner_term
+        .as_deref()
+        .and_then(|term| term.parse::<u32>().ok())
+        .filter(|_| snapshot.mode == Mode::Agent)
+    else {
+        return;
+    };
+    let (body, receipt) = crate::browser_workspace::handed_back(&snapshot.label, snapshot.revision);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::tell_seat_of_term(term, &body, &receipt, crate::now_epoch_ms());
+    });
 }
 
 /// The person turns the session's regrant off on a work browser's bar

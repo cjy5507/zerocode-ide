@@ -9641,10 +9641,16 @@ mod tests {
             router.contains(r#"word == "ssh""#) && router.contains("answer_ssh_command(&steering"),
             "remote and terminal commands can fall through to desktop accessibility:\n{router}"
         );
+        // The pane the door named rides to the open (t-66346): the asking pane
+        // is the request's, read off its header, never a word of the command.
+        assert!(
+            squeezed.contains("answer_ssh_command(&steering,pane.as_deref(),&argv[1..])"),
+            "the ssh route no longer hands the open the pane its door named:\n{router}"
+        );
         let remote = block_after(shell, "async fn answer_ssh_command(");
         for owned in [
             "ssh_agent_list(app)",
-            "ssh_agent_open(app,",
+            "ssh_agent_open(app, &command, pane)",
             "ssh_agent_send(app,",
             "ssh_agent_read(app,",
         ] {
@@ -9654,15 +9660,76 @@ mod tests {
         for owned in [
             "open_ssh_terminal(app.clone()",
             "ssh_open_remote_term(state,",
-            "open_term_tab(state, rows, cols, Some(true), cwd, None, None)",
+            "open_term_tab_in(state, root, rows, cols, Some(true), cwd, None, None)",
             r#"emit_to("main", "ssh:agent-open""#,
         ] {
             assert!(opening.contains(owned), "the remote open road lost {owned}");
         }
+        // Seated in the asking pane's project (t-66346). The pane the door
+        // named roots a local shell in that pane's checkout, rides the payload
+        // as `from`, and the answer waits, inside the door's budget, for the
+        // seat the window gave — `seatedIn`, null when none came in time.
+        let opening_squeezed: String = opening.split_whitespace().collect();
+        for owned in [
+            "letasking=pane.and_then(hooks::term_of_pane_key);",
+            "agent_shell_root(asking,",
+            "|term|pane_checkout(&state,term)",
+            "SshAgentOpen::asked(term,label.clone(),remote.clone(),asking)",
+            "agent_term_seats()",
+            "\"seatedIn\":seated",
+        ] {
+            assert!(
+                opening_squeezed.contains(owned),
+                "an agent's terminal is no longer seated by the pane that asked: lost {owned}\n{opening}"
+            );
+        }
+        // The window's word on the seat comes through one command, from the
+        // main window only.
+        let seated = block_after(shell, "fn ssh_agent_seated(");
+        assert!(
+            seated.contains("from_the_main_webview(&webview)?")
+                && seated.contains("agent_term_seats().note("),
+            "the window's word on where it seated an agent's terminal lost its door:\n{seated}"
+        );
+        assert!(
+            shell.contains("ssh_agent_seated,"),
+            "the seat command is not registered"
+        );
+        // A terminal the person opens keeps the checkout in front: only the
+        // agent's road reads the asking pane.
+        let person = block_after(shell, "pub(crate) fn open_term_tab(");
+        assert!(
+            person.contains("let root = state.active_root();")
+                && person.contains("open_term_tab_in(state, root,"),
+            "the person's terminal door stopped rooting at the checkout in front:\n{person}"
+        );
         let mounted = block_after(window, r#"listen("ssh:agent-open""#);
         assert!(
             mounted.contains("Number.isInteger(term)") && mounted.contains(r#"placement: "tab""#),
             "the window stopped validating and mounting the agent's remote pane:\n{mounted}"
+        );
+        // The emulator's rule: the caller is the window's own tab of the
+        // `from` it was told; the checkout in front gives the keyboard and
+        // another checkout never takes it; a caller the window cannot name is
+        // said in every catalog; and the seat it gave is told back.
+        for owned in [
+            "Number.isInteger(payload.from)",
+            "tabOfTerm(from)",
+            "const focus = caller !== null && caller.worktree === activeWorktreePath;",
+            "worktree: caller.worktree, pane: caller.pane",
+            r#"{ placement: "tab", focus }"#,
+            "\"ssh.agentOpenUnseated\"",
+            "invoke(\"ssh_agent_seated\", {",
+        ] {
+            assert!(
+                mounted.contains(owned),
+                "an agent's terminal tab lost {owned}:\n{mounted}"
+            );
+        }
+        assert_eq!(
+            i18n.matches("\"ssh.agentOpenUnseated\":").count(),
+            4,
+            "`ssh.agentOpenUnseated` is missing from one of the en/ja/zh/es catalogs"
         );
         assert!(
             skill.contains("zerocode-ssh list --json")
@@ -9889,7 +9956,7 @@ mod tests {
                 && leased.contains(
                     "snapshot_webview_png_held(pane, None, Some((Box::new(frame), check)))"
                 )
-                && snapshot.contains(".begin_snapshot_for(label, spectator)")
+                && snapshot.contains(".lease_frame(label, spectator)")
                 && snapshot.contains("snapshot_leased(pane, frame, Default::default())"),
             "snapshot must select Chromium without losing the existing native fallback or deadline"
         );
@@ -28907,7 +28974,7 @@ mod tests {
         // (2026-09-17). All three roads a restored leaf takes.
         for (road, file) in [
             (
-                "fn open_term_tab(",
+                "fn open_term_tab_in(",
                 include_str!("../../src/cmd/terminal.rs"),
             ),
             (

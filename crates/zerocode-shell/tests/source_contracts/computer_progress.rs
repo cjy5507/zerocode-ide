@@ -384,6 +384,8 @@ fn the_work_browsers_door_refuses_an_agent_while_the_persons_stop_stands() {
     for door in [
         "pub(crate) fn begin_agents(",
         "pub(crate) fn register_agents(",
+        // What `tabs` says of a work browser (t-67064).
+        "pub(crate) fn standing_agents(",
     ] {
         let body = block_after(&workspaces, door);
         assert!(

@@ -11,6 +11,7 @@ mod session_recall;
 mod skill_tools;
 mod smart_router;
 pub use smart_router::jev_summary;
+pub use smart_router::{custom_decide, CustomVerdict};
 mod specs;
 
 pub(crate) use dispatch::dispatch;

@@ -275,6 +275,24 @@ pub enum Field {
     Level(usize),
 }
 
+impl Field {
+    /// The field's own word, spelled as [`Refusal::word`] spells a rule: one
+    /// per field, and never what the field carries — no option's name and
+    /// no level's number.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Question => "question",
+            Self::Yes => "yes",
+            Self::No => "no",
+            Self::OptionName(_) => "option_name",
+            Self::Meaning(_) => "meaning",
+            Self::Level(_) => "level",
+        }
+    }
+}
+
 /// A rule a definition breaks. Nothing that breaks one is stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
@@ -314,6 +332,61 @@ pub enum Refusal {
     /// Its bytes are past what the store reads back
     /// ([`store::DEFINITION_MAX_BYTES`]): a list of folders too long.
     TooLarge,
+}
+
+impl Refusal {
+    /// The rule's own word, as a ledger row spells it: one per rule, and
+    /// never what the refusal carries — no option's name, no field, no line
+    /// number — so a row can say why a definition is never asked without
+    /// holding a word the person wrote.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::IdTaken => "id_taken",
+            Self::NameLength => "name_length",
+            Self::NameTaken => "name_taken",
+            Self::QuestionLength => "question_length",
+            Self::OptionCount => "option_count",
+            Self::OptionName(_) => "option_name",
+            Self::MeaningLength(_) => "meaning_length",
+            Self::SecretLine { .. } => "secret_line",
+            Self::Reads => "reads",
+            Self::Folders => "folders",
+            Self::ActFrom => "act_from",
+            Self::MaxPerHour => "max_per_hour",
+            Self::Mode => "mode",
+            Self::TooMany => "too_many",
+            Self::TooLarge => "too_large",
+        }
+    }
+}
+
+/// The most characters the one line a decision hands an agent holds
+/// (DESIGN 2.4). [`line()`] holds it by construction: a name and an option are
+/// each [`NAME_MAX_CHARS`] at most, so no line is ever cut.
+pub const LINE_MAX_CHARS: usize = 200;
+
+/// The one line a decision that is on hands the agent when its answer is as
+/// sure as its act-from line (DESIGN 2.4): `「name」 판단: option (확신 85%)`,
+/// the confidence a whole percent. Every place a decision is asked builds it
+/// here, so the line an agent reads is the same wherever it was asked.
+#[must_use]
+pub fn line(name: &str, option: &str, confidence: f64) -> String {
+    let percent = if confidence.is_nan() {
+        0.0
+    } else {
+        (confidence.clamp(0.0, 1.0) * 100.0).round()
+    };
+    format!("「{name}」 판단: {option} (확신 {percent:.0}%)")
+}
+
+/// How a score's level is shown to a person and to the agent it is handed
+/// to: counted from one, over the count of levels (`3/4`). A ledger row keeps
+/// the level counted from zero, as [`Answer::Score`] lists the levels.
+#[must_use]
+pub fn shown_level(level: usize, count: usize) -> String {
+    format!("{}/{count}", level.saturating_add(1))
 }
 
 /// Bytes that are not a definition this version reads: damaged, or of

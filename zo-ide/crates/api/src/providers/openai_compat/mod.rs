@@ -1398,8 +1398,22 @@ pub(crate) struct ErrorBody {
     pub(crate) message: Option<String>,
     /// Responses-API errors carry `code` (e.g. `rate_limit_exceeded`) where
     /// chat-completions errors carry `type`; fall back to it for display.
-    #[serde(default)]
+    /// Some gateways send the HTTP status here as a number (`"code": 404`).
+    #[serde(default, deserialize_with = "deserialize_code")]
     pub(crate) code: Option<String>,
+}
+
+/// A `code` given as a string or a number. Any other shape reads as absent
+/// rather than failing the envelope, which would drop its message.
+fn deserialize_code<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<Value>::deserialize(deserializer)? {
+        Some(Value::String(code)) => Some(code),
+        Some(Value::Number(code)) => Some(code.to_string()),
+        _ => None,
+    })
 }
 
 /// Whether `model` is an OpenAI-style reasoning model that takes

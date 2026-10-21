@@ -1862,7 +1862,7 @@ fn the_pump_sleeps_when_nothing_is_moving() {
     // moment it starts and nobody typed to earn a wake. Both spawn paths,
     // because the floating panel is as much a shell as a tab is — left
     // out, its first prompt waits out a whole idle nap.
-    for spawn in ["fn open_terminal(", "fn open_term_tab("] {
+    for spawn in ["fn open_terminal(", "fn open_term_tab_in("] {
         let body = block_after(backend, spawn);
         assert!(
             body.contains("cadence().wake()"),
@@ -6084,6 +6084,102 @@ mod browser_observation_stamp_tests {
         }
     }
 
+    /// A change's answer ends with the revision its next change goes on at
+    /// (t-67064): a plain answer's last line, after the page's fence, read
+    /// back by the one reader a look's stamp is read by; a JSON answer's
+    /// root key — a settle-later press, a find — with its own keys kept.
+    #[test]
+    fn a_changes_answer_ends_with_the_revision_its_next_change_goes_on_at() {
+        let mut pressed = browser_said(format!(
+            "클릭 이벤트를 보냈습니다\n{}",
+            zerocode_core::untrusted::fence("browser-1", "칸: 검색어\n", usize::MAX)
+        ));
+        stamp_browser_change(&mut pressed, 7);
+        assert!(
+            pressed.stdout.ends_with(&format!(
+                "{}workspaceRevision: 7\n",
+                zerocode_core::untrusted::close_marker("browser-1")
+            )),
+            "{}",
+            pressed.stdout
+        );
+        assert_eq!(
+            zerocode_core::agent_browser::observation_revision(&pressed.stdout),
+            Some(7)
+        );
+        let mut found = browser_said("{\"count\":2,\"index\":1}\n");
+        stamp_browser_change(&mut found, 7);
+        let value: serde_json::Value = serde_json::from_str(&found.stdout).unwrap();
+        assert_eq!(
+            (&value["count"], &value["index"], &value["workspaceRevision"]),
+            (&json!(2), &json!(1), &json!(7))
+        );
+        let mut bare = browser_said("스크롤 x=0 y=640");
+        stamp_browser_change(&mut bare, 7);
+        assert_eq!(bare.stdout, "스크롤 x=0 y=640\nworkspaceRevision: 7\n");
+    }
+
+    /// A look its page did not answer says what to do next (t-67064): a
+    /// line after the refusal, or `error.next` of a JSON refusal.
+    #[test]
+    fn a_failed_looks_answer_says_what_to_do_next() {
+        let next = "workspace_look_unanswered: 페이지가 답하지 않았습니다 — 1초 뒤 zerocode-browser marks browser-1로 다시 보세요";
+        let mut plain = browser_refused("zerocode-browser: 브라우저 판이 시간 안에 답하지 않았습니다\n");
+        say_next(&mut plain, next);
+        assert_eq!(
+            plain.stderr,
+            format!("zerocode-browser: 브라우저 판이 시간 안에 답하지 않았습니다\nzerocode-browser: {next}\n")
+        );
+        let mut shot = browser_screenshot_refused(true, "스냅샷 응답 시간이 초과됐습니다");
+        say_next(&mut shot, next);
+        let value: serde_json::Value = serde_json::from_str(shot.stderr.trim_end()).unwrap();
+        assert_eq!(
+            (&value["error"]["code"], &value["error"]["next"]),
+            (&json!("screenshot_error"), &json!(next))
+        );
+    }
+
+    /// A tab the person holds is refused by its own code in both shapes
+    /// (t-67064): a `--json` call hears `resume` the person, any other the
+    /// line.
+    #[test]
+    fn a_held_tabs_refusal_names_the_person_in_both_shapes() {
+        let words =
+            |list: &[&str]| -> Vec<String> { list.iter().map(|word| (*word).to_string()).collect() };
+        let workspaces = crate::browser_workspace::Workspaces::default();
+        workspaces.register("browser-1", Some("term-1"), false).unwrap();
+        let at = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut taken = workspaces
+            .transition("browser-1", crate::browser_workspace::Mode::Human, at)
+            .unwrap();
+        taken.confirm_fence().unwrap();
+        taken.finish().unwrap();
+        let error = workspaces
+            .begin_at("browser-1", Some("term-1"), "marks", None)
+            .err()
+            .expect("the person holds the tab");
+        let json = door_refused(&words(&["marks", "browser-1", "--json"]), &error);
+        let value: serde_json::Value = serde_json::from_str(json.stderr.trim_end()).unwrap();
+        assert_eq!(
+            (&value["error"]["code"], &value["error"]["resume"]),
+            (&json!("workspace_person_controlled"), &json!("person"))
+        );
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("「다시 맡기기」")),
+            "{value}"
+        );
+        let plain = door_refused(&words(&["click", "browser-1", "#login"]), &error);
+        assert!(
+            plain
+                .stderr
+                .starts_with("zerocode-browser: workspace_person_controlled: 작업 브라우저 browser-1: "),
+            "{}",
+            plain.stderr
+        );
+    }
+
     #[test]
     fn plain_and_full_reads_put_the_stamp_after_the_existing_page_fence() {
         for argv in [
@@ -6113,6 +6209,7 @@ fn tabs_answer_one_row_per_pane_in_birth_order() {
             url: "http://localhost:5173/".into(),
             profile: None,
             reader: None,
+            standing: None,
         },
         TabRow {
             label: "browser-10".into(),
@@ -6121,12 +6218,33 @@ fn tabs_answer_one_row_per_pane_in_birth_order() {
             url: "https://x.atlassian.net/wiki".into(),
             profile: Some("0123abcd".into()),
             reader: Some("Mozilla/5.0 (iPhone)".into()),
+            standing: Some(crate::browser_workspace::Standing {
+                mode: "agent",
+                seen: Some(7),
+                revision: 7,
+            }),
+        },
+        // A work browser the person holds: its mode, no look of this
+        // agent's, and none of its page's words (t-67064).
+        TabRow {
+            label: "browser-11".into(),
+            state: NavState::Loading,
+            title: String::new(),
+            url: String::new(),
+            profile: None,
+            reader: None,
+            standing: Some(crate::browser_workspace::Standing {
+                mode: "person",
+                seen: None,
+                revision: 9,
+            }),
         },
     ];
     assert_eq!(
         tabs_lines(&rows),
-        "browser-2\tdead\tdev server was here\thttp://localhost:5173/\t-\t-\n\
-         browser-10\tfinished\tConfluence\thttps://x.atlassian.net/wiki\t0123abcd\tMozilla/5.0 (iPhone)\n"
+        "browser-2\tdead\tdev server was here\thttp://localhost:5173/\t-\t-\t-\t-\t-\n\
+         browser-10\tfinished\tConfluence\thttps://x.atlassian.net/wiki\t0123abcd\tMozilla/5.0 (iPhone)\tagent\t7\t7\n\
+         browser-11\tloading\t\t\t-\t-\tperson\t-\t9\n"
     );
     assert!(tabs_lines(&[]).contains("zerocode-browser open"));
     let mut labels = vec![
@@ -16168,7 +16286,7 @@ fn a_delivered_note_leaves_only_if_it_still_says_what_was_sent() {
 #[test]
 fn a_terminal_born_an_agent_is_recorded_and_forgotten() {
     let backend = shipped_backend();
-    let opening = block_after(backend, "fn open_term_tab(");
+    let opening = block_after(backend, "fn open_term_tab_in(");
     assert!(
         opening.contains("agent_for_program(&program)"),
         "a terminal whose command is an agent is not recorded:\n{opening}"
@@ -16184,6 +16302,137 @@ fn a_terminal_born_an_agent_is_recorded_and_forgotten() {
     // The resolver reads the name as spawned, aliases included.
     assert_eq!(agent_for_program("/usr/local/bin/claude"), Some("claude"));
     assert_eq!(agent_for_program("zsh"), None);
+}
+
+/// An agent's local shell starts in, and is fenced to, the checkout of the
+/// pane that asked (t-66346): a pane of project B asking for a `--cwd`
+/// inside B gets its shell there while the person has another project in
+/// front, and a path in the project in front is refused, the refusal
+/// naming B — the checkout it was judged against. A pane this process
+/// cannot place, or none, falls back to the one in front, as before. The
+/// asking pane is the door's header, never an argument: `open` takes no
+/// pane (pinned beside the core parser).
+#[test]
+fn an_agents_local_shell_stands_in_the_asking_panes_checkout_and_is_fenced_to_it() {
+    let in_front = tempfile::tempdir().expect("the checkout in front");
+    let asking = tempfile::tempdir().expect("the asking pane's checkout");
+    let inside = asking.path().join("sub");
+    std::fs::create_dir_all(&inside).expect("a folder inside it");
+    let elsewhere = in_front.path().join("sub");
+    std::fs::create_dir_all(&elsewhere).expect("a folder in the project in front");
+    let checkout_of = |term: TermId| (term == 7).then(|| asking.path().to_path_buf());
+
+    let root = agent_shell_root(Some(7), checkout_of, in_front.path().to_path_buf());
+    assert_eq!(
+        fenced_seat(&root, Some(inside.display().to_string())),
+        Ok(inside.clone()),
+        "a `--cwd` inside the asking pane's own checkout was refused"
+    );
+    assert_eq!(
+        fenced_seat(&root, None),
+        Ok(asking.path().to_path_buf()),
+        "without `--cwd` the shell did not start in the asking pane's checkout"
+    );
+    let refused = fenced_seat(&root, Some(elsewhere.display().to_string()))
+        .expect_err("a path in the project in front was taken for the asking pane's shell");
+    assert!(
+        refused.contains(&asking.path().display().to_string()),
+        "the refusal does not say which checkout it was judged against: {refused}"
+    );
+    for unplaced in [Some(9), None] {
+        assert_eq!(
+            agent_shell_root(unplaced, checkout_of, in_front.path().to_path_buf()),
+            in_front.path().to_path_buf(),
+            "a pane this process cannot place ({unplaced:?}) did not fall back to the checkout in front"
+        );
+    }
+}
+
+/// `zerocode-ssh open` says where the window seated the tab it stood
+/// (t-66346): the checkout and the stage group, so the agent can tell the
+/// person the terminal is on their project's stage. A group is said as a
+/// group, never as the pane number every later verb takes; and an open the
+/// window did not answer for in time says only its pane.
+#[test]
+fn an_ssh_open_says_where_the_window_seated_it() {
+    use zerocode_core::computer_use::SshMethod;
+    let seated = json!({
+        "pane": 12,
+        "seatedIn": { "worktree": "/Users/dev/project-b", "group": 2 },
+    });
+    assert_eq!(
+        ssh_pretty(SshMethod::Open, &seated),
+        "Opened pane 12 — seated in /Users/dev/project-b, stage group 2.",
+        "the open's answer does not say where the window seated the tab"
+    );
+    let unanswered = json!({ "pane": 12, "seatedIn": null });
+    assert_eq!(ssh_pretty(SshMethod::Open, &unanswered), "Opened pane 12.");
+}
+
+/// An agent's `zerocode-ssh open` names the terminal that asked, read off the
+/// pane key its door presented (t-66346) — and nothing it cannot read: a door
+/// that named no pane, or named something that is not a pane key, asks from
+/// nowhere the window knows, and the payload carries no `from` at all. The
+/// rest of the wire is what it always was.
+#[test]
+fn an_ssh_open_names_the_terminal_that_asked_and_nothing_it_cannot_read() {
+    let wire = |open: SshAgentOpen| serde_json::to_value(open).expect("serializes");
+    let asking = |pane: Option<&str>| pane.and_then(hooks::term_of_pane_key);
+    let named = hooks::pane_key_of(7);
+    assert_eq!(
+        wire(SshAgentOpen::asked(
+            12,
+            Some("build-box".into()),
+            Some("host-1".into()),
+            asking(Some(named.as_str())),
+        )),
+        json!({ "term": 12, "label": "build-box", "remoteHost": "host-1", "from": 7 })
+    );
+    for unread in [None, Some("tab-1/leaf-2")] {
+        assert_eq!(
+            wire(SshAgentOpen::asked(13, None, None, asking(unread))),
+            json!({ "term": 13, "label": null, "remoteHost": null }),
+            "{unread:?}"
+        );
+    }
+}
+
+/// The window's word on where it seated an agent's terminal reaches the open
+/// waiting for it (t-66346), and nothing else stays: a word about a pane no
+/// open waits on is dropped, an open that stops waiting takes its slot away
+/// whether or not the window said, and a word after that lands nowhere. The
+/// answer carries it as a checkout and a group.
+#[test]
+fn the_seat_the_window_gave_reaches_the_open_waiting_for_it_and_nothing_stays() {
+    let seats = AgentTermSeats::default();
+    let seat = AgentTermSeat {
+        worktree: Some("/Users/dev/project-b".into()),
+        group: Some(0),
+    };
+    assert!(
+        !seats.note(21, seat.clone()),
+        "a word about a pane no open waits on was kept"
+    );
+    seats.expect(21);
+    assert!(!seats.seated(21));
+    assert!(seats.note(21, seat.clone()));
+    assert!(seats.seated(21));
+    assert_eq!(seats.take(21), Some(seat.clone()));
+    assert_eq!(seats.take(21), None, "the slot outlived its open");
+    assert!(
+        !seats.note(21, seat.clone()),
+        "a late word found the slot of an open that stopped waiting"
+    );
+    seats.expect(22);
+    assert_eq!(
+        seats.take(22),
+        None,
+        "an open the window never answered got a seat"
+    );
+    assert_eq!(
+        serde_json::to_value(&seat).expect("serializes"),
+        json!({ "worktree": "/Users/dev/project-b", "group": 0 })
+    );
 }
 
 /// A default nobody chose is no default, and an id this window cannot

@@ -401,6 +401,12 @@ const browserWired = new WeakSet();
 const browserBodyWatch = new ResizeObserver(() => syncBrowserPanes());
 
 const BROWSER_WORKSPACE_CAPTURE_MS = 1000;
+/* A watch whose capture misses keeps its last frame and tries again on its own
+ * (t-66513): a second after the first miss, then twice as long each time, five
+ * seconds at most, for as long as the person watches. The note says so only
+ * once the misses have run five seconds without a frame. */
+const BROWSER_WORKSPACE_RETRY_MAX_MS = 5000;
+const BROWSER_WORKSPACE_NOTICE_MS = 5000;
 const BROWSER_WORKSPACE_FRAME_MAX_BYTES = 32 * 1024 * 1024;
 const BROWSER_WORKSPACE_MODES = new Set(["agent", "pausing", "paused", "human"]);
 /* Each action's words come from the catalog (`browser.workspace.<name>Action`); the Korean
@@ -421,6 +427,11 @@ let browserWorkspaceCaptureTarget = null;
 let browserWorkspaceCaptureHost = null;
 let browserWorkspaceCaptureRevision = null;
 let browserWorkspaceCaptureEpoch = 0;
+/* The watched tab's misses in a row, when the first of them came, and the
+ * timer that raises the note five seconds after it (t-66513). */
+let browserWorkspaceCaptureMisses = 0;
+let browserWorkspaceCaptureMissedAt = null;
+let browserWorkspaceCaptureNoticeTimer = 0;
 const browserWorkspaceOpening = new Map();
 
 function browserWorkspaceLive(tab, label = tab?.label) {
@@ -432,6 +443,53 @@ function browserWorkspaceCanControl(tab) {
     tab.workspace?.mode === "human"
     && tab.workspaceViewing === true && !tab.workspacePending && !tab.workspaceError
   ));
+}
+
+/* Whether the person watches a work browser live (t-66513): the pane itself,
+ * at the page's own frame rate, under the backend's shield — which takes every
+ * click, key and scroll — rather than snapshots a second apart. A tab out of
+ * the person's hands that they watch, where the backend stands the shield and
+ * has not failed to since the tab's state last moved; the board pop-out holds
+ * no pane to watch. */
+function browserWorkspaceWatchesLive(tab) {
+  return !isPopout && tab?.agentWorkspace === true && tab.workspaceViewing === true
+    && tab.workspace?.liveSupported === true && tab.workspace.mode !== "human"
+    && !tab.workspacePending && !tab.workspaceError && !tab.workspaceLiveError;
+}
+
+/* The shield's dress (t-66513): its tag's words in the person's language, and
+ * the agent's working colour and the ground's as the bytes the window paints
+ * for those tokens — the native view keeps no colour of its own. The colours
+ * are read again only when the theme or the words change. */
+let browserWorkspaceDress = null;
+function browserWorkspaceShieldDress() {
+  const says = t("browser.workspace.watchShield", "에이전트 조작 중 · 보기만");
+  const theme = document.documentElement.dataset.theme ?? "";
+  if (browserWorkspaceDress?.says !== says || browserWorkspaceDress.theme !== theme) {
+    const style = getComputedStyle(document.documentElement);
+    browserWorkspaceDress = {
+      says, theme, tint: browserTokenRgb(style, "--signal-ready"), ink: browserTokenRgb(style, "--surface-abyss"),
+    };
+  }
+  return { says, tint: browserWorkspaceDress.tint, ink: browserWorkspaceDress.ink };
+}
+
+/* A colour token's three bytes, painted on one pixel of a canvas the page keeps. */
+let browserTokenPot = null;
+function browserTokenRgb(style, token) {
+  if (!browserTokenPot) {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    browserTokenPot = canvas.getContext("2d", { willReadFrequently: true });
+  }
+  browserTokenPot.clearRect(0, 0, 1, 1);
+  // A value the canvas cannot read leaves this one, not the last token's.
+  browserTokenPot.fillStyle = "transparent";
+  browserTokenPot.fillStyle = style.getPropertyValue(token).trim();
+  browserTokenPot.fillRect(0, 0, 1, 1);
+  const [red, green, blue] = browserTokenPot.getImageData(0, 0, 1, 1).data;
+  return [red, green, blue];
 }
 
 function browserWorkspaceArgs(tab, extra = {}) {
@@ -529,6 +587,9 @@ function browserWorkspaceStateOf(said, label) {
     // that a look lifts what the backend did not say it would.
     regrant: said.regrant === true,
     resume: said.mode === "agent" ? null : said.resume === "observe" ? "observe" : "person",
+    // Whether the backend stands the shield over this pane (t-66513); a state
+    // that does not say is watched by snapshots.
+    liveSupported: said.liveSupported === true,
   };
 }
 
@@ -635,6 +696,9 @@ function applyBrowserWorkspaceState(tab, said) {
   tab.workspaceRevision = state.revision;
   tab.workspaceLastMode = state.mode;
   tab.workspaceError = null;
+  // A shield that could not stand is tried again once the tab's state moved
+  // (t-66513): a placement that lost a race to the revision fails only once.
+  if (state.revision !== revision) tab.workspaceLiveError = false;
   if (state.revision !== revision || !browserWorkspaceCanControl(tab)) browserWorkspaceStopTools(tab);
   return true;
 }
@@ -1023,6 +1087,9 @@ function watchBrowserWorkspace(tab, { beside = false } = {}) {
   }
   tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
   tab.workspaceViewing = true;
+  // 「지금 보기」 asks for the live pane again, even after a shield that
+  // could not stand (t-66513).
+  tab.workspaceLiveError = false;
   setActiveTab(tab.id);
   paintBrowserWorkspaceTab(tab);
   if (!tab.workspace && !tab.workspaceReading) void refreshBrowserWorkspace(tab);
@@ -1282,12 +1349,53 @@ function clearBrowserWorkspaceFrames() {
   }
 }
 
+/* The work browser the snapshots watch: one the person watches on screen that
+ * is not watched live (t-66513). A capture that misses keeps the tab here — its
+ * last frame stays and the loop tries again — so a watch never goes dark
+ * because one capture met another. */
 function browserWorkspaceWatcher() {
   const visible = tabs.filter((tab) => tab.kind === "browser" && tab.agentWorkspace && tab.workspaceViewing
     && tab.workspace && tab.workspace.mode !== "human" && tab.workspace.snapshotSupported === true
-    && !tab.workspaceCaptureError && !tab.workspaceError && !tab.workspacePending
+    && !tab.workspaceError && !tab.workspacePending && !browserWorkspaceWatchesLive(tab)
     && browserWorkspaceOnScreen(tab));
   return visible.find((tab) => tab.id === activeTabId) ?? visible[0] ?? null;
+}
+
+/* The gap from one capture's start to the next (t-66513): a second while they
+ * land, then one, two, four and at most five seconds after misses in a row. */
+function browserWorkspaceCaptureGap() {
+  if (browserWorkspaceCaptureMisses === 0) return BROWSER_WORKSPACE_CAPTURE_MS;
+  return Math.min(BROWSER_WORKSPACE_RETRY_MAX_MS, BROWSER_WORKSPACE_CAPTURE_MS * 2 ** (browserWorkspaceCaptureMisses - 1));
+}
+
+/* The watch moved to another tab, or stopped: its misses are forgotten, and a
+ * note the old tab raised goes with them. */
+function forgetBrowserWorkspaceMisses(tab) {
+  browserWorkspaceCaptureMisses = 0;
+  browserWorkspaceCaptureMissedAt = null;
+  clearTimeout(browserWorkspaceCaptureNoticeTimer);
+  browserWorkspaceCaptureNoticeTimer = 0;
+  if (tab?.workspaceCaptureError) {
+    tab.workspaceCaptureError = false;
+    const host = groups.get(tab.pane)?.browserView;
+    if (host?._browserTab === tab) paintBrowserWorkspace(host, tab);
+  }
+}
+
+/* A capture missed: the frame stays, the gap grows, and the note comes once the
+ * misses have run five seconds with no frame between (t-66513). */
+function browserWorkspaceCaptureMissed(tab) {
+  browserWorkspaceCaptureMisses += 1;
+  if (browserWorkspaceCaptureMissedAt !== null) return;
+  browserWorkspaceCaptureMissedAt = performance.now();
+  clearTimeout(browserWorkspaceCaptureNoticeTimer);
+  browserWorkspaceCaptureNoticeTimer = setTimeout(() => {
+    browserWorkspaceCaptureNoticeTimer = 0;
+    if (browserWorkspaceCaptureMissedAt === null || browserWorkspaceCaptureTarget !== tab || !browserWorkspaceLive(tab)) return;
+    tab.workspaceCaptureError = true;
+    const host = groups.get(tab.pane)?.browserView;
+    if (host?._browserTab === tab) paintBrowserWorkspace(host, tab);
+  }, BROWSER_WORKSPACE_NOTICE_MS);
 }
 
 function syncBrowserWorkspaceCapture() {
@@ -1298,14 +1406,19 @@ function syncBrowserWorkspaceCapture() {
     clearTimeout(browserWorkspaceCaptureTimer);
     browserWorkspaceCaptureTimer = 0;
     browserWorkspaceCaptureEpoch += 1;
+    // Another tab or another view drops the frame; the same view of the same
+    // tab at a newer revision keeps it until the next one lands (t-66513).
+    if (browserWorkspaceCaptureTarget !== wanted || browserWorkspaceCaptureHost !== host) {
+      forgetBrowserWorkspaceMisses(browserWorkspaceCaptureTarget);
+      clearBrowserWorkspaceFrames();
+    }
     browserWorkspaceCaptureTarget = wanted;
     browserWorkspaceCaptureHost = host;
     browserWorkspaceCaptureRevision = revision;
-    clearBrowserWorkspaceFrames();
   }
   if (!wanted || browserWorkspaceCaptureTimer || browserWorkspaceCaptureBusy) return;
   const epoch = browserWorkspaceCaptureEpoch;
-  const delay = Math.max(0, browserWorkspaceCaptureAt + BROWSER_WORKSPACE_CAPTURE_MS - performance.now());
+  const delay = Math.max(0, browserWorkspaceCaptureAt + browserWorkspaceCaptureGap() - performance.now());
   browserWorkspaceCaptureTimer = setTimeout(() => {
     browserWorkspaceCaptureTimer = 0;
     void captureBrowserWorkspace(wanted, epoch);
@@ -1330,15 +1443,31 @@ async function captureBrowserWorkspace(tab, epoch) {
     clearBrowserWorkspaceFrames();
     image.src = frame;
     image.hidden = false;
+    forgetBrowserWorkspaceMisses(tab);
   } catch {
     if (epoch === browserWorkspaceCaptureEpoch && browserWorkspaceLive(tab, label) && browserWorkspaceWatcher() === tab) {
-      tab.workspaceCaptureError = true;
-      paintBrowserWorkspaceTab(tab);
+      browserWorkspaceCaptureMissed(tab);
     }
   } finally {
     browserWorkspaceCaptureBusy = false;
     syncBrowserWorkspaceCapture();
   }
+}
+
+/* 「화면 다시 보기」: the watch tries now (t-66513) — live again where the
+ * shield stands, else a snapshot at once — instead of at its next gap. */
+function retryBrowserWorkspaceView(tab) {
+  if (!browserWorkspaceLive(tab) || tab.workspacePending || tab.workspace?.snapshotSupported !== true) return;
+  tab.workspaceLiveError = false;
+  tab.workspaceViewing = true;
+  tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
+  if (browserWorkspaceCaptureTarget === tab) {
+    clearTimeout(browserWorkspaceCaptureTimer);
+    browserWorkspaceCaptureTimer = 0;
+    browserWorkspaceCaptureMisses = 0;
+    browserWorkspaceCaptureAt = -Infinity;
+  }
+  paintBrowserWorkspaceTab(tab);
 }
 
 /* What else reads the work browsers' state when their chrome repaints: the
@@ -1656,12 +1785,7 @@ function wireBrowserHost(host) {
     paintBrowserWorkspaceTab(tab);
   });
   host.querySelector(".browser-workspace-retry").addEventListener("click", () => {
-    const tab = held();
-    if (!browserWorkspaceLive(tab) || tab.workspacePending || tab.workspace?.snapshotSupported !== true) return;
-    tab.workspaceCaptureError = false;
-    tab.workspaceViewing = true;
-    tab.workspaceViewEpoch = (tab.workspaceViewEpoch ?? 0) + 1;
-    paintBrowserWorkspaceTab(tab);
+    retryBrowserWorkspaceView(held());
   });
   for (const name of BROWSER_WORKSPACE_ACTIONS) {
     host.querySelector(`.browser-workspace-${name}`).addEventListener("click", () => {
@@ -3937,7 +4061,19 @@ if (!isPopout) refreshEmulatorLoans();
  * payload naming a term this window never made simply finds no screen —
  * `mountTermTab` builds the view, and the backend is the only thing that can
  * feed it. Same revalidation as the emulator door: emitted payloads are data,
- * never instructions. */
+ * never instructions.
+ *
+ * Seated where it was asked for (t-66346), by the emulator door's rule:
+ * `from` is the terminal whose door asked, read off the pane key the door
+ * presented — never a word of the command — and the tab goes into that
+ * terminal's checkout and group. Asked from another checkout, it stands there
+ * and the person's screen stays as it was (10-20 15:58: an SSH tab another
+ * project's agent opened stood on the stage the person was reading, and took
+ * it); asked from the checkout in front, it stands beside the pane that asked
+ * and takes the keyboard, as before; asked from a terminal this window cannot
+ * name, it is added to the current group without taking anything, and a line
+ * says why. Then the window says where it seated it, for the agent's answer
+ * (`seatedIn`). */
 listen("ssh:agent-open", (event) => {
   if (isPopout) return;
   const payload = event?.payload ?? {};
@@ -3949,10 +4085,26 @@ listen("ssh:agent-open", (event) => {
   const remoteHost = typeof payload.remoteHost === "string" && payload.remoteHost.trim()
     ? payload.remoteHost.slice(0, 512)
     : undefined;
+  const from = Number.isInteger(payload.from) && payload.from >= 0 ? payload.from : null;
+  const caller = from === null ? null : tabOfTerm(from);
+  if (caller === null) {
+    toast(t(
+      "ssh.agentOpenUnseated",
+      "에이전트가 터미널을 열었지만 요청한 터미널을 알 수 없어, 현재 그룹에 비활성 탭으로 추가했습니다.",
+    ));
+  }
+  const focus = caller !== null && caller.worktree === activeWorktreePath;
   mountTermTab(term, {
     ...(label === undefined ? {} : { label }),
     ...(remoteHost === undefined ? {} : { remoteHost }),
-  }, { placement: "tab" });
+    ...(caller === null ? {} : { worktree: caller.worktree, pane: caller.pane }),
+  }, { placement: "tab", focus });
+  const seated = tabOfTerm(term);
+  void invoke("ssh_agent_seated", {
+    term,
+    worktree: seated?.worktree ?? null,
+    group: seated?.pane ?? null,
+  }).catch(() => {});
 });
 
 /* ---- 스크린샷 마크업 (B02 ②) --------------------------------------------
@@ -5798,19 +5950,23 @@ function syncBrowserPanes() {
     const host = groupOf(tab.pane)?.browserView;
     const visible = !covered && host && !host.hidden && !tab.marking &&
       tab.worktree === activeWorktreePath && activeTabIn(tab.pane)?.id === tab.id;
-    if (visible && !document.hidden && browserWorkspaceCanControl(tab)) scheduleBrowserRetry(tab);
+    const control = browserWorkspaceCanControl(tab);
+    // 사람이 에이전트의 작업 탭을 지켜보면 판 자체가 방패 밑에 선다(t-66513).
+    const watching = !control && browserWorkspaceWatchesLive(tab);
+    if (visible && !document.hidden && control) scheduleBrowserRetry(tab);
     else cancelBrowserRetry(tab);
     const body =
       !covered &&
       host &&
       !host.hidden &&
       !document.hidden &&
-      browserWorkspaceCanControl(tab) &&
+      (control || watching) &&
       // 마크업 중엔 편집기가 그 사각형의 주인이다 — 판은 눕는다.
       !tab.marking &&
       // 다시 발행된 새 판을 덮개 뒤에서 준비하는 동안도 눕는다(t-59665 ⑦).
       !tab.artifactSwap &&
-      !tab.navFailure &&
+      // 지켜보는 판은 불러오기 실패도 페이지 제 화면으로 보인다 — 실패 칸은 조작하는 사람의 것이다.
+      (watching || !tab.navFailure) &&
       tab.worktree === activeWorktreePath &&
       activeTabIn(tab.pane)?.id === tab.id
         ? host.querySelector(".browser-body")
@@ -5834,14 +5990,17 @@ function syncBrowserPanes() {
     // 아티팩트 페이지의 여는 시계는 판이 보이는 시간만 센다(t-59665 ⑤·⑧).
     if (tab.artifact) artifactOpenTick(tab, rect !== null && !document.hidden);
     // 프리셋도 열쇠의 일부 — 같은 몸에서 프리셋만 바뀐 판은 다시 놓여야 한다.
+    // 방패의 차림(낱말·색)도 그렇다 — 언어나 테마가 바뀌면 다시 놓는다(t-66513).
+    const dress = rect && watching ? browserWorkspaceShieldDress() : null;
     const said = rect
-      ? [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height), tab.viewport ?? ""].join(",")
+      ? [Math.round(rect.x), Math.round(rect.y), Math.round(rect.width), Math.round(rect.height), tab.viewport ?? "",
+        dress ? JSON.stringify(dress) : ""].join(",")
       : "hidden";
     if (browserSaid.get(tab.label) === said) continue;
     browserSaid.set(tab.label, said);
     const label = tab.label;
     const place = rect
-      ? { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height, shown: true }
+      ? { label, x: rect.x, y: rect.y, width: rect.width, height: rect.height, shown: true, ...(dress ? { watch: dress } : {}) }
       : { label, x: 0, y: 0, width: 1, height: 1, shown: false };
     const shading = rect === null && artifactShadeWanted(tab, host, covered);
     browserPlacing = browserPlacing.then(async () => {
@@ -5849,10 +6008,12 @@ function syncBrowserPanes() {
         await layArtifactShade(tab, host);
       }
       const currentHost = groups.get(tab.pane)?.browserView;
+      const stillControl = browserWorkspaceCanControl(tab);
       const canShow = browserWorkspaceLive(tab, label) && !document.hidden && !browserCovered()
         && browserSaid.get(label) === said
-        && browserWorkspaceCanControl(tab) && currentHost && !currentHost.hidden
-        && !tab.marking && !tab.artifactSwap && !tab.navFailure && tab.worktree === activeWorktreePath
+        && (place.watch ? !stillControl && browserWorkspaceWatchesLive(tab) : stillControl)
+        && currentHost && !currentHost.hidden
+        && !tab.marking && !tab.artifactSwap && (place.watch || !tab.navFailure) && tab.worktree === activeWorktreePath
         && activeTabIn(tab.pane)?.id === tab.id;
       const currentPlace = place.shown && !canShow ? { ...place, shown: false } : place;
       if (currentPlace !== place && browserSaid.get(label) === said) browserSaid.delete(label);
@@ -5862,8 +6023,13 @@ function syncBrowserPanes() {
       } catch {
         browserSaid.delete(label);
         if (browserWorkspaceLive(tab, label) && tab.agentWorkspace) {
-          tab.workspace = null;
-          tab.workspaceError = "placement";
+          // A shield that did not stand leaves the tab's state as it was: the
+          // watch goes on by snapshots (t-66513).
+          if (currentPlace.watch && currentPlace.shown) tab.workspaceLiveError = true;
+          else {
+            tab.workspace = null;
+            tab.workspaceError = "placement";
+          }
           if (currentHost?._browserTab === tab) paintBrowserWorkspace(currentHost, tab);
           syncBrowserWorkspaceCapture();
           await invoke("browser_place", { ...currentPlace, shown: false }).catch(() => {});

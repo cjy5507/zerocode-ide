@@ -758,14 +758,21 @@ fn door_number(name: &str) -> i64 {
 /// after: after a failing `body` too, or the next test would read a folder
 /// that is gone.
 fn under_home<T>(home: &Path, body: impl FnOnce() -> T) -> T {
+    under_home_with(home, &[], body)
+}
+
+/// `body` as [`under_home`] runs it, with each of `also` set beside the home
+/// and put back the same way.
+fn under_home_with<T>(home: &Path, also: &[(&str, &std::ffi::OsStr)], body: impl FnOnce() -> T) -> T {
     let _env = crate::test_env_lock();
-    let names = ["ZO_CONFIG_HOME", core_types::paths::ZO_STATE_DIR_ENV];
-    let before: Vec<_> = names.iter().map(std::env::var_os).collect();
-    for name in names {
-        std::env::set_var(name, home);
+    let mut names = vec![("ZO_CONFIG_HOME", home.as_os_str()), (core_types::paths::ZO_STATE_DIR_ENV, home.as_os_str())];
+    names.extend_from_slice(also);
+    let before: Vec<_> = names.iter().map(|(name, _)| std::env::var_os(name)).collect();
+    for (name, value) in &names {
+        std::env::set_var(name, value);
     }
     let said = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-    for (name, value) in names.iter().zip(before) {
+    for ((name, _), value) in names.iter().zip(before) {
         match value {
             Some(value) => std::env::set_var(name, value),
             None => std::env::remove_var(name),
@@ -837,5 +844,158 @@ fn a_resting_seat_says_until_when_why_and_after_how_many() {
 
         timed_out(now - rest_ms - 60_000);
         assert_eq!(recall_of(&said_rests()), Some(Value::Null), "a rest that has passed");
+    });
+}
+
+/// A stand-in for the judgment provider on this machine's loopback that
+/// answers every question a request asks with a yes as likely as `yes`: its
+/// origin, and how many requests it has answered.
+fn provider_answering(yes: f64) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read as _, Write as _};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a socket for the stand-in provider");
+    let origin = format!("http://{}", listener.local_addr().expect("its address"));
+    let answered = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&answered);
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let mut read = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let asked = loop {
+                let count = stream.read(&mut chunk).unwrap_or(0);
+                if count == 0 {
+                    break None;
+                }
+                read.extend_from_slice(&chunk[..count]);
+                let text = String::from_utf8_lossy(&read).into_owned();
+                let Some((head, body)) = text.split_once("\r\n\r\n") else { continue };
+                let length = head
+                    .to_ascii_lowercase()
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok()))
+                    .unwrap_or(0);
+                if body.len() >= length {
+                    break serde_json::from_str::<Value>(body).ok();
+                }
+            };
+            let Some(asked) = asked else { continue };
+            let answers: serde_json::Map<String, Value> = asked["questions"]
+                .as_object()
+                .into_iter()
+                .flat_map(serde_json::Map::keys)
+                .map(|id| (id.clone(), json!({"type": "noul", "noul": yes})))
+                .collect();
+            let body = json!({"model": "jev-test", "answers": answers, "usage": {"input_tokens": 20, "output_tokens": 0}})
+                .to_string();
+            counted.fetch_add(1, Ordering::SeqCst);
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes());
+        }
+    });
+    (origin, answered)
+}
+
+/// `zo jev decide <name>` asks the person's own decision of that name
+/// (t-62170): one that is on prints its line and exits 0; one that records is
+/// asked all the same, prints no line — `null` in its JSON — and exits 2; and
+/// a name no decision has is refused with exit 2 before anything is asked.
+#[test]
+fn decide_prints_an_on_decisions_line_and_nothing_of_one_that_records() {
+    use std::ffi::OsStr;
+    use std::sync::atomic::Ordering;
+    use zerocode_core::jev::custom::{self, store, Answer, Definition, Point};
+    use zerocode_core::jev::{door, JevMode, AGENT_TOOL_ASK_OPTIONS, CUSTOM_DECISIONS, SMART_SETTINGS_KEY};
+    let home = tempfile::tempdir().expect("a config home");
+    let work = tempfile::tempdir().expect("a project");
+    let project = std::fs::canonicalize(work.path()).expect("the project resolved");
+    let (origin, answered) = provider_answering(0.9);
+    let also = [
+        ("HOME", home.path().as_os_str()),
+        ("ZO_HOME", home.path().as_os_str()),
+        (api::SYSTEMONE_API_KEY_ENV, OsStr::new("test-key")),
+        (api::SYSTEMONE_BASE_URL_ENV, OsStr::new(&origin)),
+    ];
+    under_home_with(home.path(), &also, || {
+        let consented = json!({door::ENABLED_SETTING: true, door::WORKSPACES_SETTING: [project.to_string_lossy()]});
+        let settings =
+            json!({SMART_SETTINGS_KEY: {CUSTOM_DECISIONS.setting: JevMode::On.key(), door::JEV_SETTINGS_KEY: consented}});
+        std::fs::write(home.path().join("settings.json"), settings.to_string()).expect("settings");
+        for (name, mode) in [("Ship", JevMode::On), ("Wait", JevMode::Shadow)] {
+            let answer = Answer::YesNo { yes: "It is ready.".to_string(), no: "It needs more work.".to_string() };
+            let question = "Is the change ready to ship?".to_string();
+            let definition = Definition::new(custom::new_id(), name.to_string(), question, answer, Point::AgentAsks);
+            store::create(home.path(), &definition, mode, 1).expect("the decision kept");
+        }
+        let decide = |name: &str, json: bool| {
+            let mut args = words(&["decide", name, "--context", "the diff adds one test"]);
+            if json {
+                args.push("--json".to_string());
+            }
+            run(&args, &project, 1, 0)
+        };
+        let yes = AGENT_TOOL_ASK_OPTIONS[0];
+        let on = decide("Ship", false).expect("a report");
+        assert_eq!(on, Report { text: custom::line("Ship", yes, 0.9), exit: HEADLESS_LOOP_EXIT_DONE });
+        let recording = decide("Wait", false).expect("a report");
+        assert_eq!(recording.exit, NO_ANSWER_EXIT);
+        assert!(!recording.text.contains(&custom::line("Wait", yes, 0.9)), "{}", recording.text);
+        let said: Value = serde_json::from_str(&decide("Wait", true).expect("a report").text).expect("json");
+        assert_eq!((&said["line"], &said["mode"]), (&Value::Null, &json!(JevMode::Shadow.key())), "{said}");
+        assert_eq!(answered.load(Ordering::SeqCst), 3, "each was asked");
+        let unknown = decide("Nobody", false).expect_err("no decision has the name");
+        assert_eq!(unknown.exit, NO_ANSWER_EXIT);
+        assert!(unknown.message.contains("Nobody"), "{}", unknown.message);
+        assert_eq!(answered.load(Ordering::SeqCst), 3, "an unknown name asks nothing");
+    });
+}
+
+/// The summary's JSON carries the person's own decisions under
+/// `customDecisions` (t-62170): each with its id, name and mode, the version
+/// it asks with now, and every earlier version a row names counted apart.
+#[test]
+fn the_summary_names_each_decision_and_counts_its_versions_apart() {
+    use std::fmt::Write as _;
+    use zerocode_core::jev::custom::{self, store, Answer, Definition, Point};
+    use zerocode_core::jev::door::ANSWERED_OUTCOME;
+    use zerocode_core::jev::{JevMode, CUSTOM_DECISIONS};
+    let home = tempfile::tempdir().expect("a config home");
+    let project = tempfile::tempdir().expect("a project");
+    under_home(home.path(), || {
+        let answer = Answer::YesNo { yes: "A visible change.".to_string(), no: "No visible change.".to_string() };
+        let question = "Did the product change?".to_string();
+        let mut decision = Definition::new(custom::new_id(), "Release notes".to_string(), question, answer, Point::TurnEnd);
+        let first = store::create(home.path(), &decision, JevMode::Shadow, 1).expect("the decision kept");
+        decision.question = "Did what a person sees change?".to_string();
+        let second = store::edit(home.path(), &decision, 2).expect("the decision changed");
+        let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+        let now = i64::try_from(since.expect("after 1970").as_millis()).expect("a time");
+        let ledger = jev_summary::ledger_roots(project.path())[1].join(CUSTOM_DECISIONS.ledger);
+        let mut rows = String::new();
+        for (version, at) in [(&first, now - 2_000), (&first, now - 1_000), (&second, now - 500)] {
+            let row = json!({"at": at, "decision": decision.id, "definition": version, "outcome": ANSWERED_OUTCOME,
+                "requests": 1, "rubricVersion": CUSTOM_DECISIONS.rubric_version});
+            let _ = writeln!(rows, "{row}");
+        }
+        std::fs::create_dir_all(ledger.parent().expect("a folder")).expect("the folder");
+        std::fs::write(&ledger, rows).expect("the ledger");
+        let request = SummaryRequest { cwd: None, sessions: None, recent: 0, act_lines: false, json: true };
+        let said: Value = serde_json::from_str(&run_summary(&request, project.path(), now, 0).text).expect("json");
+        let decisions = said["customDecisions"].as_array().expect("the person's decisions");
+        assert_eq!(decisions.len(), 1, "{said}");
+        let one = &decisions[0];
+        let named = (&one["id"], &one["name"], &one["mode"]);
+        assert_eq!(named, (&json!(decision.id), &json!("Release notes"), &json!(JevMode::Shadow.key())), "{one}");
+        assert_eq!((&one["definition"], &one["requestsWeek"]), (&json!(second), &json!(1)), "{one}");
+        let earlier: Vec<(&Value, &Value)> = one["earlier"]
+            .as_array()
+            .expect("its earlier versions")
+            .iter()
+            .map(|version| (&version["definition"], &version["requestsWeek"]))
+            .collect();
+        assert_eq!(earlier, [(&json!(first), &json!(2))], "{one}");
     });
 }
