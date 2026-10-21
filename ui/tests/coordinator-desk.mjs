@@ -323,7 +323,12 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       await paintBoardView();
     });
 
-    /* ---- 기계 띠: `df`·`uptime`·`simctl`의 자리, 빌린 기기는 상태 바의 문장 ---- */
+    /* The board's three tabs (t-67607): a block is drawn on its own tab, so each
+     * part below chooses the tab it reads before it reads. */
+    const tab = (id) => page.evaluate((id) => chooseBoardTab(document.querySelector("#board-view"), id, false), id);
+
+    /* ---- 기계 띠: `df`·`uptime`·`simctl`의 자리, 빌린 기기는 상태 바의 문장 — 「워커」 탭 ---- */
+    await tab("workers");
     const machine = await page.evaluate(async () => {
       paintEmulatorLoans({ count: 1, lastUsedMs: Date.now() });
       askMachineLoad();
@@ -332,7 +337,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       const strip = document.querySelector('#board-view [data-desk-block="machine"]');
       const segment = (id) => strip?.querySelector(`[data-segment="${id}"]`);
       const read = (id) => ({ text: segment(id)?.textContent, tone: segment(id)?.className });
-      return { shown: Boolean(strip) && !strip.hidden, first: strip === strip?.parentElement.firstElementChild,
+      return { shown: Boolean(strip) && !strip.hidden, first: strip?.dataset.boardTabOf === "workers" && strip.checkVisibility(),
         disk: read("disk"), load: read("load"), ios: read("ios"), android: read("android"), loans: read("loans"),
         chip: document.querySelector("#sb-loans-words").textContent,
         order: [...(strip?.querySelectorAll("[data-segment]") ?? [])].map((node) => node.dataset.segment) };
@@ -368,7 +373,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       refused.load === "부하 3.2 · 코어 12" && !refused.loadTone.includes("is-wait") && !refused.ios &&
       refused.android === "Android 에뮬레이터 1" && refused.gone, JSON.stringify(refused));
 
-    /* ---- 한눈: 데스크가 작업 목록을 첫 화면 밖으로 밀어내지 않는다 ------------- */
+    /* ---- 한눈 (t-67607): 「지금」 탭에서 지금 도는 일의 표가 첫 화면에 선다 ------------- */
+    await tab("now");
     await page.evaluate(async () => {
       refreshDeskLedger();
       await new Promise((done) => setTimeout(done, 0));
@@ -382,16 +388,16 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       const held = view.getAttribute("style") ?? "";
       Object.assign(view.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "100" });
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-      const desk = view.querySelector(".task-board-desk").getBoundingClientRect();
-      const row = view.querySelector(".task-board-row").getBoundingClientRect();
+      const running = view.querySelector('[data-desk-block="running"] .board-run').getBoundingClientRect();
       view.setAttribute("style", held);
-      return { deskHeight: Math.round(desk.height), firstTaskRowTop: Math.round(row.top), screen: window.innerHeight };
+      return { firstRunRowTop: Math.round(running.top), screen: window.innerHeight };
     });
     await page.setViewportSize({ width: 1280, height: 860 });
-    ok("on a 1998×1069 board the desk leaves the first task row on the first screen",
-      glance.firstTaskRowTop < glance.screen, JSON.stringify(glance));
+    ok("on a 1998×1069 board the Now tab leaves the first running row on the first screen",
+      glance.firstRunRowTop < glance.screen, JSON.stringify(glance));
 
-    /* ---- 답할 우편: `check --peek`의 자리, 답하기와 확인은 원장의 뜻 그대로 ------ */
+    /* ---- 답할 우편 (t-67607): 질문은 「지금」 탭의 당신 차례에, 소식은 「기록」 탭에 —
+     * 답하기와 확인은 원장의 뜻 그대로 ------ */
     const settleMail = () => page.evaluate(async () => {
       for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
         await new Promise((done) => requestAnimationFrame(done));
@@ -399,9 +405,12 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     });
     await settleMail();
+    /* One reader for both places a letter stands: the 당신 차례 card's questions and the
+     * 소식 block's notices — each drawn on its own tab, so the reader reads the tab chosen. */
     const readMail = () => page.evaluate(() => {
+      const asks = document.querySelector('#board-view [data-desk-block="asks"]');
       const block = document.querySelector('#board-view [data-desk-block="mail"]');
-      const letters = [...(block?.querySelectorAll(".board-desk-letter") ?? [])].map((row) => ({
+      const read = (row) => ({
         key: row.dataset.letter,
         kind: row.querySelector(".board-desk-letter-kind").textContent,
         who: row.querySelector(".board-desk-letter-who").textContent,
@@ -412,34 +421,58 @@ export async function testCoordinatorDesk(browser, origin, ok) {
         note: row.querySelector(".board-desk-letter-note").hidden ? "" : row.querySelector(".board-desk-letter-note").textContent,
         act: row.querySelector(".board-desk-letter-act").hidden ? "" : row.querySelector(".board-desk-letter-act").textContent,
         form: Boolean(row.querySelector(".board-desk-reply:not([hidden])")),
-      }));
+      });
+      const onNow = asks?.checkVisibility() ?? false;
+      const shownText = (node) => (node && !node.hidden ? node.textContent : "");
       const more = block?.querySelector(".board-desk-letters-more");
-      const unseated = block?.querySelector(".board-desk-unseated");
-      const newsHead = block?.querySelector(".board-desk-news-head");
-      const folded = block?.querySelector(".board-desk-news-folded");
-      return { shown: Boolean(block) && !block.hidden, head: block?.querySelector(".board-desk-head")?.textContent,
-        letters, more: more && !more.hidden ? more.textContent : "",
-        unseated: unseated && !unseated.hidden ? unseated.textContent : "",
-        newsHead: newsHead && !newsHead.hidden ? newsHead.textContent : "",
-        folded: folded && !folded.hidden ? folded.textContent : "",
-        news: [...(block?.querySelectorAll(".board-desk-letters.is-news .board-desk-letter") ?? [])]
-          .map((row) => row.dataset.letter),
-        order: [...document.querySelectorAll("#board-view .task-board-desk > .board-desk-block:not([hidden])")].map((node) => node.dataset.deskBlock) };
+      return {
+        tab: document.querySelector("#board-view .task-board-surface").dataset.boardTab,
+        title: document.querySelector("#board-view .board-now-title").textContent,
+        asksHead: asks?.querySelector(".board-desk-head-word")?.textContent,
+        asks: onNow ? [...asks.querySelectorAll(".board-asks > li")].map((row) => row.dataset.ask) : [],
+        asksMore: onNow ? shownText(asks.querySelector(".board-asks-more")) : "",
+        asksFoot: onNow ? asks.querySelector(".board-asks-foot").textContent : "",
+        questions: onNow ? [...asks.querySelectorAll(".board-desk-letter")].map(read) : [],
+        shown: Boolean(block) && !block.hidden && block.checkVisibility(),
+        head: block?.querySelector(".board-desk-head")?.textContent,
+        owed: shownText(block?.querySelector(".board-desk-news-owed")),
+        letters: block?.checkVisibility() ? [...block.querySelectorAll(".board-desk-letter")].map(read) : [],
+        more: more && !more.hidden ? more.textContent : "",
+        unseated: shownText(block?.querySelector(".board-desk-unseated")),
+        folded: shownText(block?.querySelector(".board-desk-news-folded")),
+        news: [...(block?.querySelectorAll(".board-desk-letters.is-news .board-desk-letter") ?? [])].map((row) => row.dataset.letter),
+      };
     });
     const shut = await readMail();
-    ok("the mail to answer is the questions alone (t-9456) — oldest first, five at a time, the news behind them, with how many more",
-      shut.shown && shut.head === "답할 우편 · 6" && shut.letters.length === 5 && shut.more === "15통 더 보기" &&
-      shut.letters.map((one) => one.key).join() === [901, 906, 908, 913, 915].map((n) => `run-desk/m-${n}`).join() &&
-      shut.letters.every((one) => one.kind === "질문") && shut.newsHead === "" && shut.folded === "" &&
-      shut.order.indexOf("mail") === shut.order.indexOf("machine") + 1, JSON.stringify(shut));
+    ok("the questions to answer wait under 당신 차례 with the decisions and the reports, oldest first, four at a time",
+      shut.asksHead === "당신 차례" && shut.asks.length === 4 && shut.asksMore === "10개 더 보기" &&
+      shut.title === "답할 일 14개 — 나머지는 저절로 돕니다" &&
+      shut.asksFoot === "이 밖에 당신을 기다리는 결정은 없습니다", JSON.stringify(shut));
+    await page.click('#board-view [data-desk-block="asks"] .board-asks-more');
+    await settleMail();
+    const asked = await readMail();
+    ok("opened, 당신 차례 holds every question the ledger owes (t-9456) — the questions alone among the letters, oldest first",
+      asked.asks.length === 14 && asked.asksMore === "접기" &&
+      asked.questions.map((one) => one.key).join() === [901, 906, 908, 913, 915, 920].map((n) => `run-desk/m-${n}`).join() &&
+      asked.questions.every((one) => one.kind === "질문"), JSON.stringify(asked));
+    await page.click('#board-view [data-desk-block="asks"] .board-asks-more');
+    await tab("history");
+    await settleMail();
+    const told = await readMail();
+    ok("the news stands on the History tab under its own head with the backend's numbers, five at a time, pointing to the questions",
+      told.shown && told.head === "소식 · 14" && told.letters.length === 5 && told.more === "9통 더 보기" &&
+      told.owed === "답할 우편 6통은 「지금」의 당신 차례에 있습니다" && told.folded === "" &&
+      !told.letters.some((one) => one.kind === "질문"), JSON.stringify(told));
     await page.click('#board-view [data-desk-block="mail"] .board-desk-letters-more');
     await settleMail();
     const mail = await readMail();
-    const letter = (id) => mail.letters.find((one) => one.key === `run-desk/${id}`);
-    ok("opened, the news stands under its own head with the backend's number, and one quiet episode is one line",
-      mail.head === "답할 우편 · 6" && mail.newsHead === "소식 · 14" && mail.letters.length === 20 &&
-      mail.news.length === 14 && mail.more === "접기" && !mail.news.some((key) => letter(key.split("/")[1])?.kind === "질문"),
-      JSON.stringify(mail));
+    await tab("now");
+    await page.click('#board-view [data-desk-block="asks"] .board-asks-more');
+    await settleMail();
+    const questions = (await readMail()).questions;
+    const letter = (id) => [...questions, ...mail.letters].find((one) => one.key === `run-desk/${id}`);
+    ok("opened, the news is all fourteen, and one quiet episode is one line",
+      mail.news.length === 14 && mail.more === "접기", JSON.stringify(mail));
     ok("each letter says its kind, whom it concerns, its age and where it stands in the coordinator's inbox",
       letter("m-901")?.kind === "질문" && letter("m-901").who === "w-1 · 데스크 과업 1" &&
       /^\d+(분|시간) 전$/.test(letter("m-901").age) && letter("m-901").body.startsWith("질문 1:") &&
@@ -453,6 +486,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a question is answered where it stands; a notice the coordinator holds acknowledges its whole batch, one it has not read offers nothing",
       letter("m-901").act === "답하기" && letter("m-903").act === "확인 · 이 묶음 6통" &&
       letter("m-902").act === "" && letter("m-904").act === "", JSON.stringify(mail.letters));
+    await tab("history");
     const counted = await page.evaluate(async () => {
       const held = window.__DESK__;
       window.__DESK__ = { ...held, revision: held.revision + 1, counts: { ...held.counts, folded: 41 } };
@@ -507,6 +541,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       resting.unread === "안 읽은 편지를 둔 채 쉬고 있음" &&
       resting.waiting === "제 check --wait에서 편지를 기다리며 쉬고 있음", JSON.stringify(resting));
 
+    await tab("now");
+    await settleMail();
     await page.click('#board-view [data-letter="run-desk/m-901"] .board-desk-letter-act');
     await page.fill('#board-view [data-letter="run-desk/m-901"] .board-desk-reply-field', "그대로 main에 올리세요.");
     const drafted = await page.evaluate(async () => {
@@ -532,7 +568,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await settleMail();
     const sent = await page.evaluate(() => window.__DESK_SENT__.filter((one) => one.verb === "reply"));
     const afterReply = await readMail();
-    const replied = afterReply.letters.find((one) => one.key === "run-desk/m-901");
+    const replied = afterReply.questions.find((one) => one.key === "run-desk/m-901");
     ok("a reply goes to the ledger as the run's coordinator seat, and an uncertain one keeps its request name for the retry",
       failed.error.includes("refused: desk_reply") && sent.length === 1 &&
       sent[0].run === "run-desk" && sent[0].message === "m-901" && sent[0].body === "그대로 main에 올리세요." &&
@@ -541,6 +577,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the screen invents no answer: the letter stays until the ledger records it",
       replied && replied.note === "답을 보냄 · 원장에 적히면 목록에서 빠져요" && replied.act === "" && !replied.form,
       JSON.stringify(replied));
+    await tab("history");
+    await settleMail();
     await page.click('#board-view [data-letter="run-desk/m-903"] .board-desk-letter-act');
     await settleMail();
     const acked = await page.evaluate(() => window.__DESK_SENT__.filter((one) => one.verb === "ack"));
@@ -548,7 +586,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const held = afterAck.letters.find((one) => one.key === "run-desk/m-903");
     ok("the screen invents no acknowledgement: the batch is asked of the ledger, and the letter stays until the ledger says so",
       acked.length === 1 && acked[0].run === "run-desk" && acked[0].delivery === "d-990" &&
-      held && held.note === "묶음을 확인함 · 원장에 적히면 목록에서 빠져요" && afterAck.head === "답할 우편 · 6",
+      held && held.note === "묶음을 확인함 · 원장에 적히면 목록에서 빠져요" && afterAck.head === "소식 · 14",
       JSON.stringify({ acked, held }));
     const landed = await page.evaluate(async () => {
       const kept = (one) => one.id !== "m-901" && one.delivery_id !== "d-990";
@@ -562,10 +600,14 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     });
     await settleMail();
     const cleared = await readMail();
+    await tab("now");
+    await settleMail();
+    const clearedAsks = await readMail();
     ok("once the ledger records the answer and the acknowledgement, those letters leave the desk",
-      cleared.head === `답할 우편 · ${landed[0]}` && cleared.newsHead === `소식 · ${landed[1]}` &&
-      !cleared.letters.some((one) => one.key === "run-desk/m-901" || one.key === "run-desk/m-903"),
-      JSON.stringify(cleared));
+      cleared.head === `소식 · ${landed[1]}` && clearedAsks.title === `답할 일 ${landed[0] + 8}개 — 나머지는 저절로 돕니다` &&
+      !cleared.letters.some((one) => one.key === "run-desk/m-903") &&
+      !clearedAsks.questions.some((one) => one.key === "run-desk/m-901"),
+      JSON.stringify({ cleared, clearedAsks }));
     const unseated = await page.evaluate(async () => {
       window.__DESK__ = { ...window.__DESK__, runs: window.__DESK__.runs.map((one) => ({ ...one, seat: false })) };
       refreshDeskLedger();
@@ -582,6 +624,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a run whose coordinator seat this window does not hold offers no answer and says why",
       unseated.act && unseated.said === "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요", JSON.stringify(unseated));
     await settleMail();
+    await tab("history");
 
     /* 접힌 소식의 묶음 확인 (t-9548): 코디네이터가 받아 둔 묶음의 소식이 전부 접혔으면 접힌 수
      * 옆에서 그 묶음을 통째로 확인한다 — 어느 묶음인지는 백엔드가 고르고, 자리 없는 창은 내밀지
@@ -619,6 +662,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await settleMail();
 
     /* ---- 워커: `worker-list`의 자리, 건강이 나쁜 워커가 먼저 ------------------- */
+    await tab("workers");
     await page.evaluate(async () => {
       askDeskCheckouts();
       await new Promise((done) => setTimeout(done, 0));
@@ -741,6 +785,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       staleWorker.rows["w-2"].task === "데스크 과업 2 · 다시 검토 대기", JSON.stringify(staleWorker.rows["w-2"]));
 
     /* ---- 과업 흐름: `task-list`의 자리, 멈춰 선 단계가 먼저 펼쳐진다 ---------- */
+    await tab("history");
     const settleDesk = () => page.evaluate(async () => {
       for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
         await new Promise((done) => requestAnimationFrame(done));
@@ -1294,29 +1339,35 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
     await settleDesk();
 
-    /* ---- 릴리즈 레인: 레인의 `status.json` 그대로 ---------------------- */
+    /* ---- 빌드 줄(릴리즈 레인): 레인의 `status.json` 그대로, 「지금」 탭의 카드 (t-67607) ---- */
+    await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
     const release = await page.evaluate(() => {
       const card = document.querySelector('#board-view [data-desk-block="release"]');
       return {
         shown: Boolean(card) && !card.hidden,
-        head: card?.querySelector(".board-desk-head")?.textContent,
+        head: card?.querySelector(".board-desk-head-word")?.textContent,
         version: card?.querySelector(".board-desk-release-version")?.textContent,
         sha: card?.querySelector(".board-desk-release-sha")?.textContent,
         verdict: card?.querySelector(".board-desk-release-verdict")?.textContent,
         clock: card?.querySelector(".board-desk-release-clock")?.textContent,
-        phases: [...(card?.querySelectorAll(".board-desk-release-phase") ?? [])].map((node) => node.textContent),
-        running: card?.querySelector(".board-desk-release-phase.is-running")?.textContent,
+        phases: [...(card?.querySelectorAll(".board-desk-release-phase") ?? [])]
+          .map((node) => [node.querySelector(".board-desk-release-step").textContent,
+            node.querySelector(".board-desk-release-step-word").textContent]),
+        running: card?.querySelector(".board-desk-release-phase.is-running .board-desk-release-step")?.textContent,
+        runningFor: card?.querySelector(".board-desk-release-phase.is-running .board-desk-release-step-word")?.textContent,
+        log: card?.querySelector(".board-desk-release-log .board-raw-text")?.textContent,
         skips: [...(card?.querySelectorAll(".board-desk-release-skips li") ?? [])].map((node) => node.textContent),
         reasonHidden: card?.querySelector(".board-desk-release-reason")?.hidden,
       };
     });
-    ok("the release card reads the lane's own status: version, sha, the phase running and how long",
-      release.shown && release.head === "릴리즈 레인" && release.version === "1.1.20" && release.sha === "ccb6e1bd" &&
-      release.verdict === "진행 중 · build-app" && /^\d+분째$/.test(release.clock ?? "") &&
-      release.running === "build-app",
+    ok("the build line card reads the lane's own status: version, sha, the step running and how long it has run",
+      release.shown && release.head === "빌드 줄" && release.version === "v1.1.20" && release.sha === "ccb6e1bd" &&
+      release.verdict === "진행 중 · build-app" && release.clock === "" &&
+      release.running === "build-app" && /^(\d+분째|방금 시작)$/.test(release.runningFor ?? ""),
       JSON.stringify(release));
-    ok("a skipped phase says it was skipped and why, and a running lane invents no verdict",
-      release.phases.includes("gate-root 건너뜀") && release.phases.includes("archive 1초") &&
+    ok("a finished step says done, a skipped one says so and why, its seconds are behind the record, and a running lane invents no verdict",
+      JSON.stringify(release.phases.slice(0, 2)) === JSON.stringify([["archive", "끝"], ["gate-root", "건너뜀"]]) &&
+      release.log?.includes("archive rc=0 1s") &&
       release.skips.length === 2 && release.skips[0].startsWith("gate-root: root tree unchanged") &&
       release.reasonHidden === true, JSON.stringify(release));
     const ended = await page.evaluate(async () => {
@@ -1325,10 +1376,13 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       await askReleaseStatus();
       paintCoordinatorDesk(document.querySelector("#board-view"));
       const card = document.querySelector('#board-view [data-desk-block="release"]');
+      const failed = card.querySelector(".board-desk-release-phase.is-failed");
       const red = { verdict: card.querySelector(".board-desk-release-verdict").textContent,
         reason: card.querySelector(".board-desk-release-reason").textContent,
         reasonShown: !card.querySelector(".board-desk-release-reason").hidden,
-        failed: card.querySelector(".board-desk-release-phase.is-failed")?.textContent,
+        failed: failed ? [failed.querySelector(".board-desk-release-step").textContent,
+          failed.querySelector(".board-desk-release-step-word").textContent] : null,
+        log: card.querySelector(".board-desk-release-log .board-raw-text").textContent,
         mark: card.querySelector(".agent-graph-node-state").className,
         clock: card.querySelector(".board-desk-release-clock").textContent };
       window.__RELEASE__ = null;
@@ -1336,12 +1390,13 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       paintCoordinatorDesk(document.querySelector("#board-view"));
       return { red, gone: card.hidden };
     });
-    ok("a red lane says red with the lane's reason and the failed phase; no lane folds the card",
+    ok("a red lane says red with the lane's reason and the failed step; no lane folds the card",
       ended.red.verdict === "빨강" && ended.red.reasonShown && ended.red.reason === "gate-zo rc=101" &&
-      ended.red.failed === "build-app 288초" && ended.red.mark.includes("is-failed") &&
-      ended.red.clock.includes("걸림") && ended.gone, JSON.stringify(ended));
+      JSON.stringify(ended.red.failed) === JSON.stringify(["build-app", "실패"]) && ended.red.log.includes("build-app rc=101 288s") &&
+      ended.red.mark.includes("is-failed") && ended.red.clock.includes("걸림") && ended.gone, JSON.stringify(ended));
 
     /* ---- 계속 판정 (t-26583): 워커 줄 밑의 판정 한 줄과 그 근거 ------------------
+    await tab("workers");
      *
      * 판정·사유·숫자는 백엔드의 것이고(`continue_gate`) 행의 `gate`로 온다; 여기서 재는 것은
      * 그 낱말과 서식이다. 판정을 받은 워커에만 줄이 서고, 「계속」이어도 읽은 숫자가 보이며,

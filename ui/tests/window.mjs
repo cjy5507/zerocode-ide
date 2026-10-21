@@ -48,6 +48,7 @@ import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testQuotaWallChip } from "./quota-wall-chip.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
+import { testBoardNow } from "./board-now.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
@@ -281,6 +282,7 @@ suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, or
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));
 suite("quota-wall-chip", testQuotaWallChip);
 suite("coordinator-desk-layout", ({ browser, origin, ok }) => testCoordinatorDeskLayout(browser, origin, ok));
+suite("board-now", ({ browser, origin, ok }) => testBoardNow(browser, origin, ok));
 suite("agent-relations", async ({ browser, origin, ok }) => {
   await testAgentRelations(browser, origin, ok);
   await testAgentRelationsForm(browser, origin, ok);
