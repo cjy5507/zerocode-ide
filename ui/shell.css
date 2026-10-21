@@ -46489,12 +46489,6 @@ button.jev-token:hover {
   min-width: 0;
 }
 
-.artifacts-name {
-  flex: none;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
 .artifacts-view .artifacts-query {
   flex: 0 1 var(--artifact-search-width);
   width: var(--artifact-search-width);
@@ -48004,6 +47998,709 @@ button.jev-token:hover {
 .artifacts-view.is-tab-tasks.is-tier-compact .artifact-detail-back {
   display: inline-flex;
 }
+
+/* ---- 아티팩트 · 흐름 (t-68458) ----------------------------------------------------------------------
+ * 사람이 통과시킨 2차 시안(p-4958d4720ba9e103 v3)의 규칙을 창의 이름으로: 머리의 프로젝트, 묶음 셋,
+ * 과업마다의 줄(표식 · 문장 · 여섯 걸음의 띠 · 칩), 펼친 걸음, 발행의 줄, 흐름 곁의 읽는 칸. 값은 모두
+ * t-67607의 토큰이고 새 색 · 크기는 없다. 클래스는 `artifact-flow-`로 시작한다 — 흐름 콘솔의
+ * `.flow-*`(shell-flow.js)와 겹치지 않게. */
+
+/* 머리: 프로젝트가 먼저 — 첫 줄은 프로젝트 · 보기 · 행동, 둘째 줄은 검색과 고르개(시안 B의 두 줄). */
+.artifacts-head::after {
+  content: "";
+  order: 1;
+  flex: 0 0 100%;
+  height: 0;
+}
+
+.artifacts-head > :is(.artifacts-query, .artifacts-pick, .artifacts-origins) {
+  order: 2;
+}
+
+.artifacts-view .artifacts-head > .artifacts-query {
+  flex: 1 1 var(--artifact-search-width);
+  width: auto;
+}
+
+.artifacts-project {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: calc(var(--artifact-pick-max-width) + var(--space-6) * 2);
+  min-height: var(--artifact-press-min);
+  padding: 0 var(--space-5) 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--ink-chalk);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.artifacts-project:hover { background: var(--row-hover); }
+.artifacts-project:focus-within { box-shadow: 0 0 0 var(--ring-width) var(--ring); }
+.artifacts-project > .icon { color: var(--ink-mist); }
+
+.artifacts-project-name {
+  min-width: 0;
+  overflow: hidden;
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifacts-project-chevron {
+  position: absolute;
+  right: var(--space-2);
+  display: inline-flex;
+  color: var(--ink-mist);
+  pointer-events: none;
+}
+
+.artifacts-project-chevron .icon { transform: rotate(90deg); }
+
+.artifacts-project-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.artifacts-here {
+  flex: none;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+/* 보기의 탭 — 시안 B의 밑줄 탭: 고른 탭은 잉크 글자와 그 아래 줄 하나. */
+.artifacts-tabs {
+  align-self: stretch;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+.artifacts-tab {
+  position: relative;
+  padding: 0 var(--space-3);
+  font: var(--type-label-14);
+}
+
+.artifacts-tab[aria-selected="true"] {
+  background: none;
+  box-shadow: none;
+}
+
+.artifacts-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto var(--space-3) 0;
+  height: var(--accent-rule);
+  background: var(--ink-chalk);
+}
+
+/* 흐름의 상자와 목록 */
+.artifacts-flow {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.artifact-flow-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--space-6);
+}
+
+.artifact-flow-list:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+
+/* 묶음의 머리 — 지금 · 다음 발행 전 · 발행된 것. 수는 여기에만 선다. */
+.artifact-flow-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: calc(var(--artifact-group-head) * 1px);
+  margin: 0;
+  padding: 0 var(--space-4);
+  background: var(--surface-abyss);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.artifact-flow-group-head b { color: var(--ink-chalk); font-weight: 600; }
+
+.artifact-flow-group-note {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 시간의 선: 줄마다의 표식이 이 선 위에 선다. */
+.artifact-flow-rows,
+.artifact-flow-release-rows {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.artifact-flow-rows::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--space-4) + var(--icon-size) / 2);
+  /* 선은 테두리로 긋는다 — 테두리 토큰은 반투명이라 칠하면 사라진다. */
+  border-left: var(--rule-width) solid var(--edge-rule);
+}
+
+.artifact-flow-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--icon-size) minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--space-3);
+  row-gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-flow-item:hover { background: var(--row-hover); }
+.artifact-flow-item:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+
+.artifact-flow-item[aria-expanded="true"] {
+  background: var(--surface-deck);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule), inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
+  cursor: default;
+}
+
+.artifact-flow-item.is-reading {
+  background: var(--row-selected);
+  box-shadow: inset var(--accent-rule) 0 0 var(--artifact-selected-edge);
+}
+
+/* 상태의 표식 — 모양이 단계를 말한다: 고리 · 반 찬 원 · 찬 원 · 체크 · ✕ · 빈 원 · 줄. */
+.artifact-flow-node {
+  position: relative;
+  z-index: 1;
+  grid-column: 1;
+  grid-row: 1;
+  display: block;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  margin-top: calc((var(--space-5) - var(--space-1) - var(--icon-size)) / 2);
+  color: var(--ink-glyph);
+}
+
+.artifact-flow-node svg,
+.artifact-flow-mark svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.artifact-flow-ground { fill: var(--surface-abyss); }
+
+.artifact-flow-item[aria-expanded="true"] .artifact-flow-ground,
+.artifact-flow-steps .artifact-flow-ground { fill: var(--surface-deck); }
+
+.artifact-flow-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.artifact-flow-fill { fill: currentColor; }
+
+.artifact-flow-cut {
+  fill: none;
+  stroke: var(--surface-abyss);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.artifact-flow-steps .artifact-flow-cut,
+.artifact-flow-item[aria-expanded="true"] .artifact-flow-cut { stroke: var(--surface-deck); }
+
+:is(.artifact-flow-node, .artifact-flow-mark, .artifact-flow-state)[data-signal="ready"] { --artifact-flow-signal: var(--signal-ready); }
+:is(.artifact-flow-node, .artifact-flow-mark, .artifact-flow-state)[data-signal="wait"] { --artifact-flow-signal: var(--signal-wait); }
+:is(.artifact-flow-node, .artifact-flow-mark, .artifact-flow-state)[data-signal="done"] { --artifact-flow-signal: var(--signal-done); }
+:is(.artifact-flow-node, .artifact-flow-mark, .artifact-flow-state)[data-signal="halt"] { --artifact-flow-signal: var(--signal-halt); }
+:is(.artifact-flow-node, .artifact-flow-mark, .artifact-flow-state)[data-signal="quiet"] { --artifact-flow-signal: var(--ink-glyph); }
+:is(.artifact-flow-node, .artifact-flow-mark)[data-signal] { color: var(--artifact-flow-signal); }
+
+/* 한 일의 한 줄 — 사람의 말, 끝에 전→후 수 */
+.artifact-flow-said {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+  font-weight: 500;
+}
+
+.artifact-flow-gain { font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+.artifact-flow-dash { color: var(--ink-mist); font-weight: 400; }
+.artifact-flow-item.is-record .artifact-flow-said,
+.artifact-flow-item.is-records .artifact-flow-said { color: var(--ink-mist); font-weight: 400; }
+
+/* 상태: 여섯 걸음의 띠 + 말 */
+.artifact-flow-state {
+  grid-column: 3;
+  grid-row: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: calc(var(--space-5) - var(--space-1));
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.artifact-flow-track {
+  display: block;
+  width: calc(var(--space-6) * 2 + var(--space-5));
+  height: var(--space-1);
+}
+
+.artifact-flow-track rect { fill: var(--row-active); }
+.artifact-flow-track .is-done { fill: var(--ink-mist); }
+.artifact-flow-track .is-now { fill: var(--artifact-flow-signal); }
+.artifact-flow-track .is-stop { fill: var(--signal-halt); }
+.artifact-flow-track .is-skip { fill: transparent; stroke: var(--edge-rule); stroke-width: 1; }
+
+/* 둘째 줄: 아티팩트 칩 · 누가 · 몇 번째에 · 과업 번호 · 펼침 */
+.artifact-flow-meta {
+  grid-column: 2 / -1;
+  grid-row: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.artifact-flow-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.artifact-flow-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--artifact-press-min);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-flow-chip:hover { box-shadow: inset 0 0 0 var(--rule-width) var(--ink-mist); }
+.artifact-flow-chip:focus-visible { outline: none; box-shadow: 0 0 0 var(--ring-width) var(--ring); }
+
+.artifact-flow-chip[aria-pressed="true"] {
+  background: var(--row-selected);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--artifact-selected-edge);
+}
+
+.artifact-flow-chip > .icon { color: var(--ink-mist); }
+
+.artifact-flow-chip.is-lost {
+  background: transparent;
+  color: var(--ink-mist);
+  text-decoration: line-through;
+  text-decoration-color: var(--ink-glyph);
+  cursor: default;
+}
+
+.artifact-flow-chip.is-task { font: var(--type-label-12-mono); }
+
+.artifact-flow-who,
+.artifact-flow-none {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  white-space: nowrap;
+}
+
+.artifact-flow-id {
+  margin-left: auto;
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+}
+
+.artifact-flow-more {
+  display: inline-grid;
+  place-items: center;
+  width: var(--artifact-press-min);
+  height: var(--artifact-press-min);
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-mist);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-flow-more:hover { background: var(--row-hover); color: var(--ink-chalk); }
+.artifact-flow-more:focus-visible { outline: none; box-shadow: 0 0 0 var(--ring-width) var(--ring); }
+.artifact-flow-more[aria-expanded="true"] .icon--twist { transform: rotate(90deg); }
+
+/* 펼친 줄: 무엇 · 왜 · 대가 세 줄, 그리고 걸음마다 한 줄 */
+.artifact-flow-detail {
+  grid-column: 2 / -1;
+  grid-row: 3;
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-1);
+}
+
+.artifact-flow-three {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  font: var(--type-label-13);
+}
+
+.artifact-flow-three dt { color: var(--ink-mist); font-weight: 500; }
+.artifact-flow-three dd { min-width: 0; margin: 0; color: var(--ink-chalk); }
+
+.artifact-flow-steps {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  list-style: none;
+}
+
+.artifact-flow-step {
+  display: grid;
+  grid-template-columns: var(--icon-size) calc(var(--space-6) * 3) minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--space-3);
+  row-gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+.artifact-flow-step:first-child { box-shadow: none; }
+
+.artifact-flow-mark {
+  grid-column: 1;
+  grid-row: 1;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  margin-top: calc((var(--space-4) + var(--space-1) - var(--icon-size)) / 2);
+  color: var(--ink-glyph);
+}
+
+.artifact-flow-step-name {
+  grid-column: 2;
+  grid-row: 1;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  line-height: calc(var(--space-4) + var(--space-1));
+  white-space: nowrap;
+}
+
+.artifact-flow-step-when {
+  grid-column: 2;
+  grid-row: 2;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.artifact-flow-step-said {
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  line-height: calc(var(--space-4) + var(--space-1));
+}
+
+.artifact-flow-step-foot {
+  grid-column: 3;
+  grid-row: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+.artifact-flow-step-foot:empty { display: none; }
+.artifact-flow-step-note { color: var(--ink-mist); font: var(--type-label-12); }
+.artifact-flow-step-ids { color: var(--ink-mist); font: var(--type-label-12-mono); }
+
+.artifact-flow-step:is([data-tone="wait"], [data-tone="skip"]) :is(.artifact-flow-step-said, .artifact-flow-step-name) {
+  color: var(--ink-mist);
+  font-weight: 400;
+}
+
+/* 지난 발행 — 같은 선 위의 접힌 줄. 누르면 그 발행의 과업이 펼쳐진다. */
+.artifact-flow-release { position: relative; }
+
+.artifact-flow-release-head {
+  display: grid;
+  grid-template-columns: var(--icon-size) auto auto minmax(0, 1fr) auto var(--icon-size);
+  align-items: center;
+  column-gap: var(--space-3);
+  width: 100%;
+  min-height: calc(var(--artifact-task-row-height) * 1px - var(--space-3));
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  background: transparent;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-flow-release-head:hover { background: var(--row-hover); }
+.artifact-flow-release-head:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+.artifact-flow-release-head .artifact-flow-node { grid-row: auto; margin-top: 0; }
+.artifact-flow-release-name { font: var(--type-label-13-mono); font-weight: 600; }
+.artifact-flow-release-when { color: var(--ink-mist); white-space: nowrap; }
+
+.artifact-flow-release-digest {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-mist);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-flow-release-count {
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.artifact-flow-release-head > .icon { color: var(--ink-mist); }
+.artifact-flow-release-head[aria-expanded="true"] > .icon--twist { transform: rotate(90deg); }
+
+.artifact-flow-release[aria-expanded="true"] > .artifact-flow-release-head {
+  background: var(--surface-deck);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+.artifact-flow-older {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4) 0 calc(var(--space-4) + var(--icon-size) + var(--space-3));
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+/* 빈 프로젝트 — 무엇이 없는지와 다음에 할 일을 한 자리에 */
+.artifact-flow-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-5);
+  text-align: center;
+}
+
+.artifact-flow-empty-word {
+  margin: 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-16);
+  letter-spacing: var(--tracking-heading-16);
+}
+
+.artifact-flow-empty-hint {
+  max-width: calc(var(--artifact-drawer-min) * 1px);
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+.artifact-flow-empty-steps {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  text-align: left;
+}
+
+/* 흐름 곁의 읽는 칸 — 머리가 어느 걸음의 무엇인지와 그 과업의 상태를, 제목 위가 그 과업의 한 줄을 말한다. */
+.artifact-flow-where {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-flow-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.artifact-flow-badge .artifact-flow-node,
+.artifact-flow-context .artifact-flow-node {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+  margin-top: 0;
+}
+
+:is(.artifact-flow-badge, .artifact-flow-context) .artifact-flow-ground { fill: transparent; }
+
+.artifact-flow-context {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-3) var(--space-5) 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.artifact-flow-context-said { flex: 1; min-width: 0; }
+
+/* 흐름이 서 있는 동안 서랍의 반영 칩은 물러난다 — 상태는 흐름의 말이 한다. */
+.artifact-detail-bar .is-flow-hidden { display: none; }
+
+/* 판의 자세 — 넓게(880 이상): 읽는 칸이 열리면 흐름은 왼쪽에 남는다 · 보통: 흐름이 좁은 기둥이 된다 ·
+ * 좁게(600 미만): 읽는 칸이 흐름을 덮고 「← 목록」으로 돌아간다. */
+.artifacts-view.is-tab-flow .artifacts-main { flex: 1 1 auto; }
+.artifacts-view.is-tab-flow:not(.is-flow-reading) .artifacts-drawer { display: none; }
+.artifacts-view.is-tab-flow.is-flow-reading .artifacts-main { flex: 0 0 calc(var(--artifact-list-min) * 1px + var(--space-6) + var(--space-4)); }
+.artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-main { flex: 1 1 0; }
+.artifacts-view.is-tab-flow.is-flow-reading.is-tier-wide .artifacts-drawer { flex: 0 0 calc(var(--artifact-drawer-width) * 1px + var(--space-6) * 2); }
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifacts-drawer { flex: 1 1 auto; min-width: 0; }
+.artifacts-view.is-tab-flow.is-tier-compact .artifact-detail-back { display: inline-flex; }
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-item {
+  grid-template-columns: var(--icon-size) minmax(0, 1fr);
+  padding-inline: var(--space-3);
+}
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-rows::before { left: calc(var(--space-3) + var(--icon-size) / 2); }
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) :is(.artifact-flow-state, .artifact-flow-who, .artifact-flow-id, .artifact-flow-more, .artifact-flow-detail) {
+  display: none;
+}
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-item:not(.is-reading) .artifact-flow-meta { display: none; }
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-said {
+  display: -webkit-box;
+  overflow: hidden;
+  font: var(--type-label-13);
+  font-weight: 500;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-release-head {
+  grid-template-columns: var(--icon-size) auto minmax(0, 1fr) var(--icon-size);
+  padding-inline: var(--space-3);
+}
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) :is(.artifact-flow-release-digest, .artifact-flow-release-count) { display: none; }
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-group-head { padding-inline: var(--space-3); }
+.artifacts-view.is-tab-flow.is-flow-reading :is(.artifact-flow-who, .artifact-flow-id, .artifact-flow-more) { display: none; }
+
+/* 좁은 판: 줄은 두 단, 상태는 문장 아래 */
+.artifacts-view.is-tier-compact .artifacts-here { display: none; }
+
+.artifacts-view.is-tier-compact .artifact-flow-item {
+  grid-template-columns: var(--icon-size) minmax(0, 1fr);
+  padding-inline: var(--space-3);
+}
+
+.artifacts-view.is-tier-compact .artifact-flow-rows::before { left: calc(var(--space-3) + var(--icon-size) / 2); }
+.artifacts-view.is-tier-compact .artifact-flow-state { grid-column: 2; grid-row: 2; justify-self: start; }
+.artifacts-view.is-tier-compact .artifact-flow-meta { grid-row: 3; }
+.artifacts-view.is-tier-compact .artifact-flow-detail { grid-row: 4; }
+.artifacts-view.is-tier-compact .artifact-flow-step { grid-template-columns: var(--icon-size) minmax(0, 1fr); }
+.artifacts-view.is-tier-compact .artifact-flow-step-name { grid-column: 2; }
+.artifacts-view.is-tier-compact .artifact-flow-step-when { grid-column: 2; grid-row: 1; justify-self: end; }
+.artifacts-view.is-tier-compact .artifact-flow-step-said { grid-column: 2; grid-row: 2; }
+.artifacts-view.is-tier-compact .artifact-flow-step-foot { grid-column: 2; grid-row: 3; }
+
+.artifacts-view.is-tier-compact .artifact-flow-release-head {
+  grid-template-columns: var(--icon-size) auto minmax(0, 1fr) auto var(--icon-size);
+  padding-inline: var(--space-3);
+}
+
+.artifacts-view.is-tier-compact .artifact-flow-release-digest { display: none; }
+.artifacts-view.is-tier-compact .artifact-flow-group-head { padding-inline: var(--space-3); }
+.artifacts-view.is-tier-compact .artifact-flow-context { margin-inline: var(--space-4); }
+
+@media (prefers-reduced-motion: reduce) {
+  .artifacts-project,
+  .artifact-flow-item,
+  .artifact-flow-chip,
+  .artifact-flow-more,
+  .artifact-flow-release-head {
+    transition: none;
+  }
+}
+/* ---- 아티팩트 · 흐름 끝 (t-68458) ---- */
 
 /* 묶음 — 읽는 칸의 제목 아래: 빠진 것의 한 줄, 증거, 전후 비교, 페이지. */
 .artifact-bundle {

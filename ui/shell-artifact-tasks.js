@@ -179,7 +179,7 @@ function artifactLandingSayOf(held) {
 /* 읽는 칸 머리의 반영 상태: 작업별 탭에서 작업을 열었으면 그 작업의 것(줄이 든 커밋까지),
  * 아니면 고른 행의 것. */
 function artifactReaderLandingSay(row) {
-  const line = artifactFilter.tab === ARTIFACT_TASKS_TAB && artifactTaskOpen ? artifactTaskLine(artifactTaskOpen) : null;
+  const line = artifactTabReadsTask() && artifactTaskOpen ? artifactTaskLine(artifactTaskOpen) : null;
   return artifactLandingSayOf(line ?? row.origin);
 }
 
@@ -634,7 +634,8 @@ function paintArtifactTasks(view) {
   view.classList.toggle("is-tab-tasks", tasks);
   view.classList.toggle("is-task-open", tasks && artifactTaskOpen !== null);
   view.querySelector(".artifacts-tasks").hidden = !tasks;
-  view.querySelector(".artifacts-grid").hidden = tasks;
+  // 흐름(t-68458)도 카드가 아니라 제 줄이 선다 — 격자는 종류의 탭의 것이다.
+  view.querySelector(".artifacts-grid").hidden = tasks || artifactFilter.tab === ARTIFACT_FLOW_TAB;
   paintArtifactLoose(view);
   paintArtifactTaskRows(view);
 }
@@ -699,7 +700,8 @@ function artifactFileName(row) {
  * 다시 짓는다(같은 묶음에서 다른 행을 고르면 고른 표시만 옮긴다). */
 function paintArtifactBundle(view) {
   const box = view.querySelector(".artifact-bundle");
-  const task = artifactFilter.tab === ARTIFACT_TASKS_TAB ? artifactTaskOpen : null;
+  // 과업별 탭에서 연 과업, 그리고 흐름의 칩이 연 과업(t-68458) — 읽는 칸의 묶음은 같은 것이다.
+  const task = artifactTabReadsTask() ? artifactTaskOpen : null;
   // 아직 묻지 않은 묶음(작업을 방금 열었거나 카탈로그가 움직였다)은 한 번 묻고, 답이 오면 읽는 칸을
   // 다시 그린다 — 그 작업의 첫 행이 창에 없었다면 그 행도 그때 선다.
   if (task && !artifactBundles.has(task)) {

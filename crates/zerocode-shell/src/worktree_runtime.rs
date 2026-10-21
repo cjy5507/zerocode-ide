@@ -948,23 +948,30 @@ pub(super) fn resolve_create_base(
     default_base_probe(host, repo_root)
 }
 
+/// 원격이 말하는 기본 브랜치의 ref.
+pub(super) const ORIGIN_HEAD_REF: &str = "refs/remotes/origin/HEAD";
+
+/// 원격이 말하지 않을 때 물어보는 흔한 기본 브랜치 이름, 묻는 차례대로.
+/// 아티팩트 탭의 흐름(t-68458)도 같은 차례로 기준을 고른다.
+pub(super) const DEFAULT_BASE_NAMES: [&str; 4] = ["main", "master", "trunk", "develop"];
+
 /// 이 저장소의 기본 브랜치 — Orca `resolveDefaultBaseRefFromProbes`.
 ///
 /// 원격이 말하는 것이 먼저다(`refs/remotes/origin/HEAD`). 그것이 없는
 /// 저장소에서만 흔한 이름 넷을 차례로 물어본다 — 짐작이지만 **있는 ref만**
 /// 답하므로 없는 이름을 기준으로 넘기는 일은 없다.
 pub(super) fn default_base_probe(host: &Host, repo_root: &Path) -> Option<String> {
-    if let Ok(said) = host.vcs().text(
-        repo_root,
-        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    ) && let Some(short) = said
-        .trim()
-        .strip_prefix("refs/remotes/")
-        .filter(|short| !short.is_empty())
+    if let Ok(said) = host
+        .vcs()
+        .text(repo_root, &["symbolic-ref", "--quiet", ORIGIN_HEAD_REF])
+        && let Some(short) = said
+            .trim()
+            .strip_prefix("refs/remotes/")
+            .filter(|short| !short.is_empty())
     {
         return Some(short.to_string());
     }
-    ["main", "master", "trunk", "develop"]
+    DEFAULT_BASE_NAMES
         .into_iter()
         .find(|name| ref_exists(host, repo_root, name))
         .map(str::to_string)
