@@ -2027,6 +2027,8 @@ impl ChatGptBackendClient {
             startup_wait: startup_window,
             startup_reasoning_extended: false,
             bundle_causes: std::collections::BTreeMap::new(),
+            heard: AttemptHeard::sent_at(startup_started_at),
+            no_progress_cuts: Vec::new(),
             request_seq: NEXT_STREAM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         })
     }
@@ -2386,6 +2388,12 @@ pub struct ChatGptStream {
     /// The failures that restarted the current bundle, by kind, for the stall
     /// message when the bundle ends. Cleared when progress closes the bundle.
     bundle_causes: std::collections::BTreeMap<String, u32>,
+    /// What the attempt in flight has heard from the server.
+    heard: AttemptHeard,
+    /// The attempts cut in a row because their model made no progress in time,
+    /// oldest first, each as its record in words. Any other failure clears it;
+    /// at [`NO_PROGRESS_CUTS_BEFORE_STOP`] cuts zo stops sending the request.
+    no_progress_cuts: Vec<String>,
     /// This stream's number among the process's streams, for the restart log.
     request_seq: u64,
 }
@@ -2416,6 +2424,8 @@ impl std::fmt::Debug for ChatGptStream {
                 &self.startup_reasoning_extended,
             )
             .field("bundle_causes", &self.bundle_causes)
+            .field("heard", &self.heard)
+            .field("no_progress_cuts", &self.no_progress_cuts)
             .field("request_seq", &self.request_seq)
             .finish()
     }
@@ -2457,6 +2467,152 @@ const CHATGPT_STREAM_IDLE_TIMEOUT_ENV: &str = "ZO_CHATGPT_STREAM_IDLE_TIMEOUT_MS
 const CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_MS: u64 = 240_000;
 const CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_ENV: &str =
     "ZO_CHATGPT_STARTUP_NO_PROGRESS_TIMEOUT_MS";
+
+/// How many times in a row zo cuts one request because its model made no
+/// progress for the stall window before any output; at that many cuts zo stops
+/// sending the request. The turn then goes one tier lighter (the runtime's escape
+/// for a spent ladder) or stops with the cause named.
+///
+/// Two, because one more window is worth it once: a reconnect often answers where
+/// a connection went quiet after `response.created` (the dead-tail scene). A
+/// second cut in a row says the same bytes get the same stall, and sending them
+/// again buys nothing: the reported turn (t-68710) cut gpt-6.1-sol eight times in
+/// a row at 240 s each, 33 minutes, and failed with no output. Two cuts cost two
+/// windows, 8 minutes at 240 s.
+const NO_PROGRESS_CUTS_BEFORE_STOP: u32 = 2;
+
+/// The most event kinds one attempt's record keeps.
+const HEARD_KINDS_KEPT: usize = 6;
+
+/// What one attempt heard from the server, for the record of a stall cut: which
+/// response events came and when, and how many keep-alives held the connection
+/// open through the silence the window measured. The next stalled turn can then
+/// say whether its response had started and how far it got, which the record of
+/// the reported turn (t-68710) could not.
+#[derive(Debug, Clone)]
+struct AttemptHeard {
+    /// When the attempt's request went out.
+    sent: std::time::Instant,
+    /// The response-level event kinds it heard, in order of first arrival, each
+    /// with how long after `sent` it first came.
+    events: Vec<(String, std::time::Duration)>,
+    /// Keep-alives since the last response-level event, or since `sent`.
+    keep_alives: u32,
+    /// When the last of those keep-alives came.
+    last_keep_alive: Option<std::time::Instant>,
+}
+
+impl AttemptHeard {
+    fn sent_at(sent: std::time::Instant) -> Self {
+        Self {
+            sent,
+            events: Vec::new(),
+            keep_alives: 0,
+            last_keep_alive: None,
+        }
+    }
+
+    /// One transport batch: a keep-alive when it carries no event, else the
+    /// response-level events in it.
+    fn hear(&mut self, batch: &[Value]) {
+        if batch.is_empty() {
+            self.keep_alives = self.keep_alives.saturating_add(1);
+            self.last_keep_alive = Some(std::time::Instant::now());
+            return;
+        }
+        for value in batch.iter().filter(|value| is_response_level_event(value)) {
+            self.keep_alives = 0;
+            self.last_keep_alive = None;
+            if self.events.len() >= HEARD_KINDS_KEPT {
+                continue;
+            }
+            let kind = heard_kind(value);
+            if !self.events.iter().any(|(seen, _)| *seen == kind) {
+                self.events.push((kind, self.sent.elapsed()));
+            }
+        }
+    }
+
+    /// The record in words, for the error: `response.created, then keep-alives
+    /// only`.
+    fn words(&self) -> String {
+        let events = self
+            .events
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match (events.is_empty(), self.keep_alives > 0) {
+            (false, true) => format!("{events}, then keep-alives only"),
+            (false, false) => format!("{events}, then nothing"),
+            (true, true) => "keep-alives only".to_string(),
+            (true, false) => "nothing".to_string(),
+        }
+    }
+
+    /// The record with its numbers, for the restart log:
+    /// `response.created@0.4s; 47 keep-alives after it, the last 2.9s ago`.
+    fn numbers(&self) -> String {
+        let events = self
+            .events
+            .iter()
+            .map(|(kind, at)| format!("{kind}@{:.1}s", at.as_secs_f64()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let (events, after) = if events.is_empty() {
+            ("no response event".to_string(), "")
+        } else {
+            (events, " after it")
+        };
+        let last = self.last_keep_alive.map_or_else(String::new, |at| {
+            format!(", the last {:.1}s ago", at.elapsed().as_secs_f64())
+        });
+        format!("{events}; {} keep-alives{after}{last}", self.keep_alives)
+    }
+}
+
+/// An event's kind as an attempt's record keeps it: its `type`, and for an
+/// output item the item's own type (`response.output_item.added (reasoning)`),
+/// which says whether the model began reasoning. The record's words go into the
+/// error text, which the classifiers read for words such as `rate_limit` and
+/// `overloaded`, so a name the server chose is never copied there: a type off
+/// these lists is `another response event`.
+fn heard_kind(value: &Value) -> String {
+    const NAMED: [&str; 8] = [
+        "response.created",
+        "response.queued",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+        "response.output_text.delta",
+    ];
+    const ITEMS: [&str; 3] = ["reasoning", "message", "function_call"];
+    let Some(kind) = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| NAMED.contains(kind))
+    else {
+        return "another response event".to_string();
+    };
+    let item = value
+        .pointer("/item/type")
+        .and_then(Value::as_str)
+        .filter(|item| ITEMS.contains(item));
+    match item {
+        Some(item) if kind == "response.output_item.added" => format!("{kind} ({item})"),
+        _ => kind.to_string(),
+    }
+}
+
+/// zo's own cut of an attempt whose model made no progress in time.
+fn is_no_progress_cut(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::StreamApi { error_type: Some(kind), .. } if kind == "stream_startup_no_progress"
+    )
+}
 
 /// Resolve the per-chunk idle budget, honouring the env override. `None` means
 /// "no timeout" (override set to `0`).
@@ -2636,6 +2792,7 @@ impl ChatGptStream {
             };
             match chunk {
                 Some(batch) => {
+                    self.heard.hear(&batch);
                     if batch.iter().any(is_response_level_event) {
                         self.note_response_progress();
                     }
@@ -2652,7 +2809,7 @@ impl ChatGptStream {
                         }
                         let since = *quiet_since.get_or_insert_with(std::time::Instant::now);
                         if let Some(error) = self.startup_no_progress_error() {
-                            if self.can_restart(&error) {
+                            if self.can_restart(&error) && !self.stops_on_no_progress(&error) {
                                 self.restart(error).await?;
                                 quiet_chunks = 0;
                                 quiet_since = None;
@@ -2765,7 +2922,7 @@ impl ChatGptStream {
         if self.recover_precommit_failure(&error).await? {
             return Ok(());
         }
-        if self.can_restart(&error) {
+        if self.can_restart(&error) && !self.stops_on_no_progress(&error) {
             self.restart(error).await?;
             return Ok(());
         }
@@ -2812,10 +2969,45 @@ impl ChatGptStream {
             return None;
         }
         let wait = self.startup_wait?;
-        Some(ApiError::stream_startup_no_progress(
+        let cut = self.next_cut();
+        let heard = self
+            .no_progress_cuts
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.heard_now()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(ApiError::stream_no_progress(
+            &self.request.model,
             wait,
             &self.bundle_summary(),
+            (cut >= NO_PROGRESS_CUTS_BEFORE_STOP).then_some(cut),
+            &heard,
         ))
+    }
+
+    /// The number the attempt in flight takes in the run of cuts in a row if it
+    /// is cut now.
+    fn next_cut(&self) -> u32 {
+        u32::try_from(self.no_progress_cuts.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1)
+    }
+
+    /// The record of the attempt in flight, in words: `attempt 2 heard
+    /// response.created, then keep-alives only`.
+    fn heard_now(&self) -> String {
+        format!(
+            "attempt {} heard {}",
+            self.restart_attempts.saturating_add(1),
+            self.heard.words()
+        )
+    }
+
+    /// `error` is the cut after which zo stops sending this request: its model
+    /// made no progress in time, as on the attempts cut just before it.
+    fn stops_on_no_progress(&self, error: &ApiError) -> bool {
+        is_no_progress_cut(error) && self.next_cut() >= NO_PROGRESS_CUTS_BEFORE_STOP
     }
 
     fn next_chunk_wait_budget(
@@ -2837,7 +3029,7 @@ impl ChatGptStream {
         let Some(error) = self.startup_no_progress_error() else {
             return Ok(false);
         };
-        if self.can_restart(&error) {
+        if self.can_restart(&error) && !self.stops_on_no_progress(&error) {
             self.restart(error).await?;
             return Ok(true);
         }
@@ -2846,9 +3038,11 @@ impl ChatGptStream {
 
     /// Start the stall window for the attempt that starts now, cut to the ceiling
     /// its bundle has left: the bundle's last attempt cannot outlive the ceiling
-    /// by waiting out a full window. A new attempt may take its extension again.
+    /// by waiting out a full window. A new attempt may take its extension again,
+    /// and starts a fresh record of what it hears.
     fn arm_startup_watchdog(&mut self) {
         self.startup_reasoning_extended = false;
+        self.heard = AttemptHeard::sent_at(std::time::Instant::now());
         self.startup_wait = self.startup_window.map(|window| {
             self.bundle_remaining()
                 .map_or(window, |left| window.min(left))
@@ -2949,7 +3143,21 @@ impl ChatGptStream {
         let wallclock_spent = self
             .restart_window_start
             .is_some_and(|start| start.elapsed() >= self.client.max_restart_wallclock);
-        if !self.committed && error.is_retryable() && (attempts_spent || wallclock_spent) {
+        let stopped = self.stops_on_no_progress(&error);
+        if is_no_progress_cut(&error) {
+            eprintln!(
+                "[zo] gpt stream ended ({error}); attempt {} heard {} (request {}, session {}, at {}ms)",
+                self.restart_attempts.saturating_add(1),
+                self.heard.numbers(),
+                self.request_seq,
+                self.client.cache_scope(),
+                unix_millis(),
+            );
+        }
+        if !self.committed
+            && error.is_retryable()
+            && (attempts_spent || wallclock_spent || stopped)
+        {
             ApiError::RetriesExhausted {
                 attempts: self.restart_attempts.saturating_add(1),
                 last_error: Box::new(error),
@@ -3003,6 +3211,7 @@ impl ChatGptStream {
             .with_session_id(self.client.cache_scope().to_string());
         self.pending.clear();
         self.done = false;
+        self.no_progress_cuts.clear();
         self.arm_startup_watchdog();
         Ok(true)
     }
@@ -3017,6 +3226,16 @@ impl ChatGptStream {
             // from here on, the reconnect's own included.
             self.restart_window_start
                 .get_or_insert_with(std::time::Instant::now);
+            // A cut joins the run of cuts in a row; any other failure ends the run.
+            let cut = is_no_progress_cut(&last_error);
+            let heard = if cut {
+                let words = self.heard_now();
+                self.no_progress_cuts.push(words);
+                format!(", heard {}", self.heard.numbers())
+            } else {
+                self.no_progress_cuts.clear();
+                String::new()
+            };
             self.restart_attempts += 1;
             self.record_bundle_cause(&last_error);
             let base = self.client.backoff_for_attempt(self.restart_attempts)?;
@@ -3026,7 +3245,7 @@ impl ChatGptStream {
             let spread = super::retry_backoff::spread_backoff(base);
             let delay = self.bundle_remaining().map_or(spread, |left| spread.min(left));
             eprintln!(
-                "[zo] gpt stream stalled ({last_error}); restarting in {:.1}s (attempt {}/{}, request {}, session {}, at {}ms)",
+                "[zo] gpt stream stalled ({last_error}); restarting in {:.1}s (attempt {}/{}, request {}, session {}, at {}ms{heard})",
                 delay.as_secs_f64(),
                 self.restart_attempts,
                 self.client.max_retries,
@@ -3044,10 +3263,18 @@ impl ChatGptStream {
                     attempt: self.restart_attempts,
                     max_attempts: self.client.max_retries,
                     delay,
-                    no_progress: None,
+                    no_progress: cut.then(|| core_types::NoProgressCut {
+                        model: self.request.model.clone(),
+                        waited: self.startup_wait.unwrap_or_default(),
+                        cut: u32::try_from(self.no_progress_cuts.len()).unwrap_or(u32::MAX),
+                        of: NO_PROGRESS_CUTS_BEFORE_STOP,
+                    }),
                 });
             }
             tokio::time::sleep(delay).await;
+            // A reconnect that never opens heard nothing; the cut attempt's record
+            // must not stand in for it.
+            self.heard = AttemptHeard::sent_at(std::time::Instant::now());
             match self.open_bundle_connection().await {
                 Ok(transport) => {
                     self.transport = transport;

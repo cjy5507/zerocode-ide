@@ -302,8 +302,10 @@ pub fn is_transient_text(lower: &str) -> bool {
         || lower.contains("timed out")
         || lower.contains("timeout")
         // A silent stream: the provider sent no response event within its stall
-        // window (`stream_startup_no_progress`). Transient, like a timeout.
+        // window, or zo cut an attempt that made no progress for that window
+        // (`stream_startup_no_progress`). Transient, like a timeout.
         || lower.contains("no response event within")
+        || lower.contains(NO_PROGRESS_WORDS)
         || lower.contains("broken pipe")
         || lower.contains("eof")
         // reqwest/hyper mid-body drops. `error decoding response body` is
@@ -452,9 +454,11 @@ pub struct StreamRetryNotice {
     pub kind: StreamNoticeKind,
     /// Human-readable cause label from [`retry_notice_label`].
     pub label: &'static str,
-    /// 1-based restart attempt number.
+    /// 1-based restart number: this reconnect sends the request for the
+    /// `attempt + 1`th time.
     pub attempt: u32,
-    /// Maximum attempts the stream will make before surfacing a hard error.
+    /// Most restarts the stream makes before it surfaces the error, so the
+    /// request goes out at most `max_attempts + 1` times.
     pub max_attempts: u32,
     /// Backoff delay before this attempt's reconnect — or, for
     /// [`StreamNoticeKind::QuietReasoning`], how long the stream has been
@@ -721,6 +725,12 @@ pub fn parse_quota_fallback_model(text: &str) -> Option<&str> {
 /// wording in the same file as the classifier so it never drifts out of sync.
 #[must_use]
 pub fn retry_notice_label(error_message: &str) -> &'static str {
+    // zo cut the stream itself because the model made no progress in time;
+    // calling that a provider error hid it behind seven reconnect rows (t-68710).
+    let head = machine_readable_head(error_message).to_ascii_lowercase();
+    if head.contains("no response event within") || head.contains(NO_PROGRESS_WORDS) {
+        return "no progress from the model";
+    }
     match classify_error_text(error_message) {
         RetrySignal::Overloaded => "provider overloaded",
         RetrySignal::RateLimit => "rate limited",
@@ -731,6 +741,62 @@ pub fn retry_notice_label(error_message: &str) -> &'static str {
         // one. Deriving every label from the one classifier keeps the notice
         // honest.
         RetrySignal::Fatal => "provider error",
+    }
+}
+
+/// The words a stall cut is named by: zo cut an attempt because its model made
+/// no progress for the stall window. [`is_transient_text`] reads them, so a
+/// stall stays retryable.
+const NO_PROGRESS_WORDS: &str = "made no progress for";
+
+/// `<model> made no progress for <wait><after>`: how every surface names an
+/// attempt zo cut because no response event came for the stall window, whether
+/// or not the response had started. `after` names the failures before it in the
+/// same run of restarts (` after server_error x7`), or is empty.
+#[must_use]
+pub fn no_progress_words(model: &str, waited: std::time::Duration, after: &str) -> String {
+    format!("{model} {NO_PROGRESS_WORDS} {}{after}", wait_words(waited))
+}
+
+/// `so zo cut the request (<cut>/<of>)`: where a cut stands in the run of cuts
+/// in a row after which zo stops sending the request.
+#[must_use]
+pub fn no_progress_cut_words(cut: u32, of: u32) -> String {
+    format!("so zo cut the request ({cut}/{of})")
+}
+
+/// What the cut that ends a run adds to [`no_progress_cut_words`];
+/// [`no_progress_stop`] finds a stopped request by it.
+const NO_PROGRESS_STOP: &str = "and stopped sending it";
+
+/// `so zo cut the request (<cuts>/<cuts>) and stopped sending it`: the cut that
+/// ends a run, after which zo sends the request no more.
+#[must_use]
+pub fn no_progress_stop_words(cuts: u32) -> String {
+    format!("{} {NO_PROGRESS_STOP}", no_progress_cut_words(cuts, cuts))
+}
+
+/// The clause that names a request zo stopped sending because its model made no
+/// progress in time (`<model> made no progress for 240s, so zo cut the request
+/// (2/2) and stopped sending it`), read out of a stringified error. `None` for
+/// any other error, including a cut zo sent again and a run the restart ceiling
+/// ended. The runtime continues such a turn one tier lighter and quotes the
+/// clause (t-68710).
+#[must_use]
+pub fn no_progress_stop(error_message: &str) -> Option<&str> {
+    const STALL_TYPE: &str = "(stream_startup_no_progress): ";
+    let head = machine_readable_head(error_message);
+    let start = head.find(STALL_TYPE)? + STALL_TYPE.len();
+    let clause = head[start..].split(';').next()?.trim_end();
+    clause.ends_with(NO_PROGRESS_STOP).then_some(clause)
+}
+
+/// A wait as the stall words give it: whole seconds, or tenths under a second.
+fn wait_words(waited: std::time::Duration) -> String {
+    if waited < std::time::Duration::from_secs(1) {
+        format!("{:.1}s", waited.as_secs_f64())
+    } else {
+        format!("{}s", waited.as_secs())
     }
 }
 

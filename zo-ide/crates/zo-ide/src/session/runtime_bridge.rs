@@ -638,13 +638,26 @@ fn stream_notice_row(notice: &core_types::StreamRetryNotice) -> (SystemLevel, St
         ),
         core_types::StreamNoticeKind::Reconnect => (
             SystemLevel::Warn,
-            format!(
-                "{}; reconnecting in {:.0}s (attempt {}/{})",
-                notice.label,
-                notice.delay.as_secs_f64().ceil(),
-                notice.attempt,
-                notice.max_attempts
-            ),
+            match &notice.no_progress {
+                // zo cut the attempt itself: the row names the model and the wait,
+                // and where the cut stands before zo stops sending the request.
+                Some(cut) => format!(
+                    "{}, {}; sending it again in {:.0}s",
+                    core_types::retry_signal::no_progress_words(&cut.model, cut.waited, ""),
+                    core_types::retry_signal::no_progress_cut_words(cut.cut, cut.of),
+                    notice.delay.as_secs_f64().ceil(),
+                ),
+                // The notice counts restarts; the row counts the requests sent, the
+                // first one included — the count the error names once the ladder is
+                // spent.
+                None => format!(
+                    "{}; reconnecting in {:.0}s (attempt {}/{})",
+                    notice.label,
+                    notice.delay.as_secs_f64().ceil(),
+                    notice.attempt.saturating_add(1),
+                    notice.max_attempts.saturating_add(1)
+                ),
+            },
         ),
     }
 }
