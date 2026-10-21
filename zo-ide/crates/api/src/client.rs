@@ -1346,6 +1346,33 @@ mod tests {
         assert!(super::openai_compat_from_env(OpenAiCompatConfig::openai()).is_ok());
     }
 
+    /// A built-in route pointed at another host goes without a key only when
+    /// that host is this machine or a private network. A public host is a
+    /// cloud service, which answers a key-less request with a 401 (t-67811),
+    /// so the missing key stops the client before anything is sent.
+    #[test]
+    fn a_built_in_route_pointed_at_a_public_host_needs_a_key() {
+        use crate::providers::openai_compat::OpenAiCompatConfig;
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _key = EnvVarGuard::set("OPENAI_API_KEY", None);
+
+        let public = EnvVarGuard::set("OPENAI_BASE_URL", Some("https://openrouter.ai/api/v1"));
+        let built = super::openai_compat_from_env(OpenAiCompatConfig::openai());
+        assert!(
+            matches!(built, Err(crate::error::ApiError::MissingCredentials { .. })),
+            "a public host with no key is never sent a request: {built:?}"
+        );
+        drop(public);
+
+        let _private = EnvVarGuard::set("OPENAI_BASE_URL", Some("http://192.168.1.20:8080/v1"));
+        assert!(
+            super::openai_compat_from_env(OpenAiCompatConfig::openai()).is_ok(),
+            "a server on the private network still goes without a key"
+        );
+        drop(isolation);
+    }
+
     fn custom_provider(json: &str) -> crate::providers::ResolvedCustomProvider {
         let parsed = crate::providers::parse_custom_providers(&format!("[{json}]"))
             .expect("valid custom provider json");
