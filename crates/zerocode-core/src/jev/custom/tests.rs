@@ -404,3 +404,123 @@ fn a_score_asks_its_levels_in_order() {
         "{instructions}"
     );
 }
+
+/// Every refusal says which rule it is, and every field where, with a word of
+/// its own in snake case, and no word holds what it was built with: an
+/// option's name, the field a line stands in, a level's number, or the line's
+/// number. zo writes a refusal's word on a row for a stored definition that
+/// fails the check again, and the drawer keys its fields on a field's word,
+/// so the person's words reach neither.
+#[test]
+fn every_refusal_and_field_has_a_word_of_its_own_and_never_its_payload() {
+    let written = "deploy";
+    let fields = [
+        Field::Name,
+        Field::Question,
+        Field::Yes,
+        Field::No,
+        Field::OptionName(written.to_string()),
+        Field::Meaning(written.to_string()),
+        Field::Level(7),
+    ];
+    let field_words: BTreeSet<&str> = fields.iter().map(Field::word).collect();
+    assert_eq!(
+        field_words.len(),
+        fields.len(),
+        "two fields share a word: {field_words:?}"
+    );
+    let one_of_each = [
+        Refusal::Id,
+        Refusal::IdTaken,
+        Refusal::NameLength,
+        Refusal::NameTaken,
+        Refusal::QuestionLength,
+        Refusal::OptionCount,
+        Refusal::OptionName(written.to_string()),
+        Refusal::MeaningLength(Field::Meaning(written.to_string())),
+        Refusal::SecretLine {
+            field: Field::OptionName(written.to_string()),
+            line: 7,
+        },
+        Refusal::Reads,
+        Refusal::Folders,
+        Refusal::ActFrom,
+        Refusal::MaxPerHour,
+        Refusal::Mode,
+        Refusal::TooMany,
+        Refusal::TooLarge,
+    ];
+    let words: BTreeSet<&str> = one_of_each.iter().map(Refusal::word).collect();
+    assert_eq!(
+        words.len(),
+        one_of_each.len(),
+        "two rules share a word: {words:?}"
+    );
+    let carrying_more = [
+        Refusal::MeaningLength(Field::Level(7)),
+        Refusal::SecretLine {
+            field: Field::Meaning(written.to_string()),
+            line: 7,
+        },
+    ];
+    let spoken = one_of_each
+        .iter()
+        .chain(&carrying_more)
+        .map(|refusal| (refusal.word(), format!("{refusal:?}")))
+        .chain(
+            fields
+                .iter()
+                .map(|field| (field.word(), format!("{field:?}"))),
+        );
+    for (word, built) in spoken {
+        let snake = !word.is_empty()
+            && !word.starts_with('_')
+            && !word.ends_with('_')
+            && !word.contains("__")
+            && word
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+        assert!(snake, "{word} is not snake case");
+        assert!(
+            !word.contains(written) && !word.contains('7'),
+            "{word} holds what {built} was built with"
+        );
+    }
+}
+
+/// The line an agent is handed reads as DESIGN 2.4 writes it, the confidence
+/// a whole percent.
+#[test]
+fn a_line_reads_as_the_design_writes_it() {
+    assert_eq!(line("이름", "보기", 0.85), "「이름」 판단: 보기 (확신 85%)");
+    assert_eq!(
+        line("Release notes", "yes", 0.5),
+        "「Release notes」 판단: yes (확신 50%)"
+    );
+}
+
+/// The longest name and the longest option the check lets through, at the
+/// surest answer, fit [`LINE_MAX_CHARS`]: the cap holds by construction, and
+/// no line is cut when it is handed.
+#[test]
+fn the_longest_line_the_limits_allow_fits_the_cap() {
+    let longest = "가".repeat(NAME_MAX_CHARS);
+    let mut definition = yes_no("d-0000000a", &longest);
+    definition.answer = choice(&[(longest.as_str(), "It fits."), ("other", "It does not.")]);
+    assert_eq!(check(&definition), Vec::new());
+    let handed = line(&definition.name, &longest, 1.0);
+    let length = handed.chars().count();
+    assert!(length <= LINE_MAX_CHARS, "{length} characters: {handed}");
+    definition.name.push('가');
+    assert!(check(&definition).contains(&Refusal::NameLength));
+}
+
+/// A score's level is shown counted from one over its levels, the way a
+/// person numbers them; the most levels a score offers still read whole.
+#[test]
+fn a_level_is_shown_counted_from_one_over_the_levels() {
+    assert_eq!(shown_level(0, 4), "1/4");
+    assert_eq!(shown_level(2, 4), "3/4");
+    let most = *OPTIONS.end();
+    assert_eq!(shown_level(most - 1, most), format!("{most}/{most}"));
+}

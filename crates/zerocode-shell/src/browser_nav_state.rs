@@ -362,25 +362,34 @@ pub(super) struct TabRow {
     pub(super) url: String,
     pub(super) profile: Option<String>,
     pub(super) reader: Option<String>,
+    /// How a work browser stands for the agent asking (t-67064); none for a
+    /// tab that is no work browser.
+    pub(super) standing: Option<crate::browser_workspace::Standing>,
 }
 
-/// `label\tstate\ttitle\turl\tprofile\treader`, panes in birth order. A
-/// title's tabs and newlines are folded so a row stays a line; an absent
-/// jar or reader is `-`.
+/// `label\tstate\ttitle\turl\tprofile\treader\tmode\tseen\trevision`, panes
+/// in birth order. A title's tabs and newlines are folded so a row stays a
+/// line; an absent jar or reader is `-`. The last three are a work browser's
+/// (t-67064): who holds it, the revision the asking agent's own last look
+/// issued, and the tab's now — `-` where there is none.
 pub(super) fn tabs_lines(rows: &[TabRow]) -> String {
     if rows.is_empty() {
         return "(열린 브라우저 판이 없습니다 — `zerocode-browser open <url>`)\n".to_string();
     }
+    let number = |number: Option<u64>| number.map_or_else(|| "-".to_string(), |n| n.to_string());
     let mut out = String::new();
     for row in rows {
         out.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             row.label,
             row.state.word(),
             row.title.replace(['\t', '\n', '\r'], " "),
             row.url,
             row.profile.as_deref().unwrap_or("-"),
             row.reader.as_deref().unwrap_or("-"),
+            row.standing.map_or("-", |standing| standing.mode),
+            number(row.standing.and_then(|standing| standing.seen)),
+            number(row.standing.map(|standing| standing.revision)),
         ));
     }
     out

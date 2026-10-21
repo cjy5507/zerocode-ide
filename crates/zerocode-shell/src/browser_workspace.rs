@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use zerocode_core::agent_browser::WORKSPACE_PAUSED;
+use zerocode_core::agent_browser::{
+    BROWSER_CLI, TAB_MODE_AGENT, TAB_MODE_PAUSED, TAB_MODE_PERSON, WORKSPACE_PAUSED,
+    WORKSPACE_PERSON_CONTROLLED,
+};
 
 #[cfg(test)]
 mod original_observation_regressions {
@@ -28,24 +31,59 @@ mod original_observation_regressions {
         }
     }
 
+    /// A managed write that names no revision is judged at the one its own
+    /// agent's last look issued (t-67064): refused before any look, taken
+    /// while the tab stands at that look — its settle naming the revision the
+    /// next change goes on at — and refused once the tab moved past it, each
+    /// refusal naming the look to send.
     #[test]
-    fn a_managed_write_requires_an_explicit_original_observation_revision() {
+    fn a_managed_write_without_a_revision_goes_on_by_its_agents_own_look() {
         let workspaces = Workspaces::default();
         workspaces
             .register("browser-1", Some("pane-a"), false)
             .unwrap();
-        workspaces
-            .begin_at("browser-1", Some("pane-a"), "read", Some(1))
-            .unwrap()
-            .unwrap()
-            .finish(true);
+        let says = |result: Result<Option<Operation>, String>, code: &str| {
+            result.err().is_some_and(|error| {
+                error.starts_with(code) && error.contains("zerocode-browser marks browser-1")
+            })
+        };
         for verb in ["click", "type", "fill", "goto", "close", "scroll", "find"] {
-            let result = workspaces.begin_at("browser-1", Some("pane-a"), verb, None);
             assert!(
-                matches!(result, Err(ref error) if error.starts_with("workspace_revision_required:")),
-                "{verb}"
+                says(
+                    workspaces.begin_at("browser-1", Some("pane-a"), verb, None),
+                    "workspace_observation_required: "
+                ),
+                "{verb} before any look"
             );
         }
+        let seen = workspaces
+            .begin_at("browser-1", Some("pane-a"), "read", None)
+            .unwrap()
+            .unwrap()
+            .finish_observation()
+            .unwrap();
+        for verb in ["click", "type", "fill", "goto", "scroll", "find"] {
+            let operation = workspaces
+                .begin_at("browser-1", Some("pane-a"), verb, None)
+                .unwrap_or_else(|error| panic!("{verb} after the look: {error}"))
+                .expect("a work browser");
+            assert_eq!(operation.settle(Dispatch::Completed), Some(seen), "{verb}");
+        }
+        let at = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        workspaces
+            .transition("browser-1", Mode::Paused, at)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let mut back = workspaces
+            .transition("browser-1", Mode::Agent, at + 2)
+            .unwrap();
+        back.confirm_fence().unwrap();
+        back.finish().unwrap();
+        assert!(says(
+            workspaces.begin_at("browser-1", Some("pane-a"), "click", None),
+            "workspace_changed: "
+        ));
     }
 
     async fn switch(workspaces: &Workspaces, mode: Mode) {
@@ -158,6 +196,528 @@ mod original_observation_regressions {
     }
 }
 
+/// The agent goes on by its own look (t-67064): a change sent without
+/// `--workspace-revision` is judged at the revision its own agent's last look
+/// at that tab issued, and a tab the person holds answers at once, by name.
+#[cfg(test)]
+mod own_look_regressions {
+    use super::*;
+    use crate::computer_use::guard;
+
+    const AGENT: &str = "term-21";
+    const TAB: &str = "browser-4";
+
+    /// One command sent without `--workspace-revision` down the door's own
+    /// admission road, the page answering every one: what
+    /// `answer_browser_command` asks of the work browsers — `open` registers
+    /// by the door that reads the person's stop, every other verb is checked,
+    /// admitted and settled. The refusal, when the door refused it.
+    fn door(workspaces: &Workspaces, verb: &str, label: &str) -> Option<String> {
+        if verb == "open" {
+            return workspaces.register_agents(label, Some(AGENT)).err();
+        }
+        if let Err(error) = workspaces.check_actor(Some(AGENT), verb) {
+            return Some(error);
+        }
+        let operation = match workspaces.begin_agents(label, Some(AGENT), verb, None) {
+            Ok(operation) => operation,
+            Err(error) => return Some(error),
+        };
+        let actor = match workspaces.begin_actor_target(Some(AGENT), verb, Some(label)) {
+            Ok(actor) => actor,
+            Err(error) => {
+                if let Some(operation) = operation {
+                    operation.settle(Dispatch::NotSent);
+                }
+                return Some(error);
+            }
+        };
+        let looked = match operation {
+            Some(operation) if zerocode_core::agent_browser::observes(verb) => {
+                operation.finish_observation().err()
+            }
+            Some(operation) => {
+                operation.settle(Dispatch::Completed);
+                None
+            }
+            None => None,
+        };
+        if let Some(actor) = actor {
+            actor.settle(Dispatch::Completed);
+        }
+        looked
+    }
+
+    /// Every command of `verbs` on the one tab, in order, by one agent: the
+    /// refusals the door gave.
+    fn walk(verbs: &[&str]) -> Vec<String> {
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = Workspaces::default();
+        verbs
+            .iter()
+            .filter_map(|verb| door(&workspaces, verb, TAB))
+            .collect()
+    }
+
+    fn changes(verbs: &[&str]) -> usize {
+        verbs
+            .iter()
+            .filter(|verb| {
+                **verb != "open"
+                    && zerocode_core::agent_browser::browser_verb(verb)
+                        .is_some_and(|row| row.changes_page)
+            })
+            .count()
+    }
+
+    /// The briefing's sequence, no `--workspace-revision` anywhere: every one
+    /// of its eleven changes is taken on the agent's one look.
+    #[test]
+    fn the_briefings_sequence_without_a_revision_is_taken_whole() {
+        const SENT: [&str; 13] = [
+            "open", "read", "fill", "click", "scroll", "scroll", "scroll", "click", "scroll",
+            "scroll", "goto", "fill", "click",
+        ];
+        let refused = walk(&SENT);
+        assert_eq!(changes(&SENT), 11);
+        assert!(
+            refused.is_empty(),
+            "{} of the sequence's 11 changes were refused: {refused:#?}",
+            refused.len()
+        );
+    }
+
+    /// The coordinator's own scene of 10-21 05:13–05:15 (the session's step
+    /// log, steps 1–26 but the two with a mistaken label): the stretch it sent
+    /// before it learnt the flag, with the plain `read` it sent after `wait`,
+    /// which the step log keeps no line for. Its 16 changes were all refused
+    /// for the revision they did not name; every one is taken.
+    #[test]
+    fn the_flagless_stretch_of_the_coordinators_scene_is_taken_whole() {
+        const SENT: [&str; 25] = [
+            "open", "wait", "read", "type", "click", "scroll", "scroll", "scroll", "scroll",
+            "marks", "fill", "marks", "marks", "scroll", "scroll", "marks", "click", "scroll",
+            "scroll", "scroll", "click", "goto", "marks", "scroll", "marks",
+        ];
+        let refused = walk(&SENT);
+        assert_eq!(changes(&SENT), 16);
+        assert!(
+            refused.is_empty(),
+            "{} of the scene's 16 changes were refused: {refused:#?}",
+            refused.len()
+        );
+    }
+
+    /// Without a look first, the changes before the agent's first look are
+    /// refused — `wait` shows the agent nothing — each naming the look to
+    /// send; from the look on, every change is taken.
+    #[test]
+    fn only_the_changes_before_the_first_look_are_refused_and_each_names_the_look() {
+        const SENT: [&str; 10] = [
+            "open", "wait", "type", "click", "scroll", "scroll", "marks", "fill", "scroll", "click",
+        ];
+        let refused = walk(&SENT);
+        assert_eq!(
+            refused.len(),
+            4,
+            "the four changes before the first look, and none after it: {refused:#?}"
+        );
+        for refusal in &refused {
+            assert!(
+                refusal.starts_with("workspace_observation_required: ")
+                    && refusal.contains(&format!("zerocode-browser marks {TAB}")),
+                "{refusal}"
+            );
+        }
+    }
+
+    /// A tab the person holds answers every agent verb at once and by name
+    /// (t-67064) — a look as much as a change — and the agent's `open` beside
+    /// it names that tab and the person's 「다시 맡기기」.
+    #[test]
+    fn a_tab_the_person_holds_answers_the_agent_at_once_by_name() {
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = Workspaces::default();
+        workspaces.register(TAB, Some(AGENT), false).unwrap();
+        let at = workspaces.snapshot(TAB).unwrap().unwrap().revision;
+        let mut transition = workspaces.transition(TAB, Mode::Human, at).unwrap();
+        transition.confirm_fence().unwrap();
+        transition.finish().unwrap();
+        let held = format!("workspace_person_controlled: 작업 브라우저 {TAB}: ");
+        for verb in [
+            "marks",
+            "fields",
+            "click",
+            "read",
+            "screenshot",
+            "scroll",
+            "type",
+            "fill",
+            "goto",
+            "find",
+            "close",
+        ] {
+            let began = Instant::now();
+            let said = workspaces.check_actor(Some(AGENT), verb).and_then(|()| {
+                workspaces
+                    .begin_agents(TAB, Some(AGENT), verb, None)
+                    .map(|_| ())
+            });
+            let took = began.elapsed();
+            assert!(took < Duration::from_secs(1), "{verb} took {took:?}");
+            assert!(
+                said.as_ref().is_err_and(
+                    |error| error.starts_with(&held) && error.contains("「다시 맡기기」")
+                ),
+                "{verb}: {said:?}"
+            );
+        }
+        let opened = workspaces.register_agents("browser-5", Some(AGENT));
+        assert!(
+            opened
+                .as_ref()
+                .is_err_and(|error| error.starts_with(&held) && error.contains("「다시 맡기기」")),
+            "{:?}",
+            opened.map(|snapshot| snapshot.mode)
+        );
+    }
+
+    /// Another agent's look never lends its revision (t-67064): a tab handed
+    /// to another agent keeps none of its last owner's looks, and the new
+    /// owner's change without a revision waits for its own look.
+    #[test]
+    fn a_tab_handed_to_another_agent_keeps_none_of_its_last_owners_looks() {
+        const OTHER: &str = "term-22";
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = Workspaces::default();
+        workspaces.register(TAB, Some(AGENT), false).unwrap();
+        workspaces
+            .begin_at(TAB, Some(AGENT), "marks", None)
+            .unwrap()
+            .unwrap()
+            .finish_observation()
+            .unwrap();
+        let at = workspaces.snapshot(TAB).unwrap().unwrap().revision;
+        let mut handed = workspaces
+            .transition_owned(TAB, Mode::Agent, at, Some(OTHER))
+            .unwrap();
+        handed.confirm_fence().unwrap();
+        handed.finish().unwrap();
+        let theirs = workspaces.begin_at(TAB, Some(OTHER), "click", None).err();
+        let standing = workspaces.standing_agents(TAB, Some(OTHER)).unwrap();
+        assert!(
+            theirs
+                .as_ref()
+                .is_some_and(|error| error.starts_with("workspace_observation_required: ")),
+            "{theirs:?}"
+        );
+        assert_eq!(standing.map(|standing| standing.seen), Some(None));
+    }
+
+    /// A look whose page never answers is answered at once when the person
+    /// takes its tab (t-67064): the person's tab by name, well inside a
+    /// second, and the handoff then drains; while nobody takes the tab, the
+    /// look waits for its page.
+    #[tokio::test]
+    async fn a_look_whose_page_never_answers_is_answered_at_once_when_the_person_takes_its_tab() {
+        let workspaces = Arc::new(Workspaces::default());
+        workspaces.register(TAB, Some(AGENT), false).unwrap();
+        let look = workspaces
+            .begin_at(TAB, Some(AGENT), "marks", None)
+            .unwrap()
+            .unwrap();
+        let waiting = tokio::time::timeout(
+            Duration::from_millis(50),
+            unless_taken(Some(&look), std::future::pending::<()>()),
+        )
+        .await;
+        assert!(waiting.is_err(), "a look on a tab nobody took waits");
+        let taker = {
+            let workspaces = workspaces.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let at = workspaces.snapshot(TAB).unwrap().unwrap().revision;
+                let mut transition = workspaces.transition(TAB, Mode::Human, at).unwrap();
+                transition.wait().await.unwrap();
+                transition.confirm_fence().unwrap();
+                transition.finish().unwrap()
+            })
+        };
+        let began = Instant::now();
+        let answered = tokio::time::timeout(
+            Duration::from_secs(1),
+            unless_taken(Some(&look), std::future::pending::<()>()),
+        )
+        .await;
+        let took = began.elapsed();
+        drop(look);
+        let handed = tokio::time::timeout(Duration::from_secs(1), taker)
+            .await
+            .expect("the handoff drains once the look is answered")
+            .unwrap();
+        assert!(
+            matches!(&answered, Ok(Err(error))
+                if error.starts_with(&format!("workspace_person_controlled: 작업 브라우저 {TAB}: "))),
+            "{answered:?} after {took:?}"
+        );
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert_eq!(handed.mode, Mode::Human);
+    }
+
+    /// A change in flight is not cut short by its tab's handoff: the handoff
+    /// waits for it whole, as it always did (t-62872).
+    #[tokio::test]
+    async fn a_change_in_flight_is_waited_for_whole() {
+        let workspaces = Workspaces::default();
+        workspaces.register(TAB, Some(AGENT), false).unwrap();
+        workspaces
+            .begin_at(TAB, Some(AGENT), "read", None)
+            .unwrap()
+            .unwrap()
+            .finish_observation()
+            .unwrap();
+        let click = workspaces
+            .begin_at(TAB, Some(AGENT), "click", None)
+            .unwrap()
+            .unwrap();
+        let at = workspaces.snapshot(TAB).unwrap().unwrap().revision;
+        let _transition = workspaces.transition(TAB, Mode::Human, at).unwrap();
+        let pressed = tokio::time::timeout(
+            Duration::from_millis(50),
+            unless_taken(Some(&click), async { "pressed" }),
+        )
+        .await;
+        assert_eq!(pressed, Ok(Ok("pressed")));
+        click.settle(Dispatch::Completed);
+    }
+
+    /// `tabs` says who holds each of the agent's work browsers (t-67064): its
+    /// mode, the revision the agent's own look issued, and the tab's own —
+    /// and leaves off another agent's, and every one while the person's stop
+    /// stands (t-62872).
+    #[test]
+    fn tabs_say_who_holds_each_work_browser_and_the_agents_own_look() {
+        use zerocode_core::computer_use::STOP_REASON_HOTKEY;
+        let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let workspaces = Workspaces::default();
+        for label in ["browser-4", "browser-5", "browser-6"] {
+            workspaces.register(label, Some(AGENT), false).unwrap();
+        }
+        workspaces
+            .register("browser-7", Some("term-22"), false)
+            .unwrap();
+        let seen = workspaces
+            .begin_at("browser-4", Some(AGENT), "marks", None)
+            .unwrap()
+            .unwrap()
+            .finish_observation()
+            .unwrap();
+        let hand = |label: &str, mode: Mode| {
+            let at = workspaces.snapshot(label).unwrap().unwrap().revision;
+            let mut transition = workspaces.transition(label, mode, at).unwrap();
+            if mode != Mode::Paused {
+                transition.confirm_fence().unwrap();
+            }
+            transition.finish().unwrap().revision
+        };
+        let held = hand("browser-5", Mode::Human);
+        let paused = hand("browser-6", Mode::Paused);
+        let standing = |label: &str| workspaces.standing_agents(label, Some(AGENT));
+        assert_eq!(
+            standing("browser-4"),
+            Ok(Some(Standing {
+                mode: "agent",
+                seen: Some(seen),
+                revision: seen
+            }))
+        );
+        assert_eq!(
+            standing("browser-5"),
+            Ok(Some(Standing {
+                mode: "person",
+                seen: None,
+                revision: held
+            }))
+        );
+        assert_eq!(
+            standing("browser-6"),
+            Ok(Some(Standing {
+                mode: "paused",
+                seen: None,
+                revision: paused
+            }))
+        );
+        assert!(standing("browser-7").is_err(), "another agent's tab");
+        assert_eq!(standing("ordinary"), Ok(None));
+        guard::adopt(STOP_REASON_HOTKEY);
+        let stopped = standing("browser-4");
+        guard::lift();
+        assert!(
+            stopped
+                .as_ref()
+                .is_err_and(|error| error.starts_with("workspace_person_stopped:")),
+            "{stopped:?}"
+        );
+    }
+
+    /// A look its page did not answer says what to do next (t-67064): on a
+    /// tab still in the agent's hands, whether the page is busy loading and
+    /// the look to send again; on one the person took, who holds it; on
+    /// another agent's, nothing.
+    #[test]
+    fn a_look_its_page_did_not_answer_says_what_to_do_next() {
+        let workspaces = Workspaces::default();
+        workspaces.register(TAB, Some(AGENT), false).unwrap();
+        let loading = workspaces.after_failed_look(TAB, Some(AGENT), true);
+        let idle = workspaces.after_failed_look(TAB, Some(AGENT), false);
+        let theirs = workspaces.after_failed_look(TAB, Some("term-22"), false);
+        let at = workspaces.snapshot(TAB).unwrap().unwrap().revision;
+        let mut taken = workspaces.transition(TAB, Mode::Human, at).unwrap();
+        taken.confirm_fence().unwrap();
+        taken.finish().unwrap();
+        let held = workspaces.after_failed_look(TAB, Some(AGENT), false);
+        assert!(
+            loading.as_deref().is_some_and(|next| next
+                .starts_with("workspace_look_unanswered: 페이지가 아직 로딩 중입니다 — ")
+                && next.contains("zerocode-browser marks browser-4")),
+            "{loading:?}"
+        );
+        assert!(
+            idle.as_deref()
+                .is_some_and(|next| next
+                    .starts_with("workspace_look_unanswered: 페이지가 답하지 않았습니다 — ")),
+            "{idle:?}"
+        );
+        assert_eq!(theirs, None);
+        assert!(
+            held.as_deref()
+                .is_some_and(|next| next.starts_with("workspace_person_controlled: ")),
+            "{held:?}"
+        );
+    }
+
+    /// The letter a hand-back sends (t-67064): the tab, its mode, its new
+    /// revision, 「이어서 하세요」 and the look to send — and its receipt.
+    #[test]
+    fn a_hand_back_letter_says_the_tab_its_mode_and_revision_and_the_next_look() {
+        let (body, receipt) = handed_back(TAB, 9);
+        assert_eq!(
+            body,
+            "작업 브라우저 browser-4: 사람이 다시 맡겼습니다 — mode agent, workspaceRevision 9. 이어서 하세요: zerocode-browser marks browser-4로 다시 보고 이어 가세요"
+        );
+        assert_eq!(receipt, "browser-handback:browser-4:9");
+    }
+
+    /// Every word this module refuses in says what to do next (t-67064): each
+    /// refusal is written in the one block, and each ends — after its ` — `
+    /// — on the command an agent types or the person it waits for.
+    #[test]
+    fn every_refusal_says_what_to_do_next() {
+        // Spelt in halves: this module stands before the production code,
+        // and the first whole spelling in the file must be the code's own.
+        let source = include_str!("browser_workspace.rs");
+        let production = &source[source.find(concat!("const ", "WORKSPACE_CAP")).unwrap()
+            ..source.find(concat!("mod ", "review_regressions")).unwrap()];
+        let block = &production[production.find("/* ---- refusals (t-67064)").unwrap()
+            ..production.find("/* ---- end of refusals ---- */").unwrap()];
+        let outside = production.replace(block, "");
+        assert_eq!(
+            outside.matches("\"workspace_").count(),
+            0,
+            "a refusal written outside the one block"
+        );
+        let refusals = [
+            unavailable(AGENTS_UNREADABLE),
+            snapshot_busy(),
+            changed(),
+            stale(TAB),
+            look_first(TAB),
+            moved_since_look(TAB),
+            look_unanswered(TAB, true),
+            look_unanswered(TAB, false),
+            person_controlled(TAB),
+            paused(TAB, Resume::Observe),
+            paused(TAB, Resume::Person),
+            PERSONS_STOPPED.to_string(),
+            busy(TAB),
+            actor_required(),
+            verb_unknown(),
+            owner_mismatch(),
+            eval_refused(TAB),
+            history_unsupported(),
+            limit("작업 브라우저 수"),
+            exists(),
+            mode_invalid(),
+            missing(),
+            owner_required(),
+        ];
+        let code = |text: &str| {
+            text.split([':', '['])
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let listed: BTreeSet<String> = refusals
+            .iter()
+            .map(|refusal| code(refusal.as_str()))
+            .collect();
+        for (at, _) in block.match_indices("\"workspace_") {
+            let written = code(&block[at + 1..]);
+            assert!(
+                listed.contains(&written),
+                "`{written}` is missing from this list"
+            );
+        }
+        for refusal in &refusals {
+            let (code, next) = refusal
+                .split_once(" — ")
+                .unwrap_or_else(|| panic!("no next step: {refusal}"));
+            assert!(code.starts_with("workspace_"), "{refusal}");
+            assert!(
+                next.contains("zerocode-browser ")
+                    || next.contains("사람에게 알리세요")
+                    || next.contains("다시 요청하세요")
+                    || next.contains("다시 보내세요")
+                    || next.contains("띠에서"),
+                "{refusal}"
+            );
+        }
+        for agents in [
+            changed(),
+            stale(TAB),
+            look_first(TAB),
+            moved_since_look(TAB),
+            look_unanswered(TAB, true),
+            look_unanswered(TAB, false),
+            person_controlled(TAB),
+            paused(TAB, Resume::Observe),
+            paused(TAB, Resume::Person),
+            PERSONS_STOPPED.to_string(),
+            actor_required(),
+            verb_unknown(),
+            owner_mismatch(),
+            eval_refused(TAB),
+            history_unsupported(),
+            limit("작업 브라우저 수"),
+            exists(),
+        ] {
+            assert!(agents.contains("zerocode-browser "), "{agents}");
+        }
+    }
+}
+
 const WORKSPACE_CAP: usize = 128;
 const FRAME_INTERVAL: Duration = Duration::from_secs(1);
 type Notice = Box<dyn Fn(Snapshot) + Send + Sync>;
@@ -235,6 +795,16 @@ impl Dispatch {
     }
 }
 
+/// How a work browser stands for one agent on its `tabs` line (t-67064):
+/// who holds it — `agent`, `person` or `paused` — the revision that agent's
+/// own last look issued, if it has looked, and the tab's revision now.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Standing {
+    pub(crate) mode: &'static str,
+    pub(crate) seen: Option<u64>,
+    pub(crate) revision: u64,
+}
+
 /// What one placement of a pane may show (t-66513), decided against the
 /// tab's state at the native operation itself ([`Workspaces::with_placement`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,7 +880,7 @@ impl EvidenceCheck {
         let _sending = {
             let mut state = workspace.lock()?;
             if !agent_holds(&state, control) {
-                return Err(changed());
+                return Err(stale(&control.label));
             }
             state.capturing += 1;
             Sending(workspace)
@@ -351,19 +921,31 @@ struct State {
     /// revision — the person's pause or stop, a handoff, a close, a popup —
     /// leaves it behind.
     uncertain_at: Option<u64>,
+    /// The agent whose look last completed on this tab, and the revision that
+    /// look issued (t-67064): what a change that agent sends without
+    /// `--workspace-revision` is judged at. Never another agent's — a tab
+    /// handed to another owner forgets it.
+    seen: Option<(String, u64)>,
+    /// The mode a handoff under way hands the tab to (t-67064), while the tab
+    /// is `Pausing`: a tab on its way into the person's hands answers its agent
+    /// as one in them.
+    handing: Option<Mode>,
 }
 
 struct Workspace {
     label: String,
     state: Mutex<State>,
+    /// Rung whenever a request on the tab ends or the tab's state moves under
+    /// one — a handoff, a pause, a close — for the handoff waiting on the tab
+    /// to drain and the look waiting on its page ([`Operation::taken`]).
     drained: Notify,
 }
 
 impl Workspace {
     fn lock(&self) -> Result<MutexGuard<'_, State>, String> {
-        self.state.lock().map_err(|_| {
-            "workspace_unavailable: 작업 브라우저 상태를 확인할 수 없습니다".to_string()
-        })
+        self.state
+            .lock()
+            .map_err(|_| unavailable("작업 브라우저 상태를 확인할 수 없습니다"))
     }
 
     fn snapshot(&self, state: &State) -> Snapshot {
@@ -407,9 +989,7 @@ struct FrameSlot {
 
 impl FrameSlot {
     fn lock(&self) -> Result<MutexGuard<'_, FrameState>, String> {
-        self.state
-            .lock()
-            .map_err(|_| "workspace_unavailable: 관전 상태를 확인할 수 없습니다".to_string())
+        self.state.lock().map_err(|_| unavailable(WATCH_UNREADABLE))
     }
 }
 
@@ -418,10 +998,6 @@ impl FrameSlot {
 enum Turn {
     Released,
     At(Instant),
-}
-
-fn snapshot_busy() -> String {
-    "workspace_snapshot_busy: 관전 화면은 초당 한 번만 요청할 수 있습니다".to_string()
 }
 
 /// Take the tab's capture lease if it is free now: no capture in flight, and
@@ -509,8 +1085,93 @@ pub(crate) struct Workspaces {
     closed: Mutex<BTreeMap<String, u64>>,
 }
 
+/* ---- refusals (t-67064) -------------------------------------------------
+ * Every word this module refuses in is written between here and the end
+ * mark below, and each one ends with what to do next: the command an agent
+ * types, or the person it waits for. `every_refusal_says_what_to_do_next`
+ * reads this file and holds both. */
+
+/// The look an agent sends to see a tab again — what most refusals end on.
+fn look_at(label: &str) -> String {
+    format!("{BROWSER_CLI} marks {label}")
+}
+
+/// What the window cannot read of its own work browsers — a lock a panic
+/// left behind, a revision past `u64`: nothing an agent can fix.
+fn unavailable(what: &str) -> String {
+    format!("workspace_unavailable: {what} — 멈추고 사람에게 알리세요")
+}
+
+const WATCH_UNREADABLE: &str = "관전 상태를 확인할 수 없습니다";
+const AGENTS_UNREADABLE: &str = "에이전트 요청 상태를 확인할 수 없습니다";
+const CLOSES_UNREADABLE: &str = "닫기 확인 상태를 읽을 수 없습니다";
+
+/// A capture that met the tab's one capture lease past its wait (t-66513).
+fn snapshot_busy() -> String {
+    "workspace_snapshot_busy: 관전 화면은 초당 한 번만 요청할 수 있습니다 — 1초 뒤 다시 요청하세요"
+        .to_string()
+}
+
+/// The tab's state moved under a request that does not name it here — a
+/// handoff, a close, an open the window did not finish.
 fn changed() -> String {
-    "workspace_stale: 작업 브라우저 상태가 바뀌었습니다 — 새 상태를 확인하세요".to_string()
+    format!(
+        "workspace_stale: 작업 브라우저 상태가 바뀌었습니다 — {BROWSER_CLI} tabs로 탭을 확인하고, 다시 본 뒤 번호 없이 다시 보내세요"
+    )
+}
+
+/// [`changed`], for the tab named: the revision the agent named is not the
+/// tab's now, or the tab moved while the request was on its way.
+fn stale(label: &str) -> String {
+    format!(
+        "workspace_stale: 작업 브라우저 {label}의 상태가 바뀌었습니다 — {}로 다시 본 뒤 번호 없이 다시 보내세요",
+        look_at(label)
+    )
+}
+
+/// A change before its agent's first look at the tab, or one the tab wants
+/// a fresh look for first (t-67064).
+fn look_first(label: &str) -> String {
+    format!(
+        "workspace_observation_required: 먼저 read, marks 또는 fields를 실행하세요 — {}로 화면을 본 뒤 다시 보내세요",
+        look_at(label)
+    )
+}
+
+/// A change sent without `--workspace-revision` after the tab moved past
+/// its agent's last look (t-67064).
+fn moved_since_look(label: &str) -> String {
+    format!(
+        "workspace_changed: 화면이 바뀌었습니다 — {}(또는 read·fields)로 다시 보고 다시 보내세요",
+        look_at(label)
+    )
+}
+
+/// A look that came back without its page's answer — the page timed out,
+/// went away, or answered nothing readable — on a tab still in its agent's
+/// hands (t-67064): whether the page is busy loading, and the look to send
+/// again; a page that keeps not answering is the person's to hear of.
+fn look_unanswered(label: &str, loading: bool) -> String {
+    let why = if loading {
+        "페이지가 아직 로딩 중입니다"
+    } else {
+        "페이지가 답하지 않았습니다"
+    };
+    format!(
+        "workspace_look_unanswered: {why} — 1초 뒤 {}로 다시 보세요. 다시 답이 없으면 {BROWSER_CLI} tabs로 상태를 보고 사람에게 알리세요",
+        look_at(label)
+    )
+}
+
+/// A tab the person holds by hand, or is taking into it (t-67064): its
+/// agent neither looks at it nor changes any page nor opens a tab until the
+/// person hands it back, and hears so at once — the tab, the person's
+/// 「다시 맡기기」, and the look to send then.
+fn person_controlled(label: &str) -> String {
+    format!(
+        "{WORKSPACE_PERSON_CONTROLLED}: 작업 브라우저 {label}: 사람이 조작 중입니다 — 사람이 「다시 맡기기」를 누를 때까지 이 탭은 볼 수 없습니다. 이 판의 다른 변경과 새 탭 열기도 받지 않습니다. 어디까지 했는지 알리고 기다리세요. 맡겨지면 {}로 다시 보고 이어 가세요",
+        look_at(label)
+    )
 }
 
 /// A paused tab's refusal (t-66200): the word, who lifts the pause — the
@@ -520,11 +1181,17 @@ fn paused(label: &str, resume: Resume) -> String {
     let (why, next) = match resume {
         Resume::Observe => (
             "결과를 모르는 변경 뒤 일시정지됐습니다",
-            "read·marks·fields·screenshot으로 새로 본 뒤 이어 가세요",
+            format!(
+                "{}(또는 read·fields·screenshot)로 새로 본 뒤 이어 가세요",
+                look_at(label)
+            ),
         ),
         Resume::Person => (
-            "일시정지 또는 직접 조작 중입니다",
-            "사람이 풀 때까지 멈추세요",
+            "일시정지됐습니다",
+            format!(
+                "사람이 풀면 {}로 다시 보고 이어 가세요. 그전까지 어디까지 했는지 알리고 사람이 풀 때까지 멈추세요",
+                look_at(label)
+            ),
         ),
     };
     format!(
@@ -532,6 +1199,78 @@ fn paused(label: &str, resume: Resume) -> String {
         resume.word()
     )
 }
+
+/// What an agent is told at the work browsers' door while the person's stop
+/// stands (t-62872): the person stopped it, and only they start it again.
+pub(crate) const PERSONS_STOPPED: &str = "workspace_person_stopped: 사람이 정지했습니다 — 사람이 띠에서 다시 시작할 때까지 작업 브라우저를 열거나 쓰지 마세요. 어디까지 했는지 알리고 기다리세요. 다시 시작되면 zerocode-browser tabs로 모드를 확인하세요";
+
+fn busy(label: &str) -> String {
+    format!(
+        "workspace_busy: 작업 브라우저 {label}의 이전 요청이 끝나지 않았습니다 — 앞 명령의 답을 받은 뒤 다시 보내세요"
+    )
+}
+
+fn actor_required() -> String {
+    format!(
+        "workspace_actor_required: 현재 창이 보유한 에이전트 판이 필요합니다 — 이 창이 띄운 에이전트 판에서 {BROWSER_CLI} 명령을 다시 보내세요"
+    )
+}
+
+fn verb_unknown() -> String {
+    format!(
+        "workspace_verb_unknown: 지원하지 않는 브라우저 명령입니다 — {BROWSER_CLI} --help로 명령을 보세요"
+    )
+}
+
+fn owner_mismatch() -> String {
+    format!(
+        "workspace_owner_mismatch: 다른 에이전트의 작업 브라우저입니다 — {BROWSER_CLI} open <url>로 자신의 작업 탭을 여세요"
+    )
+}
+
+fn eval_refused(label: &str) -> String {
+    format!(
+        "workspace_eval_refused: 전용 작업 브라우저는 임의 eval을 받지 않습니다 — {BROWSER_CLI} read·fields·fill {label}을 사용하세요"
+    )
+}
+
+fn history_unsupported() -> String {
+    format!(
+        "workspace_history_unsupported: 사람이 조작한 작업 탭의 콘솔·요청 기록은 에이전트에게 주지 않습니다 — {BROWSER_CLI} open <url>로 새 작업 탭을 여세요"
+    )
+}
+
+/// One of the window's bounds reached: work browsers, an agent's requests,
+/// watch captures — `what` names its count.
+fn limit(what: &str) -> String {
+    format!(
+        "workspace_limit: {what}가 한도에 도달했습니다 — {BROWSER_CLI} close <label>로 다 쓴 작업 탭을 닫거나, 앞 요청의 답을 받은 뒤 다시 보내세요"
+    )
+}
+
+fn exists() -> String {
+    format!(
+        "workspace_exists: 이미 등록된 작업 브라우저입니다 — {BROWSER_CLI} tabs로 라벨을 확인하세요"
+    )
+}
+
+/// The bar's own refusals, the person's to read (t-66200).
+fn mode_invalid() -> String {
+    "workspace_mode_invalid: 전환 중 상태를 직접 지정할 수 없습니다 — 띠에서 일시정지·내가 조작·다시 맡기기 중 하나를 고르세요"
+        .to_string()
+}
+
+fn missing() -> String {
+    "workspace_missing: 이 탭은 전용 작업 브라우저가 아닙니다 — 작업 탭의 띠에서 다시 고르세요"
+        .to_string()
+}
+
+fn owner_required() -> String {
+    "workspace_owner_required: 맡길 에이전트 판이 없습니다 — 띠에서 맡길 에이전트 판을 선택하세요"
+        .to_string()
+}
+
+/* ---- end of refusals ---- */
 
 /// A refusal's resume word and the words after its token, when the refusal
 /// is a paused work browser's ([`paused`]).
@@ -544,6 +1283,74 @@ pub(crate) fn paused_resume(error: &str) -> Option<(Resume, &str)> {
         .into_iter()
         .find(|resume| resume.word() == word)
         .map(|resume| (resume, message))
+}
+
+/// The words after the code, when a refusal is a tab the person holds
+/// ([`person_controlled`]) — only the person lifts it, as `resume=person`.
+pub(crate) fn person_controlled_words(error: &str) -> Option<&str> {
+    error
+        .strip_prefix(WORKSPACE_PERSON_CONTROLLED)?
+        .strip_prefix(": ")
+}
+
+/// Whether the person holds the tab by hand, or a handoff under way is
+/// putting it into their hands (t-67064).
+fn persons_hand(state: &State) -> bool {
+    state.mode == Mode::Human || (state.mode == Mode::Pausing && state.handing == Some(Mode::Human))
+}
+
+/// Why a tab is out of its agent's hands, as its agent hears it (t-67064):
+/// the person holds it — or is taking it — by name; any other mode is a
+/// pause, with who lifts it.
+fn out_of_hands(label: &str, state: &State) -> String {
+    if persons_hand(state) {
+        person_controlled(label)
+    } else {
+        paused(label, resume_of(state))
+    }
+}
+
+/// Who holds the tab, in the word `tabs` says it by (t-67064).
+fn mode_word(state: &State) -> &'static str {
+    if state.mode == Mode::Agent {
+        TAB_MODE_AGENT
+    } else if persons_hand(state) {
+        TAB_MODE_PERSON
+    } else {
+        TAB_MODE_PAUSED
+    }
+}
+
+/// Whether `actor`'s own last look at the tab still stands (t-67064): a
+/// change sent without `--workspace-revision` is judged at the revision that
+/// look issued. Another agent's look is never one — a tab handed over
+/// forgets its last owner's — so no look is a look to send first, and an
+/// older one a look to send again.
+fn own_look(state: &State, actor: &str, label: &str) -> Result<(), String> {
+    match &state.seen {
+        Some((seer, revision)) if seer == actor => {
+            if *revision == state.revision {
+                Ok(())
+            } else {
+                Err(moved_since_look(label))
+            }
+        }
+        _ => Err(look_first(label)),
+    }
+}
+
+/// The letter the agent holding a work browser is sent when the person
+/// hands it back (t-67064), and the receipt that keeps one hand-back one
+/// letter: the tab, its mode, its new revision and the look to send — none
+/// of what the person did on the page.
+pub(crate) fn handed_back(label: &str, revision: u64) -> (String, String) {
+    (
+        format!(
+            "작업 브라우저 {label}: 사람이 다시 맡겼습니다 — mode {TAB_MODE_AGENT}, workspaceRevision {revision}. 이어서 하세요: {}로 다시 보고 이어 가세요",
+            look_at(label)
+        ),
+        format!("browser-handback:{label}:{revision}"),
+    )
 }
 
 /// Who lifts a tab's pause (t-66200): its owner's look only for the pause
@@ -564,25 +1371,18 @@ fn resume_of(state: &State) -> Resume {
     }
 }
 
-fn busy() -> String {
-    "workspace_busy: 작업 브라우저의 이전 요청이 끝나지 않았습니다".to_string()
-}
-
-/// What an agent is told at the work browsers' door while the person's stop
-/// stands (t-62872): the person stopped it, and only they start it again.
-pub(crate) const PERSONS_STOPPED: &str = "workspace_person_stopped: 사람이 정지했습니다 — 사람이 띠에서 다시 시작할 때까지 작업 브라우저를 열거나 쓰지 마세요. 어디까지 했는지 알리고 기다리세요";
-
 fn next_revision(state: &mut State) -> Result<(), String> {
     state.revision = state
         .revision
         .checked_add(1)
-        .ok_or("workspace_unavailable: 제어 상태 번호가 소진됐습니다")?;
+        .ok_or_else(|| unavailable("제어 상태 번호가 소진됐습니다"))?;
     Ok(())
 }
 
 /// Whether `actor` may change a page: not while a tab it owns is out of its
 /// hands. The refusal names that tab and who lifts it (t-66200) — a tab only
-/// the person can lift before one the actor's own look can.
+/// the person can lift before one the actor's own look can — and a tab the
+/// person holds by name (t-67064).
 fn owner_ready(held: &BTreeMap<String, Arc<Workspace>>, actor: &str) -> Result<(), String> {
     let mut looks = None;
     for (label, workspace) in held {
@@ -591,7 +1391,7 @@ fn owner_ready(held: &BTreeMap<String, Arc<Workspace>>, actor: &str) -> Result<(
             continue;
         }
         match resume_of(&state) {
-            Resume::Person => return Err(paused(label, Resume::Person)),
+            Resume::Person => return Err(out_of_hands(label, &state)),
             Resume::Observe if looks.is_none() => looks = Some(paused(label, Resume::Observe)),
             Resume::Observe => {}
         }
@@ -608,9 +1408,9 @@ fn agent_holds(state: &State, control: &StepControl) -> bool {
 
 impl Workspaces {
     fn lock(&self) -> Result<MutexGuard<'_, BTreeMap<String, Arc<Workspace>>>, String> {
-        self.held.lock().map_err(|_| {
-            "workspace_unavailable: 작업 브라우저 목록을 확인할 수 없습니다".to_string()
-        })
+        self.held
+            .lock()
+            .map_err(|_| unavailable("작업 브라우저 목록을 확인할 수 없습니다"))
     }
 
     pub(crate) fn register(
@@ -621,10 +1421,10 @@ impl Workspaces {
     ) -> Result<Snapshot, String> {
         let mut held = self.lock()?;
         if held.contains_key(label) {
-            return Err("workspace_exists: 이미 등록된 작업 브라우저입니다".to_string());
+            return Err(exists());
         }
         if held.len() >= WORKSPACE_CAP {
-            return Err("workspace_limit: 작업 브라우저 수가 한도에 도달했습니다".to_string());
+            return Err(limit("작업 브라우저 수"));
         }
         if let Some(owner) = owner {
             owner_ready(&held, owner)?;
@@ -647,13 +1447,15 @@ impl Workspaces {
                 person_controlled: false,
                 regrant: false,
                 uncertain_at: None,
+                seen: None,
+                handing: None,
             }),
             drained: Notify::new(),
         });
         let snapshot = workspace.snapshot(&*workspace.lock()?);
         self.closed
             .lock()
-            .map_err(|_| "workspace_unavailable: 닫기 확인 상태를 읽을 수 없습니다")?
+            .map_err(|_| unavailable(CLOSES_UNREADABLE))?
             .remove(label);
         held.insert(label.to_string(), workspace);
         Ok(snapshot)
@@ -700,10 +1502,8 @@ impl Workspaces {
     }
 
     pub(crate) fn check_actor(&self, actor: Option<&str>, verb: &str) -> Result<(), String> {
-        let actor =
-            actor.ok_or("workspace_actor_required: 현재 창이 보유한 에이전트 판이 필요합니다")?;
-        let row = zerocode_core::agent_browser::browser_verb(verb)
-            .ok_or("workspace_verb_unknown: 지원하지 않는 브라우저 명령입니다")?;
+        let actor = actor.ok_or_else(actor_required)?;
+        let row = zerocode_core::agent_browser::browser_verb(verb).ok_or_else(verb_unknown)?;
         let held = self.lock()?;
         if row.changes_page {
             owner_ready(&held, actor)?;
@@ -726,10 +1526,8 @@ impl Workspaces {
         verb: &str,
         label: Option<&str>,
     ) -> Result<Option<ActorOperation>, String> {
-        let actor =
-            actor.ok_or("workspace_actor_required: 현재 창이 보유한 에이전트 판이 필요합니다")?;
-        let row = zerocode_core::agent_browser::browser_verb(verb)
-            .ok_or("workspace_verb_unknown: 지원하지 않는 브라우저 명령입니다")?;
+        let actor = actor.ok_or_else(actor_required)?;
+        let row = zerocode_core::agent_browser::browser_verb(verb).ok_or_else(verb_unknown)?;
         if !row.changes_page {
             return Ok(None);
         }
@@ -738,7 +1536,7 @@ impl Workspaces {
         let mut actors = self
             .actors
             .lock()
-            .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?;
+            .map_err(|_| unavailable(AGENTS_UNREADABLE))?;
         let mut owners = Vec::with_capacity(held.len());
         let mut workspaces = Vec::new();
         for workspace in held.values() {
@@ -757,18 +1555,18 @@ impl Workspaces {
                 })
         });
         if actors.len() >= WORKSPACE_CAP && !actors.contains_key(actor) {
-            return Err("workspace_limit: 에이전트 요청 수가 한도에 도달했습니다".to_string());
+            return Err(limit("에이전트 요청 수"));
         }
         let activity = actors.entry(actor.to_string()).or_default().clone();
         let mut state = activity
             .state
             .lock()
-            .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?;
+            .map_err(|_| unavailable(AGENTS_UNREADABLE))?;
         if state.in_flight >= WORKSPACE_CAP
             || (state.uncertain.len() >= WORKSPACE_CAP
                 && label.is_some_and(|label| !state.uncertain.contains(label)))
         {
-            return Err("workspace_limit: 에이전트 요청 수가 한도에 도달했습니다".to_string());
+            return Err(limit("에이전트 요청 수"));
         }
         state.in_flight += 1;
         drop(state);
@@ -799,26 +1597,24 @@ impl Workspaces {
         verb: &str,
         expected_revision: Option<u64>,
     ) -> Result<Option<Operation>, String> {
-        let actor =
-            actor.ok_or("workspace_actor_required: 현재 창이 보유한 에이전트 판이 필요합니다")?;
-        let row = zerocode_core::agent_browser::browser_verb(verb)
-            .ok_or("workspace_verb_unknown: 지원하지 않는 브라우저 명령입니다")?;
+        let actor = actor.ok_or_else(actor_required)?;
+        let row = zerocode_core::agent_browser::browser_verb(verb).ok_or_else(verb_unknown)?;
         let held = self.lock()?;
         if row.changes_page {
             owner_ready(&held, actor)?;
         }
         let Some(workspace) = held.get(label).cloned() else {
             if expected_revision.is_some() {
-                return Err(changed());
+                return Err(stale(label));
             }
             return Ok(None);
         };
         let mut state = workspace.lock()?;
         if state.closed || expected_revision.is_some_and(|revision| revision != state.revision) {
-            return Err(changed());
+            return Err(stale(label));
         }
         if state.owner.as_deref() != Some(actor) {
-            return Err("workspace_owner_mismatch: 다른 에이전트의 작업 브라우저입니다 — 자신의 작업 탭을 여세요".to_string());
+            return Err(owner_mismatch());
         }
         let observes = zerocode_core::agent_browser::observes(verb);
         // The owner's look at a tab its own change of unknown outcome paused,
@@ -826,31 +1622,33 @@ impl Workspaces {
         // lifts the pause when it completes (t-66200).
         let resumes = state.mode != Mode::Agent && observes && resume_of(&state) == Resume::Observe;
         if state.mode != Mode::Agent && !resumes {
-            return Err(paused(label, resume_of(&state)));
+            return Err(out_of_hands(label, &state));
         }
         let activity = if resumes {
             self.actors
                 .lock()
-                .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                .map_err(|_| unavailable(AGENTS_UNREADABLE))?
                 .get(actor)
                 .cloned()
         } else {
             None
         };
         if verb == "eval" {
-            return Err("workspace_eval_refused: 전용 작업 브라우저는 임의 eval을 받지 않습니다 — read, fields, fill을 사용하세요".to_string());
+            return Err(eval_refused(label));
         }
         if state.person_controlled && zerocode_core::agent_browser::reads_history(verb) {
-            return Err("workspace_history_unsupported: 사람이 조작한 작업 탭의 콘솔·요청 기록은 에이전트에게 주지 않습니다 — 새 작업 탭을 여세요".to_string());
+            return Err(history_unsupported());
         }
+        // A change that names no revision is judged at the one its own
+        // agent's last look issued (t-67064) — never another agent's.
         if row.changes_page && expected_revision.is_none() {
-            return Err("workspace_revision_required: 작업 브라우저 변경에는 원관측의 workspaceRevision이 필요합니다".to_string());
+            own_look(&state, actor, label)?;
         }
         if state.in_flight != 0 {
-            return Err(busy());
+            return Err(busy(label));
         }
         if row.changes_page && state.needs_observation {
-            return Err("workspace_observation_required: 작업 브라우저의 화면을 다시 확인하세요 — 먼저 read, marks 또는 fields를 실행하세요".to_string());
+            return Err(look_first(label));
         }
         state.in_flight = 1;
         let revision = state.revision;
@@ -904,6 +1702,65 @@ impl Workspaces {
         .unwrap_or_else(|| Err(PERSONS_STOPPED.to_string()))
     }
 
+    /// How the work browser `label` stands for `actor` on its `tabs` line
+    /// (t-67064): who holds it, the revision `actor`'s own last look issued,
+    /// and the tab's own — read by the door that reads the person's stop
+    /// (t-62872). `None` for a tab that is no work browser; refused — so
+    /// `tabs` leaves the tab off — while the person's stop stands, and for a
+    /// tab another agent holds.
+    pub(crate) fn standing_agents(
+        &self,
+        label: &str,
+        actor: Option<&str>,
+    ) -> Result<Option<Standing>, String> {
+        let actor = actor.ok_or_else(actor_required)?;
+        let Some(workspace) = self.get(label)? else {
+            return Ok(None);
+        };
+        crate::computer_use::guard::unless_persons_stop(|| {
+            let state = workspace.lock()?;
+            if state.closed {
+                return Err(stale(label));
+            }
+            if state.owner.as_deref() != Some(actor) {
+                return Err(owner_mismatch());
+            }
+            Ok(Some(Standing {
+                mode: mode_word(&state),
+                seen: state
+                    .seen
+                    .as_ref()
+                    .filter(|(seer, _)| seer == actor)
+                    .map(|(_, revision)| *revision),
+                revision: state.revision,
+            }))
+        })
+        .unwrap_or_else(|| Err(PERSONS_STOPPED.to_string()))
+    }
+
+    /// What the agent does after its look at a work browser came back
+    /// without the page's answer (t-67064): who holds the tab now, when the
+    /// tab left its hands; otherwise whether the page is busy loading and
+    /// the look to send again. None for a tab that is no work browser or not
+    /// this agent's.
+    pub(crate) fn after_failed_look(
+        &self,
+        label: &str,
+        actor: Option<&str>,
+        loading: bool,
+    ) -> Option<String> {
+        let workspace = self.get(label).ok()??;
+        let state = workspace.lock().ok()?;
+        if state.closed || actor.is_none() || state.owner.as_deref() != actor {
+            return None;
+        }
+        Some(if state.mode == Mode::Agent {
+            look_unanswered(label, loading)
+        } else {
+            out_of_hands(label, &state)
+        })
+    }
+
     pub(crate) fn begin_person(
         &self,
         label: &str,
@@ -924,7 +1781,7 @@ impl Workspaces {
             return Err(paused(label, Resume::Person));
         }
         if state.in_flight != 0 {
-            return Err(busy());
+            return Err(busy(label));
         }
         state.in_flight = 1;
         let revision = state.revision;
@@ -990,37 +1847,36 @@ impl Workspaces {
         owner: Option<&str>,
     ) -> Result<Transition, String> {
         if target == Mode::Pausing {
-            return Err(
-                "workspace_mode_invalid: 전환 중 상태를 직접 지정할 수 없습니다".to_string(),
-            );
+            return Err(mode_invalid());
         }
         let held = self.lock()?;
-        let workspace = held
-            .get(label)
-            .cloned()
-            .ok_or("workspace_missing: 이 탭은 전용 작업 브라우저가 아닙니다")?;
+        let workspace = held.get(label).cloned().ok_or_else(missing)?;
         let mut state = workspace.lock()?;
         if state.closed || state.revision != expected_revision {
             return Err(changed());
         }
         if target == Mode::Agent && owner.or(state.owner.as_deref()).is_none() {
-            return Err("workspace_owner_required: 맡길 에이전트 판을 선택하세요".to_string());
+            return Err(owner_required());
         }
         let activity = match state.owner.as_deref() {
             Some(owner) => self
                 .actors
                 .lock()
-                .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                .map_err(|_| unavailable(AGENTS_UNREADABLE))?
                 .get(owner)
                 .cloned(),
             None => None,
         };
         next_revision(&mut state)?;
         state.mode = Mode::Pausing;
+        state.handing = Some(target);
         state.needs_observation = true;
         let revision = state.revision;
         drop(state);
         drop(held);
+        // A look still waiting on the tab's page hears at once that the tab
+        // left its agent's hands (t-67064).
+        workspace.drained.notify_waiters();
         Ok(Transition {
             workspace,
             activity,
@@ -1038,9 +1894,7 @@ impl Workspaces {
     /// a pause its owner's change of unknown outcome leaves waits for the
     /// person again, the one standing now included.
     pub(crate) fn end_regrant(&self, label: &str) -> Result<Snapshot, String> {
-        let workspace = self
-            .get(label)?
-            .ok_or("workspace_missing: 이 탭은 전용 작업 브라우저가 아닙니다")?;
+        let workspace = self.get(label)?.ok_or_else(missing)?;
         let mut state = workspace.lock()?;
         state.regrant = false;
         Ok(workspace.snapshot(&state))
@@ -1097,11 +1951,15 @@ impl Workspaces {
         }
         state.needs_observation = true;
         next_revision(&mut state)?;
-        if let Err(error) = navigate() {
+        let navigated = navigate();
+        if navigated.is_err() {
             state.mode = Mode::Paused;
-            return Err(error);
         }
-        Ok(true)
+        drop(state);
+        // A look still waiting on the tab's old page hears at once that the
+        // tab moved under it (t-67064).
+        workspace.drained.notify_waiters();
+        navigated.map(|()| true)
     }
 
     #[cfg(test)]
@@ -1113,9 +1971,9 @@ impl Workspaces {
         let mut frames = self
             .frames
             .lock()
-            .map_err(|_| "workspace_unavailable: 관전 상태를 확인할 수 없습니다")?;
+            .map_err(|_| unavailable(WATCH_UNREADABLE))?;
         if frames.len() >= WORKSPACE_CAP && !frames.contains_key(label) {
-            return Err("workspace_limit: 관전 화면 수가 한도에 도달했습니다".to_string());
+            return Err(limit("관전 화면 수"));
         }
         Ok(frames.entry(label.to_string()).or_default().clone())
     }
@@ -1187,11 +2045,11 @@ impl Workspaces {
             let state = workspace.lock()?;
             let control = StepControl {
                 label: label.to_string(),
-                owner: actor.ok_or_else(changed)?.to_string(),
+                owner: actor.ok_or_else(actor_required)?.to_string(),
                 revision: state.revision,
             };
             if !agent_holds(&state, &control) {
-                return Err(changed());
+                return Err(stale(label));
             }
             control
         };
@@ -1296,7 +2154,7 @@ impl Workspaces {
         Ok(self
             .closed
             .lock()
-            .map_err(|_| "workspace_unavailable: 닫기 확인 상태를 읽을 수 없습니다")?
+            .map_err(|_| unavailable(CLOSES_UNREADABLE))?
             .get(label)
             == Some(&revision))
     }
@@ -1305,7 +2163,7 @@ impl Workspaces {
         let mut closed = self
             .closed
             .lock()
-            .map_err(|_| "workspace_unavailable: 닫기 확인 상태를 읽을 수 없습니다")?;
+            .map_err(|_| unavailable(CLOSES_UNREADABLE))?;
         if closed.len() >= WORKSPACE_CAP && !closed.contains_key(label) {
             closed.pop_first();
         }
@@ -1321,18 +2179,18 @@ impl Workspaces {
         }
         self.frames
             .lock()
-            .map_err(|_| "workspace_unavailable: 관전 상태를 확인할 수 없습니다")?
+            .map_err(|_| unavailable(WATCH_UNREADABLE))?
             .remove(label);
         for activity in self
             .actors
             .lock()
-            .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+            .map_err(|_| unavailable(AGENTS_UNREADABLE))?
             .values()
         {
             activity
                 .state
                 .lock()
-                .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                .map_err(|_| unavailable(AGENTS_UNREADABLE))?
                 .uncertain
                 .remove(label);
         }
@@ -1505,25 +2363,16 @@ impl Operation {
 
     fn observed(mut self) -> Result<u64, String> {
         let mut state = self.workspace.lock()?;
-        let lifts =
-            self.resumes && state.mode == Mode::Paused && resume_of(&state) == Resume::Observe;
-        if !self.observes
-            || state.closed
-            || state.revision != self.revision
-            || state.owner != self.owner
-            || self.owner.is_none()
-        {
-            return Err(changed());
-        }
-        if state.mode != Mode::Agent && !lifts {
-            return Err(paused(&self.workspace.label, resume_of(&state)));
+        let lifts = self.lifts(&state);
+        if let Some(refusal) = self.refused(&state, lifts) {
+            return Err(refusal);
         }
         if lifts {
             if let Some(activity) = &self.activity {
                 activity
                     .state
                     .lock()
-                    .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                    .map_err(|_| unavailable(AGENTS_UNREADABLE))?
                     .uncertain
                     .remove(&self.workspace.label);
             }
@@ -1532,26 +2381,110 @@ impl Operation {
             state.uncertain_at = None;
         }
         state.needs_observation = false;
+        // The look its agent's next change without a revision is judged at
+        // (t-67064).
+        let revision = state.revision;
+        state.seen = self.owner.clone().map(|owner| (owner, revision));
         self.completed = true;
-        Ok(state.revision)
+        Ok(revision)
+    }
+
+    /// Whether this look lifts the pause it was let in under (t-66200).
+    fn lifts(&self, state: &State) -> bool {
+        self.resumes && state.mode == Mode::Paused && resume_of(state) == Resume::Observe
+    }
+
+    /// The refusal this look's completion meets as the tab stands now, or
+    /// none: the one reading the look completes by and is answered early by
+    /// ([`Self::taken`]). A tab the person's hand took under it is said by
+    /// name (t-67064); any other move is stale.
+    fn refused(&self, state: &State, lifts: bool) -> Option<String> {
+        let label = &self.workspace.label;
+        if !self.observes || state.closed || state.owner != self.owner || self.owner.is_none() {
+            return Some(stale(label));
+        }
+        if state.revision != self.revision {
+            return Some(if persons_hand(state) {
+                person_controlled(label)
+            } else {
+                stale(label)
+            });
+        }
+        (state.mode != Mode::Agent && !lifts).then(|| out_of_hands(label, state))
+    }
+
+    /// Resolves once this look's tab leaves its agent's hands while its page
+    /// is still asked (t-67064) — the person takes it, a pause or the person's
+    /// stop holds it, a change of unknown outcome pauses it, it closes — with
+    /// the refusal its completion would meet then. Never while the tab stands
+    /// as the look was let in.
+    async fn taken(&self) -> String {
+        loop {
+            let notified = self.workspace.drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let state = match self.workspace.lock() {
+                    Ok(state) => state,
+                    Err(error) => return error,
+                };
+                if let Some(refusal) = self.refused(&state, self.lifts(&state)) {
+                    return refusal;
+                }
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn finish(self, succeeded: bool) {
         self.settle(Dispatch::of(succeeded));
     }
 
-    pub(crate) fn settle(mut self, dispatch: Dispatch) {
+    /// Settle the request as its dispatch went. Answers the revision the
+    /// agent's next change may name (t-67064): a change that completed and
+    /// left its tab in the same agent's hands, at the revision it was let in
+    /// at, wanting no fresh look — what the door stamps on the change's
+    /// answer. A look's revision is its completion's ([`Self::finish_observation`]).
+    pub(crate) fn settle(mut self, dispatch: Dispatch) -> Option<u64> {
+        let mut next = None;
         if dispatch != Dispatch::NotSent
             && let Ok(mut state) = self.workspace.lock()
             && !state.closed
             && state.revision == self.revision
             && state.mode == Mode::Agent
             && state.owner == self.owner
-            && self.observes
         {
-            state.needs_observation = dispatch == Dispatch::Uncertain;
+            if self.observes {
+                state.needs_observation = dispatch == Dispatch::Uncertain;
+            } else if self.changes_page
+                && dispatch == Dispatch::Completed
+                && !state.needs_observation
+            {
+                next = Some(state.revision);
+            }
         }
         self.completed = dispatch != Dispatch::Uncertain || !self.changes_page;
+        next
+    }
+}
+
+/// A look's page work, unless its tab leaves its agent's hands first
+/// (t-67064): then the look answers at once with who holds the tab now — a
+/// page that never answers no longer holds the agent until it times out —
+/// and its page script is let go; the handoff's page fence still waits for
+/// it. Anything but a look on a work browser is waited for whole: a change
+/// in flight is the handoff's to wait for.
+pub(crate) async fn unless_taken<T>(
+    operation: Option<&Operation>,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    let Some(look) = operation.filter(|operation| operation.observes) else {
+        return Ok(work.await);
+    };
+    tokio::select! {
+        biased;
+        done = work => Ok(done),
+        refusal = look.taken() => Err(refusal),
     }
 }
 
@@ -1660,9 +2593,7 @@ impl Transition {
                 .state
                 .lock()
                 .map(|state| state.in_flight == 0)
-                .map_err(|_| {
-                    "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다".to_string()
-                })
+                .map_err(|_| unavailable(AGENTS_UNREADABLE))
         })
     }
 
@@ -1676,7 +2607,7 @@ impl Transition {
                 activity
                     .state
                     .lock()
-                    .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                    .map_err(|_| unavailable(AGENTS_UNREADABLE))?
                     .uncertain
                     .iter()
                     .cloned(),
@@ -1701,7 +2632,7 @@ impl Transition {
             activity
                 .state
                 .lock()
-                .map_err(|_| "workspace_unavailable: 에이전트 요청 상태를 확인할 수 없습니다")?
+                .map_err(|_| unavailable(AGENTS_UNREADABLE))?
                 .uncertain
                 .clear();
         }
@@ -1726,6 +2657,7 @@ impl Transition {
             }
             next_revision(&mut state)?;
             state.mode = self.target;
+            state.handing = None;
             state.person_controlled |= self.target == Mode::Human;
             // The person's 「다시 맡기기」 turns the session's regrant on, their
             // hand turns it off (t-66200).
@@ -1735,6 +2667,11 @@ impl Transition {
                 Mode::Paused | Mode::Pausing => {}
             }
             if let Some(owner) = self.owner.take() {
+                // A tab handed to another agent keeps no look of its last
+                // owner's for the new one to go on by (t-67064).
+                if state.owner.as_deref() != Some(owner.as_str()) {
+                    state.seen = None;
+                }
                 state.owner = Some(owner);
             }
             self.workspace.snapshot(&state)
@@ -1757,6 +2694,7 @@ impl Drop for Transition {
                 return;
             }
             state.mode = Mode::Paused;
+            state.handing = None;
             state.needs_observation = true;
             state.revision = state.revision.saturating_add(1);
             Some(self.workspace.snapshot(&state))
