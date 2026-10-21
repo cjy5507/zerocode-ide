@@ -1221,12 +1221,28 @@ pub struct RefusalWords {
 impl RefusalWords {
     #[must_use]
     pub fn of(refusal: &custom::Refusal) -> Self {
+        let (field, line) = match refusal {
+            custom::Refusal::SecretLine { field, line } => (Some(field), Some(*line)),
+            custom::Refusal::MeaningLength(field) => (Some(field), None),
+            _ => (None, None),
+        };
+        let option = match (refusal, field) {
+            (custom::Refusal::OptionName(name), _)
+            | (_, Some(custom::Field::OptionName(name) | custom::Field::Meaning(name))) => {
+                Some(name.clone())
+            }
+            _ => None,
+        };
+        let level = match field {
+            Some(custom::Field::Level(index)) => Some(*index),
+            _ => None,
+        };
         Self {
             word: refusal.word(),
-            field: None,
-            line: None,
-            option: None,
-            level: None,
+            field: field.map(custom::Field::word),
+            line,
+            option,
+            level,
         }
     }
 }
@@ -1325,6 +1341,14 @@ pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<Cus
 #[must_use]
 pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
     let id = draft.id.clone().unwrap_or_else(custom::new_id);
+    let first = match &draft.answer {
+        AnswerDraft::YesNo { .. } => AGENT_TOOL_ASK_OPTIONS[0].to_string(),
+        AnswerDraft::Choice { options } => options
+            .first()
+            .map(|option| option.name.clone())
+            .unwrap_or_default(),
+        AnswerDraft::Score { levels } => custom::shown_level(0, levels.len()),
+    };
     let (definition, twice) = draft.definition(id);
     DraftCheck {
         refusals: twice
@@ -1333,7 +1357,7 @@ pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
             .collect(),
         version: definition.version().unwrap_or_default(),
         questions: custom::questions(&definition),
-        line: String::new(),
+        line: custom::line(&definition.name, &first, definition.act_from),
     }
 }
 
