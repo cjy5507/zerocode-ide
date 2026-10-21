@@ -42,6 +42,10 @@ pub(super) fn legacy_migration_completed(
     repository: &settings::SettingsRepository,
     migration: LegacyMigration,
 ) -> Result<bool, String> {
+    let _io = crumbs::MainIo::enter(
+        "settings_runtime::legacy_migration_completed",
+        LEGACY_MIGRATION_LEDGER_FILE,
+    );
     Ok(repository
         .read_json::<LegacyMigrationLedger>(LEGACY_MIGRATION_LEDGER_FILE)
         .map_err(|error| error.to_string())?
@@ -63,6 +67,10 @@ pub(super) fn complete_legacy_migration(
     if legacy_migration_completed(repository, migration)? {
         return Ok(());
     }
+    let _io = crumbs::MainIo::enter(
+        "settings_runtime::complete_legacy_migration",
+        LEGACY_MIGRATION_LEDGER_FILE,
+    );
     repository
         .mutate_json(
             LEGACY_MIGRATION_LEDGER_FILE,
@@ -2853,6 +2861,7 @@ pub(super) fn record_settings_migration(
 pub(super) fn load_settings(
     repository: &settings::SettingsRepository,
 ) -> Result<SettingsSnapshot, String> {
+    let _io = crumbs::MainIo::enter("settings_runtime::load_settings", SETTINGS_DOCUMENT_FILE);
     let read = repository
         .read_json::<SettingsDocument>(SETTINGS_DOCUMENT_FILE)
         .map_err(|error| error.to_string())?;
@@ -2874,21 +2883,27 @@ pub(super) fn load_settings(
                 },
             )
             .map_err(|error| error.to_string())?;
-        return Ok(record_settings_migration(
+        return Ok(remember(
             repository,
-            snapshot_of(
-                committed.value,
-                committed.revision,
-                health_name(&committed.prior_health),
+            record_settings_migration(
+                repository,
+                snapshot_of(
+                    committed.value,
+                    committed.revision,
+                    health_name(&committed.prior_health),
+                ),
             ),
         ));
     }
     let document = read
         .value
         .expect("a commit is required when settings are missing");
-    Ok(record_settings_migration(
+    Ok(remember(
         repository,
-        snapshot_of(document, read.revision, health_name(&read.health)),
+        record_settings_migration(
+            repository,
+            snapshot_of(document, read.revision, health_name(&read.health)),
+        ),
     ))
 }
 
@@ -2909,6 +2924,10 @@ pub(super) fn load_settings_resilient(
         // the now-missing primary for permission to run legacy migration. A
         // concurrent repair wins: the locked mutation normalizes that fresh
         // document instead of replacing it with our fallback.
+        let _io = crumbs::MainIo::enter(
+            "settings_runtime::load_settings_resilient",
+            SETTINGS_DOCUMENT_FILE,
+        );
         let (document, revision) = repository
             .mutate_json(SETTINGS_DOCUMENT_FILE, SettingsDocument::default, |fresh| {
                 *fresh = fresh.clone().normalized()
@@ -2918,7 +2937,7 @@ pub(super) fn load_settings_resilient(
             });
         let mut snapshot = snapshot_of(document, revision, "error");
         snapshot.settings_error = Some(error);
-        record_settings_migration(repository, snapshot)
+        remember(repository, record_settings_migration(repository, snapshot))
     })
 }
 
@@ -2928,10 +2947,63 @@ pub(super) fn load_settings_for_boot(
     load_settings_resilient(repository)
 }
 
+/// What the settings document last said in this process, by repository root
+/// (t-67102). A read through the repository waits on its one lock, and every
+/// settings commit holds that lock through its fsync: on 2026-10-21 05:32 a
+/// build saturating the disk stretched one such commit, and `waiting_on_me`,
+/// asked on the main thread after every agent report, stood behind it while
+/// the window froze for 20 255 ms. Every load and every commit in this file
+/// leaves its snapshot here, and the main thread reads only this.
+///
+/// One entry per settings root the process reads: the window reads one, and
+/// a test one per sandbox.
+fn remembered() -> &'static Mutex<HashMap<PathBuf, Arc<SettingsSnapshot>>> {
+    static REMEMBERED: OnceLock<Mutex<HashMap<PathBuf, Arc<SettingsSnapshot>>>> = OnceLock::new();
+    REMEMBERED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Leave `snapshot` as its root's remembered settings, and hand it back. A
+/// lower revision never replaces a higher one: a read that ends after a
+/// commit may have begun before it, and the revision is the order the
+/// repository committed them in.
+pub(super) fn remember(
+    repository: &settings::SettingsRepository,
+    snapshot: SettingsSnapshot,
+) -> SettingsSnapshot {
+    let kept = Arc::new(snapshot.clone());
+    let mut held = remembered()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held
+        .get(repository.root())
+        .is_none_or(|last| last.revision <= kept.revision)
+    {
+        held.insert(repository.root().to_path_buf(), kept);
+    }
+    snapshot
+}
+
+/// The settings as this process last read or wrote them — memory, never the
+/// disk and never the repository's lock, so the road for the main thread. An
+/// edit made outside the window is seen from the next load. Boot reads the
+/// window's settings before any command can be asked; a root nothing has read
+/// yet is read here, once.
+pub(super) fn remembered_settings(
+    repository: &settings::SettingsRepository,
+) -> Arc<SettingsSnapshot> {
+    let held = remembered()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(repository.root())
+        .cloned();
+    held.unwrap_or_else(|| Arc::new(load_settings_for_boot(repository)))
+}
+
 pub(super) fn mutate_settings(
     repository: &settings::SettingsRepository,
     change: impl FnOnce(&mut SettingsDocument) -> Result<(), String>,
 ) -> Result<SettingsSnapshot, String> {
+    let _io = crumbs::MainIo::enter("settings_runtime::mutate_settings", SETTINGS_DOCUMENT_FILE);
     let seed = settings_migration_seed(repository)?;
     let committed = repository
         .try_mutate_json(
@@ -2954,12 +3026,16 @@ pub(super) fn mutate_settings(
     hooks::publish_second_brain_vault(&committed.value.second_brain_vault);
     hang_watchdog::configure(crash::Limits::overlay(&committed.value.crash));
     readiness_runtime::configure(readiness_runtime::limits_of(&committed.value.readiness));
-    Ok(record_settings_migration(
+    // And the main thread reads what was just committed (`remembered_settings`).
+    Ok(remember(
         repository,
-        snapshot_of(
-            committed.value,
-            committed.revision,
-            health_name(&committed.prior_health),
+        record_settings_migration(
+            repository,
+            snapshot_of(
+                committed.value,
+                committed.revision,
+                health_name(&committed.prior_health),
+            ),
         ),
     ))
 }

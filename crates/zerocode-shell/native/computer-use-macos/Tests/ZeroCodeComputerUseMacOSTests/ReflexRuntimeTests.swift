@@ -793,7 +793,7 @@ final class ReflexRuntimeTests: XCTestCase {
         XCTAssertEqual(result, .success, "the stop did not wait behind the action")
         let body = try XCTUnwrap(answer.value?["result"] as? [String: Any])
         XCTAssertEqual(body["stopped"] as? Bool, true)
-        OperatorGuardHost.resume(resetBudget: false)
+        try OperatorGuardHost.resume(resetBudget: false, by: .person)
         XCTAssertNil(OperatorHandHost.hand.snapshot.stopped)
     }
 
@@ -2591,7 +2591,7 @@ final class ReflexKernelAndPolicyTests: XCTestCase {
         let saved = (ReflexRuntimeHost.parts, ReflexRuntimeHost.kernel)
         defer {
             (ReflexRuntimeHost.parts, ReflexRuntimeHost.kernel) = saved
-            OperatorGuardHost.resume(resetBudget: false)
+            try? OperatorGuardHost.resume(resetBudget: false, by: .person)
         }
         let host = HostHand()
         let frames = SteppedFrames()
@@ -2979,7 +2979,7 @@ final class ReflexRunRoadTests: XCTestCase {
         let rig = HostRig()
         defer {
             rig.restore()
-            OperatorGuardHost.resume(resetBudget: false)
+            try? OperatorGuardHost.resume(resetBudget: false, by: .person)
         }
         let wire = try HostRig.clickWire()
         _ = try HostStart(runId: "run-a", plan: wire, hand: rig.host.hand).start()

@@ -98,9 +98,10 @@ fn ask(
         }
         answered => answered,
     };
+    // A stop that ended a wait is not the eye refusing it (t-66760).
     if answered
         .as_ref()
-        .is_err_and(|error| error.code != NOT_WATCHING)
+        .is_err_and(|error| error.code != NOT_WATCHING && error.code != error_code::STOPPED)
     {
         memory.note(true);
     }
@@ -274,16 +275,24 @@ impl Listed {
     }
 }
 
-/// `wait --settle`, through the helper, waiting on the thread: how it
-/// waited (`settled`, `waitedMs`, `polls`), or `None` when the eye cannot be
-/// had.
-pub fn wait_settled_desktop(asked_ms: u64) -> Option<Value> {
-    wait_settled(&MEMORY, asked_ms, &mut super::call, &mut std::thread::sleep).map(Settled::answer)
+/// `wait --settle`, asking through `call` and pausing through `pause` — a
+/// wait's own roads, which a stop ends (t-66760): how it waited (`settled`,
+/// `waitedMs`, `polls`), or `None` when the eye cannot be had.
+pub fn wait_settled_desktop(
+    asked_ms: u64,
+    call: Call<'_>,
+    pause: &mut dyn FnMut(Duration),
+) -> Option<Value> {
+    wait_settled(&MEMORY, asked_ms, call, pause).map(Settled::answer)
 }
 
-/// `watch`, through the helper, waiting on the thread.
-pub fn watch_desktop(params: &Value) -> Result<Value, ComputerUseError> {
-    watch(&MEMORY, params, &mut super::call, &mut std::thread::sleep)
+/// `watch`, down a wait's own roads (t-66760).
+pub fn watch_desktop(
+    params: &Value,
+    call: Call<'_>,
+    pause: &mut dyn FnMut(Duration),
+) -> Result<Value, ComputerUseError> {
+    watch(&MEMORY, params, call, pause)
 }
 
 /// Where the eye stands, and the repaints after `after` or from `from_ms`.

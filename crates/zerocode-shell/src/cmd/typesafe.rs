@@ -1,7 +1,10 @@
 //! TypeSafe (Jev) settings IPC — the key and the one switch.
 use crate::api_routers::{self, Keychain, RouterRefusal};
 use crate::jev_scope;
-use crate::typesafe_settings::{self, DayBudget, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
+use crate::typesafe_settings::{
+    self, CustomDecisions, DayBudget, DecisionDraft, DecisionRefusal, DraftCheck, SeatNumbers,
+    TypeSafeCheck, TypeSafeSettings,
+};
 use tauri::State;
 
 use crate::*;
@@ -172,6 +175,78 @@ pub(crate) fn set_summon_profiles(
 pub(crate) fn set_jev_model(model: String) -> Result<TypeSafeSettings, RouterRefusal> {
     typesafe_settings::set_model(&settings_path()?, &model)?;
     settings_now()
+}
+
+/// zo's config home, where a person's own decisions are kept beside zo's
+/// settings file — the home zo reads them from.
+fn decisions_home() -> Result<std::path::PathBuf, RouterRefusal> {
+    settings_path()?
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| RouterRefusal::from("설정 경로를 찾을 수 없습니다".to_string()))
+}
+
+fn decisions_now() -> Result<CustomDecisions, DecisionRefusal> {
+    let root =
+        api_routers::read_zo_settings_root(&settings_path()?).map_err(RouterRefusal::from)?;
+    Ok(typesafe_settings::custom_decisions_at(
+        &decisions_home()?,
+        &serde_json::Value::Object(root),
+    )?)
+}
+
+/// The decisions a person made, the deleted ones still to be restored, and
+/// the folders a decision may be narrowed to (t-62170 stage 3).
+#[tauri::command(async)]
+pub(crate) fn list_custom_decisions() -> Result<CustomDecisions, DecisionRefusal> {
+    decisions_now()
+}
+
+/// Core's check of a draft, with nothing kept.
+#[tauri::command(async)]
+pub(crate) fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
+    typesafe_settings::check_custom_decision(draft)
+}
+
+/// Keep a draft: a new decision recording before anything acts on it, an
+/// edit as its next version with its mode kept. The store checks it again
+/// under its lock.
+#[tauri::command(async)]
+pub(crate) fn save_custom_decision(
+    draft: DecisionDraft,
+) -> Result<CustomDecisions, DecisionRefusal> {
+    typesafe_settings::save_custom_decision_at(&decisions_home()?, draft, crate::now_epoch_ms())?;
+    decisions_now()
+}
+
+/// Delete a decision. Its records stay, and the store keeps it to be
+/// restored for its days.
+#[tauri::command(async)]
+pub(crate) fn delete_custom_decision(id: String) -> Result<CustomDecisions, DecisionRefusal> {
+    typesafe_settings::delete_custom_decision_at(&decisions_home()?, &id, crate::now_epoch_ms())?;
+    decisions_now()
+}
+
+/// Bring a deleted decision back as it was, mode and version.
+#[tauri::command(async)]
+pub(crate) fn restore_custom_decision(id: String) -> Result<CustomDecisions, DecisionRefusal> {
+    zerocode_core::jev::custom::store::restore(&decisions_home()?, &id)?;
+    decisions_now()
+}
+
+/// Move a decision to another of the modes a decision offers.
+#[tauri::command(async)]
+pub(crate) fn set_custom_decision_mode(
+    id: String,
+    mode: String,
+) -> Result<CustomDecisions, DecisionRefusal> {
+    typesafe_settings::set_custom_decision_mode_at(
+        &decisions_home()?,
+        &id,
+        &mode,
+        crate::now_epoch_ms(),
+    )?;
+    decisions_now()
 }
 
 /// Select `provider`. With `expected_provider_identity` the write lands only

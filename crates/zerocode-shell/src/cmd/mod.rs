@@ -156,6 +156,10 @@ pub(crate) use api_routers::{
 
 pub(crate) mod typesafe;
 pub(crate) use typesafe::{
+    check_custom_decision, delete_custom_decision, list_custom_decisions, restore_custom_decision,
+    save_custom_decision, set_custom_decision_mode,
+};
+pub(crate) use typesafe::{
     check_typesafe_key, jev_day, jev_review, jev_review_outcome, jev_summary, remove_typesafe_key,
     save_typesafe_key, set_jev_enabled, set_jev_model, set_jev_review_enabled,
     set_route_classifier, set_summon_profiles, typesafe_settings,

@@ -16789,6 +16789,27 @@ fn a_live_settings_snapshot_reports_corruption_before_becoming_healthy() {
     assert!(!command.contains("load_settings(state.settings())"));
 }
 
+/// t-67102: the main thread reads the settings this process last read or
+/// wrote. A read that began before a commit and ends after it must not put
+/// the older revision back over the commit it raced.
+#[test]
+fn remembered_settings_never_step_back_to_an_older_revision() {
+    let directory = tempfile::tempdir().expect("settings sandbox");
+    let repository = settings::SettingsRepository::new(directory.path());
+    let older = load_settings_for_boot(&repository);
+    let newer = mutate_settings(&repository, |document| {
+        document.theme = "dark".into();
+        Ok(())
+    })
+    .expect("a newer commit");
+    assert!(newer.revision > older.revision);
+
+    remember(&repository, older);
+    let held = remembered_settings(&repository);
+    assert_eq!(held.revision, newer.revision);
+    assert_eq!(held.document.theme, "dark");
+}
+
 #[test]
 fn deleting_canonical_documents_never_reimports_consumed_legacy_values() {
     let directory = tempfile::tempdir().expect("settings sandbox");
@@ -22380,6 +22401,7 @@ pub(crate) mod computer_desktop_wait {
         fn resume(
             &self,
             _reset: bool,
+            _lifter: crate::computer_use::guard::Lifter,
         ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
             self.resumed.set(self.resumed.get() + 1);
             self.reason.set(None);
@@ -22436,6 +22458,7 @@ pub(crate) mod computer_desktop_wait {
         fn resume(
             &self,
             _reset: bool,
+            _lifter: crate::computer_use::guard::Lifter,
         ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
             self.resumed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.reason.lock().unwrap() = None;
@@ -22483,9 +22506,12 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(helper.resumed.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(stop["maybePersonsStop"], true, "{stop}");
         let (_, revision) = guard::snapshot();
+        let person = guard::Lifter::Person {
+            revision: Some(revision),
+        };
         let band = guard::resume(
-            guard::Lifter::Person { revision: Some(revision) },
-            || helper.resume(false),
+            person,
+            || helper.resume(false, person),
             || helper.signal(),
         );
         assert!(band.lifted, "the band's resume lifts it: {band:?}");
@@ -22518,9 +22544,12 @@ pub(crate) mod computer_desktop_wait {
         let lifted_by_agent = usize::from(guard::stopped_reason().is_none());
         let reached_by_agent = answering.resumed.get();
         let (_, revision) = guard::snapshot();
+        let person = guard::Lifter::Person {
+            revision: Some(revision),
+        };
         let band = guard::resume(
-            guard::Lifter::Person { revision: Some(revision) },
-            || answering.resume(false),
+            person,
+            || answering.resume(false, person),
             || answering.signal(),
         );
         let after_band = guard::stopped_reason();
@@ -22629,6 +22658,7 @@ pub(crate) mod computer_desktop_wait {
             fn resume(
                 &self,
                 _reset: bool,
+                _lifter: crate::computer_use::guard::Lifter,
             ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
                 Ok(serde_json::Value::from("resumed"))
             }
@@ -22738,6 +22768,197 @@ pub(crate) mod computer_desktop_wait {
                 "a work browser refuses the agent ({over}): {door:?}"
             );
         }
+    }
+
+    /// The person's chord the helper heard (t-66753 B): the window hears it
+    /// at once — its stop is the person's and a work browser refuses the
+    /// agent within 200 ms of the chord, with no command of the agent's in
+    /// between — and the road it hears it by waits behind no request, though
+    /// one holds the window's session all the while. The helper is the
+    /// stand-in: nothing is launched and no key is pressed. Measured: from
+    /// the chord to the window's stop.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_persons_chord_in_the_helper_stops_the_window_and_its_work_browsers_at_once() {
+        use crate::computer_use::guard;
+        use crate::computer_use::stand_in::{Shape, StandIn};
+        use std::time::{Duration, Instant};
+        const HEARD_WITHIN: Duration = Duration::from_millis(200);
+        const WAITED_AT_MOST: Duration = Duration::from_secs(2);
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let helper = StandIn::start("chord-token", Shape::matching());
+        let session = helper
+            .connect_window("chord-token")
+            .expect("the window connects to the stand-in");
+        let workspaces = crate::browser_workspace::Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .expect("a work browser an agent holds");
+        let (held, holds) = std::sync::mpsc::channel();
+        let (end, ends) = std::sync::mpsc::channel::<()>();
+        let request = std::thread::spawn(move || {
+            crate::computer_use::while_a_request_holds_the_session(|| {
+                held.send(()).unwrap();
+                let _ = ends.recv_timeout(WAITED_AT_MOST * 2);
+            });
+        });
+        holds.recv().unwrap();
+        let pressed = Instant::now();
+        helper.press_chord();
+        let heard_after = loop {
+            if guard::persons_stop_stands() {
+                break Some(pressed.elapsed());
+            }
+            if pressed.elapsed() >= WAITED_AT_MOST {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let door = workspaces
+            .begin_agents("browser-1", Some("pane-a"), "read", None)
+            .map(|operation| operation.map(|operation| operation.finish(true)).is_some());
+        let report = guard::activity_report(None);
+        let _ = end.send(());
+        request.join().unwrap();
+        drop(session);
+        guard::lift();
+        println!("measured: the window heard the person's chord after {heard_after:?}");
+        assert!(
+            heard_after.is_some_and(|after| after < HEARD_WITHIN),
+            "the window's stop stood {heard_after:?} after the person's chord (none within {WAITED_AT_MOST:?}: the window hears the chord only at its next command)"
+        );
+        assert_eq!(report["personsStop"], true, "the band hears the person's stop: {report}");
+        assert_eq!(report["stopped"], zerocode_core::computer_use::STOP_REASON_HOTKEY, "{report}");
+        assert!(
+            door.as_ref()
+                .is_err_and(|error| error.starts_with("workspace_person_stopped:")),
+            "a work browser refuses the agent once the chord is heard: {door:?}"
+        );
+    }
+
+    /// An agent's `resume` reaches the helper as an agent's, whatever its
+    /// words carried (t-66753 A): the words cannot name who lifts — a
+    /// `--lifter` is refused before anything is asked — and the window's road
+    /// writes `agent` on what the helper is asked, so the helper never reads
+    /// the person's resume from an agent. The helper is the stand-in, which
+    /// keeps what it was asked.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_agents_resume_reaches_the_helper_as_an_agents_whatever_its_words_said() {
+        use crate::agent_tools_runtime::{agents_resume, HelperRoads};
+        use crate::computer_use::guard;
+        use crate::computer_use::stand_in::{Connected, Shape, StandIn};
+        // The window's helper roads over a stand-in's connection: a resume
+        // asked exactly as the window asks it (`guard::resume_request`).
+        struct StandInRoads(std::cell::RefCell<Connected>);
+        impl HelperRoads for StandInRoads {
+            fn status(&self) -> Option<serde_json::Value> {
+                self.0
+                    .borrow_mut()
+                    .request("status", serde_json::json!({}))
+                    .ok()
+            }
+
+            fn status_now(&self) -> Option<serde_json::Value> {
+                self.status()
+            }
+
+            fn resume(
+                &self,
+                reset: bool,
+                lifter: guard::Lifter,
+            ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
+                self.0
+                    .borrow_mut()
+                    .request("resume", guard::resume_request(reset, lifter))
+            }
+
+            // The stand-in's pid is this process's own: it is never signalled.
+            fn signal(&self) -> bool {
+                false
+            }
+
+            fn session_stands(&self) -> bool {
+                true
+            }
+        }
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let words = |argv: &[&str]| {
+            argv.iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        guard::stop_with(zerocode_core::computer_use::STOP_REASON_REQUEST, || false);
+        let forged = envelope(&answer_computer_command(&words(&[
+            "resume", "--lifter", "person", "--json",
+        ])));
+        let still = guard::stopped_reason();
+        let helper = StandIn::start("resume-token", Shape::matching());
+        let roads = StandInRoads(std::cell::RefCell::new(
+            helper
+                .connect_window("resume-token")
+                .expect("the window connects to the stand-in"),
+        ));
+        let resumed = agents_resume(&roads, false, None).map_err(|error| error.message);
+        let asked: Vec<serde_json::Value> = helper
+            .heard()
+            .into_iter()
+            .filter(|heard| heard.method == "resume")
+            .map(|heard| heard.params)
+            .collect();
+        drop(roads);
+        guard::lift();
+        assert_eq!(forged["ok"], false, "an agent's words cannot name who lifts: {forged}");
+        assert!(
+            forged["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("--lifter")),
+            "{forged}"
+        );
+        assert_eq!(
+            still.as_deref(),
+            Some(zerocode_core::computer_use::STOP_REASON_REQUEST),
+            "the refused words lifted nothing"
+        );
+        assert!(resumed.is_ok(), "an agent lifts the stop an agent asked for: {resumed:?}");
+        assert_eq!(asked.len(), 1, "the helper was asked once: {asked:?}");
+        assert_eq!(
+            asked[0]["lifter"], "agent",
+            "the helper reads an agent's resume as an agent's: {asked:?}"
+        );
+    }
+
+    /// The person's resume is named in one place (t-66753 A): the band's
+    /// click, in the main window, and no road an agent's command takes.
+    #[test]
+    fn only_the_bands_resume_names_the_person() {
+        const SETTINGS: &str = include_str!("cmd/settings.rs");
+        const RUNTIME: &str = include_str!("agent_tools_runtime.rs");
+        let shipped = |source: &'static str| {
+            source
+                .split_once("#[cfg(test)]")
+                .map_or(source, |(product, _)| product)
+        };
+        assert!(
+            !shipped(RUNTIME).contains("Lifter::Person"),
+            "an agent's door never names the person"
+        );
+        let settings = shipped(SETTINGS);
+        assert_eq!(settings.matches("Lifter::Person").count(), 1, "one place names the person");
+        let resume = &settings[settings
+            .find("pub(crate) fn computer_resume(")
+            .expect("the band's resume")..];
+        let resume = &resume[..resume.find("\n}\n").expect("its end")];
+        assert!(
+            resume.contains("Lifter::Person { revision }"),
+            "the band's resume is the one that names the person: {resume}"
+        );
     }
 
     #[test]
@@ -23245,6 +23466,10 @@ pub(crate) mod computer_desktop_wait {
 
     #[test]
     fn a_wait_is_answered_by_the_window_and_capped_by_the_table() {
+        // A stop made while it waits ends it (t-66760): no other test's stop.
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let started = std::time::Instant::now();
         let answer = answer_computer_command(&words(&["wait", "--ms", "40", "--json"]));
         assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
@@ -23257,6 +23482,433 @@ pub(crate) mod computer_desktop_wait {
 
         // The cap itself is the table's pure rule (core `desktop_wait_ms`); this
         // road only has to hand the asked number to it and speak its answer.
+    }
+
+    /// The four waits (t-66760 b2), each asked for longer than a stop takes
+    /// to land: a wait, a wait-for whose words never show, a sound-wait that
+    /// hears nothing, a watch on a screen that never changes.
+    fn the_waits() -> Vec<(&'static str, Vec<String>)> {
+        vec![
+            ("wait", words(&["wait", "--ms", "2000", "--json"])),
+            (
+                "wait-for",
+                words(&[
+                    "wait-for",
+                    "--app",
+                    "Fixture",
+                    "--window-id",
+                    "41",
+                    "--label",
+                    "Never",
+                    "--timeout-ms",
+                    "2000",
+                    "--json",
+                ]),
+            ),
+            (
+                "sound-wait",
+                words(&["sound-wait", "--timeout-ms", "2000", "--json"]),
+            ),
+            (
+                "watch",
+                words(&["watch", "--until", "change", "--timeout-ms", "2000", "--json"]),
+            ),
+        ]
+    }
+
+    /// A helper that never satisfies a wait, on the thread that stands it:
+    /// its `status` says the person's chord once `chord` is set — a chord
+    /// the window hears only by asking — and every look takes `look_holds`
+    /// with the session's lock held, as a request in flight holds it.
+    fn unsatisfying_helper(
+        chord: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        look_holds: std::time::Duration,
+    ) -> impl FnMut(
+        &str,
+        &serde_json::Value,
+    ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
+        let began = std::time::Instant::now();
+        let mut seq = 0_u64;
+        move |method, _| {
+            seq += 1;
+            let look = || {
+                crate::computer_use::while_a_request_holds_the_session(|| {
+                    std::thread::sleep(look_holds);
+                });
+            };
+            Ok(match method {
+                "status" => serde_json::json!({
+                    "stopped": chord.load(std::sync::atomic::Ordering::SeqCst),
+                    "reason": zerocode_core::computer_use::STOP_REASON_HOTKEY,
+                }),
+                "findElements" => {
+                    look();
+                    serde_json::json!({
+                        "snapshotId": format!("fixture-snapshot-{seq}"),
+                        "app": "Fixture",
+                        "window": { "id": 41, "title": "Fixture document" },
+                        "matches": [],
+                    })
+                }
+                "soundRead" => serde_json::json!({ "listening": true, "events": [], "latest": 0 }),
+                "eyeChanges" => serde_json::json!({
+                    "seq": seq,
+                    "nowMs": i64::try_from(began.elapsed().as_millis()).unwrap_or(i64::MAX),
+                    "streaming": true,
+                    "whole": true,
+                    "changes": [],
+                    "streamId": "fixture-stream",
+                }),
+                "listAllWindows" => serde_json::json!({ "windows": [] }),
+                _ => serde_json::json!({}),
+            })
+        }
+    }
+
+    /// A stop made during a wait ends it at once (t-66760 b2): the person's
+    /// band, an agent's `stop`, the person's chord the window hears only by
+    /// asking the helper, and the person's band over an agent's stop that
+    /// stood when the wait was asked — under which the wait waited, as a look
+    /// under a stop does. Each wait is asked for 2 s on a helper that never
+    /// satisfies it, and the stop comes 150 ms in; measured from the moment
+    /// the stop stood to the moment the wait answered, which refuses it
+    /// `stopped` and names who stopped it.
+    #[test]
+    fn a_stop_during_a_wait_ends_it_at_once_and_says_who_stopped_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        use zerocode_core::computer_use::{
+            COMPUTER_WAIT_FOR_POLL_MS, STOP_REASON_REQUEST, STOP_REASON_WINDOW,
+        };
+        const AT_ONCE: Duration = Duration::from_millis(200);
+        const STOP_COMES: Duration = Duration::from_millis(150);
+        const OVER_A_STOP: &str = "band over an agent's stop";
+        let stops: [(&str, &str, Duration); 4] = [
+            ("band", "person", AT_ONCE),
+            ("agent", "agent", AT_ONCE),
+            (
+                "chord",
+                "person",
+                Duration::from_millis(COMPUTER_WAIT_FOR_POLL_MS).saturating_add(AT_ONCE),
+            ),
+            (OVER_A_STOP, "person", AT_ONCE),
+        ];
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut measured = Vec::new();
+        for (verb, argv) in the_waits() {
+            for (stop, by, within) in stops {
+                crate::computer_use::guard::lift();
+                if stop == OVER_A_STOP {
+                    crate::computer_use::guard::stop_with(STOP_REASON_REQUEST, || true);
+                }
+                let chord = Arc::new(AtomicBool::new(false));
+                let asked = Instant::now();
+                let waiting = {
+                    let (argv, chord) = (argv.clone(), Arc::clone(&chord));
+                    std::thread::spawn(move || {
+                        let _helper = crate::computer_use::test_helper::stand(
+                            unsatisfying_helper(chord, Duration::ZERO),
+                        );
+                        let answer = answer_computer_command(&argv);
+                        (answer, Instant::now())
+                    })
+                };
+                std::thread::sleep(STOP_COMES);
+                match stop {
+                    "agent" => {
+                        answer_computer_command(&words(&["stop", "--json"]));
+                    }
+                    "chord" => chord.store(true, Ordering::SeqCst),
+                    _ => {
+                        crate::computer_use::guard::stop_with(STOP_REASON_WINDOW, || true);
+                    }
+                }
+                let stood = Instant::now();
+                let (answer, answered) = waiting.join().expect("the wait answers");
+                crate::computer_use::guard::lift();
+                let said = envelope(&answer);
+                measured.push((
+                    verb,
+                    stop,
+                    answered.saturating_duration_since(asked),
+                    answered.saturating_duration_since(stood),
+                    within,
+                    said["error"]["code"].clone(),
+                    said["error"]["stoppedBy"].clone(),
+                    by,
+                ));
+            }
+        }
+        for (verb, stop, waited, after, _, code, named, _) in &measured {
+            println!(
+                "measured: {verb} waited {waited:?}, ending {after:?} after the {stop} ({code}, {named})"
+            );
+        }
+        let early: Vec<_> = measured
+            .iter()
+            .filter(|(_, _, waited, ..)| *waited < STOP_COMES)
+            .map(|(verb, stop, waited, ..)| format!("{verb}/{stop} {waited:?}"))
+            .collect();
+        assert!(
+            early.is_empty(),
+            "waits that ended before any stop came: {early:?}"
+        );
+        let late: Vec<_> = measured
+            .iter()
+            .filter(|(_, _, _, after, within, ..)| after >= within)
+            .map(|(verb, stop, _, after, ..)| format!("{verb}/{stop} {after:?}"))
+            .collect();
+        assert!(
+            late.is_empty(),
+            "waits that ran on past a stop (asked for 2 s): {late:?}"
+        );
+        for (verb, stop, _, _, _, code, named, by) in &measured {
+            assert_eq!(code, "stopped", "{verb}/{stop}: the wait is refused as stopped");
+            assert_eq!(named, by, "{verb}/{stop}: the refusal names who stopped it");
+        }
+    }
+
+    /// A wait holds the helper's session only while one of its looks is in
+    /// flight (t-66760 b2, beside t-62469 B2's stop that never waits behind a
+    /// request): a plain wait never holds it, a wait-for whose every look
+    /// holds it 30 ms holds it that long a look, and a `status` asked from
+    /// another thread meanwhile is answered within one look. Measured by
+    /// trying the lock every millisecond. Green on b7fa59fbd already: the
+    /// window answers a wait itself and a wait-for looks request by request.
+    #[test]
+    fn a_wait_holds_the_helper_session_only_while_it_looks() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::time::{Duration, Instant};
+        const LOOK_HOLDS: Duration = Duration::from_millis(30);
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let wait_for = words(&[
+            "wait-for", "--app", "Fixture", "--window-id", "41", "--label", "Never",
+            "--timeout-ms", "600", "--json",
+        ]);
+        for (verb, argv) in [("wait", words(&["wait", "--ms", "600", "--json"])), ("wait-for", wait_for)] {
+            let done = Arc::new(AtomicBool::new(false));
+            let looks = Arc::new(AtomicUsize::new(0));
+            let waiting = {
+                let (done, looks) = (Arc::clone(&done), Arc::clone(&looks));
+                std::thread::spawn(move || {
+                    let mut helper =
+                        unsatisfying_helper(Arc::new(AtomicBool::new(false)), LOOK_HOLDS);
+                    let _helper = crate::computer_use::test_helper::stand(move |method, params| {
+                        if method == "findElements" {
+                            looks.fetch_add(1, Ordering::SeqCst);
+                        }
+                        helper(method, params)
+                    });
+                    let answer = answer_computer_command(&argv);
+                    done.store(true, Ordering::SeqCst);
+                    answer
+                })
+            };
+            let (mut samples, mut held) = (0_u32, 0_u32);
+            let mut status_took = Duration::ZERO;
+            while !done.load(Ordering::SeqCst) {
+                samples += 1;
+                if crate::computer_use::session_stands_now() {
+                    held += 1;
+                }
+                if samples == 300 {
+                    let asked = Instant::now();
+                    let status = answer_computer_command(&words(&["status", "--json"]));
+                    status_took = asked.elapsed();
+                    assert_eq!(status.exit_code, 0, "{verb}: status answers: {}", status.stderr);
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let answer = waiting.join().expect("the wait answers");
+            let looks = u32::try_from(looks.load(Ordering::SeqCst)).unwrap_or(u32::MAX);
+            println!(
+                "measured: beside a {verb} the session was held in {held} of {samples} tries, over {looks} looks of {LOOK_HOLDS:?}; status answered in {status_took:?}"
+            );
+            assert_ne!(envelope(&answer)["error"]["code"], "stopped", "{verb}: no stop stood");
+            let looks_held_ms = u128::from(looks) * LOOK_HOLDS.as_millis();
+            assert!(
+                u128::from(held) <= looks_held_ms + u128::from(looks) * 10 + 10,
+                "{verb}: the session was held in {held} tries of about 1 ms, past its {looks} looks"
+            );
+            assert!(
+                status_took < LOOK_HOLDS + Duration::from_millis(70),
+                "{verb}: a status waited {status_took:?} behind the wait"
+            );
+        }
+    }
+
+    /// A wait-for satisfied names the look it was satisfied on — the
+    /// helper's snapshot, the revision an action after it is held to
+    /// (t-66760 b2).
+    #[test]
+    fn a_satisfied_wait_for_names_the_look_it_was_satisfied_on() {
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let _helper = crate::computer_use::test_helper::stand(|method, _| {
+            Ok(if method == "findElements" {
+                serde_json::json!({
+                    "snapshotId": "fixture-snapshot-9",
+                    "app": "Fixture",
+                    "window": { "id": 41, "title": "Fixture document" },
+                    "matches": [{ "index": 7, "role": "AXButton", "label": "Continue" }],
+                })
+            } else {
+                serde_json::json!({ "stopped": false })
+            })
+        });
+        let answer = answer_computer_command(&words(&[
+            "wait-for", "--app", "Fixture", "--window-id", "41", "--label", "Continue",
+            "--timeout-ms", "600", "--json",
+        ]));
+        let said = envelope(&answer);
+        assert_eq!(said["result"]["satisfied"], true, "{said}");
+        assert_eq!(
+            said["result"]["snapshotId"], "fixture-snapshot-9",
+            "the satisfied wait names the look it was satisfied on: {said}"
+        );
+    }
+
+    /// A batch's wait that would run past the time the batch has left is
+    /// clipped to it, and its line says so (t-66760 b2) — it is not the
+    /// batch's end: the rest of the room is the wait's.
+    #[test]
+    fn a_batch_wait_is_clipped_to_the_time_its_batch_has_left() {
+        use zerocode_core::computer_use::COMPUTER_BATCH_ANSWER_MARGIN_MS;
+        const ROOM_MS: u64 = 400;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let command = batch_of(&serde_json::json!([["wait", "--ms", "100"], ["wait", "--ms", "5000"]]));
+        let mut asked: Vec<Vec<String>> = Vec::new();
+        let answer = crate::agent_tools_runtime::run_batch(
+            &command,
+            COMPUTER_BATCH_ANSWER_MARGIN_MS + ROOM_MS,
+            |argv| {
+                asked.push(argv.to_vec());
+                crate::agent_tools_runtime::computer_said(
+                    "{\"ok\":true,\"result\":{\"waitedMs\":0,\"capped\":false}}\n",
+                )
+            },
+            |_, _| {},
+            || true,
+        );
+        let said = envelope(&answer);
+        assert_eq!(
+            asked.len(),
+            2,
+            "the second wait ran, clipped, rather than the batch ending before it: {said}"
+        );
+        let given = asked[1]
+            .windows(2)
+            .find(|pair| pair[0] == "--ms")
+            .and_then(|pair| pair[1].parse::<u64>().ok())
+            .expect("the clipped wait asks for milliseconds");
+        assert!(given <= ROOM_MS, "the wait was given {given} ms of {ROOM_MS} left");
+        assert_eq!(said["ok"], true, "{said}");
+        assert_eq!(said["result"]["steps"][1]["clipped"]["askedMs"], 5000, "{said}");
+        assert_eq!(said["result"]["steps"][1]["clipped"]["givenMs"], given, "{said}");
+    }
+
+    /// A wait asked while a stop stands is a look and answers — and says the
+    /// stop stands, who stopped it and who lifts it, so a caller does not
+    /// wait again for it (t-66760 b2): a plain wait, and a wait-for whose
+    /// words show.
+    #[test]
+    fn a_wait_asked_under_a_stop_says_the_stop_stands_and_who_lifts_it() {
+        use zerocode_core::computer_use::{STOP_REASON_REQUEST, STOP_REASON_WINDOW};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _helper = crate::computer_use::test_helper::stand(|method, _| {
+            Ok(if method == "findElements" {
+                serde_json::json!({
+                    "snapshotId": "fixture-snapshot-3",
+                    "app": "Fixture",
+                    "window": { "id": 41, "title": "Fixture document" },
+                    "matches": [{ "index": 7, "role": "AXButton", "label": "Continue" }],
+                })
+            } else {
+                serde_json::json!({ "stopped": false })
+            })
+        });
+        let wait_for = words(&[
+            "wait-for", "--app", "Fixture", "--window-id", "41", "--label", "Continue",
+            "--timeout-ms", "600", "--json",
+        ]);
+        for (reason, by) in [(STOP_REASON_WINDOW, "person"), (STOP_REASON_REQUEST, "agent")] {
+            for argv in [words(&["wait", "--ms", "1", "--json"]), wait_for.clone()] {
+                crate::computer_use::guard::lift();
+                crate::computer_use::guard::stop_with(reason, || true);
+                let answer = answer_computer_command(&argv);
+                crate::computer_use::guard::lift();
+                assert_eq!(answer.exit_code, 0, "{argv:?} under a stop is a look: {}", answer.stderr);
+                let said = envelope(&answer);
+                assert_eq!(
+                    said["result"]["stopped"]["stoppedBy"], by,
+                    "{argv:?} under the {reason} stop names who stopped it: {said}"
+                );
+                assert!(
+                    said["result"]["stopped"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains(&format!("({reason})"))),
+                    "{argv:?} under the {reason} stop says it stands and who lifts it: {said}"
+                );
+            }
+        }
+    }
+
+    /// A stop made during a batch ends it at its next wait, as at its next
+    /// act (t-66760 b2): the wait is not waited out under the stop, and its
+    /// refusal names who stopped it.
+    #[test]
+    fn a_stop_during_a_batch_ends_it_at_its_next_wait() {
+        use std::time::{Duration, Instant};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let command = batch_of(&serde_json::json!([
+            ["wait", "--ms", "1"],
+            ["wait", "--ms", "1500"],
+            ["mouse-move", "--x", "1", "--y", "1"]
+        ]));
+        let mut stood = None;
+        let answer = run_batch(
+            &command,
+            |argv| {
+                let answer = answer_computer_command(argv);
+                if stood.is_none() {
+                    answer_computer_command(&words(&["stop", "--json"]));
+                    stood = Some(Instant::now());
+                }
+                answer
+            },
+            || true,
+        );
+        let answered = Instant::now();
+        crate::computer_use::guard::lift();
+        let said = envelope(&answer);
+        let after = answered.saturating_duration_since(stood.expect("the first step ran"));
+        println!("measured: the batch answered {after:?} after the stop");
+        assert_eq!(
+            said["result"]["refusedAt"], 2,
+            "the batch ends at the wait after the stop: {said}"
+        );
+        assert_eq!(said["result"]["steps"][1]["error"]["stoppedBy"], "agent", "{said}");
+        assert!(
+            after < Duration::from_millis(200),
+            "the batch answered {after:?} after the stop"
+        );
     }
 }
 
@@ -27942,6 +28594,7 @@ mod desktop_wait_for_tests {
             &core::WalkBudget {
                 deadline_ms: core::batch_deadline_ms(&steps),
                 out_of_time: (),
+                clips_waits: false,
             },
             |_, argv| core::held_ms(&core::parse_command(argv).unwrap()),
             |_, argv| core::Next::Run(argv.clone()),

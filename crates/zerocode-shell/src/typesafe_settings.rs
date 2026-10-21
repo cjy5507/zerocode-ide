@@ -14,16 +14,18 @@
 //! the check execs `zo decision-shadow check --json`, which puts the shadow's
 //! own question through the same key road, request and answer check.
 
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use zerocode_core::jev::custom;
 use zerocode_core::jev::door::{self, JevSettings, NotAnObject};
 use zerocode_core::jev::{
-    CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
-    ROUTING, SMART_SETTINGS_KEY, choice, count, model_in, noul, pin_in, pinned_model, promote,
-    score,
+    AGENT_TOOL_ASK_OPTIONS, CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode,
+    JevUse, MODEL_SETTING, ROUTING, SMART_SETTINGS_KEY, choice, count, model_in, noul, pin_in,
+    pinned_model, promote, score,
 };
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
@@ -240,7 +242,7 @@ impl JevSwitch {
 /// What the pane paints: whether a key could be kept here, whether one is
 /// saved — never the key itself — the one switch, and every feature as its
 /// reader reads it, with the modes it offers in the table's order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeSafeSettings {
     pub keys_kept_here: bool,
@@ -270,6 +272,8 @@ pub struct TypeSafeSettings {
     /// The routing classifier, which decides whether the routing seat is asked
     /// anything at all.
     pub classifier: ClassifierRow,
+    /// What the editor of the person's own decisions offers and bounds.
+    pub custom_decisions: CustomDecisionRules,
 }
 
 /// Every agent's launch rows against `lineup`; an agent with none is left
@@ -351,6 +355,7 @@ pub fn read_settings(
             gates: ROUTING.id,
             modes: ClassifierMode::ALL.map(ClassifierChoice::of).to_vec(),
         },
+        custom_decisions: CustomDecisionRules::of(&document),
     })
 }
 
@@ -913,6 +918,484 @@ pub fn read_day(path: &Path) -> DayBudget {
         sent,
         most: JevSettings::from_root(&root).daily_requests,
     }
+}
+
+/// A person's decision as the dashboard's editor sends it and is sent it
+/// back (t-62170): a definition's fields ([`custom::Definition`]), with no id
+/// until the store keeps one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionDraft {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub question: String,
+    pub answer: AnswerDraft,
+    pub at: custom::Point,
+    pub reads: BTreeSet<custom::Input>,
+    /// The folders it asks in; none for every folder the person consented to.
+    #[serde(default)]
+    pub folders: Option<BTreeSet<String>>,
+    pub act_from: f64,
+    pub max_per_hour: u64,
+}
+
+/// What a decision's answer is, as the editor writes it: a choice's options
+/// in the order the person wrote them, so a name written twice is seen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AnswerDraft {
+    YesNo { yes: String, no: String },
+    Choice { options: Vec<ChoiceOption> },
+    Score { levels: Vec<String> },
+}
+
+/// One option of a choice: its name, and what it means.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChoiceOption {
+    pub name: String,
+    pub means: String,
+}
+
+impl AnswerDraft {
+    /// One empty answer of every kind, in the order the editor offers them.
+    const EVERY_KIND: [Self; 3] = [
+        Self::YesNo {
+            yes: String::new(),
+            no: String::new(),
+        },
+        Self::Choice {
+            options: Vec::new(),
+        },
+        Self::Score { levels: Vec::new() },
+    ];
+}
+
+impl DecisionDraft {
+    /// A kept definition as the editor writes it: a choice's options in
+    /// core's order, and no folders for every folder the person consented to.
+    fn of(definition: custom::Definition) -> Self {
+        Self {
+            id: Some(definition.id),
+            name: definition.name,
+            question: definition.question,
+            answer: match definition.answer {
+                custom::Answer::YesNo { yes, no } => AnswerDraft::YesNo { yes, no },
+                custom::Answer::Choice(options) => AnswerDraft::Choice {
+                    options: options
+                        .into_iter()
+                        .map(|(name, means)| ChoiceOption { name, means })
+                        .collect(),
+                },
+                custom::Answer::Score(levels) => AnswerDraft::Score { levels },
+            },
+            at: definition.at,
+            reads: definition.reads,
+            folders: match definition.folders {
+                custom::Folders::Consented => None,
+                custom::Folders::Chosen(folders) => Some(folders),
+            },
+            act_from: definition.act_from,
+            max_per_hour: definition.max_per_hour,
+        }
+    }
+
+    /// The definition the draft writes under `id`, and the options a choice
+    /// names a second time: core's map holds a name once, so a second is
+    /// refused at its name as one already offered
+    /// ([`custom::Refusal::OptionName`]).
+    fn definition(self, id: String) -> (custom::Definition, Vec<custom::Refusal>) {
+        let mut twice = Vec::new();
+        let answer = match self.answer {
+            AnswerDraft::YesNo { yes, no } => custom::Answer::YesNo { yes, no },
+            AnswerDraft::Choice { options } => {
+                let mut named = BTreeMap::new();
+                for option in options {
+                    match named.entry(option.name) {
+                        btree_map::Entry::Vacant(slot) => {
+                            slot.insert(option.means);
+                        }
+                        btree_map::Entry::Occupied(taken) => {
+                            twice.push(custom::Refusal::OptionName(taken.key().clone()));
+                        }
+                    }
+                }
+                custom::Answer::Choice(named)
+            }
+            AnswerDraft::Score { levels } => custom::Answer::Score(levels),
+        };
+        let definition = custom::Definition {
+            id,
+            name: self.name,
+            question: self.question,
+            answer,
+            at: self.at,
+            reads: self.reads,
+            folders: self
+                .folders
+                .map_or(custom::Folders::Consented, custom::Folders::Chosen),
+            act_from: self.act_from,
+            max_per_hour: self.max_per_hour,
+        };
+        (definition, twice)
+    }
+}
+
+/// Keep `draft` in the person's store under `home`, zo's config home, at
+/// `now_ms`: a new decision when it has no id, recording before anything
+/// acts on it, else the newest version of the one with its id. Its version.
+///
+/// # Errors
+/// Whatever keeps it from the store.
+pub fn save_custom_decision_at(
+    home: &Path,
+    draft: DecisionDraft,
+    now_ms: i64,
+) -> Result<String, custom::store::Error> {
+    let editing = draft.id.is_some();
+    let id = draft.id.clone().unwrap_or_else(custom::new_id);
+    let (definition, twice) = draft.definition(id);
+    if !twice.is_empty() {
+        return Err(custom::store::Error::Refused(
+            twice
+                .into_iter()
+                .chain(custom::check(&definition))
+                .collect(),
+        ));
+    }
+    if editing {
+        custom::store::edit(home, &definition, now_ms)
+    } else {
+        custom::store::create(home, &definition, JevMode::Shadow, now_ms)
+    }
+}
+
+/// What the dashboard's editor of a person's decisions reads before any is
+/// listed (t-62170): the feature they stand under, every bound a definition
+/// keeps, the kinds of answer, where one may ask and what it may read there,
+/// and the modes one offers, each core's, so the page writes none.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomDecisionRules {
+    /// The use the person's decisions stand under in the use table.
+    pub feature: &'static str,
+    pub decisions_max: usize,
+    pub name_max_chars: usize,
+    pub question_max_chars: usize,
+    pub meaning_max_chars: usize,
+    pub options: Within<usize>,
+    pub hourly: Within<u64>,
+    pub hourly_default: u64,
+    /// The most requests every decision sends together in an hour, as the
+    /// person's settings hold it.
+    pub hourly_all: u64,
+    pub act_from: Within<f64>,
+    pub act_from_default: f64,
+    /// How many days a deleted decision waits to be restored.
+    pub trash_kept_days: i64,
+    /// The word each kind of answer travels under, in the editor's order.
+    pub kinds: Vec<String>,
+    /// Where a decision may ask, and what it may read there.
+    pub points: Vec<DecisionPoint>,
+    /// The modes a decision offers, each by what it does.
+    pub modes: Vec<ModeChoice>,
+}
+
+/// The least and the most a bound allows, both allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Within<T> {
+    pub least: T,
+    pub most: T,
+}
+
+/// A point a decision may ask at, and the inputs it may read there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DecisionPoint {
+    pub at: custom::Point,
+    pub inputs: &'static [custom::Input],
+}
+
+impl CustomDecisionRules {
+    fn of(document: &Value) -> Self {
+        Self {
+            feature: zerocode_core::jev::CUSTOM_DECISIONS.id,
+            decisions_max: custom::DECISIONS_MAX,
+            name_max_chars: custom::NAME_MAX_CHARS,
+            question_max_chars: custom::QUESTION_MAX_CHARS,
+            meaning_max_chars: custom::MEANING_MAX_CHARS,
+            options: Within::of(&custom::OPTIONS),
+            hourly: Within::of(&custom::HOURLY_REQUESTS),
+            hourly_default: custom::HOURLY_DEFAULT,
+            hourly_all: door::custom_hourly_requests(document),
+            act_from: Within::of(&custom::ACT_FROM),
+            act_from_default: custom::ACT_FROM_DEFAULT,
+            trash_kept_days: custom::store::TRASH_KEPT_DAYS,
+            kinds: AnswerDraft::EVERY_KIND
+                .iter()
+                .filter_map(|answer| {
+                    serde_json::to_value(answer)
+                        .ok()?
+                        .get("kind")?
+                        .as_str()
+                        .map(str::to_string)
+                })
+                .collect(),
+            points: custom::Point::ALL
+                .map(|at| DecisionPoint {
+                    at,
+                    inputs: at.inputs(),
+                })
+                .to_vec(),
+            modes: custom::MODES.map(ModeChoice::of).to_vec(),
+        }
+    }
+}
+
+impl<T: Copy> Within<T> {
+    fn of(bound: &std::ops::RangeInclusive<T>) -> Self {
+        Self {
+            least: *bound.start(),
+            most: *bound.end(),
+        }
+    }
+}
+
+/// A decision the store keeps, as the dashboard lists it: its mode, its
+/// version, when it was made and changed, and its newest version as the
+/// editor writes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeptDecision {
+    pub mode: &'static str,
+    pub version: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub draft: DecisionDraft,
+}
+
+/// A deleted decision the store can still bring back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashedDecision {
+    pub id: String,
+    pub name: String,
+    pub deleted_at: String,
+}
+
+/// Every decision the person keeps, the deleted ones still to be restored,
+/// and the folders a decision may be narrowed to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomDecisions {
+    pub decisions: Vec<KeptDecision>,
+    pub trash: Vec<TrashedDecision>,
+    /// The folders the person consented to by name.
+    pub folders: Vec<String>,
+    /// Whether the person consented to every folder.
+    pub everywhere: bool,
+}
+
+/// What core says of a draft before anything keeps it: the rules it breaks
+/// — by their words on the wire ([`RefusalWords`]) — the version it would
+/// be, the question it would ask, and the least sure line an agent would be
+/// told of it: its first option at its act-from line.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftCheck {
+    #[serde(serialize_with = "refusal_words")]
+    pub refusals: Vec<custom::Refusal>,
+    pub version: String,
+    pub questions: Value,
+    pub line: String,
+}
+
+/// A rule a draft breaks, as the drawer reads it: core's word for the rule,
+/// core's word for the field it was found in, the line of that field, and
+/// the option it names or the level, counted from zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RefusalWords {
+    pub word: &'static str,
+    pub field: Option<&'static str>,
+    pub line: Option<usize>,
+    pub option: Option<String>,
+    pub level: Option<usize>,
+}
+
+impl RefusalWords {
+    #[must_use]
+    pub fn of(refusal: &custom::Refusal) -> Self {
+        let (field, line) = match refusal {
+            custom::Refusal::SecretLine { field, line } => (Some(field), Some(*line)),
+            custom::Refusal::MeaningLength(field) => (Some(field), None),
+            _ => (None, None),
+        };
+        let option = match (refusal, field) {
+            (custom::Refusal::OptionName(name), _)
+            | (_, Some(custom::Field::OptionName(name) | custom::Field::Meaning(name))) => {
+                Some(name.clone())
+            }
+            _ => None,
+        };
+        let level = match field {
+            Some(custom::Field::Level(index)) => Some(*index),
+            _ => None,
+        };
+        Self {
+            word: refusal.word(),
+            field: field.map(custom::Field::word),
+            line,
+            option,
+            level,
+        }
+    }
+}
+
+fn refusal_words<S: serde::Serializer>(
+    refusals: &[custom::Refusal],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(refusals.iter().map(RefusalWords::of))
+}
+
+/// Why a change to a person's decisions was not made, as the drawer reads
+/// it: core's refusals by their words, a decision the store no longer keeps,
+/// or what kept the store from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecisionRefusal {
+    pub refusals: Vec<RefusalWords>,
+    pub missing: bool,
+    pub message: String,
+}
+
+impl From<custom::store::Error> for DecisionRefusal {
+    fn from(error: custom::store::Error) -> Self {
+        match error {
+            custom::store::Error::Refused(refusals) => Self {
+                refusals: refusals.iter().map(RefusalWords::of).collect(),
+                missing: false,
+                message: String::new(),
+            },
+            custom::store::Error::Missing => Self {
+                refusals: Vec::new(),
+                missing: true,
+                message: String::new(),
+            },
+            custom::store::Error::Io(error) => error.into(),
+        }
+    }
+}
+
+impl From<std::io::Error> for DecisionRefusal {
+    fn from(error: std::io::Error) -> Self {
+        Self {
+            refusals: Vec::new(),
+            missing: false,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<RouterRefusal> for DecisionRefusal {
+    fn from(refusal: RouterRefusal) -> Self {
+        Self {
+            refusals: Vec::new(),
+            missing: false,
+            message: refusal.message,
+        }
+    }
+}
+
+/// The person's decisions under `home`, zo's config home, and the folders
+/// `settings` consents to.
+///
+/// # Errors
+/// A store that cannot be read.
+pub fn custom_decisions_at(home: &Path, settings: &Value) -> std::io::Result<CustomDecisions> {
+    let decisions = custom::store::list(home)?
+        .into_iter()
+        .map(|entry| {
+            Ok(KeptDecision {
+                draft: DecisionDraft::of(custom::store::definition(home, &entry.definition)?),
+                mode: entry.mode.key(),
+                version: entry.definition,
+                created_at: entry.created_at,
+                updated_at: entry.updated_at,
+            })
+        })
+        .collect::<std::io::Result<_>>()?;
+    let trash = custom::store::trash(home)?
+        .into_iter()
+        .map(|trashed| TrashedDecision {
+            id: trashed.decision.id,
+            name: trashed.decision.name,
+            deleted_at: trashed.deleted_at,
+        })
+        .collect();
+    let door = JevSettings::from_root(settings);
+    Ok(CustomDecisions {
+        decisions,
+        trash,
+        folders: door.folders().map(str::to_string).collect(),
+        everywhere: door.everywhere(),
+    })
+}
+
+/// Core's check of `draft`, with nothing kept.
+#[must_use]
+pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
+    let id = draft.id.clone().unwrap_or_else(custom::new_id);
+    let first = match &draft.answer {
+        AnswerDraft::YesNo { .. } => AGENT_TOOL_ASK_OPTIONS[0].to_string(),
+        AnswerDraft::Choice { options } => options
+            .first()
+            .map(|option| option.name.clone())
+            .unwrap_or_default(),
+        AnswerDraft::Score { levels } => custom::shown_level(0, levels.len()),
+    };
+    let (definition, twice) = draft.definition(id);
+    DraftCheck {
+        refusals: twice
+            .into_iter()
+            .chain(custom::check(&definition))
+            .collect(),
+        version: definition.version().unwrap_or_default(),
+        questions: custom::questions(&definition),
+        line: custom::line(&definition.name, &first, definition.act_from),
+    }
+}
+
+/// Delete the decision `id` under `home` at `now_ms`, and empty the trash of
+/// what waited in it past its days.
+///
+/// # Errors
+/// Whatever keeps the store from it.
+pub fn delete_custom_decision_at(
+    home: &Path,
+    id: &str,
+    now_ms: i64,
+) -> Result<(), custom::store::Error> {
+    custom::store::delete(home, id, now_ms)?;
+    custom::store::empty_trash(home, now_ms)?;
+    Ok(())
+}
+
+/// Set the decision `id` under `home` to the mode named `mode` at `now_ms`.
+///
+/// # Errors
+/// A mode no decision offers, and whatever keeps the store from it.
+pub fn set_custom_decision_mode_at(
+    home: &Path,
+    id: &str,
+    mode: &str,
+    now_ms: i64,
+) -> Result<(), custom::store::Error> {
+    let Some(mode) = JevMode::ALL
+        .into_iter()
+        .find(|offered| offered.key() == mode)
+    else {
+        return Err(custom::store::Error::Refused(vec![custom::Refusal::Mode]));
+    };
+    custom::store::set_mode(home, id, mode, now_ms)
 }
 
 #[cfg(test)]
@@ -2900,6 +3383,544 @@ mod tests {
         );
         assert_eq!(read_summary(br#"{"seats":[]}"#), Some(Vec::new()));
     }
+
+    /// zo names the mode it asks each seat in for the folder it counted —
+    /// for the person's own decisions the lower of their switch and their
+    /// own modes, which the settings file alone cannot say — and the card
+    /// reads that word, so the reader keeps it and hands it on.
+    #[test]
+    fn a_summary_keeps_the_mode_zo_reads_each_feature_at() {
+        let stdout = br#"{"seats":[
+          {"id":"custom","setting":"customDecisions","mode":"off","stand":"recording","applies":false,
+           "today":{"rows":0,"answered":0,"answeredShare":null,"answeredLowerBound":null,"called":0,
+                    "requests":0,"redactedLines":0,"inputTokens":0,"p50Ms":null,"p95Ms":null,"failures":[]},
+           "week":{"rows":0,"answered":0,"answeredShare":null,"answeredLowerBound":null,"called":0,
+                   "requests":0,"redactedLines":0,"inputTokens":0,"p50Ms":null,"p95Ms":null,"failures":[]}}
+        ]}"#;
+        let seats = read_summary(stdout).expect("a summary");
+        let sent = serde_json::to_value(&seats).expect("the seats, sent");
+        assert_eq!(
+            sent[0]["mode"],
+            serde_json::json!("off"),
+            "the mode zo read never reaches the card: {sent}"
+        );
+    }
+
+    /// The store refuses a secret line whoever asks it: a draft that never
+    /// passed the editor's check is refused at the line core's detector
+    /// reads, and nothing is kept (t-62170 stage 3, test 9).
+    #[test]
+    fn saving_refuses_a_secret_line_without_the_screen() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let draft = DecisionDraft {
+            id: None,
+            name: "Release notes".to_string(),
+            question: "Did this turn change what a person sees?\nRead the diff first.\n\
+                       Authorization: Bearer abc\nThen answer."
+                .to_string(),
+            answer: AnswerDraft::YesNo {
+                yes: "It changed what a person sees.".to_string(),
+                no: "Nothing a person sees changed.".to_string(),
+            },
+            at: custom::Point::TurnEnd,
+            reads: BTreeSet::from([custom::Input::Task]),
+            folders: None,
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        match save_custom_decision_at(home.path(), draft, 1_792_300_000_000) {
+            Err(custom::store::Error::Refused(refusals)) => assert_eq!(
+                refusals,
+                vec![custom::Refusal::SecretLine {
+                    field: custom::Field::Question,
+                    line: 3,
+                }],
+                "refused, but not at the secret line"
+            ),
+            kept => panic!("the save kept a question with a secret line: {kept:?}"),
+        }
+        assert!(
+            custom::store::list(home.path())
+                .expect("the store reads")
+                .is_empty(),
+            "a refused decision stands in the store"
+        );
+    }
+
+    /// A refusal reaches the drawer in core's words (t-62170 stage 3): the
+    /// rule's word, the word of the field it was found in, the line, and the
+    /// option or level it names — so the drawer says it and marks the control
+    /// it points at with no word of its own for either. A decision the store
+    /// no longer keeps is said apart from a refusal.
+    #[test]
+    fn a_refusal_reaches_the_drawer_in_cores_words_and_names_where() {
+        let secret = custom::Refusal::SecretLine {
+            field: custom::Field::Question,
+            line: 3,
+        };
+        let level = custom::Refusal::MeaningLength(custom::Field::Level(2));
+        let meaning = custom::Refusal::MeaningLength(custom::Field::Meaning("ship".to_string()));
+        let twice = custom::Refusal::OptionName("ship".to_string());
+        let refused = DecisionRefusal::from(custom::store::Error::Refused(vec![
+            secret.clone(),
+            level.clone(),
+            meaning.clone(),
+            twice.clone(),
+            custom::Refusal::NameTaken,
+        ]));
+        assert_eq!(
+            serde_json::to_value(refused).expect("serializes"),
+            serde_json::json!({
+                "refusals": [
+                    { "word": secret.word(), "field": custom::Field::Question.word(),
+                      "line": 3, "option": null, "level": null },
+                    { "word": level.word(), "field": custom::Field::Level(2).word(),
+                      "line": null, "option": null, "level": 2 },
+                    { "word": meaning.word(), "field": custom::Field::Meaning(String::new()).word(),
+                      "line": null, "option": "ship", "level": null },
+                    { "word": twice.word(), "field": null, "line": null, "option": "ship",
+                      "level": null },
+                    { "word": custom::Refusal::NameTaken.word(), "field": null, "line": null,
+                      "option": null, "level": null },
+                ],
+                "missing": false,
+                "message": "",
+            }),
+            "a refusal crosses as core's words, with the field, line, option and level it names"
+        );
+        assert_eq!(
+            serde_json::to_value(DecisionRefusal::from(custom::store::Error::Missing))
+                .expect("serializes"),
+            serde_json::json!({ "refusals": [], "missing": true, "message": "" }),
+            "a decision the store no longer keeps is said apart from a refusal"
+        );
+    }
+
+    /// The drawer's check names the least sure line an agent would be told of
+    /// a draft — core's line for its first option at its act-from line: a yes,
+    /// a choice's first option as written, a score's lowest level as an agent
+    /// is shown it — and crosses with its refusals in core's words.
+    #[test]
+    fn the_drawers_check_names_the_line_an_agent_would_be_told() {
+        let draft = DecisionDraft {
+            id: None,
+            name: "Release notes".to_string(),
+            question: "Did this turn change what a person sees?\nAuthorization: Bearer abc"
+                .to_string(),
+            answer: AnswerDraft::YesNo {
+                yes: "It changed what a person sees.".to_string(),
+                no: "Nothing a person sees changed.".to_string(),
+            },
+            at: custom::Point::TurnEnd,
+            reads: BTreeSet::from([custom::Input::Task]),
+            folders: None,
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        let checked = check_custom_decision(draft.clone());
+        assert_eq!(
+            checked.line,
+            custom::line(&draft.name, AGENT_TOOL_ASK_OPTIONS[0], draft.act_from),
+            "a yes or no is told as a yes at its act-from line"
+        );
+        let wire = serde_json::to_value(&checked).expect("serializes");
+        let secret = custom::Refusal::SecretLine {
+            field: custom::Field::Question,
+            line: 2,
+        };
+        assert_eq!(
+            (&wire["refusals"], &wire["line"]),
+            (
+                &serde_json::json!([
+                    { "word": secret.word(), "field": custom::Field::Question.word(),
+                      "line": 2, "option": null, "level": null },
+                ]),
+                &serde_json::json!(checked.line),
+            ),
+            "the check crosses with its refusals in core's words and its line"
+        );
+        let options = vec![
+            ChoiceOption {
+                name: "ship".to_string(),
+                means: "Ship it this week.".to_string(),
+            },
+            ChoiceOption {
+                name: "hold".to_string(),
+                means: "Hold it back.".to_string(),
+            },
+        ];
+        let choice = DecisionDraft {
+            answer: AnswerDraft::Choice { options },
+            ..draft.clone()
+        };
+        assert_eq!(
+            check_custom_decision(choice).line,
+            custom::line(&draft.name, "ship", draft.act_from),
+            "a choice is told as its first option as written"
+        );
+        let levels = vec!["Low".to_string(), "Some".to_string(), "High".to_string()];
+        let count = levels.len();
+        let score = DecisionDraft {
+            answer: AnswerDraft::Score { levels },
+            ..draft.clone()
+        };
+        assert_eq!(
+            check_custom_decision(score).line,
+            custom::line(&draft.name, &custom::shown_level(0, count), draft.act_from),
+            "a score is told as its lowest level, as an agent is shown it"
+        );
+    }
+
+    /// The editor of a person's decisions offers and bounds only what core
+    /// holds (t-62170 stage 3): the feature, every limit, the shared hourly
+    /// bound as the person's settings hold it, the kinds of answer under the
+    /// words core's own files keep, the points with their inputs, and the
+    /// modes, each by what it does. The page reads them; it writes none.
+    #[test]
+    fn the_editor_reads_every_bound_and_word_of_a_persons_decisions_from_core() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let hourly_all = custom::ALL_HOURLY_DEFAULT + 1;
+        let document = serde_json::json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: {
+            door::CUSTOM_HOURLY_REQUESTS_SETTING: hourly_all,
+        } } });
+        std::fs::write(&path, document.to_string()).expect("write");
+        let settings = read_settings(&path, &HeldKeys::default(), true).expect("settings");
+        let sent = serde_json::to_value(&settings).expect("the settings, sent");
+        let kinds: Vec<Value> = [
+            custom::Answer::YesNo {
+                yes: String::new(),
+                no: String::new(),
+            },
+            custom::Answer::Choice(BTreeMap::new()),
+            custom::Answer::Score(Vec::new()),
+        ]
+        .into_iter()
+        .map(|answer| {
+            let written = custom::Definition::new(
+                custom::new_id(),
+                String::new(),
+                String::new(),
+                answer,
+                custom::Point::TurnStart,
+            )
+            .to_bytes()
+            .expect("a definition writes");
+            serde_json::from_slice::<Value>(&written).expect("its bytes read")["kind"].clone()
+        })
+        .collect();
+        assert_eq!(
+            sent["customDecisions"],
+            serde_json::json!({
+                "feature": zerocode_core::jev::CUSTOM_DECISIONS.id,
+                "decisionsMax": custom::DECISIONS_MAX,
+                "nameMaxChars": custom::NAME_MAX_CHARS,
+                "questionMaxChars": custom::QUESTION_MAX_CHARS,
+                "meaningMaxChars": custom::MEANING_MAX_CHARS,
+                "options": { "least": custom::OPTIONS.start(), "most": custom::OPTIONS.end() },
+                "hourly": {
+                    "least": custom::HOURLY_REQUESTS.start(),
+                    "most": custom::HOURLY_REQUESTS.end(),
+                },
+                "hourlyDefault": custom::HOURLY_DEFAULT,
+                "hourlyAll": hourly_all,
+                "actFrom": { "least": custom::ACT_FROM.start(), "most": custom::ACT_FROM.end() },
+                "actFromDefault": custom::ACT_FROM_DEFAULT,
+                "trashKeptDays": custom::store::TRASH_KEPT_DAYS,
+                "kinds": kinds,
+                "points": custom::Point::ALL.map(|at| serde_json::json!({
+                    "at": at.key(),
+                    "inputs": at.inputs().iter().map(|input| input.key()).collect::<Vec<_>>(),
+                })),
+                "modes": custom::MODES.map(ModeChoice::of),
+            }),
+            "the editor offers or bounds something core does not hold"
+        );
+    }
+
+    /// The editor's six doors (t-62170 stage 3) are registered with the
+    /// webview, answered by the settings harness's fake backend, and asked
+    /// by the dashboard: a door the page asks that nobody registered is a
+    /// button that does nothing, and one the harness never answers is one no
+    /// page test presses.
+    #[test]
+    fn the_decision_editor_asks_six_registered_doors_the_harness_answers() {
+        let main = include_str!("main.rs");
+        let handlers = main
+            .split_once("tauri::generate_handler![")
+            .map(|(_, list)| list)
+            .expect("the handler list");
+        let harness = include_str!("../../../ui/tests/settings.mjs");
+        let dashboard = include_str!("../../../ui/shell-jev.js");
+        for command in [
+            "list_custom_decisions",
+            "check_custom_decision",
+            "save_custom_decision",
+            "delete_custom_decision",
+            "restore_custom_decision",
+            "set_custom_decision_mode",
+        ] {
+            assert!(
+                handlers.contains(&format!("{command},")),
+                "{command} is not registered"
+            );
+            assert!(
+                harness.contains(&format!("case \"{command}\"")),
+                "the settings harness never answers {command}"
+            );
+            assert!(
+                dashboard.contains(&format!("invoke(\"{command}\"")),
+                "the dashboard never asks {command}"
+            );
+        }
+    }
+
+    /// The editor says every word core and the settings answer hand it in a
+    /// person's language: each point, when it asks and what it does when on,
+    /// each input, each kind of answer, each field a refusal names and each
+    /// refusal has its words in the markup under core's own word
+    /// (`#jev-custom-words`), with a key all four catalogs say. A refusal that
+    /// names no field points at a part the drawer has. A word core adds turns
+    /// this red until a person can read it.
+    #[test]
+    fn the_decision_editor_words_every_name_core_hands_it() {
+        let page = include_str!("../../../ui/index.html");
+        let i18n = include_str!("../../../ui/shell-i18n.js");
+        let dashboard = include_str!("../../../ui/shell-jev.js");
+        let template = &page[page
+            .find("<template id=\"jev-custom-words\">")
+            .expect("the editor's words")..];
+        let template = &template[..template.find("</template>").expect("the template closes")];
+        let worded = |kind: &str, word: &str| -> String {
+            let marker = format!("data-jev-{kind}=\"{word}\"");
+            let node = &template[template
+                .find(&marker)
+                .unwrap_or_else(|| panic!("the markup has no words for the {kind} {word}"))..];
+            let node = &node[..node.find('>').expect("the node opens")];
+            let key = node
+                .split("data-i18n=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("the {kind} {word} has no key"));
+            assert!(key.starts_with("jev.custom."), "{kind} {word}: {key}");
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\"")).count(),
+                4,
+                "{key} must be in en/ja/zh/es"
+            );
+            node.to_string()
+        };
+        let rules = CustomDecisionRules::of(&serde_json::json!({}));
+        for kind in &rules.kinds {
+            worded("kind", kind);
+        }
+        for point in &rules.points {
+            for kind in ["point", "point-about", "point-act"] {
+                worded(kind, point.at.key());
+            }
+            for input in point.inputs {
+                worded("input", input.key());
+            }
+        }
+        for field in [
+            custom::Field::Name,
+            custom::Field::Question,
+            custom::Field::Yes,
+            custom::Field::No,
+            custom::Field::OptionName(String::new()),
+            custom::Field::Meaning(String::new()),
+            custom::Field::Level(0),
+        ] {
+            match field {
+                custom::Field::Name
+                | custom::Field::Question
+                | custom::Field::Yes
+                | custom::Field::No
+                | custom::Field::OptionName(_)
+                | custom::Field::Meaning(_)
+                | custom::Field::Level(_) => worded("field", field.word()),
+            };
+        }
+        for refusal in [
+            custom::Refusal::Id,
+            custom::Refusal::IdTaken,
+            custom::Refusal::NameLength,
+            custom::Refusal::NameTaken,
+            custom::Refusal::QuestionLength,
+            custom::Refusal::OptionCount,
+            custom::Refusal::OptionName(String::new()),
+            custom::Refusal::MeaningLength(custom::Field::Yes),
+            custom::Refusal::SecretLine {
+                field: custom::Field::Question,
+                line: 1,
+            },
+            custom::Refusal::Reads,
+            custom::Refusal::Folders,
+            custom::Refusal::ActFrom,
+            custom::Refusal::MaxPerHour,
+            custom::Refusal::Mode,
+            custom::Refusal::TooMany,
+            custom::Refusal::TooLarge,
+        ] {
+            let node = match refusal {
+                custom::Refusal::Id
+                | custom::Refusal::IdTaken
+                | custom::Refusal::NameLength
+                | custom::Refusal::NameTaken
+                | custom::Refusal::QuestionLength
+                | custom::Refusal::OptionCount
+                | custom::Refusal::OptionName(_)
+                | custom::Refusal::MeaningLength(_)
+                | custom::Refusal::SecretLine { .. }
+                | custom::Refusal::Reads
+                | custom::Refusal::Folders
+                | custom::Refusal::ActFrom
+                | custom::Refusal::MaxPerHour
+                | custom::Refusal::Mode
+                | custom::Refusal::TooMany
+                | custom::Refusal::TooLarge => worded("refusal", refusal.word()),
+            };
+            if let Some(at) = node
+                .split("data-jev-refusal-at=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+            {
+                assert!(
+                    dashboard.contains(&format!("jevCustomGroup(\"{at}\"")),
+                    "{} points at {at}, a part the drawer does not have",
+                    refusal.word()
+                );
+            }
+        }
+    }
+
+    /// A decision made in the window comes back from the store as the editor
+    /// wrote it, recording first; core's check finds nothing in it and names
+    /// the version the store keeps; switched on and then edited into a new
+    /// version, it keeps its mode; a mode no decision offers is refused;
+    /// deleted, it waits in the trash and comes back as it was; and a choice
+    /// that names an option twice is refused at that name (t-62170 stage 3).
+    #[test]
+    fn a_decision_goes_through_the_editors_doors_and_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let settings = serde_json::json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: {
+            door::WORKSPACES_SETTING: ["/work/acme"],
+        } } });
+        let option = |name: &str, means: &str| ChoiceOption {
+            name: name.to_string(),
+            means: means.to_string(),
+        };
+        let draft = DecisionDraft {
+            id: None,
+            name: "Release risk".to_string(),
+            question: "How risky is this change to ship today?".to_string(),
+            answer: AnswerDraft::Choice {
+                options: vec![
+                    option("hold", "Wait for a person."),
+                    option("ship", "Ship it now."),
+                ],
+            },
+            at: custom::Point::TurnEnd,
+            reads: BTreeSet::from([custom::Input::Task, custom::Input::EditedPaths]),
+            folders: Some(BTreeSet::from(["/work/acme".to_string()])),
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        let first = save_custom_decision_at(home, draft.clone(), 1_000).expect("kept");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert_eq!(listed.decisions.len(), 1, "one decision is kept");
+        let kept = listed.decisions[0].clone();
+        let id = kept.draft.id.clone().expect("the store keeps it by an id");
+        assert_eq!(
+            kept.draft,
+            DecisionDraft {
+                id: Some(id.clone()),
+                ..draft.clone()
+            },
+            "the editor gets back what it wrote"
+        );
+        assert_eq!(
+            (kept.mode, kept.version.as_str()),
+            (JevMode::Shadow.key(), first.as_str()),
+            "a new decision records first"
+        );
+        assert_eq!(
+            (listed.folders, listed.everywhere),
+            (vec!["/work/acme".to_string()], false)
+        );
+        let checked = check_custom_decision(kept.draft.clone());
+        assert_eq!(
+            (checked.refusals, checked.version),
+            (Vec::new(), first.clone()),
+            "core finds nothing in a kept decision, and names its version"
+        );
+
+        set_custom_decision_mode_at(home, &id, JevMode::On.key(), 2_000).expect("on");
+        let edited = DecisionDraft {
+            question: "How risky is this change to ship this week?".to_string(),
+            ..kept.draft.clone()
+        };
+        let second = save_custom_decision_at(home, edited, 3_000).expect("edited");
+        assert_ne!(second, first, "an edited question is a new version");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert_eq!(
+            (
+                listed.decisions[0].mode,
+                listed.decisions[0].version.as_str()
+            ),
+            (JevMode::On.key(), second.as_str()),
+            "an edit keeps the mode"
+        );
+        match set_custom_decision_mode_at(home, &id, JevMode::Auto.key(), 4_000) {
+            Err(custom::store::Error::Refused(refusals)) => assert_eq!(
+                refusals,
+                vec![custom::Refusal::Mode],
+                "refused, but not as a mode no decision offers"
+            ),
+            kept => panic!("a decision took the automatic mode: {kept:?}"),
+        }
+
+        delete_custom_decision_at(home, &id, 5_000).expect("deleted");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert!(
+            listed.decisions.is_empty(),
+            "a deleted decision is not listed"
+        );
+        assert_eq!(
+            listed
+                .trash
+                .iter()
+                .map(|trashed| trashed.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![id.as_str()],
+            "it waits in the trash"
+        );
+        custom::store::restore(home, &id).expect("restored");
+        let listed = custom_decisions_at(home, &settings).expect("listed");
+        assert_eq!(
+            (
+                listed.decisions[0].mode,
+                listed.decisions[0].version.as_str()
+            ),
+            (JevMode::On.key(), second.as_str()),
+            "it comes back as it was"
+        );
+
+        let twice = DecisionDraft {
+            answer: AnswerDraft::Choice {
+                options: vec![option("ship", "Ship it now."), option("ship", "Ship it.")],
+            },
+            ..draft
+        };
+        match save_custom_decision_at(home, twice, 6_000) {
+            Err(custom::store::Error::Refused(refusals)) => assert!(
+                refusals.contains(&custom::Refusal::OptionName("ship".to_string())),
+                "refused, but not at the name given twice: {refusals:?}"
+            ),
+            kept => panic!("a choice that names an option twice was kept: {kept:?}"),
+        }
+    }
 }
 
 /// One seat's numbers, as `zo jev summary --json` reports them and the card
@@ -2915,6 +3936,10 @@ pub struct SeatNumbers {
     /// Where the seat stands, and whether it acts right now.
     pub stand: String,
     pub applies: bool,
+    /// The mode zo asks the seat in for the folder it counted: for the
+    /// person's own decisions, the lower of their switch and their own modes.
+    #[serde(default)]
+    pub mode: Option<String>,
     #[serde(default)]
     pub verdict: Option<SeatVerdict>,
     #[serde(default)]

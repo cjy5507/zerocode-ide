@@ -144,6 +144,61 @@ fn a_plain_tree_only_look_needs_no_picture_or_marks() {
     assert_eq!(answer["tree"]["text"], "[1] AXButton Continue");
 }
 
+/// An app's window read without its picture (t-66753 C1): Screen Recording
+/// not granted, the helper answers the window's tree and says why there is
+/// no picture. The look answers that tree and the helper's reason — never a
+/// failure, and never a picture it does not have — and a marked look marks
+/// the tree.
+#[test]
+fn an_app_look_without_its_picture_answers_the_tree_and_why() {
+    let why = json!({
+        "state": "failed",
+        "code": "screenshot_failed",
+        "message": "Screen Recording permission is required for ZeroCode Computer Use; grant permission or pass --no-screenshot to inspect accessibility state only.",
+        "metadata": {"engine": "unknown", "windowId": 77}
+    });
+    let mut answered = frame();
+    answered["screenshot"] = Value::Null;
+    answered["screenshotStatus"] = why.clone();
+    for marked in [false, true] {
+        let mut request = params(&format!("structured-pictureless-{marked}"));
+        request.remove("noScreenshot");
+        if !marked {
+            request.remove("marks");
+        }
+        let mut calls = Vec::new();
+        let answer = observe_with(
+            &request,
+            &super::super::eye::Memory::new(),
+            &mut |method, asked| {
+                calls.push(method.to_owned());
+                assert_ne!(
+                    asked["noScreenshot"], true,
+                    "the look asked for its picture"
+                );
+                Ok(answered.clone())
+            },
+            &mut |_| {},
+        );
+        assert!(
+            answer.is_ok(),
+            "an app's window read without its picture answers its tree (marked {marked}): {answer:?}"
+        );
+        let answer = answer.unwrap();
+        assert_eq!(calls, ["getAppState"], "one read (marked {marked})");
+        assert!(
+            answer["screenshot"].is_null(),
+            "no picture is claimed: {answer}"
+        );
+        assert_eq!(
+            answer["screenshotStatus"], why,
+            "the look says why there is no picture: {answer}"
+        );
+        assert_eq!(answer["tree"]["text"], "[1] AXButton Continue");
+        assert_eq!(answer["marks"].is_null(), !marked, "{answer}");
+    }
+}
+
 #[test]
 fn a_requested_pixel_diff_or_ocr_never_takes_the_structured_shortcut() {
     for option in ["diff", "ocr"] {

@@ -508,8 +508,8 @@
    * label and copy scale — 12, 13, 14, 16 and 24 — so the rungs that sat
    * between them move onto it: 2xs 11 → 12 (label-12), md 15 → 14
    * (label-14), lg 18 → 16 (heading-16). One step stays below Geist's
-   * smallest label, at 11, for a count inside a badge, which is read only
-   * when looked for. */
+   * smallest label, at 11, for a count inside a badge or the legend of a
+   * drawing, which is read only when looked for. */
   --text-3xs: 11px;
   --text-2xs: 12px;
   --text-xs: 12px;
@@ -1820,13 +1820,17 @@
   --knowledge-3d-label-edge: 6;
   --knowledge-3d-label-top: 44;
   --knowledge-3d-label-bottom: 70;
-  --knowledge-3d-label-tall: 19;
-  /* 필라멘트 수: 굵은 몇 쌍, 가운데 자리(t)와 화살이 가리키는 t, 한 줄의 높이 · 둘레의 틈, 화살 각의 걸음(1/rad). */
+  /* 한 줄의 높이는 그려진 이름의 높이다: 글자 단 × 창의 줄 간격(1.55) + 위아래 칸 여백 1 px씩. 쪽 이름이 Geist의
+   * 12 px 단에 서면서(t-67607, 사람의 10-21 시안 B 통과) 19.05 → 20.59 px가 됐다 — 19에 놓으면 위아래로 붙은 이름이
+   * 1.6 px씩 겹친다. */
+  --knowledge-3d-label-tall: 21;
+  /* 필라멘트 수: 굵은 몇 쌍, 가운데 자리(t)와 화살이 가리키는 t, 한 줄의 높이 · 둘레의 틈, 화살 각의 걸음(1/rad).
+   * 한 줄의 높이는 쪽 이름과 같은 셈이다 — 수의 단이 10 → 11 px가 되어(t-67607) 17.5 → 19.05 px. */
   --knowledge-3d-flow-tags: 6;
   --knowledge-3d-flow-tag-at: 0.5;
   --knowledge-3d-flow-tag-ahead: 0.56;
   --knowledge-3d-flow-tag-shift: 0.12;
-  --knowledge-3d-flow-tag-tall: 18;
+  --knowledge-3d-flow-tag-tall: 19;
   --knowledge-3d-flow-tag-room: 3;
   --knowledge-3d-flow-tag-turn: 20;
   /* 팁: 포인터에서 오른쪽 · 위로 비킨 자리, 판 오른쪽 끝에서 비울 넓이, 위의 최소, 둘레의 틈. */
@@ -1836,7 +1840,7 @@
   --knowledge-3d-tip-top: 8;
   --knowledge-3d-tip-gap: 4;
   /* 이름표의 옷(시안 CSS 57–78) — 둥글기 · 칸 여백 · 무대 바탕을 섞는 몫 · 흐린 명판과 쪽 이름의 불투명도 · 줄 간격,
-   * 서고 숨는 전이. 글자 크기는 앱의 글자 단(10 · 11 · 12 px)이다. 필라멘트 수의 화살은 시안의 강조색이다. */
+   * 서고 숨는 전이. 글자 크기는 앱의 글자 단(11 · 12 px, Geist의 단 — t-67607)이다. 필라멘트 수의 화살은 시안의 강조색이다. */
   --knowledge-3d-plate-radius: 9px;
   --knowledge-3d-plate-pad: 2px 6px;
   --knowledge-3d-plate-full-pad: 6px 11px 6px 10px;
@@ -3151,15 +3155,16 @@
   /* 우주 보기의 무대(t-12443) — 시안의 밝은 테마 바탕(음화 인쇄의 종이 곁). */
   --knowledge-3d-stage: rgb(233 228 216);
   /* 밝은 테마의 노출(시안 `applyLight`), 그리고 은하 빛깔의 원천을 어두운 테마 값으로 — 이 블록이 원천을 덮는
-   * 셋(레인 3·준비·멈춤 신호)만 그 어두운 값을 적고, 나머지는 덮지 않은 레인을 그대로 가리킨다. */
+   * 셋(레인 3·준비·멈춤 신호)만 그 어두운 값을 적고, 나머지는 덮지 않은 레인을 그대로 가리킨다. 준비·멈춤의 어두운
+   * 값은 다크 블록의 Geist green-900 #62c073 · red-900 #ff6166이다(t-67607) — 그 둘이 움직이면 여기도 함께 고친다. */
   --knowledge-3d-exposure: 1.25;
   --knowledge-3d-tint-0: var(--git-graph-lane-1);
   --knowledge-3d-tint-1: var(--git-graph-lane-2);
   --knowledge-3d-tint-2: rgb(206 145 120);
   --knowledge-3d-tint-3: var(--git-graph-lane-4);
   --knowledge-3d-tint-4: var(--git-graph-lane-5);
-  --knowledge-3d-tint-5: rgb(131 230 183);
-  --knowledge-3d-tint-6: rgb(255 116 111);
+  --knowledge-3d-tint-5: rgb(98 192 115);
+  --knowledge-3d-tint-6: rgb(255 97 102);
   --knowledge-3d-tint-7: color-mix(in srgb, var(--knowledge-3d-tint-3) 50%, var(--knowledge-3d-tint-4));
   /* 종이 위의 범례 기호와 필라멘트 수의 화살(시안 밝은 테마 CSS 23 · 50–54) — 먹빛. */
   --knowledge-3d-flow-arrow: rgb(45 95 168);

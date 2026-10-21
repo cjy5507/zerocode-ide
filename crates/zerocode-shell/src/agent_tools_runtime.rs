@@ -2710,6 +2710,7 @@ pub(super) async fn computer_loop(
 ) {
     install_confirm_asker(app.clone());
     install_frame_notice(app.clone());
+    install_band_notice(app.clone());
     let sequences = computer_use::sequence::SequenceGate::default();
     while let Some(request) = requests.recv().await {
         let steering = app.clone();
@@ -2718,7 +2719,12 @@ pub(super) async fn computer_loop(
             if request.answer.is_closed() {
                 return;
             }
-            let argv = request.argv;
+            // One spelling of the agent's words from here on (t-66753 C2):
+            // every check, log and saved step below reads `--name value`,
+            // whichever the agent wrote; words that cannot be read so are
+            // left for the parse to refuse.
+            let argv =
+                zerocode_core::computer_use::flags_apart(&request.argv).unwrap_or(request.argv);
             let local_data_root = steering.state::<AppState>().local_data_root().to_path_buf();
             computer_use::evidence::set_root(&local_data_root);
             // A verb that reads or writes the step log waits for the steps
@@ -3376,6 +3382,9 @@ pub(super) fn run_batch(
         }
         return refusal;
     }
+    // A stop made during the batch ends it at its next wait, as at its next
+    // act (t-66760).
+    let _walking = Walking::begin();
     /// Why a batch ended early: its bridge's time, or a step refused.
     #[derive(Clone, PartialEq)]
     enum Halt {
@@ -3388,6 +3397,7 @@ pub(super) fn run_batch(
         &WalkBudget {
             deadline_ms,
             out_of_time: Halt::Late,
+            clips_waits: true,
         },
         |_, argv| walk_step_holds_ms(argv, true),
         |_, argv: &Vec<String>| Next::Run(argv.clone()),
@@ -4156,8 +4166,13 @@ pub(super) trait HelperRoads {
     /// The helper's `status` unless a request is in flight: a stop never
     /// waits behind one.
     fn status_now(&self) -> Option<serde_json::Value>;
-    /// The helper's `resume`.
-    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError>;
+    /// The helper's `resume`, saying who lifts (t-66753 A): an agent's road
+    /// says an agent, whatever its words carried.
+    fn resume(
+        &self,
+        reset: bool,
+        lifter: computer_use::guard::Lifter,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError>;
     /// The signal that stops the helper: false when there is none to tell.
     fn signal(&self) -> bool;
     /// Whether a helper session stands: one that did not answer `status_now`
@@ -4181,8 +4196,12 @@ impl HelperRoads for SessionHelper {
         computer_use::status_unless_busy()
     }
 
-    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError> {
-        computer_use::guard::helper_resume(reset)
+    fn resume(
+        &self,
+        reset: bool,
+        lifter: computer_use::guard::Lifter,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+        computer_use::guard::helper_resume(reset, lifter)
     }
 
     fn signal(&self) -> bool {
@@ -4264,7 +4283,7 @@ pub(super) fn agents_resume(
     }
     computer_use::guard::resume(
         computer_use::guard::Lifter::Agent,
-        || helper.resume(reset),
+        || helper.resume(reset, computer_use::guard::Lifter::Agent),
         || helper.signal(),
     )
     .agent_answer()
@@ -5800,6 +5819,7 @@ pub(super) fn answer_computer_command_with(
         return computer_cli_error(command.json, &error.code, &error.message);
     }
     let surface_context = computer_use::surface_execution::begin(command.method);
+    let waiting = Waiting::new(&SessionHelper, permission_window);
     let result = if command.method == ComputerMethod::Stop {
         Ok(agents_stop(&SessionHelper, permission_window))
     } else if command.method == ComputerMethod::Resume {
@@ -5927,16 +5947,23 @@ pub(super) fn answer_computer_command_with(
         }
     } else if command.method == ComputerMethod::WaitFor {
         // A wait-for is the window's: it looks through the helper until what
-        // it waits for is there (or gone), bounded by the table.
-        desktop_wait_for(&command.params)
+        // it waits for is there (or gone), bounded by the table — and, as
+        // every wait, ends at once on a stop (t-66760).
+        desktop_wait_for(&command.params, &waiting)
     } else if command.method == ComputerMethod::SoundWait {
         // So is a sound-wait: the window asks the helper what it heard.
-        computer_use::listen::sound_wait(&command.params, |after| {
-            computer_use::call("soundRead", serde_json::json!({ "after": after }))
-        })
+        computer_use::listen::sound_wait(
+            &command.params,
+            |after| waiting.call("soundRead", serde_json::json!({ "after": after })),
+            &mut |pause| waiting.pause(pause),
+        )
     } else if command.method == ComputerMethod::Watch {
         // And a watch: the window reads the eye's repaints, no pictures.
-        computer_use::eye::watch_desktop(&command.params)
+        computer_use::eye::watch_desktop(
+            &command.params,
+            &mut |method, params| waiting.call(method, params),
+            &mut |pause| waiting.pause(pause),
+        )
     } else if let Some(seen) = (command.method == ComputerMethod::Screenshot)
         .then(|| computer_use::eye::screenshot(&command.params))
         .flatten()
@@ -5981,21 +6008,29 @@ pub(super) fn answer_computer_command_with(
             .get(zerocode_core::computer_use::WAIT_SETTLE_FLAG)
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        match settles
-            .then(|| computer_use::eye::wait_settled_desktop(waited))
+        let waited_out = match settles
+            .then(|| {
+                computer_use::eye::wait_settled_desktop(
+                    waited,
+                    &mut |method, params| waiting.call(method, params),
+                    &mut |pause| waiting.pause(pause),
+                )
+            })
             .flatten()
         {
-            Some(settled) => Ok(serde_json::json!({
+            Some(settled) => serde_json::json!({
                 "waitedMs": settled["waitedMs"],
                 "askedMs": waited,
                 "capped": capped,
                 "settled": settled["settled"],
-            })),
+            }),
             None => {
-                std::thread::sleep(std::time::Duration::from_millis(waited));
-                Ok(serde_json::json!({ "waitedMs": waited, "capped": capped }))
+                waiting.pause(std::time::Duration::from_millis(waited));
+                serde_json::json!({ "waitedMs": waited, "capped": capped })
             }
-        }
+        };
+        // A stop that ended the pause is the wait's answer (t-66760).
+        waiting.stopped().map(|()| waited_out)
     } else if command.method == ComputerMethod::Click
         && command
             .params
@@ -6022,6 +6057,21 @@ pub(super) fn answer_computer_command_with(
     };
     match result {
         Ok(mut result) => {
+            // A wait answered under a stop — a look, asked while the stop
+            // stood — says the stop stands, who stopped it and who lifts it,
+            // so its caller does not wait again for it (t-66760).
+            if command.method.waits()
+                && let Some((by, stop)) = standing_stop()
+                && let Some(answered) = result.as_object_mut()
+            {
+                answered.insert(
+                    "stopped".into(),
+                    serde_json::json!({
+                        zerocode_core::computer_use::STOPPED_BY_KEY: by,
+                        "message": stop.message,
+                    }),
+                );
+            }
             let png = computer_use::export_screenshot(&mut result);
             if command.method == ComputerMethod::Screenshot
                 && let Some(png) = png
@@ -6066,6 +6116,13 @@ pub(super) fn answer_computer_command_with(
                     validate::refusal_sentence(&error.code, &error.message).unwrap_or(error.message)
                 }
             };
+            // A wait a stop ended names who stopped it (t-66760).
+            if error.code == error_code::STOPPED
+                && command.method.waits()
+                && let Some(refused) = stopped_wait(command.json)
+            {
+                return refused;
+            }
             computer_cli_error(command.json, &error.code, &message)
         }
     }
@@ -6402,6 +6459,18 @@ pub(super) fn install_confirm_asker(app: AppHandle) {
     }));
 }
 
+/// The band hears a stop the helper's waiting answer moved (t-66753 B): the
+/// report it paints, as every road that moves the stop sends it — so the
+/// person's chord stops the work browsers too, with no command between.
+fn install_band_notice(app: AppHandle) {
+    computer_use::guard::install_band_notice(Box::new(move || {
+        let _ = app.emit(
+            "computer:activity",
+            computer_use::guard::activity_report(None),
+        );
+    }));
+}
+
 /// The work screen panel's notice (t-59372): a pane took a look under the
 /// assignment it holds. Only the window's own page hears it, and it carries
 /// the pane, the assignment and the look's number — the picture stays here
@@ -6421,18 +6490,22 @@ fn install_frame_notice(app: AppHandle) {
 
 /// Watch for an element, a piece of screen text or a window title until it is
 /// there — or, with `absent`, gone — looking every `COMPUTER_WAIT_FOR_POLL_MS`
-/// through the helper, for at most the table's budget. An app or window that
-/// is not there yet is a reason to look again; any other refusal is the answer.
+/// through the helper, for at most the table's budget, down a wait's own
+/// roads, which a stop ends (t-66760). An app or window that is not there yet
+/// is a reason to look again; any other refusal is the answer. Satisfied, it
+/// names the helper's snapshot it was satisfied on: the look an action after
+/// it is held to.
 pub(super) fn desktop_wait_for(
     params: &serde_json::Value,
+    waiting: &Waiting<'_>,
 ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
     let started = std::time::Instant::now();
     desktop_wait_for_with(
         params,
         &computer_use::eye::MEMORY,
-        &mut computer_use::call,
+        &mut |method, params| waiting.call(method, params),
         &mut || started.elapsed(),
-        &mut std::thread::sleep,
+        &mut |pause| waiting.pause(pause),
     )
 }
 
@@ -6551,7 +6624,7 @@ pub(super) fn desktop_wait_for_with(
                 "matches": matches.cloned().unwrap_or_else(|| serde_json::json!([])),
             });
             if let Some(answer) = seen {
-                for key in ["app", "window"] {
+                for key in ["app", "window", "snapshotId"] {
                     if let Some(actual) = answer.get(key) {
                         result[key] = actual.clone();
                     }
@@ -6894,7 +6967,7 @@ pub(super) fn desktop_run(
         bytes
     });
     let budget = std::time::Duration::from_millis(budget_ms);
-    let poll = std::time::Duration::from_millis(20);
+    let poll = COMPUTER_STOP_POLL;
     let mut timed_out = false;
     let mut cancelled = None;
     let status = loop {
@@ -6944,6 +7017,139 @@ fn computer_run_admitted() -> Result<(), computer_use::ComputerUseError> {
         .map_or(Ok(()), |reason| Err(computer_use::guard::refusal(&reason)))
 }
 
+/// How often a command that holds the desk — a program's run, every wait —
+/// reads the window's stop: well inside the 200 ms a stop has to end it.
+const COMPUTER_STOP_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// The one way every wait waits (t-66760 b2): a `wait`, a `wait-for`, a
+/// `watch` and a `sound-wait` pause and look through it, so a stop made
+/// while it waits ends it at once — the window's stop (the band, an agent's
+/// `stop`) read every `COMPUTER_STOP_POLL`, and the person's chord, which
+/// the window hears only by asking, asked of the helper every
+/// `COMPUTER_WAIT_FOR_POLL_MS` without waiting behind a request in flight.
+/// A wait asked under a stop is a look, as it was: that stop does not end
+/// it, and one made over it does. Between its looks a wait holds nothing:
+/// the helper's session is taken by a look's own request alone.
+pub(super) struct Waiting<'a> {
+    helper: &'a dyn HelperRoads,
+    app: Option<&'a AppHandle>,
+    /// The revision of the stop standing when the wait was asked.
+    asked_under: Option<u64>,
+    heard: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl<'a> Waiting<'a> {
+    pub(super) fn new(helper: &'a dyn HelperRoads, app: Option<&'a AppHandle>) -> Self {
+        let asked_under = WALK_BEGAN_UNDER.get().unwrap_or_else(|| {
+            let (standing, revision) = computer_use::guard::snapshot();
+            standing.map(|_| revision)
+        });
+        Self {
+            helper,
+            app,
+            asked_under,
+            heard: std::cell::Cell::new(None),
+        }
+    }
+
+    /// The stop that ends the wait, as its refusal, if one was made since
+    /// the wait was asked — the helper asked first when its turn has come.
+    pub(super) fn stopped(&self) -> Result<(), computer_use::ComputerUseError> {
+        computer_use::input_policy::ensure_current()?;
+        let pace = std::time::Duration::from_millis(
+            zerocode_core::computer_use::COMPUTER_WAIT_FOR_POLL_MS,
+        );
+        if self.heard.get().is_none_or(|at| at.elapsed() >= pace) {
+            self.heard.set(Some(std::time::Instant::now()));
+            if let Some(heard) = self.helper.status_now() {
+                adopt_helper_stop(&heard, self.app);
+            }
+        }
+        match computer_use::guard::snapshot() {
+            (Some(reason), revision) if self.asked_under != Some(revision) => {
+                Err(computer_use::guard::refusal(&reason))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Sleep `length`, or less once a stop stands.
+    pub(super) fn pause(&self, length: std::time::Duration) {
+        let until = std::time::Instant::now() + length;
+        while self.stopped().is_ok() {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            std::thread::sleep(left.min(COMPUTER_STOP_POLL));
+        }
+    }
+
+    /// The helper's answer — or, while a stop stands, the stop's refusal.
+    pub(super) fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+        self.stopped()?;
+        computer_use::call(method, params)
+    }
+}
+
+thread_local! {
+    /// The stop standing when the walk this thread walks began, by its
+    /// revision; `None` outside a walk (t-66760). A walk's waits are its
+    /// steps: a stop made since the walk began ends them, as it refuses its
+    /// acts at their door.
+    static WALK_BEGAN_UNDER: std::cell::Cell<Option<Option<u64>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The walk this thread walks, while it lives (t-66760).
+struct Walking(Option<Option<u64>>);
+
+impl Walking {
+    fn begin() -> Self {
+        let (standing, revision) = computer_use::guard::snapshot();
+        Self(WALK_BEGAN_UNDER.replace(Some(standing.map(|_| revision))))
+    }
+}
+
+impl Drop for Walking {
+    fn drop(&mut self) {
+        WALK_BEGAN_UNDER.set(self.0);
+    }
+}
+
+/// The stop standing, if one stands, as a wait names it (t-66760): who
+/// stopped it — the person (their chord, their band, or a stop they may have
+/// made) or an agent's `stop` — and the window's one sentence for its reason
+/// and who lifts it.
+fn standing_stop() -> Option<(&'static str, computer_use::ComputerUseError)> {
+    use zerocode_core::computer_use::{STOPPED_BY_AGENT, STOPPED_BY_PERSON};
+    let reason = computer_use::guard::stopped_reason()?;
+    let by = if zerocode_core::computer_use::persons_stop(&reason)
+        || computer_use::guard::unconfirmed_stop_stands()
+    {
+        STOPPED_BY_PERSON
+    } else {
+        STOPPED_BY_AGENT
+    };
+    Some((by, computer_use::guard::refusal(&reason)))
+}
+
+/// A wait's refusal by the stop that ended it (t-66760), naming who stopped
+/// it.
+fn stopped_wait(json: bool) -> Option<zerocode_hookd::TeamAnswer> {
+    let (by, refusal) = standing_stop()?;
+    Some(computer_cli_error_with(
+        json,
+        &refusal.code,
+        &refusal.message,
+        Some((zerocode_core::computer_use::STOPPED_BY_KEY, by)),
+    ))
+}
+
 pub(super) fn bounded_computer_run_output(mut reader: impl std::io::Read) -> Vec<u8> {
     use std::io::Read as _;
     let limit = u64::try_from(zerocode_core::computer_use::COMPUTER_RUN_MAX_BYTES)
@@ -6976,10 +7182,25 @@ pub(super) fn computer_cli_error(
     code: &str,
     message: &str,
 ) -> zerocode_hookd::TeamAnswer {
+    computer_cli_error_with(json, code, message, None)
+}
+
+/// [`computer_cli_error`] with one word its error carries besides its code
+/// and message — a stopped wait's `stoppedBy` (t-66760).
+fn computer_cli_error_with(
+    json: bool,
+    code: &str,
+    message: &str,
+    besides: Option<(&str, &str)>,
+) -> zerocode_hookd::TeamAnswer {
     if json {
+        let mut error = serde_json::json!({ "code": code, "message": message });
+        if let Some((key, word)) = besides {
+            error[key] = serde_json::Value::from(word);
+        }
         computer_refused(
             computer_use::browser_route::annotate(serde_json::json!({
-                "ok": false, "error": { "code": code, "message": message }
+                "ok": false, "error": error
             }))
             .to_string(),
         )

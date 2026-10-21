@@ -1115,6 +1115,7 @@ fn check_walk<'c>(
         &WalkBudget {
             deadline_ms,
             out_of_time: RecipeStop::Budget,
+            clips_waits: false,
         },
         |check: &&Check, argv| recipe_line_holds_ms(check.tool, argv),
         |_, check| Next::Run(check_argv(check, budget_ms)),
@@ -1209,6 +1210,7 @@ fn walk_lines(
         &WalkBudget {
             deadline_ms,
             out_of_time: RecipeStop::Budget,
+            clips_waits: false,
         },
         |(line, _), argv| recipe_line_holds_ms(line.tool, argv),
         |_, (line, plan)| match plan {

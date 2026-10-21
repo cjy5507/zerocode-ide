@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use runtime::ToolExecutionResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zerocode_core::computer_use::{CLIPPED_KEY, STOPPED_BY_AGENT, STOPPED_BY_KEY, STOPPED_BY_PERSON};
 
 use super::{ToolContext, ToolError};
 
@@ -17,6 +18,13 @@ const FILE_CAP: u64 = 512 * 1024;
 const BUNDLE_CAP: usize = 64;
 const KIND_CAP: usize = 32;
 const ROUTE_REFUSAL: &str = "browser_requires_work_browser";
+/// The kinds a call is counted by beside its refusal code (t-66760): a click
+/// re-picked after `element_not_found`, a wait the person or an agent
+/// stopped, a wait clipped to its call's deadline.
+pub(crate) const REPICKED: &str = "repicked";
+const WAIT_STOPPED_BY_PERSON: &str = "wait_stopped_by_person";
+const WAIT_STOPPED_BY_AGENT: &str = "wait_stopped_by_agent";
+const WAIT_DEADLINE: &str = "wait_deadline";
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Default)]
@@ -25,6 +33,13 @@ struct Receipt {
     several_bundles: bool,
     unknown_classification: bool,
     refusal: Option<String>,
+    noted: Vec<&'static str>,
+}
+
+impl Receipt {
+    fn note(&mut self, kind: &'static str) {
+        if !self.noted.contains(&kind) { self.noted.push(kind); }
+    }
 }
 
 thread_local! {
@@ -98,6 +113,10 @@ impl Tally {
             increment(&mut counts.refusals, code);
             if code == ROUTE_REFUSAL { self.browser_route_refusals = self.browser_route_refusals.saturating_add(1); }
         }
+        for noted in &receipt.noted {
+            increment(&mut self.refusals, noted);
+            increment(&mut counts.refusals, noted);
+        }
         if declares_chrome(input) { self.browser_chrome_calls = self.browser_chrome_calls.saturating_add(1); }
         if receipt.unknown_classification && input.get("action").and_then(Value::as_str).map(str::trim).is_some_and(super::computer_tools::acts) {
             self.browser_classification_unknown = self.browser_classification_unknown.saturating_add(1);
@@ -122,12 +141,25 @@ fn inspect(answer: &Value, receipt: &mut Receipt, depth: usize) {
     if answer.get("ok") == Some(&Value::Bool(false)) {
         receipt.refusal = answer.pointer("/error/code").and_then(Value::as_str).map(|code| kind(code).to_string());
     }
+    match answer.get("error").and_then(|error| error.get(STOPPED_BY_KEY)).and_then(Value::as_str) {
+        Some(STOPPED_BY_PERSON) => receipt.note(WAIT_STOPPED_BY_PERSON),
+        Some(STOPPED_BY_AGENT) => receipt.note(WAIT_STOPPED_BY_AGENT),
+        _ => {}
+    }
+    if answer.get(CLIPPED_KEY).is_some() { receipt.note(WAIT_DEADLINE); }
     for key in ["result", "snapshot", "report"] {
         if let Some(child) = answer.get(key) { inspect(child, receipt, depth - 1); }
     }
     if let Some(steps) = answer.get("steps").and_then(Value::as_array) {
         for step in steps { inspect(step, receipt, depth - 1); }
     }
+}
+
+/// Count the running call by `kind` as well as by its refusal code.
+pub(crate) fn note(kind: &'static str) {
+    ACTIVE.with(|active| {
+        if let Some(receipt) = active.borrow_mut().as_mut() { receipt.note(kind); }
+    });
 }
 
 /// Retain only native identity and classification facts before an error becomes plain tool text.

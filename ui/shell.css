@@ -43350,7 +43350,10 @@ h4.knowledge-inspector-head::after {
   margin-left: var(--space-1);
 }
 
-/* 군집 범례(시안): 왼쪽 아래의 점과 이름. 점의 색은 군집의 색 규칙 하나에서 온다(`data-hue`). */
+/* 군집 범례(시안): 왼쪽 아래의 점과 이름. 점의 색은 군집의 색 규칙 하나에서 온다(`data-hue`).
+ * 글자는 그림의 범례가 서는 단(`--text-3xs`, 11 px)이다 — 범례는 지도 위에 서서 그 밑의 점을 가리고, 짚는 손도
+ * 가져간다. 쪽 이름의 단(12 px, Geist — t-67607)에 두었더니 좁은 판(319 px)에서 줄이 셋에서 넷으로 늘어 범례가
+ * 59 → 86 px로 자랐고, 그 밑에 든 쪽의 점을 짚을 수 없었다. */
 .knowledge-cluster-legend {
   position: absolute;
   left: var(--space-4);
@@ -43361,7 +43364,7 @@ h4.knowledge-inspector-head::after {
   gap: var(--space-1) var(--space-3);
   max-width: var(--knowledge-cluster-legend-max);
   color: var(--ink-label);
-  font-size: var(--text-2xs);
+  font-size: var(--text-3xs);
 }
 
 .knowledge-cluster-legend[hidden] {
@@ -44186,6 +44189,376 @@ h4.knowledge-inspector-head::after {
 .jev-switch .settings-jev-switch,
 .jev-switch .settings-notice {
   margin: 0;
+}
+
+/* A person's own decisions (t-62170 stage 3, DESIGN 3): 「새 결정」 on the
+   switch line takes no height of its own, so a person with none sees no new
+   line; the part between the charts and the table lists each decision with
+   its mode as radios; the drawer they are written in stands at the window's
+   right edge, the whole width on a phone. */
+.jev-switch .jev-custom-guide {
+  flex: none;
+  align-self: center;
+  padding-block: var(--space-1);
+}
+
+.jev-custom {
+  flex: none;
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+}
+
+.jev-custom-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.jev-custom-heading {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.jev-custom-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--jev-weight-strong);
+}
+
+.jev-custom-count, .jev-custom-facts, .jev-custom-act, .jev-custom-about-line {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  line-height: var(--leading-body);
+}
+
+.jev-custom-list, .jev-custom-trash-list, .jev-custom-options {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.jev-custom-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.jev-custom-row + .jev-custom-row {
+  border-top: var(--jev-line) solid var(--edge-rule);
+}
+
+.jev-custom-about {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.jev-custom-name {
+  overflow-wrap: anywhere;
+}
+
+.jev-custom-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+}
+
+.jev-custom-fact {
+  white-space: nowrap;
+}
+
+.jev-custom-mode {
+  display: inline-flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+}
+
+.jev-custom-mode-choice {
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--jev-meta-size);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-custom-mode-choice:hover {
+  color: var(--ink-chalk);
+}
+
+.jev-custom-mode-choice[aria-checked="true"] {
+  background: var(--surface-deck);
+  color: var(--ink-chalk);
+  font-weight: var(--jev-weight-strong);
+  box-shadow: var(--shadow-1);
+}
+
+.jev-custom-actions, .jev-custom-trashed {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.jev-custom-trashed {
+  justify-content: space-between;
+}
+
+.jev-custom-trash summary, .jev-custom-preview summary {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  cursor: pointer;
+}
+
+.jev-custom-trash-list {
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.jev-custom-scrim {
+  place-items: stretch end;
+  padding: 0;
+}
+
+.jev-custom-drawer {
+  display: flex;
+  flex-direction: column;
+  width: min(var(--jev-drawer-width), 100%);
+  min-height: 0;
+  border-left: var(--jev-line) solid var(--edge-rule);
+  background: var(--surface-deck);
+  color: var(--ink-chalk);
+  box-shadow: var(--shadow-2);
+}
+
+.jev-custom-drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: var(--jev-line) solid var(--edge-rule);
+}
+
+.jev-custom-drawer-title {
+  margin: 0;
+  font-size: var(--jev-drawer-title-size);
+}
+
+.jev-custom-form {
+  flex: 1 1 auto;
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: var(--space-4);
+  overflow: auto;
+}
+
+.jev-custom-field {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.jev-custom-field legend {
+  padding: 0;
+  font-weight: var(--jev-weight-strong);
+}
+
+.jev-custom-field[data-refused] legend {
+  color: var(--signal-halt);
+}
+
+.jev-custom-input, .jev-custom-area {
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--space-2);
+  color: var(--ink-chalk);
+  background: var(--surface-well);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  font: inherit;
+}
+
+.jev-custom-area {
+  resize: vertical;
+}
+
+.jev-custom-number {
+  width: auto;
+}
+
+.jev-custom-form [aria-invalid="true"] {
+  border-color: var(--signal-halt);
+}
+
+.jev-custom-refusals {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  list-style: none;
+  color: var(--signal-halt);
+  border: var(--jev-line) solid var(--signal-halt);
+  border-radius: var(--radius-sm);
+}
+
+.jev-custom-version {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-well);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  line-height: var(--leading-body);
+}
+
+.jev-custom-choice {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.jev-custom-choice input {
+  flex: none;
+  margin: 0;
+}
+
+.jev-custom-choice-words {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.jev-custom-choice-words small {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-custom-folders {
+  display: grid;
+  gap: var(--space-1);
+  padding-left: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-custom-range {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.jev-custom-range input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.jev-custom-share {
+  font-variant-numeric: tabular-nums;
+}
+
+.jev-custom-options {
+  gap: var(--space-3);
+}
+
+.jev-custom-option {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+}
+
+.jev-custom-label {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-custom-remove {
+  justify-self: end;
+}
+
+.jev-custom-add {
+  justify-self: start;
+}
+
+.jev-custom-line, .jev-custom-questions {
+  display: block;
+  margin: 0;
+  padding: var(--space-2);
+  background: var(--surface-well);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--jev-meta-size);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.jev-custom-questions {
+  max-height: 24em;
+  margin-top: var(--space-2);
+  overflow: auto;
+}
+
+.jev-custom-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: var(--jev-line) solid var(--edge-rule);
+}
+
+.jev-custom-unsaved {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--jev-tone-under);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-custom-foot-delete {
+  margin-right: auto;
+}
+
+@container jev (width < 58em) {
+  .jev-custom-list {
+    gap: var(--space-2);
+  }
+
+  .jev-custom-row, .jev-custom-row + .jev-custom-row {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
+    padding: var(--space-3);
+    border: var(--jev-line) solid var(--edge-rule);
+    border-radius: var(--radius-sm);
+  }
 }
 
 .jev-error {

@@ -186,6 +186,32 @@ fn the_helpers_stop_reasons_are_the_cores() {
     );
 }
 
+/// Who lifts a stop is one pair of words on both sides (t-66753 A): the
+/// window writes them on the helper's `resume`, the helper reads them, and
+/// only the person's word lifts the person's chord.
+#[test]
+fn the_helpers_lifter_words_are_the_cores() {
+    use zerocode_core::computer_use::{
+        RESUME_LIFTER_AGENT, RESUME_LIFTER_KEY, RESUME_LIFTER_PERSON,
+    };
+    let guard = include_str!(
+        "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/OperatorGuard.swift"
+    );
+    for (case, word) in [
+        ("person", RESUME_LIFTER_PERSON),
+        ("agent", RESUME_LIFTER_AGENT),
+    ] {
+        assert!(
+            guard.contains(&format!("case {case} = \"{word}\"")),
+            "the helper's StopLifter.{case} is not the core's `{word}`"
+        );
+    }
+    assert!(
+        guard.contains(&format!("public static let key = \"{RESUME_LIFTER_KEY}\"")),
+        "the helper reads who lifts under the core's key"
+    );
+}
+
 /// The hand's pace and session count are the core's alone: the window hands
 /// the helper `guard_table()` at launch, the helper reads exactly that shape
 /// under the core's name and words and keeps no pace of its own, and without

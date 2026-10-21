@@ -290,6 +290,91 @@ fn board_ledger_reads_do_not_wait_for_the_authority_on_the_main_thread() {
     assert!(beat.contains("refresh_board_ledger()"));
 }
 
+/// t-67102: a plain sync command runs on the main thread, and a settings read
+/// there waits on the repository's one lock, which every settings commit holds
+/// through its fsync — `waiting_on_me` stood 20 255 ms behind one on
+/// 2026-10-21 while a build saturated the disk. Such a command reads the
+/// snapshot every load and every commit leave in memory.
+#[test]
+fn no_plain_sync_tauri_command_reads_the_settings_repository() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut count = 0;
+    for directory in [&src, &src.join("cmd")] {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "rs")
+                || path
+                    .file_name()
+                    .is_some_and(|name| name == "main_unit_tests.rs")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let shipped = text.split("#[cfg(test)]").next().unwrap();
+            for rest in shipped.split("\n#[tauri::command]\n").skip(1) {
+                if rest.split('{').next().unwrap().contains("async fn") {
+                    continue;
+                }
+                let command = super::support::block_after(rest, "fn ");
+                for road in [
+                    "load_settings",
+                    "read_json",
+                    "write_json",
+                    "mutate_json",
+                    "mutate_settings",
+                ] {
+                    assert!(
+                        !command.contains(road),
+                        "a main-thread command in {} reads the settings repository \
+                         (`{road}`):\n{command}",
+                        path.display()
+                    );
+                }
+                count += 1;
+            }
+        }
+    }
+    assert!(count > 0);
+    let waiting = std::fs::read_to_string(src.join("cmd/waiting.rs")).unwrap();
+    let finish = super::support::block_after(&waiting, "fn finish_mode(");
+    assert!(
+        finish.contains("remembered_settings(") && !finish.contains("load_settings"),
+        "the waiting list reads the finish setting from the disk again"
+    );
+    let runtime = std::fs::read_to_string(src.join("settings_runtime.rs")).unwrap();
+    for door in [
+        "pub(super) fn load_settings(",
+        "pub(super) fn load_settings_resilient(",
+        "pub(super) fn mutate_settings(",
+    ] {
+        assert!(
+            super::support::block_after(&runtime, door).contains("remember("),
+            "`{door}` no longer leaves its snapshot for the main thread"
+        );
+    }
+}
+
+/// t-67102: the hang line names the disk work the main thread stands in, so
+/// the next stall is read off the log instead of traced from a command name.
+#[test]
+fn hang_evidence_names_the_disk_work_the_main_thread_stands_in() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let watchdog = std::fs::read_to_string(src.join("hang_watchdog.rs")).unwrap();
+    assert!(watchdog.contains("crate::crumbs::main_io()"));
+    assert!(watchdog.contains("\"hang io: {io}\""));
+    let runtime = std::fs::read_to_string(src.join("settings_runtime.rs")).unwrap();
+    for door in [
+        "pub(super) fn load_settings(",
+        "pub(super) fn legacy_migration_completed(",
+        "pub(super) fn mutate_settings(",
+    ] {
+        assert!(
+            super::support::block_after(&runtime, door).contains("crumbs::MainIo::enter("),
+            "`{door}` no longer names its disk work to the hang watchdog"
+        );
+    }
+}
+
 #[test]
 fn hang_evidence_names_the_observed_main_scope_and_samples_that_thread() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
