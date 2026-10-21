@@ -64,6 +64,7 @@ mod agent_trust_presets;
 mod answer_door;
 pub(crate) mod api_routers;
 mod app_paths;
+mod artifact_flow;
 mod artifact_render;
 mod artifact_render_plan;
 mod artifact_runtime;
