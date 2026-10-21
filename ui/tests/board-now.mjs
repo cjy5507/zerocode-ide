@@ -200,7 +200,7 @@ export async function testBoardNow(browser, origin, ok) {
     /* ---- 당신 차례: 질문·검토, 행 안의 첫 행동 ---- */
     const asks = await page.evaluate(() => [...document.querySelectorAll('#board-view [data-desk-block="asks"] .board-asks > li')]
       .map((row) => ({ key: row.dataset.ask, buttons: [...row.querySelectorAll("button:not([hidden])")].map((one) => one.textContent) })));
-    ok("your turn holds the question with its answer button and the report with read and pass, oldest first",
+    ok("your turn holds the question first, with its answer button, then the report with read and pass",
       asks.length === 2 && asks[0].key.startsWith("review:") === false && asks[0].buttons.includes("답하기")
         && asks[1].buttons.includes("보고 읽기") && asks[1].buttons.includes("통과"), JSON.stringify(asks));
     await page.click('#board-view [data-ask^="review:"] [data-act="pass"]');
@@ -266,11 +266,11 @@ export async function testBoardNow(browser, origin, ok) {
     /* ---- 탭: 워커는 워커 탭에만, 목록은 기록 탭에 ---- */
     await page.click('#board-view [data-board-tab-button="workers"]');
     const workersTab = await page.evaluate(() => ({
-      workers: document.querySelector('#board-view [data-desk-block="workers"]').checkVisibility(),
-      asks: document.querySelector('#board-view [data-desk-block="asks"]').checkVisibility(),
+      workers: document.querySelector('#board-view [data-desk-block="workers"]')?.checkVisibility() ?? false,
+      asks: document.querySelector('#board-view [data-desk-block="asks"]') !== null,
       head: document.querySelector("#board-view .task-board-intro").checkVisibility(),
     }));
-    ok("the Workers tab shows the workers and nothing of Now", workersTab.workers && !workersTab.asks && !workersTab.head,
+    ok("the Workers tab shows the workers and holds nothing of Now", workersTab.workers && !workersTab.asks && !workersTab.head,
       JSON.stringify(workersTab));
     await page.keyboard.press("ArrowRight");
     const historyTab = await page.evaluate(() => ({

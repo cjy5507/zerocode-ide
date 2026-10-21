@@ -12,6 +12,13 @@ fn shell_source(name: &str) -> String {
     std::fs::read_to_string(src.join(name)).unwrap_or_else(|why| panic!("{name}: {why}"))
 }
 
+/// A window file read when the test runs, not when it compiles: a file the
+/// board has yet to grow fails its assertion instead of the build.
+fn ui_source(name: &str) -> String {
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    std::fs::read_to_string(ui.join(name)).unwrap_or_else(|why| panic!("ui/{name}: {why}"))
+}
+
 /// Every kind of decision the desk sends is said in the person's language.
 ///
 /// The ledger writes a hold as prose (`unexamined_question`, `examined_facts`
@@ -92,7 +99,7 @@ fn the_three_tabs_are_one_list_and_the_markup_carries_them() {
         );
     }
     // The person's buttons speak through `data-tip`, never a `title`.
-    let now = include_str!("../../../../ui/shell-board-now.js");
+    let now = ui_source("shell-board-now.js");
     assert!(
         !now.contains("\"title\"") && !now.contains(".title ="),
         "the board's new buttons carry a native tooltip instead of `data-tip`"

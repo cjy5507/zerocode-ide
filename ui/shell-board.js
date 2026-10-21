@@ -199,14 +199,22 @@ function paintCoordinatorDesk(view) {
   const now = Date.now();
   if (now - deskAmbientAt >= DESK.ambientEveryMs) refreshDeskAmbient();
   paintBoardTabs(view);
-  const blocks = DESK_BLOCKS.map((entry) => {
+  // Only the chosen tab's blocks stand: a block left behind on another tab is
+  // taken out and drawn afresh when its tab is chosen, so the workers' rows
+  // and the task flow do not ride along unseen under 「지금」.
+  const blocks = [];
+  for (const entry of DESK_BLOCKS) {
+    if (entry.tab !== boardNowTab) {
+      desk.querySelector(`:scope > [data-desk-block="${entry.id}"]`)?.remove();
+      continue;
+    }
     const block = deskBlock(desk, entry);
     writeAttribute(block, "data-board-tab-of", entry.tab);
-    if (entry.tab === boardNowTab) writeHidden(block, !entry.paint(block, now, view));
-    return block;
-  });
+    writeHidden(block, !entry.paint(block, now, view));
+    blocks.push(block);
+  }
   reconcileElementOrder(desk, blocks);
-  writeHidden(desk, blocks.every((block) => block.dataset.boardTabOf !== boardNowTab || block.hidden));
+  writeHidden(desk, blocks.every((block) => block.hidden));
   paintBoardHead(view, deskOwed(deskLedger), now);
 }
 

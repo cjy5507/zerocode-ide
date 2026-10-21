@@ -29,7 +29,9 @@ const BOARD_ASKS_SHOWN = 4;
 
 /* 사람이 고른 것: 당신 차례를 다 펼쳤는가, 접은 목표, 펼친 원문·보고, 쓰는 중인 답.
  * 판이 다시 그려져도 남는다. */
-const boardNowChoice = { asksAll: false, folded: new Set(), raw: new Set(), reports: new Set(), answers: new Map() };
+const boardNowChoice = {
+  asksAll: false, folded: new Set(), goalsAll: new Set(), raw: new Set(), reports: new Set(), answers: new Map(),
+};
 
 /* 누른 결정·통과(행 키마다): 보내는 중인가, 원장이 돌려준 답, 틀린 말. 보낸 요청의
  * 이름은 답이 불확실하면 그대로 남아 다시 누르면 같은 영수증을 되받는다. */
@@ -88,11 +90,12 @@ function deskTaskEta(task, now) {
 }
 
 /* 「지금 도는 일」 표 위에 일정 부품이 설 자리. 부품(`paintBoardSchedule`)이 실린
- * 창에서만 그리고, 없으면 자리는 접힌다. */
+ * 창에서만 그리고, 없으면 자리는 접힌다. 부품은 아직 이 창에 없는 이름이라 이름으로
+ * 부르지 않고 있을 때만 손에 쥔다. */
 function paintBoardScheduleSlot(host) {
-  const drawn = typeof paintBoardSchedule === "function";
-  writeHidden(host, !drawn);
-  if (drawn) paintBoardSchedule(host);
+  const draw = typeof paintBoardSchedule === "function" ? paintBoardSchedule : null;
+  writeHidden(host, draw === null);
+  draw?.(host);
 }
 
 /* ---- 게이트의 우리말 한 줄 -------------------------------------------------
@@ -185,7 +188,8 @@ function boardRunWork(task, state, carrier, health, entry) {
   return "";
 }
 
-/* 행의 끝 칸: 끝날 시각이 있으면 그 시각, 도는 일은 경과, 기다리는 일은 차례. */
+/* 행의 끝 칸: 끝날 시각이 있으면 그 시각, 도는 일은 경과, 기다리는 일은 차례. 멈춘
+ * 행의 끝 칸은 「원문 보기」 단추다(`paintBoardRunEnd`) — 멈춤은 상태 칸이 이미 말한다. */
 function boardRunEnd(task, state, carrier, now) {
   const eta = deskTaskEta(task, now);
   if (eta !== null) return t("board.now.endAt", "{{time}}쯤", { time: knowledgeClock(eta, now) });
@@ -193,7 +197,6 @@ function boardRunEnd(task, state, carrier, now) {
     const from = Number(carrier?.dispatch_started_ms) || 0;
     return (from > 0 ? runningWord(from, now) : null) ?? t("board.desk.releaseJustStarted", "방금 시작");
   }
-  if (state === "halt") return t("board.now.stateHalt", "멈춤");
   if (state === "queue") return t("board.now.stateQueue", "차례 기다림");
   return "";
 }
@@ -220,6 +223,8 @@ function boardRunRaw(row) {
  * 그대로, `paintDeskLetter`), 원장이 세운 결정(거두기·다시 띄우기·열기), 그리고
  * 보고가 와서 검증을 기다리는 과업(보고 읽기·통과). 셋 다 원장이 이미 고른 목록에서
  * 오고, 이 화면은 고르지도 세지도 않는다. */
+const BOARD_ASK_ORDER = Object.freeze(["question", "hold", "review"]);
+
 function boardAsks(ledger) {
   const asks = [];
   for (const letter of Array.isArray(ledger?.mail) ? ledger.mail : []) {
@@ -232,8 +237,9 @@ function boardAsks(ledger) {
       asks.push({ kind: "review", key: `review:${task.run}/${task.id}`, task, at: Number(task.created_ms) || 0 });
     }
   }
-  // 오래된 것이 먼저 — 가장 오래 기다린 워커부터 답한다.
-  return asks.sort((a, b) => a.at - b.at);
+  // 질문이 먼저 — 묻는 워커는 답을 받을 때까지 멈춰 있다. 그다음이 결정, 검토이고, 같은
+  // 종류 안에서는 오래된 것이 먼저다.
+  return asks.sort((a, b) => BOARD_ASK_ORDER.indexOf(a.kind) - BOARD_ASK_ORDER.indexOf(b.kind) || a.at - b.at);
 }
 
 /* 이 창이 그 런의 코디네이터 자리를 들고 있는가 — 답·결정·통과는 그 자리로만 간다. */
@@ -463,25 +469,27 @@ function paintBoardReview(row, ask, now, view) {
     { run: task.run, task: task.id, attempt, source },
     (answer) => t("board.now.reviewSent", "통과를 적음 · 원장에 적히면 줄에서 빠져요 {{receipt}}",
       { receipt: boardReceipt(answer) }).trim());
-  // 보고의 몸 — 통과 조건과 넘김 메모, 남긴 보고서의 문(과업 흐름의 행과 같은 손).
+  // 보고의 몸 — 통과 조건과 넘김 메모, 남긴 보고서의 문(과업 흐름의 행과 같은 손). 펼친
+  // 사람에게만 있다: 접힌 행은 그 몸을 들고 다니지 않는다.
   let body = row.querySelector(":scope > .board-ask-report");
+  if (!open) {
+    body?.remove();
+    return;
+  }
   if (!body) {
     body = deskElement("div", "board-ask-report");
     body.append(deskElement("p", "board-desk-task-work"), deskElement("p", "board-desk-task-handin"),
       deskElement("ol", "board-desk-task-conditions"), deskKeptLine("board-desk-task-kept", true));
     row.insertBefore(body, row.querySelector(":scope > .board-ask-note"));
   }
-  writeHidden(body, !open);
-  if (open) {
-    const [workLine, handInLine, conditions, kept] = body.children;
-    const work = deskTaskWorkWords(task.progress);
-    writeTextContent(workLine, work);
-    writeHidden(workLine, work === "");
-    const handIn = deskHandInWords(task.hand_in);
-    writeTextContent(handInLine, handIn || t("board.now.reportEmpty", "넘김 글에 남긴 메모가 없습니다"));
-    paintDeskConditions(conditions, task.hand_in?.conditions ?? []);
-    paintDeskKept(kept, task.kept, task);
-  }
+  const [workLine, handInLine, conditions, kept] = body.children;
+  const work = deskTaskWorkWords(task.progress);
+  writeTextContent(workLine, work);
+  writeHidden(workLine, work === "");
+  const handIn = deskHandInWords(task.hand_in);
+  writeTextContent(handInLine, handIn || t("board.now.reportEmpty", "넘김 글에 남긴 메모가 없습니다"));
+  paintDeskConditions(conditions, task.hand_in?.conditions ?? []);
+  paintDeskKept(kept, task.kept, task);
 }
 
 function paintBoardQuestion(row, ask, now, view) {
@@ -597,6 +605,7 @@ function boardGoals(rows) {
   return [...goals.values()].filter((goal) => goal.live.length > 0).sort((a, b) => a.at - b.at);
 }
 
+/* 한 행의 칸 여섯 — 표가 서른 행이어도 판이 가볍게, 칸 안에 상자를 겹치지 않는다. */
 function boardRunRow() {
   const row = deskElement("div", "board-run");
   row.setAttribute("role", "row");
@@ -604,22 +613,35 @@ function boardRunRow() {
   title.append(deskElement("span", "board-run-name"), deskElement("code", "board-run-id"));
   const status = deskElement("span", "board-run-state");
   status.append(agentGraphStateMark("idle"), deskElement("span", "board-run-word"));
-  const branch = deskElement("span", "board-run-branch");
-  branch.append(deskElement("code", ""));
-  const work = deskElement("span", "board-run-work");
-  const raw = deskElement("button", "board-link board-run-raw");
-  raw.type = "button";
-  raw.hidden = true;
-  raw.onclick = () => {
-    const key = row.dataset.key;
-    if (boardNowChoice.raw.has(key)) boardNowChoice.raw.delete(key);
-    else boardNowChoice.raw.add(key);
-    if (row.__view) paintCoordinatorDesk(row.__view);
-  };
-  work.append(deskElement("span", "board-run-work-text"), raw);
-  row.append(title, status, work, deskElement("span", "board-run-who"), branch, deskElement("span", "board-run-end"));
+  row.append(title, status, deskElement("span", "board-run-work"), deskElement("span", "board-run-who"),
+    deskElement("code", "board-run-branch"), deskElement("span", "board-run-end"));
   for (const cell of row.children) cell.setAttribute("role", "cell");
   return row;
+}
+
+/* 끝 칸: 멈춘 행은 「원문 보기」 단추 하나, 그 밖의 행은 끝 낱말. 단추는 멈춘 행에만
+ * 있다. */
+function paintBoardRunEnd(node, row, now) {
+  const end = node.querySelector(".board-run-end");
+  if (boardRunRaw(row) === "") {
+    if (end.firstElementChild) end.replaceChildren();
+    writeTextContent(end, boardRunEnd(row.task, row.state, row.carrier, now));
+    return;
+  }
+  let raw = end.firstElementChild;
+  if (!raw) {
+    raw = deskElement("button", "board-link board-run-raw");
+    raw.type = "button";
+    raw.onclick = () => {
+      const key = node.dataset.key;
+      if (boardNowChoice.raw.has(key)) boardNowChoice.raw.delete(key);
+      else boardNowChoice.raw.add(key);
+      if (node.__view) paintCoordinatorDesk(node.__view);
+    };
+    end.replaceChildren(raw);
+  }
+  writeTextContent(raw, t("board.now.raw", "원문 보기"));
+  writeAttribute(raw, "aria-expanded", String(boardNowChoice.raw.has(node.dataset.key)));
 }
 
 function paintBoardRunRow(node, row, now, view) {
@@ -633,16 +655,11 @@ function paintBoardRunRow(node, row, now, view) {
   dressAgentGraphStateMark(node.querySelector(".agent-graph-node-state"), said.mark);
   writeTextContent(node.querySelector(".board-run-word"),
     state === "done" ? deskStageWord(task.stage) : t(said.key, said.word));
-  writeTextContent(node.querySelector(".board-run-work-text"), boardRunWork(task, state, carrier, health, entry));
-  const raw = node.querySelector(".board-run-raw");
-  const open = boardNowChoice.raw.has(node.dataset.key);
-  writeHidden(raw, boardRunRaw(row) === "");
-  writeTextContent(raw, t("board.now.raw", "원문 보기"));
-  writeAttribute(raw, "aria-expanded", String(open));
+  writeTextContent(node.querySelector(".board-run-work"), boardRunWork(task, state, carrier, health, entry));
   const model = carrier ? ((carrier.term != null ? paneModels.get(carrier.term) : null) ?? carrier.model ?? "") : "";
   writeTextContent(node.querySelector(".board-run-who"), model || (carrier ? agentName(carrier.agent) : ""));
-  writeTextContent(node.querySelector(".board-run-branch > code"), carrier?.checkout ? basename(carrier.checkout) : "");
-  writeTextContent(node.querySelector(".board-run-end"), boardRunEnd(task, state, carrier, now));
+  writeTextContent(node.querySelector(".board-run-branch"), carrier?.checkout ? basename(carrier.checkout) : "");
+  paintBoardRunEnd(node, row, now);
 }
 
 /* 끝난 과업의 단계 낱말 — 과업 흐름의 칩과 같은 말(`DESK_STAGES`). */
@@ -666,6 +683,26 @@ function boardGoalHead(view) {
   };
   head.append(fold, deskElement("span", "board-goal-note"));
   return head;
+}
+
+/* 한 목표가 처음 보이는 행 수. 나머지는 「N개 더 보기」 뒤에 선다 — 한 목표가 스무 과업을
+ * 돌려도 다른 목표가 화면 밖으로 밀리지 않게. 멈춘 행이 먼저라 늘 보인다. */
+const BOARD_GOAL_ROWS_SHOWN = 5;
+
+function boardGoalMore(view) {
+  const line = deskElement("div", "board-goal-more");
+  line.setAttribute("role", "row");
+  const more = deskElement("button", "board-link");
+  more.type = "button";
+  more.setAttribute("role", "cell");
+  more.onclick = () => {
+    const key = line.dataset.goal;
+    if (boardNowChoice.goalsAll.has(key)) boardNowChoice.goalsAll.delete(key);
+    else boardNowChoice.goalsAll.add(key);
+    paintCoordinatorDesk(view);
+  };
+  line.append(more);
+  return line;
 }
 
 function boardDoneHead(view) {
@@ -730,14 +767,14 @@ function paintDeskRunning(block, now, view) {
   const wanted = [];
   const take = (key, make) => {
     const node = held.get(key) ?? make();
-    node.dataset.key = key;
+    writeAttribute(node, "data-key", key);
     wanted.push(node);
     return node;
   };
   for (const goal of goals) {
     const folded = boardNowChoice.folded.has(goal.key);
     const goalHead = take(`goal:${goal.key}`, () => boardGoalHead(view));
-    goalHead.dataset.goal = goal.key;
+    writeAttribute(goalHead, "data-goal", goal.key);
     const fold = goalHead.querySelector(".board-goal-fold");
     writeAttribute(fold, "aria-expanded", String(!folded));
     fold.querySelector(".icon")?.classList.toggle("is-open", !folded);
@@ -745,7 +782,9 @@ function paintDeskRunning(block, now, view) {
       goal.name || t("board.now.noGoal", "목표 없이 적은 일"));
     writeTextContent(goalHead.querySelector(".board-goal-note"), goal.parent ?? "");
     if (folded) continue;
-    for (const row of goal.live) {
+    const all = boardNowChoice.goalsAll.has(goal.key);
+    const live = all ? goal.live : goal.live.slice(0, BOARD_GOAL_ROWS_SHOWN);
+    for (const row of live) {
       const key = `task:${row.task.run}/${row.task.id}`;
       paintBoardRunRow(take(key, boardRunRow), row, now, view);
       const raw = boardRunRaw(row);
@@ -758,11 +797,18 @@ function paintDeskRunning(block, now, view) {
       });
       writeTextContent(line.firstElementChild, raw);
     }
+    if (goal.live.length > BOARD_GOAL_ROWS_SHOWN) {
+      const more = take(`more:${goal.key}`, () => boardGoalMore(view));
+      writeAttribute(more, "data-goal", goal.key);
+      writeAttribute(more.firstElementChild, "aria-expanded", String(all));
+      writeTextContent(more.firstElementChild, all ? t("board.desk.mailFewer", "접기")
+        : t("board.now.asksMore", "{{count}}개 더 보기", { count: goal.live.length - live.length }));
+    }
     if (goal.done.length === 0) continue;
     const doneKey = `done:${goal.key}`;
     const doneOpen = boardNowChoice.folded.has(doneKey);
     const doneHead = take(doneKey, () => boardDoneHead(view));
-    doneHead.dataset.goal = doneKey;
+    writeAttribute(doneHead, "data-goal", doneKey);
     const doneFold = doneHead.querySelector(".board-goal-fold");
     writeAttribute(doneFold, "aria-expanded", String(doneOpen));
     doneFold.querySelector(".icon")?.classList.toggle("is-open", doneOpen);

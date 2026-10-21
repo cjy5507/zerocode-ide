@@ -294,30 +294,38 @@ export async function testCoordinatorDesk(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await installBoardWaits(page);
-    // The first frame the list stands in already carries the desk: the rows
-    // never move down under a person's eye when the desk's answers land.
+    // The first frame the board stands in already carries the desk: what the
+    // person sees first — on a window with a ledger run, the Now tab's first
+    // block (t-67607) — is neither swapped for another nor moved down when the
+    // desk's answers land.
     await page.evaluate(() => {
-      window.__FIRST_ROW_TOP__ = null;
+      window.__FIRST_SEEN__ = null;
+      window.__FIRST_SEEN_OF__ = () => {
+        const surface = document.querySelector("#board-view .task-board-surface");
+        const first = surface && [...surface.querySelectorAll(".board-desk-block, .task-board-row")]
+          .find((one) => one.checkVisibility());
+        return first ? { key: first.dataset.deskBlock ?? first.dataset.taskKey, top: first.getBoundingClientRect().top } : null;
+      };
       const watch = () => {
-        const row = document.querySelector("#board-view .task-board-row");
-        if (row) window.__FIRST_ROW_TOP__ = row.getBoundingClientRect().top;
-        else requestAnimationFrame(watch);
+        window.__FIRST_SEEN__ = window.__FIRST_SEEN_OF__();
+        if (!window.__FIRST_SEEN__) requestAnimationFrame(watch);
       };
       requestAnimationFrame(watch);
     });
     await page.evaluate(coordinatorDeskFixture);
-    await page.waitForSelector(".task-board-row");
+    await page.waitForFunction(() => window.__FIRST_SEEN__ !== null);
     const firstFrame = await page.evaluate(async () => {
       await window.__BOARD_SETTLED__();
       for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
         await new Promise((done) => requestAnimationFrame(done));
       }
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-      const settled = document.querySelector("#board-view .task-board-row").getBoundingClientRect().top;
-      return { first: window.__FIRST_ROW_TOP__, settled, moved: Math.round(settled - window.__FIRST_ROW_TOP__) };
+      const first = window.__FIRST_SEEN__;
+      const settled = window.__FIRST_SEEN_OF__();
+      return { first, settled, moved: settled ? Math.round(settled.top - first.top) : null };
     });
-    ok("the desk stands in the board's first frame: the first task row does not move when the desk's answers land",
-      firstFrame.moved === 0, JSON.stringify(firstFrame));
+    ok("the desk stands in the board's first frame: the first thing shown is the same and does not move when the desk's answers land",
+      firstFrame.settled?.key === firstFrame.first.key && firstFrame.moved === 0, JSON.stringify(firstFrame));
     await page.evaluate(async () => {
       await askReleaseStatus();
       await paintBoardView();
@@ -962,7 +970,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       JSON.stringify({ staleRows, unknownRows }));
     ok("a carried task names who carries it and the cause the ledger witnessed — a quota wall, a pane proven gone; one whose worker asks points at the mail to answer instead of a command; a failed one with no witness says its cause needs checking",
       row(carriedRows, "t-4").owner.startsWith("담당 w-4 · ") && row(carriedRows, "t-4").owner.endsWith("막힘: 한도 벽") &&
-      row(carriedRows, "t-3").label === "답할 우편에서 질문에 답하세요" && row(carriedRows, "t-3").next === "" &&
+      row(carriedRows, "t-3").label === "「지금」의 당신 차례에서 질문에 답하세요" && row(carriedRows, "t-3").next === "" &&
       row(carriedRows, "t-3").copy === "" &&
       row(failedRows, "t-2").owner.startsWith("담당 w-2 · ") && row(failedRows, "t-2").owner.endsWith("막힘: 판 없음") &&
       row(failedRows, "t-2").next === "zerocode-orc worker-transcript --worker w-2" &&
@@ -1273,6 +1281,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("a keeping that moved rewrites that one line and nothing else",
       keptMoved.records.length > 0 && keptMoved.records.every((one) => one.includes("board-desk-kept-text") && one.endsWith(`run-desk/${keptMoved.id}`)),
       JSON.stringify(keptMoved));
+    await tab("workers");
     const workerKepts = await page.evaluate(() =>
       Object.fromEntries([...document.querySelectorAll('#board-view [data-desk-block="workers"] .board-desk-worker')].map((row) => {
         const line = row.querySelector(".board-desk-worker-kept");
@@ -1286,6 +1295,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       workerKepts["run-desk/w-3"]?.shown === false &&
       Object.entries(workerKepts).filter(([, row]) => row.shown).length === 1 &&
       Object.values(workerKepts).every((row) => !row.door), JSON.stringify(workerKepts));
+    await tab("history");
     /* The rule on its own: every state a keeping can be in, painted on a worker's line — only the clean one is not said. */
     const workerStates = await page.evaluate(() => {
       if (typeof deskKeptLine !== "function" || typeof paintDeskKept !== "function") return [];
@@ -1396,11 +1406,11 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       ended.red.mark.includes("is-failed") && ended.red.clock.includes("걸림") && ended.gone, JSON.stringify(ended));
 
     /* ---- 계속 판정 (t-26583): 워커 줄 밑의 판정 한 줄과 그 근거 ------------------
-    await tab("workers");
      *
      * 판정·사유·숫자는 백엔드의 것이고(`continue_gate`) 행의 `gate`로 온다; 여기서 재는 것은
      * 그 낱말과 서식이다. 판정을 받은 워커에만 줄이 서고, 「계속」이어도 읽은 숫자가 보이며,
      * 비용을 못 읽으면 0원이 아니라 까닭이 보이고, 조용한 폴은 아무것도 다시 쓰지 않는다. */
+    await tab("workers");
     const metricsOf = (extra = {}) => ({
       steps: 142, since_checkpoint: 142, checkpoints: 0, rework_permille: 83, rise_permille: null,
       step_usd: 0.04, spent_usd: 3.41, unpriced_calls: 0, ...extra,
