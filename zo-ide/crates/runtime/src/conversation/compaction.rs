@@ -2278,22 +2278,17 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             async_client.stream_async(request, sink_tx, id_gen.next()),
         )
         .await;
-        match result {
-            Ok(events) => {
-                // `sink_tx` moved into `stream_async`; when its future
-                // resolves the sender drops, closing the channel so the drain
-                // task ends.
-                let _ = drain.await;
-                Self::summary_text_from_events(events?)
-            }
-            Err(_) => {
-                // The deadline dropped the request. Nothing more of it is
-                // worth forwarding, and a sender it left behind must not hold
-                // the turn past its deadline.
-                drain.abort();
-                Err(RuntimeError::new(summary_deadline_reason()))
-            }
-        }
+        let Ok(events) = result else {
+            // The deadline dropped the request. Nothing more of it is worth
+            // forwarding, and a sender it left behind must not hold the turn
+            // past its deadline.
+            drain.abort();
+            return Err(RuntimeError::new(summary_deadline_reason()));
+        };
+        // `sink_tx` moved into `stream_async`; when its future resolves the
+        // sender drops, closing the channel so the drain task ends.
+        let _ = drain.await;
+        Self::summary_text_from_events(events?)
     }
 
     /// Reduce a compaction summarizer's event stream to its `<summary>` text,
