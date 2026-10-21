@@ -3590,6 +3590,10 @@ let releaseBusy = null;
  * `paintDeskRelease`). Kept here because this is the one reader of the file;
  * the card only draws what was read. `null` is "no lane here" or "unread". */
 let releaseLane = null;
+/* The lane as last drawn, spelled out: the board's 빌드 줄 card and the sentence
+ * above it read `releaseLane` (t-67607), so a lane that moved repaints the desk
+ * once and the same lane, polled again, repaints nothing. */
+let releaseLaneSaid = "null";
 const noticedBuilds = new Set();
 let updateToast = null;
 let updateToastKey = null;
@@ -3735,6 +3739,11 @@ function absorbReleaseStatus(answer) {
   releaseNotice = answer?.notice ?? null;
   releaseBusy = answer?.busy ?? null;
   releaseLane = answer?.status && typeof answer.status === "object" ? answer.status : null;
+  const laneSaid = JSON.stringify(releaseLane);
+  if (laneSaid !== releaseLaneSaid) {
+    releaseLaneSaid = laneSaid;
+    scheduleDeskPaint();
+  }
   paintUpdateNotice();
   raiseUpdateToast();
   // A toast already standing for this pair keeps saying the truth: the

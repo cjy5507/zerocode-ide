@@ -48,6 +48,7 @@ import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testQuotaWallChip } from "./quota-wall-chip.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
+import { testBoardNow } from "./board-now.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
@@ -281,6 +282,7 @@ suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, or
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));
 suite("quota-wall-chip", testQuotaWallChip);
 suite("coordinator-desk-layout", ({ browser, origin, ok }) => testCoordinatorDeskLayout(browser, origin, ok));
+suite("board-now", ({ browser, origin, ok }) => testBoardNow(browser, origin, ok));
 suite("agent-relations", async ({ browser, origin, ok }) => {
   await testAgentRelations(browser, origin, ok);
   await testAgentRelationsForm(browser, origin, ok);
@@ -679,8 +681,13 @@ const titaniumMaterial = await page.evaluate(async () => {
     ),
   };
 });
+/* The Geist material the person passed on 10-21 (draft B, t-67607) has two
+ * backgrounds where the obsidian atelier had five steps: the floor and the
+ * recess cut into a panel are background-200, a panel and the left column are
+ * background-100, and gray-100 is what rises off them. The depth is that
+ * ladder plus the 1px rule, so the equal pairs are pinned as equal. */
 ok(
-  "dark chrome is one obsidian-atelier material with legible depth",
+  "dark chrome is one Geist material with legible depth: floor and recess, then panels and the left column, then raised",
   titaniumMaterial.chrome.every(
     ({ background }) => background === titaniumMaterial.chrome[0].background,
   ) &&
@@ -688,9 +695,9 @@ ok(
     titaniumMaterial.veilAlpha >= 0.9 && titaniumMaterial.veilAlpha < 1 &&
     titaniumMaterial.body === "rgba(0, 0, 0, 0)" &&
     titaniumMaterial.stage === titaniumMaterial.surfaces.abyss &&
-    titaniumMaterial.luminance.abyss < titaniumMaterial.luminance.well &&
-    titaniumMaterial.luminance.well < titaniumMaterial.luminance["nav-plane"] &&
-    titaniumMaterial.luminance["nav-plane"] < titaniumMaterial.luminance.deck &&
+    titaniumMaterial.surfaces.well === titaniumMaterial.surfaces.abyss &&
+    titaniumMaterial.luminance.well < titaniumMaterial.luminance.deck &&
+    titaniumMaterial.surfaces["nav-plane"] === titaniumMaterial.surfaces.deck &&
     titaniumMaterial.luminance.deck < titaniumMaterial.luminance.raised &&
     titaniumMaterial.luminance.raised < titaniumMaterial.luminance["editor-surface"] &&
     titaniumMaterial.contrast.chalkOnDeck >= 7 &&
@@ -12978,13 +12985,14 @@ ok(
   `unread ${unreadWeight}`,
 );
 ok(
-  // 10px, not 8: the workspace card is `rounded-lg` in Orca
-  // (`WorktreeCard-D1AQ61B3.js:5713`) and this had it one rung down. The
+  // The workspace card wears `--radius`, Orca's `rounded-lg` rung
+  // (`WorktreeCard-D1AQ61B3.js:5713`), which is 12px on the Geist ladder the
+  // person passed on 10-21 (draft B, t-67607) and was 10px before. The
   // invariant the test is really holding — the border is PRESENT and
   // transparent, so hover arrives as colour rather than as a size change —
   // is unchanged.
   "a resting card holds its border transparent, not absent",
-  restingCard.radius === "10px" &&
+  restingCard.radius === "12px" &&
     restingCard.borderWidth === "1px" &&
     /rgba\(0, 0, 0, 0\)|transparent/.test(restingCard.borderColor),
   `radius ${restingCard.radius}, border ${restingCard.borderWidth} ${restingCard.borderColor}`,
@@ -27069,21 +27077,25 @@ ok(
 /* The two `.btn` wearers are the measured sizes as RENDERED, not as declared.
  * Both were written at 11px in the panel's own CSS section and drew at 14px,
  * because the base `.btn` rule is later in the file and wins at equal
- * specificity — a bug no attribute assertion can see. */
+ * specificity — a bug no attribute assertion can see. The sizes are the
+ * panel's own steps, read from the tokens: on the Geist steps the person
+ * passed on 10-21 (t-67607) the away button's 2xs step is 12px, not 11. */
 const checkButtons = await page.evaluate(() => {
   const face = (node) => {
     const seen = getComputedStyle(node);
     return { size: seen.fontSize, height: Math.round(node.getBoundingClientRect().height) };
   };
+  const tokens = getComputedStyle(document.documentElement);
   return {
     away: face(document.querySelector(".check-pane-away")),
     fix: face(document.getElementById("pr-fix")),
+    steps: { away: tokens.getPropertyValue("--text-2xs").trim(), fix: tokens.getPropertyValue("--text-xs").trim() },
   };
 });
 ok(
-  "the panel's buttons render at the measured sizes, not at the base button's",
-  checkButtons.away.size === "11px" && checkButtons.away.height === 24 &&
-    checkButtons.fix.size === "12px" && checkButtons.fix.height < 30,
+  "the panel's buttons render at the panel's own type steps, not at the base button's",
+  checkButtons.away.size === checkButtons.steps.away && checkButtons.away.height === 24 &&
+    checkButtons.fix.size === checkButtons.steps.fix && checkButtons.fix.height < 30,
   JSON.stringify(checkButtons),
 );
 
@@ -27599,6 +27611,7 @@ const navPlane = await page.evaluate(async () => {
     // the plane it wears now.
     deck: lumOf("var(--surface-deck)"),
     plane: lumOf("var(--nav-plane)"),
+    floor: lumOf("var(--surface-abyss)"),
     active: rowFill("is-active"),
     hover: lumOf("var(--row-hover)"),
     // The recipe the chosen row must resolve to, through the same probe —
@@ -27610,13 +27623,17 @@ const navPlane = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the left column is its own plane, and a chosen row sits above it",
-  // The column paints the plane, not the card surface it used to.
+  "the left column is its own plane on the floor, and a chosen row sits above it",
+  // The column paints the plane.
   navPlane.column === navPlane.plane.painted &&
-    navPlane.plane.painted !== navPlane.deck.painted &&
-    // The obsidian treatment recesses navigation below the content deck;
-    // separation, not a fixed lightness direction, is the cross-theme rule.
-    navPlane.plane.lum < navPlane.deck.lum &&
+    // The Geist binding the person passed on 10-21 (draft B, t-67607): the
+    // column is a panel on the black floor, as the Vercel dashboard's is —
+    // background-100 like the content deck, apart from the floor it stands
+    // on, its edge the 1px rule. (The obsidian treatment recessed it below
+    // the deck instead.)
+    navPlane.plane.painted === navPlane.deck.painted &&
+    navPlane.plane.painted !== navPlane.floor.painted &&
+    navPlane.plane.lum > navPlane.floor.lum &&
     // Both row states are steps ABOVE the plane they sit on. Their order is
     // deliberately NOT asserted: Orca's hover (`foreground/8`) composites a
     // shade lighter than its chosen fill (`accent`, #353535), and inventing a
@@ -32929,6 +32946,9 @@ const scmChrome = await page.evaluate(async () => {
       primary: {
         height: Math.round(Number.parseFloat(primaryStyle.height)),
         font: Number.parseFloat(primaryStyle.fontSize),
+        // The step it is set at, read from the tokens: 2xs is 12px on the
+        // Geist steps the person passed on 10-21 (t-67607), 11px before.
+        step: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-2xs")),
         fill: primaryStyle.backgroundColor,
       },
       duplicateAllHidden: getComputedStyle(document.getElementById("changes-open")).display,
@@ -32979,7 +32999,7 @@ ok(
     scmChrome.headInset === "12px" &&
     scmChrome.commitInset === "12px" &&
     scmChrome.primary.height === 26 &&
-    scmChrome.primary.font === 11 &&
+    scmChrome.primary.font === scmChrome.primary.step &&
     scmChrome.primary.fill === "rgba(0, 0, 0, 0)" &&
     scmChrome.duplicateAllHidden === "none" &&
     scmChrome.compareBaseBorder === "0px" &&
@@ -46739,11 +46759,14 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
       lane.remove();
       return { width: rail.width, hue: rail.backgroundColor === want };
     })(),
+    // A card that waits on the person wears the person's blue (t-67607, the
+    // person's 10-21 pass of draft B; the coordinator's m-68002): the caution
+    // amber stays for the warnings, not for 「확인 필요」.
     attentionWash: (() => {
       if (!parentNode) return false;
       const probe = document.createElement("span");
       probe.style.backgroundColor =
-        "color-mix(in srgb, var(--signal-wait) 12%, var(--surface-deck))";
+        "color-mix(in srgb, var(--signal-you) 12%, var(--surface-deck))";
       view.appendChild(probe);
       const want = getComputedStyle(probe).backgroundColor;
       probe.remove();
@@ -47127,6 +47150,9 @@ const boardFitRamp = await page.evaluate(async () => {
   takeAgentGraphZoom(view, 0.6);
   await window.__PAINTED__();
   seen.small = ramp();
+  // The status line's step at full scale, read from the tokens: 2xs is 12px
+  // on the Geist steps the person passed on 10-21 (t-67607), 11px before.
+  seen.statusStep = getComputedStyle(document.documentElement).getPropertyValue("--text-2xs").trim();
 
   agentGraphZoom = heldZoom;
   agentGraphZoomTaken = heldTaken;
@@ -47145,7 +47171,7 @@ ok(
     boardFitRamp.tall.zoom === boardFitRamp.short.zoom &&
     boardFitRamp.narrow.zoom < 0.75 && boardFitRamp.narrow.zoom >= 0.64 &&
     boardFitRamp.full.title === "13px" && boardFitRamp.full.weight === "600" &&
-    boardFitRamp.full.status === "11px" && boardFitRamp.full.band === "13px" &&
+    boardFitRamp.full.status === boardFitRamp.statusStep && boardFitRamp.full.band === "13px" &&
     boardFitRamp.small.title === "10px" && boardFitRamp.small.status === "9px" &&
     boardFitRamp.small.band === boardFitRamp.small.title,
   JSON.stringify(boardFitRamp),
