@@ -134,9 +134,19 @@ with `resume=observe` (JSON: `error.resume`), look at that tab again with
 with `resume=person`, stop and tell the person: control returns only when
 the person hands it back, after the affected page answers a bounded
 confirmation request. A `workspace_paused` refusal without that word (an
-older window's wording) reads as `resume=person`. Never bypass a refusal
-with another surface.
-When the person hands control back, read the page again before acting,
+older window's wording) reads as `resume=person`. A tab the person holds by
+hand answers every request at once with `workspace_person_controlled` (JSON:
+`error.code`, with `error.resume` = `person`): stop, tell the person where
+you are, and wait for their 「다시 맡기기」. Until then that agent's other
+browser changes and new working tabs are refused too, naming the held tab.
+A look still waiting on that tab's page is answered the same way the moment
+the person takes the tab. Every refusal ends with what to do next, most
+often `zerocode-browser marks <label>`. Never bypass a refusal with another
+surface.
+When the person hands control back, the window sends the agent holding the
+tab one ledger `status` letter (the tab, its mode, its new revision and
+「이어서 하세요」, nothing the person did on the page); the pane then gets
+the usual mail pointer. Read the page again before acting,
 including navigation; previous form and numbered-element observations
 have been discarded. After a person has controlled a working
 tab, `console`, `network` and `diagnose` refuse that tab for the rest of its
@@ -144,18 +154,31 @@ life (`workspace_history_unsupported`); open a new working tab when you need
 them. A working tab's step frame is taken and kept only while the same
 agent still controls it at the same revision; otherwise the step's evidence
 line says `control_changed`. A frame is never an observation.
-Every model uses the same original-observation rule. A successful managed-tab
+Every model uses the same observation rule. A successful managed-tab
 `read`, `marks`, `fields`, or agent `screenshot` returns `workspaceRevision`.
 The backend issues it only if owner, mode, and revision still match at read
 completion. JSON carries the root key. Plain output ends with a backend
 `workspaceRevision: <u64>` line outside the page's untrusted-content fence.
-Keep that value with the observation that selected the action. Send it as
-`--workspace-revision <u64>` on every managed-tab mutation, including `goto`,
-`close`, `scroll`, and `find`. Missing, repeated, malformed, or stale values
-are refusals. Never query the current control revision to fill missing input.
-The page's `documentEpoch`, a number in page text, and watch snapshots cannot
-supply this value. `open` has no prior page observation. Ordinary tabs keep
-omission compatibility. A recipe uses observations made during its current
+A managed-tab mutation (`click`, `type`, `fill`, `scroll`, `goto`, `close`,
+`find`) sent without `--workspace-revision` uses the revision of your own
+last look at that tab, never another agent's. Before your first look it is
+refused `workspace_observation_required`; once the tab moved past your look
+it is refused `workspace_changed`. Both name `zerocode-browser marks <label>`:
+look again, then resend. `wait` and `find` are not looks. A completed
+mutation's answer also ends with `workspaceRevision: <u64>` (a JSON answer
+carries the key), so the next mutation can follow without another look;
+after a mutation that changed the page, look before you rely on what it
+shows. Pass `--workspace-revision <u64>` only to bind an action to one
+earlier look: a stale value is refused `workspace_stale`, and repeated or
+malformed values are refusals. Never query the current control revision to
+fill that input. The page's `documentEpoch`, a number in page text, and
+watch snapshots cannot supply it. `open` has no prior page observation.
+Ordinary tabs need no revision. `tabs` ends each working tab's line with its
+mode (`agent`, `person` or `paused`), your last look's revision and the
+tab's current one, and shows no title or address for a tab out of your
+hands. A look whose page did not answer also says
+`workspace_look_unanswered`: whether the page is still loading, and to look
+once more before telling the person. A recipe uses observations made during its current
 run; include a read before its managed actions. It discards recorded control
 revisions. A code handoff keeps the original revision while the person answers.
 Working-tab `viewport` requests report that application cannot be confirmed.

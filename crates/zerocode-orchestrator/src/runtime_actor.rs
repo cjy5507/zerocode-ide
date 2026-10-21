@@ -563,6 +563,18 @@ pub enum RuntimeRequest {
         receipt: Option<String>,
         now_ms: i64,
     },
+    /// A fact the window observed for one seat alone (t-67064) — the person
+    /// handed back a work browser the agent there holds — for the ledger to
+    /// tell that seat once. `to` is the seat's address in `run`, composed by
+    /// the window from its own seat index; the body is the window's own
+    /// sentence, and `receipt` keeps one hand-back one letter.
+    SeatObservation {
+        run: String,
+        to: String,
+        body: String,
+        receipt: String,
+        now_ms: i64,
+    },
     /// The beat's retention sweep — give up what a finished run no longer
     /// has to cost. Carries only a clock, because the policy and the last
     /// sweep's stamp are the ledger's own.
@@ -1057,6 +1069,19 @@ impl std::fmt::Debug for RuntimeRequest {
                 ..
             } => formatter
                 .debug_struct("RuntimeRequest::Observation")
+                .field("run", run)
+                .field("to", to)
+                .field("body_bytes", &body.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::SeatObservation {
+                run,
+                to,
+                body,
+                now_ms,
+                ..
+            } => formatter
+                .debug_struct("RuntimeRequest::SeatObservation")
                 .field("run", run)
                 .field("to", to)
                 .field("body_bytes", &body.len())
@@ -2460,6 +2485,28 @@ impl RuntimeActor {
         }
     }
 
+    /// Tell one seat a window observation (t-67064): `to` is that seat's
+    /// address in `run`. `moved` is whether the ledger filed it.
+    pub fn seat_observation(
+        &self,
+        run: String,
+        to: String,
+        body: String,
+        receipt: String,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::SeatObservation {
+            run,
+            to,
+            body,
+            receipt,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     pub fn retention_sweep(&self, now_ms: i64) -> Result<(Sweep, u64), RuntimeError> {
         match self.request(RuntimeRequest::RetentionSweep { now_ms })? {
             RuntimeReply::Retention { swept, revision } => Ok((swept, revision)),
@@ -3708,6 +3755,13 @@ impl RuntimeState {
                 receipt,
                 now_ms,
             } => self.observed(run.as_deref(), &to, &body, receipt.as_deref(), now_ms),
+            RuntimeRequest::SeatObservation {
+                run,
+                to,
+                body,
+                receipt,
+                now_ms,
+            } => self.seat_observed(&run, &to, &body, &receipt, now_ms),
             RuntimeRequest::RetentionSweep { now_ms } => self.retention_swept(now_ms),
             RuntimeRequest::PaneTakenOver { term, now_ms } => self.pane_taken(term, now_ms),
             RuntimeRequest::PaneAttention {
@@ -5686,6 +5740,48 @@ impl RuntimeState {
             .ledger
             .post_observation_once(run, to, body, receipt, now_ms);
         if filed == 0 {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    /// [`Self::observed`] for one seat (t-67064): the letter carries the
+    /// task and dispatch a worker's seat is on.
+    fn seat_observed(
+        &mut self,
+        run: &str,
+        to: &str,
+        body: &str,
+        receipt: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || run.is_empty()
+            || run.len() > MAX_NAME
+            || to.is_empty()
+            || to.len() > MAX_PROSE
+            || body.is_empty()
+            || body.len() > MAX_PROSE
+            || receipt.is_empty()
+            || receipt.len() > MAX_NAME
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        if self
+            .ledger
+            .post_seat_observation(run, to, body, receipt, now_ms)
+            == 0
+        {
             return Ok(RuntimeReply::Settled {
                 moved: false,
                 revision: self.revision,

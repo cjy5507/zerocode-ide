@@ -285,7 +285,12 @@ fn ownership_adapters_use_held_terminal_identity_and_do_not_select_a_model() {
 fn original_revision_admission_and_observation_completion_share_backend_state() {
     let source = include_str!("../../src/browser_workspace.rs");
     let admission = block_after(source, "fn begin_at(");
-    assert!(admission.contains("workspace_revision_required:"));
+    // A change that names no revision is judged at the one its own agent's
+    // last look issued (t-67064): no refusal for a missing number is left.
+    assert!(admission.contains("own_look(&state, actor, label)?"));
+    assert!(!source.contains(concat!("workspace_", "revision_required")));
+    let own = block_after(source, "fn own_look(");
+    assert!(own.contains("Some((seer, revision)) if seer == actor"));
     assert!(
         source.contains("fn finish_observation("),
         "a read needs a checked completion"
@@ -298,14 +303,22 @@ fn original_revision_admission_and_observation_completion_share_backend_state() 
             && finishing.contains("self.observed()")
     );
     let completion = block_after(source, "fn observed(");
+    assert!(completion.contains("self.refused(&state, lifts)"));
+    assert!(completion.contains("state.seen = self.owner.clone()"));
+    // The one reading a look completes by, and is answered early by when
+    // its tab leaves its agent's hands (t-67064).
+    let refused = block_after(source, "fn refused(");
     for guard in [
         "state.closed",
         "state.revision",
         "state.mode",
         "state.owner",
     ] {
-        assert!(completion.contains(guard), "completion must check {guard}");
+        assert!(refused.contains(guard), "completion must check {guard}");
     }
+    assert!(
+        block_after(source, "async fn taken(").contains("self.refused(&state, self.lifts(&state))")
+    );
     let answer = block_after(RUNTIME, "async fn answer_browser_command(");
     assert!(answer.contains("parse_workspace_command("));
     assert!(answer.contains("finish_observation("));
@@ -947,12 +960,13 @@ fn every_paused_refusal_names_who_lifts_it() {
     let answer = block_after(RUNTIME, "async fn answer_browser_command(");
     assert_eq!(
         answer.matches("door_refused(argv, &error)").count(),
-        4,
-        "the door's three refusals and a look's completion: {answer}"
+        5,
+        "the door's three refusals, a look its tab was taken from (t-67064) and a look's completion: {answer}"
     );
     let door = block_after(RUNTIME, "pub(super) fn door_refused(");
     for piece in [
         "paused_resume(error)",
+        "person_controlled_words(error)",
         "if answers_json(argv)",
         "\"resume\": resume",
     ] {
@@ -1007,4 +1021,44 @@ fn the_sessions_regrant_is_turned_on_by_the_bars_hand_back_alone() {
         finishing.contains("Mode::Agent => state.regrant |= self.regrant,")
             && finishing.contains("Mode::Human => state.regrant = false,")
     );
+}
+
+/// The agent goes on by its own look and hears who holds its tab (t-67064):
+/// the door waits for a look's page only while its tab stays in the agent's
+/// hands, stamps on a completed change's answer the revision it leaves,
+/// tells a look its page did not answer what to do next, says each work
+/// browser's holder on `tabs` with none of a held tab's page, and the bar's
+/// handoff tells the agent holding the tab once it finished — in the
+/// workspace module's own words.
+#[test]
+fn the_agent_goes_on_by_its_own_look_and_hears_who_holds_its_tab() {
+    let answer = block_after(RUNTIME, "async fn answer_browser_command(");
+    let dispatching = answer.find("let dispatching = async {").unwrap();
+    let waited = answer
+        .find("crate::browser_workspace::unless_taken(operation.as_ref(), dispatching)")
+        .unwrap();
+    assert!(dispatching < waited);
+    let settled = answer.find("operation.settle(dispatched)").unwrap();
+    let stamped = answer
+        .find("stamp_browser_change(&mut answer, revision)")
+        .unwrap();
+    assert!(settled < stamped);
+    assert!(answer.contains(".after_failed_look("));
+    let dispatch = block_after(RUNTIME, "async fn dispatch_browser_command(");
+    let listing = block_after(dispatch, "(\"tabs\", 1) => {");
+    assert!(listing.contains(".standing_agents(&label, pane)"));
+    assert_eq!(listing.matches(".filter(|_| shown)").count(), 2);
+    let command = block_after(CONTROL, "async fn set_browser_workspace_mode(");
+    let finished = command.find("transition.finish()?").unwrap();
+    let told = command.find("tell_handed_back(&snapshot)").unwrap();
+    assert!(finished < told);
+    let telling = block_after(CONTROL, "fn tell_handed_back(");
+    for piece in [
+        "Mode::Agent",
+        "crate::browser_workspace::handed_back(",
+        "crate::orchestration::tell_seat_of_term(",
+        "spawn_blocking(",
+    ] {
+        assert!(telling.contains(piece), "{piece}");
+    }
 }

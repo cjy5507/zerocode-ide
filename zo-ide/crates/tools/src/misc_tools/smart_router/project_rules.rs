@@ -8,9 +8,14 @@ use runtime::{ContentBlock, ConversationMessage, MessageRole};
 use serde_json::json;
 use zerocode_core::jev::{self, JevMode, PROJECT_RULES, project_rules::{self as rules, Book, Facts, store}};
 
+use super::custom_decisions::{self, TurnEnd};
 use super::jev_gate::{self, JevDoor};
 use super::settings::merged_settings_root_from;
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
+
+/// What every advice for the next turn opens with, its key and `]` after it:
+/// how a host finds the advice again in the transcript, and how it clears it.
+const ADVICE_PREFIX: &str = "[zo:project-rules:";
 
 #[derive(Debug)]
 struct Turn {
@@ -86,7 +91,13 @@ fn mode(workspace: &Path) -> JevMode {
 
 /// Check after a completed turn. No turn/response is held open and no repair
 /// loop is started. Missing or stale definitions produce no model request.
+/// The person's own decisions that ask at a turn's end are asked first, and
+/// whatever this check's switch says.
 pub fn note_project_rule_turn(workspace: &Path, recipient: &str, turn_id: &str, messages: &[ConversationMessage]) {
+    custom_decisions::at_turn_end(workspace, recipient, || {
+        let Turn { task, final_text, evidence, edited, .. } = turn(workspace, messages);
+        TurnEnd { task, final_text, evidence, edited_paths: edited }
+    });
     let home = runtime::default_config_home();
     let at = super::decision_shadow::unix_millis();
     if !matches!(store::begin_check(&home, workspace, recipient, at, turn_id), Ok(true)) { return; }
@@ -184,13 +195,35 @@ async fn check(workspace: PathBuf, recipient: String, turn_id: String, book: Boo
 
 /// A delivery is prepared only while the existing switch/mode and source
 /// hashes still allow it. The caller acknowledges after adding it to context.
+/// While no rule's advice waits, the lines the person's own decisions handed
+/// at the last turn's end go out as an advice of their own.
 #[must_use]
 pub fn pending_project_rule_advice(workspace: &Path, recipient: &str, room: usize) -> Option<rules::Advice> {
-    if mode(workspace) != JevMode::On || !JevDoor::open(workspace).permits_application_now() { return None; }
-    store::pending(&runtime::default_config_home(), workspace, recipient, room).ok().flatten()
+    let rules_on = mode(workspace) == JevMode::On && JevDoor::open(workspace).permits_application_now();
+    rules_on
+        .then(|| store::pending(&runtime::default_config_home(), workspace, recipient, room).ok().flatten())
+        .flatten()
+        .or_else(|| decided_advice(workspace, recipient, room))
+}
+
+/// The lines the person's decisions handed this turn, as one advice whose
+/// text fits `room`: as many whole lines as fit under its key, and none when
+/// not one does. It names no rule, so its delivery writes no rule's receipt.
+fn decided_advice(workspace: &Path, recipient: &str, room: usize) -> Option<rules::Advice> {
+    let (key, lines) = custom_decisions::pending_lines(workspace, recipient)?;
+    let head = format!("{ADVICE_PREFIX}{key}]");
+    let mut text = head.clone();
+    for line in lines {
+        if text.chars().count() + 1 + line.chars().count() > room { break; }
+        text.push('\n');
+        text.push_str(&line);
+    }
+    (text != head).then(|| rules::Advice { key, definition: String::new(), at: 0, turn: String::new(), text,
+        rules: Vec::new(), edited: Vec::new() })
 }
 
 pub fn project_rule_advice_delivered(workspace: &Path, recipient: &str, advice: &rules::Advice) {
+    if custom_decisions::delivered(workspace, recipient, &advice.key) { return; }
     let receipt = rules::delivery_receipt(advice, recipient, i64::try_from(super::decision_shadow::unix_millis()).unwrap_or(i64::MAX));
     // Keep pending state if its receipt cannot be recorded. A retry is
     // idempotent in the shared reader and spends no second model request.
@@ -309,6 +342,21 @@ mod tests {
             let look = turn(workspace, &messages);
             assert!(look.evidence.len() <= 16 * 1024);
             assert!(look.evidence.contains("omitted"));
+        });
+    }
+
+    /// The advice a person's decisions hand the next turn opens as the
+    /// check's own advice does, `[zo:project-rules:<key>]`: the one form a
+    /// host delivers and clears.
+    #[test]
+    fn decided_advice_opens_as_the_checks_advice_does() {
+        let mock = Mock::serving(200, response());
+        machine(&PROJECT_RULES, "on", &mock.base_url, |workspace| {
+            let book = compile(workspace);
+            let answers = serde_json::from_str::<serde_json::Value>(&response()).unwrap()["answers"].clone();
+            let reading = rules::read(&answers, "shared_logic").unwrap();
+            let advice = rules::advice(&book, &[reading], "evidence", &[], 1, "turn").unwrap().unwrap();
+            assert!(advice.text.starts_with(&format!("{ADVICE_PREFIX}{}]\n", advice.key)), "{}", advice.text);
         });
     }
 }

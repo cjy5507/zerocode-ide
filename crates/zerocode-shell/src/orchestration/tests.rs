@@ -23259,6 +23259,9 @@ fn a_late_turn_end_is_never_the_next_occupants_sound() {
     drop(window);
 }
 
+/// t-67064: a work browser the person hands back tells the agent holding it,
+/// by one ledger letter its pane's pointer reads (`tests/browser_handback.rs`).
+mod browser_handback;
 /// t-65286: a run is one project's — its mail is not pointed at a pane of
 /// another, its workers do not open there, and a verb from one is written
 /// down, then refused once the boundary is on (`tests/project_scope.rs`).

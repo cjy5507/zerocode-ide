@@ -1231,6 +1231,126 @@ fn parse_sse_frame_keeps_content_deltas_that_mention_error() {
     assert_eq!(parsed.choices.len(), 1);
 }
 
+/// The body of an `OpenRouter` 404 whose account settings excluded every
+/// endpoint for the model: `code` is a number, and `metadata` names the reason.
+const ACCOUNT_SETTINGS_404_BODY: &str = r#"{"error":{"message":"0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. ZDR violation (account settings): 1 endpoint excluded","code":404,"metadata":{"ineligibility_reasons":[{"reason":"zdr-violation-by-account","configure_url":"https://openrouter.ai/settings/privacy"}],"failed_routing_step":"Filter by Guardrails"}}}"#;
+
+const ACCOUNT_SETTINGS_404_MESSAGE: &str = "0 endpoints out of 1 requested are available matching your guardrail restrictions and data policy. ZDR violation (account settings): 1 endpoint excluded";
+
+#[test]
+fn error_envelope_reads_a_numeric_code() {
+    let envelope = serde_json::from_str::<super::ErrorEnvelope>(
+        r#"{"error":{"message":"No endpoints found for this model.","code":404}}"#,
+    )
+    .ok();
+    assert!(
+        envelope.as_ref().is_some_and(|envelope| {
+            envelope.error.message.as_deref() == Some("No endpoints found for this model.")
+                && envelope.error.code.as_deref() == Some("404")
+        }),
+        "a numeric code must not lose the envelope, got {envelope:?}"
+    );
+}
+
+#[test]
+fn parse_sse_frame_surfaces_an_error_frame_with_a_numeric_code() {
+    let frame = format!("data: {ACCOUNT_SETTINGS_404_BODY}\n");
+    let outcome = parse_sse_frame(&frame);
+    assert!(
+        matches!(
+            &outcome,
+            Err(ApiError::StreamApi { message, retryable, .. })
+                if message.as_deref() == Some(ACCOUNT_SETTINGS_404_MESSAGE) && !*retryable
+        ),
+        "an error frame with a numeric code must fail the stream with its message, got {outcome:?}"
+    );
+}
+
+async fn refusal(status: u16, body: &str) -> ApiError {
+    let response = http::Response::builder()
+        .status(status)
+        .body(body.to_string())
+        .expect("a test response builds");
+    super::expect_success(reqwest::Response::from(response))
+        .await
+        .expect_err("a non-2xx answer is an error")
+}
+
+#[tokio::test]
+async fn expect_success_shows_the_message_of_an_error_with_a_numeric_code() {
+    let body = r#"{"error":{"message":"No endpoints found for this model.","code":404}}"#;
+    let error = refusal(404, body).await;
+    assert_eq!(
+        error.to_string(),
+        "api returned 404 Not Found: No endpoints found for this model."
+    );
+    assert!(
+        matches!(&error, ApiError::Api { body: kept, .. } if kept == body),
+        "the raw body stays in the error for logs, got {error:?}"
+    );
+    assert!(!error.is_retryable());
+}
+
+#[tokio::test]
+async fn expect_success_turns_an_account_settings_404_into_its_message_and_a_settings_hint() {
+    let error = refusal(404, ACCOUNT_SETTINGS_404_BODY).await;
+    let text = error.to_string();
+    assert!(!text.contains("{\"error\""), "no raw JSON in the line, got {text}");
+    assert_eq!(
+        text,
+        format!(
+            "api returned 404 Not Found: {ACCOUNT_SETTINGS_404_MESSAGE}{}The provider excluded \
+             every endpoint for this model because of this account's settings (reason: \
+             zdr-violation-by-account; routing step: Filter by Guardrails). Its setting is at \
+             https://openrouter.ai/settings/privacy — change it there or pick another model.",
+            core_types::retry_signal::HINT_SEPARATOR
+        )
+    );
+    assert!(!error.is_retryable());
+    let signal = core_types::retry_signal::classify_error_text(&text);
+    assert!(!signal.is_retryable() && !signal.is_capacity(), "{signal:?}");
+}
+
+#[test]
+fn parse_sse_frame_adds_the_settings_hint_to_an_account_settings_frame() {
+    let frame = format!("data: {ACCOUNT_SETTINGS_404_BODY}\n");
+    let text = parse_sse_frame(&frame)
+        .expect_err("an error frame must fail the stream")
+        .to_string();
+    assert!(
+        text.contains(ACCOUNT_SETTINGS_404_MESSAGE)
+            && text.contains("https://openrouter.ai/settings/privacy — change it there")
+            && !text.contains("{\"error\""),
+        "got {text}"
+    );
+}
+
+#[tokio::test]
+async fn the_settings_hint_reads_any_reason_and_https_url_as_given() {
+    let body = r#"{"error":{"message":"No allowed endpoint.","code":404,"metadata":{"ineligibility_reasons":[{"reason":"region-not-allowed","configure_url":"https://example.com/account/regions"}]}}}"#;
+    let text = refusal(404, body).await.to_string();
+    assert!(
+        text.ends_with(
+            "(reason: region-not-allowed). Its setting is at \
+             https://example.com/account/regions — change it there or pick another model."
+        ),
+        "got {text}"
+    );
+}
+
+#[tokio::test]
+async fn the_settings_hint_leaves_out_a_url_that_is_not_https() {
+    let body = r#"{"error":{"message":"No allowed endpoint.","code":404,"metadata":{"ineligibility_reasons":[{"reason":"region-not-allowed","configure_url":"http://example.com/account/regions"}]}}}"#;
+    let text = refusal(404, body).await.to_string();
+    assert!(
+        text.ends_with(
+            "(reason: region-not-allowed). Change it in the provider's account settings \
+             or pick another model."
+        ) && !text.contains("example.com"),
+        "got {text}"
+    );
+}
+
 #[test]
 fn sse_parser_large_frame_split_across_many_chunks_parses_once() {
     let big = "x".repeat(512 * 1024);

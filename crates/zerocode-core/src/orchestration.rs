@@ -9401,38 +9401,77 @@ impl Ledger {
             None => self.runs.iter().map(|held| held.id.clone()).collect(),
         };
         runs.iter()
-            .filter(|run_id| {
-                if let Some(receipt) = receipt
-                    && self.run(run_id).is_some_and(|run| {
-                        run.messages().iter().any(|mail| {
-                            mail.from == LEDGER_ITSELF
-                                && mail.to == to
-                                && mail.kind == MessageKind::Status
-                                && mail.subject.as_str() == receipt
-                        })
-                    })
-                {
-                    return true;
-                }
-                self.post(
-                    run_id,
-                    Draft {
-                        from: LEDGER_ITSELF.to_string(),
-                        to: to.to_string(),
-                        kind: MessageKind::Status,
-                        body: body.into(),
-                        subject: receipt.unwrap_or_default().into(),
-                        priority: Priority::Normal,
-                        payload: Text::default(),
-                        thread: None,
-                        task: None,
-                        dispatch: None,
-                    },
-                    now_ms,
-                )
-                .is_ok()
-            })
+            .filter(|run_id| self.file_ledger_status(run_id, to, body, receipt, None, now_ms))
             .count()
+    }
+
+    /// A fact the window observed for one seat alone (t-67064) — the person
+    /// handed back a work browser the agent there holds — told from the
+    /// ledger itself as one `status` to `to` in `run_id`, filed once per
+    /// receipt as [`Self::post_observation_once`] files its letters. A
+    /// worker's address carries the task and dispatch the worker is on; a
+    /// coordinator's seat, on no task, carries neither.
+    pub fn post_seat_observation(
+        &mut self,
+        run_id: &str,
+        to: &str,
+        body: &str,
+        receipt: &str,
+        now_ms: i64,
+    ) -> usize {
+        let work = self.run(run_id).and_then(|run| {
+            let worker = run
+                .workers
+                .iter()
+                .find(|worker| worker_address(&worker.id) == to)?;
+            let dispatch = worker.dispatch.as_deref()?;
+            Some((run.dispatch(dispatch)?.task.clone(), dispatch.to_string()))
+        });
+        usize::from(self.file_ledger_status(run_id, to, body, Some(receipt), work, now_ms))
+    }
+
+    /// One `status` from the ledger itself to `to` in `run_id`, about the
+    /// task and dispatch `work` names — unless a letter under `receipt` is
+    /// already there, which counts as filed: the replay of a fact told once.
+    fn file_ledger_status(
+        &mut self,
+        run_id: &str,
+        to: &str,
+        body: &str,
+        receipt: Option<&str>,
+        work: Option<(String, String)>,
+        now_ms: i64,
+    ) -> bool {
+        if let Some(receipt) = receipt
+            && self.run(run_id).is_some_and(|run| {
+                run.messages().iter().any(|mail| {
+                    mail.from == LEDGER_ITSELF
+                        && mail.to == to
+                        && mail.kind == MessageKind::Status
+                        && mail.subject.as_str() == receipt
+                })
+            })
+        {
+            return true;
+        }
+        let (task, dispatch) = work.unzip();
+        self.post(
+            run_id,
+            Draft {
+                from: LEDGER_ITSELF.to_string(),
+                to: to.to_string(),
+                kind: MessageKind::Status,
+                body: body.into(),
+                subject: receipt.unwrap_or_default().into(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task,
+                dispatch,
+            },
+            now_ms,
+        )
+        .is_ok()
     }
 
     /// What the window found when it looked at a dead worker's checkout.
