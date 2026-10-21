@@ -587,6 +587,12 @@ impl<W: Write> Renderer<W> {
                     StreamPhase::QuietReasoning { since_secs } => serde_json::json!({
                         "type": "stream_phase", "phase": "quiet_reasoning", "since_secs": since_secs
                     }),
+                    StreamPhase::Compacting => serde_json::json!({
+                        "type": "stream_phase", "phase": "compacting"
+                    }),
+                    StreamPhase::CompactionEnded => serde_json::json!({
+                        "type": "stream_phase", "phase": "compaction_ended"
+                    }),
                 });
             }
             RenderBlock::WireModel(wire) => {

@@ -327,6 +327,14 @@ pub enum StreamPhase {
     /// content ends, never a transcript row (2026-09-07: one long turn left
     /// five such rows behind).
     QuietReasoning { since_secs: u64 },
+    /// The turn stopped to compact the conversation: from here until
+    /// [`StreamPhase::CompactionEnded`] it waits on the summary, not on an
+    /// answer (t-68694). The summary request's own phases and its
+    /// [`RenderBlock::CompactionProgress`] fall between the two.
+    Compacting,
+    /// The compaction is over — its summary came, the local summary stood
+    /// in, or nothing needed folding — and the turn goes on.
+    CompactionEnded,
 }
 
 /// The model a request is about to run on, and why it is — or is not — the

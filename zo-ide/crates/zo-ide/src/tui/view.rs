@@ -232,6 +232,7 @@ impl Status {
                 self.quiet_reasoning_since =
                     Some(self.elapsed.saturating_sub(Duration::from_secs(since_secs)));
             }
+            StreamPhase::Compacting | StreamPhase::CompactionEnded => {}
         }
     }
 

@@ -13,16 +13,20 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use runtime::message_stream::types::BlockId;
-use runtime::message_stream::{BlockIdGen, RenderBlock};
+use runtime::message_stream::types::{BlockId, StreamPhase};
+use runtime::message_stream::{BlockIdGen, RenderBlock, SystemLevel};
+use runtime::permission::{
+    PermissionDecision, PermissionError, PermissionPrompter, PermissionRequest,
+};
 use runtime::session::Session;
 use runtime::{
     ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, CompactionConfig, ContentBlock,
-    ConversationRuntime, MessageRole, PermissionMode, PermissionPolicy, RuntimeError,
-    StaticToolExecutor,
+    ConversationMessage, ConversationRuntime, MessageRole, PermissionMode, PermissionPolicy,
+    RuntimeError, StaticToolExecutor, TokenUsage,
 };
 use tokio::sync::mpsc;
 
@@ -295,4 +299,358 @@ async fn compact_streaming_says_why_the_local_summary_stands_in() {
         reason.contains("prompt is too long"),
         "the reason names what the provider said: {reason}"
     );
+}
+
+// ── t-68694: a compaction whose summary never comes ─────────────────────────
+//
+// A zo pane compacted 393 messages in the middle of a turn and then showed
+// `Working` for 51 minutes with nothing behind it: the summary stream was
+// awaited with no deadline, and the screen dropped the compaction's progress.
+// These tests wait the summary out on a paused clock, so an hour of waiting
+// costs no real time.
+
+/// Longer than any deadline the summary may have: a wait still going this
+/// long is a wait with none.
+const AN_HOUR: Duration = Duration::from_secs(60 * 60);
+
+/// What a finished helper hands back to the turn — the result the turn must
+/// still hold after it compacted.
+const HELPER_REPORT: &str = "C68694 helper report: the parser reads its tokens in three passes.";
+
+/// The summary a willing summarizer writes.
+const SUMMARY: &str = "<summary>\n- Current state: C68694 compacted mid-turn.\n</summary>";
+
+/// A reconnect notice the live client puts on the request's own channel.
+const RECONNECT_NOTICE: &str = "transient provider error; reconnecting in 2s (attempt 1/7)";
+
+/// Whether `request` is a compaction's summary request, in either of the two
+/// shapes it is sent in (the summary instruction as the system prompt, or as
+/// the last user message of the live conversation).
+fn is_summary_request(request: &ApiRequest) -> bool {
+    let instruction = runtime::compaction_system_prompt(None);
+    request
+        .system_prompt
+        .iter()
+        .any(|prompt| prompt.contains(&instruction))
+        || request.messages.last().is_some_and(|message| {
+            message.blocks.iter().any(
+                |block| matches!(block, ContentBlock::Text { text } if text.contains(&instruction)),
+            )
+        })
+}
+
+/// Sets its flag when the future holding it is dropped: the summary request
+/// was stopped, not left running behind the turn.
+struct DropFlag(Arc<AtomicBool>);
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+fn usage(input_tokens: u32, cache_read_input_tokens: u32) -> TokenUsage {
+    TokenUsage {
+        input_tokens,
+        output_tokens: 20,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens,
+        output_tokens_details: None,
+    }
+}
+
+/// A summary request never answers. A turn's first request calls a helper
+/// with the context near full; every later one answers at once.
+struct EndlessSummaryApi {
+    turn_requests: AtomicUsize,
+    summary_stopped: Arc<AtomicBool>,
+}
+impl AsyncApiClient for EndlessSummaryApi {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        _render_tx: mpsc::Sender<RenderBlock>,
+        _text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            if is_summary_request(&request) {
+                let _stopped = DropFlag(Arc::clone(&self.summary_stopped));
+                return std::future::pending::<Result<Vec<AssistantEvent>, RuntimeError>>().await;
+            }
+            if self.turn_requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(vec![
+                    AssistantEvent::ToolUse {
+                        id: "toolu_c68694".to_string(),
+                        name: "Agent".to_string(),
+                        input: r#"{"description":"survey the parser","prompt":"Read the parser and report."}"#
+                            .to_string(),
+                    },
+                    AssistantEvent::Usage(usage(1_000, 119_000)),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("C68694 the turn goes on".to_string()),
+                AssistantEvent::Usage(usage(2_000, 0)),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+/// A turn's request answers at once with the context near full. A summary
+/// request goes the way the live client takes one: a reconnect notice and a
+/// retry phase on the request's own channel, the summary's text, then the
+/// summary.
+struct ReconnectingSummaryApi;
+impl AsyncApiClient for ReconnectingSummaryApi {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        render_tx: mpsc::Sender<RenderBlock>,
+        text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            if !is_summary_request(&request) {
+                return Ok(vec![
+                    AssistantEvent::TextDelta("done".to_string()),
+                    AssistantEvent::Usage(usage(1_000, 119_000)),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            let _ = render_tx
+                .send(RenderBlock::System {
+                    id: text_block_id,
+                    level: SystemLevel::Warn,
+                    text: RECONNECT_NOTICE.to_string(),
+                })
+                .await;
+            let _ = render_tx
+                .send(RenderBlock::StreamPhase(StreamPhase::Retrying {
+                    attempt: 1,
+                    delay_secs: 2,
+                }))
+                .await;
+            let _ = render_tx
+                .send(RenderBlock::TextDelta {
+                    id: text_block_id,
+                    text: SUMMARY.to_string(),
+                    done: true,
+                })
+                .await;
+            Ok(vec![
+                AssistantEvent::TextDelta(SUMMARY.to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+struct AllowPrompter;
+impl PermissionPrompter for AllowPrompter {
+    fn decide<'a>(
+        &'a self,
+        _request: PermissionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<PermissionDecision, PermissionError>> + Send + 'a>> {
+        Box::pin(async { Ok(PermissionDecision::Allow) })
+    }
+}
+
+/// Eight earlier messages, so a compaction has something to fold besides the
+/// turn's own last four.
+fn earlier_conversation() -> Session {
+    let mut session = Session::new();
+    let mut messages = Vec::new();
+    for exchange in 0..4 {
+        messages.push(ConversationMessage::user_text(format!("C68694 question {exchange}")));
+        messages.push(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: format!("C68694 answer {exchange}"),
+        }]));
+    }
+    session.messages = Arc::new(messages);
+    session
+}
+
+fn turn_runtime(
+    async_client: Arc<dyn AsyncApiClient>,
+) -> ConversationRuntime<PlainSyncApi, StaticToolExecutor> {
+    let mut runtime = ConversationRuntime::new(
+        earlier_conversation(),
+        PlainSyncApi,
+        StaticToolExecutor::new().register("Agent", |_input| Ok(HELPER_REPORT.to_string())),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_auto_compaction_input_tokens_threshold(100_000);
+    runtime.set_async_api_client(async_client);
+    runtime
+}
+
+fn system_rows(blocks: &[RenderBlock]) -> Vec<(SystemLevel, &str)> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            RenderBlock::System { level, text, .. } => Some((*level, text.as_str())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The person's case: the helper finished, the context crossed the line, and
+/// the turn compacted — and the summary never came. The wait now ends at its
+/// deadline: the summary request is stopped, the local summary folds the
+/// conversation, one line says what happened, and the turn goes on to its
+/// answer with the helper's report still in the conversation.
+#[tokio::test(start_paused = true)]
+async fn an_endless_summary_inside_a_turn_is_cut_at_its_deadline_and_the_turn_goes_on() {
+    let summary_stopped = Arc::new(AtomicBool::new(false));
+    let api = Arc::new(EndlessSummaryApi {
+        turn_requests: AtomicUsize::new(0),
+        summary_stopped: Arc::clone(&summary_stopped),
+    });
+    let mut runtime = turn_runtime(api.clone() as Arc<dyn AsyncApiClient>);
+    let (tx, rx) = mpsc::channel::<RenderBlock>(256);
+    let collected = tokio::spawn(drain(rx));
+
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowPrompter);
+    let finished =
+        tokio::time::timeout(AN_HOUR, runtime.run_turn_streaming("C68694 survey", tx, prompter))
+            .await;
+    let blocks = collected.await.expect("the channel drains");
+
+    let summary = finished
+        .expect("the turn was still waiting on the compaction's summary an hour later")
+        .expect("the turn ends without an error");
+    assert!(
+        summary_stopped.load(Ordering::SeqCst),
+        "the summary request that never ended is stopped, not left running"
+    );
+    let compaction = summary
+        .auto_compaction
+        .expect("the local summary still folds the conversation");
+    assert!(compaction.removed_message_count > 0, "{compaction:?}");
+
+    let rows = system_rows(&blocks);
+    let said: Vec<&(SystemLevel, &str)> = rows
+        .iter()
+        .filter(|(_, text)| text.contains("summary did not come"))
+        .collect();
+    assert_eq!(said.len(), 1, "one line says what happened: {rows:?}");
+    let (level, line) = said[0];
+    assert_eq!(*level, SystemLevel::Warn, "{line}");
+    assert!(!line.contains('\n'), "one line: {line:?}");
+    assert!(
+        line.contains("not done after") && line.contains("local summary"),
+        "the line names the deadline and what stood in: {line}"
+    );
+
+    assert_eq!(
+        api.turn_requests.load(Ordering::SeqCst),
+        2,
+        "the turn asks again after the compaction"
+    );
+    let messages = &runtime.session().messages;
+    assert!(
+        messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolResult { output, .. } if output.contains(HELPER_REPORT)
+        ))),
+        "the finished helper's report is still in the conversation"
+    );
+    assert!(
+        messages.last().is_some_and(|message| message.blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text.contains("C68694 the turn goes on")
+        ))),
+        "the turn reached its answer after the compaction"
+    );
+}
+
+/// While a turn compacts, the status line is told so: the compaction is
+/// bracketed by its own two phases, and inside them the summary request is
+/// announced, the provider's reconnect notice and retry phase reach the turn's
+/// channel, and the summary's first characters are counted at once.
+#[tokio::test]
+async fn an_in_turn_compaction_names_its_wait_on_the_turns_channel() {
+    let mut runtime = turn_runtime(Arc::new(ReconnectingSummaryApi) as Arc<dyn AsyncApiClient>);
+    let (tx, rx) = mpsc::channel::<RenderBlock>(256);
+    let collected = tokio::spawn(drain(rx));
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowPrompter);
+    let summary = runtime
+        .run_turn_streaming("C68694 survey", tx, prompter)
+        .await
+        .expect("the turn ends without an error");
+    let blocks = collected.await.expect("the channel drains");
+    assert!(summary.auto_compaction.is_some(), "the turn compacted");
+
+    let after = |from: usize, found: &dyn Fn(&RenderBlock) -> bool| {
+        blocks
+            .iter()
+            .enumerate()
+            .skip(from)
+            .find(|(_, block)| found(block))
+            .map(|(index, _)| index)
+    };
+    let notice = after(0, &|block| {
+        matches!(block, RenderBlock::System { text, .. } if text.starts_with("Compacting conversation"))
+    })
+    .expect("the compaction's start notice");
+    let started = after(notice, &|block| {
+        matches!(block, RenderBlock::StreamPhase(StreamPhase::Compacting))
+    })
+    .unwrap_or_else(|| panic!("no phase tells the status line the turn compacts: {blocks:?}"));
+    let sent = after(started, &|block| {
+        matches!(block, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }))
+    })
+    .unwrap_or_else(|| panic!("the summary request is not announced: {blocks:?}"));
+    let reconnect = after(sent, &|block| {
+        matches!(block, RenderBlock::System { level: SystemLevel::Warn, text, .. } if text == RECONNECT_NOTICE)
+    })
+    .unwrap_or_else(|| panic!("the summary's reconnect notice is dropped: {blocks:?}"));
+    let retrying = after(sent, &|block| {
+        matches!(block, RenderBlock::StreamPhase(StreamPhase::Retrying { attempt: 1, .. }))
+    })
+    .unwrap_or_else(|| panic!("the summary's retry phase is dropped: {blocks:?}"));
+    let counted = after(sent, &|block| {
+        matches!(block, RenderBlock::CompactionProgress { streamed_chars } if *streamed_chars > 0)
+    })
+    .unwrap_or_else(|| panic!("the summary's first characters are not counted: {blocks:?}"));
+    let ended = after(counted.max(reconnect).max(retrying), &|block| {
+        matches!(block, RenderBlock::StreamPhase(StreamPhase::CompactionEnded))
+    })
+    .unwrap_or_else(|| panic!("no phase tells the status line the compaction ended: {blocks:?}"));
+    after(ended, &|block| {
+        matches!(block, RenderBlock::System { text, .. } if text.starts_with("Compacted conversation"))
+    })
+    .unwrap_or_else(|| panic!("the done notice follows the end: {blocks:?}"));
+}
+
+/// `/compact` waits on the same summary request, and is cut at the same
+/// deadline: the local summary folds the conversation and the report says why.
+#[tokio::test(start_paused = true)]
+async fn compact_streaming_stops_waiting_for_a_summary_that_never_ends() {
+    let mut runtime = compactable_runtime(PlainSyncApi);
+    let summary_stopped = Arc::new(AtomicBool::new(false));
+    runtime.set_async_api_client(Arc::new(EndlessSummaryApi {
+        turn_requests: AtomicUsize::new(0),
+        summary_stopped: Arc::clone(&summary_stopped),
+    }) as Arc<dyn AsyncApiClient>);
+
+    let (tx, rx) = mpsc::channel::<RenderBlock>(64);
+    let ids = fresh_id_gen();
+    let done = tokio::time::timeout(
+        AN_HOUR,
+        runtime.compact_streaming(COMPACT_CONFIG, &tx, &ids, None),
+    )
+    .await
+    .expect("/compact was still waiting on the summary an hour later");
+    drop(tx);
+    let _ = drain(rx).await;
+
+    assert!(summary_stopped.load(Ordering::SeqCst), "the summary request is stopped");
+    assert!(
+        done.result.removed_message_count > 0,
+        "the local summary still folds the conversation"
+    );
+    let reason = done.local_summary_reason.expect("the reason the local summary stood in");
+    assert!(reason.contains("not done after"), "the reason names the deadline: {reason}");
 }
