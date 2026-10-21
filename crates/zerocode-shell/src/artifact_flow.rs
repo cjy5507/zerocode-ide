@@ -22,7 +22,10 @@
 //! ledger is the image this window already holds ([`ledger_image`]); the
 //! catalog is the store's memory; git is asked through the host boundary, and
 //! its answer is kept by the base's commit — asked again only when that commit
-//! moved, which is checked at most every [`FlowTable::git_fresh_ms`].
+//! moved, which is checked at most every [`FlowTable::git_fresh_ms`]. git is
+//! asked only at a repository this window lists, for a folder that belongs to
+//! it ([`vouch`], t-69070 P2): the folder a webview names is a request, never
+//! git's working directory.
 //!
 //! [`ledger_image`]: crate::orchestration::ledger_image
 
@@ -1480,29 +1483,77 @@ pub(crate) fn dress(
     }
 }
 
-/// What one read may touch, vouched against the projects this window lists.
+/// What one read may touch, vouched against the projects this window lists
+/// (t-69070 P2).
+///
+/// The folders a webview names are a request, never an authority — the way a
+/// clicked path is vouched before it becomes a working directory
+/// (`set_active_worktree`) or evidence (`worktree_evidence_runtime`). git is
+/// asked only at a root the window listed itself, and only when the asked
+/// folder belongs to that root's repository; the asked folder is never git's
+/// working directory, so git never follows its `.git` or a parent's. A folder
+/// in no listed repository is answered by the ledger and the catalog alone,
+/// and its flow says so ([`GitAsked::Outside`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Vouched {
-    /// The project as the ledger keys a run ([`zerocode_core::git_dir::project_root`]).
+    /// The project as the ledger keys a run
+    /// ([`zerocode_core::git_dir::project_root`]): the folder made canonical,
+    /// then its repository's shared git directory when a checkout holds it.
     pub(crate) project: Option<PathBuf>,
     /// The listed root git is asked at; `None` for a folder in no listed
     /// repository.
     pub(crate) repo: Option<PathBuf>,
-    /// The asked roots that are the project's own folders.
+    /// The asked roots that are the project's own folders — the project, a
+    /// folder inside it, its worktrees — and nothing wider.
     pub(crate) roots: Vec<PathBuf>,
 }
 
-/// The folders `ask` names, vouched against the `listed` projects.
-pub(crate) fn vouch(ask: &FlowAsk, _listed: &[PathBuf]) -> Vouched {
-    let folder = PathBuf::from(ask.root.trim());
+/// The folders `ask` names, vouched against the `listed` projects. A listed
+/// project answers for the folder when it is a checkout whose shared git
+/// directory is the folder's project — its main checkout, a linked worktree or
+/// a folder inside either; a listed folder no checkout holds answers for none,
+/// git having nothing to say there. A path that is not absolute names no
+/// folder. Files are read and no process runs: a canonical path and a `.git`
+/// pointer or two a folder.
+pub(crate) fn vouch(ask: &FlowAsk, listed: &[PathBuf]) -> Vouched {
+    use zerocode_core::git_dir::{common_of, project_root};
+    let folder = Path::new(ask.root.trim());
+    let project = if folder.is_absolute() {
+        project_root(folder)
+    } else {
+        None
+    };
+    let Some(key) = project.as_deref() else {
+        return Vouched::default();
+    };
+    let repo = listed
+        .iter()
+        .find(|root| {
+            common_of(root)
+                .and_then(|shared| shared.canonicalize().ok())
+                .is_some_and(|shared| shared == key)
+        })
+        .cloned();
+    let roots = ask
+        .roots
+        .iter()
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute() && project_root(root).as_deref() == Some(key))
+        .collect();
     Vouched {
-        project: zerocode_core::git_dir::project_root(&folder),
-        roots: ask.roots.iter().map(PathBuf::from).collect(),
-        repo: Some(folder),
+        project,
+        repo,
+        roots,
     }
 }
 
-/// The last vouch, kept for the next read of the same project.
+/// The last vouch, kept for the next read of the same project: the window asks
+/// again on every ledger change, and a vouch reads a canonical path and a
+/// `.git` pointer or two a folder — 0.93 ms for this repository's twelve
+/// worktrees (t-68458 job a7), where git's kept answer costs 0.011 ms. It
+/// stands while the folder, its roots and the list are the same, and for as
+/// long as git's answer does. Whatever it says, git is only ever asked at a
+/// root the window listed.
 struct VouchHeld {
     root: String,
     roots: Vec<String>,
@@ -1511,28 +1562,60 @@ struct VouchHeld {
     vouched: Vouched,
 }
 
+fn vouch_held() -> &'static Mutex<Option<VouchHeld>> {
+    static HELD: OnceLock<Mutex<Option<VouchHeld>>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(None))
+}
+
 /// [`vouch`], answered from `held` for the same ask against the same list
 /// within [`FlowTable::git_fresh_ms`], and kept there.
 fn vouch_kept(
-    _held: &mut Option<VouchHeld>,
+    held: &mut Option<VouchHeld>,
     ask: &FlowAsk,
     listed: &[PathBuf],
-    _now_ms: i64,
+    now_ms: i64,
 ) -> Vouched {
-    vouch(ask, listed)
+    if let Some(one) = held.as_ref().filter(|one| {
+        one.root == ask.root
+            && one.roots == ask.roots
+            && one.listed == listed
+            && now_ms - one.checked_ms < FLOW.git_fresh_ms
+    }) {
+        return one.vouched.clone();
+    }
+    let vouched = vouch(ask, listed);
+    *held = Some(VouchHeld {
+        root: ask.root.clone(),
+        roots: ask.roots.clone(),
+        listed: listed.to_vec(),
+        checked_ms: now_ms,
+        vouched: vouched.clone(),
+    });
+    vouched
 }
 
 /// The flow of the project at `ask.root`: the ledger image this window holds,
-/// git at the base, and the catalog's memory. Runs off the main thread.
-pub(crate) fn read(ask: &FlowAsk, _listed: &[PathBuf], now_ms: i64) -> Flow {
+/// git at the listed root the folder belongs to ([`vouch`]), and the catalog's
+/// memory. Runs off the main thread.
+pub(crate) fn read(ask: &FlowAsk, listed: &[PathBuf], now_ms: i64) -> Flow {
     let root = ask.root.trim();
     if root.is_empty() {
         return Flow::default();
     }
-    let folder = Path::new(root);
-    let project = zerocode_core::git_dir::project_root(folder)
+    let vouched = vouch_kept(
+        &mut vouch_held().lock().unwrap_or_else(PoisonError::into_inner),
+        ask,
+        listed,
+        now_ms,
+    );
+    let project = vouched
+        .project
+        .as_ref()
         .map(|project| project.to_string_lossy().into_owned());
-    let git = git_facts(folder, now_ms);
+    let git = vouched
+        .repo
+        .as_deref()
+        .map_or_else(Arc::default, |repo| git_facts(repo, now_ms));
     let ledger = crate::orchestration::ledger_image();
     let mut flow = assemble(&Reading {
         root,
@@ -1541,11 +1624,13 @@ pub(crate) fn read(ask: &FlowAsk, _listed: &[PathBuf], now_ms: i64) -> Flow {
         git: &git,
         table: &FLOW,
     });
+    if vouched.repo.is_none() {
+        flow.git = GitAsked::Outside;
+    }
     if let Some(store) = crate::artifact_runtime::store() {
         let chips = store.chips(&flow.task_ids());
-        let roots: Vec<PathBuf> = ask.roots.iter().map(PathBuf::from).collect();
         let records = store.loose(
-            &roots,
+            &vouched.roots,
             flow.records_since(&git),
             FLOW.records_max * (FLOW.releases_kept + 2),
         );

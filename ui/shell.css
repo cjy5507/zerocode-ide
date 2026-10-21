@@ -48137,6 +48137,15 @@ button.jev-token:hover {
 
 .artifact-flow-list:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
 
+/* 등록된 저장소 밖 폴더 — 런타임이 git을 묻지 않았다는 한 줄(t-69070 P2). 목록과 빈 안내 위에 선다. */
+.artifact-flow-outside {
+  flex: none;
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
 /* 묶음의 머리 — 지금 · 다음 발행 전 · 발행된 것. 수는 여기에만 선다. */
 .artifact-flow-group-head {
   position: sticky;

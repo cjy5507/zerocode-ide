@@ -433,12 +433,18 @@ function artifactFlowChip(row, label, tip) {
   return chip;
 }
 
-/* 흐름의 상자 — 판마다 한 번 짓는다: 묶음이 설 목록과 빈 프로젝트의 안내. 묶음과 줄은 그릴 때
- * 열쇠로 선다(`paintArtifactFlowList`). */
+/* 흐름의 상자 — 판마다 한 번 짓는다: 등록된 저장소 밖 폴더의 한 줄, 묶음이 설 목록과 빈 프로젝트의
+ * 안내. 묶음과 줄은 그릴 때 열쇠로 선다(`paintArtifactFlowList`). */
 function buildArtifactFlow() {
   const flow = document.createElement("section");
   flow.className = "artifacts-flow";
   flow.hidden = true;
+  // 런타임은 창이 등록한 저장소의 폴더에만 git을 묻는다(t-69070 P2) — 묻지 않은 폴더는 그 사실을 한 줄로.
+  const outside = document.createElement("p");
+  outside.className = "artifact-flow-outside";
+  outside.hidden = true;
+  outside.dataset.i18n = "artifacts.flow.outside";
+  outside.textContent = t("artifacts.flow.outside", "등록된 저장소 밖 폴더 — git 기록 없음");
   const list = document.createElement("div");
   list.className = "artifact-flow-list";
   artifactFlowListSerial += 1;
@@ -474,7 +480,7 @@ function buildArtifactFlow() {
   all.dataset.i18n = "artifacts.flow.emptyAll";
   all.textContent = t("artifacts.flow.emptyAll", "전체 목록 보기");
   empty.append(mark, word, hint, steps, all);
-  flow.append(list, empty);
+  flow.append(outside, list, empty);
   return flow;
 }
 
@@ -984,6 +990,7 @@ function paintArtifactFlowList(view) {
   const list = flowBox.querySelector(".artifact-flow-list");
   const empty = flowBox.querySelector(".artifact-flow-empty");
   const flow = artifactFlowAnswer;
+  writeHidden(flowBox.querySelector(".artifact-flow-outside"), flow?.git !== "outside");
   const admitted = (group) => (group?.tasks ?? []).filter(artifactFlowAdmits);
   const narrowed = artifactFilter.query.trim() !== "" || Boolean(artifactFilter.agent);
   const now = admitted(flow?.now);
