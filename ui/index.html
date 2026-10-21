@@ -1732,11 +1732,19 @@
               <header class="task-board-intro">
                 <h2 data-i18n="board.tasks.now">지금 진행 중인 일</h2>
                 <p class="task-board-summary" role="status" aria-live="polite"></p>
+                <!-- 일정 (t-67482): 「지금」은 데스크와 작업 목록, 「일정」은 빌드 줄·결합
+                     게이트·발행 레인·워커 과업의 시간축이다(`paintBoardSchedule`,
+                     shell-board-schedule.js). -->
+                <div class="board-mode task-board-views" role="group" data-i18n-aria="board.schedule.views" aria-label="작업 상황판 보기">
+                  <button type="button" data-task-board-view="now" aria-pressed="true" data-i18n="board.schedule.now">지금</button>
+                  <button type="button" data-task-board-view="schedule" aria-pressed="false" data-i18n="board.schedule.tab">일정</button>
+                </div>
               </header>
               <!-- 코디네이터 데스크 (t-6588): 코디네이터가 원장 CLI로 묻던 것을 판이
                    먼저 답한다 — 기계 띠·답할 우편·워커·과업 흐름·릴리즈 레인. 블록은
                    `paintCoordinatorDesk`(shell-board.js)가 키로 세운다. -->
               <section class="task-board-desk" hidden data-i18n-aria="board.desk.label" aria-label="코디네이터 데스크"></section>
+              <section class="task-board-schedule" hidden data-i18n-aria="board.schedule.label" aria-label="일정 타임라인"></section>
               <nav class="task-board-filters" data-i18n-aria="board.tasks.filter" aria-label="작업 상태 필터"></nav>
               <div class="task-board-sections"></div>
               <p class="task-board-empty" hidden></p>

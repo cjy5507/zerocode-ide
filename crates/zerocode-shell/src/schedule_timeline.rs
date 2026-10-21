@@ -562,10 +562,6 @@ fn one_name(name: &str) -> bool {
 
 /// The last lines of a log: its last bytes, the line they cut through dropped.
 fn tail_of(path: Option<&Path>) -> LogTail {
-    // t-67482 red: the reading is not written yet.
-    if path.is_some() {
-        return LogTail { missing: true, ..LogTail::default() };
-    }
     let missing = LogTail {
         missing: true,
         ..LogTail::default()
@@ -671,10 +667,6 @@ struct QueueLook {
 }
 
 fn look_at_queue(folder: &Path, headers: &mut HashMap<String, (FileStamp, Header)>) -> QueueLook {
-    // t-67482 red: the reading is not written yet.
-    if folder.is_dir() {
-        return QueueLook::default();
-    }
     let waiting_dir = folder.join(QUEUE_IN);
     if !waiting_dir.is_dir() {
         headers.clear();
@@ -873,10 +865,6 @@ enum Ending {
 }
 
 fn said_of(text: &str) -> Said {
-    // t-67482 red: the reading is not written yet.
-    if !text.is_empty() {
-        return Said::Other;
-    }
     let said = match text.split_whitespace().next() {
         Some("RUN") => run_line(text),
         Some("DONE") => done_line(text),
@@ -1000,10 +988,6 @@ fn clock_secs(word: &str) -> Option<u32> {
 /// The last moment at or before `ceiling_ms` (to the second) that a clock
 /// `offset_secs` east of UTC reads `clock`.
 fn clock_at_or_before(ceiling_ms: i64, clock: u32, offset_secs: i64) -> i64 {
-    // t-67482 red: the reading is not written yet.
-    if clock < u32::MAX {
-        return ceiling_ms;
-    }
     let shift = offset_secs * 1000;
     let local = (ceiling_ms + shift).div_euclid(1000) * 1000;
     let mut at = local.div_euclid(DAY_MS) * DAY_MS + i64::from(clock) * 1000;
@@ -1043,10 +1027,6 @@ struct NameParts {
 }
 
 fn name_parts(name: &str) -> NameParts {
-    // t-67482 red: the reading is not written yet.
-    if !name.is_empty() {
-        return NameParts { class: PLAIN_CLASS, ..NameParts::default() };
-    }
     let tokens: Vec<&str> = name.split('-').collect();
     let (class, mut at) = match tokens.first() {
         Some(&"0") => (FIRST_CLASS, 1),
@@ -1330,10 +1310,6 @@ impl RunnerTail {
 
 /// The middle of `secs` — the mean of the two middles for an even count.
 fn median(secs: &[u32]) -> Option<u32> {
-    // t-67482 red: the reading is not written yet.
-    if !secs.is_empty() {
-        return None;
-    }
     if secs.is_empty() {
         return None;
     }
@@ -1409,10 +1385,6 @@ struct ParsedRun {
 /// The runs of one lane log, its lines dated back from the file's last write
 /// (`anchor_ms`, [`dated_back`]).
 fn lane_runs(text: &str, anchor_ms: i64, offset_secs: i64) -> Vec<ParsedRun> {
-    // t-67482 red: the reading is not written yet.
-    if !text.is_empty() {
-        return Vec::new();
-    }
     let dated: Vec<(u32, &str)> = text
         .lines()
         .filter_map(|line| {

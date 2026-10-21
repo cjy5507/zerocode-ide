@@ -531,10 +531,6 @@ pub(crate) struct TaskTimes {
 /// A task's times, read off its attempts and its review — the readings the
 /// cost (`task_cost::attempts`) and the stage (`Run::review_of`) already use.
 fn task_times(run: &Run, task: &Task) -> Option<TaskTimes> {
-    // t-67482 red: the times are not read yet.
-    if !task.id.is_empty() {
-        return None;
-    }
     let attempts = zerocode_core::orchestration::task_cost::attempts(run, &task.id);
     let started_ms = attempts.iter().map(|attempt| attempt.started_ms).min()?;
     let review = run.review_of(task);

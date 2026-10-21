@@ -184,6 +184,8 @@ const DESK_BLOCKS = Object.freeze([
 ]);
 
 function paintCoordinatorDesk(view) {
+  // The schedule beside the desk mounts here — its one hook (t-67482, shell-board-schedule.js).
+  paintBoardSchedule(view);
   const desk = view.querySelector(".task-board-desk");
   if (!desk) return;
   if (!deskPainted.has(view)) {

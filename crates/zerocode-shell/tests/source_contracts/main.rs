@@ -11012,9 +11012,12 @@ mod tests {
         // Fifteen since t-6588: the task board desk's minute (`deskAmbient`),
         // the release lane and the machine strip, only while the desk is on
         // screen.
+        // Sixteen since t-67482: the task board schedule's five seconds
+        // (`boardSchedulePoller`), one `schedule_timeline` read answered
+        // `unchanged` until a file moved, only while the schedule is on screen.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            15,
+            16,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");

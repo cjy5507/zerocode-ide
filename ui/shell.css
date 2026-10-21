@@ -34500,6 +34500,323 @@ details.task-board-section > summary {
   padding-left: var(--space-4);
 }
 
+/* ---- 일정 (t-67482) --------------------------------------------------------------
+ * 작업 상황판의 둘째 보기(`shell-board-schedule.js`): 빌드 줄·결합 게이트·발행 레인·
+ * 워커 과업을 시간축 하나에 막대로 세운다. 그릇이 제 폭을 잰다(`board-schedule`) — 좁으면
+ * 이름과 말이 막대 위 한 줄로 올라가고 막대는 판의 폭을 다 쓴다. 막대는 커스텀 속성
+ * 셋(`--from`·`--to`·`--done`, 트랙의 퍼센트)으로 서고, 「지금」 선(`--now`)과 눈금
+ * (`--at`)도 같은 트랙 안에 같은 식으로 선다. 상태는 색과 함께 모양이 말한다: 끝남은
+ * 꽉 참, 도는 것은 지난 부분이 꽉 차고 남은 부분이 빗금, 기다림은 끊긴 테두리, 근거
+ * 없는 예상은 점선 테두리. 행의 말이 같은 것을 글로 한 번 더 말한다.
+ * 막대의 상태는 제 이름(`data-bar-state`)으로 단다: 창 전체가 쓰는 `data-state`는
+ * 규칙 73개(`:has()` 둘)가 지켜봐서, 행 하나를 바꾸는 데 효율 코어에서 1.5 ms가 들었다. */
+.task-board-views {
+  margin-top: var(--space-3);
+}
+
+.task-board-surface.is-schedule > :is(.task-board-desk, .task-board-filters, .task-board-sections, .task-board-empty) {
+  display: none;
+}
+
+.task-board-schedule {
+  --schedule-label: 14em;
+  --schedule-said: 12em;
+  --schedule-gap: var(--space-2);
+  container: board-schedule / inline-size;
+  max-width: 76em;
+  margin: var(--space-5) auto 0;
+}
+
+.task-board-schedule[hidden],
+.board-schedule-group[hidden],
+.board-schedule-rows[hidden],
+.board-schedule-note[hidden],
+.board-schedule-more[hidden],
+.board-schedule-log[hidden],
+.board-schedule-empty[hidden] {
+  display: none;
+}
+
+.board-schedule-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.board-schedule-note {
+  margin: 0;
+  color: var(--signal-wait-ink);
+  font-size: var(--text-xs);
+}
+
+.board-schedule-chart {
+  position: relative;
+  padding-top: var(--space-5);
+  overflow-x: clip;
+}
+
+.board-schedule-axis {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: calc(var(--schedule-label) + var(--schedule-gap)) calc(var(--schedule-said) + var(--schedule-gap));
+  height: var(--space-5);
+}
+
+.board-schedule-tick {
+  position: absolute;
+  inset-inline-start: calc(var(--at) * 1%);
+  translate: -50% 0;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.board-schedule-now {
+  position: absolute;
+  z-index: 1;
+  inset-block: 0;
+  inset-inline-start: calc(var(--schedule-label) + var(--schedule-gap) + (100% - var(--schedule-label) - var(--schedule-said) - 2 * var(--schedule-gap)) * var(--now) / 100);
+  width: var(--rule-width);
+  background: var(--signal-ready);
+  pointer-events: none;
+}
+
+.board-schedule-now::before {
+  content: attr(data-said);
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: var(--space-1);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  background: var(--surface-well);
+  color: var(--signal-ready-ink);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.board-schedule-group + .board-schedule-group {
+  margin-top: var(--space-3);
+}
+
+.board-schedule-group-head {
+  display: block;
+  width: 100%;
+  padding: var(--space-1) 0;
+  border: 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: transparent;
+  color: var(--ink-label);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: start;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.board-schedule-group-head:hover {
+  color: var(--ink-chalk);
+}
+
+.board-schedule-group-head::before {
+  content: "";
+  display: inline-block;
+  margin-inline-end: var(--space-2);
+  border-block: var(--space-1) solid transparent;
+  border-inline-start: var(--space-1) solid currentColor;
+  rotate: 90deg;
+  transition: rotate var(--motion-fast) var(--ease-standard);
+}
+
+.board-schedule-group-head[aria-expanded="false"]::before {
+  rotate: 0deg;
+}
+
+.board-schedule-rows {
+  display: grid;
+}
+
+.board-schedule-row {
+  display: grid;
+  grid-template-columns: var(--schedule-label) minmax(0, 1fr) var(--schedule-said);
+  grid-template-areas: "label bar said";
+  align-items: center;
+  column-gap: var(--schedule-gap);
+  min-height: var(--control-height-sm);
+  padding: 0;
+  border: 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: transparent;
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-align: start;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-schedule-row:hover {
+  background: var(--row-hover);
+}
+
+.board-schedule-row:focus-visible {
+  outline: var(--accent-rule) solid var(--ink-chalk);
+  outline-offset: calc(var(--accent-rule) * -1);
+}
+
+.board-schedule-label,
+.board-schedule-said {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-schedule-label {
+  grid-area: label;
+}
+
+.board-schedule-row[data-depth="1"] .board-schedule-label {
+  padding-inline-start: var(--space-4);
+  color: var(--ink-label);
+}
+
+.board-schedule-said {
+  grid-area: said;
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-schedule-bar {
+  position: relative;
+  grid-area: bar;
+  justify-self: start;
+  width: max(var(--space-1), calc((var(--to) - var(--from)) * 1%));
+  height: var(--space-2);
+  margin-inline-start: calc(var(--from) * 1%);
+  border-radius: var(--radius-xs);
+  background: var(--edge-mark);
+}
+
+.board-schedule-row[data-bar-state="done"] .board-schedule-bar {
+  background: color-mix(in srgb, var(--signal-done) 70%, transparent);
+}
+
+.board-schedule-row[data-bar-state="failed"] .board-schedule-bar {
+  background: var(--signal-halt);
+}
+
+.board-schedule-row[data-bar-state="running"] .board-schedule-bar {
+  background:
+    linear-gradient(to right, var(--signal-ready) calc(var(--done) * 1%), transparent calc(var(--done) * 1%)),
+    repeating-linear-gradient(135deg, color-mix(in srgb, var(--signal-ready) 45%, transparent) 0 var(--space-1), transparent var(--space-1) var(--space-2));
+}
+
+/* 제 중앙값을 넘어 도는 것: 남은 부분의 빗금이 기다림 색이 되고, 행의 말이 「+N분 지연 중」이라 적는다. */
+.board-schedule-row.is-late[data-bar-state="running"] .board-schedule-bar {
+  background:
+    linear-gradient(to right, var(--signal-ready) calc(var(--done) * 1%), transparent calc(var(--done) * 1%)),
+    repeating-linear-gradient(135deg, color-mix(in srgb, var(--signal-wait) 55%, transparent) 0 var(--space-1), transparent var(--space-1) var(--space-2));
+}
+
+.board-schedule-row:is([data-bar-state="waiting"], [data-bar-state="held"]) .board-schedule-bar {
+  background: transparent;
+  outline: var(--rule-width) dashed var(--signal-wait);
+  outline-offset: calc(var(--rule-width) * -1);
+}
+
+.board-schedule-row:is([data-bar-state="held"], .is-paused) .board-schedule-bar {
+  outline-color: var(--edge-mark);
+}
+
+.board-schedule-row:is([data-basis="cap"], [data-basis="none"]) .board-schedule-bar {
+  outline: var(--rule-width) dotted var(--ink-label);
+  outline-offset: calc(var(--rule-width) * -1);
+}
+
+/* 워커 과업의 넘김(worker_done)과 검증의 자리: 막대 위의 가는 금 둘. */
+.board-schedule-row:is([data-marks~="handed"], [data-marks~="verified"]) .board-schedule-bar::before,
+.board-schedule-row:is([data-marks~="handed"], [data-marks~="verified"]) .board-schedule-bar::after {
+  position: absolute;
+  inset-block: calc(var(--space-1) * -1);
+  width: var(--rule-width);
+  background: var(--ink-chalk);
+}
+
+.board-schedule-row[data-marks~="handed"] .board-schedule-bar::before {
+  content: "";
+  inset-inline-start: calc(var(--handed) * 1%);
+}
+
+.board-schedule-row[data-marks~="verified"] .board-schedule-bar::after {
+  content: "";
+  inset-inline-start: calc(var(--verified) * 1%);
+}
+
+.board-schedule-more,
+.board-schedule-empty {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+}
+
+.board-schedule-log {
+  margin-top: var(--space-4);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+}
+
+.board-schedule-log-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+}
+
+.board-schedule-log-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.board-schedule-log-lines {
+  max-height: 24em;
+  margin: 0;
+  padding: var(--space-3);
+  overflow: auto;
+  color: var(--ink-chalk);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  white-space: pre;
+}
+
+/* 좁은 그릇(「지금 도는 일」 단 하나, 320 px 판): 이름과 말이 막대 위 한 줄로 올라가고,
+ * 막대·눈금·「지금」 선은 그릇의 폭을 다 쓴다. */
+@container board-schedule (max-width: 479px) {
+  .board-schedule-chart {
+    --schedule-label: 0px;
+    --schedule-said: 0px;
+    --schedule-gap: 0px;
+  }
+
+  .board-schedule-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "label said"
+      "bar bar";
+    column-gap: var(--space-2);
+    row-gap: var(--space-1);
+    padding-block: var(--space-1);
+  }
+}
+
 /* ---- 묶음 통합 큐의 카드 (t-45315) ----------------------------------------------
  * 데스크의 둘째 행(`batches`)을 두 열에 걸쳐 쓴다. 큐가 꺼져 있거나 묶음이 없으면 블록이 숨어
  * 그 행은 높이도 간격도 없다(간격은 블록의 위 여백이다). 말은 릴리즈 레인 카드와 할당량
