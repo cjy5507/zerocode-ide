@@ -3460,6 +3460,18 @@ function agentGraphSignalWord(signal) {
   return t(said.key, said.word);
 }
 
+/* 카드 하나의 상태 낱말. 신호의 낱말이 기본이고, 신호 하나에 두 사실이 겹치는 둘만 제 말을 한다:
+ * 리더가 나간 팀의 워커(원장 `orphaned`)는 계속 돌지만 사람이 대체 워커를 띄우기 전에 알아야 할 단
+ * 하나의 사실이 그것이고 (t-2512), 멈춰 둔 자율 목표(`paused`)는 차례를 기다리는 모양과 색을 입되
+ * 낱말은 제 상태 「일시 정지」다 — 누군가 멈춘 것과 제 차례를 기다리는 것은 다른 일이다. */
+function agentGraphCardWord(entity) {
+  if (entity.signal === "run" && entity.card?.ledger === "orphaned") {
+    return t("board.graph.runOrphaned", "도는 중(리더 없음)");
+  }
+  if (entity.signal === "wait" && entity.state === "paused") return t("board.autonomy.paused", "일시 정지");
+  return agentGraphSignalWord(entity.signal);
+}
+
 /* 카드 제 상태만의 신호 — 자식을 보지 않는다. 사람이 이미 본 끝난 턴은 원장이 쉬는 칸으로
  * 내리지만(`zerocode_core::board`), 일이 끝났다는 사실은 그대로라 끝남이다. 자율 루프가 다음
  * 실행을 기다리는 판(`paused`)은 제 차례를 기다리는 것이다. */
@@ -4873,7 +4885,7 @@ function dressAgentGraphCard(node, entity, reply, chip) {
   writeAttribute(badge, "data-tip", unreadWords);
   writeAttribute(badge, "aria-label", unreadWords);
   for (const word of node.querySelectorAll(".agent-graph-state-word")) {
-    writeTextContent(word, agentGraphSignalWord(entity.signal));
+    writeTextContent(word, agentGraphCardWord(entity));
   }
   for (const mark of node.querySelectorAll(".agent-graph-node-status > .agent-graph-signal")) {
     dressAgentGraphSignalMark(mark, entity.signal);
@@ -5022,7 +5034,7 @@ function updateAgentGraphNode(node, entity, view) {
    * 가려 화면 낭독기에 닿지 않는다 — 같은 사실을 두 길에 같이 실어야 한다. */
   writeAttribute(node, "aria-label", [
     head ? agentGraphTeamTitle(head) : "",
-    agentGraphSignalWord(entity.signal),
+    agentGraphCardWord(entity),
     entity.label,
   ].filter(Boolean).join(" · "));
 
@@ -5045,6 +5057,7 @@ function updateAgentGraphNode(node, entity, view) {
   ].join("\u001f");
   const said = [
     entity.signal,
+    entity.card.ledger ?? "",
     entity.label,
     entity.line,
     entity.bucket,

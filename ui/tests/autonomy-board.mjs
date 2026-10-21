@@ -119,10 +119,11 @@ export async function testAutonomyBoard(browser, origin, ok) {
       paused.mixed === "streaming" && paused.question === "waiting", JSON.stringify(paused));
     await page.screenshot({ path: resolve(shot, "paused.png"), animations: "disabled" });
     await page.click('[data-board-mode="graph"]');
-    // 관계 탭은 행성계로 열린다(t-9444) — 이 검사는 카드 그림의 상태 줄을 읽는다.
+    // 관계 탭은 행성계로 열린다(t-9444) — 이 검사는 카드 그림의 상태 줄을 읽는다. 코디별 줄기(방향 E2,
+    // t-68475)에서 멈춘 목표는 차례 기다림의 작은 카드(S)이고, 둘째 줄이 「낱말 · 자율 문구」다.
     await page.click('[data-relations-view="cards"]');
-    await page.waitForSelector('.agent-graph-node.is-agent.is-paused .agent-graph-node-status');
-    ok("the relations graph keeps the paused goal visible with its actual status label", (await page.locator('.agent-graph-node.is-agent.is-paused .agent-graph-node-status').innerText()).startsWith("일시 정지"));
+    await page.waitForSelector('.agent-graph-node.is-agent.is-paused .agent-graph-card-said');
+    ok("the relations graph keeps the paused goal visible with its actual status label", (await page.locator('.agent-graph-node.is-agent.is-paused .agent-graph-card-said').innerText()).startsWith("일시 정지"));
     await page.screenshot({ path: resolve(shot, "paused-graph.png"), animations: "disabled" });
     await page.click('[data-board-mode="tasks"]');
     await page.evaluate(() => window.__PAUSE_STATE__("working", "목표 자동 진행만 일시 정지"));

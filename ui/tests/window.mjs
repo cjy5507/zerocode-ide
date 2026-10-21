@@ -20521,8 +20521,10 @@ const wireReflow = await page.evaluate(async (fixtures) => {
     wireDrawn: wire !== null && wire !== undefined,
     wireSays: wire?.textContent ?? "",
     grew: after.top > before.top,
-    lands: after.runsTo !== null && Math.abs(after.runsTo - after.wanted) < 1.5,
-    landsOnOldRow: after.runsTo !== null && Math.abs(after.runsTo - before.wanted) < 1.5,
+    // 끝점은 `offset*`의 정수를 더해 오른 값이라 층마다 반 픽셀까지 어긋날 수 있다 — 자라난 높이(로그
+    // 한 줄과 그 안쪽 여백)는 그보다 훨씬 크다.
+    lands: after.runsTo !== null && Math.abs(after.runsTo - after.wanted) < 3,
+    landsOnOldRow: after.runsTo !== null && Math.abs(after.runsTo - before.wanted) < 3,
     before, after,
   };
 }, { cross: CROSS_BAND, lineage: LINEAGE });
@@ -20767,7 +20769,11 @@ ok(
  * 아래가 재는 것은 한 조립기(`agentCardFacts`)가 낳는 여섯이다: 실제 모델 id,
  * 턴 단계, 활동 줄(도구·대상·경과), 활동 띠 여덟, 컨텍스트 미터, 그리고 그
  * 여섯을 그래프 노드와 인스펙터 카드가 **같은 손**으로 그린다는 것. 두 함수가
- * 같은 사실을 따로 지으면 한 화면의 카드 둘이 같은 일을 다르게 말한다. */
+ * 같은 사실을 따로 지으면 한 화면의 카드 둘이 같은 일을 다르게 말한다.
+ *
+ * 코디별 줄기(방향 E2, t-68475)의 카드가 다르게 쓰는 셋: 상태 낱말은 신호의 낱말(「도는 중」)이고,
+ * 턴 단계는 「지금」 줄이 도구로 말하므로 상태 줄에 다시 적지 않으며(인스펙터 카드는 든다), 컨텍스트는
+ * 60%부터만 선다 — 그 밑의 수는 할 일이 없는 숫자다. 나이는 상태 줄의 한 칸이다. */
 const cardFacts = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const heldActivities = new Map(paneActivities);
@@ -20822,14 +20828,14 @@ const cardFacts = await page.evaluate(async () => {
     modelTip: read(known, ".agent-graph-node-model")?.dataset.tip ?? "",
     unknownModel: read(unknown, ".agent-graph-node-model")?.textContent ?? null,
     unknownModelShown: (read(unknown, ".agent-graph-node-model")?.getClientRects().length ?? 0) > 0,
-    // 단계는 상태 낱말 **옆에** 서고 상태 낱말은 그대로다.
+    // 상태 낱말은 신호의 낱말이고, 턴 단계는 이 카드의 상태 줄에 서지 않는다.
     stateWord: read(known, ".agent-graph-state-word")?.textContent ?? "",
     phase: read(known, ".agent-card-phase")?.textContent ?? "",
-    // 활동 줄: 도구 · 대상(경로는 꼬리 두 마디) · 경과.
+    // 활동 줄: 도구 · 대상(경로는 꼬리 두 마디). 경과는 상태 줄의 나이 칸이 든다.
     verb: read(known, ".agent-card-activity-verb")?.textContent ?? "",
     target: read(known, ".agent-card-activity-target")?.textContent ?? "",
     targetTip: read(known, ".agent-card-activity-target")?.dataset.tip ?? "",
-    when: read(known, ".agent-card-activity-when")?.textContent ?? "",
+    when: read(known, ".agent-graph-card-age")?.textContent ?? "",
     // 활동 띠: 슬롯 여덟을 미리 만들어 두고 종류만 돌린다.
     tickSlots: ticks.length,
     kinds: ticks.filter((held) => !held.classList.contains("is-empty"))
@@ -20838,16 +20844,14 @@ const cardFacts = await page.evaluate(async () => {
     lastTick: ticks.filter((held) => held.classList.contains("is-last")).length,
     tipped: ticks.filter((held) => !held.classList.contains("is-empty"))
       .every((held) => (held.dataset.tip ?? "").length > 0),
-    // 컨텍스트 고리: 값이 있으면 비율과 퍼센트, 없으면 DOM에 둔 채 `hidden`.
+    // 컨텍스트 고리: 60% 밑(여기 12%)이면 DOM에 둔 채 `hidden`, 모르면 같은 자리에 `hidden`.
     meterHidden: meter?.hidden ?? null,
-    meterRatio: Number.parseFloat(meter?.style.getPropertyValue("--context-ratio") ?? "NaN"),
     meterWord: read(known, ".agent-graph-node-context-word")?.textContent ?? "",
-    meterSaid: meter?.getAttribute("aria-label") ?? "",
     unknownMeterHidden: read(unknown, ".agent-graph-node-context")?.hidden ?? null,
     unknownMeterInDom: read(unknown, ".agent-graph-node-context") !== null,
     // 낱말은 카탈로그의 것이다 — 이 판이 서 있는 말로 견준다.
     words: {
-      working: t("board.working", "작업 중"),
+      working: agentGraphSignalWord("run"),
       tooling: t("board.phase.tooling", "도구 실행 중"),
       edit: t("activity.edit", "고치기"),
       justNow: t("board.justNow", "방금"),
@@ -20864,6 +20868,21 @@ const cardFacts = await page.evaluate(async () => {
     .map((held) => held.dataset.kind ?? "");
   seen.inspectorMeter = Number.parseFloat(
     read(card, ".agent-card-meter")?.style.getPropertyValue("--meter-ratio") ?? "NaN");
+  // 그리고 60%를 넘으면 고리와 수가 같은 노드에 선다.
+  for (const handler of window.__LISTENERS__["session:frame"] ?? []) {
+    handler({ payload: { session: "s-2374", frame:
+      { type: "usage", ctx_tokens: 140_000, context_window: 200_000 } } });
+  }
+  await paintBoardView(boardTab(), { force: true });
+  await new Promise((done) => setTimeout(done, 160));
+  const fuller = read(node("term:2374"), ".agent-graph-node-context");
+  seen.fullMeter = {
+    sameNode: node("term:2374") === known,
+    hidden: fuller?.hidden ?? null,
+    ratio: Number.parseFloat(fuller?.style.getPropertyValue("--context-ratio") ?? "NaN"),
+    word: read(node("term:2374"), ".agent-graph-node-context-word")?.textContent ?? "",
+    said: fuller?.getAttribute("aria-label") ?? "",
+  };
   paneModels.delete(2374);
   paneSessions.delete(2374);
   paneActivities.clear();
@@ -20882,7 +20901,7 @@ ok(
   cardFacts.model === "opus-5" && cardFacts.modelTip === "claude-opus-5" &&
     cardFacts.unknownModel === "" && !cardFacts.unknownModelShown &&
     cardFacts.stateWord === cardFacts.words.working &&
-    cardFacts.phase === cardFacts.words.tooling &&
+    cardFacts.phase === "" &&
     cardFacts.verb === cardFacts.words.edit &&
     cardFacts.target === "…/ui/shell.js" &&
     cardFacts.targetTip === "/Users/dev/zerocode/workspaces/ui/shell.js" &&
@@ -20891,16 +20910,17 @@ ok(
     cardFacts.kinds.join(",") === "read,read,read,read,read,read,run,edit" &&
     cardFacts.repeats.join(",") === "3" &&
     cardFacts.lastTick === 1 && cardFacts.tipped &&
-    cardFacts.meterHidden === false &&
-    cardFacts.meterRatio > 0.12 && cardFacts.meterRatio < 0.13 &&
-    cardFacts.meterWord === "12%" && cardFacts.meterSaid.includes("24,489") &&
+    cardFacts.meterHidden === true && cardFacts.meterWord === "" &&
     cardFacts.unknownMeterInDom && cardFacts.unknownMeterHidden === true &&
+    cardFacts.fullMeter.sameNode && cardFacts.fullMeter.hidden === false &&
+    cardFacts.fullMeter.ratio === 0.7 && cardFacts.fullMeter.word === "70%" &&
+    cardFacts.fullMeter.said.includes("140,000") &&
     // 그리고 인스펙터 카드는 같은 조립기에서 같은 여섯을 받는다.
     cardFacts.inspectorModel === "claude-opus-5" &&
     cardFacts.inspectorVerb === cardFacts.words.edit &&
     cardFacts.inspectorPhase === cardFacts.words.tooling &&
     cardFacts.inspectorKinds.join(",") === cardFacts.kinds.join(",") &&
-    cardFacts.inspectorMeter === cardFacts.meterRatio,
+    cardFacts.inspectorMeter > 0.12 && cardFacts.inspectorMeter < 0.13,
   JSON.stringify(cardFacts),
 );
 
@@ -20909,9 +20929,10 @@ ok(
  * 리더가 나간 팀의 자식은 원장에 `orphaned`로 남고 판은 계속 일한다. 훅은
  * `working`이라 하고 원장은 `orphaned`라 하며 둘 다 참인데, 보드는 여태 그 행을
  * 맨 「작업 중」으로 그렸다 — 사람이 대체 워커를 띄우기 전에 알아야 할 단 하나의
- * 사실이 낱말에서 빠져 있었다. 아래가 재는 것은 셋이다: 그 짝만 「작업 중(리더
- * 없음)」이 되고, 같은 열의 평범한 행은 「작업 중」 그대로이며, 그 낱말이 카탈로그
- * 넷(en·ja·zh·es) 모두에 실려 있어 어느 말로 서 있어도 한국어 폴백으로 새지 않는다. */
+ * 사실이 낱말에서 빠져 있었다. 아래가 재는 것은 셋이다: 그 짝만 「도는 중(리더
+ * 없음)」이 되고, 같은 열의 평범한 행은 「도는 중」 그대로이며, 그 낱말이 카탈로그
+ * 넷(en·ja·zh·es) 모두에 실려 있어 어느 말로 서 있어도 한국어 폴백으로 새지 않는다.
+ * (코디별 줄기(방향 E2, t-68475)의 카드는 신호의 낱말을 말하므로 「작업 중」이 「도는 중」이 되었다.) */
 const orphanRow = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const now = Date.now();
@@ -20934,15 +20955,15 @@ const orphanRow = await page.evaluate(async () => {
   const seen = {
     orphaned: word("worker:w-2675"),
     plain: word("worker:w-2677"),
-    wantOrphaned: t("board.workingOrphaned", "작업 중(리더 없음)"),
-    wantPlain: t("board.working", "작업 중"),
+    wantOrphaned: t("board.graph.runOrphaned", "도는 중(리더 없음)"),
+    wantPlain: agentGraphSignalWord("run"),
     // 카탈로그 넷이 그 열쇠를 모두 든다 — 폴백은 한국어 원문이라, 어느 카탈로그가
     // 빠뜨리면 그 말로 선 창이 한국어를 말한다.
     catalogs: ["en", "ja", "zh", "es"].map((code) => [
       code,
-      typeof CATALOG[code]["board.workingOrphaned"] === "string" &&
-        CATALOG[code]["board.workingOrphaned"] !== "" &&
-        CATALOG[code]["board.workingOrphaned"] !== CATALOG[code]["board.working"],
+      typeof CATALOG[code]["board.graph.runOrphaned"] === "string" &&
+        CATALOG[code]["board.graph.runOrphaned"] !== "" &&
+        CATALOG[code]["board.graph.runOrphaned"] !== CATALOG[code]["board.now.stateRun"],
     ]),
   };
   window.__COLUMNS__ = heldColumns;
@@ -21081,8 +21102,12 @@ ok(
  * 넷 다 이 창이 이미 들고 있는 사실에서만 나온다: 도구 링의 마지막 박자가
  * 열려 있으면 도구를 돌리는 중이고, 닫혀 있으면 그 결과 위에 답을 쓰는
  * 중이며, 아무 박자도 없는 턴은 아직 모델을 기다리는 중이다. 마지막 소식이
- * 오래되면 `went_quiet`과 같은 층의 「조용해짐」이다 — 새 상태 낱말이 아니라
- * 상태 낱말 옆의 한 마디이고, 상태 낱말은 넷 다 「작업 중」 그대로다. */
+ * 오래되면 `went_quiet`과 같은 층의 「조용해짐」이다.
+ *
+ * 코디별 줄기(방향 E2, t-68475)의 카드는 그 낱말을 상태 줄에 다시 적지 않는다 — 「지금」 줄이
+ * 도구를 말하고, 조용함은 나이 칸이 「N째 조용」으로 말하며, 상태 줄은 시안 그대로 낱말 · 나이 ·
+ * 칩이다. 단계의 낱말은 같은 사실에서 계속 나오고 인스펙터의 카드가 든다. 상태 낱말은 넷 다
+ * 신호의 낱말 「도는 중」이다. */
 const turnPhases = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const heldActivities = new Map(paneActivities);
@@ -21111,20 +21136,24 @@ const turnPhases = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 220));
   const view = [...document.querySelectorAll("#board-view, .file-view")]
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
+  const model = agentGraphModels.get(view);
   const said = (pane) => {
     const node = [...view.querySelectorAll(".agent-graph-node.is-agent")]
       .find((held) => held.dataset.graphKey === `agent:${pane}`);
     return {
-      phase: node?.querySelector(".agent-card-phase")?.textContent ?? "",
+      // 단계의 낱말 — 인스펙터의 카드가 읽는 그 사실(`agentCardFacts`).
+      phase: model.entities.get(`agent:${pane}`)?.facts.phaseWord ?? "",
+      onCard: node?.querySelector(".agent-card-phase")?.textContent ?? "",
       state: node?.querySelector(".agent-graph-state-word")?.textContent ?? "",
       quiet: node?.classList.contains("is-went-quiet") ?? false,
+      age: node?.querySelector(".agent-graph-card-age.is-quiet")?.textContent ?? "",
     };
   };
   const seen = {
     tooling: said("term:2381"), answering: said("term:2382"),
     waiting: said("term:2383"), quiet: said("term:2384"),
     words: {
-      working: t("board.working", "작업 중"),
+      working: agentGraphSignalWord("run"),
       tooling: t("board.phase.tooling", "도구 실행 중"),
       answering: t("board.phase.answering", "답 쓰는 중"),
       waiting: t("board.phase.waiting", "모델 대기"),
@@ -21139,13 +21168,14 @@ const turnPhases = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the turn phase is a word beside the state word, derived from facts the window already holds",
+  "the turn phase is derived from facts the window already holds, and the stem card leaves it to its now line and its age",
   turnPhases.tooling.phase === turnPhases.words.tooling &&
     turnPhases.answering.phase === turnPhases.words.answering &&
     turnPhases.waiting.phase === turnPhases.words.waiting &&
     turnPhases.quiet.phase === turnPhases.words.quiet && turnPhases.quiet.quiet &&
+    turnPhases.quiet.age !== "" &&
     ["tooling", "answering", "waiting", "quiet"]
-      .every((key) => turnPhases[key].state === turnPhases.words.working),
+      .every((key) => turnPhases[key].state === turnPhases.words.working && turnPhases[key].onCard === ""),
   JSON.stringify(turnPhases),
 );
 
@@ -21330,7 +21360,10 @@ ok(
  * 그 자리는 그림마다 다르다: 그래프의 노드에는 질문이 설 다른 곳이 없지만,
  * 인스펙터의 카드에는 호박색 상자가 이미 서 있다. 사실은 한 조립기가 하나로
  * 낳고 어느 자리에 세울지는 그리는 쪽이 고른다 — 실측된 실패는 인스펙터
- * 카드에 같은 질문이 두 줄로 선 그림이었다. */
+ * 카드에 같은 질문이 두 줄로 선 그림이었다.
+ *
+ * 코디별 줄기(방향 E2, t-68475)의 당신 차례 카드(L)는 질문을 제 칸(`.agent-graph-ask`)에 크게 세우고
+ * 활동 줄을 짓지 않는다 — 질문은 그 카드에서 한 번이다. */
 const askedOnce = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const heldActivities = new Map(paneActivities);
@@ -21352,10 +21385,9 @@ const askedOnce = await page.evaluate(async () => {
   const node = [...view.querySelectorAll(".agent-graph-node.is-agent")]
     .find((one) => one.dataset.graphKey === "agent:term:2400");
   const seen = {
-    nodeSlot: [node?.querySelector(".agent-card-activity-verb")?.textContent ?? "",
-      node?.querySelector(".agent-card-activity-target")?.textContent ?? ""].join(" · "),
-    nodeAsking: node?.querySelector(".agent-card-activity")
-      ?.classList.contains("is-asking") ?? false,
+    nodeAsk: node?.querySelector(".agent-graph-ask")?.textContent ?? "",
+    nodeSize: node?.classList.contains("is-size-l") ?? false,
+    nodeSaidTwice: (node?.textContent.match(/main 에 올릴까요\?/g) ?? []).length,
   };
   node?.click();
   await window.__PAINTED__();
@@ -21376,9 +21408,9 @@ const askedOnce = await page.evaluate(async () => {
 });
 ok(
   "a stuck card puts its question where nothing else says it, and never twice on one card",
-  // 그래프의 노드: 질문이 활동 줄의 자리에 선다.
-  askedOnce.nodeSlot === `${askedOnce.words.ask} · main 에 올릴까요?` &&
-    askedOnce.nodeAsking &&
+  // 그래프의 노드: 질문이 당신 차례 카드의 제 칸에 한 번 선다.
+  askedOnce.nodeAsk === "main 에 올릴까요?" && askedOnce.nodeSize &&
+    askedOnce.nodeSaidTwice === 1 &&
     // 인스펙터의 카드: 호박색 상자가 질문을 들고, 활동 줄은 도구를 말한다.
     askedOnce.boxSays === "main 에 올릴까요?" &&
     askedOnce.cardSlot === `${askedOnce.words.bash} · cargo fmt` &&
@@ -21424,9 +21456,12 @@ const boardHardcoding = await (async () => {
       /AGENT_GRAPH_ZOOM_STEP\s*=\s*[\d.]/, /AGENT_GRAPH_LOD_ZOOM\s*=\s*[\d.]/,
       /AGENT_GRAPH_AUTO_FIT_MIN\s*=\s*[\d.]/, /AGENT_GRAPH_EDGE_STUB\s*=\s*[\d.]/,
     ].filter((one) => one.test(graphJs)).length,
-    // 한 함수가 뷰 생성 때 한 번 읽는다.
+    // 한 함수가 뷰 생성 때 한 번 읽는다. 코디별 줄기(방향 E2, t-68475)의 카드 그림에는 배율이 없어
+    // LOD 문턱과 저절로 앉는 바닥은 물러났고, 남은 넷은 입체의 배율과 오버레이 선의 도랑이다.
     tuning: /function agentGraphTuning\(/.test(graphJs),
-    tokensRead: ["zoom-min", "zoom-max", "zoom-step", "lod", "fit-floor", "edge-stub"]
+    tokensRead: ["zoom-min", "zoom-max", "zoom-step", "edge-stub"]
+      .filter((name) => graphJs.includes(`--agent-graph-${name}`)).length,
+    tokensRetired: ["lod", "fit-floor", "rail-bead"]
       .filter((name) => graphJs.includes(`--agent-graph-${name}`)).length,
     /* 데이터의 양은 상수로 남는다 — 여덟 개의 글리프도, 오 분의 침묵도, 스무
      * 칸의 링도 CSS가 골라도 되는 수가 아니다. 이 셋이 토큰으로 내려가면
@@ -21446,7 +21481,7 @@ ok(
     // 하나가 늘면 이 줄이 그것을 말한다.
     boardHardcoding.px <= 128 &&
     boardHardcoding.literals === 0 && boardHardcoding.tuning &&
-    boardHardcoding.tokensRead === 6 &&
+    boardHardcoding.tokensRead === 4 && boardHardcoding.tokensRetired === 0 &&
     boardHardcoding.amounts === 3,
   JSON.stringify({ ...boardHardcoding, hex: boardHardcoding.hex.slice(0, 8) }),
 );

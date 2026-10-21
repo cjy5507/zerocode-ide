@@ -31091,7 +31091,13 @@ input[type="search"]::-webkit-search-cancel-button {
   background: color-mix(in srgb, var(--ink-chalk) 3%, var(--surface-deck));
 }
 
-.agent-graph-node:focus-visible {
+/* 초점은 어디서나 같은 2px 잉크 테다 — 카드, 칩, 카드의 단추, 「끝남 N」 묶음. */
+.agent-graph-node:focus-visible,
+.agent-graph-node-branch:focus-visible,
+.agent-graph-reply:focus-visible,
+.agent-graph-ask-toggle:focus-visible,
+.agent-graph-log-toggle:focus-visible,
+.agent-graph-fold:focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -31334,11 +31340,6 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--ink-chalk);
 }
 
-.agent-graph-node-branch:focus-visible {
-  outline: 2px solid var(--ink-chalk);
-  outline-offset: 2px;
-}
-
 .agent-graph-node-branch-name {
   min-width: 0;
   overflow: hidden;
@@ -31501,13 +31502,6 @@ input[type="search"]::-webkit-search-cancel-button {
     background-color var(--motion-fast) var(--ease-standard),
     box-shadow var(--motion-fast) var(--ease-standard),
     color var(--motion-fast) var(--ease-standard);
-}
-
-.agent-graph-reply:focus-visible,
-.agent-graph-ask-toggle:focus-visible,
-.agent-graph-log-toggle:focus-visible {
-  outline: 2px solid var(--ink-chalk);
-  outline-offset: 2px;
 }
 
 /* 답하기 — 인스펙터의 「터미널 열기」와 같은 곳을 연다. 흰 주 단추 하나. */
@@ -31788,11 +31782,6 @@ input[type="search"]::-webkit-search-cancel-button {
 
 .agent-graph-fold:hover {
   background: var(--row-hover);
-}
-
-.agent-graph-fold:focus-visible {
-  outline: 2px solid var(--ink-chalk);
-  outline-offset: 2px;
 }
 
 .agent-graph-fold-count {
