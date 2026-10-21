@@ -211,6 +211,9 @@ impl SubagentProgressWatcher {
     ) -> Self {
         let registry_id = registry.session_id().map(str::to_string);
         let notes_roster = started_at_floor.is_none();
+        // The same intent as the roster's: the session-wide watcher feeds the
+        // window, and the turn's own floored one feeds the pane (t-69472).
+        let rows = if notes_roster { Rows::Window } else { Rows::Pane };
         let (sender, receiver) = watch::channel(RosterSnapshot::default());
         let scans = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&scans);
@@ -226,7 +229,8 @@ impl SubagentProgressWatcher {
                 let cache = Arc::clone(&cache);
                 let scan = tokio::task::spawn_blocking(move || {
                     let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let agents = scan_registry(
+                    let agents = scan_rows(
+                        rows,
                         &registry,
                         &session_id,
                         epoch_seconds_now(),
@@ -363,6 +367,9 @@ struct AgentManifest {
     /// (another flattened lifecycle key).
     #[serde(default)]
     transcript: Option<PathBuf>,
+    /// The file the helper writes its whole report to (t-69472).
+    #[serde(rename = "outputFile", default)]
+    output_file: Option<PathBuf>,
 }
 
 /// What this process last read of each manifest file, whichever watcher
@@ -559,11 +566,45 @@ fn read_manifest(path: &Path, metadata: &std::fs::Metadata) -> Option<AgentManif
     serde_json::from_str::<AgentManifest>(&contents).ok()
 }
 
+/// Whose rows a scan makes (t-69472).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// Rows that may reach the window: its frames and the background list. A
+    /// ledger worker is never one — the window lists the worker itself, and a
+    /// second row for it doubled the sidebar (t-11962).
+    Window,
+    /// The parent pane's own rows: its spawn cell shows a ledger worker too,
+    /// by what the parent can know of it.
+    Pane,
+}
+
 /// Every running child of `parent_session_id` across the registry's stores
 /// (root first, then adopted mirrors; a duplicated id resolved to its canonical
 /// copy by the registry), sorted by `(started_at, agent_id)` — a stable order
-/// that two same-labelled helpers cannot swap.
+/// that two same-labelled helpers cannot swap. These are the rows that may
+/// reach the window ([`Rows::Window`]).
 fn scan_registry(
+    registry: &AgentRegistry,
+    parent_session_id: &str,
+    now_epoch_seconds: u64,
+    started_at_floor: Option<u64>,
+    cache: &mut ManifestCache,
+    observed_at: SystemTime,
+) -> Vec<SubagentProgress> {
+    scan_rows(
+        Rows::Window,
+        registry,
+        parent_session_id,
+        now_epoch_seconds,
+        started_at_floor,
+        cache,
+        observed_at,
+    )
+}
+
+/// [`scan_registry`], for whoever `rows` names.
+fn scan_rows(
+    rows: Rows,
     registry: &AgentRegistry,
     parent_session_id: &str,
     now_epoch_seconds: u64,
@@ -586,8 +627,9 @@ fn scan_registry(
         let Some(manifest) = manifest else {
             continue;
         };
+        let ledger = manifest.execution.as_deref() == Some("ledger");
         if manifest.status != "running"
-            || manifest.execution.as_deref() == Some("ledger")
+            || (ledger && rows == Rows::Window)
             || manifest.subagent_type.as_deref() == Some("classifier")
             || manifest.parent_session_id.as_deref() != Some(parent_session_id)
         {
@@ -665,7 +707,9 @@ fn scan_registry(
             output_tail: manifest.output_tail.clone(),
             started_epoch: started_at,
             elapsed: Duration::from_secs(now_epoch_seconds.saturating_sub(started_at)),
-            no_new_output_for: (quiet >= NO_NEW_OUTPUT_AFTER).then_some(quiet),
+            // A ledger worker's output is in its own tab, out of this
+            // manifest's sight: its quiet here would be no fact (t-69472).
+            no_new_output_for: (!ledger && quiet >= NO_NEW_OUTPUT_AFTER).then_some(quiet),
             transcript_path,
             pane: manifest.pane.clone(),
             last_receipt: manifest.last_receipt.clone(),
@@ -674,8 +718,8 @@ fn scan_registry(
             } else {
                 manifest.current_tool.is_some()
             },
-            report: None,
-            ledger: false,
+            report: manifest.output_file.clone().filter(|report| report.is_file()),
+            ledger,
         });
     }
     ManifestFiles::keep_only(files, &seen, &stores);

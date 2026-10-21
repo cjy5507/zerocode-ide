@@ -511,7 +511,7 @@ where
         let guard_t = profile.then(std::time::Instant::now);
         // Emergency overflow compaction is not user-directed: no focus. A
         // local summary that stood in says so, as an auto round's does.
-        let (result, local_summary_reason) = self.compact_with_api_fallback_explained(
+        let (result, local_summary) = self.compact_with_api_fallback_explained(
             CompactionConfig {
                 max_estimated_tokens: 0,
                 ..CompactionConfig::default()
@@ -519,7 +519,7 @@ where
             None,
         );
         if self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER) {
-            say_local_summary_on_stderr(local_summary_reason.as_deref());
+            say_local_summary_on_stderr(local_summary.as_ref());
         }
 
         // Re-check after compaction — if still over budget, aggressively
@@ -529,7 +529,7 @@ where
         if self.estimated_request_context_with_reminders(wire_reminders) > budget
             && self.session.messages.len() > 2
         {
-            let (result, local_summary_reason) = self.compact_with_api_fallback_explained(
+            let (result, local_summary) = self.compact_with_api_fallback_explained(
                 CompactionConfig {
                     max_estimated_tokens: 0,
                     preserve_recent_messages: 2,
@@ -537,7 +537,7 @@ where
                 None,
             );
             if self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER) {
-                say_local_summary_on_stderr(local_summary_reason.as_deref());
+                say_local_summary_on_stderr(local_summary.as_ref());
             }
         }
         if let Some(t) = guard_t {

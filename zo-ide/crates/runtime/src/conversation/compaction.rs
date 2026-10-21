@@ -673,22 +673,100 @@ fn summary_deadline_reason() -> String {
     )
 }
 
-/// The one line a compaction leaves when the local summary folded the
-/// conversation for a reason worth a line: a summary cut at
-/// [`COMPACTION_SUMMARY_DEADLINE`] (t-68694). A turn shows it as a row, and
-/// the sync road, which has no screen, writes it on stderr (t-69472).
-fn local_summary_notice(reason: &str) -> Option<String> {
-    (reason == summary_deadline_reason()).then(|| {
-        format!("Compaction: the model's summary did not come ({reason}); the local summary stands in")
-    })
+/// Why the local summary folded the conversation in the model's place
+/// (t-10956, t-68694, t-69472): the whole reason, as `/compact`'s report says
+/// it, and the line a compaction leaves for it.
+pub(super) struct LocalSummary {
+    /// The whole reason, with the provider's own message when there was one.
+    pub(super) reason: String,
+    kind: LocalSummaryKind,
+}
+
+enum LocalSummaryKind {
+    /// The summary was not done at [`COMPACTION_SUMMARY_DEADLINE`].
+    Deadline,
+    /// Any other reason, named by its kind alone.
+    Other(&'static str),
+}
+
+impl LocalSummary {
+    /// The summary round-trip ended in `error`.
+    fn failed(error: &RuntimeError) -> Self {
+        let reason = error.to_string();
+        let kind = if reason == summary_deadline_reason() {
+            LocalSummaryKind::Deadline
+        } else {
+            LocalSummaryKind::Other(summary_failure_kind(error, &reason))
+        };
+        Self { reason, kind }
+    }
+
+    /// The summary was not asked for: the provider's quota cooldown is on.
+    fn skipped_under_cooldown() -> Self {
+        Self {
+            reason: COMPACTION_SKIPPED_UNDER_QUOTA_COOLDOWN.to_string(),
+            kind: LocalSummaryKind::Other("the provider's rate-limit cooldown"),
+        }
+    }
+
+    /// The one line a compaction leaves for it: a row in a turn, and a `[zo]`
+    /// line on the sync road's stderr. A summary cut at its deadline did not
+    /// come (t-68694); any other could not be used, and its line names the
+    /// kind of failure only — never the provider's message, the summary's
+    /// text or the conversation's (t-69472).
+    fn notice(&self) -> String {
+        match self.kind {
+            LocalSummaryKind::Deadline => format!(
+                "Compaction: the model's summary did not come ({}); the local summary stands in",
+                self.reason
+            ),
+            LocalSummaryKind::Other(kind) => format!(
+                "Compaction: the model's summary could not be used ({kind}); the local summary stands in"
+            ),
+        }
+    }
+}
+
+/// What the summarizer's own answer is refused for, word for word: the
+/// reason `/compact`'s report gives, and how its kind is told apart.
+const SUMMARY_CALLED_A_TOOL: &str =
+    "compaction summarizer emitted tool use; falling back to local summarizer";
+const SUMMARY_WITHOUT_STOP: &str = "compaction summarizer response did not include a stop event";
+const SUMMARY_WITHOUT_TEXT: &str = "compaction summarizer returned no text output";
+const SUMMARY_UNSTRUCTURED: &str = "compaction summarizer returned unstructured output";
+
+/// The kind of failure that kept the model's summary out, in a few fixed
+/// words: what the provider's class of error says, or which check the
+/// summarizer's answer failed. `reason` is `error`'s own text.
+fn summary_failure_kind(error: &RuntimeError, reason: &str) -> &'static str {
+    use crate::ProviderErrorClass as Class;
+    match error.provider_error_class() {
+        Some(Class::RateLimit {
+            scope: ::api::CapacityScope::Provider,
+            ..
+        }) => "the provider was overloaded",
+        Some(Class::RateLimit { .. }) => "a rate limit",
+        Some(Class::Transient) => "a transient provider error",
+        Some(Class::AuthExpired) => "the login was refused",
+        Some(Class::ContextOverflow) => "the conversation is too long for the summary request",
+        Some(Class::SafetyBlocked | Class::ContentRefused) => "the provider's filter refused it",
+        Some(_) => "the provider refused the request",
+        None => match reason {
+            SUMMARY_CALLED_A_TOOL => "the summary called a tool",
+            SUMMARY_WITHOUT_STOP => "the summary stream ended early",
+            SUMMARY_WITHOUT_TEXT => "the summary was empty",
+            SUMMARY_UNSTRUCTURED => "the summary was not in its expected form",
+            _ => "an error",
+        },
+    }
 }
 
 /// The sync road's word on a local summary that folded the conversation:
 /// stderr is the only screen a helper's turn or a headless run has, so the
 /// line goes there, the headless notice convention (t-69472).
-pub(super) fn say_local_summary_on_stderr(reason: Option<&str>) {
-    if let Some(line) = reason.and_then(local_summary_notice) {
-        eprintln!("[zo] {line}");
+pub(super) fn say_local_summary_on_stderr(local_summary: Option<&LocalSummary>) {
+    if let Some(local_summary) = local_summary {
+        eprintln!("[zo] {}", local_summary.notice());
     }
 }
 
@@ -1439,8 +1517,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn apply_auto_compaction(&mut self, config: CompactionConfig) -> Option<AutoCompactionEvent> {
-        let (event, local_summary_reason) = self.apply_auto_compaction_explained(config);
-        say_local_summary_on_stderr(event.and(local_summary_reason.as_deref()));
+        let (event, local_summary) = self.apply_auto_compaction_explained(config);
+        say_local_summary_on_stderr(event.and(local_summary.as_ref()));
         event
     }
 
@@ -1449,18 +1527,18 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     fn apply_auto_compaction_explained(
         &mut self,
         config: CompactionConfig,
-    ) -> (Option<AutoCompactionEvent>, Option<String>) {
+    ) -> (Option<AutoCompactionEvent>, Option<LocalSummary>) {
         let _ = self.run_lifecycle_hook(
             HookEvent::PreCompact,
             &json!({"message_count": self.session.messages.len()}),
         );
         // Auto-compaction has no user focus directive.
-        let (result, local_summary_reason) = self.compact_with_api_fallback_explained(config, None);
+        let (result, local_summary) = self.compact_with_api_fallback_explained(config, None);
         let _ = self.run_lifecycle_hook(
             HookEvent::PostCompact,
             &json!({"removed": result.removed_message_count}),
         );
-        (self.finish_auto_compaction(result), local_summary_reason)
+        (self.finish_auto_compaction(result), local_summary)
     }
 
     /// Async sibling of [`Self::apply_auto_compaction`]. Identical bookkeeping,
@@ -1474,20 +1552,20 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         config: CompactionConfig,
         id_gen: &BlockIdGen,
         progress: Option<&mpsc::Sender<RenderBlock>>,
-    ) -> (Option<AutoCompactionEvent>, Option<String>) {
+    ) -> (Option<AutoCompactionEvent>, Option<LocalSummary>) {
         let _ = self.run_lifecycle_hook(
             HookEvent::PreCompact,
             &json!({"message_count": self.session.messages.len()}),
         );
         // Auto-compaction has no user focus directive.
-        let (result, local_summary_reason) = self
+        let (result, local_summary) = self
             .compact_with_api_fallback_async(config, id_gen, None, progress)
             .await;
         let _ = self.run_lifecycle_hook(
             HookEvent::PostCompact,
             &json!({"removed": result.removed_message_count}),
         );
-        (self.finish_auto_compaction(result), local_summary_reason)
+        (self.finish_auto_compaction(result), local_summary)
     }
 
     /// Shared tail of sync/async auto-compaction: swap in the compacted session
@@ -1741,19 +1819,19 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // this `select!` drive-loop task — otherwise the spinner/reveal/input
         // freeze for the entire summary stream. Headless `-p` (no async client)
         // keeps the synchronous path.
-        let (event, local_summary_reason) = if self.async_api_client.is_some() {
+        let (event, local_summary) = if self.async_api_client.is_some() {
             self.apply_auto_compaction_async(config, id_gen, Some(render_tx)).await
         } else {
             self.apply_auto_compaction_explained(config)
         };
-        // A summary cut at its deadline is said on screen: the turn did not
-        // stop, and the local summary is what folded the conversation.
-        if let Some(line) = event.and(local_summary_reason.as_deref()).and_then(local_summary_notice) {
+        // A local summary that folded the conversation is said on screen:
+        // the turn did not stop, and the model's summary did not stand.
+        if let Some(local_summary) = event.and(local_summary.as_ref()) {
             let _ = render_tx
                 .send(RenderBlock::System {
                     id: id_gen.next(),
                     level: SystemLevel::Warn,
-                    text: line,
+                    text: local_summary.notice(),
                 })
                 .await;
         }
@@ -1837,21 +1915,21 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         &mut self,
         config: CompactionConfig,
         focus: Option<&str>,
-    ) -> (CompactionResult, Option<String>) {
+    ) -> (CompactionResult, Option<LocalSummary>) {
         // Under an active cooldown the API round-trip is doomed to retry-then-
         // fall-back; go straight to the deterministic local summarizer so the
         // session compacts instantly instead of hanging on the walled provider.
         if self.compaction_provider_rate_limited() {
             return (
                 local_compaction(&self.session, config, focus),
-                Some(COMPACTION_SKIPPED_UNDER_QUOTA_COOLDOWN.to_string()),
+                Some(LocalSummary::skipped_under_cooldown()),
             );
         }
         match self.compact_with_api(config, focus) {
             Ok(result) => (result, None),
             Err(error) => (
                 local_compaction(&self.session, config, focus),
-                Some(error.to_string()),
+                Some(LocalSummary::failed(&error)),
             ),
         }
     }
@@ -1889,7 +1967,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             tokio::task::yield_now().await;
         }
 
-        let (result, local_summary_reason) = if self.async_api_client.is_some() {
+        let (result, local_summary) = if self.async_api_client.is_some() {
             self.compact_with_api_fallback_async(config, id_gen, focus, Some(render_tx))
                 .await
         } else {
@@ -1897,7 +1975,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         };
         ManualCompaction {
             result,
-            local_summary_reason,
+            local_summary_reason: local_summary.map(|local_summary| local_summary.reason),
         }
     }
 
@@ -2073,20 +2151,20 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         id_gen: &BlockIdGen,
         focus: Option<&str>,
         progress: Option<&mpsc::Sender<RenderBlock>>,
-    ) -> (CompactionResult, Option<String>) {
+    ) -> (CompactionResult, Option<LocalSummary>) {
         // See [`Self::compaction_provider_rate_limited`]: skip the doomed API
         // round-trip while the provider is walled and compact locally at once.
         if self.compaction_provider_rate_limited() {
             return (
                 local_compaction(&self.session, config, focus),
-                Some(COMPACTION_SKIPPED_UNDER_QUOTA_COOLDOWN.to_string()),
+                Some(LocalSummary::skipped_under_cooldown()),
             );
         }
         match self.compact_with_api_async(config, id_gen, focus, progress).await {
             Ok(result) => (result, None),
             Err(error) => (
                 local_compaction(&self.session, config, focus),
-                Some(error.to_string()),
+                Some(LocalSummary::failed(&error)),
             ),
         }
     }
@@ -2338,9 +2416,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 AssistantEvent::TextDelta(delta) => text.push_str(&delta),
                 AssistantEvent::MessageStop => saw_stop = true,
                 AssistantEvent::ToolUse { .. } => {
-                    return Err(RuntimeError::new(
-                        "compaction summarizer emitted tool use; falling back to local summarizer",
-                    ));
+                    return Err(RuntimeError::new(SUMMARY_CALLED_A_TOOL));
                 }
                 // The summarizer's own reasoning is not part of its summary text.
                 AssistantEvent::Thinking { .. }
@@ -2357,19 +2433,13 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         }
 
         if !saw_stop {
-            return Err(RuntimeError::new(
-                "compaction summarizer response did not include a stop event",
-            ));
+            return Err(RuntimeError::new(SUMMARY_WITHOUT_STOP));
         }
         if text.trim().is_empty() {
-            return Err(RuntimeError::new(
-                "compaction summarizer returned no text output",
-            ));
+            return Err(RuntimeError::new(SUMMARY_WITHOUT_TEXT));
         }
         if !text.contains("<summary>") {
-            return Err(RuntimeError::new(
-                "compaction summarizer returned unstructured output",
-            ));
+            return Err(RuntimeError::new(SUMMARY_UNSTRUCTURED));
         }
 
         Ok(text)

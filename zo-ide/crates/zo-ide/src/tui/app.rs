@@ -570,6 +570,10 @@ struct Ui {
     /// Latest owned snapshot from the asynchronous manifest/transcript watcher.
     /// Paint code only formats these values; it never performs I/O.
     subagent_progress: Vec<SubagentProgress>,
+    /// The ledger workers of the same snapshot: CLIs of their own in window
+    /// tabs of their own. Only their spawn cells show them (t-69472); the
+    /// wave, the details and the agents overview keep to the helpers above.
+    ledger_helpers: Vec<SubagentProgress>,
     /// Helpers observed in the current foreground wave. Finished helpers leave
     /// the running snapshot but stay in this count until the turn ends.
     subagent_wave: SubagentWave,
@@ -964,6 +968,16 @@ fn status_detail_for(kind: &ToolKind) -> String {
 /// is THIS one doing", so the count leads and the label — already in the cell
 /// header above the row — is left out.
 fn subagent_cell_progress(progress: &SubagentProgress) -> String {
+    if progress.ledger {
+        // A ledger worker's work is in its own tab: its row says so and
+        // nothing its parent cannot see (t-69472).
+        let label = crate::util::ansi::sanitize_inline(&progress.label);
+        let model = progress
+            .model
+            .as_deref()
+            .map(crate::util::ansi::sanitize_inline);
+        return super::strings::ledger_helper(&label, model.as_deref(), progress.elapsed);
+    }
     subagent_progress_line(progress, true)
 }
 
@@ -1519,6 +1533,9 @@ impl Ui {
     /// bounded details area while any are live; the ordinary tool context is
     /// restored as soon as the snapshot becomes empty.
     fn set_subagent_progress(&mut self, progress: Vec<SubagentProgress>) {
+        let (ledger_helpers, progress): (Vec<_>, Vec<_>) =
+            progress.into_iter().partition(|helper| helper.ledger);
+        self.ledger_helpers = ledger_helpers;
         if subagent_event_arrived(&self.subagent_progress, &progress) {
             if let Some(status) = self.status.as_mut() {
                 status.note_activity_event();
@@ -1543,15 +1560,21 @@ impl Ui {
         if !self.tool_cell.as_ref().is_some_and(ToolGroup::is_spawning) {
             return;
         }
-        let rows: Vec<(String, String)> = self
-            .subagent_progress
-            .iter()
+        let helpers = || self.subagent_progress.iter().chain(&self.ledger_helpers);
+        let rows: Vec<(String, String)> = helpers()
             .filter_map(|row| {
                 Some((row.tool_call_id.clone()?, subagent_cell_progress(row)))
             })
             .collect();
+        // The file each helper writes its report to, for its finished cell.
+        let reports: Vec<(String, String)> = helpers()
+            .filter_map(|row| {
+                Some((row.tool_call_id.clone()?, row.report.as_ref()?.display().to_string()))
+            })
+            .collect();
         if let Some(cell) = self.tool_cell.as_mut() {
             cell.set_spawn_progress(&rows);
+            cell.set_spawn_reports(&reports);
         }
     }
 
@@ -1631,6 +1654,7 @@ impl Ui {
         self.status = None;
         self.tool_status_detail = None;
         self.subagent_progress.clear();
+        self.ledger_helpers.clear();
         self.subagent_wave = SubagentWave::default();
         self.published_activity = PublishedActivity::Never;
         self.parked = None;
@@ -4626,6 +4650,7 @@ impl App {
                 status: None,
                 tool_status_detail: None,
                 subagent_progress: Vec::new(),
+                ledger_helpers: Vec::new(),
                 subagent_wave: SubagentWave::default(),
                 published_activity: PublishedActivity::Never,
                 reasoning_scan: None,
@@ -6491,6 +6516,7 @@ fn test_ui() -> Ui {
         status: None,
         tool_status_detail: None,
         subagent_progress: Vec::new(),
+        ledger_helpers: Vec::new(),
         subagent_wave: SubagentWave::default(),
         published_activity: PublishedActivity::Never,
         reasoning_scan: None,
