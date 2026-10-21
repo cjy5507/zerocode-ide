@@ -345,6 +345,7 @@ suite("editor-selection", ({ browser, origin, ok }) => testEditorSelection(brows
 suite("editor-recovery", ({ browser, origin, ok }) => testEditorRecovery(browser, origin, ok));
 suite("ime-broken-commit", ({ browser, origin, ok }) => testImeBrokenCommit(browser, origin, ok));
 suite("ime-korean-regression", ({ browser, origin, ok }) => testImeKoreanRegression(browser, origin, ok));
+suite("ime-stage-switch", async ({ browser, origin, ok }) => (await import("./ime-stage-switch.mjs")).testImeStageSwitch(browser, origin, ok));
 suite("vault", async ({ browser, origin }) => {
   const { page } = await openWindowTestPage(browser, origin, {
     before: (surface) => surface.addInitScript(() => { window.__GEMINI_VENDOR_FIXTURE__ = true; }),

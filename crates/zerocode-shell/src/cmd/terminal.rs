@@ -1595,7 +1595,7 @@ pub(crate) fn term_text(
             })
         })?;
         if theirs {
-            let seat = orchestration::pane_taken_over(term, now_epoch_ms());
+            let seat = orchestration::pane_taken_over(term, "ime", now_epoch_ms());
             note_takeover(state.local_data_root(), term, seat, "ime");
         }
     } else {
@@ -1634,8 +1634,9 @@ pub(crate) fn term_key(
     // there, and takes nothing (t-17644); nor does a key that adds no words,
     // or a composer chip's own key (t-57712).
     if theirs {
-        let seat = orchestration::pane_taken_over(term, now_epoch_ms());
-        note_takeover(state.local_data_root(), term, seat, &key_kind(&press));
+        let hand = key_kind(&press);
+        let seat = orchestration::pane_taken_over(term, &hand, now_epoch_ms());
+        note_takeover(state.local_data_root(), term, seat, &hand);
     }
     if let Some(road) = road {
         note_chip(state.local_data_root(), term, road);
@@ -1941,7 +1942,7 @@ pub(crate) fn term_paste(
     // A person's paste is their words as much as a typed key is, and takes a
     // worker's pane over the same way (t-57712).
     if theirs {
-        let seat = orchestration::pane_taken_over(term, now_epoch_ms());
+        let seat = orchestration::pane_taken_over(term, "paste", now_epoch_ms());
         note_takeover(state.local_data_root(), term, seat, "paste");
     }
     if let Some(road) = road {

@@ -5936,8 +5936,10 @@ fn reported_sessions() -> &'static Mutex<ReportedSessions> {
 /// until the beat sees the pane returned ([`forget_returned_terms`]).
 ///
 /// Answers the seat this report marked, `team/pane`, for the window log's
-/// takeover line (t-57712), and `None` when it marked nothing.
-pub(crate) fn pane_taken_over(term: u32, now_ms: i64) -> Option<String> {
+/// takeover line (t-57712), and `None` when it marked nothing. `hand` is
+/// that line's kind of hand — `key <Name>`, `words`, `paste`, `ime` — and
+/// never what it typed.
+pub(crate) fn pane_taken_over(term: u32, hand: &str, now_ms: i64) -> Option<String> {
     {
         let mut taken = taken_terms()
             .lock()
@@ -5950,7 +5952,7 @@ pub(crate) fn pane_taken_over(term: u32, now_ms: i64) -> Option<String> {
         return None;
     }
     let held = runtime()?;
-    let (moved, _) = held.actor.pane_taken_over(term, now_ms).ok()?;
+    let (moved, _) = held.actor.pane_taken_over(term, hand, now_ms).ok()?;
     rang(moved);
     let mut seat = None;
     if moved {

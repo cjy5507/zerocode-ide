@@ -22681,7 +22681,7 @@ mod tests {
         assert!(
             text.contains("write_terminal_text(&state, term, &text)?;")
                 && text.contains("if human == Some(true) {")
-                && text.contains("orchestration::pane_taken_over(term, now_epoch_ms());"),
+                && text.contains("orchestration::pane_taken_over(term, \"ime\", now_epoch_ms());"),
             "ordinary keyboard text cannot transfer a live worker to the person:\n{text}"
         );
         let routing = block_after(window, "function routeText(text) {");
@@ -22702,7 +22702,8 @@ mod tests {
         let paste = block_after(backend, "fn term_paste(");
         assert!(
             !paste.contains(".map(drop)")
-                && paste.contains("orchestration::pane_taken_over(term, now_epoch_ms());")
+                && paste
+                    .contains("orchestration::pane_taken_over(term, \"paste\", now_epoch_ms());")
                 && paste.contains("note_takeover(state.local_data_root(), term, seat, \"paste\");"),
             "a person's paste does not take the pane over or name itself:\n{paste}"
         );
@@ -22718,7 +22719,9 @@ mod tests {
         );
         let key = block_after(backend, "fn term_key(");
         assert!(
-            key.contains("note_takeover(state.local_data_root(), term, seat, &key_kind(&press));")
+            key.contains("let hand = key_kind(&press);")
+                && key.contains("orchestration::pane_taken_over(term, &hand, now_epoch_ms());")
+                && key.contains("note_takeover(state.local_data_root(), term, seat, &hand);")
                 && key.contains("note_chip(state.local_data_root(), term, road);"),
             "a takeover by a key leaves no line naming the key:\n{key}"
         );

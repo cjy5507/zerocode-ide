@@ -582,9 +582,12 @@ pub enum RuntimeRequest {
         now_ms: i64,
     },
     /// A person's hand landed real keys in a terminal — the fifth host
-    /// fact. From that moment the pane is theirs, durably.
+    /// fact. From that moment the pane is theirs, durably. `hand` is the
+    /// kind of hand the window saw (`key <Name>`, `words`, `paste`, `ime`),
+    /// never what it typed.
     PaneTakenOver {
         term: u32,
+        hand: String,
         now_ms: i64,
     },
     /// A hook report said a seat's composer holds a question for the
@@ -1091,9 +1094,10 @@ impl std::fmt::Debug for RuntimeRequest {
                 .debug_struct("RuntimeRequest::RetentionSweep")
                 .field("now_ms", now_ms)
                 .finish(),
-            Self::PaneTakenOver { term, now_ms } => formatter
+            Self::PaneTakenOver { term, hand, now_ms } => formatter
                 .debug_struct("RuntimeRequest::PaneTakenOver")
                 .field("term", term)
+                .field("hand", hand)
                 .field("now_ms", now_ms)
                 .finish(),
             Self::PaneAttention {
@@ -2516,8 +2520,18 @@ impl RuntimeActor {
 
     /// A person's hand landed real keys in a terminal. Answers whether a
     /// worker's pane became theirs, and the revision that answer speaks for.
-    pub fn pane_taken_over(&self, term: u32, now_ms: i64) -> Result<(bool, u64), RuntimeError> {
-        match self.request(RuntimeRequest::PaneTakenOver { term, now_ms })? {
+    /// `hand` is the kind of hand, for the run's letter (t-69526).
+    pub fn pane_taken_over(
+        &self,
+        term: u32,
+        hand: &str,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::PaneTakenOver {
+            term,
+            hand: hand.to_string(),
+            now_ms,
+        })? {
             RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
             _ => Err(RuntimeError::AuthorityRejected),
         }
@@ -3763,7 +3777,9 @@ impl RuntimeState {
                 now_ms,
             } => self.seat_observed(&run, &to, &body, &receipt, now_ms),
             RuntimeRequest::RetentionSweep { now_ms } => self.retention_swept(now_ms),
-            RuntimeRequest::PaneTakenOver { term, now_ms } => self.pane_taken(term, now_ms),
+            RuntimeRequest::PaneTakenOver { term, hand, now_ms } => {
+                self.pane_taken(term, &hand, now_ms)
+            }
             RuntimeRequest::PaneAttention {
                 term,
                 since_ms,
@@ -4201,7 +4217,12 @@ impl RuntimeState {
 
     /// A person took a pane: the seat table turns the terminal into a seat,
     /// and the ledger marks the worker sitting there as the person's.
-    fn pane_taken(&mut self, term: u32, now_ms: i64) -> Result<RuntimeReply, RuntimeError> {
+    fn pane_taken(
+        &mut self,
+        term: u32,
+        _hand: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
         if now_ms < 0 {
             return Err(RuntimeError::InvalidInput);
         }
