@@ -33887,7 +33887,8 @@ details.task-board-section > summary {
 }
 
 /* 소식(t-9456): 답을 기다리지 않는 원장의 알림이라 레일은 조용한 선이고, 끝난
- * 워커만 멈춤의 잉크를 지킨다. 소식의 머리 줄과 접힌 개수는 조용한 작은 글자다. */
+ * 워커만 멈춤의 잉크를 지킨다. 답할 우편이 「지금」으로 갔다는 줄(t-67607)과 접힌
+ * 개수는 조용한 작은 글자다. */
 .board-desk-letters.is-news .board-desk-letter {
   box-shadow: inset var(--rail-width) 0 0 var(--edge-rule);
 }
@@ -33896,7 +33897,7 @@ details.task-board-section > summary {
   box-shadow: inset var(--rail-width) 0 0 var(--signal-halt);
 }
 
-.board-desk-news-head,
+.board-desk-news-owed,
 .board-desk-news-folded {
   margin: var(--space-3) 0 var(--space-2);
   color: var(--ink-label);
@@ -33921,7 +33922,7 @@ details.task-board-section > summary {
 .board-desk-reply[hidden],
 .board-desk-reply-error[hidden],
 .board-desk-letters[hidden],
-.board-desk-news-head[hidden],
+.board-desk-news-owed[hidden],
 .board-desk-news-folded[hidden],
 .board-desk-letters-more[hidden] {
   display: none;

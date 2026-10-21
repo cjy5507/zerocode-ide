@@ -13,13 +13,15 @@
  * 줄이고, 원문은 「원문 보기」 안에 있다. */
 
 /* 세 탭, 읽는 차례대로. 고른 탭은 창의 기억이다 — 판이 다시 그려져도 남는다. 낱말은
- * 마크업의 것이다(ui/index.html, 탭 단추의 `data-i18n`). */
+ * 마크업의 것이다(ui/index.html, 탭 단추의 `data-i18n`). 이름이 `boardNowTab`인 것은
+ * shell.js의 `boardTab()`(보드를 든 창 탭)과 한 전역 이름을 나누면 늦게 실린 파일이
+ * 통째로 서지 못하기 때문이다. */
 const BOARD_TABS = Object.freeze([
   { id: "now" },
   { id: "workers" },
   { id: "history" },
 ]);
-let boardTab = "now";
+let boardNowTab = "now";
 
 /* 당신 차례에 처음부터 보이는 행 수. 나머지는 「N개 더 보기」 뒤에 선다 — 답할 일이
  * 스무 개여도 지금 도는 일이 화면 밖으로 밀려나지 않게. */
@@ -40,7 +42,7 @@ function paintBoardTabs(view) {
   const surface = view.querySelector(".task-board-surface");
   const strip = surface?.querySelector(".board-now-tabs");
   if (!strip) return;
-  writeAttribute(surface, "data-board-tab", boardTab);
+  writeAttribute(surface, "data-board-tab", boardNowTab);
   // 원장의 런이 하나도 없는 창(코디네이터 없이 에이전트만 쓰는 사람)에는 세 탭이 나눌 것이
   // 없다: 탭과 맨 위 문장은 접히고, 에이전트 작업 목록이 예전처럼 판 전체에 선다.
   writeAttribute(surface, "data-board-ledger", (deskLedger?.runs?.length ?? 0) > 0 ? "on" : "none");
@@ -53,14 +55,14 @@ function paintBoardTabs(view) {
     // 탭 목록의 화살표 — 고른 탭만 Tab 차례에 서고(roving tabindex), 좌우가 옮긴다.
     strip.addEventListener("keydown", (event) => {
       if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-      const at = BOARD_TABS.findIndex((tab) => tab.id === boardTab);
+      const at = BOARD_TABS.findIndex((tab) => tab.id === boardNowTab);
       const step = event.key === "ArrowRight" ? 1 : BOARD_TABS.length - 1;
       event.preventDefault();
       chooseBoardTab(view, BOARD_TABS[(at + step) % BOARD_TABS.length].id, true);
     });
   }
   for (const button of strip.querySelectorAll("[data-board-tab-button]")) {
-    const chosen = button.dataset.boardTabButton === boardTab;
+    const chosen = button.dataset.boardTabButton === boardNowTab;
     writeAttribute(button, "aria-selected", String(chosen));
     writeAttribute(button, "tabindex", chosen ? "0" : "-1");
   }
@@ -68,8 +70,8 @@ function paintBoardTabs(view) {
 
 function chooseBoardTab(view, id, focus) {
   if (!BOARD_TABS.some((tab) => tab.id === id)) return;
-  const moved = boardTab !== id;
-  boardTab = id;
+  const moved = boardNowTab !== id;
+  boardNowTab = id;
   paintBoardTabs(view);
   if (moved) paintCoordinatorDesk(view);
   if (focus) view.querySelector(`.board-now-tabs [data-board-tab-button="${id}"]`)?.focus();

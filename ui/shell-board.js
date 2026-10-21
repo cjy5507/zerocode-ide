@@ -202,11 +202,11 @@ function paintCoordinatorDesk(view) {
   const blocks = DESK_BLOCKS.map((entry) => {
     const block = deskBlock(desk, entry);
     writeAttribute(block, "data-board-tab-of", entry.tab);
-    if (entry.tab === boardTab) writeHidden(block, !entry.paint(block, now, view));
+    if (entry.tab === boardNowTab) writeHidden(block, !entry.paint(block, now, view));
     return block;
   });
   reconcileElementOrder(desk, blocks);
-  writeHidden(desk, blocks.every((block) => block.dataset.boardTabOf !== boardTab || block.hidden));
+  writeHidden(desk, blocks.every((block) => block.dataset.boardTabOf !== boardNowTab || block.hidden));
   paintBoardHead(view, deskOwed(deskLedger), now);
 }
 
