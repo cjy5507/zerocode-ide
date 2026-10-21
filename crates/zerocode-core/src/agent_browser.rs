@@ -51,6 +51,16 @@ pub const WORKSPACE_PAUSED: &str = "workspace_paused";
 pub const RESUME_OBSERVE: &str = "observe";
 /// Only the person lifts it.
 pub const RESUME_PERSON: &str = "person";
+/// The word of a work browser the person holds by hand (t-67064): its agent
+/// hears it at once, for a look as for a change, and waits for the person's
+/// 「다시 맡기기」 — only the person lifts it, so a `--json` answer carries
+/// `error.resume` = [`RESUME_PERSON`] as a paused one does.
+pub const WORKSPACE_PERSON_CONTROLLED: &str = "workspace_person_controlled";
+/// Who holds a work browser, as a `tabs` line says it (t-67064): its agent,
+/// the person by hand, or nobody — paused.
+pub const TAB_MODE_AGENT: &str = "agent";
+pub const TAB_MODE_PERSON: &str = "person";
+pub const TAB_MODE_PAUSED: &str = "paused";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct WorkspaceCommand {
@@ -1417,7 +1427,10 @@ pub fn usage() -> String {
         "zerocode-browser — ZeroCode 창의 브라우저 판을 조종합니다",
         "",
         "  zerocode-browser list                 열린 판의 라벨과 주소",
-        "  zerocode-browser tabs                 판마다 라벨·상태(loading|finished|dead|blank)·제목·주소·프로필·리더",
+        format!(
+            "  zerocode-browser tabs                 판마다 라벨·상태(loading|finished|dead|blank)·제목·주소·프로필·리더 — 작업 탭은 끝에 모드({TAB_MODE_AGENT}|{TAB_MODE_PERSON}|{TAB_MODE_PAUSED})·이 판이 마지막으로 본 번호·지금 번호 (에이전트 손 밖이면 제목·주소는 비움)"
+        )
+        .as_str(),
         "  zerocode-browser open <url>           새 브라우저 탭 — 답이 라벨(browser-N)을 바로 말합니다",
         "  zerocode-browser close <label>        판을 닫음 (창이 닫고, 사라질 때까지 기다림)",
         "  zerocode-browser goto <label> <url>   그 판을 그 주소로",
@@ -1455,12 +1468,18 @@ pub fn usage() -> String {
         "  zerocode-browser diagnose <label> [--json]",
         "                                             왜 안 되는지 한 문단: 죽음 → 문서 4xx/5xx → 이름 게이팅 → 로그인 벽 → API 실패 → 스크립트 오류 → 이상 없음",
         "",
-        "공통 옵션: --workspace-revision <u64> — 행동을 선택한 원관측의 workspaceRevision을 그대로 전달합니다.",
-        "작업 탭의 read·marks·fields·agent screenshot 응답이 이 번호를 발급합니다. plain 응답은 페이지 울타리 밖의 workspaceRevision: 줄입니다.",
-        "작업 탭 변경은 번호가 없거나 오래되면 거절합니다. 현재 번호를 조회해 대신 넣지 마세요. 일반 탭은 생략할 수 있습니다.",
-        "예: zerocode-browser click <label> <css> --workspace-revision <원관측 번호>",
+        "공통 옵션: --workspace-revision <u64> — 행동을 고른 관측의 workspaceRevision입니다. 작업 탭에서는 생략하세요.",
+        "작업 탭의 read·marks·fields·agent screenshot 답이 이 번호를 줍니다. plain 답은 페이지 울타리 밖의 마지막 workspaceRevision: 줄입니다.",
+        "작업 탭의 바꾸는 명령(click·type·fill·scroll·goto·close·find)에 번호가 없으면, 이 판이 그 탭을 마지막으로 본 번호를 씁니다.",
+        "다른 판의 관측은 쓰지 않습니다. 본 적이 없으면 workspace_observation_required, 본 뒤 화면이 바뀌었으면 workspace_changed — 둘 다 marks로 다시 보고 다시 보내세요.",
+        "바꾸는 명령의 답도 끝에 workspaceRevision: 줄을 붙입니다. 그 번호로 다시 보지 않고 다음 변경을 이어 갈 수 있습니다. 일반 탭은 번호가 필요 없습니다.",
+        "예: zerocode-browser marks <label> 다음 zerocode-browser click <label> --mark <n>",
         format!(
             "작업 탭의 {WORKSPACE_PAUSED}[resume={RESUME_OBSERVE}] 거절은 read·marks·fields·screenshot으로 새로 본 뒤 이어 가고, [resume={RESUME_PERSON}]은 멈추고 사람에게 알립니다(--json 답은 error.resume). 자동으로 재시도하지 마세요."
+        )
+        .as_str(),
+        format!(
+            "사람이 「내가 조작」으로 쥔 작업 탭은 {WORKSPACE_PERSON_CONTROLLED}로 바로 답합니다(--json 답은 error.resume={RESUME_PERSON}). 「다시 맡기기」 뒤 marks로 다시 보고 이어 가세요."
         )
         .as_str(),
         "",

@@ -7149,15 +7149,28 @@ fn answers_json(argv: &[String]) -> bool {
 /// (t-66200): a paused tab answers a `--json` call with who lifts the pause
 /// in a field — `{"ok":false,"error":{"code":"workspace_paused","resume":…}}`
 /// — and any other call with the line that carries it as a token
-/// (`workspace_paused[resume=…]: …`).
+/// (`workspace_paused[resume=…]: …`). A tab the person holds answers the
+/// same way under its own code, `resume` the person (t-67064).
 pub(super) fn door_refused(argv: &[String], error: &str) -> zerocode_hookd::TeamAnswer {
-    match crate::browser_workspace::paused_resume(error) {
-        Some((resume, message)) if answers_json(argv) => browser_refused(format!(
+    use zerocode_core::agent_browser::{WORKSPACE_PAUSED, WORKSPACE_PERSON_CONTROLLED};
+    let held = crate::browser_workspace::paused_resume(error)
+        .map(|(resume, message)| (WORKSPACE_PAUSED, resume, message))
+        .or_else(|| {
+            crate::browser_workspace::person_controlled_words(error).map(|message| {
+                (
+                    WORKSPACE_PERSON_CONTROLLED,
+                    crate::browser_workspace::Resume::Person,
+                    message,
+                )
+            })
+        });
+    match held {
+        Some((code, resume, message)) if answers_json(argv) => browser_refused(format!(
             "{}\n",
             json!({
                 "ok": false,
                 "error": {
-                    "code": zerocode_core::agent_browser::WORKSPACE_PAUSED,
+                    "code": code,
                     "resume": resume,
                     "message": message,
                 },
@@ -7166,6 +7179,38 @@ pub(super) fn door_refused(argv: &[String], error: &str) -> zerocode_hookd::Team
         _ => browser_refused(format!("zerocode-browser: {error}\n")),
     }
 }
+
+/// A failed look's answer, ended with what to do next (t-67064): a line
+/// after its refusal, or `error.next` of a refusal that is one JSON object.
+pub(super) fn say_next(answer: &mut zerocode_hookd::TeamAnswer, next: &str) {
+    if let Ok(serde_json::Value::Object(mut object)) =
+        serde_json::from_str::<serde_json::Value>(&answer.stderr)
+        && let Some(serde_json::Value::Object(error)) = object.get_mut("error")
+    {
+        error.insert("next".into(), json!(next));
+        answer.stderr = format!("{}\n", serde_json::Value::Object(object));
+        return;
+    }
+    if !answer.stderr.is_empty() && !answer.stderr.ends_with('\n') {
+        answer.stderr.push('\n');
+    }
+    answer
+        .stderr
+        .push_str(&format!("zerocode-browser: {next}\n"));
+}
+
+/// Whether a pane's main document is loading, by the window's own record
+/// of it — what a look that went unanswered tells its agent (t-67064).
+fn page_loading(state: &AppState, label: &str) -> bool {
+    state
+        .browser_records()
+        .get(label)
+        .is_some_and(|record| record.nav.observed(std::time::Instant::now()) == NavState::Loading)
+}
+
+/// A label this window did not make: the one list an agent reads its labels
+/// from is the next step (t-67064).
+const NOT_A_PANE: &str = "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다 — zerocode-browser tabs로 라벨을 확인하세요\n";
 
 /// A read's words — the page's title and address, then its text, then a
 /// selector read's reduced DOM. The one formatter both read roads print
@@ -7234,7 +7279,7 @@ pub(super) async fn answer_browser_command(
         .then(|| argv.get(1))
         .flatten();
     if label.is_some_and(|label| !state.browser_panes().contains(label)) {
-        return browser_refused("zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n");
+        return browser_refused(NOT_A_PANE);
     }
     // The person's stop holds every work browser and every agent's `open`
     // (t-62872): said here, before any other refusal, and read again where
@@ -7265,9 +7310,9 @@ pub(super) async fn answer_browser_command(
     {
         match state.shell_runtime().browser_workspaces.snapshot(label) {
             Ok(Some(_)) => {
-                return browser_refused(
-                    "zerocode-browser: workspace_viewport_unconfirmed: 전용 작업 브라우저의 viewport는 적용 확인을 지원하지 않습니다\n",
-                );
+                return browser_refused(format!(
+                    "zerocode-browser: workspace_viewport_unconfirmed: 전용 작업 브라우저의 viewport는 적용 확인을 지원하지 않습니다 — 크기는 그대로 두고 zerocode-browser marks {label}로 보세요\n"
+                ));
             }
             Err(error) => return browser_refused(format!("zerocode-browser: {error}\n")),
             Ok(None) => {}
@@ -7312,8 +7357,17 @@ pub(super) async fn answer_browser_command(
         }
     };
     let mut dispatched = crate::browser_workspace::Dispatch::Uncertain;
-    let mut answer =
-        dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await;
+    // A look whose tab leaves its agent's hands while its page is still asked
+    // — the person takes it, a pause or their stop holds it — is answered at
+    // once with who holds the tab (t-67064); a change is waited for whole.
+    let dispatching = async {
+        dispatch_browser_command(app, argv, pane, expected_revision, &mut dispatched).await
+    };
+    let (mut answer, answered) =
+        match crate::browser_workspace::unless_taken(operation.as_ref(), dispatching).await {
+            Ok(answer) => (answer, true),
+            Err(error) => (door_refused(argv, &error), false),
+        };
     if answer.exit_code == 0 {
         dispatched = crate::browser_workspace::Dispatch::Completed;
     }
@@ -7322,7 +7376,7 @@ pub(super) async fn answer_browser_command(
             if step_actor(app, pane).pane.as_deref() != pane {
                 operation.finish(false);
                 answer = browser_refused(
-                    "zerocode-browser: workspace_actor_required: 관측을 요청한 에이전트 판이 더 이상 없습니다\n",
+                    "zerocode-browser: workspace_actor_required: 관측을 요청한 에이전트 판이 더 이상 없습니다 — 이 창의 에이전트 판에서 다시 보세요\n",
                 );
             } else {
                 match operation.finish_observation() {
@@ -7334,14 +7388,48 @@ pub(super) async fn answer_browser_command(
                     Err(error) => answer = door_refused(argv, &error),
                 }
             }
-        } else {
-            operation.settle(dispatched);
+        } else if let Some(revision) = operation.settle(dispatched) {
+            // A change that left the tab in the agent's hands says the
+            // revision its next change goes on at (t-67064).
+            stamp_browser_change(&mut answer, revision);
+        } else if answered
+            && zerocode_core::agent_browser::observes(verb)
+            && let Some(label) = label
+            && let Some(next) = state.shell_runtime().browser_workspaces.after_failed_look(
+                label,
+                pane,
+                page_loading(&state, label),
+            )
+        {
+            // A look its page did not answer says what to do next (t-67064).
+            say_next(&mut answer, &next);
         }
     }
     if let Some(operation) = actor_operation {
         operation.settle(dispatched);
     }
     answer
+}
+
+/// A change's answer, ended with the revision the agent's next change may
+/// name (t-67064) — a line after every page fence, as a look's answer ends,
+/// or the root key of an answer that is one JSON object — so the agent goes
+/// on without looking again.
+pub(super) fn stamp_browser_change(answer: &mut zerocode_hookd::TeamAnswer, revision: u64) {
+    use zerocode_core::agent_browser::{WORKSPACE_REVISION_KEY, WORKSPACE_REVISION_LINE};
+    if let Ok(serde_json::Value::Object(mut object)) =
+        serde_json::from_str::<serde_json::Value>(&answer.stdout)
+    {
+        object.insert(WORKSPACE_REVISION_KEY.into(), json!(revision));
+        answer.stdout = format!("{}\n", serde_json::Value::Object(object));
+        return;
+    }
+    if !answer.stdout.is_empty() && !answer.stdout.ends_with('\n') {
+        answer.stdout.push('\n');
+    }
+    answer
+        .stdout
+        .push_str(&format!("{WORKSPACE_REVISION_LINE}{revision}\n"));
 }
 
 /// Add only the backend's checked read-completion revision. Page words stay
@@ -7353,11 +7441,12 @@ pub(super) fn stamp_browser_observation(
 ) -> Result<(), String> {
     use zerocode_core::agent_browser::{WORKSPACE_REVISION_KEY, WORKSPACE_REVISION_LINE};
     if answers_json(argv) {
-        let mut value: serde_json::Value = serde_json::from_str(&answer.stdout)
-            .map_err(|_| "workspace_observation_invalid: 관측 JSON을 확인할 수 없습니다")?;
-        let object = value
-            .as_object_mut()
-            .ok_or("workspace_observation_invalid: 관측 JSON 객체가 필요합니다")?;
+        let mut value: serde_json::Value = serde_json::from_str(&answer.stdout).map_err(|_| {
+            "workspace_observation_invalid: 관측 JSON을 확인할 수 없습니다 — --json 없이 다시 보세요"
+        })?;
+        let object = value.as_object_mut().ok_or(
+            "workspace_observation_invalid: 관측 JSON 객체가 필요합니다 — --json 없이 다시 보세요",
+        )?;
         object.insert(WORKSPACE_REVISION_KEY.into(), json!(revision));
         answer.stdout = format!("{value}\n");
     } else {
@@ -7512,7 +7601,7 @@ async fn dispatch_browser_command(
                 cmd::browser::cancel_workspace_open(app, &state, &label, creation.revision);
                 pending.completed = true;
                 return browser_refused(
-                    "zerocode-browser: workspace_open_timeout: 작업 브라우저를 열지 못했습니다\n",
+                    "zerocode-browser: workspace_open_timeout: 작업 브라우저를 열지 못했습니다 — zerocode-browser tabs로 남은 탭을 확인한 뒤 다시 여세요\n",
                 );
             }
             pending.completed = true;
@@ -7521,10 +7610,7 @@ async fn dispatch_browser_command(
         ("close", 2) => {
             let label = argv[1].clone();
             if !state.browser_panes().contains(&label) {
-                return refused_unsent(
-                    dispatched,
-                    "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n",
-                );
+                return refused_unsent(dispatched, NOT_A_PANE);
             }
             let revision = match expected_revision
                 .map_or_else(|| cmd::browser::close_revision(&state, &label), Ok)
@@ -7556,7 +7642,7 @@ async fn dispatch_browser_command(
             .await;
             if !closed {
                 return browser_refused(
-                    "zerocode-browser: workspace_close_timeout: 브라우저 닫기를 확인하지 못했습니다\n",
+                    "zerocode-browser: workspace_close_timeout: 브라우저 닫기를 확인하지 못했습니다 — zerocode-browser tabs로 탭이 남았는지 확인하세요\n",
                 );
             }
             browser_said(cmd::browser::close_answer(&label, closed))
@@ -7569,10 +7655,7 @@ async fn dispatch_browser_command(
                 }
             };
             if !state.browser_panes().contains(&argv[1]) {
-                return refused_unsent(
-                    dispatched,
-                    "zerocode-browser: 이 창이 만든 브라우저 판이 아닙니다\n",
-                );
+                return refused_unsent(dispatched, NOT_A_PANE);
             }
             // A size is the window's to apply — the pane is placed by the
             // window's own preset road (`viewportBox`), so the box the agent
@@ -7833,6 +7916,16 @@ async fn dispatch_browser_command(
                     if browser_pane_of(app, &state, &label).is_err() {
                         return None;
                     }
+                    // Who holds a work browser, the revision of this agent's
+                    // own last look and the tab's own (t-67064), read by the
+                    // door that reads the person's stop: another agent's tab,
+                    // and every work browser while that stop stands, is left
+                    // off.
+                    let standing = state
+                        .shell_runtime()
+                        .browser_workspaces
+                        .standing_agents(&label, pane)
+                        .ok()?;
                     let operation = state
                         .shell_runtime()
                         .browser_workspaces
@@ -7844,12 +7937,20 @@ async fn dispatch_browser_command(
                                 "tabs",
                                 snapshot.map(|snapshot| snapshot.revision),
                             )
-                        })
-                        .ok()?;
+                        });
+                    // A tab out of the agent's hands — or busy with its own
+                    // request — keeps its line and says who holds it, with
+                    // none of its page's words.
+                    let (operation, shown) = match operation {
+                        Ok(operation) => (operation, true),
+                        Err(_) if standing.is_some() => (None, false),
+                        Err(_) => return None,
+                    };
                     let record = state.browser_records().get(&label).cloned();
                     let url = state
                         .browser_urls()
                         .get(&label)
+                        .filter(|_| shown)
                         .map(|url| cmd::browser::scrub_url_credentials(url))
                         .unwrap_or_default();
                     let row = TabRow {
@@ -7859,11 +7960,13 @@ async fn dispatch_browser_command(
                             .map_or(NavState::Loading, |record| record.nav.observed(now)),
                         title: record
                             .as_ref()
+                            .filter(|_| shown)
                             .map(|record| record.title.clone())
                             .unwrap_or_default(),
                         url,
                         profile: record.as_ref().and_then(|record| record.profile.clone()),
                         reader: record.and_then(|record| record.reader),
+                        standing,
                     };
                     if let Some(operation) = operation {
                         operation.finish(true);

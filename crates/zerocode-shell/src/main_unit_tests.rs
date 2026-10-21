@@ -6084,6 +6084,102 @@ mod browser_observation_stamp_tests {
         }
     }
 
+    /// A change's answer ends with the revision its next change goes on at
+    /// (t-67064): a plain answer's last line, after the page's fence, read
+    /// back by the one reader a look's stamp is read by; a JSON answer's
+    /// root key — a settle-later press, a find — with its own keys kept.
+    #[test]
+    fn a_changes_answer_ends_with_the_revision_its_next_change_goes_on_at() {
+        let mut pressed = browser_said(format!(
+            "클릭 이벤트를 보냈습니다\n{}",
+            zerocode_core::untrusted::fence("browser-1", "칸: 검색어\n", usize::MAX)
+        ));
+        stamp_browser_change(&mut pressed, 7);
+        assert!(
+            pressed.stdout.ends_with(&format!(
+                "{}workspaceRevision: 7\n",
+                zerocode_core::untrusted::close_marker("browser-1")
+            )),
+            "{}",
+            pressed.stdout
+        );
+        assert_eq!(
+            zerocode_core::agent_browser::observation_revision(&pressed.stdout),
+            Some(7)
+        );
+        let mut found = browser_said("{\"count\":2,\"index\":1}\n");
+        stamp_browser_change(&mut found, 7);
+        let value: serde_json::Value = serde_json::from_str(&found.stdout).unwrap();
+        assert_eq!(
+            (&value["count"], &value["index"], &value["workspaceRevision"]),
+            (&json!(2), &json!(1), &json!(7))
+        );
+        let mut bare = browser_said("스크롤 x=0 y=640");
+        stamp_browser_change(&mut bare, 7);
+        assert_eq!(bare.stdout, "스크롤 x=0 y=640\nworkspaceRevision: 7\n");
+    }
+
+    /// A look its page did not answer says what to do next (t-67064): a
+    /// line after the refusal, or `error.next` of a JSON refusal.
+    #[test]
+    fn a_failed_looks_answer_says_what_to_do_next() {
+        let next = "workspace_look_unanswered: 페이지가 답하지 않았습니다 — 1초 뒤 zerocode-browser marks browser-1로 다시 보세요";
+        let mut plain = browser_refused("zerocode-browser: 브라우저 판이 시간 안에 답하지 않았습니다\n");
+        say_next(&mut plain, next);
+        assert_eq!(
+            plain.stderr,
+            format!("zerocode-browser: 브라우저 판이 시간 안에 답하지 않았습니다\nzerocode-browser: {next}\n")
+        );
+        let mut shot = browser_screenshot_refused(true, "스냅샷 응답 시간이 초과됐습니다");
+        say_next(&mut shot, next);
+        let value: serde_json::Value = serde_json::from_str(shot.stderr.trim_end()).unwrap();
+        assert_eq!(
+            (&value["error"]["code"], &value["error"]["next"]),
+            (&json!("screenshot_error"), &json!(next))
+        );
+    }
+
+    /// A tab the person holds is refused by its own code in both shapes
+    /// (t-67064): a `--json` call hears `resume` the person, any other the
+    /// line.
+    #[test]
+    fn a_held_tabs_refusal_names_the_person_in_both_shapes() {
+        let words =
+            |list: &[&str]| -> Vec<String> { list.iter().map(|word| (*word).to_string()).collect() };
+        let workspaces = crate::browser_workspace::Workspaces::default();
+        workspaces.register("browser-1", Some("term-1"), false).unwrap();
+        let at = workspaces.snapshot("browser-1").unwrap().unwrap().revision;
+        let mut taken = workspaces
+            .transition("browser-1", crate::browser_workspace::Mode::Human, at)
+            .unwrap();
+        taken.confirm_fence().unwrap();
+        taken.finish().unwrap();
+        let error = workspaces
+            .begin_at("browser-1", Some("term-1"), "marks", None)
+            .err()
+            .expect("the person holds the tab");
+        let json = door_refused(&words(&["marks", "browser-1", "--json"]), &error);
+        let value: serde_json::Value = serde_json::from_str(json.stderr.trim_end()).unwrap();
+        assert_eq!(
+            (&value["error"]["code"], &value["error"]["resume"]),
+            (&json!("workspace_person_controlled"), &json!("person"))
+        );
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("「다시 맡기기」")),
+            "{value}"
+        );
+        let plain = door_refused(&words(&["click", "browser-1", "#login"]), &error);
+        assert!(
+            plain
+                .stderr
+                .starts_with("zerocode-browser: workspace_person_controlled: 작업 브라우저 browser-1: "),
+            "{}",
+            plain.stderr
+        );
+    }
+
     #[test]
     fn plain_and_full_reads_put_the_stamp_after_the_existing_page_fence() {
         for argv in [
@@ -6113,6 +6209,7 @@ fn tabs_answer_one_row_per_pane_in_birth_order() {
             url: "http://localhost:5173/".into(),
             profile: None,
             reader: None,
+            standing: None,
         },
         TabRow {
             label: "browser-10".into(),
@@ -6121,12 +6218,33 @@ fn tabs_answer_one_row_per_pane_in_birth_order() {
             url: "https://x.atlassian.net/wiki".into(),
             profile: Some("0123abcd".into()),
             reader: Some("Mozilla/5.0 (iPhone)".into()),
+            standing: Some(crate::browser_workspace::Standing {
+                mode: "agent",
+                seen: Some(7),
+                revision: 7,
+            }),
+        },
+        // A work browser the person holds: its mode, no look of this
+        // agent's, and none of its page's words (t-67064).
+        TabRow {
+            label: "browser-11".into(),
+            state: NavState::Loading,
+            title: String::new(),
+            url: String::new(),
+            profile: None,
+            reader: None,
+            standing: Some(crate::browser_workspace::Standing {
+                mode: "person",
+                seen: None,
+                revision: 9,
+            }),
         },
     ];
     assert_eq!(
         tabs_lines(&rows),
-        "browser-2\tdead\tdev server was here\thttp://localhost:5173/\t-\t-\n\
-         browser-10\tfinished\tConfluence\thttps://x.atlassian.net/wiki\t0123abcd\tMozilla/5.0 (iPhone)\n"
+        "browser-2\tdead\tdev server was here\thttp://localhost:5173/\t-\t-\t-\t-\t-\n\
+         browser-10\tfinished\tConfluence\thttps://x.atlassian.net/wiki\t0123abcd\tMozilla/5.0 (iPhone)\tagent\t7\t7\n\
+         browser-11\tloading\t\t\t-\t-\tperson\t-\t9\n"
     );
     assert!(tabs_lines(&[]).contains("zerocode-browser open"));
     let mut labels = vec![

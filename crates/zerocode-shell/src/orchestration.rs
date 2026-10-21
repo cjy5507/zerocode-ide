@@ -1909,6 +1909,68 @@ pub(crate) fn post_observation_once(
     }
 }
 
+/// Tell the agent seated at `term` a fact the window observed for it alone
+/// (t-67064): the person handed back a work browser it holds. The ledger
+/// files one `status` from itself at that seat — a live worker's address in
+/// its run, carrying the task and dispatch it is on, or the run's
+/// coordinator seat — and the mail pointer carries the line to the pane as
+/// it carries any letter's. False when no run seats the pane here, or the
+/// ledger cannot be written.
+pub(crate) fn tell_seat_of_term(term: u32, body: &str, receipt: &str, now_ms: i64) -> bool {
+    let Some(held) = runtime() else {
+        return false;
+    };
+    let Some((run, address)) = seat_of_term(term) else {
+        return false;
+    };
+    match held
+        .actor
+        .seat_observation(run, address, body.to_string(), receipt.to_string(), now_ms)
+    {
+        Ok((moved, _)) => {
+            rang(moved);
+            true
+        }
+        Err(_) => {
+            note_ledger_unwritten("a work browser's hand-back");
+            false
+        }
+    }
+}
+
+/// The run and the address of the seat this window holds at `term`: a live
+/// worker's before a coordinator's, read as [`seated_live_workers`] and
+/// [`seated_coordinators`] read them.
+fn seat_of_term(term: u32) -> Option<(String, String)> {
+    with_ledger_seats(|ledger, seats| {
+        let runs = ledger.runs();
+        runs.iter()
+            .find_map(|run| {
+                run.workers
+                    .iter()
+                    .filter(|worker| worker.state.is_live() && worker.state.may_occupy_pane())
+                    .find(|worker| {
+                        seats
+                            .get(worker.team.as_str())
+                            .and_then(|panes| panes.get(worker.pane.as_str()))
+                            == Some(&term)
+                    })
+                    .map(|worker| {
+                        (
+                            run.id.clone(),
+                            zerocode_core::orchestration::worker_address(&worker.id),
+                        )
+                    })
+            })
+            .or_else(|| {
+                runs.iter().find_map(|run| {
+                    (seat_term(seats, &run.coordinator_live()?.seat) == Some(term))
+                        .then(|| (run.id.clone(), run.address()))
+                })
+            })
+    })?
+}
+
 /// Every checkout a worker of this ledger sat in, once each: the folders the beat looks up in the
 /// landing cache to hold the ledger's record against git's (t-34501 stage 2).
 pub(crate) fn watched_checkouts() -> Vec<String> {
