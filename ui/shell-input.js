@@ -646,22 +646,14 @@ function typingNotSent(kind, count) {
   typingUnsent.timer = setTimeout(sayTypingNotSent, TYPING_RUN_GAP_MS);
 }
 
-function typedPlace(target) {
-  if (target === null) return "nothing";
-  if (target.kind === "term") return `terminal ${target.term}`;
-  if (target.kind === "lane") return "a lane";
-  if (target.kind === "emulator") return "a device";
-  return "a text field";
-}
-
+/* The run is over: its count goes to the stage's black-box line
+ * (`sayTypingHeldOff`), which names places and kinds and no letter — the
+ * husk stays this file's one way into the window log. */
 function sayTypingNotSent() {
   const said = typingUnsent;
   typingUnsent = null;
   if (said === null) return;
-  const kinds = [...said.kinds].map(([kind, count]) => `${kind} ${count}`).join(" · ");
-  tellWindowLog(
-    `typing not sent: the stage moved from ${typedPlace(said.from)} to ${typedPlace(said.to)} under it · ${kinds}`,
-  );
+  sayTypingHeldOff(said.from, said.to, said.kinds);
 }
 
 /* A key the router would have sent to a pane, held off by the run: it goes

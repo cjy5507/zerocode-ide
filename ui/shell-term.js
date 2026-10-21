@@ -5889,6 +5889,24 @@ function noteStageRoad() {
   stageRoadSaid = { reading, road: stageRoad() };
 }
 
+/* What typing the stage moved under could not deliver, as one black-box line
+ * (t-69526): where the run began, where the stage went, and how many of each
+ * kind — `ime 4`, `key Enter 1`, `key chord 1` — never a letter (t-11740). */
+function sayTypingHeldOff(from, to, kinds) {
+  const counted = [...kinds].map(([kind, count]) => `${kind} ${count}`).join(" · ");
+  tellWindowLog(
+    `typing not sent: the stage moved from ${heldPlace(from)} to ${heldPlace(to)} under it · ${counted}`,
+  );
+}
+
+function heldPlace(target) {
+  if (target === null) return "nothing";
+  if (target.kind === "term") return `terminal ${target.term}`;
+  if (target.kind === "lane") return "a lane";
+  if (target.kind === "emulator") return "a device";
+  return "a text field";
+}
+
 async function declareWatchedTerms() {
   const next = readingTerms();
   const fresh = [...next].filter((term) => !watchedTerms.has(term));

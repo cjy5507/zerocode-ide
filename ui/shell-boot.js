@@ -20,7 +20,7 @@ const { listen: listenToBackend } = window.__TAURI__.event;
  * the clock's to name. */
 let backendEventNow = "";
 
-function listen(name, handler) {
+const listen = (name, handler) => {
   return listenToBackend(name, (event) => {
     const outer = backendEventNow;
     backendEventNow = name;
@@ -30,7 +30,7 @@ function listen(name, handler) {
       backendEventNow = outer;
     }
   });
-}
+};
 const TERMINAL_CLIPBOARD_WRITE_EVENT = "terminal:clipboard-write";
 
 /* ---- 웹뷰 오류의 착륙장 (1-fm) ----
