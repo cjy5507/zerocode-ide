@@ -50,6 +50,7 @@ mod plan_mode_v2;
 mod preflight;
 mod registry;
 mod repl_kernel;
+mod schema_scalars;
 mod task_tools;
 mod team_inbox_store;
 mod team_tools;

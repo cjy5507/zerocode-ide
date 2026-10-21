@@ -288,8 +288,10 @@ pub(crate) fn dispatch(
     let session_id = ctx.session_id();
     match name {
         "TodoWrite" => Some(
-            maybe_enforce_permission_check(enforcer, name, input)
-                .and_then(|()| from_value::<TodoWriteInput>(input).and_then(run_todo_write)),
+            maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
+                from_value::<TodoWriteInput>(input)
+                    .and_then(|i| run_todo_write(ctx.plan_session_id().as_deref(), i))
+            }),
         ),
         "TaskCreate" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
@@ -499,8 +501,11 @@ pub(crate) fn run_task_output(
     }))
 }
 
-pub(crate) fn run_todo_write(input: TodoWriteInput) -> Result<String, ToolError> {
-    to_pretty_json(execute_todo_write(input)?)
+pub(crate) fn run_todo_write(
+    session_id: Option<&str>,
+    input: TodoWriteInput,
+) -> Result<String, ToolError> {
+    to_pretty_json(execute_todo_write(session_id, input)?)
 }
 
 /// The order of the steps is the model's, in the store and in the result.
@@ -508,14 +513,24 @@ pub(crate) fn run_todo_write(input: TodoWriteInput) -> Result<String, ToolError>
 /// this was inherited from sorted by status for a HUD, so a finished step sank
 /// to the bottom and the in-progress one rose to the top — and each
 /// `Updated Plan` cell the TUI drew read as a different plan from the last.
-fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, ToolError> {
+///
+/// The plan is session `session_id`'s own (`runtime::todo_store`): another
+/// session's plan in the same folder is never handed back as `oldTodos`, and
+/// never rewritten or emptied by this one. With no session and no
+/// `ZO_TODO_STORE`, the plan reaches the model in the result and is kept
+/// nowhere.
+fn execute_todo_write(
+    session_id: Option<&str>,
+    input: TodoWriteInput,
+) -> Result<TodoWriteOutput, ToolError> {
     validate_todos(&input.todos)?;
-    let store_path = todo_store_path()?;
-    let old_todos = if store_path.exists() {
-        serde_json::from_str::<Vec<TodoItem>>(&std::fs::read_to_string(&store_path)?)
-            .map_err(|error| ToolError::InvalidInput(error.to_string()))?
-    } else {
-        Vec::new()
+    let store_path = todo_store_path(session_id)?;
+    let old_todos = match store_path.as_deref() {
+        Some(store_path) if store_path.exists() => {
+            serde_json::from_str::<Vec<TodoItem>>(&std::fs::read_to_string(store_path)?)
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?
+        }
+        _ => Vec::new(),
     };
 
     let new_todos = input.todos;
@@ -534,11 +549,14 @@ fn execute_todo_write(input: TodoWriteInput) -> Result<TodoWriteOutput, ToolErro
     // unwritable, degrade to in-memory — `new_todos` still reaches the model in
     // the result below. Genuine errors (disk full, …) still surface.
     let bytes = serde_json::to_string_pretty(&persisted)?.into_bytes();
-    let persistence_warning = persist_todos(
-        &store_path,
-        fallback_todo_store_path(&store_path).as_deref(),
-        &bytes,
-    )?;
+    let persistence_warning = match store_path.as_deref() {
+        Some(store_path) => persist_todos(
+            store_path,
+            fallback_todo_store_path(store_path).as_deref(),
+            &bytes,
+        )?,
+        None => None,
+    };
 
     let verification_nudge_needed = (all_done
         && new_todos.len() >= 3
@@ -586,12 +604,12 @@ fn validate_todos(todos: &[TodoItem]) -> Result<(), ToolError> {
     Ok(())
 }
 
-fn todo_store_path() -> Result<std::path::PathBuf, ToolError> {
+fn todo_store_path(session_id: Option<&str>) -> Result<Option<std::path::PathBuf>, ToolError> {
     // Path resolution is owned by `runtime::todo_store` so this writer and the
-    // HUD/compaction readers can never drift (the split-brain that hid todos in
-    // a read-only cwd).
+    // runtime's readers can never drift (the split-brain that hid todos in a
+    // read-only cwd, and the one shared file that mixed two sessions' plans).
     let cwd = std::env::current_dir()?;
-    Ok(runtime::todo_store::primary_store(&cwd))
+    Ok(runtime::todo_store::primary_store(&cwd, session_id))
 }
 
 /// Persist the todo store to `store_path`. A read-only working directory must
@@ -1217,5 +1235,152 @@ mod tests {
 
         let _ = std::fs::set_permissions(&ro_dir, std::fs::Permissions::from_mode(0o755));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Sessions working in one folder -- this process's cwd, the folder
+    /// `TodoWrite` keys a project by -- with every plan under a throwaway
+    /// project state (t-68408). Holds the crate env lock, and clears
+    /// `ZO_TODO_STORE` so the per-session rule applies.
+    struct OneFolder {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        root: std::path::PathBuf,
+        prior_state: Option<std::ffi::OsString>,
+        prior_store: Option<std::ffi::OsString>,
+    }
+
+    impl OneFolder {
+        fn open(tag: &str) -> Self {
+            let guard = crate::tests::env_lock()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let root = std::env::temp_dir()
+                .join(format!("zo-todo-sessions-{tag}-{nanos}-{}", std::process::id()));
+            let prior_state = std::env::var_os("ZO_STATE_DIR");
+            let prior_store = std::env::var_os("ZO_TODO_STORE");
+            std::env::set_var("ZO_STATE_DIR", root.join("state"));
+            std::env::remove_var("ZO_TODO_STORE");
+            Self { _guard: guard, root, prior_state, prior_store }
+        }
+
+        /// A tool context serving session `session_id`.
+        fn session(session_id: &str) -> ToolContext {
+            let ctx = ToolContext::new();
+            ctx.set_session_id(session_id);
+            ctx
+        }
+    }
+
+    impl Drop for OneFolder {
+        fn drop(&mut self) {
+            match self.prior_state.take() {
+                Some(value) => std::env::set_var("ZO_STATE_DIR", value),
+                None => std::env::remove_var("ZO_STATE_DIR"),
+            }
+            match self.prior_store.take() {
+                Some(value) => std::env::set_var("ZO_TODO_STORE", value),
+                None => std::env::remove_var("ZO_TODO_STORE"),
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Write `steps` (content, status) as the plan of the session `ctx` serves,
+    /// through the tool, and answer the steps it handed back as `oldTodos`.
+    fn write_plan(ctx: &ToolContext, steps: &[(&str, &str)]) -> Vec<String> {
+        let todos: Vec<Value> = steps
+            .iter()
+            .map(|(content, status)| {
+                json!({ "content": content, "activeForm": format!("doing {content}"), "status": status })
+            })
+            .collect();
+        let output = dispatch(ctx, None, "TodoWrite", &json!({ "todos": todos }))
+            .expect("TodoWrite should dispatch")
+            .expect("TodoWrite should succeed");
+        let output: Value = serde_json::from_str(&output).expect("TodoWrite json");
+        output["oldTodos"]
+            .as_array()
+            .expect("oldTodos array")
+            .iter()
+            .map(|todo| todo["content"].as_str().expect("content").to_string())
+            .collect()
+    }
+
+    /// The steps the runtime's readers (re-anchor, compaction, task hooks)
+    /// see for session `session_id` in this folder.
+    fn plan_seen(session_id: &str) -> Vec<String> {
+        let cwd = std::env::current_dir().expect("cwd");
+        runtime::todo_progress::current_todos(&cwd, session_id)
+            .into_iter()
+            .map(|todo| todo.content)
+            .collect()
+    }
+
+    /// Two sessions in one folder each get back only the plan they wrote, as
+    /// `oldTodos` and as what the runtime re-reads (t-68408).
+    #[test]
+    fn two_sessions_in_one_folder_each_get_back_only_their_own_plan() {
+        let _folder = OneFolder::open("own");
+        let north = OneFolder::session("session-north");
+        let south = OneFolder::session("session-south");
+
+        let north_first = write_plan(&north, &[("map the north wing", "in_progress"), ("paint the north wing", "pending")]);
+        let south_first = write_plan(&south, &[("fix the south gate", "in_progress")]);
+        let north_again = write_plan(&north, &[("map the north wing", "completed"), ("paint the north wing", "in_progress")]);
+        let south_again = write_plan(&south, &[("fix the south gate", "completed"), ("oil the south gate", "in_progress")]);
+        let (north_seen, south_seen) = (plan_seen("session-north"), plan_seen("session-south"));
+
+        assert_eq!(north_first, Vec::<String>::new());
+        assert_eq!(south_first, Vec::<String>::new(), "a session is never handed its neighbour's plan");
+        assert_eq!(north_again, ["map the north wing", "paint the north wing"]);
+        assert_eq!(south_again, ["fix the south gate"]);
+        assert_eq!(north_seen, ["map the north wing", "paint the north wing"]);
+        assert_eq!(south_seen, ["fix the south gate", "oil the south gate"]);
+    }
+
+    /// A new session beside a busy one starts with an empty plan and never
+    /// takes up the file every session shared before, which it leaves as it
+    /// was (t-68408).
+    #[test]
+    fn a_new_session_never_takes_up_the_old_shared_plan() {
+        let _folder = OneFolder::open("shared");
+        let cwd = std::env::current_dir().expect("cwd");
+        let shared = runtime::zo_project_state_dir(&cwd).join(".zo-todos.json");
+        std::fs::create_dir_all(shared.parent().expect("a parent")).expect("state dir");
+        let shared_plan = r#"[{"content":"an old shared step","activeForm":"doing an old shared step","status":"in_progress"}]"#;
+        std::fs::write(&shared, shared_plan).expect("seed the old shared plan");
+        let busy = OneFolder::session("session-busy");
+        write_plan(&busy, &[("keep the busy work going", "in_progress")]);
+
+        let fresh = OneFolder::session("session-fresh");
+        let seen_before = plan_seen("session-fresh");
+        let old = write_plan(&fresh, &[("start afresh", "in_progress")]);
+        let shared_after = std::fs::read_to_string(&shared).ok();
+
+        assert_eq!(seen_before, Vec::<String>::new(), "the runtime shows a new session no plan");
+        assert_eq!(old, Vec::<String>::new(), "a new session's first plan replaces nothing");
+        assert_eq!(shared_after.as_deref(), Some(shared_plan), "the old shared file is neither rewritten nor removed");
+    }
+
+    /// One session finishing every step empties its own plan, never its
+    /// neighbour's (t-68408).
+    #[test]
+    fn finishing_every_step_leaves_the_neighbours_plan_alone() {
+        let _folder = OneFolder::open("done");
+        let north = OneFolder::session("session-north");
+        let south = OneFolder::session("session-south");
+        write_plan(&north, &[("map the north wing", "in_progress")]);
+        write_plan(&south, &[("fix the south gate", "in_progress"), ("oil the south gate", "pending")]);
+        write_plan(&north, &[("map the north wing", "completed")]);
+
+        let (north_left, south_left) = (plan_seen("session-north"), plan_seen("session-south"));
+        let south_old = write_plan(&south, &[("fix the south gate", "completed"), ("oil the south gate", "in_progress")]);
+
+        assert_eq!(north_left, Vec::<String>::new(), "a finished plan is emptied");
+        assert_eq!(south_left, ["fix the south gate", "oil the south gate"], "the neighbour's plan stands");
+        assert_eq!(south_old, ["fix the south gate", "oil the south gate"]);
     }
 }

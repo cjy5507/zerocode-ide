@@ -133,4 +133,26 @@ mod tests {
         let call = unwrap_capability_invoke(&json!({"name": " WebSearch "})).expect("unwrap");
         assert_eq!(call.name, "WebSearch");
     }
+
+    /// The trace behind t-68770: the inner arguments go on as the JSON they
+    /// arrived as, so a boolean or a number stays one across the wrapper. A
+    /// `"false"` a tool receives was sent as a string — not made one here, and
+    /// not retyped here either.
+    #[test]
+    fn arguments_cross_the_wrapper_with_the_types_they_came_with() {
+        let typed = unwrap_capability_invoke(&json!({
+            "name": "MemoryWrite",
+            "input": {"slug": "synthetic", "local": false, "count": 3}
+        }))
+        .expect("unwrap");
+        let inner: serde_json::Value = serde_json::from_str(&typed.input).expect("inner json");
+        assert_eq!(inner["local"], json!(false));
+        assert_eq!(inner["count"], json!(3));
+        let spelled = unwrap_capability_invoke(&json!({
+            "name": "MemoryWrite",
+            "input": {"local": "false"}
+        }))
+        .expect("unwrap");
+        assert_eq!(spelled.input, r#"{"local":"false"}"#);
+    }
 }

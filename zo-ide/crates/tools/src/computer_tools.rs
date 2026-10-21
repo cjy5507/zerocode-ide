@@ -775,13 +775,25 @@ fn target_of(input: &ComputerInput) -> Option<ComputerTarget> {
     input.app.as_ref().map(|app| ComputerTarget { app: app.clone(), window_id: input.window_id })
 }
 
+/// Where an answer names the one window it is of, within its result or at
+/// its top: the window's `id`, and its `title` — the document it shows.
+const ANSWER_ROOTS: &[&str] = &["/result/", "/"];
+const WINDOW_OBJECTS: &[&str] = &["snapshot/window", "tree/window", "window"];
+
+fn window_pointers(field: &'static str) -> impl Iterator<Item = String> {
+    ANSWER_ROOTS.iter().flat_map(move |root| WINDOW_OBJECTS.iter().map(move |object| format!("{root}{object}/{field}")))
+}
+
+/// The title of the window an answer is of: the document it shows.
+fn window_title(answer: &Value) -> Option<String> {
+    window_pointers("title").find_map(|pointer| answer.pointer(&pointer)?.as_str().map(str::to_string))
+}
+
 fn checked_window(answer: &Value, expected: Option<u64>) -> Result<Option<u64>, ToolError> {
     let mut found = None;
-    for pointer in [
-        "/result/action/targetWindowId", "/result/snapshot/window/id", "/result/tree/window/id", "/result/window/id",
-        "/action/targetWindowId", "/snapshot/window/id", "/tree/window/id", "/window/id",
-    ] {
-        if let Some(window_id) = answer.pointer(pointer).and_then(Value::as_u64).filter(|window_id| *window_id > 0) {
+    let acted_on = ANSWER_ROOTS.iter().map(|root| format!("{root}action/targetWindowId"));
+    for pointer in acted_on.chain(window_pointers("id")) {
+        if let Some(window_id) = answer.pointer(&pointer).and_then(Value::as_u64).filter(|window_id| *window_id > 0) {
             if expected.is_some_and(|expected| expected != window_id) || found.is_some_and(|found| found != window_id) {
                 return Err(ToolError::Execution("window_scope_mismatch: the selected window did not answer; its contents were not returned".into()));
             }
@@ -1457,6 +1469,7 @@ fn present_observation(
         window_id,
         frame,
         marked_look: answer.pointer(&format!("/result/marks/{LOOK_ID_KEY}")).and_then(Value::as_str).map(str::to_string),
+        title: window_title(answer),
     });
     let unchanged = diff && answer.pointer("/result/changed").and_then(Value::as_array).is_some_and(Vec::is_empty);
     if unchanged && observation.as_ref().is_some_and(|seen| ctx.has_computer_observation(seen)) {
@@ -2146,8 +2159,11 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
         argv = as_viewer(argv, ctx);
     }
     let mut answer = call_shim(road, &argv, ctx.cwd.as_deref())?;
+    let mut repicked = None;
     if let Some(refused) = refusal(&answer) {
-        return Err(refused.into());
+        let (pressed, picked) = repick(&input, refused, ctx, road)?;
+        answer = pressed;
+        repicked = Some(picked);
     }
     if action == LIST_WINDOWS_ACTION {
         if let Some(app) = input.app.as_deref() {
@@ -2194,19 +2210,101 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
         Some(after) => Some(after.clone()),
         None => surface,
     };
-    let text = to_pretty_json(json!({
+    let mut said = json!({
         "ok": true,
         "action": action,
         "result": result,
         "screenshot": staged,
         "first_look": first_look,
         "looked_after": looked_after.map(|look| look.value),
-    }))?;
+    });
+    if let Some(picked) = repicked {
+        said["repicked"] = picked;
+    }
+    let text = to_pretty_json(said)?;
     Ok(ToolExecutionResult { text, surface })
 }
 
+/// A lone click by reading that the window refused `element_not_found` —
+/// no control read its words, refused before any input, since the helper
+/// chooses the control before it presses — on a page that moved on (t-66760
+/// b1): the same window is read again for the same words and, while it shows
+/// the document the model's last look at it showed, the one control that
+/// reads them is pressed once, by its index on that read. No look at the
+/// window, another document, no control or several: the refusal stands, with
+/// the candidates named when there are several. One read, one press — never
+/// a loop.
+fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &ComputerRoad) -> Result<(Value, Value), ToolError> {
+    let reading = (input.label.is_some() || input.role.is_some()) && input.ocr != Some(true);
+    let (Some(app), Some(window_id)) = (input.app.as_deref(), input.window_id) else {
+        return Err(refused.into());
+    };
+    if !reading || input.action.trim() != ELEMENT_CLICK || refused.code != error_code::ELEMENT_NOT_FOUND {
+        return Err(refused.into());
+    }
+    let Some(looked_at) = ctx.computer_window_title(window_id) else {
+        return Err(refused.into());
+    };
+    let lookup = ComputerInput {
+        action: "find".into(),
+        app: Some(app.to_string()),
+        window_id: Some(window_id),
+        label: input.label.clone(),
+        role: input.role.clone(),
+        background: input.background,
+        ..ComputerInput::default()
+    };
+    let Some(found) = argv_for(&lookup)
+        .ok()
+        .and_then(|argv| call_shim(road, &argv, ctx.cwd.as_deref()).ok())
+        .filter(|found| refusal(found).is_none() && checked_window(found, Some(window_id)).is_ok())
+    else {
+        return Err(refused.into());
+    };
+    if window_title(&found).as_deref() != Some(looked_at.as_str()) {
+        let message = format!("{}; the window's document changed since your last look at it, so no other control was chosen — observe it again", refused.message);
+        return Err(Refusal { message, ..refused }.into());
+    }
+    let matches = found.pointer("/result/matches").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+    let more = found.pointer("/result/truncated") == Some(&Value::Bool(true));
+    let only = match matches {
+        [only] if !more => only,
+        [] => return Err(refused.into()),
+        several => {
+            let named = several.iter().map(candidate).collect::<Vec<_>>().join("; ");
+            let message = format!(
+                "{}; {}{} controls read these words in the window now: {named} — add role or label, or press one by element_index",
+                refused.message,
+                several.len(),
+                if more { " or more" } else { "" }
+            );
+            return Err(Refusal { message, ..refused }.into());
+        }
+    };
+    let Some(index) = only.get("index").and_then(Value::as_u64) else {
+        return Err(refused.into());
+    };
+    let press = ComputerInput { element_index: Some(index), label: None, role: None, ..input.clone() };
+    let pressed = call_shim(road, &argv_for(&press)?, ctx.cwd.as_deref())?;
+    if let Some(refused) = refusal(&pressed) {
+        return Err(refused.into());
+    }
+    super::computer_tally::note(super::computer_tally::REPICKED);
+    Ok((pressed, json!({ "label": only.get("label"), "role": only.get("role"), "element_index": index })))
+}
+
+/// A control a read found, as a refusal names it: `12 AXButton «Save»`.
+fn candidate(found: &Value) -> String {
+    let index = found.get("index").map_or_else(|| "?".to_string(), Value::to_string);
+    let role = found.get("role").and_then(Value::as_str).unwrap_or("?");
+    let reads = ["label", "value", "description"]
+        .into_iter()
+        .find_map(|key| found.get(key).and_then(Value::as_str).filter(|text| !text.trim().is_empty()));
+    reads.map_or_else(|| format!("{index} {role}"), |reads| format!("{index} {role} «{reads}»"))
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[test]
     fn browser_chrome_is_an_explicit_tool_claim_and_cli_flag() {
         let parsed = serde_json::from_value::<ComputerInput>(json!({
@@ -2306,6 +2404,7 @@ mod tests {
                 window_id: case["input"]["window_id"].as_u64(),
                 frame: ShotFrame::UNIT,
                 marked_look: None,
+                title: None,
             }));
             std::fs::write(dir.path().join("wait-for"), json!({"ok":true,"result":case["result"]}).to_string()).unwrap();
             let response = run_computer(&case["input"], &ctx, &road).unwrap();
@@ -2334,6 +2433,7 @@ mod tests {
                 window_id: case["input"]["window_id"].as_u64(),
                 frame: ShotFrame::UNIT,
                 marked_look: None,
+                title: None,
             }));
             let mut wait = case["input"].clone();
             for key in ["app", "window_id", "background"] { wait.as_object_mut().unwrap().remove(key); }
@@ -2484,6 +2584,203 @@ mod tests {
         let answer: Value = serde_json::from_str(&run_computer(&json!({"action":"left_click","app":"Fixture","window_id":41,"label":"Save"}), &ctx, &road).unwrap()).unwrap();
         let asked = answer["looked_after"]["screen"]["said"].as_str().unwrap_or_default();
         assert!(asked.contains("--app Fixture") && asked.contains("--window-id 41"), "verification observed another window: {asked}");
+    }
+
+    /// The app, window and document of the person's photo scene (10-20,
+    /// t-66760 b1), in fixture names.
+    #[cfg(unix)]
+    pub(crate) const PHOTO_APP: &str = "org.example.fixture";
+    #[cfg(unix)]
+    pub(crate) const PHOTO_WINDOW: u64 = 41;
+    #[cfg(unix)]
+    pub(crate) const PHOTO_TITLE: &str = "Fixture document";
+
+    /// The photo scene's click: by label and role, in the background, in the
+    /// window the model looked at.
+    #[cfg(unix)]
+    fn photo_click() -> Value {
+        json!({"action":"left_click","app":PHOTO_APP,"window_id":PHOTO_WINDOW,"background":true,"label":"Continue","role":"AXButton"})
+    }
+
+    /// A control that reads the photo scene's words, at `index` of a read.
+    #[cfg(unix)]
+    pub(crate) fn continue_button(index: u64) -> Value {
+        json!({"index":index,"role":"AXButton","label":"Continue"})
+    }
+
+    /// What a read of the photo scene's window answers: its document's
+    /// `title` and the controls that read the words.
+    #[cfg(unix)]
+    pub(crate) fn photo_found(title: &str, matches: &Value) -> Value {
+        json!({"source":"accessibility","snapshotId":"fixture-snapshot-2","app":"Fixture",
+            "window":{"id":PHOTO_WINDOW,"title":title},"matches":matches,"truncated":false})
+    }
+
+    /// The photo scene: the model looks at the window (its document is
+    /// `PHOTO_TITLE`), then clicks by reading; the window refuses that click
+    /// `element_not_found` before any input — the page moved on — and a read
+    /// of the same window answers `found`.
+    #[cfg(unix)]
+    pub(crate) fn photo_scene(dir: &Path, ctx: &ToolContext, road: &ComputerRoad, found: &Value) -> Result<String, ToolError> {
+        std::fs::write(dir.join("window-title"), PHOTO_TITLE).unwrap();
+        run_computer(&json!({"action":"observe","app":PHOTO_APP,"window_id":PHOTO_WINDOW}), ctx, road).expect("the model's look at the window");
+        refuse_the_first_click(dir, "element_not_found", "no control in Fixture's window reads --role AXButton --label «Continue»; look with --marks, or find");
+        std::fs::write(dir.join("reply-find"), json!({"ok":true,"result":found}).to_string()).unwrap();
+        run_computer(&photo_click(), ctx, road)
+    }
+
+    /// The window's refusal of the first click it is asked for.
+    #[cfg(unix)]
+    fn refuse_the_first_click(dir: &Path, code: &str, message: &str) {
+        std::fs::write(dir.join("reply-click.1"), json!({"ok":false,"error":{"code":code,"message":message}}).to_string()).unwrap();
+    }
+
+    /// A window's refusal as the tool hands it on: its code, then its words.
+    #[cfg(unix)]
+    fn refused_with(result: Result<String, ToolError>) -> String {
+        match result {
+            Err(ToolError::Execution(message)) => message,
+            other => panic!("a window's refusal, not {other:?}"),
+        }
+    }
+
+    /// The words of the `n`th call of `verb` the fake shim was asked.
+    #[cfg(unix)]
+    fn shim_words(dir: &Path, verb: &str, n: usize) -> Vec<String> {
+        std::fs::read_to_string(dir.join(format!("argv-{verb}.{n}"))).unwrap_or_default().lines().map(str::to_string).collect()
+    }
+
+    #[cfg(unix)]
+    fn names(words: &[String], flag: &str, value: &str) -> bool {
+        words.windows(2).any(|pair| pair[0] == flag && pair[1] == value)
+    }
+
+    #[cfg(unix)]
+    fn clicks(dir: &Path) -> usize {
+        calls(dir).iter().filter(|verb| *verb == "click").count()
+    }
+
+    /// Photo scene (a), t-66760 b1: the same document, one control that
+    /// reads the words — pressed once, by its index on that read, in the
+    /// same window and the same background; the answer says it was re-picked.
+    #[cfg(unix)]
+    #[test]
+    fn the_photo_scene_click_is_repicked_once_on_the_same_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let answer = photo_scene(dir.path(), &ctx, &road, &photo_found(PHOTO_TITLE, &json!([continue_button(7)])));
+        assert!(answer.is_ok(), "photo scene (a): one control reads the words on the same document, so the click is re-picked, not refused: {answer:?}");
+        let answer: Value = serde_json::from_str(&answer.unwrap()).unwrap();
+        assert_eq!(
+            answer["repicked"],
+            json!({"label":"Continue","role":"AXButton","element_index":7}),
+            "photo scene (a): the answer says it re-picked, and which control"
+        );
+        assert_eq!(calls(dir.path()), ["observe", "click", "find", "click", "observe"], "photo scene (a): one read of the window, one press, one look after");
+        let window = PHOTO_WINDOW.to_string();
+        let reread = shim_words(dir.path(), "find", 1);
+        assert!(
+            names(&reread, "--label", "Continue") && names(&reread, "--role", "AXButton") && names(&reread, "--window-id", &window),
+            "photo scene (a): the same window is read for the same words: {reread:?}"
+        );
+        let pressed = shim_words(dir.path(), "click", 2);
+        assert!(
+            names(&pressed, "--element-index", "7") && names(&pressed, "--window-id", &window) && pressed.iter().any(|word| word == "--background"),
+            "photo scene (a): the press names the read's control, in the same window and the background: {pressed:?}"
+        );
+    }
+
+    /// Photo scene (b): the window shows another document than the model's
+    /// look did — the same words may be another control; the refusal stands
+    /// and says why, and nothing more is pressed.
+    #[cfg(unix)]
+    #[test]
+    fn the_photo_scene_click_on_a_changed_document_keeps_its_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let refused = refused_with(photo_scene(dir.path(), &ctx, &road, &photo_found("Fixture results", &json!([continue_button(7)]))));
+        assert!(refused.starts_with("element_not_found:"), "photo scene (b): the window's refusal stands: {refused}");
+        assert!(refused.contains("document changed"), "photo scene (b): the refusal says the document changed since the look: {refused}");
+        assert_eq!(clicks(dir.path()), 1, "photo scene (b): nothing pressed after the document changed");
+    }
+
+    /// Photo scene (c): two controls read the words — the tool never guesses
+    /// between them; the refusal names both, and nothing more is pressed.
+    #[cfg(unix)]
+    #[test]
+    fn the_photo_scene_click_with_two_candidates_is_refused_with_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let refused = refused_with(photo_scene(dir.path(), &ctx, &road, &photo_found(PHOTO_TITLE, &json!([continue_button(7), continue_button(9)]))));
+        assert!(refused.starts_with("element_not_found:"), "photo scene (c): the window's refusal stands: {refused}");
+        assert!(
+            refused.contains("7 AXButton «Continue»") && refused.contains("9 AXButton «Continue»"),
+            "photo scene (c): the refusal names the candidates: {refused}"
+        );
+        assert_eq!(clicks(dir.path()), 1, "photo scene (c): nothing pressed between two candidates");
+    }
+
+    /// No look at the window: there is no document to hold a re-pick to, so
+    /// the refusal stands and the window is not read again.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_click_by_reading_with_no_look_at_its_window_is_not_repicked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        refuse_the_first_click(dir.path(), "element_not_found", "no control reads the words");
+        std::fs::write(dir.path().join("reply-find"), json!({"ok":true,"result":photo_found(PHOTO_TITLE, &json!([continue_button(7)]))}).to_string()).unwrap();
+        let refused = refused_with(run_computer(&photo_click(), &ctx, &road));
+        assert!(refused.starts_with("element_not_found:"), "{refused}");
+        assert_eq!(calls(dir.path()), ["click"], "a window never looked at is not read again");
+    }
+
+    /// Only `element_not_found` — a refusal before any input — is re-picked:
+    /// the photo scene's `requires_foreground`, the helper's own
+    /// `ambiguous_target`, a road that answered nothing, and the same click
+    /// as a batch step each stand as they came, with one press asked.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_lone_click_refused_element_not_found_is_repicked() {
+        for (code, message) in [
+            ("requires_foreground", "background input pauses while the person is using the target app"),
+            ("ambiguous_target", "2 controls read --label «Continue»"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            std::fs::write(dir.path().join("window-title"), PHOTO_TITLE).unwrap();
+            run_computer(&json!({"action":"observe","app":PHOTO_APP,"window_id":PHOTO_WINDOW}), &ctx, &road).unwrap();
+            refuse_the_first_click(dir.path(), code, message);
+            let refused = refused_with(run_computer(&photo_click(), &ctx, &road));
+            assert!(refused.starts_with(&format!("{code}:")), "{refused}");
+            assert_eq!(calls(dir.path()), ["observe", "click"], "{code} is not re-picked");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        std::fs::write(dir.path().join("window-title"), PHOTO_TITLE).unwrap();
+        run_computer(&json!({"action":"observe","app":PHOTO_APP,"window_id":PHOTO_WINDOW}), &ctx, &road).unwrap();
+        std::fs::write(dir.path().join("reply-click.1"), "not an envelope").unwrap();
+        assert!(run_computer(&photo_click(), &ctx, &road).is_err());
+        assert_eq!(calls(dir.path()), ["observe", "click"], "a road that answered nothing is not re-picked: the press may have gone");
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        std::fs::write(dir.path().join("window-title"), PHOTO_TITLE).unwrap();
+        run_computer(&json!({"action":"observe","app":PHOTO_APP,"window_id":PHOTO_WINDOW}), &ctx, &road).unwrap();
+        std::fs::write(dir.path().join("batch"), json!({"ok":false,"error":{"code":"element_not_found","message":"step 1 refused"},
+            "result":{"ran":0,"of":1,"refusedAt":1,"steps":[{"n":1,"verb":"click","ok":false,"error":{"code":"element_not_found","message":"no control reads the words"}}]}}).to_string()).unwrap();
+        let mut step = photo_click();
+        for key in ["app", "window_id", "background"] {
+            step.as_object_mut().unwrap().remove(key);
+        }
+        let batch = json!({"action":"batch","app":PHOTO_APP,"window_id":PHOTO_WINDOW,"background":true,"steps":[step]});
+        assert!(run_computer(&batch, &ctx, &road).is_err());
+        assert_eq!(calls(dir.path()), ["observe", "batch"], "a batch step is not re-picked: the batch stops at its first refusal");
     }
 
     #[cfg(unix)]
@@ -3503,9 +3800,11 @@ mod tests {
     /// every answer carries a position in points. A handoff answers as its
     /// window does: with an `--into` in its line the answer carries no code,
     /// without one it carries the old window's (`A_CODE`); the line's words
-    /// are kept, one to a line.
+    /// are kept, one to a line. The `n`th call of a verb keeps its words in
+    /// `argv-<verb>.<n>` and answers `reply-<verb>.<n>` when the test wrote
+    /// one; a window it answers for shows the title in `window-title`.
     #[cfg(unix)]
-    fn fake_shim(dir: &Path) -> (ComputerRoad, PathBuf) {
+    pub(crate) fn fake_shim(dir: &Path) -> (ComputerRoad, PathBuf) {
         use std::os::unix::fs::PermissionsExt as _;
         let png = dir.join("shot.png");
         std::fs::write(&png, TINY_PNG).unwrap();
@@ -3516,6 +3815,8 @@ mod tests {
         let script = r#"#!/bin/sh
 verb="$1"
 echo "$verb" >> '@DIR@/calls'
+asked="$(grep -cx "$verb" '@DIR@/calls')"
+for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/argv-'"$verb"'.'"$asked"
 window=''
 previous=''
 for word in "$@"; do
@@ -3523,8 +3824,11 @@ for word in "$@"; do
   previous="$word"
 done
 [ -f '@DIR@/forced-window' ] && window="$(cat '@DIR@/forced-window')"
+title=''
+[ -f '@DIR@/window-title' ] && title=',"title":"'"$(cat '@DIR@/window-title')"'"'
 target=''
-[ -n "$window" ] && target=',"window":{"id":'"$window"'},"fixture":"unrelated-window-fixture"'
+[ -n "$window" ] && target=',"window":{"id":'"$window""$title"'},"fixture":"unrelated-window-fixture"'
+[ -f '@DIR@/reply-'"$verb"'.'"$asked" ] && { cat '@DIR@/reply-'"$verb"'.'"$asked"; echo; exit 0; }
 [ -f '@DIR@/reply-'"$verb" ] && { cat '@DIR@/reply-'"$verb"; echo; exit 0; }
 [ "$verb" = batch ] && { printf '%s' "$3" > '@DIR@/batch-commands'; cat '@DIR@/batch'; echo; exit 0; }
 [ "$verb" = wait-for ] && [ -f '@DIR@/wait-for' ] && { for word in "$@"; do printf '%s\n' "$word"; done > '@DIR@/wait-for-argv'; cat '@DIR@/wait-for'; echo; exit 0; }
@@ -3909,7 +4213,7 @@ printf '%s
     }
 
     #[cfg(unix)]
-    fn calls(dir: &Path) -> Vec<String> {
+    pub(crate) fn calls(dir: &Path) -> Vec<String> {
         std::fs::read_to_string(dir.join("calls")).unwrap_or_default().lines().map(str::to_string).collect()
     }
 

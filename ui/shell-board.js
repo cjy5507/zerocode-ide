@@ -172,15 +172,19 @@ function deskBlock(desk, { id, quietHead = false }) {
   return block;
 }
 
-/* 데스크 블록, 읽는 차례대로 — DOM 순서가 곧 좁은 판의 순서다. 그리는 손은
- * 블록에 쓸 것이 있으면 참을 돌려주고, 거짓이면 그 블록은 접힌다. */
+/* 데스크 블록, 탭마다 읽는 차례대로 — DOM 순서가 곧 좁은 판의 순서다(t-67607, 시안 B).
+ * 「지금」은 당신 차례·빌드 줄·통합 묶음·지금 도는 일, 「워커」는 워커와 이 기계, 「기록」은
+ * 소식과 과업 흐름이다. 그리는 손은 블록에 쓸 것이 있으면 참을 돌려주고, 거짓이면 그
+ * 블록은 접힌다. 판에 선 탭의 블록만 그린다 — 다른 탭은 고를 때 그린다(`chooseBoardTab`). */
 const DESK_BLOCKS = Object.freeze([
-  { id: "machine", paint: paintDeskMachine, quietHead: true },
-  { id: "batches", paint: paintDeskBatches },
-  { id: "mail", paint: paintDeskMail },
-  { id: "workers", paint: paintDeskWorkers },
-  { id: "pipeline", paint: paintDeskPipeline },
-  { id: "release", paint: paintDeskRelease },
+  { id: "asks", tab: "now", paint: paintDeskAsks },
+  { id: "release", tab: "now", paint: paintDeskRelease },
+  { id: "batches", tab: "now", paint: paintDeskBatches },
+  { id: "running", tab: "now", paint: paintDeskRunning },
+  { id: "workers", tab: "workers", paint: paintDeskWorkers },
+  { id: "machine", tab: "workers", paint: paintDeskMachine, quietHead: true },
+  { id: "mail", tab: "history", paint: paintDeskMail },
+  { id: "pipeline", tab: "history", paint: paintDeskPipeline },
 ]);
 
 function paintCoordinatorDesk(view) {
@@ -190,82 +194,37 @@ function paintCoordinatorDesk(view) {
     desk.replaceChildren();
     deskPainted.add(view);
     refreshDeskLedger();
-    watchDeskRoom(view, desk);
   }
   deskAmbient.sync();
   const now = Date.now();
   if (now - deskAmbientAt >= DESK.ambientEveryMs) refreshDeskAmbient();
-  const blocks = DESK_BLOCKS.map((entry) => {
+  paintBoardTabs(view);
+  // Only the chosen tab's blocks stand: a block left behind on another tab is
+  // taken out and drawn afresh when its tab is chosen, so the workers' rows
+  // and the task flow do not ride along unseen under 「지금」.
+  const blocks = [];
+  for (const entry of DESK_BLOCKS) {
+    if (entry.tab !== boardNowTab) {
+      desk.querySelector(`:scope > [data-desk-block="${entry.id}"]`)?.remove();
+      continue;
+    }
     const block = deskBlock(desk, entry);
+    writeAttribute(block, "data-board-tab-of", entry.tab);
     writeHidden(block, !entry.paint(block, now, view));
-    return block;
-  });
+    blocks.push(block);
+  }
   reconcileElementOrder(desk, blocks);
   writeHidden(desk, blocks.every((block) => block.hidden));
-  placeDeskColumns(desk, blocks);
+  paintBoardHead(view, deskOwed(deskLedger), now);
 }
 
-/* 데스크의 두 열은 잰 높이로 정한다 (t-7448). 우편은 왼쪽, 워커는 오른쪽에 고정이고
- * 흐름과 레인은 셋 중 하나다 — 둘 다 왼쪽(워커가 왼쪽 행들을 걸치고 남는 높이는
- * 스타일시트의 `1fr` 행이 받는다), 나눠 넣기(흐름 왼쪽 · 레인 오른쪽, 한 행에
- * 나란히), 둘 다 오른쪽(우편이 걸친다). 고정 2열은 어느 경우엔 한 열 아래를 비운다:
- * 우편 세 통 옆에 워커 여덟 행이면 걸침이 낮고(실측 657 대 799), 우편 다섯 통 옆에
- * 워커 다섯이면 나눠 넣기가 낮다(599 대 807). 그래서 그릴 때마다 네 블록의 높이를
- * 한 번 읽고(한 레이아웃 — 조용한 폴은 아무것도 더럽히지 않았으므로 공짜다) 격자가
- * 실제로 낼 높이를 셈해 가장 낮은 배치를 고른다: 걸침은 두 열이 독립이고, 나눠
- * 넣기는 행마다 긴 쪽에 맞춘다(`grid-column`만으로는 행 높이가 열끼리 묶여 걸침의
- * 독립이 없으므로 배치는 블록의 `data-desk-column`을 읽는 스타일시트의 영역 이름이
- * 한다). 같은 높이면 앞의 것(읽는 차례)이고, 같은 값은 다시 쓰지 않는다. 목록
- * 티어(한 열)에서는 쓰지 않는다 — 그 폭의 높이로 고른 배치가 넓어진 뒤 한 폴 동안
- * 서지 않게. */
-const DESK_LAYOUTS = Object.freeze([
-  { id: "stack-left", columns: { pipeline: "left", release: "left" },
-    height: (h, gap) => Math.max(deskStack([h.mail, h.pipeline, h.release], gap), h.workers) },
-  { id: "split", columns: { pipeline: "left", release: "right" },
-    height: (h, gap) => deskStack([Math.max(h.mail, h.workers), Math.max(h.pipeline, h.release)], gap) },
-  { id: "stack-right", columns: { pipeline: "right", release: "right" },
-    height: (h, gap) => Math.max(h.mail, deskStack([h.workers, h.pipeline, h.release], gap)) },
-]);
-
-/* 한 열에 차곡차곡: 숨은 블록(높이 0)은 자리도 간격도 없다. */
-function deskStack(heights, gap) {
-  return heights.filter((height) => height > 0).reduce((sum, height, at) => sum + height + (at > 0 ? gap : 0), 0);
-}
-
-function placeDeskColumns(desk, blocks) {
-  if (desk.hidden) return;
-  const by = new Map(blocks.map((block) => [block.dataset.deskBlock, block]));
-  const room = desk.clientWidth;
-  const heights = {};
-  for (const id of ["mail", "workers", "pipeline", "release"]) {
-    const block = by.get(id);
-    if (!block) return;
-    const box = block.hidden ? null : block.getBoundingClientRect();
-    heights[id] = box ? box.height : 0;
-    if (box && box.width >= room - 1) return;
-  }
-  const gap = parseFloat(getComputedStyle(by.get("pipeline")).marginTop) || 0;
-  let chosen = DESK_LAYOUTS[0];
-  let lowest = Infinity;
-  for (const layout of DESK_LAYOUTS) {
-    const height = layout.height(heights, gap);
-    if (height < lowest - 0.5) {
-      lowest = height;
-      chosen = layout;
-    }
-  }
-  for (const [id, column] of Object.entries(chosen.columns)) writeAttribute(by.get(id), "data-desk-column", column);
-}
-
-/* 보드의 폭이 바뀌면(창·사이드바·인스펙터·목록 티어를 벗어남) 배치를 다시 고른다 —
- * 높이는 폭의 함수라 좁은 판에서 고른 배치가 넓은 판에서는 틀리다. 재는 것은 데스크가
- * 아니라 스크롤 판이다: 데스크를 재면 배치가 바꾼 제 높이가 같은 프레임의 관찰을 다시
- * 불러 고리가 된다(undelivered notifications). 판은 스크롤 상자라 내용의 높이에
- * 움직이지 않는다. 콜백은 레이아웃 뒤에 돌므로 읽기는 공짜고, 같은 배치면 쓰지 않는다. */
-function watchDeskRoom(view, desk) {
-  const surface = view.querySelector(".task-board-surface");
-  if (!surface || typeof ResizeObserver !== "function") return;
-  new ResizeObserver(() => placeDeskColumns(desk, [...desk.children])).observe(surface);
+/* 맨 위 문장의 N — 사람이 답해야 움직이는 것의 수, 백엔드가 센 그대로: 답할 우편
+ * (`counts.mail`)과 결정·검증 대기 단계의 과업 수(`stages`). 당신 차례 카드가 그리는
+ * 행은 이 수가 세는 바로 그것들이다(`boardAsks`). */
+function deskOwed(ledger) {
+  if (!ledger) return 0;
+  const stages = new Map((ledger.stages ?? []).map((one) => [one.stage, Number(one.count) || 0]));
+  return (Number(ledger.counts?.mail) || 0) + (stages.get("gate") ?? 0) + (stages.get("reported") ?? 0);
 }
 
 /* ---- 기계 띠 ---------------------------------------------------------------
@@ -693,9 +652,9 @@ function paintDeskLetterList(list, letters, seats, now, view) {
   writeHidden(list, letters.length === 0);
 }
 
-/* 두 목록은 처음 `DESK.mailShown`통을 함께 쓴다 — 답할 것이 먼저, 소식이 그 뒤 — 그
- * 뒤는 「N통 더 보기」 하나다. 세 숫자(답할 우편·소식·접힘)는 백엔드의 `counts`
- * 그대로다. */
+/* 소식 목록(t-67607 뒤): 답할 우편은 「지금」 탭의 당신 차례 카드에 서고(`paintDeskAsks`),
+ * 이 블록은 소식만 든다 — 처음 `DESK.mailShown`통, 그 뒤는 「N통 더 보기」 하나다. 세
+ * 숫자(답할 우편·소식·접힘)는 백엔드의 `counts` 그대로다. */
 function paintDeskMail(block, now, view) {
   const letters = Array.isArray(deskLedger?.mail) ? deskLedger.mail : [];
   const news = Array.isArray(deskLedger?.news) ? deskLedger.news : [];
@@ -703,12 +662,12 @@ function paintDeskMail(block, now, view) {
   const owed = Number(counts.mail) || 0;
   const told = Number(counts.news) || 0;
   const folded = Number(counts.folded) || 0;
-  if (owed + told + folded === 0) return false;
-  writeTextContent(block.firstElementChild, t("board.desk.mail", "답할 우편 · {{count}}", { count: owed }));
+  if (told + folded === 0) return false;
+  writeTextContent(block.firstElementChild, t("board.desk.news", "소식 · {{count}}", { count: told }));
   const body = block.lastElementChild;
-  let list = body.querySelector(":scope > .board-desk-letters.is-mail");
+  let list = body.querySelector(":scope > .board-desk-letters.is-news");
   if (!list) {
-    list = deskElement("ol", "board-desk-letters is-mail");
+    list = deskElement("ol", "board-desk-letters is-news");
     const more = deskElement("button", "board-desk-letters-more");
     more.type = "button";
     more.onclick = () => {
@@ -717,24 +676,21 @@ function paintDeskMail(block, now, view) {
     };
     const foldedLine = deskElement("p", "board-desk-news-folded");
     foldedLine.append(deskElement("span", "board-desk-news-folded-word"));
-    body.replaceChildren(deskElement("p", "board-desk-unseated"), list, deskElement("p", "board-desk-news-head"),
-      deskElement("ol", "board-desk-letters is-news"), more, foldedLine);
+    body.replaceChildren(deskElement("p", "board-desk-unseated"), deskElement("p", "board-desk-news-owed"), list,
+      more, foldedLine);
   }
-  const [unseated, , newsHead, newsList, more, foldedLine] = body.children;
+  const [unseated, owedLine, , more, foldedLine] = body.children;
   const seats = new Map((deskLedger.runs ?? []).map((run) => [run.run, run.seat === true]));
-  const room = deskChoice.mailAll ? Infinity : DESK.mailShown;
-  const shownMail = letters.slice(0, room);
-  const shownNews = news.slice(0, Math.max(0, room - shownMail.length));
-  paintDeskLetterList(list, shownMail, seats, now, view);
-  paintDeskLetterList(newsList, shownNews, seats, now, view);
-  const shown = [...shownMail, ...shownNews];
-  const strangers = !isPopout && shown.some((letter) => !(seats.get(letter.run) ?? false));
+  const shownNews = news.slice(0, deskChoice.mailAll ? Infinity : DESK.mailShown);
+  paintDeskLetterList(list, shownNews, seats, now, view);
+  const strangers = !isPopout && shownNews.some((letter) => !(seats.get(letter.run) ?? false));
   writeTextContent(unseated, strangers
     ? t("board.desk.noSeat", "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요") : "");
   writeHidden(unseated, !strangers);
-  writeTextContent(newsHead, t("board.desk.news", "소식 · {{count}}", { count: told }));
-  writeHidden(newsHead, shownNews.length === 0);
-  const rest = owed + told - DESK.mailShown;
+  writeTextContent(owedLine, t("board.desk.newsOwed", "답할 우편 {{count}}통은 「지금」의 당신 차례에 있습니다",
+    { count: owed }));
+  writeHidden(owedLine, owed === 0);
+  const rest = told - DESK.mailShown;
   writeHidden(more, rest <= 0);
   writeTextContent(more, deskChoice.mailAll ? t("board.desk.mailFewer", "접기")
     : t("board.desk.mailMore", "{{count}}통 더 보기", { count: Math.max(0, rest) }));
@@ -744,9 +700,7 @@ function paintDeskMail(block, now, view) {
   const foldedBatches = Array.isArray(deskLedger?.folded_batches) ? deskLedger.folded_batches : [];
   paintDeskFoldedAcks(foldedLine, foldedBatches, seats, view);
   writeHidden(foldedLine, folded === 0);
-  // Letters that left the ledger's lists take their drafts and presses with them.
-  const standing = new Set(letters.map((letter) => letter.id));
-  for (const id of deskDrafts.keys()) if (!standing.has(id)) deskDrafts.delete(id);
+  // Batches that left the ledger's lists take their presses with them.
   const batches = new Set([...letters, ...news, ...foldedBatches].map((letter) => letter.delivery_id).filter(Boolean));
   for (const id of deskAcks.keys()) if (!batches.has(id)) deskAcks.delete(id);
   return true;
@@ -2076,7 +2030,7 @@ function paintDeskTaskNext(line, task, health) {
   const command = asking ? "" : task.progress?.next ?? "";
   const [label, code, copy] = line.children;
   line.__command = command;
-  writeTextContent(label, asking ? t("board.desk.nextAnswer", "답할 우편에서 질문에 답하세요") : t("board.desk.taskNext", "다음"));
+  writeTextContent(label, asking ? t("board.desk.nextAnswer", "「지금」의 당신 차례에서 질문에 답하세요") : t("board.desk.taskNext", "다음"));
   writeTextContent(code, command);
   writeHidden(code, command === "");
   if (!copy.__copied) writeTextContent(copy, t("vault.copy", "명령 복사"));
@@ -2207,10 +2161,23 @@ function deskReleasePhaseState(phase) {
   return phase.rc === 0 ? "done" : "failed";
 }
 
-function deskReleasePhaseWord(phase, state) {
-  if (state === "skipped") return t("board.desk.phaseSkipped", "{{name}} 건너뜀", { name: phase.name });
-  if (state === "running" || !Number.isFinite(phase.secs)) return phase.name;
-  return t("board.desk.phaseSecs", "{{name}} {{secs}}초", { name: phase.name, secs: phase.secs });
+/* 한 단계의 표식과 오른쪽 낱말 (t-67607, 시안 B의 단계 목록): 끝난 단계는 「끝」, 도는
+ * 단계는 제 경과 — 레인이 시작한 때에서 앞선 단계가 쓴 초를 뺀 때부터. 단계마다 걸린
+ * 초는 「단계별 시간 · 원문」 안에 있다. */
+const DESK_RELEASE_STEPS = Object.freeze({
+  done: { mark: "done", key: "board.now.stepDone", word: "끝" },
+  skipped: { mark: "idle", key: "board.now.stepSkipped", word: "건너뜀" },
+  failed: { mark: "failed", key: "board.now.stepFailed", word: "실패" },
+  running: { mark: "working" },
+});
+
+function deskReleaseStepWord(state, status, phases, now) {
+  const step = DESK_RELEASE_STEPS[state];
+  if (state !== "running") return t(step.key, step.word);
+  const started = Date.parse(status.started_at);
+  const spent = phases.reduce((sum, phase) => sum + (Number(phase.secs) || 0), 0) * 1000;
+  const from = Number.isFinite(started) ? started + spent : now;
+  return runningWord(from, now) ?? t("board.desk.releaseJustStarted", "방금 시작");
 }
 
 function deskReleaseClock(status, verdict, now) {
@@ -2228,39 +2195,60 @@ function deskReleaseClock(status, verdict, now) {
 function paintDeskRelease(block, now) {
   const status = releaseLane;
   if (!status || typeof status !== "object" || !status.sha) return false;
-  writeTextContent(block.firstElementChild, t("board.desk.release", "릴리즈 레인"));
+  // The draft B card (t-67607): 「빌드 줄」, one lane at a time, its steps, and the
+  // lane's own record of each step behind 「단계별 시간 · 원문」.
+  const head = block.firstElementChild;
+  if (!head.firstElementChild) {
+    head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
+  }
+  writeTextContent(head.firstElementChild, t("board.now.line", "빌드 줄"));
+  writeTextContent(head.lastElementChild, t("board.now.lineHint", "한 번에 하나씩"));
   const body = block.lastElementChild;
   let card = body.firstElementChild;
   if (!card) {
     card = deskElement("div", "board-desk-release");
     const line = deskElement("p", "board-desk-release-line");
-    line.append(agentGraphStateMark("working"), deskElement("strong", "board-desk-release-version"),
+    line.append(agentGraphStateMark("working"), deskElement("span", "board-desk-release-title"),
+      deskElement("strong", "board-desk-release-version"),
       deskElement("code", "board-desk-release-sha"), deskElement("span", "board-desk-release-verdict"),
       deskElement("span", "board-desk-release-clock"));
+    const log = deskElement("details", "board-desk-release-log");
+    log.append(deskElement("summary", "board-raw-head"), deskElement("pre", "board-raw-text"));
     card.append(line, deskElement("ol", "board-desk-release-phases"),
-      deskElement("p", "board-desk-release-reason"), deskElement("ul", "board-desk-release-skips"));
+      deskElement("p", "board-desk-release-reason"), deskElement("ul", "board-desk-release-skips"), log);
     body.replaceChildren(card);
   }
+  writeTextContent(card.querySelector(".board-desk-release-title"), t("board.now.lineRelease", "새 버전 발행"));
   const verdict = deskReleaseVerdict(status);
   const said = DESK_RELEASE_VERDICTS[verdict];
   dressAgentGraphStateMark(card.querySelector(".agent-graph-node-state"), said.state);
   writeClassName(card, `board-desk-release is-${verdict}`);
-  writeTextContent(card.querySelector(".board-desk-release-version"), String(status.version || ""));
+  // A version is a name, and reads as one: `v1.1.84`.
+  writeTextContent(card.querySelector(".board-desk-release-version"), status.version ? `v${status.version}` : "");
   writeTextContent(card.querySelector(".board-desk-release-sha"), String(status.sha).slice(0, 8));
   writeTextContent(card.querySelector(".board-desk-release-verdict"),
     t(said.key, said.word, { phase: status.phase || "" }));
-  writeTextContent(card.querySelector(".board-desk-release-clock"), deskReleaseClock(status, verdict, now));
+  // A running lane's clock is its running step's (below); a finished one says how long it took.
+  writeTextContent(card.querySelector(".board-desk-release-clock"),
+    verdict === "running" ? "" : deskReleaseClock(status, verdict, now));
   const phases = Array.isArray(status.phases) ? status.phases.filter((one) => one && one.name) : [];
   const running = verdict === "running" && status.phase && !phases.some((one) => one.name === status.phase)
     ? [{ name: String(status.phase), running: true }] : [];
   const list = card.querySelector(".board-desk-release-phases");
   const held = new Map([...list.children].map((node) => [node.dataset.phase, node]));
   reconcileElementOrder(list, [...phases, ...running].map((phase) => {
-    const item = held.get(phase.name) ?? deskElement("li", "");
+    let item = held.get(phase.name);
+    if (!item) {
+      item = deskElement("li", "");
+      item.append(agentGraphStateMark("idle"), deskElement("span", "board-desk-release-step"),
+        deskElement("span", "board-desk-release-step-word"));
+    }
     writeAttribute(item, "data-phase", phase.name);
     const state = phase.running ? "running" : deskReleasePhaseState(phase);
     writeClassName(item, `board-desk-release-phase is-${state}`);
-    writeTextContent(item, deskReleasePhaseWord(phase, state));
+    dressAgentGraphStateMark(item.firstElementChild, DESK_RELEASE_STEPS[state].mark);
+    writeTextContent(item.children[1], phase.name);
+    writeTextContent(item.children[2], deskReleaseStepWord(state, status, phases, now));
     return item;
   }));
   const reason = card.querySelector(".board-desk-release-reason");
@@ -2277,6 +2265,15 @@ function paintDeskRelease(block, now) {
       { name: phase.name, reason: String(phase.skipped) }));
     return item;
   }));
+  // The lane's own words for each step, as its status file wrote them — the
+  // name, its exit code or skip, its seconds — for whoever opens the record.
+  const log = card.querySelector(".board-desk-release-log");
+  writeTextContent(log.firstElementChild, t("board.now.lineLog", "단계별 시간 · 원문"));
+  writeTextContent(log.lastElementChild, phases.map((phase) => [
+    phase.name, phase.skipped ? `skipped ${phase.skipped}` : `rc=${phase.rc}`,
+    Number.isFinite(phase.secs) ? `${phase.secs}s` : "",
+  ].filter(Boolean).join(" ")).join("\n"));
+  writeHidden(log, phases.length === 0);
   return true;
 }
 

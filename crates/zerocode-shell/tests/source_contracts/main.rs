@@ -4,6 +4,7 @@ mod answer_door;
 mod artifact_export;
 mod ask_popup;
 mod beat_lock_order;
+mod board_now;
 mod browser_route;
 mod browser_workspace;
 mod bundle_resources;
@@ -1814,107 +1815,149 @@ mod tests {
         );
     }
 
-    /// The dark palette is ZeroCode's obsidian-atelier material.
+    /// The palette is the Geist language the person passed (2026-10-21).
     ///
-    /// Orca supplied the role structure; live screenshots supplied the reason
-    /// to stop copying its literals. The old 72% veil let the desktop lift
-    /// chrome near #4e4e4f beside a #0d1015 terminal. These values keep four
-    /// cool graphite levels and a high-opacity veil as one room. A drift is a
-    /// material break again, just against our measured result rather than a
-    /// neighbour's compiled stylesheet.
+    /// Draft B of the task board — Vercel's Geist, artifact
+    /// p-90883818b247d08e v2, built from reports/t-67561/b.html — was the one
+    /// the person passed ("b 로진행") after every draft dressed in this file's
+    /// own obsidian-atelier values had been turned down ("전부 별로",
+    /// "너무 허접해"). So the gate that held the titanium hexes now holds
+    /// Geist's: a black floor, a panel one step above it, ten neutral greys,
+    /// and the 1px rule as the only edge. The role names did not move — every
+    /// rule in the window reads a role and follows (t-67607).
     ///
-    /// Terminal ANSI colours stay ours because Orca delegates those to a
-    /// terminal theme. Repository badges, agent state and diff colours do not:
-    /// Orca defines those roles, so the light treatment is pinned below.
-    ///
-    /// THE LIGHT SIX ARE NOT PINNED, and the token file says at length why:
-    /// Orca's #ffffff/#fafafa/#0a0a0a measured 18.97:1 for body ink, 4.54:1
-    /// for the muted role every timestamp in this window is set in, and
-    /// 1.04:1 between a panel and the stage — a screen with no edges, set in
-    /// ink past the point where more contrast stops helping. What is asserted
-    /// instead is the thing that made Orca's light theme its own: the panels
-    /// sit a step BELOW the stage rather than above it, which is the inverse
-    /// of the dark block and the one structural fact worth keeping.
+    /// What is asserted is the arrangement as much as the values: roles point
+    /// at the ramp rather than restating it, the ramp is neutral (R = G = B)
+    /// in both treatments, and in light the panel is white over a #fafafa
+    /// floor — Geist's background-100 over background-200, a step ABOVE the
+    /// stage, which is the reverse of the Orca white-on-white this used to pin.
     #[test]
-    fn the_palette_is_zero_codes_obsidian_atelier() {
+    fn the_palette_is_the_geist_language_the_person_passed() {
         let tokens = include_str!("../../../../ui/tokens.css");
         let dark = block_after(tokens, ":root {");
         let light = block_after(tokens, ":root[data-theme=\"light\"] {");
 
-        for value in [
-            "#06090b",
-            "#0d1418",
-            "#172229",
-            "#091015",
-            "#eef8f5",
-            "#8fa49f",
-            "rgb(206 239 231 / 10%)",
+        // Geist's ramp, both treatments, as the hex its hsl resolves to.
+        for (block, ramp) in [
+            (
+                dark,
+                [
+                    "--gray-100: #1a1a1a;",
+                    "--gray-200: #1f1f1f;",
+                    "--gray-700: #8f8f8f;",
+                    "--gray-900: #a1a1a1;",
+                    "--gray-1000: #ededed;",
+                    "--background-100: #0a0a0a;",
+                    "--background-200: #000000;",
+                    "--gray-alpha-400: rgb(255 255 255 / 14%);",
+                ],
+            ),
+            (
+                light,
+                [
+                    "--gray-100: #f2f2f2;",
+                    "--gray-200: #ebebeb;",
+                    "--gray-700: #8f8f8f;",
+                    "--gray-900: #4c4c4c;",
+                    "--gray-1000: #171717;",
+                    "--background-100: #ffffff;",
+                    "--background-200: #fafafa;",
+                    "--gray-alpha-400: rgb(0 0 0 / 8%);",
+                ],
+            ),
         ] {
-            assert!(
-                dark.contains(value),
-                "the dark palette drifted off ZeroCode's titanium `{value}`"
-            );
+            for step in ramp {
+                assert!(
+                    block.contains(step),
+                    "the Geist ramp drifted off the passed draft's `{step}`"
+                );
+            }
         }
 
-        // Read the three surfaces out and compare them as numbers, so this
-        // says "the arrangement" rather than "these literals".
-        let surface = |block: &str, role: &str| -> u32 {
-            let at = block
-                .find(&format!("{role}: #"))
-                .unwrap_or_else(|| panic!("`{role}` is gone from the treatment"));
-            let hex = &block[at + role.len() + 3..at + role.len() + 9];
-            u32::from_str_radix(hex, 16).expect("a six-digit hex surface")
-        };
-        let stage = surface(light, "--surface-abyss");
-        let panel = surface(light, "--surface-deck");
-        let raised = surface(light, "--surface-raised");
-
-        // THE FLOOR IS ORCA'S WHITE, and this assertion is the reverse of
-        // what it used to be.
-        //
-        // It used to demand a visible step between the stage and the panels,
-        // on the reasoning that glass needs something to be translucent
-        // against and that #fafafa on #ffffff is 1.04:1 — a screen with no
-        // edges. Both facts are still true and the conclusion was still
-        // wrong: it solved a glass problem by darkening the floor of the
-        // whole application, and beside Orca the grey stage was the single
-        // most obvious difference in the light treatment.
-        //
-        // Orca's own light block is `--background: #fff` with `--card: #fff`
-        // and `--muted: #f5f5f5` (:23936~23990) — stage and panel are the SAME
-        // white, and nothing is separated by fill at all. So the invariant
-        // moves to where the separation actually lives now, and the old one
-        // would have to be deleted rather than weakened for the floor to come
-        // across whole.
-        assert_eq!(
-            (stage, panel),
-            (0xffffff, 0xffffff),
-            "the light floor drifted off Orca's white: stage {stage:06x}, \
-             panel {panel:06x}"
-        );
-        // The raised role is the one that has to DARKEN — there is nowhere
-        // above white to go — and it is Orca's `--muted`.
-        assert!(
-            raised < panel,
-            "on a white floor the raised role must step down, not up: panel \
-             {panel:06x}, raised {raised:06x}"
-        );
-
-        // What carries the separation instead. With no fill between a panel
-        // and the stage, the rule between them and the edge of anything
-        // floating are the only things drawing a boundary — so a floating
-        // surface's edge must be strictly stronger than the window's own
-        // rule, or a dialog on a white window has no silhouette at all.
+        // The roles point at the ramp; a role that restates a hex is a second
+        // copy of the palette waiting to disagree with the first.
         for role in [
-            "--edge-rule: rgb(23 23 23 / 12%);",
-            "--glass-edge: rgb(0 0 0 / 14%);",
+            "--surface-abyss: var(--background-200);",
+            "--surface-deck: var(--background-100);",
+            "--surface-raised: var(--gray-100);",
+            "--surface-well: var(--background-200);",
+            "--ink-chalk: var(--gray-1000);",
+            "--ink-mist: var(--gray-900);",
+            "--edge-rule: var(--gray-alpha-400);",
+            "--nav-plane: var(--background-100);",
+        ] {
+            assert!(
+                dark.contains(role),
+                "the dark treatment's `{role}` no longer reads the Geist ramp"
+            );
+        }
+        for role in [
+            "--surface-abyss: var(--background-200);",
+            "--surface-deck: var(--background-100);",
+            "--surface-raised: var(--gray-100);",
+            "--surface-well: var(--gray-100);",
+            "--ink-chalk: var(--gray-1000);",
+            "--ink-mist: var(--gray-900);",
+            "--edge-rule: var(--gray-alpha-400);",
         ] {
             assert!(
                 light.contains(role),
-                "the light treatment lost `{role}`, which is what separates \
-                 its surfaces now that they share one fill"
+                "the light treatment's `{role}` no longer reads the Geist ramp"
             );
         }
+
+        // Neutral, and arranged: every grey of the ramp has R = G = B, and in
+        // both treatments the panel sits a step above the floor — darker floor
+        // in dark, a #fafafa floor under a white panel in light.
+        let hex = |block: &str, step: &str| -> u32 {
+            let at = block
+                .find(&format!("{step}: #"))
+                .unwrap_or_else(|| panic!("`{step}` is gone from the treatment"));
+            let digits = &block[at + step.len() + 3..at + step.len() + 9];
+            u32::from_str_radix(digits, 16).expect("a six-digit hex step")
+        };
+        for (treatment, block) in [("dark", dark), ("light", light)] {
+            for step in [
+                "--gray-100",
+                "--gray-200",
+                "--gray-700",
+                "--gray-900",
+                "--gray-1000",
+                "--background-100",
+                "--background-200",
+            ] {
+                let value = hex(block, step);
+                let (r, g, b) = (value >> 16, (value >> 8) & 0xff, value & 0xff);
+                assert!(
+                    r == g && g == b,
+                    "the {treatment} `{step}` left the neutral axis: {value:06x}"
+                );
+            }
+        }
+        assert!(
+            hex(dark, "--background-200") < hex(dark, "--background-100"),
+            "the dark floor is no longer below the panel"
+        );
+        assert_eq!(
+            (
+                hex(light, "--background-100"),
+                hex(light, "--background-200")
+            ),
+            (0xffffff, 0xfafafa),
+            "the light panel and floor drifted off Geist's white over #fafafa"
+        );
+
+        // With one rule as the only edge, a floating surface's must still be
+        // strictly stronger than the window's own, or a dialog on a white
+        // window has no silhouette at all.
+        assert!(
+            light.contains("--glass-edge: rgb(0 0 0 / 14%);"),
+            "the light floating edge fell to the window's own 8% rule"
+        );
+        assert!(
+            dark.contains("--glass-edge: rgb(255 255 255 / 15%);"),
+            "the dark floating edge fell to the window's own 14% rule"
+        );
     }
 
     /// A pane's inset is on all four of its edges.
@@ -2029,17 +2072,17 @@ mod tests {
     }
 
     /// Light-mode accents come from semantic roles, never from a component
-    /// inventing a colour. The default repository badge follows titanium,
-    /// agent rows stay neutral until state gives them meaning, and the editor
-    /// owns the diff pair.
+    /// inventing a colour. The default repository badge is Geist's gray-700
+    /// (t-67607), agent rows stay neutral until state gives them meaning, and
+    /// the editor owns the diff pair.
     #[test]
     fn light_accents_come_from_orca_tokens() {
         let tokens = include_str!("../../../../ui/tokens.css");
         let light = block_after(tokens, ":root[data-theme=\"light\"] {");
 
         assert!(
-            tokens.contains("--repo-badge: #73928c;"),
-            "the default repository badge drifted from the titanium ring"
+            tokens.contains("--repo-badge: var(--gray-700);"),
+            "the default repository badge drifted from Geist's naming grey"
         );
         for lane in 1..=5 {
             assert!(
@@ -2056,41 +2099,45 @@ mod tests {
                 "the light treatment is missing Orca's measured `{role}`"
             );
         }
-        // The state colours, RE-READ. Two of the three dark values here were
-        // not Orca's: `--status-success` is #86efac (green-300, :24069) where
-        // this pinned green-500, and `--destructive` is #ff6568 (:24065) where
-        // this pinned a brick. Only the amber was already right. A status
-        // colour on #0a0a0a has to be three stops lighter than the ramp's
-        // middle to read at all — green-500 measured 6.0:1 against the stage,
-        // green-300 measures 14.1:1.
+        // The state colours are Geist's (t-67607, the person's 10-21 pass of
+        // draft B), one meaning per hue, as the coordinator settled it on the
+        // draft (m-67644): alive and working is green, a caution is amber,
+        // YOUR TURN — the one thing waiting on the person — is the one blue,
+        // finished is Geist's cyan, and red is for the destructive alone.
+        // Working is everywhere on this screen, so it is the calm hue and the
+        // two that ask for attention stand out against it.
         let dark = block_after(tokens, ":root {");
         for role in [
-            "--signal-ready: #83e6b7;",
-            "--signal-wait: #f6bd68;",
-            "--signal-halt: #ff746f;",
+            "--signal-ready: var(--green-900);",
+            "--signal-wait: var(--amber-700);",
+            "--signal-you: var(--blue-900);",
+            "--signal-halt: var(--red-900);",
+            "--signal-done: var(--cyan-700);",
         ] {
             assert!(
                 dark.contains(role),
-                "the dark treatment drifted from Orca's measured `{role}`"
+                "the dark treatment drifted from the passed draft's `{role}`"
             );
         }
-        // The light treatment takes Orca's own light tokens where they clear
-        // the bar on the WHITE floor this palette now has, and answers for
-        // itself where they do not. Measured against #ffffff:
+        // Measured as words on the floor each treatment's panels stand on:
         //
-        //   #15803d  5.02:1  ✓   Orca's light `--status-success` (:23957)
-        //   #e40014  4.87:1  ✓   Orca's light `--destructive`    (:23949)
-        //   #b45309  5.02:1  ✓   OURS — Orca's light warning is amber-500,
-        //                        which measures 1.54:1 on white and cannot be
-        //                        used; this is the same hue at 700.
+        //   dark (#0a0a0a)  green-900 8.77  amber-700 10.98  blue-900 7.92
+        //                   red-900 6.74    cyan 12.36
+        //   light (#ffffff) green-900 5.33  amber-900 5.58   blue-900 5.31
+        //                   red-900 5.37    cyan → ink 6.4
         //
-        // The first two reverse the values this gate used to hold: the earlier
-        // reading had measured Orca's 500-weights rather than the light tokens
-        // it actually ships.
+        // Geist's amber-700 is a mark on white and never words (1.80:1), and
+        // its cyan reads 1.60:1 there, so light takes the 900 and a cyan taken
+        // toward the ink. Blue follows its ramp step without being named again.
         for role in [
-            "--signal-ready: #15803d;",
-            "--signal-wait: #b45309;",
-            "--signal-halt: #e40014;",
+            "--signal-ready: var(--green-900);",
+            "--signal-wait: var(--amber-900);",
+            "--signal-halt: var(--red-900);",
+            "--signal-done: color-mix(in srgb, var(--cyan-700) 40%, var(--gray-1000));",
+            "--blue-900: #0068d6;",
+            "--amber-900: #a35200;",
+            "--red-900: #cb2a2f;",
+            "--green-900: #297a3a;",
         ] {
             assert!(
                 light.contains(role),
@@ -2098,24 +2145,26 @@ mod tests {
                  draws cannot clear 4.5:1 on a white floor"
             );
         }
-        // "Finished" is a different green from "healthy", and the board uses
-        // both side by side — a dot saying an agent is alive, a card saying
-        // the work is done. Folding them onto one token is what made the board
-        // read as monochrome.
-        //
-        // The light value is CORRECTED rather than copied: emerald-500
-        // measures **2.54:1** on white, under even the 3:1 a state mark needs.
-        // emerald-600 is still short at 3.77:1; 700 is the first stop that
-        // clears 4.5:1, at 5.48:1.
-        assert!(
-            dark.contains("--signal-done: #10b981;"),
-            "the board's completed card lost Orca's emerald-500"
-        );
-        assert!(
-            light.contains("--signal-done: #047857;"),
-            "the light board colour is back to a green that measures under \
-             4.5:1 on a white floor"
-        );
+        // The blue is spent on the person's turn and nowhere else: the marks
+        // that mean "a person must answer" wear it — the sidebar's, and the
+        // relations tab's (run-4275 m-68002: seventeen rules there and the
+        // unread-mail badge) — and the caution role keeps the amber a warning
+        // needs to read as one.
+        let chrome = include_str!("../../../../ui/shell.css");
+        for selector in [
+            ".agent-graph-node-state.is-needs-attention {",
+            ".wt-agent.is-waiting .wt-agent-dot {",
+            ".agent-graph-node.is-attention {",
+            ".agent-graph-stat.is-attention .agent-graph-stat-mark {",
+            ".agent-graph-mail-badge {",
+        ] {
+            let body = block_after_css(chrome, selector);
+            assert!(
+                body.contains("var(--signal-you)") && !body.contains("var(--signal-wait)"),
+                "`{selector}` is a question for the person and no longer wears \
+                 the one blue:\n{body}"
+            );
+        }
         // The two roles that draw shapes rather than text. Both had to be
         // pushed further from their panel than the treatment they were copied
         // from: a resting dot measured 1.93:1 in dark at 35%, and a lane's
@@ -2198,23 +2247,40 @@ mod tests {
         let tokens = include_str!("../../../../ui/tokens.css");
         let root = block_after(tokens, ":root {");
 
-        // The full ladder, `md` included. It was missing — the scale went
-        // 6 → 10 with nothing between — and because `--radius-edge` fell
-        // through to `sm`, every button, input, nav row and menu item in the
-        // window sat one rung too square. `rounded-md` is Orca's single most
-        // used radius by a wide margin (338 occurrences across five bundles,
-        // against 106 for `lg` and 90 for `sm`), so the missing rung was the
-        // one almost everything should have been standing on.
+        // The Geist ladder the person passed with draft B (t-67607): 6px for
+        // a control and a card, 12px for a surface that floats. The md and xl
+        // names stay as roles standing on those two rungs, so the elements that
+        // read them moved with the values rather than with a rename.
         for value in [
-            "--radius: 10px",
-            "--radius-xl: 14px",
-            "--radius-md: 8px",
+            "--radius: 12px",
+            "--radius-xl: 12px",
+            "--radius-md: 6px",
             "--radius-sm: 6px",
             "--radius-xs: 2px",
+            "--radius-menu: var(--radius);",
+            "--radius-menu-item: var(--radius-sm);",
         ] {
             assert!(
                 root.contains(value),
-                "the radius scale drifted off Orca's measured `{value}`"
+                "the radius scale drifted off the passed Geist ladder's `{value}`"
+            );
+        }
+        // And the type steps are Geist's label and copy scale — 12, 13, 14,
+        // 16 and 24 — with one step under it for a count inside a badge.
+        for value in [
+            "--text-3xs: 11px;",
+            "--text-2xs: 12px;",
+            "--text-xs: 12px;",
+            "--text-sm: 13px;",
+            "--text-md: 14px;",
+            "--text-lg: 16px;",
+            "--text-xl: 24px;",
+            "--type-heading-24: 600 var(--text-xl) / 32px var(--font-ui);",
+            "--type-label-13: 400 var(--text-sm) / 16px var(--font-ui);",
+        ] {
+            assert!(
+                root.contains(value),
+                "the type scale drifted off the passed Geist steps' `{value}`"
             );
         }
         assert!(
@@ -2289,10 +2355,11 @@ mod tests {
         let dark = block_after(tokens, ":root {");
         let light = block_after(tokens, ":root[data-theme=\"light\"] {");
 
-        // The material, both treatments. Dark is deliberately 97% while light
+        // The material, both treatments. Dark is Geist's background-100 at 97%
+        // (t-67607 — the titanium tint is gone with the atelier) while light
         // keeps the proven 96% paper treatment.
         assert!(
-            dark.contains("--glass-veil-raised: rgb(20 25 33 / 97%);")
+            dark.contains("--glass-veil-raised: rgb(10 10 10 / 97%);")
                 && light.contains("--glass-veil-raised: rgb(255 255 255 / 96%);"),
             "a floating surface's veil drifted off its treatment"
         );
@@ -2309,8 +2376,8 @@ mod tests {
         // floating edge at the panel-divider's weight is the failure this
         // pins, not the literal.
         assert!(
-            dark.contains("--glass-edge: rgb(237 242 247 / 14%);"),
-            "the dark floating edge left the titanium ink family"
+            dark.contains("--glass-edge: rgb(255 255 255 / 15%);"),
+            "the dark floating edge left Geist's neutral white"
         );
 
         // Worn by every floating surface, from ONE rule — six surfaces each
@@ -5710,10 +5777,14 @@ mod tests {
             "the workspace-board door cannot say whether its sheet is open"
         );
 
+        // Both treatments name it, on Geist's gray-1000 (t-67607), which the
+        // light block binds to its own step.
         let tokens = include_str!("../../../../ui/tokens.css");
+        let light = block_after(tokens, ":root[data-theme=\"light\"] {");
         assert!(
-            tokens.contains("--nav-plane-accent-ink: #f0faf7;")
-                && tokens.contains("--nav-plane-accent-ink: #171717;"),
+            block_after(tokens, ":root {").contains("--nav-plane-accent-ink: var(--gray-1000);")
+                && light.contains("--nav-plane-accent-ink: var(--gray-1000);")
+                && light.contains("--gray-1000: #171717;"),
             "the accent-foreground token is missing one of its two treatment modes"
         );
     }
@@ -33292,7 +33363,7 @@ mod tests {
         // every repo path it points at must exist in the tree.
         let this_file = include_str!("main.rs");
         for cited in [
-            "the_palette_is_zero_codes_obsidian_atelier",
+            "the_palette_is_the_geist_language_the_person_passed",
             "a_state_change_is_eased_not_snapped",
             "no_catalog_key_is_shipped_unused",
             "every_key_the_window_asks_for_is_translated",
@@ -33320,7 +33391,7 @@ mod tests {
         // so the skill is the copy that is gated.
         for shared in [
             "4 / 8 / 12 / 16 / 24 / 32",
-            "11 / 12 / 13 / 15 / 18 / 24",
+            "11 / 12 / 13 / 14 / 16 / 24",
             "word-break: keep-all",
             "prefers-reduced-motion",
             "720px",
@@ -33757,37 +33828,41 @@ mod tests {
 
     /// The left column is a plane of its own, in both treatments.
     ///
-    /// Orca established that the left column is a plane of its own. ZeroCode's
-    /// titanium binding re-derives the dark values so the plane remains distinct
-    /// without becoming the bright grey slab measured in the old blurred window.
-    ///
-    /// The direction REVERSES between treatments — lighter in the dark, darker in
-    /// the light — which is why this is pinned as "its own value" rather than as
-    /// "a step lighter". What the two have in common is separation, not lightness.
-    ///
-    /// The version is in the citation because these are line numbers into a
-    /// bundle; see `zerocode_core::account` for the time that bit.
+    /// Orca established that the left column is a plane of its own. The Geist
+    /// binding the person passed (t-67607) keeps it one the way the Vercel
+    /// dashboard does: chrome on background-100 over the black floor, its
+    /// chosen row on gray-200, its rule the window's own 1px border.
     #[test]
-    fn the_left_column_wears_its_own_titanium_plane() {
+    fn the_left_column_wears_its_own_plane() {
         let tokens = include_str!("../../../../ui/tokens.css");
         let styles = include_str!("../../../../ui/shell.css");
+        let dark_block = block_after(tokens, ":root {");
+        let light_block = block_after(tokens, ":root[data-theme=\"light\"] {");
 
-        // The family, both treatments. Named per value rather than counted: a
-        // count breaks when a sixth role is added and passes when two are
-        // swapped.
+        // The family, both treatments, each in its own block. Named per value
+        // rather than counted: a count breaks when a sixth role is added and
+        // passes when two are swapped.
         for (role, dark, light) in [
-            ("--nav-plane", "#0b1216", "#f5f5f5"),
-            ("--nav-plane-accent", "#16252a", "#eaeaea"),
-            ("--nav-plane-rule", "rgb(206 239 231 / 10%)", "#e5e5e5"),
-            ("--nav-plane-ring", "#80a9a0", "#a1a1a1"),
+            (
+                "--nav-plane",
+                "var(--background-100)",
+                "var(--background-100)",
+            ),
+            ("--nav-plane-accent", "var(--gray-200)", "var(--gray-200)"),
+            (
+                "--nav-plane-rule",
+                "var(--gray-alpha-400)",
+                "var(--gray-400)",
+            ),
+            ("--nav-plane-ring", "var(--gray-700)", "var(--gray-700)"),
         ] {
             assert!(
-                tokens.contains(&format!("{role}: {dark};")),
-                "`{role}` no longer carries its titanium dark value {dark}"
+                dark_block.contains(&format!("{role}: {dark};")),
+                "`{role}` no longer carries its Geist dark value {dark}"
             );
             assert!(
-                tokens.contains(&format!("{role}: {light};")),
-                "`{role}` no longer carries its measured light value {light}"
+                light_block.contains(&format!("{role}: {light};")),
+                "`{role}` no longer carries its Geist light value {light}"
             );
         }
 

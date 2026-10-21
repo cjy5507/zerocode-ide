@@ -647,8 +647,31 @@ pub const MICROCOMPACT_MIN_OUTPUT_BYTES: usize = 240;
 /// not silently also change how eager the trim is; the live ledger's realized
 /// break-even was ~3.3 requests per firing, so five is on the safe side of it.
 const MICROCOMPACT_PAYBACK_REQUESTS: u64 = 5;
+use crate::message_stream::types::StreamPhase;
 use crate::message_stream::{BlockIdGen, RenderBlock, SystemLevel};
 use tokio::sync::mpsc;
+
+/// How long a compaction waits for the model's summary, start to end, before
+/// it stops the request and folds the conversation with the local summary
+/// (t-68694).
+///
+/// Measured: a `/compact` of 102,849 input tokens that wrote 8,196 tokens back
+/// (Opus 5 at xhigh, 2026-09-22) took about 106 s. Ten minutes is about six
+/// times that, room for a summary several times larger or a provider having a
+/// slow day. Past it the wait is no longer a slow summary: a pane waited 51
+/// minutes on one that never came (2026-10-21). Cutting a summary that would
+/// have come costs its quality, not the conversation — the local summary
+/// stands in, and the originals stay recoverable through `session_recall`.
+const COMPACTION_SUMMARY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Why the local summary stood in when [`COMPACTION_SUMMARY_DEADLINE`] cut
+/// the wait.
+fn summary_deadline_reason() -> String {
+    format!(
+        "it was not done after {} minutes",
+        COMPACTION_SUMMARY_DEADLINE.as_secs() / 60
+    )
+}
 
 // --- Runtime-side compaction driver (moved from the conversation core) ---
 //
@@ -1427,9 +1450,24 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             &json!({"message_count": self.session.messages.len()}),
         );
         // Auto-compaction has no user focus directive.
-        let (result, _) = self
+        let (result, local_summary_reason) = self
             .compact_with_api_fallback_async(config, id_gen, None, progress)
             .await;
+        // A summary cut at its deadline is said on screen: the turn did not
+        // stop, and the local summary is what folded the conversation.
+        if let (Some(tx), Some(reason)) = (progress, local_summary_reason) {
+            if reason == summary_deadline_reason() {
+                let _ = tx
+                    .send(RenderBlock::System {
+                        id: id_gen.next(),
+                        level: SystemLevel::Warn,
+                        text: format!(
+                            "Compaction: the model's summary did not come ({reason}); the local summary stands in"
+                        ),
+                    })
+                    .await;
+            }
+        }
         let _ = self.run_lifecycle_hook(
             HookEvent::PostCompact,
             &json!({"removed": result.removed_message_count}),
@@ -1613,12 +1651,12 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // model loses its plan on exactly the long, many-step tasks that
         // trigger compaction. Best-effort and rooted at the stable workspace
         // (`trace_cwd`, the same seam dream/turn traces use) so it reads the
-        // same store the `TodoWrite` tool writes; `None` (no todos, or all
-        // todos already complete) appends nothing, keeping the no-todo path
-        // byte-identical.
+        // store the `TodoWrite` tool writes for this session; `None` (no todos,
+        // or all todos already complete) appends nothing, keeping the no-todo
+        // path byte-identical.
         if let Some(reminder) = self
             .trace_cwd()
-            .map(|cwd| crate::todo_progress::current_todos(&cwd))
+            .map(|cwd| crate::todo_progress::current_todos(&cwd, &self.session.session_id))
             .and_then(|todos| crate::todo_progress::render_todos_reminder(&todos))
         {
             new_prompt.push(format!("{TODO_PROGRESS_REMINDER_PREFIX}\n{reminder}"));
@@ -1676,6 +1714,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 text: format_auto_compaction_start_notice(self.session.messages.len()),
             })
             .await;
+        // From here to `CompactionEnded` the turn waits on the summary, not on
+        // an answer: the status line says so (t-68694).
+        let _ = render_tx
+            .send(RenderBlock::StreamPhase(StreamPhase::Compacting))
+            .await;
         tokio::task::yield_now().await;
 
         // Route the summarizing round-trip through the async client when one is
@@ -1688,6 +1731,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         } else {
             self.apply_auto_compaction(config)
         };
+        let _ = render_tx
+            .send(RenderBlock::StreamPhase(StreamPhase::CompactionEnded))
+            .await;
         if let Some(event) = event {
             let _ = render_tx
                 .send(RenderBlock::System {
@@ -2171,8 +2217,9 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// through the async client so the round-trip await-suspends and the
     /// drive-loop `select!` keeps servicing render/reveal/input. The summary is
     /// internal (it rewrites the system prompt, never the transcript), so its
-    /// render deltas go to a throwaway channel that is drained and discarded —
-    /// only the returned event sequence is consumed.
+    /// text is only counted; how the request stands — its phases and the
+    /// provider's notices — goes on to `progress`, as a turn request's does.
+    /// The whole wait ends at [`COMPACTION_SUMMARY_DEADLINE`].
     async fn request_compaction_summary_async(
         async_client: &Arc<dyn AsyncApiClient>,
         request: ApiRequest,
@@ -2180,14 +2227,21 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         progress: Option<&mpsc::Sender<RenderBlock>>,
     ) -> Result<String, RuntimeError> {
         let (sink_tx, mut sink_rx) = mpsc::channel::<RenderBlock>(64);
+        let progress_tx = progress.cloned();
+        // The summary's wait is named the way a turn's request is: the status
+        // line counts it from here until the first characters (t-68694).
+        if let Some(tx) = &progress_tx {
+            let _ = tx
+                .send(RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }))
+                .await;
+        }
         // P2: the summary's own deltas never reach the transcript, but their
         // volume is the only live progress signal a multi-minute compaction
         // has — fold a throttled counter into the spinner via the id-less
         // `CompactionProgress` block (the `Usage` precedent: live ledger only).
-        let progress_tx = progress.cloned();
         let drain = tokio::spawn(async move {
             let mut streamed_chars: u64 = 0;
-            let mut last_reported: u64 = 0;
+            let mut last_reported: Option<u64> = None;
             while let Some(block) = sink_rx.recv().await {
                 // The summarizer's reasoning counts as well as its text: at a
                 // high effort a summary's first minute is thinking, and a
@@ -2196,24 +2250,45 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                     &block
                 {
                     streamed_chars += text.chars().count() as u64;
-                    if streamed_chars.saturating_sub(last_reported) >= 2_000 {
-                        last_reported = streamed_chars;
+                    // The first characters end the wait at once; after them,
+                    // every 2,000 more.
+                    let due = last_reported.map_or(streamed_chars > 0, |last| {
+                        streamed_chars.saturating_sub(last) >= 2_000
+                    });
+                    if due {
+                        last_reported = Some(streamed_chars);
                         if let Some(tx) = &progress_tx {
                             let _ = tx
                                 .send(RenderBlock::CompactionProgress { streamed_chars })
                                 .await;
                         }
                     }
+                } else if matches!(block, RenderBlock::StreamPhase(_) | RenderBlock::System { .. }) {
+                    // How the request stands — a retry, a quiet stretch — and
+                    // the provider's notices about it (a reconnect, a wait for
+                    // a login) are the person's to see, as a turn's are.
+                    if let Some(tx) = &progress_tx {
+                        let _ = tx.send(block).await;
+                    }
                 }
             }
         });
-        let result = async_client
-            .stream_async(request, sink_tx, id_gen.next())
-            .await;
+        let result = tokio::time::timeout(
+            COMPACTION_SUMMARY_DEADLINE,
+            async_client.stream_async(request, sink_tx, id_gen.next()),
+        )
+        .await;
+        let Ok(events) = result else {
+            // The deadline dropped the request. Nothing more of it is worth
+            // forwarding, and a sender it left behind must not hold the turn
+            // past its deadline.
+            drain.abort();
+            return Err(RuntimeError::new(summary_deadline_reason()));
+        };
         // `sink_tx` moved into `stream_async`; when its future resolves the
         // sender drops, closing the channel so the drain task ends.
         let _ = drain.await;
-        Self::summary_text_from_events(result?)
+        Self::summary_text_from_events(events?)
     }
 
     /// Reduce a compaction summarizer's event stream to its `<summary>` text,

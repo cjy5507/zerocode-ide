@@ -357,7 +357,9 @@ fn memory_store_file_lock_retries_before_timing_out() {
         panic!("a held advisory lock must time out");
     };
     assert_eq!(attempts, vec![0, 1, 2]);
-    let DreamError::Io(error) = error;
+    let DreamError::Io(error) = error else {
+        panic!("a lock timeout is an io error");
+    };
     assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     assert!(error.to_string().contains("timed out after 3 attempts"));
 }
@@ -1890,7 +1892,9 @@ fn quarantine_collision_resistant_ids_preserve_prior_audit_run() {
 
     let collision = run_quarantine_patch(cwd, &first_request)
         .expect_err("identical run identifiers must not reuse an audit directory");
-    let DreamError::Io(collision) = collision;
+    let DreamError::Io(collision) = collision else {
+        panic!("a reused audit directory is an io error");
+    };
     assert_eq!(collision.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(fs::read_to_string(first_dir.join("metadata.json")).unwrap(), first_metadata);
     assert_eq!(registered_worktrees(cwd), worktrees_before);

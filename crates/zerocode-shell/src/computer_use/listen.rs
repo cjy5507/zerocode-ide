@@ -18,10 +18,12 @@ use super::ComputerUseError;
 /// Wait for a sound. `heard(after)` answers what the helper heard after the
 /// event numbered `after` (`soundRead`); the wait starts from the newest
 /// event unless the caller names its own cursor (`--after`), so a sound heard
-/// before the wait began does not end it.
+/// before the wait began does not end it. It pauses between its asks through
+/// `pause`, which a stop cuts short (t-66760).
 pub fn sound_wait(
     params: &Value,
     heard: impl Fn(u64) -> Result<Value, ComputerUseError>,
+    pause: &mut dyn FnMut(Duration),
 ) -> Result<Value, ComputerUseError> {
     let labels = sound_wait_labels(params.get("label").and_then(Value::as_str));
     let min_confidence = params
@@ -77,7 +79,7 @@ pub fn sound_wait(
                 ),
             ));
         }
-        std::thread::sleep(poll);
+        pause(poll);
     }
 }
 
@@ -111,8 +113,12 @@ mod tests {
             json!({ "listening": true, "latest": 5, "events": [heard(5, "speech", 0.9)] }),
             json!({ "listening": true, "latest": 7, "events": [heard(6, "siren", 0.3), heard(7, "siren", 0.95)] }),
         ]);
-        let answer =
-            sound_wait(&json!({ "label": "Siren", "timeoutMs": 5000 }), helper).expect("heard");
+        let answer = sound_wait(
+            &json!({ "label": "Siren", "timeoutMs": 5000 }),
+            helper,
+            &mut std::thread::sleep,
+        )
+        .expect("heard");
         assert_eq!(
             answer["event"]["seq"], 7,
             "not the siren before the wait, not the unsure one"
@@ -126,7 +132,8 @@ mod tests {
         let helper = scripted(vec![
             json!({ "listening": true, "latest": 3, "events": [heard(3, "knock", 0.6)] }),
         ]);
-        let answer = sound_wait(&json!({ "after": 2 }), helper).expect("heard");
+        let answer =
+            sound_wait(&json!({ "after": 2 }), helper, &mut std::thread::sleep).expect("heard");
         assert_eq!(answer["event"]["label"], "knock");
     }
 
@@ -136,11 +143,13 @@ mod tests {
             json!({ "listening": true, "latest": 0, "events": [] }),
             json!({ "listening": false, "latest": 0, "events": [], "failure": "the sound stream stopped" }),
         ]);
-        let error = sound_wait(&json!({}), stopped).expect_err("not listening");
+        let error =
+            sound_wait(&json!({}), stopped, &mut std::thread::sleep).expect_err("not listening");
         assert_eq!(error.code, error_code::NOT_LISTENING);
         assert!(error.message.contains("stream stopped"));
         let quiet = scripted(vec![]);
-        let error = sound_wait(&json!({ "timeoutMs": 1 }), quiet).expect_err("nothing heard");
+        let error = sound_wait(&json!({ "timeoutMs": 1 }), quiet, &mut std::thread::sleep)
+            .expect_err("nothing heard");
         assert_eq!(error.code, error_code::TIMEOUT);
     }
 }

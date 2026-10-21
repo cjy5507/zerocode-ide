@@ -538,7 +538,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "MemoryWrite",
-            description: "Atomically record a persistent project memory entry. By default it writes the machine-local project overlay (`memory.local`), which survives compaction and a restart on this machine but cannot modify global memory. Set `local: false` only to write durable global project knowledge in `memory/`. Both live under Zo's config home, never the repository, and recall merges both.",
+            description: "Atomically record a persistent project memory entry. By default it writes the machine-local project overlay (`memory.local`), which survives compaction and a restart on this machine but cannot modify global memory. Set `local: false` only to write durable global project knowledge in `memory/`. Both live under Zo's config home, never the repository, and recall merges both. Declined while this session's plan has open items.",
             input_schema: json!({
                 "type": "object",
                 "properties": {

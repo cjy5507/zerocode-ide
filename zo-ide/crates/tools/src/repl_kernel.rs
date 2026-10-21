@@ -612,8 +612,8 @@ fn spawn_kernel(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    // Same scoping rule as the one-shot path: the parent session's todo store
-    // is a zo implementation detail and must not leak into children.
+    // Same rule as the one-shot path: a todo-store override given to this zo
+    // is its own and must not leak into children.
     command.env_remove("ZO_TODO_STORE");
     if let Some(snapshot) = snapshot {
         command.env("ZO_KERNEL_SNAPSHOT", snapshot);

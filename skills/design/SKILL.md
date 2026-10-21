@@ -24,7 +24,16 @@ the rule breaks the build, so read the gate before negotiating with it.
 never restate a hex, a shadow, or a duration anywhere else, this file
 included. Reference tokens by role. If a value you need has no token, that
 is a design decision to surface, not a literal to inline. The palette itself
-is guarded by `the_palette_is_zero_codes_obsidian_atelier`.
+is guarded by `the_palette_is_the_geist_language_the_person_passed`.
+
+**The language is Geist** (2026-10-21, the person passed task-board draft B,
+t-67607): a black floor, ten neutral greys, 1px edges drawn as a shadow ring
+(`--shadow-border`, `--shadow-border-small`), radius 6 for a control or card
+and 12 for what floats, and Geist's named type styles
+(`--type-heading-24`, `--type-label-14`, `--type-label-13`, `--type-copy-13`,
+`--type-label-12`). Roles point at the ramp (`--gray-100`…`--gray-1000`,
+`--background-100`/`--background-200`); a surface reads the role, never the step,
+except a badge that names Geist's own 200 ground.
 
 ## Artifact creation surfaces
 
@@ -49,10 +58,14 @@ The same brief extends that expression to the knowledge graph, the task board
   `--workbench-ambient`) is resolved on that same element. The hue appears
   where the view is named — masthead mark, nav tab dot, a related door that
   leads there, the one row the view has selected — and nowhere else.
-- **State keeps its signals.** Attention, working, done and failed stay on
-  `--signal-wait`, `--signal-ready`, `--signal-done` and `--signal-halt` with a
-  shape or a word beside the colour; a view hue never stands for a state. On a
-  signal-tinted ground, words take `--signal-wait-ink` or `--signal-halt-ink`.
+- **State keeps its signals.** Caution, working, done and failed stay on
+  `--signal-wait` (amber), `--signal-ready` (green), `--signal-done` (cyan) and
+  `--signal-halt` (red) with a shape or a word beside the colour; a view hue
+  never stands for a state. The one blue, `--signal-you` on
+  `--signal-you-ground`, is spent only on what waits for the person reading
+  the screen — a question to answer, a report to pass — never on a warning,
+  which a blue would make read as information. On a signal-tinted ground,
+  words take `--signal-wait-ink` or `--signal-halt-ink`.
 - **Plan, activity and verification stay three facts.** On a workspace row the
   person's stage is a hollow square in the stage colour, the agent's activity a
   status dot whose shape changes with its state, verification the PR pill and
@@ -88,7 +101,7 @@ The same brief extends that expression to the knowledge graph, the task board
    `a_state_change_is_eased_not_snapped`, and `prefers-reduced-motion`
    always wins.
 5. **Rhythm is the scales.** Spacing sits on `4 / 8 / 12 / 16 / 24 / 32`,
-   type on `11 / 12 / 13 / 15 / 18 / 24`, radius on the small ledger scale —
+   type on `11 / 12 / 13 / 14 / 16 / 24`, radius on the small ledger scale —
    full-bleed rows divided by 1px rules, not card stacks. A px value outside
    the scales needs a written reason next to it.
 6. **Korean wraps by word.** `word-break: keep-all` is the typesetting

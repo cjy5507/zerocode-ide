@@ -764,6 +764,25 @@ fn build_includes_memory_protocol_section_before_boundary() {
         .any(|s| s.starts_with("# Persistent project memory")));
 }
 
+/// When and what the memory protocol says to write (t-68770). The old text
+/// said to record a fact "when you learn" it, a "hard-won gotcha" included,
+/// which a model read as "stop and write it now" — mid-task, and about its own
+/// tools. The protocol waits for the work to be done, leaves tool know-how
+/// out, and has the model name what it wrote so the person can review it.
+#[test]
+fn memory_protocol_waits_for_the_work_and_leaves_tool_know_how_out() {
+    let sections = SystemPromptBuilder::new().build();
+    let memory = sections
+        .iter()
+        .find(|s| s.starts_with("# Persistent memory"))
+        .expect("memory protocol section should be present");
+    assert!(!memory.contains("When you learn"), "{memory}");
+    assert!(!memory.contains("hard-won gotcha"), "{memory}");
+    assert!(memory.contains("once the requested work is done"), "{memory}");
+    assert!(memory.contains("how a tool behaves"), "{memory}");
+    assert!(memory.contains("final answer"), "{memory}");
+}
+
 #[test]
 fn context_trust_label_is_static_and_cacheable() {
     let sections = SystemPromptBuilder::new().build();

@@ -67,6 +67,9 @@ session-corpus = { path = "../session-corpus" }
 # The order tests read the group-end and reap trace that plugins keeps for them
 # (t-19897). Only the test build of this crate turns the feature on.
 plugins = { path = "../plugins", features = ["order-trace"] }
+# A compaction summary that never ends is waited out on a paused clock, so its
+# deadline costs a test no real time (t-68694).
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 # A test holds a loopback port bound without listening, so no other test binary

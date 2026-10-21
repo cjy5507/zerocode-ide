@@ -291,6 +291,16 @@ fn execute_tool_result_with_context_and_artifact_dir(
 ) -> Result<ToolExecutionResult, ToolError> {
     let canonical = canonical_tool_name(name);
     let canonical_ref = canonical.as_str();
+    // A deferred tool's schema never reached the provider, so a boolean or an
+    // integer can arrive spelled as a string; the tool's own schema puts the
+    // type back before anything reads the input — the policy check included,
+    // so the audit and the enforcer judge the same call (`schema_scalars`,
+    // t-68770).
+    let restored = crate::mvp_tool_specs()
+        .iter()
+        .find(|spec| spec.name == canonical_ref)
+        .and_then(|spec| crate::schema_scalars::restore_declared_scalars(&spec.input_schema, input));
+    let input = restored.as_ref().unwrap_or(input);
     let invocation = gateway::begin_tool_invocation(name, canonical_ref, input, enforcer);
     if ctx.is_tool_disabled(canonical_ref) {
         let error = disabled_tool_error(canonical_ref);

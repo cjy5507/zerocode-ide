@@ -58,11 +58,13 @@ pub struct Status {
     pub details_max_lines: usize,
     inline_message: Option<String>,
     /// The runtime's latest housekeeping word (a context trim, the
-    /// auto-compaction heads-up), shown dim in the activity's place until the
-    /// next thing happens — content, a tool boundary, the turn's end. A
-    /// stream phase (the request left, a retry) is not a happening: the
-    /// notice is sent right before the request goes out, and the wait for
-    /// the model is exactly the moment it can be read (t-3177).
+    /// auto-compaction heads-up), shown dim after the clock until the next
+    /// thing happens — content, a tool boundary, the turn's end — and while
+    /// no wait has a name of its own. A request leaving is not a happening:
+    /// the notice is sent right before the request goes out, and the first
+    /// seconds of the wait for the model are exactly when it can be read
+    /// (t-3177); a wait with a name — a retry, a model silent past its
+    /// threshold, a compaction — is said in its place (t-68694).
     housekeeping: Option<String>,
     interrupt_binding: String,
     /// `false` 면 `(Ns)` 만 — 인터럽트가 불가능한 구간.
@@ -77,6 +79,9 @@ pub struct Status {
     /// `QuietReasoning` phase, cleared by content), so the phrase keeps a
     /// clock of its own.
     quiet_reasoning_since: Option<Duration>,
+    /// The compaction the turn stopped for, from its start phase to its end
+    /// phase (t-68694) — or the `/compact` the row stands for.
+    compaction: Option<CompactionStanding>,
     active_tools: Vec<ActiveTool>,
     last_tool: Option<Activity>,
     last_event_at: Duration,
@@ -89,6 +94,15 @@ struct ActiveTool {
     id: String,
     activity: Activity,
     started_at: Duration,
+}
+
+/// A compaction under way: when it began, how much of its summary has come,
+/// and the word it took the row's header from.
+#[derive(Debug, Clone)]
+struct CompactionStanding {
+    started_at: Duration,
+    streamed_chars: Option<u64>,
+    header_before: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +126,12 @@ pub enum StatusActivity {
         elapsed: Duration,
         last: Option<Activity>,
     },
+    /// The conversation is being compacted; `progress` is how its summary
+    /// stands, once there is something to say.
+    Compacting {
+        elapsed: Duration,
+        progress: Option<String>,
+    },
 }
 
 impl StatusActivity {
@@ -123,6 +143,7 @@ impl StatusActivity {
             Self::Reconnecting { .. } => strings::ACTIVITY_RECONNECTING.to_string(),
             Self::ReasoningSilently { .. } => strings::ACTIVITY_REASONING_SILENTLY.to_string(),
             Self::Quiet { .. } => strings::ACTIVITY_QUIET.to_string(),
+            Self::Compacting { .. } => strings::ACTIVITY_COMPACTING.to_string(),
         }
     }
 
@@ -136,6 +157,7 @@ impl StatusActivity {
             }
             Self::ReasoningSilently { .. } => None,
             Self::Quiet { last, .. } => last.as_ref().map(strings::last_activity),
+            Self::Compacting { progress, .. } => progress.clone(),
         }
     }
 
@@ -145,7 +167,8 @@ impl StatusActivity {
             Self::Tool { elapsed, .. }
             | Self::Waiting { elapsed }
             | Self::ReasoningSilently { elapsed }
-            | Self::Quiet { elapsed, .. } => *elapsed,
+            | Self::Quiet { elapsed, .. }
+            | Self::Compacting { elapsed, .. } => *elapsed,
             Self::Reconnecting { seconds_left, .. } => Duration::from_secs(*seconds_left),
         }
     }
@@ -164,6 +187,19 @@ impl StatusActivity {
                 strings::reconnecting(*attempt, *seconds_left)
             }
             Self::Quiet { elapsed, last } => strings::quiet(*elapsed, last.as_ref()),
+            Self::Compacting { progress, .. } => progress.clone().unwrap_or_default(),
+        }
+    }
+
+    /// What the status row says after its clock: the wait, by name. A running
+    /// call names itself on its own row, with its own spinner, so the row
+    /// keeps the turn's one clock and does not say it twice (t-48216); a
+    /// compaction's word is the row's header, so only its progress follows.
+    fn wait_phrase(&self) -> Option<String> {
+        match self {
+            Self::Tool { .. } => None,
+            Self::Compacting { progress, .. } => progress.clone(),
+            _ => Some(self.line()),
         }
     }
 }
@@ -186,6 +222,7 @@ impl Status {
             interruptible: true,
             request_sent_at: None,
             quiet_reasoning_since: None,
+            compaction: None,
             retry: None,
             active_tools: Vec::new(),
             last_tool: None,
@@ -200,7 +237,7 @@ impl Status {
     #[must_use]
     pub fn compacting() -> Self {
         let mut status = Self::working(Duration::ZERO);
-        status.header = strings::COMPACTING.to_string();
+        status.note_stream_phase(runtime::message_stream::types::StreamPhase::Compacting);
         status
     }
 
@@ -232,14 +269,52 @@ impl Status {
                 self.quiet_reasoning_since =
                     Some(self.elapsed.saturating_sub(Duration::from_secs(since_secs)));
             }
+            StreamPhase::Compacting => {
+                // The compaction is the newer fact than any word before it,
+                // and its summary request is announced on its own.
+                self.clear_wait();
+                self.housekeeping = None;
+                if self.compaction.is_none() {
+                    let header_before =
+                        std::mem::replace(&mut self.header, strings::COMPACTING.to_string());
+                    self.compaction = Some(CompactionStanding {
+                        started_at: self.elapsed,
+                        streamed_chars: None,
+                        header_before,
+                    });
+                }
+            }
+            StreamPhase::CompactionEnded => {
+                // What the summary request was waiting on is over with it;
+                // the turn's next request announces its own wait.
+                self.clear_wait();
+                if let Some(compaction) = self.compaction.take() {
+                    self.header = compaction.header_before;
+                }
+            }
         }
+    }
+
+    fn clear_wait(&mut self) {
+        self.request_sent_at = None;
+        self.retry = None;
+        self.quiet_reasoning_since = None;
+    }
+
+    /// The compaction's summary has streamed `streamed_chars` so far: its
+    /// wait for the model is over, and the count is how it stands.
+    pub fn note_compaction_progress(&mut self, streamed_chars: u64) {
+        let Some(compaction) = self.compaction.as_mut() else {
+            return;
+        };
+        compaction.streamed_chars = Some(streamed_chars);
+        self.clear_wait();
+        self.note_activity_event();
     }
 
     /// Content arrived (text, reasoning or a tool call): the wait is over.
     pub fn note_stream_content(&mut self) {
-        self.request_sent_at = None;
-        self.retry = None;
-        self.quiet_reasoning_since = None;
+        self.clear_wait();
         self.housekeeping = None;
         self.note_activity_event();
     }
@@ -326,6 +401,18 @@ impl Status {
 
     #[must_use]
     pub fn activity(&self) -> Option<StatusActivity> {
+        // A compaction is what the turn waits on from its start to its end:
+        // the summary's own wait, retry or count is its progress, and its
+        // clock is its own, not the quiet stretch it fills.
+        if let Some(compaction) = &self.compaction {
+            return Some(StatusActivity::Compacting {
+                elapsed: self.elapsed.saturating_sub(compaction.started_at),
+                progress: self
+                    .phase_activity()
+                    .map(|phase| phase.line())
+                    .or_else(|| compaction.streamed_chars.map(strings::compaction_progress)),
+            });
+        }
         self.quiet_activity()
             .or_else(|| self.current_tool_activity())
             .or_else(|| self.phase_activity())
@@ -395,16 +482,18 @@ impl Status {
         } else {
             spans.push(Span::dim(format!("({elapsed})")));
         }
-        // The housekeeping word takes the activity's place: it is the newer
-        // fact, and the activity phrase it hides is the wait it fills. A
-        // running call names itself on its own row, with its own spinner, so
-        // the row keeps the turn's one clock and does not say it twice
-        // (t-48216).
-        if let Some(word) = self.housekeeping.clone().or_else(|| {
-            self.activity()
-                .filter(|activity| !matches!(activity, StatusActivity::Tool { .. }))
-                .map(|activity| activity.line())
-        }) {
+        // The wait with a name — a model silent past its threshold, a retry, a
+        // quiet stretch, a compaction — is what the turn waits on, and says
+        // so. The housekeeping word stands in the gap before a wait has a
+        // name: a trim noted as the request leaves is read while the model
+        // has not answered yet (t-3177), but it does not stand in front of a
+        // wait that has one (t-68694: a trim's word stood for 51 minutes in
+        // front of a compaction).
+        if let Some(word) = self
+            .activity()
+            .and_then(|activity| activity.wait_phrase())
+            .or_else(|| self.housekeeping.clone())
+        {
             spans.push(Span::dim(" · "));
             spans.push(Span::dim(word));
         }
@@ -1892,8 +1981,9 @@ mod tests {
     }
 
     /// A context trim is noted right before the request leaves, so the
-    /// request's own phase must not wipe it: the wait for the model is the
-    /// moment it can be read. Content, or a tool boundary, retires it.
+    /// request's own phase must not wipe it: the first seconds of the wait
+    /// for the model are the moment it can be read. Content, or a tool
+    /// boundary, retires it.
     #[test]
     fn a_housekeeping_note_takes_the_activity_place_and_outlives_the_request_phase() {
         use runtime::message_stream::types::StreamPhase;
@@ -1905,7 +1995,7 @@ mod tests {
         assert_eq!(
             status.line(140).plain(),
             "• Working (9s • esc to interrupt) · Context trim · cleared 3 old tool result(s) (~12k tokens freed)",
-            "the note hides the waiting phrase it fills the place of"
+            "a request just out is no wait with a name yet: the note stands"
         );
 
         status.note_stream_content();

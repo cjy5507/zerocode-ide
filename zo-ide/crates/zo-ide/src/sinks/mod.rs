@@ -578,6 +578,18 @@ pub(crate) mod serializable {
                             delay_secs: Some(*since_secs),
                         }
                     }
+                    runtime::message_stream::types::StreamPhase::Compacting => Self::StreamPhase {
+                        phase: "compacting".to_string(),
+                        attempt: 0,
+                        delay_secs: None,
+                    },
+                    runtime::message_stream::types::StreamPhase::CompactionEnded => {
+                        Self::StreamPhase {
+                            phase: "compaction_ended".to_string(),
+                            attempt: 0,
+                            delay_secs: None,
+                        }
+                    }
                 },
             }
         }
@@ -837,6 +849,10 @@ pub(crate) mod serializable {
                     runtime::message_stream::types::StreamPhase::QuietReasoning {
                         since_secs: *since_secs,
                     }
+                }
+                ("compacting", _) => runtime::message_stream::types::StreamPhase::Compacting,
+                ("compaction_ended", _) => {
+                    runtime::message_stream::types::StreamPhase::CompactionEnded
                 }
                 _ => runtime::message_stream::types::StreamPhase::RequestSent { attempt: *attempt },
             }),

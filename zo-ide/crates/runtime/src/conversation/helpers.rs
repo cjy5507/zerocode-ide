@@ -254,8 +254,37 @@ pub(super) struct AskInput {
     /// When `true` the user may check several options and the answer comes back
     /// as an array. Accepts the canonical `camelCase` `multiSelect` and a
     /// `snake_case` alias; missing defaults to single-select.
-    #[serde(default, rename = "multiSelect", alias = "multi_select")]
+    #[serde(
+        default,
+        rename = "multiSelect",
+        alias = "multi_select",
+        deserialize_with = "lenient_multi_select"
+    )]
     multi_select: bool,
+}
+
+/// `multiSelect` as the tools crate's road reads it: a JSON boolean, or the
+/// words `true`/`false` a model sends when the tool's schema never reached the
+/// provider (t-68770). `AskUserQuestion` is deferred, and this streaming road
+/// answers it before the tools crate's dispatch seam could put the type back.
+/// Any other value fails as the type error it is.
+fn lenient_multi_select<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    use serde::de::Error as _;
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(text) => match text.trim() {
+            word if word.eq_ignore_ascii_case("true") => Ok(true),
+            word if word.eq_ignore_ascii_case("false") => Ok(false),
+            _ => Err(D::Error::invalid_type(
+                serde::de::Unexpected::Str(&text),
+                &"a boolean",
+            )),
+        },
+        other => bool::deserialize(other).map_err(D::Error::custom),
+    }
 }
 
 fn lenient_question_options<'de, D>(
@@ -772,6 +801,30 @@ mod ask_input_tests {
             error.contains("`options` was a string"),
             "error should name the double-encoding: {error}"
         );
+    }
+
+    /// `AskUserQuestion` is deferred, so its schema never reaches the provider
+    /// and `multiSelect` can arrive as the words "true"/"false" (t-68770).
+    /// This streaming road answers the question before the tools crate's
+    /// dispatch seam could put the type back, so it reads the words itself —
+    /// those two words and nothing else.
+    #[test]
+    fn multi_select_takes_the_words_true_and_false() {
+        let parsed = parse_ask_input(
+            r#"{"question":"둘 다 고를까요?","options":["가","나"],"multiSelect":" True "}"#,
+        )
+        .expect("a spelled-out true");
+        assert!(parsed.multi_select);
+        let parsed = parse_ask_input(
+            r#"{"question":"하나만 고를까요?","options":["가","나"],"multi_select":"false"}"#,
+        )
+        .expect("a spelled-out false through the alias");
+        assert!(!parsed.multi_select);
+        let typed = parse_ask_input(r#"{"question":"?","multiSelect":true}"#).expect("typed");
+        assert!(typed.multi_select);
+        let error = parse_ask_input(r#"{"question":"?","multiSelect":"yes"}"#)
+            .expect_err("any other word still fails");
+        assert!(error.contains("expected a boolean"), "{error}");
     }
 
     /// A hook's stdout is captured with no size bound (`hooks::run_hook`), and
