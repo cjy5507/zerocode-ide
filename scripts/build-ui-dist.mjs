@@ -37,6 +37,7 @@ const FILES = Object.freeze([
   "shell-explorer-search.js",
   "shell-explorer-tree.js",
   "shell-attach.js",
+  "shell-board-now.js",
   "shell-board.js",
   "shell-board-live.js",
   "shell-board-orbit.js",

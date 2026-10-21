@@ -27,7 +27,8 @@ is a design decision to surface, not a literal to inline. The palette itself
 is guarded by `the_palette_is_the_geist_language_the_person_passed`.
 
 **The language is Geist** (2026-10-21, the person passed task-board draft B,
-t-67607): a black floor, ten neutral greys, 1px edges, radius 6 for a control or card
+t-67607): a black floor, ten neutral greys, 1px edges drawn as a shadow ring
+(`--shadow-border`, `--shadow-border-small`), radius 6 for a control or card
 and 12 for what floats, and Geist's named type styles
 (`--type-heading-24`, `--type-label-14`, `--type-label-13`, `--type-copy-13`,
 `--type-label-12`). Roles point at the ramp (`--gray-100`…`--gray-1000`,

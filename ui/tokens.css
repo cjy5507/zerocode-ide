@@ -1087,6 +1087,14 @@
    * exists to catch, so it is taken out rather than kept for symmetry. */
   --shadow-1: 0 1px 2px 0 rgb(0 0 0 / 5%);
   --shadow-2: 0 1px 3px 0 rgb(0 0 0 / 10%), 0 1px 2px -1px rgb(0 0 0 / 10%);
+  /* Geist's materials draw their edge as a shadow, not a border: a 1px ring in
+   * the window's rule, and for a card that small drop under it. A ring takes
+   * no layout, so a card and a row inside it line up to the pixel. The card's
+   * pair spells the ring out rather than reading `--shadow-border`, so each
+   * depth tier stays one declaration the depth gate can name. */
+  --shadow-border: 0 0 0 var(--rule-width) var(--edge-rule);
+  --material-drop: 0 1px 2px rgb(0 0 0 / 16%);
+  --shadow-border-small: 0 0 0 var(--rule-width) var(--edge-rule), var(--material-drop);
   /* The same tier thrown UPWARD, for a surface that floats over content from
    * the bottom edge — tailwind's `shadow-lg` mirrored, which is the shadow
    * Orca's bulk action bar wears (bulk-action-bar.tsx). A direction is a role
@@ -2935,6 +2943,9 @@
    * darkening, and the lit edge is carried by the inset in `--shadow-float`
    * instead. */
   --glass-edge: rgb(0 0 0 / 14%);
+  /* Geist's light card drop: shallower and fainter than the dark one, because
+   * on white the 1px ring already draws the edge. */
+  --material-drop: 0 2px 2px rgb(0 0 0 / 4%);
 
   /* The one mix that needs a different weight here. Dark gets its contrast by
    * rising off #171717; a light treatment has to reach further down for the
