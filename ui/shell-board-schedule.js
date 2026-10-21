@@ -8,9 +8,9 @@
  * 읽는 것은 둘이다. 빌드 줄과 레인은 창의 읽기 전용 명령 하나(`schedule_timeline`)가
  * 읽는다 — 파일의 사실과, 같은 이름의 지난 소요 중앙값으로 낸 예상 소요까지. 워커
  * 과업은 데스크가 이미 읽는 원장의 과업 행(`deskLedger.tasks`의 `times`)이다. 예상
- * 소요(과거의 셈)는 백엔드의 것이고, 지금을 기준으로 막대를 놓는 일 — 도는 것의 남은
- * 시간, 기다리는 일감이 두 줄에 서는 차례 — 은 이 파일의 것이다: 시간이 흘러도
- * 백엔드를 다시 부르지 않는다.
+ * 소요(과거의 셈)와 실행기의 줄 목록은 백엔드의 것이고, 지금을 기준으로 막대를 놓는 일 —
+ * 도는 것의 남은 시간, 기다리는 일감이 그 줄들에 서는 차례 — 은 이 파일의 것이다: 시간이
+ * 흘러도 백엔드를 다시 부르지 않는다.
  *
  * 그림은 부품 하나다(`paintBoardScheduleHost`): 어느 그릇에 담겨도 그 그릇의 폭으로
  * 접힌다(shell.css 「일정」 절의 `@container board-schedule`). 지금은 작업 상황판의
@@ -219,15 +219,18 @@ function paintBoardScheduleHosts() {
 
 /* ---- 배치: 지금을 기준으로 막대를 놓는다 --------------------------------------- */
 
-/* 기다리는 일감이 두 줄에 서는 차례를 흉내 낸다. 도는 일감이 예상 끝에 그 줄을 비우고,
- * 기다리는 일감은 0- → 보통 → 9- 차례로, 같은 차례 안에서는 넣은 차례로, 먼저 비는
- * 줄에 선다. 같은 주인의 일감은 한 번에 하나다(실행기의 규칙). 가드가 세운 일감은
- * 줄에 서지 않는다. 예상이지 약속이 아니다 — 행의 글이 「예상」이라고 말한다. */
-function boardScheduleQueuePlan(jobs, now) {
+/* 기다리는 일감이 실행기의 줄에 서는 차례를 흉내 낸다. 줄은 실행기 기록이 말한 것이다(백엔드의
+ * `line.runner_lanes`). 도는 일감이 예상 끝에 그 줄을 비우고, 기다리는 일감은 0- → 보통 → 9-
+ * 차례로, 같은 차례 안에서는 넣은 차례로, 먼저 비는 줄에 선다. 같은 주인의 일감은 한 번에
+ * 하나다(실행기의 규칙). 가드가 세운 일감은 줄에 서지 않고, 기록이 아직 어느 줄도 말하지 않았으면
+ * 기다리는 일감도 그처럼 지금에 선다 — 그 행은 「시작 모름」이라 말한다. 예상이지 약속이 아니다 —
+ * 행의 글이 「예상」이라고 말한다. */
+function boardScheduleQueuePlan(jobs, runnerLanes, now) {
   const placed = new Map();
-  const lanes = new Map([[1, now], [2, now]]);
+  const lanes = new Map(runnerLanes.map((lane) => [lane, now]));
   const owners = new Map();
   const secs = (job) => Number(job.expected?.secs ?? job.cap_secs) || 0;
+  const unplaced = (job) => ({ start: now, end: now + secs(job) * 1_000, late: false });
   for (const job of jobs) {
     if (job.state !== "running") continue;
     const start = Number(job.start_ms) || now;
@@ -241,7 +244,12 @@ function boardScheduleQueuePlan(jobs, now) {
     (BOARD_SCHEDULE_CLASS_RANK[a.class] ?? 1) - (BOARD_SCHEDULE_CLASS_RANK[b.class] ?? 1)
       || (Number(a.queued_ms) || 0) - (Number(b.queued_ms) || 0) || a.name.localeCompare(b.name));
   for (const job of waiting) {
-    const [lane, free] = [...lanes].sort((a, b) => a[1] - b[1] || a[0] - b[0])[0];
+    const first = [...lanes].sort((a, b) => a[1] - b[1] || a[0] - b[0])[0];
+    if (!first) {
+      placed.set(job.name, unplaced(job));
+      continue;
+    }
+    const [lane, free] = first;
     const start = Math.max(free, owners.get(job.who) ?? now);
     const end = start + secs(job) * 1_000;
     lanes.set(lane, end);
@@ -249,9 +257,18 @@ function boardScheduleQueuePlan(jobs, now) {
     placed.set(job.name, { start, end, late: false });
   }
   for (const job of jobs) {
-    if (job.state === "held") placed.set(job.name, { start: now, end: now + secs(job) * 1_000, late: false });
+    if (job.state === "held") placed.set(job.name, unplaced(job));
   }
   return placed;
+}
+
+/* 기다리는 일감의 시작을 모르는 까닭, 없으면 "". 줄이 멈췄으면(PAUSE) "paused"로 행이 「줄 멈춤」을
+ * 말하고, 측정이 조용한 기계를 기다리거나(QUIET_WANTED) 디스크가 하한 아래거나 실행기 기록이 아직 어느
+ * 줄도 말하지 않았으면 "unknown"으로 「시작 모름」만 말한다 — 앞의 둘은 머리 글이 까닭을 말한다. 어느
+ * 쪽이든 기다리는 행은 시작 시각을 말하지 않는다: 머리 글과 행이 같은 말을 한다(검토 t-69069 P2-2). */
+function boardScheduleStall(facts, runnerLanes) {
+  if (facts.paused === true) return "paused";
+  return facts.quiet_wanted === true || facts.disk_low === true || runnerLanes.length === 0 ? "unknown" : "";
 }
 
 /* 도는 레인의 예상 끝: 지금 단계는 시작 + 중앙값, 그 뒤의 단계는 중앙값을 차례로 더한다.
@@ -291,8 +308,9 @@ function boardScheduleBasis(expected) {
     : t("board.schedule.basisCap", "근거 없음 · 상한 {{time}}", { time });
 }
 
-/* 일감 한 줄의 말: 끝난 것은 판정과 길이, 도는 것은 남은 시간, 기다리는 것은 예상 시작. */
-function boardScheduleJobSaid(job, place, now, paused) {
+/* 일감 한 줄의 말: 끝난 것은 판정과 길이, 도는 것은 남은 시간, 기다리는 것은 예상 시작 — 시작을
+ * 모르면(`boardScheduleStall`) 그렇다고. */
+function boardScheduleJobSaid(job, place, now, stall) {
   const took = boardScheduleSpan((Number(job.secs) || 0) * 1_000);
   switch (job.state) {
     case "passed": return t("board.schedule.passed", "통과 · {{time}}", { time: took });
@@ -308,9 +326,11 @@ function boardScheduleJobSaid(job, place, now, paused) {
         time: boardScheduleSpan(now - (Number(job.start_ms) + (Number(job.expected?.secs) || 0) * 1_000)),
       })
       : t("board.schedule.left", "{{time}} 남음", { time: boardScheduleSpan((place?.end ?? now) - now) });
-    default: return paused
+    default: return stall === "paused"
       ? t("board.schedule.paused", "줄 멈춤 · 시작 모름")
-      : t("board.schedule.startsAt", "{{time}} 시작 예상", { time: boardScheduleClock(place?.start ?? now, now) });
+      : stall
+        ? t("board.schedule.startUnknown", "시작 모름")
+        : t("board.schedule.startsAt", "{{time}} 시작 예상", { time: boardScheduleClock(place?.start ?? now, now) });
   }
 }
 
@@ -324,7 +344,7 @@ function boardScheduleJobLabel(name) {
   return String(name).replace(/^[09]-/, "").replace(/^\d{9,11}-/, "");
 }
 
-function boardScheduleJobRow(job, plan, now, paused, depth) {
+function boardScheduleJobRow(job, plan, now, stall, depth) {
   const place = plan.get(job.name);
   const start = Number(job.start_ms) || place?.start || Number(job.end_ms) || now;
   const end = Number(job.end_ms) || place?.end || start;
@@ -340,9 +360,9 @@ function boardScheduleJobRow(job, plan, now, paused, depth) {
     state: BOARD_SCHEDULE_JOB_STATES[job.state] ?? "idle",
     basis: job.expected && Number(job.expected.samples) === 0 && ["running", "waiting", "held"].includes(job.state)
       ? "cap" : "history",
-    said: boardScheduleJobSaid(job, place, now, paused),
+    said: boardScheduleJobSaid(job, place, now, stall),
     act: { log: { job: job.name } },
-    paused: paused && job.state === "waiting",
+    paused: Boolean(stall) && job.state === "waiting",
     late: job.state === "running" && Boolean(place?.late),
   });
 }
@@ -385,7 +405,7 @@ function boardScheduleLaneRows(lanes, now) {
 
 /* 결합 게이트: 이름의 `-l<NN>` 토막마다 한 행, 시작 차례로. 펴면 그 일감들이 바로
  * 아래에 선다. 도는 일감이나 기다리는 일감이 있는 게이트는 처음부터 펴져 있다. */
-function boardScheduleGateRows(jobs, plan, now, choice, paused) {
+function boardScheduleGateRows(jobs, plan, now, choice, stall) {
   const gates = new Map();
   for (const job of jobs) {
     if (!job.gate) continue;
@@ -394,7 +414,7 @@ function boardScheduleGateRows(jobs, plan, now, choice, paused) {
   }
   const entries = [];
   for (const [gate, members] of gates) {
-    const placed = members.map((job) => boardScheduleJobRow(job, plan, now, paused, 1));
+    const placed = members.map((job) => boardScheduleJobRow(job, plan, now, stall, 1));
     const start = Math.min(...placed.map((row) => row.start));
     const end = Math.max(...placed.map((row) => row.end));
     // A step's last job speaks for it: a step that failed and passed on its rerun passed.
@@ -415,9 +435,11 @@ function boardScheduleGateRows(jobs, plan, now, choice, paused) {
         done: steps.length - open, total: steps.length, time: boardScheduleSpan(end - now),
       })
       : state === "waiting"
-        ? t("board.schedule.gateWaiting", "대기 {{count}}개 · {{time}} 시작 예상", {
-          count: open, time: boardScheduleClock(start, now),
-        })
+        ? stall
+          ? t("board.schedule.gateWaitingUnknown", "대기 {{count}}개 · 시작 모름", { count: open })
+          : t("board.schedule.gateWaiting", "대기 {{count}}개 · {{time}} 시작 예상", {
+            count: open, time: boardScheduleClock(start, now),
+          })
         : state === "failed"
           ? t("board.schedule.gateFailed", "실패 {{count}}개 · {{time}}", { count: failed, time: boardScheduleSpan(end - start) })
           : t("board.schedule.gatePassed", "통과 {{count}}개 · {{time}}", {
@@ -429,7 +451,7 @@ function boardScheduleGateRows(jobs, plan, now, choice, paused) {
         key: `gate:${gate}`, label: parts.length > 0 ? `${gate} (${parts.join("·")})` : gate,
         tip: members.map((job) => job.name).join(" · "), start, end, state,
         basis: placed.some((row) => row.basis === "cap") ? "cap" : "history", said,
-        act: { fold: gate, opened }, opened,
+        act: { fold: gate, opened }, opened, paused: Boolean(stall) && state === "waiting",
       }),
       rows: opened ? placed.sort((a, b) => a.start - b.start) : [],
     });
@@ -438,14 +460,14 @@ function boardScheduleGateRows(jobs, plan, now, choice, paused) {
 }
 
 /* 게이트 밖의 일감: 도는 것·기다리는 것은 다, 끝난 것은 가장 최근의 몇만. */
-function boardScheduleLineRows(jobs, plan, now, paused, from) {
+function boardScheduleLineRows(jobs, plan, now, stall, from) {
   const outside = jobs.filter((job) => !job.gate);
   const open = outside.filter((job) => ["running", "waiting", "held", "lost"].includes(job.state));
   const ended = outside.filter((job) => !open.includes(job) && (Number(job.end_ms) || 0) >= from)
     .sort((a, b) => (Number(b.end_ms) || 0) - (Number(a.end_ms) || 0));
   const shown = [...ended.slice(0, BOARD_SCHEDULE.lineShown), ...open];
   return {
-    rows: shown.map((job) => boardScheduleJobRow(job, plan, now, paused, 0)).sort((a, b) => a.start - b.start),
+    rows: shown.map((job) => boardScheduleJobRow(job, plan, now, stall, 0)).sort((a, b) => a.start - b.start),
     more: Math.max(0, ended.length - BOARD_SCHEDULE.lineShown),
   };
 }
@@ -517,13 +539,15 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
   const zoom = BOARD_SCHEDULE.zooms[choice.zoom] ?? BOARD_SCHEDULE.zooms.day;
   const jobs = Array.isArray(answer?.jobs) ? answer.jobs : [];
   const lanes = Array.isArray(answer?.lanes) ? answer.lanes : [];
-  const paused = answer?.line?.paused === true;
-  const plan = boardScheduleQueuePlan(jobs, now);
+  const facts = answer?.line ?? {};
+  const runnerLanes = Array.isArray(facts.runner_lanes) ? facts.runner_lanes : [];
+  const stall = boardScheduleStall(facts, runnerLanes);
+  const plan = boardScheduleQueuePlan(jobs, runnerLanes, now);
   const from = now - zoom.beforeMs;
-  const line = boardScheduleLineRows(jobs, plan, now, paused, from);
+  const line = boardScheduleLineRows(jobs, plan, now, stall, from);
   const built = {
     lanes: boardScheduleLaneRows(lanes, now),
-    gates: boardScheduleGateRows(jobs, plan, now, choice, paused),
+    gates: boardScheduleGateRows(jobs, plan, now, choice, stall),
     line: line.rows,
     workers: boardScheduleTaskRows(tasks, now),
   };
@@ -554,7 +578,7 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
     };
   });
   return { from, to, now, nowAt: percent(now), ticks: boardScheduleTicks(from, to, width, zoom.ticksMs).map((tick) =>
-    ({ ...tick, at: percent(tick.at) })), groups, paused };
+    ({ ...tick, at: percent(tick.at) })), groups, stall };
 }
 
 /* ---- 그림 ----------------------------------------------------------------------- */

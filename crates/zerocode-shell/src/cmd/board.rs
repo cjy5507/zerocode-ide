@@ -582,6 +582,11 @@ pub(crate) async fn schedule_timeline(
 /// One look at the schedule, as the command takes it on the blocking pool:
 /// the open repository's workspace folder by the window's workspace setting,
 /// then the build line under it and the lanes under `release`.
+///
+/// The setting is the one this process last read or wrote
+/// (`remembered_settings`, t-67102). Read through the settings repository, a
+/// look took its lock, waited behind any settings commit holding it through
+/// its fsync, and could write the document back (the review t-69069, P2-1).
 fn schedule_look(
     settings: &settings::SettingsRepository,
     orchestrator: Option<Orchestrator>,
@@ -597,11 +602,12 @@ fn schedule_look(
         ask.known.is_none(),
         now_ms,
         || {
-            let prefs = load_settings_for_boot(settings)
-                .document
-                .workspace_creation_prefs;
+            let held = remembered_settings(settings);
             orchestrator
-                .and_then(|open| apply_workspace_creation_prefs(open, &prefs).ok())
+                .and_then(|open| {
+                    apply_workspace_creation_prefs(open, &held.document.workspace_creation_prefs)
+                        .ok()
+                })
                 .map(|open| open.worktree_root().to_path_buf())
         },
     );

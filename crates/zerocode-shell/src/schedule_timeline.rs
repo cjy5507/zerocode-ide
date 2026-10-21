@@ -22,7 +22,7 @@
 //! window's to place (`ui/shell-board-schedule.js`): that moves with the
 //! time, and this answer moves only when a file does.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{File, Metadata};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
@@ -186,6 +186,10 @@ pub(crate) struct LineFacts {
     /// `QUIET_WANTED`: lane 1 waits to start a measurement on a quiet
     /// machine, and lane 2 holds.
     pub(crate) quiet_wanted: bool,
+    /// The runner's lanes its log named (`lane=` on a `RUN` or a `DONE`
+    /// line), in order — none before it names one. The window places a
+    /// waiting job's start on these.
+    pub(crate) runner_lanes: Vec<u8>,
     /// Where the lane logs were looked for.
     pub(crate) lanes_folder: Option<String>,
 }
@@ -412,6 +416,7 @@ impl Book {
                 disk_floor_gib: self.floor.and_then(|(_, value)| value),
                 disk_low: self.runner.disk_low,
                 quiet_wanted: queue.as_ref().is_some_and(|look| look.quiet_wanted),
+                runner_lanes: self.runner.lanes.iter().copied().collect(),
                 lanes_folder: lanes_folder.as_ref().map(|path| path.display().to_string()),
             },
             jobs: self.jobs(queue.as_ref(), from_ms),
@@ -1141,6 +1146,8 @@ struct RunnerTail {
     past: HashMap<String, VecDeque<u32>>,
     pause_note: Option<String>,
     disk_low: bool,
+    /// Every lane a `RUN` or a `DONE` line named.
+    lanes: BTreeSet<u8>,
 }
 
 impl RunnerTail {
@@ -1208,6 +1215,7 @@ impl RunnerTail {
                 cap_secs,
                 ..
             } => {
+                self.lanes.extend(lane);
                 self.open.insert(
                     name,
                     Started {
@@ -1225,6 +1233,7 @@ impl RunnerTail {
                 lane,
                 ..
             } => {
+                self.lanes.extend(lane);
                 let started = self.open.remove(&name);
                 // Its start and its count date the end to the second; a job
                 // that started before what this look read ends at its own line.
