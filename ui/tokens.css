@@ -533,6 +533,17 @@
   --tracking-heading-24: -0.96px;
   --tracking-heading-16: -0.32px;
   --tracking-heading-14: -0.28px;
+  /* Geist's control geometry the passed draft uses (t-67607): a small button
+   * stands 32px tall and a badge 24px, a chosen tab is underlined 2px, a
+   * status dot is 10px across, and a focus ring is a 2px line of the ink 2px
+   * off its control. Named here so the board's surfaces read them rather
+   * than spell the numbers. */
+  --control-height-md: 32px;
+  --badge-height: 24px;
+  --tab-underline-width: 2px;
+  --status-dot-size: 10px;
+  --focus-ring: 2px solid var(--ink-chalk);
+  --focus-ring-offset: 2px;
   --leading-body: 1.55;
   --leading-tight: 1.25;
   --tracking-label: 0.08em;
@@ -3265,9 +3276,11 @@
   --tree-touch-write: #a3470a;
   --tree-touch-commit: #18753c;
   /* The sheen on white, weaker than on dark because the name is darker than
-   * its ground by less: at 14% the name is still 4.5:1 or better under the
-   * sheen's peak, on `--surface-deck` and on `--surface-well`. */
-  --tree-writing-sheen: color-mix(in srgb, var(--tree-touch-write) 14%, transparent);
+   * its ground by less: at 12% the name is still 4.5:1 or better under the
+   * sheen's peak — 5.08:1 on `--surface-deck`, 4.57:1 on `--surface-well`.
+   * It was 14% until the Geist well (#f2f2f2, t-67607, the person's 10-21
+   * pass of draft B) took that peak to 4.43:1. */
+  --tree-writing-sheen: color-mix(in srgb, var(--tree-touch-write) 12%, transparent);
   --annotation-highlight: #f59e0b;
   --tab-group-split-divider: #868690;
   --tab-group-split-divider-strong: #71717a;
