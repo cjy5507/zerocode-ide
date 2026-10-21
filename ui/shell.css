@@ -1674,8 +1674,10 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 .team-badge.is-question,
 .team-chip.is-question {
-  background: color-mix(in srgb, var(--signal-wait) 24%, transparent);
-  color: var(--signal-wait-ink);
+  /* A question is the person's to answer: the one blue, on Geist's badge
+   * ground (t-67607). */
+  background: var(--signal-you-ground);
+  color: var(--signal-you);
 }
 
 .team-badge.is-letters {
@@ -2119,7 +2121,7 @@ svg.wt-agent-dot {
 }
 
 .wt-agent.is-waiting .wt-agent-dot {
-  color: var(--signal-wait);
+  color: var(--signal-you);
 }
 
 /* A turn that ended is not work that was verified. The check stays quiet
@@ -2237,7 +2239,7 @@ svg.wt-agent-dot {
 }
 
 .wt-agent.is-waiting .wt-agent-state {
-  color: var(--signal-wait);
+  color: var(--signal-you);
 }
 
 .wt-agent.is-verified .wt-agent-state {
@@ -3040,7 +3042,7 @@ svg.wt-agent-dot {
   height: auto;
   border-radius: 0;
   background: none;
-  color: var(--signal-wait);
+  color: var(--signal-you);
   font-family: var(--font-ui);
   font-size: 12px;
   font-weight: 700;
@@ -26079,7 +26081,7 @@ select {
  * for that one themselves. The rule is drawn inside the frame (an inset shadow
  * follows the corner) over the float shadow every surface of this kind wears. */
 .permission.ask {
-  --ask-edge: var(--signal-wait);
+  --ask-edge: var(--signal-you);
   box-shadow: inset 0 3px 0 var(--ask-edge), var(--shadow-float);
 }
 
@@ -29913,8 +29915,8 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-stat.is-attention .agent-graph-stat-mark {
-  border-color: var(--signal-wait);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal-wait) 22%, transparent);
+  border-color: var(--signal-you);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal-you) 22%, transparent);
 }
 
 /* 넷 중 하나만 사람을 붙잡는다 (1-t353).
@@ -29924,7 +29926,7 @@ input[type="search"]::-webkit-search-cancel-button {
  * 멈춰 선 수이고 다른 하나는 지나간 일의 수다. 0인 칩은 이미 `:disabled`로
  * 물러나 있으므로, 남은 일은 **서 있는 확인 필요**를 앞으로 내는 것뿐이다. */
 .agent-graph-stat.is-attention:not(:disabled) {
-  color: var(--signal-wait-ink);
+  color: var(--signal-you-ink);
 }
 
 /* 잉크는 신호색이 아니라 신호색의 **잉크**다 (1-t385).
@@ -29934,7 +29936,7 @@ input[type="search"]::-webkit-search-cancel-button {
  * 3.91:1, 11px 글자에 필요한 4.5:1 밑이다. 같은 산술이 이 저장소에 이미
  * 한 번 적혀 있고(`--signal-halt-ink`), 답도 같다. */
 .agent-graph-stat.is-attention:not(:disabled) .agent-graph-stat-count {
-  color: var(--signal-wait-ink);
+  color: var(--signal-you-ink);
 }
 
 .agent-graph-stat.is-working .agent-graph-stat-mark {
@@ -30379,7 +30381,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-rail-bead.is-needs-attention {
-  fill: var(--signal-wait);
+  fill: var(--signal-you);
 }
 
 .agent-graph-rail-bead.is-done {
@@ -30539,6 +30541,14 @@ input[type="search"]::-webkit-search-cancel-button {
   white-space: nowrap;
 }
 
+/* A wait on the person — 답 기다림 — is the person's turn, so it wears the one
+ * blue; a wall, a missing pane and a sleep stay the amber of waiting
+ * (t-67607, run-4275 m-68002). */
+.agent-graph-wait.is-asking {
+  background: color-mix(in srgb, var(--signal-you) 14%, transparent);
+  color: var(--signal-you-ink);
+}
+
 .agent-graph-wait:empty,
 .agent-graph-wait:not(:has(.agent-graph-wait-cause:not(:empty))) {
   display: none;
@@ -30673,7 +30683,7 @@ input[type="search"]::-webkit-search-cancel-button {
    * 한 판에서 갈리지 않는다. 섞는 짝이 잉크(`--ink-chalk`)라 다크에서는 밝게, 라이트에서는
    * 깊게 함께 뒤집힌다. 대기는 꺼진 빛: 안개가 바닥 쪽으로 가라앉은 색. */
   --agent-orbit-working: color-mix(in srgb, var(--workspace-board-sky) 80%, var(--ink-chalk));
-  --agent-orbit-attention: var(--signal-wait);
+  --agent-orbit-attention: var(--signal-you);
   --agent-orbit-done: var(--signal-done);
   --agent-orbit-idle: color-mix(in srgb, var(--ink-mist) 60%, var(--surface-deck));
   --agent-orbit-failed: var(--signal-halt);
@@ -30681,7 +30691,7 @@ input[type="search"]::-webkit-search-cancel-button {
   /* 우편은 호박(확인 필요)과 갈리는 주황이고, 읽지 않은 우편은 호박으로 밝다. */
   --agent-orbit-mail: color-mix(in srgb,
     color-mix(in srgb, var(--workspace-board-amber) 60%, var(--workspace-board-rose)) 80%, var(--ink-chalk));
-  --agent-orbit-unread: var(--signal-wait);
+  --agent-orbit-unread: var(--signal-you);
   /* 의존의 관은 카드 그림의 의존 선과 같은 잉크다 — 한 관계를 두 색으로 말하지 않게. */
   --agent-orbit-dependency: var(--accent-core, var(--signal-ready));
   --agent-orbit-spark: var(--ink-chalk);
@@ -31440,12 +31450,12 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-band-chip.is-attention {
-  border-color: color-mix(in srgb, var(--signal-wait) 42%, transparent);
-  background: color-mix(in srgb, var(--signal-wait) 10%, var(--surface-deck));
+  border-color: color-mix(in srgb, var(--signal-you) 42%, transparent);
+  background: color-mix(in srgb, var(--signal-you) 10%, var(--surface-deck));
 }
 
 .agent-graph-band-chip.is-attention i {
-  background: var(--signal-wait);
+  background: var(--signal-you);
 }
 
 .agent-graph-band-chip.is-working {
@@ -31486,7 +31496,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-band-face.is-attention {
-  border-color: var(--signal-wait);
+  border-color: var(--signal-you);
 }
 
 .agent-graph-band-face.is-working {
@@ -31623,7 +31633,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-node.is-attention::before {
-  background: var(--signal-wait);
+  background: var(--signal-you);
 }
 
 .agent-graph-node.is-working::before {
@@ -31657,10 +31667,10 @@ input[type="search"]::-webkit-search-cancel-button {
 
 /* 확인 필요는 호박색 워시와 안쪽 고리 (t-2466). 색이 빠져도 고리가 남는다. */
 .agent-graph-node.is-attention {
-  border-color: color-mix(in srgb, var(--signal-wait) 55%, transparent);
-  background-color: color-mix(in srgb, var(--signal-wait) 12%, var(--surface-deck));
+  border-color: color-mix(in srgb, var(--signal-you) 55%, transparent);
+  background-color: color-mix(in srgb, var(--signal-you) 12%, var(--surface-deck));
   box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--signal-wait) 30%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--signal-you) 30%, transparent),
     var(--shadow-node);
 }
 
@@ -31686,7 +31696,7 @@ input[type="search"]::-webkit-search-cancel-button {
   padding-inline: var(--space-1);
   border: 2px solid var(--surface-deck);
   border-radius: var(--radius-pill);
-  background: var(--signal-wait);
+  background: var(--signal-you);
   color: var(--surface-abyss);
   font-size: var(--text-3xs);
   font-weight: 700;
@@ -31765,12 +31775,12 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-node-state.is-needs-attention {
-  color: var(--signal-wait);
+  color: var(--signal-you);
 }
 
 .agent-graph-node-state.is-needs-attention::before {
-  border-color: var(--signal-wait);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal-wait) 24%, transparent);
+  border-color: var(--signal-you);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal-you) 24%, transparent);
 }
 
 .agent-graph-node-state.is-working::before {
@@ -32056,7 +32066,7 @@ input[type="search"]::-webkit-search-cancel-button {
 .board-card.is-waiting .agent-graph-state-word,
 .board-card.is-blocked .agent-graph-state-word,
 .board-card.is-awaiting_permission .agent-graph-state-word {
-  color: var(--signal-wait-ink);
+  color: var(--signal-you-ink);
 }
 
 .agent-graph-node.is-working .agent-graph-state-word,
@@ -32200,7 +32210,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-card-activity.is-ask .agent-card-activity-mark {
-  background: var(--signal-wait);
+  background: var(--signal-you);
 }
 
 .agent-card-activity-verb {
@@ -32227,7 +32237,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-card-activity.is-asking .agent-card-activity-target {
-  color: var(--signal-wait-ink);
+  color: var(--signal-you-ink);
 }
 
 .agent-card-activity-when {
@@ -32489,7 +32499,7 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-node.is-agent.is-working { --agent-card-light: var(--signal-ready); }
-.agent-graph-node.is-agent.is-attention { --agent-card-light: var(--signal-wait); }
+.agent-graph-node.is-agent.is-attention { --agent-card-light: var(--signal-you); }
 .agent-graph-node.is-agent.is-done { --agent-card-light: var(--signal-done); }
 .agent-graph-node.is-agent.is-failed { --agent-card-light: var(--signal-halt); }
 
@@ -32525,12 +32535,12 @@ input[type="search"]::-webkit-search-cancel-button {
 .agent-graph-node.is-agent.is-attention,
 .agent-graph-node.is-agent.is-attention:hover,
 .agent-graph-node.is-agent.is-attention.is-selected {
-  border-color: color-mix(in srgb, var(--signal-wait) 55%, transparent);
+  border-color: color-mix(in srgb, var(--signal-you) 55%, transparent);
   border-left-color: var(--agent-card-edge);
-  background-color: color-mix(in srgb, var(--signal-wait) 12%, var(--surface-deck));
+  background-color: color-mix(in srgb, var(--signal-you) 12%, var(--surface-deck));
   box-shadow:
-    inset 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-wait) 24%, transparent),
-    0 0 0 3px color-mix(in srgb, var(--signal-wait) 12%, transparent);
+    inset 0 0 0 var(--rule-width) color-mix(in srgb, var(--signal-you) 24%, transparent),
+    0 0 0 3px color-mix(in srgb, var(--signal-you) 12%, transparent);
 }
 
 .agent-graph-node.is-agent.is-attention.is-selected {
@@ -32788,7 +32798,7 @@ input[type="search"]::-webkit-search-cancel-button {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
-  color: var(--signal-wait-ink);
+  color: var(--signal-you-ink);
   font-family: var(--font-ui);
   font-size: var(--agent-graph-text-now);
   font-weight: 500;
@@ -32848,7 +32858,7 @@ input[type="search"]::-webkit-search-cancel-button {
   padding: 0;
   border: 0;
   background: none;
-  color: var(--signal-wait-ink);
+  color: var(--signal-you-ink);
   font: inherit;
   font-size: var(--agent-graph-text-line);
   font-weight: 600;
@@ -32962,8 +32972,8 @@ input[type="search"]::-webkit-search-cancel-button {
  * 그래서 찍은 픽셀에서 **후광이 바탕으로 셈해졌고**, 고리는 제 후광에 대해
  * 2.72:1이었다(밝은 테마). 모양의 단서는 그대로 남기면서 값을 벌린다. */
 .agent-graph-pip.is-attention {
-  border-color: var(--signal-wait);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal-wait) 14%, transparent);
+  border-color: var(--signal-you);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--signal-you) 14%, transparent);
 }
 
 .agent-graph-pip.is-working {

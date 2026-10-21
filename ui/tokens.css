@@ -14,29 +14,73 @@
   color-scheme: dark;
   --ui-zoom-factor: 1;
 
-  /* 2026-08-26 — obsidian atelier.
+  /* 2026-10-21 — the Geist language (t-67607).
    *
-   * Orca remains the structural baseline, not the visual ceiling. ZeroCode's
-   * chrome now reads as blackened glass with a restrained mint/copper light
-   * source: neutral enough for long sessions, but recognisable before a logo
-   * is visible. Hue still carries meaning; the ambient mixes below only turn
-   * that existing semantic palette into material and depth. */
+   * The person passed draft B of the task board (artifact p-90883818b247d08e
+   * v2, reports/t-67561/b.html): Vercel's Geist — a black floor, ten steps of
+   * neutral grey, 1px borders drawn as shadows, one blue for the thing that is
+   * yours to do, and a status dot beside a word for everything else. Every
+   * draft dressed in this file's own obsidian-atelier values had been turned
+   * down first ("전부 별로", "너무 허접해"), so the window now wears the passed
+   * language and the role names stay — every rule that reads a role follows.
+   *
+   * The ramp below is Geist's, read off vercel.com/geist (colors, materials,
+   * typography) on 2026-10-21 as hsl and written here as the hex it resolves
+   * to. Roles point at it; nothing in shell.css reads a ramp step directly
+   * except where Geist itself names the step (a badge's 200 ground). Lane,
+   * diff and terminal colours remain semantic systems of their own. */
+  --gray-100: #1a1a1a;
+  --gray-200: #1f1f1f;
+  --gray-300: #292929;
+  --gray-400: #2e2e2e;
+  --gray-500: #454545;
+  --gray-600: #878787;
+  --gray-700: #8f8f8f;
+  --gray-800: #7d7d7d;
+  --gray-900: #a1a1a1;
+  --gray-1000: #ededed;
+  --gray-alpha-100: rgb(255 255 255 / 6%);
+  --gray-alpha-200: rgb(255 255 255 / 9%);
+  --gray-alpha-400: rgb(255 255 255 / 14%);
+  --background-100: #0a0a0a;
+  --background-200: #000000;
+  /* The four signal hues, at the three steps Geist uses: 200 is a tinted
+   * ground (a badge), 700 a solid mark, 900 the hue set as words. Measured on
+   * --background-100: blue-900 7.92:1, amber-700 10.98:1, red-900 6.74:1,
+   * green-900 8.77:1. */
+  --blue-200: #10233d;
+  --blue-700: #0072f5;
+  --blue-900: #52a8ff;
+  --amber-200: #331b00;
+  --amber-700: #ffb224;
+  --amber-900: #f2a20d;
+  --red-200: #3c1618;
+  --red-700: #e5484d;
+  --red-900: #ff6166;
+  --green-200: #0f2e18;
+  --green-700: #45a557;
+  --green-900: #62c073;
+  /* Geist's "ready" cyan, the dot a finished deployment wears: 12.36:1 on
+   * --background-100. It has no light step that reads on white (1.60:1), so
+   * the light block answers with green-900 instead. */
+  --cyan-700: #50e3c2;
 
-  /* Surfaces, ink and structure. Orca's compiled stylesheet established the
-   * roles and their restraint; ZeroCode's screen-pixel comparison established
-   * these dark bindings. The light treatment below keeps its separately
-   * measured paper ramp. Lane, state, diff and terminal colours remain
-   * semantic systems of their own. */
-  --surface-abyss: #06090b;
-  --surface-deck: #0d1418;
-  --surface-raised: #172229;
+  /* Surfaces, ink and structure: Geist's two backgrounds and its grey ramp.
+   * The floor is background-200 and a panel background-100 — a panel sits a
+   * step ABOVE the black floor, and its edge is the 1px rule, not a fill. */
+  --surface-abyss: var(--background-200);
+  --surface-deck: var(--background-100);
+  --surface-raised: var(--gray-100);
 
   /* Material helpers. They are deliberately derived from semantic tokens so
    * light mode keeps the same hierarchy without a second decorative palette. */
   --surface-glass: color-mix(in srgb, var(--surface-deck) 90%, transparent);
   --edge-glint: color-mix(in srgb, var(--ink-chalk) 16%, transparent);
-  --ambient-mint: color-mix(in srgb, var(--lane-1) 10%, transparent);
-  --ambient-copper: color-mix(in srgb, var(--lane-3) 8%, transparent);
+  /* The atelier's two lit corners are off: Geist's floor is flat, and the
+   * passed draft carries no glow anywhere. The roles stay so the window's
+   * background rule keeps one shape for both treatments. */
+  --ambient-mint: transparent;
+  --ambient-copper: transparent;
   --shadow-soft: 0 18px 54px rgb(0 0 0 / 34%);
   --shadow-nav-edge: 18px 0 48px rgb(0 0 0 / 12%);
 
@@ -56,7 +100,9 @@
    * things are `bg-background` where that is dark and `bg-muted` where the
    * background is white. Keeping the role separate lets each treatment
    * preserve the recess instead of depending on an accidental equality. */
-  --surface-well: #091015;
+  /* Geist draws a recess as background-200 inside a background-100 panel —
+   * the floor showing through, outlined by the 1px rule. */
+  --surface-well: var(--background-200);
 
   /* The left column is a LAYER OF ITS OWN, not the card surface.
    *
@@ -76,18 +122,20 @@
    * that what sits ON it is measured against it: the accent for a row that is
    * chosen, the ink, the rule, and the ring. Reusing `--surface-raised` for a
    * selected row would confuse content elevation with navigation state. The
-   * latest dark binding preserves that hierarchy on a cooler,
-   * deliberately tighter 24→39 ramp instead of copying Orca's 42→53 literals. */
-  --nav-plane: #0b1216;
-  --nav-plane-accent: #16252a;
-  --nav-plane-accent-ink: #f0faf7;
-  --nav-plane-ink: #e7f3ef;
-  --nav-plane-rule: rgb(206 239 231 / 10%);
-  --nav-plane-ring: #80a9a0;
+   * Geist binding (t-67607) keeps the column a plane of its own the way the
+   * Vercel dashboard does: chrome on background-100 over the black floor, its
+   * chosen row on gray-200, its edge the same 1px rule as everything else. */
+  --nav-plane: var(--background-100);
+  --nav-plane-accent: var(--gray-200);
+  --nav-plane-accent-ink: var(--gray-1000);
+  --nav-plane-ink: var(--gray-1000);
+  --nav-plane-rule: var(--gray-alpha-400);
+  --nav-plane-ring: var(--gray-700);
 
-  /* Ink */
-  --ink-chalk: #eef8f5;
-  --ink-mist: #8fa49f;
+  /* Ink: Geist's gray-1000 for words and gray-900 for the secondary line —
+   * 16.91:1 and 7.66:1 on --background-100. */
+  --ink-chalk: var(--gray-1000);
+  --ink-mist: var(--gray-900);
 
   /* The chevron a `<select>` wears, as an image rather than a mask.
    *
@@ -102,7 +150,7 @@
    * measured 16px past the control on the usage plan card, which is the
    * detached chevron in the report. On the control's own background it
    * cannot come off. */
-  --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238fa49f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1a1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
   /* Two quieter steps, as ROLES rather than as the alpha that produced them.
    *
@@ -136,13 +184,15 @@
    * white.
    * That is why its rules sit correctly on every surface instead of being one
    * grey that is slightly wrong on all of them. Use it in `border`, never as
-   * a fill: 8% near-white painted as a shape is a shape nobody can see. */
-  --edge-rule: rgb(206 239 231 / 10%);
+   * a fill: 8% near-white painted as a shape is a shape nobody can see.
+   * Geist's own border is gray-alpha-400, the 14% white its
+   * `--ds-shadow-border` draws as a 1px ring. */
+  --edge-rule: var(--gray-alpha-400);
 
   /* Default repository badge. Components read this role; they never invent a
-   * colour from a filesystem path. It tracks the titanium ring instead of
-   * retaining an unrelated neutral literal. */
-  --repo-badge: #73928c;
+   * colour from a filesystem path. It is Geist's gray-700, the grey of a
+   * mark that names without signalling. */
+  --repo-badge: var(--gray-700);
 
   /* The AI-action accent — the violet Orca reserves for "an agent will act
    * here" affordances (`--ai-action-accent: var(--color-violet-400)`,
@@ -221,13 +271,29 @@
    * it is what a status colour has to be to sit on #0a0a0a: at 500 the mark
    * measured 6.0:1 against the stage, at 300 it measures 14.1:1, and the
    * difference on screen is a green you notice versus a green you look for. */
-  --signal-ready: #83e6b7;
-  --signal-wait: #f6bd68;
+  /* The Geist binding (t-67607): alive and working is Geist's green set as
+   * words (8.77:1 on --background-100), and a caution — a meter past its
+   * threshold, a conflict, a reconnect — is Geist's amber (10.98:1). Amber is
+   * the warning and nothing else: the coordinator's rule on the passed draft
+   * is that a warning painted blue reads as information. */
+  --signal-ready: var(--green-900);
+  --signal-wait: var(--amber-700);
 
-  /* The one exception to the ramp: destructive actions only. Orca's
-   * `--destructive` (:24065), which is a step brighter and a step cooler than
-   * the brick this used to carry. */
-  --signal-halt: #ff746f;
+  /* YOUR TURN — the one blue (t-67607). Draft B paints exactly one thing blue:
+   * what is waiting on the person reading the screen, a question to answer or
+   * a report to pass. It is not the caution above, which is amber and asks
+   * nobody in particular; a mark that says "this is yours" wears this, with
+   * its word beside it. Geist's blue-900 as words: 7.92:1. */
+  --signal-you: var(--blue-900);
+  --signal-you-ground: var(--blue-200);
+  /* Words set in that blue on a ground tinted by it. On this floor the tint
+   * barely lifts the ground (6.59:1 at 14%, 5.41:1 at 24%), so the ink is the
+   * signal; the light block is where the two part. */
+  --signal-you-ink: var(--signal-you);
+
+  /* The one exception to the ramp: destructive actions only — Geist's red-900
+   * as words, 6.74:1 on --background-100. */
+  --signal-halt: var(--red-900);
 
   /* 심각도의 램프(SCA의 CVSS 등급, 지식 그래프 P4) — 신호색과 다른 뜻이라 제 이름으로 선다. 값은 재서
    * 고른 것이다(09-17): 바탕 #0d1418에서 심각 5.4 · 높음 4.9 · 보통 8.7 · 낮음 14.9:1, 그리고 제2색맹·
@@ -317,7 +383,7 @@
    * Folding them onto one token is what made the board read as monochrome
    * green. Kept as its own role so the ramp above can move without repainting
    * the board. */
-  --signal-done: #10b981;
+  --signal-done: var(--cyan-700);
 
   /* Diff is the second place a hue answers something other than "which
    * agent", and it earns it: the +/- sign alone cannot be read at a glance
@@ -333,7 +399,7 @@
    * behind it readable, and a light-tinted scrim erases that context. On the
    * neutral axis like every other grey here — the blue cast this used to
    * carry was the old palette's, not Orca's. */
-  --scrim: rgb(7 10 14 / 66%);
+  --scrim: rgb(0 0 0 / 66%);
 
   /* ---- the glass material ----
    *
@@ -347,7 +413,7 @@
    * bright wallpaper lifted chrome to #4e4e4f. At 94% the wallpaper supplies
    * depth and blur, not the palette; opaque mode and glass mode now read as
    * the same material. */
-  --glass-veil: rgb(16 21 28 / 94%);
+  --glass-veil: rgb(10 10 10 / 94%);
   /* THE FLOATING SURFACE, at Orca's own recipe rather than near it.
    *
    * `DialogContent` is `bg-[rgba(23,23,23,0.96)] backdrop-blur-2xl`
@@ -358,7 +424,7 @@
    * 22px where `backdrop-blur-2xl` is **40**. Under 40px the room behind the
    * glass stops being legible shapes and becomes colour, which is the whole
    * difference between a translucent panel and a frosted one. */
-  --glass-veil-raised: rgb(20 25 33 / 97%);
+  --glass-veil-raised: rgb(10 10 10 / 97%);
   /* No `saturate()`. It was doing real work under a 22px blur, and it is the
    * one part of this material Orca does not have — the utility is not in the
    * bundle at all. At 40px there is little chroma left to rescue, and keeping
@@ -379,7 +445,7 @@
    * dialog had
    * no silhouette against the scrim behind it. Orca draws this one at 14%
    * (`border-white/14`, and `border-black/14` in the light treatment). */
-  --glass-edge: rgb(237 242 247 / 14%);
+  --glass-edge: rgb(255 255 255 / 15%);
 
   /* Type — Orca's own stacks, measured from its APP token block rather than
    * from tailwind's default layer.
@@ -438,13 +504,35 @@
    * A label is bigger than the rows under it on purpose: it is a landmark,
    * and Orca sets its section titles a step above its rows for the same
    * reason. */
-  --text-3xs: 10px;
-  --text-2xs: 11px;
+  /* The Geist steps (t-67607). The passed draft sets everything on Geist's
+   * label and copy scale — 12, 13, 14, 16 and 24 — so the rungs that sat
+   * between them move onto it: 2xs 11 → 12 (label-12), md 15 → 14
+   * (label-14), lg 18 → 16 (heading-16). One step stays below Geist's
+   * smallest label, at 11, for a count inside a badge, which is read only
+   * when looked for. */
+  --text-3xs: 11px;
+  --text-2xs: 12px;
   --text-xs: 12px;
   --text-sm: 13px;
-  --text-md: 15px;
-  --text-lg: 18px;
+  --text-md: 14px;
+  --text-lg: 16px;
   --text-xl: 24px;
+  /* Geist's named styles, whole: weight, size, line and face in one value, so
+   * a surface written in the passed language says `font: var(--type-…)` and
+   * cannot pair a size with another style's line. The tracking is Geist's
+   * own, for the headings only. */
+  --type-heading-24: 600 var(--text-xl) / 32px var(--font-ui);
+  --type-heading-16: 600 var(--text-lg) / 24px var(--font-ui);
+  --type-heading-14: 600 var(--text-md) / 20px var(--font-ui);
+  --type-label-14: 400 var(--text-md) / 20px var(--font-ui);
+  --type-label-13: 400 var(--text-sm) / 16px var(--font-ui);
+  --type-copy-13: 400 var(--text-sm) / 18px var(--font-ui);
+  --type-label-12: 400 var(--text-xs) / 16px var(--font-ui);
+  --type-label-13-mono: 400 var(--text-sm) / 20px var(--font-mono);
+  --type-label-12-mono: 400 var(--text-xs) / 16px var(--font-mono);
+  --tracking-heading-24: -0.96px;
+  --tracking-heading-16: -0.32px;
+  --tracking-heading-14: -0.28px;
   --leading-body: 1.55;
   --leading-tight: 1.25;
   --tracking-label: 0.08em;
@@ -594,9 +682,15 @@
    *
    * `--radius` stays the name of the 10px rung rather than gaining an `lg`
    * alias — it is already spelled that way everywhere a surface floats. */
-  --radius: 10px;
-  --radius-xl: 14px;
-  --radius-md: 8px;
+  /* THE GEIST LADDER (t-67607) has two rungs: 6px for a control and a
+   * card (Geist's base material, button and input) and 12px for a surface
+   * that floats (its large material, modal and menu). The md and xl names
+   * stay as roles on those two rungs — `--radius-edge` is still the role
+   * every button, input, nav row and menu item reads — and only the values
+   * moved onto the ladder the person passed. */
+  --radius: 12px;
+  --radius-xl: 12px;
+  --radius-md: 6px;
   --radius-sm: 6px;
   --radius-xs: 2px;
   --radius-edge: var(--radius-md);
@@ -608,8 +702,8 @@
    * whose corner is cut against the corners nested one pixel inside it, and
    * Orca tuned that pair by hand. Named as the roles they are so nobody
    * "corrects" them back onto the scale. */
-  --radius-menu: 11px;
-  --radius-menu-item: 7px;
+  --radius-menu: var(--radius);
+  --radius-menu-item: var(--radius-sm);
 
   /* A lane's colour is drawn as a rail on the row that carries it. Three
    * pixels because it has to read at a glance without becoming a second
@@ -2695,6 +2789,39 @@
 :root[data-theme="light"] {
   color-scheme: light;
 
+  /* Geist's light ramp (t-67607), the same steps as the dark block's: every
+   * role that points at a step follows it here without being named again. */
+  --gray-100: #f2f2f2;
+  --gray-200: #ebebeb;
+  --gray-300: #e6e6e6;
+  --gray-400: #ebebeb;
+  --gray-500: #c9c9c9;
+  --gray-600: #a8a8a8;
+  --gray-700: #8f8f8f;
+  --gray-800: #7d7d7d;
+  --gray-900: #4c4c4c;
+  --gray-1000: #171717;
+  --gray-alpha-100: rgb(0 0 0 / 5%);
+  --gray-alpha-200: rgb(0 0 0 / 8%);
+  --gray-alpha-400: rgb(0 0 0 / 8%);
+  --background-100: #ffffff;
+  --background-200: #fafafa;
+  /* As words on white: blue-900 5.31:1, amber-900 5.58:1, red-900 5.37:1,
+   * green-900 5.33:1. Geist's amber-700 is a mark on white, never words
+   * (1.80:1), so the light signal takes the 900. */
+  --blue-200: #ebf5ff;
+  --blue-700: #0072f5;
+  --blue-900: #0068d6;
+  --amber-200: #fff4d6;
+  --amber-700: #ffb224;
+  --amber-900: #a35200;
+  --red-200: #ffebeb;
+  --red-700: #e5484d;
+  --red-900: #cb2a2f;
+  --green-200: #ebfaeb;
+  --green-700: #45a557;
+  --green-900: #297a3a;
+
   /* THE FLOOR IS WHITE, which reverses the three values this block opened
    * with.
    *
@@ -2718,32 +2845,32 @@
    * this block went UP rather than down — mist 5.86:1 → 6.39:1, label 7.51 →
    * 8.19, glyph 3.94 → 4.29, chalk 16.4 → 17.93 — because each was tuned
    * against the darker panel that is now gone. */
-  --surface-abyss: #ffffff;
+  --surface-abyss: var(--background-200);
   /* Orca's `--card`/`--sidebar` white. Kept OPAQUE for the reason the old
    * note gave and which still holds: half a dozen roles below mix into this
    * one, and a translucent reference would hand a scrollbar thumb and a
    * workspace dot an alpha of their own. */
-  --surface-deck: #ffffff;
+  --surface-deck: var(--background-100);
   /* Orca's own light `--muted` (:23549), a step DOWN from the panel where it
    * used to be a step up. On a white floor the raised role is the one that
    * has to darken — there is nowhere above white to go. */
-  --surface-raised: #f5f5f5;
+  --surface-raised: var(--gray-100);
   /* And the recess DOES NOT follow the floor here, which is the whole reason
    * it is a role. On white, a well has to be the step below the card rather
    * than the card's own colour — Orca's `bg-muted` for exactly these
    * elements. Left tracking `--surface-abyss` it would paint a search field
    * white on a white panel. */
-  --surface-well: #f5f5f5;
+  --surface-well: var(--gray-100);
   /* Orca's dark-panel grey, standing as light ink: **16.4:1** on the panel,
    * **14.1:1** on the stage. Past AAA with room, and clear of the 18.97:1
    * halation that #0a0a0a-on-white measures. */
-  --ink-chalk: #171717;
+  --ink-chalk: var(--gray-1000);
   /* 5.86:1 on the panel and 5.02:1 on the stage. Orca's own #737373 measures
    * **4.35:1** on this panel — the same four-hundredths-from-AA failure it
    * has on white — so the hue stays and the lightness answers for itself. */
-  --ink-mist: #5f5f5f;
+  --ink-mist: var(--gray-900);
   /* Same geometry, this theme's ink — see the note in the dark block. */
-  --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235f5f5f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234c4c4c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
   /* The two quiet steps, answered for THIS treatment.
    *
@@ -2761,7 +2888,7 @@
    * 1.21:1 against a panel that was itself invisible. And the panels have a
    * step of their own again: **1.17:1**, where #fafafa on #ffffff was
    * 1.04:1. */
-  --edge-rule: rgb(23 23 23 / 12%);
+  --edge-rule: var(--gray-alpha-400);
 
   /* The measured light `--ai-action-accent`: violet-500 (:23557, ramp at
    * :161). A step deeper than dark's violet-400 for the same reason Orca
@@ -2775,17 +2902,17 @@
    *
    * The rule and the ring are solid greys here rather than translucent white:
    * `#ffffff12` over a near-white plane is nothing at all. Orca's own values. */
-  --nav-plane: #f5f5f5;
-  --nav-plane-accent: #eaeaea;
+  --nav-plane: var(--background-100);
+  --nav-plane-accent: var(--gray-200);
   /* Orca's own light accent-foreground IS #171717 (main.css:199) — the one
    * member of this family whose original value needs no halation step. */
-  --nav-plane-accent-ink: #171717;
+  --nav-plane-accent-ink: var(--gray-1000);
   /* Orca's own value here is #0a0a0a; this is #171717 for the reason
    * `--ink-chalk` is — near-black on a near-white plane measures 18.97:1 and
    * halates. On this plane #171717 is **16.4:1**, past AAA with room. */
-  --nav-plane-ink: #171717;
-  --nav-plane-rule: #e5e5e5;
-  --nav-plane-ring: #a1a1a1;
+  --nav-plane-ink: var(--gray-1000);
+  --nav-plane-rule: var(--gray-400);
+  --nav-plane-ring: var(--gray-700);
 
   /* ---- the glass itself ----
    *
@@ -2866,9 +2993,14 @@
    * The amber stays OURS. Orca's light `--status-warning` is amber-500, which
    * measures 1.54:1 on white — invisible — and it has no darker light value
    * to read. #b45309 is amber-700 and measures **5.02:1** here. */
-  --signal-ready: #15803d;
-  --signal-wait: #b45309;
-  --signal-halt: #e40014;
+  --signal-ready: var(--green-900);
+  --signal-wait: var(--amber-900);
+  --signal-halt: var(--red-900);
+  /* The person's blue as words on its own tint: blue-900 falls to 4.34:1 on a
+   * 14% blue ground and 3.72:1 on 24%, so the ink is that blue a quarter of
+   * the way to this block's ink — #0654a6, 6.08:1 and 5.22:1 there, 7.45:1 on
+   * white (t-67607). */
+  --signal-you-ink: color-mix(in srgb, var(--blue-900) 75%, var(--gray-1000));
 
   /* …and here they part. #e40014 measures 4.87:1 on white — it clears text's
    * 4.5:1 by 0.37, which is nothing. Tint a ground with that same colour and
@@ -2923,8 +3055,15 @@
    * 700 is the first stop that clears it. Taken rather than a hand-mixed
    * near-value: #078761 is the literal nearest passing point on the 500→700
    * line (4.52:1) but it is not a colour this palette has anywhere else, and
-   * a one-off hex is how a ramp stops being a ramp. */
-  --signal-done: #047857; /* emerald-700 — 5.48:1 on white */
+   * a one-off hex is how a ramp stops being a ramp.
+   *
+   * That was emerald-700 (#047857, 5.48:1 on white) until the Geist binding
+   * (t-67607) replaced it with Geist's own "ready"
+   * cyan, which as it ships reads at 1.60:1 on white: the light step is that
+   * cyan taken 60% of the way to this block's ink, so it keeps the hue the
+   * dark treatment wears and measures 6.4:1 on white, clear of green-900
+   * beside it (the colour "alive" wears here). */
+  --signal-done: color-mix(in srgb, var(--cyan-700) 40%, var(--gray-1000));
 
   /* Monaco's light diff defaults bundled by Orca 1.4.164. The UI consumes
    * these roles; no diff component owns a colour literal. */
