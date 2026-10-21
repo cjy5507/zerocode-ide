@@ -779,7 +779,8 @@ pub(crate) async fn negotiate(
 }
 
 /// Reading details is the only installed-file/source comparison trigger. No poller.
-#[tauri::command]
+/// Off the main thread: finding `zo` stats every `PATH` entry (t-67102).
+#[tauri::command(async)]
 pub(crate) fn zo_integration_details(
     state: State<'_, AppState>,
     pane: Option<String>,

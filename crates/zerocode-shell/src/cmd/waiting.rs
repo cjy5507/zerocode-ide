@@ -4,7 +4,12 @@
 //! The decisions are `zerocode_core::notify::waiting_for`, and a finish is listed
 //! only where the device's finish setting would ring it. What lives here is the
 //! lock around the rows and the names a click needs. The locks are taken one at
-//! a time: every row is read first, and the names are read after.
+//! a time, each only while its facts are copied: every row is read first, and
+//! the names are read after.
+//!
+//! Nothing here waits on the disk. The list is asked on the main thread after
+//! every agent report, so the finish setting is the one this process last read
+//! or wrote (`remembered_settings`, t-67102).
 
 use zerocode_core::notify::{Look, Waiting, turn_ms, waiting_for};
 
@@ -49,23 +54,24 @@ const fn word(waiting: Waiting) -> &'static str {
 pub(crate) fn waiting_on_me(state: State<'_, AppState>) -> Vec<WaitingRow> {
     let _crumb = crate::crumbs::Command::enter("waiting_on_me");
     let mode = finish_mode(state.settings());
-    let waiting: Vec<(TermId, Waiting, i64)> = {
-        let states = state.pane_states();
-        states
-            .iter()
-            .filter_map(|(term, held)| {
-                let look = Look {
-                    state: held.state,
-                    asking: held.ask.is_some() || held.ask_prompt.is_some(),
-                    mark: held.finish_mark && !held.interrupted && !held.session_boundary,
-                    turn_ms: turn_ms(held.turn_started_at, held.state_started_at),
-                };
-                waiting_for(look, mode).map(|kind| (*term, kind, held.state_started_at))
-            })
-            .collect()
-    };
-    let mut rows: Vec<(Waiting, WaitingRow)> = waiting
+    let looks: Vec<(TermId, Look, i64)> = state
+        .pane_states()
+        .iter()
+        .map(|(term, held)| {
+            let look = Look {
+                state: held.state,
+                asking: held.ask.is_some() || held.ask_prompt.is_some(),
+                mark: held.finish_mark && !held.interrupted && !held.session_boundary,
+                turn_ms: turn_ms(held.turn_started_at, held.state_started_at),
+            };
+            (*term, look, held.state_started_at)
+        })
+        .collect();
+    let mut rows: Vec<(Waiting, WaitingRow)> = looks
         .into_iter()
+        .filter_map(|(term, look, since_ms)| {
+            waiting_for(look, mode).map(|kind| (term, kind, since_ms))
+        })
         .map(|(term, kind, since_ms)| {
             let agent = state.agent_terms().get(&term).copied().unwrap_or("");
             let seat = state.last_status_seats().get(&term).cloned();
@@ -91,9 +97,11 @@ pub(crate) fn waiting_on_me(state: State<'_, AppState>) -> Vec<WaitingRow> {
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
-/// The device's finish setting, as the list reads it.
+/// The device's finish setting, as the list reads it: from memory, so a
+/// settings commit holding the repository through a slow fsync never holds
+/// the main thread with it.
 fn finish_mode(repository: &settings::SettingsRepository) -> zerocode_core::notify::FinishRing {
-    load_settings_for_boot(repository)
+    remembered_settings(repository)
         .document
         .notifications
         .agent_completion
