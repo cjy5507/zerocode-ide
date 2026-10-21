@@ -223,49 +223,6 @@ pub fn session_stands_now() -> bool {
     }
 }
 
-/// A test's helper, on the thread that stood it (t-66760): it answers
-/// [`call`] and [`status_unless_busy`] in place of a session until the
-/// handle drops, so a test can look, wait and be stopped without a helper.
-#[cfg(test)]
-pub(crate) mod test_helper {
-    use std::cell::RefCell;
-
-    use serde_json::Value;
-
-    use super::ComputerUseError;
-
-    type Answers = Box<dyn FnMut(&str, &Value) -> Result<Value, ComputerUseError>>;
-
-    thread_local! {
-        static STANDING: RefCell<Option<Answers>> = const { RefCell::new(None) };
-    }
-
-    /// The helper stands while this lives.
-    pub(crate) struct Standing(());
-
-    impl Drop for Standing {
-        fn drop(&mut self) {
-            STANDING.with(|standing| standing.borrow_mut().take());
-        }
-    }
-
-    pub(crate) fn stand(
-        answers: impl FnMut(&str, &Value) -> Result<Value, ComputerUseError> + 'static,
-    ) -> Standing {
-        STANDING.with(|standing| *standing.borrow_mut() = Some(Box::new(answers)));
-        Standing(())
-    }
-
-    pub(super) fn answer(method: &str, params: &Value) -> Option<Result<Value, ComputerUseError>> {
-        STANDING.with(|standing| {
-            standing
-                .borrow_mut()
-                .as_mut()
-                .map(|answers| answers(method, params))
-        })
-    }
-}
-
 /// Hold the session's lock for as long as `hold` runs, as [`call`] holds it
 /// across a request in flight — a test's request that reaches no helper.
 #[cfg(test)]
@@ -354,4 +311,47 @@ pub fn tcc_row_action(
     action: ComputerPermissionRowAction,
 ) -> Result<ComputerPermissionReport, ComputerUseError> {
     platform::tcc_row_action(id, bundle_id, action)
+}
+
+/// A test's helper, on the thread that stood it (t-66760): it answers
+/// [`call`] and [`status_unless_busy`] in place of a session until the
+/// handle drops, so a test can look, wait and be stopped without a helper.
+#[cfg(test)]
+pub(crate) mod test_helper {
+    use std::cell::RefCell;
+
+    use serde_json::Value;
+
+    use super::ComputerUseError;
+
+    type Answers = Box<dyn FnMut(&str, &Value) -> Result<Value, ComputerUseError>>;
+
+    thread_local! {
+        static STANDING: RefCell<Option<Answers>> = const { RefCell::new(None) };
+    }
+
+    /// The helper stands while this lives.
+    pub(crate) struct Standing(());
+
+    impl Drop for Standing {
+        fn drop(&mut self) {
+            STANDING.with(|standing| standing.borrow_mut().take());
+        }
+    }
+
+    pub(crate) fn stand(
+        answers: impl FnMut(&str, &Value) -> Result<Value, ComputerUseError> + 'static,
+    ) -> Standing {
+        STANDING.with(|standing| *standing.borrow_mut() = Some(Box::new(answers)));
+        Standing(())
+    }
+
+    pub(super) fn answer(method: &str, params: &Value) -> Option<Result<Value, ComputerUseError>> {
+        STANDING.with(|standing| {
+            standing
+                .borrow_mut()
+                .as_mut()
+                .map(|answers| answers(method, params))
+        })
+    }
 }
