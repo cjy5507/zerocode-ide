@@ -1457,11 +1457,15 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   display: none;
 }
 
+/* `line-height: 1`, as the task id below: on the Geist steps (t-67607, the
+ * person's 10-21 pass of draft B) 2xs is 12px, a step over the 11px branch
+ * line it sits in, and at its own line height it grew the row by 1.4px. */
 .wt-unseated {
   flex: none;
   margin-inline-start: var(--space-1);
   color: var(--ink-mist);
   font-size: var(--text-2xs);
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -8592,8 +8596,12 @@ body.is-dragging-pane {
 /* Orca: `.mermaid-block svg { max-width: 100%; height: auto }`. */
 .mmd {
   /* The smallest text a drawing sets, as a number so a width can be divided
-   * by it. */
-  --mmd-text-least: 11;
+   * by it: Geist's smallest label, 12. It was 11 until the window's caption
+   * step rose to 11 with the Geist steps (t-67607, the person's 10-21 pass of
+   * draft B) — at 11 over 11 a drawing could not shrink at all, and one a
+   * little wider than its column scrolled; at 12 it shrinks to 11/12 again,
+   * as it shrank to 10/11 before. */
+  --mmd-text-least: 12;
   max-width: 100%;
   height: auto;
 }
@@ -33042,11 +33050,18 @@ input[type="search"]::-webkit-search-cancel-button {
   font-size: var(--text-2xs);
 }
 
+/* The hint gives way on a narrow board: it turns its line rather than squeeze
+ * the legend beside it. Held to one line, its step up to the Geist caption
+ * (11px, t-67607, the person's 10-21 pass of draft B) squeezed the legend
+ * from 81 to 62px at a 433px board, and the legend's extra rows took 81px from
+ * the stage above. */
 .agent-graph-gesture-hint {
+  min-width: 0;
   margin-left: auto;
   color: var(--ink-mist);
   font-size: var(--text-3xs);
-  white-space: nowrap;
+  text-align: end;
+  text-wrap: balance;
 }
 
 .agent-graph-legend[hidden] {
@@ -34627,12 +34642,12 @@ details.task-board-section > summary {
   content: "";
   position: absolute;
   inset: auto var(--space-3) 0;
-  height: 2px; /* Geist 탭의 고른 밑줄 */
+  height: var(--tab-underline-width);
   background: var(--ink-chalk);
 }
 
 .board-now-tab:focus-visible {
-  outline: 2px solid var(--ink-chalk);
+  outline: var(--focus-ring);
   outline-offset: calc(-1 * var(--space-1));
 }
 
@@ -34694,8 +34709,8 @@ details.task-board-section > summary {
 .board-desk-block[data-desk-block="asks"] > .board-desk-head::before {
   content: "";
   flex: none;
-  width: 10px; /* Geist의 상태 점, 시안 B의 「당신 차례」 점 */
-  height: 10px;
+  width: var(--status-dot-size);
+  height: var(--status-dot-size);
   border-radius: var(--radius-pill);
   background: var(--signal-you);
 }
@@ -34714,7 +34729,7 @@ details.task-board-section > summary {
   align-items: center;
   justify-content: center;
   gap: var(--space-1);
-  min-height: 32px; /* Geist의 small 단추 높이 */
+  min-height: var(--control-height-md);
   padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-sm);
@@ -34754,8 +34769,8 @@ details.task-board-section > summary {
 .board-link:focus-visible,
 .board-goal-fold:focus-visible,
 .board-raw-head:focus-visible {
-  outline: 2px solid var(--ink-chalk);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .board-btn[hidden] {
@@ -34825,7 +34840,7 @@ details.task-board-section > summary {
   display: inline-flex;
   flex: none;
   align-items: center;
-  min-height: 24px; /* Geist의 배지 높이 */
+  min-height: var(--badge-height);
   padding: 0 var(--space-3);
   border-radius: var(--radius-pill);
   background: var(--signal-you-ground);
@@ -34836,7 +34851,7 @@ details.task-board-section > summary {
 
 .board-ask-title {
   min-width: 0;
-  padding-top: 2px; /* 24px 배지의 가운데에 14/20 글줄을 맞춘다 */
+  padding-top: calc(var(--space-1) / 2); /* 배지 높이의 가운데에 14/20 글줄을 맞춘다 */
 }
 
 .board-ask-meta {
@@ -34871,7 +34886,7 @@ details.task-board-section > summary {
 }
 
 .board-asks > li .board-desk-letter-act {
-  min-height: 32px; /* Geist의 small 단추 높이 */
+  min-height: var(--control-height-md);
   padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-sm);
@@ -34887,8 +34902,8 @@ details.task-board-section > summary {
 }
 
 .board-asks > li .board-desk-letter-act:focus-visible {
-  outline: 2px solid var(--ink-chalk);
-  outline-offset: 2px;
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 
 .board-ask-acts {
