@@ -7672,7 +7672,9 @@ function paintTaskBoard(view, model) {
   taskBoardModels.set(view, tasks);
   const surface = view.querySelector(".task-board-surface");
   const sections = taskBoardSections();
-  writeTextContent(surface.querySelector(".task-board-summary"), t("board.tasks.summary",
+  // The agents' tally heads the list on the 기록 tab (t-67607); the line above the
+  // desk is the 지금 tab's sentence, which the desk writes.
+  writeTextContent(surface.querySelector(".task-board-tally"), t("board.tasks.summary",
     "작업 {{total}}개 · 진행 중 {{working}}개 · 내 확인 필요 {{attention}}개", {
       total: tasks.groups.length, working: tasks.counts.get("working"), attention: tasks.counts.get("attention"),
     }));

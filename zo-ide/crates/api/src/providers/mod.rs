@@ -2616,7 +2616,7 @@ pub fn custom_provider_catalog() -> Vec<(&'static str, Vec<String>)> {
 }
 
 fn custom_provider_is_usable(provider: &ResolvedCustomProvider) -> bool {
-    !provider.requires_auth
+    !custom_provider_needs_key(provider)
         || provider.config.credential_env_vars.iter().any(|env| {
             env_non_empty(env)
                 || crate::oauth_store::load_openai_compat_api_key(env)
@@ -2624,6 +2624,18 @@ fn custom_provider_is_usable(provider: &ResolvedCustomProvider) -> bool {
                     .flatten()
                     .is_some_and(|value| !value.trim().is_empty())
         })
+}
+
+/// Whether a request to `provider` must carry a key. A line that says so
+/// does, and so does a router the window keeps on a public host even when its
+/// line says `requires_auth: false`: the window writes a router first saved
+/// without a key that way, and the cloud behind it answers a key-less request
+/// with a 401 (t-67811). A line written by hand or by `/connect` keeps its own
+/// `false`.
+pub(crate) fn custom_provider_needs_key(provider: &ResolvedCustomProvider) -> bool {
+    provider.requires_auth
+        || (window_router_key(provider.config.api_key_env)
+            && !openai_compat::base_url_is_local(&openai_compat::read_base_url(provider.config)))
 }
 
 /// Custom provider usability details for UIs that need to explain why a
@@ -4489,6 +4501,21 @@ pub fn find_router_keys_in_keychain(env_prefix: &str, service_prefix: &str) {
         service_prefix,
         anthropic::keychain::read_router_key,
     );
+}
+
+/// Whether `env` holds the key of a router the window keeps: the `auth_env` of
+/// a custom provider that one of the window's keychain roads answers for. Such
+/// a key is put in, and put right, in the window's settings — never by an
+/// `export` or a login.
+pub(crate) fn window_router_key(env: &str) -> bool {
+    let kept = window_keychains()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|keychain| keychain.names.answers(env));
+    kept && custom_provider_snapshot()
+        .iter()
+        .any(|provider| provider.config.api_key_env == env)
 }
 
 /// Let this process find a service key the window's settings keep under the
@@ -7528,6 +7555,350 @@ mod tests {
 
         super::forget_adopted_launch_keys_for_test();
         super::refresh_custom_providers_from_json("[]").expect("clear");
+    }
+
+    /// Puts back what a router test changed in this process — its providers,
+    /// the keychain road it installed and every key read through it — even
+    /// when an assertion fails, so a failing test leaves no router behind.
+    struct RouterTestState;
+
+    impl Drop for RouterTestState {
+        fn drop(&mut self) {
+            super::forget_adopted_launch_keys_for_test();
+            let _ = super::refresh_custom_providers_from_json("[]");
+        }
+    }
+
+    /// A keychain whose first two reads cannot be answered and whose third
+    /// finds the key, counted in [`FLAKY_ASKS`].
+    fn slow_keychain(_service: &str) -> super::KeychainAnswer {
+        let mut asks = FLAKY_ASKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *asks += 1;
+        if *asks > 2 {
+            super::KeychainAnswer::Found("dummy-keychain-value".to_string())
+        } else {
+            super::KeychainAnswer::Unanswered
+        }
+    }
+
+    /// A chat completion that says "ok".
+    const ROUTER_REPLY: &str = r#"{"id":"chatcmpl-test","model":"zo-test-model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#;
+
+    /// `OpenRouter`'s 401 to a key it cannot read (t-67811).
+    const ROUTER_REFUSAL: &str =
+        r#"{"error":{"message":"Missing Authentication header","code":401}}"#;
+
+    /// An HTTP/1.1 answer that closes its connection, so the next request
+    /// opens a new one.
+    fn http_answer(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// A chat endpoint on this machine that answers each request with the next
+    /// of `answers` and keeps the `Authorization` header each request carried,
+    /// `None` for a request sent without one.
+    async fn local_router(
+        answers: Vec<String>,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a local port");
+        let base_url = format!("http://{}/v1", listener.local_addr().expect("its address"));
+        let carried = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = std::sync::Arc::clone(&carried);
+        tokio::spawn(async move {
+            for answer in answers {
+                let (mut socket, _) = listener.accept().await.expect("a request");
+                let mut read = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let head_end = loop {
+                    let got = socket.read(&mut chunk).await.expect("the request");
+                    assert!(got > 0, "the request ended inside its headers");
+                    read.extend_from_slice(&chunk[..got]);
+                    if let Some(at) = read.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break at + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&read[..head_end]).into_owned();
+                let header = |wanted: &str| {
+                    head.lines().find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case(wanted).then(|| value.trim().to_string())
+                    })
+                };
+                let length = header("content-length")
+                    .map_or(0, |value| value.parse::<usize>().expect("a length"));
+                while read.len() < head_end + length {
+                    let got = socket.read(&mut chunk).await.expect("the body");
+                    assert!(got > 0, "the body ended short");
+                    read.extend_from_slice(&chunk[..got]);
+                }
+                kept.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(header("authorization"));
+                socket.write_all(answer.as_bytes()).await.expect("the answer");
+            }
+        });
+        (base_url, carried)
+    }
+
+    /// A one-line request for `model`.
+    fn one_line(model: &str) -> crate::types::MessageRequest {
+        crate::types::MessageRequest {
+            model: model.to_string(),
+            max_tokens: 16,
+            messages: vec![crate::types::InputMessage::user_text("hello")],
+            system: None,
+            tools: None,
+            tool_choice: None,
+            stream: false,
+            thinking: None,
+            output_config: None,
+            effort: None,
+            effort_band_ceiling: None,
+        }
+    }
+
+    /// A router the window keeps a key for, with no key anywhere, stops before
+    /// anything is sent, and its error says where the key goes (t-67811). The
+    /// window writes a router first saved without a key as
+    /// `requires_auth: false`; on a public host the cloud behind it answered
+    /// the key-less request with a 401, and the person was shown the logins of
+    /// four other providers. A line written by hand keeps its own `false`.
+    #[test]
+    fn a_window_router_with_no_key_stops_before_sending_and_names_the_windows_settings() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _custom = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _open = EnvVarGuard::set("ZO_TEST_RK_OPENROUTER_KEY", None);
+        let _agent = EnvVarGuard::set("ZO_TEST_RK_AGENTROUTER_KEY", None);
+        let _hand = EnvVarGuard::set("ZO_TEST_HAND_KEY", None);
+        let _state = RouterTestState;
+        super::forget_adopted_launch_keys_for_test();
+        super::refresh_custom_providers_from_json(
+            r#"[{"name":"OpenRouter","base_url":"https://openrouter.ai/api/v1",
+                 "models":["zo-test-openrouter-model"],"requires_auth":false,
+                 "auth_env":"ZO_TEST_RK_OPENROUTER_KEY"},
+                {"name":"AgentRouter","base_url":"https://agentrouter.org/v1",
+                 "models":["zo-test-agentrouter-model"],"requires_auth":true,
+                 "auth_env":"ZO_TEST_RK_AGENTROUTER_KEY"},
+                {"name":"HandRouter","base_url":"https://hand.example.com/v1",
+                 "models":["zo-test-hand-model"],"requires_auth":false,
+                 "auth_env":"ZO_TEST_HAND_KEY"}]"#,
+        )
+        .expect("providers");
+        super::install_window_keychain(
+            super::WindowKeyNames::Prefix("ZO_TEST_RK_".to_string()),
+            "test.router.",
+            fake_keychain,
+        );
+
+        for (model, router) in [
+            ("zo-test-openrouter-model", "OpenRouter"),
+            ("zo-test-agentrouter-model", "AgentRouter"),
+        ] {
+            let refused = crate::client::ProviderClient::from_model(model)
+                .expect_err("no key anywhere: no client, so no request");
+            assert!(
+                matches!(refused, crate::error::ApiError::MissingCredentials { .. }),
+                "{refused:?}"
+            );
+            let shown = refused.to_string();
+            assert!(
+                shown.contains(&format!(
+                    "No {router} key — put it in the window's Settings › API Routers › {router}, then reopen zo."
+                )),
+                "the error says where the key goes: {shown}"
+            );
+            assert!(!shown.contains("export ZO_TEST_RK_"), "{shown}");
+            assert!(
+                !shown.contains(crate::sign_in::CLAUDE.road)
+                    && !shown.contains(crate::sign_in::CHATGPT.road),
+                "a router's key is not a login: {shown}"
+            );
+        }
+        let usable = super::custom_provider_usable_catalog();
+        assert!(
+            !usable
+                .iter()
+                .any(|(provider, _)| ["OpenRouter", "AgentRouter"].contains(provider)),
+            "a router with no key stays out of the routing pool: {usable:?}"
+        );
+        assert!(
+            crate::client::ProviderClient::from_model("zo-test-hand-model").is_ok(),
+            "a line written by hand keeps its own requires_auth: false"
+        );
+        drop(isolation);
+    }
+
+    /// A router the window keeps on this machine still goes without a key when
+    /// its line says it needs none — Ollama, LM Studio, a proxy on the desk.
+    /// The keychain, which has no key for it, is asked once.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_window_router_on_this_machine_still_goes_without_a_key() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _custom = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _key = EnvVarGuard::set("ZO_TEST_RK_LOCAL_KEY", None);
+        let _state = RouterTestState;
+        super::forget_adopted_launch_keys_for_test();
+        KEYCHAIN_ASKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        let (base_url, carried) = local_router(vec![http_answer("200 OK", ROUTER_REPLY)]).await;
+        super::refresh_custom_providers_from_json(&format!(
+            r#"[{{"name":"LocalRouter","base_url":"{base_url}","models":["zo-test-local-model"],
+                 "requires_auth":false,"auth_env":"ZO_TEST_RK_LOCAL_KEY"}}]"#
+        ))
+        .expect("providers");
+        super::install_window_keychain(
+            super::WindowKeyNames::Prefix("ZO_TEST_RK_".to_string()),
+            "test.router.",
+            fake_keychain,
+        );
+
+        crate::client::ProviderClient::from_model("zo-test-local-model")
+            .expect("a router on this machine needs no key")
+            .send_message(&one_line("zo-test-local-model"))
+            .await
+            .expect("and is answered");
+        assert_eq!(
+            *carried.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            [None::<String>],
+            "one request, sent without an Authorization header"
+        );
+        assert_eq!(
+            *KEYCHAIN_ASKED.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            ["test.router.ZO_TEST_RK_LOCAL_KEY"],
+            "a key the keychain does not have is asked about once"
+        );
+        drop(isolation);
+    }
+
+    /// A router the window keeps a key for that answers 401 — `OpenRouter`'s
+    /// "Missing Authentication header" to a key it cannot read (t-67811) — is
+    /// shown the window's settings, where its key is put right, never the
+    /// logins of other providers. A router zo had no key to send to is told it
+    /// has none.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_window_routers_401_names_the_windows_settings_not_the_logins() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _custom = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _sent = EnvVarGuard::set("ZO_TEST_RK_ROUTER_KEY", Some("dummy-router-key"));
+        let _none = EnvVarGuard::set("ZO_TEST_RK_LOCAL_KEY", None);
+        let _state = RouterTestState;
+        super::forget_adopted_launch_keys_for_test();
+        let refusal = http_answer("401 Unauthorized", ROUTER_REFUSAL);
+        let (base_url, carried) = local_router(vec![refusal.clone(), refusal]).await;
+        super::refresh_custom_providers_from_json(&format!(
+            r#"[{{"name":"OpenRouter","base_url":"{base_url}","models":["zo-test-router-model"],
+                 "requires_auth":true,"auth_env":"ZO_TEST_RK_ROUTER_KEY"}},
+                {{"name":"LocalRouter","base_url":"{base_url}","models":["zo-test-local-model"],
+                 "requires_auth":false,"auth_env":"ZO_TEST_RK_LOCAL_KEY"}}]"#
+        ))
+        .expect("providers");
+        super::install_window_keychain(
+            super::WindowKeyNames::Prefix("ZO_TEST_RK_".to_string()),
+            "test.router.",
+            fake_keychain,
+        );
+
+        let refused = crate::client::ProviderClient::from_model("zo-test-router-model")
+            .expect("the key is there")
+            .send_message(&one_line("zo-test-router-model"))
+            .await
+            .expect_err("the router refuses it");
+        assert!(refused.is_unauthorized(), "still a 401 to every caller: {refused:?}");
+        let shown = refused.to_string();
+        assert!(
+            shown.contains("Missing Authentication header"),
+            "the router's own words stay: {shown}"
+        );
+        assert!(
+            shown.contains(
+                "OpenRouter refused the key zo sent — put the right key in the window's Settings › API Routers › OpenRouter, then reopen zo."
+            ),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains(crate::sign_in::CLAUDE.road)
+                && !shown.contains(crate::sign_in::CHATGPT.road),
+            "a router's key is not a login: {shown}"
+        );
+
+        let keyless = crate::client::ProviderClient::from_model("zo-test-local-model")
+            .expect("a router on this machine needs no key")
+            .send_message(&one_line("zo-test-local-model"))
+            .await
+            .expect_err("the router wants one after all");
+        let shown = keyless.to_string();
+        assert!(
+            shown.contains(
+                "No LocalRouter key — put it in the window's Settings › API Routers › LocalRouter, then reopen zo."
+            ),
+            "{shown}"
+        );
+        assert_eq!(
+            *carried.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            [Some("Bearer dummy-router-key".to_string()), None],
+            "the first request carried the key, the second none"
+        );
+        drop(isolation);
+    }
+
+    /// A key-less client for a router the window keeps asks for the key again
+    /// on each request (t-67811). A session builds its client once, when its
+    /// model is chosen, so a keychain read that could not be answered then
+    /// must not leave every request of the session without the key the
+    /// keychain holds.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_router_key_the_keychain_could_not_answer_is_asked_again_on_the_next_request() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _custom = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _key = EnvVarGuard::set("ZO_TEST_RK_SLOW_KEY", None);
+        let _state = RouterTestState;
+        super::forget_adopted_launch_keys_for_test();
+        *FLAKY_ASKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = 0;
+        let reply = http_answer("200 OK", ROUTER_REPLY);
+        let (base_url, carried) = local_router(vec![reply.clone(), reply]).await;
+        super::refresh_custom_providers_from_json(&format!(
+            r#"[{{"name":"LocalRouter","base_url":"{base_url}","models":["zo-test-local-model"],
+                 "requires_auth":false,"auth_env":"ZO_TEST_RK_SLOW_KEY"}}]"#
+        ))
+        .expect("providers");
+        super::install_window_keychain(
+            super::WindowKeyNames::Prefix("ZO_TEST_RK_".to_string()),
+            "test.router.",
+            slow_keychain,
+        );
+
+        let client = crate::client::ProviderClient::from_model("zo-test-local-model")
+            .expect("a router on this machine needs no key");
+        for _ in 0..2 {
+            client
+                .send_message(&one_line("zo-test-local-model"))
+                .await
+                .expect("answered");
+        }
+        assert_eq!(
+            *carried.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            [None, Some("Bearer dummy-keychain-value".to_string())],
+            "the request after an unanswered read carries the key the next read found"
+        );
+        assert_eq!(
+            *FLAKY_ASKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            3,
+            "asked when the client was built and once for each request"
+        );
+        drop(isolation);
     }
 
     #[test]

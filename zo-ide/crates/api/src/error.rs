@@ -7,7 +7,7 @@ use std::time::Duration;
 // producer and the reader cannot drift — see its docs for what drifting cost.
 use core_types::retry_signal::{
     HINT_SEPARATOR, RESET_HINT_TOKEN, UNSUPPORTED_VISION_HINT_BODY, human_reset_wait,
-    is_unsupported_vision_text, is_usage_limit_text,
+    is_unsupported_vision_text, is_usage_limit_text, machine_readable_head,
 };
 
 #[derive(Debug)]
@@ -51,6 +51,14 @@ pub enum ApiError {
     RetriesExhausted {
         attempts: u32,
         last_error: Box<ApiError>,
+    },
+    /// A router whose key the window keeps answered 401 — to the key zo sent,
+    /// or to a request zo had no key for. Its way back is that key, in the
+    /// window's settings, not the logins any other 401 names.
+    RouterKeyRefused {
+        provider: &'static str,
+        key_sent: bool,
+        refusal: Box<ApiError>,
     },
     InvalidSseFrame(&'static str),
     BackoffOverflow {
@@ -442,6 +450,7 @@ impl ApiError {
                 ProviderErrorClass::Transient
             }
             Self::RetriesExhausted { last_error, .. } => last_error.provider_error_class(),
+            Self::RouterKeyRefused { refusal, .. } => refusal.provider_error_class(),
             Self::MissingCredentials { .. }
             | Self::UnsupportedProvider { .. }
             | Self::MissingAuthRouteCredentials { .. }
@@ -508,6 +517,7 @@ impl ApiError {
             }
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
             Self::MissingCredentials { .. }
+            | Self::RouterKeyRefused { .. }
             | Self::UnsupportedProvider { .. }
             | Self::MissingAuthRouteCredentials { .. }
             | Self::UnsupportedAuthRoute { .. }
@@ -547,8 +557,23 @@ impl ApiError {
                     )
             }
             Self::RetriesExhausted { last_error, .. } => last_error.is_unauthorized(),
+            Self::RouterKeyRefused { refusal, .. } => refusal.is_unauthorized(),
             _ => false,
         }
+    }
+}
+
+/// The one sentence that sends a person to a router's key. The menu words are
+/// the window's own (`ui/shell-i18n.js`).
+fn router_key_hint(provider: &str, key_sent: bool) -> String {
+    if key_sent {
+        format!(
+            "{provider} refused the key zo sent — put the right key in the window's Settings › API Routers › {provider}, then reopen zo."
+        )
+    } else {
+        format!(
+            "No {provider} key — put it in the window's Settings › API Routers › {provider}, then reopen zo."
+        )
     }
 }
 
@@ -800,6 +825,18 @@ impl Display for ApiError {
     )]
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            // A router the window keeps: its key is put in there, not exported.
+            Self::MissingCredentials { provider, env_vars }
+                if env_vars
+                    .iter()
+                    .any(|env| crate::providers::window_router_key(env)) =>
+            {
+                write!(
+                    f,
+                    "missing {provider} credentials{HINT_SEPARATOR}{}",
+                    router_key_hint(provider, false)
+                )
+            }
             Self::MissingCredentials { provider, env_vars } => {
                 let credential_hint = if env_vars.is_empty() {
                     "set the provider's configured api-key env var".to_string()
@@ -972,6 +1009,19 @@ impl Display for ApiError {
                     )?;
                 }
                 Ok(())
+            }
+            Self::RouterKeyRefused {
+                provider,
+                key_sent,
+                refusal,
+            } => {
+                let refused = refusal.to_string();
+                write!(
+                    f,
+                    "{}{HINT_SEPARATOR}{}",
+                    machine_readable_head(&refused),
+                    router_key_hint(provider, *key_sent)
+                )
             }
             Self::InvalidSseFrame(message) => write!(f, "invalid sse frame: {message}"),
             Self::BackoffOverflow {

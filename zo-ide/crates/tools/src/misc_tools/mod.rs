@@ -2602,6 +2602,12 @@ pub(crate) fn run_memory_write(
 }
 
 fn execute_memory_write(input: &MemoryWriteInput, ctx: &ToolContext) -> Result<Value, ToolError> {
+    // Memory is written after the task, not during it (t-68770): the session's
+    // own plan says whether the requested work is still under way.
+    let open = open_plan_items(ctx);
+    if open > 0 {
+        return Err(ToolError::Declined(memory_waits_for_the_plan(open)));
+    }
     let slug = normalize_memory_slug(&input.slug)?;
     let summary = sanitize_memory_summary(&input.summary)?;
     let body = input.body.trim();
@@ -2630,7 +2636,12 @@ fn execute_memory_write(input: &MemoryWriteInput, ctx: &ToolContext) -> Result<V
             body,
         },
     )
-    .map_err(|error| ToolError::Io(std::io::Error::other(error)))?;
+    .map_err(|error| match error {
+        runtime::memory::DreamError::ScopeConflict { slug } => {
+            ToolError::Declined(local_would_hide_global(&slug))
+        }
+        error @ runtime::memory::DreamError::Io(_) => ToolError::Io(std::io::Error::other(error)),
+    })?;
     let memory_dir = runtime::memory::paths::memory_write_dir(&cwd, input.local);
     let entry_path = memory_dir.join(format!("{slug}.md"));
     let index_path = memory_dir.join("MEMORY.md");
@@ -2641,6 +2652,47 @@ fn execute_memory_write(input: &MemoryWriteInput, ctx: &ToolContext) -> Result<V
         "path": entry_path.display().to_string(),
         "indexPath": index_path.display().to_string()
     }))
+}
+
+/// Items of this session's plan that are not completed — the signal that the
+/// requested work is still under way. Read where `TodoWrite` keeps the plan:
+/// the session's own store for the process folder (`runtime::todo_store`).
+/// A session with no plan, or one closed by completing every item, has none.
+fn open_plan_items(ctx: &ToolContext) -> usize {
+    std::env::current_dir().map_or(0, |cwd| {
+        runtime::todo_progress::open_items(&cwd, ctx.plan_session_id().as_deref())
+    })
+}
+
+/// The verdict for a write while the plan is open. It names the one way out —
+/// finish the plan, then write — and keeps the write itself out of the plan,
+/// where an in-progress "save the note" item would hold the list open and the
+/// answer the same. A person who asked for the note hears that it waits, so
+/// the request is never dropped in silence.
+fn memory_waits_for_the_plan(open: usize) -> String {
+    format!(
+        "memory is written after the task, not during it: this session's plan still has {open} \
+         open item(s). Carry on with the task; finish the plan (mark every item completed), then \
+         call MemoryWrite again — do not add this write to the plan, where it would stay an open \
+         item. If the person asked you to remember something, tell the person now that it will be \
+         saved when the task is done, and name what you saved in your final answer."
+    )
+}
+
+/// The verdict for a local write that would hide a global entry of the same
+/// slug: the overlay is read after the durable store and wins
+/// (`memory::paths::global_memory_read_roots`), so it would. zo has no locale
+/// of its own (`tui/strings.rs`) and the person hears prose in the language of
+/// their request (`# Responding to the user`), so these words are for the
+/// model to act on and to relay.
+fn local_would_hide_global(slug: &str) -> String {
+    format!(
+        "a global memory entry `{slug}` already exists, and a local entry with the same slug \
+         would hide it on this machine, so nothing was written. To change that entry, write it \
+         again with `local: false` — only when the person asked for a durable, shared change; \
+         otherwise use another slug. Explain this to the person in the language of the person's \
+         request."
+    )
 }
 
 fn body_with_hand_written_metadata(body: &str, active_model: Option<&str>) -> String {

@@ -326,8 +326,9 @@ pub(super) fn tool_execution_input(
 
 /// Decode a `Sleep` tool invocation into the actual wait duration plus
 /// the rewritten input JSON the dispatcher will pass through to record
-/// the side effect. Returns `None` for any other tool so the dispatcher
-/// can keep the original input.
+/// the side effect. Returns `None` for any other tool, and for a
+/// `duration_ms` that is not a JSON number, so the dispatcher can keep the
+/// original input.
 pub(super) fn sleep_tool_execution_input(
     tool_name: &str,
     input: &str,
@@ -337,10 +338,14 @@ pub(super) fn sleep_tool_execution_input(
     }
 
     let mut value = serde_json::from_str::<Value>(input).ok()?;
+    // Only a duration this runtime reads as a number is waited here. A
+    // spelled-out one (`"5000"`, from a model that never saw the deferred
+    // tool's schema) is left to the tool: the dispatch seam puts its type back
+    // and the tool waits itself. Marked slept after a 0 ms wait, it would
+    // report a wait that never happened (t-68770).
     let duration_ms = value
         .get("duration_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(0)
+        .and_then(Value::as_u64)?
         .min(MAX_SLEEP_TOOL_DURATION_MS);
 
     if let Value::Object(map) = &mut value {
@@ -393,5 +398,18 @@ mod tests {
         assert!(tool_execution_input("Agent", "", "{}").is_none());
         assert!(tool_execution_input("Agent", "toolu_123", "not json").is_none());
         assert!(tool_execution_input("Agent", "toolu_123", "[1]").is_none());
+    }
+
+    /// A spelled-out duration is not waited here (t-68770). The runtime cannot
+    /// read `"5000"`, and marking the call slept after a 0 ms wait would have
+    /// the tool — which the dispatch seam hands the number back to — report a
+    /// wait that never happened. The tool waits itself instead.
+    #[test]
+    fn a_sleep_the_runtime_cannot_read_is_left_to_the_tool() {
+        assert!(sleep_tool_execution_input("Sleep", r#"{"duration_ms":"5000"}"#).is_none());
+        let (wait, input) = sleep_tool_execution_input("Sleep", r#"{"duration_ms":250}"#)
+            .expect("a typed duration is waited here");
+        assert_eq!(wait, Duration::from_millis(250));
+        assert!(input.contains("__zo_already_slept"), "{input}");
     }
 }

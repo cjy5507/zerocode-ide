@@ -129,6 +129,14 @@ const MAX_SELF_IMPROVE_CANDIDATE_EVIDENCE: usize = 64;
 pub enum DreamError {
     #[error("dreamer IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// A machine-local write named a slug the durable global store already
+    /// holds. The overlay is read after the durable store and wins
+    /// (`memory::paths::global_memory_read_roots`), so the entry would hide
+    /// the global one on this machine; the write is refused rather than
+    /// shadowing durable knowledge. Its own kind, so the `MemoryWrite` tool
+    /// can say so as a verdict instead of an IO failure (t-68770).
+    #[error("local memory `{slug}` cannot modify the read-only global entry with the same slug")]
+    ScopeConflict { slug: String },
 }
 
 /// Source of candidate lessons (DIP seam). Implementors decide *where* the
@@ -3484,10 +3492,9 @@ pub fn write_hand_written_memory_entry(
     entry: &MemoryWriteRequest,
 ) -> Result<WriteOutcome, DreamError> {
     if local && global_memory_has_slug(cwd, &entry.slug) {
-        return Err(io_error(format!(
-            "local memory `{}` cannot modify the read-only global entry with the same slug",
-            entry.slug
-        )));
+        return Err(DreamError::ScopeConflict {
+            slug: entry.slug.clone(),
+        });
     }
     let mut entry = entry.clone();
     entry.body = crate::memory::with_memory_scope_metadata(

@@ -260,7 +260,9 @@ export async function testLandBatch({ browser, origin, ok, faults: shared }) {
     await page.waitForFunction(() => projectsRead);
     const now = Date.now();
     await page.evaluate(coordinatorDeskFixture, { tasks: 8, workers: 2, mail: 2, now });
-    await page.waitForSelector(".task-board-row");
+    // The board has painted its list — on a window with a ledger run it stands on the 기록 tab
+    // (t-67607), and the batch card read below is the 지금 tab's, where the board opens.
+    await page.waitForSelector(".task-board-row", { state: "attached" });
     await page.evaluate(installBatchScene, { now, minute: MINUTE });
 
     /* ---- 25 꺼짐이면 아무것도 없다 ------------------------------------------------ */

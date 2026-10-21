@@ -1,13 +1,21 @@
-//! Single source of truth for locating the per-session todo store.
+//! Single source of truth for locating a session's todo store.
 //!
-//! The `TodoWrite` tool, the HUD sidebar, and the compaction re-injection all
-//! need to agree on *which file* holds the live todo list. Historically each
-//! resolved the path on its own, and the writer additionally fell back to a
-//! writable `<zo-home>/orphan-todos/` copy when the primary store sat on a
-//! read-only filesystem -- but the readers never knew about that fallback. The
-//! result was a split brain: in a read-only cwd the writer saved todos to the
-//! fallback while the HUD/compaction read the empty primary, so the live list
-//! silently vanished.
+//! Each session keeps its own plan, `<project state>/todos/<session id>.json`,
+//! so two sessions in one folder never read or rewrite each other's. The
+//! session id is handed in by whoever runs the conversation rather than read
+//! from the process environment: one process runs a session and its helpers
+//! at once. The one per-project file every session used to share,
+//! `<project state>/.zo-todos.json`, is neither read nor deleted -- it may
+//! still hold a person's plan, and it belongs to no session.
+//!
+//! The `TodoWrite` tool, the mid-turn re-anchor, the compaction re-injection
+//! and the task lifecycle hooks all need to agree on *which file* holds the
+//! live todo list. Historically each resolved the path on its own, and the
+//! writer additionally fell back to a writable `<zo-home>/orphan-todos/` copy
+//! when the primary store sat on a read-only filesystem -- but the readers
+//! never knew about that fallback. The result was a split brain: in a
+//! read-only cwd the writer saved todos to the fallback while the readers read
+//! the empty primary, so the live list silently vanished.
 //!
 //! This module owns the path rule once. Writers persist to [`primary_store`]
 //! (degrading to [`fallback_store`] on an unwritable primary); readers call
@@ -17,22 +25,41 @@
 
 use std::path::{Path, PathBuf};
 
-/// Filename of the per-project todo store under the zo state base.
-pub const TODO_STORE_FILE: &str = ".zo-todos.json";
+/// Folder under a project's state holding one plan file per session.
+pub const TODO_STORE_DIR: &str = "todos";
 
-/// The primary todo store for `cwd`, honoring the same overrides every reader
-/// and writer must agree on: a non-empty `ZO_TODO_STORE` wins (a blank value
-/// behaves as unset); otherwise the store lives under Zo's global per-project
-/// state directory so todo writes do not dirty the workspace (while
-/// `ZO_STATE_DIR` still redirects that state explicitly).
+/// The primary todo store of session `session_id` in `cwd`. A non-empty
+/// `ZO_TODO_STORE` wins for every session (a blank value behaves as unset);
+/// otherwise the store lives under Zo's global per-project state directory so
+/// todo writes do not dirty the workspace (while `ZO_STATE_DIR` still
+/// redirects that state explicitly).
+///
+/// `None` without an override when there is no session, or its id cannot be a
+/// file name: that plan belongs to no session, so it is kept nowhere another
+/// session could read it.
 #[must_use]
-pub fn primary_store(cwd: &Path) -> PathBuf {
+pub fn primary_store(cwd: &Path, session_id: Option<&str>) -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("ZO_TODO_STORE") {
         if !explicit.to_string_lossy().trim().is_empty() {
-            return PathBuf::from(explicit);
+            return Some(PathBuf::from(explicit));
         }
     }
-    crate::zo_project_state_dir(cwd).join(TODO_STORE_FILE)
+    let session_id = session_id.filter(|id| names_a_file(id))?;
+    Some(
+        crate::zo_project_state_dir(cwd)
+            .join(TODO_STORE_DIR)
+            .join(format!("{session_id}.json")),
+    )
+}
+
+/// Whether `session_id` can name a plan file: the rule the background task
+/// store holds its per-session files to (`TaskRegistry::for_session`).
+fn names_a_file(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && !matches!(session_id, "." | "..")
+        && session_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 /// The writable per-user fallback for `primary` -- `<zo home>/orphan-todos/
@@ -61,30 +88,30 @@ pub fn orphan_todo_key(store_path: &Path) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// The store a *reader* should load for `cwd`: the primary when it exists,
-/// otherwise the writable fallback when *it* exists, otherwise the primary path
-/// (so a missing-store reader still gets a stable, sensible path to report
-/// empty from). This is the counterpart to the writer's primary->fallback
-/// degrade, so a read-only cwd no longer hides the todos the writer saved.
+/// The store a *reader* should load for session `session_id` in `cwd`: the
+/// primary when it exists, otherwise the writable fallback when *it* exists,
+/// otherwise the primary path (so a missing-store reader still gets a stable,
+/// sensible path to report empty from). `None` when the session has no store
+/// ([`primary_store`]). This is the counterpart to the writer's
+/// primary->fallback degrade, so a read-only cwd no longer hides the todos the
+/// writer saved.
 #[must_use]
-pub fn resolve_readable_store(cwd: &Path) -> PathBuf {
-    let primary = primary_store(cwd);
+pub fn resolve_readable_store(cwd: &Path, session_id: Option<&str>) -> Option<PathBuf> {
+    let primary = primary_store(cwd, session_id)?;
     if primary.exists() {
-        return primary;
+        return Some(primary);
     }
     if let Some(fallback) = fallback_store(&primary) {
         if fallback.exists() {
-            return fallback;
+            return Some(fallback);
         }
     }
-    primary
+    Some(primary)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        fallback_store, orphan_todo_key, primary_store, resolve_readable_store, TODO_STORE_FILE,
-    };
+    use super::{fallback_store, orphan_todo_key, primary_store, resolve_readable_store};
     use std::path::{Path, PathBuf};
 
     fn unique_dir(tag: &str) -> PathBuf {
@@ -95,15 +122,24 @@ mod tests {
         std::env::temp_dir().join(format!("zo-todo-store-{tag}-{nanos}"))
     }
 
+    /// The tail every store of session `session_id` ends with.
+    fn session_file(session_id: &str) -> PathBuf {
+        Path::new("todos").join(format!("{session_id}.json"))
+    }
+
     #[test]
     fn explicit_non_empty_env_override_wins() {
         let _lock = crate::test_env_lock();
         let prior = std::env::var_os("ZO_TODO_STORE");
         std::env::set_var("ZO_TODO_STORE", "/tmp/explicit-todos.json");
-        assert_eq!(
-            primary_store(Path::new("/whatever")),
-            PathBuf::from("/tmp/explicit-todos.json")
-        );
+        // An explicit store is every session's, and a session-less caller's.
+        for session in [Some("session-a"), Some("session-b"), None] {
+            assert_eq!(
+                primary_store(Path::new("/whatever"), session),
+                Some(PathBuf::from("/tmp/explicit-todos.json")),
+                "{session:?}"
+            );
+        }
         match prior {
             Some(value) => std::env::set_var("ZO_TODO_STORE", value),
             None => std::env::remove_var("ZO_TODO_STORE"),
@@ -116,8 +152,9 @@ mod tests {
         let prior = std::env::var_os("ZO_TODO_STORE");
         std::env::set_var("ZO_TODO_STORE", "   ");
         let cwd = Path::new("/proj");
-        assert!(primary_store(cwd).ends_with(TODO_STORE_FILE));
-        assert!(primary_store(cwd).is_absolute());
+        let store = primary_store(cwd, Some("session-a")).expect("a session's store");
+        assert!(store.ends_with(session_file("session-a")), "{}", store.display());
+        assert!(store.is_absolute());
         match prior {
             Some(value) => std::env::set_var("ZO_TODO_STORE", value),
             None => std::env::remove_var("ZO_TODO_STORE"),
@@ -137,10 +174,10 @@ mod tests {
         std::env::remove_var("ZO_STATE_DIR");
         std::env::set_var("ZO_CONFIG_HOME", &home);
 
-        let store = primary_store(&cwd);
+        let store = primary_store(&cwd, Some("session-a")).expect("a session's store");
 
         assert!(store.starts_with(&home));
-        assert!(store.ends_with(TODO_STORE_FILE));
+        assert!(store.ends_with(session_file("session-a")), "{}", store.display());
         assert!(!store.starts_with(&cwd));
 
         match prior_todo {
@@ -167,8 +204,8 @@ mod tests {
         std::env::remove_var("ZO_TODO_STORE");
         std::env::set_var("ZO_STATE_DIR", &state_root);
 
-        let first = primary_store(&root.join("workspace-a"));
-        let second = primary_store(&root.join("workspace-b"));
+        let first = primary_store(&root.join("workspace-a"), Some("session-a")).expect("a store");
+        let second = primary_store(&root.join("workspace-b"), Some("session-a")).expect("a store");
 
         assert!(first.starts_with(&state_root));
         assert!(second.starts_with(&state_root));
@@ -176,7 +213,7 @@ mod tests {
             first, second,
             "state override must still partition per workspace"
         );
-        assert!(first.ends_with(TODO_STORE_FILE));
+        assert!(first.ends_with(session_file("session-a")), "{}", first.display());
         match prior_todo {
             Some(value) => std::env::set_var("ZO_TODO_STORE", value),
             None => std::env::remove_var("ZO_TODO_STORE"),
@@ -197,7 +234,70 @@ mod tests {
         std::env::set_var("ZO_TODO_STORE", &explicit);
         std::env::set_var("ZO_STATE_DIR", root.join("state-root"));
 
-        assert_eq!(primary_store(&root.join("workspace")), explicit);
+        assert_eq!(primary_store(&root.join("workspace"), Some("session-a")), Some(explicit));
+        match prior_todo {
+            Some(value) => std::env::set_var("ZO_TODO_STORE", value),
+            None => std::env::remove_var("ZO_TODO_STORE"),
+        }
+        match prior_state {
+            Some(value) => std::env::set_var("ZO_STATE_DIR", value),
+            None => std::env::remove_var("ZO_STATE_DIR"),
+        }
+    }
+
+    /// Two sessions in one folder keep two plans (t-68408): their stores, and
+    /// the read-only fallbacks keyed off them, never meet, and neither is the
+    /// file every session shared before.
+    #[test]
+    fn two_sessions_in_one_folder_keep_two_stores() {
+        let _lock = crate::test_env_lock();
+        let prior_todo = std::env::var_os("ZO_TODO_STORE");
+        let prior_state = std::env::var_os("ZO_STATE_DIR");
+        let root = unique_dir("two-sessions");
+        std::env::remove_var("ZO_TODO_STORE");
+        std::env::set_var("ZO_STATE_DIR", root.join("state-root"));
+        let cwd = root.join("workspace");
+
+        let first = primary_store(&cwd, Some("session-a")).expect("a session's store");
+        let second = primary_store(&cwd, Some("session-b")).expect("a session's store");
+        let shared = crate::zo_project_state_dir(&cwd).join(".zo-todos.json");
+
+        assert_ne!(first, second, "two sessions in one folder must not share a plan");
+        assert_ne!(first, shared, "a session never takes the old shared file");
+        assert_ne!(second, shared, "a session never takes the old shared file");
+        assert_eq!(first.parent(), second.parent(), "one plan folder per project");
+        assert_ne!(
+            fallback_store(&first),
+            fallback_store(&second),
+            "their read-only fallbacks stay apart too"
+        );
+        match prior_todo {
+            Some(value) => std::env::set_var("ZO_TODO_STORE", value),
+            None => std::env::remove_var("ZO_TODO_STORE"),
+        }
+        match prior_state {
+            Some(value) => std::env::set_var("ZO_STATE_DIR", value),
+            None => std::env::remove_var("ZO_STATE_DIR"),
+        }
+    }
+
+    /// A plan that belongs to no session has no store: no session, or an id
+    /// that cannot be a file name, never falls back to a file another session
+    /// reads.
+    #[test]
+    fn a_store_needs_a_session_that_names_a_file() {
+        let _lock = crate::test_env_lock();
+        let prior_todo = std::env::var_os("ZO_TODO_STORE");
+        let prior_state = std::env::var_os("ZO_STATE_DIR");
+        let root = unique_dir("no-session");
+        std::env::remove_var("ZO_TODO_STORE");
+        std::env::set_var("ZO_STATE_DIR", root.join("state-root"));
+        let cwd = root.join("workspace");
+
+        for session in [None, Some(""), Some("."), Some(".."), Some("../escape"), Some("a/b"), Some("two words")] {
+            assert_eq!(primary_store(&cwd, session), None, "{session:?}");
+            assert_eq!(resolve_readable_store(&cwd, session), None, "{session:?}");
+        }
         match prior_todo {
             Some(value) => std::env::set_var("ZO_TODO_STORE", value),
             None => std::env::remove_var("ZO_TODO_STORE"),
@@ -233,23 +333,23 @@ mod tests {
         let _lock = crate::test_env_lock();
         let dir = unique_dir("resolve");
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let primary = dir.join(TODO_STORE_FILE);
+        let primary = dir.join("todos.json");
         let prior = std::env::var_os("ZO_TODO_STORE");
         std::env::set_var("ZO_TODO_STORE", &primary);
 
-        assert_eq!(resolve_readable_store(&dir), primary);
+        assert_eq!(resolve_readable_store(&dir, Some("session-a")), Some(primary.clone()));
 
         if let Some(fallback) = fallback_store(&primary) {
             if let Some(parent) = fallback.parent() {
                 std::fs::create_dir_all(parent).expect("fallback dir");
             }
             std::fs::write(&fallback, b"[]").expect("write fallback");
-            assert_eq!(resolve_readable_store(&dir), fallback);
+            assert_eq!(resolve_readable_store(&dir, Some("session-a")), Some(fallback.clone()));
             let _ = std::fs::remove_file(&fallback);
         }
 
         std::fs::write(&primary, b"[]").expect("write primary");
-        assert_eq!(resolve_readable_store(&dir), primary);
+        assert_eq!(resolve_readable_store(&dir, Some("session-a")), Some(primary));
 
         match prior {
             Some(value) => std::env::set_var("ZO_TODO_STORE", value),

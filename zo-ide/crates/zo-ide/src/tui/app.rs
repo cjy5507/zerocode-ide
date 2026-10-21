@@ -4158,8 +4158,14 @@ impl Ui {
             // 트랜스크립트의 재료가 아니다.
             RenderBlock::UserMessage { .. }
             | RenderBlock::Image { .. }
-            | RenderBlock::RateLimit(_)
-            | RenderBlock::CompactionProgress { .. } => {}
+            | RenderBlock::RateLimit(_) => {}
+            // How far a compaction's summary has come — the turn's own or a
+            // `/compact` — counts on the status row, never in the transcript.
+            RenderBlock::CompactionProgress { streamed_chars } => {
+                if let Some(status) = self.status.as_mut() {
+                    status.note_compaction_progress(streamed_chars);
+                }
+            }
         }
     }
 
@@ -6204,7 +6210,7 @@ impl App {
                 biased;
                 joined = &mut job => break joined,
                 Some(block) = block_rx.recv() => {
-                    ui.compaction_block(block);
+                    ui.block(block);
                     ui.draw_with_queue(|| block_rx.len());
                 }
                 command = events::next_command(scaffold.ide) => match command {
@@ -6255,7 +6261,7 @@ impl App {
             Err(error) => (Err(format!("compact task ended: {error}")), true),
         };
         let ui = &mut self.ui;
-        scaffold.drain(&mut block_rx, |block| ui.compaction_block(block));
+        scaffold.drain(&mut block_rx, |block| ui.block(block));
         let cancelled = scaffold.cancelled();
         ui.status = None;
         ui.publish_working_activity(scaffold.ide);
@@ -6283,18 +6289,6 @@ impl App {
 
 /// 하위 에이전트 보고 셀의 호출 id — 묶임 판정에 안 쓰이는 자리표다.
 impl Ui {
-    /// One block of a `/compact` job (t-10956): the summary's progress
-    /// counts on the status row, everything else lands like a turn's block.
-    fn compaction_block(&mut self, block: RenderBlock) {
-        if let RenderBlock::CompactionProgress { streamed_chars } = block {
-            if let Some(status) = self.status.as_mut() {
-                status.set_inline_message(Some(super::strings::compaction_progress(streamed_chars)));
-            }
-            return;
-        }
-        self.block(block);
-    }
-
     /// 방금 파킹된 프롬프트에 채널의 `prompt_id` 를 얹는다(이미 있으면 그대로).
     fn tag_parked(&mut self, published: Option<u64>) {
         if let (Some(parked), Some(id)) = (self.parked.as_mut(), published) {
@@ -7118,6 +7112,139 @@ mod tests {
         assert_eq!(retrying.target.as_deref(), Some("attempt 2 in 8s"));
 
         assert!(hook_events(&captured).is_empty(), "{:?}", hook_events(&captured));
+    }
+
+    fn working_line(ui: &super::Ui) -> String {
+        ui.status.as_ref().expect("working status").line(120).plain()
+    }
+
+    /// t-68694: a compaction inside a turn left the Working line on the last
+    /// word it had — `Context trim …` for 51 minutes while the summary was
+    /// waited on. Its phases put the compaction's name and progress on the
+    /// line and on the window's activity card, and its end gives the line
+    /// back to the turn.
+    #[test]
+    fn an_in_turn_compaction_stands_on_the_working_line_until_it_ends() {
+        use runtime::message_stream::types::StreamPhase;
+        use runtime::message_stream::SystemLevel;
+
+        let (mut ui, captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        tick(&mut ui, 3_000);
+        arrive(
+            &mut ui,
+            RenderBlock::System {
+                id: ids.next(),
+                level: SystemLevel::Housekeeping,
+                text: "Context trim · cleared 9 old tool result(s) (~27k tokens freed)".to_string(),
+            },
+        );
+        arrive(
+            &mut ui,
+            RenderBlock::System {
+                id: ids.next(),
+                level: SystemLevel::Info,
+                text: "Compacting conversation… (393 messages)".to_string(),
+            },
+        );
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::Compacting));
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }));
+        tick(&mut ui, 3_061);
+        assert_eq!(
+            working_line(&ui),
+            "• Compacting conversation (51m 01s • esc to interrupt) · waiting for the model 1m 01s",
+            "the summary's wait stands where the trim's word stood"
+        );
+        let card = published_card(&ui).expect("the compaction's activity card");
+        assert_eq!(card.verb, "compacting");
+        assert_eq!(card.target.as_deref(), Some("waiting for the model 1m 01s"));
+        assert_eq!(card.elapsed_secs, 61);
+
+        arrive(&mut ui, RenderBlock::CompactionProgress { streamed_chars: 4_000 });
+        tick(&mut ui, 3_075);
+        assert_eq!(
+            working_line(&ui),
+            "• Compacting conversation (51m 15s • esc to interrupt) · 4000 chars of summary so far"
+        );
+        let card = published_card(&ui).expect("the compaction's activity card");
+        assert_eq!(card.verb, "compacting");
+        assert_eq!(card.target.as_deref(), Some("4000 chars of summary so far"));
+
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::Retrying { attempt: 2, delay_secs: 5 }));
+        assert_eq!(
+            working_line(&ui),
+            "• Compacting conversation (51m 15s • esc to interrupt) · reconnecting · attempt 2 in 5s",
+            "the provider's retry of the summary request is named"
+        );
+
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::CompactionEnded));
+        arrive(
+            &mut ui,
+            RenderBlock::System {
+                id: ids.next(),
+                level: SystemLevel::Info,
+                text: "Compacted conversation · 380 messages summarized · 254.1k → 40.2k tokens"
+                    .to_string(),
+            },
+        );
+        assert_eq!(
+            working_line(&ui),
+            "• Working (51m 15s • esc to interrupt)",
+            "the end gives the line back to the turn"
+        );
+        assert!(
+            published_card(&ui).is_none_or(|card| card.verb != "compacting"),
+            "{:?}",
+            published_card(&ui)
+        );
+        assert!(hook_events(&captured).is_empty(), "{:?}", hook_events(&captured));
+    }
+
+    /// t-68694: the Working line says what the turn waits on. A housekeeping
+    /// word is the newest fact only until the wait has a name of its own — a
+    /// retry of the provider, a model that has not answered for a while.
+    #[test]
+    fn a_wait_with_a_name_takes_the_place_of_an_older_housekeeping_word() {
+        use crate::autonomy::limits::DEFAULT_STREAM_PHASE_AFTER_SECS;
+        use runtime::message_stream::types::StreamPhase;
+        use runtime::message_stream::SystemLevel;
+
+        let trim = "Context trim · cleared 3 old tool result(s) (~12k tokens freed)";
+        let (mut ui, _captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        tick(&mut ui, 10);
+        arrive(
+            &mut ui,
+            RenderBlock::System {
+                id: ids.next(),
+                level: SystemLevel::Housekeeping,
+                text: trim.to_string(),
+            },
+        );
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }));
+        tick(&mut ui, 12);
+        assert_eq!(
+            working_line(&ui),
+            format!("• Working (12s • esc to interrupt) · {trim}"),
+            "a request just out is no wait yet: the word stands"
+        );
+
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::Retrying { attempt: 2, delay_secs: 8 }));
+        assert_eq!(
+            working_line(&ui),
+            "• Working (12s • esc to interrupt) · reconnecting · attempt 2 in 8s",
+            "the provider's retry is what the turn waits on now"
+        );
+
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 2 }));
+        tick(&mut ui, 12 + DEFAULT_STREAM_PHASE_AFTER_SECS);
+        assert_eq!(
+            working_line(&ui),
+            format!(
+                "• Working ({}s • esc to interrupt) · waiting for the model {DEFAULT_STREAM_PHASE_AFTER_SECS}s",
+                12 + DEFAULT_STREAM_PHASE_AFTER_SECS
+            )
+        );
     }
 
     #[test]
