@@ -5340,29 +5340,33 @@ fn created_then_silent() -> SceneScript {
     script
 }
 
-/// Scene U: the reported turn (t-68710). Every connection answers `response.created` and then
-/// sends only keep-alives, so each one closes its bundle and the ceiling never ends the run:
-/// the ladder went on for eight full windows (33 minutes at 240 s). zo stops sending the
-/// request after two cuts in a row, within two windows. The stop names the model, the wait and
-/// what each attempt heard, and the one reconnect between the cuts names the model and the
-/// wait too — never a transient provider error.
-async fn check_a_model_that_never_starts_is_stopped_after_two_cuts(wire: SceneWire, name: &str) {
+/// Scene U: the reported turn (t-68710) as its code and timing allow it to be read; the turn's
+/// own record kept no event names. Every connection answers `response.created` and then sends
+/// only keep-alives, so each one closes its bundle and the ceiling never ends the run: the
+/// ladder went on for eight full windows (33 minutes at 240 s). zo stops sending the request
+/// after two cuts in a row, within two windows. The stop names the model, the wait and what
+/// each attempt heard, and the one reconnect between the cuts names the model and the wait
+/// too — never a transient provider error.
+async fn check_a_model_that_makes_no_progress_is_stopped_after_two_cuts(
+    wire: SceneWire,
+    name: &str,
+) {
     let scripts = (0..9).map(|_| created_then_silent()).collect();
     let notices = SceneNotices::default();
     let (text, error, connections, elapsed) = run_scene_noting(wire, scripts, None, &notices).await;
     report_scene(name, &text, error.as_ref(), connections, elapsed);
     for notice in notices.lock().unwrap().iter() {
         eprintln!(
-            "[t-68710 scene {name}] notice label={:?} attempt={}/{} delay_ms={} unanswered={:?}",
+            "[t-68710 scene {name}] notice label={:?} attempt={}/{} delay_ms={} no_progress={:?}",
             notice.label,
             notice.attempt,
             notice.max_attempts,
             notice.delay.as_millis(),
-            notice.unanswered,
+            notice.no_progress,
         );
     }
     assert!(text.is_empty(), "nothing was answered: {text:?}");
-    let error = error.expect("a model that never starts its response must end the request");
+    let error = error.expect("a model that makes no progress must end the request");
     assert_eq!(scene_error_type(&error), Some("stream_startup_no_progress"), "{error}");
     assert_eq!(connections, 2, "two cuts in a row, then the request is not sent again");
     assert!(
@@ -5376,7 +5380,7 @@ async fn check_a_model_that_never_starts_is_stopped_after_two_cuts(wire: SceneWi
     let said = error.to_string();
     assert!(
         said.contains(
-            "gpt-5.6-sol sent no response event within 0.3s, so zo cut the request (2/2) \
+            "gpt-5.6-sol made no progress for 0.3s, so zo cut the request (2/2) \
              and stopped sending it;"
         ),
         "the stop names the model, the wait and the cut: {said}"
@@ -5396,8 +5400,8 @@ async fn check_a_model_that_never_starts_is_stopped_after_two_cuts(wire: SceneWi
     let notices = notices.lock().unwrap();
     assert_eq!(notices.len(), 1, "one reconnect between the two cuts: {notices:?}");
     assert_eq!(
-        notices[0].unanswered,
-        Some(core_types::UnansweredCut {
+        notices[0].no_progress,
+        Some(core_types::NoProgressCut {
             model: "gpt-5.6-sol".to_string(),
             waited: SCENE_WINDOW,
             cut: 1,
@@ -5409,16 +5413,16 @@ async fn check_a_model_that_never_starts_is_stopped_after_two_cuts(wire: SceneWi
 }
 
 #[tokio::test]
-async fn a_model_that_never_starts_is_stopped_after_two_cuts_sse() {
-    check_a_model_that_never_starts_is_stopped_after_two_cuts(SceneWire::Sse, "U-never-starts-sse")
+async fn a_model_that_makes_no_progress_is_stopped_after_two_cuts_sse() {
+    check_a_model_that_makes_no_progress_is_stopped_after_two_cuts(SceneWire::Sse, "U-no-progress-sse")
         .await;
 }
 
 #[tokio::test]
-async fn a_model_that_never_starts_is_stopped_after_two_cuts_websocket() {
-    check_a_model_that_never_starts_is_stopped_after_two_cuts(
+async fn a_model_that_makes_no_progress_is_stopped_after_two_cuts_websocket() {
+    check_a_model_that_makes_no_progress_is_stopped_after_two_cuts(
         SceneWire::WebSocket,
-        "U-never-starts-ws",
+        "U-no-progress-ws",
     )
     .await;
 }

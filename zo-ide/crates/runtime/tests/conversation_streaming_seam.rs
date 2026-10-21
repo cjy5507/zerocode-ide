@@ -2099,12 +2099,12 @@ fn sync_run_turn_demotes_a_spent_5xx_ladder() {
     assert!(history.contains("lighter sync answer"), "got {history:?}");
 }
 
-// --- A request zo stopped sending for silence → one-tier demotion (t-68710) ------
+// --- A request zo stopped sending for no progress → one-tier demotion (t-68710) ---
 
 /// What a ChatGPT turn hands up once zo cut the same request twice in a row because its
-/// model sent no response event within the stall window.
-const SPENT_UNANSWERED: &str = "provider stream: transport error: api failed after 2 attempts: \
-     api stream error (stream_startup_no_progress): gpt-5.6-sol sent no response event within 240s, \
+/// model made no progress for the stall window.
+const SPENT_NO_PROGRESS: &str = "provider stream: transport error: api failed after 2 attempts: \
+     api stream error (stream_startup_no_progress): gpt-5.6-sol made no progress for 240s, \
      so zo cut the request (2/2) and stopped sending it; transport keep-alives are not progress; \
      attempt 1 heard response.created, then keep-alives only; \
      attempt 2 heard response.created, then keep-alives only";
@@ -2123,10 +2123,10 @@ fn runtime_on(
 /// cuts. The turn continues one tier down instead of failing, and its one warning names the
 /// model, the wait and the cut — not a provider's capacity.
 #[tokio::test]
-async fn a_request_stopped_for_silence_continues_the_turn_one_tier_down_and_says_why() {
+async fn a_request_stopped_for_no_progress_continues_the_turn_one_tier_down_and_says_why() {
     let _env = hermetic_env();
     let main = Arc::new(ServerFaultingAsyncApi::new(
-        SPENT_UNANSWERED,
+        SPENT_NO_PROGRESS,
         ProviderErrorClass::Transient,
         "lighter answer",
     ));
@@ -2143,7 +2143,7 @@ async fn a_request_stopped_for_silence_continues_the_turn_one_tier_down_and_says
     assert_eq!(
         warn_texts(&blocks),
         vec![format!(
-            "gpt-5.6-sol sent no response event within 240s, so zo cut the request (2/2) and \
+            "gpt-5.6-sol made no progress for 240s, so zo cut the request (2/2) and \
              stopped sending it; this turn continues on {lighter}. The next turn starts on \
              gpt-5.6-sol again."
         )],
@@ -2154,10 +2154,10 @@ async fn a_request_stopped_for_silence_continues_the_turn_one_tier_down_and_says
 /// (2) With no lighter tier the turn stops, and the words it ends with name the model, the
 /// wait and the cut.
 #[tokio::test]
-async fn a_request_stopped_for_silence_on_the_bottom_rung_ends_the_turn_in_its_words() {
+async fn a_request_stopped_for_no_progress_on_the_bottom_rung_ends_the_turn_in_its_words() {
     let _env = hermetic_env();
     let main = Arc::new(ServerFaultingAsyncApi::new(
-        SPENT_UNANSWERED,
+        SPENT_NO_PROGRESS,
         ProviderErrorClass::Transient,
         "never",
     ));
@@ -2166,7 +2166,7 @@ async fn a_request_stopped_for_silence_on_the_bottom_rung_ends_the_turn_in_its_w
     let (result, blocks) = run_turn_reporting(&mut runtime, "hi").await;
     let error = result.expect_err("the bottom rung has no lighter tier: the turn stops");
     assert!(
-        error.contains("sent no response event within 240s, so zo cut the request (2/2)"),
+        error.contains("made no progress for 240s, so zo cut the request (2/2)"),
         "{error}"
     );
     assert_eq!(main.overrides(), vec![None], "no second request");

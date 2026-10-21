@@ -460,20 +460,20 @@ pub struct StreamRetryNotice {
     /// [`StreamNoticeKind::QuietReasoning`], how long the stream has been
     /// quiet so far.
     pub delay: std::time::Duration,
-    /// Set when zo cut the attempt itself because its model sent no response
-    /// event within the stall window: the row names the model and the wait
-    /// instead of a cause label.
-    pub unanswered: Option<UnansweredCut>,
+    /// Set when zo cut the attempt itself because its model made no progress
+    /// for the stall window: the row names the model and the wait instead of a
+    /// cause label.
+    pub no_progress: Option<NoProgressCut>,
 }
 
-/// An attempt zo cut because its model sent no response event within the
-/// stall window, and where the cut stands in the run of cuts after which zo
-/// stops sending the request.
+/// An attempt zo cut because its model made no progress for the stall window,
+/// and where the cut stands in the run of cuts after which zo stops sending the
+/// request.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnansweredCut {
+pub struct NoProgressCut {
     /// The model the request went to.
     pub model: String,
-    /// How long zo waited for a response event before it cut the attempt.
+    /// How long zo waited without a response event before it cut the attempt.
     pub waited: std::time::Duration,
     /// This cut's number in the run of cuts in a row, 1-based.
     pub cut: u32,
@@ -1070,16 +1070,19 @@ mod tests {
             "a fatal-by-text server error is not named as transient"
         );
         let stall = "api stream error (stream_startup_no_progress): no response event within 120s after server_error x7; transport keep-alives are not progress";
-        assert_eq!(
-            retry_notice_label(stall),
-            "no response from the model",
-            "zo's own cut of a silent stream says what happened, not a provider fault (t-68710)"
-        );
-        assert_eq!(
-            classify_error_text(stall),
-            RetrySignal::Transient,
-            "a stall is still retried like an idle timeout"
-        );
+        let cut = "api stream error (stream_startup_no_progress): gpt-6.1-sol made no progress for 240s, so zo cut the request (1/2); transport keep-alives are not progress";
+        for text in [stall, cut] {
+            assert_eq!(
+                retry_notice_label(text),
+                "no progress from the model",
+                "zo's own cut of a stream with no progress says what happened, not a provider fault (t-68710): {text}"
+            );
+            assert_eq!(
+                classify_error_text(text),
+                RetrySignal::Transient,
+                "a stall is still retried like an idle timeout: {text}"
+            );
+        }
     }
 
     #[test]

@@ -2720,10 +2720,10 @@ fn a_4xx_a_silent_stream_or_a_dropped_connection_is_not_demoted() {
 }
 
 /// What a ChatGPT turn hands up once zo cut the same request twice in a row because
-/// its model sent no response event within the stall window (t-68710), as the stream
-/// road delivers it.
-const UNANSWERED_STOP: &str = "runtime: provider stream: transport error: api failed after 2 attempts: \
-     api stream error (stream_startup_no_progress): gpt-5.6-sol sent no response event within 240s, \
+/// its model made no progress for the stall window (t-68710), as the stream road
+/// delivers it.
+const NO_PROGRESS_STOP: &str = "runtime: provider stream: transport error: api failed after 2 attempts: \
+     api stream error (stream_startup_no_progress): gpt-5.6-sol made no progress for 240s, \
      so zo cut the request (2/2) and stopped sending it; transport keep-alives are not progress; \
      attempt 1 heard response.created, then keep-alives only; \
      attempt 2 heard response.created, then keep-alives only";
@@ -2741,19 +2741,19 @@ fn runtime_on(model: &str) -> ConversationRuntime<NoopApiClient, StaticToolExecu
     runtime
 }
 
-/// A request zo stopped sending because its model never started answering takes the
-/// road a spent 5xx ladder takes (t-15565): one tier down the same provider, once per
-/// turn. Sending the same bytes again bought nothing in the reported turn: eight cuts
-/// of 240 s, 33 minutes, no output (t-68710).
+/// A request zo stopped sending because its model made no progress takes the road a
+/// spent 5xx ladder takes (t-15565): one tier down the same provider, once per turn.
+/// Sending the same bytes again bought nothing in the reported turn: eight cuts of
+/// 240 s, 33 minutes, no output (t-68710).
 #[test]
-fn a_request_stopped_for_silence_continues_one_tier_down_once_per_turn() {
+fn a_request_stopped_for_no_progress_continues_one_tier_down_once_per_turn() {
     let stopped = || {
-        RuntimeError::with_provider_error_class(UNANSWERED_STOP, api::ProviderErrorClass::Transient)
+        RuntimeError::with_provider_error_class(NO_PROGRESS_STOP, api::ProviderErrorClass::Transient)
     };
     let mut runtime = runtime_on("gpt-5.6-sol");
     let QuotaEscape::Lighter(lighter) = runtime.decide_quota_escape_with_gate(&stopped(), |_| false)
     else {
-        panic!("a request zo stopped sending for silence must continue one tier down");
+        panic!("a request zo stopped sending for no progress must continue one tier down");
     };
     assert!(lighter.contains("luna"), "sol continues on luna: {lighter}");
     assert_eq!(
@@ -2775,10 +2775,10 @@ fn a_request_stopped_for_silence_continues_one_tier_down_once_per_turn() {
 /// and a stopped request on the bottom rung, which has no lighter tier. These fail the
 /// turn as before.
 #[test]
-fn a_ceiling_stop_or_the_bottom_rung_is_not_demoted_for_silence() {
+fn a_ceiling_stop_or_the_bottom_rung_is_not_demoted_for_no_progress() {
     for text in [
         "runtime: provider stream: transport error: api failed after 4 attempts: api stream error \
-         (stream_startup_no_progress): gpt-5.6-sol sent no response event within 30s after \
+         (stream_startup_no_progress): gpt-5.6-sol made no progress for 30s after \
          server_error x3; transport keep-alives are not progress; attempt 4 heard keep-alives only",
         "runtime: provider stream: transport error: api failed after 8 attempts: api stream error \
          (stream_startup_no_progress): no response event within 240s; transport keep-alives are \
@@ -2796,7 +2796,7 @@ fn a_ceiling_stop_or_the_bottom_rung_is_not_demoted_for_silence() {
     }
     let mut bottom = runtime_on("gpt-5.6-luna");
     let stopped =
-        RuntimeError::with_provider_error_class(UNANSWERED_STOP, api::ProviderErrorClass::Transient);
+        RuntimeError::with_provider_error_class(NO_PROGRESS_STOP, api::ProviderErrorClass::Transient);
     assert!(
         matches!(
             bottom.decide_quota_escape_with_gate(&stopped, |_| false),
