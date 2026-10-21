@@ -548,11 +548,17 @@ document.addEventListener("focusout", (event) => {
   if (event.target !== keySink && event.target?.closest?.(TYPING_FIELDS) && typingRunHolds(run)) run.moved = true;
 }, true);
 
+/* A key the black box may name: one of the platform's named keys — `Enter`,
+ * `ArrowLeft`, `F1`, an ASCII name that starts upper case. Anything else is a
+ * character somebody typed, whatever its length in UTF-16 (an emoji, a
+ * character outside the basic plane), and stays out of the log (t-11740). */
+const NAMED_KEY = /^[A-Z][A-Za-z0-9]+$/;
+
 /* How a gesture is named in the black box — the event, and a key only by its
- * name: a printable key is a letter somebody typed and stays out (t-11740). */
+ * name. */
 function handWord(event) {
   if (event.type !== "keydown") return event.type;
-  return event.key.length > 1 ? `keydown ${event.key}` : "keydown";
+  return NAMED_KEY.test(event.key) ? `keydown ${event.key}` : "keydown";
 }
 
 /* Every key, before anything else in this window hears it — ahead of the
@@ -658,7 +664,8 @@ function sayTypingNotSent() {
 
 /* A key the router would have sent to a pane, held off by the run: it goes
  * nowhere, and is counted. Printable text reaches the sink and is counted on
- * the text road (`routeText`); a chord is counted without its letter. */
+ * the text road (`routeText`); a key with no name is counted as `key chord`,
+ * without its character. */
 function holdOffKey(event) {
   if (!typingHeldOff()) return;
   const active = document.activeElement;
@@ -666,7 +673,7 @@ function holdOffKey(event) {
   const plain = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
   if (plain && active === keySink) return;
   event.preventDefault();
-  typingNotSent(event.key.length > 1 ? `key ${event.key}` : "key chord", 1);
+  typingNotSent(NAMED_KEY.test(event.key) ? `key ${event.key}` : "key chord", 1);
 }
 
 /* Why the stage moved, said with the shells it now reads (t-69526):

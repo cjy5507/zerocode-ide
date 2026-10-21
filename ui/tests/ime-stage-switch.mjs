@@ -42,6 +42,8 @@ const SCRIPT = Object.freeze({
   settleMs: 160,
   latencyRounds: 40,
   notSentToast: "화면이 바뀌어 친 글자를 보내지 않았습니다",
+  /* 합성 글자 하나 — U+1F600, UTF-16 두 단위. */
+  wideKey: "\u{1F600}",
 });
 
 /* 이 창의 입력 층에 브라우저가 내는 열 그대로를 쏘는 손 — `ime-broken-commit`의
@@ -63,6 +65,9 @@ export function standImeHands(script) {
       sink.dispatchEvent(new CompositionEvent("compositionend", { data, bubbles: true }));
     } else if (kind === "enter") {
       sink.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 13, bubbles: true, cancelable: true }));
+    } else if (kind === "press") {
+      // A key the IME does not hold, by the character it carries.
+      sink.dispatchEvent(new KeyboardEvent("keydown", { key: data, bubbles: true, cancelable: true }));
     }
   };
   const rec = { texts: [], keys: [], watches: [], logs: [] };
@@ -130,6 +135,9 @@ export async function sceneProgramRaisesTheWorker(script) {
     ...syllable("ㅎ", "하", ["ㅎ", "ㅏ"]),
     ...syllable("ㅅ", "세", ["ㅅ", "ㅔ"]),
     ...syllable("ㅇ", "요", ["ㅇ", "ㅛ"]),
+    // A character outside the basic plane, two UTF-16 units long: held off
+    // like the rest, and named in the black box by no more than its kind.
+    ["press", script.wideKey],
     ["enter"],
   ]);
   await wait(script.settleMs);
@@ -303,7 +311,8 @@ export async function testImeStageSwitch(browser, origin, ok) {
       "장면 1: 버린 글은 한 번 말한다 — 토스트 하나, 창 기록 한 줄(종류와 글자 수만, 글자는 없이)",
       one.toast === 1 && one.notSent.length === 1 &&
         one.notSent[0].includes("ime 4") && one.notSent[0].includes("key Enter 1") &&
-        !/[㄰-㆏가-힣]/.test(one.notSent[0]),
+        one.notSent[0].includes("key chord 1") && !one.notSent[0].includes(SCRIPT.wideKey) &&
+        /^[\x20-\x7e·]*$/.test(one.notSent[0]),
       JSON.stringify(one.notSent),
     );
     ok(
