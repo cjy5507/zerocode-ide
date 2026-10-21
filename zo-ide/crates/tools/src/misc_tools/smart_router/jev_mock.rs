@@ -1,5 +1,5 @@
 //! The fake System One every zo seat's tests ask — one scripted HTTP answer on
-//! a loopback port that records each request body it saw — and the machine
+//! a loopback port that records each request it saw — and the machine
 //! such a test stands on: a config home with one consented workspace, a key,
 //! and the mock's origin in the environment for the length of the test.
 //!
@@ -52,7 +52,7 @@ impl SettingsChange {
 pub(super) const APPLICATION_CHANGES: [&str; 6] = ["none", "off", "shadow", "global_off", "consent", "model"];
 
 /// One scripted HTTP answer on a loopback port, recording each request
-/// body it saw. `std::net` on a thread, because the tools crate's tokio
+/// it saw. `std::net` on a thread, because the tools crate's tokio
 /// has no network driver of its own — the client brings its own.
 ///
 /// Dropping the mock closes its port: the accept thread is woken, sees the stop
@@ -62,7 +62,7 @@ pub(super) const APPLICATION_CHANGES: [&str; 6] = ["none", "off", "shadow", "glo
 /// 256 (t-20571).
 pub(super) struct Mock {
     pub(super) base_url: String,
-    bodies: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<String>>>,
     addr: SocketAddr,
     stop: Arc<AtomicBool>,
 }
@@ -83,7 +83,7 @@ struct Bound {
     listener: TcpListener,
     base_url: String,
     addr: SocketAddr,
-    bodies: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
 }
 
@@ -95,7 +95,7 @@ impl Mock {
             listener,
             base_url: format!("http://{addr}"),
             addr,
-            bodies: Arc::new(Mutex::new(Vec::new())),
+            requests: Arc::new(Mutex::new(Vec::new())),
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -103,7 +103,7 @@ impl Mock {
     /// A port that accepts and never answers — a judgment that misses any
     /// wall put in front of it.
     pub(super) fn silent() -> Self {
-        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
+        let Bound { listener, base_url, addr, requests, stop } = Self::bind();
         let watching = Arc::clone(&stop);
         std::thread::spawn(move || {
             let mut held: Vec<TcpStream> = Vec::new();
@@ -115,7 +115,7 @@ impl Mock {
             }
             drop(held);
         });
-        Self { base_url, bodies, addr, stop }
+        Self { base_url, requests, addr, stop }
     }
 
     /// A port whose first answer is `delay` late and whose later answers
@@ -125,8 +125,8 @@ impl Mock {
     /// holds two of them open at the same moment and a server that
     /// answered them in turn would be measuring itself.
     pub(super) fn slow_first(delay: Duration, body: String) -> Self {
-        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
-        let recorder = Arc::clone(&bodies);
+        let Bound { listener, base_url, addr, requests, stop } = Self::bind();
+        let recorder = Arc::clone(&requests);
         let watching = Arc::clone(&stop);
         std::thread::spawn(move || {
             for (nth, stream) in listener.incoming().enumerate() {
@@ -152,7 +152,7 @@ impl Mock {
                 });
             }
         });
-        Self { base_url, bodies, addr, stop }
+        Self { base_url, requests, addr, stop }
     }
 
     /// A port that reads each request and answers it with whatever `answer`
@@ -161,8 +161,8 @@ impl Mock {
     /// asked under. Each connection is answered on its own thread, because
     /// the shards leave together.
     pub(super) fn answering(answer: impl Fn(&str) -> (u16, String) + Send + Sync + 'static) -> Self {
-        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
-        let recorder = Arc::clone(&bodies);
+        let Bound { listener, base_url, addr, requests, stop } = Self::bind();
+        let recorder = Arc::clone(&requests);
         let watching = Arc::clone(&stop);
         let answer = Arc::new(answer);
         std::thread::spawn(move || {
@@ -175,7 +175,7 @@ impl Mock {
                 let answer = Arc::clone(&answer);
                 std::thread::spawn(move || {
                     let request = read_request(&mut stream);
-                    let (status, body) = answer(&request);
+                    let (status, body) = answer(parts(&request).1);
                     if let Ok(mut seen) = recorder.lock() {
                         seen.push(request);
                     }
@@ -187,15 +187,15 @@ impl Mock {
                 });
             }
         });
-        Self { base_url, bodies, addr, stop }
+        Self { base_url, requests, addr, stop }
     }
 
     /// A port whose first answer is a `503` that asks the client to wait
     /// `wait` — its `Retry-After`, as a server waiting out a restart sends
     /// one (t-58193) — and whose later answers are `then`.
     pub(super) fn waiting_first(wait: &'static str, then: String) -> Self {
-        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
-        let recorder = Arc::clone(&bodies);
+        let Bound { listener, base_url, addr, requests, stop } = Self::bind();
+        let recorder = Arc::clone(&requests);
         let watching = Arc::clone(&stop);
         std::thread::spawn(move || {
             for (nth, stream) in listener.incoming().enumerate() {
@@ -220,12 +220,12 @@ impl Mock {
                 let _ = stream.write_all(response.as_bytes());
             }
         });
-        Self { base_url, bodies, addr, stop }
+        Self { base_url, requests, addr, stop }
     }
 
     pub(super) fn serving(status: u16, body: String) -> Self {
-        let Bound { listener, base_url, addr, bodies, stop } = Self::bind();
-        let recorder = Arc::clone(&bodies);
+        let Bound { listener, base_url, addr, requests, stop } = Self::bind();
+        let recorder = Arc::clone(&requests);
         let watching = Arc::clone(&stop);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -244,16 +244,32 @@ impl Mock {
                 let _ = stream.write_all(response.as_bytes());
             }
         });
-        Self { base_url, bodies, addr, stop }
+        Self { base_url, requests, addr, stop }
     }
 
     pub(super) fn requests(&self) -> Vec<String> {
-        self.bodies.lock().map(|seen| seen.clone()).unwrap_or_default()
+        self.seen().iter().map(|request| parts(request).1.to_string()).collect()
+    }
+
+    /// The head of each request the mock read — its request line and its
+    /// headers, as the client wrote them — in the order it read them.
+    pub(super) fn heads(&self) -> Vec<String> {
+        self.seen().iter().map(|request| parts(request).0.to_string()).collect()
+    }
+
+    fn seen(&self) -> Vec<String> {
+        self.requests.lock().map(|seen| seen.clone()).unwrap_or_default()
     }
 }
 
-/// The body of one HTTP/1.1 request: headers up to the blank line, then
-/// exactly `Content-Length` bytes.
+/// A request as the mock read it, cut into its head and its body. One that
+/// ended before its blank line is all body, as it was read.
+fn parts(request: &str) -> (&str, &str) {
+    request.split_once("\r\n\r\n").unwrap_or(("", request))
+}
+
+/// One HTTP/1.1 request as it was read: headers up to the blank line, then
+/// exactly `Content-Length` bytes of body.
 fn read_request(stream: &mut std::net::TcpStream) -> String {
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -280,7 +296,7 @@ fn read_request(stream: &mut std::net::TcpStream) -> String {
         }
         buffer.extend_from_slice(&chunk[..read]);
     }
-    String::from_utf8_lossy(&buffer[header_end..]).into_owned()
+    String::from_utf8_lossy(&buffer).into_owned()
 }
 
 

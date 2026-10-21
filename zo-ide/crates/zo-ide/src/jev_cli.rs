@@ -1,6 +1,8 @@
 //! `zo jev summary` — every Jev seat's ledger, counted
 //! (docs/design/jev-settings-20260917.md §5) — and `zo jev ask|choose|score`,
-//! an agent's own question put to the agent tool seat from a shell (t-6040).
+//! an agent's own question put to the agent tool seat from a shell (t-6040),
+//! and `zo jev decide`, one of the person's own decisions asked by its name
+//! (t-62170).
 //!
 //! The window asks `summary` rather than counting for itself: the window↔zo
 //! line is an exec boundary, and a screen that counted the rows would be a
@@ -34,6 +36,7 @@ zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--a
 zo jev ask <question> [--context <text>] [--cwd <dir>] [--json]
 zo jev choose <question> (--option <text>... | --stdin) [--context <text>] [--cwd <dir>] [--json]
 zo jev score <question> --level <text>... (--item <text>... | --stdin) [--cwd <dir>] [--json]
+zo jev decide <name> [--context <text>] [--item <text>... | --stdin] [--cwd <dir>] [--json]
 zo jev review [--seat <id>] [--limit <n>] [--audit <n>] [--seed <n>] [--json]
 zo jev outcome <case-id> --question <id> --correct true|false --reviewer human|agent|execution --note <text> [--json]
 zo jev export [--seat <id>] [--json]
@@ -75,6 +78,15 @@ zo jev rules activate <definition-id> [--cwd <dir>] [--json]
   as the tool would return it.
   Exit codes: ask 0 = yes, 1 = no, 2 = nothing answered (off, refused,
   failed, or a bad command line); choose and score 0 = answered, 2 = not.
+
+  decide: ask one of the person's own decisions by its name (t-62170): one
+  they made in ZeroCode to be asked when an agent asks. smart.customDecisions
+  and the decision's own mode say what happens: off sends nothing, shadow
+  records the answer for the person and prints none, on prints the
+  decision's one line when its answer is as sure as its act-from line.
+  --context and --item are what the decision reads; --stdin reads the items.
+  --json prints the verdict. Exit codes: 0 = the line was printed, 2 = no
+  line (off, shadow, refused, unsure, an unknown name, or a bad command line).
 ";
 
 /// What `zo jev` refused, and the exit code the verb refuses with:
@@ -122,9 +134,21 @@ struct JudgeRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct DecideRequest {
+    name: String,
+    context: Option<String>,
+    items: Vec<String>,
+    /// Read the items from standard input.
+    stdin: bool,
+    cwd: Option<PathBuf>,
+    json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Request {
     Summary(SummaryRequest),
     Judge(JudgeRequest),
+    Decide(DecideRequest),
     Learning(learning::Request),
     Rules(rules::Request),
 }
@@ -138,6 +162,7 @@ fn parse(args: &[String]) -> Result<Request, Refused> {
         Some("review" | "outcome" | "export" | "archive") => learning::parse(args).map(Request::Learning),
         Some("rules") => rules::parse(&args[1..]).map(Request::Rules),
         Some("summary") => parse_summary(&args[1..]).map(Request::Summary),
+        Some("decide") => parse_decide(&args[1..]).map(Request::Decide),
         Some(verb) if JevShape::from_word(verb).is_some() => {
             let shape = JevShape::from_word(verb).unwrap_or(JevShape::Ask);
             parse_judge(shape, &args[1..]).map(Request::Judge)
@@ -220,6 +245,36 @@ fn parse_judge(shape: JevShape, args: &[String]) -> Result<JudgeRequest, Refused
     Ok(request)
 }
 
+fn parse_decide(args: &[String]) -> Result<DecideRequest, Refused> {
+    let refuse = |message: String| Refused { message, exit: NO_ANSWER_EXIT };
+    let mut request =
+        DecideRequest { name: String::new(), context: None, items: Vec::new(), stdin: false, cwd: None, json: false };
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let mut value = |flag: &str| {
+            rest.next().cloned().ok_or_else(|| refuse(format!("{flag} needs a value")))
+        };
+        match arg.as_str() {
+            "--json" => request.json = true,
+            "--stdin" => request.stdin = true,
+            "--cwd" => request.cwd = Some(PathBuf::from(value("--cwd")?)),
+            "--context" => request.context = Some(value("--context")?),
+            "--item" => request.items.push(value("--item")?),
+            flag if flag.starts_with("--") => {
+                return Err(refuse(format!("unknown argument '{flag}'\n\n{USAGE}")));
+            }
+            word if request.name.is_empty() => request.name = word.to_string(),
+            word => {
+                return Err(refuse(format!("one name only; '{word}' came after it (quote a name that has spaces)")));
+            }
+        }
+    }
+    if request.name.trim().is_empty() {
+        return Err(refuse(format!("decide needs a decision's name\n\n{USAGE}")));
+    }
+    Ok(request)
+}
+
 /// The options or items standard input carried: one JSON array of strings,
 /// or one per line with blank lines dropped.
 #[must_use]
@@ -250,18 +305,26 @@ pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Re
         Request::Rules(request) => rules::run(&request, cwd, &runtime::default_config_home()),
         Request::Summary(request) => Ok(run_summary(&request, cwd, now_ms, offset_s)),
         Request::Judge(request) => {
-            let parts = if request.stdin {
-                let mut text = String::new();
-                std::io::stdin()
-                    .read_to_string(&mut text)
-                    .map_err(|error| Refused { message: format!("could not read stdin: {error}"), exit: NO_ANSWER_EXIT })?;
-                parts_from_text(&text)
-            } else {
-                Vec::new()
-            };
+            let parts = if request.stdin { stdin_parts()? } else { Vec::new() };
             run_judge(&request, parts, cwd)
         }
+        Request::Decide(request) => {
+            let mut items = request.items.clone();
+            if request.stdin {
+                items.extend(stdin_parts()?);
+            }
+            run_decide(&request, &items, cwd)
+        }
     }
+}
+
+/// The parts standard input carried ([`parts_from_text`]).
+fn stdin_parts() -> Result<Vec<String>, Refused> {
+    let mut text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .map_err(|error| Refused { message: format!("could not read stdin: {error}"), exit: NO_ANSWER_EXIT })?;
+    Ok(parts_from_text(&text))
 }
 
 fn run_summary(request: &SummaryRequest, cwd: &Path, now_ms: i64, offset_s: i64) -> Report {
@@ -279,12 +342,30 @@ fn run_summary(request: &SummaryRequest, cwd: &Path, now_ms: i64, offset_s: i64)
     let seats = jev_summary::with_rests(seats, &cwd);
     Report {
         text: if request.json {
-            render_json(&seats, request.act_lines).to_string()
+            let mut said = render_json(&seats, request.act_lines);
+            let decisions = jev_summary::custom_decisions(&roots, request.sessions.as_deref(), now_ms, offset_s);
+            said["customDecisions"] = custom_decisions_json(&decisions);
+            said.to_string()
         } else {
             render_text(&seats)
         },
         exit: HEADLESS_LOOP_EXIT_DONE,
     }
+}
+
+/// Ask the person's decision `request` names, with `items` beside the
+/// context: its line and exit 0 when it hands one, else why not and exit 2.
+fn run_decide(request: &DecideRequest, items: &[String], cwd: &Path) -> Result<Report, Refused> {
+    let cwd = request.cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
+    let verdict = tools::custom_decide(&cwd, &request.name, request.context.as_deref(), items)
+        .map_err(|message| Refused { message, exit: NO_ANSWER_EXIT })?;
+    let exit = if verdict.line.is_some() { HEADLESS_LOOP_EXIT_DONE } else { NO_ANSWER_EXIT };
+    let text = if request.json {
+        serde_json::to_string_pretty(&verdict).unwrap_or_default()
+    } else {
+        verdict.line.clone().unwrap_or_else(|| verdict.note.clone())
+    };
+    Ok(Report { text, exit })
 }
 
 /// Decide one question verb: `parts` is what standard input carried, read
@@ -449,6 +530,33 @@ fn decision_json(decision: &jev_summary::SeatDecision) -> Value {
         "agreed": decision.agreed,
         "followed": decision.followed,
     })
+}
+
+fn version_json(version: &jev_summary::VersionReport) -> Value {
+    json!({
+        "definition": version.definition,
+        "requestsToday": version.requests_today,
+        "requestsWeek": version.requests_week,
+        "latest": version.latest.as_ref().map(decision_json),
+    })
+}
+
+/// The person's own decisions (t-62170): each with its own mode and the
+/// version it asks with now — that version's requests today and over the
+/// week, and its latest answer — and every earlier version counted apart.
+fn custom_decisions_json(decisions: &[jev_summary::DecisionReport]) -> Value {
+    decisions
+        .iter()
+        .map(|decision| {
+            let mut said = version_json(&decision.current);
+            said["id"] = Value::from(decision.id.as_str());
+            said["name"] = Value::from(decision.name.as_str());
+            said["mode"] = Value::from(decision.mode.key());
+            said["earlier"] = decision.earlier.iter().map(version_json).collect::<Vec<Value>>().into();
+            said
+        })
+        .collect::<Vec<Value>>()
+        .into()
 }
 
 /// What a seat's graded answers say of its act line (t-9468): the line they

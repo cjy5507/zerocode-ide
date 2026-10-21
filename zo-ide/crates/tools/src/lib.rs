@@ -99,6 +99,7 @@ pub use hunk_attribution::{
 };
 pub use misc_tools::agent_store_dir;
 pub use misc_tools::jev_summary;
+pub use misc_tools::{custom_decide, CustomVerdict};
 pub use misc_tools::{
     agent_tool_mode_from, agent_tool_path, jev_decide, AgentToolRow, JevAnswer, JevCaller,
     JevInvalid, JevQuestion, JevShape, JevVerdict, ScoredItem, AGENT_TOOL_FILE,
