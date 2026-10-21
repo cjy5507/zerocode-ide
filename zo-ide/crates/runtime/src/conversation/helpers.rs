@@ -774,6 +774,30 @@ mod ask_input_tests {
         );
     }
 
+    /// `AskUserQuestion` is deferred, so its schema never reaches the provider
+    /// and `multiSelect` can arrive as the words "true"/"false" (t-68770).
+    /// This streaming road answers the question before the tools crate's
+    /// dispatch seam could put the type back, so it reads the words itself —
+    /// those two words and nothing else.
+    #[test]
+    fn multi_select_takes_the_words_true_and_false() {
+        let parsed = parse_ask_input(
+            r#"{"question":"둘 다 고를까요?","options":["가","나"],"multiSelect":" True "}"#,
+        )
+        .expect("a spelled-out true");
+        assert!(parsed.multi_select);
+        let parsed = parse_ask_input(
+            r#"{"question":"하나만 고를까요?","options":["가","나"],"multi_select":"false"}"#,
+        )
+        .expect("a spelled-out false through the alias");
+        assert!(!parsed.multi_select);
+        let typed = parse_ask_input(r#"{"question":"?","multiSelect":true}"#).expect("typed");
+        assert!(typed.multi_select);
+        let error = parse_ask_input(r#"{"question":"?","multiSelect":"yes"}"#)
+            .expect_err("any other word still fails");
+        assert!(error.contains("expected a boolean"), "{error}");
+    }
+
     /// A hook's stdout is captured with no size bound (`hooks::run_hook`), and
     /// output that is not JSON becomes a feedback message verbatim
     /// (`parse_hook_output`). So a chatty `PostToolUse` hook — a linter, a test

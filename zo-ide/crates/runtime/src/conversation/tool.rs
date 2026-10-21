@@ -394,4 +394,17 @@ mod tests {
         assert!(tool_execution_input("Agent", "toolu_123", "not json").is_none());
         assert!(tool_execution_input("Agent", "toolu_123", "[1]").is_none());
     }
+
+    /// A spelled-out duration is not waited here (t-68770). The runtime cannot
+    /// read `"5000"`, and marking the call slept after a 0 ms wait would have
+    /// the tool — which the dispatch seam hands the number back to — report a
+    /// wait that never happened. The tool waits itself instead.
+    #[test]
+    fn a_sleep_the_runtime_cannot_read_is_left_to_the_tool() {
+        assert!(sleep_tool_execution_input("Sleep", r#"{"duration_ms":"5000"}"#).is_none());
+        let (wait, input) = sleep_tool_execution_input("Sleep", r#"{"duration_ms":250}"#)
+            .expect("a typed duration is waited here");
+        assert_eq!(wait, Duration::from_millis(250));
+        assert!(input.contains("__zo_already_slept"), "{input}");
+    }
 }
