@@ -33661,7 +33661,7 @@ details.task-board-section > summary {
 
 /* ---- 코디네이터 데스크 (t-6588 → t-67607) ---------------------------------
  *
- * 데스크는 상황판의 세 탭 위에 선다(사람이 통과시킨 시안 B). 「지금」 탭은 두 단과
+ * 데스크는 상황판의 탭 위에 선다(사람이 통과시킨 시안 B). 「지금」 탭은 두 단과
  * 넓은 한 단이다: 왼쪽 넓은 열에 당신 차례, 오른쪽에 빌드 줄, 그 아래 통합 묶음과
  * 지금 도는 일이 판의 폭 전체를 쓴다. 한 장만 서면 그 장이 행을 다 쓴다. 「워커」와
  * 「기록」은 한 열이다. 목록과 같은 폭(76em)이고, 빈 블록은 접히고 나머지가 차례대로
@@ -34479,7 +34479,7 @@ details.task-board-section > summary {
 }
 
 /* ---- 일정 (t-67482) --------------------------------------------------------------
- * 작업 상황판의 둘째 보기(`shell-board-schedule.js`): 빌드 줄·결합 게이트·발행 레인·
+ * 작업 상황판의 「일정」 탭(`shell-board-schedule.js`): 빌드 줄·결합 게이트·발행 레인·
  * 워커 과업을 시간축 하나에 막대로 세운다. 그릇이 제 폭을 잰다(`board-schedule`) — 좁으면
  * 이름과 말이 막대 위 한 줄로 올라가고 막대는 판의 폭을 다 쓴다. 막대는 커스텀 속성
  * 셋(`--from`·`--to`·`--done`, 트랙의 퍼센트)으로 서고, 「지금」 선(`--now`)과 눈금
@@ -34488,14 +34488,6 @@ details.task-board-section > summary {
  * 없는 예상은 점선 테두리. 행의 말이 같은 것을 글로 한 번 더 말한다.
  * 막대의 상태는 제 이름(`data-bar-state`)으로 단다: 창 전체가 쓰는 `data-state`는
  * 규칙 73개(`:has()` 둘)가 지켜봐서, 행 하나를 바꾸는 데 효율 코어에서 1.5 ms가 들었다. */
-.task-board-views {
-  margin-top: var(--space-3);
-}
-
-.task-board-surface.is-schedule > :is(.task-board-desk, .task-board-filters, .task-board-sections, .task-board-empty) {
-  display: none;
-}
-
 .task-board-schedule {
   --schedule-label: 14em;
   --schedule-said: 12em;
@@ -34915,14 +34907,16 @@ details.task-board-section > summary {
 
 /* ---- 작업 상황판 · 시안 B (t-67607) ------------------------------------------
  *
- * 사람이 통과시킨 Geist 언어의 상황판: 밑줄 탭 셋, 24px 머리 문장 하나, 1px 고리
- * 그림자를 두른 카드, 상태 표식 곁의 낱말, 행 안의 단추. 값은 모두 tokens.css의 역할과
- * Geist 묶음 글꼴(`--type-*`)이다. 파랑(`--signal-you`)은 당신 차례 한 곳에만 쓴다. */
+ * 사람이 통과시킨 Geist 언어의 상황판: 밑줄 탭 넷(일정은 t-67482), 24px 머리 문장
+ * 하나, 1px 고리 그림자를 두른 카드, 상태 표식 곁의 낱말, 행 안의 단추. 값은 모두
+ * tokens.css의 역할과 Geist 묶음 글꼴(`--type-*`)이다. 파랑(`--signal-you`)은 당신
+ * 차례 한 곳에만 쓴다. */
 
 /* 탭이 보이는 블록을 정한다 — 블록마다 제 탭(`data-board-tab-of`), 표면에 고른 탭
  * 하나(`data-board-tab`). 원장이 없는 창에는 나눌 것이 없어 탭도 머리 문장도 서지
  * 않고, 에이전트 작업 목록이 예전처럼 판 전체에 선다. */
 .task-board-surface[data-board-ledger="on"][data-board-tab="now"] [data-board-tab-of]:not([data-board-tab-of="now"]),
+.task-board-surface[data-board-ledger="on"][data-board-tab="schedule"] [data-board-tab-of]:not([data-board-tab-of="schedule"]),
 .task-board-surface[data-board-ledger="on"][data-board-tab="workers"] [data-board-tab-of]:not([data-board-tab-of="workers"]),
 .task-board-surface[data-board-ledger="on"][data-board-tab="history"] [data-board-tab-of]:not([data-board-tab-of="history"]),
 .task-board-surface[data-board-ledger="none"] .board-now-tabs,
@@ -35431,15 +35425,6 @@ details.task-board-section > summary {
 .board-runs {
   display: grid;
   min-width: 0;
-}
-
-.board-now-schedule {
-  padding: var(--space-3) var(--space-4);
-  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
-}
-
-.board-now-schedule[hidden] {
-  display: none;
 }
 
 .board-goal {

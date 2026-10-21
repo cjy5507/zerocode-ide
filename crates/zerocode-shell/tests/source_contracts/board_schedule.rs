@@ -119,6 +119,53 @@ fn the_schedule_reads_the_workspace_setting_from_memory_and_locks_nothing() {
     }
 }
 
+/// The schedule is the board's second tab (t-67482 over t-67607's draft B):
+/// its block stands on the 「일정」 tab, the tab is the board's one choice
+/// (`boardNowTab`, `chooseBoardTab`), and the view draws and asks only while
+/// the surface the tabs just wrote stands on that tab with the ledger's runs
+/// behind it. The 「지금 | 일정」 switch that came before the tabs is gone.
+#[test]
+fn the_schedule_is_the_boards_second_tab_and_opens_only_on_it() {
+    let markup = include_str!("../../../../ui/index.html");
+    let styles = include_str!("../../../../ui/shell.css");
+    assert!(
+        markup.contains(
+            "<section class=\"task-board-schedule\" hidden data-board-tab-of=\"schedule\""
+        ),
+        "the schedule's block does not stand on the 「일정」 tab"
+    );
+    assert!(
+        markup.contains("data-board-tab-button=\"schedule\"")
+            && markup.contains("data-i18n=\"board.schedule.tab\">일정</button>"),
+        "the 「일정」 tab has no button with its own words"
+    );
+    let window = window_source();
+    for gone in [
+        "data-task-board-view",
+        "task-board-views",
+        "is-schedule",
+        "boardScheduleChoice.view",
+    ] {
+        assert!(
+            !markup.contains(gone) && !styles.contains(gone) && !window.contains(gone),
+            "the switch that came before the tabs is back (`{gone}`)"
+        );
+    }
+    let open = block_after(window, "function paintBoardSchedule(");
+    assert!(
+        open.contains("surface.dataset.boardTab === \"schedule\"")
+            && open.contains("surface.dataset.boardLedger === \"on\""),
+        "the schedule opens on something other than its tab:\n{open}"
+    );
+    let desk = block_after(window, "function paintCoordinatorDesk(");
+    let at = |needle: &str| desk.find(needle).unwrap_or(usize::MAX);
+    assert!(
+        at("paintBoardTabs(view);") < at("paintBoardSchedule(view);")
+            && desk.matches("paintBoardSchedule(").count() == 1,
+        "the schedule reads a tab the desk has not written yet:\n{desk}"
+    );
+}
+
 /// The view asks only while it is seen, with the revision it holds, and asks a
 /// log only by a name its answer listed; every state word the command writes
 /// has the view's own reading, and the part is one the contracts read.

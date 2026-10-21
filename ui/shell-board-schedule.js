@@ -1,6 +1,6 @@
 /* ---- 일정 (t-67482) -----------------------------------------------------------
  *
- * 작업 상황판의 「일정」 보기: 빌드 줄의 일감, 그 가운데 결합 게이트의 묶음, 발행
+ * 작업 상황판의 「일정」 탭: 빌드 줄의 일감, 그 가운데 결합 게이트의 묶음, 발행
  * 레인, 워커 과업을 시간축 하나에 막대로 세운다. 끝난 것은 시작~끝, 도는 것은
  * 시작~예상 끝, 기다리는 것은 예상 시작~예상 끝이다. 사람이 아침마다 물은 「빌드 뒤
  * 다음 일정은」「언제 반영되나」에 창이 먼저 답한다.
@@ -13,12 +13,12 @@
  * 흘러도 백엔드를 다시 부르지 않는다.
  *
  * 그림은 부품 하나다(`paintBoardScheduleHost`): 어느 그릇에 담겨도 그 그릇의 폭으로
- * 접힌다(shell.css 「일정」 절의 `@container board-schedule`). 지금은 작업 상황판의
- * 「지금 | 일정」 전환이 그릇을 세운다. */
+ * 접힌다(shell.css 「일정」 절의 `@container board-schedule`). 그릇은 작업 상황판의 네 탭
+ * 가운데 「일정」의 블록이다(shell-board-now.js의 `BOARD_TABS`, t-67607의 시안 B). */
 
 /* 일정의 박자와 범위, 한 표. */
 const BOARD_SCHEDULE = Object.freeze({
-  /* 보기가 보일 때만 도는 박자. 묻을 때 쥔 판 번호를 함께 보내, 파일이 그대로면
+  /* 탭이 보일 때만 도는 박자. 묻을 때 쥔 판 번호를 함께 보내, 파일이 그대로면
    * 백엔드는 「그대로」만 답하고 여기는 아무것도 다시 그리지 않는다. */
   everyMs: 5_000,
   /* 「지금」 선과 남은 시간은 분 단위로 움직인다 — 5초에 옮길 픽셀은 없다. */
@@ -85,12 +85,12 @@ const BOARD_SCHEDULE_TASK_STATES = Object.freeze({
 let boardScheduleAnswer = null;
 let boardScheduleAsking = false;
 let boardScheduleAgain = false;
-/* 마지막으로 물은 때. 보기를 다시 열면 이것이 박자 하나보다 오래됐을 때만 곧바로
+/* 마지막으로 물은 때. 탭을 다시 열면 이것이 박자 하나보다 오래됐을 때만 곧바로
  * 묻는다 — 열 때마다 묻지도, 첫 박자를 기다리지도 않는다(데스크와 같은 규칙). */
 let boardScheduleAskedAt = 0;
-/* 사람이 고른 것: 보기(지금·일정), 확대, 접은 묶음, 편 게이트, 연 로그. 창의
- * 기억이지 원장의 것이 아니다 — 판이 다시 그려져도 남는다. */
-const boardScheduleChoice = { view: "now", zoom: "day", folded: new Set(), opened: new Set(), log: null };
+/* 사람이 고른 것: 확대, 접은 묶음, 편 게이트, 연 로그. 고른 탭은 상황판의 것이다
+ * (`boardNowTab`). 창의 기억이지 원장의 것이 아니다 — 판이 다시 그려져도 남는다. */
+const boardScheduleChoice = { zoom: "day", folded: new Set(), opened: new Set(), log: null };
 /* 고른 것이 바뀔 때마다 오르는 수: 그림의 서명에 든다. */
 let boardScheduleChoiceRevision = 0;
 /* 연 로그의 답(`LogTail`), 읽는 중이면 `{ reading: true }`. */
@@ -115,7 +115,7 @@ function boardScheduleRemembered(key, make) {
   return said;
 }
 
-/* 일정이 서 있는 그릇들: 작업 보기의 보드에서 「일정」을 고른 판. */
+/* 일정이 서 있는 그릇들: 작업 보기의 보드에서 「일정」 탭을 고른 판. */
 function boardScheduleHosts() {
   return deskViews()
     .map((view) => view.querySelector(".task-board-schedule"))
@@ -126,26 +126,17 @@ function noteBoardScheduleChoice() {
   boardScheduleChoiceRevision += 1;
 }
 
-/* 작업 상황판의 두 보기 — 지금(데스크와 작업 목록)과 일정. 작업 보기의 그림이 부르고,
- * 복제된 판은 리스너를 들고 오지 않으므로 그릴 때마다 단추를 다시 맨다(보드 머리와
- * 같은 규칙). */
+/* 「일정」 탭의 블록. 데스크의 그림(`paintCoordinatorDesk`)이 탭을 쓴 뒤에 부른다 — 그릇은
+ * 표면이 지금 든 탭(`data-board-tab`)이 「일정」이고 원장의 런이 있어 탭이 설 때만
+ * 보이고(`data-board-ledger`, `paintBoardTabs`), 그때만 묻고 박자를 돌린다. 탭을 바꾸는
+ * 손은 상황판의 것이다(`chooseBoardTab`). */
 function paintBoardSchedule(view) {
   const surface = view.querySelector(".task-board-surface");
   const host = surface?.querySelector(".task-board-schedule");
   if (!host) return;
-  const chosen = boardScheduleChoice.view === "schedule";
-  for (const button of surface.querySelectorAll("[data-task-board-view]")) {
-    writeAttribute(button, "aria-pressed", String(button.dataset.taskBoardView === boardScheduleChoice.view));
-    button.onclick = () => {
-      if (boardScheduleChoice.view === button.dataset.taskBoardView) return;
-      boardScheduleChoice.view = button.dataset.taskBoardView;
-      noteBoardScheduleChoice();
-      paintBoardSchedule(view);
-    };
-  }
-  // A view that opens asks at once, with no revision: the range it shows starts now.
+  const chosen = surface.dataset.boardTab === "schedule" && surface.dataset.boardLedger === "on";
+  // A tab that opens asks at once, with no revision: the range it shows starts now.
   const opening = chosen && host.hidden;
-  writeClass(surface, "is-schedule", chosen);
   writeHidden(host, !chosen);
   boardSchedulePoller.sync();
   if (!chosen) return;
@@ -160,7 +151,7 @@ function boardScheduleFrom() {
 }
 
 /* 백엔드에 묻는다. 쥔 판 번호를 함께 보내고, 같은 판이면 답은 「그대로」뿐이다.
- * 보기를 처음 열거나 확대를 바꾸면 판 번호 없이 묻는다 — 보이는 범위가 달라졌다. */
+ * 탭을 처음 열거나 확대를 바꾸면 판 번호 없이 묻는다 — 보이는 범위가 달라졌다. */
 function refreshBoardSchedule({ fresh = false } = {}) {
   if (boardScheduleAsking) {
     boardScheduleAgain = boardScheduleAgain || fresh;
@@ -185,7 +176,7 @@ function refreshBoardSchedule({ fresh = false } = {}) {
 }
 
 /* 로그 하나를 연다: 같은 명령에 일감 이름이나 레인 sha를 실어 끝 줄들을 받는다.
- * 프로젝트 밖의 파일이라 편집기의 문(`read_text_file`)은 거절한다 — 그래서 이 보기
+ * 프로젝트 밖의 파일이라 편집기의 문(`read_text_file`)은 거절한다 — 그래서 이 탭
  * 아래 칸에 보인다. 같은 것을 다시 누르면 닫는다. */
 function openBoardScheduleLog(ask) {
   const same = boardScheduleChoice.log && JSON.stringify(boardScheduleChoice.log) === JSON.stringify(ask);
@@ -819,12 +810,11 @@ function paintBoardScheduleLog(log) {
   writeTextContent(lines, text);
 }
 
-/* 워커 과업의 행을 누르면 「지금」 보기의 그 과업으로 간다: 작업 목록에 그 과업이
- * 있으면 고르고, 없으면 데스크의 과업 흐름에서 그 단계를 펴고 그 행을 보인다. */
+/* 워커 과업의 행을 누르면 「기록」 탭의 그 과업으로 간다 — 과업의 넘김·검증·비용이 서는
+ * 곳이다: 작업 목록에 그 과업이 있으면 고르고, 없으면 데스크의 과업 흐름에서 그 단계를
+ * 펴고 그 행을 보인다. */
 function openBoardScheduleTask(view, task) {
-  boardScheduleChoice.view = "now";
-  noteBoardScheduleChoice();
-  paintBoardSchedule(view);
+  chooseBoardTab(view, "history", false);
   const key = JSON.stringify([task.run, task.id]);
   const group = taskBoardModels.get(view)?.groups.find((one) => one.key === key);
   if (group) {
@@ -837,7 +827,7 @@ function openBoardScheduleTask(view, task) {
     ?.scrollIntoView({ block: "center" });
 }
 
-/* 보이는 동안의 박자. 보드가 숨거나 「지금」으로 돌아가면 멈춘다. */
+/* 보이는 동안의 박자. 보드가 숨거나 다른 탭으로 가면 멈춘다. */
 const boardSchedulePoller = idlePoller({
   wanted: () => boardScheduleHosts().length > 0,
   every: BOARD_SCHEDULE.everyMs,

@@ -1,4 +1,4 @@
-/* 일정 보기의 무게 (t-67482) — 50행을 그리는 ms, 요소 수, 조용한 박자의 쓰기 수, 열어 둔 보기의
+/* 일정 탭의 무게 (t-67482) — 50행을 그리는 ms, 요소 수, 조용한 박자의 쓰기 수, 열어 둔 탭의
  * 쉬는 CPU.
  *
  * 「숫자 없는 개선 금지」의 자다. 50행 픽스처(`boardScheduleFiftyRows`)는 결정적이다: 레인 4, 게이트
@@ -11,8 +11,8 @@
  *      하나의 상태가 바뀜), 각각 그 뒤의 강제 레이아웃까지. 다시 그리기는 p50·p95.
  *   2. 요소 수 — 그릇 안의 모든 요소.
  *   3. 조용한 박자의 쓰기 수 — `unchanged` 답 뒤의 MutationObserver 기록. 0이어야 한다.
- *   4. 쉬는 CPU — 보기를 연 채 N초와 「지금」 보기로 N초, 렌더러의 TaskDuration(CDP) 차이를 벽시계로
- *      나눈 백분율: 5초 박자와 1분 시계가 드는 값이다. 백엔드의 몫(명령 한 번)은 러스트 시험
+ *   4. 쉬는 CPU — 「일정」 탭을 연 채 N초와 「지금」 탭으로 N초, 렌더러의 TaskDuration(CDP) 차이를
+ *      벽시계로 나눈 백분율: 5초 박자와 1분 시계가 드는 값이다. 백엔드의 몫(명령 한 번)은 러스트 시험
  *      `schedule_timeline::tests::a_look_costs_little_when_nothing_moved`가 잰다.
  *
  * 저사양 프로필(tools/low-spec/profile.mjs의 두 단계):
@@ -130,8 +130,9 @@ async function measure(page, { polls, idleSecs }) {
     openBoard();
   }, boardScheduleFiftyRows(Date.now()));
   await page.evaluate(async () => {
-    await window.__UNTIL__(() => document.querySelector('#board-view [data-task-board-view="schedule"]'), "the switch");
-    document.querySelector('#board-view [data-task-board-view="schedule"]').click();
+    const tab = () => document.querySelector('#board-view [data-board-tab-button="schedule"]');
+    await window.__UNTIL__(() => tab()?.checkVisibility(), "the schedule's tab");
+    tab().click();
     await window.__UNTIL__(() => document.querySelectorAll("#board-view .board-schedule-row").length >= 50, "fifty rows", 5000);
   });
   const paint = await page.evaluate(async (polls) => {
@@ -181,7 +182,7 @@ async function measure(page, { polls, idleSecs }) {
     watch.disconnect();
     return { first, rows, elements, moved, quiet, writes: records.length };
   }, polls);
-  // The idle cost: the view open, then the board's 「now」 view, each for idleSecs.
+  // The idle cost: the schedule's tab open, then the board's 「now」 tab, each for idleSecs.
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Performance.enable");
   const taskSeconds = async () => (await cdp.send("Performance.getMetrics")).metrics
@@ -193,7 +194,7 @@ async function measure(page, { polls, idleSecs }) {
     return ((cpu1 - cpu0) / ((wall1 - wall0) / 1000)) * 100;
   };
   const open = await idle();
-  await page.evaluate(() => document.querySelector('#board-view [data-task-board-view="now"]').click());
+  await page.evaluate(() => document.querySelector('#board-view [data-board-tab-button="now"]').click());
   const closed = await idle();
   return { ...paint, idleOpenPercent: open, idleClosedPercent: closed, idleDeltaPercent: open - closed };
 }

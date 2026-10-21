@@ -3,8 +3,8 @@
  * 시안(아티팩트 p-90883818b247d08e v2, reports/t-67561/b.html)과 같은 예시 상황을
  * 창의 데스크 답으로 세우고(`draftBoardOverlay`), 시안이 스스로 잰 넷을 같은 셈으로
  * 잰다: 1440×900 첫 화면의 숫자(개수·시각·분) ≤ 8, 묶음(카드) 3, 글자 크기 단계 4,
- * 원장의 영어 진단 노출 0. 그리고 세 탭, 당신 차례의 단추가 원장의 문(`desk_reply`·
- * `desk_hold_resolve`·`desk_review_pass`)으로만 가는지, 원장이 없는 창에서 예전
+ * 원장의 영어 진단 노출 0. 그리고 네 탭(일정은 t-67482), 당신 차례의 단추가 원장의
+ * 문(`desk_reply`·`desk_hold_resolve`·`desk_review_pass`)으로만 가는지, 원장이 없는 창에서 예전
  * 작업 목록이 그대로 서는지, 30과업·7워커의 그림이 저사양(CPU 4배 감속)에서 3 ms·
  * 요소 400 안인지를 잰다.
  *
@@ -172,7 +172,7 @@ export async function testBoardNow(browser, origin, ok) {
     await page.evaluate(async () => { await askReleaseStatus(); await paintBoardView(); });
     await fullBoard(page);
 
-    /* ---- 세 탭과 맨 위 한 문장 ---- */
+    /* ---- 네 탭과 맨 위 한 문장 ---- */
     const head = await page.evaluate(() => {
       const surface = document.querySelector("#board-view .task-board-surface");
       return {
@@ -182,8 +182,9 @@ export async function testBoardNow(browser, origin, ok) {
         sub: surface.querySelector(".task-board-summary").textContent,
       };
     });
-    ok("the board opens on the Now tab of three, the chosen one alone in the Tab order",
-      head.tab === "now" && head.ledger === "on" && JSON.stringify(head.tabs) === JSON.stringify([["now", "true", 0], ["workers", "false", -1], ["history", "false", -1]]),
+    ok("the board opens on the Now tab of four, the chosen one alone in the Tab order",
+      head.tab === "now" && head.ledger === "on" && JSON.stringify(head.tabs)
+        === JSON.stringify([["now", "true", 0], ["schedule", "false", -1], ["workers", "false", -1], ["history", "false", -1]]),
       JSON.stringify(head));
     ok("the sentence on top counts what waits on the person — one question and one review",
       head.title === "답할 일 2개 — 나머지는 저절로 돕니다", JSON.stringify(head));

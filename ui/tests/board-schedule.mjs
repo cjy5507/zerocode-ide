@@ -1,5 +1,5 @@
-/* 일정 (t-67482) — 작업 상황판의 「일정」 보기가 빌드 줄·결합 게이트·발행 레인·워커 과업을
- * 시간축 위 제자리에 세우는가.
+/* 일정 (t-67482) — 작업 상황판의 「일정」 탭(시안 B의 네 탭 가운데 둘째, t-67607)이 빌드 줄·결합
+ * 게이트·발행 레인·워커 과업을 시간축 위 제자리에 세우는가.
  *
  * 답은 러스트가 픽스처(`ui/tests/fixtures/board-schedule/`)에서 지은 그대로다: `answer.json`은
  * `schedule_timeline::tests::the_fixture_reads_into_the_answer_the_board_draws`가 값 하나까지
@@ -7,7 +7,8 @@
  * 09:50 KST — l61 게이트가 PAUSE 뒤에 서 있고, 그 전에 시작한 일감 둘이 돌고, v1.1.83 레인이 루트
  * 게이트에 있다. 셈(지난 소요의 중앙값)은 러스트 시험의 것이고, 여기서 재는 것은 배치와 그림이다:
  * 묶음마다 행 수, 막대의 시작과 끝, 예상 끝과 남은 시간, 기다리는 일감이 실행기 기록이 말한 줄에
- * 서는 차례와 시작을 모를 때의 말, 묶기와 펴기, 「지금」 선, 조용한 박자, 좁은 그릇, 눈금 글 사이의 틈.
+ * 서는 차례와 시작을 모를 때의 말, 묶기와 펴기, 「지금」 선, 조용한 박자, 좁은 그릇, 눈금 글 사이의 틈,
+ * 그리고 탭: 일정 탭만 그리고 묻고, 다른 탭으로 가면 숨고 멈추며, 워커 과업은 기록 탭의 그 과업으로 간다.
  *
  *   node ui/tests/board-schedule.mjs */
 import { mkdir, readFile } from "node:fs/promises";
@@ -54,7 +55,7 @@ export function installBoardSchedule({ answer, desk }) {
   window.__PANES__ = [];
   window.__LEDGER__ = [];
   agentBoardMode = "tasks";
-  boardScheduleChoice.view = "now";
+  boardNowTab = "now";
   boardScheduleChoice.zoom = "day";
   boardScheduleChoice.folded.clear();
   boardScheduleChoice.opened.clear();
@@ -62,11 +63,13 @@ export function installBoardSchedule({ answer, desk }) {
   openBoard();
 }
 
-/* Open the schedule view and wait until its rows stand. */
+/* Choose the schedule's tab the way a person does — once the tabs stand, which is once the desk's
+ * runs arrived — and wait until its rows stand. */
 export async function openBoardSchedule(page) {
   await page.evaluate(async () => {
-    await window.__UNTIL__(() => document.querySelector('#board-view [data-task-board-view="schedule"]'), "the view switch");
-    document.querySelector('#board-view [data-task-board-view="schedule"]').click();
+    const tab = () => document.querySelector('#board-view [data-board-tab-button="schedule"]');
+    await window.__UNTIL__(() => tab()?.checkVisibility(), "the schedule's tab");
+    tab().click();
     await window.__UNTIL__(() => document.querySelector("#board-view .board-schedule-row"), "the schedule's rows", 5000);
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
   });
@@ -167,6 +170,55 @@ export async function testBoardSchedule(browser, origin, ok) {
       drawn.asked[0]?.known === null && drawn.asked[0]?.fromMs === from, JSON.stringify(drawn.asked[0]));
     ok("「now」 stands two thirds of the way across a day view: sixteen hours behind it, eight ahead",
       near(drawn.now, placed(SCHEDULE_NOW, from, to)), String(drawn.now));
+
+    /* ---- 탭: 상황판의 네 탭 가운데 둘째, 그 탭에서만 그리고 묻는다 ------------------------ */
+    const board = () => page.evaluate(() => {
+      const surface = document.querySelector("#board-view .task-board-surface");
+      const shown = (selector) => surface.querySelector(selector)?.checkVisibility() ?? false;
+      return {
+        tab: surface.dataset.boardTab,
+        tabs: [...surface.querySelectorAll(".board-now-tab")].map((one) =>
+          [one.dataset.boardTabButton, one.getAttribute("aria-selected"), one.tabIndex, one.textContent]),
+        focused: document.activeElement?.dataset.boardTabButton ?? null,
+        schedule: shown(".task-board-schedule"),
+        hidden: surface.querySelector(".task-board-schedule").hidden,
+        intro: shown(".task-board-intro"),
+        desk: shown(".task-board-desk"),
+        list: shown(".task-board-filters") || shown(".task-board-sections"),
+        switches: surface.querySelectorAll("[data-task-board-view]").length,
+        // The beat's own test (`boardSchedulePoller`'s `wanted`): a schedule standing on screen.
+        beating: boardScheduleHosts().length,
+        asked: window.__SCHEDULE_ASKED__.length,
+      };
+    });
+    const onTab = await board();
+    ok("the schedule is the second of the board's four tabs, and its tab shows the schedule alone",
+      onTab.tab === "schedule" && JSON.stringify(onTab.tabs) === JSON.stringify([["now", "false", -1, "지금"],
+        ["schedule", "true", 0, "일정"], ["workers", "false", -1, "워커"], ["history", "false", -1, "기록"]])
+        && onTab.schedule && !onTab.intro && !onTab.desk && !onTab.list && onTab.switches === 0 && onTab.beating === 1,
+      JSON.stringify(onTab));
+    // The person's hand on the Now tab, then the arrow key from there (the tab strip's own keys, t-67607).
+    await page.evaluate(() => {
+      const now = document.querySelector('#board-view [data-board-tab-button="now"]');
+      now.focus();
+      now.click();
+    });
+    const away = await board();
+    ok("on another tab the schedule is hidden and its five-second beat has nothing to read",
+      away.tab === "now" && away.hidden && !away.schedule && away.intro && away.beating === 0, JSON.stringify(away));
+    await page.keyboard.press("ArrowRight");
+    const fresh = await page.evaluate(async (since) => {
+      await window.__UNTIL__(() => !document.querySelector("#board-view .task-board-schedule").hidden
+        && document.querySelector("#board-view .board-schedule-row"), "the schedule again");
+      await window.__UNTIL__(() => !boardScheduleAsking, "the reopened tab's answer");
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return window.__SCHEDULE_ASKED__.slice(since).filter((one) => one.known === null);
+    }, away.asked);
+    const again = await board();
+    ok("an arrow key from Now opens the schedule's tab, which asks once afresh for the range it shows",
+      again.tab === "schedule" && again.focused === "schedule" && again.schedule && again.beating === 1
+        && fresh.length === 1 && fresh[0].fromMs === from,
+      JSON.stringify({ again, fresh }));
 
     /* ---- 발행 레인: 끝난 v1.1.82와 루트 게이트에 있는 v1.1.83 -------------------- */
     const lanes = drawn.groups.lanes.rows;
@@ -311,14 +363,21 @@ export async function testBoardSchedule(browser, origin, ok) {
     }
     drawn = await moveScheduleLine(page, { runner_lanes: answer.line.runner_lanes, quiet_wanted: false, disk_low: false });
 
-    /* ---- 워커 과업을 누르면 「지금」 보기의 그 과업으로 ---------------------------- */
+    /* ---- 워커 과업을 누르면 「기록」 탭의 그 과업으로 — 넘김·검증·비용이 서는 곳 ------------ */
     await page.evaluate(() => document.querySelector('#board-view [data-key="task:run-4275/t-67102"]').click());
-    const went = await page.evaluate(() => ({
-      view: document.querySelector('#board-view [data-task-board-view="now"]').getAttribute("aria-pressed"),
-      schedule: document.querySelector("#board-view .task-board-schedule").hidden,
-      stage: deskChoice.stage,
-    }));
-    ok("a worker task's row goes to that task on the 「now」 view", went.view === "true" && went.schedule && went.stage === "reported",
+    const went = await page.evaluate(async () => {
+      await new Promise((done) => requestAnimationFrame(done));
+      const surface = document.querySelector("#board-view .task-board-surface");
+      return {
+        tab: surface.dataset.boardTab,
+        chosen: surface.querySelector('[data-board-tab-button="history"]').getAttribute("aria-selected"),
+        schedule: surface.querySelector(".task-board-schedule").hidden,
+        stage: deskChoice.stage,
+        row: surface.querySelector('.board-desk-task[data-task="run-4275/t-67102"]')?.checkVisibility() ?? false,
+      };
+    });
+    ok("a worker task's row goes to that task on the History tab, its stage open in the task flow",
+      went.tab === "history" && went.chosen === "true" && went.schedule && went.stage === "reported" && went.row,
       JSON.stringify(went));
 
     /* ---- 한 주로 넓히면 ------------------------------------------------------------ */
