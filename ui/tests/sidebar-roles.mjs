@@ -347,6 +347,8 @@ export async function testSidebarRoles({ browser, origin, ok, faults }) {
     const heads = await desk.page.evaluate(async () => {
       window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-2" ? { ...row, taken_over: true } : row);
       for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: Date.now() });
+      // The workers' rows stand on the board's 워커 tab (t-67607).
+      chooseBoardTab(document.querySelector("#board-view"), "workers", false);
       const read = () => Object.fromEntries([...document.querySelectorAll('#board-view [data-desk-block="workers"] .board-desk-worker')]
         .map((row) => [row.dataset.worker.split("/")[1], row.querySelector(".board-desk-worker-id")?.textContent ?? ""]));
       // Bounded: on a window without role words the head never changes, and the check below says so.
