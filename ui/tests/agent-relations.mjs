@@ -37,10 +37,11 @@ export async function testAgentRelations(browser, origin, ok) {
     ok('task scope preserves the full inventory and shows only its participants', await page.evaluate(() => {
       const view=document.querySelector('#board-view'); return agentGraphModels.get(view).agents.length===1 && agentGraphFullModel(view).agents.length===6;
     }));
-    ok('scoped project folds work without changing the full inventory', await page.evaluate(() => {
-      const view=document.querySelector('#board-view');const key=agentGraphModels.get(view).bands[0].key;
-      agentGraphFoldProject(view,key);const folded=agentGraphModels.get(view).bands[0].folded;
-      agentGraphFoldProject(view,key);return folded && !agentGraphModels.get(view).bands[0].folded && agentGraphFullModel(view).agents.length===6;
+    // 방향 E2: 범위 안의 워커는 제 실행의 열에 선다 — 그 실행의 코디가 범위 밖이어도 열은 실행을 머리로 단다.
+    ok('a scoped picture stands its run\'s column without changing the full inventory', await page.evaluate(() => {
+      const view=document.querySelector('#board-view');const teams=agentGraphModels.get(view).teams;
+      return teams.length===1 && teams[0].runs.join()==='run-test' && view.querySelectorAll('.agent-graph-team').length===1
+        && agentGraphFullModel(view).agents.length===6;
     }));
     await page.evaluate(() => selectAgentGraphEntity(document.querySelector('#board-view'),'agent:term:101'));
     ok('scoped inspector exposes cross-task mail and dependencies', await page.locator('.agent-relation-row').count() >= 2);
@@ -249,14 +250,12 @@ export async function testAgentRelationsForm(browser, origin, ok) {
         const shown = (selector) => { const held = view.querySelector(selector); return held ? getComputedStyle(held).display !== 'none' : null; };
         const railBox = view.querySelector('.agent-relations-rail')?.getBoundingClientRect();
         const dress = getComputedStyle(view);
-        const surface = getComputedStyle(view.querySelector('.agent-graph-surface'));
         const px = (name, from = dress) => Number.parseFloat(from.getPropertyValue(name));
-        const scale = px('--agent-graph-density', surface) * agentGraphTuning(view).fitFloor;
-        const lanes = 2;
-        const need = (AGENT_GRAPH_CONTEXT_LAYERS.length * px('--agent-graph-context-width')
-          + lanes * px('--agent-graph-agent-width') + (AGENT_GRAPH_CONTEXT_LAYERS.length + lanes - 1) * px('--agent-graph-layer-gap')) * scale;
+        // 방향 E2: 코디의 열은 제 최소 폭으로 나란히 서거나, 그림이 좁으면 한 열로 쌓인다.
         const scroll = view.querySelector('.agent-graph-scroll');
         const inner = scroll.clientWidth - Number.parseFloat(getComputedStyle(scroll).paddingLeft) - Number.parseFloat(getComputedStyle(scroll).paddingRight);
+        const columns = new Set([...view.querySelectorAll('.agent-graph-team')].map((one) => Math.round(one.getBoundingClientRect().left))).size;
+        const need = columns > 1 ? px('--agent-graph-team-width') * columns : 0;
         const toggle = view.querySelector('.agent-inspector-toggle');
         const before = view.classList.contains('is-inspector-open');
         toggle?.click();
@@ -267,7 +266,7 @@ export async function testAgentRelationsForm(browser, origin, ok) {
           railToken: px('--agent-relations-rail-width'), railDrawerToken: px('--agent-relations-rail-width-drawer'),
           inspectorPlace: getComputedStyle(view.querySelector('.agent-inspector')).position === 'static' ? 'beside' : 'floating',
           toggle: shown('.agent-inspector-toggle'), toggled: !before && after.open && after.expanded === 'true',
-          list: view.classList.contains('is-graph-list'), need: Math.round(need), inner: Math.round(inner),
+          list: view.classList.contains('is-graph-list'), need: Math.round(need), inner: Math.round(inner), columns,
           fits: fits(view) && fits(view.querySelector('.agent-graph-head')) && fits(view.querySelector('.agent-relations-toolbar')) && fits(scroll) };
       }, width);
     };
@@ -279,9 +278,8 @@ export async function testAgentRelationsForm(browser, origin, ok) {
         && tiers.list.rail && tiers.list.railWidth === tiers.list.railDrawerToken && tiers.list.toggle
         && tiers.sheet.rail === false && tiers.sheet.list && tiers.tight.rail === false,
       JSON.stringify(tiers));
-    ok('F5 at every tier a two-lane picture fits the canvas at the fit floor, and nothing scrolls sideways',
-      ['wide', 'side', 'drawer', 'list'].every((key) => tiers[key].inner >= tiers[key].need)
-        && Object.values(tiers).every((one) => one.fits),
+    ok('F5 at every tier the coordinators\' columns stand side by side at their own width or stack in one, and nothing scrolls sideways',
+      Object.values(tiers).every((one) => one.inner >= one.need && one.fits) && tiers.wide.columns > 1 && tiers.tight.columns === 1,
       JSON.stringify(tiers));
 
     const tasksMode = await page.evaluate(async () => {
@@ -318,7 +316,7 @@ export async function testAgentRelationsForm(browser, origin, ok) {
         scopeTitle: pair('.agent-graph-scope-title', '.agent-graph-surface'), scopeCopy: pair('.agent-graph-scope-copy', '.agent-graph-surface'),
         railTitle: pair('.agent-relations-rail-item b', '.agent-relations-rail'), railSmall: pair('.agent-relations-rail-item small', '.agent-relations-rail'),
         inspectorKind: pair('.agent-inspector-kind', '.agent-inspector'), inspectorTitle: pair('.agent-inspector-title', '.agent-inspector'),
-        hint: pair('.agent-graph-gesture-hint', '.agent-graph-canvas-foot'), stat: pair('.agent-graph-stat.is-attention .agent-graph-stat-count', '.agent-graph-head') };
+        hint: pair('.agent-graph-gesture-hint', '.agent-graph-canvas-foot'), stat: pair('.agent-graph-stat.is-you .agent-graph-stat-count', '.agent-graph-stat.is-you') };
     });
     const readable = (ink) => ink && ink.scopeTitle >= 4.5 && ink.railTitle >= 4.5 && ink.inspectorTitle >= 4.5 && ink.stat >= 4.5
       && ink.scopeCopy >= 3 && ink.railSmall >= 3 && ink.inspectorKind >= 3 && ink.hint >= 3;

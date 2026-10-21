@@ -1,0 +1,170 @@
+{
+  "runs": [
+    {
+      "run": "run-4275",
+      "name": "코디 런",
+      "seat": false,
+      "term": null,
+      "held": true,
+      "generation": 1,
+      "vacated_ms": null,
+      "mail": 0,
+      "news": 0,
+      "landing": 1,
+      "batched": 0
+    }
+  ],
+  "tasks": [
+    {
+      "run": "run-4275",
+      "id": "t-63492",
+      "title": "사람이 할 결정을 zo가 묻는다",
+      "stage": "dispatched",
+      "gate": null,
+      "blocked_by": [],
+      "closed": null,
+      "created_ms": 1792537500000,
+      "cost": null,
+      "writing": null,
+      "times": {
+        "started_ms": 1792537800000,
+        "handed_ms": null,
+        "verified_ms": null,
+        "landed_ms": null
+      }
+    },
+    {
+      "run": "run-4275",
+      "id": "t-67102",
+      "title": "기다림 설정 읽기를 메인 밖으로",
+      "stage": "reported",
+      "gate": null,
+      "blocked_by": [],
+      "closed": null,
+      "created_ms": 1792534500000,
+      "cost": null,
+      "writing": null,
+      "times": {
+        "started_ms": 1792534800000,
+        "handed_ms": 1792541100000,
+        "verified_ms": null,
+        "landed_ms": null
+      }
+    },
+    {
+      "run": "run-4275",
+      "id": "t-66539",
+      "title": "입력 지연 실측",
+      "stage": "verified",
+      "gate": null,
+      "blocked_by": [],
+      "closed": null,
+      "created_ms": 1792500600000,
+      "cost": null,
+      "writing": null,
+      "times": {
+        "started_ms": 1792501200000,
+        "handed_ms": 1792519200000,
+        "verified_ms": 1792539000000,
+        "landed_ms": null
+      }
+    },
+    {
+      "run": "run-4275",
+      "id": "t-67064",
+      "title": "작업 브라우저는 혼자 몬다",
+      "stage": "merged",
+      "gate": null,
+      "blocked_by": [],
+      "closed": null,
+      "created_ms": 1792513200000,
+      "cost": null,
+      "writing": null,
+      "times": {
+        "started_ms": 1792513800000,
+        "handed_ms": 1792527000000,
+        "verified_ms": 1792531200000,
+        "landed_ms": 1792532700000
+      }
+    },
+    {
+      "run": "run-4275",
+      "id": "t-66982",
+      "title": "공급자 오류를 말로",
+      "stage": "merged",
+      "gate": null,
+      "blocked_by": [],
+      "closed": null,
+      "created_ms": 1792510200000,
+      "cost": null,
+      "writing": null,
+      "times": {
+        "started_ms": 1792510800000,
+        "handed_ms": 1792524600000,
+        "verified_ms": 1792530600000,
+        "landed_ms": 1792532700000
+      }
+    },
+    {
+      "run": "run-4275",
+      "id": "t-62493",
+      "title": "실제 입력",
+      "stage": "merged",
+      "gate": null,
+      "blocked_by": [],
+      "closed": null,
+      "created_ms": 1792371000000,
+      "cost": null,
+      "writing": null,
+      "times": {
+        "started_ms": 1792371600000,
+        "handed_ms": 1792389600000,
+        "verified_ms": 1792400400000,
+        "landed_ms": 1792402200000
+      }
+    },
+    {
+      "run": "run-4275",
+      "id": "t-60888",
+      "title": "라벨이 흐르게",
+      "stage": "pending",
+      "gate": null,
+      "blocked_by": [],
+      "closed": null,
+      "created_ms": 1792540800000,
+      "cost": null,
+      "writing": null
+    }
+  ],
+  "stages": [
+    {
+      "stage": "dispatched",
+      "count": 1
+    },
+    {
+      "stage": "reported",
+      "count": 1
+    },
+    {
+      "stage": "verified",
+      "count": 1
+    },
+    {
+      "stage": "merged",
+      "count": 3
+    },
+    {
+      "stage": "pending",
+      "count": 1
+    }
+  ],
+  "mail": [],
+  "news": [],
+  "counts": {
+    "mail": 0,
+    "news": 0,
+    "folded": 0
+  },
+  "folded_batches": [],
+  "land_batches": []
+}

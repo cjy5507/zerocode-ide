@@ -241,15 +241,18 @@ pub struct ForkSource {
 }
 
 /// The target, coordinates and mark numbering of a staged Computer picture,
-/// and the title its window showed — the document the model chose words on,
-/// which a click re-picked there must still be on (t-66760).
-#[derive(Debug, PartialEq)]
+/// and the document its window showed — its title, and its identity when the
+/// window gives one (an `AXDocument`, a page's URL): the document the model
+/// chose words on, which a click re-picked there must still be on (t-66760,
+/// t-68358).
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ComputerObservation {
     pub app: Option<String>,
     pub window_id: Option<u64>,
     pub frame: ShotFrame,
     pub marked_look: Option<String>,
     pub title: Option<String>,
+    pub document: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -625,16 +628,17 @@ impl ToolContext {
             .and_then(|seen| seen.app.as_ref().map(|app| ComputerTarget { app: app.clone(), window_id: seen.window_id }))
     }
 
-    /// The title window `window_id` showed in the last picture staged for
-    /// this model, when that picture was of it (t-66760).
-    pub(crate) fn computer_window_title(&self, window_id: u64) -> Option<String> {
+    /// The last picture staged for this model, when it was of window
+    /// `window_id`: the title and document identity the window showed in it
+    /// (t-66760, t-68358).
+    pub(crate) fn computer_window_look(&self, window_id: u64) -> Option<ComputerObservation> {
         self.computer
             .observation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .filter(|seen| seen.window_id == Some(window_id))
-            .and_then(|seen| seen.title.clone())
+            .cloned()
     }
 
     pub(crate) fn computer_target_frame(&self, target: &ComputerTarget) -> Option<ShotFrame> {

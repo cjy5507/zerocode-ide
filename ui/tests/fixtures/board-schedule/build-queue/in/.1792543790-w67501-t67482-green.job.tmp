@@ -1,0 +1,8 @@
+# who: w67501-t67482
+# cwd: /work/zerocode/t-67482-eta
+# run: run-4275
+# notify: run:run-4275
+# what: 쓰는 중
+# cap: 600
+set -e
+true

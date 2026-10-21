@@ -1,0 +1,69 @@
+14:05:48 == lane 607e69e3 start (dry=0)
+14:05:48 == archive
+14:05:49 archive rc=0 1s free=23G load=4.75/4.45
+14:05:50 target root-gate: removed 395 workspace unit(s), 5327M — the fresh scratch rebuilds them anyway
+14:05:52 target zo-gate: removed 284 workspace unit(s), 5485M — the fresh scratch rebuilds them anyway
+14:05:52 target root-release: removed 26 workspace unit(s), 277M — the fresh scratch rebuilds them anyway
+14:05:53 target zo-release: removed 19 workspace unit(s), 396M — the fresh scratch rebuilds them anyway
+14:05:53 == gate-root
+16:42:33 gate-root rc=1 9400s free=29G load=36.31/18.99
+16:42:33 == gate-zo
+16:42:33 gate-zo: waiting for calm — load 36.31 > 12 (up to 900s)
+17:12:10 gate-zo: calm at load 9.97 after 1777s
+17:50:21 gate-zo rc=0 2291s free=23G load=6.93/16.74
+17:50:21 == flakes
+17:50:21 unlisted red root:harness:knowledge — judged solo
+17:59:41 solo root harness:knowledge 1/3 rc=0
+18:08:59 solo root harness:knowledge 2/3 rc=1
+18:08:59 unlisted red root:harness:knowledge — judged solo 1/3 red
+18:08:59 flakes rc=1 1118s free=23G load=15.20/12.75
+18:08:59 red: solo root harness:knowledge run 2 rc=1
+18:08:59 == sweep
+18:09:01 sweep rc=0 2s free=24G load=15.20/12.75
+18:09:01 == red (solo root harness:knowledge run 2 rc=1)
+18:11:16 == lane 607e69e3 start (dry=0)
+18:11:16 == archive
+18:11:17 archive rc=0 1s free=23G load=5.81/11.57
+18:11:19 target root-gate: removed 341 workspace unit(s), 4328M — the fresh scratch rebuilds them anyway
+18:11:21 target zo-gate: removed 292 workspace unit(s), 5625M — the fresh scratch rebuilds them anyway
+18:11:22 == gate-root
+22:30:49 gate-root rc=1 15567s free=28G load=7.42/13.30
+22:30:49 == gate-zo
+22:31:47 red: SIGTERM
+22:31:47 == sweep
+22:31:51 sweep rc=0 4s free=28G load=3.98/12.49
+22:31:51 == red (SIGTERM)
+22:48:53 == lane 607e69e3 start (dry=0)
+22:48:53 == archive
+22:48:55 archive rc=0 2s free=25G load=67.08/28.18
+22:48:56 target root-gate: removed 341 workspace unit(s), 4328M — the fresh scratch rebuilds them anyway
+22:48:57 target zo-gate: removed 54 workspace unit(s), 98M — the fresh scratch rebuilds them anyway
+22:48:58 == gate-root
+22:48:58 gate-root: waiting for calm — load 65.39 > 12 (up to 900s)
+22:57:59 gate-root: calm at load 10.15 after 541s
+23:57:27 gate-root rc=0 3568s free=20G load=7.62/8.08
+23:57:27 == gate-zo
+00:24:21 gate-zo rc=0 1614s free=24G load=5.21/7.38
+00:24:21 == flakes
+00:24:21 flakes rc=0 0s free=24G load=5.21/7.38
+00:24:21 == push
+00:24:22 push rc=0 1s free=23G load=5.21/7.38
+00:24:22 == build-app
+00:41:25 build-app rc=0 1023s free=23G load=3.84/5.32
+00:41:25 == swap-app
+00:41:25 swap-app rc=0 0s free=23G load=3.84/5.32
+00:41:25 == build-zo
+00:41:25 build-zo rc=0 276s free=23G load=3.84/5.32
+00:41:25 == swap-zo
+00:41:25 swap-zo rc=0 0s free=23G load=3.84/5.32
+00:41:25 == bundle-updater
+00:42:07 bundle-updater: archive and DMG packed from build-app's sealed ZeroCode.app, the installed one
+00:42:07 bundle-updater: ZeroCode_1.1.77_aarch64.app.tar.gz + .sig + latest.json under ~/.local/share/zerocode/release/out/607e69e3 (key 0000000000000000)
+00:42:07 bundle-updater rc=0 42s free=22G load=7.85/5.77
+00:42:07 == publish
+00:42:24 publish: v1.1.77 on owner/zerocode prerelease=0 assets=ZeroCode_1.1.77_aarch64.app.tar.gz,ZeroCode_1.1.77_aarch64.app.tar.gz.sig,ZeroCode_1.1.77_aarch64.dmg,latest.json,install.sh
+00:42:42 publish: source snapshot v1.1.77 on the public repository
+00:42:42 publish rc=0 35s free=22G load=6.85/5.75
+00:42:42 == sweep
+00:42:43 sweep rc=0 1s free=23G load=6.85/5.75
+00:42:43 == green

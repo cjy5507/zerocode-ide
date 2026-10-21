@@ -578,8 +578,8 @@ export async function testArtifactTasks(browser, origin, ok) {
       return seen;
     });
     ok(
-      "the tabs read 작업별 · 보고서 · 증거 · 페이지·문서, each with its count, and the tab opens on 작업별 — the lines asked for once, beside the rows",
-      list.tabs === `tasks:${fixture.lines},reports:5,evidence:4,pages:3` && list.tabWords.startsWith("작업별 · 보고서 · 증거 · 페이지·문서")
+      "the tabs read 흐름 · 과업별 · 보고서 · 증거 · 페이지·문서 — the flow first and without a count (t-68458), the rest each with its count — and the tab opens on 과업별 — the lines asked for once, beside the rows",
+      list.tabs === `flow:,tasks:${fixture.lines},reports:5,evidence:4,pages:3` && list.tabWords.startsWith("흐름 · 과업별 · 보고서 · 증거 · 페이지·문서")
         && list.selectedTab === "tasks" && list.asks === 1,
       JSON.stringify({ tabs: list.tabs, words: list.tabWords, selected: list.selectedTab, asks: list.asks }),
     );

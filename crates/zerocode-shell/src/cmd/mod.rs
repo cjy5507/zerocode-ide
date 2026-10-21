@@ -134,8 +134,9 @@ pub(crate) use board::{
     ledger_agents, machine_load, open_board_popout, orchestration_accuracy, pane_activities,
     pane_agents, pane_sessions, pane_subagents, quota_wall_handover, quota_wall_retry,
     release_untitled_markdown, resume_line, resume_session, reveal_board_agent,
-    save_clipboard_image, set_coordinator_handover, set_dock_badge, set_hooks_enabled,
-    set_previewed_terms, set_watched_terms, term_pull, term_snapshot, worker_screen,
+    save_clipboard_image, schedule_timeline, set_coordinator_handover, set_dock_badge,
+    set_hooks_enabled, set_previewed_terms, set_watched_terms, term_pull, term_snapshot,
+    worker_screen,
 };
 pub(crate) use board::{
     land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
@@ -287,11 +288,11 @@ pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 pub(crate) use artifacts::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
     artifact_export, artifact_export_formats, artifact_export_reveal, artifact_feedback_record,
-    artifact_import_transcripts, artifact_open, artifact_open_record, artifact_page_at,
-    artifact_preference_revoke, artifact_preference_save, artifact_preferences, artifact_preview,
-    artifact_register, artifact_reveal, artifact_search, artifact_tasks, artifact_thumbnail,
-    artifact_versions, artifacts_list, explain_cancel, explain_preview, explain_roads,
-    explain_start,
+    artifact_flow, artifact_import_transcripts, artifact_open, artifact_open_record,
+    artifact_page_at, artifact_preference_revoke, artifact_preference_save, artifact_preferences,
+    artifact_preview, artifact_register, artifact_reveal, artifact_search, artifact_tasks,
+    artifact_thumbnail, artifact_versions, artifacts_list, explain_cancel, explain_preview,
+    explain_roads, explain_start,
 };
 pub(crate) use skills::{
     computer_use_skill_report, install_bundled_skill, list_skills, orchestration_report,

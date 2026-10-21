@@ -394,7 +394,8 @@ export async function testAgentRelationsDeep(browser, origin, ok) {
       const tasks = agentGraphTasksFor(view, agentGraphFullModel(view));
       const group = tasks.groups.find((one) => one.key === JSON.stringify(["run-1", "t-A"]));
       const chip = view.querySelector("[data-graph-key='agent:term:205'] .agent-graph-previous-attempt")?.textContent ?? "";
-      const currentChip = view.querySelector("[data-graph-key='agent:term:202'] .agent-graph-previous-attempt");
+      // 칸은 카드마다 늘 지어 두고 `hidden`이 접는다(방향 E2) — 지금 시도의 카드에는 보이지 않아야 한다.
+      const currentChip = view.querySelector("[data-graph-key='agent:term:202'] .agent-graph-previous-attempt:not([hidden])");
       setAgentGraphScope(view, JSON.stringify(["run-1", "t-A"]));
       await window.__BOARD_SETTLED__();
       const scoped = agentGraphModels.get(view).agents.map((entry) => entry.key).sort();
@@ -539,8 +540,11 @@ export async function testAgentRelationsDeep(browser, origin, ok) {
       const view = document.querySelector("#board-view");
       const at = (key) => view.querySelector(`[data-graph-key='${key}']`).getBoundingClientRect();
       const a = at("agent:term:202"), b = at("agent:term:203");
+      /* 방향 E2(t-68475): 203은 202가 시작한 판이라 같은 열의 줄기에서 202 밑에 선다. 둘 사이의 의존 선은
+       * 같은 열이라 오른쪽 모서리에서 나가 열 밖의 도랑을 타고 내려와 든다 — 그 세로 줄의 한가운데가 도랑이다. */
+      const anchor = Math.min(a.height, b.height) / 2;
       const points = { leftEdge: [b.left + 4, b.top + b.height / 2], center: [b.left + b.width / 2, b.top + b.height / 2],
-        gutter: [(a.right + b.left) / 2, a.top + Math.min(a.height, b.height) / 2] };
+        gutter: [Math.max(a.right, b.right) + (agentGraphTuning(view)?.edgeStub ?? 0), (a.top + b.top) / 2 + anchor] };
       const under = {};
       for (const [name, [x, y]] of Object.entries(points)) {
         const el = document.elementFromPoint(x, y);

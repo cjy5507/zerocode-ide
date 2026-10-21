@@ -1,0 +1,8 @@
+# who: run11955-l61q
+# cwd: /work/zerocode/integration-l61
+# run: run-4275
+# notify: run:run-4275
+# what: l61 창 실측 g5 — 측정
+# cap: 1800
+set -e
+node ui/tests/window.mjs

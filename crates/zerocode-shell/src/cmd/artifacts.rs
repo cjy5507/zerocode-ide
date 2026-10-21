@@ -139,6 +139,26 @@ pub(crate) fn artifact_bundle(task: String) -> Result<Option<artifact_runtime::B
     Ok(store_or_refuse()?.bundle(&task))
 }
 
+/// The flow of the project the person looks at (t-68458): its work task by
+/// task, from the ledger image this window holds, git at the project's base
+/// and the catalog's memory — read off the window's thread, like every read
+/// here, and without the store when it has not opened yet. git is asked only
+/// at a project this window lists — the stored ones and the one it stands in,
+/// as `project_catalog` lists them — and never in a folder the webview names
+/// (t-69070 P2).
+#[tauri::command(async)]
+pub(crate) fn artifact_flow(
+    state: State<'_, AppState>,
+    ask: crate::artifact_flow::FlowAsk,
+) -> crate::artifact_flow::Flow {
+    let mut listed: Vec<PathBuf> = stored_projects(state.config_root())
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    listed.push(state.active_project_context().repo_root);
+    crate::artifact_flow::read(&ask, &listed, now_epoch_ms())
+}
+
 fn path_of(id: &str) -> Result<PathBuf, String> {
     let artifact = store_or_refuse()?
         .get(id)

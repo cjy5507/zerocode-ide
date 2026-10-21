@@ -434,7 +434,7 @@ async function testOrbitFallback(browser, origin, ok) {
         } catch (error) {
           const state = agentOrbitStates.get(view);
           throw new Error(`${error.message} after ${step}: ${JSON.stringify({ model: agentGraphModels.has(view),
-            edge: agentGraphEdgeFrames.has(view), fit: agentGraphFitFrames.has(view), refreshing: agentGraphRefreshing,
+            edge: agentGraphEdgeFrames.has(view), refreshing: agentGraphRefreshing,
             paint: agentPaintFrame, flight: ["board_snapshot", "pane_agents", "ledger_agents"]
               .map((name) => window.__IN_FLIGHT__.get(name) ?? 0), showing: agentOrbitShowing(view),
             broken: window.__ORBIT__().broken, scene: Boolean(state?.scene), dirty: state?.dirty ?? null,
@@ -1443,7 +1443,8 @@ async function testOrbitRemembered(browser, origin, ok) {
  * 때문이다. 모델의 배치(`agentGraphLayoutRuns`)는 입체도 읽는 모델 안의 셈이라 수만 적는다.
  *
  * 그리고 카드로 돌아온 첫 판이 건너뛴 갱신을 한 번에 그린다: 노드가 모델과 같고(끝난 카드는
- * 끝난 옷, 새 에이전트는 제 노드), 간선은 새로 재도 같은 자리이며, 맞춤은 한 번 돈다. */
+ * 끝난 옷, 새 에이전트는 제 노드), 오버레이 선이 있으면 새로 재도 같은 자리다. 맞춤은 돌지 않는다 —
+ * 카드 그림(방향 E2, t-68475)의 열은 판의 폭에 맞춰 접히므로 맞출 그림이 없다. */
 async function testOrbitLeavesTheCardsAlone(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -1519,9 +1520,9 @@ async function testOrbitLeavesTheCardsAlone(browser, origin, ok) {
         remeasuredInPlace: JSON.stringify(standing) === JSON.stringify(edges()),
       };
     });
-    ok("the card view it returns to draws every update the 3D view skipped, fits once, and its edges stand where a fresh measure puts them",
-      back.fits === 1 && JSON.stringify(back.nodes) === JSON.stringify(back.wanted) && back.finished === true
-      && back.arrived && back.edges > 0 && back.remeasuredInPlace, JSON.stringify(back));
+    ok("the card view it returns to draws every update the 3D view skipped, fits nothing, and any line stands where a fresh measure puts it",
+      back.fits === 0 && JSON.stringify(back.nodes) === JSON.stringify(back.wanted) && back.finished === true
+      && back.arrived && back.remeasuredInPlace, JSON.stringify(back));
     ok("the folded-cards page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();

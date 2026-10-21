@@ -1,0 +1,8 @@
+# who: w66784-t66539
+# cwd: /work/zerocode/t-66539-bench
+# run: run-4275
+# notify: run:run-4275
+# what: 다음 릴리즈와 무관한 실측 — 입력 지연
+# cap: 900
+set -e
+node tools/computer-bench/run.mjs
