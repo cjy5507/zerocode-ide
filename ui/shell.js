@@ -4527,8 +4527,9 @@ function agentCardDoingNode({ graph = false } = {}) {
 /* 그래프 카드(`graphBlock`)는 이 블록을 「지금」으로 읽는다 (방향 D): 줄 끝의 나이는 카드에
  * 하나뿐이고(`age`, 조용하면 그 자리에 `quiet` 칩), 흔적은 그 줄 **앞의** 도구들을 새것부터
  * 파일 이름으로 적는다 — 줄이 이미 말한 마지막 도구를 한 줄 아래 다시 적지 않는다. `holds`는
- * 이 블록 안에 선 다른 줄(마지막 말, 답하기)이 있다는 뜻이라 블록이 접히지 않는다. */
-function dressAgentCardDoing(doing, facts, { askInline = true, age = "", quiet = "", holds = false } = {}) {
+ * 이 블록 안에 선 다른 줄(마지막 말, 답하기)이 있다는 뜻이라 블록이 접히지 않는다. `open`은 줄기
+ * 카드의 「로그 보기」가 편 흔적이다(방향 E2) — 옷의 한 조각이라 같은 한 번의 쓰기에 든다. */
+function dressAgentCardDoing(doing, facts, { askInline = true, age = "", quiet = "", holds = false, open = false } = {}) {
   /* 아무 말도 없는 판은 이 블록을 세우지 않는다 — 테두리와 여백만 남은 상자는
    * "아무것도 모른다"를 "무언가 있는데 비었다"로 읽히게 한다. 노드를 지우는
    * 대신 클래스 하나인 것은 §5 그대로다: DOM은 하나이고, 다음 도구 호출은
@@ -4544,6 +4545,7 @@ function dressAgentCardDoing(doing, facts, { askInline = true, age = "", quiet =
     "agent-card-doing",
     graph ? "agent-graph-wire" : "",
     bare ? "is-bare" : "",
+    graph && open ? "is-log-open" : "",
   ].filter(Boolean).join(" "));
   const activity = doing.querySelector(".agent-card-activity");
   writeClassName(activity, said
@@ -4774,7 +4776,8 @@ function buildAgentGraphCard(node, entity, view) {
     parts.push(said);
   } else {
     const status = taskBoardElement("span", "agent-graph-node-status");
-    status.append(agentGraphSignalMark(entity.signal), taskBoardElement("span", "agent-graph-state-word"));
+    status.append(agentGraphSignalMark(entity.signal), taskBoardElement("span", "agent-graph-state-word"),
+      taskBoardElement("span", "agent-card-phase is-dotted"));
     if (head) status.appendChild(taskBoardElement("span", "agent-graph-card-now is-dotted"));
     status.appendChild(taskBoardElement("span", "agent-graph-card-age is-dotted"));
     const branch = taskBoardElement("button", "agent-graph-node-branch is-dotted");
@@ -4875,6 +4878,14 @@ function dressAgentGraphCard(node, entity, reply, chip) {
   for (const mark of node.querySelectorAll(".agent-graph-node-status > .agent-graph-signal")) {
     dressAgentGraphSignalMark(mark, entity.signal);
   }
+  /* 자율 실행의 단계(「목표 · 다음 실행 대기 · 게이트 1/2」) — 방향 D의 상태 줄이 들던 한 마디이고
+   * 여섯째 상태가 아니다. 턴의 단계는 「지금」 줄이 이미 도구로 말하므로 여기 서지 않는다. */
+  const phase = node.querySelector(".agent-graph-node-status > .agent-card-phase");
+  if (phase) {
+    const said = facts.phase === "goal" || facts.phase === "loop" ? facts.phaseWord : "";
+    writeTextContent(phase, said);
+    writeAttribute(phase, "data-tip", said ? facts.phaseTip || said : "");
+  }
   const age = node.querySelector(".agent-graph-card-age");
   const aged = agentGraphAgeWord(entity);
   writeTextContent(age, aged);
@@ -4942,8 +4953,7 @@ function dressAgentGraphCard(node, entity, reply, chip) {
   const doing = node.querySelector(".agent-card-doing");
   if (doing) {
     const open = agentGraphCardDetails || agentGraphLogsOpen.has(entity.key);
-    dressAgentCardDoing(doing, facts, { askInline: false, age: "", quiet: "", holds: true });
-    doing.classList.toggle("is-log-open", open);
+    dressAgentCardDoing(doing, facts, { askInline: false, age: "", quiet: "", holds: true, open });
     const message = node.querySelector(".agent-graph-node-message");
     writeTextContent(message, entity.line);
     writeAttribute(message, "data-tip", entity.line);
@@ -5018,8 +5028,9 @@ function updateAgentGraphNode(node, entity, view) {
 
   /* 서명 둘 — 무엇을 다시 지어야 하고 무엇을 자리에 써 넣으면 되는가 (1-t353, t-2374).
    *
-   * `shape`는 카드의 뼈대를 정하는 것(머리인가, 크기, 신호, 벤더, 실시간 지도의 칸)이고, 그것이
-   * 움직이면 뼈대를 다시 짓는다 — 상태가 바뀌어 크기가 바뀐 카드의 자식 열 남짓이다. `said`는 그
+   * `shape`는 카드의 뼈대를 정하는 것(머리인가, 크기, 묻는가, 벤더, 실시간 지도의 칸)이고, 그것이
+   * 움직이면 뼈대를 다시 짓는다 — 상태가 바뀌어 크기가 바뀐 카드의 자식 열 남짓이다. 같은 크기 안에서
+   * 갈리는 신호(도는 중 ↔ 멈춤, 끝남 ↔ 쉬는 중 ↔ 차례 기다림)는 표식과 낱말만 갈아입는다. `said`는 그
    * 뼈대에 써 넣는 모든 것이고, 같으면 이 카드는 아무것도 쓰지 않는다: 조용한 박자의 값은 0이다.
    * 셋째(`geometry`)는 높이를 바꾸는 것들 — 오버레이 선이 다시 잴지를 묻는 답이다. */
   const facts = entity.facts;
@@ -5028,11 +5039,12 @@ function updateAgentGraphNode(node, entity, view) {
   const shape = [
     locale,
     head ? `head:${head.kind}` : entity.size,
-    entity.signal,
+    String(entity.signal === "you"),
     entity.card.agent ?? "",
     String(agentGraphLiveOn()),
   ].join("\u001f");
   const said = [
+    entity.signal,
     entity.label,
     entity.line,
     entity.bucket,
@@ -6303,21 +6315,20 @@ function paintGraphEdges(host, edges, { path, dress, marker = null, frame = null
 
 /* ---- zoom, pan and fit -------------------------------------------------- */
 
-/* Zoom is a REFLOW, not a transform.
+/* Zoom belongs to the orbit (direction E2, t-68475).
  *
- * A transformed canvas keeps its layout size, so the scroll extents stop
- * matching what is drawn and the sticky lane strip sticks to the wrong box.
- * Scaling the lane tokens instead means the browser lays the graph out at the
- * size a person asked for, and every measure this file takes afterwards — the
- * edge endpoints included — is already true without a correction factor. */
+ * The card picture folds its coordinator columns to the board's width, so it
+ * has nothing to zoom: its buttons, wheel and Shift+1/2 stand on the orbit
+ * alone, whose scale is its fit times this value (`agentOrbitZoomed`). In
+ * direction D this was a REFLOW of the lane tokens rather than a transform, so
+ * the scroll extents kept matching what was drawn; the canvas still carries the
+ * value as `--agent-graph-zoom` for the surface's text scale. */
 function applyAgentGraphZoom(view, { remeasure = true } = {}) {
   // On the canvas and not on the layout: the inspector is the layout's other
   // half, and its words are read at the size the rest of the window uses. A
   // zoom that reached it would shrink a panel nobody asked to zoom.
   const surface = view.querySelector(".agent-graph-surface");
   surface.style.setProperty("--agent-graph-zoom", String(agentGraphZoom));
-  const tuning = agentGraphTuning(view);
-  if (tuning) surface.classList.toggle("is-lod", agentGraphZoom < tuning.lod);
   const label = view.querySelector(".agent-graph-zoom-label");
   // 같은 낱말을 다시 써 넣지 않는다: 매 판 지나가는 길이고, 같은 글자로 텍스트
   // 노드를 갈아 끼우는 것도 그 자리의 스타일을 다시 계산시키는 쓰기다.
@@ -6596,13 +6607,13 @@ const agentGraphTiers = new WeakMap();
 
 /* ---- 그림의 조율은 토큰이 든다 (t-2374) ----------------------------------
  *
- * 배율의 범위, 눈금 한 칸, LOD 문턱, 저절로 앉는 판의 바닥, 간선이 카드를
- * 비껴 도는 거리 — 여섯 다 이 파일에 손으로 적힌 수였고, 여섯 다 CSS가 정한
- * 밀도와 글자 바닥에서 나온 수였다. 두 곳에 적힌 수는 한 곳만 움직이는 날이
- * 오고, 이 표면에서 그날은 이미 한 번 왔다(맞춤의 여백 24가 `--space-5`의
- * 두 번째 사본이었다, 1-t385).
+ * 배율의 범위, 눈금 한 칸, 선이 카드를 비껴 도는 거리 — 다 이 파일에 손으로
+ * 적힌 수였고, 다 CSS가 정한 밀도와 글자 바닥에서 나온 수였다. 두 곳에 적힌
+ * 수는 한 곳만 움직이는 날이 오고, 이 표면에서 그날은 이미 한 번 왔다(맞춤의
+ * 여백 24가 `--space-5`의 두 번째 사본이었다, 1-t385). 방향 D의 LOD 문턱·저절로
+ * 앉는 판의 바닥·레일 구슬은 코디별 줄기(방향 E2)에서 그림과 함께 물러났다.
  *
- * 뷰마다 한 번 읽는다: 이 여섯은 사람이 창을 여는 동안 움직이지 않고,
+ * 뷰마다 한 번 읽는다: 이 수들은 사람이 창을 여는 동안 움직이지 않고,
  * `getComputedStyle`은 배치를 강제하지 않지만 공짜도 아니다.
  *
  * 하나라도 읽히지 않으면 **아무 답도 하지 않는다**. 대비값을 쥐면 그것이
@@ -6623,10 +6634,7 @@ function agentGraphTuning(view) {
     zoomMin: read("--agent-graph-zoom-min"),
     zoomMax: read("--agent-graph-zoom-max"),
     zoomStep: read("--agent-graph-zoom-step"),
-    lod: read("--agent-graph-lod"),
-    fitFloor: read("--agent-graph-fit-floor"),
     edgeStub: read("--agent-graph-edge-stub"),
-    railBead: read("--agent-graph-rail-bead"),
     /* 맥박이 사는 길이와 한 판에 도는 맥박의 수 (t-7288). 둘 다 시각 수치라
      * 토큰이 정하고, 시계를 거는 손은 이 한 곳에서만 읽는다 — 애니메이션의
      * 길이가 CSS와 JS 두 곳에 적히면 둘 중 하나만 움직이는 날이 온다. */
