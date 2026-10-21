@@ -14713,8 +14713,10 @@ pub enum Examined {
 }
 
 /// The two answers a hold offers, as advice — the resolution is free text.
-const HARVEST: &str = "harvest";
-const DISPATCH_AGAIN: &str = "dispatch again";
+/// Public so the window's board answers a hold in these words and no copy of
+/// them (t-67607).
+pub const HARVEST: &str = "harvest";
+pub const DISPATCH_AGAIN: &str = "dispatch again";
 /// The resolutions the ledger writes when it resolves a hold by itself.
 const NOTHING_TO_HARVEST: &str =
     "nothing to harvest: the checkout was clean and every commit on its branch had landed";

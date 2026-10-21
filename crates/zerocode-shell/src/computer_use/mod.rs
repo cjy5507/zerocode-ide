@@ -136,6 +136,10 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     if let Some(answer) = browser_route::tests::helper(method, &params) {
         return answer;
     }
+    #[cfg(test)]
+    if let Some(answer) = test_helper::answer(method, &params) {
+        return answer;
+    }
     let mut held = held_client()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -239,6 +243,10 @@ pub(crate) fn while_a_request_holds_the_session<T>(hold: impl FnOnce() -> T) -> 
 /// broke drops the session, as [`call`] does.
 pub fn status_unless_busy() -> Option<Value> {
     input_policy::ensure_current().ok()?;
+    #[cfg(test)]
+    if let Some(answer) = test_helper::answer("status", &Value::Null) {
+        return answer.ok();
+    }
     let mut held = match held_client().try_lock() {
         Ok(held) => held,
         Err(std::sync::TryLockError::Poisoned(held)) => held.into_inner(),
@@ -307,4 +315,47 @@ pub fn tcc_row_action(
     action: ComputerPermissionRowAction,
 ) -> Result<ComputerPermissionReport, ComputerUseError> {
     platform::tcc_row_action(id, bundle_id, action)
+}
+
+/// A test's helper, on the thread that stood it (t-66760): it answers
+/// [`call`] and [`status_unless_busy`] in place of a session until the
+/// handle drops, so a test can look, wait and be stopped without a helper.
+#[cfg(test)]
+pub(crate) mod test_helper {
+    use std::cell::RefCell;
+
+    use serde_json::Value;
+
+    use super::ComputerUseError;
+
+    type Answers = Box<dyn FnMut(&str, &Value) -> Result<Value, ComputerUseError>>;
+
+    thread_local! {
+        static STANDING: RefCell<Option<Answers>> = const { RefCell::new(None) };
+    }
+
+    /// The helper stands while this lives.
+    pub(crate) struct Standing(());
+
+    impl Drop for Standing {
+        fn drop(&mut self) {
+            STANDING.with(|standing| standing.borrow_mut().take());
+        }
+    }
+
+    pub(crate) fn stand(
+        answers: impl FnMut(&str, &Value) -> Result<Value, ComputerUseError> + 'static,
+    ) -> Standing {
+        STANDING.with(|standing| *standing.borrow_mut() = Some(Box::new(answers)));
+        Standing(())
+    }
+
+    pub(super) fn answer(method: &str, params: &Value) -> Option<Result<Value, ComputerUseError>> {
+        STANDING.with(|standing| {
+            standing
+                .borrow_mut()
+                .as_mut()
+                .map(|answers| answers(method, params))
+        })
+    }
 }

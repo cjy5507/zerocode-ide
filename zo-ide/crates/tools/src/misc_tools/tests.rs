@@ -54,17 +54,87 @@ fn env_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// The variables a memory test owns while it runs: its own Zo home, and no
+/// plan or state folder inherited from the process (`ZO_TODO_STORE`,
+/// `ZO_STATE_DIR`) — `MemoryWrite` reads the session's plan (t-68770), so a
+/// plan exported by whoever runs the tests must not decide one.
+const MEMORY_TEST_ENV: [&str; 3] = ["ZO_CONFIG_HOME", "ZO_TODO_STORE", "ZO_STATE_DIR"];
+
 fn with_config_home<T>(home: &std::path::Path, f: impl FnOnce() -> T) -> T {
-    let previous = std::env::var_os("ZO_CONFIG_HOME");
+    let previous = MEMORY_TEST_ENV.map(|key| (key, std::env::var_os(key)));
     std::env::set_var("ZO_CONFIG_HOME", home);
+    std::env::remove_var("ZO_TODO_STORE");
+    std::env::remove_var("ZO_STATE_DIR");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    match previous {
-        Some(value) => std::env::set_var("ZO_CONFIG_HOME", value),
-        None => std::env::remove_var("ZO_CONFIG_HOME"),
+    for (key, value) in previous {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
     match result {
         Ok(value) => value,
         Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// A synthetic memory project: a temp root, a temp Zo home inside it, and
+/// contexts pointed at the root. Nothing here reads the person's own home.
+struct MemoryFixture {
+    root: std::path::PathBuf,
+    config_home: std::path::PathBuf,
+}
+
+impl MemoryFixture {
+    fn new() -> Self {
+        let root = temp_dir();
+        let config_home = root.join("home").join(".zo");
+        std::fs::create_dir_all(&config_home).expect("config home");
+        let config_home = std::fs::canonicalize(config_home).expect("canonical config home");
+        Self { root, config_home }
+    }
+
+    fn ctx(&self) -> ToolContext {
+        ToolContext::new().with_cwd(self.root.clone())
+    }
+
+    /// A registry over a context of this project, serving session `session`
+    /// when one is named.
+    fn registry(&self, session: Option<&str>) -> crate::GlobalToolRegistry {
+        let ctx = self.ctx();
+        if let Some(session) = session {
+            ctx.set_session_id(session);
+        }
+        crate::GlobalToolRegistry::builtin().with_context(ctx)
+    }
+
+    fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        with_config_home(&self.config_home, f)
+    }
+
+    /// `(memory.local, memory)` of this project.
+    fn stores(&self) -> (std::path::PathBuf, std::path::PathBuf) {
+        self.run(|| {
+            (
+                runtime::memory::paths::memory_write_dir(&self.root, true),
+                runtime::memory::paths::memory_write_dir(&self.root, false),
+            )
+        })
+    }
+
+    fn note(slug: &str, local: bool, body: &str) -> super::MemoryWriteInput {
+        super::MemoryWriteInput {
+            slug: slug.to_string(),
+            summary: "a synthetic fact".to_string(),
+            body: body.to_string(),
+            local,
+        }
+    }
+}
+
+impl Drop for MemoryFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
@@ -615,6 +685,315 @@ fn memory_write_local_targets_local_overlay_not_durable_store() {
     );
 
     std::fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
+/// `MemoryWrite` is deferred (t-68770): its schema never reaches the provider.
+/// Called through `CapabilityInvoke`, whose `input` is a bare `object` on the
+/// wire, or by name, `local` can arrive as the words `"false"`/`"true"`. The
+/// tool's own schema says `boolean`, so the call runs as if it had been typed.
+#[test]
+fn memory_write_takes_a_spelled_out_local_on_both_deferred_roads() {
+    let _guard = env_lock();
+    let fixture = MemoryFixture::new();
+    let registry = fixture.registry(None);
+
+    let wrapped = fixture.run(|| {
+        registry.execute(
+            "CapabilityInvoke",
+            &serde_json::json!({
+                "name": "MemoryWrite",
+                "input": {"slug": "wrapped-durable", "summary": "a synthetic rule", "body": "synthetic body", "local": "false"}
+            }),
+        )
+    });
+    assert!(
+        wrapped.as_ref().is_ok_and(|report| report.contains("\"local\": false")),
+        "\"false\" through CapabilityInvoke must write the durable store: {wrapped:?}"
+    );
+    let named = fixture.run(|| {
+        registry.execute(
+            "MemoryWrite",
+            &serde_json::json!({"slug": "named-overlay", "summary": "a synthetic note", "body": "synthetic body", "local": " TRUE "}),
+        )
+    });
+    assert!(
+        named.as_ref().is_ok_and(|report| report.contains("\"local\": true")),
+        "\" TRUE \" by name must write the local overlay: {named:?}"
+    );
+
+    let (local_dir, durable_dir) = fixture.stores();
+    assert!(durable_dir.join("wrapped-durable.md").exists());
+    assert!(local_dir.join("named-overlay.md").exists());
+}
+
+/// What putting the type back must leave alone (t-68770): a real JSON boolean
+/// and an absent `local` behave as before, and a value that is not the word
+/// `true` or `false` still fails as the type error it is, writing nothing.
+#[test]
+fn memory_write_keeps_typed_and_absent_local_and_still_rejects_other_values() {
+    let _guard = env_lock();
+    let fixture = MemoryFixture::new();
+    let registry = fixture.registry(None);
+    let write = |slug: &str, local: Option<serde_json::Value>| {
+        let mut input = serde_json::json!({"slug": slug, "summary": "a synthetic note", "body": "synthetic body"});
+        if let Some(local) = local {
+            input["local"] = local;
+        }
+        fixture.run(|| registry.execute("MemoryWrite", &input))
+    };
+
+    let typed = write("typed-false", Some(serde_json::json!(false)));
+    assert!(typed.as_ref().is_ok_and(|report| report.contains("\"local\": false")), "{typed:?}");
+    let absent = write("absent-local", None);
+    assert!(absent.as_ref().is_ok_and(|report| report.contains("\"local\": true")), "{absent:?}");
+    let wrong = [
+        ("word-yes", serde_json::json!("yes")),
+        ("word-blank", serde_json::json!("")),
+        ("number-one", serde_json::json!(1)),
+    ];
+    for (slug, value) in &wrong {
+        let result = write(slug, Some(value.clone()));
+        assert!(
+            matches!(&result, Err(ToolError::InvalidInput(message)) if message.contains("expected a boolean")),
+            "{value} must stay a type error: {result:?}"
+        );
+    }
+
+    let (local_dir, durable_dir) = fixture.stores();
+    assert!(durable_dir.join("typed-false.md").exists());
+    assert!(local_dir.join("absent-local.md").exists());
+    for (slug, _) in &wrong {
+        let file = format!("{slug}.md");
+        assert!(!local_dir.join(&file).exists() && !durable_dir.join(&file).exists(), "{file}");
+    }
+}
+
+/// Every deferred tool rides the same road (t-68770): `CronRunDue`'s
+/// `dry_run` and `Sleep`'s `duration_ms` sent as words run as the types their
+/// schemas declare. A word that is no decimal integer, or one outside the
+/// field's own range, still fails as a type error.
+#[test]
+fn deferred_tools_take_spelled_out_booleans_and_integers_their_schemas_declare() {
+    let _guard = env_lock();
+    let mut ctx = ToolContext::new().with_tasks(runtime::task_registry::TaskRegistry::new_in_memory());
+    ctx.crons = runtime::team_cron_registry::CronRegistry::new_in_memory();
+    let registry = crate::GlobalToolRegistry::builtin().with_context(ctx);
+
+    let preview = registry.execute(
+        "CapabilityInvoke",
+        &serde_json::json!({"name": "CronRunDue", "input": {"dry_run": "true"}}),
+    );
+    assert!(
+        preview.as_ref().is_ok_and(|report| report.contains("\"dry_run\": true")),
+        "a spelled-out dry run must preview: {preview:?}"
+    );
+    let slept = registry.execute(
+        "CapabilityInvoke",
+        &serde_json::json!({"name": "Sleep", "input": {"duration_ms": "1"}}),
+    );
+    assert!(
+        slept.as_ref().is_ok_and(|report| report.contains("\"duration_ms\": 1")),
+        "a spelled-out duration must sleep: {slept:?}"
+    );
+    for wrong in ["1.5", "-1", "one", "+1"] {
+        let result = registry.execute("Sleep", &serde_json::json!({"duration_ms": wrong}));
+        assert!(matches!(&result, Err(ToolError::InvalidInput(_))), "{wrong}: {result:?}");
+    }
+}
+
+/// Memory is written after the task, not during it (t-68770). The task-end
+/// signal is this session's own plan: while its `TodoWrite` list holds an item
+/// that is not completed, `MemoryWrite` is declined and writes nothing. The
+/// decline names the one way out — finish the list, then write — and must not
+/// lead into the loop below: the write tracked as a plan item left in progress
+/// is still an open item, so it stays declined until the list is done.
+#[test]
+fn memory_write_waits_while_this_sessions_plan_has_open_items() {
+    let _guard = env_lock();
+    let fixture = MemoryFixture::new();
+    let registry = fixture.registry(Some("synthetic-session-open"));
+    let plan = |todos: serde_json::Value| {
+        fixture
+            .run(|| registry.execute("TodoWrite", &serde_json::json!({ "todos": todos })))
+            .expect("plan written")
+    };
+    let note = || {
+        fixture.run(|| {
+            registry.execute(
+                "MemoryWrite",
+                &serde_json::json!({"slug": "mid-task-note", "summary": "a synthetic fact", "body": "synthetic body"}),
+            )
+        })
+    };
+
+    plan(serde_json::json!([
+        {"content": "Fix the parser", "activeForm": "Fixing the parser", "status": "completed"},
+        {"content": "Run the tests", "activeForm": "Running the tests", "status": "in_progress"},
+        {"content": "Write the summary", "activeForm": "Writing the summary", "status": "pending"}
+    ]));
+    let declined = note();
+    let Err(ToolError::Declined(message)) = &declined else {
+        panic!("an open plan must decline the write: {declined:?}");
+    };
+    assert!(message.contains("2 open"), "says how much of the plan is left: {message}");
+    assert!(message.contains("finish"), "names the way out: {message}");
+    assert!(
+        message.contains("do not add"),
+        "must not lead the write into the plan, where it would keep the list open: {message}"
+    );
+    assert!(
+        message.contains("tell the person"),
+        "a person's request to remember must not vanish in silence: {message}"
+    );
+
+    // The loop the decline steers away from: the write as an in-progress item.
+    plan(serde_json::json!([
+        {"content": "Fix the parser", "activeForm": "Fixing the parser", "status": "completed"},
+        {"content": "Save the memory note", "activeForm": "Saving the memory note", "status": "in_progress"}
+    ]));
+    let tracked = note();
+    assert!(matches!(&tracked, Err(ToolError::Declined(_))), "{tracked:?}");
+
+    let (local_dir, durable_dir) = fixture.stores();
+    assert!(!local_dir.join("mid-task-note.md").exists() && !durable_dir.exists());
+}
+
+/// The other side of the same signal (t-68770): a plan with only completed
+/// items, a plan closed by marking every item completed, no plan at all, and
+/// another session's unfinished plan each let the write through. A list left
+/// open elsewhere never holds this session's memory, and a session that
+/// never plans keeps today's flow.
+#[test]
+fn memory_write_runs_once_this_sessions_plan_is_done_or_absent() {
+    let _guard = env_lock();
+    let fixture = MemoryFixture::new();
+    let busy = fixture.registry(Some("synthetic-session-busy"));
+    let quiet = fixture.registry(Some("synthetic-session-quiet"));
+    let unplanned = fixture.registry(None);
+    let open_plan = serde_json::json!([
+        {"content": "Run the tests", "activeForm": "Running the tests", "status": "in_progress"}
+    ]);
+    fixture
+        .run(|| busy.execute("TodoWrite", &serde_json::json!({ "todos": open_plan })))
+        .expect("busy plan");
+    let write = |registry: &crate::GlobalToolRegistry, slug: &str| {
+        fixture.run(|| {
+            registry.execute(
+                "MemoryWrite",
+                &serde_json::json!({"slug": slug, "summary": "a synthetic fact", "body": "synthetic body"}),
+            )
+        })
+    };
+
+    let beside = write(&quiet, "beside-a-busy-session");
+    assert!(beside.is_ok(), "another session's open plan must not hold this one: {beside:?}");
+    let without = write(&unplanned, "without-a-plan");
+    assert!(without.is_ok(), "a session that never plans keeps today's flow: {without:?}");
+
+    let store = fixture.run(|| {
+        runtime::todo_store::primary_store(
+            &std::env::current_dir().expect("cwd"),
+            Some("synthetic-session-quiet"),
+        )
+    });
+    let store = store.expect("a session's plan has a store");
+    std::fs::create_dir_all(store.parent().expect("store folder")).expect("store folder");
+    std::fs::write(
+        &store,
+        r#"[{"content":"Run the tests","activeForm":"Running the tests","status":"completed"}]"#,
+    )
+    .expect("completed plan");
+    let after_completed = write(&quiet, "after-a-completed-plan");
+    assert!(after_completed.is_ok(), "only completed items is a finished task: {after_completed:?}");
+
+    fixture
+        .run(|| {
+            busy.execute(
+                "TodoWrite",
+                &serde_json::json!({"todos": [{"content": "Run the tests", "activeForm": "Running the tests", "status": "completed"}]}),
+            )
+        })
+        .expect("closed plan");
+    let after_closing = write(&busy, "after-closing-the-plan");
+    assert!(after_closing.is_ok(), "closing the plan ends the wait: {after_closing:?}");
+
+    let (local_dir, _) = fixture.stores();
+    for slug in ["beside-a-busy-session", "without-a-plan", "after-a-completed-plan", "after-closing-the-plan"] {
+        assert!(local_dir.join(format!("{slug}.md")).exists(), "{slug}");
+    }
+}
+
+/// A local write cannot hide a global entry of the same slug (t-68770): the
+/// overlay wins on read (`memory::paths::global_memory_read_roots`), so it
+/// would. The rule stays. How it is said changes: a verdict the model acts on
+/// and explains in the person's own language — zo has no locale of its own —
+/// instead of `io error: dreamer IO error: …`.
+#[test]
+fn memory_write_declines_a_local_entry_that_would_hide_a_global_one() {
+    let _guard = env_lock();
+    let fixture = MemoryFixture::new();
+    let ctx = fixture.ctx();
+    fixture
+        .run(|| super::run_memory_write(&MemoryFixture::note("shared-rule", false, "durable body"), &ctx))
+        .expect("explicit global write");
+
+    let result =
+        fixture.run(|| super::run_memory_write(&MemoryFixture::note("Shared Rule.md", true, "overlay body"), &ctx));
+    let Err(ToolError::Declined(message)) = &result else {
+        panic!("a same-slug local write must be a verdict, not an io error: {result:?}");
+    };
+    assert!(message.contains("`shared-rule`"), "names the slug: {message}");
+    assert!(message.contains("`local: false`"), "names the explicit global road: {message}");
+    assert!(message.contains("another slug"), "names the other road: {message}");
+    assert!(
+        message.contains("language of the person's request"),
+        "the model explains it in the person's language: {message}"
+    );
+    assert!(!message.contains("io error"), "{message}");
+
+    let (local_dir, durable_dir) = fixture.stores();
+    assert!(!local_dir.join("shared-rule.md").exists(), "nothing was written locally");
+    let global = std::fs::read_to_string(durable_dir.join("shared-rule.md")).expect("global entry");
+    assert!(global.contains("durable body"), "the global entry is untouched: {global}");
+}
+
+/// The rules t-68770 keeps, pinned on synthetic entries: one slug written
+/// twice in one store updates the one entry under one index line, and a
+/// rewrite that changes nothing is `unchanged`; a global write beside a
+/// same-slug local entry goes through and leaves the local one as it was,
+/// because the overlay is read after the durable store and wins.
+#[test]
+fn memory_write_same_slug_rules_hold() {
+    let _guard = env_lock();
+    let fixture = MemoryFixture::new();
+    let ctx = fixture.ctx();
+    let write = |slug: &str, local: bool, body: &str| {
+        fixture
+            .run(|| super::run_memory_write(&MemoryFixture::note(slug, local, body), &ctx))
+            .expect("memory write")
+    };
+
+    assert!(write("twice-local", true, "first body").contains("\"status\": \"created\""));
+    assert!(write("twice-local", true, "second body").contains("\"status\": \"updated\""));
+    assert!(write("twice-local", true, "second body").contains("\"status\": \"unchanged\""));
+    let (local_dir, durable_dir) = fixture.stores();
+    let index = std::fs::read_to_string(local_dir.join("MEMORY.md")).expect("local index");
+    assert_eq!(index.matches("](twice-local.md)").count(), 1, "{index}");
+    let entry = std::fs::read_to_string(local_dir.join("twice-local.md")).expect("local entry");
+    assert!(entry.contains("second body"), "{entry}");
+
+    assert!(write("twice-local", false, "global body").contains("\"local\": false"));
+    let durable = std::fs::read_to_string(durable_dir.join("twice-local.md")).expect("global entry");
+    assert!(durable.contains("global body"), "{durable}");
+    let overlay = std::fs::read_to_string(local_dir.join("twice-local.md")).expect("local entry");
+    assert!(overlay.contains("second body"), "the overlay is left as it was: {overlay}");
+
+    let roots = fixture.run(|| runtime::memory::paths::global_memory_read_roots(&fixture.root));
+    let position = |dir: &std::path::Path| roots.iter().position(|root| root.dir == dir);
+    assert!(
+        position(&durable_dir) < position(&local_dir) && position(&durable_dir).is_some(),
+        "the overlay is read after the durable store, so it wins: {roots:?}"
+    );
 }
 
 #[test]

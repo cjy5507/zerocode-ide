@@ -45,6 +45,15 @@ const FIRST_SCREEN_ROWS = 7;
 /* The narrow window the dashboard has to stay whole in (t-9633): a laptop
  * split in two, both side panels open. */
 const NARROW = { width: 900, height: 1000 };
+/* The 1080p stage the first screen is measured on (t-9633). */
+const FIRST_SCREEN = { width: 1920, height: 1080 };
+/* A phone's width, the narrowest a person's decisions are pictured at. */
+const PHONE = { width: 390, height: 844 };
+/* The features the built-in table names: every one the markup names but the
+ * one a person's own decisions stand under (the fixture's
+ * `customDecisions.feature`), which the part over the table holds instead
+ * (t-62170). */
+const BUILT_IN = SEATS - 1;
 
 /* The narrow window, grown as tall as the dashboard it holds so every part
  * of it stands on the screen at once — again after each growth, since a
@@ -292,9 +301,24 @@ export function jevDashboardFixture(real = null) {
   // The one switch (§6.1): in use, from four folders — a machine set up
   // before the switch — until a press says otherwise.
   const jev = { on: true, everywhere: false, folders: 4 };
-  window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [] };
+  const rules = {
+    feature: "custom", decisionsMax: 3, nameMaxChars: 30, questionMaxChars: 900, meaningMaxChars: 300,
+    options: { least: 2, most: 6 }, hourly: { least: 2, most: 90 }, hourlyDefault: 17, hourlyAll: 55,
+    actFrom: { least: 0.55, most: 0.9 }, actFromDefault: 0.75, trashKeptDays: 21,
+    kinds: ["yes_no", "choice", "score"],
+    points: [
+      { at: "turn_start", inputs: ["task"] },
+      { at: "turn_end", inputs: ["task", "final_text", "evidence", "edited_paths"] },
+      { at: "before_command", inputs: ["command", "cwd", "task"] },
+      { at: "agent_asks", inputs: ["context", "items"] },
+    ],
+    modes: modes.filter((choice) => !choice.automatic),
+  };
+  const store = { decisions: [], trash: [], folders: ["/Users/p/project", "/Users/p/shop"], everywhere: false };
+  const custom = { rules, store, saves: [], checks: 0, lines: [], modes: [], deletes: [], restores: [], made: 0, deleted: new Map() };
+  window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [], custom };
   const settings = () => ({
-    keysKeptHere: true, keySaved: true, jev: { ...jev },
+    keysKeptHere: true, keySaved: true, jev: { ...jev }, customDecisions: structuredClone(rules),
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
     // And the wall the model tier feature's paragraph names
@@ -319,6 +343,69 @@ export function jevDashboardFixture(real = null) {
     window.__JEV__.pressed.push(args.on);
     Object.assign(jev, args.on ? { on: true, everywhere: true, folders: 0 } : { on: false });
     return settings();
+  };
+  const canonical = (value) => (Array.isArray(value) ? value.map(canonical)
+    : value && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value);
+  const versionOf = (draft) => {
+    let hash = 7;
+    const written = canonical({ ...draft, id: null, reads: [...draft.reads].sort(),
+      folders: draft.folders ? [...draft.folders].sort() : null });
+    for (const character of JSON.stringify(written)) hash = (hash * 31 + character.codePointAt(0)) >>> 0;
+    return hash.toString(16).padStart(8, "0");
+  };
+  const refusal = (word, extra = {}) => ({ word, field: null, line: null, option: null, level: null, ...extra });
+  const refusalsOf = (draft) => [
+    ...String(draft.question ?? "").split("\n").flatMap((line, at) => (/^authorization:\s*bearer\s/i.test(line.trim())
+      ? [refusal("secret_line", { field: "question", line: at + 1 })] : [])),
+    ...(store.decisions.some((kept) => kept.draft.name.trim() === draft.name.trim() && kept.draft.id !== draft.id)
+      ? [refusal("name_taken")] : []),
+  ];
+  const stamp = () => new Date().toISOString();
+  window.__ANSWER__.list_custom_decisions = () => structuredClone(store);
+  window.__ANSWER__.check_custom_decision = ({ draft }) => {
+    custom.checks += 1;
+    const answer = draft.answer;
+    const first = answer.kind === "choice" ? answer.options[0]?.name ?? "" : answer.kind === "score" ? "0" : "yes";
+    const line = `${draft.name} / ${first} / ${Math.round(draft.actFrom * 100)}`;
+    custom.lines.push(line);
+    return { refusals: refusalsOf(draft), version: versionOf(draft), line,
+      questions: { [draft.id ?? "draft"]: { question: draft.question, answer } } };
+  };
+  window.__ANSWER__.save_custom_decision = ({ draft }) => {
+    custom.saves.push(structuredClone(draft));
+    const refusals = refusalsOf(draft);
+    if (refusals.length > 0) throw { refusals };
+    const kept = store.decisions.find((one) => one.draft.id === draft.id);
+    if (kept) {
+      Object.assign(kept, { draft: structuredClone(draft), version: versionOf(draft), updatedAt: stamp() });
+    } else {
+      custom.made += 1;
+      store.decisions.push({
+        mode: rules.modes.find((choice) => choice.asks && !choice.applies).mode, version: versionOf(draft),
+        createdAt: stamp(), updatedAt: stamp(), draft: { ...structuredClone(draft), id: `cd-${custom.made.toString(16).padStart(8, "0")}` },
+      });
+    }
+    return structuredClone(store);
+  };
+  window.__ANSWER__.set_custom_decision_mode = ({ id, mode }) => {
+    custom.modes.push({ id, mode });
+    store.decisions.find((one) => one.draft.id === id).mode = mode;
+    return structuredClone(store);
+  };
+  window.__ANSWER__.delete_custom_decision = ({ id }) => {
+    custom.deletes.push(id);
+    const [gone] = store.decisions.splice(store.decisions.findIndex((one) => one.draft.id === id), 1);
+    custom.deleted.set(id, gone);
+    store.trash.push({ id, name: gone.draft.name, deletedAt: stamp() });
+    return structuredClone(store);
+  };
+  window.__ANSWER__.restore_custom_decision = ({ id }) => {
+    custom.restores.push(id);
+    store.trash = store.trash.filter((one) => one.id !== id);
+    store.decisions.push(custom.deleted.get(id));
+    store.decisions.sort((one, other) => one.createdAt.localeCompare(other.createdAt));
+    return structuredClone(store);
   };
   if (real) {
     for (const seat of real.seats) if (seat.id in modeOf) modeOf[seat.id] = seat.mode;
@@ -497,7 +584,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
           rows: view.querySelectorAll("[data-jev-dash-row]").length,
           // The features nothing asked all week fold into one row (t-6243
           // D1); the rest stand, whether or not zo could count them.
-          unused: (jevNumbers ?? []).filter((one) => one.week.rows === 0).length,
+          unused: (jevNumbers ?? []).filter((one) => one.week.rows === 0 && one.id !== typesafeState.customDecisions?.feature).length,
           fold: view.querySelector("[data-jev-fold]") !== null,
           decisions: view.querySelectorAll(".jev-decision").length,
           // One accuracy picture per feature with three graded days (t-6243
@@ -521,7 +608,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       await page.screenshot({ path });
       shots[theme] = { ...seen, path };
       ok(`the ${theme} dashboard is one readable screen: no text cut, clipped or overlapping`,
-        seen.faults.length === 0 && seen.oneScreen && seen.tableFits && seen.rows === SEATS - seen.unused
+        seen.faults.length === 0 && seen.oneScreen && seen.tableFits && seen.rows === BUILT_IN - seen.unused
           && seen.fold === (seen.unused > 0) && seen.pictures === seen.drawable && seen.strips === seen.asked
           && seen.charts === 2 && seen.theme === theme,
         JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
@@ -733,7 +820,8 @@ export async function testJevDashboard(browser, origin, ok) {
         ms, active: activeTabId, visible: !view().hidden, hiddenAttr: view().hidden,
         rowIds: rows.map((row) => row.dataset.jevDashRow),
         rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"] .jev-row-open').textContent),
-        cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, small, trends, switchOver, tableSelects,
+        cardNames, cardSeats: window.__JEV__.seats, personal: window.__JEV__.custom.rules.feature,
+        summon, recallWeek, statuses, caption, small, trends, switchOver, tableSelects,
         strip, fold, bodyRows: bodyRows.length,
         asks: window.__JEV__.asks.slice(), settingsAsks: window.__COUNTS__.typesafe_settings ?? 0,
         summaryAsks: window.__COUNTS__.jev_summary ?? 0, dayAsks: window.__COUNTS__.jev_day ?? 0,
@@ -756,7 +844,7 @@ export async function testJevDashboard(browser, origin, ok) {
       opened.rowIds.join(",") === "summon,placement,recall,routing,notify,browser"
         && opened.rowNames.join("|") === opened.rowIds.map(cardName).join("|")
         && opened.fold !== null && opened.fold.at === 6 && opened.bodyRows === 7
-        && opened.fold.text.includes(String(SEATS - 6)) && opened.fold.expanded === "false",
+        && opened.fold.text.includes(String(BUILT_IN - 6)) && opened.fold.expanded === "false",
       JSON.stringify({ rows: opened.rowIds, names: opened.rowNames, fold: opened.fold, bodyRows: opened.bodyRows }));
     ok("the strip over the table counts today, the week, its cost, where the features stand and the day's limit",
       opened.strip.today === "44" && opened.strip.week === "1,156" && opened.strip.cost === "$0.328"
@@ -1122,7 +1210,7 @@ export async function testJevDashboard(browser, origin, ok) {
       return opened;
     });
     const inUse = ["summon", "placement", "recall", "routing", "notify", "browser"];
-    const unusedInOrder = opened.cardSeats.filter((id) => !inUse.includes(id));
+    const unusedInOrder = opened.cardSeats.filter((id) => !inUse.includes(id) && id !== opened.personal);
     ok("one press unfolds the unused features in the card's order, and the next open remembers it",
       unfolded.rows.join(",") === [...inUse, ...unusedInOrder].join(",")
         && unfolded.expanded === "true" && unfolded.stored === "1" && unfolded.reopened.join(",") === unfolded.rows.join(","),
@@ -1346,7 +1434,7 @@ export async function testJevDashboard(browser, origin, ok) {
     });
     const unnamed = named.rows.filter((row) => row.shownId !== row.id || !row.tip || row.tip !== row.expected);
     ok("every feature names its id under its name and tips what it judges in one sentence, from its own key",
-      named.rows.length === SEATS && unnamed.length === 0 && named.rows.every((row) => row.tip.length < row.expected.length + 1)
+      named.rows.length === BUILT_IN && unnamed.length === 0 && named.rows.every((row) => row.tip.length < row.expected.length + 1)
         && named.titled === 0 && !named.shown.hidden
         && named.shown.text === named.rows.find((row) => row.id === "placement").tip,
       JSON.stringify({ rows: named.rows.length, unnamed: unnamed.slice(0, 3), titled: named.titled, shown: named.shown }));
@@ -1412,7 +1500,7 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("a burst of ledger events is one settled summary ask",
       refreshed.during === refreshed.before && refreshed.after === refreshed.before + 1, JSON.stringify(refreshed));
     ok("a re-open within the beat draws what is in hand and asks nothing",
-      refreshed.reopened === refreshed.after && refreshed.rows === SEATS && refreshed.closedPressed === "false", JSON.stringify(refreshed));
+      refreshed.reopened === refreshed.after && refreshed.rows === BUILT_IN && refreshed.closedPressed === "false", JSON.stringify(refreshed));
     ok("the dashboard's beat is a slow one, not the ledger's second",
       refreshed.pollMs >= 10_000 && refreshed.settleMs >= 1_000, JSON.stringify({ poll: refreshed.pollMs, settle: refreshed.settleMs }));
 
@@ -1449,7 +1537,7 @@ export async function testJevDashboard(browser, origin, ok) {
       };
     });
     ok("a zo that cannot count leaves the last numbers standing and says so",
-      !refused.hidden && refused.error.includes("refused: jev_summary") && refused.rows === SEATS && refused.week === "50",
+      !refused.hidden && refused.error.includes("refused: jev_summary") && refused.rows === BUILT_IN && refused.week === "50",
       JSON.stringify(refused));
 
     // One frame and one edge (t-6277 D10): the switch over the table is the
@@ -2544,4 +2632,532 @@ async function testJevReview(page, ok) {
   }
   ok("the Jev evidence owns PageDown and scrolls without sending a key to the terminal",
     !keyboard.error && keyboard.focused && keyboard.scrolled && keyboard.terminalKeys === 0, JSON.stringify(keyboard));
+}
+
+/* A person's own decisions on the dashboard (t-62170 stage 3, DESIGN 3):
+ * with none, no new line — only 「새 결정」 on the switch line; with some, a
+ * part between the charts and the built-in table. A decision is made, refused
+ * at a secret line, edited into a new version with its mode kept, deleted
+ * behind one question with an undo and a trash, switched between modes, held
+ * to the store's limit, and reached from the keyboard. Every number the page
+ * says is the fixture's (`customDecisions`, none of them core's) and every
+ * refusal the check's. With `JEV_CUSTOM_SHOTS` naming a folder, each state is
+ * pictured light and dark, and the switch line, the list and the drawer at a
+ * phone's width too. */
+export async function testJevCustomDecisions(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const consoleErrors = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") consoleErrors.push(message.text());
+  });
+  const folder = process.env.JEV_CUSTOM_SHOTS ? resolve(ROOT, process.env.JEV_CUSTOM_SHOTS) : null;
+  const pictures = [];
+  const picture = async (name, phone = false, shown = null) => {
+    if (!folder) return;
+    await mkdir(folder, { recursive: true });
+    for (const width of phone ? [null, PHONE.width] : [null]) {
+      let scrolled = 0;
+      if (width !== null) {
+        await page.setViewportSize(PHONE);
+        scrolled = await page.evaluate(() => {
+          const view = document.querySelector("#jev-view");
+          const before = view.scrollTop;
+          Object.assign(view.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "29" });
+          return before;
+        });
+      }
+      for (const theme of ["light", "dark"]) {
+        await setQualityTheme(page, theme);
+        if (width !== null && shown !== null) {
+          await page.evaluate((selector) => {
+            const view = document.querySelector("#jev-view");
+            view.scrollTop += view.querySelector(selector).getBoundingClientRect().top - view.getBoundingClientRect().top;
+          }, shown);
+        }
+        const path = join(folder, `jev-custom-${name}-${theme}${width === null ? "" : `-${width}`}.png`);
+        await page.screenshot({ path });
+        pictures.push(path);
+      }
+      if (width !== null) {
+        await page.evaluate((before) => {
+          const view = document.querySelector("#jev-view");
+          Object.assign(view.style, { position: "", inset: "", width: "", height: "", zIndex: "" });
+          view.scrollTop = before;
+        }, scrolled);
+        await page.setViewportSize(FIRST_SCREEN);
+        await settlePaint(page);
+      }
+    }
+  };
+  const waitFor = (test, argument = null, timeout = 3_000) =>
+    page.waitForFunction(test, argument, { timeout }).then(() => true, () => false);
+  const checked = () => waitFor(() => el("jev-custom-form")?.getAttribute("aria-busy") === "false");
+  const fill = async (values) => {
+    for (const [name, value] of Object.entries(values)) {
+      await page.fill(`#jev-custom-form [name="${name}"]`, value, { timeout: 1_000 }).catch(() => {});
+    }
+    return checked();
+  };
+  const press = (selector) => page.evaluate((target) => document.querySelector(target)?.click(), selector);
+  const drawerOpen = () => waitFor(() => el("jev-custom-scrim")?.hidden === false);
+  const drawerClosed = () => waitFor(() => el("jev-custom-scrim")?.hidden !== false);
+  const rowOf = (index) => page.evaluate((at) => window.__JEV__.custom.store.decisions[at]?.draft.id ?? "", index);
+  try {
+    await page.setViewportSize(FIRST_SCREEN);
+    await page.evaluate(jevDashboardFixture);
+    await page.evaluate(() => el("nav-jev").click());
+    await waitFor(() => document.querySelector('#jev-view [data-jev-dash-row="summon"] [data-jev-fact="week"]')?.textContent === "50");
+    await waitFor(() => (window.__COUNTS__.list_custom_decisions ?? 0) > 0);
+    await settlePaint(page);
+    const rules = await page.evaluate(() => window.__JEV__.custom.rules);
+
+    const empty = await page.evaluate(async () => {
+      await window.__PAINTED__();
+      const view = document.querySelector("#jev-view");
+      const shown = (node) => Boolean(node) && node.getClientRects().length > 0;
+      const row = view.querySelector(".jev-switch [data-jev-switch-row]");
+      const guide = view.querySelector("[data-jev-custom-guide]");
+      const first = view.querySelector("[data-jev-dash-row]");
+      const top = () => Math.round(first.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop);
+      const tall = () => Math.round(row.getBoundingClientRect().height);
+      const seen = { asked: window.__COUNTS__.list_custom_decisions ?? 0, guide: shown(guide), part: shown(view.querySelector("[data-jev-custom]")) };
+      if (!seen.guide) return seen;
+      const box = guide.getBoundingClientRect();
+      const line = row.getBoundingClientRect();
+      Object.assign(seen, {
+        onSwitchLine: guide.closest("[data-jev-switch-row]") === row,
+        level: box.top >= line.top - 1 && box.bottom <= line.bottom + 1,
+        words: guide.textContent.trim(),
+        withGuide: { top: top(), tall: tall() },
+      });
+      guide.style.display = "none";
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      seen.withoutGuide = { top: top(), tall: tall() };
+      guide.style.display = "";
+      return seen;
+    });
+    ok("a person with no decisions sees no new line: 「새 결정」 stands on the switch line, and the first built-in row stands where it would without it",
+      empty.asked > 0 && empty.guide && !empty.part && empty.onSwitchLine && empty.level && empty.words.includes("새 결정")
+        && empty.withGuide.top === empty.withoutGuide.top && empty.withGuide.tall === empty.withoutGuide.tall,
+      JSON.stringify(empty));
+    await picture("empty", true);
+
+    await press("#jev-view [data-jev-custom-guide]");
+    await drawerOpen();
+    await checked();
+    const opened = await page.evaluate(() => {
+      const form = el("jev-custom-form");
+      const field = (name) => form?.querySelector(`[name="${name}"]`) ?? null;
+      const chosen = (name) => [...(form?.querySelectorAll(`[name="${name}"]:checked`) ?? [])].map((one) => one.value);
+      return {
+        open: el("jev-custom-scrim")?.hidden === false, top: window.__MODAL_STACK__().at(-1) ?? null,
+        focus: document.activeElement !== null && document.activeElement === field("name"),
+        title: el("jev-custom-title")?.textContent.trim() ?? "",
+        kind: chosen("kind"), at: chosen("at"), reads: chosen("reads"), folders: chosen("folders"),
+        actFrom: [field("actFrom")?.value, field("actFrom")?.min, field("actFrom")?.max].map(Number),
+        hourly: [field("maxPerHour")?.value, field("maxPerHour")?.min, field("maxPerHour")?.max].map(Number),
+        line: form?.querySelector("[data-jev-custom-line]")?.textContent.trim() ?? null,
+        lastLine: window.__JEV__.custom.lines.at(-1) ?? "",
+      };
+    });
+    ok("「새 결정」 opens the drawer as the window's top modal, the keyboard in its name and every default the settings answer's",
+      opened.open && opened.top === "jev-custom-scrim" && opened.focus && opened.title === "새 결정"
+        && opened.kind.join() === rules.kinds[0] && opened.at.join() === rules.points[0].at
+        && opened.reads.join() === rules.points[0].inputs.join() && opened.folders.join() === "consented"
+        && opened.actFrom.join() === [rules.actFromDefault, rules.actFrom.least, rules.actFrom.most].join()
+        && opened.hourly.join() === [rules.hourlyDefault, rules.hourly.least, rules.hourly.most].join(),
+      JSON.stringify(opened));
+
+    const first = { name: "릴리스 노트가 필요한가", question: "이번 턴의 변경이 사용자에게 보이는 동작을 바꿨나요?", yes: "보이는 동작이 바뀌었다", no: "바뀌지 않았다" };
+    const firstChecked = await fill(first);
+    const previewed = await page.evaluate(() => ({
+      line: el("jev-custom-form")?.querySelector("[data-jev-custom-line]")?.textContent.trim() ?? null,
+      lastLine: window.__JEV__.custom.lines.at(-1) ?? "",
+      questions: el("jev-custom-form")?.querySelector("[data-jev-custom-questions]")?.textContent ?? "",
+    }));
+    ok("the drawer prints the line an agent is told and the question as the check returned them",
+      firstChecked && previewed.lastLine !== "" && previewed.line === previewed.lastLine && previewed.questions.includes(first.question),
+      JSON.stringify(previewed));
+    await press("#jev-custom-save");
+    const madeClosed = await drawerClosed();
+    await waitFor(() => document.querySelector("#jev-view [data-jev-custom-row]") !== null);
+    const made = await page.evaluate(() => {
+      const custom = window.__JEV__.custom;
+      const kept = custom.store.decisions[0] ?? null;
+      const row = kept ? document.querySelector(`#jev-view [data-jev-custom-row="${kept.draft.id}"]`) : null;
+      const radio = row?.querySelector('[data-jev-custom-mode] [role="radio"][aria-checked="true"]') ?? null;
+      return {
+        saves: custom.saves.length, sent: custom.saves[0] ?? null, checks: custom.checks,
+        name: row?.querySelector(".jev-custom-name")?.textContent.trim() ?? null,
+        mode: radio?.dataset.mode ?? null, modeWords: radio?.textContent.trim() ?? null,
+        recording: custom.rules.modes.find((choice) => choice.asks && !choice.applies).mode,
+        selects: row?.querySelectorAll("select").length ?? null,
+        group: row?.querySelector("[data-jev-custom-mode]")?.getAttribute("role") ?? null,
+        focus: document.activeElement?.matches?.("#jev-view [data-jev-custom-new]") ?? false,
+      };
+    });
+    const sent = made.sent ?? {};
+    ok("saving a new decision asks the store once with the draft as written, and its line stands at 「기록만」 on radios, not a select",
+      madeClosed && made.saves === 1 && made.checks > 0 && made.name === first.name
+        && made.mode === made.recording && made.modeWords === "기록만" && made.selects === 0 && made.group === "radiogroup"
+        && (sent.id ?? null) === null && sent.name === first.name && sent.question === first.question
+        && sent.answer?.kind === rules.kinds[0] && sent.answer?.yes === first.yes && sent.answer?.no === first.no
+        && sent.at === rules.points[0].at && sent.reads?.join() === rules.points[0].inputs.join()
+        && sent.folders === null && sent.actFrom === rules.actFromDefault && sent.maxPerHour === rules.hourlyDefault,
+      JSON.stringify({ madeClosed, ...made }));
+    ok("closing the drawer after the first save hands the keyboard to the part's own 「새 결정」", made.focus, JSON.stringify({ focus: made.focus }));
+
+    const placed = await page.evaluate(async () => {
+      await window.__PAINTED__();
+      const view = document.querySelector("#jev-view");
+      view.scrollTop = 0;
+      const shown = (node) => Boolean(node) && node.getClientRects().length > 0;
+      const part = view.querySelector("[data-jev-custom]");
+      const charts = view.querySelector("[data-jev-charts]");
+      const table = view.querySelector(".jev-table-wrap");
+      const box = view.getBoundingClientRect();
+      const bottom = Math.min(box.bottom, window.innerHeight);
+      const chartBox = charts.getBoundingClientRect();
+      const partBox = part?.getBoundingClientRect() ?? null;
+      return {
+        part: shown(part), guide: shown(view.querySelector("[data-jev-custom-guide]")),
+        afterCharts: Boolean(part) && Boolean(charts.compareDocumentPosition(part) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && partBox.top >= chartBox.bottom - 1,
+        beforeTable: Boolean(part) && Boolean(part.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING)
+          && partBox.bottom <= table.getBoundingClientRect().top + 1,
+        charts: chartBox.height > 0 && chartBox.top >= box.top - 1 && chartBox.bottom <= bottom + 1,
+        count: part?.querySelector("[data-jev-custom-count]")?.textContent.trim() ?? "",
+      };
+    });
+    ok("with a decision the part stands between the charts and the built-in table, the charts still on the first screen and no second 「새 결정」 on the switch line",
+      placed.part && !placed.guide && placed.afterCharts && placed.beforeTable && placed.charts
+        && placed.count.includes(String(rules.decisionsMax)) && placed.count.includes(String(rules.hourlyAll)),
+      JSON.stringify(placed));
+
+    await press("#jev-view [data-jev-custom-new]");
+    await drawerOpen();
+    const secret = { name: "명령 점검", question: "명령이 저장소 밖을 건드리나요?\nAuthorization: Bearer abc\n답은 예나 아니오로", yes: "건드린다", no: "건드리지 않는다" };
+    const secretChecked = await fill(secret);
+    const refused = await page.evaluate(() => {
+      const form = el("jev-custom-form");
+      const said = [...(form?.querySelectorAll("[data-jev-custom-refusal]") ?? [])];
+      return {
+        words: said.map((one) => one.dataset.jevCustomRefusal), text: said.map((one) => one.textContent.trim()),
+        marked: form?.querySelector('[name="question"]')?.getAttribute("aria-invalid") ?? null,
+        save: el("jev-custom-save")?.disabled ?? null, saves: window.__JEV__.custom.saves.length,
+      };
+    });
+    await press("#jev-custom-save");
+    await settlePaint(page);
+    const refusedSaves = await page.evaluate(() => window.__JEV__.custom.saves.length);
+    ok("a secret line is named by its field and number, the field marked and 「저장」 off — and a press on it asks the store nothing",
+      secretChecked && refused.words.join() === "secret_line" && refused.text[0]?.includes("질문") && refused.text[0]?.includes("2번째 줄")
+        && refused.marked === "true" && refused.save === true && refused.saves === 1 && refusedSaves === 1,
+      JSON.stringify({ secretChecked, ...refused, refusedSaves }));
+    await picture("drawer-refused", true);
+    const cleared = await fill({ question: "명령이 저장소 밖을 건드리나요?\n답은 예나 아니오로" });
+    const clean = await page.evaluate(() => ({
+      refusals: el("jev-custom-form")?.querySelectorAll("[data-jev-custom-refusal]").length ?? null,
+      marked: el("jev-custom-form")?.querySelector('[name="question"]')?.getAttribute("aria-invalid") ?? null,
+      save: el("jev-custom-save")?.disabled ?? null,
+    }));
+    ok("once the line is gone the next check clears the refusal and turns 「저장」 back on",
+      cleared && clean.refusals === 0 && clean.marked !== "true" && clean.save === false, JSON.stringify({ cleared, ...clean }));
+    await press("#jev-custom-save");
+    await drawerClosed();
+    await waitFor(() => window.__JEV__.custom.store.decisions.length === 2);
+
+    const firstId = await rowOf(0);
+    const secondId = await rowOf(1);
+    const applying = rules.modes.find((choice) => choice.applies).mode;
+    await press(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-mode] [data-mode="${applying}"]`);
+    await waitFor((id) => window.__JEV__.custom.modes.length === 1
+      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"] [role="radio"][aria-checked="true"]`)?.dataset.mode
+        === window.__JEV__.custom.modes[0].mode, firstId);
+    const switched = await page.evaluate((id) => ({
+      calls: window.__JEV__.custom.modes.slice(),
+      checked: document.querySelector(`#jev-view [data-jev-custom-row="${id}"] [role="radio"][aria-checked="true"]`)?.textContent.trim() ?? null,
+    }), firstId);
+    ok("a press on 「켜짐」 switches that one decision through the store, and its line says so",
+      switched.calls.length === 1 && switched.calls[0].id === firstId && switched.calls[0].mode === applying && switched.checked === "켜짐",
+      JSON.stringify(switched));
+    await picture("list", true, "[data-jev-custom]");
+
+    const keptBefore = await page.evaluate(() => window.__JEV__.custom.store.decisions[0]?.version ?? "");
+    await press(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`);
+    await drawerOpen();
+    await checked();
+    const editing = await page.evaluate(() => {
+      const form = el("jev-custom-form");
+      const notice = form?.querySelector("[data-jev-custom-version]");
+      return {
+        title: el("jev-custom-title")?.textContent.trim() ?? "", name: form?.querySelector('[name="name"]')?.value ?? null,
+        question: form?.querySelector('[name="question"]')?.value ?? null,
+        notice: Boolean(notice) && notice.getClientRects().length > 0, remove: el("jev-custom-delete")?.hidden === false,
+      };
+    });
+    const versioned = await fill({ question: "이번 턴의 변경이 사용자에게 보이는 동작이나 문서를 바꿨나요?" });
+    const notice = await page.evaluate(() => {
+      const node = el("jev-custom-form")?.querySelector("[data-jev-custom-version]");
+      return { shown: Boolean(node) && node.getClientRects().length > 0, text: node?.textContent.trim() ?? "" };
+    });
+    ok("「편집」 opens the decision as written, and a change says saving makes a new version with earlier records kept apart",
+      editing.title === "결정 고치기" && editing.name === first.name && editing.question === first.question && !editing.notice
+        && editing.remove && versioned && notice.shown && notice.text.includes("새 판"),
+      JSON.stringify({ editing, versioned, notice }));
+    await picture("drawer-version");
+    await press("#jev-custom-save");
+    await drawerClosed();
+    await waitFor(() => window.__JEV__.custom.saves.length === 3);
+    const kept = await page.evaluate((id) => {
+      const custom = window.__JEV__.custom;
+      const decision = custom.store.decisions.find((one) => one.draft.id === id);
+      return {
+        sentId: custom.saves.at(-1)?.id ?? null, version: decision?.version ?? "", mode: decision?.mode ?? null,
+        row: document.querySelector(`#jev-view [data-jev-custom-row="${id}"] [role="radio"][aria-checked="true"]`)?.dataset.mode ?? null,
+      };
+    }, firstId);
+    ok("saving the edit keeps the same decision under a new version and leaves its mode where it was",
+      kept.sentId === firstId && kept.version !== "" && kept.version !== keptBefore && kept.mode === applying && kept.row === applying,
+      JSON.stringify({ ...kept, keptBefore }));
+
+    const builtIn = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const feature = window.__JEV__.custom.rules.feature;
+      const week = () => Number(view.querySelector('[data-jev-stat="week"] dd').textContent.replace(/\D/g, ""));
+      const before = week();
+      const answered = window.__ANSWER__.jev_summary;
+      window.__ANSWER__.jev_summary = (args) => {
+        const reading = answered(args);
+        const seat = reading.seats.find((one) => one.id === feature);
+        if (seat) seat.week = { ...seat.week, rows: 7, answered: 7, requests: 7, called: 7 };
+        return reading;
+      };
+      await refreshJevDashboard({ force: true });
+      await window.__PAINTED__();
+      const after = week();
+      window.__ANSWER__.jev_summary = answered;
+      const unfolded = !jevUnusedOpen;
+      if (unfolded) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      const rows = [...view.querySelectorAll("[data-jev-dash-row]")].map((row) => row.dataset.jevDashRow);
+      if (unfolded) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
+      await window.__PAINTED__();
+      const drawer = view.querySelector(".jev-drawer");
+      return {
+        feature, before, after, rows: rows.length, listed: rows.includes(feature), selects: view.querySelectorAll(".jev-table select").length,
+        open: !drawer.hidden, fields: drawer.querySelectorAll("input, textarea, select").length,
+        fixed: drawer.querySelector("[data-jev-drawer-fixed]")?.textContent.trim() ?? "",
+      };
+    });
+    ok("the built-in table names no row for a person's decisions and no select, even while they ask, the strip still counts their requests, and a built-in drawer offers nothing to write",
+      !builtIn.listed && builtIn.rows === BUILT_IN && builtIn.selects === 0 && builtIn.after === builtIn.before + 7
+        && builtIn.open && builtIn.fields === 0 && builtIn.fixed.length > 0,
+      JSON.stringify(builtIn));
+    await picture("builtin-drawer");
+    await page.evaluate(async () => {
+      document.querySelector("#jev-view .jev-drawer-close").click();
+      await refreshJevDashboard({ force: true });
+      await window.__PAINTED__();
+    });
+
+    await press(`#jev-view [data-jev-custom-row="${secondId}"] [data-jev-custom-delete]`);
+    await waitFor(() => el("jev-custom-delete-scrim")?.hidden === false);
+    const asking = await page.evaluate(() => ({
+      open: el("jev-custom-delete-scrim")?.hidden === false, top: window.__MODAL_STACK__().at(-1) ?? null,
+      title: el("jev-custom-delete-title")?.textContent ?? "", body: el("jev-custom-delete-body")?.textContent ?? "",
+      focus: document.activeElement !== null && document.activeElement === el("jev-custom-delete-cancel"),
+    }));
+    ok("「삭제」 asks once, naming the decision, that its records stay, and for how many days it can come back",
+      asking.open && asking.top === "jev-custom-delete-scrim" && asking.title.includes(secret.name)
+        && asking.body.includes(String(rules.trashKeptDays)) && asking.focus,
+      JSON.stringify(asking));
+    await picture("delete-confirm");
+    await press("#jev-custom-delete-ok");
+    await waitFor((id) => window.__JEV__.custom.deletes.length === 1
+      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) === null
+      && document.querySelector(`.toast[data-jev-custom-undo="${id}"] .toast-action`) !== null, secondId);
+    const deleted = await page.evaluate((id) => ({
+      deletes: window.__JEV__.custom.deletes.slice(), row: document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null,
+      confirm: el("jev-custom-delete-scrim")?.hidden === false,
+      undo: document.querySelector(`.toast[data-jev-custom-undo="${id}"] .toast-action`)?.textContent.trim() ?? null,
+    }), secondId);
+    ok("「지우기」 deletes it through the store, and the toast offers 「되돌리기」",
+      deleted.deletes.join() === secondId && !deleted.row && !deleted.confirm && deleted.undo === "되돌리기", JSON.stringify(deleted));
+    await picture("undo");
+    await press(`.toast[data-jev-custom-undo="${secondId}"] .toast-action`);
+    const undone = await waitFor((id) => window.__JEV__.custom.restores.length === 1
+      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null
+      && document.querySelector(`.toast[data-jev-custom-undo="${id}"]`) === null, secondId);
+    ok("「되돌리기」 brings it back through the store and takes the toast away",
+      undone, JSON.stringify(await page.evaluate(() => window.__JEV__.custom.restores)));
+
+    await press(`#jev-view [data-jev-custom-row="${secondId}"] [data-jev-custom-delete]`);
+    await waitFor(() => el("jev-custom-delete-scrim")?.hidden === false);
+    const held = await page.evaluate(async (id) => {
+      const started = performance.now();
+      el("jev-custom-delete-ok")?.click();
+      const undoMs = typeof JEV_CUSTOM_UNDO_MS === "number" ? JEV_CUSTOM_UNDO_MS : 0;
+      await new Promise((done) => setTimeout(done, TOAST_MS + 250));
+      const standing = document.querySelector(`.toast[data-jev-custom-undo="${id}"]`) !== null;
+      await new Promise((done) => setTimeout(done, Math.max(0, undoMs + 400 - (performance.now() - started))));
+      return { standing, gone: document.querySelector(`.toast[data-jev-custom-undo="${id}"]`) === null, undoMs, toastMs: TOAST_MS };
+    }, secondId);
+    ok("the undo stands past a plain toast's time and leaves at the design's eight seconds",
+      held.standing && held.gone && held.undoMs === 8_000 && held.undoMs > held.toastMs, JSON.stringify(held));
+    const trash = await page.evaluate((id) => {
+      const fold = document.querySelector("#jev-view [data-jev-custom-trash]");
+      return {
+        shown: Boolean(fold) && fold.getClientRects().length > 0,
+        items: [...(fold?.querySelectorAll("[data-jev-custom-restore]") ?? [])].map((one) => one.dataset.jevCustomRestore),
+        row: document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null,
+      };
+    }, secondId);
+    ok("with the undo gone the deleted decision waits in a fold under the list", trash.shown && trash.items.join() === secondId && !trash.row,
+      JSON.stringify(trash));
+    await page.evaluate(() => {
+      const fold = document.querySelector("#jev-view [data-jev-custom-trash]");
+      if (fold) fold.open = true;
+    });
+    await press(`#jev-view [data-jev-custom-restore="${secondId}"]`);
+    const restored = await waitFor((id) => window.__JEV__.custom.restores.length === 2
+      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"]`) !== null
+      && (document.querySelector("#jev-view [data-jev-custom-trash]")?.getClientRects().length ?? 0) === 0, secondId);
+    ok("「되살리기」 in the fold brings it back through the store", restored,
+      JSON.stringify(await page.evaluate(() => window.__JEV__.custom.restores)));
+
+    const full = await page.evaluate(async () => {
+      const custom = window.__JEV__.custom;
+      while (custom.store.decisions.length < custom.rules.decisionsMax) {
+        const copy = structuredClone(custom.store.decisions[0]);
+        custom.made += 1;
+        copy.draft.id = `cd-${custom.made.toString(16).padStart(8, "0")}`;
+        copy.draft.name = `${copy.draft.name} ${custom.made}`;
+        copy.createdAt = new Date().toISOString();
+        custom.store.decisions.push(copy);
+      }
+      await refreshJevDashboard({ force: true });
+      await window.__PAINTED__();
+      const view = document.querySelector("#jev-view");
+      const button = view.querySelector("[data-jev-custom-new]");
+      const guide = view.querySelector("[data-jev-custom-guide]");
+      const seen = {
+        disabled: button?.disabled ?? null, tip: button?.dataset.tip ?? "",
+        count: view.querySelector("[data-jev-custom-count]")?.textContent.trim() ?? "",
+        guide: Boolean(guide) && guide.getClientRects().length > 0, rows: view.querySelectorAll("[data-jev-custom-row]").length,
+      };
+      custom.store.decisions.splice(2);
+      await refreshJevDashboard({ force: true });
+      await window.__PAINTED__();
+      seen.after = view.querySelector("[data-jev-custom-new]")?.disabled ?? null;
+      return seen;
+    });
+    ok("at the store's limit 「새 결정」 turns off and says the limit, the settings answer's own",
+      full.disabled === true && full.tip.includes(String(rules.decisionsMax)) && full.count.includes(String(rules.decisionsMax))
+        && !full.guide && full.rows === rules.decisionsMax && full.after === false,
+      JSON.stringify(full));
+
+    const focusIs = (selector) => page.evaluate((target) => document.activeElement !== null
+      && document.activeElement === document.querySelector(target), selector);
+    const keys = {};
+    await page.focus("#jev-view [data-jev-custom-new]").catch(() => {});
+    await page.keyboard.press("Enter");
+    keys.opened = await drawerOpen();
+    await checked();
+    keys.name = await focusIs('#jev-custom-form [name="name"]');
+    const stops = () => page.evaluate(() => {
+      const found = typeof modalTabStops === "function" && el("jev-custom-scrim")
+        ? modalTabStops({ root: el("jev-custom-scrim") }) : [];
+      return { first: found.indexOf(document.activeElement) === 0, last: found.length > 1 && found.indexOf(document.activeElement) === found.length - 1 };
+    });
+    await page.keyboard.press("Shift+Tab");
+    keys.atFirst = (await stops()).first;
+    await page.keyboard.press("Shift+Tab");
+    keys.wrappedToLast = (await stops()).last;
+    await page.keyboard.press("Tab");
+    keys.wrappedToFirst = (await stops()).first;
+    await page.keyboard.press("Escape");
+    keys.escaped = await drawerClosed();
+    keys.back = await focusIs("#jev-view [data-jev-custom-new]");
+    await page.keyboard.press("Enter");
+    await drawerOpen();
+    await checked();
+    await page.keyboard.type("초안");
+    await checked();
+    await page.keyboard.press("Escape");
+    keys.unsaved = await page.evaluate(() => el("jev-custom-scrim")?.hidden === false
+      && el("jev-custom-unsaved")?.hidden === false && el("jev-custom-unsaved").textContent.trim().length > 0);
+    await page.keyboard.press("Escape");
+    keys.discarded = await drawerClosed();
+    keys.backAgain = await focusIs("#jev-view [data-jev-custom-new]");
+    ok("the drawer holds the keyboard: Tab wraps both ways, Esc closes it and hands focus back, and unsaved words take a second Esc",
+      Object.values(keys).every(Boolean), JSON.stringify(keys));
+
+    const confirm = {};
+    await page.focus(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`).catch(() => {});
+    await page.keyboard.press("Enter");
+    confirm.opened = await drawerOpen();
+    await checked();
+    await press("#jev-custom-delete");
+    confirm.asked = await waitFor(() => el("jev-custom-delete-scrim")?.hidden === false);
+    confirm.cancel = await focusIs("#jev-custom-delete-cancel");
+    await page.keyboard.press("Tab");
+    confirm.wrapped = await focusIs("#jev-custom-delete-ok");
+    await page.keyboard.press("Shift+Tab");
+    confirm.wrappedBack = await focusIs("#jev-custom-delete-cancel");
+    await page.keyboard.press("Escape");
+    confirm.closed = await waitFor(() => el("jev-custom-delete-scrim")?.hidden !== false);
+    confirm.drawer = await page.evaluate(() => el("jev-custom-scrim")?.hidden === false && window.__MODAL_STACK__().at(-1) === "jev-custom-scrim");
+    confirm.back = await focusIs("#jev-custom-delete");
+    confirm.nothingDeleted = await page.evaluate(() => window.__JEV__.custom.deletes.length === 2);
+    await page.keyboard.press("Escape");
+    confirm.drawerClosed = await drawerClosed();
+    confirm.edit = await focusIs(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`);
+    ok("the delete question over the drawer holds the keyboard too, and Esc closes only it, handing focus back to the drawer's 「삭제」",
+      Object.values(confirm).every(Boolean), JSON.stringify(confirm));
+
+    const radios = {};
+    const recording = rules.modes.find((choice) => choice.asks && !choice.applies).mode;
+    const checkedRadio = `#jev-view [data-jev-custom-row="${firstId}"] [role="radio"][aria-checked="true"]`;
+    await page.focus(checkedRadio).catch(() => {});
+    const modeCalls = await page.evaluate(() => window.__JEV__.custom.modes.length);
+    await page.keyboard.press("ArrowLeft");
+    radios.left = await waitFor(({ id, mode, before }) => window.__JEV__.custom.modes.length === before + 1
+      && window.__JEV__.custom.modes.at(-1).mode === mode
+      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"] [role="radio"][aria-checked="true"]`)?.dataset.mode === mode,
+    { id: firstId, mode: recording, before: modeCalls });
+    radios.focused = await page.evaluate((selector) => document.activeElement === document.querySelector(selector), checkedRadio);
+    await page.keyboard.press("ArrowRight");
+    radios.right = await waitFor(({ id, mode, before }) => window.__JEV__.custom.modes.length === before + 2
+      && document.querySelector(`#jev-view [data-jev-custom-row="${id}"] [role="radio"][aria-checked="true"]`)?.dataset.mode === mode,
+    { id: firstId, mode: applying, before: modeCalls });
+    ok("the arrow keys move a decision's mode one step and keep the keyboard on the mode now chosen",
+      Object.values(radios).every(Boolean), JSON.stringify(radios));
+
+    const english = await page.evaluate(async () => {
+      setLocale("en");
+      await window.__PAINTED__();
+      const part = document.querySelector("#jev-view [data-jev-custom]");
+      let words = part?.innerText ?? "";
+      for (const kept of window.__JEV__.custom.store.decisions) words = words.split(kept.draft.name).join(" ");
+      const said = { korean: (words.match(/[가-힣]+/g) ?? []).slice(0, 8), length: words.trim().length };
+      setLocale("ko");
+      await window.__PAINTED__();
+      return said;
+    });
+    ok("the part speaks English with no Korean of its own left", english.length > 0 && english.korean.length === 0, JSON.stringify(english));
+
+    ok("a person's decisions on the dashboard raise no renderer fault and log no console error",
+      faults.length === 0 && consoleErrors.length === 0,
+      JSON.stringify({ faults: faults.slice(0, 3), consoleErrors: consoleErrors.slice(0, 3) }));
+    if (folder) ok("the pictures of a person's decisions are written", pictures.length > 0, JSON.stringify(pictures));
+  } finally {
+    await page.close();
+  }
 }

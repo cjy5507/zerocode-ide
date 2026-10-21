@@ -141,7 +141,9 @@ export async function testQuotaWallChip({ browser, origin, ok, faults: shared })
     /* ---- 상황판: 워커 줄의 띠와 두 단추 --------------------------------------- */
     const deskNow = Date.now();
     await page.evaluate(coordinatorDeskFixture, { workers: 4, now: deskNow });
-    await page.waitForSelector(".task-board-row");
+    await page.waitForSelector(".task-board-row", { state: "attached" });
+    // The workers' rows stand on the board's 워커 tab (t-67607): the strip is read there.
+    await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "workers", false));
     // Worker w-4 is the desk fixture's walled worker; it wears the ledger's chip now.
     const strip = await page.evaluate(async ({ now, minute }) => {
       agentRows = [

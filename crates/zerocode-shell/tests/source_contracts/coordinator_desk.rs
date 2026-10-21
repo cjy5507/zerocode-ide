@@ -135,6 +135,8 @@ fn the_desk_answers_and_acknowledges_through_the_ledgers_own_verbs_and_invents_n
     for door in [
         "pub(crate) async fn desk_reply(",
         "pub(crate) async fn desk_ack(",
+        "pub(crate) async fn desk_hold_resolve(",
+        "pub(crate) async fn desk_review_pass(",
     ] {
         let body = block_after(&board, door);
         assert!(
@@ -153,6 +155,10 @@ fn the_desk_answers_and_acknowledges_through_the_ledgers_own_verbs_and_invents_n
         (
             "ackDeskBatch",
             block_after(window, "async function ackDeskBatch("),
+        ),
+        (
+            "pressBoardAsk",
+            block_after(window, "async function pressBoardAsk("),
         ),
     ] {
         assert!(

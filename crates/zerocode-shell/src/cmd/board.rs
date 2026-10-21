@@ -360,6 +360,63 @@ pub(crate) async fn desk_ack(
     .map_err(|error| error.to_string())?
 }
 
+/// Answer, from the task board, a decision standing in front of a task
+/// (t-67607, `desk::resolve_hold`): for a hold the ledger opened on a worker
+/// that exited before reporting, 거두기 or 다시 띄우기; for one somebody
+/// opened, the person's own words. As the run's coordinator seat, which this
+/// window must hold. The main window only, and only on the person's press.
+#[tauri::command]
+pub(crate) async fn desk_hold_resolve(
+    webview: tauri::Webview,
+    run: String,
+    gate: String,
+    act: String,
+    answer: Option<String>,
+    retry_request: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::desk::resolve_hold(
+            &run,
+            &gate,
+            &act,
+            answer.as_deref(),
+            &retry_request,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Pass, from the task board, a task a worker reported (t-67607,
+/// `desk::pass_review`): a verified review naming the attempt and the source
+/// the board drew, as the run's coordinator seat this window must hold. The
+/// main window only, and only on the person's press.
+#[tauri::command]
+pub(crate) async fn desk_review_pass(
+    webview: tauri::Webview,
+    run: String,
+    task: String,
+    attempt: String,
+    source: String,
+    retry_request: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::desk::pass_review(
+            &run,
+            &task,
+            &attempt,
+            &source,
+            &retry_request,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// 「지금 다시 시도」 on a quota-wall chip (t-39771): type one continuation at a
 /// worker standing at its wall, through the ledger's resume road
 /// (`wall_press::retry`). The main window only, and only after the renderer's

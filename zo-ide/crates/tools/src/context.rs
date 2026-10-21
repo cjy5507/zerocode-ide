@@ -240,13 +240,16 @@ pub struct ForkSource {
     pub system_prompt: Vec<String>,
 }
 
-/// The target, coordinates and mark numbering of a staged Computer picture.
+/// The target, coordinates and mark numbering of a staged Computer picture,
+/// and the title its window showed — the document the model chose words on,
+/// which a click re-picked there must still be on (t-66760).
 #[derive(Debug, PartialEq)]
 pub(crate) struct ComputerObservation {
     pub app: Option<String>,
     pub window_id: Option<u64>,
     pub frame: ShotFrame,
     pub marked_look: Option<String>,
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -422,6 +425,12 @@ pub struct ToolContext {
     /// context-build time per agent and never mutated live (same lifecycle as
     /// [`Self::lease_owner`]). See [`Self::with_subagent_identity`].
     subagent_identity: Option<SubagentIdentity>,
+    /// The conversation whose plan `TodoWrite` keeps, when it is not the
+    /// session in [`Self::session_id`]: an in-process helper runs its own
+    /// conversation under its parent's session id, and its plan is its own
+    /// (see [`Self::plan_session_id`]). Plain `Option`, fixed at
+    /// context-build time per agent like [`Self::lease_owner`].
+    plan_owner: Option<String>,
     /// Session-local disabled tool names loaded from `.zo/tool-toggles.json`
     /// and shared across registry clones. Names are stored canonicalized, so
     /// aliases like `web_search` disable the same handler as `WebSearch`.
@@ -551,6 +560,7 @@ impl fmt::Debug for ToolContext {
             .field("worktree_confinement", &self.worktree_confinement)
             .field("lease_owner", &self.lease_owner)
             .field("subagent_identity", &self.subagent_identity)
+            .field("plan_owner", &self.plan_owner)
             .field("disabled_tools", &self.disabled_tools())
             .field(
                 "background_agent_default",
@@ -615,6 +625,18 @@ impl ToolContext {
             .and_then(|seen| seen.app.as_ref().map(|app| ComputerTarget { app: app.clone(), window_id: seen.window_id }))
     }
 
+    /// The title window `window_id` showed in the last picture staged for
+    /// this model, when that picture was of it (t-66760).
+    pub(crate) fn computer_window_title(&self, window_id: u64) -> Option<String> {
+        self.computer
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|seen| seen.window_id == Some(window_id))
+            .and_then(|seen| seen.title.clone())
+    }
+
     pub(crate) fn computer_target_frame(&self, target: &ComputerTarget) -> Option<ShotFrame> {
         self.computer.observation.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
@@ -673,6 +695,7 @@ impl ToolContext {
             worktree_confinement: None,
             lease_owner: None,
             subagent_identity: None,
+            plan_owner: None,
             disabled_tools: Arc::new(Mutex::new(BTreeSet::new())),
             tool_invocations: Arc::new(Mutex::new(Vec::new())),
             active_run_id: Arc::new(Mutex::new(None)),
@@ -1066,6 +1089,25 @@ impl ToolContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The session whose plan `TodoWrite` reads and writes: the helper's own
+    /// conversation when this context runs one ([`Self::with_plan_owner`]),
+    /// else the session it serves. `None` when it serves no session.
+    #[must_use]
+    pub fn plan_session_id(&self) -> Option<String> {
+        self.plan_owner.clone().or_else(|| self.session_id())
+    }
+
+    /// Keep this context's plan with conversation `session_id`. A helper runs
+    /// its own conversation under its parent's session id, the id its
+    /// manifests are stamped with, and its plan must never land in its
+    /// parent's (t-68408). A blank id leaves the plan with the served session.
+    #[must_use]
+    pub fn with_plan_owner(mut self, session_id: &str) -> Self {
+        let session_id = session_id.trim();
+        self.plan_owner = (!session_id.is_empty()).then(|| session_id.to_string());
+        self
     }
 
     /// Install the session-owned agent registry (see `Self::agent_registry`).
