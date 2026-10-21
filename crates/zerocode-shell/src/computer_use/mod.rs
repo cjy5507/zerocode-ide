@@ -66,6 +66,10 @@ mod typed_text;
 mod macos;
 #[cfg(target_os = "macos")]
 use macos as platform;
+/// The signed helper stood in for by a thread of the test process (t-66753):
+/// the window's own road to it, with nothing launched.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) use macos::stand_in;
 
 #[cfg(target_os = "windows")]
 mod windows;

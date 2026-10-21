@@ -651,9 +651,22 @@ fn structured_look(
         ask.insert(ELEMENT_FRAMES_KEY.into(), true.into());
     }
     let frame = call("getAppState", Value::Object(ask))?;
-    let key = resolved_key(params, &frame).unwrap_or_else(|| frame_key(params));
+    tree_look(params, &frame, epoch, began, "app-structured")
+}
+
+/// An app's look answered from its tree alone — asked so, or read without a
+/// picture (t-66753 C1) — with the road it came by on its line. `None`: marks
+/// were asked and the tree gives none.
+fn tree_look(
+    params: &Map<String, Value>,
+    frame: &Value,
+    epoch: u64,
+    began: std::time::Instant,
+    road: &str,
+) -> Result<Option<Value>, ComputerUseError> {
+    let key = resolved_key(params, frame).unwrap_or_else(|| frame_key(params));
     let marked = if params.get("marks") == Some(&Value::Bool(true)) {
-        let Some(marked) = super::marks::structured_marks(&frame, &key, epoch)? else {
+        let Some(marked) = super::marks::structured_marks(frame, &key, epoch)? else {
             return Ok(None);
         };
         Some(marked.answer)
@@ -671,7 +684,7 @@ fn structured_look(
         "n": LOOKS.fetch_add(1, Ordering::Relaxed) + 1,
         "atEpochMs": crate::now_epoch_ms(),
         "ms": u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "road": "app-structured",
+        "road": road,
         "diff": false,
         "imageBytes": 0,
     }));
@@ -684,13 +697,41 @@ fn structured_look(
             "y": frame.pointer("/snapshot/window/y"),
         },
         "scale": 1.0,
-        "tree": tree_answer(&frame),
+        "tree": tree_answer(frame),
         "text": null,
         "changed": null,
         "changedShare": null,
         "marks": marked,
         "perception": "accessibility",
     })))
+}
+
+/// An app's look the helper answered with its tree and no picture (t-66753
+/// C1): the tree, its marks when the tree gives some, and the helper's own
+/// `screenshotStatus` saying why there is no picture.
+fn pictureless_look(
+    params: &Map<String, Value>,
+    frame: &Value,
+    epoch: u64,
+    began: std::time::Instant,
+) -> Result<Value, ComputerUseError> {
+    const ROAD: &str = "app-tree-only";
+    let why = frame
+        .get("screenshotStatus")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut answer = if let Some(answer) = tree_look(params, frame, epoch, began, ROAD)? {
+        answer
+    } else {
+        // Marks were asked, and neither the tree nor a picture gives any.
+        let mut unmarked = params.clone();
+        unmarked.remove("marks");
+        let mut answer = tree_look(&unmarked, frame, epoch, began, ROAD)?.unwrap_or_default();
+        answer["marks"] = serde_json::json!({ "unavailable": why.clone() });
+        answer
+    };
+    answer["screenshotStatus"] = why;
+    Ok(answer)
 }
 
 /// One look: the app's window through its tree, or the desktop — the eye's
@@ -794,6 +835,16 @@ fn look(
             Road::Capture,
         )
     };
+    // An app's window the helper read without its picture — Screen
+    // Recording not granted, or a window the window server keeps from
+    // capture (t-66753 C1): the look answers the tree and the helper's reason
+    // for no picture, never a picture it does not have.
+    if road == Road::App
+        && frame.get("snapshot").is_some()
+        && super::screenshot_png(&frame).is_none()
+    {
+        return pictureless_look(params, &frame, epoch, began);
+    }
     let png = super::screenshot_png(&frame).ok_or_else(|| {
         ComputerUseError::new(
             error_code::SCREENSHOT_FAILED,

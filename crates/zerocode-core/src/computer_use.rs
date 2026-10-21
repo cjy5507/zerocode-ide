@@ -686,6 +686,13 @@ pub const STOP_REASON_SESSION_BUDGET: &str = "budget:session";
 /// never an agent's `resume`, or one hand on the operator would be the
 /// operator's own (review, 2026-09-11).
 pub const PERSONS_STOP_REASONS: &[&str] = &[STOP_REASON_HOTKEY, STOP_REASON_WINDOW];
+/// Who lifts a stop, in the words the window writes on the helper's `resume`
+/// and the helper reads (its `StopLifter`, a source contract holds them):
+/// the person — the window's band alone — or an agent, any other road. A
+/// resume that names no one is an agent's (t-66753 A).
+pub const RESUME_LIFTER_KEY: &str = "lifter";
+pub const RESUME_LIFTER_PERSON: &str = "person";
+pub const RESUME_LIFTER_AGENT: &str = "agent";
 
 /// Whether a stop is the person's to lift.
 #[must_use]
@@ -1163,6 +1170,8 @@ pub fn batch_commands(raw: &str) -> Result<Vec<Vec<String>>, String> {
     let mut normalised = Vec::with_capacity(steps.len());
     for (at, step) in steps.into_iter().enumerate() {
         let n = at + 1;
+        // One spelling for every check below (t-66753 C2).
+        let step = flags_apart(&step).map_err(|error| format!("step {n}: {error}"))?;
         let verb = step.first().cloned().unwrap_or_default();
         let method = verb_method(&verb)
             .ok_or_else(|| format!("step {n}: `{verb}` is not a {COMPUTER_CLI} command"))?;
@@ -3259,6 +3268,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
             usage()
         ));
     };
+    let argv = flags_apart(argv)?;
     let flags = flags(&argv[1..])?;
     let json = flags.contains_key("json");
     reject_unknown(method, &flags)?;
@@ -3458,6 +3468,83 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
 /// Flags whose value is a program's own argument words — dashes and all.
 pub(crate) const PROGRAM_WORD_FLAGS: &[&str] = &["args"];
 
+/// A command line — its verb, then its words — with every `--name=value`
+/// written as `--name value` (t-66753 C2): the one spelling every reader of
+/// a line's words reads, so a region whose corner is negative can be joined
+/// to its flag, and what a reader refuses or stops for in one spelling it
+/// refuses or stops for in the other. A flag's value standing apart is kept
+/// whole, whatever it holds (`--args --x=1`); a flag that takes no value
+/// refuses one after `=`.
+pub fn flags_apart(argv: &[String]) -> Result<Vec<String>, String> {
+    let mut apart = Vec::with_capacity(argv.len() + 1);
+    apart.extend(argv.first().cloned());
+    let mut at = 1;
+    while at < argv.len() {
+        let word = &argv[at];
+        at += 1;
+        let Some(flag) = word.strip_prefix("--") else {
+            apart.push(word.clone());
+            continue;
+        };
+        match flag.split_once('=') {
+            Some((name, _)) if !name.is_empty() && takes_no_value(name) => {
+                return Err(format!("--{name} takes no value"));
+            }
+            Some((name, value)) if !name.is_empty() => {
+                apart.push(format!("--{name}"));
+                apart.push(value.to_string());
+            }
+            _ => {
+                apart.push(word.clone());
+                // A value standing apart is the next word, kept whole.
+                if !takes_no_value(flag)
+                    && let Some(value) = argv.get(at)
+                {
+                    apart.push(value.clone());
+                    at += 1;
+                }
+            }
+        }
+    }
+    Ok(apart)
+}
+
+/// Whether a flag stands alone — there or not, with no value of its own.
+fn takes_no_value(name: &str) -> bool {
+    matches!(
+        name,
+        "json"
+            | "background"
+            | "restore-window"
+            | "no-screenshot"
+            | "local"
+            | "enter"
+            | "full-res"
+            | "force"
+            | "ocr"
+            | "absent"
+            | "reset-budget"
+            | "reset"
+            | "allow-self"
+            | "browser-chrome"
+            | "instant"
+            | "pass"
+            | "fail"
+            | "diff"
+            | "marks"
+            | "settle"
+            | "all-layers"
+            | "verify"
+            | "repeat"
+            | "renew"
+            | "ask-code"
+            | WALK_OVERLAP_FLAG
+            | WALK_RESCUE_FLAG
+            | WALK_REPLAY_FLAG
+            | EMULATOR_PREVIEW_FLAG
+    )
+}
+
 fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
     let mut flags = BTreeMap::new();
     let mut at = 0;
@@ -3469,38 +3556,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
         if name.is_empty() {
             return Err("empty flag".into());
         }
-        let boolean = matches!(
-            name,
-            "json"
-                | "background"
-                | "restore-window"
-                | "no-screenshot"
-                | "local"
-                | "enter"
-                | "full-res"
-                | "force"
-                | "ocr"
-                | "absent"
-                | "reset-budget"
-                | "reset"
-                | "allow-self"
-                | "browser-chrome"
-                | "instant"
-                | "pass"
-                | "fail"
-                | "diff"
-                | "marks"
-                | "settle"
-                | "all-layers"
-                | "verify"
-                | "repeat"
-                | "renew"
-                | "ask-code"
-                | WALK_OVERLAP_FLAG
-                | WALK_RESCUE_FLAG
-                | WALK_REPLAY_FLAG
-                | EMULATOR_PREVIEW_FLAG
-        );
+        let boolean = takes_no_value(name);
         if flags.contains_key(name) {
             return Err(format!("duplicate --{name}"));
         }
@@ -5555,6 +5611,108 @@ mod tests {
 
     fn words(input: &[&str]) -> Vec<String> {
         input.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    /// A screen left of or above the main one has negative coordinates
+    /// (t-66753 C2): a region there is taken in both spellings of its flag —
+    /// `--region -2560,-38,560,1340` and `--region=-2560,-38,560,1340` — as
+    /// the same region, as every flag with a value is, while a flag that
+    /// takes none refuses a value after `=`. The picture's top-left is the
+    /// region's corner, so a pixel read off it names the same point. A batch
+    /// step and a recipe line read `=` the same way, so what they refuse or
+    /// stop for in one spelling they refuse or stop for in the other.
+    #[test]
+    fn a_value_may_follow_its_flag_after_an_equals_sign_and_a_region_may_lie_left_of_the_main_screen()
+     {
+        use crate::computer_recipe::{RecipeStop, recipe_lines, recipe_step_stop};
+        use crate::computer_use_protocol::frame::ShotFrame;
+        let spaced = parse_command(&words(&[
+            "screenshot",
+            "--region",
+            "-2560,-38,560,1340",
+            "--json",
+        ]));
+        let joined = parse_command(&words(&[
+            "screenshot",
+            "--region=-2560,-38,560,1340",
+            "--json",
+        ]));
+        assert_eq!(
+            joined, spaced,
+            "the two spellings of a region are one region"
+        );
+        assert_eq!(
+            spaced.expect("a region left of the main screen").params["region"],
+            json!({ "x": -2560.0, "y": -38.0, "width": 560.0, "height": 1340.0 })
+        );
+        assert_eq!(
+            parse_command(&words(&["zoom", "--region=100,-1000,300,200"]))
+                .map(|command| command.params["region"]["y"].clone()),
+            Ok(json!(-1000.0)),
+            "a region above the main screen"
+        );
+        assert_eq!(
+            parse_command(&words(&["mouse-move", "--x=-1200", "--y=300"])),
+            parse_command(&words(&["mouse-move", "--x", "-1200", "--y", "300"])),
+            "every flag with a value reads `=`"
+        );
+        let boolean = parse_command(&words(&["screenshot", "--full-res=true"]));
+        assert!(
+            boolean
+                .as_ref()
+                .is_err_and(|error| error.contains("--full-res takes no value")),
+            "a flag that takes no value refuses one: {boolean:?}"
+        );
+        let frame = ShotFrame::from_answer(&json!({
+            "origin": { "x": -2560.0, "y": -38.0 },
+            "screenshot": { "scale": 2.0 },
+        }))
+        .expect("the region's picture");
+        assert_eq!(frame.to_point([0.0, 0.0]), [-2560.0, -38.0], "its corner");
+        assert_eq!(frame.to_point([1120.0, 2680.0]), [-2000.0, 1302.0]);
+        assert_eq!(frame.to_pixel([-2000.0, 1302.0]), [1120.0, 2680.0]);
+        let batch = parse_command(&words(&[
+            "batch",
+            "--commands",
+            r#"[["mouse-move","--x=-1200","--y=300"]]"#,
+        ]));
+        assert_eq!(
+            batch.as_ref().map(batch_steps),
+            Ok(vec![words(&[
+                "mouse-move",
+                "--x",
+                "-1200",
+                "--y",
+                "300",
+                "--json"
+            ])]),
+            "a batch step reads `=`: {batch:?}"
+        );
+        let stale = parse_command(&words(&[
+            "batch",
+            "--commands",
+            r#"[["click","--app","Fixture","--element-index","1"],["click","--app","Fixture","--element-index=2"]]"#,
+        ]));
+        assert!(
+            stale
+                .as_ref()
+                .is_err_and(|error| error.contains("element indexes change after every action")),
+            "a stale index after an action is refused in either spelling: {stale:?}"
+        );
+        let recipe = recipe_lines(
+            "## Steps\n\n1. `zerocode-computer click --app=Fixture --element-index=3`\n",
+        )
+        .expect("a recipe line");
+        assert_eq!(
+            recipe[0].argv,
+            words(&["click", "--app", "Fixture", "--element-index", "3"]),
+            "a recipe line reads `=`"
+        );
+        assert_eq!(
+            recipe_step_stop(&recipe[0].argv),
+            Some(RecipeStop::NeedsALook),
+            "a saved number stops the replay in either spelling"
+        );
     }
 
     /// `reflex-auto` names the sentence its plan is written for, the app the

@@ -126,6 +126,25 @@ public enum StopReason {
     public static let signal = "signal"
     public static let request = "request"
     public static let sessionBudget = "budget:session"
+
+    /// Whether a stop is the person's: their chord (t-66753 A). The window's
+    /// own stop button reaches the helper as `signal`, which the helper
+    /// cannot tell from an agent's (`zerocode_core::computer_use::persons_stop`).
+    public static func isPersons(_ reason: String) -> Bool {
+        reason == hotkey
+    }
+}
+
+/// Who asks the helper to lift its stop, in the window's words
+/// (`zerocode_core::computer_use::RESUME_LIFTER_*`, t-66753 A): the person,
+/// from the window's band, or an agent. A request that names no one is an
+/// agent's; a word the helper does not know is nobody's authority.
+public enum StopLifter: String, Sendable {
+    case person = "person"
+    case agent = "agent"
+
+    /// The key a `resume` request names its lifter under.
+    public static let key = "lifter"
 }
 
 /// Why the hand took a hold back by itself, in the words a status reads.
@@ -142,6 +161,9 @@ public struct OperatorLedger: Equatable, Sendable {
     /// refused while the stop still stands and answers.
     public let budget: ActionBudget?
     public private(set) var stoppedReason: String?
+    /// A count that moves whenever the stop is made, changed or lifted
+    /// (t-66753 B): the window's waiting request asks after the one it heard.
+    public private(set) var stopRevision: UInt64 = 0
     public private(set) var actions: Int = 0
     public private(set) var lastActionAt: TimeInterval?
     /// Actions a paced hand may still take back to back; refills at the pace.
@@ -162,19 +184,39 @@ public struct OperatorLedger: Equatable, Sendable {
 
     public var isStopped: Bool { stoppedReason != nil }
 
+    /// Stop. A stop the person made stays theirs (t-66753 A): a later one
+    /// that is not theirs — the window's signal, a request, the session's
+    /// count — leaves the reason as it stands, so it is still their resume
+    /// that lifts it. Their chord over any other stop is theirs from then on.
     public mutating func stop(reason: String) {
-        stoppedReason = reason
+        if let standing = stoppedReason, StopReason.isPersons(standing), !StopReason.isPersons(reason) {
+            return
+        }
+        stand(reason)
+    }
+
+    /// Whether `lifter` may lift the stop that stands (t-66753 A): the
+    /// person's stop is theirs alone to lift; any other, anyone's.
+    public func liftable(by lifter: StopLifter) -> Bool {
+        lifter == .person || !(stoppedReason.map(StopReason.isPersons) ?? false)
     }
 
     /// Lift the stop. The pace starts fresh — a person who resumed means "go
     /// on" — and the session count clears only when asked, because the
     /// session cap is the person's to lift.
     public mutating func resume(resetBudget: Bool) {
-        stoppedReason = nil
+        stand(nil)
         tokens = Self.fullBurst(budget)
         refilledAt = nil
         recent.removeAll()
         if resetBudget { actions = 0 }
+    }
+
+    /// The stop as it stands from now; its count moves only when it changed.
+    private mutating func stand(_ reason: String?) {
+        guard stoppedReason != reason else { return }
+        stoppedReason = reason
+        stopRevision &+= 1
     }
 
     /// Count one action at `now` if it may go; otherwise say how long until
@@ -184,7 +226,7 @@ public struct OperatorLedger: Equatable, Sendable {
         if let reason = stoppedReason { return .stopped(reason: reason) }
         guard let budget else { return .noBudget }
         if actions >= budget.perSession {
-            stoppedReason = StopReason.sessionBudget
+            stand(StopReason.sessionBudget)
             return .sessionBudget(limit: budget.perSession)
         }
         if case let .paced(perSecond, burst) = budget.pace {
@@ -553,12 +595,16 @@ public final class OperatorHand: @unchecked Sendable {
 
     /// The operator stops (the hotkey, the signal, a request): nothing is
     /// pressed until `resume`, the current hold is taken back, and every input
-    /// the hand pressed is let go of here, on the stopping thread.
+    /// the hand pressed is let go of here, on the stopping thread. A stop the
+    /// person made keeps their reason through a later one that is not theirs
+    /// (t-66753 A), which lets go of what is held all the same.
     @discardableResult
     public func stop(reason: String) -> Release {
         lock.lock()
-        stoppedReason = reason
-        if holder != nil, revokedReason == nil { revokedReason = reason }
+        if !(stoppedReason.map(StopReason.isPersons) ?? false) || StopReason.isPersons(reason) {
+            stoppedReason = reason
+        }
+        if holder != nil, revokedReason == nil { revokedReason = stoppedReason ?? reason }
         let release = releaseHeldLocked()
         lock.unlock()
         sleeper.wake()

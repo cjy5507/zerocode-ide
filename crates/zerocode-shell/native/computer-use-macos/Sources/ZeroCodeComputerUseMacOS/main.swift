@@ -373,7 +373,8 @@ final class Provider {
                 benchPressAim: params["benchPressAim"]?.string
             )
         case "resume":
-            OperatorGuardHost.resume(resetBudget: params["resetBudget"]?.bool == true)
+            let lifter = try stopLifter(params)
+            try OperatorGuardHost.resume(resetBudget: params["resetBudget"]?.bool == true, by: lifter)
             return OperatorGuardHost.status()
         case "handshake":
             return providerHandshake()
@@ -519,7 +520,11 @@ final class Provider {
         }
     }
 
-    private func observe(params: [String: JSONValue]) throws -> Snapshot {
+    /// The app's window as the request names it. `acting`: the snapshot an
+    /// action is checked against, which only a window the window server lists
+    /// may be (t-66753 C1); every other look may read the app's own
+    /// accessibility window when the server lists none of the app's.
+    private func observe(params: [String: JSONValue], acting: Bool = false) throws -> Snapshot {
         let query = try requiredString(params, "app")
         let windowId = try requestedWindowId(params)
         let windowIndex = try requestedWindowIndex(params)
@@ -532,7 +537,8 @@ final class Provider {
             includeScreenshot: params["noScreenshot"]?.bool != true,
             windowId: windowId,
             windowIndex: windowIndex,
-            restoreWindow: params["restoreWindow"]?.bool == true
+            restoreWindow: params["restoreWindow"]?.bool == true,
+            readsTheTree: !acting
         )
         // Why: cached snapshots only validate element identity for follow-up
         // actions; retaining MB-scale screenshot base64 in the long-lived agent grows memory.
@@ -628,7 +634,7 @@ final class Provider {
         let cached = try cachedSnapshot(params: params)
         // Why: cached AX frames can be stale after a window move or resize, and
         // stale geometry can turn an intended action into a misclick.
-        let snapshot = try observe(params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement })
+        let snapshot = try observe(params: params.merging(["noScreenshot": .bool(true)]) { _, replacement in replacement }, acting: true)
         try validateRequestedElements(cached: cached, current: snapshot, params: params)
         return snapshot
     }
@@ -955,7 +961,8 @@ final class Provider {
         includeScreenshot: Bool,
         windowId: CGWindowID?,
         windowIndex: Int?,
-        restoreWindow: Bool
+        restoreWindow: Bool,
+        readsTheTree: Bool
     ) throws -> Snapshot {
         guard accessibilityTrustedSettled() else {
             // Why: agents retry failed observations. Only the explicit setup flow
@@ -967,15 +974,24 @@ final class Provider {
         }
         let appElement = AXUIElementCreateApplication(app.pid)
         prepareApplicationAccessibility(appElement, app: app)
-        let windowCandidates = WindowCapture.candidates(pid: app.pid)
+        let listed = WindowCapture.candidates(pid: app.pid)
+        // Without Screen Recording the window server names no other app's
+        // window and may list none of them as shared (t-66753 C1): a look
+        // then reads the app's own accessibility windows — that process's
+        // alone, and never for an action, whose checks ask the server.
+        let windowCandidates = readsTheTree
+            ? WindowList.forReading(listed: listed, pid: app.pid, accessibility: { accessibilityWindows(of: appElement) })
+            : listed
+        let throughTheTree = listed.isEmpty && !windowCandidates.isEmpty
         let focused = try focusedWindow(
             appElement: appElement,
             app: app,
-            visibleWindowCount: windowCandidates.count,
+            visibleWindowCount: listed.count,
             allowRecovery: restoreWindow
         )
         let focusedTitle = stringAttribute(focused, kAXTitleAttribute as String) ?? app.name
-        let canCaptureScreenshot = includeScreenshot && screenCaptureTrustedSettled()
+        // A window the server does not list is no picture's: none is taken.
+        let canCaptureScreenshot = includeScreenshot && !throughTheTree && screenCaptureTrustedSettled()
         guard let capture = WindowCapture.resolve(
             candidates: windowCandidates,
             titleHint: focusedTitle,
@@ -998,6 +1014,8 @@ final class Provider {
         let screenshot = includeScreenshot ? capture.screenshotPayload() : nil
         let screenshotStatus: ScreenshotStatus = if screenshot != nil {
             .captured
+        } else if includeScreenshot && throughTheTree {
+            .failed(treeOnlyReason(app: app))
         } else if includeScreenshot && !canCaptureScreenshot {
             .failed("Screen Recording permission is required for ZeroCode Computer Use; grant permission or pass --no-screenshot to inspect accessibility state only.")
         } else if includeScreenshot {
@@ -2057,6 +2075,33 @@ private func focusedWindow(appElement: AXUIElement, app: AppDescriptor, visibleW
         throw ProviderError.coded("permission_denied", "app '\(app.name)' has visible windows but no accessibility window (AX reads stayed blocked for \(outcome.waitedMs)ms after retries). macOS Accessibility may need ZeroCode Computer Use toggled off and on again in System Settings.")
     }
     throw ProviderError.coded("window_not_found", "app '\(app.name)' has no accessibility window; make sure the app has a visible window, then retry with --restore-window.")
+}
+
+/// The app's own windows as its accessibility tree gives them (t-66753 C1),
+/// for a look at an app the window server lists no window of.
+private func accessibilityWindows(of appElement: AXUIElement) -> [AccessibilityWindow] {
+    (copyArray(appElement, kAXWindowsAttribute as String) ?? []).map { window in
+        var owner: pid_t = 0
+        if AXUIElementGetPid(window, &owner) != .success {
+            owner = 0
+        }
+        return AccessibilityWindow(
+            pid: owner,
+            number: windowNumber(window),
+            frame: absoluteFrame(window),
+            title: stringAttribute(window, kAXTitleAttribute as String),
+            minimized: boolAttribute(window, kAXMinimizedAttribute as String) == true
+        )
+    }
+}
+
+/// Why a look read through the app's own tree has no picture (t-66753 C1):
+/// said in the answer, so no one takes the tree for what the screen shows.
+private func treeOnlyReason(app: AppDescriptor) -> String {
+    if screenCaptureTrusted() {
+        return "the window server lists no window of '\(app.name)' it may picture (the app keeps its windows from capture): this answer is the window's accessibility tree alone, with no picture."
+    }
+    return "Screen Recording is not granted to ZeroCode Computer Use, so the window server lists no window of '\(app.name)' to picture: this answer is the window's accessibility tree alone, with no picture. Grant it for a picture (zerocode-computer permissions --id screenshots)."
 }
 
 private func lookupUsableWindow(
@@ -3464,25 +3509,6 @@ private func jsonNullable<T>(_ value: T?) -> Any {
     value ?? NSNull()
 }
 
-private struct WindowCandidate {
-    let windowId: CGWindowID
-    let layer: Int
-    let bounds: CGRect
-    let title: String?
-    let alpha: CGFloat
-    let isOnScreen: Bool
-    let sharingState: Int?
-
-    var score: Int {
-        var value = Int(bounds.width * bounds.height)
-        if layer == 0 { value += 1_000_000_000 }
-        if title != nil && title?.isEmpty == false { value += 10_000_000 }
-        if isOnScreen { value += 1_000_000 }
-        if alpha >= 0.99 { value += 100_000 }
-        return value
-    }
-}
-
 private struct WindowCapture {
     let windowId: CGWindowID
     let layer: Int
@@ -3550,35 +3576,7 @@ private struct WindowCapture {
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
-        return infos.compactMap { info in
-            guard let ownerPid = info[kCGWindowOwnerPID as String] as? pid_t, ownerPid == pid,
-                  let number = info[kCGWindowNumber as String] as? NSNumber,
-                  let layer = info[kCGWindowLayer as String] as? Int,
-                  let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
-                  bounds.width >= 48,
-                  bounds.height >= 48
-            else {
-                return nil
-            }
-            let alpha = info[kCGWindowAlpha as String] as? CGFloat ?? 1
-            guard alpha > 0.01 else { return nil }
-            let sharing = (info[kCGWindowSharingState as String] as? NSNumber).map { $0.intValue }
-            if sharing == 0 { return nil }
-            let isOnScreen = (info[kCGWindowIsOnscreen as String] as? Bool) ?? true
-            return WindowCandidate(
-                windowId: CGWindowID(number.uint32Value),
-                layer: layer,
-                bounds: bounds,
-                title: info[kCGWindowName as String] as? String,
-                alpha: alpha,
-                isOnScreen: isOnScreen,
-                sharingState: sharing
-            )
-        }
-        .sorted { lhs, rhs in
-            lhs.score > rhs.score
-        }
+        return WindowList.candidates(infos: infos, pid: pid)
     }
 
     func screenshotPayload() -> ScreenshotPayload? {
@@ -5506,6 +5504,13 @@ func unlockedRoad(_ method: String, params: [String: JSONValue]) throws -> [Stri
         return OperatorGuardHost.status()
     case "status":
         return OperatorGuardHost.status()
+    case "stopWatch":
+        let waitMs = try requiredInteger(params, "ms")
+        let after = try optionalInteger(params, "after")
+        guard waitMs > 0, (after ?? 0) >= 0 else {
+            throw ProviderError.coded("invalid_argument", "stopWatch waits ms above 0, after a stopRevision from 0")
+        }
+        return OperatorGuardHost.watch(after: after.map { UInt64($0) }, waitMs: waitMs)
     case "reflexStatus":
         return ReflexRuntimeHost.status(run: try reflexRunId(params, "run"))
     case "reflexStop":
@@ -5517,6 +5522,20 @@ func unlockedRoad(_ method: String, params: [String: JSONValue]) throws -> [Stri
     default:
         return nil
     }
+}
+
+/// Who a `resume` names as lifting the stop (t-66753 A): none is an agent;
+/// a word the helper does not know, or no word at all, is refused.
+private func stopLifter(_ params: [String: JSONValue]) throws -> StopLifter {
+    switch params[StopLifter.key] {
+    case nil, .null?:
+        return .agent
+    case let .string(word)?:
+        if let lifter = StopLifter(rawValue: word) { return lifter }
+    default:
+        break
+    }
+    throw ProviderError.coded("invalid_argument", "\(StopLifter.key) is \(StopLifter.person.rawValue) or \(StopLifter.agent.rawValue)")
 }
 
 /// A reflex run's id: the plan's identifier alphabet and bound, never empty.
@@ -5772,15 +5791,8 @@ enum DesktopScreen {
                 throw ProviderError.coded("invalid_argument", "display \(index) is not one of the \(all.count) active displays")
             }
             chosen = all[index]
-        } else if let region,
-                  let showing = all.first(where: { $0.bounds.contains(CGPoint(x: region.midX, y: region.midY)) })
-                      ?? all.first(where: { $0.bounds.intersects(region) }) {
-            // The display that shows the region's centre — a box about a
-            // point near an edge belongs to the point's display, not to the
-            // first one it grazes.
-            chosen = showing
         } else {
-            chosen = all[0]
+            chosen = all[desktopDisplayIndex(showing: region, among: all.map(\.bounds))]
         }
         // Only a request that names pointScale is planned; the rest keeps the
         // whole-display capture below, cropped, as it was (t-10424).
@@ -6496,7 +6508,9 @@ private enum DesktopClipboard {
 /// lock on purpose: the hotkey and the signal must land while an action is
 /// in flight, and the next posted event must see them.
 enum OperatorGuardHost {
-    private static let lock = NSLock()
+    /// Guards the ledger, and wakes the window's waiting request when the
+    /// stop moved (t-66753 B).
+    private static let lock = NSCondition()
     /// Counts by the window's table, read at launch (`guard_table()` through
     /// `open --env`); until then, or when it could not be read, nothing acts
     /// and `tableRefusal` says why — never a pace of the helper's own.
@@ -6544,31 +6558,64 @@ enum OperatorGuardHost {
         signalSource = source
     }
 
-    /// The stop, on whatever thread it came in on: the hand lets go of what
-    /// it pressed first, then the count refuses, then a reflex run ends.
-    static func stop(reason: String) {
-        let release = OperatorHandHost.hand.stop(reason: reason)
+    /// Change the ledger under its lock; a stop that moved wakes the window's
+    /// waiting request (t-66753 B).
+    private static func changing<T>(_ change: (inout OperatorLedger) -> T) -> T {
         lock.lock()
-        ledger.stop(reason: reason)
-        lock.unlock()
-        BackgroundPointerOverlay.hide()
-        fputs("computer-use operator stopped: \(reason) (let go of \(release.released.count), unconfirmed \(release.unconfirmed.count))\n", stderr)
-        ReflexRuntimeHost.operatorStopped(reason: reason)
+        defer { lock.unlock() }
+        let before = ledger.stopRevision
+        let result = change(&ledger)
+        if ledger.stopRevision != before { lock.broadcast() }
+        return result
     }
 
-    static func resume(resetBudget: Bool) {
-        lock.lock()
-        ledger.resume(resetBudget: resetBudget)
-        lock.unlock()
+    /// The stop, on whatever thread it came in on: the hand lets go of what
+    /// it pressed first, then the count refuses, then a reflex run ends. The
+    /// person's chord keeps its reason through a later stop that is not
+    /// theirs (t-66753 A): the stop is theirs, as the reason a run ends for.
+    static func stop(reason: String) {
+        let release = OperatorHandHost.hand.stop(reason: reason)
+        let standing = changing { ledger in
+            ledger.stop(reason: reason)
+            return ledger.stoppedReason ?? reason
+        }
+        BackgroundPointerOverlay.hide()
+        fputs("computer-use operator stopped: \(reason), standing \(standing) (let go of \(release.released.count), unconfirmed \(release.unconfirmed.count))\n", stderr)
+        ReflexRuntimeHost.operatorStopped(reason: standing)
+    }
+
+    /// Lift the stop for `lifter` (t-66753 A): the person's stop for the
+    /// person — the window's band — alone; anyone else's resume of it is
+    /// refused and lifts nothing.
+    static func resume(resetBudget: Bool, by lifter: StopLifter) throws {
+        let refused: String? = changing { ledger in
+            guard ledger.liftable(by: lifter) else { return ledger.stoppedReason ?? "" }
+            ledger.resume(resetBudget: resetBudget)
+            return nil
+        }
+        if let refused {
+            throw ProviderError.coded("stopped", "the operator is stopped (\(refused)); the person stopped it — only they lift it, from the window's band")
+        }
         OperatorHandHost.hand.resume()
+    }
+
+    /// The window's waiting request (t-66753 B): answered once the stop is
+    /// no longer the one the window last heard (`after`, a `stopRevision`),
+    /// else after `waitMs` with the stop as it stands — at once without
+    /// `after`. It waits on its connection's own thread, outside the provider
+    /// lock: no request waits behind it, and it waits behind none.
+    static func watch(after: UInt64?, waitMs: Int) -> [String: Any] {
+        let deadline = Date(timeIntervalSinceNow: Double(waitMs) / 1_000)
+        lock.lock()
+        while let after, ledger.stopRevision == after, lock.wait(until: deadline) {}
+        lock.unlock()
+        return status()
     }
 
     /// One action's admission as the ledger answers it, for a reflex run's
     /// leaf: the run sleeps a pace's wait on the hand, where a stop ends it.
     static func admission() -> GuardAdmission {
-        lock.lock()
-        defer { lock.unlock() }
-        return ledger.admit(now: Date().timeIntervalSince1970)
+        changing { $0.admit(now: Date().timeIntervalSince1970) }
     }
 
     /// What the ledger would answer an action now, counting nothing: asked of a
@@ -6595,10 +6642,7 @@ enum OperatorGuardHost {
     /// read again after every wait, so the hotkey cuts a paced action too.
     static func admit() throws {
         while true {
-            lock.lock()
-            let admission = ledger.admit(now: Date().timeIntervalSince1970)
-            let refusal = tableRefusal
-            lock.unlock()
+            let (admission, refusal) = changing { ($0.admit(now: Date().timeIntervalSince1970), tableRefusal) }
             switch admission {
             case .admitted:
                 return
@@ -6641,6 +6685,8 @@ enum OperatorGuardHost {
             "stopped": snapshot.isStopped,
             "backgroundPointer": BackgroundPointerOverlay.status(),
             "reason": jsonNullable(snapshot.stoppedReason),
+            // What the window's waiting request asks after (t-66753 B).
+            "stopRevision": Int(clamping: snapshot.stopRevision),
             "actions": snapshot.actions,
             "actionsLastMinute": snapshot.actionsInLastMinute(now: now),
             "lastActionAt": snapshot.lastActionAt.map { Int($0 * 1_000) } ?? NSNull(),

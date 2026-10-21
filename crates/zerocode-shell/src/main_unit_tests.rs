@@ -22401,6 +22401,7 @@ pub(crate) mod computer_desktop_wait {
         fn resume(
             &self,
             _reset: bool,
+            _lifter: crate::computer_use::guard::Lifter,
         ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
             self.resumed.set(self.resumed.get() + 1);
             self.reason.set(None);
@@ -22457,6 +22458,7 @@ pub(crate) mod computer_desktop_wait {
         fn resume(
             &self,
             _reset: bool,
+            _lifter: crate::computer_use::guard::Lifter,
         ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
             self.resumed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.reason.lock().unwrap() = None;
@@ -22504,9 +22506,12 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(helper.resumed.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(stop["maybePersonsStop"], true, "{stop}");
         let (_, revision) = guard::snapshot();
+        let person = guard::Lifter::Person {
+            revision: Some(revision),
+        };
         let band = guard::resume(
-            guard::Lifter::Person { revision: Some(revision) },
-            || helper.resume(false),
+            person,
+            || helper.resume(false, person),
             || helper.signal(),
         );
         assert!(band.lifted, "the band's resume lifts it: {band:?}");
@@ -22539,9 +22544,12 @@ pub(crate) mod computer_desktop_wait {
         let lifted_by_agent = usize::from(guard::stopped_reason().is_none());
         let reached_by_agent = answering.resumed.get();
         let (_, revision) = guard::snapshot();
+        let person = guard::Lifter::Person {
+            revision: Some(revision),
+        };
         let band = guard::resume(
-            guard::Lifter::Person { revision: Some(revision) },
-            || answering.resume(false),
+            person,
+            || answering.resume(false, person),
             || answering.signal(),
         );
         let after_band = guard::stopped_reason();
@@ -22650,6 +22658,7 @@ pub(crate) mod computer_desktop_wait {
             fn resume(
                 &self,
                 _reset: bool,
+                _lifter: crate::computer_use::guard::Lifter,
             ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
                 Ok(serde_json::Value::from("resumed"))
             }
@@ -22759,6 +22768,197 @@ pub(crate) mod computer_desktop_wait {
                 "a work browser refuses the agent ({over}): {door:?}"
             );
         }
+    }
+
+    /// The person's chord the helper heard (t-66753 B): the window hears it
+    /// at once — its stop is the person's and a work browser refuses the
+    /// agent within 200 ms of the chord, with no command of the agent's in
+    /// between — and the road it hears it by waits behind no request, though
+    /// one holds the window's session all the while. The helper is the
+    /// stand-in: nothing is launched and no key is pressed. Measured: from
+    /// the chord to the window's stop.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_persons_chord_in_the_helper_stops_the_window_and_its_work_browsers_at_once() {
+        use crate::computer_use::guard;
+        use crate::computer_use::stand_in::{Shape, StandIn};
+        use std::time::{Duration, Instant};
+        const HEARD_WITHIN: Duration = Duration::from_millis(200);
+        const WAITED_AT_MOST: Duration = Duration::from_secs(2);
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let helper = StandIn::start("chord-token", Shape::matching());
+        let session = helper
+            .connect_window("chord-token")
+            .expect("the window connects to the stand-in");
+        let workspaces = crate::browser_workspace::Workspaces::default();
+        workspaces
+            .register("browser-1", Some("pane-a"), false)
+            .expect("a work browser an agent holds");
+        let (held, holds) = std::sync::mpsc::channel();
+        let (end, ends) = std::sync::mpsc::channel::<()>();
+        let request = std::thread::spawn(move || {
+            crate::computer_use::while_a_request_holds_the_session(|| {
+                held.send(()).unwrap();
+                let _ = ends.recv_timeout(WAITED_AT_MOST * 2);
+            });
+        });
+        holds.recv().unwrap();
+        let pressed = Instant::now();
+        helper.press_chord();
+        let heard_after = loop {
+            if guard::persons_stop_stands() {
+                break Some(pressed.elapsed());
+            }
+            if pressed.elapsed() >= WAITED_AT_MOST {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let door = workspaces
+            .begin_agents("browser-1", Some("pane-a"), "read", None)
+            .map(|operation| operation.map(|operation| operation.finish(true)).is_some());
+        let report = guard::activity_report(None);
+        let _ = end.send(());
+        request.join().unwrap();
+        drop(session);
+        guard::lift();
+        println!("measured: the window heard the person's chord after {heard_after:?}");
+        assert!(
+            heard_after.is_some_and(|after| after < HEARD_WITHIN),
+            "the window's stop stood {heard_after:?} after the person's chord (none within {WAITED_AT_MOST:?}: the window hears the chord only at its next command)"
+        );
+        assert_eq!(report["personsStop"], true, "the band hears the person's stop: {report}");
+        assert_eq!(report["stopped"], zerocode_core::computer_use::STOP_REASON_HOTKEY, "{report}");
+        assert!(
+            door.as_ref()
+                .is_err_and(|error| error.starts_with("workspace_person_stopped:")),
+            "a work browser refuses the agent once the chord is heard: {door:?}"
+        );
+    }
+
+    /// An agent's `resume` reaches the helper as an agent's, whatever its
+    /// words carried (t-66753 A): the words cannot name who lifts — a
+    /// `--lifter` is refused before anything is asked — and the window's road
+    /// writes `agent` on what the helper is asked, so the helper never reads
+    /// the person's resume from an agent. The helper is the stand-in, which
+    /// keeps what it was asked.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_agents_resume_reaches_the_helper_as_an_agents_whatever_its_words_said() {
+        use crate::agent_tools_runtime::{agents_resume, HelperRoads};
+        use crate::computer_use::guard;
+        use crate::computer_use::stand_in::{Connected, Shape, StandIn};
+        // The window's helper roads over a stand-in's connection: a resume
+        // asked exactly as the window asks it (`guard::resume_request`).
+        struct StandInRoads(std::cell::RefCell<Connected>);
+        impl HelperRoads for StandInRoads {
+            fn status(&self) -> Option<serde_json::Value> {
+                self.0
+                    .borrow_mut()
+                    .request("status", serde_json::json!({}))
+                    .ok()
+            }
+
+            fn status_now(&self) -> Option<serde_json::Value> {
+                self.status()
+            }
+
+            fn resume(
+                &self,
+                reset: bool,
+                lifter: guard::Lifter,
+            ) -> Result<serde_json::Value, crate::computer_use::ComputerUseError> {
+                self.0
+                    .borrow_mut()
+                    .request("resume", guard::resume_request(reset, lifter))
+            }
+
+            // The stand-in's pid is this process's own: it is never signalled.
+            fn signal(&self) -> bool {
+                false
+            }
+
+            fn session_stands(&self) -> bool {
+                true
+            }
+        }
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard::lift();
+        let words = |argv: &[&str]| {
+            argv.iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        guard::stop_with(zerocode_core::computer_use::STOP_REASON_REQUEST, || false);
+        let forged = envelope(&answer_computer_command(&words(&[
+            "resume", "--lifter", "person", "--json",
+        ])));
+        let still = guard::stopped_reason();
+        let helper = StandIn::start("resume-token", Shape::matching());
+        let roads = StandInRoads(std::cell::RefCell::new(
+            helper
+                .connect_window("resume-token")
+                .expect("the window connects to the stand-in"),
+        ));
+        let resumed = agents_resume(&roads, false, None).map_err(|error| error.message);
+        let asked: Vec<serde_json::Value> = helper
+            .heard()
+            .into_iter()
+            .filter(|heard| heard.method == "resume")
+            .map(|heard| heard.params)
+            .collect();
+        drop(roads);
+        guard::lift();
+        assert_eq!(forged["ok"], false, "an agent's words cannot name who lifts: {forged}");
+        assert!(
+            forged["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("--lifter")),
+            "{forged}"
+        );
+        assert_eq!(
+            still.as_deref(),
+            Some(zerocode_core::computer_use::STOP_REASON_REQUEST),
+            "the refused words lifted nothing"
+        );
+        assert!(resumed.is_ok(), "an agent lifts the stop an agent asked for: {resumed:?}");
+        assert_eq!(asked.len(), 1, "the helper was asked once: {asked:?}");
+        assert_eq!(
+            asked[0]["lifter"], "agent",
+            "the helper reads an agent's resume as an agent's: {asked:?}"
+        );
+    }
+
+    /// The person's resume is named in one place (t-66753 A): the band's
+    /// click, in the main window, and no road an agent's command takes.
+    #[test]
+    fn only_the_bands_resume_names_the_person() {
+        const SETTINGS: &str = include_str!("cmd/settings.rs");
+        const RUNTIME: &str = include_str!("agent_tools_runtime.rs");
+        let shipped = |source: &'static str| {
+            source
+                .split_once("#[cfg(test)]")
+                .map_or(source, |(product, _)| product)
+        };
+        assert!(
+            !shipped(RUNTIME).contains("Lifter::Person"),
+            "an agent's door never names the person"
+        );
+        let settings = shipped(SETTINGS);
+        assert_eq!(settings.matches("Lifter::Person").count(), 1, "one place names the person");
+        let resume = &settings[settings
+            .find("pub(crate) fn computer_resume(")
+            .expect("the band's resume")..];
+        let resume = &resume[..resume.find("\n}\n").expect("its end")];
+        assert!(
+            resume.contains("Lifter::Person { revision }"),
+            "the band's resume is the one that names the person: {resume}"
+        );
     }
 
     #[test]
