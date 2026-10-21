@@ -250,6 +250,74 @@ impl Drop for MainScope {
     }
 }
 
+// The disk work the main thread stands in, beside its scope (t-67102): the
+// hang line names the function and the file, so a stall behind the settings
+// lock is read off the log instead of guessed from the command's name.
+static MAIN_IO: RingStorage<1> = RingStorage::new();
+
+/// A stretch of disk work: the function doing it, the file, and when it began.
+type Io = (&'static str, &'static str, u64);
+
+thread_local! {
+    static IO_HELD: std::cell::Cell<Option<Io>> = const { std::cell::Cell::new(None) };
+}
+
+/// The disk work the main thread is in now — `function file`, stamped when
+/// it began — or `None` when it is in none.
+pub(crate) fn main_io() -> Option<Crumb> {
+    MAIN_IO.snapshot().pop().filter(|row| !row.line.is_empty())
+}
+
+fn note_main_io(io: Option<Io>) {
+    let mut line = Text::new();
+    let mut at_ms = crate::now_epoch_ms().max(0) as u64;
+    if let Some((function, path, began_ms)) = io {
+        let _ = write!(line, "{function} {path}");
+        at_ms = began_ms;
+    }
+    MAIN_IO.write(at_ms, line.as_str());
+}
+
+/// Disk work on the main thread, named for the hang watchdog while it lasts.
+/// Off the main thread it records nothing, as [`MainScope`] does; nested, the
+/// inner one is named, and the outer one again when the inner one ends.
+pub(crate) struct MainIo {
+    /// The disk work this one interrupted, and the thread it began on —
+    /// `None` off the main thread, where nothing was recorded.
+    previous: Option<(Option<Io>, std::thread::ThreadId)>,
+}
+
+impl MainIo {
+    pub(crate) fn enter(function: &'static str, path: &'static str) -> Self {
+        Self::enter_if(
+            function,
+            path,
+            MAIN_THREAD.get() == Some(&std::thread::current().id()),
+        )
+    }
+
+    fn enter_if(function: &'static str, path: &'static str, on_main: bool) -> Self {
+        let previous = on_main.then(|| {
+            let io = Some((function, path, crate::now_epoch_ms().max(0) as u64));
+            let previous = IO_HELD.with(|held| held.replace(io));
+            note_main_io(io);
+            (previous, std::thread::current().id())
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for MainIo {
+    fn drop(&mut self) {
+        if let Some((previous, owner)) = self.previous
+            && owner == std::thread::current().id()
+        {
+            IO_HELD.with(|held| held.set(previous));
+            note_main_io(previous);
+        }
+    }
+}
+
 /// Command history records both synchronous and asynchronous roads. Only a
 /// command actually running on the registered main thread changes its scope.
 /// Unwinding still records leave; the panic hook sees enter before that unwind.
@@ -308,6 +376,40 @@ mod tests {
         let _event = MainScope::enter_if("event_window_resized", true);
         let _background = MainScope::enter_if("update_check", false);
         assert_eq!(SCOPE_NAME.with(|held| held.get()), "event_window_resized");
+    }
+
+    #[test]
+    fn main_io_names_the_inner_disk_work_and_then_the_outer_again() {
+        let named = || main_io().map(|row| row.line);
+        {
+            let _load =
+                MainIo::enter_if("settings_runtime::load_settings", "preferences.json", true);
+            {
+                let _ledger = MainIo::enter_if(
+                    "settings_runtime::legacy_migration_completed",
+                    "legacy-migrations.json",
+                    true,
+                );
+                assert_eq!(
+                    named().as_deref(),
+                    Some("settings_runtime::legacy_migration_completed legacy-migrations.json")
+                );
+            }
+            assert_eq!(
+                named().as_deref(),
+                Some("settings_runtime::load_settings preferences.json")
+            );
+            let _background = MainIo::enter_if(
+                "settings_runtime::mutate_settings",
+                "preferences.json",
+                false,
+            );
+            assert_eq!(
+                named().as_deref(),
+                Some("settings_runtime::load_settings preferences.json")
+            );
+        }
+        assert_eq!(named(), None);
     }
 
     #[test]

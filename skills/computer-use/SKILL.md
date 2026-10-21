@@ -579,7 +579,9 @@ zerocode-computer permissions --json
 
 On macOS, Accessibility is required to read/action interface trees and Screen
 Recording is required for screenshots. `--no-screenshot` may be used when the
-accessibility tree is sufficient.
+accessibility tree is sufficient. Without Screen Recording an app's look still
+answers its accessibility tree: `screenshot` is null and `screenshotStatus`
+says why. Read the tree; never describe a picture you were not given.
 
 Use `permissions --id accessibility` or `permissions --id screenshots` to
 request that OS permission and open its exact System Settings list. The person
@@ -706,6 +708,9 @@ display's top-left — and a screenshot's `origin` and `scale` say how to read
 a point off the picture (`desktop = origin + pixel / scale`). Inside zo, the
 `Computer` tool does this for you: every position it takes and answers is in
 the last screenshot's pixels, and a region is its two corners `[x0, y0, x1, y1]`.
+A display left of or above the main one has negative points:
+`--region -2560,-38,560,1340` and `--region=-2560,-38,560,1340` name the same
+region, as any flag's value may follow it after `=`.
 
 ```text
 zerocode-computer screenshot [--display N] [--region x,y,w,h] [--full-res] --json

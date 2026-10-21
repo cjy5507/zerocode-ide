@@ -47,7 +47,9 @@ pub(crate) async fn skill_install_plan(
     .await
     .map_err(|e| e.to_string())?
 }
-#[tauri::command]
+// Off the main thread like its neighbours: its context reads the settings
+// repository, the recent projects and the accounts store (t-67102).
+#[tauri::command(async)]
 pub(crate) fn skill_bundle_parse(
     state: State<'_, AppState>,
     output: String,

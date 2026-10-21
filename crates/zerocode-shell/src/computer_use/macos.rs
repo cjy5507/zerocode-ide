@@ -38,6 +38,8 @@ mod tcc;
 
 #[cfg(test)]
 mod background_tests;
+#[cfg(test)]
+pub(crate) mod stand_in;
 
 const HELPER_APP_NAME: &str = "ZeroCode Computer Use.app";
 const HELPER_EXECUTABLE: &str = "zerocode-computer-use-macos";
@@ -52,117 +54,54 @@ const PERMISSION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+/// How long the window's waiting request (t-66753 B) waits for the helper's
+/// stop to change before it is asked again: well inside the read limit every
+/// answer has (`REQUEST_TIMEOUT`), so a quiet helper is asked again rather
+/// than taken for a dead one.
+const STOP_WATCH_WAIT: Duration = Duration::from_secs(20);
+/// The helper's road for that request (`OperatorGuardHost.watch`).
+const STOP_WATCH_METHOD: &str = "stopWatch";
+// Every waiting request is answered inside the limit every answer has.
+const _: () = assert!(STOP_WATCH_WAIT.as_secs() < REQUEST_TIMEOUT.as_secs());
 
 pub(super) struct Session {
-    stream: std::os::unix::net::UnixStream,
-    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+    wire: Wire,
+    /// The window's waiting request (t-66753 B): its own connection, shut
+    /// when the session ends, and the thread that waits on it.
+    watching: Option<StopWatch>,
     /// The helper's pid, read off the socket once it answered
     /// (`LOCAL_PEERPID`). Not a `Child`: LaunchServices launched it, so it is
     /// nobody's child here — see the module comment.
     helper_pid: Option<libc::pid_t>,
     directory: PathBuf,
-    token: String,
-    next_id: u64,
     supports_background: bool,
 }
 
-impl ProviderSession for Session {
-    fn supports_background(&self) -> bool {
-        self.supports_background
-    }
-    fn helper_pid(&self) -> Option<i32> {
-        self.helper_pid
-    }
+/// What a launch leaves for the connection (t-66753 C): the helper's private
+/// folder, the socket it listens on, the token file it reads at start and
+/// the token it expects on every request.
+pub(crate) struct Launched {
+    pub(crate) directory: PathBuf,
+    pub(crate) socket: PathBuf,
+    pub(crate) token_file: PathBuf,
+    pub(crate) token: String,
+}
 
-    fn start() -> Result<Self, ComputerUseError> {
-        use std::os::unix::fs::PermissionsExt as _;
+/// One authenticated connection to the helper: a request goes out as one
+/// line carrying the token, its answer comes back as one line, each within
+/// `REQUEST_TIMEOUT`.
+struct Wire {
+    stream: std::os::unix::net::UnixStream,
+    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
+    token: String,
+    next_id: u64,
+}
 
-        // The bundle, because LaunchServices launches bundles; the executable
-        // check keeps the older "app found but hollow" answer.
-        let app = helper_app_path()
-            .filter(|_| helper_executable_path().is_some())
-            .ok_or_else(|| {
-                ComputerUseError::new(
-                    error_code::ACCESSIBILITY_ERROR,
-                    "ZeroCode Computer Use.app was not found",
-                )
-            })?;
-        let nonce = crate::hooks::random_token().ok_or_else(|| {
-            ComputerUseError::new(
-                error_code::ACCESSIBILITY_ERROR,
-                "could not mint a helper token",
-            )
-        })?;
-        let directory = PathBuf::from(format!(
-            "/tmp/zerocode-computer-use-{}-{}",
-            std::process::id(),
-            &nonce[..12]
-        ));
-        if directory.exists() {
-            std::fs::remove_dir_all(&directory).map_err(io_error("remove stale helper state"))?;
-        }
-        std::fs::create_dir(&directory).map_err(io_error("create helper state"))?;
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(io_error("protect helper state"))?;
-        let socket = directory.join("provider.sock");
-        let token_file = directory.join("provider.token");
-        std::fs::write(&token_file, &nonce).map_err(io_error("write helper token"))?;
-        std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600))
-            .map_err(io_error("protect helper token"))?;
-
-        // `open -n`: a new instance, launched by LaunchServices so that TCC
-        // sees the helper bundle and not this window (module comment). The
-        // environment does not cross that launch, so the debug-only peer
-        // fallback travels as `--env`; the per-launch 0600 token still
-        // authenticates the exact socket session either way.
-        let mut command = crate::proc::quiet_command("/usr/bin/open");
-        command.arg("-n").arg(&app);
-        if cfg!(debug_assertions) {
-            command.args(["--env", "ZEROCODE_COMPUTER_USE_ALLOW_UNBUNDLED=1"]);
-        }
-        // The guard's table — the pace and the session count — travels the
-        // same way: the helper keeps no numbers of its own.
-        command
-            .arg("--env")
-            .arg(guard_table_env())
-            .arg("--args")
-            .args(["--agent", &socket.to_string_lossy(), "--token-file"])
-            .arg(&token_file)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null());
-        let launched = command
-            .output()
-            .map_err(io_error("launch Computer Use helper"))?;
-        if !launched.status.success() {
-            cleanup(&directory);
-            let why = String::from_utf8_lossy(&launched.stderr).trim().to_string();
-            return Err(ComputerUseError::new(
-                error_code::ACCESSIBILITY_ERROR,
-                format!("LaunchServices could not launch the Computer Use helper: {why}"),
-            ));
-        }
-        // No child to watch for an early exit: a helper that dies before it
-        // listens simply never answers, and the deadline below says so. A
-        // helper that listens but is never claimed reaps itself after its own
-        // thirty-second deadline (`AgentRuntime.unclaimedSessionDeadline`).
-        let started = std::time::Instant::now();
-        let stream = loop {
-            match std::os::unix::net::UnixStream::connect(&socket) {
-                Ok(stream) => break stream,
-                Err(_error) if started.elapsed() < CONNECT_TIMEOUT => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(error) => {
-                    cleanup(&directory);
-                    return Err(ComputerUseError::new(
-                        error_code::ACTION_TIMEOUT,
-                        format!("timed out connecting to Computer Use helper: {error}"),
-                    ));
-                }
-            }
-        };
-        let helper_pid = peer_pid(&stream);
-        let _ = std::fs::remove_file(&token_file);
+impl Wire {
+    fn new(
+        stream: std::os::unix::net::UnixStream,
+        token: String,
+    ) -> Result<Self, ComputerUseError> {
         stream
             .set_read_timeout(Some(REQUEST_TIMEOUT))
             .map_err(io_error("set helper read timeout"))?;
@@ -174,34 +113,12 @@ impl ProviderSession for Session {
                 .try_clone()
                 .map_err(io_error("clone helper socket"))?,
         );
-        let mut client = Self {
+        Ok(Self {
             stream,
             reader,
-            helper_pid,
-            directory,
-            token: nonce,
+            token,
             next_id: 1,
-            supports_background: false,
-        };
-        let handshake = client
-            .request("handshake", json!({}))
-            .map_err(SessionFailure::into_error_pub)?;
-        let protocol = handshake
-            .get("protocolVersion")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        if protocol != COMPUTER_USE_PROTOCOL_VERSION {
-            return Err(ComputerUseError::new(
-                error_code::PROVIDER_INCOMPATIBLE,
-                format!(
-                    "Computer Use helper protocol {protocol} is incompatible with required protocol {COMPUTER_USE_PROTOCOL_VERSION}"
-                ),
-            ));
-        }
-        validate_guard_budget(&handshake)?;
-        client.supports_background =
-            handshake.pointer("/supports/actions/background") == Some(&Value::Bool(true));
-        Ok(client)
+        })
     }
 
     fn request(&mut self, method: &str, params: Value) -> Result<Value, SessionFailure> {
@@ -272,6 +189,219 @@ impl ProviderSession for Session {
     }
 }
 
+/// The connection the window's waiting request rides, and its thread.
+struct StopWatch {
+    stream: std::os::unix::net::UnixStream,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl StopWatch {
+    /// One waiting request to the helper at a time, on a connection of its
+    /// own: never the session's lock, so it waits behind no request in
+    /// flight and none waits behind it (t-62469 B2). Each answer goes to the
+    /// guard, which takes in the person's chord at once; then it asks again
+    /// after the stop it heard. A helper that cannot answer one — or a
+    /// connection that broke — ends it; the session goes on without it.
+    fn start(socket: &Path, token: &str) -> Option<Self> {
+        let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
+        let kept = stream.try_clone().ok()?;
+        let mut wire = Wire::new(stream, token.to_string()).ok()?;
+        let wait = u64::try_from(STOP_WATCH_WAIT.as_millis()).unwrap_or(u64::MAX);
+        let thread = std::thread::Builder::new()
+            .name("computer-use-stop-watch".into())
+            .spawn(move || {
+                let mut after: Option<u64> = None;
+                loop {
+                    let mut asked = serde_json::Map::new();
+                    asked.insert("ms".into(), wait.into());
+                    if let Some(after) = after {
+                        asked.insert("after".into(), after.into());
+                    }
+                    let Ok(heard) = wire.request(STOP_WATCH_METHOD, Value::Object(asked)) else {
+                        return;
+                    };
+                    super::guard::hear_watched(&heard);
+                    // An answer with no count to ask after is not this road's.
+                    let Some(revision) = heard.get("stopRevision").and_then(Value::as_u64) else {
+                        return;
+                    };
+                    after = Some(revision);
+                }
+            })
+            .ok()?;
+        Some(Self {
+            stream: kept,
+            thread,
+        })
+    }
+
+    /// Shut its connection, which ends the request waiting on it, and wait
+    /// for its thread to end: nothing it heard is taken in after the session.
+    fn end(self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+        let _ = self.thread.join();
+    }
+}
+
+impl ProviderSession for Session {
+    fn supports_background(&self) -> bool {
+        self.supports_background
+    }
+    fn helper_pid(&self) -> Option<i32> {
+        self.helper_pid
+    }
+
+    fn start() -> Result<Self, ComputerUseError> {
+        Self::connect(launch()?)
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, SessionFailure> {
+        self.wire.request(method, params)
+    }
+}
+
+/// Launch the signed helper through LaunchServices with a fresh token —
+/// the first half of [`Session::start`]; [`Session::connect`] is the other.
+fn launch() -> Result<Launched, ComputerUseError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // The bundle, because LaunchServices launches bundles; the executable
+    // check keeps the older "app found but hollow" answer.
+    let app = helper_app_path()
+        .filter(|_| helper_executable_path().is_some())
+        .ok_or_else(|| {
+            ComputerUseError::new(
+                error_code::ACCESSIBILITY_ERROR,
+                "ZeroCode Computer Use.app was not found",
+            )
+        })?;
+    let nonce = crate::hooks::random_token().ok_or_else(|| {
+        ComputerUseError::new(
+            error_code::ACCESSIBILITY_ERROR,
+            "could not mint a helper token",
+        )
+    })?;
+    let directory = PathBuf::from(format!(
+        "/tmp/zerocode-computer-use-{}-{}",
+        std::process::id(),
+        &nonce[..12]
+    ));
+    if directory.exists() {
+        std::fs::remove_dir_all(&directory).map_err(io_error("remove stale helper state"))?;
+    }
+    std::fs::create_dir(&directory).map_err(io_error("create helper state"))?;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        .map_err(io_error("protect helper state"))?;
+    let socket = directory.join("provider.sock");
+    let token_file = directory.join("provider.token");
+    std::fs::write(&token_file, &nonce).map_err(io_error("write helper token"))?;
+    std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600))
+        .map_err(io_error("protect helper token"))?;
+
+    // `open -n`: a new instance, launched by LaunchServices so that TCC
+    // sees the helper bundle and not this window (module comment). The
+    // environment does not cross that launch, so the debug-only peer
+    // fallback travels as `--env`; the per-launch 0600 token still
+    // authenticates the exact socket session either way.
+    let mut command = crate::proc::quiet_command("/usr/bin/open");
+    command.arg("-n").arg(&app);
+    if cfg!(debug_assertions) {
+        command.args(["--env", "ZEROCODE_COMPUTER_USE_ALLOW_UNBUNDLED=1"]);
+    }
+    // The guard's table — the pace and the session count — travels the
+    // same way: the helper keeps no numbers of its own.
+    command
+        .arg("--env")
+        .arg(guard_table_env())
+        .arg("--args")
+        .args(["--agent", &socket.to_string_lossy(), "--token-file"])
+        .arg(&token_file)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null());
+    let launched = command
+        .output()
+        .map_err(io_error("launch Computer Use helper"))?;
+    if !launched.status.success() {
+        cleanup(&directory);
+        let why = String::from_utf8_lossy(&launched.stderr).trim().to_string();
+        return Err(ComputerUseError::new(
+            error_code::ACCESSIBILITY_ERROR,
+            format!("LaunchServices could not launch the Computer Use helper: {why}"),
+        ));
+    }
+    Ok(Launched {
+        directory,
+        socket,
+        token_file,
+        token: nonce,
+    })
+}
+
+impl Session {
+    /// Connect to a launched helper and shake hands — the second half of
+    /// [`Session::start`]: the pid read off the socket, the token on every
+    /// request, the protocol and the guard table held to this window's.
+    pub(crate) fn connect(launched: Launched) -> Result<Self, ComputerUseError> {
+        let Launched {
+            directory,
+            socket,
+            token_file,
+            token,
+        } = launched;
+        // No child to watch for an early exit: a helper that dies before it
+        // listens simply never answers, and the deadline below says so. A
+        // helper that listens but is never claimed reaps itself after its own
+        // thirty-second deadline (`AgentRuntime.unclaimedSessionDeadline`).
+        let started = std::time::Instant::now();
+        let stream = loop {
+            match std::os::unix::net::UnixStream::connect(&socket) {
+                Ok(stream) => break stream,
+                Err(_error) if started.elapsed() < CONNECT_TIMEOUT => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => {
+                    cleanup(&directory);
+                    return Err(ComputerUseError::new(
+                        error_code::ACTION_TIMEOUT,
+                        format!("timed out connecting to Computer Use helper: {error}"),
+                    ));
+                }
+            }
+        };
+        let helper_pid = peer_pid(&stream);
+        let _ = std::fs::remove_file(&token_file);
+        let mut client = Self {
+            wire: Wire::new(stream, token)?,
+            watching: None,
+            helper_pid,
+            directory,
+            supports_background: false,
+        };
+        let handshake = client
+            .request("handshake", json!({}))
+            .map_err(SessionFailure::into_error_pub)?;
+        let protocol = handshake
+            .get("protocolVersion")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        if protocol != COMPUTER_USE_PROTOCOL_VERSION {
+            return Err(ComputerUseError::new(
+                error_code::PROVIDER_INCOMPATIBLE,
+                format!(
+                    "Computer Use helper protocol {protocol} is incompatible with required protocol {COMPUTER_USE_PROTOCOL_VERSION}"
+                ),
+            ));
+        }
+        validate_guard_budget(&handshake)?;
+        client.supports_background =
+            handshake.pointer("/supports/actions/background") == Some(&Value::Bool(true));
+        // The person's chord reaches the window as the helper hears it
+        // (t-66753 B), not at the window's next command.
+        client.watching = StopWatch::start(&socket, &client.wire.token);
+        Ok(client)
+    }
+}
+
 impl SessionFailure {
     fn into_error_pub(self) -> ComputerUseError {
         match self {
@@ -282,16 +412,19 @@ impl SessionFailure {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let id = self.next_id;
+        if let Some(watching) = self.watching.take() {
+            watching.end();
+        }
+        let id = self.wire.next_id;
         if let Ok(line) = serde_json::to_vec(&json!({
             "id": id,
             "method": "terminate",
             "params": {},
-            "token": self.token,
+            "token": self.wire.token,
         })) {
-            let _ = self.stream.write_all(&line);
-            let _ = self.stream.write_all(b"\n");
-            let _ = self.stream.flush();
+            let _ = self.wire.stream.write_all(&line);
+            let _ = self.wire.stream.write_all(b"\n");
+            let _ = self.wire.stream.flush();
         }
         // `terminate` is the helper's own exit; the signal is for a helper
         // that stopped reading. Only ever aimed at the process this socket
@@ -1051,15 +1184,53 @@ mod tests {
             serde_json::from_str::<Value>(table).expect("json"),
             Value::Object(zerocode_core::computer_use::guard_table())
         );
-        let launch = include_str!("macos.rs");
-        let start = &launch[launch.find("fn start()").expect("start")..];
-        let start = &start[..start.find("let launched").expect("the launch")];
-        let env = start
+        let source = include_str!("macos.rs");
+        let launch = &source[source.find("fn launch()").expect("launch")..];
+        let launch = &launch[..launch.find("let launched").expect("the launch")];
+        let env = launch
             .find(".arg(guard_table_env())")
             .expect("the table rides the launch");
         assert!(
-            env < start.find(".arg(\"--args\")").expect("--args"),
+            env < launch.find(".arg(\"--args\")").expect("--args"),
             "`open` reads --env only before --args"
+        );
+    }
+
+    /// The window's road to the helper is the launch and then the connection
+    /// with its handshake, and nothing else (t-66753 C): the stand-in tests
+    /// drive `Session::connect` alone, so `start` must be exactly the two,
+    /// in that order, for what they prove to be the product's own road.
+    #[test]
+    fn the_session_starts_by_launching_the_helper_then_connecting_to_it() {
+        let source = include_str!("macos.rs");
+        let start = &source[source
+            .find("    fn start() -> Result<Self, ComputerUseError> {")
+            .expect("start")..];
+        let body = &start[..start.find("\n    }\n").expect("start's end")];
+        let said: Vec<&str> = body.lines().skip(1).map(str::trim).collect();
+        assert_eq!(
+            said,
+            ["Self::connect(launch()?)"],
+            "start is the launch, then the connection"
+        );
+    }
+
+    /// The window's waiting request is a road the helper answers outside
+    /// its provider lock (t-66753 B): beside an action in flight, as the
+    /// stop and the status are.
+    #[test]
+    fn the_waiting_request_is_one_of_the_helpers_unlocked_roads() {
+        let helper = include_str!(
+            "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOS/main.swift"
+        );
+        let roads = helper
+            .split("func unlockedRoad(")
+            .nth(1)
+            .expect("the helper's unlocked roads");
+        let roads = &roads[..roads.find("\n}\n").expect("their end")];
+        assert!(
+            roads.contains(&format!("case \"{STOP_WATCH_METHOD}\":")),
+            "the helper answers the window's waiting request outside its provider lock"
         );
     }
 

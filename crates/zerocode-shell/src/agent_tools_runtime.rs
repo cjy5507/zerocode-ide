@@ -2710,6 +2710,7 @@ pub(super) async fn computer_loop(
 ) {
     install_confirm_asker(app.clone());
     install_frame_notice(app.clone());
+    install_band_notice(app.clone());
     let sequences = computer_use::sequence::SequenceGate::default();
     while let Some(request) = requests.recv().await {
         let steering = app.clone();
@@ -2718,7 +2719,12 @@ pub(super) async fn computer_loop(
             if request.answer.is_closed() {
                 return;
             }
-            let argv = request.argv;
+            // One spelling of the agent's words from here on (t-66753 C2):
+            // every check, log and saved step below reads `--name value`,
+            // whichever the agent wrote; words that cannot be read so are
+            // left for the parse to refuse.
+            let argv =
+                zerocode_core::computer_use::flags_apart(&request.argv).unwrap_or(request.argv);
             let local_data_root = steering.state::<AppState>().local_data_root().to_path_buf();
             computer_use::evidence::set_root(&local_data_root);
             // A verb that reads or writes the step log waits for the steps
@@ -4156,8 +4162,13 @@ pub(super) trait HelperRoads {
     /// The helper's `status` unless a request is in flight: a stop never
     /// waits behind one.
     fn status_now(&self) -> Option<serde_json::Value>;
-    /// The helper's `resume`.
-    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError>;
+    /// The helper's `resume`, saying who lifts (t-66753 A): an agent's road
+    /// says an agent, whatever its words carried.
+    fn resume(
+        &self,
+        reset: bool,
+        lifter: computer_use::guard::Lifter,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError>;
     /// The signal that stops the helper: false when there is none to tell.
     fn signal(&self) -> bool;
     /// Whether a helper session stands: one that did not answer `status_now`
@@ -4181,8 +4192,12 @@ impl HelperRoads for SessionHelper {
         computer_use::status_unless_busy()
     }
 
-    fn resume(&self, reset: bool) -> Result<serde_json::Value, computer_use::ComputerUseError> {
-        computer_use::guard::helper_resume(reset)
+    fn resume(
+        &self,
+        reset: bool,
+        lifter: computer_use::guard::Lifter,
+    ) -> Result<serde_json::Value, computer_use::ComputerUseError> {
+        computer_use::guard::helper_resume(reset, lifter)
     }
 
     fn signal(&self) -> bool {
@@ -4264,7 +4279,7 @@ pub(super) fn agents_resume(
     }
     computer_use::guard::resume(
         computer_use::guard::Lifter::Agent,
-        || helper.resume(reset),
+        || helper.resume(reset, computer_use::guard::Lifter::Agent),
         || helper.signal(),
     )
     .agent_answer()
@@ -6399,6 +6414,18 @@ pub(super) fn install_confirm_asker(app: AppHandle) {
             serde_json::json!({ "id": ask.id, "decision": decision }),
         );
         decision
+    }));
+}
+
+/// The band hears a stop the helper's waiting answer moved (t-66753 B): the
+/// report it paints, as every road that moves the stop sends it — so the
+/// person's chord stops the work browsers too, with no command between.
+fn install_band_notice(app: AppHandle) {
+    computer_use::guard::install_band_notice(Box::new(move || {
+        let _ = app.emit(
+            "computer:activity",
+            computer_use::guard::activity_report(None),
+        );
     }));
 }
 

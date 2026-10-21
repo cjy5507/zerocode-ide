@@ -482,6 +482,10 @@ mod tests {
                             // The boot restore gate and shutdown startup checks
                             // are tested beside their command backend.
                             | "cmd/managed_judgment.rs"
+                            // t-67102: the list's read of the finish setting is
+                            // timed beside the command that makes it, while a
+                            // settings commit holds the repository.
+                            | "cmd/waiting.rs"
                             // t-21017: a provider's done report reaches the
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.

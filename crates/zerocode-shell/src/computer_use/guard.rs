@@ -328,12 +328,64 @@ impl Resumed {
     }
 }
 
-/// The helper's own `resume`, when a session stands.
-pub fn helper_resume(reset: bool) -> Result<Value, ComputerUseError> {
+/// The helper's own `resume`, when a session stands, saying who lifts
+/// (t-66753 A).
+pub fn helper_resume(reset: bool, lifter: Lifter) -> Result<Value, ComputerUseError> {
     if super::session_stands() {
-        super::call("resume", serde_json::json!({ "resetBudget": reset }))
+        super::call("resume", resume_request(reset, lifter))
     } else {
         Ok(Value::String("idle".into()))
+    }
+}
+
+/// What the window asks the helper's `resume` with (t-66753 A): whether
+/// the session count starts again, and who lifts — the word the band's
+/// resume alone writes `person`; every other road, whatever its words
+/// carried, writes `agent`.
+#[must_use]
+pub fn resume_request(reset: bool, lifter: Lifter) -> Value {
+    let lifter = match lifter {
+        Lifter::Person { .. } => zerocode_core::computer_use::RESUME_LIFTER_PERSON,
+        Lifter::Agent => zerocode_core::computer_use::RESUME_LIFTER_AGENT,
+    };
+    serde_json::json!({
+        "resetBudget": reset,
+        (zerocode_core::computer_use::RESUME_LIFTER_KEY): lifter,
+    })
+}
+
+/// What tells the band the window's stop moved without a command of the
+/// window's own (t-66753 B): installed by the window once, to send the band
+/// the report it paints.
+pub(crate) type BandNotice = dyn Fn() + Send + Sync;
+
+static BAND: std::sync::OnceLock<Box<BandNotice>> = std::sync::OnceLock::new();
+
+/// Install the band's notice, once.
+pub(crate) fn install_band_notice(notice: Box<BandNotice>) {
+    let _ = BAND.set(notice);
+}
+
+/// The helper's answer to the window's waiting request (t-66753 B): the
+/// person's chord it says stands is taken in at once ([`adopt`]) and the band
+/// is told, so the window and its work browsers stop with the desktop — not
+/// at the window's next command. Any other stop of the helper's is left to
+/// the roads that hear the helper beside a command: an answer that waited
+/// may be older than a resume made meanwhile, and only the person's chord is
+/// worth taking in from it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn hear_watched(answer: &Value) {
+    let Some(reason) = (answer.get("stopped").and_then(Value::as_bool) == Some(true))
+        .then(|| answer.get("reason").and_then(Value::as_str))
+        .flatten()
+        .filter(|reason| zerocode_core::computer_use::persons_stop(reason))
+    else {
+        return;
+    };
+    if adopt(reason)
+        && let Some(notice) = BAND.get()
+    {
+        notice();
     }
 }
 
