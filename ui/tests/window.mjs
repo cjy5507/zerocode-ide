@@ -50,6 +50,7 @@ import { testQuotaWallChip } from "./quota-wall-chip.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testBoardNow } from "./board-now.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
+import { testAgentGraphTeams } from "./agent-graph-teams.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
@@ -287,6 +288,9 @@ suite("agent-relations", async ({ browser, origin, ok }) => {
   await testAgentRelations(browser, origin, ok);
   await testAgentRelationsForm(browser, origin, ok);
 });
+// The relations tab's card picture, direction E2 (t-68475): one column per
+// coordinator, its workers and helpers hung on the stem by urgency.
+suite("agent-graph-teams", ({ browser, origin, ok }) => testAgentGraphTeams(browser, origin, ok));
 // The live coordination map layered over that same graph (t-7288).
 suite("board-live", ({ browser, origin, ok }) => testBoardLive(browser, origin, ok));
 // The orbit view of the same relations picture (t-9444): stars, planets, moons and mail.
