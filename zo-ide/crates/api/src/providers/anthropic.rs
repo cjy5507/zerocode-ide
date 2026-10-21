@@ -732,7 +732,7 @@ impl AnthropicClient {
             return Err(ApiError::Api {
                 status,
                 error_type: None,
-                message: Some("count_tokens".to_string()),
+                message: None,
                 body: body.chars().take(300).collect(),
                 retryable: false,
                 retry_after: None,
