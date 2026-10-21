@@ -4158,8 +4158,14 @@ impl Ui {
             // 트랜스크립트의 재료가 아니다.
             RenderBlock::UserMessage { .. }
             | RenderBlock::Image { .. }
-            | RenderBlock::RateLimit(_)
-            | RenderBlock::CompactionProgress { .. } => {}
+            | RenderBlock::RateLimit(_) => {}
+            // How far a compaction's summary has come — the turn's own or a
+            // `/compact` — counts on the status row, never in the transcript.
+            RenderBlock::CompactionProgress { streamed_chars } => {
+                if let Some(status) = self.status.as_mut() {
+                    status.note_compaction_progress(streamed_chars);
+                }
+            }
         }
     }
 
@@ -6204,7 +6210,7 @@ impl App {
                 biased;
                 joined = &mut job => break joined,
                 Some(block) = block_rx.recv() => {
-                    ui.compaction_block(block);
+                    ui.block(block);
                     ui.draw_with_queue(|| block_rx.len());
                 }
                 command = events::next_command(scaffold.ide) => match command {
@@ -6255,7 +6261,7 @@ impl App {
             Err(error) => (Err(format!("compact task ended: {error}")), true),
         };
         let ui = &mut self.ui;
-        scaffold.drain(&mut block_rx, |block| ui.compaction_block(block));
+        scaffold.drain(&mut block_rx, |block| ui.block(block));
         let cancelled = scaffold.cancelled();
         ui.status = None;
         ui.publish_working_activity(scaffold.ide);
@@ -6283,18 +6289,6 @@ impl App {
 
 /// 하위 에이전트 보고 셀의 호출 id — 묶임 판정에 안 쓰이는 자리표다.
 impl Ui {
-    /// One block of a `/compact` job (t-10956): the summary's progress
-    /// counts on the status row, everything else lands like a turn's block.
-    fn compaction_block(&mut self, block: RenderBlock) {
-        if let RenderBlock::CompactionProgress { streamed_chars } = block {
-            if let Some(status) = self.status.as_mut() {
-                status.set_inline_message(Some(super::strings::compaction_progress(streamed_chars)));
-            }
-            return;
-        }
-        self.block(block);
-    }
-
     /// 방금 파킹된 프롬프트에 채널의 `prompt_id` 를 얹는다(이미 있으면 그대로).
     fn tag_parked(&mut self, published: Option<u64>) {
         if let (Some(parked), Some(id)) = (self.parked.as_mut(), published) {

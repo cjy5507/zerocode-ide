@@ -88,6 +88,9 @@ pub const ACTIVITY_WAITING: &str = "waiting";
 pub const ACTIVITY_RECONNECTING: &str = "reconnecting";
 pub const ACTIVITY_QUIET: &str = "quiet";
 pub const ACTIVITY_REASONING_SILENTLY: &str = "reasoning silently";
+/// The conversation is being compacted — the turn's own (t-68694) or a
+/// `/compact` — and the summary is what the row waits on.
+pub const ACTIVITY_COMPACTING: &str = "compacting";
 pub const ACTIVITY_MODEL_TARGET: &str = "model";
 pub const ACTIVITY_PHASE_STARTED: &str = "started";
 /// The reason beside a call that never got its result — the turn was
