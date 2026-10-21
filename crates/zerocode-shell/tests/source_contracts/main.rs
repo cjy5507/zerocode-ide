@@ -31597,7 +31597,10 @@ mod tests {
             // Every card lands in a column (direction E2): a root nobody seated
             // leads its own column or joins the person's own, and a cycle is
             // cut where the walk from the stem's top cannot reach it.
-            let teams = block_after(window, "function agentGraphTeamLayout(agents, byPane, seats) {");
+            let teams = block_after(
+                window,
+                "function agentGraphTeamLayout(agents, byPane, seats) {",
+            );
             assert!(
                 graph.contains("entry.card.parent")
                     && graph.contains("const children = new Map();")
