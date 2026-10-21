@@ -1613,12 +1613,12 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // model loses its plan on exactly the long, many-step tasks that
         // trigger compaction. Best-effort and rooted at the stable workspace
         // (`trace_cwd`, the same seam dream/turn traces use) so it reads the
-        // same store the `TodoWrite` tool writes; `None` (no todos, or all
-        // todos already complete) appends nothing, keeping the no-todo path
-        // byte-identical.
+        // store the `TodoWrite` tool writes for this session; `None` (no todos,
+        // or all todos already complete) appends nothing, keeping the no-todo
+        // path byte-identical.
         if let Some(reminder) = self
             .trace_cwd()
-            .map(|cwd| crate::todo_progress::current_todos(&cwd))
+            .map(|cwd| crate::todo_progress::current_todos(&cwd, &self.session.session_id))
             .and_then(|todos| crate::todo_progress::render_todos_reminder(&todos))
         {
             new_prompt.push(format!("{TODO_PROGRESS_REMINDER_PREFIX}\n{reminder}"));

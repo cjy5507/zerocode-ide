@@ -451,10 +451,10 @@ fn execute_repl(input: ReplInput, cwd: Option<&Path>) -> Result<ReplOutput, Tool
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    // Per-session scoping env is this zo process's implementation detail, not
-    // part of the child's contract. Any REPL child can launch `zo` (a shell
-    // language directly; python/node via shell-out), and the inherited value
-    // grafts the PARENT session's todo store onto that child. Same policy as
+    // A todo-store override given to this zo process is its own, not part of
+    // the child's contract. Any REPL child can launch `zo` (a shell language
+    // directly; python/node via shell-out), and the inherited value grafts
+    // this process's todo store onto that child. Same policy as
     // the Bash runner's `STRIPPED_SESSION_SCOPE_ENV` (runtime/src/bash.rs) —
     // kept as a literal here because `tools` does not depend on `runtime`.
     process.env_remove("ZO_TODO_STORE");
@@ -1469,11 +1469,10 @@ mod tests {
 
     #[test]
     fn repl_children_never_inherit_session_scope_env() {
-        // Regression: the parent zo sets `ZO_TODO_STORE` on itself for
-        // per-session todo scoping; a REPL child inheriting it hands the
-        // PARENT session's store to any `zo` launched from that child. No
-        // other test in this crate touches this var, so a save/restore
-        // without a lock is race-free here.
+        // Regression: a `ZO_TODO_STORE` given to the parent zo, inherited by a
+        // REPL child, hands the parent's store to any `zo` launched from that
+        // child. No other test in this crate touches this var, so a
+        // save/restore without a lock is race-free here.
         let previous = std::env::var_os("ZO_TODO_STORE");
         std::env::set_var("ZO_TODO_STORE", "/tmp/parent-session.todos.json");
         let result = execute_repl(

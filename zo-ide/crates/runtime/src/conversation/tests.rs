@@ -6482,9 +6482,11 @@ fn todo_lifecycle_hooks_diff_against_the_turn_entry_baseline() {
     )
     .with_session_tracer(tracer);
     runtime.set_workspace_cwd(home.clone());
+    let session_id = runtime.session().session_id.clone();
 
     let write_plan = |body: &str| {
-        let store = crate::todo_store::resolve_readable_store(&home);
+        let store = crate::todo_store::resolve_readable_store(&home, Some(&session_id))
+            .expect("the pinned store");
         if let Some(parent) = store.parent() {
             std::fs::create_dir_all(parent).expect("todo store dir");
         }
@@ -16606,7 +16608,7 @@ fn todo_progress_reminder_reflects_pending_plan_and_clears_when_done() {
             {"content":"write tests","activeForm":"writing tests","status":"pending"}]"#,
     )
     .expect("write pending plan");
-    let pending = todo_progress_reminder_for(&dir).expect("pending plan yields a reminder");
+    let pending = todo_progress_reminder_for(&dir, "session-reanchor").expect("pending plan yields a reminder");
     assert!(
         pending.starts_with(TODO_PROGRESS_REMINDER_PREFIX),
         "reminder must be prefix-tagged so replace-by-prefix refreshes it: {pending}"
@@ -16619,7 +16621,7 @@ fn todo_progress_reminder_reflects_pending_plan_and_clears_when_done() {
     )
     .expect("write completed plan");
     assert!(
-        todo_progress_reminder_for(&dir).is_none(),
+        todo_progress_reminder_for(&dir, "session-reanchor").is_none(),
         "an all-complete plan clears the reminder"
     );
 
@@ -16628,6 +16630,87 @@ fn todo_progress_reminder_reflects_pending_plan_and_clears_when_done() {
         None => std::env::remove_var("ZO_TODO_STORE"),
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two sessions in one folder (t-68408): a new session opened beside one with
+/// a plan in progress is shown no plan -- no re-anchored `Current todos`, no
+/// task-hook baseline -- and the busy one, resumed after its neighbour wrote a
+/// plan of its own, is re-anchored on its own plan alone.
+#[test]
+fn a_session_is_only_ever_shown_its_own_plan() {
+    struct SimpleApi;
+    impl ApiClient for SimpleApi {
+        fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+            Ok(vec![AssistantEvent::MessageStop])
+        }
+    }
+
+    let _env = crate::test_env_lock();
+    let root = temp_workspace("todo-two-sessions");
+    let _state = EnvVarGuard::set("ZO_STATE_DIR", root.join("state"));
+    let _todo_store = EnvVarGuard::unset("ZO_TODO_STORE");
+    let _trace_root = EnvVarGuard::unset("ZO_TRACE_ROOT");
+    let cwd = root.join("workspace");
+    fs::create_dir_all(&cwd).expect("workspace dir");
+    let write_plan = |session_id: &str, body: &str| {
+        let store = crate::todo_store::primary_store(&cwd, Some(session_id))
+            .expect("a session's store");
+        fs::create_dir_all(store.parent().expect("a parent")).expect("store dir");
+        fs::write(&store, body).expect("write plan");
+    };
+    let open = |session_id: Option<&str>| {
+        let mut session = Session::new();
+        if let Some(id) = session_id {
+            session.session_id = id.to_string();
+        }
+        let mut runtime = ConversationRuntime::new(
+            session,
+            SimpleApi,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        runtime.set_workspace_cwd(cwd.clone());
+        runtime
+    };
+    let plan_shown = |runtime: &ConversationRuntime<SimpleApi, StaticToolExecutor>| {
+        runtime
+            .transient_reminders()
+            .iter()
+            .find(|held| held.starts_with(TODO_PROGRESS_REMINDER_PREFIX))
+            .cloned()
+    };
+
+    write_plan(
+        "session-north",
+        r#"[{"content":"map the north wing","activeForm":"mapping the north wing","status":"in_progress"},
+            {"content":"paint the north wing","activeForm":"painting the north wing","status":"pending"}]"#,
+    );
+
+    // A new session opens beside the busy one.
+    let mut fresh = open(None);
+    fresh.reinject_todo_progress_reminder();
+    fresh.seed_todo_baseline();
+    let fresh_shown = plan_shown(&fresh);
+    let fresh_baseline = fresh.todo_baseline.clone();
+
+    // It writes a plan of its own; then the busy session is resumed.
+    write_plan(
+        &fresh.session().session_id,
+        r#"[{"content":"fix the south gate","activeForm":"fixing the south gate","status":"in_progress"}]"#,
+    );
+    let mut resumed = open(Some("session-north"));
+    resumed.reinject_todo_progress_reminder();
+    let resumed_shown = plan_shown(&resumed).unwrap_or_default();
+    let _ = fs::remove_dir_all(&root);
+
+    assert_eq!(fresh_shown, None, "a new session is shown no neighbour's plan");
+    assert!(fresh_baseline.is_empty(), "a new session's task hooks start from no plan: {fresh_baseline:?}");
+    assert!(
+        resumed_shown.contains("mapping the north wing"),
+        "the resumed session gets its own plan back: {resumed_shown}"
+    );
+    assert!(!resumed_shown.contains("south gate"), "and never its neighbour's: {resumed_shown}");
 }
 
 /// P3 (read-only screenshot regression): repeated permission denials of the
