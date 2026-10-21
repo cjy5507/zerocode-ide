@@ -43960,7 +43960,10 @@ h4.knowledge-inspector-head::after {
   margin-left: var(--space-1);
 }
 
-/* 군집 범례(시안): 왼쪽 아래의 점과 이름. 점의 색은 군집의 색 규칙 하나에서 온다(`data-hue`). */
+/* 군집 범례(시안): 왼쪽 아래의 점과 이름. 점의 색은 군집의 색 규칙 하나에서 온다(`data-hue`).
+ * 글자는 그림의 범례가 서는 단(`--text-3xs`, 11 px)이다 — 범례는 지도 위에 서서 그 밑의 점을 가리고, 짚는 손도
+ * 가져간다. 쪽 이름의 단(12 px, Geist — t-67607)에 두었더니 좁은 판(319 px)에서 줄이 셋에서 넷으로 늘어 범례가
+ * 59 → 86 px로 자랐고, 그 밑에 든 쪽의 점을 짚을 수 없었다. */
 .knowledge-cluster-legend {
   position: absolute;
   left: var(--space-4);
@@ -43971,7 +43974,7 @@ h4.knowledge-inspector-head::after {
   gap: var(--space-1) var(--space-3);
   max-width: var(--knowledge-cluster-legend-max);
   color: var(--ink-label);
-  font-size: var(--text-2xs);
+  font-size: var(--text-3xs);
 }
 
 .knowledge-cluster-legend[hidden] {
