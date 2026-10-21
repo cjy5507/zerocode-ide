@@ -1640,6 +1640,10 @@ pub struct ChatGptBackendClient {
     http: reqwest::Client,
     access_token: String,
     account_id: Option<String>,
+    /// The `user-agent` the requests carry: [`USER_AGENT`] in every build. A field
+    /// rather than the constant so the user-agent measurement (t-68710) can send
+    /// another Codex version's down this same request path.
+    user_agent: String,
     session_id: String,
     /// Stable cache scope for `prompt_cache_key` derivation and the
     /// reasoning-replay fallback cache — the zo session id when the host
@@ -1674,6 +1678,7 @@ impl ChatGptBackendClient {
             http: shared_http_client(),
             access_token: access_token.into(),
             account_id,
+            user_agent: USER_AGENT.to_string(),
             session_id: random_session_id(),
             cache_scope: None,
             base_url: CHATGPT_RESPONSES_URL.to_string(),
@@ -1852,7 +1857,7 @@ impl ChatGptBackendClient {
         let mut headers = vec![
             ("OpenAI-Beta", websocket::OPENAI_BETA_RESPONSES_WEBSOCKETS.to_string()),
             ("originator", ORIGINATOR.to_string()),
-            ("user-agent", USER_AGENT.to_string()),
+            ("user-agent", self.user_agent.clone()),
             ("session_id", self.session_id.clone()),
             ("authorization", format!("Bearer {}", self.access_token)),
         ];
@@ -1966,7 +1971,7 @@ impl ChatGptBackendClient {
             .header("originator", ORIGINATOR)
             // Model-gating fingerprint (see [`USER_AGENT`]): without it the
             // backend 404s `gpt-5.6-luna` as "Model not found".
-            .header("user-agent", USER_AGENT)
+            .header("user-agent", self.user_agent.as_str())
             .header("session_id", &self.session_id)
             .bearer_auth(&self.access_token);
         if let Some(account_id) = &self.account_id {

@@ -5623,3 +5623,161 @@ async fn reconnect_inside_the_bundle_answers_and_the_next_turn_starts_clean_sse(
     assert_eq!(total, 3, "the next turn opens its own connection");
     assert!(second_elapsed < SCENE_WINDOW, "the next turn answers at once: {second_elapsed:?}");
 }
+
+/// How long one measured request may take before its record says it timed out.
+const MEASURE_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The rest between two measured requests, so neither leans on the one before.
+const MEASURE_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Item 7 of t-68710, a measurement and not a rule: the user agent zo sends against
+/// the installed Codex's, the rest of zo's request path the same, in six pairs on the
+/// person's own ChatGPT login. The order inside a pair alternates, so a drift in the
+/// backend falls on both versions. A record keeps timings, event kinds and their
+/// counts, never the answer, the prompt or the login. The job names the record file,
+/// the model and the installed version in `ZO_UA_MEASURE_OUT`, `ZO_UA_MEASURE_MODEL`
+/// and `ZO_UA_MEASURE_NEW`; without them nothing is sent.
+#[tokio::test]
+#[ignore = "measurement, not a rule: live ChatGPT requests; run with --ignored --nocapture"]
+async fn user_agent_versions_compared_live() {
+    use std::io::Write as _;
+    let (Ok(out), Ok(model), Ok(installed)) = (
+        std::env::var("ZO_UA_MEASURE_OUT"),
+        std::env::var("ZO_UA_MEASURE_MODEL"),
+        std::env::var("ZO_UA_MEASURE_NEW"),
+    ) else {
+        eprintln!("[t-68710 ua] ZO_UA_MEASURE_OUT, ZO_UA_MEASURE_MODEL or ZO_UA_MEASURE_NEW is unset; nothing sent");
+        return;
+    };
+    let login = match crate::client::ProviderClient::from_provider_kind_with_auth_route(
+        crate::providers::ProviderKind::OpenAi,
+        crate::client::AuthRoute::OAuth,
+    ) {
+        Ok(crate::client::ProviderClient::ChatGpt(client)) => client,
+        Ok(_) => panic!("the OpenAI login is not a ChatGPT login"),
+        Err(error) => panic!("no ChatGPT login: {error}"),
+    };
+    let shipped = user_agent_version(super::USER_AGENT).to_string();
+    let request = MessageRequest {
+        model,
+        max_tokens: 64,
+        messages: vec![InputMessage::user_text("Reply with the single word: ready.")],
+        system: None,
+        tools: None,
+        tool_choice: None,
+        stream: true,
+        thinking: None,
+        output_config: None,
+        effort: Some(EffortLevel::Low),
+        effort_band_ceiling: None,
+    };
+    let mut sink = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(out)
+        .expect("the record file opens");
+    for pair in 1..=6_u32 {
+        let sequence = if pair % 2 == 1 { [&shipped, &installed] } else { [&installed, &shipped] };
+        for (order, version) in (1_u32..).zip(sequence) {
+            let mut client =
+                super::ChatGptBackendClient::new(login.access_token.clone(), login.account_id.clone());
+            client.user_agent = super::USER_AGENT.replacen(shipped.as_str(), version, 1);
+            let mut record = measure_one(&client, &request).await;
+            record["pair"] = json!(pair);
+            record["order"] = json!(order);
+            record["version"] = json!(version);
+            eprintln!("[t-68710 ua] {record}");
+            writeln!(sink, "{record}").expect("the record is written");
+            tokio::time::sleep(MEASURE_PAUSE).await;
+        }
+    }
+}
+
+/// One request of the user-agent measurement: when its first response event and its
+/// first answer text came after it was sent, each event kind it heard with its count,
+/// and how it ended.
+async fn measure_one(client: &super::ChatGptBackendClient, request: &MessageRequest) -> serde_json::Value {
+    let sent = std::time::Instant::now();
+    let since_sent = || u64::try_from(sent.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut transport = match client.open_transport(request, false).await {
+        Ok(transport) => transport,
+        Err(error) => {
+            return json!({"status": format!("not opened: {}", error_kind(&error)), "total_ms": since_sent()});
+        }
+    };
+    let wire = if matches!(transport, super::ChatGptTransport::Ws(_)) { "websocket" } else { "sse" };
+    let mut counts = std::collections::BTreeMap::<String, u32>::new();
+    let (mut first_response, mut first_text, mut empty_batches) = (None, None, 0_u32);
+    let status = loop {
+        let left = MEASURE_LIMIT.saturating_sub(sent.elapsed());
+        let batch = match tokio::time::timeout(left, transport.next_batch()).await {
+            Err(_) => break "timed out".to_string(),
+            Ok(Err(error)) => break error_kind(&error),
+            Ok(Ok(None)) => break "stream ended".to_string(),
+            Ok(Ok(Some(batch))) => batch,
+        };
+        let at = since_sent();
+        empty_batches += u32::from(batch.is_empty());
+        let mut ended = None;
+        for event in &batch {
+            let kind = plain_name(event.get("type").and_then(serde_json::Value::as_str).unwrap_or_default())
+                .unwrap_or("other")
+                .to_string();
+            if kind.starts_with("response.") && first_response.is_none() {
+                first_response = Some(at);
+            }
+            if kind == "response.output_text.delta" && first_text.is_none() {
+                first_text = Some(at);
+            }
+            if matches!(kind.as_str(), "response.completed" | "response.failed" | "response.incomplete" | "error") {
+                ended = Some(kind.clone());
+            }
+            *counts.entry(kind).or_default() += 1;
+        }
+        if let Some(kind) = ended {
+            break kind;
+        }
+    };
+    json!({
+        "wire": wire,
+        "status": status,
+        "first_response_ms": first_response,
+        "first_text_ms": first_text,
+        "total_ms": since_sent(),
+        "kinds": counts,
+        "empty_batches": empty_batches,
+    })
+}
+
+/// `name` when it is a plain dotted name of lower-case words
+/// (`response.output_text.delta`, `server_error`): all the measurement keeps of the
+/// server's words, so nothing else it wrote enters a record.
+fn plain_name(name: &str) -> Option<&str> {
+    let plain = (1..=64).contains(&name.len())
+        && name
+            .split('.')
+            .all(|word| !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_'));
+    plain.then_some(name)
+}
+
+/// A measured request's error by its kind only: the HTTP status, or the stream
+/// error's type.
+fn error_kind(error: &ApiError) -> String {
+    match error {
+        ApiError::Api { status, .. } => format!("http {}", status.as_u16()),
+        ApiError::StreamApi { error_type, .. } => {
+            format!("stream error {}", error_type.as_deref().and_then(plain_name).unwrap_or("untyped"))
+        }
+        ApiError::Http(_) => "transport error".to_string(),
+        _ => "other error".to_string(),
+    }
+}
+
+/// The version in a Codex user agent: `0.144.1` in
+/// `codex_cli_rs/0.144.1 (Mac OS; arm64) zo`.
+fn user_agent_version(agent: &str) -> &str {
+    agent
+        .split_once('/')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .unwrap_or(agent)
+}
