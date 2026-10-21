@@ -2652,24 +2652,38 @@ export async function testJevCustomDecisions(browser, origin, ok) {
   });
   const folder = process.env.JEV_CUSTOM_SHOTS ? resolve(ROOT, process.env.JEV_CUSTOM_SHOTS) : null;
   const pictures = [];
-  const picture = async (name, phone = false) => {
+  const picture = async (name, phone = false, shown = null) => {
     if (!folder) return;
     await mkdir(folder, { recursive: true });
     for (const width of phone ? [null, PHONE.width] : [null]) {
+      let scrolled = 0;
       if (width !== null) {
         await page.setViewportSize(PHONE);
-        await page.evaluate(() => Object.assign(document.querySelector("#jev-view").style,
-          { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "29" }));
+        scrolled = await page.evaluate(() => {
+          const view = document.querySelector("#jev-view");
+          const before = view.scrollTop;
+          Object.assign(view.style, { position: "fixed", inset: "0", width: "100vw", height: "100vh", zIndex: "29" });
+          return before;
+        });
       }
       for (const theme of ["light", "dark"]) {
         await setQualityTheme(page, theme);
+        if (width !== null && shown !== null) {
+          await page.evaluate((selector) => {
+            const view = document.querySelector("#jev-view");
+            view.scrollTop += view.querySelector(selector).getBoundingClientRect().top - view.getBoundingClientRect().top;
+          }, shown);
+        }
         const path = join(folder, `jev-custom-${name}-${theme}${width === null ? "" : `-${width}`}.png`);
         await page.screenshot({ path });
         pictures.push(path);
       }
       if (width !== null) {
-        await page.evaluate(() => Object.assign(document.querySelector("#jev-view").style,
-          { position: "", inset: "", width: "", height: "", zIndex: "" }));
+        await page.evaluate((before) => {
+          const view = document.querySelector("#jev-view");
+          Object.assign(view.style, { position: "", inset: "", width: "", height: "", zIndex: "" });
+          view.scrollTop = before;
+        }, scrolled);
         await page.setViewportSize(FIRST_SCREEN);
         await settlePaint(page);
       }
@@ -2867,7 +2881,7 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     ok("a press on 「켜짐」 switches that one decision through the store, and its line says so",
       switched.calls.length === 1 && switched.calls[0].id === firstId && switched.calls[0].mode === applying && switched.checked === "켜짐",
       JSON.stringify(switched));
-    await picture("list", true);
+    await picture("list", true, "[data-jev-custom]");
 
     const keptBefore = await page.evaluate(() => window.__JEV__.custom.store.decisions[0]?.version ?? "");
     await press(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`);
