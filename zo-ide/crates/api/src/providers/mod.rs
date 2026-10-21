@@ -2616,7 +2616,7 @@ pub fn custom_provider_catalog() -> Vec<(&'static str, Vec<String>)> {
 }
 
 fn custom_provider_is_usable(provider: &ResolvedCustomProvider) -> bool {
-    !provider.requires_auth
+    !custom_provider_needs_key(provider)
         || provider.config.credential_env_vars.iter().any(|env| {
             env_non_empty(env)
                 || crate::oauth_store::load_openai_compat_api_key(env)
@@ -2624,6 +2624,18 @@ fn custom_provider_is_usable(provider: &ResolvedCustomProvider) -> bool {
                     .flatten()
                     .is_some_and(|value| !value.trim().is_empty())
         })
+}
+
+/// Whether a request to `provider` must carry a key. A line that says so
+/// does, and so does a router the window keeps on a public host even when its
+/// line says `requires_auth: false`: the window writes a router first saved
+/// without a key that way, and the cloud behind it answers a key-less request
+/// with a 401 (t-67811). A line written by hand or by `/connect` keeps its own
+/// `false`.
+pub(crate) fn custom_provider_needs_key(provider: &ResolvedCustomProvider) -> bool {
+    provider.requires_auth
+        || (window_router_key(provider.config.api_key_env)
+            && !openai_compat::base_url_is_local(&openai_compat::read_base_url(provider.config)))
 }
 
 /// Custom provider usability details for UIs that need to explain why a
@@ -4489,6 +4501,21 @@ pub fn find_router_keys_in_keychain(env_prefix: &str, service_prefix: &str) {
         service_prefix,
         anthropic::keychain::read_router_key,
     );
+}
+
+/// Whether `env` holds the key of a router the window keeps: the `auth_env` of
+/// a custom provider that one of the window's keychain roads answers for. Such
+/// a key is put in, and put right, in the window's settings — never by an
+/// `export` or a login.
+pub(crate) fn window_router_key(env: &str) -> bool {
+    let kept = window_keychains()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|keychain| keychain.names.answers(env));
+    kept && custom_provider_snapshot()
+        .iter()
+        .any(|provider| provider.config.api_key_env == env)
 }
 
 /// Let this process find a service key the window's settings keep under the

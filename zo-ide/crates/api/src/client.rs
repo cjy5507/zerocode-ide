@@ -559,12 +559,15 @@ pub fn read_xai_base_url() -> String {
 }
 
 /// Build an OpenAI-compatible client from the environment. When the provider
-/// points at a *custom* base URL (a self-hosted or proxy endpoint), fall back
-/// to optional auth like Ollama so a keyless endpoint works; the official
-/// cloud endpoints keep requiring a key, surfacing a clean missing-credentials
-/// error instead of a downstream 401.
+/// points at a *custom* base URL on this machine or a private network (a
+/// self-hosted or proxy endpoint), fall back to optional auth like Ollama so a
+/// keyless endpoint works; a custom public host and the official cloud
+/// endpoints keep requiring a key, surfacing a clean missing-credentials error
+/// instead of a downstream 401 (t-67811).
 fn openai_compat_from_env(config: OpenAiCompatConfig) -> Result<OpenAiCompatClient, ApiError> {
-    if openai_compat::has_custom_base_url(config) {
+    if openai_compat::has_custom_base_url(config)
+        && openai_compat::base_url_is_local(&openai_compat::read_base_url(config))
+    {
         OpenAiCompatClient::from_env(config)
             .or_else(|_| OpenAiCompatClient::from_env_optional_auth(config))
     } else {
@@ -616,14 +619,15 @@ fn openai_compat_api_key_for_route(
     })
 }
 
-/// Build the Gemini/OpenAI-compatible fallback client. Custom `GOOGLE_BASE_URL`
-/// endpoints keep the old optional-auth behavior so keyless proxies remain
-/// supported. On the official Google endpoint, OAuth/ADC wins over
-/// `GOOGLE_API_KEY` to keep Gemini on an OAuth-first policy.
+/// Build the Gemini/OpenAI-compatible fallback client. A custom
+/// `GOOGLE_BASE_URL` keeps the old optional-auth behavior on this machine or a
+/// private network so a keyless proxy remains supported, and needs a key on a
+/// public host ([`openai_compat_from_env`]). On the official Google endpoint,
+/// OAuth/ADC wins over `GOOGLE_API_KEY` to keep Gemini on an OAuth-first policy.
 fn google_openai_compat_from_env() -> Result<OpenAiCompatClient, ApiError> {
     let config = OpenAiCompatConfig::google();
     if openai_compat::has_custom_base_url(config) {
-        return OpenAiCompatClient::from_env_optional_auth(config);
+        return openai_compat_from_env(config);
     }
     if crate::providers::google_auth::gemini_oauth_available() {
         return Ok(OpenAiCompatClient::google_oauth(config));
@@ -631,13 +635,14 @@ fn google_openai_compat_from_env() -> Result<OpenAiCompatClient, ApiError> {
     OpenAiCompatClient::from_env(config)
 }
 
-/// Build the OpenAI-compatible client for a user-defined provider. A provider
-/// declaring `requires_auth: true` errors clearly when its key env is unset;
-/// `false` lets a keyless self-host build with an empty key.
+/// Build the OpenAI-compatible client for a user-defined provider. One that
+/// needs a key ([`providers::custom_provider_needs_key`]) errors clearly when
+/// its key env is unset; any other builds with optional auth, so a keyless
+/// self-host works.
 fn build_custom_client(
     custom: &providers::ResolvedCustomProvider,
 ) -> Result<OpenAiCompatClient, ApiError> {
-    if custom.requires_auth {
+    if providers::custom_provider_needs_key(custom) {
         OpenAiCompatClient::from_env(custom.config)
     } else {
         OpenAiCompatClient::from_env_optional_auth(custom.config)
