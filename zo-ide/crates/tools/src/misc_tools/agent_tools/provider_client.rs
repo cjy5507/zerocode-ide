@@ -921,12 +921,39 @@ fn build_provider_client_for_agent_with_rate_limit_failover(
 }
 
 impl ApiClient for ProviderRuntimeClient {
+    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        // No deadline: a turn's request ends with its answer or an error, so
+        // it never comes back empty-handed for a deadline it was not given.
+        self.stream_until(request, None).map(Option::unwrap_or_default)
+    }
+
+    /// Only a compaction's summary is asked this way (t-69472): it is given up
+    /// at `deadline`, and a turn's request keeps its no-deadline [`Self::stream`].
+    fn stream_within(
+        &mut self,
+        request: ApiRequest,
+        deadline: std::time::Duration,
+    ) -> Result<Option<Vec<AssistantEvent>>, RuntimeError> {
+        self.stream_until(request, Some(deadline))
+    }
+}
+
+impl ProviderRuntimeClient {
+    /// One request, given up at `deadline` when it has one (`Ok(None)` then).
+    /// The deadline spans the whole request — the rate-limit cool-downs, the
+    /// retries and the stream — and is checked whenever the request awaits; a
+    /// wait for an API slot blocks its thread, so it is cut only once the slot
+    /// comes (t-69472).
     // A cohesive async streaming + rate-limit-retry state machine: the
     // `'retry` loop shares `rl_attempts`/`permit` across three failure points
     // (stream open, mid-stream, non-stream fallback), so splitting it would
     // scatter the retry semantics across helpers without making them clearer.
     #[allow(clippy::too_many_lines)]
-    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+    fn stream_until(
+        &mut self,
+        request: ApiRequest,
+        deadline: Option<std::time::Duration>,
+    ) -> Result<Option<Vec<AssistantEvent>>, RuntimeError> {
         let mut tools = agent_tool_definitions(&self.allowed_tools, self.structured_schema.as_ref());
         // Inherited parent-session MCP tools ride along with the builtins; the
         // history reconcile below then treats them as known, so a stored MCP
@@ -1043,7 +1070,7 @@ impl ApiClient for ProviderRuntimeClient {
         // Owned clone so the live-activity stamps below never borrow `self`.
         let manifest_path = self.manifest_path.clone();
         let mut tail = TailFlusher::new(manifest_path.clone());
-        handle.block_on(async {
+        let request_done = async {
             // Background agents share the foreground turn's provider quota. The
             // adaptive `RateGovernor` admits a *live* number of concurrent
             // requests that halves on a 429 and ramps back up on sustained
@@ -1679,7 +1706,15 @@ impl ApiClient for ProviderRuntimeClient {
                 }
                 return Ok(events);
             }
-        })
+        };
+        match deadline {
+            None => handle.block_on(request_done).map(Some),
+            // Dropping the request at its deadline closes its connection; the
+            // guards it holds settle as on any other early end.
+            Some(deadline) => handle
+                .block_on(async { tokio::time::timeout(deadline, request_done).await })
+                .map_or(Ok(None), |done| done.map(Some)),
+        }
     }
 }
 

@@ -673,6 +673,25 @@ fn summary_deadline_reason() -> String {
     )
 }
 
+/// The one line a compaction leaves when the local summary folded the
+/// conversation for a reason worth a line: a summary cut at
+/// [`COMPACTION_SUMMARY_DEADLINE`] (t-68694). A turn shows it as a row, and
+/// the sync road, which has no screen, writes it on stderr (t-69472).
+fn local_summary_notice(reason: &str) -> Option<String> {
+    (reason == summary_deadline_reason()).then(|| {
+        format!("Compaction: the model's summary did not come ({reason}); the local summary stands in")
+    })
+}
+
+/// The sync road's word on a local summary that folded the conversation:
+/// stderr is the only screen a helper's turn or a headless run has, so the
+/// line goes there, the headless notice convention (t-69472).
+pub(super) fn say_local_summary_on_stderr(reason: Option<&str>) {
+    if let Some(line) = reason.and_then(local_summary_notice) {
+        eprintln!("[zo] {line}");
+    }
+}
+
 // --- Runtime-side compaction driver (moved from the conversation core) ---
 //
 // The sync turn loop's auto-compaction surface: threshold check, summary
@@ -1420,17 +1439,28 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     }
 
     pub(super) fn apply_auto_compaction(&mut self, config: CompactionConfig) -> Option<AutoCompactionEvent> {
+        let (event, local_summary_reason) = self.apply_auto_compaction_explained(config);
+        say_local_summary_on_stderr(event.and(local_summary_reason.as_deref()));
+        event
+    }
+
+    /// [`Self::apply_auto_compaction`], saying nothing: the fold, and why the
+    /// local summary stood in when it did.
+    fn apply_auto_compaction_explained(
+        &mut self,
+        config: CompactionConfig,
+    ) -> (Option<AutoCompactionEvent>, Option<String>) {
         let _ = self.run_lifecycle_hook(
             HookEvent::PreCompact,
             &json!({"message_count": self.session.messages.len()}),
         );
         // Auto-compaction has no user focus directive.
-        let result = self.compact_with_api_fallback(config, None);
+        let (result, local_summary_reason) = self.compact_with_api_fallback_explained(config, None);
         let _ = self.run_lifecycle_hook(
             HookEvent::PostCompact,
             &json!({"removed": result.removed_message_count}),
         );
-        self.finish_auto_compaction(result)
+        (self.finish_auto_compaction(result), local_summary_reason)
     }
 
     /// Async sibling of [`Self::apply_auto_compaction`]. Identical bookkeeping,
@@ -1444,7 +1474,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         config: CompactionConfig,
         id_gen: &BlockIdGen,
         progress: Option<&mpsc::Sender<RenderBlock>>,
-    ) -> Option<AutoCompactionEvent> {
+    ) -> (Option<AutoCompactionEvent>, Option<String>) {
         let _ = self.run_lifecycle_hook(
             HookEvent::PreCompact,
             &json!({"message_count": self.session.messages.len()}),
@@ -1453,26 +1483,11 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         let (result, local_summary_reason) = self
             .compact_with_api_fallback_async(config, id_gen, None, progress)
             .await;
-        // A summary cut at its deadline is said on screen: the turn did not
-        // stop, and the local summary is what folded the conversation.
-        if let (Some(tx), Some(reason)) = (progress, local_summary_reason) {
-            if reason == summary_deadline_reason() {
-                let _ = tx
-                    .send(RenderBlock::System {
-                        id: id_gen.next(),
-                        level: SystemLevel::Warn,
-                        text: format!(
-                            "Compaction: the model's summary did not come ({reason}); the local summary stands in"
-                        ),
-                    })
-                    .await;
-            }
-        }
         let _ = self.run_lifecycle_hook(
             HookEvent::PostCompact,
             &json!({"removed": result.removed_message_count}),
         );
-        self.finish_auto_compaction(result)
+        (self.finish_auto_compaction(result), local_summary_reason)
     }
 
     /// Shared tail of sync/async auto-compaction: swap in the compacted session
@@ -1726,11 +1741,22 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         // this `select!` drive-loop task — otherwise the spinner/reveal/input
         // freeze for the entire summary stream. Headless `-p` (no async client)
         // keeps the synchronous path.
-        let event = if self.async_api_client.is_some() {
+        let (event, local_summary_reason) = if self.async_api_client.is_some() {
             self.apply_auto_compaction_async(config, id_gen, Some(render_tx)).await
         } else {
-            self.apply_auto_compaction(config)
+            self.apply_auto_compaction_explained(config)
         };
+        // A summary cut at its deadline is said on screen: the turn did not
+        // stop, and the local summary is what folded the conversation.
+        if let Some(line) = event.and(local_summary_reason.as_deref()).and_then(local_summary_notice) {
+            let _ = render_tx
+                .send(RenderBlock::System {
+                    id: id_gen.next(),
+                    level: SystemLevel::Warn,
+                    text: line,
+                })
+                .await;
+        }
         let _ = render_tx
             .send(RenderBlock::StreamPhase(StreamPhase::CompactionEnded))
             .await;
@@ -1807,7 +1833,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
 
     /// [`Self::compact_with_api_fallback`], and why the local summary stood
     /// in when it did.
-    fn compact_with_api_fallback_explained(
+    pub(super) fn compact_with_api_fallback_explained(
         &mut self,
         config: CompactionConfig,
         focus: Option<&str>,
@@ -2209,7 +2235,14 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
         focus: Option<&str>,
     ) -> Result<String, RuntimeError> {
         let request = self.compaction_summary_request(plan, focus);
-        let events = self.api_client.stream(request)?;
+        // The async road's deadline holds here too (t-69472): a helper's own
+        // turn compacts on this road, and the client gives the request up.
+        let Some(events) = self
+            .api_client
+            .stream_within(request, COMPACTION_SUMMARY_DEADLINE)?
+        else {
+            return Err(RuntimeError::new(summary_deadline_reason()));
+        };
         Self::summary_text_from_events(events)
     }
 
