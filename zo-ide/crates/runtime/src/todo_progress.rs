@@ -88,10 +88,31 @@ impl TodoStatus {
 /// degrades to a no-op rather than ever failing the enclosing turn.
 #[must_use]
 pub fn current_todos(cwd: &Path, session_id: &str) -> Vec<TodoSnapshot> {
-    let Some(path) = crate::todo_store::resolve_readable_store(cwd, Some(session_id)) else {
-        return Vec::new();
-    };
-    let Ok(raw) = std::fs::read_to_string(&path) else {
+    crate::todo_store::resolve_readable_store(cwd, Some(session_id))
+        .map(|path| read_plan(&path))
+        .unwrap_or_default()
+}
+
+/// How many items of session `session_id`'s plan are not completed — the
+/// signal that the requested work is still under way, which `MemoryWrite`
+/// waits on (t-68770). Read through the same store rule as every reader and
+/// best-effort like [`current_todos`]: no store, or one that does not parse,
+/// has none open. Without a session or a `ZO_TODO_STORE`, no plan is kept,
+/// so none is open.
+#[must_use]
+pub fn open_items(cwd: &Path, session_id: Option<&str>) -> usize {
+    crate::todo_store::resolve_readable_store(cwd, session_id).map_or(0, |path| {
+        read_plan(&path)
+            .iter()
+            .filter(|todo| !todo.status.is_complete())
+            .count()
+    })
+}
+
+/// A plan file as every reader takes it: missing, unreadable or malformed is
+/// an empty plan, never an error.
+fn read_plan(path: &Path) -> Vec<TodoSnapshot> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     serde_json::from_str::<Vec<TodoSnapshot>>(&raw).unwrap_or_default()
@@ -218,6 +239,53 @@ mod tests {
         assert_eq!(south, ["south step"], "its neighbour reads its own plan");
         assert_eq!(fresh, Vec::<String>::new(), "a new session starts with no plan");
         assert_eq!(shared_after.ok().as_deref(), Some(shared_plan), "the old shared file is left as it was");
+    }
+
+    /// What `MemoryWrite` waits on (t-68770): the steps of this session's plan
+    /// that are not completed. A plan of completed steps, a missing or
+    /// malformed one, and a caller with no session have none open, and another
+    /// session's open steps are not this one's.
+    #[test]
+    fn open_items_count_only_this_sessions_unfinished_steps() {
+        let _lock = crate::test_env_lock();
+        let prior_todo = std::env::var_os("ZO_TODO_STORE");
+        let prior_state = std::env::var_os("ZO_STATE_DIR");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("zo-todo-progress-open-{nanos}"));
+        std::env::remove_var("ZO_TODO_STORE");
+        std::env::set_var("ZO_STATE_DIR", root.join("state-root"));
+        let cwd = root.join("workspace");
+        let write = |session: &str, body: &str| {
+            let path =
+                crate::todo_store::primary_store(&cwd, Some(session)).expect("a session's store");
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("store dir");
+            std::fs::write(path, body).expect("write plan");
+        };
+        write("busy", r#"[{"content":"a","activeForm":"doing a","status":"completed"},{"content":"b","activeForm":"doing b","status":"in_progress"},{"content":"c","activeForm":"doing c","status":"pending"}]"#);
+        write("done", r#"[{"content":"a","activeForm":"doing a","status":"completed"}]"#);
+        write("broken", "not json");
+
+        let counts = [
+            super::open_items(&cwd, Some("busy")),
+            super::open_items(&cwd, Some("done")),
+            super::open_items(&cwd, Some("broken")),
+            super::open_items(&cwd, Some("fresh")),
+            super::open_items(&cwd, None),
+        ];
+        match prior_todo {
+            Some(value) => std::env::set_var("ZO_TODO_STORE", value),
+            None => std::env::remove_var("ZO_TODO_STORE"),
+        }
+        match prior_state {
+            Some(value) => std::env::set_var("ZO_STATE_DIR", value),
+            None => std::env::remove_var("ZO_STATE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(counts, [2, 0, 0, 0, 0], "busy, done, broken, fresh, no session");
     }
 
     #[test]
