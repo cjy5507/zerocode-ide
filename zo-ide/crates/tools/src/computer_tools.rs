@@ -73,6 +73,11 @@ const MARK_CLICKS: &[&str] = &["left_click", "right_click", "middle_click", "dou
 /// The click an element of an app's tree is pressed by: the element's own
 /// press, which has no button or count.
 const ELEMENT_CLICK: &str = "left_click";
+/// What a click re-picked after `element_not_found` compared to hold to the
+/// model's document, as its answer says (t-68358): the title and the
+/// document's identity, or the title alone when the window gives none.
+const REPICK_COMPARED_DOCUMENT: &str = "title and document";
+const REPICK_COMPARED_TITLE: &str = "title only";
 /// The action that leaves no window of its app to look at after it.
 const QUIT_ACTION: &str = "quit";
 /// Actions whose answer names places on the screen: before the first of them
@@ -776,7 +781,8 @@ fn target_of(input: &ComputerInput) -> Option<ComputerTarget> {
 }
 
 /// Where an answer names the one window it is of, within its result or at
-/// its top: the window's `id`, and its `title` — the document it shows.
+/// its top: the window's `id`, its `title` — the document it shows — and the
+/// document's identity in `document` when the window gives one.
 const ANSWER_ROOTS: &[&str] = &["/result/", "/"];
 const WINDOW_OBJECTS: &[&str] = &["snapshot/window", "tree/window", "window"];
 
@@ -787,6 +793,14 @@ fn window_pointers(field: &'static str) -> impl Iterator<Item = String> {
 /// The title of the window an answer is of: the document it shows.
 fn window_title(answer: &Value) -> Option<String> {
     window_pointers("title").find_map(|pointer| answer.pointer(&pointer)?.as_str().map(str::to_string))
+}
+
+/// The identity of the document the window an answer is of shows, when the
+/// window gives one — its `AXDocument`, a browser page's URL (t-68358). A
+/// title can stay through a change of document (Finder, Terminal, a web app
+/// with one title per site); the identity does not.
+fn window_document(answer: &Value) -> Option<String> {
+    window_pointers("document").find_map(|pointer| answer.pointer(&pointer)?.as_str().map(str::to_string))
 }
 
 fn checked_window(answer: &Value, expected: Option<u64>) -> Result<Option<u64>, ToolError> {
@@ -1470,6 +1484,7 @@ fn present_observation(
         frame,
         marked_look: answer.pointer(&format!("/result/marks/{LOOK_ID_KEY}")).and_then(Value::as_str).map(str::to_string),
         title: window_title(answer),
+        document: window_document(answer),
     });
     let unchanged = diff && answer.pointer("/result/changed").and_then(Value::as_array).is_some_and(Vec::is_empty);
     if unchanged && observation.as_ref().is_some_and(|seen| ctx.has_computer_observation(seen)) {
@@ -2229,11 +2244,14 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
 /// no control read its words, refused before any input, since the helper
 /// chooses the control before it presses — on a page that moved on (t-66760
 /// b1): the same window is read again for the same words and, while it shows
-/// the document the model's last look at it showed, the one control that
-/// reads them is pressed once, by its index on that read. No look at the
-/// window, another document, no control or several: the refusal stands, with
-/// the candidates named when there are several. One read, one press — never
-/// a loop.
+/// the document the model's last look at it showed — the same title, and the
+/// same identity when the window gives one (t-68358) — and one control reads
+/// them, the click is pressed once more by those words: the helper chooses
+/// the control again on the press's own tree and refuses none or several, so
+/// a tree that moved after the read is never pressed by the read's index. No
+/// look at the window, another document, no control or several: the refusal
+/// stands, with the candidates named when there are several. One read, one
+/// press — never a loop.
 fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &ComputerRoad) -> Result<(Value, Value), ToolError> {
     let reading = (input.label.is_some() || input.role.is_some()) && input.ocr != Some(true);
     let (Some(app), Some(window_id)) = (input.app.as_deref(), input.window_id) else {
@@ -2242,7 +2260,7 @@ fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &Com
     if !reading || input.action.trim() != ELEMENT_CLICK || refused.code != error_code::ELEMENT_NOT_FOUND {
         return Err(refused.into());
     }
-    let Some(looked_at) = ctx.computer_window_title(window_id) else {
+    let Some(looked) = ctx.computer_window_look(window_id).filter(|looked| looked.title.is_some()) else {
         return Err(refused.into());
     };
     let lookup = ComputerInput {
@@ -2261,7 +2279,7 @@ fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &Com
     else {
         return Err(refused.into());
     };
-    if window_title(&found).as_deref() != Some(looked_at.as_str()) {
+    if window_title(&found) != looked.title || window_document(&found) != looked.document {
         let message = format!("{}; the window's document changed since your last look at it, so no other control was chosen — observe it again", refused.message);
         return Err(Refusal { message, ..refused }.into());
     }
@@ -2281,16 +2299,13 @@ fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &Com
             return Err(Refusal { message, ..refused }.into());
         }
     };
-    let Some(index) = only.get("index").and_then(Value::as_u64) else {
-        return Err(refused.into());
-    };
-    let press = ComputerInput { element_index: Some(index), label: None, role: None, ..input.clone() };
-    let pressed = call_shim(road, &argv_for(&press)?, ctx.cwd.as_deref())?;
+    let pressed = call_shim(road, &argv_for(input)?, ctx.cwd.as_deref())?;
     if let Some(refused) = refusal(&pressed) {
         return Err(refused.into());
     }
     super::computer_tally::note(super::computer_tally::REPICKED);
-    Ok((pressed, json!({ "label": only.get("label"), "role": only.get("role"), "element_index": index })))
+    let compared = if looked.document.is_some() { REPICK_COMPARED_DOCUMENT } else { REPICK_COMPARED_TITLE };
+    Ok((pressed, json!({ "label": only.get("label"), "role": only.get("role"), "compared": compared })))
 }
 
 /// A control a read found, as a refusal names it: `12 AXButton «Save»`.
@@ -2405,6 +2420,7 @@ pub(crate) mod tests {
                 frame: ShotFrame::UNIT,
                 marked_look: None,
                 title: None,
+                document: None,
             }));
             std::fs::write(dir.path().join("wait-for"), json!({"ok":true,"result":case["result"]}).to_string()).unwrap();
             let response = run_computer(&case["input"], &ctx, &road).unwrap();
@@ -2434,6 +2450,7 @@ pub(crate) mod tests {
                 frame: ShotFrame::UNIT,
                 marked_look: None,
                 title: None,
+                document: None,
             }));
             let mut wait = case["input"].clone();
             for key in ["app", "window_id", "background"] { wait.as_object_mut().unwrap().remove(key); }
