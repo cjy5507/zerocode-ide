@@ -64,6 +64,7 @@ mod agent_trust_presets;
 mod answer_door;
 pub(crate) mod api_routers;
 mod app_paths;
+mod artifact_flow;
 mod artifact_render;
 mod artifact_render_plan;
 mod artifact_runtime;
@@ -398,12 +399,12 @@ use cmd::{
 };
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
-    artifact_export, artifact_feedback_record, artifact_import_transcripts, artifact_open,
-    artifact_open_record, artifact_page_at, artifact_preference_revoke, artifact_preference_save,
-    artifact_preferences, artifact_preview, artifact_register, artifact_reveal, artifact_search,
-    artifact_tasks, artifact_thumbnail, artifact_versions, artifacts_list, explain_cancel,
-    explain_preview, explain_roads, explain_start, set_artifacts_auto_open_beside,
-    set_artifacts_retention_days, set_vault_session_limit,
+    artifact_export, artifact_feedback_record, artifact_flow, artifact_import_transcripts,
+    artifact_open, artifact_open_record, artifact_page_at, artifact_preference_revoke,
+    artifact_preference_save, artifact_preferences, artifact_preview, artifact_register,
+    artifact_reveal, artifact_search, artifact_tasks, artifact_thumbnail, artifact_versions,
+    artifacts_list, explain_cancel, explain_preview, explain_roads, explain_start,
+    set_artifacts_auto_open_beside, set_artifacts_retention_days, set_vault_session_limit,
 };
 use cmd::{artifact_export_formats, artifact_export_reveal};
 use cmd::{
@@ -3173,6 +3174,7 @@ fn main() -> ExitCode {
             artifact_counts,
             artifact_tasks,
             artifact_bundle,
+            artifact_flow,
             commit_landings,
             artifact_open,
             artifact_reveal,

@@ -44,6 +44,7 @@ import { testArtifactTasks } from "./artifact-tasks.mjs";
 import { testArtifactReopen } from "./artifact-reopen.mjs";
 import { testArtifactDiagrams } from "./artifact-diagrams.mjs";
 import { testArtifactStage2 } from "./artifact-stage2.mjs";
+import { testArtifactFlow } from "./artifact-flow.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testQuotaWallChip } from "./quota-wall-chip.mjs";
@@ -278,6 +279,8 @@ suite("artifact-tasks", ({ browser, origin, ok }) => testArtifactTasks(browser, 
 suite("artifact-reopen", ({ browser, origin, ok }) => testArtifactReopen(browser, origin, ok));
 suite("artifact-diagrams", ({ browser, origin, ok }) => testArtifactDiagrams(browser, origin, ok));
 suite("artifact-stage2", ({ browser, origin, ok }) => testArtifactStage2(browser, origin, ok));
+// The tab's first view: the flow of the project in view (t-68458, draft p-4958d4720ba9e103 v3).
+suite("artifact-flow", ({ browser, origin, ok }) => testArtifactFlow(browser, origin, ok));
 suite("agent-support", ({ browser, origin, ok }) => testAgentSupport(browser, origin, ok));
 // The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
 suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));

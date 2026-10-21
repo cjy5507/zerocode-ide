@@ -2,6 +2,7 @@ mod act_lines;
 mod agent_capabilities;
 mod answer_door;
 mod artifact_export;
+mod artifact_flow;
 mod ask_popup;
 mod beat_lock_order;
 mod board_now;

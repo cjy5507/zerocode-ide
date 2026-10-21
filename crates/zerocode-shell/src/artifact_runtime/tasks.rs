@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::PoisonError;
 
 use serde::Serialize;
-use zerocode_core::artifact::{Artifact, ArtifactKind, Limits, Source};
+use zerocode_core::artifact::{Artifact, ArtifactKind, Limits, Preview, Source};
 use zerocode_core::evidence_digest::{self, Digest, Format, Tests, Told, Verdict};
 use zerocode_core::hand_in::Expect;
 
@@ -506,6 +506,33 @@ pub(crate) struct Bundle {
     pub(crate) missing: Vec<String>,
 }
 
+/// What one task left, for the chips of its line in the artifact tab's flow
+/// (t-68458): the rows a chip opens, and how many of each kind — counted in one
+/// pass by the gathering a task's line is counted by, so a chip and a line never
+/// say two different sums.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct Chips {
+    /// The newest report and the newest page or document: what the report and
+    /// page chips open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) report: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) page: Option<String>,
+    pub(crate) parts: Parts,
+    /// Its pictures as the bundle pairs them ([`SIDE_WORDS`]): before-and-after
+    /// pairs, and the pictures that stand alone.
+    pub(crate) pairs: usize,
+    pub(crate) singles: usize,
+    /// Sessions of Computer Use whose steps name the task.
+    pub(crate) sessions: usize,
+    /// Workers that handed a report in.
+    pub(crate) attempts: usize,
+    /// The newest report's excerpt as the catalog already holds it — the flow
+    /// reads its three lines from it. Never sent: the reader asks for the report.
+    #[serde(skip)]
+    pub(crate) lead_text: Option<String>,
+}
+
 impl Store {
     /// One line for each task the filter admits, newest first. The filter is
     /// the gallery's own — project, agent, period, origin — and its words are
@@ -635,6 +662,87 @@ impl Store {
             missing,
             rows,
         })
+    }
+
+    /// The chips of every task `tasks` names (t-68458), in one pass over the
+    /// catalog: the same gathering a task's line is counted by, and its pictures
+    /// paired by the bundle's own table of names. Nothing is read off a disk — a
+    /// report's three lines come from the excerpt the catalog keeps. A task no
+    /// row names has no entry.
+    pub(crate) fn chips(&self, tasks: &BTreeSet<String>) -> BTreeMap<String, Chips> {
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut gathered: BTreeMap<&str, (Gathering<'_>, Vec<&Artifact>)> = BTreeMap::new();
+        for row in index.rows.values() {
+            let artifact = &row.artifact;
+            let gone = is_gone(artifact);
+            for task in tasks_of(artifact).filter(|task| tasks.contains(*task)) {
+                let (gathering, pictures) = gathered.entry(task).or_default();
+                gathering.take(artifact, gone);
+                if !gone && part_of(artifact) == Part::Picture {
+                    pictures.push(artifact);
+                }
+            }
+        }
+        gathered
+            .into_iter()
+            .map(|(task, (gathering, pictures))| {
+                let paired = pictures_of(&pictures);
+                let pairs = paired.iter().filter(|one| one.before.is_some()).count();
+                let lead_text = gathering.report.and_then(|row| match &row.preview {
+                    Preview::Markdown { text } | Preview::Text { text } => Some(text.clone()),
+                    Preview::Image { .. } | Preview::None => None,
+                });
+                let chips = Chips {
+                    report: gathering.report.map(|row| row.id.clone()),
+                    page: gathering.page.map(|row| row.id.clone()),
+                    parts: gathering.parts,
+                    pairs,
+                    singles: paired.len() - pairs,
+                    sessions: gathering.sessions,
+                    attempts: gathering.workers.len(),
+                    lead_text,
+                };
+                (task.to_string(), chips)
+            })
+            .collect()
+    }
+
+    /// The rows no task is linked to that lie under `roots` and were written at
+    /// `since_ms` or later — a flow's 「기록」 (t-68458) — newest first and at
+    /// most `limit`. A row whose file is gone is not one, and a Computer Use
+    /// session stands as its step log, not as every picture it took.
+    pub(crate) fn loose(&self, roots: &[PathBuf], since_ms: i64, limit: usize) -> Vec<Artifact> {
+        if roots.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+        let index = self.index.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut rows: Vec<&Artifact> = index
+            .rows
+            .values()
+            .map(|row| &row.artifact)
+            .filter(|artifact| {
+                artifact.modified_ms >= since_ms
+                    && tasks_of(artifact).next().is_none()
+                    && !is_gone(artifact)
+                    && (artifact.origin.automation.as_deref()
+                        != Some(crate::agent_tools_runtime::EVIDENCE_AUTOMATION_ID)
+                        || is_step_log(&artifact.path, artifact.source))
+                    && [
+                        artifact.origin.project.as_deref(),
+                        artifact.origin.worktree.as_deref(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .any(|path| roots.iter().any(|root| path.starts_with(root)))
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.modified_ms
+                .cmp(&a.modified_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        rows.truncate(limit);
+        rows.into_iter().cloned().collect()
     }
 
     /// The rows of one task, as copies: the files are read with the catalog's

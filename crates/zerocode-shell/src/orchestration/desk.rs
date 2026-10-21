@@ -761,7 +761,9 @@ const fn completed_stage(work: WorkStage) -> &'static str {
     }
 }
 
-fn stage_of(run: &Run, task: &Task) -> &'static str {
+/// A task's one stage word ([`STAGES`]) — the reading the desk, the board and
+/// the artifact tab's flow (t-68458) all draw, so no surface keeps a second one.
+pub(crate) fn stage_of(run: &Run, task: &Task) -> &'static str {
     staged(run, task).0
 }
 

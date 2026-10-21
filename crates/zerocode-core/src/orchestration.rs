@@ -1047,7 +1047,11 @@ pub fn is_workers_own(author: Option<&ResultAuthor>) -> bool {
 }
 
 /// The [`HANDED_IN_SUMMARY`] string of a `worker_done` body, when it carries one.
-fn summary_of_body(body: &str) -> Option<String> {
+/// Public for the readers that hold one attempt's own report — the artifact
+/// tab's flow says what each attempt reported (t-68458) — and read the key
+/// the briefing spells from this one place.
+#[must_use]
+pub fn summary_of_body(body: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()?
         .get(HANDED_IN_SUMMARY)?
