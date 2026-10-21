@@ -2797,10 +2797,7 @@ impl ChatGptStream {
             };
             match chunk {
                 Some(batch) => {
-                    self.heard.hear(&batch);
-                    if batch.iter().any(is_response_level_event) {
-                        self.note_response_progress();
-                    }
+                    self.hear_batch(&batch);
                     let emitted = self.ingest_batch(batch).await;
                     if emitted {
                         quiet_chunks = 0;
@@ -3055,6 +3052,15 @@ impl ChatGptStream {
         self.startup_deadline = self
             .startup_wait
             .and_then(|wait| std::time::Instant::now().checked_add(wait));
+    }
+
+    /// One transport batch, before its events are parsed: it goes into what this
+    /// attempt heard, and a response-level event in it is progress.
+    fn hear_batch(&mut self, batch: &[Value]) {
+        self.heard.hear(batch);
+        if batch.iter().any(is_response_level_event) {
+            self.note_response_progress();
+        }
     }
 
     /// Response-level progress: the server is making this response. It closes the
