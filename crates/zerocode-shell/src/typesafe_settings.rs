@@ -3672,6 +3672,125 @@ mod tests {
         }
     }
 
+    /// The editor says every word core and the settings answer hand it in a
+    /// person's language: each point, when it asks and what it does when on,
+    /// each input, each kind of answer, each field a refusal names and each
+    /// refusal has its words in the markup under core's own word
+    /// (`#jev-custom-words`), with a key all four catalogs say. A refusal that
+    /// names no field points at a part the drawer has. A word core adds turns
+    /// this red until a person can read it.
+    #[test]
+    fn the_decision_editor_words_every_name_core_hands_it() {
+        let page = include_str!("../../../ui/index.html");
+        let i18n = include_str!("../../../ui/shell-i18n.js");
+        let dashboard = include_str!("../../../ui/shell-jev.js");
+        let template = &page[page
+            .find("<template id=\"jev-custom-words\">")
+            .expect("the editor's words")..];
+        let template = &template[..template.find("</template>").expect("the template closes")];
+        let worded = |kind: &str, word: &str| -> String {
+            let marker = format!("data-jev-{kind}=\"{word}\"");
+            let node = &template[template
+                .find(&marker)
+                .unwrap_or_else(|| panic!("the markup has no words for the {kind} {word}"))..];
+            let node = &node[..node.find('>').expect("the node opens")];
+            let key = node
+                .split("data-i18n=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("the {kind} {word} has no key"));
+            assert!(key.starts_with("jev.custom."), "{kind} {word}: {key}");
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\"")).count(),
+                4,
+                "{key} must be in en/ja/zh/es"
+            );
+            node.to_string()
+        };
+        let rules = CustomDecisionRules::of(&serde_json::json!({}));
+        for kind in &rules.kinds {
+            worded("kind", kind);
+        }
+        for point in &rules.points {
+            for kind in ["point", "point-about", "point-act"] {
+                worded(kind, point.at.key());
+            }
+            for input in point.inputs {
+                worded("input", input.key());
+            }
+        }
+        for field in [
+            custom::Field::Name,
+            custom::Field::Question,
+            custom::Field::Yes,
+            custom::Field::No,
+            custom::Field::OptionName(String::new()),
+            custom::Field::Meaning(String::new()),
+            custom::Field::Level(0),
+        ] {
+            match field {
+                custom::Field::Name
+                | custom::Field::Question
+                | custom::Field::Yes
+                | custom::Field::No
+                | custom::Field::OptionName(_)
+                | custom::Field::Meaning(_)
+                | custom::Field::Level(_) => worded("field", field.word()),
+            };
+        }
+        for refusal in [
+            custom::Refusal::Id,
+            custom::Refusal::IdTaken,
+            custom::Refusal::NameLength,
+            custom::Refusal::NameTaken,
+            custom::Refusal::QuestionLength,
+            custom::Refusal::OptionCount,
+            custom::Refusal::OptionName(String::new()),
+            custom::Refusal::MeaningLength(custom::Field::Yes),
+            custom::Refusal::SecretLine {
+                field: custom::Field::Question,
+                line: 1,
+            },
+            custom::Refusal::Reads,
+            custom::Refusal::Folders,
+            custom::Refusal::ActFrom,
+            custom::Refusal::MaxPerHour,
+            custom::Refusal::Mode,
+            custom::Refusal::TooMany,
+            custom::Refusal::TooLarge,
+        ] {
+            let node = match refusal {
+                custom::Refusal::Id
+                | custom::Refusal::IdTaken
+                | custom::Refusal::NameLength
+                | custom::Refusal::NameTaken
+                | custom::Refusal::QuestionLength
+                | custom::Refusal::OptionCount
+                | custom::Refusal::OptionName(_)
+                | custom::Refusal::MeaningLength(_)
+                | custom::Refusal::SecretLine { .. }
+                | custom::Refusal::Reads
+                | custom::Refusal::Folders
+                | custom::Refusal::ActFrom
+                | custom::Refusal::MaxPerHour
+                | custom::Refusal::Mode
+                | custom::Refusal::TooMany
+                | custom::Refusal::TooLarge => worded("refusal", refusal.word()),
+            };
+            if let Some(at) = node
+                .split("data-jev-refusal-at=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+            {
+                assert!(
+                    dashboard.contains(&format!("jevCustomGroup(\"{at}\"")),
+                    "{} points at {at}, a part the drawer does not have",
+                    refusal.word()
+                );
+            }
+        }
+    }
+
     /// A decision made in the window comes back from the store as the editor
     /// wrote it, recording first; core's check finds nothing in it and names
     /// the version the store keeps; switched on and then edited into a new
