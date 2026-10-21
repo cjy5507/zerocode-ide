@@ -1,0 +1,5 @@
+09:47:57 == lane fc4abd39 start (dry=0)
+09:47:57 == archive
+09:47:58 archive rc=0 1s free=21G load=4.29/7.06
+09:47:59 target zo-gate: removed 292 workspace unit(s), 5699M — the fresh scratch rebuilds them anyway
+09:48:00 == gate-root

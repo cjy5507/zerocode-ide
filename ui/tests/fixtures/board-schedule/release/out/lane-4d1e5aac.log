@@ -1,0 +1,37 @@
+05:49:45 == lane 4d1e5aac start (dry=0)
+05:49:45 == archive
+05:49:46 archive rc=0 1s free=27G load=9.95/8.06
+05:49:47 target root-gate: removed 395 workspace unit(s), 5299M — the fresh scratch rebuilds them anyway
+05:49:48 target zo-gate: removed 284 workspace unit(s), 5483M — the fresh scratch rebuilds them anyway
+05:49:49 target root-release: removed 26 workspace unit(s), 276M — the fresh scratch rebuilds them anyway
+05:49:49 target zo-release: removed 19 workspace unit(s), 396M — the fresh scratch rebuilds them anyway
+05:49:49 == gate-root
+06:39:11 gate-root rc=1 2962s free=35G load=8.40/7.92
+06:39:11 == gate-zo
+07:07:21 gate-zo rc=0 1690s free=29G load=4.90/8.87
+07:07:21 == flakes
+07:09:08 solo root test_evidence::tests::a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence 1/3 rc=0
+07:10:23 solo root test_evidence::tests::a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence 2/3 rc=0
+07:11:35 solo root test_evidence::tests::a_daemonized_pipe_holder_cannot_extend_the_deadline_or_leave_evidence 3/3 rc=0
+07:11:35 flakes rc=0 254s free=28G load=8.21/9.37
+07:11:35 == push
+07:11:35 push rc=0 0s free=28G load=7.79/9.33
+07:11:35 == build-app
+07:28:25 build-app rc=0 1010s free=27G load=3.66/6.18
+07:28:25 == swap-app
+07:28:25 swap-app rc=0 0s free=27G load=3.66/6.18
+07:28:25 == build-zo
+07:28:25 build-zo rc=0 273s free=27G load=3.66/6.18
+07:28:25 == swap-zo
+07:28:25 swap-zo rc=0 0s free=27G load=3.66/6.18
+07:28:25 == bundle-updater
+07:28:57 bundle-updater: archive and DMG packed from build-app's sealed ZeroCode.app, the installed one
+07:28:58 bundle-updater: ZeroCode_1.1.76_aarch64.app.tar.gz + .sig + latest.json under ~/.local/share/zerocode/release/out/4d1e5aac (key 0000000000000000)
+07:28:58 bundle-updater rc=0 33s free=27G load=5.95/6.34
+07:28:58 == publish
+07:29:24 publish: v1.1.76 on owner/zerocode prerelease=0 assets=ZeroCode_1.1.76_aarch64.app.tar.gz,ZeroCode_1.1.76_aarch64.app.tar.gz.sig,ZeroCode_1.1.76_aarch64.dmg,latest.json,install.sh
+07:29:43 publish: source snapshot v1.1.76 on the public repository
+07:29:43 publish rc=0 45s free=27G load=5.62/6.28
+07:29:43 == sweep
+07:29:44 sweep rc=0 1s free=28G load=5.62/6.28
+07:29:44 == green

@@ -51,6 +51,7 @@ import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
+import { testBoardSchedule } from "./board-schedule.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
@@ -289,6 +290,9 @@ suite("agent-relations", async ({ browser, origin, ok }) => {
 suite("board-live", ({ browser, origin, ok }) => testBoardLive(browser, origin, ok));
 // The orbit view of the same relations picture (t-9444): stars, planets, moons and mail.
 suite("board-orbit", ({ browser, origin, ok }) => testBoardOrbit(browser, origin, ok));
+// The task board's schedule (t-67482): the build line, its gates, the release lanes and the
+// worker tasks on one time axis, each running or waiting one with its ETA.
+suite("board-schedule", ({ browser, origin, ok }) => testBoardSchedule(browser, origin, ok));
 suite("autonomy-board", ({ browser, origin, ok }) => testAutonomyBoard(browser, origin, ok));
 suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench(browser, origin, ok));
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));

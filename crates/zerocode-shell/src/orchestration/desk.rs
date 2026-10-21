@@ -508,6 +508,46 @@ pub(crate) struct DeskTask {
     /// sends, and read once for a completed task, whose stage it decides.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) progress: Option<WorkProgress>,
+    /// When its work moved (t-67482): the task board's schedule draws the row
+    /// on the time axis from these. Asked of the rows the desk sends; `None`
+    /// for a task nobody has carried yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) times: Option<TaskTimes>,
+}
+
+/// When a task's work moved, as the ledger keeps it: its first attempt's
+/// start, the newest attempt that ended handing its work in (`worker_done`),
+/// the coordinator's first `verified` of the review that stands, and its
+/// landing — the completion the coordinator wrote over a verified, merged
+/// review ([`Run::completion_ms`]). Each is `None` until it happened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct TaskTimes {
+    pub(crate) started_ms: Option<i64>,
+    pub(crate) handed_ms: Option<i64>,
+    pub(crate) verified_ms: Option<i64>,
+    pub(crate) landed_ms: Option<i64>,
+}
+
+/// A task's times, read off its attempts and its review — the readings the
+/// cost (`task_cost::attempts`) and the stage (`Run::review_of`) already use.
+fn task_times(run: &Run, task: &Task) -> Option<TaskTimes> {
+    // t-67482 red: the times are not read yet.
+    if !task.id.is_empty() {
+        return None;
+    }
+    let attempts = zerocode_core::orchestration::task_cost::attempts(run, &task.id);
+    let started_ms = attempts.iter().map(|attempt| attempt.started_ms).min()?;
+    let review = run.review_of(task);
+    Some(TaskTimes {
+        started_ms: Some(started_ms),
+        handed_ms: attempts
+            .iter()
+            .filter(|attempt| attempt.succeeded == Some(true))
+            .filter_map(|attempt| attempt.ended_ms)
+            .max(),
+        verified_ms: review.verified_ms.filter(|_| review.verified),
+        landed_ms: run.completion_ms(task),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -710,6 +750,7 @@ pub(crate) fn desk_snapshot(
                     writing: None,
                     kept: None,
                     hand_in: TaskHandIn::default(),
+                    times: None,
                 },
             ));
         }
@@ -756,6 +797,7 @@ pub(crate) fn desk_snapshot(
             cost: finished.then(|| cost(run, task)),
             hand_in: hand_in_of(run, task),
             progress: row.progress.clone().or_else(|| Some(run.progress_of(task))),
+            times: task_times(run, task),
             ..row.clone()
         }));
     }
@@ -3203,6 +3245,89 @@ mod tests {
                 "deskBytes": desk_bytes,
                 "rowBytes": row_bytes,
             })
+        );
+    }
+
+    /// The task board's schedule draws a task on the time axis from when its
+    /// work moved (t-67482): its first attempt's start, the report that ended
+    /// it, the coordinator's first `verified` and the landing it wrote — read
+    /// off the ledger the desk already holds. A task nobody carried has none.
+    #[test]
+    fn a_desk_row_carries_when_its_work_moved() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("timed", 1);
+        let landed = ledger
+            .create_task(&run, "land it".into(), "landed".into(), vec![], None, 10)
+            .expect("a task");
+        let waiting = ledger
+            .create_task(&run, "wait".into(), "waiting".into(), vec![], None, 11)
+            .expect("a task");
+        let started = ledger
+            .start_worker(&run, "claude", ("team-timed", "%2"), Some(&landed), 12)
+            .expect("a worker carries it");
+        ledger
+            .post(
+                &run,
+                Draft {
+                    from: worker_address(&started.worker),
+                    to: ledger.run(&run).expect("the run").address(),
+                    kind: MessageKind::WorkerDone,
+                    body: Text::from(r#"{"ok":true,"head":"89abcde"}"#.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(landed.clone()),
+                    dispatch: started.dispatch.clone(),
+                },
+                20,
+            )
+            .expect("the report");
+        ledger
+            .update_task(
+                &run,
+                &landed,
+                Some(TaskStatus::Completed),
+                Some(r#"{"verified":true,"merged":true,"mergeHead":"89abcde"}"#.to_string()),
+                ResultAuthor::Coordinator {
+                    seat: "team-timed/%1".to_string(),
+                    generation: Some(1),
+                    attempt: started.dispatch.clone(),
+                    source: Some("89abcde".to_string()),
+                    completed_ms: None,
+                    verified_ms: None,
+                },
+                30,
+            )
+            .expect("a review");
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
+        let times = |id: &str| {
+            desk.tasks
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.times)
+                .unwrap_or_else(|| panic!("{id} missing"))
+        };
+        assert_eq!(
+            times(&landed),
+            Some(TaskTimes {
+                started_ms: Some(12),
+                handed_ms: Some(20),
+                verified_ms: Some(30),
+                landed_ms: Some(30),
+            })
+        );
+        assert_eq!(times(&waiting), None, "nobody carried it");
+        let wire = serde_json::to_value(&desk).expect("the desk serializes");
+        let row = wire["tasks"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["id"] == landed.as_str()))
+            .cloned()
+            .expect("the landed row");
+        assert_eq!(
+            row["times"],
+            serde_json::json!({"started_ms": 12, "handed_ms": 20, "verified_ms": 30, "landed_ms": 30}),
+            "the window reads these keys"
         );
     }
 }

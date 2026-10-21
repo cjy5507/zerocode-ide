@@ -40,6 +40,7 @@ const FILES = Object.freeze([
   "shell-board.js",
   "shell-board-live.js",
   "shell-board-orbit.js",
+  "shell-board-schedule.js",
   "shell-explain.js",
   "shell-composer.js",
   "shell-conversation-view.js",

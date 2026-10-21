@@ -544,6 +544,61 @@ pub(crate) async fn machine_load(
         .map_err(|error| error.to_string())
 }
 
+/// The task board's schedule (t-67482): the build line's jobs, the gates among
+/// them and the release lanes, each running or waiting one with what it is
+/// expected to take — read off the folders those processes write, never
+/// written, moved or locked here, and on the blocking pool. The build line is
+/// looked for under the open repository's workspace folder (the window's
+/// workspace setting), the lanes under the release folder. A window holding
+/// `known` is told `unchanged` until a file moved; `log` reads the end of one
+/// job's or lane's log this reading listed.
+#[tauri::command]
+pub(crate) async fn schedule_timeline(
+    state: State<'_, AppState>,
+    known: Option<u64>,
+    from_ms: Option<i64>,
+    log: Option<crate::schedule_timeline::LogAsk>,
+) -> Result<crate::schedule_timeline::Timeline, String> {
+    let orchestrator = state.active().orchestrator;
+    let settings = std::sync::Arc::clone(state.settings());
+    tauri::async_runtime::spawn_blocking(move || {
+        let now_ms = crate::now_epoch_ms();
+        let repo = orchestrator
+            .as_ref()
+            .map(|open| open.repo_root().to_path_buf());
+        let workspaces = crate::schedule_timeline::workspaces_of(
+            repo.as_deref(),
+            known.is_none(),
+            now_ms,
+            || {
+                let prefs = load_settings_for_boot(&settings)
+                    .document
+                    .workspace_creation_prefs;
+                orchestrator
+                    .and_then(|open| apply_workspace_creation_prefs(open, &prefs).ok())
+                    .map(|open| open.worktree_root().to_path_buf())
+            },
+        );
+        let roots = crate::schedule_timeline::Roots::of(
+            workspaces.as_deref(),
+            crate::update_runtime::release_dir(),
+        );
+        let ask = crate::schedule_timeline::Ask {
+            known,
+            from_ms,
+            log,
+        };
+        crate::schedule_timeline::read(
+            &roots,
+            &ask,
+            now_ms,
+            crate::automation_runtime::local_offset_secs(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// Bounded recent active/pending runs for the manual coordinator picker.
 #[tauri::command]
 pub(crate) async fn coordinator_seat_runs(
