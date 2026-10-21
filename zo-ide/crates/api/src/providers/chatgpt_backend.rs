@@ -2672,6 +2672,7 @@ impl ChatGptStream {
                                     attempt: 0,
                                     max_attempts: 0,
                                     delay: since.elapsed(),
+                                    unanswered: None,
                                 });
                             }
                         }
@@ -3043,6 +3044,7 @@ impl ChatGptStream {
                     attempt: self.restart_attempts,
                     max_attempts: self.client.max_retries,
                     delay,
+                    unanswered: None,
                 });
             }
             tokio::time::sleep(delay).await;

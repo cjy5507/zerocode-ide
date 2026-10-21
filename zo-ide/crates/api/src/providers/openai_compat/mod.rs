@@ -867,6 +867,7 @@ impl MessageStream {
             attempt: self.restart_attempts,
             max_attempts: self.client.max_retries,
             delay,
+            unanswered: None,
         });
         tokio::time::sleep(delay).await;
         // The shared HTTP client deliberately carries no blanket request

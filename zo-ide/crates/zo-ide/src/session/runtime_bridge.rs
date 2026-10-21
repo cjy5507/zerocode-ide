@@ -1211,6 +1211,7 @@ pub(in crate::session) mod tests {
             attempt: 0,
             max_attempts: 0,
             delay: std::time::Duration::from_secs(61),
+            unanswered: None,
         };
         // A quiet stretch is a PHASE the status line wears, never a transcript
         // row: a long turn left five such rows behind (2026-09-07).
@@ -1230,10 +1231,40 @@ pub(in crate::session) mod tests {
             attempt: 2,
             max_attempts: 3,
             delay: std::time::Duration::from_secs(4),
+            unanswered: None,
         };
         let (level, text) = stream_notice_row(&reconnect);
         assert_eq!(level, SystemLevel::Warn);
-        assert!(text.contains("reconnecting in 4s (attempt 2/3)"), "text: {text}");
+        // The notice counts restarts; the row counts the requests sent, the first
+        // one included — the count the error names once the ladder is spent.
+        assert!(text.contains("reconnecting in 4s (attempt 3/4)"), "text: {text}");
+    }
+
+    /// An attempt zo cut because its model sent no response event in time is named
+    /// by that model and the wait, with the cut's place in the run after which zo
+    /// stops sending the request — never as a transient provider error (t-68710).
+    #[test]
+    fn a_cut_for_silence_names_the_model_and_the_wait() {
+        let cut = core_types::StreamRetryNotice {
+            kind: core_types::StreamNoticeKind::Reconnect,
+            label: "no response from the model",
+            attempt: 1,
+            max_attempts: 7,
+            delay: std::time::Duration::from_millis(1_200),
+            unanswered: Some(core_types::UnansweredCut {
+                model: "gpt-6.1-sol".to_string(),
+                waited: std::time::Duration::from_secs(240),
+                cut: 1,
+                of: 2,
+            }),
+        };
+        let (level, text) = stream_notice_row(&cut);
+        assert_eq!(level, SystemLevel::Warn);
+        assert_eq!(
+            text,
+            "gpt-6.1-sol sent no response event within 240s, so zo cut the request (1/2); \
+             sending it again in 2s"
+        );
     }
 
     #[test]

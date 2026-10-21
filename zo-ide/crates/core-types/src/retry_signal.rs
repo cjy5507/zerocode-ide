@@ -460,6 +460,25 @@ pub struct StreamRetryNotice {
     /// [`StreamNoticeKind::QuietReasoning`], how long the stream has been
     /// quiet so far.
     pub delay: std::time::Duration,
+    /// Set when zo cut the attempt itself because its model sent no response
+    /// event within the stall window: the row names the model and the wait
+    /// instead of a cause label.
+    pub unanswered: Option<UnansweredCut>,
+}
+
+/// An attempt zo cut because its model sent no response event within the
+/// stall window, and where the cut stands in the run of cuts after which zo
+/// stops sending the request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnansweredCut {
+    /// The model the request went to.
+    pub model: String,
+    /// How long zo waited for a response event before it cut the attempt.
+    pub waited: std::time::Duration,
+    /// This cut's number in the run of cuts in a row, 1-based.
+    pub cut: u32,
+    /// The cuts in a row after which zo stops sending the request.
+    pub of: u32,
 }
 
 /// What a [`StreamRetryNotice`] describes: a reconnect backoff (the stream
@@ -1050,12 +1069,16 @@ mod tests {
             "provider error",
             "a fatal-by-text server error is not named as transient"
         );
+        let stall = "api stream error (stream_startup_no_progress): no response event within 120s after server_error x7; transport keep-alives are not progress";
         assert_eq!(
-            retry_notice_label(
-                "api stream error (stream_startup_no_progress): no response event within 120s after server_error x7; transport keep-alives are not progress"
-            ),
-            "transient provider error",
-            "a stall is transient, like an idle timeout"
+            retry_notice_label(stall),
+            "no response from the model",
+            "zo's own cut of a silent stream says what happened, not a provider fault (t-68710)"
+        );
+        assert_eq!(
+            classify_error_text(stall),
+            RetrySignal::Transient,
+            "a stall is still retried like an idle timeout"
         );
     }
 

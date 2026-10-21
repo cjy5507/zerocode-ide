@@ -5072,11 +5072,24 @@ fn scene_client_backing_off(
     }
 }
 
+/// The notices a scene's stream raised, in order.
+type SceneNotices = std::sync::Arc<std::sync::Mutex<Vec<core_types::StreamRetryNotice>>>;
+
 /// Drive one turn to its end: the text it produced and the error that ended it.
 async fn play_scene_turn(client: &super::ChatGptBackendClient) -> (String, Option<ApiError>) {
+    play_scene_turn_noting(client, &SceneNotices::default()).await
+}
+
+/// [`play_scene_turn`], keeping the notices the stream raised in `notices`.
+async fn play_scene_turn_noting(
+    client: &super::ChatGptBackendClient,
+    notices: &SceneNotices,
+) -> (String, Option<ApiError>) {
     let message_request = request(vec![InputMessage::user_text("hi")], None, None);
+    let sink = notices.clone();
     let mut stream = match client.stream_message(&message_request).await {
-        Ok(stream) => stream,
+        Ok(stream) => stream
+            .with_retry_notice_callback(move |notice| sink.lock().unwrap().push(notice)),
         Err(error) => return (String::new(), Some(error)),
     };
     let mut text = String::new();
@@ -5120,6 +5133,17 @@ async fn run_scene_backing_off(
     scripts: Vec<SceneScript>,
     backoff: Option<(std::time::Duration, std::time::Duration)>,
 ) -> (String, Option<ApiError>, usize, std::time::Duration) {
+    run_scene_noting(wire, scripts, backoff, &SceneNotices::default()).await
+}
+
+/// [`run_scene_backing_off`], keeping the notices the stream raised in `notices`.
+#[allow(clippy::await_holding_lock)]
+async fn run_scene_noting(
+    wire: SceneWire,
+    scripts: Vec<SceneScript>,
+    backoff: Option<(std::time::Duration, std::time::Duration)>,
+    notices: &SceneNotices,
+) -> (String, Option<ApiError>, usize, std::time::Duration) {
     let _guard = env_lock();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -5138,7 +5162,7 @@ async fn run_scene_backing_off(
         None => scene_client(addr, wire),
     };
     let started = std::time::Instant::now();
-    let (text, error) = tokio::time::timeout(SCENE_LIMIT, play_scene_turn(&client))
+    let (text, error) = tokio::time::timeout(SCENE_LIMIT, play_scene_turn_noting(&client, notices))
         .await
         .expect("a scene ends within its limit");
     let elapsed = started.elapsed();
@@ -5303,6 +5327,122 @@ async fn a_backoff_past_the_ceiling_is_cut_to_the_bundles_rest_sse() {
 async fn a_backoff_past_the_ceiling_is_cut_to_the_bundles_rest_websocket() {
     check_a_backoff_past_the_ceiling_is_cut(SceneWire::WebSocket, "S-backoff-past-ceiling-ws")
         .await;
+}
+
+/// One connection of the reported turn's shape (t-68710): the backend makes the response
+/// (`response.created`) and then sends only keep-alives.
+fn created_then_silent() -> SceneScript {
+    let mut script: SceneScript = vec![(
+        std::time::Duration::ZERO,
+        SceneBeat::Event(json!({"type":"response.created","response":{"id":"resp_scene"}})),
+    )];
+    script.extend(silent_connection());
+    script
+}
+
+/// Scene U: the reported turn (t-68710). Every connection answers `response.created` and then
+/// sends only keep-alives, so each one closes its bundle and the ceiling never ends the run:
+/// the ladder went on for eight full windows (33 minutes at 240 s). zo stops sending the
+/// request after two cuts in a row, within two windows. The stop names the model, the wait and
+/// what each attempt heard, and the one reconnect between the cuts names the model and the
+/// wait too — never a transient provider error.
+async fn check_a_model_that_never_starts_is_stopped_after_two_cuts(wire: SceneWire, name: &str) {
+    let scripts = (0..9).map(|_| created_then_silent()).collect();
+    let notices = SceneNotices::default();
+    let (text, error, connections, elapsed) = run_scene_noting(wire, scripts, None, &notices).await;
+    report_scene(name, &text, error.as_ref(), connections, elapsed);
+    for notice in notices.lock().unwrap().iter() {
+        eprintln!(
+            "[t-68710 scene {name}] notice label={:?} attempt={}/{} delay_ms={} unanswered={:?}",
+            notice.label,
+            notice.attempt,
+            notice.max_attempts,
+            notice.delay.as_millis(),
+            notice.unanswered,
+        );
+    }
+    assert!(text.is_empty(), "nothing was answered: {text:?}");
+    let error = error.expect("a model that never starts its response must end the request");
+    assert_eq!(scene_error_type(&error), Some("stream_startup_no_progress"), "{error}");
+    assert_eq!(connections, 2, "two cuts in a row, then the request is not sent again");
+    assert!(
+        matches!(error, ApiError::RetriesExhausted { attempts: 2, .. }),
+        "two attempts: {error}"
+    );
+    assert!(
+        elapsed <= SCENE_WINDOW * 2 + SCENE_SLACK,
+        "the request ends after two windows: {elapsed:?}"
+    );
+    let said = error.to_string();
+    assert!(
+        said.contains(
+            "gpt-5.6-sol sent no response event within 0.3s, so zo cut the request (2/2) \
+             and stopped sending it;"
+        ),
+        "the stop names the model, the wait and the cut: {said}"
+    );
+    assert!(
+        said.contains(
+            "attempt 1 heard response.created, then keep-alives only; \
+             attempt 2 heard response.created, then keep-alives only"
+        ),
+        "the record says what each attempt heard: {said}"
+    );
+    assert_eq!(
+        core_types::retry_signal::classify_error_text(&said),
+        core_types::retry_signal::RetrySignal::Transient,
+        "{said}"
+    );
+    let notices = notices.lock().unwrap();
+    assert_eq!(notices.len(), 1, "one reconnect between the two cuts: {notices:?}");
+    assert_eq!(
+        notices[0].unanswered,
+        Some(core_types::UnansweredCut {
+            model: "gpt-5.6-sol".to_string(),
+            waited: SCENE_WINDOW,
+            cut: 1,
+            of: 2,
+        }),
+        "the reconnect names the model and the wait"
+    );
+    assert_ne!(notices[0].label, "transient provider error");
+}
+
+#[tokio::test]
+async fn a_model_that_never_starts_is_stopped_after_two_cuts_sse() {
+    check_a_model_that_never_starts_is_stopped_after_two_cuts(SceneWire::Sse, "U-never-starts-sse")
+        .await;
+}
+
+#[tokio::test]
+async fn a_model_that_never_starts_is_stopped_after_two_cuts_websocket() {
+    check_a_model_that_never_starts_is_stopped_after_two_cuts(
+        SceneWire::WebSocket,
+        "U-never-starts-ws",
+    )
+    .await;
+}
+
+/// Scene V: two cuts with a server error between them are not two in a row (t-68710). The
+/// server error keeps the ladder's own rule, and the request goes out again and answers.
+#[tokio::test]
+async fn cuts_with_another_failure_between_them_are_not_in_a_row_sse() {
+    let mut failing: SceneScript = vec![(
+        std::time::Duration::ZERO,
+        SceneBeat::Event(json!({"type":"response.created","response":{"id":"resp_scene"}})),
+    )];
+    failing.extend(server_error_connection());
+    let scripts = vec![
+        created_then_silent(),
+        failing,
+        created_then_silent(),
+        answer("answered after two cuts apart"),
+    ];
+    let (text, error, connections, elapsed) = run_scene(SceneWire::Sse, scripts).await;
+    report_scene("V-cuts-apart-sse", &text, error.as_ref(), connections, elapsed);
+    assert!(error.is_none(), "the request must go on: {error:?}");
+    assert_eq!(text, "answered after two cuts apart");
+    assert_eq!(connections, 4, "a cut, a server error, a cut, the answer");
 }
 
 /// Scene C: response-level events (`response.in_progress`) a third of a window
