@@ -641,6 +641,15 @@ function jevSeatStatus(held, choice) {
   return (held ? held.applies : choice?.applies) ? "applying" : "recording";
 }
 
+/* Whether the mode zo names for a feature, for the folder it counted, asks:
+ * for a person's own decisions it is the lower of their switch and their own
+ * modes, which the settings answer cannot say. Read among the modes the
+ * feature offers; a zo that names none leaves the switch to say it. */
+function jevZoAsks(seat, held) {
+  const named = held?.mode ? seat.modes?.find((choice) => choice.mode === held.mode) : null;
+  return named?.asks !== false;
+}
+
 /* Whether a recording feature was measured and held under a line of its own
  * rather than still counting samples (`JEV_LINES`' `wants`). */
 function jevUnderBar(held) {
@@ -671,7 +680,7 @@ function paintJevStandings(root = document) {
   for (const seat of typesafeState.switches ?? []) {
     const choice = jevSeatChoice(typesafeState, seat.id);
     const held = heldOf.get(seat.id);
-    if (!choice?.asks || !held) continue;
+    if (!choice?.asks || !held || !jevZoAsks(seat, held)) continue;
     rows.push({ seat, held, status: jevSeatStatus(held, choice) });
   }
   rows.sort((a, b) => JEV_STANDING_ORDER.indexOf(a.status) - JEV_STANDING_ORDER.indexOf(b.status));
@@ -765,7 +774,10 @@ function buildJevView() {
     jevNode("div", "jev-actions", freshness, refresh, settings), jevNode("div", "jev-scope", scopeLine, choices))));
   // The settings card's switch, worn over the table (§6.1).
   const mirror = jevSwitchMirror();
-  if (mirror) root.append(mirror);
+  if (mirror) {
+    mirror.querySelector("[data-jev-switch-row]")?.append(jevCustomGuide());
+    root.append(mirror);
+  }
 
   const status = jevNode("p", "jev-status");
   status.setAttribute("role", "status");
@@ -816,7 +828,7 @@ function buildJevView() {
   charts.dataset.jevCharts = "";
   charts.dataset.i18nAria = "jev.charts";
   charts.setAttribute("aria-label", t("jev.charts", "지난 7일 그래프"));
-  root.append(charts);
+  root.append(charts, jevCustomPart());
 
   // Each part of the table says what it is (`role`): a narrow window lays
   // the rows out as cards (t-9633), and a table that stops displaying as one
@@ -865,8 +877,10 @@ function jevBuildDrawer() {
   // compared nothing, reason by reason.
   const whyHead = jevNode("p", "jev-drawer-text");
   whyHead.dataset.jevWhyHead = "";
+  const fixed = jevText("jev.drawer.fixed", "내장 결정이라 질문·보기·입력은 고칠 수 없습니다. 위의 「판단 기능 사용」 스위치가 모든 기능을 함께 켜고 끕니다.", "p", "jev-drawer-fixed");
+  fixed.dataset.jevDrawerFixed = "";
   const drawer = jevNode("aside", "jev-drawer", head,
-    jevNode("p", "jev-drawer-summary"),
+    jevNode("p", "jev-drawer-summary"), fixed,
     jevText("jev.drawer.written", "설정 파일에 이 기능만 따로 정해 두어 스위치를 따르지 않습니다. 스위치를 다시 켜면 권장 설정으로 돌아갑니다.", "p", "jev-drawer-written"),
     part("why", "jev.drawer.why", "자동 적용 판정", jevNode("dl", "jev-drawer-facts"), whyHead, jevNode("ol", "jev-judgment")),
     part("days", "jev.drawer.days", "날마다", jevNode("div", "jev-days-picture"), jevNode("div", "jev-days-legend"),
@@ -917,6 +931,7 @@ function wireJevView(host) {
     if (row) jevToggleDrawer(host, row.dataset.jevDashRow);
   });
   host.querySelector(".jev-drawer-close").addEventListener("click", () => jevToggleDrawer(host, null));
+  wireJevCustom(host);
   host.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && jevDrawerSeat !== null) {
       event.stopPropagation();
@@ -1001,6 +1016,7 @@ function jevSayStatus(words) {
 function paintJevStage(tab) {
   const view = docHost(tab.pane, "jev");
   paintJevView(view);
+  if (jevCustom === null) void loadJevCustom();
   void refreshJevDashboard();
 }
 
@@ -1011,9 +1027,10 @@ async function refreshJevDashboard({ force = false } = {}) {
   // zo's; the card's own refresh asks both and hands the numbers here.
   if (!typesafeState) {
     await refreshTypeSafe();
+    if (jevCustom === null) void loadJevCustom();
     if (!force && fresh()) return;
   }
-  await loadJevNumbers({ recent: true });
+  await Promise.all([loadJevNumbers({ recent: true }), loadJevCustom()]);
 }
 
 /* The dashboard's slow beat while it is on stage (the constant says why
@@ -2186,10 +2203,11 @@ function paintJevView(view) {
   const numbers = jevNumbers ?? [];
   const order = switches.length > 0 ? switches.map((row) => row.id) : numbers.map((row) => row.id);
   const heldOf = new Map(numbers.map((one) => [one.id, one]));
+  const builtIn = order.filter((id) => id !== jevCustomRules()?.feature);
   // A feature zo did not count stands with its dashes, never folded: only a
   // count of nothing says a feature was not used.
-  const unused = order.filter((id) => heldOf.get(id)?.week.rows === 0);
-  const inUse = jevActivityOrder(order.filter((id) => !unused.includes(id)), heldOf);
+  const unused = builtIn.filter((id) => heldOf.get(id)?.week.rows === 0);
+  const inUse = jevActivityOrder(builtIn.filter((id) => !unused.includes(id)), heldOf);
   const body = view.querySelector("[data-jev-rows]");
   jevNameColumns(view);
   const head = jevHeadModel(numbers);
@@ -2211,6 +2229,7 @@ function paintJevView(view) {
   }
   jevArrange(body, drawn);
   paintJevCharts(view, inUse, heldOf, numbers);
+  paintJevCustom(view);
   // The scope just chosen is being counted: what stands counted the other
   // one, and says so by stepping back until the answer lands (t-9633).
   const stale = jevScope !== null && jevScope.scope !== jevScopeChoice;
@@ -2222,7 +2241,7 @@ function paintJevView(view) {
   paintJevSummary(view, order, heldOf);
   paintJevFreshness(view);
   // A feature the table no longer names has no drawer to stand open.
-  const open = order.includes(jevDrawerSeat) ? jevDrawerSeat : null;
+  const open = builtIn.includes(jevDrawerSeat) ? jevDrawerSeat : null;
   paintJevDrawer(view, open, open === null ? null : heldOf.get(open) ?? null);
 }
 
@@ -2871,3 +2890,840 @@ function jevDecisionNode(decision, now) {
   item.append(when, outcome, asked, answered, mark);
   return item;
 }
+
+/* ---- A person's own decisions (t-62170 stage 3, DESIGN 3) ----
+ *
+ * The part between the charts and the built-in table that lists the
+ * decisions a person wrote, the drawer they are written in, and the question
+ * before one is deleted. Every bound and mode is the settings answer's
+ * (`customDecisions`, read from core); the words for a point, an input, a
+ * kind of answer, a field and a refusal are the markup's under core's own
+ * word (`#jev-custom-words`); and what may be kept is core's to say — the
+ * drawer asks the check, and the store checks again under its lock. With no
+ * decision the part does not stand and 「새 결정」 waits on the switch line,
+ * so the first screen keeps its rows (`FIRST_SCREEN_ROWS`). */
+
+/* How long the undo after a delete stands (DESIGN 3): longer than a plain
+ * toast (`TOAST_MS`), so it is held and taken away here. */
+const JEV_CUSTOM_UNDO_MS = 8_000;
+
+/* The pause after the last change in the drawer before core's check is
+ * asked: one ask per pause in typing, not one per key. */
+const JEV_CUSTOM_CHECK_MS = 250;
+
+/* What each mode a decision offers is called, by what it does: the settings
+ * answer names a mode with its flags (`ModeChoice`), and its word is never
+ * matched here. */
+const JEV_CUSTOM_MODE_WORDS = Object.freeze([
+  Object.freeze({ asks: false, applies: false, key: "jev.custom.mode.off", word: "끔" }),
+  Object.freeze({ asks: true, applies: false, key: "jev.custom.mode.shadow", word: "기록만" }),
+  Object.freeze({ asks: true, applies: true, key: "jev.custom.mode.on", word: "켜짐" }),
+]);
+
+/* The store as `list_custom_decisions` last answered — `{ decisions, trash,
+ * folders, everywhere }` — or `null` before it has. */
+let jevCustom = null;
+let jevCustomAsking = null;
+/* The words of the last failure to read the store, said once: the poll asks
+ * again, and the same failure is not said again each time. */
+let jevCustomListFailed = "";
+/* The drawer while it stands: the decision it edits (`null` for a new one),
+ * the draft as it opened, the check owed and the last one answered, and
+ * whether a close already found words unsaved. */
+let jevCustomDrawer = null;
+/* The decision the delete question is about. */
+let jevCustomDeleting = null;
+const jevCustomWordsHeld = new Map();
+
+function jevCustomRules() {
+  return typesafeState?.customDecisions ?? null;
+}
+
+/* The markup's node for core's `word` of `kind` — a point, what a point does
+ * when on, an input, a kind of answer, a field or a refusal — or `null` for
+ * one it does not word. */
+function jevCustomWordNode(kind, word) {
+  const at = `${kind}:${word}`;
+  if (!jevCustomWordsHeld.has(at)) {
+    jevCustomWordsHeld.set(at, el("jev-custom-words")?.content.querySelector(`[data-jev-${kind}="${word}"]`) ?? null);
+  }
+  return jevCustomWordsHeld.get(at);
+}
+
+/* Core's `word` of `kind` in the language in force, the markup's Korean when
+ * no catalog says it, and the word itself when the markup does not either. */
+function jevCustomSay(kind, word, vars) {
+  const node = jevCustomWordNode(kind, word);
+  return node ? t(node.dataset.i18n, node.textContent.replace(/\s+/g, " ").trim(), vars) : String(word);
+}
+
+function jevCustomModeWords(choice) {
+  const words = JEV_CUSTOM_MODE_WORDS.find((one) => one.asks === choice.asks && one.applies === choice.applies);
+  return words ? t(words.key, words.word) : choice.mode;
+}
+
+/* The bounds a sentence may name, each the settings answer's. */
+function jevCustomBounds(rules) {
+  return {
+    nameMax: jevCount(rules.nameMaxChars), questionMax: jevCount(rules.questionMaxChars),
+    meaningMax: jevCount(rules.meaningMaxChars), optionsLeast: jevCount(rules.options.least),
+    optionsMost: jevCount(rules.options.most), hourlyLeast: jevCount(rules.hourly.least),
+    hourlyMost: jevCount(rules.hourly.most), hourlyAll: jevCount(rules.hourlyAll),
+    actLeast: jevPercent(rules.actFrom.least), actMost: jevPercent(rules.actFrom.most),
+    decisionsMax: jevCount(rules.decisionsMax), days: jevCount(rules.trashKeptDays),
+  };
+}
+
+/* What a refusal says: the markup's sentence for core's word, with the field
+ * it names, the line, the option or level, and the bounds. */
+function jevCustomRefusalWords(refusal, rules) {
+  const level = refusal.level === null || refusal.level === undefined ? "" : jevCount(refusal.level + 1);
+  const named = { option: refusal.option ?? "", level };
+  return jevCustomSay("refusal", refusal.word, {
+    ...jevCustomBounds(rules), ...named, line: jevCount(refusal.line),
+    field: refusal.field ? jevCustomSay("field", refusal.field, named) : "",
+  });
+}
+
+/* What a store's refusal or failure says: core's refusals by their words,
+ * a decision the store no longer keeps, else the failure as it came back. */
+function jevCustomFailure(failure) {
+  const rules = jevCustomRules();
+  if (rules && Array.isArray(failure?.refusals) && failure.refusals.length > 0) {
+    return failure.refusals.map((refusal) => jevCustomRefusalWords(refusal, rules)).join(" ");
+  }
+  if (failure?.missing) return t("jev.custom.missing", "그 결정을 찾지 못했습니다. 목록을 다시 읽습니다.");
+  return t("jev.custom.failed", "내가 만든 결정을 읽거나 쓰지 못했습니다 — {{error}}",
+    { error: failure?.message ?? String(failure ?? "") });
+}
+
+/* Ask the store what it keeps, one ask at a time, and paint the answer. A
+ * window whose settings name no editor (`customDecisions`) asks nothing. */
+function loadJevCustom() {
+  if (!jevCustomRules()) return Promise.resolve();
+  jevCustomAsking ??= invoke("list_custom_decisions").then((store) => {
+    jevCustom = store;
+    jevCustomListFailed = "";
+  }, (failure) => {
+    const words = jevCustomFailure(failure);
+    if (words !== jevCustomListFailed) toast(words, "halt");
+    jevCustomListFailed = words;
+  }).finally(() => {
+    jevCustomAsking = null;
+    paintJevViews();
+  });
+  return jevCustomAsking;
+}
+
+/* Hand a change to the store (`asking`, the door's own ask) and keep the
+ * list it answers with; a refusal or a failure is said and the list in hand
+ * stands — asked again when the store no longer keeps the decision. Whether
+ * it took. */
+async function jevCustomChange(asking) {
+  try {
+    jevCustom = await asking();
+    return true;
+  } catch (failure) {
+    toast(jevCustomFailure(failure), "halt");
+    if (failure?.missing) void loadJevCustom();
+    return false;
+  } finally {
+    paintJevViews();
+  }
+}
+
+/* 「새 결정」 on the switch line: all a person with no decisions sees of
+ * them, on a line that already stands (DESIGN 3). */
+function jevCustomGuide() {
+  const guide = jevText("jev.custom.new", "＋ 새 결정", "button", "btn jev-custom-guide");
+  guide.type = "button";
+  guide.hidden = true;
+  guide.dataset.jevCustomGuide = "";
+  guide.dataset.keyboardOwner = "jev-custom";
+  return jevHint("jev.custom.guideTip", "질문 하나를 직접 적어 Jev에 묻습니다. 새 결정은 기록만으로 시작합니다.", guide);
+}
+
+/* The part a person's decisions stand in: its head with the count and
+ * 「새 결정」, the list, and the fold of deleted ones (`paintJevCustom`). */
+function jevCustomPart() {
+  const add = jevText("jev.custom.new", "＋ 새 결정", "button", "btn jev-custom-new");
+  add.type = "button";
+  add.dataset.jevCustomNew = "";
+  const count = jevNode("p", "jev-custom-count");
+  count.dataset.jevCustomCount = "";
+  const list = jevNode("ul", "jev-custom-list");
+  list.dataset.jevCustomList = "";
+  const trash = jevNode("details", "jev-custom-trash", jevNode("summary"), jevNode("ul", "jev-custom-trash-list"));
+  trash.dataset.jevCustomTrash = "";
+  const part = jevNode("section", "jev-custom",
+    jevNode("header", "jev-custom-head",
+      jevNode("div", "jev-custom-heading", jevText("settings.typesafe.custom", "내가 만든 결정", "h2", "jev-custom-title"), count), add),
+    list, trash);
+  part.dataset.jevCustom = "";
+  part.dataset.keyboardOwner = "jev-custom";
+  part.dataset.i18nAria = "settings.typesafe.custom";
+  part.setAttribute("aria-label", t("settings.typesafe.custom", "내가 만든 결정"));
+  part.hidden = true;
+  return part;
+}
+
+/* The part's hands on one view: 「새 결정」, a row's mode, 「편집」 and
+ * 「삭제」, and 「되살리기」 — and the arrow keys that move a mode. */
+function wireJevCustom(host) {
+  host.querySelector("[data-jev-custom-guide]")?.addEventListener("click", (event) => {
+    openJevCustomDrawer(null, event.currentTarget);
+  });
+  const part = host.querySelector("[data-jev-custom]");
+  part.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button || button.disabled) return;
+    if (button.matches("[data-jev-custom-new]")) {
+      openJevCustomDrawer(null, button);
+      return;
+    }
+    if (button.dataset.jevCustomRestore) {
+      const id = button.dataset.jevCustomRestore;
+      void jevCustomChange(() => invoke("restore_custom_decision", { id }));
+      return;
+    }
+    const id = button.closest("[data-jev-custom-row]")?.dataset.jevCustomRow;
+    const kept = jevCustom?.decisions.find((one) => one.draft.id === id);
+    if (!kept) return;
+    if (button.matches("[data-jev-custom-edit]")) openJevCustomDrawer(kept, button);
+    else if (button.matches("[data-jev-custom-delete]")) openJevCustomDelete(kept, button);
+    else if (button.getAttribute("role") === "radio") void setJevCustomMode(kept, button.dataset.mode);
+  });
+  part.addEventListener("keydown", (event) => {
+    const radio = event.target.closest("[data-jev-custom-mode] [role='radio']");
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+    if (!radio || !step) return;
+    event.preventDefault();
+    const radios = [...radio.parentElement.querySelectorAll("[role='radio']")];
+    const next = radios[(radios.indexOf(radio) + step + radios.length) % radios.length];
+    next.focus();
+    const kept = jevCustom?.decisions.find((one) => one.draft.id === radio.closest("[data-jev-custom-row]").dataset.jevCustomRow);
+    if (kept) void setJevCustomMode(kept, next.dataset.mode);
+  });
+}
+
+/* The part and the switch line's 「새 결정」 from the store in hand: the part
+ * stands while the store keeps a decision, or a deleted one still to be
+ * restored; with neither only the switch line's 「새 결정」 does. */
+function paintJevCustom(view) {
+  const rules = jevCustomRules();
+  const store = rules ? jevCustom : null;
+  const decisions = store?.decisions ?? [];
+  const trash = store?.trash ?? [];
+  const standing = decisions.length > 0 || trash.length > 0;
+  const guide = view.querySelector("[data-jev-custom-guide]");
+  if (guide) guide.hidden = !store || standing;
+  const part = view.querySelector("[data-jev-custom]");
+  part.hidden = !store || !standing;
+  if (part.hidden || !jevMoved(part, JSON.stringify(store), JSON.stringify(rules), jevLanguage())) return;
+  const bounds = jevCustomBounds(rules);
+  jevSay(part.querySelector("[data-jev-custom-count]"), t("jev.custom.count",
+    "{{count}}/{{decisionsMax}}개 · 모두 합쳐 한 시간에 {{hourlyAll}}회까지 묻습니다", { ...bounds, count: jevCount(decisions.length) }));
+  const add = part.querySelector("[data-jev-custom-new]");
+  add.disabled = decisions.length >= rules.decisionsMax;
+  if (add.disabled) add.dataset.tip = t("jev.custom.full", "내가 만든 결정은 {{decisionsMax}}개까지입니다. 하나를 지우면 새로 만들 수 있습니다.", bounds);
+  else delete add.dataset.tip;
+  const list = part.querySelector("[data-jev-custom-list]");
+  const rows = decisions.map((kept) => jevCustomRow(list, kept, rules));
+  for (const row of list.querySelectorAll("[data-jev-custom-row]")) {
+    if (!rows.includes(row)) row.remove();
+  }
+  if (!list.contains(document.activeElement)) {
+    rows.forEach((row, at) => {
+      if (list.children[at] !== row) list.insertBefore(row, list.children[at] ?? null);
+    });
+  }
+  const fold = part.querySelector("[data-jev-custom-trash]");
+  fold.hidden = trash.length === 0;
+  jevSay(fold.querySelector("summary"), t("jev.custom.trash", "지운 결정 {{count}}개 · {{days}}일 동안 되살릴 수 있습니다",
+    { ...bounds, count: jevCount(trash.length) }));
+  fold.querySelector("ul").replaceChildren(...trash.map((one) => {
+    const restore = jevText("jev.custom.restore", "되살리기", "button", "btn jev-custom-restore");
+    restore.type = "button";
+    restore.dataset.jevCustomRestore = one.id;
+    return jevNode("li", "jev-custom-trashed", jevNode("span", "jev-custom-name", document.createTextNode(one.name)), restore);
+  }));
+}
+
+/* One decision's line, built once and kept: its name, what it is and when
+ * it asks, its mode as radios — never a select — and 「편집」 and 「삭제」. */
+function jevCustomRow(list, kept, rules) {
+  const id = kept.draft.id;
+  let row = [...list.children].find((one) => one.dataset.jevCustomRow === id);
+  if (!row) {
+    const modes = jevNode("div", "jev-custom-mode", ...rules.modes.map((choice) => {
+      const radio = jevNode("button", "jev-custom-mode-choice");
+      radio.type = "button";
+      radio.setAttribute("role", "radio");
+      radio.dataset.mode = choice.mode;
+      return radio;
+    }));
+    modes.setAttribute("role", "radiogroup");
+    modes.dataset.jevCustomMode = "";
+    const edit = jevText("jev.custom.edit", "편집", "button", "btn jev-custom-edit");
+    edit.type = "button";
+    edit.dataset.jevCustomEdit = "";
+    const remove = jevText("app.delete", "삭제", "button", "btn btn--halt-quiet jev-custom-delete");
+    remove.type = "button";
+    remove.dataset.jevCustomDelete = "";
+    row = jevNode("li", "jev-custom-row",
+      jevNode("div", "jev-custom-about", jevNode("strong", "jev-custom-name"), jevNode("p", "jev-custom-facts")),
+      modes, jevNode("div", "jev-custom-actions", edit, remove));
+    row.dataset.jevCustomRow = id;
+    list.append(row);
+  }
+  if (!jevMoved(row, JSON.stringify(kept), jevLanguage())) return row;
+  jevSay(row.querySelector(".jev-custom-name"), kept.draft.name);
+  row.querySelector(".jev-custom-facts").replaceChildren(...jevCustomFacts(kept.draft));
+  const group = row.querySelector("[data-jev-custom-mode]");
+  group.setAttribute("aria-label", t("jev.custom.modeOf", "{{name}} 모드", { name: kept.draft.name }));
+  const radios = [...group.querySelectorAll("[role='radio']")];
+  for (const radio of radios) {
+    const choice = rules.modes.find((one) => one.mode === radio.dataset.mode);
+    jevSay(radio, choice ? jevCustomModeWords(choice) : radio.dataset.mode);
+    const on = radio.dataset.mode === kept.mode;
+    radio.setAttribute("aria-checked", String(on));
+    radio.tabIndex = on ? 0 : -1;
+  }
+  if (!radios.some((radio) => radio.tabIndex === 0) && radios.length > 0) radios[0].tabIndex = 0;
+  return row;
+}
+
+/* What a decision is, fact by fact: its kind of answer, when it asks and
+ * what it does there when on, the confidence it acts from — with the whole
+ * rule as its tip — its hourly bound, and where it asks. */
+function jevCustomFacts(draft) {
+  const fact = (text) => jevNode("span", "jev-custom-fact", document.createTextNode(text));
+  const share = { share: jevPercent(draft.actFrom) };
+  const acting = fact(t("jev.custom.actsFrom", "확신 {{share}} 이상", share));
+  acting.dataset.tip = t("jev.custom.actsFromTip",
+    "확신이 {{share}} 이상인 답만 넘깁니다. 동률인 답은 기준과 상관없이 넘기지 않습니다. 동률은 가장 높은 확률을 보기 둘 이상이 나눠 가진 답입니다.", share);
+  return [
+    fact(jevCustomSay("kind", draft.answer.kind)),
+    fact(`${jevCustomSay("point", draft.at)} — ${jevCustomSay("point-act", draft.at)}`),
+    acting,
+    fact(t("jev.custom.hourly", "한 시간에 {{count}}회까지", { count: jevCount(draft.maxPerHour) })),
+    fact(draft.folders === null ? t("jev.custom.everyFolder", "동의한 모든 폴더")
+      : t("jev.custom.someFolders", "고른 폴더 {{count}}곳", { count: jevCount(draft.folders.length) })),
+  ];
+}
+
+/* Move `kept` to `mode` through the store; the radios stand where the
+ * store's answer puts them. */
+function setJevCustomMode(kept, mode) {
+  if (!mode || kept.mode === mode) return Promise.resolve(false);
+  return jevCustomChange(() => invoke("set_custom_decision_mode", { id: kept.draft.id, mode }));
+}
+
+/* A new decision's draft: the first kind, point and its every input, every
+ * consented folder, and the settings answer's defaults. */
+function jevCustomBlank(rules) {
+  const point = rules.points[0];
+  return {
+    id: null, name: "", question: "", answer: jevCustomBlankAnswer(rules.kinds[0], rules), at: point.at,
+    reads: [...point.inputs], folders: null, actFrom: rules.actFromDefault, maxPerHour: rules.hourlyDefault,
+  };
+}
+
+/* An empty answer of `kind` in the window's draft (`AnswerDraft`): a yes
+ * and a no, or as many options or levels as a decision needs at least. */
+function jevCustomBlankAnswer(kind, rules) {
+  const empty = Array.from({ length: rules.options.least }, () => "");
+  if (kind === "choice") return { kind, options: empty.map(() => ({ name: "", means: "" })) };
+  if (kind === "score") return { kind, levels: empty };
+  return { kind, yes: "", no: "" };
+}
+
+/* The draft the drawer's fields hold now, in the window's shape
+ * (`DecisionDraft`): the point's inputs in the point's own order, and no
+ * folders for every consented one. */
+function jevCustomDraftOf(form) {
+  const rules = jevCustomRules();
+  const value = (name) => form.querySelector(`[name="${name}"]`)?.value ?? "";
+  const chosen = (name) => form.querySelector(`[name="${name}"]:checked`)?.value ?? null;
+  const kind = chosen("kind") ?? rules.kinds[0];
+  const point = rules.points.find((one) => one.at === chosen("at")) ?? rules.points[0];
+  const ticked = new Set([...form.querySelectorAll("[name='reads']:checked")].map((one) => one.value));
+  const rows = [...form.querySelectorAll("[data-jev-custom-option]")];
+  const answer = kind === "choice"
+    ? { kind, options: rows.map((row) => ({ name: row.querySelector("[name='option_name']").value, means: row.querySelector("[name='meaning']").value })) }
+    : kind === "score" ? { kind, levels: rows.map((row) => row.querySelector("[name='level']").value) }
+      : { kind, yes: value("yes"), no: value("no") };
+  return {
+    id: jevCustomDrawer?.kept?.draft.id ?? null, name: value("name"), question: value("question"), answer, at: point.at,
+    reads: point.inputs.filter((input) => ticked.has(input)),
+    folders: chosen("folders") === "chosen" ? [...form.querySelectorAll("[name='folder']:checked")].map((one) => one.value) : null,
+    actFrom: Number(value("actFrom")), maxPerHour: Number(value("maxPerHour")),
+  };
+}
+
+/* One group of the drawer — its words, a line about it, and its controls —
+ * under the name a refusal finds it by. */
+function jevCustomGroup(part, legend, about, ...controls) {
+  const group = jevNode("fieldset", "jev-custom-field", legend, ...(about ? [about] : []), ...controls);
+  group.dataset.jevCustomField = part;
+  return group;
+}
+
+/* A sentence that names a bound, said again in the language in force. */
+function jevCustomAbout(key, word) {
+  const about = jevNode("p", "jev-custom-about-line");
+  say(about, () => t(key, word, jevCustomBounds(jevCustomRules())));
+  return about;
+}
+
+/* A radio or a checkbox with its words beside it, and a line under them. */
+function jevCustomTick(type, name, value, checked, words, under = null) {
+  const box = document.createElement("input");
+  box.type = type;
+  box.name = name;
+  box.value = value;
+  box.checked = checked;
+  return jevNode("label", "jev-custom-choice", box, jevNode("span", "jev-custom-choice-words", words, ...(under ? [under] : [])));
+}
+
+/* The judgment model that answers every decision, as the settings card
+ * names it: a decision has no model of its own. */
+function jevCustomModelLine() {
+  const line = jevNode("p", "jev-custom-about-line");
+  say(line, () => {
+    const provider = typesafeState?.provider;
+    return provider
+      ? t("jev.custom.model", "{{provider}} · {{model}} — 설정의 「판단 모델」을 따릅니다.",
+        { provider: judgmentProviderController.providerName(provider), model: provider.model })
+      : t("jev.custom.modelAbout", "설정에서 고른 판단 모델이 답합니다.");
+  });
+  return line;
+}
+
+/* The drawer's fields for `draft`, built afresh each time it opens: the
+ * kinds, points and inputs are the settings answer's of the moment. */
+function jevCustomFormOf(form, draft, rules) {
+  const notice = jevText("jev.custom.version", "저장하면 새 판으로 기록이 나뉩니다. 지금까지의 기록은 이전 판으로 따로 남습니다.", "p", "jev-custom-version");
+  notice.dataset.jevCustomVersion = "";
+  notice.hidden = true;
+  const refusals = jevNode("ul", "jev-custom-refusals");
+  refusals.dataset.jevCustomRefusals = "";
+  refusals.setAttribute("role", "alert");
+  refusals.hidden = true;
+  const text = (tag, name, value) => {
+    const node = document.createElement(tag);
+    node.name = name;
+    node.value = value;
+    node.className = tag === "textarea" ? "jev-custom-area" : "jev-custom-input";
+    if (tag === "input") node.type = "text";
+    node.spellcheck = false;
+    return node;
+  };
+  const name = text("input", "name", draft.name);
+  name.id = "jev-custom-name";
+  const question = text("textarea", "question", draft.question);
+  question.rows = 4;
+  const kinds = jevCustomGroup("kind", jevText("jev.custom.kindLegend", "답의 종류", "legend"), null,
+    ...rules.kinds.map((kind) => jevCustomTick("radio", "kind", kind, kind === draft.answer.kind, jevCustomSay("kind", kind))));
+  const answer = jevCustomGroup("answer", jevText("jev.custom.answerLegend", "보기", "legend"), null);
+  const points = jevCustomGroup("at", jevText("jev.custom.atLegend", "언제 묻나", "legend"), null,
+    ...rules.points.map((point) => jevCustomTick("radio", "at", point.at, point.at === draft.at, jevCustomSay("point", point.at),
+      jevNode("small", "", document.createTextNode(jevCustomSay("point-about", point.at))))));
+  const acts = jevNode("p", "jev-custom-act");
+  acts.dataset.jevCustomAct = "";
+  const reads = jevCustomGroup("reads", jevText("jev.custom.readsLegend", "읽는 입력", "legend"),
+    jevText("jev.custom.readsAbout", "질문이 읽을 자료입니다. 보내기 전에 정해진 길이로 자르고, 비밀처럼 보이는 줄은 지웁니다.", "p", "jev-custom-about-line"));
+  const actFrom = document.createElement("input");
+  actFrom.type = "range";
+  actFrom.name = "actFrom";
+  actFrom.step = "any";
+  actFrom.min = String(rules.actFrom.least);
+  actFrom.max = String(rules.actFrom.most);
+  actFrom.value = String(draft.actFrom);
+  const shown = jevNode("output", "jev-custom-share");
+  const hourly = document.createElement("input");
+  hourly.type = "number";
+  hourly.name = "maxPerHour";
+  hourly.className = "jev-custom-input jev-custom-number";
+  hourly.step = "1";
+  hourly.min = String(rules.hourly.least);
+  hourly.max = String(rules.hourly.most);
+  hourly.value = String(draft.maxPerHour);
+  const candidates = [...new Set([...(jevCustom?.folders ?? []), ...(draft.folders ?? [])])];
+  const picks = jevNode("div", "jev-custom-folders", ...candidates.map((folder) =>
+    jevCustomTick("checkbox", "folder", folder, draft.folders?.includes(folder) ?? false, folder)));
+  const chosen = jevCustomTick("radio", "folders", "chosen", draft.folders !== null,
+    jevText("jev.custom.chosenFolders", "고른 폴더만"), jevText("jev.custom.chosenFoldersAbout", "동의한 폴더 가운데서 고릅니다.", "small"));
+  chosen.querySelector("input").disabled = candidates.length === 0;
+  const line = jevNode("code", "jev-custom-line");
+  line.dataset.jevCustomLine = "";
+  const questions = jevNode("pre", "jev-custom-questions");
+  questions.dataset.jevCustomQuestions = "";
+  form.replaceChildren(notice, refusals,
+    jevCustomGroup("name", jevText("jev.custom.nameLegend", "이름", "legend"),
+      jevCustomAbout("jev.custom.nameAbout", "화면과 기록에 보이는 이름입니다. {{nameMax}}자까지 적습니다."), name),
+    kinds,
+    jevCustomGroup("question", jevText("jev.custom.questionLegend", "질문", "legend"),
+      jevCustomAbout("jev.custom.questionAbout", "Jev에 묻는 글입니다. {{questionMax}}자까지 적습니다. 비밀번호나 키는 적지 마세요."), question),
+    answer, points, acts, reads,
+    jevCustomGroup("actFrom", jevText("jev.custom.actFromLegend", "확신도 기준", "legend"),
+      jevCustomAbout("jev.custom.actFromAbout", "확신이 이보다 낮은 답은 기록만 하고 넘기지 않습니다. 동률인 답도 기준과 상관없이 넘기지 않습니다. 동률은 가장 높은 확률을 보기 둘 이상이 나눠 가진 답입니다. {{actLeast}}~{{actMost}} 사이에서 고릅니다."),
+      jevNode("div", "jev-custom-range", actFrom, shown)),
+    jevCustomGroup("folders", jevText("jev.custom.foldersLegend", "묻는 폴더", "legend"), null,
+      jevCustomTick("radio", "folders", "consented", draft.folders === null, jevText("jev.custom.everyFolder", "동의한 모든 폴더"),
+        jevText("jev.custom.everyFolderAbout", "설정의 폴더 동의를 그대로 따릅니다.", "small")),
+      chosen, picks),
+    jevCustomGroup("maxPerHour", jevText("jev.custom.hourlyLegend", "한 시간 상한", "legend"),
+      jevCustomAbout("jev.custom.hourlyAbout", "이 결정이 한 시간에 보내는 요청 수입니다. {{hourlyLeast}}~{{hourlyMost}}회까지 정하고, 모든 결정을 합쳐 한 시간에 {{hourlyAll}}회, 하루 한도는 그 위에 그대로 걸립니다."),
+      hourly),
+    jevCustomGroup("model", jevText("jev.custom.modelLegend", "답하는 모델", "legend"), jevCustomModelLine()),
+    jevCustomGroup("line", jevText("jev.custom.lineLegend", "에이전트가 읽는 줄", "legend"),
+      jevText("jev.custom.lineAbout", "켠 결정의 답이 기준을 넘으면 에이전트가 이 줄을 읽습니다.", "p", "jev-custom-about-line"), line),
+    jevNode("details", "jev-custom-preview", jevText("jev.custom.preview", "보내는 내용 미리보기", "summary"), questions));
+  jevCustomAnswerFields(form, draft.answer, rules);
+  jevCustomPointFields(form, draft.at, draft.reads, rules);
+  jevCustomFieldsShown(form);
+}
+
+/* The answer's fields for `answer`: a meaning for a yes and for a no, or a
+ * list of options each named with its meaning, or levels lowest first — with
+ * a press to add one up to the most and to take one away down to the least. */
+function jevCustomAnswerFields(form, answer, rules) {
+  const holder = form.querySelector("[data-jev-custom-field='answer']");
+  const legend = holder.querySelector("legend");
+  const area = (name, value) => {
+    const node = document.createElement("textarea");
+    node.className = "jev-custom-area";
+    node.name = name;
+    node.rows = 2;
+    node.value = value;
+    return node;
+  };
+  if (answer.kind !== "choice" && answer.kind !== "score") {
+    holder.replaceChildren(legend,
+      jevCustomAbout("jev.custom.yesNoAbout", "예와 아니오가 각각 무엇을 뜻하는지 적습니다. 각 {{meaningMax}}자까지입니다."),
+      jevNode("label", "jev-custom-label", jevText("jev.custom.yesMeans", "「예」의 뜻"), area("yes", answer.yes)),
+      jevNode("label", "jev-custom-label", jevText("jev.custom.noMeans", "「아니오」의 뜻"), area("no", answer.no)));
+    return;
+  }
+  const named = answer.kind === "choice";
+  const rows = (named ? answer.options : answer.levels.map((means) => ({ means }))).map((option) => {
+    const remove = jevText("jev.custom.removeOption", "빼기", "button", "btn jev-custom-remove");
+    remove.type = "button";
+    remove.dataset.jevCustomRemove = "";
+    const label = jevNode("span", "jev-custom-option-label");
+    const controls = named
+      ? [jevNode("label", "jev-custom-label", label, (() => {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "jev-custom-input";
+        input.name = "option_name";
+        input.value = option.name;
+        return input;
+      })()), jevNode("label", "jev-custom-label", jevText("jev.custom.optionMeans", "뜻"), area("meaning", option.means))]
+      : [jevNode("label", "jev-custom-label", label, area("level", option.means))];
+    const row = jevNode("li", "jev-custom-option", ...controls, remove);
+    row.dataset.jevCustomOption = "";
+    return row;
+  });
+  const add = named
+    ? jevText("jev.custom.addOption", "＋ 보기 더하기", "button", "btn jev-custom-add")
+    : jevText("jev.custom.addLevel", "＋ 단계 더하기", "button", "btn jev-custom-add");
+  add.type = "button";
+  add.dataset.jevCustomAdd = answer.kind;
+  holder.replaceChildren(legend,
+    named
+      ? jevCustomAbout("jev.custom.optionsAbout", "보기마다 이름과 뜻을 적습니다. 보기는 {{optionsLeast}}~{{optionsMost}}개, 뜻은 각 {{meaningMax}}자까지입니다. 어느 보기도 맞지 않으면 답은 그렇다고 말할 수 있습니다.")
+      : jevCustomAbout("jev.custom.levelsAbout", "가장 낮은 단계부터 각 단계가 무엇을 뜻하는지 적습니다. {{optionsLeast}}~{{optionsMost}}단계, 뜻은 각 {{meaningMax}}자까지입니다."),
+    jevNode("ol", "jev-custom-options", ...rows), add);
+  jevCustomOptionsCounted(form, rules);
+}
+
+/* The options' labels and presses after one was added or taken away: each
+ * level named by its place, and no press past the bounds. */
+function jevCustomOptionsCounted(form, rules) {
+  const holder = form.querySelector("[data-jev-custom-field='answer']");
+  const rows = [...holder.querySelectorAll("[data-jev-custom-option]")];
+  const named = holder.querySelector("[data-jev-custom-add]")?.dataset.jevCustomAdd === "choice";
+  rows.forEach((row, at) => {
+    say(row.querySelector(".jev-custom-option-label"), () => (named
+      ? t("jev.custom.optionName", "보기 {{count}}", { count: jevCount(at + 1) })
+      : t("jev.custom.level", "{{count}}단계", { count: jevCount(at + 1) })));
+    row.querySelector("[data-jev-custom-remove]").disabled = rows.length <= rules.options.least;
+  });
+  const add = holder.querySelector("[data-jev-custom-add]");
+  if (add) add.disabled = rows.length >= rules.options.most;
+}
+
+/* The inputs a point offers, ticked where the draft reads them, and what
+ * the point does with an answer when the decision is on. */
+function jevCustomPointFields(form, at, reads, rules) {
+  const point = rules.points.find((one) => one.at === at) ?? rules.points[0];
+  const holder = form.querySelector("[data-jev-custom-field='reads']");
+  for (const tick of holder.querySelectorAll(".jev-custom-choice")) tick.remove();
+  holder.append(...point.inputs.map((input) => jevCustomTick("checkbox", "reads", input, reads.includes(input), jevCustomSay("input", input))));
+  say(form.querySelector("[data-jev-custom-act]"), () => t("jev.custom.act", "켜면 하는 일: {{act}}", { act: jevCustomSay("point-act", point.at) }));
+}
+
+/* What stands in the drawer for the choices made: the act-from line in
+ * words, the folders to pick from only when the person picks, and each
+ * count of what was written against its bound. */
+function jevCustomFieldsShown(form) {
+  const share = form.querySelector("[name='actFrom']");
+  form.querySelector(".jev-custom-share").textContent = t("jev.custom.actsFrom", "확신 {{share}} 이상", { share: jevPercent(Number(share.value)) });
+  form.querySelector(".jev-custom-folders").hidden = form.querySelector("[name='folders']:checked")?.value !== "chosen";
+}
+
+/* Open the drawer on `kept` — a decision the store keeps — or on a new one,
+ * with the keyboard in its name; `opener` takes the keyboard back, and the
+ * part's own 「새 결정」 does when the opener is gone. */
+function openJevCustomDrawer(kept, opener) {
+  const rules = jevCustomRules();
+  if (!rules || jevCustomDrawer) return;
+  const form = el("jev-custom-form");
+  const view = opener?.closest(".jev-view") ?? null;
+  jevCustomDrawer = { kept, view, opened: "", check: null, timer: null, wanted: 0, warned: false, saving: false };
+  say(el("jev-custom-title"), () => (kept ? t("jev.custom.editTitle", "결정 고치기") : t("jev.custom.newTitle", "새 결정")));
+  el("jev-custom-delete").hidden = !kept;
+  el("jev-custom-unsaved").hidden = true;
+  jevCustomFormOf(form, kept?.draft ?? jevCustomBlank(rules), rules);
+  jevCustomDrawer.opened = JSON.stringify(jevCustomDraftOf(form));
+  showModal(el("jev-custom-scrim"), {
+    opener,
+    fallback: () => view?.querySelector("[data-jev-custom-new]") ?? null,
+  });
+  jevCustomCheckSoon(0);
+}
+
+/* Close the drawer — 「닫기」's road, 「취소」's and Esc's (`MODAL_SPECS`):
+ * words not saved hold it open once and say so, and a second close lets them
+ * go. */
+function closeJevCustomDrawer({ saved = false } = {}) {
+  const drawer = jevCustomDrawer;
+  if (!drawer) return;
+  const unsaved = !saved && JSON.stringify(jevCustomDraftOf(el("jev-custom-form"))) !== drawer.opened;
+  if (unsaved && !drawer.warned) {
+    drawer.warned = true;
+    el("jev-custom-unsaved").hidden = false;
+    return;
+  }
+  window.clearTimeout(drawer.timer);
+  jevCustomDrawer = null;
+  hideModal(el("jev-custom-scrim"));
+}
+
+/* A change in the drawer: a kind or a point chosen anew redraws the fields
+ * it decides, and core's check is asked again after a pause. */
+function jevCustomEdited(event) {
+  const drawer = jevCustomDrawer;
+  if (!drawer) return;
+  const form = el("jev-custom-form");
+  const rules = jevCustomRules();
+  const target = event.target;
+  if (target.name === "kind") jevCustomAnswerFields(form, jevCustomBlankAnswer(target.value, rules), rules);
+  if (target.name === "at") {
+    const point = rules.points.find((one) => one.at === target.value);
+    jevCustomPointFields(form, target.value, point ? [...point.inputs] : [], rules);
+  }
+  if (target.name === "actFrom") target.value = String(Math.round(Number(target.value) * 100) / 100);
+  jevCustomFieldsShown(form);
+  drawer.warned = false;
+  el("jev-custom-unsaved").hidden = true;
+  jevCustomCheckSoon();
+}
+
+/* Add an option or a level, or take one away. */
+function jevCustomOptionPressed(event) {
+  const button = event.target.closest("[data-jev-custom-add], [data-jev-custom-remove]");
+  const form = el("jev-custom-form");
+  const rules = jevCustomRules();
+  if (!button || !jevCustomDrawer || !rules) return;
+  if (button.matches("[data-jev-custom-remove]")) {
+    button.closest("[data-jev-custom-option]").remove();
+  } else {
+    const draft = jevCustomDraftOf(form);
+    const answer = draft.answer.kind === "choice"
+      ? { ...draft.answer, options: [...draft.answer.options, { name: "", means: "" }] }
+      : { ...draft.answer, levels: [...draft.answer.levels, ""] };
+    jevCustomAnswerFields(form, answer, rules);
+    form.querySelector("[data-jev-custom-option]:last-of-type input, [data-jev-custom-option]:last-of-type textarea")?.focus();
+  }
+  jevCustomOptionsCounted(form, rules);
+  jevCustomCheckSoon();
+}
+
+/* Ask core's check after `after` ms; the drawer is busy, and its save off,
+ * until the answer to the newest change is painted. */
+function jevCustomCheckSoon(after = JEV_CUSTOM_CHECK_MS) {
+  const drawer = jevCustomDrawer;
+  if (!drawer) return;
+  drawer.wanted += 1;
+  const wanted = drawer.wanted;
+  el("jev-custom-form").setAttribute("aria-busy", "true");
+  el("jev-custom-save").disabled = true;
+  window.clearTimeout(drawer.timer);
+  drawer.timer = window.setTimeout(() => void jevCustomCheck(drawer, wanted), after);
+}
+
+async function jevCustomCheck(drawer, wanted) {
+  const form = el("jev-custom-form");
+  let check;
+  try {
+    check = await invoke("check_custom_decision", { draft: jevCustomDraftOf(form) });
+  } catch (failure) {
+    check = { refusals: [], version: null, questions: null, line: null, failure: jevCustomFailure(failure) };
+  }
+  if (jevCustomDrawer !== drawer || wanted !== drawer.wanted) return;
+  drawer.check = check;
+  paintJevCustomCheck(form, check);
+  form.setAttribute("aria-busy", "false");
+}
+
+/* Core's check, said in the drawer: each refusal in words with the control
+ * it points at marked, the new-version notice while an edit is a new
+ * version, the line an agent reads and the question as core would send it —
+ * and 「저장」 on only when nothing is refused. */
+function paintJevCustomCheck(form, check) {
+  const drawer = jevCustomDrawer;
+  const rules = jevCustomRules();
+  for (const marked of form.querySelectorAll("[aria-invalid]")) marked.removeAttribute("aria-invalid");
+  for (const marked of form.querySelectorAll("[data-refused]")) delete marked.dataset.refused;
+  const said = form.querySelector("[data-jev-custom-refusals]");
+  said.replaceChildren(...check.refusals.map((refusal) => {
+    const item = jevNode("li", "jev-custom-refusal");
+    item.dataset.jevCustomRefusal = refusal.word;
+    say(item, () => jevCustomRefusalWords(refusal, jevCustomRules() ?? rules));
+    jevCustomMark(form, refusal);
+    return item;
+  }));
+  if (check.failure) said.append(jevNode("li", "jev-custom-refusal", document.createTextNode(check.failure)));
+  said.hidden = said.childElementCount === 0;
+  form.querySelector("[data-jev-custom-version]").hidden = !drawer.kept || !check.version || check.version === drawer.kept.version;
+  const line = form.querySelector("[data-jev-custom-line]");
+  line.textContent = check.line ?? "";
+  line.closest("[data-jev-custom-field]").hidden = !check.line;
+  form.querySelector("[data-jev-custom-questions]").textContent = check.questions ? JSON.stringify(check.questions, null, 2) : "";
+  el("jev-custom-save").disabled = check.refusals.length > 0 || Boolean(check.failure) || drawer.saving;
+}
+
+/* Mark the control a refusal points at — the field core names (its
+ * `Field::word`, which the drawer's controls are named by), in the option or
+ * level it names, else the control or the part of the drawer the markup puts
+ * its rule under (`data-jev-refusal-at`). */
+function jevCustomMark(form, refusal) {
+  const rows = [...form.querySelectorAll("[data-jev-custom-option]")];
+  const option = rows.find((row) => row.querySelector("[name='option_name']")?.value === refusal.option);
+  const within = refusal.level !== null && refusal.level !== undefined ? rows[refusal.level] : option;
+  const named = refusal.option !== null && refusal.option !== undefined ? "option_name" : null;
+  const at = refusal.field ?? named ?? jevCustomWordNode("refusal", refusal.word)?.dataset.jevRefusalAt ?? "";
+  if (!at) return;
+  const control = (within ?? form).querySelector(
+    `textarea[name="${at}"], input[name="${at}"]:not([type="checkbox"]):not([type="radio"])`);
+  control?.setAttribute("aria-invalid", "true");
+  const part = control?.closest("[data-jev-custom-field]") ?? form.querySelector(`[data-jev-custom-field="${at}"]`);
+  if (part) part.dataset.refused = "";
+}
+
+/* Keep the drawer's draft: a new decision recording before anything acts on
+ * it, an edit as its next version with its mode kept — both core's store's
+ * doing. A refusal the store finds is said where the check's are. */
+async function saveJevCustomDrawer() {
+  const drawer = jevCustomDrawer;
+  const save = el("jev-custom-save");
+  if (!drawer || save.disabled) return;
+  drawer.saving = true;
+  save.disabled = true;
+  const draft = jevCustomDraftOf(el("jev-custom-form"));
+  try {
+    jevCustom = await invoke("save_custom_decision", { draft });
+  } catch (failure) {
+    drawer.saving = false;
+    if (jevCustomDrawer !== drawer) return;
+    if (Array.isArray(failure?.refusals) && failure.refusals.length > 0) {
+      drawer.check = { ...(drawer.check ?? { version: null, questions: null, line: null }), refusals: failure.refusals };
+      paintJevCustomCheck(el("jev-custom-form"), drawer.check);
+    } else {
+      toast(jevCustomFailure(failure), "halt");
+      save.disabled = false;
+    }
+    return;
+  }
+  drawer.saving = false;
+  paintJevViews();
+  if (jevCustomDrawer === drawer) closeJevCustomDrawer({ saved: true });
+  toast(draft.id
+    ? t("jev.custom.saved", "결정을 저장했습니다: 「{{name}}」", { name: draft.name })
+    : t("jev.custom.made", "새 결정을 만들었습니다: 「{{name}}」. 기록만으로 시작합니다.", { name: draft.name }));
+}
+
+/* Ask once before `kept` is deleted (DESIGN 3): its records stay, and it
+ * can be restored for the store's days. `opener` — the row's 「삭제」 or the
+ * drawer's — takes the keyboard back if the person keeps it. */
+function openJevCustomDelete(kept, opener) {
+  jevCustomDeleting = { kept, view: opener?.closest(".jev-view") ?? jevCustomDrawer?.view ?? null };
+  say(el("jev-custom-delete-title"), () => t("jev.custom.deleteTitle", "「{{name}}」 결정을 지울까요?", { name: kept.draft.name }));
+  say(el("jev-custom-delete-body"), () => t("jev.custom.deleteBody",
+    "지금까지의 기록은 남고, {{days}}일 동안 되살릴 수 있습니다.", jevCustomBounds(jevCustomRules())));
+  showModal(el("jev-custom-delete-scrim"), { opener, animated: true });
+}
+
+/* Close the delete question and only it — the drawer under it stays. */
+function closeJevCustomDelete() {
+  jevCustomDeleting = null;
+  hideModal(el("jev-custom-delete-scrim"));
+}
+
+/* 「지우기」: the drawer on the decision closes, the store deletes it, and
+ * 「되돌리기」 stands for the design's time. */
+async function confirmJevCustomDelete() {
+  const asked = jevCustomDeleting;
+  if (!asked) return;
+  closeJevCustomDelete();
+  if (jevCustomDrawer?.kept?.draft.id === asked.kept.draft.id) closeJevCustomDrawer({ saved: true });
+  if (!(await jevCustomChange(() => invoke("delete_custom_decision", { id: asked.kept.draft.id })))) return;
+  if (document.activeElement === null || document.activeElement === document.body) {
+    asked.view?.querySelector("[data-jev-custom-new]")?.focus({ preventScroll: true });
+  }
+  jevCustomUndo(asked.kept);
+}
+
+/* 「되돌리기」 for the decision just deleted: it stands the design's time,
+ * longer than a plain toast's, and leaves once used. */
+function jevCustomUndo(kept) {
+  const id = kept.draft.id;
+  let note = null;
+  const leave = () => {
+    if (note?.isConnected) closing(note, () => note.remove());
+  };
+  note = toast(t("jev.custom.deleted", "결정을 지웠습니다: 「{{name}}」", { name: kept.draft.name }), "", {
+    sticky: true,
+    action: {
+      label: t("jev.custom.undo", "되돌리기"),
+      run: () => {
+        leave();
+        void jevCustomChange(() => invoke("restore_custom_decision", { id }));
+      },
+    },
+  });
+  if (!note) return;
+  note.dataset.jevCustomUndo = id;
+  window.setTimeout(leave, JEV_CUSTOM_UNDO_MS);
+}
+
+el("jev-custom-close").addEventListener("click", () => closeJevCustomDrawer());
+el("jev-custom-cancel").addEventListener("click", () => closeJevCustomDrawer());
+el("jev-custom-save").addEventListener("click", () => void saveJevCustomDrawer());
+el("jev-custom-delete").addEventListener("click", (event) => {
+  if (jevCustomDrawer?.kept) openJevCustomDelete(jevCustomDrawer.kept, event.currentTarget);
+});
+el("jev-custom-scrim").addEventListener("mousedown", (event) => {
+  if (event.target === el("jev-custom-scrim")) closeJevCustomDrawer();
+});
+el("jev-custom-form").addEventListener("input", jevCustomEdited);
+el("jev-custom-form").addEventListener("click", jevCustomOptionPressed);
+el("jev-custom-form").addEventListener("submit", (event) => event.preventDefault());
+el("jev-custom-delete-ok").addEventListener("click", () => void confirmJevCustomDelete());
+el("jev-custom-delete-cancel").addEventListener("click", closeJevCustomDelete);
+el("jev-custom-delete-scrim").addEventListener("mousedown", (event) => {
+  if (event.target === el("jev-custom-delete-scrim")) closeJevCustomDelete();
+});

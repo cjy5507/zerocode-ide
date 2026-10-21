@@ -64,6 +64,11 @@ const MODAL_SPECS = Object.freeze({
     initial: "wsclean-confirm-cancel",
     cancel: () => closeCleanupConfirm(false),
   },
+  "jev-custom-scrim": { initial: "jev-custom-name", cancel: () => closeJevCustomDrawer() },
+  "jev-custom-delete-scrim": {
+    initial: "jev-custom-delete-cancel",
+    cancel: () => closeJevCustomDelete(),
+  },
   "ext-scrim": { initial: "ext-go", cancel: () => closeExternalWorktrees() },
   "ext-suppress-scrim": {
     initial: "ext-suppress-cancel",
