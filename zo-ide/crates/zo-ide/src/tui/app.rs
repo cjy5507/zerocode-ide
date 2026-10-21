@@ -7247,6 +7247,92 @@ mod tests {
         );
     }
 
+    /// t-69472: a ChatGPT, OpenAI-compatible or Gemini stream that drops and
+    /// opens again inside a request says so with a reconnect notice. Its
+    /// warning row stands in the transcript as before, and now the Working
+    /// line and the window's activity card say the turn is reconnecting —
+    /// the attempt and the pause, counted down — until the answer's text
+    /// comes again. A quiet stretch after a reconnect is a live stream too:
+    /// the model is reasoning, and the line says that instead.
+    #[test]
+    fn a_reconnect_inside_a_stream_stands_on_the_working_line_until_text_comes_again() {
+        use runtime::message_stream::types::StreamPhase;
+
+        let (mut ui, captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        let reconnect = |attempt: u32, delay_secs: u64| core_types::StreamRetryNotice {
+            kind: core_types::StreamNoticeKind::Reconnect,
+            label: "transient provider error",
+            attempt,
+            max_attempts: 7,
+            delay: Duration::from_secs(delay_secs),
+        };
+        let text = ids.next();
+        tick(&mut ui, 30);
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }));
+        arrive(
+            &mut ui,
+            RenderBlock::TextDelta {
+                id: text,
+                text: "C69472 the answer starts".to_string(),
+                done: false,
+            },
+        );
+        for block in crate::session::runtime_bridge::stream_notice_blocks(&reconnect(1, 4), &ids) {
+            arrive(&mut ui, block);
+        }
+        assert_eq!(
+            working_line(&ui),
+            "• Working (30s • esc to interrupt) · reconnecting · attempt 1 in 4s",
+            "the stream's reconnect is what the turn waits on now"
+        );
+        let card = published_card(&ui).expect("the reconnect's activity card");
+        assert_eq!(card.verb, crate::tui::strings::ACTIVITY_RECONNECTING);
+        assert_eq!(card.target.as_deref(), Some("attempt 1 in 4s"));
+
+        tick(&mut ui, 33);
+        assert_eq!(
+            working_line(&ui),
+            "• Working (33s • esc to interrupt) · reconnecting · attempt 1 in 1s"
+        );
+
+        arrive(
+            &mut ui,
+            RenderBlock::TextDelta {
+                id: text,
+                text: " and goes on".to_string(),
+                done: false,
+            },
+        );
+        assert_eq!(
+            working_line(&ui),
+            "• Working (33s • esc to interrupt)",
+            "the text that came again ends the reconnect"
+        );
+        assert!(
+            published_card(&ui).is_none_or(|card| card.verb != crate::tui::strings::ACTIVITY_RECONNECTING),
+            "{:?}",
+            published_card(&ui)
+        );
+
+        tick(&mut ui, 100);
+        for block in crate::session::runtime_bridge::stream_notice_blocks(&reconnect(2, 8), &ids) {
+            arrive(&mut ui, block);
+        }
+        assert_eq!(
+            working_line(&ui),
+            "• Working (1m 40s • esc to interrupt) · reconnecting · attempt 2 in 8s"
+        );
+        tick(&mut ui, 170);
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::QuietReasoning { since_secs: 61 }));
+        assert_eq!(
+            working_line(&ui),
+            "• Working (2m 50s • esc to interrupt) · model reasoning silently · 1m 01s",
+            "a quiet stretch after a reconnect is a live stream, not a reconnect"
+        );
+        assert!(hook_events(&captured).is_empty(), "{:?}", hook_events(&captured));
+    }
+
     #[test]
     fn a_question_hooks_its_tool_once_and_keeps_waiting_quietly() {
         use runtime::message_stream::{QuestionOption, UserQuestionPrompt};

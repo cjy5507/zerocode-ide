@@ -553,7 +553,9 @@ impl AsyncApiClient for LiveAsyncApiClient {
             let restart_ids = ids.clone();
             let restart_tx = render_tx.clone();
             let stream = stream.with_stream_retry_notice(move |notice| {
-                let _ = restart_tx.try_send(stream_notice_block(&notice, &restart_ids));
+                for block in stream_notice_blocks(&notice, &restart_ids) {
+                    let _ = restart_tx.try_send(block);
+                }
             });
 
             let source = HttpSource::new(stream);
@@ -624,6 +626,15 @@ fn stream_notice_block(
             }
         }
     }
+}
+
+/// Everything one stream notice puts on the turn's channel: its row or its
+/// phase ([`stream_notice_block`]).
+pub(crate) fn stream_notice_blocks(
+    notice: &core_types::StreamRetryNotice,
+    ids: &runtime::message_stream::types::BlockIdGen,
+) -> Vec<RenderBlock> {
+    vec![stream_notice_block(notice, ids)]
 }
 
 fn stream_notice_row(notice: &core_types::StreamRetryNotice) -> (SystemLevel, String) {

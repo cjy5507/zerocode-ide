@@ -46,7 +46,7 @@ use compaction::{auto_compaction_threshold_from_env_or_policy, ContextPolicy};
 pub use compaction::{
     auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, MICROCOMPACT_MIN_OUTPUT_BYTES,
     count_progress_tool_results, final_assistant_text, AutoCompactionEvent, BudgetExhausted,
-    ManualCompaction, TurnSummary,
+    ManualCompaction, TurnSummary, COMPACTION_SUMMARY_DEADLINE,
 };
 pub use config::{
     declare_attendance, declare_classifier_fallback, declared_attendance,

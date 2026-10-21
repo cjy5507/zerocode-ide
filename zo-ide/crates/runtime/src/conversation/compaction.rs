@@ -662,7 +662,7 @@ use tokio::sync::mpsc;
 /// minutes on one that never came (2026-10-21). Cutting a summary that would
 /// have come costs its quality, not the conversation — the local summary
 /// stands in, and the originals stay recoverable through `session_recall`.
-const COMPACTION_SUMMARY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+pub const COMPACTION_SUMMARY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Why the local summary stood in when [`COMPACTION_SUMMARY_DEADLINE`] cut
 /// the wait.

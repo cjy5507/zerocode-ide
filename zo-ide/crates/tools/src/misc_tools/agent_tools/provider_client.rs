@@ -2027,6 +2027,193 @@ mod tests {
         );
     }
 
+    /// The event stream of one Anthropic answer that says `said` and ends.
+    fn answer_stream(said: &str) -> String {
+        use std::fmt::Write as _;
+
+        let usage = |output_tokens: u32| {
+            json!({
+                "input_tokens": 1,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "output_tokens": output_tokens
+            })
+        };
+        let events = [
+            ("message_start", json!({"type": "message_start", "message": {
+                "id": "msg_c69472", "type": "message", "role": "assistant", "content": [],
+                "model": "claude-opus-5-5", "stop_reason": null, "stop_sequence": null,
+                "usage": usage(0)
+            }})),
+            ("content_block_start", json!({
+                "type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            })),
+            ("content_block_delta", json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": said}
+            })),
+            ("content_block_stop", json!({"type": "content_block_stop", "index": 0})),
+            ("message_delta", json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                "usage": usage(2)
+            })),
+            ("message_stop", json!({"type": "message_stop"})),
+        ];
+        let mut stream = String::new();
+        for (event, data) in events {
+            let _ = write!(stream, "event: {event}\ndata: {data}\n\n");
+        }
+        stream
+    }
+
+    /// A provider on a local port that answers every request with `said`,
+    /// `pause` after the request came in. Each connection is served on a
+    /// thread of its own for as long as the test runs.
+    fn slow_provider(pause: Duration, said: &'static str) -> String {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a local port");
+        let base_url = format!("http://{}", listener.local_addr().expect("its address"));
+        std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                let Ok(mut connection) = connection else {
+                    continue;
+                };
+                std::thread::spawn(move || {
+                    // The request's head and body, read to their end.
+                    let mut seen = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    let mut read_more = |seen: &mut Vec<u8>| match connection.read(&mut chunk) {
+                        Ok(0) | Err(_) => false,
+                        Ok(read) => {
+                            seen.extend_from_slice(&chunk[..read]);
+                            true
+                        }
+                    };
+                    let head_end = loop {
+                        if let Some(at) = seen.windows(4).position(|four| four == b"\r\n\r\n") {
+                            break at + 4;
+                        }
+                        if !read_more(&mut seen) {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&seen[..head_end]).to_ascii_lowercase();
+                    let length = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|length| length.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while seen.len() < head_end + length {
+                        if !read_more(&mut seen) {
+                            return;
+                        }
+                    }
+                    std::thread::sleep(pause);
+                    let body = answer_stream(said);
+                    let _ = write!(
+                        connection,
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                });
+            }
+        });
+        base_url
+    }
+
+    /// A helper's client pointed at `base_url` on `driver`, with a synthetic
+    /// key and no tools — nothing of a person's login or network.
+    fn agent_at(base_url: &str, driver: &tokio::runtime::Runtime) -> super::ProviderRuntimeClient {
+        super::ProviderRuntimeClient {
+            run_generation: None,
+            handle: driver.handle().clone(),
+            client: api::ProviderClient::Anthropic(
+                api::AnthropicClient::from_auth(api::AuthSource::ApiKey(
+                    "synthetic-key".to_string(),
+                ))
+                .with_base_url(base_url),
+            ),
+            model: "claude-opus-5-5".to_string(),
+            allowed_tools: std::collections::BTreeSet::new(),
+            mcp_tools: Vec::new(),
+            structured_schema: None,
+            token_history: std::sync::Arc::default(),
+            output_tokens_total: std::sync::Arc::default(),
+            workflow_member: false,
+            thinking_budget_tokens: None,
+            route_effort: None,
+            api_concurrency: None,
+            rate_limit_fallback_models: std::collections::VecDeque::new(),
+            cancel_signal: None,
+            manifest_path: None,
+            agent_identity: None,
+        }
+    }
+
+    fn one_question() -> runtime::ApiRequest {
+        runtime::ApiRequest {
+            system_prompt: std::sync::Arc::from(vec!["system".to_string()]),
+            wire_reminders: std::sync::Arc::from(Vec::<String>::new()),
+            messages: std::sync::Arc::new(vec![runtime::ConversationMessage::user_text(
+                "C69472 a question",
+            )]),
+            tool_choice: None,
+            effort_override: None,
+            effort_step: None,
+            model_override: None,
+            picture_cap: None,
+        }
+    }
+
+    /// t-69472: only a request given a deadline is cut at it. A helper's
+    /// compaction asks its summary with one (`ApiClient::stream_within`), and
+    /// the helper's client gives the request up once the deadline passes; a
+    /// turn's request (`stream`) has none, and waits for the same slow
+    /// provider's answer however long it takes.
+    #[test]
+    fn only_a_request_with_a_deadline_is_given_up_on_a_slow_provider() {
+        use runtime::ApiClient as _;
+
+        const ANSWER_AFTER: Duration = Duration::from_millis(1_500);
+        const DEADLINE: Duration = Duration::from_millis(300);
+        let base_url = slow_provider(ANSWER_AFTER, "C69472 a slow answer");
+        let driver = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let mut agent = agent_at(&base_url, &driver);
+
+        let asked = std::time::Instant::now();
+        let given_up = agent
+            .stream_within(one_question(), DEADLINE)
+            .expect("a deadline that passes is no error");
+        let waited = asked.elapsed();
+        assert!(
+            given_up.is_none(),
+            "the request with a deadline was not given up: {given_up:?}"
+        );
+        assert!(
+            waited >= DEADLINE && waited < ANSWER_AFTER,
+            "given up {waited:?} in, not at its deadline"
+        );
+
+        let asked = std::time::Instant::now();
+        let events = agent.stream(one_question()).expect("the slow answer comes");
+        let waited = asked.elapsed();
+        assert!(waited >= ANSWER_AFTER, "answered {waited:?} in, before the provider said anything");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                runtime::AssistantEvent::TextDelta(text) if text.contains("C69472 a slow answer")
+            )),
+            "a turn's request takes the answer whenever it comes: {events:?}"
+        );
+    }
+
     #[test]
     fn structured_output_advertises_the_delegated_schema() {
         let allowed = std::collections::BTreeSet::from(["StructuredOutput".to_string()]);
