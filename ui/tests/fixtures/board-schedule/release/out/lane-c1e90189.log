@@ -1,0 +1,34 @@
+08:12:21 == lane c1e90189 start (dry=0)
+08:12:21 == archive
+08:12:21 archive rc=0 0s free=20G load=6.78/6.71
+08:12:22 target root-gate: removed 341 workspace unit(s), 4328M — the fresh scratch rebuilds them anyway
+08:12:23 target zo-gate: removed 292 workspace unit(s), 5625M — the fresh scratch rebuilds them anyway
+08:12:23 == gate-root
+09:40:26 released root-gate — 19G free < 20G after its last use in this run
+09:40:31 gate-root rc=0 5283s free=24G load=8.35/9.14
+09:40:31 == gate-zo
+10:08:21 released zo-gate — 18G free < 20G after its last use in this run
+10:08:23 gate-zo rc=0 1670s free=23G load=5.29/6.81
+10:08:23 == flakes
+10:08:24 flakes rc=0 1s free=23G load=4.94/6.77
+10:08:24 == push
+10:08:24 push rc=0 0s free=23G load=4.94/6.77
+10:08:24 == build-app
+10:27:06 build-app rc=0 1122s free=18G load=4.28/6.91
+10:27:06 == swap-app
+10:27:07 swap-app rc=0 1s free=18G load=4.28/6.91
+10:27:07 == build-zo
+10:27:07 build-zo rc=0 314s free=18G load=4.28/6.91
+10:27:07 == swap-zo
+10:27:07 swap-zo rc=0 0s free=18G load=4.28/6.91
+10:27:07 == bundle-updater
+10:27:41 bundle-updater: archive and DMG packed from build-app's sealed ZeroCode.app, the installed one
+10:27:41 bundle-updater: ZeroCode_1.1.78_aarch64.app.tar.gz + .sig + latest.json under ~/.local/share/zerocode/release/out/c1e90189 (key 0000000000000000)
+10:27:41 bundle-updater rc=0 34s free=17G load=7.50/7.17
+10:27:41 == publish
+10:29:00 publish: v1.1.78 on owner/zerocode prerelease=0 assets=ZeroCode_1.1.78_aarch64.app.tar.gz,ZeroCode_1.1.78_aarch64.app.tar.gz.sig,ZeroCode_1.1.78_aarch64.dmg,latest.json,install.sh
+10:29:27 publish: source snapshot v1.1.78 on the public repository
+10:29:27 publish rc=0 106s free=16G load=19.54/9.50
+10:29:27 == sweep
+10:29:29 sweep rc=0 2s free=16G load=19.54/9.50
+10:29:29 == green

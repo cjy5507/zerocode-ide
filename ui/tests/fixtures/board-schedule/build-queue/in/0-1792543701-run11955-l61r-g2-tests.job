@@ -1,0 +1,8 @@
+# who: run11955-l61r
+# cwd: /work/zerocode/integration-l61
+# run: run-4275
+# notify: run:run-4275
+# what: l61 결합 게이트 g2 — 루트 시험
+# cap: 1800
+set -e
+cargo test -p zerocode-shell --no-fail-fast

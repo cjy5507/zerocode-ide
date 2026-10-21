@@ -5,6 +5,7 @@ mod artifact_export;
 mod ask_popup;
 mod beat_lock_order;
 mod board_now;
+mod board_schedule;
 mod browser_route;
 mod browser_workspace;
 mod bundle_resources;
@@ -486,6 +487,9 @@ mod tests {
                             // timed beside the command that makes it, while a
                             // settings commit holds the repository.
                             | "cmd/waiting.rs"
+                            // t-67482: the schedule's look is timed the same
+                            // way, beside its command (review t-69069, P2-1).
+                            | "cmd/board.rs"
                             // t-21017: a provider's done report reaches the
                             // human-input line through the one door
                             // `note_pane_state` calls, tested beside that door.
@@ -11086,9 +11090,12 @@ mod tests {
         // Fifteen since t-6588: the task board desk's minute (`deskAmbient`),
         // the release lane and the machine strip, only while the desk is on
         // screen.
+        // Sixteen since t-67482: the task board schedule's five seconds
+        // (`boardSchedulePoller`), one `schedule_timeline` read answered
+        // `unchanged` until a file moved, only while the schedule is on screen.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            15,
+            16,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");

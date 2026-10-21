@@ -174,8 +174,10 @@ function deskBlock(desk, { id, quietHead = false }) {
 
 /* 데스크 블록, 탭마다 읽는 차례대로 — DOM 순서가 곧 좁은 판의 순서다(t-67607, 시안 B).
  * 「지금」은 당신 차례·빌드 줄·통합 묶음·지금 도는 일, 「워커」는 워커와 이 기계, 「기록」은
- * 소식과 과업 흐름이다. 그리는 손은 블록에 쓸 것이 있으면 참을 돌려주고, 거짓이면 그
- * 블록은 접힌다. 판에 선 탭의 블록만 그린다 — 다른 탭은 고를 때 그린다(`chooseBoardTab`). */
+ * 소식과 과업 흐름이다. 「일정」에는 데스크 블록이 없다 — 그 탭의 블록은 일정의 그릇
+ * 하나다(`paintBoardSchedule`, t-67482). 그리는 손은 블록에 쓸 것이 있으면 참을
+ * 돌려주고, 거짓이면 그 블록은 접힌다. 판에 선 탭의 블록만 그린다 — 다른 탭은 고를 때
+ * 그린다(`chooseBoardTab`). */
 const DESK_BLOCKS = Object.freeze([
   { id: "asks", tab: "now", paint: paintDeskAsks },
   { id: "release", tab: "now", paint: paintDeskRelease },
@@ -199,6 +201,9 @@ function paintCoordinatorDesk(view) {
   const now = Date.now();
   if (now - deskAmbientAt >= DESK.ambientEveryMs) refreshDeskAmbient();
   paintBoardTabs(view);
+  // The schedule tab's one block mounts here, once the tab is written — its one hook
+  // (t-67482, shell-board-schedule.js).
+  paintBoardSchedule(view);
   // Only the chosen tab's blocks stand: a block left behind on another tab is
   // taken out and drawn afresh when its tab is chosen, so the workers' rows
   // and the task flow do not ride along unseen under 「지금」.

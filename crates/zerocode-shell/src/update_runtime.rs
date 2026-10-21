@@ -26,8 +26,12 @@ use serde_json::Value;
 /// the design (§3 rule 6) rather than by a shared constant, because the lane
 /// is a shell script launchd runs without this binary.
 const RELEASE_DIR: &[&str] = &[".local", "share", "zerocode", "release"];
-const STATUS_FILE: &str = "status.json";
+pub(crate) const STATUS_FILE: &str = "status.json";
 const INSTALLED_FILE: &str = "installed.json";
+/// The lane's own logs under the release folder (`OUT` in the same table):
+/// one `lane-<sha8>.log` per sha, which the task board's schedule reads
+/// (`schedule_timeline`, t-67482).
+pub(crate) const OUT_DIR: &str = "out";
 
 /// A sha shorter than this is a word, not an identity. Seven is git's own
 /// abbreviation floor; both producers write the full forty, so this only

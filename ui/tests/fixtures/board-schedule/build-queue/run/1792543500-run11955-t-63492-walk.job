@@ -1,0 +1,8 @@
+# who: run11955-t-63492
+# cwd: /work/zerocode/t-63492-walk
+# run: run-4275
+# notify: run:run-4275
+# what: t-63492 걸음 시험
+# cap: 1800
+set -e
+just zo-walk

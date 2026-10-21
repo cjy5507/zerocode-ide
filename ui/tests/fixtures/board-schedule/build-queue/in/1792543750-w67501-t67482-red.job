@@ -1,0 +1,8 @@
+# who: w67501-t67482
+# cwd: /work/zerocode/t-67482-eta
+# run: run-4275
+# notify: run:run-4275
+# what: t-67482 빨강 시험 — 일정 읽기 단위
+# cap: 600
+set -e
+cargo test -p zerocode-shell schedule_timeline
