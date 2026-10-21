@@ -495,6 +495,11 @@ enum OpenAiCompatAuth {
     /// Resolve a fresh Google OAuth access token for Gemini requests from ADC
     /// or gcloud, using the cache in `google_auth` to avoid per-request mints.
     GoogleGeminiOAuth,
+    /// The key of a router the window keeps, read again for each request: a
+    /// client built while the key was missing, or while the keychain could not
+    /// answer, sends it once it is there instead of going without it for the
+    /// whole session (t-67811).
+    WindowKey(&'static str),
 }
 
 /// A client's debug line names how it authenticates, never with what: a
@@ -516,6 +521,7 @@ impl std::fmt::Debug for OpenAiCompatAuth {
             Self::None => f.write_str("None"),
             Self::StaticBearer(_) => f.write_str("StaticBearer(<redacted>)"),
             Self::GoogleGeminiOAuth => f.write_str("GoogleGeminiOAuth"),
+            Self::WindowKey(env) => write!(f, "WindowKey({env})"),
         }
     }
 }
@@ -570,7 +576,16 @@ impl OpenAiCompatClient {
     pub fn from_env_optional_auth(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
         let auth = read_env_non_empty(config.api_key_env)?
             .or_else(|| read_saved_api_key_non_empty(config.api_key_env))
-            .map_or(OpenAiCompatAuth::None, OpenAiCompatAuth::StaticBearer);
+            .map_or_else(
+                || {
+                    if super::window_router_key(config.api_key_env) {
+                        OpenAiCompatAuth::WindowKey(config.api_key_env)
+                    } else {
+                        OpenAiCompatAuth::None
+                    }
+                },
+                OpenAiCompatAuth::StaticBearer,
+            );
         Ok(Self::new_with_auth(auth, config))
     }
 
@@ -648,10 +663,10 @@ impl OpenAiCompatClient {
         let last_error = loop {
             attempts += 1;
             let retryable_error = match self.send_raw_request(request).await {
-                Ok(response) => match expect_success(response).await {
+                Ok((response, key_sent)) => match expect_success(response).await {
                     Ok(response) => return Ok(response),
                     Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => error,
-                    Err(error) => return Err(error),
+                    Err(error) => return Err(self.refused_router_key(error, key_sent)),
                 },
                 Err(error) if error.is_retryable() && attempts <= self.max_retries + 1 => error,
                 Err(error) => return Err(error),
@@ -673,10 +688,25 @@ impl OpenAiCompatClient {
         })
     }
 
+    /// A 401 from a router the window keeps a key for points at that key
+    /// ([`ApiError::RouterKeyRefused`]); any other failure is kept as it came.
+    fn refused_router_key(&self, error: ApiError, key_sent: bool) -> ApiError {
+        if error.is_unauthorized() && super::window_router_key(self.config.api_key_env) {
+            ApiError::RouterKeyRefused {
+                provider: self.config.provider_name,
+                key_sent,
+                refusal: Box::new(error),
+            }
+        } else {
+            error
+        }
+    }
+
+    /// The response, and whether a key went with the request.
     async fn send_raw_request(
         &self,
         request: &MessageRequest,
-    ) -> Result<reqwest::Response, ApiError> {
+    ) -> Result<(reqwest::Response, bool), ApiError> {
         let request_url = chat_completions_endpoint(&self.base_url);
         let config = request_config_for_base_url(self.config(), &self.base_url);
         let builder = self
@@ -685,8 +715,9 @@ impl OpenAiCompatClient {
             .header("content-type", "application/json")
             .json(&build_chat_completion_request(request, config));
         let builder = self.apply_client_identity(builder);
-        let builder = self.apply_auth(builder).await?;
-        builder.send().await.map_err(ApiError::from)
+        let (builder, key_sent) = self.apply_auth(builder).await?;
+        let response = builder.send().await.map_err(ApiError::from)?;
+        Ok((response, key_sent))
     }
 
     /// Present the operator-configured client fingerprint (`User-Agent` and any
@@ -705,21 +736,26 @@ impl OpenAiCompatClient {
     async fn apply_auth(
         &self,
         builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, ApiError> {
+    ) -> Result<(reqwest::RequestBuilder, bool), ApiError> {
         match &self.auth {
-            OpenAiCompatAuth::None => Ok(builder),
-            OpenAiCompatAuth::StaticBearer(token) if token.is_empty() => Ok(builder),
-            OpenAiCompatAuth::StaticBearer(token) => Ok(builder.bearer_auth(token)),
+            OpenAiCompatAuth::None => Ok((builder, false)),
+            OpenAiCompatAuth::StaticBearer(token) if token.is_empty() => Ok((builder, false)),
+            OpenAiCompatAuth::StaticBearer(token) => Ok((builder.bearer_auth(token), true)),
+            OpenAiCompatAuth::WindowKey(env) => Ok(match read_env_non_empty(env)? {
+                Some(key) => (builder.bearer_auth(key), true),
+                None => (builder, false),
+            }),
             OpenAiCompatAuth::GoogleGeminiOAuth => {
                 let token = super::google_auth::gemini_access_token().await?;
                 let builder = builder.bearer_auth(token);
-                Ok(
+                Ok((
                     if let Some(project) = super::google_auth::request_user_project() {
                         builder.header("x-goog-user-project", project)
                     } else {
                         builder
                     },
-                )
+                    true,
+                ))
             }
         }
     }
@@ -1935,15 +1971,61 @@ fn read_saved_api_key_non_empty(key: &str) -> Option<String> {
 }
 
 /// Whether a *custom* base URL is configured for `config` (its `base_url_env`
-/// is set to a non-empty value). A custom endpoint is treated as a self-hosted
-/// / proxy target that may legitimately need no API key, unlike the official
-/// cloud endpoint reached via the default base URL.
+/// is set to a non-empty value). A custom endpoint on this machine or a private
+/// network (`base_url_is_local`) is a self-hosted / proxy target that may
+/// legitimately need no API key; one on a public host, like the official cloud
+/// endpoint reached via the default base URL, needs one.
 #[must_use]
 pub fn has_custom_base_url(config: OpenAiCompatConfig) -> bool {
     read_env_non_empty(config.base_url_env)
         .ok()
         .flatten()
         .is_some()
+}
+
+/// Whether `base_url` is on this machine or a private network — the only hosts
+/// a request may go to without a key. A public host is a cloud service, which
+/// answers a key-less request with a 401 (t-67811).
+pub(crate) fn base_url_is_local(base_url: &str) -> bool {
+    let Some(host) = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+    else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return ip_is_local(ip);
+    }
+    let name = host.trim_end_matches('.');
+    !name.contains('.')
+        || [".localhost", ".local", ".internal", ".home.arpa", ".lan"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
+fn ip_is_local(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            let [first, second, ..] = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                // 100.64.0.0/10, the shared space a carrier NAT or a tailnet hands out.
+                || (first == 100 && (second & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(ip) => {
+            let first = ip.segments()[0];
+            ip.to_ipv4_mapped()
+                .is_some_and(|mapped| ip_is_local(mapped.into()))
+                || ip.is_loopback()
+                || ip.is_unspecified()
+                // fc00::/7 unique local, fe80::/10 link-local.
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 #[must_use]
