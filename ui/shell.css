@@ -30973,9 +30973,12 @@ input[type="search"]::-webkit-search-cancel-button {
   }
 }
 
-/* 입체에는 카드의 손잡이 둘이 없다 — 오버레이 고르개(입체는 우편과 의존을 늘 그린다)와
- * 카드 정보 펼치기. 아래 범례도 카드의 모양 둘과 카드의 상태 빛을 내려놓는다: 입체의 빛은
- * 판 위의 제 범례(`.agent-orbit-key`)가 말하고, 아래 범례는 이 보기의 몸짓 한 줄만 든다. */
+/* 입체에는 카드의 손잡이 셋이 없다 — 오버레이 고르개(입체는 우편과 의존을 늘 그린다), 카드 정보
+ * 펼치기, 그리고 카드로 가는 상태 칩 다섯(방향 E2, t-68475: 입체의 수는 판 위의 「지금 흐름」 줄이
+ * 말하고, 칩 줄이 머리를 두 줄로 늘려 입체의 무대를 줄이지 않게). 아래 범례도 카드의 모양 둘과
+ * 카드의 상태 빛을 내려놓는다: 입체의 빛은 판 위의 제 범례(`.agent-orbit-key`)가 말하고, 아래 범례는
+ * 이 보기의 몸짓 한 줄만 든다. */
+.agent-board.is-orbit .agent-graph-summary,
 .agent-board.is-orbit .agent-graph-overlays,
 .agent-board.is-orbit .agent-graph-density,
 .agent-board.is-orbit .agent-graph-legend-list.is-nodes,
@@ -31399,7 +31402,20 @@ input[type="search"]::-webkit-search-cancel-button {
   white-space: nowrap;
 }
 
-.agent-graph-card-said > .agent-graph-state-word:not(:empty) + .agent-graph-card-why:not(:empty)::before {
+/* 둘째 줄의 조각은 가운뎃점으로 잇는다 — 낱말 · 이전 시도 · 마지막 말. 빈 조각은 서지 않는다. 「이전
+ * 시도」는 이 줄에서 테 없는 글이다(상태 줄의 칩과 같은 말). */
+.agent-graph-card-said > .agent-graph-previous-attempt {
+  padding: 0;
+  box-shadow: none;
+  font: inherit;
+}
+
+.agent-graph-card-said > .agent-graph-previous-attempt[hidden] {
+  display: none;
+}
+
+.agent-graph-card-said > .agent-graph-previous-attempt:not([hidden])::before,
+.agent-graph-card-said > .agent-graph-card-why:not(:empty)::before {
   content: " \00b7 ";
 }
 

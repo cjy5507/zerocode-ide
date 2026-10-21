@@ -4756,7 +4756,12 @@ function dressAgentGraphTeamSum(list, team) {
   const held = [...list.children];
   reconcileElementOrder(list, cells.map(({ signal, count }, at) => {
     const item = held[at] ?? document.createElement("li");
-    if (!item.firstElementChild) item.append(agentGraphSignalMark("idle"), taskBoardElement("span", ""), taskBoardElement("b", ""));
+    /* 낱말과 수 사이의 빈칸은 글자다 — 눈에는 틈(gap)이 같은 일을 하지만, 낭독기와 복사한 글은 「팀 5」로
+     * 읽어야 한다. */
+    if (!item.firstElementChild) {
+      item.append(agentGraphSignalMark("idle"), taskBoardElement("span", ""), document.createTextNode(" "),
+        taskBoardElement("b", ""));
+    }
     const [mark, word, value] = item.children;
     writeHidden(mark, signal === "");
     if (signal) dressAgentGraphSignalMark(mark, signal);
@@ -4783,8 +4788,10 @@ function buildAgentGraphCard(node, entity, view) {
   const stop = (event) => event.stopPropagation();
   const subject = () => agentGraphModels.get(view)?.entities.get(node.dataset.graphKey) ?? null;
   if (small) {
+    /* 둘째 줄: 낱말 · (재시도의 옛 시도면 「이전 시도」) · 마지막 말. */
     const said = taskBoardElement("span", "agent-graph-card-said");
-    said.append(taskBoardElement("b", "agent-graph-state-word"), taskBoardElement("span", "agent-graph-card-why"));
+    said.append(taskBoardElement("b", "agent-graph-state-word"),
+      taskBoardElement("span", "agent-graph-previous-attempt"), taskBoardElement("span", "agent-graph-card-why"));
     parts.push(said);
   } else {
     const status = taskBoardElement("span", "agent-graph-node-status");

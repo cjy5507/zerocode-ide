@@ -300,6 +300,9 @@ export async function testAgentGraphTeams(browser, origin, ok) {
       const counts = Object.fromEntries([...view.querySelectorAll("[data-graph-signal]")]
         .map((button) => [button.dataset.graphSignal, button.querySelector("[data-graph-count]").textContent]));
       const words = [...view.querySelectorAll("[data-graph-signal] > span")].map((one) => one.textContent);
+      // 그림의 기본 선택은 첫 당신 차례 카드다 — 그 위에서 누르면 다음 카드로 가므로, 다른 카드에서 시작한다.
+      selectAgentGraphEntity(view, "agent:term:6", { focus: false });
+      await window.__BOARD_SETTLED__();
       const you = view.querySelector('[data-graph-signal="you"]');
       you.click();
       await window.__BOARD_SETTLED__();
@@ -356,10 +359,16 @@ export async function testAgentGraphTeams(browser, origin, ok) {
     const trace = await page.evaluate(async () => {
       const view = document.querySelector("#board-view");
       const node = (key) => view.querySelector(`.agent-graph-node[data-graph-key="${key}"]`);
+      // term:6의 끝난 헬퍼 둘이 펼쳐진 판 — 계보는 아래로 끝까지 밝다.
+      agentGraphFoldsOpen.add("fold:agent:term:6");
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
       node("agent:term:6").click();
       await window.__BOARD_SETTLED__();
       const lit = [...view.querySelectorAll(".agent-graph-node.is-traced")].map((one) => one.dataset.graphKey).sort();
       const tracing = view.querySelector(".agent-graph-nodes").classList.contains("is-tracing");
+      // 물러남은 전이다 — 다 지난 뒤의 값을 읽는다.
+      await new Promise((done) => setTimeout(done, 400));
       const dim = getComputedStyle(node("agent:term:9")).opacity;
       view.querySelector(".agent-graph-layout").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
       await window.__BOARD_SETTLED__();
@@ -367,7 +376,8 @@ export async function testAgentGraphTeams(browser, origin, ok) {
         selected: agentGraphSelectedKey };
     });
     ok("a pressed card keeps only its lineage lit, and Escape gives the whole picture back",
-      trace.tracing && trace.lit.join() === "agent:term:3,agent:term:6" && Number(trace.dim) < 1 && !trace.after
+      trace.tracing && trace.lit.join() === "agent:sub:6:a1,agent:sub:6:a2,agent:term:3,agent:term:6"
+        && Math.abs(Number(trace.dim) - 0.45) < 0.01 && !trace.after
         && trace.selected === "agent:term:6",
       JSON.stringify(trace));
 
@@ -407,7 +417,8 @@ export async function testAgentGraphTeams(browser, origin, ok) {
       return seen;
     });
     ok("the mail overlay draws its line across the columns, and none stands when the overlay is off",
-      mail.across && /^M [\d.]+ [\d.]+ C /.test(mail.d) && mail.label.startsWith("메일 · 2") && mail.after === 0,
+      // 두 끝이 같은 높이면 곧은 한 획(`H`), 다르면 곡선(`C`)이다.
+      mail.across && /^M [\d.]+ [\d.]+ (C|H) /.test(mail.d) && mail.label.startsWith("메일 · 2") && mail.after === 0,
       JSON.stringify(mail));
 
     const still = await page.evaluate(async () => {
@@ -417,10 +428,18 @@ export async function testAgentGraphTeams(browser, origin, ok) {
       const zoom = getComputedStyle(view.querySelector(".agent-graph-zoom")).display;
       const before = agentGraphZoom;
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "1", shiftKey: true, bubbles: true }));
-      return { infinite: running.length, zoom, zoomKept: agentGraphZoom === before };
+      /* 그리고 상태 칩 다섯은 카드로 가는 손잡이라 입체의 머리에는 서지 않는다 — 입체의 무대가 D 때의
+       * 높이를 지킨다. 입체를 띄우지 않고 그 보기의 표지만 잠깐 입혀 규칙을 읽는다. */
+      const summary = view.querySelector(".agent-graph-summary");
+      const chipsInCards = getComputedStyle(summary).display;
+      view.classList.add("is-orbit");
+      const chipsInOrbit = getComputedStyle(summary).display;
+      view.classList.remove("is-orbit");
+      return { infinite: running.length, zoom, zoomKept: agentGraphZoom === before, chipsInCards, chipsInOrbit };
     });
-    ok("the card picture runs no endless animation and stands no zoom buttons — zoom is the orbit's",
-      still.infinite === 0 && still.zoom === "none" && still.zoomKept, JSON.stringify(still));
+    ok("the card picture runs no endless animation and stands no zoom buttons — zoom is the orbit's, and the five chips are the cards'",
+      still.infinite === 0 && still.zoom === "none" && still.zoomKept
+        && still.chipsInCards !== "none" && still.chipsInOrbit === "none", JSON.stringify(still));
 
     const stacked = async (width) => {
       await page.setViewportSize({ width, height: 1100 });

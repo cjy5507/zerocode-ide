@@ -394,7 +394,8 @@ export async function testAgentRelationsDeep(browser, origin, ok) {
       const tasks = agentGraphTasksFor(view, agentGraphFullModel(view));
       const group = tasks.groups.find((one) => one.key === JSON.stringify(["run-1", "t-A"]));
       const chip = view.querySelector("[data-graph-key='agent:term:205'] .agent-graph-previous-attempt")?.textContent ?? "";
-      const currentChip = view.querySelector("[data-graph-key='agent:term:202'] .agent-graph-previous-attempt");
+      // 칸은 카드마다 늘 지어 두고 `hidden`이 접는다(방향 E2) — 지금 시도의 카드에는 보이지 않아야 한다.
+      const currentChip = view.querySelector("[data-graph-key='agent:term:202'] .agent-graph-previous-attempt:not([hidden])");
       setAgentGraphScope(view, JSON.stringify(["run-1", "t-A"]));
       await window.__BOARD_SETTLED__();
       const scoped = agentGraphModels.get(view).agents.map((entry) => entry.key).sort();
