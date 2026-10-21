@@ -240,13 +240,16 @@ pub struct ForkSource {
     pub system_prompt: Vec<String>,
 }
 
-/// The target, coordinates and mark numbering of a staged Computer picture.
+/// The target, coordinates and mark numbering of a staged Computer picture,
+/// and the title its window showed — the document the model chose words on,
+/// which a click re-picked there must still be on (t-66760).
 #[derive(Debug, PartialEq)]
 pub(crate) struct ComputerObservation {
     pub app: Option<String>,
     pub window_id: Option<u64>,
     pub frame: ShotFrame,
     pub marked_look: Option<String>,
+    pub title: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -613,6 +616,18 @@ impl ToolContext {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .and_then(|seen| seen.app.as_ref().map(|app| ComputerTarget { app: app.clone(), window_id: seen.window_id }))
+    }
+
+    /// The title window `window_id` showed in the last picture staged for
+    /// this model, when that picture was of it (t-66760).
+    pub(crate) fn computer_window_title(&self, window_id: u64) -> Option<String> {
+        self.computer
+            .observation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|seen| seen.window_id == Some(window_id))
+            .and_then(|seen| seen.title.clone())
     }
 
     pub(crate) fn computer_target_frame(&self, target: &ComputerTarget) -> Option<ShotFrame> {

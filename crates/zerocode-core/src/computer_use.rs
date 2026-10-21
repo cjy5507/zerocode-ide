@@ -340,8 +340,10 @@ pub struct ComputerPermissionReset {
 }
 
 /// The longest a `wait` may hold the agent's turn: a person's pause, not a
-/// sleep — anything longer is a scheduler's job.
-pub const COMPUTER_WAIT_MAX_MS: u64 = 30_000;
+/// sleep — anything longer is a scheduler's job, and a screen the agent
+/// waits on for longer is one to watch for a change (`wait-for`, `watch`),
+/// which a minute bounds (t-66760).
+pub const COMPUTER_WAIT_MAX_MS: u64 = 20_000;
 
 /// The longest a `run` may hold the agent's turn, and the most of its output
 /// the answer carries — a person's glance at a terminal, not a log archive.
@@ -699,6 +701,17 @@ pub const RESUME_LIFTER_AGENT: &str = "agent";
 pub fn persons_stop(reason: &str) -> bool {
     PERSONS_STOP_REASONS.contains(&reason)
 }
+/// A wait a stop ended (t-66760): its `stopped` refusal names who stopped it
+/// in its error, beside the reason its message gives — the person (their
+/// chord, the window's button, or a stop they may have made) or an agent's
+/// `stop` — so a caller counts the two apart without reading words.
+pub const STOPPED_BY_KEY: &str = "stoppedBy";
+pub const STOPPED_BY_PERSON: &str = "person";
+pub const STOPPED_BY_AGENT: &str = "agent";
+/// What a walked step's report carries when the walk shortened its wait to
+/// the time its call had left (t-66760): the milliseconds it asked for
+/// (`askedMs`) and the milliseconds it was given (`givenMs`).
+pub const CLIPPED_KEY: &str = "clipped";
 /// How fast the hand may go (§1.4), in the one shape every reader takes —
 /// the helper that counts, `status`, the usage and the skill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1503,10 +1516,14 @@ pub enum Next<K> {
 
 /// What a walk may spend: the bridge's deadline, and the halt a step that
 /// could not answer before it — or a caller gone — ends the walk with.
+/// `clips_waits`: a wait that would run past the deadline is given the room
+/// left instead (a batch, t-66760), rather than end the walk before it (a
+/// recipe, whose halt names the step to resume from).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalkBudget<K> {
     pub deadline_ms: u64,
     pub out_of_time: K,
+    pub clips_waits: bool,
 }
 
 /// How a walk went: a report per step it ran or skipped, in order, and the
@@ -1530,7 +1547,8 @@ impl<K> Walked<K> {
 /// two planners over it. Before each step the caller must still be waiting,
 /// the planner decides whether it runs (and as what command line), and a step
 /// that could not answer before the bridge gives up is never begun — each of
-/// those halts the walk out of time. A step is given what it says it holds
+/// those halts the walk out of time — unless it is a wait and the budget
+/// clips waits: then it waits the room left, and its report says so. A step is given what it says it holds
 /// plus the most any step before it ran past its own (an app's tree, a last
 /// look: work no table counts), so a slow desk ends the walk early rather than
 /// losing its answer; the first step of a call needs only to fit the budget.
@@ -1557,7 +1575,7 @@ pub fn walk<S, K: Clone>(
             halted = Some((n, budget.out_of_time.clone()));
             break;
         }
-        let argv = match plan(n, step) {
+        let mut argv = match plan(n, step) {
             Next::Run(argv) => argv,
             Next::Skip(why) => {
                 reports.push(json!({ "n": n, "skipped": why }));
@@ -1568,13 +1586,28 @@ pub fn walk<S, K: Clone>(
                 break;
             }
         };
-        let holds = holds_ms(step, &argv);
-        let fits = if ran_any {
-            walk_step_fits(now, holds.saturating_add(overrun), budget.deadline_ms)
-        } else {
-            holds <= walk_budget_ms(budget.deadline_ms) && now < walk_budget_ms(budget.deadline_ms)
+        let carried = if ran_any { overrun } else { 0 };
+        let fits = |holds: u64| {
+            if ran_any {
+                walk_step_fits(now, holds.saturating_add(carried), budget.deadline_ms)
+            } else {
+                holds <= walk_budget_ms(budget.deadline_ms)
+                    && now < walk_budget_ms(budget.deadline_ms)
+            }
         };
-        if !fits {
+        let mut holds = holds_ms(step, &argv);
+        let mut clipped = None;
+        if !fits(holds) && budget.clips_waits {
+            let room = walk_budget_ms(budget.deadline_ms)
+                .saturating_sub(now)
+                .saturating_sub(carried);
+            if let Some((shorter, asked)) = clipped_wait(&argv, room) {
+                holds = holds_ms(step, &shorter);
+                argv = shorter;
+                clipped = Some(json!({ "askedMs": asked, "givenMs": room }));
+            }
+        }
+        if !fits(holds) {
             halted = Some((n, budget.out_of_time.clone()));
             break;
         }
@@ -1584,6 +1617,9 @@ pub fn walk<S, K: Clone>(
         overrun = overrun.max(took.saturating_sub(holds));
         ran_any = true;
         report["ms"] = json!(took);
+        if let Some(clipped) = clipped {
+            report[CLIPPED_KEY] = clipped;
+        }
         reports.push(report);
         if let Some(kind) = halt {
             halted = Some((n, kind));
@@ -1595,6 +1631,25 @@ pub fn walk<S, K: Clone>(
         halted,
         elapsed_ms: elapsed_ms(),
     }
+}
+
+/// A wait step given `room_ms` in place of the longer hold it asked for, and
+/// what it asked: `None` for a step that does not wait, asks no more than
+/// the room, or is left no room at all.
+fn clipped_wait(step: &[String], room_ms: u64) -> Option<(Vec<String>, u64)> {
+    let command = parse_command(step)
+        .ok()
+        .filter(|command| command.method.waits())?;
+    let hold = hold_of(command.method)?;
+    let asked = asked_hold_ms(hold, &command)?;
+    if room_ms == 0 || asked <= room_ms {
+        return None;
+    }
+    let flag = format!("--{}", hold.asked_by?.flag);
+    let at = step.iter().position(|word| *word == flag)? + 1;
+    let mut shorter = step.to_vec();
+    *shorter.get_mut(at)? = room_ms.to_string();
+    Some((shorter, asked))
 }
 
 /// What a walked step's result says when its answer is ok but its work did
@@ -1800,13 +1855,12 @@ pub const COMPUTER_WAIT_FOR_MIN_MS: u64 = 0;
 
 /// A Flow's two budgets (docs/plans/flow-engine-implementation-20260914.md
 /// D9): its acts are held by the verbs' own tables, its verify lines by
-/// this one. A verify line waits a person's pause (`COMPUTER_WAIT_MAX_MS`,
-/// the longest a `wait` may hold a turn): three times a replayed check's
-/// default (`computer_recipe::RECIPE_CHECK_MS`, 10 s — a check that must
-/// come is given longer than one that merely places the walk), under a
-/// `wait-for`'s own ceiling and inside one `recipe-run`'s room, so a verdict
-/// is never cut short by a clock meant for an act.
-pub const FLOW_VERIFY_MS: u64 = COMPUTER_WAIT_MAX_MS;
+/// this one. A verify line waits three times a replayed check's default
+/// (`computer_recipe::RECIPE_CHECK_MS`, 10 s — a check that must come is
+/// given longer than one that merely places the walk), under a `wait-for`'s
+/// own ceiling and inside one `recipe-run`'s room, so a verdict is never cut
+/// short by a clock meant for an act.
+pub const FLOW_VERIFY_MS: u64 = 3 * crate::computer_recipe::RECIPE_CHECK_MS;
 /// A Flow's baseline probe: before its first act, every event line is
 /// asked once with no wait — the least a `wait-for` allows — so an event
 /// that already holds at the start is known to be stale, not this run's.
@@ -2506,6 +2560,18 @@ impl ComputerMethod {
                 | Self::WaitFor
                 | Self::SoundWait
                 | Self::Watch
+        )
+    }
+
+    /// Whether the verb waits — for time, a condition, the ears or the
+    /// screen — holding the desk by its own table and nothing else: a stop
+    /// ends it at once, and a walk clips it to the room its call has left
+    /// rather than end before it (t-66760).
+    #[must_use]
+    pub const fn waits(self) -> bool {
+        matches!(
+            self,
+            Self::Wait | Self::WaitFor | Self::SoundWait | Self::Watch
         )
     }
 
@@ -6874,6 +6940,24 @@ mod tests {
         );
     }
 
+    /// A wait holds a turn at most 20 s (t-66760 b2): the condition waits
+    /// keep their minute, and a Flow's verify line keeps its three replayed
+    /// checks — a wait's cap is not theirs.
+    #[test]
+    fn a_wait_holds_a_turn_at_most_twenty_seconds() {
+        assert_eq!(
+            desktop_wait_ms(30_000),
+            (20_000, true),
+            "a wait asked for 30 s is held 20 s, and says the table cut it"
+        );
+        assert_eq!(desktop_wait_for_ms(Some(60_000)), (60_000, false));
+        assert_eq!(
+            FLOW_VERIFY_MS,
+            3 * crate::computer_recipe::RECIPE_CHECK_MS,
+            "a Flow's verify line keeps its 30 s"
+        );
+    }
+
     /// The desktop verbs a person has and an app-scoped verb does not: the
     /// whole screen, the mouse and the keys at screen coordinates, a wait,
     /// the displays (docs/design/computer-use-full-operator.md §2.1). Each
@@ -8140,10 +8224,11 @@ mod tests {
             untimed.starts_with("step 1 (wait-for)") && untimed.contains("--timeout-ms"),
             "{untimed}"
         );
+        let past_the_budget = (COMPUTER_BATCH_MAX_WAIT_MS - COMPUTER_WAIT_MAX_MS + 1).to_string();
         assert!(
             refused(json!([
-                ["wait", "--ms", "30000"],
-                ["hold-key", "--key", "a", "--ms", "5000"]
+                ["wait", "--ms", COMPUTER_WAIT_MAX_MS.to_string()],
+                ["hold-key", "--key", "a", "--ms", past_the_budget]
             ]))
             .contains("at most")
         );
@@ -8472,6 +8557,7 @@ mod tests {
         let budget = WalkBudget {
             deadline_ms: COMPUTER_USE_DEADLINE_SECONDS * 1_000,
             out_of_time: "late",
+            clips_waits: false,
         };
         let walked = walk(
             &steps,
@@ -8512,6 +8598,7 @@ mod tests {
         let tight = WalkBudget {
             deadline_ms: COMPUTER_BATCH_ANSWER_MARGIN_MS + 30,
             out_of_time: "late",
+            clips_waits: false,
         };
         let late = walk(
             &steps,
@@ -8536,6 +8623,7 @@ mod tests {
             &WalkBudget {
                 deadline_ms: base,
                 out_of_time: "late",
+                clips_waits: false,
             },
             |_, _| 1_000,
             |_, step: &&str| Next::Run(vec![(*step).to_string()]),
@@ -8560,6 +8648,7 @@ mod tests {
             &WalkBudget {
                 deadline_ms: base,
                 out_of_time: "late",
+                clips_waits: false,
             },
             |_, _| walk_budget_ms(base),
             |_, step: &&str| Next::Run(vec![(*step).to_string()]),
