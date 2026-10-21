@@ -122,7 +122,7 @@ impl MemoryFixture {
         })
     }
 
-    fn note(&self, slug: &str, local: bool, body: &str) -> super::MemoryWriteInput {
+    fn note(slug: &str, local: bool, body: &str) -> super::MemoryWriteInput {
         super::MemoryWriteInput {
             slug: slug.to_string(),
             summary: "a synthetic fact".to_string(),
@@ -934,11 +934,11 @@ fn memory_write_declines_a_local_entry_that_would_hide_a_global_one() {
     let fixture = MemoryFixture::new();
     let ctx = fixture.ctx();
     fixture
-        .run(|| super::run_memory_write(&fixture.note("shared-rule", false, "durable body"), &ctx))
+        .run(|| super::run_memory_write(&MemoryFixture::note("shared-rule", false, "durable body"), &ctx))
         .expect("explicit global write");
 
     let result =
-        fixture.run(|| super::run_memory_write(&fixture.note("Shared Rule.md", true, "overlay body"), &ctx));
+        fixture.run(|| super::run_memory_write(&MemoryFixture::note("Shared Rule.md", true, "overlay body"), &ctx));
     let Err(ToolError::Declined(message)) = &result else {
         panic!("a same-slug local write must be a verdict, not an io error: {result:?}");
     };
@@ -969,7 +969,7 @@ fn memory_write_same_slug_rules_hold() {
     let ctx = fixture.ctx();
     let write = |slug: &str, local: bool, body: &str| {
         fixture
-            .run(|| super::run_memory_write(&fixture.note(slug, local, body), &ctx))
+            .run(|| super::run_memory_write(&MemoryFixture::note(slug, local, body), &ctx))
             .expect("memory write")
     };
 

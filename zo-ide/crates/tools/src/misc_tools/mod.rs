@@ -2640,7 +2640,7 @@ fn execute_memory_write(input: &MemoryWriteInput, ctx: &ToolContext) -> Result<V
         runtime::memory::DreamError::ScopeConflict { slug } => {
             ToolError::Declined(local_would_hide_global(&slug))
         }
-        error => ToolError::Io(std::io::Error::other(error)),
+        error @ runtime::memory::DreamError::Io(_) => ToolError::Io(std::io::Error::other(error)),
     })?;
     let memory_dir = runtime::memory::paths::memory_write_dir(&cwd, input.local);
     let entry_path = memory_dir.join(format!("{slug}.md"));
