@@ -2594,6 +2594,10 @@ pub(crate) mod tests {
     pub(crate) const PHOTO_WINDOW: u64 = 41;
     #[cfg(unix)]
     pub(crate) const PHOTO_TITLE: &str = "Fixture document";
+    /// The identity the photo scene's window gives its document when a test
+    /// has it give one — an `AXDocument`, a page's URL (t-68358).
+    #[cfg(unix)]
+    const PHOTO_DOCUMENT: &str = "fixture-document-a";
 
     /// The photo scene's click: by label and role, in the background, in the
     /// window the model looked at.
@@ -2614,6 +2618,13 @@ pub(crate) mod tests {
     pub(crate) fn photo_found(title: &str, matches: &Value) -> Value {
         json!({"source":"accessibility","snapshotId":"fixture-snapshot-2","app":"Fixture",
             "window":{"id":PHOTO_WINDOW,"title":title},"matches":matches,"truncated":false})
+    }
+
+    /// A read of the photo scene's window whose document gives `identity`.
+    #[cfg(unix)]
+    fn of_document(mut found: Value, identity: &str) -> Value {
+        found["window"]["document"] = json!(identity);
+        found
     }
 
     /// The photo scene: the model looks at the window (its document is
@@ -2661,8 +2672,10 @@ pub(crate) mod tests {
     }
 
     /// Photo scene (a), t-66760 b1: the same document, one control that
-    /// reads the words — pressed once, by its index on that read, in the
-    /// same window and the same background; the answer says it was re-picked.
+    /// reads the words — pressed once, by those words (t-68358), in the
+    /// same window and the same background; the answer says it was
+    /// re-picked, which control, and that only the title was compared: the
+    /// fixture's window gives no document identity.
     #[cfg(unix)]
     #[test]
     fn the_photo_scene_click_is_repicked_once_on_the_same_document() {
@@ -2674,8 +2687,8 @@ pub(crate) mod tests {
         let answer: Value = serde_json::from_str(&answer.unwrap()).unwrap();
         assert_eq!(
             answer["repicked"],
-            json!({"label":"Continue","role":"AXButton","element_index":7}),
-            "photo scene (a): the answer says it re-picked, and which control"
+            json!({"label":"Continue","role":"AXButton","compared":"title only"}),
+            "photo scene (a): the answer says it re-picked, which control, and that only the title was compared"
         );
         assert_eq!(calls(dir.path()), ["observe", "click", "find", "click", "observe"], "photo scene (a): one read of the window, one press, one look after");
         let window = PHOTO_WINDOW.to_string();
@@ -2686,8 +2699,8 @@ pub(crate) mod tests {
         );
         let pressed = shim_words(dir.path(), "click", 2);
         assert!(
-            names(&pressed, "--element-index", "7") && names(&pressed, "--window-id", &window) && pressed.iter().any(|word| word == "--background"),
-            "photo scene (a): the press names the read's control, in the same window and the background: {pressed:?}"
+            names(&pressed, "--label", "Continue") && names(&pressed, "--window-id", &window) && pressed.iter().any(|word| word == "--background"),
+            "photo scene (a): the press names the control by its words, in the same window and the background: {pressed:?}"
         );
     }
 
@@ -2721,6 +2734,85 @@ pub(crate) mod tests {
             "photo scene (c): the refusal names the candidates: {refused}"
         );
         assert_eq!(clicks(dir.path()), 1, "photo scene (c): nothing pressed between two candidates");
+    }
+
+    /// Photo scene (d), t-68358: the window keeps its title through a change
+    /// of document — Finder, Terminal, a web app with one title per site —
+    /// and gives its document's identity. The identity holds the re-pick to
+    /// the document as well as the title: another identity, or one on one
+    /// side only, keeps the refusal, and nothing more is pressed.
+    #[cfg(unix)]
+    #[test]
+    fn a_repick_whose_title_stayed_but_whose_document_changed_is_refused() {
+        for (looked, read) in [(Some(PHOTO_DOCUMENT), Some("fixture-document-b")), (Some(PHOTO_DOCUMENT), None), (None, Some(PHOTO_DOCUMENT))] {
+            let dir = tempfile::tempdir().unwrap();
+            let (road, _) = fake_shim(dir.path());
+            let ctx = crate::tests::tool_context_outside_cwd_windows();
+            if let Some(looked) = looked {
+                std::fs::write(dir.path().join("window-document"), looked).unwrap();
+            }
+            let mut found = photo_found(PHOTO_TITLE, &json!([continue_button(7)]));
+            if let Some(read) = read {
+                found = of_document(found, read);
+            }
+            let answer = photo_scene(dir.path(), &ctx, &road, &found);
+            assert!(
+                answer.as_ref().is_err_and(|error| error.to_string().contains("document changed")),
+                "photo scene (d), {looked:?} → {read:?}: the same title on another document keeps the refusal: {answer:?}"
+            );
+            assert_eq!(clicks(dir.path()), 1, "photo scene (d), {looked:?} → {read:?}: nothing pressed on another document");
+        }
+    }
+
+    /// Photo scene (e), t-68358: the same title and the same document
+    /// identity — the click is re-picked, and the answer says both were
+    /// compared.
+    #[cfg(unix)]
+    #[test]
+    fn a_repick_on_the_same_title_and_document_says_it_compared_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        std::fs::write(dir.path().join("window-document"), PHOTO_DOCUMENT).unwrap();
+        let found = of_document(photo_found(PHOTO_TITLE, &json!([continue_button(7)])), PHOTO_DOCUMENT);
+        let answer = photo_scene(dir.path(), &ctx, &road, &found);
+        assert!(answer.is_ok(), "photo scene (e): the same title and document, so the click is re-picked: {answer:?}");
+        let answer: Value = serde_json::from_str(&answer.unwrap()).unwrap();
+        assert_eq!(answer["repicked"]["compared"], "title and document", "photo scene (e): the answer says the title and the document were compared");
+        assert_eq!(clicks(dir.path()), 2, "photo scene (e): one press after the refused click");
+    }
+
+    /// Photo scene (f), t-68358: the window's tree moved between the read
+    /// and the press, so the read's index 7 may name another control by
+    /// then. The press is the click the model asked, once more, by its
+    /// words: the helper chooses the control on the press's own tree and
+    /// refuses none or several; the read's index is never sent.
+    #[cfg(unix)]
+    #[test]
+    fn a_repick_on_a_tree_that_moved_presses_by_the_words_not_a_stale_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let answer = photo_scene(dir.path(), &ctx, &road, &photo_found(PHOTO_TITLE, &json!([continue_button(7)])));
+        assert!(answer.is_ok(), "photo scene (f): one control reads the words on the same document: {answer:?}");
+        let (asked, pressed) = (shim_words(dir.path(), "click", 1), shim_words(dir.path(), "click", 2));
+        assert_eq!(pressed, asked, "photo scene (f): the press is the click the model asked, by its words — not by the read's index 7");
+    }
+
+    /// Photo scene (g): the re-picked press is itself refused — by then the
+    /// tree moved again, and no control or several read the words. That
+    /// refusal is the answer; nothing is read or pressed a third time.
+    #[cfg(unix)]
+    #[test]
+    fn a_repicked_press_the_window_refuses_is_the_answer_and_nothing_is_pressed_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let several = json!({"ok":false,"error":{"code":"ambiguous_target","message":"2 controls read --role AXButton --label «Continue»"}});
+        std::fs::write(dir.path().join("reply-click.2"), several.to_string()).unwrap();
+        let refused = refused_with(photo_scene(dir.path(), &ctx, &road, &photo_found(PHOTO_TITLE, &json!([continue_button(7)]))));
+        assert!(refused.starts_with("ambiguous_target:"), "photo scene (g): the press's own refusal is the answer: {refused}");
+        assert_eq!(calls(dir.path()), ["observe", "click", "find", "click"], "photo scene (g): one read, one press — never a third");
     }
 
     /// No look at the window: there is no document to hold a re-pick to, so
@@ -3802,7 +3894,8 @@ pub(crate) mod tests {
     /// without one it carries the old window's (`A_CODE`); the line's words
     /// are kept, one to a line. The `n`th call of a verb keeps its words in
     /// `argv-<verb>.<n>` and answers `reply-<verb>.<n>` when the test wrote
-    /// one; a window it answers for shows the title in `window-title`.
+    /// one; a window it answers for shows the title in `window-title`, and
+    /// gives the identity in `window-document` as its document's.
     #[cfg(unix)]
     pub(crate) fn fake_shim(dir: &Path) -> (ComputerRoad, PathBuf) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -3826,6 +3919,7 @@ done
 [ -f '@DIR@/forced-window' ] && window="$(cat '@DIR@/forced-window')"
 title=''
 [ -f '@DIR@/window-title' ] && title=',"title":"'"$(cat '@DIR@/window-title')"'"'
+[ -f '@DIR@/window-document' ] && title="$title"',"document":"'"$(cat '@DIR@/window-document')"'"'
 target=''
 [ -n "$window" ] && target=',"window":{"id":'"$window""$title"'},"fixture":"unrelated-window-fixture"'
 [ -f '@DIR@/reply-'"$verb"'.'"$asked" ] && { cat '@DIR@/reply-'"$verb"'.'"$asked"; echo; exit 0; }
