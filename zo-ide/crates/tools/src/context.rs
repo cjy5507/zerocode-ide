@@ -425,6 +425,12 @@ pub struct ToolContext {
     /// context-build time per agent and never mutated live (same lifecycle as
     /// [`Self::lease_owner`]). See [`Self::with_subagent_identity`].
     subagent_identity: Option<SubagentIdentity>,
+    /// The conversation whose plan `TodoWrite` keeps, when it is not the
+    /// session in [`Self::session_id`]: an in-process helper runs its own
+    /// conversation under its parent's session id, and its plan is its own
+    /// (see [`Self::plan_session_id`]). Plain `Option`, fixed at
+    /// context-build time per agent like [`Self::lease_owner`].
+    plan_owner: Option<String>,
     /// Session-local disabled tool names loaded from `.zo/tool-toggles.json`
     /// and shared across registry clones. Names are stored canonicalized, so
     /// aliases like `web_search` disable the same handler as `WebSearch`.
@@ -554,6 +560,7 @@ impl fmt::Debug for ToolContext {
             .field("worktree_confinement", &self.worktree_confinement)
             .field("lease_owner", &self.lease_owner)
             .field("subagent_identity", &self.subagent_identity)
+            .field("plan_owner", &self.plan_owner)
             .field("disabled_tools", &self.disabled_tools())
             .field(
                 "background_agent_default",
@@ -688,6 +695,7 @@ impl ToolContext {
             worktree_confinement: None,
             lease_owner: None,
             subagent_identity: None,
+            plan_owner: None,
             disabled_tools: Arc::new(Mutex::new(BTreeSet::new())),
             tool_invocations: Arc::new(Mutex::new(Vec::new())),
             active_run_id: Arc::new(Mutex::new(None)),
@@ -1081,6 +1089,25 @@ impl ToolContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The session whose plan `TodoWrite` reads and writes: the helper's own
+    /// conversation when this context runs one ([`Self::with_plan_owner`]),
+    /// else the session it serves. `None` when it serves no session.
+    #[must_use]
+    pub fn plan_session_id(&self) -> Option<String> {
+        self.plan_owner.clone().or_else(|| self.session_id())
+    }
+
+    /// Keep this context's plan with conversation `session_id`. A helper runs
+    /// its own conversation under its parent's session id, the id its
+    /// manifests are stamped with, and its plan must never land in its
+    /// parent's (t-68408). A blank id leaves the plan with the served session.
+    #[must_use]
+    pub fn with_plan_owner(mut self, session_id: &str) -> Self {
+        let session_id = session_id.trim();
+        self.plan_owner = (!session_id.is_empty()).then(|| session_id.to_string());
+        self
     }
 
     /// Install the session-owned agent registry (see `Self::agent_registry`).

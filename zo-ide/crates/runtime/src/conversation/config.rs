@@ -1225,7 +1225,7 @@ where
         &self,
     ) -> std::collections::BTreeMap<String, crate::todo_progress::TodoStatus> {
         self.trace_cwd().map_or_else(Default::default, |cwd| {
-            crate::todo_progress::current_todos(&cwd)
+            crate::todo_progress::current_todos(&cwd, &self.session.session_id)
                 .into_iter()
                 .map(|todo| (todo.content, todo.status))
                 .collect()

@@ -8353,6 +8353,119 @@ async fn e2e_headless_background_exit_reaches_the_model_at_a_tool_boundary() {
     assert!(requests[2].contains("headless-tail") && requests[2].contains("use TaskOutput"));
 }
 
+/// t-68408: two zo sessions in one folder never hand each other their plans.
+/// The first writes a plan and leaves it in progress; the second, opened in the
+/// same folder, runs a tool and writes a plan of its own, and is handed none
+/// of the first one's steps -- neither re-anchored as `Current todos` nor
+/// handed back as `oldTodos`. The first, resumed, gets its own plan back and
+/// never the second's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_two_sessions_in_one_folder_keep_their_own_plans() {
+    let layout = Layout::new();
+    layout.model_led();
+    let args = ["--plain", "--permission-mode", "danger-full-access"];
+    // A store override inherited from the shell that runs the suite would give
+    // every session one plan; a blank value behaves as unset.
+    let env = [("ZO_TODO_STORE", "")];
+    let north_steps = [
+        ("Map the north wing", "Mapping the north wing"),
+        ("Paint the north wing", "Painting the north wing"),
+        ("Inspect the north wing", "Inspecting the north wing"),
+    ];
+    let north_plan = |at: usize| {
+        let todos: Vec<serde_json::Value> = north_steps
+            .iter()
+            .enumerate()
+            .map(|(step, (content, active))| {
+                let status = match step.cmp(&at) {
+                    std::cmp::Ordering::Less => "completed",
+                    std::cmp::Ordering::Equal => "in_progress",
+                    std::cmp::Ordering::Greater => "pending",
+                };
+                serde_json::json!({ "content": content, "activeForm": active, "status": status })
+            })
+            .collect();
+        serde_json::json!({ "todos": todos })
+    };
+
+    let first = ScriptedAnthropicService::tool_calls(&[("TodoWrite", north_plan(0))], "north-plan-written")
+        .await
+        .expect("start the first session's script");
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, first.base_url(),
+        &args, b"Plan the north wing.\n/exit\n", &env).expect("run the first session");
+    assert!(output.status.success(), "the first session: {}", String::from_utf8_lossy(&output.stderr));
+    let first_id = session_id_of(transcripts(&layout.sessions).first().expect("the first session's transcript"));
+
+    let second = ScriptedAnthropicService::tool_calls(&[
+        ("bash", serde_json::json!({ "command": "printf south-ready" })),
+        ("TodoWrite", serde_json::json!({ "todos": [
+            { "content": "Fix the south gate", "activeForm": "Fixing the south gate", "status": "in_progress" },
+        ] })),
+    ], "south-plan-written").await.expect("start the second session's script");
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, second.base_url(),
+        &args, b"Fix the south gate.\n/exit\n", &env).expect("run the second session");
+    assert!(output.status.success(), "the second session: {}", String::from_utf8_lossy(&output.stderr));
+    let heard = second.request_bodies().await;
+    assert!(heard.iter().any(|body| body.contains("south-ready")), "the second session ran its tool");
+    assert!(heard.iter().any(|body| body.contains("newTodos")), "and wrote its plan");
+    let handed: Vec<String> = heard.iter().flat_map(|body| plan_handed_over(body)).collect();
+    let foreign: Vec<&str> = north_steps
+        .iter()
+        .filter(|(content, active)| handed.iter().any(|plan| plan.contains(content) || plan.contains(active)))
+        .map(|(content, _)| *content)
+        .collect();
+    eprintln!(
+        "t-68408: the new session was handed {} of the {} steps of the session beside it",
+        foreign.len(),
+        north_steps.len()
+    );
+    assert_eq!(foreign, Vec::<&str>::new(), "the new session was handed its neighbour's plan: {handed:?}");
+
+    let resumed = ScriptedAnthropicService::tool_calls(&[("TodoWrite", north_plan(1))], "north-plan-resumed")
+        .await
+        .expect("start the resumed session's script");
+    let resumed_args = ["--plain", "--permission-mode", "danger-full-access", "--resume", first_id.as_str()];
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, resumed.base_url(),
+        &resumed_args, b"Carry on with the north wing.\n/exit\n", &env).expect("resume the first session");
+    assert!(output.status.success(), "the resumed session: {}", String::from_utf8_lossy(&output.stderr));
+    let handed: Vec<String> = resumed.request_bodies().await.iter().flat_map(|body| plan_handed_over(body)).collect();
+    let own_back = north_steps
+        .iter()
+        .filter(|(content, _)| handed.iter().any(|plan| plan.contains(content)))
+        .count();
+    assert_eq!(own_back, north_steps.len(), "the resumed session gets its own plan back: {handed:?}");
+    assert!(!handed.iter().any(|plan| plan.contains("south gate")), "and never its neighbour's: {handed:?}");
+}
+
+/// What one request body hands the model as its plan: every re-anchored
+/// `[zo:todo-progress]` reminder, and every step a `TodoWrite` result handed
+/// back as `oldTodos`.
+fn plan_handed_over(body: &str) -> Vec<String> {
+    fn walk(value: &serde_json::Value, plan: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => {
+                if text.contains("[zo:todo-progress]") {
+                    plan.push(text.clone());
+                }
+                let result = text.find('{').and_then(|start| {
+                    serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>().next()?.ok()
+                });
+                if let Some(result) = result.filter(|result| result.get("newTodos").is_some()) {
+                    for todo in result["oldTodos"].as_array().into_iter().flatten() {
+                        plan.extend(todo["content"].as_str().map(str::to_string));
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, plan)),
+            serde_json::Value::Object(fields) => fields.values().for_each(|field| walk(field, plan)),
+            _ => {}
+        }
+    }
+    let mut plan = Vec::new();
+    walk(&serde_json::from_str(body).expect("a JSON request body"), &mut plan);
+    plan
+}
+
 /// The plan scorer's shadow files one row per turn under the project's state
 /// dir: the alternatives it priced beside the plan the turn ran. A plain
 /// text turn is a solo plan on the current model, and every candidate the

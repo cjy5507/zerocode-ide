@@ -1224,13 +1224,14 @@ const NONINTERACTIVE_ENV: &[(&str, &str)] =
 /// respected.
 const STRIPPED_GIT_ENV: &[&str] = &["GIT_DIR", "GIT_WORK_TREE"];
 
-/// Per-session state zo scopes by setting process env vars on ITSELF
-/// (`scope_todo_store_to_session`). Those vars are an implementation detail of
-/// this process, not part of the child's contract — inherited by a shell they
-/// leak into any `zo` launched from it, which then reads (and rewrites) the
-/// PARENT session's store. Stripped like [`STRIPPED_GIT_ENV`]: only the
-/// inherited value is removed, so `ZO_TODO_STORE=x zo …` written inline in the
-/// command, `settings.env`, or a profile re-export still applies.
+/// A todo-store override (`ZO_TODO_STORE`) given to THIS zo is this process's
+/// own: every session in it keeps its plan there instead of in its per-session
+/// store (`runtime::todo_store`). Inherited by a shell it would leak into any
+/// `zo` launched from that shell, which would then read (and rewrite) this
+/// process's plan instead of keeping its own. Stripped like
+/// [`STRIPPED_GIT_ENV`]: only the inherited value is removed, so
+/// `ZO_TODO_STORE=x zo …` written inline in the command, `settings.env`, or a
+/// profile re-export still applies.
 const STRIPPED_SESSION_SCOPE_ENV: &[&str] = &["ZO_TODO_STORE"];
 
 /// Apply [`NONINTERACTIVE_ENV`] and detach stdin so no child can reach the
@@ -2452,10 +2453,10 @@ mod tests {
 
     #[test]
     fn inherited_session_scope_env_never_reaches_child_shells() {
-        // Regression: `ZO_TODO_STORE` is set on THIS process by per-session
-        // scoping, so every child shell inherited it — and any `zo` launched
-        // from that shell (Bash tool, `!`, tmux) adopted the PARENT session's
-        // todo store, resurrecting a previous session's plan after `/new`.
+        // Regression: a `ZO_TODO_STORE` given to THIS process reached every
+        // child shell — and any `zo` launched from that shell (Bash tool, `!`,
+        // tmux) adopted the PARENT's todo store instead of its own session's,
+        // resurrecting a previous session's plan after `/new`.
         // The runner must strip the inherited value before the child runs.
         //
         // Lock discipline: `ZO_TODO_STORE` writers across this test binary

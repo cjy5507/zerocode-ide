@@ -221,12 +221,13 @@ fn contains_whole_words(text: &str, phrase: &str) -> bool {
 }
 
 
-/// Build the mid-turn todo-progress reminder for `cwd` from the persisted plan,
-/// prefixed so [`ConversationRuntime::replace_transient_system_reminder_by_prefix`]
-/// can refresh it without accumulating. `None` when there is nothing to anchor
+/// Build the mid-turn todo-progress reminder for session `session_id` in `cwd`
+/// from its persisted plan, prefixed so
+/// [`ConversationRuntime::replace_transient_system_reminder_by_prefix`] can
+/// refresh it without accumulating. `None` when there is nothing to anchor
 /// (no plan, or every item complete), which clears any prior reminder.
-pub(super) fn todo_progress_reminder_for(cwd: &std::path::Path) -> Option<String> {
-    let todos = crate::todo_progress::current_todos(cwd);
+pub(super) fn todo_progress_reminder_for(cwd: &std::path::Path, session_id: &str) -> Option<String> {
+    let todos = crate::todo_progress::current_todos(cwd, session_id);
     crate::todo_progress::render_todos_reminder(&todos)
         .map(|body| format!("{TODO_PROGRESS_REMINDER_PREFIX}\n{body}"))
 }
@@ -490,7 +491,7 @@ where
             None
         } else {
             self.trace_cwd()
-                .and_then(|cwd| todo_progress_reminder_for(&cwd))
+                .and_then(|cwd| todo_progress_reminder_for(&cwd, &self.session.session_id))
         };
         self.replace_transient_system_reminder_by_prefix(
             TODO_PROGRESS_REMINDER_PREFIX,
