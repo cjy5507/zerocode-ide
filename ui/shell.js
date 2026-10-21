@@ -3379,10 +3379,13 @@ function agentGraphTeamLayout(agents, byPane, seats) {
     if (!held.runs.includes(run)) held.runs.push(run);
     teamOf.set(entry.card.pane, held.key);
   }
-  /* 누가 누군가를 시작했는가 — 4의 갈림. 제 자신을 부모로 적은 판은 시작한 것이 아니다. */
+  /* 누가 누군가를 시작했는가 — 4의 갈림. 셈에 드는 자식은 아직 열이 없는 자식뿐이다: 자리를 넘긴
+   * 옛 코디가 시작한 워커는 이미 새 코디의 열에 섰으므로(2), 옛 코디의 판은 빈 열의 머리가 되지 않고
+   * 「내 판」에 선다. 제 자신을 부모로 적은 판은 시작한 것이 아니다. */
   const started = new Set();
   for (const entry of agents) {
-    if (entry.card.parent !== entry.card.pane && byPane.has(entry.card.parent)) started.add(entry.card.parent);
+    if (teamOf.has(entry.card.pane) || entry.card.parent === entry.card.pane) continue;
+    if (byPane.has(entry.card.parent)) started.add(entry.card.parent);
   }
   const byName = (left, right) => left.card.pane.localeCompare(right.card.pane);
   for (const entry of [...agents].sort(byName)) {
