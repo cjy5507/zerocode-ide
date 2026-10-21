@@ -1783,8 +1783,10 @@ mod tests {
              freezes on the first word:\n{said}"
         );
         let graph = block_after(window, "function paintAgentGraph(view, model) {");
+        // The keyed reconcile stands in the columns' own painter (direction E2).
+        let teams = block_after(window, "function paintAgentGraphTeams(view, model) {");
         assert!(
-            graph.contains("reconcileElementOrder(nodesHost, wanted)")
+            teams.contains("reconcileElementOrder(nodesHost, wanted)")
                 && graph.contains("topologyMoved || dressMoved")
                 && graph.contains("paintAgentGraphEdges(view, { styleOnly: true })"),
             "the graph rebuilds its keyed nodes or remeasures unchanged edges:\n{graph}"
@@ -2144,14 +2146,15 @@ mod tests {
         // The blue is spent on the person's turn and nowhere else: the marks
         // that mean "a person must answer" wear it — the sidebar's, and the
         // relations tab's (run-4275 m-68002: seventeen rules there and the
-        // unread-mail badge) — and the caution role keeps the amber a warning
-        // needs to read as one.
+        // unread-mail badge; direction E2, t-68475: the coordinator's head
+        // when it asks, and the 당신 차례 mark on stems and chips) — and the
+        // caution role keeps the amber a warning needs to read as one.
         let chrome = include_str!("../../../../ui/shell.css");
         for selector in [
             ".agent-graph-node-state.is-needs-attention {",
             ".wt-agent.is-waiting .wt-agent-dot {",
-            ".agent-graph-node.is-attention {",
-            ".agent-graph-stat.is-attention .agent-graph-stat-mark {",
+            ".agent-graph-node.is-head.is-signal-you {",
+            ".agent-graph-signal.is-you {",
             ".agent-graph-mail-badge {",
         ] {
             let body = block_after_css(chrome, selector);
@@ -2450,10 +2453,12 @@ mod tests {
             "--palette-drop: 20%;",
             "--palette-input-height: 48px;",
             "--palette-list-height: min(400px, 60vh);",
-            // The graph's three common layers fit beside the inspector. These
-            // values live in tokens so JavaScript measures the DOM rather than
-            // carrying a second pixel vocabulary for SVG edges.
-            "--agent-graph-context-width: 116px;",
+            // The graph's columns sit beside the inspector (direction E2,
+            // t-68475: one column per coordinator, 340px at least and 720px at
+            // most). These values live in tokens so JavaScript measures the DOM
+            // rather than carrying a second pixel vocabulary for SVG edges.
+            "--agent-graph-team-width: 340px;",
+            "--agent-graph-team-max: 720px;",
             "--agent-graph-agent-width: 172px;",
             "--agent-graph-inspector-width: 300px;",
             // `.scrollbar-sleek`: 12px track, 3px inset — a 6px bar — and a
@@ -2484,9 +2489,10 @@ mod tests {
         );
         let nodes = block_after_css(&styles, ".agent-graph-nodes {");
         assert!(
-            styles.contains("--agent-graph-lane-gap: calc(var(--agent-graph-layer-gap)")
-                && nodes.contains("column-gap: var(--agent-graph-lane-gap)"),
-            "the graph stopped spending its shared layer gap:\n{nodes}"
+            nodes.contains("minmax(min(100%, var(--agent-graph-team-width)), 1fr)")
+                && nodes.contains("var(--agent-graph-team-max)")
+                && nodes.contains("gap: var(--agent-graph-team-gap)"),
+            "the graph stopped spending its team geometry:\n{nodes}"
         );
         // The active tab is a lit panel, not just brighter text. Titanium uses
         // a 5% lift and a 42% marker: enough to navigate, quieter than state.
@@ -17568,17 +17574,22 @@ mod tests {
                 "the graph built a second data pipeline instead of using its cards:\n{model}"
             );
             let painting = block_after(window, "function paintAgentGraph(view, model) {");
+            let teams = block_after(window, "function paintAgentGraphTeams(view, model) {");
             assert!(
-                painting.contains("reconcileElementOrder(nodesHost, wanted)")
+                teams.contains("reconcileElementOrder(nodesHost, wanted)")
+                    && painting.contains("paintAgentGraphTeams(view, model)")
                     && painting.contains("topologyMoved || dressMoved")
                     && painting.contains("paintAgentGraphEdges(view, { styleOnly: true })"),
                 "the graph rebuilds nodes or edges whose topology did not move:\n{painting}"
             );
+            // Who started whom is the stem (direction E2): a column per
+            // coordinator, its workers hung under it and each helper under its
+            // worker on an indented stem.
             let styles = include_str!("../../../../ui/shell.css");
             assert!(
-                styles.contains(".agent-graph-edge.is-spawned")
-                    && styles.contains("stroke-dasharray"),
-                "spawned-by edges are no longer drawn as a distinct relation"
+                styles.contains(".agent-graph-spine::before")
+                    && styles.contains(".agent-graph-spine.is-sub"),
+                "spawned-by is no longer drawn as a stem"
             );
             return;
         }
@@ -31579,11 +31590,17 @@ mod tests {
 
         if window.contains("function agentGraphModel(columns, places, reviews") {
             let graph = block_after(window, "function agentGraphModel(");
+            // Every card lands in a column (direction E2): a root nobody seated
+            // leads its own column or joins the person's own, and a cycle is
+            // cut where the walk from the stem's top cannot reach it.
+            let teams = block_after(window, "function agentGraphTeamLayout(agents, byPane, seats) {");
             assert!(
                 graph.contains("entry.card.parent")
                     && graph.contains("const children = new Map();")
-                    && graph.contains("if (!placed.has(entry.card.pane)) place(entry, 0);")
-                    && graph.contains("!visiting.has(child.card.pane)"),
+                    && graph.contains("agentGraphTeamLayout(agents, byPane, seatList)")
+                    && teams.contains("team(\"team:own\", \"own\")")
+                    && teams.contains("if (reached.has(pane)) continue;")
+                    && teams.contains("spineParentOf.set(pane, null);"),
                 "the graph can lose an orphan or cycle, or stopped reading spawned-by edges:\n{graph}"
             );
             assert!(

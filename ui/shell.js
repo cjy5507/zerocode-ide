@@ -641,8 +641,6 @@ let agentGraphScopeLabel = "";
 let agentGraphInspectorTab = "relations";
 let agentGraphCardDetails = false;
 const agentGraphScopeSources = new WeakMap();
-const agentGraphScopeFolded = new Set();
-const agentGraphScopeIdleCollapsed = new Set();
 const agentGraphTaskScopes = new WeakMap();
 const agentGraphInspectorViews = new WeakMap();
 const agentGraphEdgeMeasurements = new WeakMap();
@@ -656,12 +654,6 @@ let agentGraphLayoutRuns = 0;
 let agentGraphNodeCreations = 0;
 let agentGraphEdgeMeasureRuns = 0;
 const agentGraphEdgeFrames = new WeakMap();
-/* The lanes that are not agents. The project is NOT one of them — it is the
- * band a lane strip runs across, because the number that grows without bound
- * on this surface is projects, and a project in a column is a heading that
- * scrolls off the left edge the moment a lineage gets deep. */
-const AGENT_GRAPH_CONTEXT_LAYERS = ["workspace"];
-const AGENT_GRAPH_LANE_CLASSES = ["lane-1", "lane-2", "lane-3", "lane-4", "lane-5"];
 const AGENT_RELATIVE_TIME_TICK_MS = 30_000;
 /* 카드가 그리는 활동의 양 (t-2374).
  *
@@ -702,21 +694,21 @@ const AGENT_ACTIVITY_GLYPHS = new Map([
  * 시각 수치가 아니므로 상수로 남는다 — 이 수를 CSS가 골라도 되는 값으로
  * 내리면 「80%가 되면 노랗다」는 계약이 두 곳에 적힌다. */
 const AGENT_GRAPH_CONTEXT_FULL = 0.8;
+/* 그리고 카드가 컨텍스트를 말하기 시작하는 자리 (방향 E2). 그 밑의 수는 사람이 할 일이 없는
+ * 숫자라 카드에 서지 않는다 — 인스펙터의 미터는 그대로 다 말한다. 같은 이유로 상수다. */
+const AGENT_GRAPH_CONTEXT_SHOWN = 0.6;
 const AGENT_GRAPH_QUIET_AFTER_MS = 5 * 60_000;
-/* Which project bands a person has closed, how far the canvas is zoomed, and
- * whether the legend stands. All three are user facts rather than model facts
+/* What a person has opened on the card picture — a 「끝남 N」 fold (by the
+ * spine it closes), a card's full question, a card's log — and which card's
+ * lineage they asked to trace. All four are user facts rather than model facts
  * and live beside the selection: a hook event repaints the graph several times
- * a second, and a repaint that reopened a band somebody just closed would make
- * the fold useless on exactly the busy surface it exists for. */
-const agentGraphFolded = new Set();
-/* Projects without a single agent start as one summary row. Unlike an active
- * project's ordinary fold, opening dormant inventory is the exceptional user
- * choice, so remember the OPEN set: newly discovered quiet projects then keep
- * the useful default without a paint mutating presentation state. */
-const agentGraphDormantExpanded = new Set();
-/* Idle inventory is never removed from the model. This set records the
- * workspaces whose presentation chip a person explicitly opened. */
-const agentGraphIdleExpanded = new Set();
+ * a second, and a repaint that closed what somebody just opened would make the
+ * gesture useless on exactly the busy surface it exists for. */
+const agentGraphFoldsOpen = new Set();
+const agentGraphAsksOpen = new Set();
+const agentGraphLogsOpen = new Set();
+let agentGraphTraceKey = null;
+let agentGraphAskIds = 0;
 const agentGraphExpandedTimelines = new Set();
 let agentGraphZoom = 1;
 let agentGraphLegendOpen = true;
@@ -3340,6 +3332,289 @@ function agentGraphAgentKey(value) {
   return word.startsWith("agent:") ? word : `agent:${word}`;
 }
 
+/* ---- 코디별 줄기 (방향 E2, 사람 10-21 「e2로 가자」, t-68475) ------------------
+ *
+ * 관계 탭의 카드 그림은 코디마다 한 열이다. 사람이 말을 거는 상대가 코디라서, 열은 원장의 코디
+ * 자리(`coordinatorSeats`)가 정한다 — 계보(`card.parent`)만이 아니다. 계보만 따르면 자리를 넘겨받은
+ * 새 코디의 워커가 떠난 코디 밑에 서고, 주인이 떠난 워커는 부모 없이 뜬다(방향 D의 결함 둘째와 같은
+ * 모양). 넷의 차례:
+ *
+ *   1. 코디 자리에 앉은 판은 제 열의 머리다. 한 판이 실행 둘의 자리를 쥐면 열 하나가 둘을 적는다.
+ *   2. 원장의 워커(`place.run`)는 그 실행의 열에 선다 — 그 실행의 코디 판이 이 그림에 없으면 실행을
+ *      머리로 단 열에. 그래서 주인이 떠난 워커도, 자리가 넘어간 실행의 워커도 제 실행 밑에 선다.
+ *   3. 나머지는 계보를 따라 올라가 처음 만나는 열에 선다 — 헬퍼는 제 워커 밑에, 코디가 띄운 판은 그
+ *      코디 밑에.
+ *   4. 끝까지 열을 못 만난 뿌리는, 누군가를 시작했으면 제 열의 머리가 되고 아니면 「직접 연 판」 한
+ *      열에 모인다.
+ *
+ * 열 안에서 줄기의 부모는 같은 열에 선 `card.parent`이고, 그 밖이면 열의 머리다. 고리는 줄기의 맨
+ * 위에서 걸어 닿지 못한 카드를 맨 위로 올려 끊는다 — 카드 하나도 빠지지 않는다. 이 셈은 열의 위상이
+ * 움직인 판에서만 다시 한다(`agentGraphLayoutRuns`); 판(pane)만 들고 개체는 들지 않으므로 다음 모델이
+ * 그대로 다시 쓴다. */
+function agentGraphTeamLayout(agents, byPane, seats) {
+  const teams = new Map();
+  const teamOf = new Map();
+  const team = (key, kind, lead = null) => {
+    if (!teams.has(key)) teams.set(key, { key, kind, lead, runs: [] });
+    return teams.get(key);
+  };
+  const leadOfRun = new Map();
+  for (const seat of seats) {
+    if (seat.term === null || !byPane.has(`term:${seat.term}`)) continue;
+    const pane = `term:${seat.term}`;
+    const held = team(`team:${pane}`, "lead", pane);
+    if (!held.runs.includes(seat.run)) held.runs.push(seat.run);
+    teamOf.set(pane, held.key);
+    leadOfRun.set(seat.run, pane);
+  }
+  for (const entry of agents) {
+    const run = agentGraphCleanText(entry.place.run);
+    if (!run || teamOf.has(entry.card.pane)) continue;
+    const lead = leadOfRun.get(run);
+    if (lead) {
+      teamOf.set(entry.card.pane, `team:${lead}`);
+      continue;
+    }
+    const held = team(`team:run:${run}`, "run");
+    if (!held.runs.includes(run)) held.runs.push(run);
+    teamOf.set(entry.card.pane, held.key);
+  }
+  /* 누가 누군가를 시작했는가 — 4의 갈림. 제 자신을 부모로 적은 판은 시작한 것이 아니다. */
+  const started = new Set();
+  for (const entry of agents) {
+    if (entry.card.parent !== entry.card.pane && byPane.has(entry.card.parent)) started.add(entry.card.parent);
+  }
+  const byName = (left, right) => left.card.pane.localeCompare(right.card.pane);
+  for (const entry of [...agents].sort(byName)) {
+    if (teamOf.has(entry.card.pane)) continue;
+    const path = [];
+    const seen = new Set();
+    let here = entry;
+    while (here && !teamOf.has(here.card.pane) && !seen.has(here.card.pane)) {
+      seen.add(here.card.pane);
+      path.push(here);
+      here = byPane.get(here.card.parent) ?? null;
+    }
+    let key = here ? teamOf.get(here.card.pane) : null;
+    if (!key) {
+      /* 뿌리, 또는 어느 열에도 닿지 않은 고리 — 고리라면 그 안의 첫 이름이 뿌리 노릇을 한다. */
+      const root = here ? path.slice(path.indexOf(here)).sort(byName)[0] : path.at(-1);
+      key = started.has(root.card.pane)
+        ? team(`team:${root.card.pane}`, "lead", root.card.pane).key
+        : team("team:own", "own").key;
+    }
+    for (const one of path) teamOf.set(one.card.pane, key);
+  }
+  const spineParentOf = new Map();
+  for (const entry of agents) {
+    const pane = entry.card.pane;
+    const lead = teams.get(teamOf.get(pane)).lead;
+    const parent = entry.card.parent;
+    spineParentOf.set(pane, pane !== lead && parent && parent !== pane && parent !== lead &&
+      byPane.has(parent) && teamOf.get(parent) === teamOf.get(pane) ? parent : null);
+  }
+  for (const held of teams.values()) {
+    if (held.lead) spineParentOf.set(held.lead, null);
+  }
+  /* 고리 끊기: 줄기의 맨 위에서 걸어 닿는 카드를 세고, 닿지 못한 카드는 이름 차례로 맨 위에 올린다. */
+  const below = new Map();
+  for (const [pane, parent] of spineParentOf) {
+    if (parent) below.set(parent, [...(below.get(parent) ?? []), pane]);
+  }
+  const reached = new Set();
+  const walk = (pane) => {
+    if (reached.has(pane)) return;
+    reached.add(pane);
+    for (const kid of below.get(pane) ?? []) walk(kid);
+  };
+  for (const [pane, parent] of spineParentOf) {
+    if (parent === null) walk(pane);
+  }
+  for (const pane of [...spineParentOf.keys()].sort()) {
+    if (reached.has(pane)) continue;
+    spineParentOf.set(pane, null);
+    walk(pane);
+  }
+  return { teams, teamOf, spineParentOf };
+}
+
+/* 다섯 상태와 그 급함 (방향 E2). 카드의 크기도 이것이 정한다: 당신 차례는 L, 멈춤과 도는 중은 M,
+ * 차례 기다림·끝남·쉬는 중은 S. 색은 낱말과 모양을 곁에 두고 토큰 하나씩 — 당신 차례
+ * `--signal-you`, 도는 중 `--signal-ready`, 차례 기다림 `--signal-wait`, 멈춤 `--signal-halt`,
+ * 끝남 `--signal-done`(4275 m-68003). */
+const AGENT_GRAPH_SIGNAL_RANK = Object.freeze({ you: 5, halt: 4, run: 3, wait: 2, idle: 1, done: 0 });
+const AGENT_GRAPH_SIGNALS = Object.freeze([
+  { signal: "you", key: "board.now.asks", word: "당신 차례" },
+  { signal: "halt", key: "board.now.stateHalt", word: "멈춤" },
+  { signal: "run", key: "board.now.stateRun", word: "도는 중" },
+  { signal: "wait", key: "board.now.stateQueue", word: "차례 기다림" },
+  { signal: "done", key: "board.now.stateDone", word: "끝남" },
+  { signal: "idle", key: "board.graph.resting", word: "쉬는 중" },
+]);
+
+function agentGraphSignalWord(signal) {
+  const said = AGENT_GRAPH_SIGNALS.find((one) => one.signal === signal) ?? AGENT_GRAPH_SIGNALS.at(-1);
+  return t(said.key, said.word);
+}
+
+/* 카드 제 상태만의 신호 — 자식을 보지 않는다. 사람이 이미 본 끝난 턴은 원장이 쉬는 칸으로
+ * 내리지만(`zerocode_core::board`), 일이 끝났다는 사실은 그대로라 끝남이다. 자율 루프가 다음
+ * 실행을 기다리는 판(`paused`)은 제 차례를 기다리는 것이다. */
+function agentGraphOwnSignal(entity) {
+  if (entity.state === "needs-attention") return "you";
+  if (entity.state === "failed") return "halt";
+  if (entity.state === "working") return "run";
+  if (entity.state === "paused") return "wait";
+  if (entity.state === "done") return "done";
+  const raw = String(entity.card?.state ?? "").toLowerCase();
+  return raw === "done" || raw === "exited" ? "done" : "idle";
+}
+
+/* 열마다 머리와 줄기, 판마다 (방향 E2).
+ *
+ * 열의 위상은 캐시에서 오고(`agentGraphTeamLayout`), 여기서는 상태가 정하는 것만 정한다:
+ *
+ *   - 신호. 제 턴이 끝났는데 줄기 아래에 도는 일이 남은 카드는 「차례 기다림」이고, 기다리는 그
+ *     일을 `waitsOn`에 든다 — 코디의 머리가 「○○의 넘김을 기다립니다」라고 말하는 근거.
+ *   - 차례. 줄기마다 가장 급한 가지부터: 당신 차례 → 멈춤 → 도는 중 → 차례 기다림 → 쉬는 중 →
+ *     끝남. 같은 급함은 프로젝트·워크스페이스·판의 이름 차례.
+ *   - 끝남 묶음. 한 줄기에 자식 없는 끝남이 둘 이상이면 「끝남 N — 제목들 … 펼치기」 한 줄로
+ *     접는다. 펼친 묶음은 사람의 것이라 다시 그려도 그대로다(`agentGraphFoldsOpen`).
+ *   - 열의 차례. 급한 일이 많은 열부터(당신 차례 → 멈춤 → 도는 중의 수), 같으면 코디가 앉은
+ *     열이 먼저, 그다음 실행 번호.
+ *
+ * 셈은 카드 수에 비례하고 배치를 읽지 않는다. */
+function agentGraphArrange(layout, agentsByKey, seats, compareAgents) {
+  const byPane = new Map([...agentsByKey.values()].map((entity) => [entity.card.pane, entity]));
+  const rank = (signal) => AGENT_GRAPH_SIGNAL_RANK[signal] ?? 0;
+  const kids = new Map();
+  const teams = new Map();
+  for (const spec of layout.teams.values()) {
+    teams.set(spec.key, {
+      key: spec.key,
+      kind: spec.kind,
+      lead: spec.lead ? byPane.get(spec.lead) ?? null : null,
+      runs: [...spec.runs],
+      seats: spec.runs.map((run) => seats.find((seat) => seat.run === run)
+        ?? { run, name: "", term: null, held: false }),
+      members: [],
+      top: [],
+    });
+  }
+  for (const entity of agentsByKey.values()) {
+    const team = teams.get(layout.teamOf.get(entity.card.pane));
+    entity.team = team.key;
+    entity.head = null;
+    entity.fold = null;
+    entity.above = null;
+    if (team.lead === entity) continue;
+    team.members.push(entity);
+    const parent = byPane.get(layout.spineParentOf.get(entity.card.pane));
+    /* 줄기의 부모 — 같은 열의 `card.parent`, 그 밖이면 열의 머리. 칩(소속)과 계보가 이것을 읽는다. */
+    entity.above = parent ?? team.lead;
+    if (parent) kids.set(parent.key, [...(kids.get(parent.key) ?? []), entity]);
+    else team.top.push(entity);
+  }
+  const order = (left, right) => right.reach - left.reach
+    || rank(right.signal) - rank(left.signal)
+    || compareAgents(left, right);
+  const settle = (entity, depth) => {
+    const own = agentGraphOwnSignal(entity);
+    const below = kids.get(entity.key) ?? [];
+    let reach = rank(own);
+    let waitsOn = null;
+    for (const kid of below) {
+      settle(kid, depth + 1);
+      reach = Math.max(reach, kid.reach);
+      const moving = kid.signal === "you" || kid.signal === "run" ? kid : kid.waitsOn ?? (kid.signal === "wait" ? kid : null);
+      if (moving && (!waitsOn || rank(moving.signal) > rank(waitsOn.signal))) waitsOn = moving;
+    }
+    below.sort(order);
+    entity.signal = (own === "idle" || own === "done") && waitsOn ? "wait" : own;
+    entity.waitsOn = entity.signal === "wait" && own !== "wait" ? waitsOn : null;
+    entity.reach = Math.max(reach, rank(entity.signal));
+    entity.size = entity.signal === "you" ? "l" : entity.signal === "run" || entity.signal === "halt" ? "m" : "s";
+    entity.depth = depth;
+  };
+  for (const team of teams.values()) {
+    if (team.lead) {
+      kids.set(team.lead.key, team.top);
+      settle(team.lead, 0);
+    } else {
+      for (const entity of team.top) settle(entity, 1);
+      team.top.sort(order);
+    }
+    team.signals = new Map();
+    for (const entity of team.lead ? [team.lead, ...team.members] : team.members) {
+      team.signals.set(entity.signal, (team.signals.get(entity.signal) ?? 0) + 1);
+    }
+    team.weight = ["you", "halt", "run"].map((signal) => team.signals.get(signal) ?? 0);
+    team.spine = team.lead?.key ?? team.key;
+    team.label = team.lead?.label ?? (team.seats.find((seat) => seat.name)?.name || team.runs[0] || "");
+    if (team.lead) team.lead.head = team;
+  }
+  const runNumber = (team) => Math.min(Infinity, ...team.runs.map((run) =>
+    Number.parseInt(run.replace(/\D+/g, ""), 10)).filter(Number.isFinite));
+  const kindOrder = { lead: 0, run: 1, own: 2 };
+  const ordered = [...teams.values()]
+    .filter((team) => team.lead || team.members.length > 0)
+    .sort((left, right) => right.weight[0] - left.weight[0]
+      || right.weight[1] - left.weight[1]
+      || right.weight[2] - left.weight[2]
+      || Number(right.runs.length > 0) - Number(left.runs.length > 0)
+      || kindOrder[left.kind] - kindOrder[right.kind]
+      || runNumber(left) - runNumber(right)
+      || left.label.localeCompare(right.label));
+
+  /* 줄기마다: 선 카드들과, 둘 이상이면 접힌 끝남. DOM의 차례가 곧 키보드가 걷는 차례다. */
+  const spines = new Map();
+  const walked = [];
+  const sized = [];
+  const lay = (list, key) => {
+    const quiet = list.filter((entity) => entity.signal === "done" && !(kids.get(entity.key)?.length));
+    const fold = quiet.length >= 2
+      ? { key: `fold:${key}`, members: quiet, open: agentGraphFoldsOpen.has(`fold:${key}`) }
+      : null;
+    const folded = new Set(fold?.members ?? []);
+    const items = list.filter((entity) => !folded.has(entity));
+    spines.set(key, { items, fold });
+    for (const entity of items) {
+      walked.push(entity.key);
+      sized.push(`${entity.key}:${entity.size}`);
+      if (kids.get(entity.key)?.length) lay(kids.get(entity.key), entity.key);
+    }
+    if (!fold) return;
+    walked.push(fold.key);
+    sized.push(`${fold.key}:${fold.open}`);
+    for (const entity of fold.members) {
+      entity.fold = fold.key;
+      if (!fold.open) continue;
+      walked.push(entity.key);
+      sized.push(`${entity.key}:${entity.size}`);
+    }
+  };
+  for (const team of ordered) {
+    sized.push(team.key);
+    if (team.lead) {
+      walked.push(team.lead.key);
+      sized.push(`${team.lead.key}:head`);
+    }
+    if (team.top.length > 0) lay(team.top, team.spine);
+  }
+  const signals = new Map();
+  for (const entity of agentsByKey.values()) {
+    signals.set(entity.signal, (signals.get(entity.signal) ?? 0) + 1);
+  }
+  return {
+    teams: ordered,
+    spines,
+    order: walked,
+    signature: sized.join("\u001f"),
+    signals,
+    coordinators: ordered.filter((team) => team.kind === "lead" && team.runs.length > 0).length,
+  };
+}
+
 function agentGraphModel(columns, places, reviews,
   now = Date.now(),
   previous = null,
@@ -3349,7 +3624,7 @@ function agentGraphModel(columns, places, reviews,
   /* `ledger` is the ledger rows the same paint asked beside its cards (pane →
    * row, `boardCardsAndLedger`). The model keeps it in `source` so every rebuild from
    * this snapshot reads the same bundle, never a later paint's rows. */
-  { scoped = false, ledger = null } = {},
+  { scoped = false, ledger = null, seats = coordinatorSeats } = {},
 ) {
   const counts = new Map(columns.map((column) => [column.bucket, column.cards.length]));
   const agents = columns.flatMap((column) =>
@@ -3491,24 +3766,18 @@ function agentGraphModel(columns, places, reviews,
       entry.project.searchMatch = true;
     }
   }
-  for (const workspace of workspacesAt.values()) {
-    workspace.idleAgents = [...workspace.agents].filter((entry) => entry.state === "idle");
-    workspace.activeAgents = [...workspace.agents].filter((entry) => entry.state !== "idle");
-    workspace.idleExpanded = scoped ? !agentGraphScopeIdleCollapsed.has(workspace.key) : agentGraphIdleExpanded.has(workspace.key);
-    /* A workspace with no live work becomes a project-rail chip. It is still
-     * a model entity, and opening the chip restores the same keyed node. */
-    const prior = previous?.entities?.get(workspace.key);
-    workspace.collapsed = workspace.activeAgents.length === 0 && !workspace.idleExpanded &&
-      prior?.collapsed !== false;
-  }
-
-  const rowOf = new Map();
-  const depthOf = new Map();
-  const placed = new Set();
-  const visiting = new Set();
-  /* Row 1 is the lane strip — the words naming what each column holds. Every
-   * band opens below it. */
-  let nextRow = 2;
+  /* 열의 위상 (방향 E2) — 누가 어느 코디의 열에 서는가를 다시 셀지 묻는 서명. 열은 판·부모·
+   * 실행·코디 자리가 정하므로 그 넷이 들고, 이름표의 낱말을 바꾸는 말(번역된 「범위 밖」·
+   * 「워크스페이스 없음」)도 든다. 상태는 들지 않는다: 상태는 열 **안의** 차례를 바꿀 뿐
+   * 누가 어느 열인지를 바꾸지 않고, 그 차례는 판마다 정한다(`agentGraphArrange`). */
+  const seatList = (Array.isArray(seats) ? seats : [])
+    .filter((seat) => seat && agentGraphCleanText(seat.run))
+    .map((seat) => ({
+      run: agentGraphCleanText(seat.run),
+      name: agentGraphCleanText(seat.name),
+      term: Number.isInteger(seat.term) ? seat.term : null,
+      held: seat.held === true,
+    }));
   const topologySignature = [
     String(scoped),
     [...projectsAt.values()]
@@ -3517,59 +3786,25 @@ function agentGraphModel(columns, places, reviews,
         ...[...project.workspaces].map((workspace) => `W${project.path}\u0000${workspace.path}`),
       ])
       .sort()
-      .join(""),
+      .join("\u001e"),
     agents
       .map((entry) => [
         entry.card.pane,
         entry.card.parent,
         entry.project.path,
         entry.workspace.path,
-      ].join(""))
+        entry.place.run ?? "",
+      ].join("\u001f"))
       .sort()
-      .join(""),
-    [...(scoped ? agentGraphScopeFolded : agentGraphFolded)].sort().join(""),
-    [...agentGraphDormantExpanded].sort().join(""),
-    [...(scoped ? agentGraphScopeIdleCollapsed : agentGraphIdleExpanded)].sort().join(""),
-    /* The rows are ordered by LABELS, and two of those labels are translated
-     * ("범위 밖", "워크스페이스 없음"). Changing the language can therefore
-     * reorder the bands without a single card moving — and a signature that
-     * did not carry the language would call that "unchanged" and leave every
-     * edge measured against the order before it. */
+      .join("\u001e"),
+    seatList.map((seat) => [seat.run, seat.term ?? "", String(seat.held)].join("\u001f")).sort().join("\u001e"),
     locale,
-  ].join("");
-
-  /* A subtree keeps its own rows, and a band keeps its own subtrees: the
-   * recursion refuses to follow an edge that leaves the project, so an agent
-   * one project's agent spawned inside another is drawn as a root of the band
-   * it actually lives in and the spawned edge crosses the bands in the open. A
-   * lineage that quietly reparented a card into a neighbouring project would
-   * put a running agent under a heading that does not own it. */
-  const place = (entry, depth) => {
-    if (placed.has(entry.card.pane)) return rowOf.get(entry.card.pane);
-    visiting.add(entry.card.pane);
-    const childRows = (children.get(entry.card.pane) ?? [])
-      .filter((child) => !visiting.has(child.card.pane) && child.project === entry.project)
-      .map((child) => place(child, depth + 1));
-    visiting.delete(entry.card.pane);
-    /* 부모는 첫 자식의 행에 선다 (round three). 자식들의 한가운데에 서면 자식이
-     * 둘일 때 부모가 둘째 자식과 나란히 서고, 그 위 행의 왼쪽은 빈 판이 된다 —
-     * 실측: 헬퍼 둘을 거느린 카드 하나가 판의 3분의 1을 빈 자리로 만들었다.
-     * 원장은 위에서 아래로 읽히므로 부모가 위, 자식이 그 곁에서 아래로. */
-    const row = childRows.length > 0 ? childRows[0] : nextRow++;
-    rowOf.set(entry.card.pane, row);
-    depthOf.set(entry.card.pane, depth);
-    placed.add(entry.card.pane);
-    return row;
-  };
-
-  /* 워크스페이스의 이름표도 제 첫 에이전트의 행에 선다 — 절의 소제목처럼. */
-  const centerOf = (entries) => {
-    const rows = [...entries]
-      .map((entry) => rowOf.get(entry.card.pane))
-      .filter(Number.isFinite)
-      .sort((left, right) => left - right);
-    return rows.length === 0 ? nextRow++ : rows[0];
-  };
+  ].join("\u001d");
+  let teamLayout = previous?.topologySignature === topologySignature ? previous.teamLayout ?? null : null;
+  if (!teamLayout || agents.some((entry) => !teamLayout.teamOf.has(entry.card.pane))) {
+    agentGraphLayoutRuns += 1;
+    teamLayout = agentGraphTeamLayout(agents, byPane, seatList);
+  }
 
   const orderedProjects = [...projectsAt.values()]
     /* The first screen is for live work. Catalog-only projects follow it as
@@ -3578,136 +3813,51 @@ function agentGraphModel(columns, places, reviews,
       Number(left.agents.size === 0) - Number(right.agents.size === 0)
       || left.label.localeCompare(right.label));
   for (const project of orderedProjects) {
-    project.dormant = project.agents.size === 0;
-    project.folded = scoped ? agentGraphScopeFolded.has(project.key) : (project.dormant
-      ? !agentGraphDormantExpanded.has(project.key)
-      : agentGraphFolded.has(project.key));
     project.counts = new Map();
     for (const entry of project.agents) {
       project.counts.set(entry.bucket, (project.counts.get(entry.bucket) ?? 0) + 1);
     }
   }
-  const cachedLayout = previous?.topologySignature === topologySignature
-    ? previous.layout
-    : null;
-  if (cachedLayout) {
-    for (const [pane, row] of cachedLayout.rowOf) rowOf.set(pane, row);
-    for (const [pane, depth] of cachedLayout.depthOf) depthOf.set(pane, depth);
-    for (const project of orderedProjects) {
-      const held = cachedLayout.projects.get(project.key);
-      project.headRow = held?.headRow ?? 2;
-      project.rowEnd = held?.rowEnd ?? project.headRow;
-      for (const workspace of project.workspaces) {
-        workspace.row = cachedLayout.workspaces.get(workspace.key) ?? project.headRow + 1;
-      }
-    }
-    nextRow = cachedLayout.nextRow;
-  } else {
-    agentGraphLayoutRuns += 1;
-    for (const project of orderedProjects) {
-      project.headRow = nextRow;
-      nextRow += 1;
-      if (project.folded) {
-        project.rowEnd = project.headRow;
-        continue;
-      }
-      const inside = [...project.agents].sort(compareAgents);
-      for (const entry of inside) {
-        const above = byPane.get(entry.card.parent);
-        if (!above || above.project !== project) place(entry, 0);
-      }
-      for (const entry of inside) {
-        if (!placed.has(entry.card.pane)) place(entry, 0);
-      }
-      /* A workspace sits level with the middle of its own agents, and two of
-       * them can want the same middle — a parent sharing a row with its one
-       * child has put two workspaces on one line. Pushing the later one down
-       * costs a row of drift; letting them collide costs one of them entirely. */
-      const workspaces = [...project.workspaces]
-        .map((workspace) => ({ workspace, wanted: centerOf(workspace.agents) }))
-        .sort((left, right) => left.wanted - right.wanted
-          || left.workspace.label.localeCompare(right.workspace.label));
-      let lastRow = project.headRow;
-      for (const { workspace, wanted } of workspaces) {
-        workspace.row = Math.max(lastRow + 1, wanted);
-        lastRow = workspace.row;
-      }
-      project.rowEnd = Math.max(project.headRow, nextRow - 1, lastRow);
-      nextRow = project.rowEnd + 1;
-    }
-  }
 
-  const bandNodes = new Map();
   const agentNodes = new Map();
   const bands = [];
   const edges = [];
   const entities = new Map();
-  let maxDepth = 0;
 
+  /* 프로젝트와 워크스페이스는 그림의 상자가 아니라 인스펙터의 주체다 (방향 E2): 카드는 제
+   * 워크스페이스를 칩으로 말하고, 칩을 누르면 그 워크스페이스가 인스펙터에 선다. 그래서 둘은
+   * 모델에 남고 — 관계 목록과 위치(breadcrumb)가 읽는다 — 격자의 행은 없다. */
   for (const project of orderedProjects) {
-    [...project.workspaces]
-      .sort((left, right) => left.label.localeCompare(right.label))
-      .forEach((workspace, index) => {
-        workspace.laneClass = AGENT_GRAPH_LANE_CLASSES[index % AGENT_GRAPH_LANE_CLASSES.length];
-      });
     const band = {
       key: project.key,
       type: "project",
-      row: project.headRow,
-      rowEnd: project.rowEnd,
-      folded: project.folded,
-      dormant: project.dormant,
       label: project.label,
       line: agentGraphCountWord("workspace", project.workspaces.size),
       meta: project.path === unscopedProject ? "" : project.path,
       counts: project.counts,
       agentCount: project.agents.size,
-      faces: [...project.agents].sort(compareAgents),
       searchMatch: project.searchMatch,
-      dormantWorkspaces: [...project.workspaces]
-        .filter((workspace) => workspace.collapsed)
-        .sort((left, right) => left.label.localeCompare(right.label)),
       project,
     };
     bands.push(band);
     entities.set(band.key, band);
-    const inside = [];
-    bandNodes.set(band.key, inside);
-    if (project.folded) continue;
 
-    const workspaceEntities = new Map();
-    for (const workspace of [...project.workspaces].sort((left, right) => left.row - right.row)) {
-      const workspaceEntity = {
+    for (const workspace of [...project.workspaces].sort((left, right) => left.label.localeCompare(right.label))) {
+      entities.set(workspace.key, {
         key: workspace.key,
         type: "workspace",
-        column: 1,
-        row: workspace.row,
         label: workspace.label,
         line: workspace.branch && workspace.base
           ? `${workspace.branch} ← ${workspace.base}`
           : workspace.branch,
         meta: agentGraphCountWord("agent", workspace.agents.size),
-        buckets: [...workspace.agents].sort(compareAgents).map((entry) => entry.bucket),
-        idleCount: workspace.idleAgents.length,
-        idleExpanded: workspace.idleExpanded,
-        collapsed: workspace.collapsed,
-        laneClass: workspace.laneClass,
         searchMatch: workspace.searchMatch,
         band,
         workspace,
-      };
-      const workspaceRows = [...workspace.agents]
-        .map((entry) => rowOf.get(entry.card.pane))
-        .filter(Number.isFinite);
-      workspaceEntity.rowStart = Math.min(workspace.row, ...workspaceRows);
-      workspaceEntity.rowEnd = Math.max(workspace.row, ...workspaceRows);
-      workspaceEntities.set(workspace, workspaceEntity);
-      entities.set(workspaceEntity.key, workspaceEntity);
+      });
     }
 
     for (const entry of [...project.agents].sort(compareAgents)) {
-      const depth = depthOf.get(entry.card.pane) ?? 0;
-      maxDepth = Math.max(maxDepth, depth);
       /* 발치의 `Claude · 방금 · 2분째`. 시계는 카드의 발치와
        * **같은 손**을 쓴다(`cardClock`): 한 화면에서 같은 판을 그리는 두
        * 그림이 마지막 소식과 이 턴의 길이를 둘 다 같이 말한다. */
@@ -3715,18 +3865,13 @@ function agentGraphModel(columns, places, reviews,
       const entity = {
         ...entry,
         type: "agent",
-        depth,
-        column: AGENT_GRAPH_CONTEXT_LAYERS.length + depth + 1,
-        row: rowOf.get(entry.card.pane) ?? nextRow++,
-        laneClass: entry.workspace.laneClass,
         label: agentGraphIdentity(entry.card),
-        /* 대화만. 상태 낱말은 눈썹줄이 늘 들고 있으므로(`updateAgentGraphNode`)
+        /* 대화만. 상태 낱말은 카드의 상태 줄이 늘 들고 있으므로(`updateAgentGraphNode`)
          * 여기에 대체값으로 두면 말수 없는 카드 하나가 같은 낱말을 두 줄에
          * 겹쳐 쓴다. */
         state: entry.state,
         line: "",
         clock,
-        /* 이 그림이 그리는 자식의 수 — 레일이 닿는 그 수라 카드의 「하위 N」과 선이 어긋나지 않는다. */
         childCount: children.get(entry.card.pane)?.length ?? 0,
         /* 카드가 말하는 일곱, 한 손으로 (t-2374). 그래프 노드와 인스펙터
          * 카드가 같은 이 묶음을 그린다 — 두 함수가 같은 사실을 따로 지으면
@@ -3748,9 +3893,6 @@ function agentGraphModel(columns, places, reviews,
         wait: agentGraphLiveWait(entry, now, ledger),
         wentQuiet: entry.bucket === "working" && entry.card.at > 0 &&
           now - entry.card.at >= AGENT_GRAPH_QUIET_AFTER_MS,
-        hiddenByIdle: entry.state === "idle" && !entry.workspace.idleExpanded &&
-          previous?.entities?.get(entry.key)?.hiddenByIdle !== false,
-        hiddenByWorkspace: entry.workspace.collapsed,
         searchMatch: entry.searchMatch,
         band,
       };
@@ -3773,47 +3915,18 @@ function agentGraphModel(columns, places, reviews,
         });
       }
     }
-
-    /* DOM order is CONTAINMENT order, because the surface calls itself a tree
-     * and a tree is read parent-first: the band, then a workspace, then the
-     * agents that workspace holds with each agent's own helpers right behind
-     * it. Both other candidates were worse in the same way — "every band head,
-     * then every workspace, then every agent" is three lists nobody drew, and
-     * strict top-to-bottom splits a parent from the child it spawned whenever
-     * the child's row happens to sit above it. */
-    for (const workspace of [...project.workspaces].sort((left, right) => left.row - right.row)) {
-      if (workspace.collapsed) continue;
-      inside.push(workspaceEntities.get(workspace));
-      const held = [...workspace.agents]
-        .sort(compareAgents)
-        .map((entry) => agentNodes.get(entry.key))
-        .filter((entity) => entity && !entity.hiddenByIdle && !entity.hiddenByWorkspace);
-      const mine = new Map(held.map((entity) => [entity.card.pane, entity]));
-      const seen = new Set();
-      const walk = (entity) => {
-        if (seen.has(entity.card.pane)) return;
-        seen.add(entity.card.pane);
-        inside.push(entity);
-        for (const child of children.get(entity.card.pane) ?? []) {
-          const below = mine.get(child.card.pane);
-          if (below) walk(below);
-        }
-      };
-      for (const entity of held) {
-        const above = byPane.get(entity.card.parent);
-        if (!above || !mine.has(above.card.pane)) walk(entity);
-      }
-      // A cycle inside one workspace reaches nobody from a root. Walked again
-      // from the front rather than dropped: a card missing from the tree is a
-      // running agent a person cannot tab to.
-      for (const entity of held) walk(entity);
-    }
   }
 
-  const nodes = bands.flatMap((band) => bandNodes.get(band.key) ?? []);
-  const drawn = agents.map((entry) => agentNodes.get(entry.key)).filter(Boolean);
+  /* 열과 줄기와 크기 — 판마다 (방향 E2). 그림에 서는 것은 카드뿐이고(접힌 「끝남 N」 안의
+   * 카드는 펼칠 때 선다), DOM의 차례가 곧 키보드가 걷는 차례다. */
+  const arranged = agentGraphArrange(teamLayout, agentNodes, seatList, compareAgents);
+  const nodes = arranged.order
+    .map((key) => agentNodes.get(key))
+    .filter(Boolean);
+  /* 모든 개체가 어딘가에 선다 — 에이전트는 카드로, 워크스페이스는 칩으로, 프로젝트는
+   * 인스펙터의 위치로. 그래서 계보와 담김은 모델에 그대로 남고(관계 목록이 읽는다), 그림이
+   * 선으로 긋는 것은 사람이 고른 오버레이와 실시간 지도뿐이다(`paintAgentGraphEdges`). */
   const visibleKeys = new Set(nodes.map((entity) => entity.key));
-  const visibleEdges = edges.filter((edge) => visibleKeys.has(edge.from) && visibleKeys.has(edge.to));
   const mail = (Array.isArray(overlays?.mail) ? overlays.mail : [])
     .map((edge) => ({
       key: `overlay:mail:${agentGraphAgentKey(edge.from)}>${agentGraphAgentKey(edge.to)}`,
@@ -3885,22 +3998,23 @@ function agentGraphModel(columns, places, reviews,
   /* 실시간 지도가 더 그리는 선 (t-7288). 오버레이 고르개는 셋 중 하나를
    * 고르지만 이 지도는 「누가 누구에게」와 「누가 무엇을 기다리는가」를 함께
    * 답해야 하므로 메일과 의존을 합집합으로 든다 — 이미 오버레이로 선 키는
-   * 빼고, 노드의 자리와 `topologySignature`는 건드리지 않는다. */
+   * 빼고, 열의 위상(`topologySignature`)은 건드리지 않는다. */
   const liveEdges = agentGraphLiveEdges(mail, dependencies, overlayEdges, visibleKeys);
   return {
+    /* 그림에 선 카드들, DOM의 차례대로 — 열마다 머리, 그 줄기를 위에서 아래로. */
     nodes,
     bands,
-    /* The same nodes, still grouped by the band they belong to. The paint needs
-     * this and not just the flat list: it builds one keyed child list for the
-     * whole grid, and appending every heading before any of the cards puts the
-     * SECOND project's heading directly after the first one — so a keyboard
-     * walking down from a project it just opened lands on the next project
-     * instead of on the workspace inside it. */
-    nodesByBand: bandNodes,
-    /* An edge with a folded-away end is not an edge this paint can draw.
-     * Dropped here rather than skipped at the SVG, so the relation count the
-     * legend reads is the count actually on the screen. */
-    edges: visibleEdges,
+    /* 코디마다 한 열 (방향 E2). 열의 차례·머리·줄기·접힌 「끝남 N」은 `agentGraphArrange`의 답. */
+    teams: arranged.teams,
+    spines: arranged.spines,
+    order: arranged.order,
+    /* 카드의 자리와 키를 바꾸는 것 전부 — 차례·크기·펼친 묶음. 이것이 움직인 판만 오버레이
+     * 선을 다시 잰다(`paintAgentGraph`): 상태가 갈리면 카드가 줄기 안에서 자리를 옮긴다. */
+    arrangement: arranged.signature,
+    signals: arranged.signals,
+    coordinatorCount: arranged.coordinators,
+    /* 계보와 담김 — 그림이 줄기와 칩으로 말하고, 관계 목록과 인스펙터가 읽는다. */
+    edges,
     allEdges: edges,
     overlayEdges,
     liveEdges,
@@ -3911,37 +4025,22 @@ function agentGraphModel(columns, places, reviews,
     entities,
     agents,
     counts,
-    maxDepth,
-    maxRow: Math.max(1, nextRow - 1),
-    laneCount: AGENT_GRAPH_CONTEXT_LAYERS.length + Math.max(1, maxDepth + 1),
-    liveCount: drawn.filter((entity) => !entity.hiddenByIdle && !entity.hiddenByWorkspace && entity.live).length,
+    liveCount: nodes.filter((entity) => entity.live).length,
     runCount: new Set(agents.map((entry) => entry.place.run).filter(Boolean)).size,
     searchMatchCount: agents.filter((entry) => entry.searchMatch).length,
     searchActive: needle !== "",
-    /* Attention first, and the columns already rank it that way. A folded band
-     * over that agent falls through to the first one actually on the screen —
+    /* Attention first, and the columns already rank it that way. A card folded
+     * into 「끝남 N」 falls through to the first one actually on the screen —
      * an inspector opened on an entity nobody can see is a dead panel. */
     // An inventory-only graph has valid destinations but no urgent default.
     // Leaving selection empty keeps the inspector honest and prevents a
     // background catalog repaint from manufacturing user selection.
-    defaultKey: drawn.find((entity) => !entity.hiddenByIdle && !entity.hiddenByWorkspace)?.key ?? null,
+    defaultKey: agents.map((entry) => entry.key).find((key) => visibleKeys.has(key)) ?? null,
     topologySignature,
-    layout: {
-      rowOf: new Map(rowOf),
-      depthOf: new Map(depthOf),
-      projects: new Map(orderedProjects.map((project) => [project.key, {
-        headRow: project.headRow,
-        rowEnd: project.rowEnd,
-      }])),
-      workspaces: new Map([...workspacesAt.values()].map((workspace) => [
-        workspace.key,
-        workspace.row,
-      ])),
-      nextRow,
-    },
-    layoutRecomputed: cachedLayout === null,
+    teamLayout,
+    layoutRecomputed: previous?.teamLayout !== teamLayout,
     scoped,
-    source: { columns, places, reviews, catalog: knownCatalog, search, overlays, ledger },
+    source: { columns, places, reviews, catalog: knownCatalog, search, overlays, ledger, seats: seatList },
   };
 }
 
@@ -3962,20 +4061,6 @@ function agentGraphCountWord(kind, count) {
   return kind === "workspace"
     ? t("board.graph.workspaceCountOne", "워크스페이스 1개")
     : t("board.graph.agentCountOne", "에이전트 1개");
-}
-
-function agentGraphIdleCountWord(count) {
-  return t("board.graph.idleCount", "+{{count}} 대기", { count });
-}
-
-function agentGraphIdleActionWord(workspace) {
-  return workspace.idleExpanded
-    ? t("board.graph.collapseIdle", "{{name}}의 대기 에이전트 접기", {
-        name: workspace.label,
-      })
-    : t("board.graph.expandIdle", "{{name}}의 대기 에이전트 펼치기", {
-        name: workspace.label,
-      });
 }
 
 /* Rebuild from the model's own complete snapshot, not another backend read.
@@ -4038,9 +4123,7 @@ function selectAgentGraphRelation(view, key) {
     agentGraphScopeKey = "";
     agentGraphScopeLabel = "";
   }
-  const source = full.source;
-  const model = agentGraphModel(source.columns, source.places, source.reviews, Date.now(), full,
-    source.catalog, source.search, source.overlays, { ledger: source.ledger });
+  const model = agentGraphRebuild(view);
   paintAgentGraph(view, model);
   void syncPreviewedTerms();
 }
@@ -4063,7 +4146,7 @@ function agentGraphScopedModel(view, full) {
     .filter((project) => project.worktrees.length > 0 || members.some((entry) => entry.project.path === project.path));
   const scoped = agentGraphModel(columns, source.places, source.reviews, Date.now(),
     agentGraphModels.get(view), catalog, source.search, source.overlays,
-    { scoped: true, ledger: source.ledger });
+    { scoped: true, ledger: source.ledger, seats: source.seats });
   agentGraphScopeSources.set(scoped, full);
   return scoped;
 }
@@ -4079,9 +4162,8 @@ function setAgentGraphScope(view, key) {
    * 갱신이 늦게 도착해도 지금의 지도·선택·근거를 덮지 못하고, 새 범위의 지금
    * 모습이 조용한 기준선이 된다 — 범위를 옮긴 것은 사건이 아니다. */
   agentGraphLiveScopeMoved();
-  agentGraphScopeFolded.clear();
-  agentGraphScopeIdleCollapsed.clear();
   agentGraphSelectedEdgeKey = null;
+  agentGraphTraceKey = null;
   if (group && !group.members.some((entry) => entry.key === agentGraphSelectedKey)) {
     agentGraphSelectedKey = group.lead?.key ?? group.root.key;
   }
@@ -4162,11 +4244,13 @@ function paintAgentRelationsControls(view, full, model) {
   const copy = view.querySelector(".agent-graph-scope-copy");
   if (copy) writeTextContent(copy, agentGraphScopeKey
     ? t("board.graph.scopeCopy", "누가 시작했고, 어떤 결과를 기다리는지 확인하세요.")
-    : t("board.graph.allExecutionsCopy", "작업별 관계를 유지하면서 진행 중인 실행을 함께 살펴봅니다."));
+    : t("board.graph.teamsCopy", "코디마다 한 열, 그 줄기에 워커와 헬퍼가 급한 순서로 매달립니다."));
+  /* 「코디 N · 에이전트 N」 (방향 E2) — 열의 수가 아니라 코디 자리에 앉은 판의 수다. */
   const count = view.querySelector(".agent-graph-scope-count");
   if (count) writeTextContent(count, agentGraphScopeKey
     ? t("board.graph.scopeCount", "{{shown}} / {{total}} 에이전트", { shown: model.agents.length, total: full.agents.length })
-    : agentGraphCountWord("agent", full.agents.length));
+    : t("board.graph.teamCount", "코디 {{teams}} · 에이전트 {{agents}}", {
+        teams: full.coordinatorCount, agents: full.agents.length }));
   const density = view.querySelector(".agent-graph-density");
   if (density) {
     writeAttribute(density, "aria-pressed", String(agentGraphCardDetails));
@@ -4193,44 +4277,11 @@ function paintAgentRelationsControls(view, full, model) {
   }
 }
 
-function agentGraphToggleIdle(view, workspaceKey) {
-  const preference = agentGraphScopeKey ? agentGraphScopeIdleCollapsed : agentGraphIdleExpanded;
-  if (preference.has(workspaceKey)) preference.delete(workspaceKey);
-  else preference.add(workspaceKey);
-  const previous = agentGraphFullModel(view);
-  const source = previous?.source;
-  if (!source) return;
-  const model = agentGraphModel(
-    source.columns,
-    source.places,
-    source.reviews,
-    Date.now(),
-    previous,
-    source.catalog,
-    source.search,
-    source.overlays,
-    { ledger: source.ledger },
-  );
-  paintAgentGraph(view, model);
-}
-
 function agentGraphSetOverlay(view, mode) {
   if (!AGENT_GRAPH_OVERLAYS.has(mode)) return false;
   agentGraphOverlayMode = agentGraphOverlayMode === mode ? "none" : mode;
-  const previous = agentGraphFullModel(view);
-  const source = previous?.source;
-  if (!source) return false;
-  const model = agentGraphModel(
-    source.columns,
-    source.places,
-    source.reviews,
-    Date.now(),
-    previous,
-    source.catalog,
-    source.search,
-    source.overlays,
-    { ledger: source.ledger },
-  );
+  const model = agentGraphRebuild(view);
+  if (!model) return false;
   paintAgentGraph(view, model);
   return true;
 }
@@ -4259,15 +4310,6 @@ function agentGraphRelationWord(type) {
   if (type === "mail") return t("board.graph.mail", "메일");
   if (type === "dependency") return t("board.graph.dependency", "의존");
   return t("board.graph.relContains", "품음");
-}
-
-function agentGraphLaneWord(lane) {
-  if (lane < AGENT_GRAPH_CONTEXT_LAYERS.length) {
-    return agentGraphKindWord(AGENT_GRAPH_CONTEXT_LAYERS[lane]);
-  }
-  const depth = lane - AGENT_GRAPH_CONTEXT_LAYERS.length;
-  if (depth === 0) return t("board.graph.agent", "에이전트");
-  return t("board.graph.subagentLane", "하위 {{depth}}단", { depth });
 }
 
 function agentGraphNodeIcon(entity) {
@@ -4570,35 +4612,19 @@ function dressAgentCardDoing(doing, facts, { askInline = true, age = "", quiet =
 }
 
 
-/* The pips a workspace wears: one per agent inside it, in that agent's own
- * state colour. A workspace holding four agents where one of them wants an
- * answer says so on the workspace, so a deep lineage scrolled off to the right
- * still has its state visible at the left edge. */
-function agentGraphPipsNode(buckets) {
-  const pips = document.createElement("span");
-  pips.className = "agent-graph-pips";
-  pips.setAttribute("aria-hidden", "true");
-  for (const bucket of buckets.slice(0, 8)) {
-    const pip = document.createElement("i");
-    pip.className = `agent-graph-pip is-${bucket}`;
-    pips.appendChild(pip);
-  }
-  if (buckets.length > 8) {
-    const more = document.createElement("span");
-    more.className = "agent-graph-pip-more";
-    more.textContent = `+${buckets.length - 8}`;
-    pips.appendChild(more);
-  }
-  return pips;
-}
-
 /* ---- nodes -------------------------------------------------------------- */
 
-/* 오르빗 문법의 카드 (방향 D, 2026-09-28) — 그래프의 에이전트 카드는 입체 보기의 이름표와 같은
- * 말투로 말한다: 첫 줄은 벤더의 타일 · 제목 · 모델, 둘째 줄은 상태의 점과 낱말 · 가지 · 하위 ·
- * 컨텍스트 고리, 헤어라인 아래는 「지금」(동사 · 대상 · 나이 하나, 흔적, 마지막 말, 답하기).
- * 발치의 모델 칩과 시계는 없다 — 나이는 「지금」 줄 끝에 한 번만 선다. 인스펙터의 카드는
- * `boardCardNode`가 지으므로 제 발치를 그대로 든다. */
+/* 코디별 줄기의 카드 (방향 E2, t-68475) — 크기가 급한 정도를 말한다.
+ *
+ *   L · 당신 차례    타일 · 제목 · 모델 / 상태 줄 / 질문 전문(세 줄까지, 「질문 전문」이 편다) /
+ *                   「답하기 term:N」 「질문 전문」
+ *   M · 도는 중·멈춤  타일 · 제목 · 모델 / 상태 줄 / 명령이나 읽는 파일 한 줄 / 까닭 한 줄 / 「로그 보기」
+ *   S · 그 밖        제목 · 나이 / 「낱말 · 마지막 말」 한 줄
+ *
+ * 상태 줄은 낱말 · 나이 · 소속 칩(줄기의 부모와 다른 워크스페이스일 때만) · 컨텍스트 고리(60% 이상)다.
+ * 상태의 표식은 카드가 아니라 줄기의 마디에 선다(`paintAgentGraphTeams`) — 색만으로 말하지 않게
+ * 낱말과 모양이 늘 곁에 있다. 열의 머리는 같은 카드에 팀 줄을 더한 것이다: 코디의 이름과
+ * 실행 · 모델, 「상태 · 나이 · 지금 하는 일 · 가지」, 「팀 N · 당신 차례 n · 멈춤 n」. */
 
 /* 모델 id에서 벤더 접두를 뗀다 — 벤더는 타일이 이미 말한다(`claude-opus-5` → `opus-5`). */
 function agentGraphModelWord(card, modelId) {
@@ -4607,11 +4633,25 @@ function agentGraphModelWord(card, modelId) {
   return vendor && id.toLowerCase().startsWith(`${vendor}-`) ? id.slice(vendor.length + 1) : id;
 }
 
-/* 카드가 서 있는 가지. 워크스페이스 이름표가 전문을 들고, 카드는 `wt/`를 뗀 꼬리를 든다. */
-function agentGraphBranchWord(workspace) {
-  const full = agentGraphCleanText(workspace?.branch)
-    || (workspace?.scoped ? agentGraphCleanText(workspace.label) : "");
-  return { full, short: full.replace(/^wt\//, "") };
+/* 카드의 소속 칩 — 워크트리와 가지. 줄기의 부모와 같은 워크스페이스면 서지 않는다(같은 말을 줄마다
+ * 되풀이하지 않게). 열의 머리는 제 워크스페이스를 늘 든다. 누르면 그 워크스페이스가 인스펙터에
+ * 선다 — 방향 D의 이름표가 하던 일이다. */
+function agentGraphChipOf(entity, view) {
+  const workspace = entity.workspace;
+  const above = entity.above?.workspace ?? null;
+  if (!workspace || (!entity.head && above === workspace)) return null;
+  const full = agentGraphCleanText(workspace.branch)
+    || (workspace.scoped ? agentGraphCleanText(workspace.label) : "");
+  if (!full) return null;
+  const merge = agentGraphOverlayMode === "merge"
+    ? agentGraphModels.get(view)?.entities.get(workspace.key)?.merge ?? null
+    : null;
+  return {
+    key: workspace.key,
+    label: full,
+    tip: workspace.base ? `${full} ← ${workspace.base}` : full,
+    merge,
+  };
 }
 
 /* 「답하기」가 여는 곳 — 인스펙터의 「터미널 열기」와 같은 판정, 같은 손(`revealAgentGraphCard`). */
@@ -4627,410 +4667,422 @@ function agentGraphReplyPlace(card) {
   };
 }
 
-/* 카드가 훅마다 갈아입는 것 — 지을 때 한 번, 그 뒤로는 서명이 자리에 써 넣을 수 있다고 답한
- * 박자마다. 쓰는 것은 글자·속성·인라인 값뿐이고 노드는 늘지 않는다. */
-function dressAgentGraphCard(node, entity, reply) {
-  const facts = entity.facts;
-  const attention = entity.state === "needs-attention";
-  const model = node.querySelector(".agent-graph-node-model");
-  writeTextContent(model, agentGraphModelWord(entity.card, facts.modelId));
-  writeAttribute(model, "data-tip", facts.modelId);
-  const where = agentGraphBranchWord(entity.workspace);
-  const branch = node.querySelector(".agent-graph-node-branch");
-  writeHidden(branch, where.short === "");
-  writeAttribute(branch, "data-tip", where.full);
-  writeTextContent(branch.querySelector(".agent-graph-node-branch-name"), where.short);
-  writeTextContent(node.querySelector(".agent-graph-node-kids"), entity.childCount > 0
-    ? t("board.graph.children", "하위 {{count}}", { count: entity.childCount })
-    : "");
-  const bubble = node.querySelector(".agent-graph-bubble");
-  writeAttribute(bubble, "data-bubble", entity.wentQuiet ? "" : agentOrbitBubbleKind(entity.state));
-  writeTextContent(bubble, entity.wentQuiet ? "" : agentOrbitBubbleWord(entity.state, entity.card.ledger ?? ""));
-  const context = node.querySelector(".agent-graph-node-context");
-  const held = facts.context;
-  writeHidden(context, held === null);
-  writeClassName(context, held && held.ratio >= AGENT_GRAPH_CONTEXT_FULL
-    ? "agent-graph-node-context is-full"
-    : "agent-graph-node-context");
-  writeStyleProperty(context, "--context-ratio", held ? String(Math.round(held.ratio * 1e4) / 1e4) : "");
-  writeTextContent(context.querySelector(".agent-graph-node-context-word"),
-    held ? `${Math.round(held.ratio * 100)}%` : "");
-  const said = held
-    ? t("board.graph.contextUsed", "컨텍스트 창 {{percent}}% 사용 · {{used}} / {{all}}", {
-        percent: Math.round(held.ratio * 100),
-        used: held.tokens.toLocaleString(),
-        all: held.window.toLocaleString(),
-      })
-    : "";
-  writeAttribute(context, "aria-label", said);
-  writeAttribute(context, "data-tip", said);
-  dressAgentCardDoing(node.querySelector(".agent-card-doing"), facts, {
-    age: entity.clock?.word ?? "",
-    quiet: entity.wentQuiet
-      ? t("board.graph.quietFor", "{{time}}째 조용", { time: entity.clock?.word ?? "" })
-      : "",
-    holds: Boolean(entity.line) || attention,
-  });
-  const button = node.querySelector(".agent-graph-reply");
-  writeHidden(button, !attention);
-  writeDisabled(button, !reply.reachable);
-  writeTextContent(button.querySelector(".agent-graph-reply-pane"), reply.label);
-  writeAttribute(button, "data-tip", `${reply.tip} · ${reply.label}`);
-  writeAttribute(button, "aria-label", `${t("board.graph.reply", "답하기")} · ${reply.tip} · ${reply.label}`);
+/* 카드의 나이 한 낱말. 당신 차례는 기다린 시간(「3분째 기다림」), 차례 기다림은 그 길이(「9분째」),
+ * 도는 중은 마지막 소식(「방금」), 나머지는 지난 때(「4분 전」). 도는 중인데 오래 말이 없으면
+ * 「N째 조용」이 그 자리에 선다(`wentQuiet`). 낱말의 계단은 `agoWord` 하나다. */
+function agentGraphAgeWord(entity) {
+  const word = entity.clock?.word ?? "";
+  if (!word) return "";
+  const fresh = word === t("board.justNow", "방금");
+  if (entity.wentQuiet && entity.signal === "run") {
+    return t("board.graph.quietFor", "{{time}}째 조용", { time: word });
+  }
+  if (fresh) return word;
+  if (entity.signal === "you") return t("board.graph.waitingFor", "{{time}}째 기다림", { time: word });
+  if (entity.signal === "wait") return t("board.desk.landingSince", "{{time}}째", { time: word });
+  if (entity.signal === "run") return word;
+  return t("board.desk.mailAge", "{{time}} 전", { time: word });
 }
 
-/* Draws one node, and answers whether its CONTENTS were rebuilt.
+/* 카드가 말하는 「지금」 한 줄 — 무엇을 하는가, 또는 무엇을 기다리는가. 차례를 기다리는 카드는 그
+ * 차례를 쥔 카드의 이름을 말하고(`waitsOn`, `agentGraphArrange`), 도는 카드는 마지막 도구를, 그 밖은
+ * 마지막 말을 말한다. */
+function agentGraphNowWord(entity) {
+  const facts = entity.facts;
+  if (entity.signal === "wait") {
+    return entity.waitsOn
+      ? t("board.graph.waitsOn", "{{name}}의 넘김을 기다립니다", { name: entity.waitsOn.label })
+      : facts.phaseWord || entity.line;
+  }
+  if (entity.signal === "run") {
+    return facts.activity ? `${facts.activity.word} ${facts.activity.target}`.trim()
+      : facts.phaseWord || entity.line;
+  }
+  if (entity.signal === "you") return "";
+  return entity.line || (facts.activity ? `${facts.activity.word} ${facts.activity.target}`.trim() : "");
+}
+
+/* 열의 제목. 코디의 열은 「코디 — 실행의 이름」이고(이름이 없으면 판의 이름), 그 밖의 열은 머리
+ * 카드의 이름, 코디 판이 이 그림에 없는 실행은 실행의 이름, 사람이 직접 연 판의 열은 「내 판 N」. */
+function agentGraphTeamTitle(team) {
+  const named = team.seats.find((seat) => seat.name)?.name ?? "";
+  if (team.kind === "own") return t("sidebar.team.own", "내 판 {{count}}", { count: team.members.length });
+  if (team.kind === "run" || team.runs.length > 0) {
+    return t("board.graph.teamLead", "코디 — {{name}}", { name: named || team.lead?.label || team.runs[0] });
+  }
+  return team.lead?.label ?? "";
+}
+
+/* 신호의 표식 — 색과 모양이 함께 말한다: 당신 차례는 고리 두른 점, 도는 중은 틈 있는 고리, 차례
+ * 기다림은 반쯤 찬 원, 멈춤은 네모, 끝남은 체크, 쉬는 중은 빈 원. 도는 고리는 돌지 않는다 —
+ * 상시 애니메이션은 없다. 방향 D의 표식(`agentGraphStateMark`)은 작업 탭이 빌려 쓰므로 그대로다. */
+function agentGraphSignalMark(signal) {
+  const mark = document.createElement("i");
+  mark.setAttribute("aria-hidden", "true");
+  dressAgentGraphSignalMark(mark, signal);
+  return mark;
+}
+
+function dressAgentGraphSignalMark(mark, signal) {
+  writeClassName(mark, `agent-graph-signal is-${signal}`);
+  const drawn = signal === "done" ? icon("circle-check") : "";
+  if (mark.innerHTML !== drawn) mark.innerHTML = drawn;
+}
+
+/* 열의 머리가 드는 팀 줄 — 「팀 N · 당신 차례 n · 멈춤 n」. 0인 칸은 서지 않는다. */
+function dressAgentGraphTeamSum(list, team) {
+  const cells = [{ signal: "", count: team.members.length }];
+  for (const signal of ["you", "halt"]) {
+    const count = team.signals.get(signal) ?? 0;
+    if (count > 0) cells.push({ signal, count });
+  }
+  const held = [...list.children];
+  reconcileElementOrder(list, cells.map(({ signal, count }, at) => {
+    const item = held[at] ?? document.createElement("li");
+    if (!item.firstElementChild) item.append(agentGraphSignalMark("idle"), taskBoardElement("span", ""), taskBoardElement("b", ""));
+    const [mark, word, value] = item.children;
+    writeHidden(mark, signal === "");
+    if (signal) dressAgentGraphSignalMark(mark, signal);
+    writeTextContent(word, signal ? agentGraphSignalWord(signal) : t("board.graph.teamSize", "팀"));
+    writeTextContent(value, String(count));
+    return item;
+  }));
+}
+
+/* 카드의 뼈대 — 모양(머리인가, 크기, 신호)이 바뀔 때만 짓는다. 글자와 속성은
+ * `dressAgentGraphCard`가 박자마다 자리에 써 넣는다. 모양 안에서 서고 접히는 칸(칩·배지·이전 시도·
+ * 기다림·컨텍스트·로그)은 늘 지어 두고 `hidden`이 접는다 — 조건부 자식은 조건이 바뀔 때마다 카드를
+ * 다시 짓게 만든다(t-2374). 손은 지을 때 한 번 매고, 무엇을 가리키는지는 누를 때 판에게 묻는다. */
+function buildAgentGraphCard(node, entity, view) {
+  const head = Boolean(entity.head);
+  const small = !head && entity.size === "s";
+  const asking = entity.signal === "you";
+  const top = taskBoardElement("span", "agent-graph-node-head");
+  const title = taskBoardElement("span", "agent-graph-node-title");
+  if (small) top.append(title, taskBoardElement("span", "agent-graph-card-age"));
+  else top.append(agentGraphNodeIcon(entity), title, taskBoardElement("code", "agent-graph-node-model"));
+  top.appendChild(taskBoardElement("span", "agent-graph-mail-badge"));
+  const parts = [top];
+  const stop = (event) => event.stopPropagation();
+  const subject = () => agentGraphModels.get(view)?.entities.get(node.dataset.graphKey) ?? null;
+  if (small) {
+    const said = taskBoardElement("span", "agent-graph-card-said");
+    said.append(taskBoardElement("b", "agent-graph-state-word"), taskBoardElement("span", "agent-graph-card-why"));
+    parts.push(said);
+  } else {
+    const status = taskBoardElement("span", "agent-graph-node-status");
+    status.append(agentGraphSignalMark(entity.signal), taskBoardElement("span", "agent-graph-state-word"));
+    if (head) status.appendChild(taskBoardElement("span", "agent-graph-card-now is-dotted"));
+    status.appendChild(taskBoardElement("span", "agent-graph-card-age is-dotted"));
+    const branch = taskBoardElement("button", "agent-graph-node-branch is-dotted");
+    branch.type = "button";
+    branch.tabIndex = -1;
+    branch.appendChild(taskBoardElement("span", "agent-graph-node-branch-name"));
+    branch.onclick = (event) => {
+      stop(event);
+      const held = subject();
+      if (held?.type === "agent") selectAgentGraphEntity(view, held.workspace.key);
+    };
+    branch.ondblclick = stop;
+    const context = taskBoardElement("span", "agent-graph-node-context");
+    context.setAttribute("role", "img");
+    const ring = taskBoardElement("i", "agent-graph-node-context-ring");
+    ring.setAttribute("aria-hidden", "true");
+    context.append(ring, taskBoardElement("span", "agent-graph-node-context-word"));
+    status.append(branch, taskBoardElement("span", "agent-graph-merge-port"),
+      taskBoardElement("span", "agent-graph-previous-attempt"));
+    if (agentGraphLiveOn()) status.appendChild(agentGraphWaitNode());
+    status.appendChild(context);
+    parts.push(status);
+  }
+  if (!head && entity.size === "m") {
+    const log = taskBoardElement("button", "agent-graph-log-toggle");
+    log.type = "button";
+    log.tabIndex = -1;
+    log.onclick = (event) => {
+      stop(event);
+      toggleAgentGraphCardPart(view, agentGraphLogsOpen, node.dataset.graphKey);
+    };
+    log.ondblclick = stop;
+    const actions = taskBoardElement("span", "agent-graph-card-actions");
+    actions.appendChild(log);
+    parts.push(agentCardDoingNode({ graph: true }), taskBoardElement("span", "agent-graph-node-message"), actions);
+  }
+  if (asking) {
+    const ask = taskBoardElement("span", "agent-graph-ask");
+    agentGraphAskIds += 1;
+    ask.id = `agent-graph-ask-${agentGraphAskIds}`;
+    /* 답하기는 카드에서 가장 무거운 단추다 — 탭 멈춤이 아닌 것은 트리에 Tab이 한 번 들기 때문이고
+     * (화살표가 카드를, Enter가 고르기를 맡는다), 손과 화면 낭독기에는 그대로 단추다. */
+    const answer = taskBoardElement("button", "agent-graph-reply");
+    answer.type = "button";
+    answer.tabIndex = -1;
+    const arrow = taskBoardElement("span", "agent-graph-reply-arrow", "→");
+    arrow.setAttribute("aria-hidden", "true");
+    answer.append(taskBoardElement("span", "agent-graph-reply-word", t("board.graph.reply", "답하기")),
+      taskBoardElement("code", "agent-graph-reply-pane"), arrow);
+    answer.onclick = (event) => {
+      stop(event);
+      const held = subject();
+      if (held?.type === "agent") revealAgentGraphCard(held.card);
+    };
+    answer.ondblclick = stop;
+    const full = taskBoardElement("button", "agent-graph-ask-toggle");
+    full.type = "button";
+    full.tabIndex = -1;
+    full.setAttribute("aria-controls", ask.id);
+    full.onclick = (event) => {
+      stop(event);
+      toggleAgentGraphCardPart(view, agentGraphAsksOpen, node.dataset.graphKey);
+    };
+    full.ondblclick = stop;
+    const actions = taskBoardElement("span", "agent-graph-card-actions");
+    actions.append(answer, full);
+    parts.push(ask, actions);
+  }
+  if (head) parts.push(taskBoardElement("ul", "agent-graph-team-sum"));
+  node.replaceChildren(...parts);
+}
+
+/* 카드가 박자마다 갈아입는 것 — 쓰는 것은 글자·속성·`hidden`뿐이고 노드는 늘지 않는다. */
+function dressAgentGraphCard(node, entity, reply, chip) {
+  const facts = entity.facts;
+  const head = entity.head;
+  const title = node.querySelector(".agent-graph-node-title");
+  const named = head ? agentGraphTeamTitle(head) : entity.label;
+  writeTextContent(title, named);
+  writeAttribute(title, "data-tip", head && named !== entity.label ? `${named} · ${entity.label}` : named);
+  const model = node.querySelector(".agent-graph-node-model");
+  if (model) {
+    const word = agentGraphModelWord(entity.card, facts.modelId);
+    writeTextContent(model, head && head.runs.length > 0
+      ? [head.runs.join(" · "), word].filter(Boolean).join(" · ") : word);
+    writeAttribute(model, "data-tip", [head?.runs.join(" · ") ?? "", facts.modelId].filter(Boolean).join(" · "));
+  }
+  const badge = node.querySelector(".agent-graph-mail-badge");
+  const unread = entity.mailUnread ?? 0;
+  writeHidden(badge, unread === 0);
+  writeTextContent(badge, unread === 0 ? "" : unread > 99 ? "99+" : String(unread));
+  const unreadWords = unread === 0 ? "" : t("board.graph.unreadMail", "읽지 않은 메일 {{count}}개", { count: unread });
+  writeAttribute(badge, "data-tip", unreadWords);
+  writeAttribute(badge, "aria-label", unreadWords);
+  for (const word of node.querySelectorAll(".agent-graph-state-word")) {
+    writeTextContent(word, agentGraphSignalWord(entity.signal));
+  }
+  for (const mark of node.querySelectorAll(".agent-graph-node-status > .agent-graph-signal")) {
+    dressAgentGraphSignalMark(mark, entity.signal);
+  }
+  const age = node.querySelector(".agent-graph-card-age");
+  const aged = agentGraphAgeWord(entity);
+  writeTextContent(age, aged);
+  writeClassName(age, [
+    "agent-graph-card-age",
+    head || entity.size !== "s" ? "is-dotted" : "",
+    entity.wentQuiet && entity.signal === "run" ? "is-quiet" : "",
+  ].filter(Boolean).join(" "));
+  const now = node.querySelector(".agent-graph-card-now");
+  if (now) {
+    const doing = agentGraphNowWord(entity);
+    writeTextContent(now, doing);
+    writeAttribute(now, "data-tip", doing);
+  }
+  const why = node.querySelector(".agent-graph-card-why");
+  if (why) {
+    const said = agentGraphNowWord(entity);
+    writeTextContent(why, said);
+    writeAttribute(why, "data-tip", said);
+  }
+  const branch = node.querySelector(".agent-graph-node-branch");
+  if (branch) {
+    writeHidden(branch, chip === null);
+    writeTextContent(branch.firstElementChild, chip?.label ?? "");
+    writeAttribute(branch, "data-tip", chip?.tip ?? "");
+    writeAttribute(branch, "aria-label", chip
+      ? t("board.graph.chipOpen", "{{name}} 워크스페이스 보기", { name: chip.tip }) : "");
+    const port = node.querySelector(".agent-graph-merge-port");
+    const merge = chip?.merge ?? null;
+    writeHidden(port, merge === null);
+    writeTextContent(port, merge
+      ? `→ ${merge.base} · ${merge.landed ? t("board.graph.mergeLanded", "반영됨")
+        : t("board.graph.mergeDistance", "앞 {{ahead}} · 뒤 {{behind}}", { ahead: merge.ahead, behind: merge.behind })}`
+      : "");
+    writeAttribute(port, "data-tip", merge
+      ? t("board.graph.mergeFlow", "{{branch}}에서 {{base}}로 병합 흐름", { branch: chip.label, base: merge.base })
+      : "");
+  }
+  const previous = node.querySelector(".agent-graph-previous-attempt");
+  if (previous) {
+    writeHidden(previous, !entity.previousAttempt);
+    writeTextContent(previous, entity.previousAttempt ? t("board.graph.previousAttempt", "이전 시도") : "");
+  }
+  dressAgentGraphWait(node.querySelector(".agent-graph-wait"), entity.wait);
+  const context = node.querySelector(".agent-graph-node-context");
+  if (context) {
+    /* 컨텍스트는 60%부터만 선다 (방향 E2) — 그 밑의 수는 할 일이 없는 숫자다. 80%부터는 주의의
+     * 색이 낱말과 고리에 함께 든다. */
+    const held = facts.context && facts.context.ratio >= AGENT_GRAPH_CONTEXT_SHOWN ? facts.context : null;
+    writeHidden(context, held === null);
+    writeClassName(context, held && held.ratio >= AGENT_GRAPH_CONTEXT_FULL
+      ? "agent-graph-node-context is-full" : "agent-graph-node-context");
+    writeStyleProperty(context, "--context-ratio", held ? String(Math.round(held.ratio * 1e4) / 1e4) : "");
+    writeTextContent(context.lastElementChild, held ? `${Math.round(held.ratio * 100)}%` : "");
+    const said = held
+      ? t("board.graph.contextUsed", "컨텍스트 창 {{percent}}% 사용 · {{used}} / {{all}}", {
+          percent: Math.round(held.ratio * 100),
+          used: held.tokens.toLocaleString(),
+          all: held.window.toLocaleString(),
+        })
+      : "";
+    writeAttribute(context, "aria-label", said);
+    writeAttribute(context, "data-tip", said);
+  }
+  const doing = node.querySelector(".agent-card-doing");
+  if (doing) {
+    const open = agentGraphCardDetails || agentGraphLogsOpen.has(entity.key);
+    dressAgentCardDoing(doing, facts, { askInline: false, age: "", quiet: "", holds: true });
+    doing.classList.toggle("is-log-open", open);
+    const message = node.querySelector(".agent-graph-node-message");
+    writeTextContent(message, entity.line);
+    writeAttribute(message, "data-tip", entity.line);
+    const log = node.querySelector(".agent-graph-log-toggle");
+    writeHidden(log, facts.trail.length < 2);
+    writeTextContent(log, open ? t("board.graph.logClose", "로그 접기") : t("board.graph.logOpen", "로그 보기"));
+    writeAttribute(log, "aria-expanded", String(open));
+  }
+  const ask = node.querySelector(".agent-graph-ask");
+  if (ask) {
+    const open = agentGraphAsksOpen.has(entity.key);
+    const question = facts.question?.target || entity.line
+      || t("board.graph.askFallback", "이 에이전트가 답을 기다립니다");
+    writeTextContent(ask, question);
+    writeClassName(ask, open ? "agent-graph-ask is-open" : "agent-graph-ask");
+    const full = node.querySelector(".agent-graph-ask-toggle");
+    writeTextContent(full, open ? t("board.graph.askClose", "질문 접기") : t("board.graph.askOpen", "질문 전문"));
+    writeAttribute(full, "aria-expanded", String(open));
+    const button = node.querySelector(".agent-graph-reply");
+    writeDisabled(button, !reply.reachable);
+    writeTextContent(button.querySelector(".agent-graph-reply-pane"), reply.label);
+    writeAttribute(button, "data-tip", `${reply.tip} · ${reply.label}`);
+    writeAttribute(button, "aria-label", `${t("board.graph.reply", "답하기")} · ${reply.tip} · ${reply.label}`);
+  }
+  const sum = node.querySelector(".agent-graph-team-sum");
+  if (sum && head) dressAgentGraphTeamSum(sum, head);
+}
+
+/* Draws one card, and answers whether its CONTENTS may have changed height.
  *
- * The caller needs that answer and not just "did the topology move": a live
- * wire appearing under a card makes the card taller, which moves every row
- * below it — while the topology, the selection, and (on a graph smaller than
- * the canvas it is drawn on) the canvas's own size all stay exactly as they
- * were. Edges measured before that rebuild point at where the nodes used to be,
- * and stay there until something unrelated happens to move them. */
+ * The caller needs that answer and not just "did the arrangement move": a
+ * question opening under a card makes the card taller, which moves every card
+ * below it — while the order, the selection and the sizes all stay exactly as
+ * they were. Overlay lines measured before that change point at where the
+ * cards used to be, and stay there until something unrelated moves them. */
 function updateAgentGraphNode(node, entity, view) {
   const selected = entity.key === agentGraphSelectedKey;
+  const head = entity.head ?? null;
   /* 입힐 옷을 먼저 한 문자열로 짓고, 지금 입은 것과 다를 때만 갈아입힌다.
    * `classList.add`를 네 번 부르면 아무것도 달라지지 않은 판에도 이 노드의
-   * 스타일이 네 번 무효가 된다 — 노드가 백 개인 표면에서 그것이 값이다. */
-  const dress = ["agent-graph-node", `is-${entity.type}`];
-  if (entity.laneClass) dress.push(entity.laneClass);
+   * 스타일이 네 번 무효가 된다 — 노드가 백 개인 표면에서 그것이 값이다.
+   * `is-attention`·`is-working` 같은 칸의 이름은 카드를 읽는 다른 손(실시간 지도, 시험)이 그대로
+   * 읽으므로 남고, 그림의 옷은 신호(`is-signal-*`)와 크기(`is-size-*`)가 정한다. */
+  const dress = ["agent-graph-node", "is-agent", `is-${entity.bucket}`];
+  if (entity.state !== entity.bucket) dress.push(`is-${entity.state}`);
+  dress.push(`is-signal-${entity.signal}`, head ? "is-head" : `is-size-${entity.size}`);
   if (selected) dress.push("is-selected");
   if (entity.relationEndpoint) dress.push("is-relation-endpoint");
   if (entity.searchMatch === false) dress.push("is-search-dimmed");
-  if (entity.type === "agent") {
-    dress.push(`is-${entity.bucket}`);
-    if (entity.state !== entity.bucket) dress.push(`is-${entity.state}`);
-    if (entity.card.unseen) dress.push("is-unseen");
-    if (entity.live) dress.push("is-live");
-    if (entity.wentQuiet) dress.push("is-went-quiet");
-  }
+  if (entity.card.unseen) dress.push("is-unseen");
+  if (entity.live) dress.push("is-live");
+  if (entity.wentQuiet) dress.push("is-went-quiet");
+  if (entity.traced) dress.push("is-traced");
   writeClassName(node, dress.join(" "));
   writeAttribute(node, "data-graph-key", entity.key);
   writeAttribute(node, "data-graph-type", entity.type);
   writeAttribute(node, "data-search-match", String(entity.searchMatch !== false));
-  if (entity.type === "agent") writeAttribute(node, "data-agent-state", entity.state);
-  else if (node.hasAttribute("data-agent-state")) node.removeAttribute("data-agent-state");
-  writeStyleValue(node, "gridColumn", String(entity.column));
-  writeStyleValue(node, "gridRow", String(entity.row));
-  /* 이 노드가 몇 번째 층인가 — 좌표가 아니라 사실이다. 넓은 판에서는 열이
-   * 그것을 말하고 목록 모드에서는 들여쓰기가 말하지만, 어느 쪽을 그릴지 고르는
-   * 것은 CSS다. 노드는 제 깊이를 적을 뿐 티어를 모른다 (t-2374). */
-  writeStyleProperty(node, "--graph-depth", String(Math.max(0, entity.column - 1)));
+  writeAttribute(node, "data-agent-state", entity.state);
+  writeAttribute(node, "data-signal", entity.signal);
   writeAttribute(node, "aria-selected", String(selected));
-  /* The tree this markup declares is the CONTAINMENT one — project, workspace,
-   * agent — and it has exactly three levels no matter how deep a lineage gets.
-   * Counting the agent lanes instead would announce a helper as level 4 under a
-   * workspace that is level 2, with no level 3 between them, and would disagree
-   * with where ArrowLeft actually goes (its own workspace). Who spawned whom is
-   * the other relation on this surface, and it is said in the inspector and
-   * drawn as a dashed edge rather than folded into this ladder. */
-  writeAttribute(
-    node,
-    "aria-level",
-    String(AGENT_GRAPH_CONTEXT_LAYERS.length + (entity.type === "agent" ? 2 : 1)),
-  );
+  /* 나무의 층은 줄기의 층이다 — 열의 머리가 1, 그 줄기의 카드가 2, 헬퍼가 3. 화살표의 왼쪽이 가는
+   * 곳(`agentGraphWalk`)과 같은 사다리다. */
+  writeAttribute(node, "aria-level", String((entity.depth ?? 0) + 1));
   writeAttribute(node, "tabindex", selected ? "0" : "-1");
-  /* 상태를 낱말로. 눈이 읽는 것은 카드 머리의 눈썹줄이고, 그 줄은 이 레이블에
+  /* 상태를 낱말로. 눈이 읽는 것은 카드의 상태 줄이고, 그 줄은 이 레이블에
    * 가려 화면 낭독기에 닿지 않는다 — 같은 사실을 두 길에 같이 실어야 한다. */
   writeAttribute(node, "aria-label", [
-    agentGraphKindWord(entity.type),
-    entity.type === "agent" ? agentGraphStateWord(entity.state) : "",
+    head ? agentGraphTeamTitle(head) : "",
+    agentGraphSignalWord(entity.signal),
     entity.label,
   ].filter(Boolean).join(" · "));
 
-  /* 서명 셋 — 무엇이 바뀌었고 무엇을 다시 해야 하는가 (1-t353, t-2374).
+  /* 서명 둘 — 무엇을 다시 지어야 하고 무엇을 자리에 써 넣으면 되는가 (1-t353, t-2374).
    *
-   * `signature`는 이 노드가 그리는 모든 것, `stableSignature`는 그 중 **자리에
-   * 써 넣을 수 있는 것을 뺀** 나머지, `geometrySignature`는 높이를 바꾸는 것들.
-   * 셋째가 따로 있는 것은 첫째가 움직여도 간선이 그대로일 수 있고, 둘째가
-   * 그대로여도 카드가 자랄 수 있기 때문이다 — 활동 줄 하나가 나타나면 그
-   * 아래 모든 줄이 내려간다.
-   *
-   * t-2374이 둘째에서 걷어낸 것은 활동·단계·모델·컨텍스트다. 그 넷은 훅 하나에
-   * 한 번씩 움직이는 값이고, 서명에 남겨 두면 「무엇을 하는 중인가」가 바뀔
-   * 때마다 카드의 자식 전부가 다시 지어졌다 — 카드가 그 물음에 답하기 시작한
-   * 바로 그 순간부터 매 박자가 전면 재건이 되는 셈이다. */
-  const facts = entity.type === "agent" ? entity.facts : null;
-  const reply = facts ? agentGraphReplyPlace(entity.card) : null;
-  const where = facts ? agentGraphBranchWord(entity.workspace) : null;
-  const volatileSignature = [
-    entity.state ?? "",
-    entity.bucket ?? "",
-    facts?.stateWord ?? "",
-    facts?.modelId ?? "",
-    reply ? `${reply.label}:${reply.reachable}` : "",
-    where?.full ?? "",
-    String(entity.childCount ?? 0),
-    entity.clock?.word ?? "",
-    entity.clock?.running ?? "",
-    facts?.phase ?? "",
-    facts?.phaseWord ?? "",
-    facts?.phaseTip ?? "",
-    facts?.model ?? "",
-    [facts?.question, facts?.activity]
-      .map((one) => (one ? [one.kind, one.word, one.target, one.when].join("\u001f") : ""))
-      .join("\u001d"),
-    facts?.ticks.map((tick) => `${tick.kind}:${tick.repeat}:${tick.tip}`).join(",") ?? "",
-    facts?.trail.map((tool) => `${tool.kind}:${tool.word}:${tool.target}`).join(",") ?? "",
-    String(facts?.trailHidden ?? 0),
-    facts?.context ? String(Math.round(facts.context.ratio * 1e4)) : "",
-    /* 기다림의 사유와 칸이 **실제로 쓰는 낱말** (t-7288). 나이와 벽의 남은 때는
-     * 시계가 흐르면 바뀌므로 자리에 써 넣는 쪽에 둔다 — 시계 낱말과 같은
-     * 이유로, 여기 없으면 그 칸만 옛 낱말에 굳는다. */
-    entity.wait ? [entity.wait.cause, entity.wait.text, entity.wait.said].join("\u001f") : "",
-  ].join("\u001e");
-  const stableSignature = [
+   * `shape`는 카드의 뼈대를 정하는 것(머리인가, 크기, 신호, 벤더, 실시간 지도의 칸)이고, 그것이
+   * 움직이면 뼈대를 다시 짓는다 — 상태가 바뀌어 크기가 바뀐 카드의 자식 열 남짓이다. `said`는 그
+   * 뼈대에 써 넣는 모든 것이고, 같으면 이 카드는 아무것도 쓰지 않는다: 조용한 박자의 값은 0이다.
+   * 셋째(`geometry`)는 높이를 바꾸는 것들 — 오버레이 선이 다시 잴지를 묻는 답이다. */
+  const facts = entity.facts;
+  const reply = agentGraphReplyPlace(entity.card);
+  const chip = agentGraphChipOf(entity, view);
+  const shape = [
     locale,
-    entity.type,
-    entity.label,
-    entity.line,
-    entity.card?.agent ?? "",
-    entity.buckets?.join(",") ?? "",
-    String(entity.idleCount ?? 0),
-    String(entity.idleExpanded ?? false),
-    String(entity.wentQuiet ?? false),
-    String(entity.mailUnread ?? 0),
-    entity.merge ? JSON.stringify(entity.merge) : "",
-    entity.type === "workspace" ? agentGraphOverlayMode : "",
-    String(entity.previousAttempt ?? false),
-    /* 기다림의 칸을 카드가 **드는가** (t-7288). 손잡이는 사람이 누를 때만
-     * 움직이므로 이것은 안정된 조건이고, 그 한 번의 누름이 카드를 다시 짓는
-     * 것은 옳다 — 지도를 끈 판(보드의 기본값)의 카드는 이 칸을 아예 들지
-     * 않는다. 어느 카드가 기다리는지는 **볼 수 있는 상태**이므로, 그쪽은
-     * 늘 서 있는 빈 칸이 맡고 CSS가 접는다. */
+    head ? `head:${head.kind}` : entity.size,
+    entity.signal,
+    entity.card.agent ?? "",
     String(agentGraphLiveOn()),
   ].join("\u001f");
-  const signature = `${stableSignature}\u001d${volatileSignature}`;
-  const geometrySignature = [
-    entity.type,
+  const said = [
+    entity.label,
+    entity.line,
+    entity.bucket,
+    entity.state,
+    facts.modelId,
+    `${reply.label}:${reply.reachable}`,
+    chip ? `${chip.key}:${chip.label}:${chip.tip}:${chip.merge ? JSON.stringify(chip.merge) : ""}` : "",
+    entity.clock?.word ?? "",
+    String(entity.wentQuiet),
+    entity.waitsOn?.label ?? "",
+    facts.phaseWord,
+    [facts.question, facts.activity]
+      .map((one) => (one ? [one.kind, one.word, one.target, one.when].join("\u001f") : ""))
+      .join("\u001d"),
+    facts.ticks.map((tick) => `${tick.kind}:${tick.repeat}:${tick.tip}`).join(","),
+    facts.trail.map((tool) => `${tool.kind}:${tool.word}:${tool.target}`).join(","),
+    String(facts.trailHidden),
+    facts.context ? String(Math.round(facts.context.ratio * 1e4)) : "",
+    String(entity.mailUnread ?? 0),
+    String(entity.previousAttempt ?? false),
+    String(agentGraphCardDetails),
+    String(agentGraphLogsOpen.has(entity.key)),
+    String(agentGraphAsksOpen.has(entity.key)),
+    /* 기다림의 사유와 칸이 **실제로 쓰는 낱말** (t-7288). 나이와 벽의 남은 때는
+     * 시계가 흐르면 바뀌므로 서명에 든다 — 시계 낱말과 같은 이유로, 여기 없으면
+     * 그 칸만 옛 낱말에 굳는다. */
+    entity.wait ? [entity.wait.cause, entity.wait.text, entity.wait.said].join("\u001f") : "",
+    head ? [agentGraphTeamTitle(head), head.runs.join(","), head.members.length,
+      head.signals.get("you") ?? 0, head.signals.get("halt") ?? 0].join("\u001f") : "",
+  ].join("\u001e");
+  const geometry = [
+    shape,
     String(Boolean(entity.line)),
-    String(Boolean(facts?.question ?? facts?.activity)),
-    String((facts?.ticks.length ?? 0) > 0),
-    String(Boolean(facts?.context)),
-    String(entity.idleCount > 0),
-    String(Boolean(entity.merge) && agentGraphOverlayMode === "merge"),
-    String(Boolean(entity.meta)),
-    String(Boolean(entity.wentQuiet)),
-    String(entity.mailUnread > 0),
-    /* 기다림의 칸은 늘 서지만 비어 있을 때 CSS가 접으므로, 서고 접히는 그
-     * 순간이 카드의 높이를 바꾼다 — 그 아래 줄이 전부 내려간다 (t-7288). */
+    String(chip !== null),
+    String(Boolean(chip?.merge)),
     String(Boolean(entity.wait)),
-    /* 방향 D의 줄들: 답하기와 두 줄까지 받는 질문, 줄 앞의 흔적(자세히 보기에서만 선다), 나이 하나로 서는 「지금」,
-     * 그리고 상태 줄과 첫 줄에 서고 접히는 칸들. 말풍선은 여기 없다 — 카드 밖에 떠 있어
-     * (`position: absolute`) 상자도 닻도 옮기지 않으므로, 넣으면 상태가 갈릴 때마다 간선을
-     * 다시 잰다(위의 「백 번의 상태에 간선 측정 0」 계약). */
-    String(entity.state === "needs-attention"),
-    facts?.question?.target ?? "",
-    String(agentGraphCardDetails && (facts?.trail.length ?? 0) > 1),
-    String(Boolean(entity.clock)),
-    String(Boolean(facts?.modelId)),
-    String(Boolean(where?.short)),
-    String((entity.childCount ?? 0) > 0),
+    String(Boolean(entity.previousAttempt)),
+    String(Boolean(facts.question)),
+    facts.question?.target ?? "",
+    String(facts.trail.length > 1 && (agentGraphCardDetails || agentGraphLogsOpen.has(entity.key))),
+    String(agentGraphAsksOpen.has(entity.key)),
   ].join("\u001f");
-  const geometryChanged = node.dataset.graphGeometry !== geometrySignature;
-  if (node.dataset.graphSignature !== signature &&
-      node.dataset.graphStable === stableSignature && entity.type === "agent") {
-    node.dataset.graphSignature = signature;
-    node.dataset.graphGeometry = geometrySignature;
-    const mark = node.querySelector(".agent-graph-node-state");
-    if (mark) dressAgentGraphStateMark(mark, entity.state);
-    const state = node.querySelector(".agent-graph-state-word");
-    if (state) writeTextContent(state, facts.stateWord);
-    const phase = node.querySelector(".agent-card-phase");
-    if (phase) {
-      writeClassName(phase, `agent-card-phase is-${facts.phase || "none"}`);
-      writeTextContent(phase, facts.phaseWord);
-      writeAttribute(phase, "data-tip", facts.phaseTip);
-    }
-    dressAgentGraphCard(node, entity, reply);
-    dressAgentGraphWait(node.querySelector(".agent-graph-wait"), entity.wait);
-    /* 자리에 써 넣었어도 **높이는** 바뀔 수 있다: 첫 도구 호출이 활동 줄을
-     * 세우면 그 아래 줄이 전부 내려간다. 그 사실을 삼키면 간선은 카드가 한
-     * 박자 전에 서 있던 자리를 가리킨 채로 남는다. */
-    return geometryChanged;
+  if (node.dataset.graphShape !== shape) {
+    node.dataset.graphShape = shape;
+    node.dataset.graphSignature = "";
+    buildAgentGraphCard(node, entity, view);
   }
-  if (node.dataset.graphSignature !== signature) {
-    node.dataset.graphSignature = signature;
-    node.dataset.graphStable = stableSignature;
-    node.dataset.graphGeometry = geometrySignature;
-    const head = document.createElement("span");
-    head.className = "agent-graph-node-head";
-    const copy = document.createElement("span");
-    copy.className = "agent-graph-node-copy";
-    const kind = document.createElement("span");
-    kind.className = "agent-graph-node-kind";
-    /* 눈썹줄은 종류와 **상태**다 (1-t353).
-     *
-     * 벤더가 아니다: 이 카드는 벤더를 이미 두 번 말한다 — 머리의 마크가 한 번,
-     * 발치의 `Claude · 2분`이 한 번. 세 번째 사본을 걷어 낸 자리에 들어오는 것은
-     * 카드가 여태 낱말로 말하지 않던 하나다. 상태는 지금까지 7px 점 하나였고,
-     * 대화 줄이 없는 카드에서만 우연히 낱말이 되었다(`line`의 옛 대체값) —
-     * 그래서 같은 화면의 카드 둘이 같은 사실을 서로 다른 자리에서 말했다. */
-    kind.textContent = agentGraphKindWord(entity.type);
-    const title = document.createElement("span");
-    title.className = "agent-graph-node-title";
-    title.textContent = entity.label;
-    title.dataset.tip = entity.label;
-    copy.append(kind, title);
-    if (entity.line && entity.type !== "agent") {
-      const line = document.createElement("span");
-      line.className = entity.type === "agent"
-        ? "agent-graph-node-message"
-        : "agent-graph-node-line";
-      line.dataset.tip = entity.line;
-      if (entity.type === "workspace" && entity.workspace?.branch && entity.workspace?.base) {
-        const basePart = document.createElement("span");
-        basePart.className = "agent-graph-base-part";
-        basePart.textContent = `← ${entity.workspace.base}`;
-        /* 이름줄이 이미 그 브랜치면, 아래 줄은 조상만 말한다 (t-1853).
-         *
-         * 워크스페이스의 이름은 거의 언제나 브랜치 그 자체이고(`label`), 그
-         * 아래 줄은 `branch ← base`였다 — 116px 레인 안에서 같은 문자열을 두 번
-         * 쓴 셈이라 두 줄이 나란히 말줄임표가 되었다(실측 1440px, 배율 75%:
-         * 레인 134.8px에 「wt/t-142…」와 「wt… ← main」). 위가 브랜치, 아래가
-         * 조상이면 두 줄이 함께 `branch ← base`를 말하면서 아무것도 잘리지
-         * 않는다. 전문은 툴팁이 계속 든다. */
-        if (entity.label === entity.workspace.branch) {
-          line.appendChild(basePart);
-        } else {
-          const branchPart = document.createElement("span");
-          branchPart.className = "agent-graph-branch-part";
-          branchPart.textContent = entity.workspace.branch;
-          line.append(branchPart, document.createTextNode(" "), basePart);
-        }
-      } else {
-        line.textContent = entity.line;
-      }
-      copy.appendChild(line);
-    }
-    head.append(agentGraphNodeIcon(entity), copy);
-    if (entity.type === "agent") head.appendChild(taskBoardElement("span", "agent-graph-node-model"));
-    if (entity.type === "agent" && entity.mailUnread > 0) {
-      const unread = document.createElement("span");
-      unread.className = "agent-graph-mail-badge";
-      unread.textContent = entity.mailUnread > 99 ? "99+" : String(entity.mailUnread);
-      unread.dataset.tip = t("board.graph.unreadMail", "읽지 않은 메일 {{count}}개", {
-        count: entity.mailUnread,
-      });
-      unread.setAttribute("aria-label", unread.dataset.tip);
-      head.appendChild(unread);
-    }
-    const parts = [head];
-    if (entity.type === "agent") {
-      /* 상태 줄의 다섯 칸은 **언제나** 선다 (t-2374).
-       *
-       * 셋이 조건부였다 — 시계 둘과 조용함의 도장. 조건부 자식은 그 조건이
-       * 바뀔 때마다 카드를 다시 짓게 만들고, 카드가 「무엇을 하는 중인가」를
-       * 말하기 시작하면 그 조건은 훅 하나마다 바뀐다. 빈 칸은 CSS가 접는다
-       * (`:empty`), 그래서 그림은 그대로이고 서명만 조용해진다. */
-      const status = document.createElement("span");
-      status.className = "agent-graph-node-status";
-      const stateWord = document.createElement("span");
-      stateWord.className = "agent-graph-state-word";
-      stateWord.textContent = facts.stateWord;
-      /* 상태 낱말 옆의 한 마디 — 여섯째 상태가 아니라 `working` 위의 옷. */
-      const phase = document.createElement("span");
-      phase.className = `agent-card-phase is-${facts.phase || "none"}`;
-      phase.textContent = facts.phaseWord;
-      phase.dataset.tip = facts.phaseTip;
-      /* 가지는 레인 색의 틱과 함께, 하위는 이 그림의 자식이 있을 때만, 컨텍스트는 아는 판만. */
-      const branch = document.createElement("span");
-      branch.className = "agent-graph-node-branch";
-      const tick = document.createElement("i");
-      tick.setAttribute("aria-hidden", "true");
-      branch.append(tick, taskBoardElement("span", "agent-graph-node-branch-name"));
-      const kids = taskBoardElement("span", "agent-graph-node-kids");
-      const context = document.createElement("span");
-      context.className = "agent-graph-node-context";
-      context.setAttribute("role", "img");
-      const ring = document.createElement("i");
-      ring.className = "agent-graph-node-context-ring";
-      ring.setAttribute("aria-hidden", "true");
-      context.append(ring, taskBoardElement("span", "agent-graph-node-context-word"));
-      status.append(agentGraphStateMark(entity.state), stateWord, phase, branch, kids, context);
-      if (entity.previousAttempt) status.append(taskBoardElement("span", "agent-graph-previous-attempt", t("board.graph.previousAttempt", "이전 시도")));
-      if (agentGraphLiveOn()) {
-        const wait = agentGraphWaitNode();
-        dressAgentGraphWait(wait, entity.wait);
-        status.append(wait);
-      }
-      parts.push(status);
-      /* 「지금」의 한 블록: 활동 줄과 흔적 아래에 마지막 말과 답하기가 같은 헤어라인 안에 선다. */
-      const doing = agentCardDoingNode({ graph: true });
-      if (entity.line) {
-        const message = document.createElement("span");
-        message.className = "agent-graph-node-message";
-        message.textContent = entity.line;
-        message.dataset.tip = entity.line;
-        doing.appendChild(message);
-      }
-      /* 답하기는 늘 지어 두고 확인 필요일 때만 선다 — 상태가 바뀔 때마다 카드를 다시 짓지 않게.
-       * 탭 멈춤이 아닌 것은 접기 단추와 같은 이유다: 트리에는 Tab이 한 번 든다. */
-      const answer = document.createElement("button");
-      answer.type = "button";
-      answer.className = "agent-graph-reply";
-      answer.tabIndex = -1;
-      const arrow = taskBoardElement("span", "agent-graph-reply-arrow", "→");
-      arrow.setAttribute("aria-hidden", "true");
-      answer.append(taskBoardElement("span", "agent-graph-reply-word", t("board.graph.reply", "답하기")),
-        taskBoardElement("code", "agent-graph-reply-pane"), arrow);
-      answer.onclick = (event) => {
-        event.stopPropagation();
-        const subject = agentGraphModels.get(view)?.entities.get(node.dataset.graphKey);
-        if (subject?.type === "agent") revealAgentGraphCard(subject.card);
-      };
-      answer.ondblclick = (event) => event.stopPropagation();
-      doing.appendChild(answer);
-      parts.push(doing);
-      const bubble = document.createElement("span");
-      bubble.className = "agent-graph-bubble";
-      bubble.setAttribute("aria-hidden", "true");
-      parts.push(bubble);
-    }
-    if (entity.type === "workspace" && entity.idleCount > 0) {
-      const idle = document.createElement("button");
-      idle.type = "button";
-      idle.className = "agent-graph-idle-chip";
-      idle.textContent = agentGraphIdleCountWord(entity.idleCount);
-      idle.dataset.tip = agentGraphIdleActionWord(entity);
-      idle.setAttribute("aria-label", idle.dataset.tip);
-      idle.setAttribute("aria-expanded", String(entity.idleExpanded));
-      idle.onclick = (event) => {
-        event.stopPropagation();
-        agentGraphToggleIdle(view, entity.key);
-      };
-      parts.push(idle);
-    }
-    if (entity.type === "workspace" && entity.merge && agentGraphOverlayMode === "merge") {
-      const port = document.createElement("span");
-      port.className = "agent-graph-merge-port";
-      const standing = entity.merge.landed
-        ? t("board.graph.mergeLanded", "반영됨")
-        : t("board.graph.mergeDistance", "앞 {{ahead}} · 뒤 {{behind}}", {
-            ahead: entity.merge.ahead,
-            behind: entity.merge.behind,
-          });
-      port.textContent = `→ ${entity.merge.base} · ${standing}`;
-      port.dataset.tip = t("board.graph.mergeFlow", "{{branch}}에서 {{base}}로 병합 흐름", {
-        branch: entity.workspace.branch || entity.label,
-        base: entity.merge.base,
-      });
-      port.setAttribute("role", "status");
-      parts.push(port);
-    }
-    if (entity.type === "workspace" && entity.buckets.length > 0) {
-      parts.push(agentGraphPipsNode(entity.buckets));
-    }
-    if (entity.type !== "agent" && entity.meta) {
-      const meta = document.createElement("span");
-      meta.className = "agent-graph-node-meta";
-      meta.textContent = entity.meta;
-      parts.push(meta);
-    }
-    reconcileElementOrder(node, parts);
-    if (entity.type === "agent") dressAgentGraphCard(node, entity, reply);
-  }
-  return geometryChanged;
+  if (node.dataset.graphSignature === `${shape}\u001d${said}`) return false;
+  node.dataset.graphSignature = `${shape}\u001d${said}`;
+  dressAgentGraphCard(node, entity, reply, chip);
+  const moved = node.dataset.graphGeometry !== geometry;
+  node.dataset.graphGeometry = geometry;
+  return moved;
 }
 
 function agentGraphStateMark(state) {
@@ -5057,13 +5109,16 @@ function dressAgentGraphStateMark(mark, state) {
  * 이 둘은 판마다 다시 매여 있었다 — 그리는 일이 카드마다 클로저 둘을 새로
  * 짓는다는 뜻이고, 훅이 초당 쉰 번 오는 표면에서 카드 백 장이면 초당 만 개의
  * 함수다. 노드는 키로 살아남으므로 그 손도 살아남아야 한다: 손이 지금 무엇을
- * 가리키는지는 **잡을 때** 판에게 물으면 되고, 노드는 제 키를 이미 들고 있다. */
+ * 가리키는지는 **잡을 때** 판에게 물으면 되고, 노드는 제 키를 이미 들고 있다.
+ *
+ * 카드는 단추가 아니라 나무의 항목이다 (방향 E2): 안에 「답하기」·「질문 전문」·「로그 보기」·소속
+ * 칩이 단추로 서므로, 단추 속 단추가 되지 않게. Enter와 Space는 나무의 키 손이 맡는다
+ * (`wireAgentGraphKeys`). */
 function agentGraphNode(entity, view) {
   agentGraphNodeCreations += 1;
-  const node = document.createElement("button");
-  node.type = "button";
+  const node = document.createElement("div");
   node.setAttribute("role", "treeitem");
-  node.onclick = () => selectAgentGraphEntity(view, node.dataset.graphKey);
+  node.onclick = () => pickAgentGraphCard(view, node.dataset.graphKey);
   node.ondblclick = () => {
     const held = agentGraphModels.get(view)?.entities.get(node.dataset.graphKey);
     if (held?.type === "agent") revealAgentGraphCard(held.card);
@@ -5072,207 +5127,207 @@ function agentGraphNode(entity, view) {
   return node;
 }
 
-/* ---- the project band --------------------------------------------------- */
-
-function agentGraphFoldProject(view, key, { focus = false } = {}) {
-  const band = agentGraphModels.get(view)?.entities.get(key);
-  if (agentGraphScopeKey) {
-    if (agentGraphScopeFolded.has(key)) agentGraphScopeFolded.delete(key);
-    else agentGraphScopeFolded.add(key);
-    if (focus) agentGraphSelectedKey = key;
-    paintAgentGraph(view, agentGraphFullModel(view));
-    if (focus) focusAgentGraphSelection(view);
-    return;
-  }
-  if (band?.dormant) {
-    if (agentGraphDormantExpanded.has(key)) agentGraphDormantExpanded.delete(key);
-    else agentGraphDormantExpanded.add(key);
-  } else if (agentGraphFolded.has(key)) agentGraphFolded.delete(key);
-  else {
-    agentGraphFolded.add(key);
-    /* Folding a band must not fold the inspector's subject away with it. The
-     * band is itself an entity, so the selection lands on the heading a person
-     * just closed instead of jumping to some other project's first agent. */
-    const held = agentGraphModels.get(view)?.entities.get(agentGraphSelectedKey);
-    if (held?.band?.key === key) agentGraphSelectedKey = key;
-  }
-  /* Folding rebuilds the heading's own contents, so the button a keyboard was
-   * standing on is replaced by a new one and the focus falls to the document.
-   * Put back only when the fold came from the keyboard: a pointer that closed a
-   * band did not ask to be moved anywhere. */
-  const drawn = paintBoardView(boardTab(), { force: true });
-  if (focus) void drawn.then(() => focusAgentGraphSelection(view));
-  else void drawn;
+/* 고르기와 계보 (방향 E2). 카드를 누르면 그 카드가 인스펙터에 서고, 그 카드의 계보 — 줄기의 위로
+ * 열의 머리까지, 아래로 헬퍼까지 — 만 남기고 나머지가 물러난다. 같은 카드를 다시 누르거나 Escape를
+ * 누르면 다 돌아온다. 고르기는 인스펙터의 것이고 계보는 그림의 것이라 둘은 따로 산다: 첫 판의 기본
+ * 선택은 계보를 켜지 않는다. */
+function pickAgentGraphCard(view, key) {
+  agentGraphTraceKey = agentGraphTraceKey === key ? null : key;
+  selectAgentGraphEntity(view, key);
 }
 
-function updateAgentGraphBandHead(head, band, view) {
-  const selected = band.key === agentGraphSelectedKey;
-  writeClassName(head, [
-    "agent-graph-band-head",
-    band.folded ? "is-folded" : "",
-    band.dormant ? "is-dormant" : "",
-    selected ? "is-selected" : "",
-    band.searchMatch === false ? "is-search-dimmed" : "",
-  ].filter(Boolean).join(" "));
-  writeStyleValue(head, "gridRow", String(band.row));
-  const signature = [
-    locale,
-    band.label,
-    band.line,
-    band.meta,
-    String(band.folded),
-    String(band.agentCount),
-    [...band.counts].sort().join(","),
-    band.faces.map((entry) => `${entry.card.agent}:${entry.bucket}`).join(","),
-    band.dormantWorkspaces
-      .map((workspace) => `${workspace.key}:${workspace.idleAgents.length}`)
-      .join(","),
-  ].join("");
-  const geometrySignature = [
-    band.label,
-    String(band.folded),
-    band.dormantWorkspaces.map((workspace) => workspace.key).join(","),
-  ].join("");
-  const geometryChanged = head.dataset.graphGeometry !== geometrySignature;
-  if (head.dataset.graphSignature !== signature) {
-    head.dataset.graphSignature = signature;
-    head.dataset.graphGeometry = geometrySignature;
-    const rail = document.createElement("div");
-    rail.className = "agent-graph-band-rail";
-
-    const fold = document.createElement("button");
-    fold.type = "button";
-    fold.className = "agent-graph-band-fold";
-    fold.innerHTML = icon("chevron", !band.folded);
-    /* Not a tab stop. The treeitem beside it already carries `aria-expanded`
-     * and the arrow keys already fold, so leaving this in the tab order would
-     * add one stop per project to a surface whose contract is that Tab enters
-     * the tree once. It stays a real button because a pointer needs one. */
-    fold.tabIndex = -1;
-    fold.setAttribute("aria-expanded", String(!band.folded));
-    fold.setAttribute(
-      "aria-label",
-      band.folded
-        ? t("board.graph.unfoldBand", "{{name}} 펼치기", { name: band.label })
-        : t("board.graph.foldBand", "{{name}} 접기", { name: band.label }),
-    );
-
-    const name = document.createElement("button");
-    name.type = "button";
-    name.className = "agent-graph-band-name";
-    name.setAttribute("role", "treeitem");
-    name.setAttribute("aria-level", "1");
-    name.dataset.graphKey = band.key;
-    name.innerHTML = icon("folder");
-    const label = document.createElement("strong");
-    label.textContent = band.label;
-    const line = document.createElement("span");
-    line.className = "agent-graph-band-line";
-    const counts = document.createElement("span");
-    counts.className = "agent-graph-band-counts";
-    for (const [kind, count] of [
-      ["workspace", band.project.workspaces.size],
-      ["agent", band.agentCount],
-    ]) {
-      const chip = document.createElement("span");
-      chip.className = "agent-graph-count-chip";
-      const value = document.createElement("b");
-      value.textContent = String(count);
-      const word = document.createElement("span");
-      word.textContent = agentGraphKindWord(kind);
-      chip.append(value, word);
-      counts.appendChild(chip);
+/* 계보에 드는 카드들 — 줄기의 부모를 따라 머리까지, 줄기를 따라 아래로 끝까지. 고른 카드가 그림에
+ * 없으면 계보도 없다. */
+function agentGraphTraced(model) {
+  const start = model.entities.get(agentGraphTraceKey);
+  if (start?.type !== "agent" || !model.nodes.includes(start)) return null;
+  const held = new Set([start.key]);
+  for (let above = start.above; above; above = above.above) held.add(above.key);
+  const down = (key) => {
+    const spine = model.spines.get(key);
+    if (!spine) return;
+    for (const entity of [...spine.items, ...(spine.fold?.members ?? [])]) {
+      held.add(entity.key);
+      down(entity.key);
     }
-    line.appendChild(counts);
-    name.append(label, line);
-
-    const roll = document.createElement("span");
-    roll.className = "agent-graph-band-roll";
-    for (const bucket of ["attention", "working", "done"]) {
-      const count = band.counts.get(bucket) ?? 0;
-      if (count === 0) continue;
-      const chip = document.createElement("span");
-      chip.className = `agent-graph-band-chip is-${bucket}`;
-      const mark = document.createElement("i");
-      mark.setAttribute("aria-hidden", "true");
-      const value = document.createElement("b");
-      value.textContent = String(count);
-      chip.append(mark, value);
-      chip.dataset.tip = bucketWord(bucket);
-      roll.appendChild(chip);
-    }
-    rail.append(fold, name, roll);
-
-    if (!band.folded && band.dormantWorkspaces.length > 0) {
-      const dormant = document.createElement("span");
-      dormant.className = "agent-graph-dormant-list";
-      for (const workspace of band.dormantWorkspaces) {
-        const chip = document.createElement("button");
-        chip.type = "button";
-        chip.className = "agent-graph-dormant-chip";
-        chip.dataset.idleWorkspace = workspace.key;
-        const count = workspace.idleAgents.length;
-        chip.textContent = count > 0
-          ? `${workspace.label} · ${agentGraphIdleCountWord(count)}`
-          : workspace.label;
-        chip.dataset.tip = count > 0
-          ? agentGraphIdleActionWord(workspace)
-          : t("board.graph.expandWorkspace", "{{name}} 레인 펼치기", {
-              name: workspace.label,
-            });
-        chip.setAttribute("aria-label", chip.dataset.tip);
-        chip.setAttribute("aria-expanded", "false");
-        chip.onclick = (event) => {
-          event.stopPropagation();
-          agentGraphToggleIdle(view, workspace.key);
-        };
-        dormant.appendChild(chip);
-      }
-      rail.appendChild(dormant);
-    }
-
-    /* A folded band still has to answer "who is in there". The faces are the
-     * shortest true answer — the agent marks a person already recognises, each
-     * wearing its own state ring. */
-    if (band.folded) {
-      const faces = document.createElement("span");
-      faces.className = "agent-graph-band-faces";
-      for (const entry of band.faces.slice(0, 6)) {
-        const face = document.createElement("span");
-        face.className = `agent-graph-band-face is-${entry.bucket}`;
-        face.appendChild(
-          agentIcon(agentRows.find((row) => row.id === entry.card.agent) ?? {
-            id: entry.card.agent,
-            name: agentName(entry.card.agent),
-          }),
-        );
-        face.dataset.tip = entry.card.heading;
-        faces.appendChild(face);
-      }
-      if (band.faces.length > 6) {
-        const more = document.createElement("span");
-        more.className = "agent-graph-band-more";
-        more.textContent = `+${band.faces.length - 6}`;
-        faces.appendChild(more);
-      }
-      rail.appendChild(faces);
-    }
-    head.replaceChildren(rail);
-  }
-  head.querySelector(".agent-graph-band-fold").onclick = (event) => {
-    event.stopPropagation();
-    agentGraphFoldProject(view, band.key);
   };
-  const name = head.querySelector(".agent-graph-band-name");
-  name.setAttribute("aria-selected", String(selected));
-  // The expansion belongs to the ITEM, not to the chevron beside it: a tree
-  // reader asks the treeitem whether it is open, and the chevron is one way of
-  // answering rather than the fact itself.
-  name.setAttribute("aria-expanded", String(!band.folded));
-  name.tabIndex = selected ? 0 : -1;
-  name.onclick = () => selectAgentGraphEntity(view, band.key);
-  name.ondblclick = () => agentGraphFoldProject(view, band.key);
-  return geometryChanged;
+  down(start.key);
+  return held;
+}
+
+/* 판을 이 판의 스냅샷에서 다시 짓는다 — 묶음을 펴고 접는 것은 이 창의 몸짓이라 백엔드에 다시 묻지
+ * 않는다. 모델이 든 한 벌(`source`)을 그대로 읽으므로 같은 시각의 카드·원장·자리가 다시 선다. */
+function agentGraphRebuild(view) {
+  const previous = agentGraphFullModel(view);
+  const source = previous?.source;
+  if (!source) return null;
+  return agentGraphModel(source.columns, source.places, source.reviews, Date.now(), previous,
+    source.catalog, source.search, source.overlays, { ledger: source.ledger, seats: source.seats });
+}
+
+/* 「끝남 N」 묶음 하나를 펴거나 접는다. 펼친 사실은 사람의 것이라 다시 그려도 남는다. */
+function toggleAgentGraphFold(view, key, { focus = false } = {}) {
+  if (agentGraphFoldsOpen.has(key)) agentGraphFoldsOpen.delete(key);
+  else agentGraphFoldsOpen.add(key);
+  const model = agentGraphRebuild(view);
+  if (!model) return;
+  paintAgentGraph(view, model);
+  if (focus) {
+    const fold = [...view.querySelectorAll(".agent-graph-fold")].find((one) => one.dataset.graphFold === key);
+    fold?.focus({ preventScroll: true });
+  }
+}
+
+/* 카드 하나의 「질문 전문」·「로그 보기」. 카드의 높이만 바뀌므로 모델은 그대로 두고 다시 입힌다. */
+function toggleAgentGraphCardPart(view, open, key) {
+  if (open.has(key)) open.delete(key);
+  else open.add(key);
+  const model = agentGraphModels.get(view);
+  if (model) paintAgentGraph(view, agentGraphFullModel(view, model));
+}
+
+/* 열과 줄기를 세운다 (방향 E2).
+ *
+ * 카드는 키로 살아남는다 — 상태가 바뀌어 줄기 안의 자리가 바뀌어도 같은 노드가 자리만 옮기고
+ * (`reconcileElementOrder`), 쓰는 것은 바뀐 글자·속성뿐이다. 열·줄기·마디·묶음도 각자 키로 산다
+ * (`data-graph-part`). 접힌 「끝남 N」 안의 카드는 펼칠 때 선다 — 펼치기 전에는 DOM에 없다.
+ * 옮긴 노드가 초점을 쥐고 있었으면 초점을 되돌린다: 자리를 옮기는 일이 키보드를 놓치게 하지 않는다.
+ *
+ * 답하는 것: 어느 카드의 **내용**이 높이를 바꿨을 수 있는가. */
+function paintAgentGraphTeams(view, model) {
+  const nodesHost = view.querySelector(".agent-graph-nodes");
+  const active = document.activeElement;
+  const focused = active && nodesHost.contains(active) ? active : null;
+  const parts = new Map([...nodesHost.querySelectorAll("[data-graph-part]")]
+    .map((part) => [part.dataset.graphPart, part]));
+  const nodes = new Map([...nodesHost.querySelectorAll(".agent-graph-node[data-graph-key]")]
+    .map((node) => [node.dataset.graphKey, node]));
+  let dressMoved = false;
+  const take = (part, make) => {
+    const held = parts.get(part) ?? make();
+    writeAttribute(held, "data-graph-part", part);
+    return held;
+  };
+  const cardOf = (entity) => {
+    const node = nodes.get(entity.key) ?? agentGraphNode(entity, view);
+    if (updateAgentGraphNode(node, entity, view)) dressMoved = true;
+    return node;
+  };
+  const joint = (signal) => {
+    const held = taskBoardElement("span", "agent-graph-joint");
+    held.setAttribute("aria-hidden", "true");
+    held.appendChild(agentGraphSignalMark(signal));
+    return held;
+  };
+  const group = (tag) => () => {
+    const held = document.createElement(tag);
+    held.setAttribute("role", "group");
+    return held;
+  };
+  let spineOf = null;
+  const limbOf = (entity) => {
+    const limb = take(`limb:${entity.key}`, () => {
+      const held = document.createElement("li");
+      held.appendChild(joint(entity.signal));
+      return held;
+    });
+    writeClassName(limb, `agent-graph-limb is-size-${entity.size}`);
+    const mark = limb.querySelector(":scope > .agent-graph-joint");
+    dressAgentGraphSignalMark(mark.firstElementChild, entity.signal);
+    const wanted = [mark, cardOf(entity)];
+    if (model.spines.has(entity.key)) wanted.push(spineOf(entity.key, true));
+    reconcileElementOrder(limb, wanted);
+    return limb;
+  };
+  const foldOf = (fold) => {
+    const limb = take(fold.key, () => {
+      const held = document.createElement("li");
+      const button = taskBoardElement("button", "agent-graph-fold");
+      button.type = "button";
+      button.tabIndex = -1;
+      button.setAttribute("role", "treeitem");
+      button.append(agentGraphSignalMark("done"), taskBoardElement("b", "agent-graph-fold-count"),
+        taskBoardElement("span", "agent-graph-fold-names"), taskBoardElement("span", "agent-graph-fold-act"));
+      button.onclick = (event) => {
+        event.stopPropagation();
+        toggleAgentGraphFold(view, button.dataset.graphFold);
+      };
+      held.append(joint("done"), button, group("ol")());
+      return held;
+    });
+    writeClassName(limb, "agent-graph-limb is-fold");
+    const button = limb.querySelector(":scope > .agent-graph-fold");
+    const box = limb.querySelector(":scope > ol");
+    const titles = fold.members.map((entity) => entity.label);
+    writeAttribute(button, "data-graph-fold", fold.key);
+    writeAttribute(button, "aria-expanded", String(fold.open));
+    writeAttribute(button, "aria-level", String((fold.members[0]?.depth ?? 1) + 1));
+    writeAttribute(button, "data-tip", titles.join("\n"));
+    writeTextContent(button.querySelector(".agent-graph-fold-count"),
+      t("board.graph.doneCount", "끝남 {{count}}", { count: fold.members.length }));
+    writeTextContent(button.querySelector(".agent-graph-fold-names"), titles.join(" · "));
+    writeTextContent(button.querySelector(".agent-graph-fold-act"), fold.open
+      ? t("board.graph.foldClose", "접기") : t("board.graph.foldOpen", "펼치기"));
+    writeClassName(box, "agent-graph-spine is-sub is-folded");
+    writeHidden(box, !fold.open);
+    reconcileElementOrder(box, fold.open ? fold.members.map(limbOf) : []);
+    const traced = nodesHost.classList.contains("is-tracing") && fold.members.some((entity) => entity.traced);
+    button.classList.toggle("is-traced", traced);
+    return limb;
+  };
+  spineOf = (key, sub) => {
+    const spine = model.spines.get(key);
+    const list = take(`spine:${key}`, group("ol"));
+    writeClassName(list, sub ? "agent-graph-spine is-sub" : "agent-graph-spine");
+    const wanted = spine.items.map(limbOf);
+    if (spine.fold) wanted.push(foldOf(spine.fold));
+    reconcileElementOrder(list, wanted);
+    return list;
+  };
+  const headOf = (team) => {
+    const head = take(`head:${team.key}`, () => {
+      const held = taskBoardElement("header", "agent-graph-team-head");
+      const top = taskBoardElement("span", "agent-graph-node-head");
+      top.append(taskBoardElement("span", "agent-graph-node-title"), taskBoardElement("code", "agent-graph-node-model"));
+      const status = taskBoardElement("span", "agent-graph-node-status");
+      status.append(agentGraphSignalMark("idle"), taskBoardElement("span", "agent-graph-state-word"));
+      held.append(top, status, taskBoardElement("ul", "agent-graph-team-sum"));
+      return held;
+    });
+    writeClassName(head, `agent-graph-team-head is-${team.kind}`);
+    const title = agentGraphTeamTitle(team);
+    writeTextContent(head.querySelector(".agent-graph-node-title"), title);
+    writeAttribute(head.querySelector(".agent-graph-node-title"), "data-tip", title);
+    writeTextContent(head.querySelector(".agent-graph-node-model"), team.runs.join(" · "));
+    const status = head.querySelector(".agent-graph-node-status");
+    const vacant = team.seats.length > 0 && team.seats.every((seat) => !seat.held);
+    writeHidden(status, team.kind !== "run");
+    writeTextContent(status.lastElementChild, team.kind !== "run" ? ""
+      : vacant ? t("board.graph.seatVacant", "코디 자리가 비어 있습니다")
+        : t("board.graph.leadAway", "코디 판이 이 그림 밖에 있습니다"));
+    dressAgentGraphTeamSum(head.querySelector(".agent-graph-team-sum"), team);
+    return head;
+  };
+  /* 열의 수 — 열이 적은 판에서 한 열이 한없이 넓어지지 않게 격자의 폭을 그 수로 묶는다(shell.css
+   * `.agent-graph-nodes`). */
+  writeStyleProperty(nodesHost, "--agent-graph-teams", String(Math.max(1, model.teams.length)));
+  const wanted = model.teams.map((team) => {
+    const section = take(`team:${team.key}`, group("section"));
+    writeClassName(section, [
+      "agent-graph-team",
+      `is-${team.kind}`,
+      team.lead?.searchMatch === false && team.members.every((entity) => entity.searchMatch === false)
+        ? "is-search-dimmed" : "",
+    ].filter(Boolean).join(" "));
+    writeAttribute(section, "aria-label", agentGraphTeamTitle(team));
+    const rows = [team.lead ? cardOf(team.lead) : headOf(team)];
+    if (model.spines.has(team.spine)) rows.push(spineOf(team.spine, false));
+    reconcileElementOrder(section, rows);
+    return section;
+  });
+  reconcileElementOrder(nodesHost, wanted);
+  if (focused?.isConnected && document.activeElement !== focused) focused.focus({ preventScroll: true });
+  return dressMoved;
 }
 
 function revealAgentGraphCard(card) {
@@ -5534,8 +5589,6 @@ function paintAgentGraphContextInspector(view, entity) {
   const signature = [
     locale,
     entity.key,
-    String(entity.folded ?? ""),
-    entity.buckets?.join(",") ?? "",
     JSON.stringify(agentGraphTriples(entity)),
   ].join("");
   if (body.dataset.graphSignature === signature) return;
@@ -5569,27 +5622,6 @@ function paintAgentGraphContextInspector(view, entity) {
       start.onclick = () => void spawnAgentFromGraph(entity.workspace, agent);
       actions.appendChild(start);
     }
-    facts.appendChild(actions);
-  }
-  if (entity.type === "project") {
-    const actions = document.createElement("div");
-    actions.className = "agent-inspector-context-actions";
-    const fold = document.createElement("button");
-    fold.type = "button";
-    fold.className = "btn";
-    fold.textContent = entity.folded
-      ? t("board.graph.unfold", "밴드 펼치기")
-      : t("board.graph.fold", "밴드 접기");
-    fold.onclick = () => agentGraphFoldProject(view, entity.key);
-    actions.appendChild(fold);
-
-    const fit = document.createElement("button");
-    fit.type = "button";
-    fit.className = "btn";
-    fit.textContent = t("board.graph.fit", "화면에 맞추기");
-    fit.onclick = () => fitAgentGraph(view);
-    actions.appendChild(fit);
-
     facts.appendChild(actions);
   }
   body.replaceChildren(facts);
@@ -5997,16 +6029,17 @@ function selectAgentGraphEntity(view, key, { focus = false } = {}) {
     agentGraphScopeKey = "";
     agentGraphScopeLabel = "";
   }
-  if (agentGraphScopeKey === "" && !model.nodes.some((one) => one.key === key) && entry.workspace) {
-    agentGraphIdleExpanded.add(entry.workspace.key);
-    agentGraphFolded.delete(entry.project.key);
-    agentGraphDormantExpanded.add(entry.project.key);
-    const source = model.source;
-    model = agentGraphModel(source.columns, source.places, source.reviews, Date.now(), model,
-      source.catalog, source.search, source.overlays, { ledger: source.ledger });
+  /* 접힌 「끝남 N」 안의 카드를 고르면 그 묶음이 펼쳐진다 (방향 E2) — 인스펙터가 선 카드가 그림에
+   * 없는 판은 없다. 묶음은 모델이 정하므로 펼친 뒤 이 스냅샷에서 다시 짓는다. */
+  const fold = (drawn?.entities.get(key) ?? entity)?.fold;
+  if (fold && !agentGraphFoldsOpen.has(fold)) {
+    agentGraphFoldsOpen.add(fold);
+    model = agentGraphRebuild(view) ?? model;
   }
   agentGraphSelectedEdgeKey = null;
   agentGraphSelectedKey = key;
+  /* 계보가 켜져 있으면 고른 카드를 따라간다 — 화살표로 걸어도 지금 카드의 계보가 남는다. */
+  if (agentGraphTraceKey && entity?.type === "agent") agentGraphTraceKey = key;
   /* 좁은 판에서 인스펙터는 **고른 다음에** 온다 (t-2374). 첫 판의 기본 선택이
    * 서랍을 열면, 그림을 보려고 보드를 연 사람이 맨 처음 보는 것은 그림을 덮은
    * 판이다. 이 손은 사람이 실제로 고른 길이고 — 클릭과 화살표 — 그래서 여는
@@ -6316,123 +6349,17 @@ function takeAgentGraphZoom(view, next) {
   setAgentGraphZoom(view, next);
 }
 
-/* The canvas is stretched to fill its frame, so its own box says nothing about
- * how big the PICTURE is. The drawn extent does: the far corner of the furthest
- * node is the only number a fit can honestly divide by, and it is the number
- * that lets a small graph zoom back IN instead of sitting at 50% forever. */
-/* The far corner of the drawn picture.
- *
- * Neither the canvas nor a band head can answer this: both are stretched to
- * the width of the scrollport by `min-width: 100%`, so dividing by either one
- * says "already fitted" no matter how small the graph really is — which is why
- * a fit could only ever zoom OUT. What is actually drawn is the cards and the
- * band rails, and a rail is `width: max-content`, so it measures the heading
- * rather than the stretch behind it. */
-function agentGraphDrawnSize(view) {
-  const drawn = graphDrawnSize(
-    view.querySelector(".agent-graph-nodes"),
-    ".agent-graph-node, .agent-graph-band-rail",
-  );
-  /* 폭은 그림의 **제** 폭이다 (round three). 레인이 남는 폭을 나눠 가지므로
-   * 그려진 카드의 오른쪽 끝은 언제나 판의 끝이고, 그것을 나누면 답은 늘
-   * 「이미 맞다」다 — 한 번 줄어든 배율이 판이 넓어져도 돌아오지 못했다(실측:
-   * 파일 패널을 접어도 71%). 빈 상자가 레인이 실측 폭일 때의 폭을 CSS의 같은
-   * 셈으로 들고 있으므로 그것을 잰다; 높이는 그려진 것에서 그대로 읽는다. */
-  const extent = view.querySelector(".agent-graph-extent");
-  return extent && extent.offsetWidth > 0 ? { wide: extent.offsetWidth, tall: drawn.tall } : drawn;
-}
-
-/* 저절로 앉는 판이 내려갈 수 있는 바닥은, 판이 받은 밀도만큼이다 (t-1853).
- *
- * 손으로 적은 0.75는 한 화면 폭을 보고 고른 수였고, 인스펙터가 선 1440px에서는
- * 그 수 때문에 그림이 104px 잘린 채로 맞춤이 끝났다(실측: 그림 581px, 앉을
- * 자리 477px). 진짜 바닥은 이미 토큰에 적혀 있다 — 에이전트 레인은 실측
- * 172px에 밀도(`--agent-graph-density`)를 곱한 폭이고, 그 밀도는 카드가 도구
- * 호출의 경로를 담기 위해 **덧입은** 것이다. 그러므로 저절로 하는 맞춤은 그
- * 덧입은 것을 도로 내어놓을 수 있고, 실측 레인보다 좁아지는 일은 할 수 없다:
- * 바닥은 `1 / density`(1.55 → 0.65)이며, 그 자리에서 카드는 172px, 제목은 제
- * `max()` 바닥인 10px이다. 손으로는 `AGENT_GRAPH_ZOOM_MIN`까지 더 내려간다.
- *
- * 수는 CSS에서 읽는다 — 이 파일이 픽셀 어휘를 두 벌 들지 않는다는 규칙 그대로.
- * 토큰을 읽지 못하는 판에서만 옛 상수가 대신 선다. */
-function agentGraphAutoFitFloor(view) {
-  const tuning = agentGraphTuning(view);
-  if (!tuning) return 1;
-  const surface = view.querySelector(".agent-graph-surface");
-  const density = Number.parseFloat(
-    getComputedStyle(surface).getPropertyValue("--agent-graph-density"));
-  /* 밀도가 읽히지 않으면 토큰에 적힌 바닥을 그대로 쓴다 — 그 수는 지금의
-   * 밀도에서 나온 값이므로 둘은 늘 같은 답이고, 여기 손으로 적을 수는 그래서
-   * 하나도 없다. */
-  if (!Number.isFinite(density) || density <= 1) return tuning.fitFloor;
-  return Math.max(tuning.zoomMin, 1 / density);
-}
-
-/* Widths scale with the zoom exactly; heights do not, because a card's text has
- * a floor it will not shrink past. So the fit lands in two steps — the ratio,
- * then whatever the reflow actually gave — and stops as soon as the second one
- * has nothing left to correct. */
-function fitAgentGraph(view, { asked = true, pass = 0 } = {}) {
-  /* 사람이 배율을 쥐었으면 저절로 앉는 일은 끝난다 — 예약한 프레임이 이미
-   * 날아가고 있었더라도 (1-t385).
-   *
-   * 예약은 위상이 움직인 판에서 걸리고 그 프레임은 16밀리초 뒤에 온다. 그
-   * 사이는 사람도 쓰는 시간이고, 위상은 에이전트 하나가 시작할 때마다 움직이므로
-   * 그 창은 판이 가장 바쁠 때 가장 자주 열린다 — 실측: 축소를 누른 손이 97%를
-   * 82%로 내린 직후 예약된 프레임이 75%로 되돌렸다. 「사람이 쥐었는가」의 답은
-   * 예약할 때가 아니라 **쓸 때** 유효해야 한다. 둘째 판(`pass === 1`)도 같은
-   * 문을 지난다: 그 사이에도 손은 움직인다. */
-  if (!asked && agentGraphZoomTaken) return;
-  /* 행성계가 선 판의 맞춤은 행성계의 것이다 (t-9444): 행성계는 늘 판에 맞춰 서므로
-   * 저절로 하는 맞춤은 할 일이 없고, 청한 맞춤은 배율 1과 제자리다. 접힌 카드 판을
-   * 재면 크기 0이라 이 문 밑의 셈은 아무 답도 하지 않는다. */
-  if (agentOrbitShowing(view)) {
-    if (asked) agentOrbitFit(view);
-    return;
-  }
-  const scroll = view.querySelector(".agent-graph-scroll");
-  const { wide, tall } = agentGraphDrawnSize(view);
-  if (wide <= 0 || tall <= 0) return;
-  /* 여백은 판이 이미 들고 있는 그것이다 (1-t385).
-   *
-   * 여기 서 있던 것은 "캔버스의 제 여백과 같게"라고 적힌 24였고, 그것은
-   * `--space-5`를 손으로 한 번 더 적은 값이었다. 같은 간격이 두 곳에 적히면
-   * 한 곳만 움직이는 날이 오고, 그날 맞춘 그림은 판 밖으로 나간다 — 실측:
-   * 판의 여백을 40으로 두면 맞춘 그림이 안쪽 429px 자리에 463px로 앉았다.
-   * `clientWidth`는 여백을 품은 폭이므로, 빼고 남는 것이 그림이 앉을 자리다. */
-  /* 나누는 것은 **폭**이다 (t-1853).
-   *
-   * 여기 있던 것은 폭과 높이 중 작은 비율이었고, 그래서 카드가 늘어나 그림이
-   * 길어지는 것만으로 배율이 바닥까지 눌렸다 — 실측(1440×900, 파일 패널 접음,
-   * 세 열): 에이전트 둘이면 100%, 같은 폭에 스무 개를 쌓으면 75%였고 그때
-   * 가로로 넘친 것은 0px이었다. 사람이 보는 화면은 카드가 왼쪽에 몰리고
-   * 오른쪽은 빈 모눈이며 눈금은 75%에 붙어 있는 그림이 된다.
-   *
-   * 두 축은 같은 축이 아니다. 세로는 스크롤이 있는 축이고, 아래로 이어지는
-   * 것은 「더 많은 에이전트」다 — 이 온톨로지가 세로에 두기로 한 바로 그것.
-   * 가로로 잘려 나가는 것은 한 층(하위 에이전트)이고 그것이 사라진 자리에는
-   * 아무 표시도 남지 않는다. 그래서 맞춤은 폭을 맞추고, 길이는 스크롤에
-   * 맡긴다. 그림이 판보다 작을 때 가운데로 가는 일은 캔버스의 몫이다
-   * (`place-content`). */
-  const room = graphFitRoom(scroll) / wide;
-  /* 청해서 하는 맞춤은 위아래로 다 간다. 저절로 앉는 판은 100%와 낱말의 바닥
-   * 사이에만 머문다 — 카드 셋을 160%로 부풀린 것은 「맞춘」 그림이 아니라 다른
-   * 그림이고(작은 그림을 판 한가운데 놓는 일은 이제 캔버스가 한다,
-   * `place-content`), 낱말이 더 줄지 않는 지점 밑으로 내려간 그림은 맞춘 것이
-   * 아니라 읽을 수 없게 된 것이다. */
-  const fitted = fittedGraphZoom(agentGraphZoom * room);
-  const want = asked ? fitted : Math.min(1, Math.max(agentGraphAutoFitFloor(view), fitted));
-  const before = agentGraphZoom;
-  setAgentGraphZoom(view, want);
-  // 사람의 스크롤을 빼앗는 것은 사람이 청했을 때만. 에이전트 하나가 시작할
-  // 때마다 읽던 자리가 맨 위로 튕기면 그 자동은 도움이 아니라 방해다.
-  if (asked) scroll.scrollTo({ left: 0, top: 0 });
-  if (pass === 0 && agentGraphZoom !== before) {
-    requestAnimationFrame(() => fitAgentGraph(view, { asked, pass: 1 }));
-  }
+/* 맞춤은 입체의 것이다 (방향 E2). 카드 그림은 코디의 열이 판의 폭에 맞춰 접히고 쌓이므로 맞출
+ * 그림이 없다 — 가로로 넘치는 것이 없고, 세로는 스크롤의 축이다(방향 D의 맞춤도 폭만 맞췄다). 입체는
+ * 늘 판에 맞춰 서므로 청한 맞춤은 배율 1과 제자리다(`agentOrbitFit`). 그래서 카드 그림에는 저절로
+ * 앉는 판도, 배율의 단추도 없다 — 단추는 입체가 선 판에만 선다(shell.css `.agent-graph-zoom`). */
+function fitAgentGraph(view) {
+  if (agentOrbitShowing(view)) agentOrbitFit(view);
 }
 
 function agentGraphShortcut(view, key) {
+  /* Shift+1·2는 입체의 배율이다 (방향 E2) — 카드 그림에는 맞출 그림도 키울 그림도 없다. */
+  if (!agentOrbitShowing(view)) return false;
   if (key === "1") {
     agentGraphZoomTaken = true;
     fitAgentGraph(view);
@@ -6447,63 +6374,42 @@ function agentGraphShortcut(view, key) {
   return false;
 }
 
-/* 그림이 판을 넘쳤을 때, 아직 배율이 사람의 것이 아니면 판에 맞춰 앉힌다.
- *
- * 실측: 카드 100장이면 그림은 775×11282이고 스크롤포트는 749×889 — 112 노드 중
- * 103이 첫 화면 밖에 있는데 배율은 그대로 100%였다. 「전체 보기」 단추가 있었지만
- * 그것은 누른 사람에게만 있는 기능이고, 처음 열어 본 사람에게 이 표면은 끝없는
- * 세로 목록이다. 배치가 끝난 다음 프레임에 재는 것은 지금 세운 DOM의 크기를
- * 물어야 하기 때문이고, 판마다가 아니라 **위상이 움직인 판**에만 도는 것은
- * 카드의 낱말 하나가 바뀐 박자에는 잴 것이 없기 때문이다. */
-const agentGraphFitFrames = new WeakMap();
-
-function scheduleAgentGraphFit(view) {
-  if (agentGraphZoomTaken) return;
-  /* 목록 모드에는 맞춤이 없다 (t-2374). 한 열로 접힌 그림에 배율은 뜻이
-   * 없고 — 줄이면 카드가 좁아지는 것이 아니라 낱말만 작아진다 — 계속 돌면
-   * 폭을 바꿀 때마다 눈금이 흔들린다. 판단은 폭을 이미 재는
-   * `watchAgentGraphSize`가 내려 이 클래스로 적어 두었으므로, 여기서 다시
-   * 재지 않는다: 이 함수는 위상이 움직인 판마다 지나는 길이다. */
-  if (view.classList.contains("is-graph-list")) return;
-  scheduleGraphFrame(agentGraphFitFrames, view, () => fitAgentGraph(view, { asked: false }));
-}
-
 /* Arrow keys, because the surface says `role="tree"`.
  *
- * A tree that can only be walked with Tab is a tree in name only, and the name
- * is what a screen reader announces before anything else. Up and down walk the
- * items in the order they are drawn; right opens a band or steps along a
- * relation to what it holds; left closes a band or steps back to what holds
- * this. One item carries `tabIndex 0` at a time (the selected one), so Tab
- * enters the graph once and the arrows do the rest. */
+ * 나무의 항목은 카드와 「끝남 N」 묶음이다 (방향 E2). DOM의 차례가 곧 걷는 차례이고, 그 차례는 열마다
+ * 머리, 그리고 그 줄기를 위에서 아래로다. 위아래는 그 차례를 걷는다 — 열의 끝에서 다음 열의 머리로
+ * 넘어간다. 오른쪽은 줄기를 따라 첫 자식으로 가고 접힌 묶음이면 편다. 왼쪽은 줄기의 부모(끝내 열의
+ * 머리)로 가고 펼친 묶음이면 접는다. One item carries `tabIndex 0` at a time (the selected one), so
+ * Tab enters the graph once and the arrows do the rest. Enter는 카드를 누른 것과 같다 — 고르고 계보를
+ * 켠다. Space는 이 그림의 손 도구라 그대로 둔다(문서의 키 손). */
 function agentGraphWalk(view, model, from, key) {
-  const items = [...view.querySelectorAll(".agent-graph-nodes [data-graph-key]")];
+  const items = [...view.querySelectorAll(".agent-graph-nodes [data-graph-key], .agent-graph-nodes .agent-graph-fold")];
   const at = items.indexOf(from);
   if (at < 0) return null;
   if (key === "ArrowDown") return items[Math.min(items.length - 1, at + 1)];
   if (key === "ArrowUp") return items[Math.max(0, at - 1)];
   if (key === "Home") return items[0];
   if (key === "End") return items[items.length - 1];
-  const here = from.dataset.graphKey;
-  const entity = model.entities.get(here);
-  if (key === "ArrowRight") {
-    if (entity?.type === "project" && entity.folded) {
-      agentGraphFoldProject(view, here, { focus: true });
+  const item = (graphKey) => items.find((one) => one.dataset.graphKey === graphKey) ?? null;
+  const fold = from.dataset.graphFold;
+  if (fold) {
+    const open = from.getAttribute("aria-expanded") === "true";
+    if ((key === "ArrowRight" && !open) || (key === "ArrowLeft" && open)) {
+      toggleAgentGraphFold(view, fold, { focus: true });
       return null;
     }
-    const below = model.edges.find((edge) => edge.from === here);
-    return below
-      ? items.find((item) => item.dataset.graphKey === below.to) ?? null
-      : items[Math.min(items.length - 1, at + 1)];
+    return key === "ArrowRight" ? items[Math.min(items.length - 1, at + 1)] : item(fold.slice("fold:".length));
+  }
+  const entity = model.entities.get(from.dataset.graphKey);
+  if (key === "ArrowRight") {
+    const spine = model.spines.get(entity?.key);
+    if (spine?.items.length) return item(spine.items[0].key);
+    if (spine?.fold) return items.find((one) => one.dataset.graphFold === spine.fold.key) ?? null;
+    return items[Math.min(items.length - 1, at + 1)];
   }
   if (key === "ArrowLeft") {
-    if (entity?.type === "project") {
-      if (!entity.folded) agentGraphFoldProject(view, here, { focus: true });
-      return null;
-    }
-    const above = model.edges.find((edge) => edge.to === here);
-    const target = above?.from ?? entity?.band?.key;
-    return items.find((item) => item.dataset.graphKey === target) ?? null;
+    if (entity?.fold) return items.find((one) => one.dataset.graphFold === entity.fold) ?? null;
+    return entity?.above ? item(entity.above.key) : null;
   }
   return null;
 }
@@ -6514,16 +6420,30 @@ function wireAgentGraphKeys(view) {
   if (host.onkeydown) return;
   host.onkeydown = (event) => {
     if (event.metaKey || event.ctrlKey || event.altKey) return;
+    const from = event.target.closest("[data-graph-key], .agent-graph-fold");
+    const model = agentGraphModels.get(view);
+    if (!from || !model) return;
+    /* 카드 위의 Enter. 묶음은 단추라 제 Enter가 이미 누름이고, 카드 안의 단추도 제 것이다. */
+    if (event.key === "Enter" && event.target === from && from.dataset.graphKey) {
+      event.preventDefault();
+      pickAgentGraphCard(view, from.dataset.graphKey);
+      return;
+    }
     if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       return;
     }
-    const from = event.target.closest("[data-graph-key]");
-    const model = agentGraphModels.get(view);
-    if (!from || !model) return;
     event.preventDefault();
     const next = agentGraphWalk(view, model, from, event.key);
-    if (next) selectAgentGraphEntity(view, next.dataset.graphKey, { focus: true });
+    if (!next) return;
+    /* 묶음은 개체가 아니라 고를 것이 없다 — 초점만 선다. */
+    if (next.dataset.graphFold) next.focus({ preventScroll: false });
+    else selectAgentGraphEntity(view, next.dataset.graphKey, { focus: true });
   };
+}
+
+/* 서랍과 시트가 그림을 덮는 티어인가 (t-2374) — 넓은 판의 곁판은 늘 서 있어 덮는 것이 없다. */
+function agentGraphInspectorCovers(view) {
+  return view.clientWidth > 0 && view.clientWidth < agentGraphTierWidths(view).side;
 }
 
 /* Drag the empty grid to move the picture.
@@ -6563,8 +6483,10 @@ function wireAgentGraphCanvas(view) {
   }
   const layout = view.querySelector(".agent-graph-layout");
   if (layout && !layout.onkeydown) {
-    /* Escape 는 가장 바깥의 덮개부터 걷는다: 팝오버가 서 있으면 그것을, 아니면
-     * 서랍을. 둘 다 없으면 이 키는 이 판의 것이 아니므로 위로 흘려보낸다. */
+    /* Escape 는 가장 바깥의 덮개부터 걷는다: 팝오버가 서 있으면 그것을, 그다음
+     * 그림을 덮은 서랍을, 그다음 그림 안의 계보를 (방향 E2). 넓은 판의 곁판은
+     * 덮지 않으므로 거기서는 계보가 먼저다. 셋 다 없으면 이 키는 이 판의 것이
+     * 아니므로 위로 흘려보낸다. */
     layout.onkeydown = (event) => {
       if (event.key !== "Escape") return;
       if (view.classList.contains("is-overlays-open")) {
@@ -6573,8 +6495,15 @@ function wireAgentGraphCanvas(view) {
         event.stopPropagation();
         return;
       }
-      if (!view.classList.contains("is-inspector-open")) return;
-      setAgentGraphInspectorOpen(view, false);
+      const drawer = view.classList.contains("is-inspector-open");
+      if (drawer && (agentGraphInspectorCovers(view) || !agentGraphTraceKey)) {
+        setAgentGraphInspectorOpen(view, false);
+        event.stopPropagation();
+        return;
+      }
+      if (!agentGraphTraceKey) return;
+      agentGraphTraceKey = null;
+      paintAgentGraph(view, agentGraphFullModel(view));
       event.stopPropagation();
     };
   }
@@ -6605,14 +6534,9 @@ function wireAgentGraphCanvas(view) {
     },
     onEnd: () => scroll.classList.remove("is-panning"),
   });
-  // Only with the modifier held: a bare wheel over a graph this tall is a
-  // scroll, and a surface that zooms on it is one nobody can read.
-  scroll.onwheel = (event) => {
-    if (!event.ctrlKey && !event.metaKey) return;
-    event.preventDefault();
-    agentGraphPauseFollow(view);
-    takeAgentGraphZoom(view, agentGraphZoom * graphWheelZoomFactor(event.deltaY));
-  };
+  /* 카드 그림에는 휠 배율이 없다 (방향 E2) — 열이 판의 폭에 맞춰 접히므로 늘릴 그림도 줄일 그림도
+   * 없고, 휠은 스크롤이다. 입체는 제 무대에서 휠을 받는다(`shell-board-orbit.js`). 아래 셋은 입체가
+   * 선 판에만 보이는 바닥의 단추다(shell.css `.agent-graph-zoom`). */
   const out = view.querySelector(".agent-graph-zoom-out");
   const into = view.querySelector(".agent-graph-zoom-in");
   const fit = view.querySelector(".agent-graph-fit");
@@ -6732,19 +6656,13 @@ function agentGraphListMode(view) {
   return view.clientWidth > 0 && view.clientWidth < agentGraphTierWidths(view).list;
 }
 
-/* 목록 모드의 배율은 1이고 그 단추는 눌리지 않는다. 한 열에서 축소는 카드를
- * 좁히지 못하고 낱말만 줄이므로, 눌리는 채로 두면 아무 일도 하지 않는 단추가
- * 된다 — 그리고 눈금은 사람이 마지막으로 넓은 판에서 고른 수에 굳어 있다. */
+/* 목록 티어의 표시. 카드 그림의 열은 CSS가 그림의 폭으로 쌓으므로(방향 E2) 이 클래스는 티어를
+ * 이름으로만 말하고, 배율은 건드리지 않는다 — 배율은 입체의 것이고 그 단추는 입체에만 선다. */
 function syncAgentGraphTier(view) {
   /* 행성계는 목록 티어가 없다 (t-9444): 판에 맞춰 서는 그림이라 좁은 판에서도 배율이
    * 뜻을 가진다. 카드로 돌아가면 카드 판의 관찰자가 다시 묻는다. */
   const list = agentGraphListMode(view) && !agentOrbitShowing(view);
   view.classList.toggle("is-graph-list", list);
-  for (const button of view.querySelectorAll(
-    ".agent-graph-zoom-in, .agent-graph-zoom-out, .agent-graph-fit")) {
-    button.disabled = list;
-  }
-  if (list && agentGraphZoom !== 1) setAgentGraphZoom(view, 1);
   return list;
 }
 
@@ -6772,111 +6690,23 @@ function watchAgentGraphSize(view) {
     /* 폭을 이미 재고 있는 자리가 여기다 — 티어를 묻기에 가장 싼 자리이기도
      * 하다. 이 콜백은 뷰가 관찰에 들어갈 때 한 번 저절로 오므로, 처음 열린
      * 판도 제 티어를 안다. */
-    if (syncAgentGraphTier(owner)) {
-      scheduleAgentGraphEdges(owner);
-      return;
-    }
+    syncAgentGraphTier(owner);
+    /* 판의 폭이 바뀌면 열이 다시 접히고 카드가 자리를 옮기므로 오버레이 선을 다시 잰다 (방향 E2).
+     * 그을 선이 없으면 그 일은 아무것도 읽지 않는다(`paintAgentGraphEdges`). */
     scheduleAgentGraphEdges(owner);
-    /* 판이 넓어졌으면 그림도 그 자리를 받는다 (t-1853).
-     *
-     * 맞춤은 여태 **위상이 움직인 판**에서만 걸렸다. 그래서 파일 패널을 접거나
-     * 창을 넓혀 자리가 생겨도 그림은 방금 좁던 판에 맞춰 앉은 채로 남았고,
-     * 사람이 본 것은 왼쪽에 몰린 카드와 오른쪽의 빈 모눈이다 (실측: 패널을 펴
-     * 앉을 자리가 477px일 때 맞춘 65%가, 패널을 접어 827px이 되어도 65%
-     * 그대로 — 넘치는 298px 대신 남는 200px). 사람이 배율을 쥐었으면 이 문은
-     * `scheduleAgentGraphFit` 안에서 닫힌다. 되먹임은 한 판에서 멎는다: 다시
-     * 잰 비율이 1이면 배율이 움직이지 않고, 움직이지 않은 배율은 리플로도 새
-     * 알림도 만들지 않는다. */
-    scheduleAgentGraphFit(owner);
   });
 }
 
-function agentGraphSelectedEdges(model) {
-  const selected = agentGraphSelectedKey;
-  if (!selected) return new Set();
-  const incoming = new Map();
-  for (const edge of model.edges) {
-    const held = incoming.get(edge.to) ?? [];
-    held.push(edge);
-    incoming.set(edge.to, held);
-  }
-  const held = new Set();
-  const seen = new Set();
-  const pending = [selected];
-  while (pending.length > 0) {
-    const here = pending.pop();
-    if (!here || seen.has(here)) continue;
-    seen.add(here);
-    for (const edge of incoming.get(here) ?? []) {
-      held.add(edge.key);
-      pending.push(edge.from);
-    }
-  }
-  return held;
-}
-
-/* An elbow, not a bezier.
- *
- * The lanes are twenty pixels apart and the rows they join can be half a band
- * apart, so a curve whose control points sit at the midpoint is a near-vertical
- * stroke crammed into that gap — five of them read as one bar. The orthogonal
- * run says the same thing in the space it has: out of the source, down the
- * gutter, into the target, with a corner small enough to stay inside it. */
-function agentGraphEdgePath(
-  startX, startY, endX, endY, track = null, stub = 0, gutterX = null,
-) {
-  const span = endX - startX;
-  const rise = endY - startY;
-  if (Math.abs(rise) < 1) return `M ${startX} ${startY} H ${endX}`;
-  /* Backwards, or too tight to turn in.
-   *
-   * An agent that one project's agent spawned inside ANOTHER project is drawn
-   * as a root of the band it actually lives in, so its lane can be to the LEFT
-   * of the lane its parent sits in — the one relation on this surface that runs
-   * uphill. There is no gutter between the two to run down, so the route steps
-   * clear of the source, crosses on a track in the GAP above the row it is
-   * heading for, and comes back in at the target's own edge. The track matters:
-   * the long horizontal run passes over every lane between the two, so a track
-   * halfway between the rows goes straight through whatever card a third
-   * project happens to have at that height, and the caller hands down the gap
-   * instead. Answering this case with a straight `H` — the first version — made
-   * a cross-band lineage draw a line that stopped in mid-air. */
-  if (span <= stub * 2) {
-    return [
-      `M ${startX} ${startY}`,
-      `H ${startX + stub}`,
-      `V ${track ?? startY + rise / 2}`,
-      `H ${endX - stub}`,
-      `V ${endY}`,
-      `H ${endX}`,
-    ].join(" ");
-  }
-  /* Forward relations own exactly one column gap. Run horizontally to its
-   * centre, vertically through that gutter, then horizontally to the target's
-   * edge. A bezier's painted curve can bow back over either card even when its
-   * control points live in the gap; orthogonal segments cannot. */
-  const turnX = gutterX ?? startX + span * 0.5;
-  return [
-    `M ${startX} ${startY}`,
-    `H ${turnX}`,
-    `V ${endY}`,
-    `H ${endX}`,
-  ].join(" ");
-}
-
-/* 부모 → 자식의 레일은 곡선이다 (방향 D, 오르빗의 빛의 관). 두 조절점이 제 끝의 높이에 서고
- * 가로로는 도랑 안에서 엇갈리므로(폭의 0.6씩) 곡선의 x는 두 끝 사이에서 한 방향으로만 가고,
- * 어느 카드 위로도 되돌아 휘지 않는다 — 그래서 도랑이 좁은 배율에서도 곡선이다. 거꾸로 가는
- * 관계는 곡선이 카드를 가로지르므로 위의 직각 길을 그대로 탄다. */
-function agentGraphRailPath(startX, startY, endX, endY, track = null, stub = 0, gutterX = null) {
-  const span = endX - startX;
-  if (span <= 0) return agentGraphEdgePath(startX, startY, endX, endY, track, stub, gutterX);
-  const bend = span * 0.6;
+/* 오버레이 선의 길 (방향 E2). 계보는 줄기가, 담김은 칩이 말하므로 그림이 선으로 긋는 것은 사람이
+ * 고른 메일·의존과 실시간 지도의 선뿐이고, 그 선은 대개 열을 건넌다. 다른 열이면 두 카드의 마주 보는
+ * 모서리를 곡선으로 잇는다 — 두 조절점이 제 끝의 높이에 서서 곡선의 x가 한 방향으로만 가므로 어느
+ * 카드 위로도 되돌아 휘지 않는다. 같은 열이면 오른쪽 모서리에서 나가 열 밖의 도랑(`around`)을 타고
+ * 내려와 같은 쪽 모서리로 든다 — 같은 열의 카드들을 가로지르지 않게. */
+function agentGraphOverlayPath({ at: [startX, startY, endX, endY, around] }) {
+  if (around !== null) return `M ${startX} ${startY} H ${around} V ${endY} H ${endX}`;
+  if (Math.abs(endY - startY) < 1) return `M ${startX} ${startY} H ${endX}`;
+  const bend = (endX - startX) * 0.5;
   return `M ${startX} ${startY} C ${startX + bend} ${startY} ${endX - bend} ${endY} ${endX} ${endY}`;
-}
-
-function agentGraphRelationPath({ edge, at }) {
-  return edge.type === "spawned" ? agentGraphRailPath(...at) : agentGraphEdgePath(...at);
 }
 
 /* 재는 일을 다 끝내고 나서 그린다 (1-t353).
@@ -6885,26 +6715,21 @@ function agentGraphRelationPath({ edge, at }) {
  * 순간 레이아웃이 더러워지고, 바로 다음 간선의 `offsetLeft`가 그것을 **동기로**
  * 다시 계산하게 만든다 — 그래서 다시 그리기 한 번의 레이아웃 횟수가 간선 수를
  * 따라갔다(실측: 카드 100장·간선 96개에 한 판 레이아웃 98회, 20.2ms 중 16ms가
- * 이 함수). 읽는 것은 전부 이 위에서, 쓰는 것은 전부 그 아래에서.
- *
- * 세로 여백도 같은 이유로 한 번만 묻는다: 모든 노드가 `.agent-graph-node` 한
- * 규칙에서 같은 `margin-block`을 받으므로, 간선마다 `getComputedStyle`을
- * 부르는 것은 같은 답을 아흔여섯 번 받으려고 스타일을 아흔여섯 번 다시
- * 계산시키는 일이다. */
+ * 이 함수). 읽는 것은 전부 이 위에서, 쓰는 것은 전부 그 아래에서. */
 function paintAgentGraphEdgeTargets(view, measured, frame) {
   const canvas = view.querySelector(".agent-graph-canvas");
   let layer = canvas.querySelector(".agent-graph-edge-targets");
   if (!layer) {
+    if (measured.length === 0) return;
     layer = graphSvgElement("svg");
     layer.setAttribute("class", "agent-graph-edge-targets");
     layer.setAttribute("aria-hidden", "true");
     layer.appendChild(graphSvgElement("g"));
     canvas.prepend(layer);
   }
-  paintGraphEdges(layer.querySelector("g"), measured.filter(({ edge }) =>
-    !(edge.type === "contains" && (agentGraphModels.get(view).entities.get(edge.to)?.depth ?? 0) > 0)), {
+  paintGraphEdges(layer.querySelector("g"), measured, {
     frame,
-    path: agentGraphRelationPath,
+    path: agentGraphOverlayPath,
     dress: (group, { edge }, line) => {
       writeAttribute(line, "class", "agent-graph-edge-hit");
       group.onpointerdown = (event) => {
@@ -6926,62 +6751,69 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
   const model = agentGraphModels.get(view);
   const canvas = view.querySelector(".agent-graph-canvas");
   /* 행성계가 선 판의 간선은 접힌 카드 판에 있다 — 재지도 쓰지도 않는다 (t-9532). 크기 관찰자·
-   * 배율·상세도가 예약한 박자도 여기서 멎고, 카드로 돌아온 판의 관찰자가 다시 부른다. */
+   * 상세도가 예약한 박자도 여기서 멎고, 카드로 돌아온 판의 관찰자가 다시 부른다. */
   if (!model || view.hidden || agentOrbitShowing(view) || !canvas.isConnected) return;
   const svg = canvas.querySelector(".agent-graph-edges");
+  const drawn = [...(model.overlayEdges ?? []), ...(model.liveEdges ?? [])];
+  /* 그을 선이 없으면 아무것도 재지 않는다 (방향 E2) — 계보는 줄기가 말하므로, 오버레이를 끈 판(보드의
+   * 기본값)에서 이 함수가 읽는 배치는 0이다. 남은 선은 걷는다. */
+  if (drawn.length === 0) {
+    paintGraphEdges(svg.querySelector("g"), [], { path: agentGraphOverlayPath });
+    paintAgentGraphEdgeTargets(view, [], null);
+    agentGraphEdgeMeasurements.delete(view);
+    dressAgentGraphLive(view);
+    return;
+  }
   let geometry = agentGraphEdgeMeasurements.get(view);
-  const current = geometry && geometry.signature === model.topologySignature
-    && geometry.zoom === agentGraphZoom && geometry.details === agentGraphCardDetails
+  const current = geometry && geometry.arrangement === model.arrangement
+    && geometry.details === agentGraphCardDetails
     && geometry.frameWide === canvas.offsetWidth && geometry.frameTall === canvas.offsetHeight;
   if (!styleOnly || !current) {
     agentGraphEdgeMeasureRuns += 1;
     const nodesHost = canvas.querySelector(".agent-graph-nodes");
-    const drawn = [...canvas.querySelectorAll(".agent-graph-node")];
-    const nodes = new Map(drawn.map((node) => [node.dataset.graphKey, {
-      offsetLeft: node.offsetLeft, offsetTop: node.offsetTop,
-      offsetWidth: node.offsetWidth, offsetHeight: node.offsetHeight,
-    }]));
+    /* 카드는 열과 줄기 안에 겹겹이 서므로 제 자리를 그림의 원점까지 더해 올라간다 — 변형에 흔들리지
+     * 않는 `offset*`의 길이고, 읽기는 다 여기서 한 번에 한다. */
+    const nodes = new Map();
+    for (const node of nodesHost.querySelectorAll(".agent-graph-node[data-graph-key]")) {
+      let left = 0;
+      let top = 0;
+      for (let at = node; at && at !== nodesHost; at = at.offsetParent) {
+        left += at.offsetLeft;
+        top += at.offsetTop;
+      }
+      nodes.set(node.dataset.graphKey, { left, top, wide: node.offsetWidth, tall: node.offsetHeight });
+    }
     geometry = {
-      signature: model.topologySignature, zoom: agentGraphZoom, details: agentGraphCardDetails,
+      arrangement: model.arrangement, details: agentGraphCardDetails,
       nodes, originX: nodesHost.offsetLeft, originY: nodesHost.offsetTop,
       frameWide: canvas.offsetWidth, frameTall: canvas.offsetHeight,
-      gap: drawn.length ? Number.parseFloat(getComputedStyle(drawn[0]).marginTop) || 0 : 0,
       stub: agentGraphTuning(view)?.edgeStub ?? 0,
     };
     agentGraphEdgeMeasurements.set(view, geometry);
   }
-  const { nodes, originX, originY, frameWide, frameTall, gap, stub } = geometry;
-  const bead = agentGraphTuning(view)?.railBead ?? 0;
+  const { nodes, originX, originY, frameWide, frameTall, stub } = geometry;
   const measured = [];
-  for (const edge of [...model.edges, ...(model.overlayEdges ?? []), ...(model.liveEdges ?? [])]) {
+  for (const edge of drawn) {
     const from = nodes.get(edge.from);
     const to = nodes.get(edge.to);
     if (!from || !to) continue;
-    const toTop = originY + to.offsetTop;
-    const startX = originX + from.offsetLeft + from.offsetWidth;
-    const endX = originX + to.offsetLeft;
-    /* 두 끝은 같은 높이에서 나가고 든다 (round three). 행의 카드들은 윗선을
-     * 맞추므로, 짧은 쪽의 한가운데 높이를 둘 다 쓰면 같은 행의 이름표와
-     * 카드 사이는 곧은 한 획이 된다 — 각자의 한가운데를 쓰면 키 차이만큼
-     * 도랑 안에서 꺾이는 열다섯 픽셀짜리 계단이 그려졌다. 다른 행으로 가는
-     * 선은 그 높이에서 도랑을 타고 내려가 같은 높이로 들어간다. */
-    const anchor = Math.min(from.offsetHeight, to.offsetHeight) / 2;
-    measured.push({
-      key: edge.key,
-      edge,
-      at: [
-        startX,
-        originY + from.offsetTop + anchor,
-        endX,
-        toTop + anchor,
-        toTop - gap / 2,
-        stub,
-        startX + (endX - startX) / 2,
-      ],
-    });
+    /* 두 끝은 같은 높이에서 나가고 든다 (round three) — 짧은 쪽 카드의 한가운데. 같은 높이의 두
+     * 카드 사이는 곧은 한 획이 된다. */
+    const anchor = Math.min(from.tall, to.tall) / 2;
+    const startY = originY + from.top + anchor;
+    const endY = originY + to.top + anchor;
+    let at;
+    if (to.left >= from.left + from.wide) {
+      at = [originX + from.left + from.wide, startY, originX + to.left, endY, null];
+    } else if (to.left + to.wide <= from.left) {
+      at = [originX + from.left, startY, originX + to.left + to.wide, endY, null];
+    } else {
+      const right = Math.max(from.left + from.wide, to.left + to.wide);
+      at = [originX + from.left + from.wide, startY, originX + to.left + to.wide, endY, originX + right + stub];
+    }
+    measured.push({ key: edge.key, edge, at });
   }
 
-  const selected = agentGraphSelectedEdges(model);
   /* 실시간 지도가 더해 그린 선 (t-7288). 고른 오버레이의 선과 같은 옷을
    * 입히면 사람이 고른 것과 지도가 늘 드는 것이 구별되지 않으므로, 이 선들은
    * 조용한 옷을 입고 무한히 흐르는 맥박을 달지 않는다. */
@@ -6992,75 +6824,48 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
   paintGraphEdges(svg.querySelector("g"), measured, {
     marker: "agent-graph-arrow",
     frame: [frameWide, frameTall],
-    path: agentGraphRelationPath,
-    dress: (group, { edge, at: [startX, startY, endX, endY] }, line) => {
-      const lit = selected.has(edge.key) || edge.type === "dependency" || edge.key === agentGraphSelectedEdgeKey;
+    path: agentGraphOverlayPath,
+    dress: (group, { edge, at: [startX, startY, endX, endY, around] }, line) => {
+      /* 밝은 선: 의존(늘), 고른 관계, 그리고 고른 카드에 닿는 선 — 방향 D의 「고른 사슬」이 하던 일. */
+      const lit = edge.type === "dependency" || edge.key === agentGraphSelectedEdgeKey
+        || edge.from === agentGraphSelectedKey || edge.to === agentGraphSelectedKey;
       const searchDimmed = model.searchActive && (
         model.entities.get(edge.from)?.searchMatch === false ||
         model.entities.get(edge.to)?.searchMatch === false
       );
-      /* 하위 에이전트의 「품음」은 계보가 이미 말한다 (round three). 이름표에서
-       * 둘째 층으로 가는 선은 첫째 층의 카드를 가로질러야만 닿는데, 그 카드가
-       * 곧 이 에이전트를 시작한 부모다 — 부모의 점선이 같은 담김을 말하고
-       * 있다. 선은 모델과 DOM에 남고(범례의 수, 선택 사슬) 그림에서만 물러난다. */
-      const implied = edge.type === "contains" &&
-        (model.entities.get(edge.to)?.depth ?? 0) > 0;
-      const liveRelation = liveKeys.has(edge.key);
-      /* 레일은 자식이 일하거나 사람을 기다릴 때 밝고, 나머지는 물러난다. 끝의 구슬은 자식의
-       * 상태 색이고, 카드 왼쪽 모서리 바로 밖에 앉아 카드에 반쯤 먹히지 않는다. */
-      const child = edge.type === "spawned" ? model.entities.get(edge.to) : null;
-      const childState = child?.state ?? "idle";
       writeAttribute(line, "class", [
         "agent-graph-edge",
         `is-${edge.type}`,
-        child ? (childState === "working" || childState === "needs-attention" ? "is-lit" : "is-dim") : "",
         edge.overlay ? "is-overlay" : "",
-        liveRelation ? "is-live-relation" : "",
+        liveKeys.has(edge.key) ? "is-live-relation" : "",
         lit ? "is-selected" : "",
-        implied ? "is-implied" : "",
         searchDimmed ? "is-search-dimmed" : "",
       ].filter(Boolean).join(" "));
-      if (child) {
-        const dot = group.querySelector(".agent-graph-rail-bead")
-          ?? group.appendChild(graphSvgElement("circle"));
-        writeAttribute(dot, "class", [
-          "agent-graph-rail-bead",
-          `is-${childState}`,
-          searchDimmed ? "is-search-dimmed" : "",
-        ].filter(Boolean).join(" "));
-        writeAttribute(dot, "cx", String(endX - bead - 1));
-        writeAttribute(dot, "cy", String(endY));
-        writeAttribute(dot, "r", String(bead));
-      }
       if (!edge.overlay) return;
+      const midX = around ?? (startX + endX) / 2;
       const label = group.querySelector("text")
         ?? group.appendChild(graphSvgElement("text"));
       writeAttribute(label, "class", "agent-graph-overlay-label");
-      writeAttribute(label, "x", String((startX + endX) / 2));
+      writeAttribute(label, "x", String(midX));
       writeAttribute(label, "y", String((startY + endY) / 2 - 5));
       const verb = edge.type === "mail"
         ? t("board.graph.mailVerb", "메일")
         : t("board.graph.dependencyVerb", "선행");
       /* 실시간 지도의 메일 선은 배달 상태를 **아는 만큼만** 말한다 (t-7288):
        * 미확인이 있으면 그 수, 없으면 「미제공」 — 「전달됨」도 「확인됨」도
-       * 이 판이 증명하지 못한다.
-       *
-       * 판정은 지도가 켜졌는가이지 이 선을 어느 목록이 그렸는가가 아니다.
-       * 사람이 메일 오버레이를 고르면 그 선들은 지도의 조용한 덤이 아니라
-       * 고른 오버레이가 되는데, 그렇다고 같은 선이 배달 상태를 갑자기 말하지
-       * 않게 되는 것은 아니다 — 정직함은 고르기에 딸린 것이 아니다. */
+       * 이 판이 증명하지 못한다. 판정은 지도가 켜졌는가이지 이 선을 어느 목록이
+       * 그렸는가가 아니다 — 정직함은 고르기에 딸린 것이 아니다. */
       writeTextContent(label, agentGraphLiveOn() && edge.type === "mail"
         ? `${verb} · ${edge.count} · ${agentGraphLiveDeliveryWord(edge)}`
         : `${verb} · ${edge.count}`);
       /* 지도가 선 판에는 **도는 점**을 달지 않는다 (t-7288). 이 표면의 움직임은
        * 실제로 일어난 사건 하나에 한 번이고, 영원히 도는 점은 아무것도 일어나지
-       * 않은 판에서도 무언가 일어나는 것처럼 보인다. 위와 같은 이유로 판정은
-       * 지도가 켜졌는가이지 어느 목록이 그렸는가가 아니다. */
+       * 않은 판에서도 무언가 일어나는 것처럼 보인다. */
       if (edge.type !== "mail" || agentGraphLiveOn()) return;
       const pulse = group.querySelector("circle")
         ?? group.appendChild(graphSvgElement("circle"));
       writeAttribute(pulse, "class", "agent-graph-mail-pulse");
-      writeAttribute(pulse, "cx", String((startX + endX) / 2));
+      writeAttribute(pulse, "cx", String(midX));
       writeAttribute(pulse, "cy", String((startY + endY) / 2));
       writeAttribute(pulse, "r", "3");
     },
@@ -7074,21 +6879,30 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
 
 /* 머리의 칩이 무엇을 고르는지는 **누를 때**의 판에게 묻는다 (1-t385).
  *
- * 그려질 때의 판을 클로저에 담으면 그 손은 판마다 새로 매여야 하고, 이 판은
- * 훅 하나에 한 번씩 다시 그려진다. 여기 있는 것은 그때 담겨 있던 것 그대로다 —
- * 접힌 띠 아래 있는 에이전트를 청하면 그 띠가 열린다는 것까지. */
-function pickAgentGraphBucket(view, bucket) {
+ * 「당신 차례 N」을 누르면 그 카드로 간다 (방향 E2) — 그 상태의 첫 카드가 골라지고 화면에 들어오고
+ * 초점을 받는다. 이미 그 상태의 카드에 서 있으면 다음 카드로 가므로, 같은 칩을 거듭 누르면 그 상태의
+ * 카드를 그림의 차례대로 돈다. 접힌 「끝남 N」 안의 카드면 그 묶음이 펼쳐진다
+ * (`selectAgentGraphEntity`). */
+function pickAgentGraphSignal(view, signal) {
   const model = agentGraphModels.get(view);
-  const target = model?.agents.find((entry) => entry.bucket === bucket);
-  if (!target) return;
-  // A band folded over the agent a person just asked for opens to show it.
-  if (!model.entities.has(target.key)) {
-    agentGraphFolded.delete(target.project.key);
-    agentGraphSelectedKey = target.key;
-    void paintBoardView(boardTab(), { force: true });
-    return;
+  if (!model) return;
+  const seen = [];
+  const walk = (key) => {
+    const spine = model.spines.get(key);
+    if (!spine) return;
+    for (const entity of spine.items) {
+      seen.push(entity);
+      walk(entity.key);
+    }
+    seen.push(...(spine.fold?.members ?? []));
+  };
+  for (const team of model.teams) {
+    if (team.lead) seen.push(team.lead);
+    walk(team.spine);
   }
-  selectAgentGraphEntity(view, target.key, { focus: true });
+  const keys = seen.filter((entity) => entity.signal === signal).map((entity) => entity.key);
+  if (keys.length === 0) return;
+  selectAgentGraphEntity(view, keys[(keys.indexOf(agentGraphSelectedKey) + 1) % keys.length], { focus: true });
 }
 
 /* A person's pane-menu command. Eligibility and transfer are ledger facts;
@@ -7802,14 +7616,12 @@ function paintAgentGraph(view, model) {
   delete view.querySelector(".agent-inspector-body").dataset.taskSignature;
   const { selectDefault = true } = arguments[2] ?? {};
   const previous = agentGraphModels.get(view);
-  const topologyMoved = previous?.topologySignature !== model.topologySignature;
+  /* 열의 위상과 열 안의 차례 (방향 E2) — 상태가 바뀌면 카드가 줄기 안에서 자리를 옮기므로, 오버레이
+   * 선은 차례가 움직인 판에서도 다시 잰다. */
+  const topologyMoved = previous?.topologySignature !== model.topologySignature
+    || previous?.arrangement !== model.arrangement;
   const overlayMoved = previous?.overlayMode !== model.overlayMode ||
     previous?.overlaySignature !== model.overlaySignature;
-  /* 레일은 자식의 상태를 입는다(밝기와 구슬의 색) — 상태만 갈린 판은 기하가 그대로라
-   * 간선을 재지 않고 옷만 다시 입힌다. */
-  const railState = (held) => (held?.edges ?? []).filter((edge) => edge.type === "spawned")
-    .map((edge) => `${edge.key}:${held.entities.get(edge.to)?.state ?? ""}`).join("\u001f");
-  const railMoved = railState(previous) !== railState(model);
   /* 검색이 켜지고 꺼지거나 맞는 것이 갈린 판도 기하는 그대로다 — 흐림은 옷이라 다시 입힌다.
    * 이것이 없으면 검색어를 지운 뒤에도 간선이 흐린 채 남았다. */
   const dimState = (held) => (held?.searchActive
@@ -7839,7 +7651,7 @@ function paintAgentGraph(view, model) {
   /* 그림이 없으면 그림에 딸린 것도 서지 않는다. 없는 선의 범례와 없는 그림의
    * 배율은 "아직 아무도 시작하지 않았다"를 "무언가 고장 났다"로 읽히게 하는 두
    * 상자였다 — 빈 판에서 사람이 읽을 것은 한 문장이면 된다. */
-  const drawnNothing = model.bands.length === 0;
+  const drawnNothing = model.teams.length === 0;
   view.querySelector(".agent-graph-surface").classList.toggle("is-empty", drawnNothing);
   /* 행성계가 선 판은 카드 그림을 접어 둔다 (t-9444). */
   const cardsFolded = agentOrbitShowing(view);
@@ -7849,12 +7661,14 @@ function paintAgentGraph(view, model) {
     writeTextContent(run.querySelector(".agent-graph-run-count"), String(model.runCount));
   }
 
-  for (const button of view.querySelectorAll("[data-graph-bucket]")) {
-    const bucket = button.dataset.graphBucket;
-    const count = model.counts.get(bucket) ?? 0;
+  /* 머리의 상태 칩 다섯 (방향 E2) — 당신 차례 · 멈춤 · 도는 중 · 차례 기다림 · 끝남의 수. 누르면 그
+   * 상태의 카드로 간다(`pickAgentGraphSignal`). */
+  for (const button of view.querySelectorAll("[data-graph-signal]")) {
+    const signal = button.dataset.graphSignal;
+    const count = model.signals.get(signal) ?? 0;
     writeTextContent(button.querySelector("[data-graph-count]"), String(count));
-    button.disabled = count === 0;
-    if (!button.onclick) button.onclick = () => pickAgentGraphBucket(view, bucket);
+    writeDisabled(button, count === 0);
+    if (!button.onclick) button.onclick = () => pickAgentGraphSignal(view, signal);
   }
   for (const button of view.querySelectorAll("[data-graph-overlay]")) {
     const active = button.dataset.graphOverlay === agentGraphOverlayMode;
@@ -7912,82 +7726,25 @@ function paintAgentGraph(view, model) {
    * (실측, 에이전트 12의 판: 같은 판마다 변이 4, 카드 하나가 끝나면 27, 새 에이전트면 37에
    * 노드 하나를 짓고 간선을 한 번 잼). 건너뛴 갱신은 잃지 않는다: 카드로 돌아온 첫 판이
    * 모델 전체로 노드를 맞추고(노드는 위상이 그대로인 판에서도 판마다 맞춘다), 접혔던 판이
-   * 제 크기를 되찾는 순간 크기 관찰자(`watchAgentGraphSize`)가 간선과 맞춤을 한 번 부른다.
+   * 제 크기를 되찾는 순간 크기 관찰자(`watchAgentGraphSize`)가 간선을 한 번 부른다.
    * 모델(`agentGraphModels`)은 두 보기와 인스펙터가 함께 읽으므로 위에서 판마다 적는다. */
   if (cardsFolded) return;
+  /* 계보 (방향 E2): 사람이 누른 카드의 위아래만 남고 나머지가 물러난다. 그림에 없는 카드의 계보는
+   * 없다 — 범위를 옮기거나 그 카드가 떠나면 저절로 걷힌다. */
+  const traced = agentGraphTraced(model);
+  if (traced === null) agentGraphTraceKey = null;
   const nodesHost = view.querySelector(".agent-graph-nodes");
-  const agentLayers = Math.max(1, model.maxDepth + 1);
-  /* 층의 수를 격자에 적어 둔다 (round three). 에이전트 레인의 폭은 실측 폭과
-   * 「판의 몫」 중 큰 쪽이고, 그 몫은 판의 폭을 층의 수로 나눈 것이다 — 나누는
-   * 수를 아는 것은 이 함수뿐이라 여기서 한 번 적고 셈은 CSS가 한다
-   * (`.agent-graph-nodes`의 `--agent-graph-lane-share`). */
-  writeStyleProperty(nodesHost.parentElement, "--agent-graph-agent-lanes", String(agentLayers));
-  writeStyleValue(nodesHost, "gridTemplateColumns", [
-    ...AGENT_GRAPH_CONTEXT_LAYERS.map(() => "var(--agent-graph-context-lane)"),
-    ...Array.from({ length: agentLayers }, () => "var(--agent-graph-agent-lane)"),
-  ].join(" "));
-
-  /* Four kinds of child share one keyed list — the lane strip, the band fills,
-   * the band heads and the nodes — because they share one grid, and a second
-   * reconcile over a second container is a second answer to where a row is. */
-  const existing = new Map([...nodesHost.children].map((node) => [node.dataset.graphPart, node]));
-  const wanted = [];
-  const take = (part, make) => {
-    const held = existing.get(part) ?? make();
-    writeAttribute(held, "data-graph-part", part);
-    wanted.push(held);
-    return held;
-  };
-
-  const lanes = model.bands.length > 0 ? model.laneCount : 0;
-  for (let lane = 0; lane < lanes; lane += 1) {
-    const strip = take(`lane:${lane}`, () => document.createElement("span"));
-    writeClassName(strip, "agent-graph-lane");
-    writeStyleValue(strip, "gridColumn", String(lane + 1));
-    writeStyleValue(strip, "gridRow", "1");
-    writeTextContent(strip, agentGraphLaneWord(lane));
-  }
-  /* Band by band, and inside a band the fill, the heading and then everything
-   * that heading holds. Grouping the headings together instead — every project
-   * first, then every card — reads as one flat list to anything that walks the
-   * DOM: a keyboard opening a project and pressing down would land on the NEXT
-   * project rather than on the workspace it just opened.
-   *
-   * `dressMoved` rides along because anything rebuilt here may have changed
-   * height, and a height change moves every row under it. Collected rather than
-   * assumed: it is the difference between an edge that follows its nodes and
-   * one that points at where they stood one hook event ago. */
+  nodesHost.classList.toggle("is-tracing", traced !== null);
+  /* `dressMoved`는 다시 지은 카드가 높이를 바꿨을 수 있다는 답이다 — 높이가 바뀌면 그 아래 카드가
+   * 전부 내려가고, 오버레이 선은 한 박자 전의 자리를 가리킨 채 남는다. 모아서 받는다. */
   const selectedRelation = agentGraphRelations(model).find((edge) => edge.key === agentGraphSelectedEdgeKey);
   const previousAttempts = new Set(agentGraphTasksFor(view, full).groups.flatMap((group) => group.previousMembers.map((entry) => entry.key)));
-  let dressMoved = false;
-  for (const band of model.bands) {
-    const fill = take(`band:${band.key}`, () => document.createElement("div"));
-    writeClassName(fill, [
-      "agent-graph-band",
-      band.folded ? "is-folded" : "",
-      band.searchMatch === false ? "is-search-dimmed" : "",
-    ].filter(Boolean).join(" "));
-    writeStyleValue(fill, "gridRow", `${band.row} / ${band.rowEnd + 1}`);
-    writeAttribute(fill, "aria-hidden", "true");
-    const head = take(`head:${band.key}`, () => document.createElement("div"));
-    if (updateAgentGraphBandHead(head, band, view)) dressMoved = true;
-    for (const workspace of (model.nodesByBand.get(band.key) ?? [])
-      .filter((entity) => entity.type === "workspace")) {
-      const lane = take(`swimlane:${workspace.key}`, () => document.createElement("div"));
-      writeClassName(lane, ["agent-graph-swimlane", workspace.laneClass]
-        .filter(Boolean).join(" "));
-      writeStyleValue(lane, "gridRow", `${workspace.rowStart} / ${workspace.rowEnd + 1}`);
-      writeAttribute(lane, "data-graph-workspace", workspace.key);
-      writeAttribute(lane, "aria-hidden", "true");
-    }
-    for (const entity of model.nodesByBand.get(band.key) ?? []) {
-      entity.relationEndpoint = entity.key === selectedRelation?.from || entity.key === selectedRelation?.to;
-      entity.previousAttempt = previousAttempts.has(entity.key);
-      const node = take(`node:${entity.key}`, () => agentGraphNode(entity, view));
-      if (updateAgentGraphNode(node, entity, view)) dressMoved = true;
-    }
+  for (const entity of model.nodes) {
+    entity.traced = traced?.has(entity.key) ?? false;
+    entity.relationEndpoint = entity.key === selectedRelation?.from || entity.key === selectedRelation?.to;
+    entity.previousAttempt = previousAttempts.has(entity.key);
   }
-  reconcileElementOrder(nodesHost, wanted);
+  const dressMoved = paintAgentGraphTeams(view, model);
   const empty = view.querySelector(".agent-graph-empty");
   empty.hidden = !drawnNothing;
   writeAttribute(empty, "data-i18n", agentGraphScopeKey ? "board.graph.scopeEmpty" : "board.graph.empty");
@@ -8004,9 +7761,8 @@ function paintAgentGraph(view, model) {
   dressAgentGraphLive(view);
   watchAgentGraphSize(view);
   wireAgentGraphKeys(view);
-  if (topologyMoved) scheduleAgentGraphFit(view);
   if (topologyMoved || dressMoved) scheduleAgentGraphEdges(view);
-  else if (selectionMoved || overlayMoved || railMoved || dimMoved) paintAgentGraphEdges(view, { styleOnly: true });
+  else if (selectionMoved || overlayMoved || dimMoved) paintAgentGraphEdges(view, { styleOnly: true });
   if (followMoved) requestAnimationFrame(() => softlyFollowAgentGraphSelection(view));
 }
 
@@ -8048,7 +7804,7 @@ function paintBoardBroken(view) {
    * "대시보드가 그리다 멈췄습니다"가 서고, 둘 중 하나는 반드시 거짓말이다 —
    * 게다가 누를 수 있는 채로 남아, 이제 없는 모델에서 노드를 고르려 든다.
    * 다시 세워지는 첫 판이 넷 다 제 수로 되돌린다. */
-  for (const button of view.querySelectorAll("[data-graph-bucket]")) {
+  for (const button of view.querySelectorAll("[data-graph-signal]")) {
     writeTextContent(button.querySelector("[data-graph-count]"), "0");
     button.disabled = true;
   }
@@ -8122,9 +7878,9 @@ function agentGraphSaid(columns, reviews, places, now, ledger = null) {
       ...(project.worktrees ?? []).map((workspace) =>
         [workspace.path, workspace.branch ?? "", workspace.base ?? ""].join("")),
     ]),
-    folded: [...agentGraphFolded].sort(),
-    dormantExpanded: [...agentGraphDormantExpanded].sort(),
-    idleExpanded: [...agentGraphIdleExpanded].sort(),
+    /* 코디 자리 (방향 E2) — 열은 원장의 자리가 정하므로, 자리만 옮긴 판(인수, 자리 빔)도 그림이
+     * 바뀐 판이다. 원장의 박자가 자리를 바꾸면 그림을 다시 청한다(`refreshPaneLedger`). */
+    seats: coordinatorSeats.map((seat) => [seat.run, seat.name, seat.term, seat.held]),
     overlays: agentGraphSnapshotOverlays,
     overlayMode: agentGraphOverlayMode,
     /* 실시간 손잡이는 그림을 바꾸므로 서명에 든다. 장부의 **사건**은 들지
