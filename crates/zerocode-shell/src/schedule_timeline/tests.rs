@@ -761,6 +761,50 @@ fn the_fixture_reads_into_the_answer_the_board_draws() {
     );
 }
 
+/// The window places a waiting job's start on the runner's lanes, so the
+/// answer carries the lanes the runner's log named — `lane=` on a `RUN` or a
+/// `DONE` line, in order, none before it names one — beside the flag that
+/// holds them for a measurement (the review t-69069, P2-2: the window had the
+/// runner's two lanes written into it).
+#[test]
+fn the_answer_carries_the_lanes_the_runner_named_and_its_quiet_wait() {
+    let lanes_of = |timeline: &Timeline| {
+        serde_json::to_value(timeline).expect("the answer serializes")["line"]["runner_lanes"]
+            .clone()
+    };
+    let scratch = copied();
+    assert_eq!(
+        lanes_of(&fixture_reading(scratch.path())),
+        serde_json::json!([1, 2]),
+        "this morning's runner ran two lanes"
+    );
+    // A runner with a third lane, and a measurement that waits for a quiet machine.
+    let queue = scratch.path().join("build-queue");
+    let log = queue.join(RUNNER_LOG);
+    let mut text = std::fs::read_to_string(&log).expect("the runner log");
+    text.push_str(concat!(
+        "RUN 1792543680-w67501-t67482-probe2 who=w67501-t67482 lane=3 cap=600s 09:48:10\n",
+        "DONE 1792543680-w67501-t67482-probe2 rc=0 20s lane=3 09:48:30 load=5.1\n",
+    ));
+    std::fs::write(&log, text).expect("the runner log grows");
+    stamp_at(&log, NOW_MS - 30_000);
+    std::fs::write(queue.join(QUIET_FLAG), "").expect("the quiet flag");
+    let three = fixture_reading(scratch.path());
+    assert_eq!(lanes_of(&three), serde_json::json!([1, 2, 3]));
+    assert_eq!(
+        serde_json::to_value(&three).expect("the answer serializes")["line"]["quiet_wanted"],
+        serde_json::json!(true)
+    );
+    // A new runner's log that names no lane yet: the window is told none.
+    std::fs::write(&log, "PAUSE lifted 09:49:00 by coord4275: the lane ended\n")
+        .expect("a new runner log");
+    stamp_at(&log, NOW_MS - 30_000);
+    assert_eq!(
+        lanes_of(&fixture_reading(scratch.path())),
+        serde_json::json!([])
+    );
+}
+
 #[test]
 fn a_look_where_nothing_moved_answers_unchanged_and_one_that_moved_does_not() {
     let scratch = copied();

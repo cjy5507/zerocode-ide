@@ -10,6 +10,10 @@
     "disk_floor_gib": 12,
     "disk_low": false,
     "quiet_wanted": false,
+    "runner_lanes": [
+      1,
+      2
+    ],
     "lanes_folder": "<fixture>/release/out"
   },
   "jobs": [

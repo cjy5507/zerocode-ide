@@ -6,8 +6,8 @@
  * 맞추고, 워커 과업은 데스크의 답(`desk.json`, 과업 행의 `times`)이다. 그 순간은 2026-10-21
  * 09:50 KST — l61 게이트가 PAUSE 뒤에 서 있고, 그 전에 시작한 일감 둘이 돌고, v1.1.83 레인이 루트
  * 게이트에 있다. 셈(지난 소요의 중앙값)은 러스트 시험의 것이고, 여기서 재는 것은 배치와 그림이다:
- * 묶음마다 행 수, 막대의 시작과 끝, 예상 끝과 남은 시간, 묶기와 펴기, 「지금」 선, 조용한 박자,
- * 좁은 그릇, 눈금 글 사이의 틈.
+ * 묶음마다 행 수, 막대의 시작과 끝, 예상 끝과 남은 시간, 기다리는 일감이 실행기 기록이 말한 줄에
+ * 서는 차례와 시작을 모를 때의 말, 묶기와 펴기, 「지금」 선, 조용한 박자, 좁은 그릇, 눈금 글 사이의 틈.
  *
  *   node ui/tests/board-schedule.mjs */
 import { mkdir, readFile } from "node:fs/promises";
@@ -109,6 +109,19 @@ export async function readBoardSchedule(page) {
       asked: window.__SCHEDULE_ASKED__,
     };
   });
+}
+
+/* The answer moves: a new revision whose line facts are `facts` over the last ones. The view asks
+ * again, and what it drew once the moved answer stood is read. */
+async function moveScheduleLine(page, facts) {
+  await page.evaluate(async (facts) => {
+    window.__SCHEDULE__ = { ...window.__SCHEDULE__, revision: window.__SCHEDULE__.revision + 1,
+      line: { ...window.__SCHEDULE__.line, ...facts } };
+    refreshBoardSchedule();
+    await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+    await new Promise((done) => requestAnimationFrame(done));
+  }, facts);
+  return readBoardSchedule(page);
 }
 
 /* Every mutation the schedule takes while `act` (a page function) runs. */
@@ -263,20 +276,40 @@ export async function testBoardSchedule(browser, origin, ok) {
       await page.evaluate(() => document.querySelector("#board-view .board-schedule-log").hidden), "");
 
     /* ---- 줄이 풀리면: 기다리는 일감이 비는 줄에 차례로 선다 -------------------------- */
-    await page.evaluate(async () => {
-      window.__SCHEDULE__ = { ...window.__SCHEDULE__, revision: window.__SCHEDULE__.revision + 1,
-        line: { ...window.__SCHEDULE__.line, paused: false, pause_note: null } };
-      refreshBoardSchedule();
-      await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
-      await new Promise((done) => requestAnimationFrame(done));
-    });
-    drawn = await readBoardSchedule(page);
-    const build = drawn.groups.gates.rows.find((row) => row.key === "job:0-1792543700-run11955-l61r-g1-build");
-    const tests = drawn.groups.gates.rows.find((row) => row.key === "job:0-1792543701-run11955-l61r-g2-tests");
+    drawn = await moveScheduleLine(page, { paused: false, pause_note: null });
+    const queued = (key) => [...drawn.groups.gates.rows, ...drawn.groups.line.rows].find((row) => row.key === key);
+    const BUILD = "job:0-1792543700-run11955-l61r-g1-build";
+    const TESTS = "job:0-1792543701-run11955-l61r-g2-tests";
+    const PLAIN = "job:1792543750-w67501-t67482-red";
+    const [build, tests, plain] = [BUILD, TESTS, PLAIN].map(queued);
     ok("with the line free the first waiting job starts where the late lint left lane 2: 「now」",
       near(build?.from, drawn.now) && build?.said.includes("시작 예상") && !build?.paused, JSON.stringify(build));
     ok("the same owner's next job waits for the first: the root tests start where the root build ends",
       tests && build && near(tests.from, build.to), JSON.stringify({ build, tests }));
+    ok("on the runner's two lanes the plain job waits until the root tests end",
+      plain && tests && near(plain.from, tests.to), JSON.stringify({ plain, tests }));
+
+    /* ---- 줄은 실행기 기록이 말한 것이다: 셋째 줄을 말하면 기다리는 일감이 거기에도 선다 ------ */
+    drawn = await moveScheduleLine(page, { runner_lanes: [1, 2, 3] });
+    const [build3, tests3, plain3] = [BUILD, TESTS, PLAIN].map(queued);
+    ok("on a third lane the runner named the root tests wait only for the root build, and the plain job starts when it ends",
+      build3 && tests3 && plain3 && near(build3.from, drawn.now) && near(tests3.from, build3.to) && near(plain3.from, build3.to),
+      JSON.stringify({ build3, tests3, plain3 }));
+
+    /* ---- 시작을 모를 때: 측정이 조용한 기계를 기다리거나, 디스크가 하한 아래거나, 실행기가 아직 어느
+     * 줄도 말하지 않았다. 기다리는 행은 시각 대신 「시작 모름」이고, 시작 시각을 말하는 행은 없다 ---- */
+    for (const [facts, note] of [[{ quiet_wanted: true }, "측정이 조용한 기계를 기다림"],
+      [{ disk_low: true }, "디스크가 하한 아래라 줄이 기다림"], [{ runner_lanes: [] }, ""]]) {
+      drawn = await moveScheduleLine(page, { runner_lanes: answer.line.runner_lanes, quiet_wanted: false, disk_low: false, ...facts });
+      const rows = Object.values(drawn.groups).flatMap((group) => group.rows);
+      // The job rows: a worker task waiting for its review is a waiting bar too, and says how long it waited.
+      const waitingNow = rows.filter((row) => row.state === "waiting" && row.key.startsWith("job:"));
+      ok(`with ${JSON.stringify(facts)} every waiting job says its start is not known, and no row says when one starts`,
+        waitingNow.length === 4 && waitingNow.every((row) => row.paused && row.said.includes("시작 모름"))
+          && rows.every((row) => !row.said.includes("시작 예상")) && drawn.note === note,
+        JSON.stringify({ note: drawn.note, waiting: waitingNow.map((row) => [row.key, row.said, row.paused]) }));
+    }
+    drawn = await moveScheduleLine(page, { runner_lanes: answer.line.runner_lanes, quiet_wanted: false, disk_low: false });
 
     /* ---- 워커 과업을 누르면 「지금」 보기의 그 과업으로 ---------------------------- */
     await page.evaluate(() => document.querySelector('#board-view [data-key="task:run-4275/t-67102"]').click());

@@ -14,6 +14,26 @@ fn shell_source(name: &str) -> String {
     std::fs::read_to_string(src.join(name)).unwrap_or_else(|why| panic!("{name}: {why}"))
 }
 
+/// What writes, moves, renames or locks a file, or opens the ledger's
+/// database — none of it in the schedule's reading, nor in its command.
+const WRITES: [&str; 15] = [
+    "fs::write",
+    "fs::rename",
+    "fs::remove",
+    "fs::create_dir",
+    "fs::copy",
+    "OpenOptions",
+    "File::create",
+    "File::options",
+    ".set_len(",
+    ".set_modified(",
+    "flock",
+    "try_lock",
+    "rusqlite",
+    "sqlite",
+    "Ledger",
+];
+
 /// The build line and the lane are other processes' files: the command reads
 /// them on the blocking pool, and the module never writes, moves, renames or
 /// locks one — nor opens the ledger's database, which a second process must
@@ -29,23 +49,7 @@ fn the_schedule_reads_two_folders_off_the_main_thread_and_writes_nothing() {
         "the schedule reads on the main thread, or finds the lanes another way:\n{command}"
     );
     let module = strip_rust_comments(&shell_source("schedule_timeline.rs"));
-    for write in [
-        "fs::write",
-        "fs::rename",
-        "fs::remove",
-        "fs::create_dir",
-        "fs::copy",
-        "OpenOptions",
-        "File::create",
-        "File::options",
-        ".set_len(",
-        ".set_modified(",
-        "flock",
-        "try_lock",
-        "rusqlite",
-        "sqlite",
-        "Ledger",
-    ] {
+    for write in WRITES {
         assert!(
             !module.contains(write),
             "the schedule touches what it only reads (`{write}`)"
@@ -71,6 +75,47 @@ fn the_schedule_reads_two_folders_off_the_main_thread_and_writes_nothing() {
         "LINE_FOLDER",
     ] {
         assert!(module.contains(road), "the schedule lost `{road}`");
+    }
+}
+
+/// The command finds the build line by the window's workspace setting, and
+/// reads that setting from memory (`remembered_settings`, t-67102). Through
+/// the settings repository a look took its process lock and its
+/// `.settings.lock`, waited behind any settings commit holding them through
+/// its fsync, and could write the document back — from a view that asks
+/// every five seconds while it is seen (the review t-69069, P2-1). The
+/// command and the look it runs hold none of the module's writes either.
+#[test]
+fn the_schedule_reads_the_workspace_setting_from_memory_and_locks_nothing() {
+    let board = shell_source("cmd/board.rs");
+    let command = block_after(&board, "pub(crate) async fn schedule_timeline(");
+    let look = block_after(&board, "fn schedule_look(");
+    assert!(
+        command.contains("schedule_look("),
+        "the command looks at the schedule another way:\n{command}"
+    );
+    assert!(
+        look.contains("remembered_settings("),
+        "the schedule reads the workspace setting some other way:\n{look}"
+    );
+    for block in [command, look] {
+        let code = strip_rust_comments(block);
+        for word in WRITES.iter().chain(&[
+            "load_settings_for_boot",
+            "load_settings_resilient",
+            "load_settings(",
+            "mutate_settings",
+            "mutate_json",
+            "read_json",
+            "write_json",
+            ".settings.lock",
+            "settings_lock",
+        ]) {
+            assert!(
+                !code.contains(word),
+                "the schedule's command reads the settings repository or writes (`{word}`):\n{code}"
+            );
+        }
     }
 }
 

@@ -93,7 +93,7 @@ export function boardScheduleFiftyRows(now) {
   const answer = {
     revision: 7, unchanged: false, read_ms: now,
     line: { folder: "/work/build-line/build-queue", found: true, paused: false, pause_note: null, disk_floor_gib: 12,
-      disk_low: false, quiet_wanted: false, lanes_folder: "/work/release/out" },
+      disk_low: false, quiet_wanted: false, runner_lanes: [1, 2], lanes_folder: "/work/release/out" },
     jobs, lanes,
   };
   const stages = ["merged", "merged", "verified", "reported", "dispatched"];

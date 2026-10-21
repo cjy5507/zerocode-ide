@@ -562,41 +562,56 @@ pub(crate) async fn schedule_timeline(
     let orchestrator = state.active().orchestrator;
     let settings = std::sync::Arc::clone(state.settings());
     tauri::async_runtime::spawn_blocking(move || {
-        let now_ms = crate::now_epoch_ms();
-        let repo = orchestrator
-            .as_ref()
-            .map(|open| open.repo_root().to_path_buf());
-        let workspaces = crate::schedule_timeline::workspaces_of(
-            repo.as_deref(),
-            known.is_none(),
-            now_ms,
-            || {
-                let prefs = load_settings_for_boot(&settings)
-                    .document
-                    .workspace_creation_prefs;
-                orchestrator
-                    .and_then(|open| apply_workspace_creation_prefs(open, &prefs).ok())
-                    .map(|open| open.worktree_root().to_path_buf())
-            },
-        );
-        let roots = crate::schedule_timeline::Roots::of(
-            workspaces.as_deref(),
-            crate::update_runtime::release_dir(),
-        );
         let ask = crate::schedule_timeline::Ask {
             known,
             from_ms,
             log,
         };
-        crate::schedule_timeline::read(
-            &roots,
+        schedule_look(
+            &settings,
+            orchestrator,
             &ask,
-            now_ms,
-            crate::automation_runtime::local_offset_secs(),
+            crate::update_runtime::release_dir(),
+            crate::now_epoch_ms(),
         )
     })
     .await
     .map_err(|error| error.to_string())
+}
+
+/// One look at the schedule, as the command takes it on the blocking pool:
+/// the open repository's workspace folder by the window's workspace setting,
+/// then the build line under it and the lanes under `release`.
+fn schedule_look(
+    settings: &settings::SettingsRepository,
+    orchestrator: Option<Orchestrator>,
+    ask: &crate::schedule_timeline::Ask,
+    release: Option<PathBuf>,
+    now_ms: i64,
+) -> crate::schedule_timeline::Timeline {
+    let repo = orchestrator
+        .as_ref()
+        .map(|open| open.repo_root().to_path_buf());
+    let workspaces = crate::schedule_timeline::workspaces_of(
+        repo.as_deref(),
+        ask.known.is_none(),
+        now_ms,
+        || {
+            let prefs = load_settings_for_boot(settings)
+                .document
+                .workspace_creation_prefs;
+            orchestrator
+                .and_then(|open| apply_workspace_creation_prefs(open, &prefs).ok())
+                .map(|open| open.worktree_root().to_path_buf())
+        },
+    );
+    let roots = crate::schedule_timeline::Roots::of(workspaces.as_deref(), release);
+    crate::schedule_timeline::read(
+        &roots,
+        ask,
+        now_ms,
+        crate::automation_runtime::local_offset_secs(),
+    )
 }
 
 /// Bounded recent active/pending runs for the manual coordinator picker.
@@ -2508,5 +2523,91 @@ mod clipboard_picture_tests {
         );
         assert!(!pasteboard_holds_image(&pasteboard));
         assert_eq!(png_from_pasteboard(&pasteboard), Ok(None));
+    }
+}
+
+/// The schedule's look beside a settings commit (t-67482, P2-1 of the review
+/// t-69069). Every settings commit holds the settings repository's one lock
+/// through its fsync — on 2026-10-21 05:32 a build saturating the disk
+/// stretched one to 20 s (t-67102) — and the view asks every five seconds
+/// while it is seen.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// What one look may take beside the commit: a look that waits on the
+    /// lock waits as long as the commit holds it.
+    const LOOK_BUDGET: Duration = Duration::from_millis(100);
+
+    /// How long the stand-in commit holds the repository: three seconds tell
+    /// a wait from none, as in t-67102's test.
+    const HELD_FOR: Duration = Duration::from_secs(3);
+
+    /// A look that holds no revision resolves the workspace folder afresh. It
+    /// answers at once beside a commit holding the settings repository, and
+    /// looks for the build line where the setting last saved puts it.
+    #[test]
+    fn a_look_answers_beside_a_held_settings_commit() {
+        let directory = tempfile::tempdir().expect("settings sandbox");
+        let repository = settings::SettingsRepository::new(directory.path());
+        let checkout = tempfile::tempdir().expect("a repository");
+        Host::for_workspace(checkout.path())
+            .vcs()
+            .text(checkout.path(), &["init", "-q"])
+            .expect("git init");
+        let orchestrator = Orchestrator::open(checkout.path()).expect("open repository");
+        let workspaces = tempfile::tempdir().expect("a workspace folder");
+        // Boot reads the window's settings before any command can be asked,
+        // and the person chose where workspaces go.
+        load_settings_for_boot(&repository);
+        mutate_settings(&repository, |document| {
+            document.workspace_creation_prefs.directory = workspaces.path().display().to_string();
+            Ok(())
+        })
+        .expect("the workspace setting is saved");
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let committing = repository.clone();
+        let writer = std::thread::spawn(move || {
+            committing
+                .mutate_json(
+                    "slow-commit.json",
+                    serde_json::Value::default,
+                    |_: &mut serde_json::Value| {
+                        held_tx.send(()).expect("the look waits for the hold");
+                        let _ = done_rx.recv_timeout(HELD_FOR);
+                    },
+                )
+                .expect("the stand-in commit");
+        });
+        held_rx.recv().expect("the commit holds the repository");
+        let started = Instant::now();
+        let look = schedule_look(
+            &repository,
+            Some(orchestrator),
+            &crate::schedule_timeline::Ask::default(),
+            None,
+            crate::now_epoch_ms(),
+        );
+        let waited = started.elapsed();
+        let _ = done_tx.send(());
+        writer.join().expect("the stand-in commit ends");
+        eprintln!(
+            "schedule_look_ms={} commit_held_ms={}",
+            waited.as_millis(),
+            HELD_FOR.as_millis()
+        );
+        assert!(
+            waited < LOOK_BUDGET,
+            "the schedule waited {} ms behind a settings commit",
+            waited.as_millis()
+        );
+        let folder = look.line.folder.expect("the build line is looked for");
+        assert!(
+            Path::new(&folder).starts_with(workspaces.path()),
+            "the build line is looked for at {folder}, not under the saved workspace folder {}",
+            workspaces.path().display()
+        );
     }
 }
