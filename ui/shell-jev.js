@@ -3315,7 +3315,6 @@ function jevCustomFormOf(form, draft, rules) {
     node.value = value;
     node.className = tag === "textarea" ? "jev-custom-area" : "jev-custom-input";
     if (tag === "input") node.type = "text";
-    node.autocomplete = "off";
     node.spellcheck = false;
     return node;
   };
@@ -3367,8 +3366,7 @@ function jevCustomFormOf(form, draft, rules) {
       jevCustomAbout("jev.custom.questionAbout", "Jev에 묻는 글입니다. {{questionMax}}자까지 적습니다. 비밀번호나 키는 적지 마세요."), question),
     answer, points, acts, reads,
     jevCustomGroup("actFrom", jevText("jev.custom.actFromLegend", "확신도 기준", "legend"),
-      jevCustomAbout("jev.custom.actFromAbout",
-        "확신이 이보다 낮은 답은 기록만 하고 넘기지 않습니다. 동률인 답도 기준과 상관없이 넘기지 않습니다. 동률은 가장 높은 확률을 보기 둘 이상이 나눠 가진 답입니다. {{actLeast}}~{{actMost}} 사이에서 고릅니다."),
+      jevCustomAbout("jev.custom.actFromAbout", "확신이 이보다 낮은 답은 기록만 하고 넘기지 않습니다. 동률인 답도 기준과 상관없이 넘기지 않습니다. 동률은 가장 높은 확률을 보기 둘 이상이 나눠 가진 답입니다. {{actLeast}}~{{actMost}} 사이에서 고릅니다."),
       jevNode("div", "jev-custom-range", actFrom, shown)),
     jevCustomGroup("folders", jevText("jev.custom.foldersLegend", "묻는 폴더", "legend"), null,
       jevCustomTick("radio", "folders", "consented", draft.folders === null, jevText("jev.custom.everyFolder", "동의한 모든 폴더"),
@@ -3420,7 +3418,6 @@ function jevCustomAnswerFields(form, answer, rules) {
         input.className = "jev-custom-input";
         input.name = "option_name";
         input.value = option.name;
-        input.autocomplete = "off";
         return input;
       })()), jevNode("label", "jev-custom-label", jevText("jev.custom.optionMeans", "뜻"), area("meaning", option.means))]
       : [jevNode("label", "jev-custom-label", label, area("level", option.means))];
@@ -3428,7 +3425,9 @@ function jevCustomAnswerFields(form, answer, rules) {
     row.dataset.jevCustomOption = "";
     return row;
   });
-  const add = jevText(named ? "jev.custom.addOption" : "jev.custom.addLevel", named ? "＋ 보기 더하기" : "＋ 단계 더하기", "button", "btn jev-custom-add");
+  const add = named
+    ? jevText("jev.custom.addOption", "＋ 보기 더하기", "button", "btn jev-custom-add")
+    : jevText("jev.custom.addLevel", "＋ 단계 더하기", "button", "btn jev-custom-add");
   add.type = "button";
   add.dataset.jevCustomAdd = answer.kind;
   holder.replaceChildren(legend,

@@ -14,7 +14,7 @@
 //! the check execs `zo decision-shadow check --json`, which puts the shadow's
 //! own question through the same key road, request and answer check.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -1011,10 +1011,13 @@ impl DecisionDraft {
             AnswerDraft::Choice { options } => {
                 let mut named = BTreeMap::new();
                 for option in options {
-                    if named.contains_key(&option.name) {
-                        twice.push(custom::Refusal::OptionName(option.name));
-                    } else {
-                        named.insert(option.name, option.means);
+                    match named.entry(option.name) {
+                        btree_map::Entry::Vacant(slot) => {
+                            slot.insert(option.means);
+                        }
+                        btree_map::Entry::Occupied(taken) => {
+                            twice.push(custom::Refusal::OptionName(taken.key().clone()));
+                        }
                     }
                 }
                 custom::Answer::Choice(named)
