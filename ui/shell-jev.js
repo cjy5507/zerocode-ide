@@ -1027,6 +1027,7 @@ async function refreshJevDashboard({ force = false } = {}) {
   // zo's; the card's own refresh asks both and hands the numbers here.
   if (!typesafeState) {
     await refreshTypeSafe();
+    if (jevCustom === null) void loadJevCustom();
     if (!force && fresh()) return;
   }
   await Promise.all([loadJevNumbers({ recent: true }), loadJevCustom()]);
