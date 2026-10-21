@@ -75,6 +75,13 @@ pub(crate) struct SubagentProgress {
     /// [`NO_NEW_OUTPUT_AFTER`] outside any tool may be stuck
     /// ([`Self::may_be_stuck`]).
     pub(crate) in_tool: bool,
+    /// The file the helper writes its whole report to (the manifest's
+    /// `outputFile`), while that file is there (t-69472).
+    pub(crate) report: Option<PathBuf>,
+    /// A ledger worker: a CLI of its own in a window tab of its own, whose
+    /// work its parent does not see (t-11962). Only the turn's own watcher
+    /// lists one (t-69472).
+    pub(crate) ledger: bool,
 }
 
 impl SubagentProgress {
@@ -667,6 +674,8 @@ fn scan_registry(
             } else {
                 manifest.current_tool.is_some()
             },
+            report: None,
+            ledger: false,
         });
     }
     ManifestFiles::keep_only(files, &seen, &stores);
@@ -863,8 +872,8 @@ mod tests {
     use tools::AgentRegistry;
 
     use super::{
-        epoch_seconds_now, scan_registry, scan_store, ManifestCache, Pulse, SubagentProgressWatcher,
-        NO_NEW_OUTPUT_AFTER,
+        background_tasks_for_session, epoch_seconds_now, scan_registry, scan_store, ManifestCache,
+        Pulse, SubagentProgress, SubagentProgressWatcher, NO_NEW_OUTPUT_AFTER,
     };
 
     /// One line of a zo session transcript, as the session writes it.
@@ -1629,5 +1638,120 @@ mod tests {
         let rows = watcher.receiver.borrow().agents.clone();
         assert_eq!(rows.len(), 1, "a helper another zo started was not seen within the quiet interval: {rows:?}");
         assert_eq!(rows[0].agent_id, "agent-elsewhere");
+    }
+
+    /// t-69472: a running helper's row names the file its whole report goes
+    /// to — the manifest's `outputFile` — while that file is there, and names
+    /// none when it is not.
+    #[test]
+    fn a_row_names_the_report_file_while_it_is_there() {
+        let store = tempfile::tempdir().expect("store");
+        let written = store.path().join("agent-with-report.md");
+        fs::write(&written, "# Agent Task\n").expect("report file");
+        for (id, report) in [
+            ("agent-with-report", written.clone()),
+            ("agent-without-file", store.path().join("agent-without-file.md")),
+        ] {
+            fs::write(
+                store.path().join(format!("{id}.json")),
+                serde_json::to_vec(&json!({
+                    "agentId": id,
+                    "parentSessionId": "session-a",
+                    "toolCallId": format!("toolu_{id}"),
+                    "name": id,
+                    "status": "running",
+                    "startedAt": "100",
+                    "outputFile": report,
+                }))
+                .expect("manifest json"),
+            )
+            .expect("write manifest");
+        }
+
+        let rows = scan_store(store.path(), "session-a", 200, None);
+        let report_of = |id: &str| {
+            rows.iter()
+                .find(|row| row.agent_id == id)
+                .unwrap_or_else(|| panic!("{id} is not a row: {rows:?}"))
+                .report
+                .clone()
+        };
+        assert_eq!(
+            report_of("agent-with-report").as_deref(),
+            Some(written.as_path()),
+            "the row names the report file the helper writes"
+        );
+        assert_eq!(report_of("agent-without-file"), None, "a file that is not there is not named");
+    }
+
+    /// t-69472: the turn's own watcher — the TUI's, whose spawn cell is where
+    /// the parent pane shows a helper — lists a ledger worker beside a helper
+    /// of this process, marked, and says nothing its parent cannot see: no
+    /// quiet warning, however old its manifest's last activity. The session's
+    /// watcher, whose rows become the window's frames, and the background list
+    /// leave it out: the window lists the worker itself (t-11962).
+    #[tokio::test]
+    async fn a_ledger_worker_is_a_row_of_the_turns_watcher_and_never_of_the_windows() {
+        let store = tempfile::tempdir().expect("store");
+        let started = epoch_seconds_now() + 5;
+        for (id, execution) in [("agent-in-process", None), ("agent-ledger", Some("ledger"))] {
+            let mut manifest = json!({
+                "agentId": id,
+                "parentSessionId": "session-c69472",
+                "toolCallId": format!("toolu_{id}"),
+                "name": id,
+                "subagentType": "general-purpose",
+                "status": "running",
+                "startedAt": started.to_string(),
+                "lastActivityAt": 100,
+            });
+            if let Some(execution) = execution {
+                manifest["execution"] = json!(execution);
+                manifest["pane"] = json!("%9");
+            }
+            fs::write(
+                store.path().join(format!("{id}.json")),
+                serde_json::to_vec(&manifest).expect("manifest json"),
+            )
+            .expect("write manifest");
+        }
+        let registry = AgentRegistry::at_root_for_tests("session-c69472", store.path());
+        let ids = |rows: &[SubagentProgress]| -> Vec<String> {
+            rows.iter().map(|row| row.agent_id.clone()).collect()
+        };
+
+        let mut turn = SubagentProgressWatcher::start(
+            std::sync::Arc::clone(&registry),
+            "session-c69472".to_string(),
+        );
+        let rows = tokio::time::timeout(Duration::from_secs(10), turn.changed())
+            .await
+            .expect("the turn's watcher looked")
+            .expect("the turn's rows");
+        assert_eq!(
+            ids(&rows),
+            ["agent-in-process", "agent-ledger"],
+            "the turn's watcher lists the ledger worker too"
+        );
+        assert!(!rows[0].ledger, "{:?}", rows[0]);
+        let ledger = &rows[1];
+        assert!(ledger.ledger, "the ledger worker's row is marked: {ledger:?}");
+        assert_eq!(ledger.tool_call_id.as_deref(), Some("toolu_agent-ledger"));
+        assert_eq!(ledger.no_new_output_for, None, "its parent cannot see its output: {ledger:?}");
+
+        let mut session = SubagentProgressWatcher::start_for_session(
+            std::sync::Arc::clone(&registry),
+            "session-c69472".to_string(),
+        );
+        let rows = tokio::time::timeout(Duration::from_secs(10), session.changed())
+            .await
+            .expect("the session's watcher looked")
+            .expect("the session's rows");
+        assert_eq!(ids(&rows), ["agent-in-process"], "the window's rows leave the ledger worker out");
+        let background: Vec<String> = background_tasks_for_session(&registry, "session-c69472")
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+        assert_eq!(background, ["agent-in-process"], "the background list leaves it out");
     }
 }

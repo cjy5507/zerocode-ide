@@ -6606,6 +6606,8 @@ mod tests {
             pane: None,
             last_receipt: None,
             in_tool: false,
+            report: None,
+            ledger: false,
         }
     }
 
@@ -7537,6 +7539,8 @@ mod tests {
                 pane: None,
                 last_receipt: None,
                 in_tool: false,
+                report: None,
+                ledger: false,
             }]})
             .expect("roster change");
 
@@ -8710,6 +8714,127 @@ mod tests {
         assert!(cell.is_spawning(), "the read must not evict a live helper");
         assert!(cell.is_active(), "and it must not close it as failed");
         assert!(cell.contains_call("spawn-1"));
+    }
+
+    /// An `Agent` call announced the way the turn announces one.
+    fn announce_agent(ui: &mut super::Ui, ids: &BlockIdGen, call_id: &str, description: &str) {
+        let input = json!({
+            "description": description,
+            "prompt": "Read the parser and report.",
+            "subagent_type": "general-purpose"
+        });
+        let preview = preview_tool_input("Agent", &input);
+        let summary = preview_summary(&preview);
+        ui.block(RenderBlock::ToolCall {
+            id: ids.next(),
+            tool_call_id: ToolCallId(call_id.to_string()),
+            name: "Agent".to_string(),
+            summary,
+            preview,
+            input_print: None,
+            status: ToolCallStatus::Running,
+        });
+    }
+
+    /// t-69472: a finished helper's cell says where its whole report is. Its
+    /// live row named the file it writes (the manifest's `outputFile`), and
+    /// the `Completed` cell's body names that file on one line after the
+    /// answer's preview. The body stays within the five rows a terminal that
+    /// does not know the fold markers shows open, at any width.
+    #[test]
+    fn a_finished_helpers_cell_names_its_report_file_in_five_rows_at_most() {
+        let report = "/workspace/.zo/agents/agent-c69472.md";
+        let answer = format!(
+            "C69472 helper report: {}",
+            "the parser reads its tokens in three passes and keeps the spans. ".repeat(8)
+        );
+        let finished = json!({
+            "agentId": "agent-c69472",
+            "name": "survey-the-parser",
+            "subagentType": "general-purpose",
+            "status": "completed",
+            "result": answer,
+            "structured": null,
+            "error": null,
+            "summary": "4 tool uses · 12s",
+            "outputFile": report,
+        })
+        .to_string();
+        for cols in [120, 40] {
+            let mut ui = test_ui();
+            ui.resize(cols, 24);
+            ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(12)));
+            let ids = BlockIdGen::default();
+            announce_agent(&mut ui, &ids, "toolu_c69472", "survey the parser");
+            let mut helper = running_helper("agent-c69472", "survey the parser", "Read · src/parser.rs", 4, 12);
+            helper.tool_call_id = Some("toolu_c69472".to_string());
+            helper.report = Some(std::path::PathBuf::from(report));
+            ui.set_subagent_progress(vec![helper]);
+            // The helper is done: the live rows no longer name it.
+            ui.set_subagent_progress(Vec::new());
+            ui.block(RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId("toolu_c69472".to_string()),
+                is_error: false,
+                body: format_tool_result_from_raw("Agent", &finished, false),
+            });
+            // The finished cell goes to history with the turn's next cell.
+            ui.flush_tool_cell();
+
+            let history: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
+            // The body is the answer's preview and what follows it: a narrow
+            // row hangs the rest of its target above it first.
+            let preview = history
+                .iter()
+                .position(|row| row.starts_with("  └ Completed - C69472 helper report"))
+                .unwrap_or_else(|| panic!("the answer's preview is not in the cell at {cols} columns: {history:#?}"));
+            let body = &history[preview..];
+            let said: String = body.iter().map(|row| row.trim()).collect();
+            assert!(
+                said.contains(report),
+                "the body names the report file at {cols} columns: {body:#?}"
+            );
+            assert!(
+                body.len() <= 5,
+                "the body is {} rows at {cols} columns: {body:#?}",
+                body.len()
+            );
+        }
+    }
+
+    /// t-69472: inside ZeroCode a general-purpose `Agent` call opens a ledger
+    /// worker — a CLI of its own in a window tab of its own — and its spawn
+    /// cell stood empty for as long as it ran. The turn's watcher now hands
+    /// the screen its row, and the row says what the parent can know of it:
+    /// the helper, its model, how long it has run, and that it runs in its own
+    /// tab. A helper of this process keeps its full row beside it.
+    #[test]
+    fn a_ledger_workers_row_stands_in_its_spawn_cell() {
+        let mut ui = test_ui();
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(95)));
+        let ids = BlockIdGen::default();
+        announce_agent(&mut ui, &ids, "toolu_ledger", "survey the parser");
+        announce_agent(&mut ui, &ids, "toolu_inline", "read the lexer");
+        let mut ledger = running_helper("agent-ledger", "survey the parser", "working", 0, 95);
+        ledger.tool_call_id = Some("toolu_ledger".to_string());
+        ledger.model = Some("claude-opus-5-5".to_string());
+        ledger.pane = Some("%9".to_string());
+        ledger.ledger = true;
+        let mut inline = running_helper("agent-inline", "read the lexer", "Read · src/lexer.rs", 3, 40);
+        inline.tool_call_id = Some("toolu_inline".to_string());
+        ui.set_subagent_progress(vec![inline, ledger]);
+
+        let cell = ui.tool_cell.as_ref().expect("the spawns keep the live cell");
+        let rows: Vec<String> = cell.lines(120, Duration::ZERO).iter().map(Line::plain).collect();
+        assert!(
+            rows.iter().any(|row| row
+                == "  └ survey the parser · claude-opus-5-5 · 1m 35s · running in its own tab"),
+            "the ledger worker's row stands in its spawn cell: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.starts_with("  └ read the lexer · 3 tool uses · 40s")),
+            "the helper of this process keeps its row: {rows:#?}"
+        );
     }
 
     /// Everything the frame put on screen, without its colours and cursor

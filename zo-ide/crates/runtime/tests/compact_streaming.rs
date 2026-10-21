@@ -983,3 +983,73 @@ async fn a_streaming_turn_request_longer_than_the_summary_deadline_is_not_cut() 
         "the answer that came after the summary's deadline is the turn's"
     );
 }
+
+// ── t-69472: a summary that fails for another reason says so too ──────────
+
+/// What the provider said when it refused the summary request: its own
+/// words, which no line the person reads may carry.
+const PROVIDER_SAID: &str = "prompt is too long: 1200000 tokens > 1000000 maximum";
+
+/// A turn's request answers at once with the context near full. A summary
+/// request is refused the way a provider refuses a conversation too long for
+/// it, in the provider's own words.
+struct RefusedSummaryApi;
+impl AsyncApiClient for RefusedSummaryApi {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        _render_tx: mpsc::Sender<RenderBlock>,
+        _text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            if is_summary_request(&request) {
+                return Err(RuntimeError::with_provider_error_class(
+                    PROVIDER_SAID,
+                    runtime::ProviderErrorClass::ContextOverflow,
+                ));
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::Usage(usage(1_000, 119_000)),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+/// t-69472: a summary that fails inside a turn for another reason than its
+/// deadline — here the provider refuses the request — still lets the local
+/// summary fold the conversation, and the turn says so in one line of its
+/// own: the kind of failure only, never the provider's words, and not the
+/// deadline's line.
+#[tokio::test]
+async fn an_in_turn_summary_that_fails_says_its_kind_in_one_line() {
+    let mut conversation = turn_runtime(Arc::new(RefusedSummaryApi) as Arc<dyn AsyncApiClient>);
+    let (tx, rx) = mpsc::channel::<RenderBlock>(256);
+    let collected = tokio::spawn(drain(rx));
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowPrompter);
+    let summary = conversation
+        .run_turn_streaming("C69472 survey", tx, prompter)
+        .await
+        .expect("the turn ends without an error");
+    let blocks = collected.await.expect("the channel drains");
+    assert!(
+        summary.auto_compaction.is_some(),
+        "the local summary folds the conversation"
+    );
+
+    let rows = system_rows(&blocks);
+    let said: Vec<&(SystemLevel, &str)> = rows
+        .iter()
+        .filter(|(_, text)| text.contains("the local summary stands in"))
+        .collect();
+    assert_eq!(said.len(), 1, "one line says the local summary stood in: {rows:?}");
+    let (level, line) = said[0];
+    assert_eq!(*level, SystemLevel::Warn, "{line}");
+    assert_eq!(
+        *line,
+        "Compaction: the model's summary could not be used (the conversation is too long for the summary request); the local summary stands in",
+        "the line names the kind of failure, apart from the deadline's line"
+    );
+    assert!(!line.contains(PROVIDER_SAID), "the provider's words stay out of the line: {line}");
+}
