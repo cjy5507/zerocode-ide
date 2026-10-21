@@ -6,7 +6,8 @@
  *   - 코디마다 한 열, 열의 머리는 코디의 카드(제목 · 실행 · 모델 / 상태 줄 / 팀 줄)다.
  *   - 줄기의 차례는 당신 차례 → 멈춤 → 도는 중 → 차례 기다림 → 끝남, 헬퍼는 제 워커 밑에 들여쓴다.
  *   - 카드 크기 셋: L(질문 전문 · 답하기 · 질문 전문), M(지금 줄 · 까닭 · 로그 보기), S(두 줄).
- *   - 끝난 카드가 둘 이상이면 「끝남 N — 제목들 … 펼치기」 한 줄로 묶이고, 편 것은 다시 그려도 남는다.
+ *   - 헬퍼 줄기에 끝난 카드가 둘 이상이면 「끝남 N — 제목들 … 펼치기」 한 줄로 묶이고(시안의 「끝난
+ *     헬퍼는 한 줄로 묶습니다」), 편 것은 다시 그려도 남는다.
  *   - 머리의 「당신 차례 N」을 누르면 그 카드로 가고, 거듭 누르면 다음 카드로 간다.
  *   - 쉬는 코디의 자식은 그 코디의 열에 선다(방향 D의 결함 둘째), 칩은 카드 제 워크스페이스를 말한다
  *     (결함 첫째), 컨텍스트 수는 60%부터만 서고 4.5:1 위에서 읽힌다(결함 셋째).
@@ -428,18 +429,25 @@ export async function testAgentGraphTeams(browser, origin, ok) {
       const zoom = getComputedStyle(view.querySelector(".agent-graph-zoom")).display;
       const before = agentGraphZoom;
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "1", shiftKey: true, bubbles: true }));
-      /* 그리고 상태 칩 다섯은 카드로 가는 손잡이라 입체의 머리에는 서지 않는다 — 입체의 무대가 D 때의
-       * 높이를 지킨다. 입체를 띄우지 않고 그 보기의 표지만 잠깐 입혀 규칙을 읽는다. */
+      /* 그리고 상태 칩 다섯은 두 보기 모두의 머리에 선다 — D의 상태 단추가 그랬듯이. 입체에서는 점과
+       * 숫자만 남고 낱말은 단추의 이름으로 남아, 칩 줄이 머리를 두 줄로 늘리지 않는다(입체의 무대가 D
+       * 때의 높이를 지킨다). 입체를 띄우지 않고 그 보기의 표지만 잠깐 입혀 규칙을 읽는다. */
       const summary = view.querySelector(".agent-graph-summary");
+      const word = summary.querySelector(".agent-graph-stat > span");
       const chipsInCards = getComputedStyle(summary).display;
+      const wordInCards = Math.round(word.getBoundingClientRect().width);
       view.classList.add("is-orbit");
       const chipsInOrbit = getComputedStyle(summary).display;
+      const wordInOrbit = Math.round(word.getBoundingClientRect().width);
+      const nameInOrbit = word.textContent;
       view.classList.remove("is-orbit");
-      return { infinite: running.length, zoom, zoomKept: agentGraphZoom === before, chipsInCards, chipsInOrbit };
+      return { infinite: running.length, zoom, zoomKept: agentGraphZoom === before,
+        chipsInCards, chipsInOrbit, wordInCards, wordInOrbit, nameInOrbit };
     });
-    ok("the card picture runs no endless animation and stands no zoom buttons — zoom is the orbit's, and the five chips are the cards'",
+    ok("the card picture runs no endless animation and stands no zoom buttons — zoom is the orbit's, and the five chips stand in both views, the orbit's as mark and count",
       still.infinite === 0 && still.zoom === "none" && still.zoomKept
-        && still.chipsInCards !== "none" && still.chipsInOrbit === "none", JSON.stringify(still));
+        && still.chipsInCards !== "none" && still.chipsInOrbit !== "none"
+        && still.wordInCards > 1 && still.wordInOrbit <= 1 && still.nameInOrbit !== "", JSON.stringify(still));
 
     const stacked = async (width) => {
       await page.setViewportSize({ width, height: 1100 });

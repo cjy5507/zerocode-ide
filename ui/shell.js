@@ -3493,8 +3493,10 @@ function agentGraphOwnSignal(entity) {
  *     일을 `waitsOn`에 든다 — 코디의 머리가 「○○의 넘김을 기다립니다」라고 말하는 근거.
  *   - 차례. 줄기마다 가장 급한 가지부터: 당신 차례 → 멈춤 → 도는 중 → 차례 기다림 → 쉬는 중 →
  *     끝남. 같은 급함은 프로젝트·워크스페이스·판의 이름 차례.
- *   - 끝남 묶음. 한 줄기에 자식 없는 끝남이 둘 이상이면 「끝남 N — 제목들 … 펼치기」 한 줄로
- *     접는다. 펼친 묶음은 사람의 것이라 다시 그려도 그대로다(`agentGraphFoldsOpen`).
+ *   - 끝남 묶음. 카드 밑의 줄기(헬퍼의 줄기)에 자식 없는 끝남이 둘 이상이면 「끝남 N — 제목들 …
+ *     펼치기」 한 줄로 접는다 — 시안의 「끝난 헬퍼는 한 줄로 묶습니다」. 열의 본 줄기에 선 끝난
+ *     워커는 접지 않고 저마다 S 카드로 선다. 펼친 묶음은 사람의 것이라 다시 그려도 그대로다
+ *     (`agentGraphFoldsOpen`).
  *   - 열의 차례. 급한 일이 많은 열부터(당신 차례 → 멈춤 → 도는 중의 수), 같으면 코디가 앉은
  *     열이 먼저, 그다음 실행 번호.
  *
@@ -3585,8 +3587,8 @@ function agentGraphArrange(layout, agentsByKey, seats, compareAgents) {
   const spines = new Map();
   const walked = [];
   const sized = [];
-  const lay = (list, key) => {
-    const quiet = list.filter((entity) => entity.signal === "done" && !(kids.get(entity.key)?.length));
+  const lay = (list, key, sub) => {
+    const quiet = sub ? list.filter((entity) => entity.signal === "done" && !(kids.get(entity.key)?.length)) : [];
     const fold = quiet.length >= 2
       ? { key: `fold:${key}`, members: quiet, open: agentGraphFoldsOpen.has(`fold:${key}`) }
       : null;
@@ -3596,7 +3598,7 @@ function agentGraphArrange(layout, agentsByKey, seats, compareAgents) {
     for (const entity of items) {
       walked.push(entity.key);
       sized.push(`${entity.key}:${entity.size}`);
-      if (kids.get(entity.key)?.length) lay(kids.get(entity.key), entity.key);
+      if (kids.get(entity.key)?.length) lay(kids.get(entity.key), entity.key, true);
     }
     if (!fold) return;
     walked.push(fold.key);
@@ -3614,7 +3616,7 @@ function agentGraphArrange(layout, agentsByKey, seats, compareAgents) {
       walked.push(team.lead.key);
       sized.push(`${team.lead.key}:head`);
     }
-    if (team.top.length > 0) lay(team.top, team.spine);
+    if (team.top.length > 0) lay(team.top, team.spine, false);
   }
   const signals = new Map();
   for (const entity of agentsByKey.values()) {

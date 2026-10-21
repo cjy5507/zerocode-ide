@@ -18814,7 +18814,8 @@ const elapsedClock = await page.evaluate(async () => {
   // 화면에서 물러난다. 이 줄이 묻는 것은 카드가 **적은 낱말**이다.
   /* 코디별 줄기의 카드(방향 E2)는 나이를 한 칸에 한 번 적는다(`.agent-graph-card-age`) — 도는 카드는
    * 마지막 소식(「방금」), 끝난 카드는 지난 때(「50분 전」). 두 칸이 서면 이 줄이 `A · B`로 그것을
-   * 말한다. 이 턴의 경과는 인스펙터 카드가 든다(아래). 끝난 둘은 「끝남 2」로 접혀 서므로 먼저 편다. */
+   * 말한다. 이 턴의 경과는 인스펙터 카드가 든다(아래). 「끝남 N」으로 접힌 묶음이 있으면 먼저 편다 —
+   * 접힘은 헬퍼 줄기의 것이라, 본 줄기에 선 이 장면의 끝난 둘은 저마다 카드로 선다. */
   for (const fold of view.querySelectorAll('.agent-graph-fold[aria-expanded="false"]')) fold.click();
   await window.__BOARD_SETTLED__();
   const metaOf = (pane) => [...(nodeOf(pane)?.querySelectorAll(".agent-graph-card-age") ?? [])]
@@ -20619,6 +20620,14 @@ const orbitCard = await page.evaluate(async (fixtures) => {
     headLeads: node("term:71")?.classList.contains("is-head") === true,
     sum: [...(node("term:71")?.querySelectorAll(".agent-graph-team-sum > li") ?? [])]
       .map((item) => item.textContent).join(" · "),
+    /* 팀 N은 코디 아래 모든 자손의 수다(시안 page.js 643~644행, 코디 자신은 빼고) — 장면의 카드에서
+     * 부모를 따라 센다. */
+    team: (() => {
+      const cards = columns("done").flatMap((column) => column.cards);
+      const below = (pane) => cards.filter((one) => one.parent === pane)
+        .flatMap((one) => [one, ...below(one.pane)]);
+      return below("term:71").length;
+    })(),
     replies: [asker, "term:71", "term:72", "term:73"].map((pane) =>
       (node(pane)?.querySelector(".agent-graph-reply")?.getClientRects().length ?? 0) > 0),
     replyPane: node(asker)?.querySelector(".agent-graph-reply-pane")?.textContent ?? "",
@@ -20657,7 +20666,9 @@ ok(
     orbitCard.limbs.done.word === orbitCard.words.done && orbitCard.limbs.done.mark.includes("is-done") &&
     ["asker", "working", "done"].every((key) => orbitCard.limbs[key].outside && orbitCard.limbs[key].level) &&
     orbitCard.headLeads && orbitCard.headWord === orbitCard.words.run &&
-    orbitCard.sum.includes("4") && orbitCard.sum.includes(orbitCard.words.you) &&
+    orbitCard.team > 0 &&
+    Number(orbitCard.sum.split(" · ")[0].match(/\d+/)?.[0]) === orbitCard.team &&
+    orbitCard.sum.includes(orbitCard.words.you) &&
     orbitCard.relit.mark.includes("is-run") && orbitCard.relit.word === orbitCard.words.run &&
     orbitCard.relit.outside && orbitCard.sameNode &&
     orbitCard.replies.join(",") === "true,false,false,false" &&
@@ -45337,10 +45348,27 @@ const boardDress = await page.evaluate(async () => {
     await settle();
     const view = [...document.querySelectorAll("#board-view, .file-view")]
       .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
+    /* 상태 칩 다섯 (방향 E2, t-68475 — D의 단추 셋을 잇는다). 칩마다 D의 단추가 하던 일을 그대로
+     * 한다: 제 수를 적고(그림의 모델이 세는 수 그대로), 0이면 누를 수 없고, 누르면 그 상태의 카드를
+     * 고르는 손이 매여 있다. 누른 뒤 그 카드로 가는 것은 agent-graph-teams의 「「당신 차례 N」 goes to
+     * that card」가, 그 손이 다시 그려도 같은 손인 것은 위의 「the graph's per-node, per-chip and
+     * surface handlers survive a repaint」가 잰다. */
+    const model = view ? agentGraphModels.get(view) : null;
+    const chips = [...(view?.querySelectorAll("[data-graph-signal]") ?? [])].map((chip) => {
+      const count = chip.querySelector("[data-graph-count]")?.textContent ?? "";
+      return {
+        signal: chip.dataset.graphSignal,
+        count,
+        counted: count === String(model?.signals.get(chip.dataset.graphSignal) ?? 0),
+        shut: chip.disabled === (count === "0"),
+        pressable: typeof chip.onclick === "function",
+      };
+    });
     return {
-      summaryButtons: view?.querySelectorAll("[data-graph-bucket]").length ?? 0,
+      summaryButtons: chips.length,
       summaryCounts: [...(view?.querySelectorAll("[data-graph-count]") ?? [])]
         .map((one) => one.textContent),
+      chips,
       inspector: view?.querySelector(".agent-inspector") !== null,
       legacySettings: document.getElementById("board-settings-pop") !== null,
       legacyFilters: view?.querySelector(".board-filters") !== null,
@@ -45469,7 +45497,9 @@ const boardDress = await page.evaluate(async () => {
 });
 ok(
   "the relations header keeps status actions and the inspector beside the task/relations switch",
-  boardDress.summaryButtons === 3 && boardDress.summaryCounts.length === 3 &&
+  boardDress.summaryButtons === 5 && boardDress.summaryCounts.length === 5 &&
+    boardDress.chips.map((chip) => chip.signal).join() === "you,halt,run,wait,done" &&
+    boardDress.chips.every((chip) => chip.counted && chip.shut && chip.pressable) &&
     boardDress.inspector && !boardDress.legacySettings &&
     !boardDress.legacyFilters && boardDress.modes.join() === "tasks,graph",
   JSON.stringify(boardDress),
@@ -46247,7 +46277,16 @@ const boardHeader = await page.evaluate(async () => {
   const summary = view?.querySelector(".agent-graph-summary") ?? null;
   seen.groupSpeaks = summary?.getAttribute("role") === "group"
     && summary?.getAttribute("aria-label") === t("board.graph.summary", "에이전트 상태 요약");
-  seen.summaryCount = summary?.querySelectorAll("[data-graph-bucket]").length ?? 0;
+  seen.summaryCount = summary?.querySelectorAll("[data-graph-signal]").length ?? 0;
+  /* 상태 칩은 두 보기 모두의 머리에 선다 (방향 E2, t-68475) — 관계 탭은 입체로 열리므로, 지금 선
+   * 보기와 입체의 표지를 입은 보기 둘 다에서 칩 묶음이 보이는지 읽는다. */
+  const shown = () => (summary ? getComputedStyle(summary).display !== "none" : false);
+  const wasOrbit = view?.classList.contains("is-orbit") ?? false;
+  seen.summaryShown = shown();
+  view?.classList.add("is-orbit");
+  seen.summaryShownInOrbit = shown();
+  if (!wasOrbit) view?.classList.remove("is-orbit");
+  seen.openedInOrbit = wasOrbit;
   seen.activeMode = view?.querySelector('[data-board-mode][aria-pressed="true"]')?.dataset.boardMode;
 
   // ⌘K — 검색으로. 터미널 위에서는 조용히.
@@ -46267,7 +46306,8 @@ const boardHeader = await page.evaluate(async () => {
 });
 ok(
   "the relations header selects its mode, retains status actions, and ⌘K reaches search",
-  boardHeader.headingSays && boardHeader.groupSpeaks && boardHeader.summaryCount === 3 &&
+  boardHeader.headingSays && boardHeader.groupSpeaks && boardHeader.summaryCount === 5 &&
+    boardHeader.summaryShown && boardHeader.summaryShownInOrbit &&
     boardHeader.activeMode === "graph" &&
     boardHeader.cmdKFocuses && boardHeader.cmdKYieldsToTerm,
   JSON.stringify(boardHeader),
@@ -46757,26 +46797,40 @@ const boardFitRamp = await page.evaluate(async () => {
     await window.__PAINTED__();
     await settle();
     const chip = view.querySelector(".agent-graph-node-branch:not([hidden]) .agent-graph-node-branch-name");
+    const titles = [...view.querySelectorAll(".agent-graph-node-title")];
     const lefts = new Set([...view.querySelectorAll(".agent-graph-team")]
       .map((one) => Math.round(one.getBoundingClientRect().left)));
     return {
+      graph: scroll.clientWidth,
       teams: view.querySelectorAll(".agent-graph-team").length,
       columns: lefts.size,
       overWide: Math.round(scroll.scrollWidth - scroll.clientWidth),
       overTall: Math.round(scroll.scrollHeight - scroll.clientHeight),
       chipWhole: chip !== null && chip.scrollWidth <= chip.clientWidth + 1,
+      titleWhole: titles.length > 0 && titles.every((one) => one.scrollWidth <= one.clientWidth + 1),
     };
   };
-  const seen = { short: await paint(4), tall: await paint(20) };
+  /* 하네스의 기본 보드 — 1440 창에서 왼쪽 목록 · 작업 레일 · 곁의 인스펙터를 뺀 그림의 판(약 640px).
+   * 사람이 1440 창에서 보는 폭이고, 시안의 격자(열 340px 둘)가 들지 않아 열이 하나로 선다. 가로로
+   * 넘치지 않고, 칩과 제목은 잘리지 않는다. */
+  const seen = { base: await paint(4) };
+
+  // 열 둘이 설 보드(1440px — 그림의 판 약 920px). 시안의 격자는 판의 폭으로 열의 수를 정한다.
+  const heldWidth = view.style.width;
+  const heldMaxWidth = view.style.maxWidth;
+  view.style.width = "1440px";
+  view.style.maxWidth = "1440px";
+  await settle();
+  seen.short = await paint(4);
+  seen.tall = await paint(20);
 
   // 좁은 판(760px 밑)에서는 열이 한 줄로 쌓이고, 가로로 넘치는 것은 여전히 없다.
-  const heldWidth = view.style.width;
   view.style.width = "720px";
   view.style.maxWidth = "720px";
   await settle();
   seen.narrow = await paint(20);
   view.style.width = heldWidth;
-  view.style.maxWidth = "";
+  view.style.maxWidth = heldMaxWidth;
   await settle();
 
   // 사다리. 제목은 토큰이 정하고, 배율은 카드의 글자를 움직이지 않는다.
@@ -46821,7 +46875,9 @@ const boardFitRamp = await page.evaluate(async () => {
 });
 ok(
   "the columns fit the width they have, the stem grows downward, and one type ramp carries every title",
-  boardFitRamp.short.overWide <= 1 && boardFitRamp.tall.overWide <= 1 &&
+  boardFitRamp.base.columns === 1 && boardFitRamp.base.overWide <= 1 &&
+    boardFitRamp.base.chipWhole && boardFitRamp.base.titleWhole &&
+    boardFitRamp.short.overWide <= 1 && boardFitRamp.tall.overWide <= 1 &&
     boardFitRamp.narrow.overWide <= 1 && boardFitRamp.tall.overTall > 0 &&
     boardFitRamp.short.teams === 2 && boardFitRamp.short.columns === 2 &&
     boardFitRamp.tall.columns === 2 && boardFitRamp.narrow.columns === 1 &&

@@ -29859,12 +29859,15 @@ input[type="search"]::-webkit-search-cancel-button {
   text-transform: uppercase;
 }
 
+/* 칩 다섯은 머리의 폭까지 줄고, 모자라면 묶음 안에서 줄을 바꾼다 — 한 줄로 서면 560px의 판에서
+ * 머리를 가로로 넘친다(한국어 약 540px). */
 .agent-graph-summary {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
+  min-width: 0;
   margin-left: auto;
 }
 
@@ -30981,18 +30984,32 @@ input[type="search"]::-webkit-search-cancel-button {
   }
 }
 
-/* 입체에는 카드의 손잡이 셋이 없다 — 오버레이 고르개(입체는 우편과 의존을 늘 그린다), 카드 정보
- * 펼치기, 그리고 카드로 가는 상태 칩 다섯(방향 E2, t-68475: 입체의 수는 판 위의 「지금 흐름」 줄이
- * 말하고, 칩 줄이 머리를 두 줄로 늘려 입체의 무대를 줄이지 않게). 아래 범례도 카드의 모양 둘과
- * 카드의 상태 빛을 내려놓는다: 입체의 빛은 판 위의 제 범례(`.agent-orbit-key`)가 말하고, 아래 범례는
- * 이 보기의 몸짓 한 줄만 든다. */
-.agent-board.is-orbit .agent-graph-summary,
+/* 입체에는 카드의 손잡이 둘이 없다 — 오버레이 고르개(입체는 우편과 의존을 늘 그린다)와 카드 정보
+ * 펼치기. 아래 범례도 카드의 모양 둘과 카드의 상태 빛을 내려놓는다: 입체의 빛은 판 위의 제
+ * 범례(`.agent-orbit-key`)가 말하고, 아래 범례는 이 보기의 몸짓 한 줄만 든다. */
 .agent-board.is-orbit .agent-graph-overlays,
 .agent-board.is-orbit .agent-graph-density,
 .agent-board.is-orbit .agent-graph-legend-list.is-nodes,
 .agent-board.is-orbit .agent-graph-legend-list.is-relations,
 .agent-board.is-orbit .agent-graph-legend-list.is-states {
   display: none;
+}
+
+/* 입체에서도 머리의 상태 칩 다섯이 선다 — D의 상태 단추가 두 보기 모두에 섰듯이(누르면 그 상태의
+ * 첫 카드가 골라지고, 입체는 고른 것을 따라간다). 다만 점과 숫자만 남는다: 낱말까지 서면 칩 줄이
+ * 머리를 두 줄로 늘려 입체의 무대를 줄인다(1440에서 546 → 502px). 낱말은 단추의 이름으로 남는다 —
+ * 아래 감춤은 좁은 티어(399px 밑)의 것과 같은 `.sr`이고, 모양과 숫자가 상태를 색 없이 가른다. */
+.agent-board.is-orbit .agent-graph-stat {
+  padding-inline: var(--space-2);
+}
+
+.agent-board.is-orbit .agent-graph-stat > span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* 보기 토글은 그림의 머리 오른쪽, 에이전트 수 곁에 선다 — 수가 남는 폭을 먹어 둘을
