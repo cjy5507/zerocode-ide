@@ -23,9 +23,9 @@ use serde_json::{Map, Value};
 use zerocode_core::jev::custom;
 use zerocode_core::jev::door::{self, JevSettings, NotAnObject};
 use zerocode_core::jev::{
-    CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
-    ROUTING, SMART_SETTINGS_KEY, choice, count, model_in, noul, pin_in, pinned_model, promote,
-    score,
+    AGENT_TOOL_ASK_OPTIONS, CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode,
+    JevUse, MODEL_SETTING, ROUTING, SMART_SETTINGS_KEY, choice, count, model_in, noul, pin_in,
+    pinned_model, promote, score,
 };
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
@@ -1192,13 +1192,98 @@ pub struct CustomDecisions {
     pub everywhere: bool,
 }
 
-/// What core says of a draft before anything keeps it: the rules it breaks,
-/// the version it would be, and the question it would ask.
-#[derive(Debug, Clone, PartialEq)]
+/// What core says of a draft before anything keeps it: the rules it breaks
+/// — by their words on the wire ([`RefusalWords`]) — the version it would
+/// be, the question it would ask, and the least sure line an agent would be
+/// told of it: its first option at its act-from line.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DraftCheck {
+    #[serde(serialize_with = "refusal_words")]
     pub refusals: Vec<custom::Refusal>,
     pub version: String,
     pub questions: Value,
+    pub line: String,
+}
+
+/// A rule a draft breaks, as the drawer reads it: core's word for the rule,
+/// core's word for the field it was found in, the line of that field, and
+/// the option it names or the level, counted from zero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RefusalWords {
+    pub word: &'static str,
+    pub field: Option<&'static str>,
+    pub line: Option<usize>,
+    pub option: Option<String>,
+    pub level: Option<usize>,
+}
+
+impl RefusalWords {
+    #[must_use]
+    pub fn of(refusal: &custom::Refusal) -> Self {
+        Self {
+            word: refusal.word(),
+            field: None,
+            line: None,
+            option: None,
+            level: None,
+        }
+    }
+}
+
+fn refusal_words<S: serde::Serializer>(
+    refusals: &[custom::Refusal],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(refusals.iter().map(RefusalWords::of))
+}
+
+/// Why a change to a person's decisions was not made, as the drawer reads
+/// it: core's refusals by their words, a decision the store no longer keeps,
+/// or what kept the store from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DecisionRefusal {
+    pub refusals: Vec<RefusalWords>,
+    pub missing: bool,
+    pub message: String,
+}
+
+impl From<custom::store::Error> for DecisionRefusal {
+    fn from(error: custom::store::Error) -> Self {
+        match error {
+            custom::store::Error::Refused(refusals) => Self {
+                refusals: refusals.iter().map(RefusalWords::of).collect(),
+                missing: false,
+                message: String::new(),
+            },
+            custom::store::Error::Missing => Self {
+                refusals: Vec::new(),
+                missing: true,
+                message: String::new(),
+            },
+            custom::store::Error::Io(error) => error.into(),
+        }
+    }
+}
+
+impl From<std::io::Error> for DecisionRefusal {
+    fn from(error: std::io::Error) -> Self {
+        Self {
+            refusals: Vec::new(),
+            missing: false,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<RouterRefusal> for DecisionRefusal {
+    fn from(refusal: RouterRefusal) -> Self {
+        Self {
+            refusals: Vec::new(),
+            missing: false,
+            message: refusal.message,
+        }
+    }
 }
 
 /// The person's decisions under `home`, zo's config home, and the folders
@@ -1248,6 +1333,7 @@ pub fn check_custom_decision(draft: DecisionDraft) -> DraftCheck {
             .collect(),
         version: definition.version().unwrap_or_default(),
         questions: custom::questions(&definition),
+        line: String::new(),
     }
 }
 
@@ -3331,6 +3417,130 @@ mod tests {
                 .expect("the store reads")
                 .is_empty(),
             "a refused decision stands in the store"
+        );
+    }
+
+    /// A refusal reaches the drawer in core's words (t-62170 stage 3): the
+    /// rule's word, the word of the field it was found in, the line, and the
+    /// option or level it names — so the drawer says it and marks the control
+    /// it points at with no word of its own for either. A decision the store
+    /// no longer keeps is said apart from a refusal.
+    #[test]
+    fn a_refusal_reaches_the_drawer_in_cores_words_and_names_where() {
+        let secret = custom::Refusal::SecretLine {
+            field: custom::Field::Question,
+            line: 3,
+        };
+        let level = custom::Refusal::MeaningLength(custom::Field::Level(2));
+        let meaning = custom::Refusal::MeaningLength(custom::Field::Meaning("ship".to_string()));
+        let twice = custom::Refusal::OptionName("ship".to_string());
+        let refused = DecisionRefusal::from(custom::store::Error::Refused(vec![
+            secret.clone(),
+            level.clone(),
+            meaning.clone(),
+            twice.clone(),
+            custom::Refusal::NameTaken,
+        ]));
+        assert_eq!(
+            serde_json::to_value(refused).expect("serializes"),
+            serde_json::json!({
+                "refusals": [
+                    { "word": secret.word(), "field": custom::Field::Question.word(),
+                      "line": 3, "option": null, "level": null },
+                    { "word": level.word(), "field": custom::Field::Level(2).word(),
+                      "line": null, "option": null, "level": 2 },
+                    { "word": meaning.word(), "field": custom::Field::Meaning(String::new()).word(),
+                      "line": null, "option": "ship", "level": null },
+                    { "word": twice.word(), "field": null, "line": null, "option": "ship",
+                      "level": null },
+                    { "word": custom::Refusal::NameTaken.word(), "field": null, "line": null,
+                      "option": null, "level": null },
+                ],
+                "missing": false,
+                "message": "",
+            }),
+            "a refusal crosses as core's words, with the field, line, option and level it names"
+        );
+        assert_eq!(
+            serde_json::to_value(DecisionRefusal::from(custom::store::Error::Missing))
+                .expect("serializes"),
+            serde_json::json!({ "refusals": [], "missing": true, "message": "" }),
+            "a decision the store no longer keeps is said apart from a refusal"
+        );
+    }
+
+    /// The drawer's check names the least sure line an agent would be told of
+    /// a draft — core's line for its first option at its act-from line: a yes,
+    /// a choice's first option as written, a score's lowest level as an agent
+    /// is shown it — and crosses with its refusals in core's words.
+    #[test]
+    fn the_drawers_check_names_the_line_an_agent_would_be_told() {
+        let draft = DecisionDraft {
+            id: None,
+            name: "Release notes".to_string(),
+            question: "Did this turn change what a person sees?\nAuthorization: Bearer abc"
+                .to_string(),
+            answer: AnswerDraft::YesNo {
+                yes: "It changed what a person sees.".to_string(),
+                no: "Nothing a person sees changed.".to_string(),
+            },
+            at: custom::Point::TurnEnd,
+            reads: BTreeSet::from([custom::Input::Task]),
+            folders: None,
+            act_from: custom::ACT_FROM_DEFAULT,
+            max_per_hour: custom::HOURLY_DEFAULT,
+        };
+        let checked = check_custom_decision(draft.clone());
+        assert_eq!(
+            checked.line,
+            custom::line(&draft.name, AGENT_TOOL_ASK_OPTIONS[0], draft.act_from),
+            "a yes or no is told as a yes at its act-from line"
+        );
+        let wire = serde_json::to_value(&checked).expect("serializes");
+        let secret = custom::Refusal::SecretLine {
+            field: custom::Field::Question,
+            line: 2,
+        };
+        assert_eq!(
+            (&wire["refusals"], &wire["line"]),
+            (
+                &serde_json::json!([
+                    { "word": secret.word(), "field": custom::Field::Question.word(),
+                      "line": 2, "option": null, "level": null },
+                ]),
+                &serde_json::json!(checked.line),
+            ),
+            "the check crosses with its refusals in core's words and its line"
+        );
+        let options = vec![
+            ChoiceOption {
+                name: "ship".to_string(),
+                means: "Ship it this week.".to_string(),
+            },
+            ChoiceOption {
+                name: "hold".to_string(),
+                means: "Hold it back.".to_string(),
+            },
+        ];
+        let choice = DecisionDraft {
+            answer: AnswerDraft::Choice { options },
+            ..draft.clone()
+        };
+        assert_eq!(
+            check_custom_decision(choice).line,
+            custom::line(&draft.name, "ship", draft.act_from),
+            "a choice is told as its first option as written"
+        );
+        let levels = vec!["Low".to_string(), "Some".to_string(), "High".to_string()];
+        let count = levels.len();
+        let score = DecisionDraft {
+            answer: AnswerDraft::Score { levels },
+            ..draft.clone()
+        };
+        assert_eq!(
+            check_custom_decision(score).line,
+            custom::line(&draft.name, &custom::shown_level(0, count), draft.act_from),
+            "a score is told as its lowest level, as an agent is shown it"
         );
     }
 
