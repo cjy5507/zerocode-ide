@@ -1,13 +1,21 @@
-//! Single source of truth for locating the per-session todo store.
+//! Single source of truth for locating a session's todo store.
 //!
-//! The `TodoWrite` tool, the HUD sidebar, and the compaction re-injection all
-//! need to agree on *which file* holds the live todo list. Historically each
-//! resolved the path on its own, and the writer additionally fell back to a
-//! writable `<zo-home>/orphan-todos/` copy when the primary store sat on a
-//! read-only filesystem -- but the readers never knew about that fallback. The
-//! result was a split brain: in a read-only cwd the writer saved todos to the
-//! fallback while the HUD/compaction read the empty primary, so the live list
-//! silently vanished.
+//! Each session keeps its own plan, `<project state>/todos/<session id>.json`,
+//! so two sessions in one folder never read or rewrite each other's. The
+//! session id is handed in by whoever runs the conversation rather than read
+//! from the process environment: one process runs a session and its helpers
+//! at once. The one per-project file every session used to share,
+//! `<project state>/.zo-todos.json`, is neither read nor deleted -- it may
+//! still hold a person's plan, and it belongs to no session.
+//!
+//! The `TodoWrite` tool, the mid-turn re-anchor, the compaction re-injection
+//! and the task lifecycle hooks all need to agree on *which file* holds the
+//! live todo list. Historically each resolved the path on its own, and the
+//! writer additionally fell back to a writable `<zo-home>/orphan-todos/` copy
+//! when the primary store sat on a read-only filesystem -- but the readers
+//! never knew about that fallback. The result was a split brain: in a
+//! read-only cwd the writer saved todos to the fallback while the readers read
+//! the empty primary, so the live list silently vanished.
 //!
 //! This module owns the path rule once. Writers persist to [`primary_store`]
 //! (degrading to [`fallback_store`] on an unwritable primary); readers call
@@ -17,23 +25,41 @@
 
 use std::path::{Path, PathBuf};
 
-/// Filename of the per-project todo store under the zo state base.
-pub const TODO_STORE_FILE: &str = ".zo-todos.json";
+/// Folder under a project's state holding one plan file per session.
+pub const TODO_STORE_DIR: &str = "todos";
 
-/// The primary todo store for `cwd`, honoring the same overrides every reader
-/// and writer must agree on: a non-empty `ZO_TODO_STORE` wins (a blank value
-/// behaves as unset); otherwise the store lives under Zo's global per-project
-/// state directory so todo writes do not dirty the workspace (while
-/// `ZO_STATE_DIR` still redirects that state explicitly). Every session in
-/// `cwd` gets this one store, whatever its `session_id`.
+/// The primary todo store of session `session_id` in `cwd`. A non-empty
+/// `ZO_TODO_STORE` wins for every session (a blank value behaves as unset);
+/// otherwise the store lives under Zo's global per-project state directory so
+/// todo writes do not dirty the workspace (while `ZO_STATE_DIR` still
+/// redirects that state explicitly).
+///
+/// `None` without an override when there is no session, or its id cannot be a
+/// file name: that plan belongs to no session, so it is kept nowhere another
+/// session could read it.
 #[must_use]
-pub fn primary_store(cwd: &Path, _session_id: Option<&str>) -> Option<PathBuf> {
+pub fn primary_store(cwd: &Path, session_id: Option<&str>) -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("ZO_TODO_STORE") {
         if !explicit.to_string_lossy().trim().is_empty() {
             return Some(PathBuf::from(explicit));
         }
     }
-    Some(crate::zo_project_state_dir(cwd).join(TODO_STORE_FILE))
+    let session_id = session_id.filter(|id| names_a_file(id))?;
+    Some(
+        crate::zo_project_state_dir(cwd)
+            .join(TODO_STORE_DIR)
+            .join(format!("{session_id}.json")),
+    )
+}
+
+/// Whether `session_id` can name a plan file: the rule the background task
+/// store holds its per-session files to (`TaskRegistry::for_session`).
+fn names_a_file(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && !matches!(session_id, "." | "..")
+        && session_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
 /// The writable per-user fallback for `primary` -- `<zo home>/orphan-todos/
@@ -65,9 +91,10 @@ pub fn orphan_todo_key(store_path: &Path) -> String {
 /// The store a *reader* should load for session `session_id` in `cwd`: the
 /// primary when it exists, otherwise the writable fallback when *it* exists,
 /// otherwise the primary path (so a missing-store reader still gets a stable,
-/// sensible path to report empty from). This is the counterpart to the
-/// writer's primary->fallback degrade, so a read-only cwd no longer hides the
-/// todos the writer saved.
+/// sensible path to report empty from). `None` when the session has no store
+/// ([`primary_store`]). This is the counterpart to the writer's
+/// primary->fallback degrade, so a read-only cwd no longer hides the todos the
+/// writer saved.
 #[must_use]
 pub fn resolve_readable_store(cwd: &Path, session_id: Option<&str>) -> Option<PathBuf> {
     let primary = primary_store(cwd, session_id)?;

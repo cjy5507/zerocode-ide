@@ -116,6 +116,13 @@ impl SubagentToolExecutor {
         self
     }
 
+    /// Keep this helper's plan with its own conversation, `session_id`, rather
+    /// than with the parent session its context is stamped with (t-68408).
+    pub(crate) fn with_plan_owner(mut self, session_id: &str) -> Self {
+        self.context = self.context.with_plan_owner(session_id);
+        self
+    }
+
     /// Record WHO this executor runs tools for, so a tool addressing the parent
     /// conversation (`SendMessage(to: "main")`) can authorize and attribute the
     /// caller. See [`ToolContext::with_subagent_identity`].
@@ -441,7 +448,9 @@ pub(super) fn build_agent_runtime_on<C: runtime::ApiClient>(
         permission_policy = permission_policy
             .with_tool_requirement(definition.name.as_str(), definition.required_permission);
     }
-    let tool_executor = build_subagent_tool_executor(job, allowed_tools, &permission_policy);
+    let session = agent_session(job)?;
+    let tool_executor = build_subagent_tool_executor(job, allowed_tools, &permission_policy)
+        .with_plan_owner(&session.session_id);
     let feature_config = RuntimeFeatureConfig::default()
         .with_hooks(job.hook_config.clone())
         .with_model(model.clone());
@@ -450,7 +459,7 @@ pub(super) fn build_agent_runtime_on<C: runtime::ApiClient>(
     // `consumed` here, when a boundary actually READS the queue.
     let receipt_manifest = std::path::PathBuf::from(&job.manifest.manifest_file);
     let runtime = ConversationRuntime::new_with_features(
-        agent_session(job)?,
+        session,
         api_client,
         tool_executor,
         permission_policy,

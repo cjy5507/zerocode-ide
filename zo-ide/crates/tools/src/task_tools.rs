@@ -513,6 +513,12 @@ pub(crate) fn run_todo_write(
 /// this was inherited from sorted by status for a HUD, so a finished step sank
 /// to the bottom and the in-progress one rose to the top — and each
 /// `Updated Plan` cell the TUI drew read as a different plan from the last.
+///
+/// The plan is session `session_id`'s own (`runtime::todo_store`): another
+/// session's plan in the same folder is never handed back as `oldTodos`, and
+/// never rewritten or emptied by this one. With no session and no
+/// `ZO_TODO_STORE`, the plan reaches the model in the result and is kept
+/// nowhere.
 fn execute_todo_write(
     session_id: Option<&str>,
     input: TodoWriteInput,
@@ -600,8 +606,8 @@ fn validate_todos(todos: &[TodoItem]) -> Result<(), ToolError> {
 
 fn todo_store_path(session_id: Option<&str>) -> Result<Option<std::path::PathBuf>, ToolError> {
     // Path resolution is owned by `runtime::todo_store` so this writer and the
-    // HUD/compaction readers can never drift (the split-brain that hid todos in
-    // a read-only cwd).
+    // runtime's readers can never drift (the split-brain that hid todos in a
+    // read-only cwd, and the one shared file that mixed two sessions' plans).
     let cwd = std::env::current_dir()?;
     Ok(runtime::todo_store::primary_store(&cwd, session_id))
 }

@@ -82,9 +82,10 @@ impl TodoStatus {
 }
 
 /// Read session `session_id`'s current todo list from its store, best-effort.
-/// A missing store, unreadable file, or malformed JSON all yield an empty list
-/// -- re-injection degrades to a no-op rather than ever failing the enclosing
-/// turn.
+/// Another session's plan in the same folder is never this one's, and neither
+/// is the file every session shared before (`todo_store`). A missing store,
+/// unreadable file, or malformed JSON all yield an empty list -- re-injection
+/// degrades to a no-op rather than ever failing the enclosing turn.
 #[must_use]
 pub fn current_todos(cwd: &Path, session_id: &str) -> Vec<TodoSnapshot> {
     let Some(path) = crate::todo_store::resolve_readable_store(cwd, Some(session_id)) else {
