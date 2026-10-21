@@ -51,6 +51,7 @@ import { testQuotaWallChip } from "./quota-wall-chip.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testBoardNow } from "./board-now.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
+import { testAgentGraphTeams } from "./agent-graph-teams.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
 import { testBoardSchedule } from "./board-schedule.mjs";
@@ -291,6 +292,9 @@ suite("agent-relations", async ({ browser, origin, ok }) => {
   await testAgentRelations(browser, origin, ok);
   await testAgentRelationsForm(browser, origin, ok);
 });
+// The relations tab's card picture, direction E2 (t-68475): one column per
+// coordinator, its workers and helpers hung on the stem by urgency.
+suite("agent-graph-teams", ({ browser, origin, ok }) => testAgentGraphTeams(browser, origin, ok));
 // The live coordination map layered over that same graph (t-7288).
 suite("board-live", ({ browser, origin, ok }) => testBoardLive(browser, origin, ok));
 // The orbit view of the same relations picture (t-9444): stars, planets, moons and mail.
@@ -18344,19 +18348,17 @@ const board = await page.evaluate(async (columns) => {
     agentCount: agents.length,
     counts: [...view.querySelectorAll("[data-graph-count]")].map((one) => one.textContent),
     labels: agents.map((one) => one.querySelector(".agent-graph-node-title")?.textContent),
-    workingColumns: working.map((one) => one.style.gridColumn),
-    attentionEdge: attention ? getComputedStyle(attention).borderTopColor : null,
-    doneEdge: done ? getComputedStyle(done).borderTopColor : null,
-    plainEdge: working[0] ? getComputedStyle(working[0]).borderTopColor : null,
+    // Direction E2 (t-68475): nobody here sits in a coordinator seat or started
+    // anybody, so every card stands in the one column of the person's own panes.
+    workingColumns: working.map((one) => one.closest(".agent-graph-team")?.dataset.graphPart ?? ""),
+    attentionEdge: attention ? getComputedStyle(attention).boxShadow : null,
+    doneEdge: done ? getComputedStyle(done).boxShadow : null,
+    plainEdge: working[0] ? getComputedStyle(working[0]).boxShadow : null,
+    // Lineage is the stem and containment the chip: no line stands until an
+    // overlay or the live map asks for one.
     edges: view.querySelectorAll(".agent-graph-edge").length,
-    // The project is a BAND, not a lane: one head per project, pinned to the
-    // left of the scroll, and a lane strip naming the columns that remain.
-    bands: [...view.querySelectorAll(".agent-graph-band-head")]
-      .map((one) => one.querySelector(".agent-graph-band-name strong")?.textContent),
-    bandRailSticks: view.querySelector(".agent-graph-band-rail")
-      ? getComputedStyle(view.querySelector(".agent-graph-band-rail")).position
-      : null,
-    lanes: [...view.querySelectorAll(".agent-graph-lane")].map((one) => one.textContent),
+    teams: [...view.querySelectorAll(".agent-graph-team")].map((one) => one.dataset.graphPart),
+    ownHead: view.querySelector(".agent-graph-team-head .agent-graph-node-title")?.textContent ?? "",
     selected: view.querySelector(".agent-graph-node.is-selected")?.dataset.graphKey ?? null,
     inspector: view.querySelector(".agent-inspector .board-card-heading")?.textContent ?? null,
     tab: [...document.querySelectorAll(".tab")].map((one) => one.textContent).join("|"),
@@ -18366,19 +18368,17 @@ await page.screenshot({ path: join(UI, "..", "output/playwright/agent-ontology-g
 ok(
   "the graph draws one stable topology from Rust's state snapshot and selects attention first",
   board.agentCount === 4 &&
-    board.counts.join(",") === "1,2,1" &&
+    // 당신 차례 · 멈춤 · 도는 중 · 차례 기다림 · 끝남 (direction E2's five state chips).
+    board.counts.join(",") === "1,0,2,0,1" &&
     // DOM order is containment order — the workspace, then the agents it
     // holds — because this surface calls itself a tree and a tree is read
     // parent first. The board's own attention-first precedence still decides
     // which node is SELECTED, which is the assertion further down.
     board.labels.join(",") === Array(4).fill("make the reader read TOML").join(",") &&
-    new Set(board.workingColumns).size === 1 &&
+    new Set(board.workingColumns).size === 1 && board.workingColumns[0] === "team:team:own" &&
     board.cardCount === 2 &&
-    // Four containments, one per agent — the project's own is the band it
-    // sits in rather than a fifth line to a node in a fourth column.
-    board.edges === 4 &&
-    board.bands.join(",") === "/repos/zerocode" && board.bandRailSticks === "sticky" &&
-    board.lanes.join(",") === "Workspace,Agent" &&
+    board.edges === 0 &&
+    board.teams.join(",") === "team:team:own" && board.ownHead === "My panes 4" &&
     board.attentionEdge !== board.plainEdge &&
     board.selected === "agent:term:3" &&
     board.inspector === "make the reader read TOML" &&
@@ -18676,22 +18676,14 @@ const boardMarks = await page.evaluate(async (columns) => {
       const numbers = color.match(/[\d.]+/g)?.map(Number) ?? [];
       return numbers.length >= 4 ? numbers.at(-1) : 1;
     };
+    /* 줄기의 마디가 카드의 상태 표식을 든다 (방향 E2): 도는 중은 틈 있는 고리(돌지 않는다),
+     * 끝남은 체크 — 판에 상시 모션은 없고, 모양과 곁의 낱말이 색 없이도 둘을 가른다. */
+    const markOf = (node) => node?.closest(".agent-graph-limb")?.querySelector(":scope > .agent-graph-joint > .agent-graph-signal");
     const answer = {
       attentionShape: attention ? getComputedStyle(attention).boxShadow : "",
-      /* 오르빗 문법의 카드(방향 D)에서 작업 중의 점은 돌지 않는다 — 판에 상시 모션은 없고,
-       * 작업 중은 제 색의 점과 곁의 낱말로 완료와 갈린다. */
-      workingStill: working
-        ? getComputedStyle(working.querySelector(".agent-graph-node-state"), "::before")
-          .animationName
-        : "",
-      workingFill: working
-        ? getComputedStyle(working.querySelector(".agent-graph-node-state"), "::before")
-          .backgroundColor
-        : "",
-      doneFill: done
-        ? getComputedStyle(done.querySelector(".agent-graph-node-state"), "::before")
-          .backgroundColor
-        : "",
+      workingStill: working ? getComputedStyle(markOf(working)).animationName : "",
+      workingFill: working ? getComputedStyle(markOf(working)).borderRightColor : "",
+      doneFill: done ? getComputedStyle(markOf(done)).color : "",
       nodes: view.querySelectorAll(".agent-graph-node.is-agent").length,
       keysSaid: keys?.textContent ?? "",
       keysSpelled: chordLabel("mod+k"),
@@ -18764,7 +18756,9 @@ ok(
     boardMarks.clockArmed &&
     boardMarks.legendBackdrop === "none" && boardMarks.zoomBackdrop === "none" &&
     boardMarks.legendAlpha >= 0.99 && boardMarks.zoomAlpha >= 0.99 &&
-    boardMarks.selectedEdge && boardMarks.selectedEdgeMotion === "none",
+    // No line stands without an overlay (direction E2): the selection lights its
+    // lineage on the stem, not a chain of edges.
+    !boardMarks.selectedEdge,
   JSON.stringify(boardMarks),
 );
 
@@ -18825,9 +18819,13 @@ const elapsedClock = await page.evaluate(async () => {
   // 빈 칸은 낱말이 아니다 (t-2374): 상태 줄의 다섯 자리는 이제 언제나 서 있고
   // — 조건부 자식이 카드를 다시 짓게 만들기 때문에 — 말할 것이 없는 칸만
   // 화면에서 물러난다. 이 줄이 묻는 것은 카드가 **적은 낱말**이다.
-  /* 오르빗 문법의 카드(방향 D)는 발치가 없고 나이는 「지금」 줄 끝에 한 번만 선다 — 두 칸이
-   * 서면 이 줄이 `A · B`로 그것을 말한다. 이 턴의 경과는 인스펙터 카드가 든다(아래). */
-  const metaOf = (pane) => [...(nodeOf(pane)?.querySelectorAll(".agent-card-activity-when") ?? [])]
+  /* 코디별 줄기의 카드(방향 E2)는 나이를 한 칸에 한 번 적는다(`.agent-graph-card-age`) — 도는 카드는
+   * 마지막 소식(「방금」), 끝난 카드는 지난 때(「50분 전」). 두 칸이 서면 이 줄이 `A · B`로 그것을
+   * 말한다. 이 턴의 경과는 인스펙터 카드가 든다(아래). 「끝남 N」으로 접힌 묶음이 있으면 먼저 편다 —
+   * 접힘은 헬퍼 줄기의 것이라, 본 줄기에 선 이 장면의 끝난 둘은 저마다 카드로 선다. */
+  for (const fold of view.querySelectorAll('.agent-graph-fold[aria-expanded="false"]')) fold.click();
+  await window.__BOARD_SETTLED__();
+  const metaOf = (pane) => [...(nodeOf(pane)?.querySelectorAll(".agent-graph-card-age") ?? [])]
     .map((one) => one.textContent).filter(Boolean).join(" · ");
   const open = async (pane) => {
     nodeOf(pane)?.click();
@@ -18985,9 +18983,10 @@ ok(
     elapsedClock.running.runningWord === "50분째" &&
     elapsedClock.running.clockCount === 2 &&
     elapsedClock.quiet.word === "50분" && !elapsedClock.quiet.dressed &&
-    // 그래프의 노드는 같은 손의 낱말 하나 — 마지막으로 말한 때 — 만 적는다.
+    // 그래프의 노드는 같은 손의 낱말 하나만 적는다 — 도는 카드는 마지막으로 말한 때,
+    // 끝난 카드는 지난 때.
     elapsedClock.graph["term:1153"] === "방금" &&
-    elapsedClock.graph["term:1156"] === "50분" &&
+    elapsedClock.graph["term:1156"] === "50분 전" &&
     // 얇은 데이터는 지어내지 않는다: 1분 아래는 두 답이 같으니 옛 낱말,
     // 시작이 0인 판도 옛 낱말, 한 번도 말하지 않은 판은 시계가 없다.
     elapsedClock.fresh.word === "방금" && !elapsedClock.fresh.dressed &&
@@ -19025,27 +19024,28 @@ ok(
   JSON.stringify({ ...elapsedClock, fit: elapsedFits }),
 );
 
-await page.emulateMedia({ reducedMotion: "reduce" });
-const graphReducedMotion = await page.evaluate(() => {
+/* 도는 중의 표식은 돌지 않는다 (방향 E2) — 틈 있는 고리가 모양이고 움직임이 아니다. 머리의 칩과
+ * 줄기의 마디가 같은 손(`agentGraphSignalMark`)이라, 줄인 모션이든 아니든 둘 다 멈춰 선다. */
+const runMarks = () => page.evaluate(() => {
   const view = [...document.querySelectorAll("#board-view, .file-view")]
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  const header = view?.querySelector(".agent-graph-stat.is-working .agent-graph-stat-mark");
-  const node = view?.querySelector(".agent-graph-node-state.is-working");
-  const headerStyle = header ? getComputedStyle(header) : null;
-  const nodeStyle = node ? getComputedStyle(node, "::before") : null;
+  const header = view?.querySelector(".agent-graph-stat.is-run .agent-graph-signal");
+  const node = view?.querySelector(".agent-graph-joint .agent-graph-signal.is-run");
   return {
-    headerAnimation: headerStyle?.animationName ?? "missing",
-    nodeAnimation: nodeStyle?.animationName ?? "missing",
-    headerRingClosed: headerStyle?.borderTopColor === headerStyle?.borderRightColor,
-    nodeRingClosed: nodeStyle?.borderTopColor === nodeStyle?.borderRightColor,
+    headerAnimation: header ? getComputedStyle(header).animationName : "missing",
+    nodeAnimation: node ? getComputedStyle(node).animationName : "missing",
+    headerGap: header ? getComputedStyle(header).borderTopColor !== getComputedStyle(header).borderRightColor : null,
   };
 });
+const graphMotion = await runMarks();
+await page.emulateMedia({ reducedMotion: "reduce" });
+const graphReducedMotion = await runMarks();
 await page.emulateMedia({ reducedMotion: "no-preference" });
 ok(
-  "reduced motion stills both graph progress rings and closes their gaps",
-  graphReducedMotion.headerAnimation === "none" && graphReducedMotion.nodeAnimation === "none" &&
-    graphReducedMotion.headerRingClosed && graphReducedMotion.nodeRingClosed,
-  JSON.stringify(graphReducedMotion),
+  "the running mark never spins — with or without reduced motion — and keeps its gap as its shape",
+  [graphMotion, graphReducedMotion].every((one) => one.headerAnimation === "none" && one.nodeAnimation === "none"
+    && one.headerGap === true),
+  JSON.stringify({ graphMotion, graphReducedMotion }),
 );
 
 /* ---- 옮긴 것들을 되짚는다 (1-t385) --------------------------------------
@@ -19132,19 +19132,19 @@ await page.evaluate(async (columns) => {
 }, COLUMNS);
 const attentionInk = {
   standing: await page.evaluate(() => {
-    const chip = [...document.querySelectorAll(".agent-graph-stat.is-attention")]
+    const chip = [...document.querySelectorAll(".agent-graph-stat.is-you")]
       .find((one) => one.getClientRects().length);
     return { disabled: chip.disabled, count: chip.querySelector("[data-graph-count]").textContent };
   }),
-  dark: await paintedContrast(".agent-graph-stat.is-attention .agent-graph-stat-count"),
+  dark: await paintedContrast(".agent-graph-stat.is-you .agent-graph-stat-count"),
 };
 await page.evaluate(async () => {
   document.documentElement.dataset.theme = "light";
   // 색은 전이를 타고 옮겨 간다 — 전이가 끝나기 전에 읽으면 어느 테마의 값도 아니다.
   await new Promise((done) => setTimeout(done, 600));
 });
-attentionInk.light = await paintedContrast(".agent-graph-stat.is-attention .agent-graph-stat-count");
-attentionInk.lightWord = await paintedContrast(".agent-graph-stat.is-attention");
+attentionInk.light = await paintedContrast(".agent-graph-stat.is-you .agent-graph-stat-count");
+attentionInk.lightWord = await paintedContrast(".agent-graph-stat.is-you");
 await page.evaluate(async () => {
   delete document.documentElement.dataset.theme;
   await new Promise((done) => setTimeout(done, 600));
@@ -19156,124 +19156,43 @@ ok(
   JSON.stringify(attentionInk),
 );
 
-/* ② 사람이 배율을 쥔 순간, 이미 날아가고 있던 자동 맞춤도 물러난다.
+/* ②·③·⑦(배율과 맞춤)은 방향 E2에서 물러났다 (t-68475): 카드 그림의 열은 판의 폭에 맞춰 접히고
+ * 쌓이므로 맞출 그림이 없고, 배율의 단추는 입체가 선 판에만 선다 — agent-graph-teams 묶음이 잰다.
  *
- * 자동 맞춤은 위상이 움직인 판에서 **다음 프레임**에 앉는다. 그 사이 16밀리초는
- * 사람도 쓸 수 있는 시간이다 — 그리고 위상은 에이전트 하나가 시작할 때마다
- * 움직이므로, 그 창은 판이 가장 바쁠 때 가장 자주 열린다. 「사람이 쥐었는가」의
- * 답은 예약할 때가 아니라 **쓸 때** 유효해야 한다. */
-const fitYields = await page.evaluate(async (columns) => {
-  const many = (count) => [{ bucket: "working", cards:
-    Array.from({ length: count }, (_, index) => ({
-      pane: `term:${800 + index}`, agent: "claude", state: "working", heading: `일 ${index}`,
-      worktree: `wt/${Math.floor(index / 4)}`, project: `/repos/p${Math.floor(index / 10)}`,
-      unseen: false, changed_at: 1000 + index, at: 1000 + index })) }];
-  agentGraphZoomTaken = false;
-  window.__COLUMNS__ = many(6);
-  await paintBoardView(boardTab(), { force: true });
-  await window.__BOARD_SETTLED__();
-  const view = [...document.querySelectorAll("#board-view, .file-view")]
-    .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  /* 맞춤이 사는 폭에서 잰다 (t-2374). 이 창의 파일 패널이 서 있으면 보드가
-   * 받는 자리는 649px이고 그것은 목록 모드다 — 한 열로 접힌 그림에 배율은
-   * 뜻이 없으므로 맞춤도 눈금도 거기서는 물러난다. 재려는 계약은 그 아래가
-   * 아니라 그 위의 것이므로, 판의 폭을 명시하고 끝나면 되돌린다. */
-  const heldWidth = view.style.width;
-  view.style.width = "1000px";
-  view.style.maxWidth = "1000px";
-  await window.__BOARD_SETTLED__();
-  const said = () => view.querySelector(".agent-graph-zoom-label").textContent;
-  const opened = said();
-  // 위상이 움직인다 — 여기서 자동 맞춤이 다음 프레임에 예약된다.
-  window.__COLUMNS__ = many(40);
-  await paintBoardView(boardTab(), { force: true });
-  // …그리고 그 프레임이 오기 전에 사람이 배율을 쥔다.
-  view.querySelector(".agent-graph-zoom-out").click();
-  const asked = said();
-  await window.__PAINTED__();
-  await window.__PAINTED__();
-  const held = said();
-  view.style.width = heldWidth;
-  view.style.maxWidth = "";
-  agentGraphZoomTaken = false;
-  window.__COLUMNS__ = columns;
-  return { opened, asked, held };
-}, COLUMNS);
-ok(
-  "a zoom taken while a fit is already in flight is not taken back",
-  fitYields.asked !== fitYields.opened && fitYields.held === fitYields.asked,
-  JSON.stringify(fitYields),
-);
-
-/* ③ 맞춤이 남기는 여백은 판의 제 안쪽 여백이다.
+ * ④ 다섯 상태와 쉬는 중의 표식은 색 말고도 갈린다 (방향 E2).
  *
- * `AGENT_GRAPH_FIT_INSET`은 "캔버스의 제 여백과 같게"라고 적힌 24였다 — 곧
- * `--space-5`를 손으로 한 번 더 적은 것이다. 같은 간격이 두 곳에 적히면 한 곳만
- * 움직이는 날이 오고, 그날 맞춘 그림은 판 밖으로 나간다. */
-const fitInset = await page.evaluate(async (columns) => {
-  const many = (count) => [{ bucket: "working", cards:
-    Array.from({ length: count }, (_, index) => ({
-      pane: `term:${850 + index}`, agent: "claude", state: "working", heading: `일 ${index}`,
-      worktree: "main", project: "/repos/p",
-      unseen: false, changed_at: 1000 + index, at: 1000 + index })) }];
-  agentGraphZoomTaken = false;
-  window.__COLUMNS__ = many(6);
-  await paintBoardView(boardTab(), { force: true });
-  await window.__BOARD_SETTLED__();
-  const view = [...document.querySelectorAll("#board-view, .file-view")]
-    .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  const scroll = view.querySelector(".agent-graph-scroll");
-  const host = view.querySelector(".agent-graph-nodes");
-  const room = 40;
-  scroll.style.padding = `${room}px`;
-  await window.__PAINTED__();
-  view.querySelector(".agent-graph-fit").click();
-  await window.__PAINTED__();
-  await window.__PAINTED__();
-  await window.__PAINTED__();
-  const picture = Math.round(host.getBoundingClientRect().width);
-  const inside = scroll.clientWidth - 2 * room;
-  scroll.style.padding = "";
-  agentGraphZoomTaken = false;
-  window.__COLUMNS__ = columns;
-  await paintBoardView(boardTab(), { force: true });
-  // 바닥도 토큰에서 온다 (t-2374) — 시험이 손으로 적으면 그것이 세 번째 사본이다.
-  return { picture, inside, zoom: agentGraphZoom, floor: agentGraphTuning(view).zoomMin };
-}, COLUMNS);
-ok(
-  "fit-to-view leaves the canvas's own padding rather than a second copy of it",
-  fitInset.zoom > fitInset.floor && fitInset.picture <= fitInset.inside + 4,
-  JSON.stringify(fitInset),
-);
-
-/* ④ 워크스페이스의 pip 셋은 색 말고도 갈린다.
- *
- * 카드의 상태 마크는 이미 모양으로 갈린다(빈 원 + 후광 / 트인 원 / 채운 원).
- * 워크스페이스 카드가 제 에이전트들의 상태를 말하는 자리는 그 낱말을 데리고 오지
- * 못하므로 — 그 줄은 `aria-hidden`이고 이름도 붙지 않는다 — 색만 다른 점 여덟은
- * 색을 구별하지 못하는 눈에게 점 여덟이다. 같은 모양 어휘를 그대로 쓴다. */
-const pipShapes = await page.evaluate(() => {
-  const dress = (bucket) => {
-    const pip = document.createElement("i");
-    pip.className = `agent-graph-pip is-${bucket}`;
-    document.body.appendChild(pip);
-    const held = getComputedStyle(pip);
+ * 줄기의 마디와 머리의 칩이 같은 표식을 든다. 그 줄은 `aria-hidden`이고 이름이 붙지 않으므로, 색만
+ * 다른 점 여섯은 색을 구별하지 못하는 눈에게 점 여섯이다 — 그래서 모양이 갈린다: 당신 차례는 채운
+ * 점과 고리, 도는 중은 틈 있는 고리, 차례 기다림은 반쯤 찬 원, 멈춤은 네모, 끝남은 체크, 쉬는 중은
+ * 빈 원. */
+const signalShapes = await page.evaluate(() => {
+  const dress = (signal) => {
+    const mark = agentGraphSignalMark(signal);
+    document.body.appendChild(mark);
+    const held = getComputedStyle(mark);
     const seen = {
-      filled: held.backgroundColor !== "rgba(0, 0, 0, 0)" && held.backgroundColor !== "transparent",
+      filled: held.backgroundColor !== "rgba(0, 0, 0, 0)" && held.backgroundColor !== "transparent"
+        && !held.backgroundImage.includes("gradient"),
+      halved: held.backgroundImage.includes("conic-gradient"),
       halo: held.boxShadow !== "none",
-      ringClosed: held.borderTopColor === held.borderRightColor,
+      gap: held.borderTopColor !== held.borderRightColor,
+      square: held.borderTopLeftRadius === "2px",
+      check: mark.querySelector("use")?.getAttribute("href") === "#i-circle-check",
     };
-    pip.remove();
+    mark.remove();
     return seen;
   };
-  return { attention: dress("attention"), working: dress("working"), done: dress("done") };
+  return Object.fromEntries(["you", "run", "wait", "halt", "done", "idle"].map((one) => [one, dress(one)]));
 });
 ok(
-  "the workspace pips carry the card's own shape vocabulary, not hue alone",
-  !pipShapes.attention.filled && pipShapes.attention.halo && pipShapes.attention.ringClosed &&
-    !pipShapes.working.ringClosed &&
-    pipShapes.done.filled && !pipShapes.done.halo,
-  JSON.stringify(pipShapes),
+  "the six signal marks carry their own shapes, not hue alone",
+  signalShapes.you.filled && signalShapes.you.halo && !signalShapes.you.gap &&
+    signalShapes.run.gap && !signalShapes.run.filled &&
+    signalShapes.wait.halved &&
+    signalShapes.halt.square && signalShapes.halt.filled &&
+    signalShapes.done.check &&
+    !signalShapes.idle.filled && signalShapes.idle.halo && !signalShapes.idle.halved,
+  JSON.stringify(signalShapes),
 );
 
 /* ⑤ 카드의 손은 판마다 새로 매이지 않는다.
@@ -19293,9 +19212,9 @@ const graphHands = await page.evaluate(async (columns) => {
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
   const node = (pane) => [...view().querySelectorAll(".agent-graph-node.is-agent")]
     .find((one) => one.dataset.graphKey === `agent:${pane}`);
-  const chip = () => view().querySelector('[data-graph-bucket="working"]');
+  const chip = () => view().querySelector('[data-graph-signal="run"]');
+  // 카드 그림에는 휠 배율이 없다 (방향 E2) — 남는 손은 셋이다.
   const surface = () => ({
-    wheel: view().querySelector(".agent-graph-scroll").onwheel,
     pan: view().querySelector(".agent-graph-scroll").onpointerdown,
     out: view().querySelector(".agent-graph-zoom-out").onclick,
     keys: view().querySelector(".agent-graph-nodes").onkeydown,
@@ -19334,7 +19253,7 @@ const graphHands = await page.evaluate(async (columns) => {
     sameClick: first.click === again.click && typeof again.click === "function",
     sameOpen: first.open === again.open && typeof again.open === "function",
     sameBucket: first.bucket === again.bucket && typeof again.bucket === "function",
-    sameSurface: ["wheel", "pan", "out", "keys"]
+    sameSurface: ["pan", "out", "keys"]
       .filter((one) => first[one] === again[one] && typeof again[one] === "function"),
     walked,
     opened,
@@ -19344,61 +19263,11 @@ const graphHands = await page.evaluate(async (columns) => {
 ok(
   "the graph's per-node, per-chip and surface handlers survive a repaint instead of being rebuilt",
   graphHands.sameClick && graphHands.sameOpen && graphHands.sameBucket &&
-    graphHands.sameSurface.length === 4 &&
+    graphHands.sameSurface.length === 3 &&
     graphHands.walked === "agent:term:912" &&
     graphHands.opened === 912 &&
     graphHands.picks === "agent:term:912",
   JSON.stringify(graphHands),
-);
-
-/* ⑦ 「전체 보기」로 앉힌 그림은 다음 에이전트가 되돌리지 않는다.
- *
- * 저절로 앉는 판은 "아직 아무도 배율을 정하지 않았다" 동안만 하는 일이고,
- * 「전체 보기」를 누른 손은 그 말을 이미 깬 손이다 — 눈금에 답이 남는다.
- * 실측: 카드 예순 장을 맞추면 45%가 되고, 그 다음 에이전트 하나가 시작하는
- * 순간 저절로 앉는 판이 75%로 되돌렸다. 저절로 앉는 판은 100%와 낱말의 바닥
- * 사이에서만 움직이므로 사람이 방금 본 그림을 **다시 만들지도 못한다**. */
-const fitHolds = await page.evaluate(async (columns) => {
-  const many = (count) => [{ bucket: "working", cards:
-    Array.from({ length: count }, (_, index) => ({
-      pane: `term:${960 + index}`, agent: "claude", state: "working", heading: `일 ${index}`,
-      worktree: `wt/${Math.floor(index / 4)}`, project: `/repos/p${Math.floor(index / 10)}`,
-      unseen: false, changed_at: 1000 + index, at: 1000 + index })) }];
-  agentGraphZoomTaken = false;
-  window.__COLUMNS__ = many(60);
-  await paintBoardView(boardTab(), { force: true });
-  await window.__BOARD_SETTLED__();
-  const view = [...document.querySelectorAll("#board-view, .file-view")]
-    .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  /* 맞춤이 사는 폭에서 잰다 (t-2374). 이 창의 파일 패널이 서 있으면 보드가
-   * 받는 자리는 649px이고 그것은 목록 모드다 — 한 열로 접힌 그림에 배율은
-   * 뜻이 없으므로 맞춤도 눈금도 거기서는 물러난다. 재려는 계약은 그 아래가
-   * 아니라 그 위의 것이므로, 판의 폭을 명시하고 끝나면 되돌린다. */
-  const heldWidth = view.style.width;
-  view.style.width = "1000px";
-  view.style.maxWidth = "1000px";
-  await window.__BOARD_SETTLED__();
-  const said = () => view.querySelector(".agent-graph-zoom-label").textContent;
-  const opened = said();
-  view.querySelector(".agent-graph-fit").click();
-  await window.__PAINTED__();
-  await window.__PAINTED__();
-  const fitted = said();
-  window.__COLUMNS__ = many(61);
-  await paintBoardView(boardTab(), { force: true });
-  await window.__BOARD_SETTLED__();
-  const held = said();
-  view.style.width = heldWidth;
-  view.style.maxWidth = "";
-  agentGraphZoomTaken = false;
-  window.__COLUMNS__ = columns;
-  await paintBoardView(boardTab(), { force: true });
-  return { opened, fitted, held };
-}, COLUMNS);
-ok(
-  "a graph fitted by hand is not re-fitted out from under the person by the next agent",
-  fitHolds.fitted !== fitHolds.opened && fitHolds.held === fitHolds.fitted,
-  JSON.stringify(fitHolds),
 );
 
 /* ⑥ 그림이 그대로면 간선의 경로 문자열도 다시 지어지지 않는다.
@@ -19413,27 +19282,35 @@ const edgeStrings = await page.evaluate(async (columns) => {
       pane: `term:${930 + index}`, agent: "claude", state: "working", heading: `일 ${index}`,
       worktree: `wt/${Math.floor(index / 3)}`, project: "/repos/p",
       unseen: false, changed_at: 1000 + index, at: 1000 + index })) }];
+  // 방향 E2의 그림이 긋는 선은 오버레이뿐이다 — 열두 장 사이의 메일 열한 줄.
+  const overlays = window.__OVERLAYS__;
+  window.__OVERLAYS__ = { latest: null, dependencies: [], merge: [],
+    mail: Array.from({ length: 11 }, (_, index) => ({ from: `term:${930 + index}`, to: `term:${931 + index}`,
+      count: 1, unread: 0, at: 1000 + index })) };
+  agentGraphOverlayMode = "mail";
   await paintBoardView(boardTab(), { force: true });
   await window.__BOARD_SETTLED__();
   const view = [...document.querySelectorAll("#board-view, .file-view")]
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  const edges = view.querySelectorAll(".agent-graph-edge").length;
-  const held = agentGraphEdgePath;
+  const edges = view.querySelectorAll(".agent-graph-edges .agent-graph-edge").length;
+  const held = agentGraphOverlayPath;
   let built = 0;
   // eslint-disable-next-line no-func-assign
-  agentGraphEdgePath = (...args) => { built += 1; return held(...args); };
+  agentGraphOverlayPath = (...args) => { built += 1; return held(...args); };
   paintAgentGraphEdges(view);
   const first = built;
   built = 0;
   paintAgentGraphEdges(view);
   const second = built;
-  agentGraphEdgePath = held;
+  agentGraphOverlayPath = held;
+  agentGraphOverlayMode = "none";
+  window.__OVERLAYS__ = overlays;
   window.__COLUMNS__ = columns;
   return { edges, first, second };
 }, COLUMNS);
 ok(
   "an unmoved graph rebuilds none of its edge path strings",
-  edgeStrings.edges >= 12 && edgeStrings.second === 0,
+  edgeStrings.edges === 11 && edgeStrings.second === 0,
   JSON.stringify(edgeStrings),
 );
 await page.evaluate(async () => {
@@ -19451,7 +19328,8 @@ await page.evaluate(async () => {
  * 띠 머리는 `z-index: 5`, 레인 줄은 6, 범례는 `auto`다. 즉 에이전트가 늘어
  * 띠가 왼쪽 아래까지 자라면 띠 머리가 범례 **위에** 그려진다(실측: 860×760에
  * 열여섯이면 5664px²가 범례의 마지막 줄을 가로질렀다). 사용자가 본 "범례부분이
- * 에이전트들이 많아지면 덮어써짐"이 그것이다.
+ * 에이전트들이 많아지면 덮어써짐"이 그것이다. (코디별 줄기(방향 E2)에서 그려진 것은
+ * 카드·열 머리·「끝남 N」 접힘이다.)
  *
  * 여백을 예약하는 것으로는 낫지 않는다: 스크롤 여백은 **내용**에 자리를 만들지
  * 판에 만들지 않으므로, 한 번만 굴려도 카드는 다시 그 겹 밑을 지난다. 그래서
@@ -19491,7 +19369,7 @@ const legendCase = async ({ count, zoom, scrolled }) => page.evaluate(async (ask
   let covered = 0;
   let worst = 0;
   for (const one of view.querySelectorAll(
-    ".agent-graph-node, .agent-graph-band-head, .agent-graph-lane")) {
+    ".agent-graph-node, .agent-graph-team-head, .agent-graph-fold")) {
     const drawn = one.getBoundingClientRect();
     const wide = Math.min(box.right, drawn.right, port.right)
       - Math.max(box.left, drawn.left, port.left);
@@ -19851,8 +19729,6 @@ ok(
  * the model; board columns only dress the two agent leaves with state. */
 const navGraphParity = await page.evaluate(() => {
   const heldProjects = projects;
-  const heldFolded = [...agentGraphFolded];
-  agentGraphFolded.clear();
   try {
     projects = [{
       name: "Parity",
@@ -19909,8 +19785,6 @@ const navGraphParity = await page.evaluate(() => {
     };
   } finally {
     projects = heldProjects;
-    agentGraphFolded.clear();
-    for (const key of heldFolded) agentGraphFolded.add(key);
   }
 });
 ok(
@@ -19921,13 +19795,12 @@ ok(
   JSON.stringify(navGraphParity),
 );
 
-/* A catalog can be much larger than its live work. Zero-agent projects are a
- * one-line inventory by default and come after every project with an agent;
- * otherwise the first screen is mostly rows of things that are not alive. */
+/* A catalog can be much larger than its live work (direction E2, t-68475): the card picture
+ * stands columns of agents only, so zero-agent projects stand none — they stay in the model's
+ * inventory (the inspector and the relations list read them) and nothing of them takes the
+ * first screen. */
 const dormantProjectHierarchy = await page.evaluate(async () => {
   const heldProjects = projects;
-  const heldFolded = [...agentGraphFolded];
-  const heldDormant = [...agentGraphDormantExpanded];
   const heldSelection = agentGraphSelectedKey;
   const project = (name, workspaces) => ({
     name,
@@ -19940,8 +19813,6 @@ const dormantProjectHierarchy = await page.evaluate(async () => {
   });
   try {
     projects = [project("Alpha", 8), project("Zulu", 9), project("Live", 5)];
-    agentGraphFolded.clear();
-    agentGraphDormantExpanded.clear();
     const card = {
       pane: "term:density-live", agent: "codex", state: "working",
       heading: "Live agent", task: "Keep the first screen alive", parent: "",
@@ -19959,46 +19830,32 @@ const dormantProjectHierarchy = await page.evaluate(async () => {
       .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
     paintAgentGraph(view, model);
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-    const heads = [...view.querySelectorAll(".agent-graph-band-head")];
     return {
-      order: heads.map((head) => head.querySelector(".agent-graph-band-name strong")?.textContent),
-      dormant: heads.slice(1).map((head) => ({
-        folded: head.classList.contains("is-folded"),
-        oneLine: head.querySelector(".agent-graph-band-rail")?.getClientRects().length === 1,
-        workspaces: head.querySelectorAll(".agent-graph-dormant-chip").length,
-        words: head.textContent.replace(/\s+/g, " ").trim(),
-      })),
+      inventory: model.bands.map((band) => band.label),
+      columns: view.querySelectorAll(".agent-graph-team").length,
+      cards: [...view.querySelectorAll(".agent-graph-node.is-agent")].map((node) => node.dataset.graphKey),
     };
   } finally {
     projects = heldProjects;
-    agentGraphFolded.clear();
-    for (const key of heldFolded) agentGraphFolded.add(key);
-    agentGraphDormantExpanded.clear();
-    for (const key of heldDormant) agentGraphDormantExpanded.add(key);
     agentGraphSelectedKey = heldSelection;
     await paintBoardView(boardTab(), { force: true });
   }
 });
 ok(
-  "zero-agent projects fold to one line below every live project",
-  dormantProjectHierarchy.order.join(",") === "Live,Alpha,Zulu" &&
-    dormantProjectHierarchy.dormant.length === 2 &&
-    dormantProjectHierarchy.dormant.every((one) =>
-      one.folded && one.oneLine && one.workspaces === 0 &&
-      one.words.includes("0")),
+  "zero-agent projects stand no column on the card picture and stay in the model's inventory",
+  dormantProjectHierarchy.inventory.join(",") === "Live,Alpha,Zulu" &&
+    dormantProjectHierarchy.columns === 1 &&
+    dormantProjectHierarchy.cards.join(",") === "agent:term:density-live",
   JSON.stringify(dormantProjectHierarchy),
 );
 
-/* P2: topology keeps its seats while presentation folds quiet inventory. A
- * mixed workspace gets one +N idle chip, all-quiet/empty workspaces become
- * project-rail chips, and expanding either treatment reveals the same keyed
- * nodes. Five states are model vocabulary; went-quiet and LOD are dresses. */
+/* P2 in direction E2 (t-68475): nothing is hidden for being idle — the stem keeps every card, in
+ * urgency order, and a card that changes state keeps its node while it moves along the stem. Five
+ * states stay model vocabulary; went-quiet is a dress. (Direction D folded idle inventory into a
+ * workspace chip, and a coordinator folded that way left its children floating.) */
 const graphSwimlanes = await page.evaluate(async () => {
-  if (typeof agentGraphToggleIdle !== "function") return { supported: false };
   const heldProjects = projects;
   const heldSelection = agentGraphSelectedKey;
-  const heldZoom = agentGraphZoom;
-  const heldExpanded = [...agentGraphIdleExpanded];
   const now = Date.now();
   const projectPath = "/repos/p2";
   const main = projectPath;
@@ -20036,7 +19893,6 @@ const graphSwimlanes = await page.evaluate(async () => {
         { path: empty, branch: "empty", base: "main" },
       ],
     }];
-    agentGraphIdleExpanded.clear();
     agentGraphSelectedKey = "agent:p2-attention";
     const view = [...document.querySelectorAll("#board-view, .file-view")]
       .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
@@ -20045,29 +19901,20 @@ const graphSwimlanes = await page.evaluate(async () => {
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     const agents = () => [...view.querySelectorAll(".agent-graph-node.is-agent")];
     const workingBefore = agents().find((node) => node.dataset.graphKey === "agent:p2-working");
-    const seatBefore = workingBefore
-      ? `${workingBefore.style.gridColumn}:${workingBefore.style.gridRow}` : "";
     const states = [...model.agents]
       .map((entry) => model.entities.get(entry.key)?.state)
       .filter(Boolean)
       .sort();
     const seen = {
-      supported: true,
-      swimlanes: view.querySelectorAll(".agent-graph-swimlane").length,
-      strip: view.querySelector(".agent-graph-node.is-workspace .agent-graph-node-line")
-        ?.textContent ?? "",
-      idleChips: view.querySelectorAll(".agent-graph-idle-chip").length,
-      dormantChips: view.querySelectorAll(".agent-graph-dormant-chip").length,
-      collapsedAgents: agents().length,
+      drawn: agents().length,
       inventoryAgents: model.agents.length,
+      order: agents().map((node) => node.dataset.graphKey.slice("agent:p2-".length)),
       states,
       quiet: view.querySelector("[data-graph-key='agent:p2-quiet']")
         ?.classList.contains("is-went-quiet") === true,
+      quietAge: view.querySelector("[data-graph-key='agent:p2-quiet'] .agent-graph-card-age.is-quiet")?.textContent ?? "",
+      chip: view.querySelector("[data-graph-key='agent:p2-only-idle'] .agent-graph-card-said")?.textContent ?? "",
     };
-    view.querySelector(".agent-graph-idle-chip")?.click();
-    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
-    seen.expandedAgents = agents().length;
-    const workingAfter = agents().find((node) => node.dataset.graphKey === "agent:p2-working");
     const moved = columns.find((column) => column.bucket === "working")
       .cards.find((one) => one.pane === "p2-working");
     const changedColumns = columns.map((column) => ({
@@ -20078,58 +19925,38 @@ const graphSwimlanes = await page.evaluate(async () => {
           ? [...column.cards, { ...moved, state: "done" }]
           : column.cards,
     }));
-    const dressed = agentGraphModel(
-      changedColumns,
-      places,
-      new Map(),
-      now + 1,
-      agentGraphModels.get(view),
-      projects,
-      "",
-    );
+    const dressed = agentGraphModel(changedColumns, places, new Map(), now + 1,
+      agentGraphModels.get(view), projects, "");
     paintAgentGraph(view, dressed);
-    const workingDressed = agents().find((node) => node.dataset.graphKey === "agent:p2-working");
-    seen.keyed = workingBefore === workingAfter && workingAfter === workingDressed;
-    seen.seat = workingDressed
-      ? `${workingDressed.style.gridColumn}:${workingDressed.style.gridRow}` : "";
-    setAgentGraphZoom(view, 0.55);
-    seen.lod = view.querySelector(".agent-graph-surface")?.classList.contains("is-lod") === true;
-    seen.lodWireHidden = workingAfter?.querySelector(".agent-graph-wire") == null ||
-      getComputedStyle(workingAfter.querySelector(".agent-graph-wire")).display === "none";
-    /* 이름만 남은 카드에서 이름은 카드의 폭을 쓴다 — 방향 D의 첫 줄 세 칸이 이 티어에 남으면
-     * 타일이 물러난 자리(20px)에 제목이 들어가 한두 글자로 잘렸다. */
-    const lodTitle = workingAfter?.querySelector(".agent-graph-node-title");
-    seen.lodTitleShare = lodTitle && workingAfter
-      ? Math.round((lodTitle.getBoundingClientRect().width / workingAfter.clientWidth) * 100) / 100
-      : 0;
-    return { ...seen, seatBefore };
+    const workingDressed = agents().find((node) => node.dataset.graphKey === "agent:p2-working")
+      ?? null;
+    const foldAfter = view.querySelector(".agent-graph-fold")?.dataset.graphFold ?? "";
+    seen.keyedOrFolded = workingDressed === workingBefore || foldAfter !== "";
+    seen.movedSignal = dressed.entities.get("agent:p2-working")?.signal ?? "";
+    return seen;
   } finally {
     projects = heldProjects;
     agentGraphSelectedKey = heldSelection;
-    agentGraphIdleExpanded.clear();
-    for (const key of heldExpanded) agentGraphIdleExpanded.add(key);
-    agentGraphZoom = heldZoom;
     await paintBoardView(boardTab(), { force: true });
   }
 });
 ok(
-  "workspace swimlanes fold idle inventory, preserve five states, mark quiet work and enter LOD",
-  graphSwimlanes.supported && graphSwimlanes.swimlanes >= 1 &&
-    graphSwimlanes.strip.includes("←") && graphSwimlanes.idleChips === 1 &&
-    graphSwimlanes.dormantChips === 2 && graphSwimlanes.collapsedAgents === 5 &&
-    graphSwimlanes.inventoryAgents === 7 && graphSwimlanes.expandedAgents === 6 &&
-    graphSwimlanes.keyed && graphSwimlanes.seat === graphSwimlanes.seatBefore &&
+  "the stem keeps idle inventory in urgency order, preserves five states, marks quiet work and keeps a moving card's node",
+  graphSwimlanes.drawn === 7 && graphSwimlanes.inventoryAgents === 7 &&
+    graphSwimlanes.order.join(",") === "attention,failed,quiet,working,idle,only-idle,done" &&
     graphSwimlanes.states.join(",") ===
       "done,failed,idle,idle,needs-attention,working,working" &&
-    graphSwimlanes.quiet && graphSwimlanes.lod && graphSwimlanes.lodWireHidden &&
-    graphSwimlanes.lodTitleShare > 0.5,
+    graphSwimlanes.quiet && graphSwimlanes.quietAge.length > 0 &&
+    graphSwimlanes.keyedOrFolded && graphSwimlanes.movedSignal === "done",
   JSON.stringify(graphSwimlanes),
 );
 
-/* P3: the permanent picture remains containment + lineage. Mail, task
- * dependency and merge flow are mutually-exclusive overlays; unread mail
- * remains a node badge. Follow chooses the hottest agent but manual movement
- * releases it, and backtrace walks spawn plus dispatch ancestry. */
+/* P3: the permanent picture remains containment + lineage — in direction E2
+ * (t-68475) lineage is the stem and containment the chip, so no permanent line
+ * stands. Mail, task dependency and merge flow are mutually-exclusive overlays;
+ * unread mail remains a node badge and merge flow rides the chip. Follow
+ * chooses the hottest agent but manual movement releases it, and backtrace
+ * walks spawn plus dispatch ancestry. */
 const graphTracing = await page.evaluate(async () => {
   if (typeof agentGraphSetOverlay !== "function") return { supported: false };
   const heldProjects = projects;
@@ -20183,11 +20010,12 @@ const graphTracing = await page.evaluate(async () => {
     const skeleton = () => view.querySelectorAll(
       ".agent-graph-edge.is-contains, .agent-graph-edge.is-spawned").length;
     const oneOverlay = () => view.querySelectorAll(".agent-graph-edge.is-overlay").length;
+    const level = (pane) => view.querySelector(`[data-graph-key='agent:${pane}']`)?.getAttribute("aria-level") ?? "";
     const seen = {
       supported: true,
       skeleton: skeleton(),
-      contains: view.querySelectorAll(".agent-graph-edge.is-contains").length,
-      spawned: view.querySelectorAll(".agent-graph-edge.is-spawned").length,
+      stem: ["p3-lead", "p3-worker", "p3-leaf"].map(level).join(","),
+      leadHeads: view.querySelector("[data-graph-key='agent:p3-lead']")?.classList.contains("is-head") === true,
     };
     agentGraphSetOverlay(view, "mail");
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
@@ -20217,15 +20045,19 @@ const graphTracing = await page.evaluate(async () => {
     agentGraphPauseFollow(view);
     seen.paused = agentGraphFollowing === false;
     agentGraphSelectedKey = "agent:p3-leaf";
+    agentGraphTraceKey = "agent:p3-leaf";
     paintAgentGraph(view, model);
-    seen.backtraceEdges = agentGraphSelectedEdges(model).size;
+    seen.backtraceEdges = agentGraphTraced(agentGraphModels.get(view))?.size ?? 0;
+    agentGraphTraceKey = null;
+    paintAgentGraph(view, model);
     view.querySelector('[data-agent-inspector-tab="details"]').click();
     seen.backtraceRows = view.querySelectorAll(".agent-inspector-backtrace li").length;
     view.querySelector('[data-agent-inspector-tab="activity"]').click();
+    // Shift+1·2 are the orbit's zoom (direction E2): the card picture leaves them be.
     const beforeFit = agentGraphZoom;
-    seen.fitShortcut = agentGraphShortcut(view, "1") === true;
+    seen.fitShortcut = agentGraphShortcut(view, "1") === false;
     agentGraphZoom = 0.8;
-    seen.selectionShortcut = agentGraphShortcut(view, "2") === true && agentGraphZoom > 0.8;
+    seen.selectionShortcut = agentGraphShortcut(view, "2") === false && agentGraphZoom === 0.8;
     seen.beforeFit = beforeFit;
     await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     return seen;
@@ -20242,14 +20074,14 @@ const graphTracing = await page.evaluate(async () => {
 });
 ok(
   "the graph keeps two skeletons while one overlay, follow and backtrace trace live work",
-  graphTracing.supported && graphTracing.contains === 3 && graphTracing.spawned === 2 &&
-    graphTracing.skeleton === 5 && graphTracing.skeletonAfter === 5 &&
+  graphTracing.supported && graphTracing.stem === "1,2,3" && graphTracing.leadHeads &&
+    graphTracing.skeleton === 0 && graphTracing.skeletonAfter === 0 &&
     graphTracing.mailOnly && graphTracing.mailPulse && graphTracing.unread === "2" &&
     graphTracing.mailLabel.includes("2") && graphTracing.dependencyOnly &&
     graphTracing.mergeOnly && graphTracing.mergePort.includes("→ main") &&
     graphTracing.mergePort.includes("2") && graphTracing.mergePort.includes("1") &&
     graphTracing.followed === "agent:p3-leaf" && graphTracing.paused &&
-    graphTracing.backtraceEdges >= 4 && graphTracing.backtraceRows >= 2 &&
+    graphTracing.backtraceEdges === 3 && graphTracing.backtraceRows >= 2 &&
     graphTracing.fitShortcut && graphTracing.selectionShortcut,
   JSON.stringify(graphTracing),
 );
@@ -20302,17 +20134,10 @@ const graphStateBudget = await page.evaluate(async () => {
       requestAnimationFrame(() => requestAnimationFrame(done))));
     paintAgentGraphEdges(view);
     const beforeNodes = [...view.querySelectorAll(".agent-graph-node.is-agent")];
-    // 활동을 그리는 세 조각의 정체. 이것들이 그대로면 갈린 것은 글자와
-    // 속성뿐이고, 갈리면 카드의 자식이 다시 지어진 것이다.
-    const doingParts = (node) => [
-      node.querySelector(".agent-card-doing"),
-      node.querySelector(".agent-card-activity"),
-      node.querySelector(".agent-card-ticker"),
-      node.querySelector(".agent-graph-node-context"),
-      node.querySelector(".agent-graph-bubble"),
-      node.querySelector(".agent-graph-reply"),
-      ...node.querySelectorAll(".agent-card-tick"),
-    ];
+    // 카드의 자식 전부의 정체 (방향 E2). 이것들이 그대로면 갈린 것은 글자와 속성뿐이고,
+    // 갈리면 카드의 뼈대가 다시 지어진 것이다 — 머리(p4-0)는 끝남과 도는 중을 오가도 머리이고,
+    // 줄기의 셋은 도는 중 그대로다.
+    const doingParts = (node) => [...node.querySelectorAll("*")];
     const beforeDoing = beforeNodes.flatMap(doingParts);
     const before = {
       layouts: agentGraphLayoutRuns,
@@ -20354,8 +20179,9 @@ const graphStateBudget = await page.evaluate(async () => {
         beforeDoing.every((part, at) => part !== null && part === afterDoing[at]),
       // 그리고 마지막 판이 실제로 낱말을 갈아 끼웠다 — 아무것도 그리지 않는
       // 카드에 "안 다시 지었다"는 자랑은 아무 뜻이 없다.
-      activityMoved: afterNodes[0]?.querySelector(".agent-card-activity-target")
+      activityMoved: afterNodes[1]?.querySelector(".agent-card-activity-target")
         ?.textContent.includes("turn99") ?? false,
+      headMoved: afterNodes[0]?.dataset.signal ?? "",
       layoutRecalculations: agentGraphLayoutRuns - before.layouts,
       nodeCreations: agentGraphNodeCreations - before.nodes,
       edgeMeasurements: agentGraphEdgeMeasureRuns - before.edges,
@@ -20382,10 +20208,9 @@ ok(
   graphStateBudget.paints === 100 && graphStateBudget.layoutRecalculations === 0 &&
     graphStateBudget.nodeCreations === 0 && graphStateBudget.edgeMeasurements === 0 &&
     !graphStateBudget.edgeScheduled && graphStateBudget.nodesReused &&
-    // 활동을 그리는 세 조각도 같은 요소로 남았다 — 갈린 것은 글자와 속성뿐.
-    // 넷에 둘: 방향 D의 말풍선과 답하기도 상태가 백 번 갈리는 동안 같은 요소로 남는다.
-    graphStateBudget.doingParts === 4 * (6 + 8) && graphStateBudget.doingReused &&
-    graphStateBudget.activityMoved &&
+    // 카드의 자식이 하나도 다시 지어지지 않았다 — 갈린 것은 글자와 속성뿐이다(방향 E2).
+    graphStateBudget.doingParts > 40 && graphStateBudget.doingReused &&
+    graphStateBudget.activityMoved && graphStateBudget.headMoved === "run" &&
     graphStateBudget.coalesceMs >= 150 &&
     graphStateBudget.coalesceMs <= 250 && !graphStateBudget.canvasReplaceChildren,
   JSON.stringify(graphStateBudget),
@@ -20479,27 +20304,29 @@ const tree = await page.evaluate(async (columns) => {
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
   const nodes = [...board().querySelectorAll(".agent-graph-node.is-agent")];
   const byPane = (pane) => nodes.find((one) => one.dataset.graphKey === `agent:${pane}`);
-  const spawned = [...board().querySelectorAll(".agent-graph-edge.is-spawned")];
+  // Direction E2 (t-68475): who started whom is the stem — the starter heads its
+  // column, its children hang on the stem and a grandchild on an indented one.
+  const stemOf = (pane) => byPane(pane)?.closest(".agent-graph-limb")?.parentElement
+    ?.closest(".agent-graph-limb")?.querySelector(":scope > .agent-graph-node")?.dataset.graphKey ?? "";
   return {
     headings: nodes.map((one) => one.querySelector(".agent-graph-node-title").textContent),
-    columns: ["term:1", "term:2", "term:3", "term:4", "term:9"]
-      .map((pane) => byPane(pane)?.style.gridColumn ?? ""),
-    spawned: spawned.length,
-    pathsDrawn: spawned.every((edge) => edge.getAttribute("d")?.startsWith("M ")),
+    levels: ["term:1", "term:2", "term:3", "term:4", "term:9"]
+      .map((pane) => byPane(pane)?.getAttribute("aria-level") ?? ""),
+    deepUnder: stemOf("term:3"),
+    lines: board().querySelectorAll(".agent-graph-edges .agent-graph-edge").length,
     orphanParent: columns[0].cards[4].parent,
-    orphanColumn: byPane("term:9")?.style.gridColumn ?? "",
-    rootColumn: byPane("term:1")?.style.gridColumn ?? "",
+    orphanTeam: byPane("term:9")?.closest(".agent-graph-team")?.dataset.graphPart ?? "",
+    rootTeam: byPane("term:1")?.closest(".agent-graph-team")?.dataset.graphPart ?? "",
+    rootHeads: byPane("term:1")?.classList.contains("is-head") === true,
   };
 }, LINEAGE);
 ok(
-  "the graph draws spawned agents in deeper layers and promotes an orphan to the root layer",
+  "the graph hangs spawned agents on the starter's stem and stands an orphan at the top of a stem of its own",
   tree.headings.join(",") === "Coordinator,Reader,Deep,Writer,Orphan" &&
-    // Lane 1 is the workspace and the agents start at lane 2: the project
-    // moved out of the columns and became the band around them.
-    tree.columns.join(",") === "2,3,4,3,2" &&
-    tree.spawned === 3 && tree.pathsDrawn &&
+    tree.levels.join(",") === "1,2,3,2,2" && tree.rootHeads &&
+    tree.deepUnder === "agent:term:2" && tree.lines === 0 &&
     tree.orphanParent === "term:404" &&
-    tree.orphanColumn === tree.rootColumn,
+    tree.orphanTeam === "team:team:own" && tree.rootTeam === "team:team:term:1",
   JSON.stringify(tree),
 );
 
@@ -20562,184 +20389,41 @@ const crossBand = await page.evaluate(async (columns) => {
   await new Promise((done) => setTimeout(done, 220));
   const board = [...document.querySelectorAll("#board-view, .file-view")]
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  /* 레인이 서 있는 폭에서 잰다 (t-2374). 파일 패널이 선 판의 보드는 649px
-   * 이고 그 아래는 목록 모드다 — 한 열에 「위로 거슬러 오르는 관계」의 경로는
-   * 없다(층은 열이 아니라 들여쓰기가 말하고, lineage 선은 물러난다). 여기서
-   * 재려는 계약은 레인 배치의 것이므로 폭을 명시하고 끝나면 되돌린다. */
-  const heldBoardWidth = board.style.width;
-  board.style.width = "1100px";
-  board.style.maxWidth = "1100px";
-  await paintBoardView(boardTab(), { force: true });
-  await new Promise((done) => setTimeout(done, 260));
-  const node = (pane) => [...board.querySelectorAll(".agent-graph-node.is-agent")]
-    .find((one) => one.dataset.graphKey === `agent:${pane}`);
-  const host = board.querySelector(".agent-graph-nodes");
-  const uphill = [...board.querySelectorAll(".agent-graph-edge.is-spawned")]
-    .map((edge) => edge.getAttribute("d"))
-    .find((drawn) => drawn?.includes("V"));
-  const target = node("term:13");
-  const ends = uphill ? uphill.trim().split(/\s+/).slice(-2) : [];
-  const said = {
-    bands: board.querySelectorAll(".agent-graph-band-head").length,
-    // The child is a ROOT of its own band, so its lane is shallower than the
-    // lane its parent sits in — this is what makes the edge run backwards.
-    parentColumn: node("term:12")?.style.gridColumn ?? "",
-    childColumn: node("term:13")?.style.gridColumn ?? "",
-    // Where the route actually ends, against where the card actually is.
-    endsAt: ends[0] === "H" ? Number.parseFloat(ends[1]) : null,
-    wantedX: target ? host.offsetLeft + target.offsetLeft : null,
-    wantedY: target ? host.offsetTop + target.offsetTop + target.offsetHeight / 2 : null,
-    // And the vertical run is present at all — the bug drew none.
-    verticals: (uphill?.match(/V/g) ?? []).length,
-    rest: uphill ?? "",
-  };
-  board.style.width = heldBoardWidth;
-  board.style.maxWidth = "";
   await paintBoardView(boardTab(), { force: true });
   await new Promise((done) => setTimeout(done, 160));
-  return said;
+  const node = (pane) => [...board.querySelectorAll(".agent-graph-node.is-agent")]
+    .find((one) => one.dataset.graphKey === `agent:${pane}`);
+  // Direction E2 (t-68475): the stem follows who started whom whatever project
+  // the child stands in, so the lineage never runs uphill and draws no line.
+  const stemOf = (pane) => node(pane)?.closest(".agent-graph-limb")?.parentElement
+    ?.closest(".agent-graph-limb")?.querySelector(":scope > .agent-graph-node")?.dataset.graphKey ?? "";
+  return {
+    teams: board.querySelectorAll(".agent-graph-team").length,
+    helperUnder: stemOf("term:12"),
+    childUnder: stemOf("term:13"),
+    childLevel: node("term:13")?.getAttribute("aria-level") ?? "",
+    childProject: agentGraphModels.get(board).entities.get("agent:term:13")?.project.path ?? "",
+    lines: board.querySelectorAll(".agent-graph-edges .agent-graph-edge").length,
+  };
 }, CROSS_BAND);
 ok(
-  "a lineage that crosses into another project still reaches the card it spawned",
-  crossBand.bands === 2 &&
-    Number(crossBand.childColumn) < Number(crossBand.parentColumn) &&
-    crossBand.verticals >= 1 &&
-    crossBand.endsAt !== null && crossBand.wantedX !== null &&
-    Math.abs(crossBand.endsAt - crossBand.wantedX) < 2 &&
-    crossBand.rest.includes(`V ${crossBand.wantedY}`),
+  "a lineage that crosses into another project hangs under the card that spawned it, drawing no uphill line",
+  crossBand.teams === 1 && crossBand.helperUnder === "" &&
+    crossBand.childUnder === "agent:term:12" && crossBand.childLevel === "3" &&
+    crossBand.childProject === "/repos/beta" && crossBand.lines === 0,
   JSON.stringify(crossBand),
 );
 
-/* And it crosses in the gap, not through whatever is standing there.
+/* The keyboard walks the stem (direction E2, t-68475).
  *
- * Three projects, and the uphill relation skips the middle one: the long
- * horizontal run of that route passes over every lane between its two ends, so
- * a track halfway between the rows goes straight through the card the middle
- * band happens to have at that height. Measured as geometry — every segment of
- * the drawn path against the third project's own box — because "the path
- * reaches its target" was already true of the version that did this.
- */
-const THREE_BANDS = [
-  { bucket: "working", cards: [
-    { pane: "term:21", agent: "claude", state: "working", heading: "Alpha lead",
-      worktree: "main", project: "/repos/alpha", task: "", parent: "", unseen: false,
-      changed_at: 9, at: 9,
-      lineage: { depth: 0, is_first_sibling: true, is_last_sibling: true, child_count: 1 } },
-    { pane: "term:22", agent: "codex", state: "working", heading: "Alpha helper",
-      worktree: "main", project: "/repos/alpha", task: "", parent: "term:21", unseen: false,
-      changed_at: 8, at: 8,
-      lineage: { depth: 1, is_first_sibling: true, is_last_sibling: true, child_count: 1 } },
-    // The bystander, in the band between the two ends of the uphill edge.
-    { pane: "term:23", agent: "codex", state: "working", heading: "Beta bystander",
-      worktree: "main", project: "/repos/beta", task: "", parent: "", unseen: false,
-      changed_at: 7, at: 7,
-      lineage: { depth: 0, is_first_sibling: true, is_last_sibling: true, child_count: 0 } },
-    { pane: "term:24", agent: "codex", state: "working", heading: "Gamma worker",
-      worktree: "main", project: "/repos/gamma", task: "", parent: "term:22", unseen: false,
-      changed_at: 6, at: 6,
-      lineage: { depth: 2, is_first_sibling: true, is_last_sibling: true, child_count: 0 } },
-  ] },
-];
-
-const uphillRoute = await page.evaluate(async (fixtures) => {
-  window.__COLUMNS__ = fixtures.three;
-  window.__PANES__ = [];
-  if (activeTabId === "board") dropTab("board");
-  document.getElementById("nav-agents").click();
-  await new Promise((done) => setTimeout(done, 220));
-  const board = [...document.querySelectorAll("#board-view, .file-view")]
-    .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  const node = (pane) => [...board.querySelectorAll(".agent-graph-node.is-agent")]
-    .find((one) => one.dataset.graphKey === `agent:${pane}`);
-  const host = board.querySelector(".agent-graph-nodes");
-  const boxOf = (pane) => {
-    const card = node(pane);
-    return card === undefined ? null : {
-      left: host.offsetLeft + card.offsetLeft,
-      top: host.offsetTop + card.offsetTop,
-      right: host.offsetLeft + card.offsetLeft + card.offsetWidth,
-      bottom: host.offsetTop + card.offsetTop + card.offsetHeight,
-    };
-  };
-  // Walk the path back into the points it draws, so each straight run can be
-  // compared with a rectangle.
-  const runsOf = (drawn) => {
-    const parts = drawn.trim().split(/\s+/);
-    const runs = [];
-    let x = 0;
-    let y = 0;
-    for (let at = 0; at < parts.length; at += 1) {
-      const verb = parts[at];
-      if (verb === "M") {
-        x = Number.parseFloat(parts[at + 1]);
-        y = Number.parseFloat(parts[at + 2]);
-        at += 2;
-      } else if (verb === "H") {
-        const to = Number.parseFloat(parts[at + 1]);
-        runs.push({ x0: Math.min(x, to), x1: Math.max(x, to), y0: y, y1: y });
-        x = to;
-        at += 1;
-      } else if (verb === "V") {
-        const to = Number.parseFloat(parts[at + 1]);
-        runs.push({ x0: x, x1: x, y0: Math.min(y, to), y1: Math.max(y, to) });
-        y = to;
-        at += 1;
-      }
-    }
-    return runs;
-  };
-  const uphill = [...board.querySelectorAll(".agent-graph-edge.is-spawned")]
-    .map((edge) => edge.getAttribute("d") ?? "")
-    .find((drawn) => drawn.includes("V") && !drawn.includes("Q"));
-  const bystander = boxOf("term:23");
-  const runs = uphill ? runsOf(uphill) : [];
-  const hits = bystander === null ? -1 : runs.filter((run) =>
-    run.x1 > bystander.left && run.x0 < bystander.right
-    && run.y1 > bystander.top && run.y0 < bystander.bottom).length;
-  const boxes = [...board.querySelectorAll(".agent-graph-node")].map((card) => ({
-    left: host.offsetLeft + card.offsetLeft,
-    top: host.offsetTop + card.offsetTop,
-    right: host.offsetLeft + card.offsetLeft + card.offsetWidth,
-    bottom: host.offsetTop + card.offsetTop + card.offsetHeight,
-  }));
-  const everyRun = [...board.querySelectorAll(".agent-graph-edge")]
-    .flatMap((edge) => runsOf(edge.getAttribute("d") ?? ""));
-  const cardIntersections = everyRun.filter((run) => boxes.some((box) =>
-    run.x1 > box.left && run.x0 < box.right &&
-    run.y1 > box.top && run.y0 < box.bottom)).length;
-  return {
-    bands: board.querySelectorAll(".agent-graph-band-head").length,
-    sourceColumn: node("term:22")?.style.gridColumn ?? "",
-    targetColumn: node("term:24")?.style.gridColumn ?? "",
-    runs: runs.length,
-    hits,
-    cardIntersections,
-    // And the layer is above the cards, so an edge can never be lost behind one.
-    edgeLayer: Number.parseInt(
-      getComputedStyle(board.querySelector(".agent-graph-edges")).zIndex, 10),
-    cardLayer: Number.parseInt(getComputedStyle(node("term:23")).zIndex, 10),
-  };
-}, { three: THREE_BANDS });
-ok(
-  "an uphill relation crosses between the rows instead of through a third project's card",
-  uphillRoute.bands === 3 &&
-    Number(uphillRoute.targetColumn) < Number(uphillRoute.sourceColumn) &&
-    uphillRoute.runs >= 3 && uphillRoute.hits === 0 &&
-    uphillRoute.cardIntersections === 0 &&
-    uphillRoute.edgeLayer > uphillRoute.cardLayer,
-  JSON.stringify(uphillRoute),
-);
-
-/* The keyboard walks INTO a project, not past it.
- *
- * The grid holds four kinds of child and the paint builds one keyed list for
- * all of them; appending every heading before any of the cards makes the second
- * project's heading the DOM neighbour of the first one, so a person who just
- * opened a project and pressed down would land on the next project instead of
- * on the workspace inside it. Measured through the real keydown, on the real
- * `activeElement`, because the failure was never in the model. */
+ * The columns are a tree: a column's head is level 1, the cards on its stem
+ * level 2, a helper on an indented stem level 3. Down and Up walk the order the
+ * cards stand in — down the stem, then on to the next column's head — Right goes
+ * into the first card a card started, Left back to the card that started it and
+ * at last to the column's head. Measured through the real keydown, on the real
+ * `activeElement`, because the failure is never in the model. */
 const graphKeys = await page.evaluate(async (fixtures) => {
-  window.__COLUMNS__ = fixtures.three;
+  window.__COLUMNS__ = fixtures.lineage;
   window.__PANES__ = [];
   if (activeTabId === "board") dropTab("board");
   document.getElementById("nav-agents").click();
@@ -20749,139 +20433,118 @@ const graphKeys = await page.evaluate(async (fixtures) => {
   const host = board.querySelector(".agent-graph-nodes");
   const settle = () => new Promise((done) => setTimeout(done, 140));
   const press = async (key) => {
-    document.activeElement.dispatchEvent(
-      new KeyboardEvent("keydown", { key, bubbles: true }));
+    document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
     await settle();
+    return document.activeElement?.dataset?.graphKey ?? "";
   };
-  const first = [...host.querySelectorAll(".agent-graph-band-name")][0];
-  first.click();
+  selectAgentGraphEntity(board, "agent:term:1", { focus: true });
   await settle();
-  first.focus();
   const seen = {
-    // One stop into the tree: the chevrons beside each heading are not stops.
-    chevronStops: [...host.querySelectorAll(".agent-graph-band-fold")]
-      .filter((one) => one.tabIndex >= 0).length,
-    roving: [...host.querySelectorAll("[data-graph-key]")]
-      .filter((one) => one.tabIndex === 0).length,
-    levels: [
-      host.querySelector(".agent-graph-band-name")?.getAttribute("aria-level"),
-      host.querySelector(".agent-graph-node.is-workspace")?.getAttribute("aria-level"),
-      host.querySelector(".agent-graph-node.is-agent")?.getAttribute("aria-level"),
-    ],
+    roving: [...host.querySelectorAll("[data-graph-key]")].filter((one) => one.tabIndex === 0).length,
+    levels: ["term:1", "term:2", "term:3"].map((pane) =>
+      host.querySelector(`[data-graph-key="agent:${pane}"]`)?.getAttribute("aria-level")),
   };
-  await press("ArrowDown");
-  seen.afterDown = document.activeElement?.dataset?.graphKey ?? "";
-  await press("ArrowDown");
-  seen.afterSecondDown = document.activeElement?.dataset?.graphKey ?? "";
-  // Left from an agent walks back up its containment, never sideways.
-  await press("ArrowLeft");
-  seen.afterLeft = document.activeElement?.dataset?.graphKey ?? "";
-  // And left again folds the band it belongs to, keeping the focus.
-  await press("ArrowLeft");
-  await press("ArrowLeft");
-  seen.afterFold = document.activeElement?.dataset?.graphKey ?? "";
-  seen.folded = board.querySelectorAll(".agent-graph-band-head.is-folded").length;
-  await press("ArrowRight");
-  seen.afterUnfold = document.activeElement?.dataset?.graphKey ?? "";
-  seen.unfolded = board.querySelectorAll(".agent-graph-band-head.is-folded").length;
+  seen.walk = [await press("ArrowDown"), await press("ArrowDown"), await press("ArrowDown"), await press("ArrowDown")];
+  seen.back = [await press("ArrowUp"), await press("ArrowLeft")];
+  seen.into = [await press("ArrowRight"), await press("ArrowRight"), await press("ArrowLeft")];
+  seen.ends = [await press("End"), await press("Home")];
+  seen.rovingAfter = [...host.querySelectorAll("[data-graph-key]")].filter((one) => one.tabIndex === 0).length;
   window.__COLUMNS__ = [];
   return seen;
-}, { three: THREE_BANDS });
+}, { lineage: LINEAGE });
 ok(
-  "the graph's tree is walkable: one tab stop, arrow keys that go inside a band",
-  graphKeys.chevronStops === 0 && graphKeys.roving === 1 &&
-    graphKeys.levels.join(",") === "1,2,3" &&
-    // Down from the first project's heading enters THAT project.
-    graphKeys.afterDown.startsWith("workspace:/repos/alpha") &&
-    graphKeys.afterSecondDown === "agent:term:21" &&
-    graphKeys.afterLeft.startsWith("workspace:/repos/alpha") &&
-    graphKeys.afterFold === "project:/repos/alpha" && graphKeys.folded === 1 &&
-    graphKeys.afterUnfold === "project:/repos/alpha" && graphKeys.unfolded === 0,
+  "the columns are a walkable tree: one tab stop, down the stem and on to the next column, right into a child, left back up",
+  graphKeys.roving === 1 && graphKeys.rovingAfter === 1 && graphKeys.levels.join(",") === "1,2,3" &&
+    graphKeys.walk.join(",") === "agent:term:2,agent:term:3,agent:term:4,agent:term:9" &&
+    graphKeys.back.join(",") === "agent:term:4,agent:term:1" &&
+    graphKeys.into.join(",") === "agent:term:2,agent:term:3,agent:term:2" &&
+    graphKeys.ends.join(",") === "agent:term:9,agent:term:1",
   JSON.stringify(graphKeys),
 );
 
-/* And an edge follows its cards when a card grows.
+/* And a line follows its cards when a card grows (direction E2).
  *
- * The Orbit-grammar card (direction D) already stands its Now line whenever it
- * has an age, so the first tool call only fills that line. What grows the card
- * is the trail: the second call puts the first one on a row under the Now line
- * (detailed density), and that makes the card taller — which moves every row
- * below it. Nothing else
- * moved: same topology, same selection, and on a graph smaller than its own
- * canvas the canvas does not resize either, so neither the topology guard nor
- * the ResizeObserver has anything to say. Measured as the edge's own endpoint
- * against the node's own box, because "the paint ran" is not the contract —
- * "the line is on the card" is. */
+ * The lines this picture draws are overlays — here the mail from the column's
+ * head to the grandchild at the bottom of its stem. The helper between them
+ * grows when its log opens (the second tool call puts the first on a row under
+ * the now line, detailed density), and that moves the grandchild down while
+ * nothing else moved: same topology, same selection, same order. Measured as the
+ * line's own vertical run against the card's own box, because "the paint ran" is
+ * not the contract — "the line is on the card" is. */
 const wireReflow = await page.evaluate(async (fixtures) => {
-  const columns = fixtures.cross;
+  /* 완료 관측기(`__IN_FLIGHT__`)는 위의 그래프 장면들의 것이라 여기선 판의 그림과 선의 측정만
+   * 기다린다. */
+  const settled = async () => {
+    await new Promise((done) => requestAnimationFrame(done));
+    await window.__UNTIL__(() => {
+      const view = [...document.querySelectorAll("#board-view, .file-view")]
+        .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
+      return Boolean(view) && agentGraphModels.has(view) && !agentGraphEdgeFrames.has(view)
+        && !agentGraphRefreshing && agentPaintFrame === null;
+    }, "board paint and overlay lines");
+  };
   const heldDetails = agentGraphCardDetails;
+  const heldOverlays = window.__OVERLAYS__;
   agentGraphCardDetails = true;
-  window.__COLUMNS__ = columns;
+  window.__COLUMNS__ = fixtures.cross;
   window.__PANES__ = [];
+  window.__OVERLAYS__ = { latest: null, dependencies: [], merge: [],
+    mail: [{ from: "term:11", to: "term:13", count: 1, unread: 0, at: 1 }] };
+  agentGraphOverlayMode = "mail";
   if (activeTabId === "board") dropTab("board");
   document.getElementById("nav-agents").click();
   await new Promise((done) => setTimeout(done, 220));
+  await paintBoardView(boardTab(), { force: true });
+  await settled();
   const board = () => [...document.querySelectorAll("#board-view, .file-view")]
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
   const node = (pane) => [...board().querySelectorAll(".agent-graph-node.is-agent")]
     .find((one) => one.dataset.graphKey === `agent:${pane}`);
-  // The edge that arrives at the LAST card in the band — the one every card
-  // above it pushes down.
-  const arrivalOf = (pane) => {
-    const held = [...board().querySelectorAll(".agent-graph-edge")]
-      .map((edge) => edge.getAttribute("d") ?? "")
-      .filter((drawn) => drawn.length > 0);
-    const host = board().querySelector(".agent-graph-nodes");
-    const card = node(pane);
-    if (!card) return { drawn: null, wanted: null };
-    const wanted = host.offsetTop + card.offsetTop + card.offsetHeight / 2;
-    const arriving = held
-      .map((drawn) => drawn.trim().split(/\s+/))
-      .filter((parts) => parts[parts.length - 2] === "H"
-        && Math.abs(Number.parseFloat(parts[parts.length - 1])
-          - (host.offsetLeft + card.offsetLeft)) < 2);
-    return { drawn: arriving.length, wanted };
+  const arrival = () => {
+    const line = board().querySelector(".agent-graph-edges .agent-graph-edge.is-mail");
+    const drawn = line?.getAttribute("d") ?? "";
+    const parts = drawn.trim().split(/\s+/);
+    const vertical = parts.indexOf("V");
+    const frame = board().querySelector(".agent-graph-edges").getBoundingClientRect();
+    const head = node("term:11").getBoundingClientRect();
+    const card = node("term:13").getBoundingClientRect();
+    return {
+      drawn,
+      runsTo: vertical >= 0 ? Number.parseFloat(parts[vertical + 1]) : null,
+      wanted: Math.round((card.top - frame.top + Math.min(head.height, card.height) / 2) * 100) / 100,
+      top: card.top,
+    };
   };
-  const before = arrivalOf("term:13");
+  const before = arrival();
   for (const handler of window.__LISTENERS__["hook:activity"] ?? []) {
-    handler({ payload: { pane: "term:11", activities: [
+    handler({ payload: { pane: "term:12", activities: [
       { seq: 0, activity: { verb: "read", target: "/repo/ui/shell.js", phase: "finished" } },
       { seq: 1, activity: { verb: "bash", target: "cargo test --workspace", phase: "started" } },
     ] } });
   }
   await window.__PAINTED__();
-  await new Promise((done) => setTimeout(done, 160));
-  const after = arrivalOf("term:13");
-  const wire = node("term:11")?.querySelector(".agent-graph-wire");
-  const paths = [...board().querySelectorAll(".agent-graph-edge")]
-    .map((edge) => edge.getAttribute("d") ?? "");
-  const host = board().querySelector(".agent-graph-nodes");
-  const card = node("term:13");
-  const arrivesAt = paths
-    .map((drawn) => drawn.trim().split(/\s+/))
-    .filter((parts) => parts[parts.length - 2] === "H"
-      && Math.abs(Number.parseFloat(parts[parts.length - 1])
-        - (host.offsetLeft + card.offsetLeft)) < 2)
-    .map((parts) => Number.parseFloat(parts[parts.indexOf("M") + 2]));
-  // Hand the board back the way it was found: the scene below this one reads
-  // the surface that is already standing rather than raising its own.
+  await settled();
+  const after = arrival();
+  const wire = node("term:12")?.querySelector(".agent-graph-wire");
   window.__COLUMNS__ = fixtures.lineage;
+  window.__OVERLAYS__ = heldOverlays;
+  agentGraphOverlayMode = "none";
   agentGraphCardDetails = heldDetails;
   await paintBoardView();
   await new Promise((done) => setTimeout(done, 140));
   return {
     wireDrawn: wire !== null && wire !== undefined,
     wireSays: wire?.textContent ?? "",
-    grew: after.wanted > before.wanted,
-    // Every edge that lands on the moved card lands at its NEW middle.
-    lands: paths.some((drawn) => drawn.includes(`V ${after.wanted}`)
-      || drawn.endsWith(`H ${host.offsetLeft + card.offsetLeft}`)),
-    landsOnOldRow: paths.some((drawn) => drawn.includes(`V ${before.wanted}`)),
-    arrivals: arrivesAt.length,
+    grew: after.top > before.top,
+    // 끝점은 `offset*`의 정수를 더해 오른 값이라 층마다 반 픽셀까지 어긋날 수 있다 — 자라난 높이(로그
+    // 한 줄과 그 안쪽 여백)는 그보다 훨씬 크다.
+    lands: after.runsTo !== null && Math.abs(after.runsTo - after.wanted) < 3,
+    landsOnOldRow: after.runsTo !== null && Math.abs(after.runsTo - before.wanted) < 3,
+    before, after,
   };
 }, { cross: CROSS_BAND, lineage: LINEAGE });
 ok(
-  "a card that grows a live wire takes its edges with it",
+  "a card that grows its log takes the lines below it along",
   wireReflow.wireDrawn &&
     wireReflow.wireSays.includes("cargo test") &&
     !wireReflow.wireSays.includes("--workspace") &&
@@ -20889,19 +20552,27 @@ ok(
   JSON.stringify(wireReflow),
 );
 
-/* ---- 오르빗 문법의 카드 (방향 D, 2026-09-28) --------------------------------
+/* ---- 줄기의 카드 (방향 E2, t-68475) ------------------------------------------
  *
- * 위의 계약들이 볼 수 없는 새 말들. (1) 상태 말풍선은 오르빗 이름표가 읽는 그 말
- * (`agentOrbitBubbleWord`)이고, 작업 중에는 없다. (2) 부모 → 자식의 레일은 곡선이고,
- * 자식이 일하거나 사람을 기다리면 밝고 아니면 물러나며, 끝의 구슬은 자식의 상태 색으로
- * 카드 왼쪽 모서리 **바깥**에 온전히 앉는다. (3) 자식의 상태만 갈린 판도 레일이 옷을
- * 갈아입는다. (4) 「답하기」는 인스펙터의 「터미널 열기」와 같은 곳 — 그 판의 탭 — 을 연다.
- * (5) 새 낱말은 카탈로그 넷에 다 실려 있다.
- *
- * 1280px 창에서 이 판은 649px이라 늘 목록 티어이고, 그 티어의 레일은 자식이 부모 아래에 들여
- * 서므로 직각 길을 탄다(`agentGraphRailPath`). 넓은 판을 재려고 이 시험만 창을 넓혔다 되돌린다. */
-await page.setViewportSize({ width: 1920, height: 1000 });
+ * 위의 계약들이 볼 수 없는 말들. (1) 카드의 상태 줄은 신호의 낱말(`agentGraphSignalWord`)을 말하고,
+ * 그 신호의 모양은 줄기의 마디가 든다 — 마디는 카드 왼쪽 모서리 **바깥**, 줄기 위에 온전히 앉는다.
+ * (2) 자식의 상태만 갈린 판도 마디와 낱말이 옷을 갈아입고, 카드는 같은 노드다. (3) 열의 머리는
+ * 팀 줄(「팀 N · 당신 차례 n」)을 든다. (4) 「답하기」는 당신 차례 카드에만 서고, 인스펙터의
+ * 「터미널 열기」와 같은 곳 — 그 판의 탭 — 을 연다. (5) 새 낱말은 카탈로그 넷에 다 실려 있다.
+ * (방향 D의 말풍선·레일·자식 수 칩은 이 그림에 없다 — 낱말은 상태 줄이, 레일은 줄기가, 자식 수는
+ * 팀 줄이 맡았다. 말풍선의 낱말 `agentOrbitBubbleWord`는 입체가 그대로 쓴다.) */
 const orbitCard = await page.evaluate(async (fixtures) => {
+  /* 완료 관측기(`__IN_FLIGHT__`)는 위의 그래프 장면들의 것이라 여기선 판의 그림과 선의 측정만
+   * 기다린다. */
+  const settled = async () => {
+    await new Promise((done) => requestAnimationFrame(done));
+    await window.__UNTIL__(() => {
+      const view = [...document.querySelectorAll("#board-view, .file-view")]
+        .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
+      return Boolean(view) && agentGraphModels.has(view) && !agentGraphEdgeFrames.has(view)
+        && !agentGraphRefreshing && agentPaintFrame === null;
+    }, "board paint and overlay lines");
+  };
   const term = await openTermTab();
   const now = Date.now();
   const card = (pane, state, parent, extra = {}) => ({
@@ -20928,49 +20599,42 @@ const orbitCard = await page.evaluate(async (fixtures) => {
   await new Promise((done) => setTimeout(done, 220));
   const board = () => [...document.querySelectorAll("#board-view, .file-view")]
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
-  /* 옆에 선 인스펙터도 판을 좁히고, 앞 시험이 남긴 검색어는 레일을 흐린다 — 재는 동안 서랍을
-   * 닫고 검색어를 비운다(둘 다 끝에 되돌린다). */
-  const heldInspector = board().classList.contains("is-inspector-open");
+  /* 앞 시험이 남긴 검색어는 카드를 흐린다 — 재는 동안 비우고 끝에 되돌린다. */
   const heldQuery = boardQuery;
   boardQuery = "";
-  setAgentGraphInspectorOpen(board(), false);
   await paintBoardView();
-  await new Promise((done) => setTimeout(done, 260));
   await window.__PAINTED__();
-  await new Promise((done) => setTimeout(done, 160));
+  await settled();
   const node = (pane) => board().querySelector(`.agent-graph-node[data-graph-key="agent:${pane}"]`);
-  const rail = (pane) => {
-    // 보이는 층의 무리 — 같은 열쇠를 든 클릭 영역의 무리가 먼저 선다.
-    const group = board().querySelector(`.agent-graph-edges [data-graph-edge="agent:term:71>agent:${pane}:spawned"]`);
-    const path = group?.querySelector(".agent-graph-edge");
-    const bead = group?.querySelector(".agent-graph-rail-bead");
-    const child = node(pane)?.getBoundingClientRect();
-    const round = bead?.getBoundingClientRect();
+  const limb = (pane) => {
+    const held = node(pane);
+    const joint = held?.parentElement?.querySelector(":scope > .agent-graph-joint");
+    const mark = joint?.querySelector(".agent-graph-signal");
+    const box = held?.getBoundingClientRect();
+    const round = joint?.getBoundingClientRect();
     return {
-      lit: path?.classList.contains("is-lit") ?? null,
-      dim: path?.classList.contains("is-dim") ?? null,
-      curved: / C /.test(path?.getAttribute("d") ?? ""),
-      marker: path ? getComputedStyle(path).markerEnd : "",
-      bead: bead?.getAttribute("class") ?? "",
-      outside: Boolean(round && child) && round.right <= child.left + 0.5 && round.width > 0,
-      level: Boolean(round && child) &&
-        round.top + round.height / 2 > child.top && round.top + round.height / 2 < child.bottom,
+      mark: mark?.getAttribute("class") ?? "",
+      word: held?.querySelector(".agent-graph-state-word")?.textContent ?? "",
+      outside: Boolean(round && box) && round.right <= box.left + 0.5 && round.width > 0,
+      level: Boolean(round && box) &&
+        round.top + round.height / 2 > box.top && round.top + round.height / 2 < box.bottom,
     };
   };
-  const bubble = (pane) => {
-    const held = node(pane)?.querySelector(".agent-graph-bubble");
-    return { said: held?.textContent ?? null, shown: (held?.getClientRects().length ?? 0) > 0 };
-  };
   const seen = {
-    wideTier: !board().classList.contains("is-graph-list"),
-    words: {
-      attention: agentOrbitBubbleWord("needs-attention"),
-      done: agentOrbitBubbleWord("done"),
-      working: agentOrbitBubbleWord("working"),
-    },
-    bubbles: { asker: bubble(asker), done: bubble("term:73"), working: bubble("term:72") },
-    rails: { asker: rail(asker), working: rail("term:72"), done: rail("term:73") },
-    kids: node("term:71")?.querySelector(".agent-graph-node-kids")?.textContent ?? "",
+    words: { you: agentGraphSignalWord("you"), run: agentGraphSignalWord("run"), done: agentGraphSignalWord("done") },
+    limbs: { asker: limb(asker), working: limb("term:72"), done: limb("term:73") },
+    headWord: node("term:71")?.querySelector(".agent-graph-node-status .agent-graph-state-word")?.textContent ?? "",
+    headLeads: node("term:71")?.classList.contains("is-head") === true,
+    sum: [...(node("term:71")?.querySelectorAll(".agent-graph-team-sum > li") ?? [])]
+      .map((item) => item.textContent).join(" · "),
+    /* 팀 N은 코디 아래 모든 자손의 수다(시안 page.js 643~644행, 코디 자신은 빼고) — 장면의 카드에서
+     * 부모를 따라 센다. */
+    team: (() => {
+      const cards = columns("done").flatMap((column) => column.cards);
+      const below = (pane) => cards.filter((one) => one.parent === pane)
+        .flatMap((one) => [one, ...below(one.pane)]);
+      return below("term:71").length;
+    })(),
     replies: [asker, "term:71", "term:72", "term:73"].map((pane) =>
       (node(pane)?.querySelector(".agent-graph-reply")?.getClientRects().length ?? 0) > 0),
     replyPane: node(asker)?.querySelector(".agent-graph-reply-pane")?.textContent ?? "",
@@ -20978,46 +20642,42 @@ const orbitCard = await page.evaluate(async (fixtures) => {
     replyDisabled: node(asker)?.querySelector(".agent-graph-reply")?.disabled ?? null,
     foot: board().querySelectorAll(".agent-graph-node .agent-card-meta").length,
   };
-  // 자식 하나가 끝에서 다시 일로 — 기하는 그대로이고, 레일만 옷을 간다.
+  // 자식 하나가 끝에서 다시 일로 — 같은 노드가 마디와 낱말만 갈아입고 줄기의 자리를 옮긴다.
+  const doneNode = node("term:73");
   window.__COLUMNS__ = columns("working");
   await paintBoardView();
   await window.__PAINTED__();
-  seen.relit = rail("term:73");
+  seen.relit = limb("term:73");
+  seen.sameNode = node("term:73") === doneNode;
   seen.replyWent = false;
   node(asker)?.querySelector(".agent-graph-reply")?.click();
   await new Promise((done) => setTimeout(done, 160));
   seen.replyWent = activeTabId === tabOfTerm(term)?.id;
   seen.catalogs = ["en", "ja", "zh", "es"].map((code) => [
-    "board.graph.reply", "board.graph.children", "board.graph.quietFor", "board.graph.contextUsed",
+    "board.graph.reply", "board.graph.waitingFor", "board.graph.quietFor", "board.graph.contextUsed",
+    "board.graph.teamSize", "board.graph.askOpen", "board.graph.logOpen", "board.graph.doneCount",
   ].every((key) => typeof CATALOG[code]?.[key] === "string" && CATALOG[code][key] !== ""));
   window.__COLUMNS__ = fixtures.lineage;
   if (activeTabId === "board") dropTab("board");
   document.getElementById("nav-agents").click();
   await new Promise((done) => setTimeout(done, 220));
   boardQuery = heldQuery;
-  setAgentGraphInspectorOpen(board(), heldInspector);
   await paintBoardView();
   return seen;
 }, { lineage: LINEAGE });
-await page.setViewportSize({ width: 1280, height: 860 });
 ok(
-  "the orbit-grammar card: bubbles speak orbit's words, rails light by the child's state with the bead outside the card, and 답하기 opens that pane",
-  orbitCard.wideTier &&
-    orbitCard.words.attention !== "" && orbitCard.words.done !== "" && orbitCard.words.working === "" &&
-    orbitCard.bubbles.asker.said === orbitCard.words.attention && orbitCard.bubbles.asker.shown &&
-    orbitCard.bubbles.done.said === orbitCard.words.done && orbitCard.bubbles.done.shown &&
-    !orbitCard.bubbles.working.shown &&
-    orbitCard.rails.asker.lit && orbitCard.rails.working.lit &&
-    orbitCard.rails.done.dim && !orbitCard.rails.done.lit &&
-    // 앞 시험이 남긴 검색어를 지웠으니 레일은 흐리지 않다 — 흐림도 옷이라 다시 입는다.
-    ["asker", "working", "done"].every((key) =>
-      orbitCard.rails[key].curved && orbitCard.rails[key].marker === "none" &&
-      orbitCard.rails[key].outside && orbitCard.rails[key].level &&
-      !orbitCard.rails[key].bead.includes("is-search-dimmed")) &&
-    orbitCard.rails.asker.bead.includes("is-needs-attention") &&
-    orbitCard.rails.done.bead.includes("is-done") &&
-    orbitCard.relit.lit && orbitCard.relit.bead.includes("is-working") &&
-    orbitCard.kids.includes("3") &&
+  "the stem card: its status line speaks the signal's word, its joint wears the signal's shape outside the card, the head carries the team line, and 답하기 opens that pane",
+  orbitCard.words.you !== "" && orbitCard.words.run !== "" && orbitCard.words.done !== "" &&
+    orbitCard.limbs.asker.word === orbitCard.words.you && orbitCard.limbs.asker.mark.includes("is-you") &&
+    orbitCard.limbs.working.word === orbitCard.words.run && orbitCard.limbs.working.mark.includes("is-run") &&
+    orbitCard.limbs.done.word === orbitCard.words.done && orbitCard.limbs.done.mark.includes("is-done") &&
+    ["asker", "working", "done"].every((key) => orbitCard.limbs[key].outside && orbitCard.limbs[key].level) &&
+    orbitCard.headLeads && orbitCard.headWord === orbitCard.words.run &&
+    orbitCard.team > 0 &&
+    Number(orbitCard.sum.split(" · ")[0].match(/\d+/)?.[0]) === orbitCard.team &&
+    orbitCard.sum.includes(orbitCard.words.you) &&
+    orbitCard.relit.mark.includes("is-run") && orbitCard.relit.word === orbitCard.words.run &&
+    orbitCard.relit.outside && orbitCard.sameNode &&
     orbitCard.replies.join(",") === "true,false,false,false" &&
     orbitCard.replyTag === "BUTTON" && orbitCard.replyDisabled === false &&
     orbitCard.replyPane.startsWith("term:") && orbitCard.replyWent &&
@@ -21134,7 +20794,11 @@ ok(
  * 아래가 재는 것은 한 조립기(`agentCardFacts`)가 낳는 여섯이다: 실제 모델 id,
  * 턴 단계, 활동 줄(도구·대상·경과), 활동 띠 여덟, 컨텍스트 미터, 그리고 그
  * 여섯을 그래프 노드와 인스펙터 카드가 **같은 손**으로 그린다는 것. 두 함수가
- * 같은 사실을 따로 지으면 한 화면의 카드 둘이 같은 일을 다르게 말한다. */
+ * 같은 사실을 따로 지으면 한 화면의 카드 둘이 같은 일을 다르게 말한다.
+ *
+ * 코디별 줄기(방향 E2, t-68475)의 카드가 다르게 쓰는 셋: 상태 낱말은 신호의 낱말(「도는 중」)이고,
+ * 턴 단계는 「지금」 줄이 도구로 말하므로 상태 줄에 다시 적지 않으며(인스펙터 카드는 든다), 컨텍스트는
+ * 60%부터만 선다 — 그 밑의 수는 할 일이 없는 숫자다. 나이는 상태 줄의 한 칸이다. */
 const cardFacts = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const heldActivities = new Map(paneActivities);
@@ -21189,14 +20853,14 @@ const cardFacts = await page.evaluate(async () => {
     modelTip: read(known, ".agent-graph-node-model")?.dataset.tip ?? "",
     unknownModel: read(unknown, ".agent-graph-node-model")?.textContent ?? null,
     unknownModelShown: (read(unknown, ".agent-graph-node-model")?.getClientRects().length ?? 0) > 0,
-    // 단계는 상태 낱말 **옆에** 서고 상태 낱말은 그대로다.
+    // 상태 낱말은 신호의 낱말이고, 턴 단계는 이 카드의 상태 줄에 서지 않는다.
     stateWord: read(known, ".agent-graph-state-word")?.textContent ?? "",
     phase: read(known, ".agent-card-phase")?.textContent ?? "",
-    // 활동 줄: 도구 · 대상(경로는 꼬리 두 마디) · 경과.
+    // 활동 줄: 도구 · 대상(경로는 꼬리 두 마디). 경과는 상태 줄의 나이 칸이 든다.
     verb: read(known, ".agent-card-activity-verb")?.textContent ?? "",
     target: read(known, ".agent-card-activity-target")?.textContent ?? "",
     targetTip: read(known, ".agent-card-activity-target")?.dataset.tip ?? "",
-    when: read(known, ".agent-card-activity-when")?.textContent ?? "",
+    when: read(known, ".agent-graph-card-age")?.textContent ?? "",
     // 활동 띠: 슬롯 여덟을 미리 만들어 두고 종류만 돌린다.
     tickSlots: ticks.length,
     kinds: ticks.filter((held) => !held.classList.contains("is-empty"))
@@ -21205,16 +20869,14 @@ const cardFacts = await page.evaluate(async () => {
     lastTick: ticks.filter((held) => held.classList.contains("is-last")).length,
     tipped: ticks.filter((held) => !held.classList.contains("is-empty"))
       .every((held) => (held.dataset.tip ?? "").length > 0),
-    // 컨텍스트 고리: 값이 있으면 비율과 퍼센트, 없으면 DOM에 둔 채 `hidden`.
+    // 컨텍스트 고리: 60% 밑(여기 12%)이면 DOM에 둔 채 `hidden`, 모르면 같은 자리에 `hidden`.
     meterHidden: meter?.hidden ?? null,
-    meterRatio: Number.parseFloat(meter?.style.getPropertyValue("--context-ratio") ?? "NaN"),
     meterWord: read(known, ".agent-graph-node-context-word")?.textContent ?? "",
-    meterSaid: meter?.getAttribute("aria-label") ?? "",
     unknownMeterHidden: read(unknown, ".agent-graph-node-context")?.hidden ?? null,
     unknownMeterInDom: read(unknown, ".agent-graph-node-context") !== null,
     // 낱말은 카탈로그의 것이다 — 이 판이 서 있는 말로 견준다.
     words: {
-      working: t("board.working", "작업 중"),
+      working: agentGraphSignalWord("run"),
       tooling: t("board.phase.tooling", "도구 실행 중"),
       edit: t("activity.edit", "고치기"),
       justNow: t("board.justNow", "방금"),
@@ -21231,6 +20893,21 @@ const cardFacts = await page.evaluate(async () => {
     .map((held) => held.dataset.kind ?? "");
   seen.inspectorMeter = Number.parseFloat(
     read(card, ".agent-card-meter")?.style.getPropertyValue("--meter-ratio") ?? "NaN");
+  // 그리고 60%를 넘으면 고리와 수가 같은 노드에 선다.
+  for (const handler of window.__LISTENERS__["session:frame"] ?? []) {
+    handler({ payload: { session: "s-2374", frame:
+      { type: "usage", ctx_tokens: 140_000, context_window: 200_000 } } });
+  }
+  await paintBoardView(boardTab(), { force: true });
+  await new Promise((done) => setTimeout(done, 160));
+  const fuller = read(node("term:2374"), ".agent-graph-node-context");
+  seen.fullMeter = {
+    sameNode: node("term:2374") === known,
+    hidden: fuller?.hidden ?? null,
+    ratio: Number.parseFloat(fuller?.style.getPropertyValue("--context-ratio") ?? "NaN"),
+    word: read(node("term:2374"), ".agent-graph-node-context-word")?.textContent ?? "",
+    said: fuller?.getAttribute("aria-label") ?? "",
+  };
   paneModels.delete(2374);
   paneSessions.delete(2374);
   paneActivities.clear();
@@ -21249,7 +20926,7 @@ ok(
   cardFacts.model === "opus-5" && cardFacts.modelTip === "claude-opus-5" &&
     cardFacts.unknownModel === "" && !cardFacts.unknownModelShown &&
     cardFacts.stateWord === cardFacts.words.working &&
-    cardFacts.phase === cardFacts.words.tooling &&
+    cardFacts.phase === "" &&
     cardFacts.verb === cardFacts.words.edit &&
     cardFacts.target === "…/ui/shell.js" &&
     cardFacts.targetTip === "/Users/dev/zerocode/workspaces/ui/shell.js" &&
@@ -21258,16 +20935,17 @@ ok(
     cardFacts.kinds.join(",") === "read,read,read,read,read,read,run,edit" &&
     cardFacts.repeats.join(",") === "3" &&
     cardFacts.lastTick === 1 && cardFacts.tipped &&
-    cardFacts.meterHidden === false &&
-    cardFacts.meterRatio > 0.12 && cardFacts.meterRatio < 0.13 &&
-    cardFacts.meterWord === "12%" && cardFacts.meterSaid.includes("24,489") &&
+    cardFacts.meterHidden === true && cardFacts.meterWord === "" &&
     cardFacts.unknownMeterInDom && cardFacts.unknownMeterHidden === true &&
+    cardFacts.fullMeter.sameNode && cardFacts.fullMeter.hidden === false &&
+    cardFacts.fullMeter.ratio === 0.7 && cardFacts.fullMeter.word === "70%" &&
+    cardFacts.fullMeter.said.includes("140,000") &&
     // 그리고 인스펙터 카드는 같은 조립기에서 같은 여섯을 받는다.
     cardFacts.inspectorModel === "claude-opus-5" &&
     cardFacts.inspectorVerb === cardFacts.words.edit &&
     cardFacts.inspectorPhase === cardFacts.words.tooling &&
     cardFacts.inspectorKinds.join(",") === cardFacts.kinds.join(",") &&
-    cardFacts.inspectorMeter === cardFacts.meterRatio,
+    cardFacts.inspectorMeter > 0.12 && cardFacts.inspectorMeter < 0.13,
   JSON.stringify(cardFacts),
 );
 
@@ -21276,9 +20954,10 @@ ok(
  * 리더가 나간 팀의 자식은 원장에 `orphaned`로 남고 판은 계속 일한다. 훅은
  * `working`이라 하고 원장은 `orphaned`라 하며 둘 다 참인데, 보드는 여태 그 행을
  * 맨 「작업 중」으로 그렸다 — 사람이 대체 워커를 띄우기 전에 알아야 할 단 하나의
- * 사실이 낱말에서 빠져 있었다. 아래가 재는 것은 셋이다: 그 짝만 「작업 중(리더
- * 없음)」이 되고, 같은 열의 평범한 행은 「작업 중」 그대로이며, 그 낱말이 카탈로그
- * 넷(en·ja·zh·es) 모두에 실려 있어 어느 말로 서 있어도 한국어 폴백으로 새지 않는다. */
+ * 사실이 낱말에서 빠져 있었다. 아래가 재는 것은 셋이다: 그 짝만 「도는 중(리더
+ * 없음)」이 되고, 같은 열의 평범한 행은 「도는 중」 그대로이며, 그 낱말이 카탈로그
+ * 넷(en·ja·zh·es) 모두에 실려 있어 어느 말로 서 있어도 한국어 폴백으로 새지 않는다.
+ * (코디별 줄기(방향 E2, t-68475)의 카드는 신호의 낱말을 말하므로 「작업 중」이 「도는 중」이 되었다.) */
 const orphanRow = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const now = Date.now();
@@ -21301,15 +20980,15 @@ const orphanRow = await page.evaluate(async () => {
   const seen = {
     orphaned: word("worker:w-2675"),
     plain: word("worker:w-2677"),
-    wantOrphaned: t("board.workingOrphaned", "작업 중(리더 없음)"),
-    wantPlain: t("board.working", "작업 중"),
+    wantOrphaned: t("board.graph.runOrphaned", "도는 중(리더 없음)"),
+    wantPlain: agentGraphSignalWord("run"),
     // 카탈로그 넷이 그 열쇠를 모두 든다 — 폴백은 한국어 원문이라, 어느 카탈로그가
     // 빠뜨리면 그 말로 선 창이 한국어를 말한다.
     catalogs: ["en", "ja", "zh", "es"].map((code) => [
       code,
-      typeof CATALOG[code]["board.workingOrphaned"] === "string" &&
-        CATALOG[code]["board.workingOrphaned"] !== "" &&
-        CATALOG[code]["board.workingOrphaned"] !== CATALOG[code]["board.working"],
+      typeof CATALOG[code]["board.graph.runOrphaned"] === "string" &&
+        CATALOG[code]["board.graph.runOrphaned"] !== "" &&
+        CATALOG[code]["board.graph.runOrphaned"] !== CATALOG[code]["board.now.stateRun"],
     ]),
   };
   window.__COLUMNS__ = heldColumns;
@@ -21448,8 +21127,12 @@ ok(
  * 넷 다 이 창이 이미 들고 있는 사실에서만 나온다: 도구 링의 마지막 박자가
  * 열려 있으면 도구를 돌리는 중이고, 닫혀 있으면 그 결과 위에 답을 쓰는
  * 중이며, 아무 박자도 없는 턴은 아직 모델을 기다리는 중이다. 마지막 소식이
- * 오래되면 `went_quiet`과 같은 층의 「조용해짐」이다 — 새 상태 낱말이 아니라
- * 상태 낱말 옆의 한 마디이고, 상태 낱말은 넷 다 「작업 중」 그대로다. */
+ * 오래되면 `went_quiet`과 같은 층의 「조용해짐」이다.
+ *
+ * 코디별 줄기(방향 E2, t-68475)의 카드는 그 낱말을 상태 줄에 다시 적지 않는다 — 「지금」 줄이
+ * 도구를 말하고, 조용함은 나이 칸이 「N째 조용」으로 말하며, 상태 줄은 시안 그대로 낱말 · 나이 ·
+ * 칩이다. 단계의 낱말은 같은 사실에서 계속 나오고 인스펙터의 카드가 든다. 상태 낱말은 넷 다
+ * 신호의 낱말 「도는 중」이다. */
 const turnPhases = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const heldActivities = new Map(paneActivities);
@@ -21478,20 +21161,24 @@ const turnPhases = await page.evaluate(async () => {
   await new Promise((done) => setTimeout(done, 220));
   const view = [...document.querySelectorAll("#board-view, .file-view")]
     .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
+  const model = agentGraphModels.get(view);
   const said = (pane) => {
     const node = [...view.querySelectorAll(".agent-graph-node.is-agent")]
       .find((held) => held.dataset.graphKey === `agent:${pane}`);
     return {
-      phase: node?.querySelector(".agent-card-phase")?.textContent ?? "",
+      // 단계의 낱말 — 인스펙터의 카드가 읽는 그 사실(`agentCardFacts`).
+      phase: model.entities.get(`agent:${pane}`)?.facts.phaseWord ?? "",
+      onCard: node?.querySelector(".agent-card-phase")?.textContent ?? "",
       state: node?.querySelector(".agent-graph-state-word")?.textContent ?? "",
       quiet: node?.classList.contains("is-went-quiet") ?? false,
+      age: node?.querySelector(".agent-graph-card-age.is-quiet")?.textContent ?? "",
     };
   };
   const seen = {
     tooling: said("term:2381"), answering: said("term:2382"),
     waiting: said("term:2383"), quiet: said("term:2384"),
     words: {
-      working: t("board.working", "작업 중"),
+      working: agentGraphSignalWord("run"),
       tooling: t("board.phase.tooling", "도구 실행 중"),
       answering: t("board.phase.answering", "답 쓰는 중"),
       waiting: t("board.phase.waiting", "모델 대기"),
@@ -21506,13 +21193,14 @@ const turnPhases = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the turn phase is a word beside the state word, derived from facts the window already holds",
+  "the turn phase is derived from facts the window already holds, and the stem card leaves it to its now line and its age",
   turnPhases.tooling.phase === turnPhases.words.tooling &&
     turnPhases.answering.phase === turnPhases.words.answering &&
     turnPhases.waiting.phase === turnPhases.words.waiting &&
     turnPhases.quiet.phase === turnPhases.words.quiet && turnPhases.quiet.quiet &&
+    turnPhases.quiet.age !== "" &&
     ["tooling", "answering", "waiting", "quiet"]
-      .every((key) => turnPhases[key].state === turnPhases.words.working),
+      .every((key) => turnPhases[key].state === turnPhases.words.working && turnPhases[key].onCard === ""),
   JSON.stringify(turnPhases),
 );
 
@@ -21584,13 +21272,18 @@ const boardTiers = await page.evaluate(async () => {
       overlayToggle: shown(".agent-graph-overlay-toggle"),
       searchInDom: view.querySelector(".board-query") !== null,
       popoutInDom: view.querySelector(".board-popout, #board-popout") !== null,
-      // 목록 모드: 격자가 한 열이고 자식은 들여쓰기 레일을 갖는다.
-      columns: getComputedStyle(view.querySelector(".agent-graph-nodes")).gridTemplateColumns
-        .split(" ").length,
-      childIndent: Math.round(Number.parseFloat(
-        getComputedStyle(view.querySelector('[data-graph-key="agent:term:2391"]')).marginLeft)),
-      childRail: getComputedStyle(
-        view.querySelector('[data-graph-key="agent:term:2391"]')).borderLeftWidth,
+      /* 코디별 줄기 (방향 E2, t-68475): 열은 760px 밑에서 한 줄로 쌓이고, 시작한 판의 자식은 어느
+       * 폭에서도 그 판의 줄기에 들여 서며, 줄기의 줄이 그 곁을 내려간다. */
+      columns: new Set([...view.querySelectorAll(".agent-graph-team")]
+        .map((one) => Math.round(one.getBoundingClientRect().left))).size,
+      childIndent: Math.round(
+        view.querySelector('[data-graph-key="agent:term:2391"]').getBoundingClientRect().left
+        - view.querySelector('[data-graph-key="agent:term:2390"]').getBoundingClientRect().left),
+      stemDrawn: (() => {
+        const spine = view.querySelector('[data-graph-key="agent:term:2390"]')
+          ?.closest(".agent-graph-team")?.querySelector(".agent-graph-spine");
+        return spine ? getComputedStyle(spine, "::before").borderLeftWidth : "";
+      })(),
       /* 그리고 카드들이 정말로 **세로로 쌓인다**. 행 번호는 레인 배치의
        * 좌표라 부모와 자식이 같은 행을 받으므로, 한 열로 접기만 하면 그
        * 둘이 같은 자리에 겹쳐 그려진다 — 실측된 그림에서 카드 하나가 다른
@@ -21611,12 +21304,10 @@ const boardTiers = await page.evaluate(async () => {
         return hit;
       })(),
       nodesDrawn: view.querySelectorAll(".agent-graph-node").length,
-      // lineage 선은 물러나되 DOM에 남는다.
-      edgePaths: view.querySelectorAll(".agent-graph-edge").length,
-      edgesShown: getComputedStyle(view.querySelector(".agent-graph-edges")).visibility,
-      // 목록 모드에서 배율은 1이고 단추는 눌리지 않는다.
-      zoom: agentGraphZoom,
-      zoomOff: view.querySelector(".agent-graph-zoom-in").disabled,
+      // 계보는 줄기라 선이 없다.
+      edgePaths: view.querySelectorAll(".agent-graph-edges .agent-graph-edge").length,
+      // 카드 그림에는 배율이 없다 — 단추는 입체에만 선다.
+      zoomShown: shown(".agent-graph-zoom"),
       // 그리고 `role="tree"` 걷기는 같은 차례로 돈다.
       walk: [...view.querySelectorAll(".agent-graph-nodes [data-graph-key]")]
         .map((one) => one.dataset.graphKey).join(","),
@@ -21670,18 +21361,15 @@ ok(
     // 오버레이 셋은 중간 티어부터 세그먼트 팝오버 하나로 물러난다.
     boardTiers.wide.overlayToggle === false && boardTiers.drawer.overlayToggle &&
     boardTiers.list.overlayToggle && boardTiers.tight.overlayToggle &&
-    // 목록 모드: 한 열, 들여쓴 자식, 물러난 lineage 선(DOM에는 그대로).
-    boardTiers.wide.columns > 1 &&
+    // 넓은 판은 열이 나란히, 760px 밑은 한 줄로 쌓이고, 자식은 어느 폭에서도 줄기에 들여 선다.
+    boardTiers.wide.columns === 2 &&
     boardTiers.list.columns === 1 && boardTiers.tight.columns === 1 &&
-    boardTiers.list.childIndent > 0 && boardTiers.list.childRail === "3px" &&
-    // 어느 폭에서도 카드 둘이 같은 자리에 서지 않는다 — 넷 다 카드 넷을 그린다.
     ["wide", "drawer", "list", "tight", "back"].every((key) =>
-      boardTiers[key].overlaps === 0 && boardTiers[key].nodesDrawn === 4) &&
-    boardTiers.list.edgePaths >= 2 && boardTiers.list.edgesShown === "hidden" &&
-    boardTiers.wide.edgesShown === "visible" &&
-    // 배율은 목록 모드에서 1로 굳고 단추는 눌리지 않는다.
-    boardTiers.list.zoom === 1 && boardTiers.list.zoomOff &&
-    boardTiers.wide.zoomOff === false &&
+      boardTiers[key].childIndent > 0 && boardTiers[key].stemDrawn === "2px" &&
+      // 어느 폭에서도 카드 둘이 같은 자리에 서지 않는다 — 다섯 다 카드 셋을 그린다.
+      boardTiers[key].overlaps === 0 && boardTiers[key].nodesDrawn === 3 &&
+      // 계보의 선은 없고, 카드 그림에는 배율의 단추가 서지 않는다.
+      boardTiers[key].edgePaths === 0 && boardTiers[key].zoomShown === false) &&
     // 걷기는 네 폭에서 같은 차례다.
     new Set(["wide", "drawer", "list", "tight", "back"]
       .map((key) => boardTiers[key].walk)).size === 1 &&
@@ -21697,7 +21385,10 @@ ok(
  * 그 자리는 그림마다 다르다: 그래프의 노드에는 질문이 설 다른 곳이 없지만,
  * 인스펙터의 카드에는 호박색 상자가 이미 서 있다. 사실은 한 조립기가 하나로
  * 낳고 어느 자리에 세울지는 그리는 쪽이 고른다 — 실측된 실패는 인스펙터
- * 카드에 같은 질문이 두 줄로 선 그림이었다. */
+ * 카드에 같은 질문이 두 줄로 선 그림이었다.
+ *
+ * 코디별 줄기(방향 E2, t-68475)의 당신 차례 카드(L)는 질문을 제 칸(`.agent-graph-ask`)에 크게 세우고
+ * 활동 줄을 짓지 않는다 — 질문은 그 카드에서 한 번이다. */
 const askedOnce = await page.evaluate(async () => {
   const heldColumns = window.__COLUMNS__;
   const heldActivities = new Map(paneActivities);
@@ -21719,10 +21410,9 @@ const askedOnce = await page.evaluate(async () => {
   const node = [...view.querySelectorAll(".agent-graph-node.is-agent")]
     .find((one) => one.dataset.graphKey === "agent:term:2400");
   const seen = {
-    nodeSlot: [node?.querySelector(".agent-card-activity-verb")?.textContent ?? "",
-      node?.querySelector(".agent-card-activity-target")?.textContent ?? ""].join(" · "),
-    nodeAsking: node?.querySelector(".agent-card-activity")
-      ?.classList.contains("is-asking") ?? false,
+    nodeAsk: node?.querySelector(".agent-graph-ask")?.textContent ?? "",
+    nodeSize: node?.classList.contains("is-size-l") ?? false,
+    nodeSaidTwice: (node?.textContent.match(/main 에 올릴까요\?/g) ?? []).length,
   };
   node?.click();
   await window.__PAINTED__();
@@ -21743,9 +21433,9 @@ const askedOnce = await page.evaluate(async () => {
 });
 ok(
   "a stuck card puts its question where nothing else says it, and never twice on one card",
-  // 그래프의 노드: 질문이 활동 줄의 자리에 선다.
-  askedOnce.nodeSlot === `${askedOnce.words.ask} · main 에 올릴까요?` &&
-    askedOnce.nodeAsking &&
+  // 그래프의 노드: 질문이 당신 차례 카드의 제 칸에 한 번 선다.
+  askedOnce.nodeAsk === "main 에 올릴까요?" && askedOnce.nodeSize &&
+    askedOnce.nodeSaidTwice === 1 &&
     // 인스펙터의 카드: 호박색 상자가 질문을 들고, 활동 줄은 도구를 말한다.
     askedOnce.boxSays === "main 에 올릴까요?" &&
     askedOnce.cardSlot === `${askedOnce.words.bash} · cargo fmt` &&
@@ -21791,9 +21481,12 @@ const boardHardcoding = await (async () => {
       /AGENT_GRAPH_ZOOM_STEP\s*=\s*[\d.]/, /AGENT_GRAPH_LOD_ZOOM\s*=\s*[\d.]/,
       /AGENT_GRAPH_AUTO_FIT_MIN\s*=\s*[\d.]/, /AGENT_GRAPH_EDGE_STUB\s*=\s*[\d.]/,
     ].filter((one) => one.test(graphJs)).length,
-    // 한 함수가 뷰 생성 때 한 번 읽는다.
+    // 한 함수가 뷰 생성 때 한 번 읽는다. 코디별 줄기(방향 E2, t-68475)의 카드 그림에는 배율이 없어
+    // LOD 문턱과 저절로 앉는 바닥은 물러났고, 남은 넷은 입체의 배율과 오버레이 선의 도랑이다.
     tuning: /function agentGraphTuning\(/.test(graphJs),
-    tokensRead: ["zoom-min", "zoom-max", "zoom-step", "lod", "fit-floor", "edge-stub"]
+    tokensRead: ["zoom-min", "zoom-max", "zoom-step", "edge-stub"]
+      .filter((name) => graphJs.includes(`--agent-graph-${name}`)).length,
+    tokensRetired: ["lod", "fit-floor", "rail-bead"]
       .filter((name) => graphJs.includes(`--agent-graph-${name}`)).length,
     /* 데이터의 양은 상수로 남는다 — 여덟 개의 글리프도, 오 분의 침묵도, 스무
      * 칸의 링도 CSS가 골라도 되는 수가 아니다. 이 셋이 토큰으로 내려가면
@@ -21813,7 +21506,7 @@ ok(
     // 하나가 늘면 이 줄이 그것을 말한다.
     boardHardcoding.px <= 128 &&
     boardHardcoding.literals === 0 && boardHardcoding.tuning &&
-    boardHardcoding.tokensRead === 6 &&
+    boardHardcoding.tokensRead === 4 && boardHardcoding.tokensRetired === 0 &&
     boardHardcoding.amounts === 3,
   JSON.stringify({ ...boardHardcoding, hex: boardHardcoding.hex.slice(0, 8) }),
 );
@@ -21879,12 +21572,14 @@ const boardInkFixture = async () => page.evaluate(async () => {
 });
 const boardInk = { dark: {}, light: {} };
 await boardInkFixture();
+// 코디별 줄기(방향 E2)의 신호 여섯 — 범례의 표식이 마디의 표식과 같은 손이다.
 const INK_PROBES = [
-  ["idle", ".agent-graph-legend-list.is-states .agent-graph-pip.is-idle"],
-  ["attention", ".agent-graph-legend-list.is-states .agent-graph-pip.is-attention"],
-  ["working", ".agent-graph-legend-list.is-states .agent-graph-pip.is-working"],
-  ["done", ".agent-graph-legend-list.is-states .agent-graph-pip.is-done"],
-  ["failed", ".agent-graph-legend-list.is-states .agent-graph-pip.is-failed"],
+  ["you", ".agent-graph-legend-list.is-states .agent-graph-signal.is-you"],
+  ["halt", ".agent-graph-legend-list.is-states .agent-graph-signal.is-halt"],
+  ["run", ".agent-graph-legend-list.is-states .agent-graph-signal.is-run"],
+  ["wait", ".agent-graph-legend-list.is-states .agent-graph-signal.is-wait"],
+  ["done", ".agent-graph-legend-list.is-states .agent-graph-signal.is-done"],
+  ["idle", ".agent-graph-legend-list.is-states .agent-graph-signal.is-idle"],
   ["meter", ".agent-graph-node-context:not([hidden]) .agent-graph-node-context-ring"],
   ["activity", ".agent-card-activity:not(.is-none) .agent-card-activity-target"],
 ];
@@ -21910,11 +21605,11 @@ await page.evaluate(async (columns) => {
   await new Promise((done) => setTimeout(done, 160));
 }, COLUMNS);
 ok(
-  "the five state colours, the context meter and the activity ink all clear 3:1 in both treatments",
+  "the six signal marks, the context meter and the activity ink all clear 3:1 in both treatments",
   ["dark", "light"].every((theme) =>
     INK_PROBES.every(([name]) => boardInk[theme][name] >= 3)) &&
     // 그리고 두 테마가 같은 값이 아니다 — 같으면 하나는 재지 않은 것이다.
-    boardInk.dark.working !== boardInk.light.working,
+    boardInk.dark.run !== boardInk.light.run,
   JSON.stringify(boardInk),
 );
 
@@ -38221,15 +37916,21 @@ const orchestraView = await page.evaluate(async () => {
     await window.__PAINTED__();
     await settle();
     const agents = [...host().querySelectorAll(".agent-graph-node.is-agent")];
+    /* 코디별 줄기 (방향 E2, t-68475): 시작한 판이 열의 머리이고, 그가 시작한 판과 헬퍼가 줄기에,
+     * 손자는 한 칸 들여 쓴 줄기에 매달린다. 계보는 줄기라 선이 없다. */
+    const teamOf = (pane) => node(pane)?.closest(".agent-graph-team")?.dataset.graphPart ?? "";
     return {
       agents: agents.length,
-      spawned: host().querySelectorAll(".agent-graph-edge.is-spawned").length,
-      paths: [...host().querySelectorAll(".agent-graph-edge.is-spawned")]
-        .every((edge) => edge.getAttribute("d")?.startsWith("M ")),
-      leaderColumn: node("term:1")?.style.gridColumn ?? "",
-      workerColumn: node("term:2")?.style.gridColumn ?? "",
-      grandchildColumn: node("term:3")?.style.gridColumn ?? "",
-      loneColumn: node("term:9")?.style.gridColumn ?? "",
+      lines: host().querySelectorAll(".agent-graph-edges .agent-graph-edge").length,
+      leaderHeads: node("term:1")?.classList.contains("is-head") === true,
+      levels: ["term:1", "term:2", "sub:1:a-1", "term:3"]
+        .map((pane) => node(pane)?.getAttribute("aria-level") ?? ""),
+      grandchildUnder: node("term:3")?.closest(".agent-graph-spine.is-sub")?.closest(".agent-graph-limb")
+        ?.querySelector(":scope > .agent-graph-node")?.dataset.graphKey ?? "",
+      stemmed: host().querySelectorAll(
+        '[data-graph-part="team:team:term:1"] .agent-graph-limb:not(.is-fold)').length,
+      leaderTeam: teamOf("term:1"),
+      loneTeam: teamOf("term:9"),
       beforeActivity,
       afterActivity: doing("term:2"),
     };
@@ -38388,16 +38089,15 @@ const orchestraView = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the ontology graph places spawned agents in deeper layers with real SVG edges",
-  orchestraView.agents === 5 && orchestraView.spawned === 3 && orchestraView.paths &&
-    orchestraView.leaderColumn === orchestraView.loneColumn &&
-    Number(orchestraView.workerColumn) > Number(orchestraView.leaderColumn) &&
-    Number(orchestraView.grandchildColumn) > Number(orchestraView.workerColumn),
+  "the relations picture hangs spawned agents on the starter's stem, a grandchild one step in, with no lineage line",
+  orchestraView.agents === 5 && orchestraView.lines === 0 && orchestraView.leaderHeads &&
+    orchestraView.levels.join(",") === "1,2,2,3" &&
+    orchestraView.grandchildUnder === "agent:term:2",
   JSON.stringify(orchestraView),
 );
 ok(
-  "an agent with nobody above it remains in the root agent layer",
-  orchestraView.loneColumn === orchestraView.leaderColumn,
+  "an agent with nobody above it stands in the person's own column, not under a starter",
+  orchestraView.loneTeam === "team:team:own" && orchestraView.leaderTeam === "team:team:term:1",
   JSON.stringify(orchestraView),
 );
 ok(
@@ -38409,7 +38109,7 @@ ok(
 );
 ok(
   "the relation graph replaces the separate global orchestration projection",
-  orchestraView.spawned === 3,
+  orchestraView.stemmed === 3,
   JSON.stringify(orchestraView),
 );
 
@@ -45655,10 +45355,27 @@ const boardDress = await page.evaluate(async () => {
     await settle();
     const view = [...document.querySelectorAll("#board-view, .file-view")]
       .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
+    /* 상태 칩 다섯 (방향 E2, t-68475 — D의 단추 셋을 잇는다). 칩마다 D의 단추가 하던 일을 그대로
+     * 한다: 제 수를 적고(그림의 모델이 세는 수 그대로), 0이면 누를 수 없고, 누르면 그 상태의 카드를
+     * 고르는 손이 매여 있다. 누른 뒤 그 카드로 가는 것은 agent-graph-teams의 「「당신 차례 N」 goes to
+     * that card」가, 그 손이 다시 그려도 같은 손인 것은 위의 「the graph's per-node, per-chip and
+     * surface handlers survive a repaint」가 잰다. */
+    const model = view ? agentGraphModels.get(view) : null;
+    const chips = [...(view?.querySelectorAll("[data-graph-signal]") ?? [])].map((chip) => {
+      const count = chip.querySelector("[data-graph-count]")?.textContent ?? "";
+      return {
+        signal: chip.dataset.graphSignal,
+        count,
+        counted: count === String(model?.signals.get(chip.dataset.graphSignal) ?? 0),
+        shut: chip.disabled === (count === "0"),
+        pressable: typeof chip.onclick === "function",
+      };
+    });
     return {
-      summaryButtons: view?.querySelectorAll("[data-graph-bucket]").length ?? 0,
+      summaryButtons: chips.length,
       summaryCounts: [...(view?.querySelectorAll("[data-graph-count]") ?? [])]
         .map((one) => one.textContent),
+      chips,
       inspector: view?.querySelector(".agent-inspector") !== null,
       legacySettings: document.getElementById("board-settings-pop") !== null,
       legacyFilters: view?.querySelector(".board-filters") !== null,
@@ -45787,7 +45504,9 @@ const boardDress = await page.evaluate(async () => {
 });
 ok(
   "the relations header keeps status actions and the inspector beside the task/relations switch",
-  boardDress.summaryButtons === 3 && boardDress.summaryCounts.length === 3 &&
+  boardDress.summaryButtons === 5 && boardDress.summaryCounts.length === 5 &&
+    boardDress.chips.map((chip) => chip.signal).join() === "you,halt,run,wait,done" &&
+    boardDress.chips.every((chip) => chip.counted && chip.shut && chip.pressable) &&
     boardDress.inspector && !boardDress.legacySettings &&
     !boardDress.legacyFilters && boardDress.modes.join() === "tasks,graph",
   JSON.stringify(boardDress),
@@ -46248,29 +45967,30 @@ const boardMapView = await page.evaluate(async () => {
     const view = [...document.querySelectorAll("#board-view, .file-view")]
       .find((one) => one.querySelector(".agent-graph-layout") && !one.hidden);
     const agentNodes = () => [...view.querySelectorAll(".agent-graph-node.is-agent")];
+    const nodeOf = (term) => agentNodes().find((node) => node.dataset.graphKey === `agent:term:${term}`);
+    /* 코디별 줄기 (방향 E2, t-68475): 자식을 띄운 판은 제 열을 이끌고, 홀로 선 판은 「내 판」 열에
+     * 선다. 담김은 칩이 말한다 — 열의 머리는 제 워크스페이스를, 줄기의 카드는 부모와 다른
+     * 워크스페이스일 때만. 계보도 담김도 선이 아니다. */
     const result = {
-      // A project is the BAND its workspaces sit in, named on a rail pinned to
-      // the left edge of the scroll — not a node in a fourth column.
-      projects: [...view.querySelectorAll(".agent-graph-band-name strong")]
-        .map((one) => one.textContent),
-      workspaces: [...view.querySelectorAll(".agent-graph-node.is-workspace .agent-graph-node-title")]
+      teams: [...view.querySelectorAll(".agent-graph-team")].map((one) => one.dataset.graphPart),
+      wantedTeams: [`team:team:term:${leader.term}`, "team:team:own"],
+      chips: [...view.querySelectorAll(".agent-graph-node-branch:not([hidden]) .agent-graph-node-branch-name")]
         .map((one) => one.textContent),
       agents: agentNodes().length,
-      spawned: view.querySelectorAll(".agent-graph-edge.is-spawned").length,
-      edgesDrawn: [...view.querySelectorAll(".agent-graph-edge")]
-        .every((edge) => edge.getAttribute("d")?.startsWith("M ")),
-      layers: agentNodes().map((one) => one.style.gridColumn),
+      lines: view.querySelectorAll(".agent-graph-edges .agent-graph-edge").length,
+      levels: [leader.term, worker.term].map((term) => nodeOf(term)?.getAttribute("aria-level") ?? ""),
     };
-    agentNodes().find((node) => node.dataset.graphKey === `agent:term:${leader.term}`)?.click();
+    nodeOf(leader.term)?.click();
     await settle();
     result.inspector = view.querySelector(".agent-inspector-title")?.textContent ?? "";
     result.hasBreadcrumb = view.querySelector(".agent-inspector-breadcrumb") !== null;
-    view.querySelector(".agent-graph-band-name")?.click();
+    // 칩을 누르면 그 워크스페이스가 인스펙터에 선다 — 방향 D의 띠 이름이 하던 일.
+    nodeOf(leader.term)?.querySelector(".agent-graph-node-branch")?.click();
     await settle();
     result.hasSummaryCard = view.querySelector(".agent-inspector-summary-card") !== null;
-    result.hasFitButton = [...view.querySelectorAll(".agent-inspector-context-actions button")]
-      .some((btn) => btn.textContent.includes(t("board.graph.fit", "화면에 맞추기")));
-    agentNodes().find((node) => node.dataset.graphKey === `agent:term:${leader.term}`)?.click();
+    result.hasOpenButton = [...view.querySelectorAll(".agent-inspector-context-actions button")]
+      .some((btn) => btn.textContent.includes(t("board.openWorktree", "워크스페이스 열기")));
+    nodeOf(leader.term)?.click();
     await settle();
     view.querySelector(".agent-inspector-preview")?.click();
     await settle();
@@ -46283,7 +46003,7 @@ const boardMapView = await page.evaluate(async () => {
     result.empty = view.querySelector(".agent-graph-empty")?.hidden === false;
     result.searchKept = agentNodes().length;
     result.searchDimmed = view.querySelectorAll(
-      ".agent-graph-node.is-search-dimmed, .agent-graph-band-head.is-search-dimmed",
+      ".agent-graph-node.is-search-dimmed, .agent-graph-team.is-search-dimmed",
     ).length;
     query.value = "";
     query.dispatchEvent(new Event("input", { bubbles: true }));
@@ -46534,15 +46254,15 @@ const boardMapView = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the ontology graph connects projects, workspaces and spawned agents, then acts in one inspector",
-  boardMapView.projects.join("|") === "zerocode" &&
-    // Top to bottom, which is the order the graph draws them in.
-    boardMapView.workspaces.join("|") === "feature/parse|main" &&
-    boardMapView.agents === 3 && boardMapView.spawned === 1 && boardMapView.edgesDrawn &&
-    new Set(boardMapView.layers).size === 2 &&
+  "the relations picture stands a starter's column and the person's own panes, says containment in chips, then acts in one inspector",
+  boardMapView.teams.join("|") === boardMapView.wantedTeams.join("|") &&
+    // Left to right, which is the order the columns stand in.
+    boardMapView.chips.join("|") === "main|feature/parse" &&
+    boardMapView.agents === 3 && boardMapView.lines === 0 &&
+    boardMapView.levels.join(",") === "1,2" &&
     boardMapView.inspector !== "" && boardMapView.peekTerm !== null && !boardMapView.empty &&
     boardMapView.searchKept === 3 && boardMapView.searchDimmed > 0 &&
-    boardMapView.hasSummaryCard && boardMapView.hasBreadcrumb && boardMapView.hasFitButton,
+    boardMapView.hasSummaryCard && boardMapView.hasBreadcrumb && boardMapView.hasOpenButton,
   JSON.stringify(boardMapView),
 );
 
@@ -46564,7 +46284,16 @@ const boardHeader = await page.evaluate(async () => {
   const summary = view?.querySelector(".agent-graph-summary") ?? null;
   seen.groupSpeaks = summary?.getAttribute("role") === "group"
     && summary?.getAttribute("aria-label") === t("board.graph.summary", "에이전트 상태 요약");
-  seen.summaryCount = summary?.querySelectorAll("[data-graph-bucket]").length ?? 0;
+  seen.summaryCount = summary?.querySelectorAll("[data-graph-signal]").length ?? 0;
+  /* 상태 칩은 두 보기 모두의 머리에 선다 (방향 E2, t-68475) — 관계 탭은 입체로 열리므로, 지금 선
+   * 보기와 입체의 표지를 입은 보기 둘 다에서 칩 묶음이 보이는지 읽는다. */
+  const shown = () => (summary ? getComputedStyle(summary).display !== "none" : false);
+  const wasOrbit = view?.classList.contains("is-orbit") ?? false;
+  seen.summaryShown = shown();
+  view?.classList.add("is-orbit");
+  seen.summaryShownInOrbit = shown();
+  if (!wasOrbit) view?.classList.remove("is-orbit");
+  seen.openedInOrbit = wasOrbit;
   seen.activeMode = view?.querySelector('[data-board-mode][aria-pressed="true"]')?.dataset.boardMode;
 
   // ⌘K — 검색으로. 터미널 위에서는 조용히.
@@ -46584,7 +46313,8 @@ const boardHeader = await page.evaluate(async () => {
 });
 ok(
   "the relations header selects its mode, retains status actions, and ⌘K reaches search",
-  boardHeader.headingSays && boardHeader.groupSpeaks && boardHeader.summaryCount === 3 &&
+  boardHeader.headingSays && boardHeader.groupSpeaks && boardHeader.summaryCount === 5 &&
+    boardHeader.summaryShown && boardHeader.summaryShownInOrbit &&
     boardHeader.activeMode === "graph" &&
     boardHeader.cmdKFocuses && boardHeader.cmdKYieldsToTerm,
   JSON.stringify(boardHeader),
@@ -46737,8 +46467,23 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
   const nodes = [...view.querySelectorAll(".agent-graph-node.is-agent")];
   const childNode = nodes.find((one) => one.dataset.graphKey === `agent:${child.pane}`);
   const parentNode = nodes.find((one) => one.dataset.graphKey === `agent:${parent.pane}`);
-  const project = view.querySelector(".agent-graph-band-head");
-  const workspace = view.querySelector(".agent-graph-node.is-workspace");
+  const thirdNode = nodes.find((one) => one.dataset.graphKey === `agent:${third.pane}`);
+  /* 코디별 줄기 (방향 E2, t-68475): 실행마다 한 열이고, 코디 판이 이 그림에 없는 실행은 실행의
+   * 이름을 단 머리로 선다. 담김은 칩이 말한다 — 프로젝트의 띠와 워크스페이스의 노드는 물러났다. */
+  const runHead = view.querySelector(".agent-graph-team-head.is-run");
+  const chipOf = (node) => {
+    const chip = node?.querySelector(".agent-graph-node-branch");
+    return chip && !chip.hidden ? { said: chip.textContent, tip: chip.dataset.tip ?? "" } : null;
+  };
+  const probeStyle = (dress) => {
+    const probe = document.createElement("span");
+    probe.style.cssText = dress;
+    view.appendChild(probe);
+    const held = getComputedStyle(probe);
+    const read = { color: held.color, fontSize: held.fontSize, fontWeight: held.fontWeight };
+    probe.remove();
+    return read;
+  };
   const seen = {
     run: view.querySelector(".agent-graph-run")?.textContent.trim() ?? "",
     runIcon: view.querySelector(".agent-graph-run use")?.getAttribute("href") ?? "",
@@ -46747,42 +46492,29 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
       workspaces: projects.reduce((sum, one) => sum + one.worktrees.length, 0),
       agents: nodes.length,
       foldedAgents: nodes.filter((one) => one.closest(".is-folded")).length,
-      projectOrder: [...view.querySelectorAll(".agent-graph-band-name strong")]
-        .map((one) => one.textContent),
+      teams: [...view.querySelectorAll(".agent-graph-team")].map((one) => one.dataset.graphPart),
     },
-    projectCounts: [...(project?.querySelectorAll(".agent-graph-count-chip") ?? [])]
-      .map((one) => one.textContent.trim()),
-    workspaceLine: workspace?.querySelector(".agent-graph-node-line")?.textContent ?? "",
-    workspaceTip: workspace?.querySelector(".agent-graph-node-line")?.dataset.tip ?? "",
-    workspaceTitle: workspace?.querySelector(".agent-graph-node-title")?.textContent ?? "",
-    workspaceCount: workspace?.querySelector(".agent-graph-node-meta")?.textContent ?? "",
-    workspaceRail: (() => {
-      if (!workspace) return { width: "", hue: false };
-      const rail = getComputedStyle(workspace, "::before");
-      const lane = document.createElement("span");
-      lane.style.backgroundColor = "var(--lane)";
-      workspace.appendChild(lane);
-      const want = getComputedStyle(lane).backgroundColor;
-      lane.remove();
-      return { width: rail.width, hue: rail.backgroundColor === want };
-    })(),
-    // A card that waits on the person wears the person's blue (t-67607, the
-    // person's 10-21 pass of draft B; the coordinator's m-68002): the caution
-    // amber stays for the warnings, not for 「확인 필요」.
-    attentionWash: (() => {
+    runHead: {
+      title: runHead?.querySelector(".agent-graph-node-title")?.textContent ?? "",
+      runs: runHead?.querySelector(".agent-graph-node-model")?.textContent ?? "",
+      sum: [...(runHead?.querySelectorAll(".agent-graph-team-sum > li") ?? [])]
+        .map((one) => one.textContent.trim()),
+    },
+    chips: { parent: chipOf(parentNode), child: chipOf(childNode), third: chipOf(thirdNode) },
+    childUnder: childNode?.closest(".agent-graph-spine.is-sub")?.closest(".agent-graph-limb")
+      ?.querySelector(":scope > .agent-graph-node")?.dataset.graphKey ?? "",
+    // 당신 차례는 2px 파랑 고리 하나다(번짐 없음).
+    youRing: (() => {
       if (!parentNode) return false;
-      const probe = document.createElement("span");
-      probe.style.backgroundColor =
-        "color-mix(in srgb, var(--signal-you) 12%, var(--surface-deck))";
-      view.appendChild(probe);
-      const want = getComputedStyle(probe).backgroundColor;
-      probe.remove();
-      return getComputedStyle(parentNode).backgroundColor === want;
+      const want = probeStyle("color: var(--signal-you)").color;
+      const ring = getComputedStyle(parentNode).boxShadow;
+      return ring.includes(want) && ring.includes("2px");
     })(),
     title: childNode?.querySelector(".agent-graph-node-title")?.textContent ?? "",
     status: childNode?.querySelector(".agent-graph-node-status")?.textContent.trim() ?? "",
+    runWord: agentGraphSignalWord("run"),
     model: childNode?.querySelector(".agent-graph-node-head .agent-graph-node-model")?.textContent ?? null,
-    phase: childNode?.querySelector(".agent-card-phase")?.textContent ?? "",
+    phase: childNode?.querySelector(".agent-graph-node-status > .agent-card-phase")?.textContent ?? "",
     message: childNode?.querySelector(".agent-graph-node-message")?.textContent ?? "",
     /* 카드의 활동은 이제 줄 하나와 띠 여덟이다 (t-2374). 줄은 마지막 호출을
      * 문장으로 말하고, 띠는 그 뒤 여덟을 종류로만 눕힌다 — 스물여섯 박자의
@@ -46819,28 +46551,22 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
       const status = childNode?.querySelector(".agent-graph-node-status");
       const activity = childNode?.querySelector(".agent-card-doing");
       const meta = childNode?.querySelector(".agent-card-meta");
-      /* 오르빗 문법의 카드(방향 D)에는 발치가 없다: 제목 · 상태 줄 · 「지금」 셋이 차례로 선다. */
+      /* 줄기의 카드(방향 E2)에는 발치가 없다: 제목 · 상태 줄 · 「지금」 셋이 차례로 선다. 상태의
+       * 표식은 줄기의 마디가 들고, 상태 줄의 것은 열의 머리만 보인다. */
       const tops = [title, status, activity]
         .map((one) => one?.getBoundingClientRect().top ?? 0);
+      const heading = probeStyle("font: var(--type-heading-14)");
+      const statusMark = status?.querySelector(":scope > .agent-graph-signal");
       return {
         tops,
         ordered: tops.every((top, index) => index === 0 || top > tops[index - 1]),
         titleSize: title ? getComputedStyle(title).fontSize : "",
-        /* 제목이 읽는 토큰, 실제 맞춰진 배율로 (t-4145). 여기 서 있던 것은
-         * 「13px」이었고, 그것은 「이 픽스처가 이 하네스 폭에서 배율 1.0에
-         * 앉는다」는 전제 위의 수였다 — 시안의 작업 레일(172px)이 그림 판을
-         * 808→636px로 좁혀 맞춤이 1.0→0.82로 내려가자 같은 토큰이 10.66px가
-         * 되었다(2레인 그림 775px, 여유는 33px뿐이었다). 사다리 계약은 배율마다
-         * boardFitRamp가 재고, 여기서 지키는 것은 「제목이 그 토큰을 읽는다」다:
-         * 기대값은 `--text-sm` × `--agent-graph-zoom`을 `--agent-graph-text-floor-title`로
-         * 받친 수이고, 어느 수도 여기 적지 않는다. */
-        titleWanted: (() => {
-          const surface = getComputedStyle(view.querySelector(".agent-graph-surface"));
-          const read = (name) => Number.parseFloat(surface.getPropertyValue(name));
-          return Math.max(read("--agent-graph-text-floor-title"), read("--text-sm") * read("--agent-graph-zoom"));
-        })(),
+        titleWanted: heading.fontSize,
         titleWeight: title ? getComputedStyle(title).fontWeight : "",
-        stateMark: status?.querySelector(".agent-graph-node-state") !== null,
+        weightWanted: heading.fontWeight,
+        jointMark: childNode?.parentElement
+          ?.querySelector(":scope > .agent-graph-joint > .agent-graph-signal.is-run") !== null,
+        statusMarkFolded: statusMark ? getComputedStyle(statusMark).display === "none" : false,
         statusHasModel: status?.querySelector(".agent-card-model, .agent-graph-node-model") !== null,
         foot: meta !== null,
         vendorSaid: childNode?.querySelector(".agent-graph-node-icon")?.getAttribute("aria-label") ?? "",
@@ -46852,23 +46578,13 @@ const boardOntologyPromise = page.evaluate(async ({ capture, filePanel }) => {
     legendNodes: view.querySelectorAll(".agent-graph-legend-list.is-nodes li").length,
     legendRelations: view.querySelectorAll(".agent-graph-legend-list.is-relations li").length,
     legendStates: view.querySelectorAll(".agent-graph-legend-list.is-states li").length,
-    /* 대기 중도 사이드바의 그 토큰을 입는다 (t-1853).
-     *
-     * 다섯 중 이것만 `--edge-mark`였다 — 사이드바의 대기 중은
-     * `--ink-mist`이므로(`.workspace-board-card-state.is-idle`) 그것은 보드가
-     * 혼자 만든 상태 색이고, 온톨로지가 금지한 바로 그것이다. 픽셀로도
-     * 걸렸다: 찍힌 그림에서 이 6px 고리의 가장 진한 픽셀이 바탕에 대해
-     * 2.75:1로, 셋 중 유일하게 3:1 밑이었다(나머지 넷 7.06~10.94:1). */
+    /* 쉬는 중도 사이드바의 그 토큰을 입는다 (t-1853) — 빈 원의 테가 `--ink-mist`다. 보드가 혼자
+     * 만든 상태 색은 온톨로지가 금지한 바로 그것이다. */
     idleWearsSidebarToken: (() => {
-      const pip = view.querySelector(
-        ".agent-graph-legend-list.is-states .agent-graph-pip.is-idle");
-      if (!pip) return false;
-      const probe = document.createElement("span");
-      probe.style.color = "var(--ink-mist)";
-      view.appendChild(probe);
-      const want = getComputedStyle(probe).color;
-      probe.remove();
-      return getComputedStyle(pip).borderTopColor === want;
+      const mark = view.querySelector(
+        ".agent-graph-legend-list.is-states .agent-graph-signal.is-idle");
+      if (!mark) return false;
+      return getComputedStyle(mark).boxShadow.includes(probeStyle("color: var(--ink-mist)").color);
     })(),
   };
   childNode?.click();
@@ -46948,28 +46664,29 @@ if (captureAgentBoard) {
 }
 const boardOntologyUx = await boardOntologyPromise;
 ok(
-  "the agent board speaks one ontology from header through cards, timeline and legend",
+  "the agent board speaks one ontology from header through columns, cards, timeline and legend",
   boardOntologyUx.run.includes("런") &&
     boardOntologyUx.run.includes("2") && boardOntologyUx.runIcon === "#i-orbit" &&
-    boardOntologyUx.projectCounts.some((one) => one.includes("3")) &&
-    boardOntologyUx.projectCounts.some((one) => one.includes("2")) &&
     boardOntologyUx.density.projects === 5 && boardOntologyUx.density.workspaces === 22 &&
     boardOntologyUx.density.agents === 3 && boardOntologyUx.density.foldedAgents === 0 &&
-    boardOntologyUx.density.projectOrder.slice(0, 2).join(",") === "zerocode,zeta" &&
-    // 카드가 제 브랜치를 두 번 말하지 않는다 (t-1853): 이름줄이 이미 브랜치이므로
-    // 그 아래 줄은 조상만 말하고, `branch ← base` 전문은 툴팁이 든다.
-    boardOntologyUx.workspaceTitle === "wt/t-1421/agent-board" &&
-    boardOntologyUx.workspaceLine === "← main" &&
-    boardOntologyUx.workspaceTip === "wt/t-1421/agent-board ← main" &&
-    boardOntologyUx.workspaceCount.includes("2") &&
-    boardOntologyUx.workspaceRail.width === "3px" && boardOntologyUx.workspaceRail.hue &&
-    boardOntologyUx.attentionWash &&
+    // 실행마다 한 열, 당신 차례가 선 열이 먼저 (방향 E2).
+    boardOntologyUx.density.teams.join(",") === "team:team:run:run-1421,team:team:run:run-1422" &&
+    boardOntologyUx.runHead.title.includes("run-1421") && boardOntologyUx.runHead.runs === "run-1421" &&
+    boardOntologyUx.runHead.sum.some((one) => one.includes("2")) &&
+    // 카드가 제 브랜치를 두 번 말하지 않는다 (t-1853): 칩은 이름만, `branch ← base` 전문은 툴팁이
+    // 든다. 부모와 같은 워크스페이스에 선 자식은 칩을 다시 들지 않는다.
+    boardOntologyUx.chips.parent?.said === "wt/t-1421/agent-board" &&
+    boardOntologyUx.chips.parent?.tip === "wt/t-1421/agent-board ← main" &&
+    boardOntologyUx.chips.child === null && boardOntologyUx.chips.third?.said === "review" &&
+    boardOntologyUx.childUnder === "agent:term:14210" &&
+    boardOntologyUx.youRing &&
     boardOntologyUx.title === "Implement the board UX" &&
-    boardOntologyUx.status.includes("작업 중") &&
+    boardOntologyUx.status.includes(boardOntologyUx.runWord) &&
     boardOntologyUx.hierarchy.ordered &&
-    Math.abs(Number.parseFloat(boardOntologyUx.hierarchy.titleSize) - boardOntologyUx.hierarchy.titleWanted) < 0.05 &&
-    boardOntologyUx.hierarchy.titleWeight === "600" &&
-    boardOntologyUx.hierarchy.stateMark && !boardOntologyUx.hierarchy.statusHasModel &&
+    boardOntologyUx.hierarchy.titleSize === boardOntologyUx.hierarchy.titleWanted &&
+    boardOntologyUx.hierarchy.titleWeight === boardOntologyUx.hierarchy.weightWanted &&
+    boardOntologyUx.hierarchy.jointMark && boardOntologyUx.hierarchy.statusMarkFolded &&
+    !boardOntologyUx.hierarchy.statusHasModel &&
     !boardOntologyUx.hierarchy.foot &&
     // 벤더는 타일이 말한다(읽는 이에게도 마우스에도). 이 판은 `paneModels`에 없으므로
     // 첫 줄의 모델 칸은 비어 물러난다 — 벤더 이름으로 채우면 타일과 같은 말을 두 번 한다.
@@ -46990,8 +46707,8 @@ ok(
     boardOntologyUx.cardTrail.shellCharacters === 0 &&
     boardOntologyUx.cardTrail.wordCap <= 3 && boardOntologyUx.cardTrail.rawTipKept &&
     boardOntologyUx.repeat === "3" &&
-    boardOntologyUx.legendNodes === 3 && boardOntologyUx.legendRelations === 2 &&
-    boardOntologyUx.legendStates === 5 && boardOntologyUx.idleWearsSidebarToken &&
+    boardOntologyUx.legendNodes === 3 && boardOntologyUx.legendRelations === 1 &&
+    boardOntologyUx.legendStates === 6 && boardOntologyUx.idleWearsSidebarToken &&
     boardOntologyUx.inspectorTitle === "Implement the board UX" &&
     boardOntologyUx.inspectorId.includes("term:14211") &&
     boardOntologyUx.breadcrumb.includes("zerocode") &&
@@ -47005,21 +46722,16 @@ ok(
 );
 if (captureAgentBoard && captureAgentBoardOnly) return;
 
-/* 폭에 맞고, 낱말은 그림과 함께 줄어든다 (t-1853).
+/* 폭에 맞고, 낱말은 한 벌의 사다리다 (t-1853 → 방향 E2, t-68475).
  *
- * 두 가지가 여기서 갈린다.
+ * ① **긴 그림은 작은 그림이 아니다.** 코디별 줄기의 열은 판의 폭에 맞춰 접히고(760px
+ * 밑에서는 한 열로 쌓인다), 카드가 늘면 줄기가 아래로 자란다 — 가로로 넘치는 일이 없고
+ * 세로는 스크롤의 축이다. 방향 D의 저절로 앉는 맞춤(배율)이 카드가 늘 때마다 그림을 눌러
+ * 찌그러뜨리던 일은 그래서 카드 그림에서 물러났다.
  *
- * ① **긴 그림은 작은 그림이 아니다.** 저절로 앉는 맞춤이 폭과 높이 중 작은
- * 비율을 골랐기 때문에, 카드가 늘어나 그림이 길어지는 것만으로 배율이 바닥까지
- * 눌렸다 — 실측(1440×900, 파일 패널 접음): 에이전트 둘이면 100%, 같은 세 열에
- * 스무 개를 쌓으면 75%. 세로는 스크롤이 있는 축이고 가로는 없다: 오른쪽으로
- * 잘려 나가는 것은 이 온톨로지의 한 층(하위 에이전트)이고 아래로 이어지는 것은
- * 그냥 더 많은 에이전트다. 그래서 맞춤이 나누는 것은 폭이고, 행이 늘어난 것만으로
- * 배율이 움직이면 안 된다.
- *
- * ② **낱말은 한 벌의 사다리다.** 카드의 제목·상태줄은 13·11px로 굳어 있었고
- * 띠 제목만 배율을 따라 줄었다 — 같은 화면의 두 제목이 서로 다른 크기가 되고,
- * 축소가 사는 것은 화면이 아니라 말줄임표다. 두 제목은 같은 토큰을 읽는다. */
+ * ② **낱말은 한 벌의 사다리다.** 열의 머리는 `--type-heading-16`, 줄기의 카드는
+ * `--type-heading-14` — 둘 다 토큰을 읽고, 입체의 배율이 카드의 글자를 움직이지 않는다. 칩(워크트리·가지)은 제 줄 안에 온전히 선다 —
+ * 꼬리가 이름이고 머리가 과제이므로 잘린 칩은 같은 과제의 워크스페이스 둘을 가르지 못한다. */
 const boardFitRamp = await page.evaluate(async () => {
   const settle = () => new Promise((done) => setTimeout(done, 120));
   const heldProjects = projects;
@@ -47032,12 +46744,10 @@ const boardFitRamp = await page.evaluate(async () => {
   const scroll = view.querySelector(".agent-graph-scroll");
   const aside = document.getElementById("toggle-aside");
   const asideWasPressed = aside?.getAttribute("aria-pressed") === "true";
-  // 보드가 주인공인 판. 파일 패널은 이 그림의 일부가 아니고, 그림이 설계된
-  // 폭(세 열 775px)을 재려면 그 폭이 실제로 있어야 한다.
+  // 보드가 주인공인 판. 파일 패널은 이 그림의 일부가 아니다.
   if (!asideWasPressed) aside?.click();
   /* 접힘은 전환(`--panel-fold-duration`, 110ms)이다. 기다리는 것은 벽시계가
-   * 아니라 그 효과 — 판의 폭이 세 프레임 연속 같아지는 것. 120ms 타이머는
-   * 그 전환에 10ms 여유였고, 부하 든 레인에서 그 여유는 없다. */
+   * 아니라 그 효과 — 판의 폭이 세 프레임 연속 같아지는 것. */
   for (let last = -1, still = 0, frames = 0; frames < 120 && still < 3; frames += 1) {
     await new Promise(requestAnimationFrame);
     still = scroll.clientWidth === last ? still + 1 : 0;
@@ -47058,7 +46768,6 @@ const boardFitRamp = await page.evaluate(async () => {
       is_folder: false,
     }],
   }];
-  const surface = view.querySelector(".agent-graph-surface");
   const card = (index, parent) => ({
     pane: `term:${18530 + index}`,
     agent: "claude",
@@ -47078,16 +46787,13 @@ const boardFitRamp = await page.evaluate(async () => {
       child_count: parent ? 0 : 1,
     },
   });
-  // 두 판 모두 세 열이다 — 하위 에이전트 하나가 늘 서 있으므로 달라지는 것은
-  // 행의 수뿐이고, 그래서 배율이 움직인다면 그것은 높이가 움직인 것이다.
-  const paint = async (rows, { deep = false } = {}) => {
-    const cards = [card(0), card(1, "term:18530")];
-    // 넷째 레인을 세우는 손자 하나. 밀도의 바닥은 레인이 넷은 되어야 닿는
-    // 자리이므로(아래 참조), 그것을 재는 판만 이것을 청한다.
-    if (deep) cards.push(card(2, "term:18531"));
+  /* 실행 둘: 첫 실행의 열이 자라고(행의 수만 달라진다), 둘째 실행은 카드 하나다. 그래서 열이
+   * 둘 서는 폭과 한 열로 쌓이는 폭을 같은 그림으로 잰다. */
+  const paint = async (rows) => {
+    const cards = [card(0), card(1, "term:18530"), card(2, "term:18531")];
     for (let index = cards.length; index < rows; index += 1) cards.push(card(index));
-    const places = new Map(cards.map((one) =>
-      [one.pane, { checkout, host: "local", hostName: "", run: "run-1853" }]));
+    const places = new Map(cards.map((one, index) =>
+      [one.pane, { checkout, host: "local", hostName: "", run: index === rows - 1 ? "run-1854" : "run-1853" }]));
     agentGraphZoom = 1;
     agentGraphZoomTaken = false;
     paintAgentGraph(
@@ -47097,58 +46803,65 @@ const boardFitRamp = await page.evaluate(async () => {
     await window.__PAINTED__();
     await window.__PAINTED__();
     await settle();
-    /* 그리고 브랜치는 제 카드 안에 온전히 선다. 꼬리가 이름이고 머리가
-     * 과제이므로 잘린 브랜치는 같은 과제의 워크스페이스 둘을 구별해 주지
-     * 못한다 — 두 줄이 그 값이다. */
-    const branch = view.querySelector(
-      ".agent-graph-node.is-workspace .agent-graph-node-title");
+    const chip = view.querySelector(".agent-graph-node-branch:not([hidden]) .agent-graph-node-branch-name");
+    const titles = [...view.querySelectorAll(".agent-graph-node-title")];
+    const lefts = new Set([...view.querySelectorAll(".agent-graph-team")]
+      .map((one) => Math.round(one.getBoundingClientRect().left)));
     return {
-      zoom: Number.parseFloat(
-        getComputedStyle(surface).getPropertyValue("--agent-graph-zoom")),
+      graph: scroll.clientWidth,
+      teams: view.querySelectorAll(".agent-graph-team").length,
+      columns: lefts.size,
       overWide: Math.round(scroll.scrollWidth - scroll.clientWidth),
       overTall: Math.round(scroll.scrollHeight - scroll.clientHeight),
-      branchWhole: branch !== null
-        && branch.scrollWidth <= branch.clientWidth + 1
-        && branch.scrollHeight <= branch.clientHeight + 1,
+      chipWhole: chip !== null && chip.scrollWidth <= chip.clientWidth + 1,
+      titleWhole: titles.length > 0 && titles.every((one) => one.scrollWidth <= one.clientWidth + 1),
     };
   };
-  const seen = { short: await paint(2), tall: await paint(20) };
+  /* 하네스의 기본 보드 — 1440 창에서 왼쪽 목록 · 작업 레일 · 곁의 인스펙터를 뺀 그림의 판(약 640px).
+   * 사람이 1440 창에서 보는 폭이고, 시안의 격자(열 340px 둘)가 들지 않아 열이 하나로 선다. 가로로
+   * 넘치지 않고, 칩과 제목은 잘리지 않는다. */
+  const seen = { base: await paint(4) };
 
-  /* 그리고 판이 좁으면, 맞춤은 판이 받은 밀도만큼만 내어놓는다 — 손으로 적은
-   * 0.75에서 멈추던 자리(104px 잘림)를 지나 밀도의 바닥 1/1.55 = 0.65까지
-   * 내려가고, 거기서 카드는 실측 레인인 172px이다.
-   *
-   * 재는 자리가 t-2374에서 옮겨졌다. 예전에는 파일 패널을 도로 펴서 477px을
-   * 만들었지만, 그 폭은 이제 **목록 모드**다 — 한 열로 접힌 그림에 배율은
-   * 뜻이 없으므로 맞춤도 거기서는 물러난다. 그래서 맞춤이 사는 폭 안에서
-   * 바닥에 닿는 판을 짓는다: 레인 넷(워크스페이스 + 에이전트 셋)이면 그림은
-   * 배율 1에서 1074px이고, 720px 판의 앉을 자리 672px은 그 그림의 0.63배라
-   * 맞춤이 바닥 0.65에 걸린다. 레인 셋으로는 700px 위에서 바닥에 닿는 폭이
-   * 아예 없다(0.65 × 776 = 504 → 552px 판이 필요하고 그것은 목록 모드다). */
+  // 열 둘이 설 보드(1440px — 그림의 판 약 920px). 시안의 격자는 판의 폭으로 열의 수를 정한다.
   const heldWidth = view.style.width;
+  const heldMaxWidth = view.style.maxWidth;
+  view.style.width = "1440px";
+  view.style.maxWidth = "1440px";
+  await settle();
+  seen.short = await paint(4);
+  seen.tall = await paint(20);
+
+  // 좁은 판(760px 밑)에서는 열이 한 줄로 쌓이고, 가로로 넘치는 것은 여전히 없다.
   view.style.width = "720px";
   view.style.maxWidth = "720px";
   await settle();
-  seen.narrow = await paint(20, { deep: true });
+  seen.narrow = await paint(20);
   view.style.width = heldWidth;
-  view.style.maxWidth = "";
+  view.style.maxWidth = heldMaxWidth;
   await settle();
 
-  // 사다리. 배율 하나에 크기 하나이고, 두 제목은 같은 크기다.
+  // 사다리. 제목은 토큰이 정하고, 배율은 카드의 글자를 움직이지 않는다.
   const ramp = () => {
-    const node = view.querySelector(".agent-graph-node.is-agent");
-    const read = (selector) => {
+    const read = (node, selector) => {
       const found = node?.querySelector(selector);
       return found ? getComputedStyle(found) : null;
     };
-    const title = read(".agent-graph-node-title");
-    const status = read(".agent-graph-node-status");
-    const band = view.querySelector(".agent-graph-band-name strong");
+    const token = (font) => {
+      const probe = document.createElement("span");
+      probe.style.font = font;
+      view.appendChild(probe);
+      const size = getComputedStyle(probe).fontSize;
+      probe.remove();
+      return size;
+    };
+    const stem = view.querySelector(".agent-graph-limb > .agent-graph-node.is-size-m");
+    const head = view.querySelector(".agent-graph-team-head");
     return {
-      title: title?.fontSize ?? "",
-      weight: title?.fontWeight ?? "",
-      status: status?.fontSize ?? "",
-      band: band ? getComputedStyle(band).fontSize : "",
+      title: read(stem, ".agent-graph-node-title")?.fontSize ?? "",
+      status: read(stem, ".agent-graph-node-status")?.fontSize ?? "",
+      head: read(head, ".agent-graph-node-title")?.fontSize ?? "",
+      titleWanted: token("var(--type-heading-14)"),
+      headWanted: token("var(--type-heading-16)"),
     };
   };
   takeAgentGraphZoom(view, 1);
@@ -47157,9 +46870,6 @@ const boardFitRamp = await page.evaluate(async () => {
   takeAgentGraphZoom(view, 0.6);
   await window.__PAINTED__();
   seen.small = ramp();
-  // The status line's step at full scale, read from the tokens: 2xs is 12px
-  // on the Geist steps the person passed on 10-21 (t-67607), 11px before.
-  seen.statusStep = getComputedStyle(document.documentElement).getPropertyValue("--text-2xs").trim();
 
   agentGraphZoom = heldZoom;
   agentGraphZoomTaken = heldTaken;
@@ -47171,16 +46881,20 @@ const boardFitRamp = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "the board fits the width it has, and one type ramp carries every title",
-  boardFitRamp.short.overWide <= 1 && boardFitRamp.tall.overWide <= 1 &&
-    boardFitRamp.tall.overTall > 0 &&
-    boardFitRamp.short.branchWhole && boardFitRamp.tall.branchWhole &&
-    boardFitRamp.tall.zoom === boardFitRamp.short.zoom &&
-    boardFitRamp.narrow.zoom < 0.75 && boardFitRamp.narrow.zoom >= 0.64 &&
-    boardFitRamp.full.title === "13px" && boardFitRamp.full.weight === "600" &&
-    boardFitRamp.full.status === boardFitRamp.statusStep && boardFitRamp.full.band === "13px" &&
-    boardFitRamp.small.title === "10px" && boardFitRamp.small.status === "9px" &&
-    boardFitRamp.small.band === boardFitRamp.small.title,
+  "the columns fit the width they have, the stem grows downward, and one type ramp carries every title",
+  boardFitRamp.base.columns === 1 && boardFitRamp.base.overWide <= 1 &&
+    boardFitRamp.base.chipWhole && boardFitRamp.base.titleWhole &&
+    boardFitRamp.short.overWide <= 1 && boardFitRamp.tall.overWide <= 1 &&
+    boardFitRamp.narrow.overWide <= 1 && boardFitRamp.tall.overTall > 0 &&
+    boardFitRamp.short.teams === 2 && boardFitRamp.short.columns === 2 &&
+    boardFitRamp.tall.columns === 2 && boardFitRamp.narrow.columns === 1 &&
+    boardFitRamp.short.chipWhole && boardFitRamp.tall.chipWhole &&
+    boardFitRamp.full.title === boardFitRamp.full.titleWanted &&
+    boardFitRamp.full.head === boardFitRamp.full.headWanted &&
+    boardFitRamp.full.title !== boardFitRamp.full.head && boardFitRamp.full.status !== "" &&
+    boardFitRamp.small.title === boardFitRamp.full.title &&
+    boardFitRamp.small.head === boardFitRamp.full.head &&
+    boardFitRamp.small.status === boardFitRamp.full.status,
   JSON.stringify(boardFitRamp),
 );
 

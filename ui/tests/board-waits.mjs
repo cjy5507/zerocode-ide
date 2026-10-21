@@ -11,8 +11,11 @@ export async function installBoardWaits(page) {
       await window.__UNTIL__(() => {
         const views = [...document.querySelectorAll("#board-view, .file-view")]
           .filter((view) => !view.hidden && view.querySelector(".agent-graph-layout"));
+        // The card picture has no fit of its own any more (direction E2,
+        // t-68475): its columns fold to the board's width, so the one frame
+        // left to wait for is the overlay lines' measure.
         return views.length > 0 && views.every((view) => agentGraphModels.has(view)
-          && !agentGraphEdgeFrames.has(view) && !agentGraphFitFrames.has(view))
+          && !agentGraphEdgeFrames.has(view))
           && !agentGraphRefreshing && agentPaintFrame === null
           && !["board_snapshot", "pane_agents", "ledger_agents"].some((name) => window.__IN_FLIGHT__.get(name) > 0);
       }, "board snapshot, paint and graph geometry");
