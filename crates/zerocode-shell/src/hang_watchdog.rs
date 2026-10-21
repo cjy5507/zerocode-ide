@@ -308,10 +308,11 @@ impl Monitor {
             }
         }
         if let Some(ms) = tick.hang {
-            let scope = if answered.is_none() {
-                crate::crumbs::main_scope()
+            let (scope, io) = if answered.is_none() {
+                (crate::crumbs::main_scope(), main_io_now(wall_ms()))
             } else {
-                "answered_before_observation".to_string()
+                let word = "answered_before_observation".to_string();
+                (word.clone(), word)
             };
             let command = crate::crumbs::last_command();
             // The last view census, so a mouse-move stack (AppKit re-collects
@@ -324,11 +325,16 @@ impl Monitor {
                 "hang",
                 format_args!("ms={ms} main_scope={scope} last_command={command}{census}"),
             );
+            crate::crumbs::record("hang_io", format_args!("{io}"));
             let state = app.state::<crate::AppState>();
             crate::note_window_event(
                 state.local_data_root(),
                 &format!("hang: {ms}ms main_scope={scope} last_command={command}{census}"),
             );
+            // The disk work the main thread stands in, if any (t-67102): the
+            // 20 255 ms of 2026-10-21 had to be traced to a settings read by
+            // hand, from the command's name alone.
+            crate::note_window_event(state.local_data_root(), &format!("hang io: {io}"));
             let sample = if answered.is_none() {
                 crate::hang_sample::sample_main_thread()
             } else {
@@ -389,6 +395,15 @@ pub(crate) fn event_name(event: &tauri::RunEvent) -> &'static str {
         },
         _ => "event_loop_callback",
     }
+}
+
+/// The main thread's disk work for a hang line: the function and the file it
+/// stands in and for how long, or `none`.
+fn main_io_now(now_ms: u64) -> String {
+    crate::crumbs::main_io().map_or_else(
+        || "none".to_string(),
+        |io| format!("{} for {}ms", io.line, now_ms.saturating_sub(io.at_ms)),
+    )
 }
 
 /// Wall-clock milliseconds, the unit crumbs and censuses are stamped in.

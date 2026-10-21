@@ -16789,6 +16789,27 @@ fn a_live_settings_snapshot_reports_corruption_before_becoming_healthy() {
     assert!(!command.contains("load_settings(state.settings())"));
 }
 
+/// t-67102: the main thread reads the settings this process last read or
+/// wrote. A read that began before a commit and ends after it must not put
+/// the older revision back over the commit it raced.
+#[test]
+fn remembered_settings_never_step_back_to_an_older_revision() {
+    let directory = tempfile::tempdir().expect("settings sandbox");
+    let repository = settings::SettingsRepository::new(directory.path());
+    let older = load_settings_for_boot(&repository);
+    let newer = mutate_settings(&repository, |document| {
+        document.theme = "dark".into();
+        Ok(())
+    })
+    .expect("a newer commit");
+    assert!(newer.revision > older.revision);
+
+    remember(&repository, older);
+    let held = remembered_settings(&repository);
+    assert_eq!(held.revision, newer.revision);
+    assert_eq!(held.document.theme, "dark");
+}
+
 #[test]
 fn deleting_canonical_documents_never_reimports_consumed_legacy_values() {
     let directory = tempfile::tempdir().expect("settings sandbox");
