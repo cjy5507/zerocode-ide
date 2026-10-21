@@ -3095,6 +3095,44 @@ class StatefulBackend {
         this.zoSettings.smart = smart;
         return this.typesafeSettings();
       }
+      case "list_custom_decisions":
+        this.customDecisions ??= { decisions: [], trash: [], folders: [], everywhere: false };
+        return clone(this.customDecisions);
+      case "check_custom_decision":
+        return { refusals: [], version: JSON.stringify(args.draft), questions: { [args.draft.id ?? "draft"]: args.draft.question }, line: args.draft.name };
+      case "save_custom_decision": {
+        this.customDecisions ??= { decisions: [], trash: [], folders: [], everywhere: false };
+        const store = this.customDecisions;
+        const kept = store.decisions.find((one) => one.draft.id === args.draft.id);
+        const version = JSON.stringify(args.draft);
+        if (kept) {
+          Object.assign(kept, { draft: clone(args.draft), version });
+        } else {
+          const recording = JEV_SEATS.find((seat) => seat.setting === "customDecisions").modes.split(" ")[1];
+          const id = `cd-${String(store.decisions.length + store.trash.length + 1).padStart(8, "0")}`;
+          store.decisions.push({ mode: recording, version, createdAt: "", updatedAt: "", draft: { ...clone(args.draft), id } });
+        }
+        return clone(store);
+      }
+      case "set_custom_decision_mode": {
+        const store = this.customDecisions;
+        store.decisions.find((one) => one.draft.id === args.id).mode = args.mode;
+        return clone(store);
+      }
+      case "delete_custom_decision": {
+        const store = this.customDecisions;
+        const at = store.decisions.findIndex((one) => one.draft.id === args.id);
+        const [gone] = store.decisions.splice(at, 1);
+        store.trash.push({ id: args.id, name: gone.draft.name, deletedAt: "", kept: gone });
+        return clone(store);
+      }
+      case "restore_custom_decision": {
+        const store = this.customDecisions;
+        const trashed = store.trash.find((one) => one.id === args.id);
+        store.trash = store.trash.filter((one) => one !== trashed);
+        store.decisions.push(trashed.kept);
+        return clone(store);
+      }
       case "set_judgment_provider": {
         if (args.expectedProviderIdentity && args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (this.typesafeSetFailure) throw { kind: "failed", message: "fixture refused the model" };
