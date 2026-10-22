@@ -1603,7 +1603,7 @@
                선택과 같은 묶음(taskBoardModel)에서 같은 답을 내고, 목록 티어
                아래에서는 접힌다(범위 선택은 툴바에 남으므로 목적지는 사라지지
                않는다). 항목은 `paintAgentRelationsControls`가 키로 맞춘다. -->
-          <aside class="agent-relations-rail" data-i18n-aria="board.graph.scope" aria-label="범위">
+          <aside class="agent-relations-rail" id="agent-relations-rail" data-i18n-aria="board.graph.scope" aria-label="범위">
             <p class="agent-relations-rail-caption" data-i18n="board.graph.scope">범위</p>
             <div class="agent-relations-rail-list"></div>
           </aside>
@@ -1697,6 +1697,17 @@
           <!-- 시안의 툴바 (t-4145): 범위 · 관계 종류 · 검색 · 카드 상세도. 작업
                보기에서도 서서 검색을 들고, 관계에만 있는 셋은 접힌다. -->
           <div class="agent-relations-toolbar" data-i18n-aria="board.graph.scope" aria-label="관계 범위">
+            <!-- 범위 목록(레일)의 여닫이 (t-69978). 카드 보기에서 인스펙터가 곁에 선 판이 코디 두 열을
+                 담지 못하면 레일이 저절로 접히고, 이 단추가 다시 편다 — 사람이 누른 쪽이 그 뒤로 이긴다
+                 (`setAgentGraphRailChoice`). 레일이 접혀 있거나 접는 폭에서만 선다. 키는 이 단추의
+                 것이다(`data-keyboard-owner`): 아니면 창이 Enter·Space를 터미널의 입력칸으로 가져가
+                 단추가 눌리지 않는다(`rearmKeySink`). -->
+            <button class="icon-btn agent-relations-rail-toggle" type="button" hidden data-keyboard-owner="true"
+                    aria-expanded="true" aria-controls="agent-relations-rail"
+                    data-i18n-aria="board.graph.railToggle" aria-label="범위 목록"
+                    data-i18n-title="board.graph.railToggle" data-tip="범위 목록">
+              <svg class="icon" aria-hidden="true"><use href="#i-panel"></use></svg>
+            </button>
             <label class="agent-graph-scope-label">
               <svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>
               <span class="sr" data-i18n="board.graph.scope">범위</span>
