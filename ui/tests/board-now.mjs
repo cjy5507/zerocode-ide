@@ -133,7 +133,7 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
     batch: 1, notices: 1,
   }];
   const stages = ["pending", "ready", "dispatched", "reported", "verified", "merged", "deployed", "gate", "blocked",
-    "stale", "failed", "unreviewable", "nothing_to_land", "unknown", "closed"];
+    "stale", "failed", "unreviewable", "waived", "nothing_to_land", "unknown", "closed"];
   window.__DESK__ = {
     revision: 1,
     runs: ledger ? [{ run, name: "시안 B", seat: true }] : [],
@@ -317,7 +317,7 @@ async function fullBoard(page) {
 
 /* The draft's scene, with the facts the desk reads on its slow beat asked at once: the lane's
  * status, the schedule's reading, the workers' checkouts and their models. */
-async function draftScene(page, options = {}) {
+export async function draftScene(page, options = {}) {
   await page.evaluate(draftBoardOverlay, options);
   await page.evaluate(async () => {
     await askReleaseStatus();

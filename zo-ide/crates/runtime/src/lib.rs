@@ -163,7 +163,7 @@ pub use conversation::{
 };
 pub use conversation::{
     auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, bash_result_exited_zero, MICROCOMPACT_MIN_OUTPUT_BYTES,
-    detect_check_command, format_kilo_tokens,
+    detect_check_command, format_kilo_tokens, COMPACTION_SUMMARY_DEADLINE,
     declare_attendance, declare_classifier_fallback, declared_attendance,
     declared_classifier_fallback, env_deadline_extension, env_turn_budgets,
     final_assistant_text, read_only_bash_allow_rules, ClassifierFallback,

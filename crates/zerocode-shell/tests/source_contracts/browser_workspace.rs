@@ -460,6 +460,13 @@ fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
             "(\"screenshot\", _) =>",
             "automate_fill(",
         ),
+        // A key press (t-70755): a key or a selector it cannot use is
+        // refused unsent; the page's answer is the executor's to judge.
+        (
+            "(\"press\", 3) | (\"press\", 4) =>",
+            "(\"tabs\", 1) =>",
+            "automate_press(",
+        ),
     ] {
         let arm = arm(dispatch, opens, next);
         let sent = arm.find(sent).unwrap_or_else(|| panic!("{opens}"));
@@ -857,7 +864,9 @@ fn a_pages_unsent_refusals_come_before_its_first_event() {
         .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
         .collect();
     assert!(
-        unsent.contains(&"element_obscured") && unsent.len() == 12,
+        unsent.contains(&"element_obscured")
+            && unsent.contains(&"point_outside")
+            && unsent.len() == 13,
         "{unsent:?}"
     );
     for (opens, sends) in [
@@ -880,6 +889,16 @@ fn a_pages_unsent_refusals_come_before_its_first_event() {
         (
             "const BROWSER_SCROLL_BODY: &str",
             &["scrollIntoView(", "scrollTo(", "scrollBy("][..],
+        ),
+        // A key press and a point press (t-70755): a key's first event is its
+        // keydown or the focus its selector asks; a point's, its pointer.
+        (
+            "pub(crate) const KEY_PRESS_BODY: &str",
+            &["dispatchEvent(", ".focus("][..],
+        ),
+        (
+            "pub(crate) const POINT_PRESS_BODY: &str",
+            &["dispatchEvent(", ".focus(", ".blur("][..],
         ),
     ] {
         let script = raw_body(BROWSER, opens);
@@ -925,9 +944,18 @@ fn an_executor_says_unsent_for_what_it_refused_before_sending() {
         stale.contains("return Err(BrowserRefusal::Unsent("),
         "{stale}"
     );
+    // The typing's keys and a key press (t-70755) are held at a password
+    // field by one helper.
     let typed = block_after(BROWSER, "pub(crate) fn typed_report(");
-    let held = typed.find("SecretEntryVerdict::PersonsEntry {").unwrap();
-    assert!(typed[held..].starts_with("SecretEntryVerdict::PersonsEntry {\n            return Err(BrowserRefusal::Unsent(page_failure("));
+    let pressed = block_after(BROWSER, "pub(crate) fn pressed_report(");
+    assert!(
+        typed.contains("held_at_secret_field(&value, ChordWrites::Character)?;")
+            && pressed.contains("held_at_secret_field(&value, writes)?;"),
+        "{typed}\n{pressed}"
+    );
+    let holding = block_after(BROWSER, "fn held_at_secret_field(");
+    let held = holding.find("SecretEntryVerdict::PersonsEntry {").unwrap();
+    assert!(holding[held..].starts_with("SecretEntryVerdict::PersonsEntry {\n        return Err(BrowserRefusal::Unsent(page_failure("));
     for executor in [
         "async fn press(",
         "pub(crate) async fn automate_type(",

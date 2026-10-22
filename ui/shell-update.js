@@ -12,9 +12,10 @@
  * The surfaces are the t-3005 ones: the same sticky toast shape (once per
  * version, in window memory), the same General-page notice
  * (`paintUpdateNotice`, which reads `updateReadyVersion()`), and the same
- * one restart road — `restartToInstall` invokes `relaunch_window`, where the
- * staged bundle is swapped in right before the restart. Nothing here
- * restarts anything by itself.
+ * one restart road — `restartToInstall` asks the census and goes by the way
+ * out's notice, and the backend reaches `relaunch_window` when the notice
+ * ends (t-67936), where the staged bundle is swapped in right before the
+ * restart. Nothing here restarts anything by itself.
  *
  * Numbers are the table's: the megabyte the progress line counts in, and the
  * knock words the backend's `Knock` enum spells. */
@@ -53,6 +54,7 @@ function applyUpdateSettingsSnapshot(snapshot, first) {
   paintUpdatePane();
   updateAmbient.sync();
   armUpdateBootCheck();
+  if (first) void sayRestartBack();
 }
 
 /* One knock a minute after boot (the table's `check_after_boot_secs`), then
@@ -128,18 +130,24 @@ function restartToInstall() {
  *
  * Every restart door asks the one census before it goes (`busy_census`, the
  * census `release_status` answers too). Nothing a restart would cut: the
- * door restarts at once through the one restart road, naming itself.
- * Anything busy — or a census nobody could read — asks: 「끝나면 다시 시작」
- * hands the wait to the backend's beat, which goes at the first gap
- * (nothing running under any worker's pane, nothing unread), and 「지금 다시
- * 시작」 goes now. The wait stands as one line with its own 「취소」, said
- * again whenever the beat says it moved; a wait the table ran out of asks
- * again. Every number — the counts, the minutes, the patience — is the
- * backend's; this file keeps no clock. */
+ * door goes unasked, naming itself. Anything busy — or a census nobody
+ * could read — asks: 「끝나면 다시 시작」 hands the wait to the backend's
+ * beat, which goes at the first gap (nothing running under any worker's
+ * pane, nothing unread), and 「지금 다시 시작」 goes now. The wait stands as
+ * one line with its own 「취소」, said again whenever the beat says it moved;
+ * a wait the table ran out of asks again. Every number — the counts, the
+ * minutes, the patience — is the backend's; this file keeps no clock.
+ *
+ * And no door restarts the window by itself (t-67936): every one goes by the
+ * way out's `leave_now`, whose restart stands its notice first — the line
+ * below — and the beat takes the one restart road when the notice ends. Each
+ * says whose hand pressed it (`handSaid`), read before the census's await
+ * takes the event away. */
 const EXIT_WAIT_MARK = "exit-wait";
 let exitWaitToast = null;
 
 async function askBeforeRestart(door) {
+  const by = handSaid();
   let census = null;
   try {
     census = await invoke("busy_census", { road: "restart", door });
@@ -147,7 +155,11 @@ async function askBeforeRestart(door) {
     census = null;
   }
   if (census && !census.busy?.busy) {
-    invoke("relaunch_window", { door }).catch(showError);
+    try {
+      standExitNotice(await invoke("leave_now", { road: "restart", door, by, unasked: true }));
+    } catch (error) {
+      showError(error);
+    }
     return;
   }
   await askLeaving(census ?? { road: "restart", door, busy: null, waitMin: null }, "");
@@ -201,14 +213,20 @@ async function askLeaving(census, lead) {
     confirm: words.confirm,
     deny: words.deny,
   });
+  // The hand that answered, just after its own press (t-67936).
+  const by = handSaid();
   if (answer === true) {
     try {
-      standExitWait(await invoke("leave_when_idle", { road, door }));
+      standExitWait(await invoke("leave_when_idle", { road, door, by }));
     } catch (error) {
       showError(error);
     }
   } else if (answer === false) {
-    invoke("leave_now", { road, door }).catch(showError);
+    try {
+      standExitNotice(await invoke("leave_now", { road, door, by }));
+    } catch (error) {
+      showError(error);
+    }
   } else if (road === "close") {
     // The close waits on this question; 「취소」 keeps the window.
     invoke("leave_cancel").catch(() => {});
@@ -259,13 +277,133 @@ function cancelExitWait() {
 
 listen("exit:waiting", (event) => standExitWait(event?.payload));
 
+/* ---- 다시 시작 예고 (t-67936) ----
+ *
+ * A restart decided — a door pressed, 「지금 다시 시작」, or a wait that found
+ * its gap — stands one line with its own 「취소」 before it goes:
+ * 「10초 뒤 1.1.86(으)로 다시 시작합니다」, said again in place each whole
+ * second the beat counts, led by 「입력 중이라 미룹니다」 while the person's
+ * typing holds it. On 2026-10-21 the window went twice by this road with no
+ * word at all, and the person read it as 「갑자기 꺼짐」. The seconds and the
+ * hold are the backend's (`exit_runtime`'s table); this file reports the
+ * person's keys while the line stands (`leave_hold`) and keeps no clock. */
+const EXIT_NOTICE_MARK = "exit-notice";
+let exitNoticeToast = null;
+/* Whether a key has been reported since the beat last said the line — one
+ * report a line is all the backend's hold needs. */
+let exitNoticeKeyed = false;
+
+/* The build a restart brings, as the lane's notice or the feed's 「준비됨」
+ * names it — the version, else the lane's sha — or nothing when neither
+ * stands: the window material's relaunch brings the build it runs. */
+function restartBrings() {
+  const app = releaseNotice?.app ?? null;
+  if (app) return (app.change === "version" ? app.installed_version : shortSha(app.installed)) || "";
+  return updateReadyVersion() ?? "";
+}
+
+function exitNoticeWords(line) {
+  const brings = restartBrings();
+  const when = brings
+    ? t("exit.noticeTo", "{{seconds}}초 뒤 {{version}}(으)로 다시 시작합니다", {
+        seconds: line.seconds,
+        version: brings,
+      })
+    : t("exit.notice", "{{seconds}}초 뒤 다시 시작합니다", { seconds: line.seconds });
+  return line.held ? `${t("exit.noticeHeld", "입력 중이라 미룹니다")} · ${when}` : when;
+}
+
+/* One line stands for the notice, said again in place — and the person's
+ * last key reported with each saying, so a word typed just before the
+ * notice holds it too. A road that went at once (`null`) stands nothing. */
+function standExitNotice(line) {
+  if (!line || typeof line !== "object") return;
+  dropExitWait();
+  const words = exitNoticeWords(line);
+  const node = exitNoticeToast?.isConnected ? exitNoticeToast.querySelector(".toast-text") : null;
+  if (node) {
+    node.textContent = words;
+  } else {
+    exitNoticeToast = toast(words, "", {
+      sticky: true,
+      action: { label: t("app.cancel", "취소"), run: cancelExitNotice },
+    });
+    if (exitNoticeToast) exitNoticeToast.dataset.notice = EXIT_NOTICE_MARK;
+  }
+  exitNoticeKeyed = false;
+  holdExitNotice(performance.now() - handKeyedAt);
+}
+
+/* The person's hands moved `agoMs` ago: the backend holds the notice until
+ * they have rested. A key that never went down says nothing. */
+function holdExitNotice(agoMs) {
+  if (!Number.isFinite(agoMs)) return;
+  invoke("leave_hold", { agoMs: Math.max(0, Math.round(agoMs)) }).catch(() => {});
+}
+
+function dropExitNotice() {
+  const note = exitNoticeToast;
+  exitNoticeToast = null;
+  if (note?.isConnected) closing(note, () => note.remove());
+}
+
+function cancelExitNotice() {
+  dropExitNotice();
+  invoke("leave_cancel").catch(() => {});
+}
+
+listen("exit:notice", (event) => standExitNotice(event?.payload));
+
+/* A key the person presses while the notice stands holds it — anywhere in
+ * the window: a pane, a field, a conversation's composer. */
+window.addEventListener("keydown", (event) => {
+  if (!event.isTrusted || exitNoticeKeyed || !exitNoticeToast?.isConnected) return;
+  exitNoticeKeyed = true;
+  holdExitNotice(0);
+}, { capture: true });
+
+/* ---- 다시 시작한 뒤 (t-67936) ----
+ *
+ * The window a restart started says so once, as it comes up: which build it
+ * came back as, and — when the build moved — that an update was why. The
+ * note is the backend's, left on the restart road and taken once by the main
+ * window (`boot_after_restart`); a start that was no restart says nothing. */
+const RESTART_BACK_MARK = "restart-back";
+
+async function sayRestartBack() {
+  if (isPopout) return;
+  let back = null;
+  try {
+    back = await invoke("boot_after_restart");
+  } catch {
+    back = null;
+  }
+  if (!back || typeof back !== "object") return;
+  const note = toast(restartBackWords(back), "", {
+    sticky: true,
+    action: { label: t("app.close", "닫기"), run: () => closing(note, () => note.remove()) },
+  });
+  if (note) note.dataset.notice = RESTART_BACK_MARK;
+}
+
+function restartBackWords(back) {
+  if (back.version !== back.fromVersion) {
+    return t("exit.backTo", "{{version}}(으)로 다시 시작했습니다 (업데이트)", { version: back.version });
+  }
+  if (back.commit !== back.fromCommit) {
+    return t("exit.backToBuild", "새 빌드({{sha}})로 다시 시작했습니다 (업데이트)", { sha: shortSha(back.commit) });
+  }
+  return t("exit.back", "다시 시작했습니다");
+}
+
 /* The window's close held by the backend because it would cut work: the
- * same question, in the close's words. A restart's wait standing before it
- * is gone — the backend put the close's question in its place. */
+ * same question, in the close's words. A restart's wait or notice standing
+ * before it is gone — the backend put the close's question in its place. */
 listen("exit:ask", (event) => {
   const census = event?.payload;
   if (!census || typeof census !== "object") return;
   dropExitWait();
+  dropExitNotice();
   void askLeaving(census, "");
 });
 

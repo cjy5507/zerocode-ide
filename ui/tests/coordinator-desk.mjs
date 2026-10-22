@@ -154,7 +154,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   const stages = [
     ["pending", 6], ["ready", 20], ["dispatched", 5], ["reported", 6], ["verified", 0],
     ["merged", 18], ["deployed", 0], ["gate", 2], ["blocked", 2], ["stale", 0], ["failed", 1], ["unreviewable", 0],
-    ["nothing_to_land", 0], ["unknown", 0], ["closed", 0],
+    ["waived", 0], ["nothing_to_land", 0], ["unknown", 0], ["closed", 0],
   ];
   const head = (n) => n.toString(16).padStart(7, "0").repeat(6).slice(0, 40);
   const progressOf = (stage, n) => stage === "reported"
@@ -963,7 +963,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       todayRead.totalsShown && todayRead.totalsHead === "누적" &&
       todayRead.totalsNote === "누적 수는 첫 화면에서 이리로 옮겼습니다 — 지금 일과 겨루지 않게." &&
       todayRead.totals.join() ===
-        "deployed:배포됨:1,nothing_to_land:완료 — 착지할 것 없음:1,unreviewable:종료 — 검토 자료 없음:0,closed:닫힘:201",
+        "deployed:배포됨:1,unreviewable:종료 — 검토 자료 없음:0,waived:종료 — 검토 생략(사람):0,nothing_to_land:완료 — 착지할 것 없음:1,closed:닫힘:201",
       JSON.stringify(todayRead.totals));
     const historyWidth = page.viewportSize();
     const narrowHistory = {};
@@ -1026,8 +1026,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last — the evidence stage 상태 모름 only when its count is not an exact zero",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,nothing_to_land:0,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,완료 — 착지할 것 없음,닫힘",
+        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,waived:0,nothing_to_land:0,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,종료 — 검토 생략(사람),완료 — 착지할 것 없음,닫힘",
       JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&

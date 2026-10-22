@@ -9356,11 +9356,20 @@ const TAB_GLYPH = {
  * board. A tab holding the coordinator's pane is the coordinator's, whatever
  * else is split into it; any other tab speaks for its one pane. Only the strip
  * leads with the role: everything else that names a tab (a crumb, a sentence)
- * names the work. */
+ * names the work.
+ *
+ * And it counts (t-67936): a tab holding two runs' coordinators reads
+ * 「코디 2 · …」. The tab the 2026-10-21 13:24:35 close took held two
+ * coordinators and read as one; its tip names them (`termTabTip`). */
 function tabStripWords(tab) {
   const label = tabLabel(tab);
   const role = tabRole(tab);
-  return role ? t("agent.role.tab", "{{role}} · {{label}}", { role: paneRoleWord(role), label }) : label;
+  if (!role) return label;
+  const panes = paneLeaves(tab.layout).filter((term) => paneRole(term)?.kind === role.kind).length;
+  const word = panes > 1
+    ? t("agent.role.count", "{{role}} {{n}}", { role: paneRoleWord(role), n: panes })
+    : paneRoleWord(role);
+  return t("agent.role.tab", "{{role}} · {{label}}", { role: word, label });
 }
 
 function tabRole(tab) {

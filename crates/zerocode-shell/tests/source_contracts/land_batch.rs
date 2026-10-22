@@ -1,8 +1,9 @@
 //! t-45315, test 16 of the design's table: a person's press on an integration batch is the main
 //! window's alone. The core defines the person as a presser once (`person_press`), and the only
-//! other shipped source that names it is the board's four commands, each proving the main window
-//! first — no verb the CLI plans, no beat, no hook and no worker endpoint can say the person
-//! pressed.
+//! other shipped source that names it is the board's commands — the batch's four and the settle's
+//! one (t-71220) — each proving the main window first. The core's settle reads who pressed and
+//! mints nobody, and only the ledger's actor carries a settle to it: no verb the CLI plans, no beat,
+//! no hook and no worker endpoint can say the person pressed.
 
 use std::path::Path;
 
@@ -52,11 +53,16 @@ fn only_the_window_command_mints_a_person_press() {
         "zerocode-core/src/orchestration/land_batch.rs",
         "zerocode-shell/src/cmd/board.rs",
     ];
+    // The core's settle asks who pressed and refuses anybody but the person; it mints no press.
+    let reads_the_presser = "zerocode-core/src/orchestration/settle.rs";
     let mut minted = Vec::new();
     for (path, text) in &sources {
         let code = super::support::strip_rust_comments(text);
         for name in ["person_press(", "PressedBy::Person"] {
             if !code.contains(name) {
+                continue;
+            }
+            if name == "PressedBy::Person" && path.ends_with(reads_the_presser) {
                 continue;
             }
             assert!(
@@ -65,6 +71,14 @@ fn only_the_window_command_mints_a_person_press() {
                  command alone"
             );
             minted.push(path.clone());
+        }
+        // The settle reaches the ledger by the actor's own request alone.
+        if code.contains(".person_settle(") {
+            assert!(
+                path.ends_with("zerocode-orchestrator/src/runtime_actor.rs")
+                    || path.ends_with("zerocode-shell/src/orchestration.rs"),
+                "a settle reaches the ledger from {path}, outside the actor's own request"
+            );
         }
     }
     assert!(
@@ -78,6 +92,7 @@ fn only_the_window_command_mints_a_person_press() {
         "pub(crate) async fn land_batch_bisect(",
         "pub(crate) async fn land_batch_restack(",
         "pub(crate) async fn land_batch_cancel(",
+        "pub(crate) async fn board_settle(",
     ];
     for door in doors {
         assert!(board.contains(door), "the board has no `{door}`");
@@ -96,7 +111,7 @@ fn only_the_window_command_mints_a_person_press() {
     assert_eq!(
         board.matches("person_press(").count(),
         doors.len(),
-        "the board names the person's press outside its four commands"
+        "the board names the person's press outside its five commands"
     );
 
     let core = core_source("orchestration/land_batch.rs");

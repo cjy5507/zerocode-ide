@@ -14,10 +14,14 @@ use std::path::Path;
 
 use serde::Serialize;
 use zerocode_core::orchestration::evidence::{TaskHandIn, hand_in_of};
+use zerocode_core::orchestration::settle::{
+    Left, Named, PRESS_TASKS_MAX, awaits_review, left_behind_by,
+};
 use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
-    Closure, Delivery, Gate, GateStatus, LEDGER_ITSELF, Ledger, Message, MessageKind, Run, Task,
-    TaskStatus, WorkProgress, WorkStage, WorktreeRoom, worktree_room,
+    Closure, Delivery, Gate, GateStatus, LEDGER_ITSELF, Ledger, Message, MessageKind, Run,
+    SETTLE_QUIET_DAYS, Task, TaskStatus, WorkProgress, WorkStage, WorktreeRoom, last_touched_ms,
+    worktree_room,
 };
 use zerocode_core::plain_text::TextLint;
 
@@ -50,6 +54,25 @@ pub(crate) struct DeskSnapshot {
     /// The integration batches of those runs (t-45315): every open one, and
     /// one that ended within the news's own window, so its end is seen.
     pub(crate) land_batches: Vec<DeskLandBatch>,
+    /// Their work nobody is coming back to (t-71220): every task of each
+    /// pile, which a press names whole — the rows above carry at most
+    /// [`STAGE_ROWS`] of them a stage.
+    pub(crate) left: DeskLeft,
+}
+
+/// The piles of work nobody is coming back to, read once
+/// ([`zerocode_core::orchestration::settle::left_behind`]): what a 「정리」 closes,
+/// what stays open for a look, and what a 「검토 생략」 waives. Oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct DeskLeft {
+    pub(crate) settle: Vec<Named>,
+    pub(crate) look: Vec<Named>,
+    pub(crate) unreviewed: Vec<Named>,
+    /// How many tasks one press may name ([`PRESS_TASKS_MAX`]): a longer pile
+    /// is cleared that many at a time, oldest first.
+    pub(crate) press_max: usize,
+    /// The quiet time the piles are read with ([`SETTLE_QUIET_DAYS`]), in days.
+    pub(crate) quiet_days: i64,
 }
 
 /// One integration batch the board draws a card for: the batch as the
@@ -518,6 +541,12 @@ pub(crate) struct DeskTask {
     /// for a task nobody has carried yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) times: Option<TaskTimes>,
+    /// The pile it is left in when nobody is coming back to it (t-71220,
+    /// [`left_behind`]); `None` for a task somebody is on, or over.
+    pub(crate) left: Option<Left>,
+    /// When it was last touched — written, or an attempt begun or ended: what
+    /// a pile orders by and the age a row says.
+    pub(crate) touched_ms: i64,
 }
 
 /// When a task's work moved, as the ledger keeps it: its first attempt's
@@ -661,6 +690,9 @@ fn desk_gate(run: &Run, gate: &Gate, examined: &HashMap<String, serde_json::Valu
 pub(crate) struct StageCount {
     pub(crate) stage: &'static str,
     pub(crate) count: usize,
+    /// How many of them nobody is coming back to (t-71220): counted in
+    /// `count`, and not anybody's turn — what the board's 「답할 일」 leaves out.
+    pub(crate) left: usize,
 }
 
 /// The pipeline's stages in the order the board draws them — a task's one
@@ -669,10 +701,11 @@ pub(crate) struct StageCount {
 /// it are where a task stands still or is over: a decision in front of it, held
 /// back, a review that names an older attempt or commit than the work handed in
 /// (t-47538), failed, completed with nothing a coordinator could ever review
-/// (`ReviewFacts::unreviewable`), verified with nothing to land, completed on
+/// (`ReviewFacts::unreviewable`), completed with the review the person waived
+/// (`ReviewFacts::waived`, t-71220), verified with nothing to land, completed on
 /// what the ledger cannot read as any of these (`WorkStage::Unknown`), closed
 /// (over without being done or failed — `TaskStatus::Closed`).
-pub(crate) const STAGES: [&str; 15] = [
+pub(crate) const STAGES: [&str; 16] = [
     "pending",
     "ready",
     "dispatched",
@@ -685,6 +718,7 @@ pub(crate) const STAGES: [&str; 15] = [
     "stale",
     "failed",
     "unreviewable",
+    "waived",
     "nothing_to_land",
     "unknown",
     "closed",
@@ -696,13 +730,14 @@ const OPEN_STAGES: [&str; 5] = ["pending", "ready", "dispatched", "gate", "block
 
 /// The stages a completed task stands in — every one [`completed_stage`]
 /// answers — the ones whose rows carry the task's cost (t-9470).
-pub(super) const FINISHED_STAGES: [&str; 8] = [
+pub(super) const FINISHED_STAGES: [&str; 9] = [
     "reported",
     "verified",
     "merged",
     "deployed",
     "stale",
     "unreviewable",
+    "waived",
     "nothing_to_land",
     "unknown",
 ];
@@ -753,12 +788,23 @@ const fn completed_stage(work: WorkStage) -> &'static str {
         WorkStage::Deployed => "deployed",
         WorkStage::Stale => "stale",
         WorkStage::Unreviewable => "unreviewable",
+        WorkStage::Waived => "waived",
         WorkStage::NothingToLand => "nothing_to_land",
         WorkStage::Closed => "closed",
         WorkStage::Working | WorkStage::Failed | WorkStage::Superseded | WorkStage::Unknown => {
             "unknown"
         }
     }
+}
+
+/// Whether a stage word says finished work waits on a review — the desk's word
+/// for [`awaits_review`], read through the one mapping of a work stage to its
+/// word ([`completed_stage`]), so the flow can ask it of the stage a line read
+/// (t-71220).
+pub(crate) fn word_awaits_review(word: &str) -> bool {
+    WorkStage::ALL
+        .into_iter()
+        .any(|stage| awaits_review(stage) && completed_stage(stage) == word)
 }
 
 /// A task's one stage word ([`STAGES`]) — the reading the desk, the board and
@@ -832,8 +878,24 @@ pub(crate) fn desk_snapshot(
         let term = live.and_then(|held| seat_term(&held.seat));
         let tasks_before = staged_tasks.len();
         let examined = examined_holds(run);
-        for task in &run.tasks {
-            let (stage, progress) = staged(run, task);
+        // Each task's stage is read once: who is coming back to finished work
+        // is read off the progress its stage was read from (t-71220).
+        let read: Vec<(&Task, (&'static str, Option<WorkProgress>))> = run
+            .tasks
+            .iter()
+            .map(|task| (task, staged(run, task)))
+            .collect();
+        let awaiting: HashSet<&str> = read
+            .iter()
+            .filter(|(_, (_, progress))| {
+                progress
+                    .as_ref()
+                    .is_some_and(|progress| awaits_review(progress.stage))
+            })
+            .map(|(task, _)| task.id.as_str())
+            .collect();
+        let left = left_behind_by(run, now_ms, |task| awaiting.contains(task.id.as_str()));
+        for (task, (stage, progress)) in read {
             staged_tasks.push((
                 run,
                 task,
@@ -860,6 +922,8 @@ pub(crate) fn desk_snapshot(
                     kept: None,
                     hand_in: TaskHandIn::default(),
                     times: None,
+                    left: left.get(task.id.as_str()).copied(),
+                    touched_ms: last_touched_ms(run, task),
                 },
             ));
         }
@@ -883,20 +947,26 @@ pub(crate) fn desk_snapshot(
     let mut stages = Vec::with_capacity(STAGES.len());
     let mut tasks = Vec::new();
     for stage in STAGES {
-        let mut rows: Vec<&(&Run, &Task, DeskTask)> = staged_tasks
+        let (mut rows, mut behind): (Vec<_>, Vec<_>) = staged_tasks
             .iter()
             .filter(|(_, _, row)| row.stage == stage)
-            .collect();
+            .partition(|(_, _, row)| row.left.is_none());
         stages.push(StageCount {
             stage,
-            count: rows.len(),
+            count: rows.len() + behind.len(),
+            left: behind.len(),
         });
         if OPEN_STAGES.contains(&stage) {
             rows.sort_by_key(|(_, _, row)| row.created_ms);
         } else {
             rows.sort_by_key(|(_, _, row)| std::cmp::Reverse(row.created_ms));
         }
+        // Work nobody is coming back to has rows of its own, oldest first, so
+        // a pile of it never takes the rows of the work somebody is on.
+        behind.sort_by_key(|(_, _, row)| row.touched_ms);
         rows.truncate(STAGE_ROWS);
+        behind.truncate(STAGE_ROWS);
+        rows.extend(behind);
         // A finished task's cost, asked of the rows the desk sends and no
         // other — a stage of two hundred is two dozen rows and a count.
         let finished = FINISHED_STAGES.contains(&stage);
@@ -925,7 +995,38 @@ pub(crate) fn desk_snapshot(
         news,
         folded_batches,
         land_batches,
+        left: desk_left(&staged_tasks),
     }
+}
+
+/// Every task of the desk's runs left behind, by pile and oldest first — what
+/// a press names whole.
+fn desk_left(staged: &[(&Run, &Task, DeskTask)]) -> DeskLeft {
+    let mut behind: Vec<&DeskTask> = staged
+        .iter()
+        .map(|(_, _, row)| row)
+        .filter(|row| row.left.is_some())
+        .collect();
+    behind.sort_by_key(|row| row.touched_ms);
+    let mut left = DeskLeft {
+        press_max: PRESS_TASKS_MAX,
+        quiet_days: SETTLE_QUIET_DAYS,
+        ..DeskLeft::default()
+    };
+    for row in behind {
+        let pile = match row.left {
+            Some(Left::Settle) => &mut left.settle,
+            Some(Left::Look) => &mut left.look,
+            Some(Left::Unreviewed) => &mut left.unreviewed,
+            None => continue,
+        };
+        pile.push(Named {
+            run: row.run.clone(),
+            task: row.id.clone(),
+            was: None,
+        });
+    }
+    left
 }
 
 /// Plan one verb as `run_id`'s live coordinator seat, on the person's behalf:
@@ -2861,6 +2962,7 @@ mod tests {
                 ("stale", 0),
                 ("failed", 1),
                 ("unreviewable", 0),
+                ("waived", 0),
                 ("nothing_to_land", 0),
                 ("unknown", 0),
                 ("closed", 1),
@@ -3022,6 +3124,100 @@ mod tests {
             "an unreviewable row lost its cost"
         );
         assert!(finished(held, held.task(&by_hand[0]).expect("a task")));
+    }
+
+    /// Work nobody is coming back to stands apart on the desk (t-71220): each
+    /// row says the pile it is in, each stage counts how many of its tasks are
+    /// left, and the piles carry every task a press names — so the board's
+    /// 「지금 도는 일」 and its 「답할 일」 leave them out without counting again.
+    #[test]
+    fn the_desk_reads_which_work_nobody_is_coming_back_to() {
+        let now = crate::now_epoch_ms();
+        let quiet = SETTLE_QUIET_DAYS * 86_400_000;
+        let task = |ledger: &mut Ledger, run: &str, name: &str, at: i64| {
+            ledger
+                .create_task(run, name.into(), name.into(), vec![], None, at)
+                .expect("a task")
+        };
+        let mut ledger = Ledger::new();
+        let seated = ledger.create_run("seated", now - 2 * quiet);
+        ledger
+            .seat_coordinator(&seated, "team-desk/%1", None, now - 2 * quiet)
+            .expect("the coordinator sits");
+        let old = task(&mut ledger, &seated, "old", now - 2 * quiet);
+        let fresh = task(&mut ledger, &seated, "fresh", now - HOUR_MS);
+        // Nobody sits in this run; its worker, still summoned, keeps it in play.
+        let empty = ledger.create_run("empty", now - HOUR_MS);
+        let done = task(&mut ledger, &empty, "done", now - HOUR_MS);
+        let started = ledger
+            .start_worker(
+                &empty,
+                "claude",
+                ("team-empty", "%2"),
+                Some(&done),
+                now - HOUR_MS + 1,
+            )
+            .expect("a worker carries it");
+        ledger
+            .post(
+                &empty,
+                Draft {
+                    from: worker_address(&started.worker),
+                    to: ledger.run(&empty).expect("the run").address(),
+                    kind: MessageKind::WorkerDone,
+                    body: Text::from(r#"{"ok":true,"head":"d1d1d1d"}"#.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(done.clone()),
+                    dispatch: started.dispatch.clone(),
+                },
+                now - HOUR_MS + 2,
+            )
+            .expect("the report");
+
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
+        let row = |id: &str| {
+            desk.tasks
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("{id} has no row: {:#?}", desk.tasks))
+        };
+        assert_eq!(row(&old).left, Some(Left::Settle));
+        assert_eq!(row(&fresh).left, None, "the coordinator's own week");
+        assert_eq!(
+            (row(&done).stage, row(&done).left),
+            ("reported", Some(Left::Unreviewed))
+        );
+        let counted = |stage: &str| {
+            desk.stages
+                .iter()
+                .find(|one| one.stage == stage)
+                .map(|one| (one.count, one.left))
+        };
+        assert_eq!(counted("ready"), Some((2, 1)));
+        assert_eq!(counted("reported"), Some((1, 1)));
+        fn ids(pile: &[Named]) -> Vec<&str> {
+            pile.iter().map(|one| one.task.as_str()).collect()
+        }
+        assert_eq!(ids(&desk.left.settle), [old.as_str()]);
+        assert!(desk.left.look.is_empty());
+        assert_eq!(ids(&desk.left.unreviewed), [done.as_str()]);
+        assert_eq!(
+            (desk.left.press_max, desk.left.quiet_days),
+            (PRESS_TASKS_MAX, SETTLE_QUIET_DAYS)
+        );
+        let json = serde_json::to_value(&desk).expect("the desk serializes");
+        let rows = json["tasks"].as_array().expect("rows");
+        let left_of = |id: &str| {
+            rows.iter()
+                .find(|row| row["id"] == id)
+                .map(|row| row["left"].clone())
+        };
+        assert_eq!(left_of(&old), Some(serde_json::json!("settle")));
+        assert_eq!(left_of(&fresh), Some(serde_json::Value::Null));
+        assert_eq!(json["left"]["unreviewed"][0]["task"], done.as_str());
     }
 
     /// A task the coordinator verified and marked as having no code to land — research, a review, a

@@ -227,7 +227,7 @@ async function press(page, selector) {
 }
 
 /* 확인 창이 서기까지 기다렸다가 제목과 본문을 읽고, 「예」나 「아니요」로 답한다. */
-async function answerAsk(page, yes) {
+export async function answerAsk(page, yes) {
   const shown = await page.waitForSelector("#ask-yes", { state: "visible", timeout: 5_000 }).then(() => true, () => false);
   if (!shown) return { shown, title: "", body: "", danger: false };
   const asked = await page.evaluate(() => ({

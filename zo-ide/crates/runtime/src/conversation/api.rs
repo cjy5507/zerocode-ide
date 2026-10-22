@@ -446,6 +446,19 @@ pub fn record_non_anthropic_prompt_cache_usage(
 pub trait ApiClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError>;
 
+    /// [`Self::stream`] for a request that must be over within `deadline`:
+    /// `Ok(None)` when it was not, and the client stopped it (t-69472). A
+    /// client that drives its request as a future stops it there; the
+    /// provided body only calls [`Self::stream`], which nothing can stop from
+    /// outside, so it waits the request out.
+    fn stream_within(
+        &mut self,
+        request: ApiRequest,
+        _deadline: std::time::Duration,
+    ) -> Result<Option<Vec<AssistantEvent>>, RuntimeError> {
+        self.stream(request).map(Some)
+    }
+
     /// Where this client sends a request: an endpoint that tells one
     /// destination from another and carries no credential, or `None` when
     /// the client cannot say (t-57512). `None` proves nothing, so a decline

@@ -257,29 +257,29 @@ use cmd::{
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
     answer_secret, antigravity_usage, api_router_keys_kept, api_router_presets,
     api_router_providers, apply_ghostty_import, apply_ui_zoom, archive_trust_standing,
-    automation_born_worktrees, board_columns, board_desk, board_snapshot, boot_report, browse_dir,
-    browse_places, browser_click, browser_console, browser_devtools, browser_diagnose,
-    browser_eval, browser_find, browser_find_clear, browser_grab_arm, browser_grab_disarm,
-    browser_grab_take, browser_history, browser_menu_take, browser_navigate, browser_network,
-    browser_place, browser_profiles, browser_read, browser_reload, browser_scroll,
-    browser_snapshot, browser_stop, browser_type, browser_wait, browser_zoom, build_stamp,
-    busy_census, cancel_folder_panel, cancel_google_login, check_typesafe_key, choose_paths,
-    choose_project, claude_account_usage, claude_accounts, claude_autoswitch_apply,
-    claude_autoswitch_mode, claude_token_usage, claude_usage, claude_usage_stats,
-    clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark, cli_login_list,
-    cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
-    clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
-    close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
-    codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_landings,
-    commit_staged, computer_awake_status, computer_confirm_answer, computer_guard_status,
-    computer_handoff_code, computer_live_reflex_check, computer_resume, computer_stop,
-    computer_use_capabilities, computer_use_permission_status, computer_use_skill_report,
-    computer_use_tcc_row_action, conflict_card, continuation_source, cookie_sources, crash_bundle,
-    crash_open_log, create_browser_profile, create_project, create_pull_request,
-    create_untitled_markdown, create_worktree, default_project_parent, default_tabs,
-    delete_automation, delete_browser_profile, delete_diff_note, delete_quick_command,
-    delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts, desk_hold_resolve,
-    desk_reply, desk_review_pass, developer_permission_statuses, discard_paths,
+    automation_born_worktrees, board_columns, board_desk, board_settle, board_snapshot,
+    boot_after_restart, boot_report, browse_dir, browse_places, browser_click, browser_console,
+    browser_devtools, browser_diagnose, browser_eval, browser_find, browser_find_clear,
+    browser_grab_arm, browser_grab_disarm, browser_grab_take, browser_history, browser_menu_take,
+    browser_navigate, browser_network, browser_place, browser_profiles, browser_read,
+    browser_reload, browser_scroll, browser_snapshot, browser_stop, browser_type, browser_wait,
+    browser_zoom, build_stamp, busy_census, cancel_folder_panel, cancel_google_login,
+    check_typesafe_key, choose_paths, choose_project, claude_account_usage, claude_accounts,
+    claude_autoswitch_apply, claude_autoswitch_mode, claude_token_usage, claude_usage,
+    claude_usage_stats, clear_delivered_diff_notes, clear_diff_notes, clear_finish_mark,
+    cli_login_list, cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness,
+    cli_login_witness_drop, clipboard_has_image, clone_repository, clone_target_name,
+    close_browser_pane, close_lane, close_onboarding, close_term, codex_account_list,
+    codex_token_usage, codex_usage, codex_usage_stats, commit_failure_card, commit_file_diff,
+    commit_files, commit_landings, commit_staged, computer_awake_status, computer_confirm_answer,
+    computer_guard_status, computer_handoff_code, computer_live_reflex_check, computer_resume,
+    computer_stop, computer_use_capabilities, computer_use_permission_status,
+    computer_use_skill_report, computer_use_tcc_row_action, conflict_card, continuation_source,
+    cookie_sources, crash_bundle, crash_open_log, create_browser_profile, create_project,
+    create_pull_request, create_untitled_markdown, create_worktree, default_project_parent,
+    default_tabs, delete_automation, delete_browser_profile, delete_diff_note,
+    delete_quick_command, delete_untitled_markdown, delete_untracked, desk_ack, desk_checkouts,
+    desk_hold_resolve, desk_reply, desk_review_pass, developer_permission_statuses, discard_paths,
     dismiss_external_worktree_prompt, enable_automation, end_all_terminal_sessions,
     end_terminal_session, file_diff, file_version, floating_workspace_seat, flow_list, flow_set,
     focus_lane, focus_main, fs_create, fs_duplicate, fs_move, fs_open_default, fs_redo, fs_rename,
@@ -297,7 +297,7 @@ use cmd::{
     import_browser_cookies, import_cookie_file, import_external_worktrees, install_bundled_skill,
     install_hooks, jev_day, jev_review, jev_review_outcome, jev_summary, judge_worker_room,
     judgment_models, key_input, kimi_usage, lane_fold, lane_lines, lane_scroll, launch_agent_tab,
-    launch_plan_for_action, launch_recipes, leave_cancel, leave_now, leave_when_idle,
+    launch_plan_for_action, launch_recipes, leave_cancel, leave_hold, leave_now, leave_when_idle,
     ledger_agents, list_agents, list_automation_runs, list_automations, list_branches,
     list_claude_sessions, list_diff_notes, list_dir, list_quick_commands, list_run_evidence,
     list_skills, list_system_fonts, list_worktrees, listening_ports, log_window_error,
@@ -324,29 +324,29 @@ use cmd::{
     preview_warp_terminal_themes, probe_remote_workspace, probe_ssh_host, process_memory,
     project_catalog, project_kind, project_scripts, pull_request_seed, quota_wall_handover,
     quota_wall_retry, read_image_file, read_primary_selection, read_text_file, recall_folder_panel,
-    record_archive_trust, record_repo_trust, relaunch_window, release_status,
-    release_untitled_markdown, relogin_claude_account, relogin_codex_account, relogin_codex_login,
-    remote_servers, remote_workspaces, remove_api_router, remove_claude_account,
-    remove_codex_account, remove_project, remove_remote_server, remove_remote_workspace,
-    remove_ssh_host, remove_type_value_key, remove_typesafe_key, remove_worktree, render_mermaid,
-    reopen_onboarding, reorder_projects, repo_trust_standing, request_developer_permission,
-    reset_agent_launch, reset_computer_use_permissions, resize_lane,
-    resolve_claude_account_identity, resolve_mr_base, resolve_pr_base, resource_snapshot,
-    respond_permission, resume_line, resume_session, resume_vault_session, reveal_board_agent,
-    reveal_run_evidence, reveal_skill, reveal_vault_session, run_automation, save_agent_launch,
-    save_agent_launch_env, save_api_router, save_automation, save_clipboard_image, save_diff_note,
-    save_launch_recipe, save_onboarding_step, save_pane_layouts, save_quick_command,
-    save_remote_server, save_remote_workspace, save_ssh_host, save_stage_layouts,
-    save_type_value_key, save_typesafe_key, save_worktree_prefs, schedule_timeline, scm_fetch,
-    scm_numstat, scm_observer_dismiss, scm_observer_health, scm_observer_retry, scm_observer_shown,
-    scm_pull, scm_push, scm_status, scm_tree_rows, search_files, search_text,
-    second_brain_export_html, second_brain_graph, second_brain_link, second_brain_open,
-    second_brain_page, second_brain_paths, second_brain_relate, second_brain_seat_recalls,
-    second_brain_setup, second_brain_status, select_claude_account, select_codex_account,
-    send_prompt, session_info, set_active_worktree, set_agent_activity_display,
-    set_agent_permission_mode, set_agent_teams_mode, set_app_font_family,
-    set_browser_default_profile, set_browser_default_zoom, set_browser_home_page,
-    set_browser_open_tabs, set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
+    record_archive_trust, record_repo_trust, release_status, release_untitled_markdown,
+    relogin_claude_account, relogin_codex_account, relogin_codex_login, remote_servers,
+    remote_workspaces, remove_api_router, remove_claude_account, remove_codex_account,
+    remove_project, remove_remote_server, remove_remote_workspace, remove_ssh_host,
+    remove_type_value_key, remove_typesafe_key, remove_worktree, render_mermaid, reopen_onboarding,
+    reorder_projects, repo_trust_standing, request_developer_permission, reset_agent_launch,
+    reset_computer_use_permissions, resize_lane, resolve_claude_account_identity, resolve_mr_base,
+    resolve_pr_base, resource_snapshot, respond_permission, resume_line, resume_session,
+    resume_vault_session, reveal_board_agent, reveal_run_evidence, reveal_skill,
+    reveal_vault_session, run_automation, save_agent_launch, save_agent_launch_env,
+    save_api_router, save_automation, save_clipboard_image, save_diff_note, save_launch_recipe,
+    save_onboarding_step, save_pane_layouts, save_quick_command, save_remote_server,
+    save_remote_workspace, save_ssh_host, save_stage_layouts, save_type_value_key,
+    save_typesafe_key, save_worktree_prefs, schedule_timeline, scm_fetch, scm_numstat,
+    scm_observer_dismiss, scm_observer_health, scm_observer_retry, scm_observer_shown, scm_pull,
+    scm_push, scm_status, scm_tree_rows, search_files, search_text, second_brain_export_html,
+    second_brain_graph, second_brain_link, second_brain_open, second_brain_page,
+    second_brain_paths, second_brain_relate, second_brain_seat_recalls, second_brain_setup,
+    second_brain_status, select_claude_account, select_codex_account, send_prompt, session_info,
+    set_active_worktree, set_agent_activity_display, set_agent_permission_mode,
+    set_agent_teams_mode, set_app_font_family, set_browser_default_profile,
+    set_browser_default_zoom, set_browser_home_page, set_browser_open_tabs,
+    set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
     set_browser_workspace_mode, set_claude_autoswitch_mode, set_clipboard_image,
     set_compact_worktree_cards, set_computer_awake_mode, set_computer_confirm,
     set_computer_generator_road, set_computer_input_policy, set_computer_live_reflex,
@@ -2607,7 +2607,9 @@ fn main() -> ExitCode {
         // Versioned updates (t-3191): the feed check and the signed
         // download. Registered, not granted — `capabilities/default.json`
         // names neither plugin, so the window's only roads are the five
-        // `update_*` commands and `relaunch_window` (design §2.3, §3).
+        // `update_*` commands and the way out's `leave_now`, which reaches
+        // `relaunch_window` once its notice has stood (design §2.3, §3;
+        // t-67936).
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
@@ -3096,6 +3098,7 @@ fn main() -> ExitCode {
             pane_agents,
             ledger_agents,
             board_desk,
+            board_settle,
             desk_reply,
             desk_ack,
             desk_hold_resolve,
@@ -3265,11 +3268,12 @@ fn main() -> ExitCode {
             scm_tree_rows,
             set_terminal_opacity,
             set_window_blur,
-            relaunch_window,
             busy_census,
             leave_when_idle,
             leave_now,
             leave_cancel,
+            leave_hold,
+            boot_after_restart,
             build_stamp,
             release_status,
             patch_update_prefs,
@@ -3784,6 +3788,10 @@ fn main() -> ExitCode {
                 } else {
                     exit_runtime::ExitRoad::App
                 });
+                // Whose hand moved it, said once per exit (t-67936).
+                if let Some(line) = exit_runtime::door_line(road) {
+                    note_window_event(handle.state::<AppState>().local_data_root(), &line);
+                }
                 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
                 if chromium_browser::defer_exit(handle, code.unwrap_or(0)) {
                     api.prevent_exit();
@@ -3818,6 +3826,12 @@ fn main() -> ExitCode {
                 // goodbye and everything the next window restores from come
                 // before the embedded browser's shutdown, which can stall.
                 exit_runtime::terminate(&ExitSteps(handle));
+                // The road this exit was named by — ⌘Q's own when nothing
+                // named one before — says whose hand moved it, once (t-67936).
+                let road = exit_runtime::begin(exit_runtime::ExitRoad::Terminate);
+                if let Some(line) = exit_runtime::door_line(road) {
+                    note_window_event(handle.state::<AppState>().local_data_root(), &line);
+                }
                 note_window_event(
                     handle.state::<AppState>().local_data_root(),
                     "event loop exited",

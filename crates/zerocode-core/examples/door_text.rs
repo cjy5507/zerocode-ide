@@ -79,6 +79,7 @@ fn parse(asked: &Value) -> Value {
             Ok(ClickTarget::MarkSettleLater(mark)) => {
                 json!({ "ok": true, "mark": mark, "later": true })
             }
+            Ok(ClickTarget::At(point)) => json!({ "ok": true, "at": point }),
             Err(why) => refused(why),
         },
         Some("read") => match agent_browser::parse_read(&argv) {

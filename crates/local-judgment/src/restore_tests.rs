@@ -130,6 +130,19 @@ fn port(provider: &Provider) -> u16 {
     url::Url::parse(&provider.base_url).unwrap().port().unwrap()
 }
 
+/// A status read as JSON, without what the supervision says of it: the state
+/// a start that restores nothing leaves as it found it.
+fn state_of(snapshot: Snapshot) -> Value {
+    let mut state = serde_json::to_value(snapshot).unwrap();
+    state.as_object_mut().unwrap().remove("supervision");
+    state
+}
+
+/// Why a start restored nothing, as a status read says it.
+fn reason_of(snapshot: &Snapshot) -> Value {
+    serde_json::to_value(snapshot).unwrap()["supervision"]["reason"].clone()
+}
+
 struct Restoring {
     _home: tempfile::TempDir,
     control: tempfile::TempDir,
@@ -357,12 +370,30 @@ impl Restoring {
     }
 
     fn attempts(&self) -> Vec<Value> {
+        self.kept("restore")
+    }
+
+    /// The store's kept records of `kind`.
+    fn kept(&self, kind: &str) -> Vec<Value> {
         fs::read_to_string(self.data.join("managed-judgment/server-exits.jsonl"))
             .unwrap_or_default()
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|record| record["kind"] == "restore")
+            .filter(|record| record["kind"] == kind)
             .collect()
+    }
+
+    /// A manager opening the same store and settings, as the next window
+    /// start does, while this one is left as it is.
+    fn next_window(&self) -> Arc<Manager> {
+        test_support::reopened_manager(
+            &self.data,
+            &self.settings,
+            self.models.clone(),
+            factory(self.control.path().to_path_buf(), self.starts.clone()),
+            Arc::new(|_| {}),
+            true,
+        )
     }
 
     async fn recorded(&self) -> Vec<Value> {
@@ -455,9 +486,9 @@ async fn restore_gate_skips_without_changing_state_and_has_a_live_control() {
             }
             _ => {}
         }
-        let before = serde_json::to_value(fixture.manager.snapshot()).unwrap();
+        let before = state_of(fixture.manager.snapshot());
         let after = fixture.restore(case != "off").unwrap();
-        assert_eq!(serde_json::to_value(after).unwrap(), before);
+        assert_eq!(state_of(after), before);
         fixture.clock.advance(HOUR);
         tokio::task::yield_now().await;
         let after = fixture.manager.snapshot();
@@ -466,11 +497,25 @@ async fn restore_gate_skips_without_changing_state_and_has_a_live_control() {
             after.operation.is_none(),
             "excluded restore reserved for {case}"
         );
+        let reason = reason_of(&after);
         assert_eq!(
-            serde_json::to_value(after).unwrap(),
+            state_of(after),
             before,
             "excluded restore changed state for {case}"
         );
+        // The status says why the start restored nothing; settings that
+        // choose no managed model have nothing to say.
+        let wanted = match case {
+            "off" => json!("jev_off"),
+            "unmanaged" => Value::Null,
+            "missing_model" => json!("model_missing"),
+            "uncatalogued_model" => json!("unknown_model"),
+            "missing_runtime" => json!("runtime_missing"),
+            "unverified_runtime" => json!("engine_unverified"),
+            "unsupported" => json!("engine_not_supported"),
+            _ => json!("no_intent"),
+        };
+        assert_eq!(reason, wanted, "why the start restored nothing, for {case}");
     }
     let fixture = Restoring::new();
     fixture.seed();
@@ -532,9 +577,9 @@ async fn invalid_intents_skip_and_a_valid_intent_still_restores() {
                 fs::write(fixture.intent_path(), serde_json::to_vec(&intent).unwrap()).unwrap();
             }
         }
-        let before = serde_json::to_value(fixture.manager.snapshot()).unwrap();
+        let before = state_of(fixture.manager.snapshot());
         let after = fixture.restore(true).unwrap();
-        assert_eq!(serde_json::to_value(after).unwrap(), before);
+        assert_eq!(state_of(after), before);
         fixture.clock.advance(HOUR);
         tokio::task::yield_now().await;
         let after = fixture.manager.snapshot();
@@ -547,7 +592,17 @@ async fn invalid_intents_skip_and_a_valid_intent_still_restores() {
             after.operation.is_none(),
             "invalid {case} intent reserved an operation"
         );
-        assert_eq!(serde_json::to_value(after).unwrap(), before);
+        let reason = reason_of(&after);
+        assert_eq!(state_of(after), before);
+        let wanted = match case {
+            "model" | "revision" | "identity" => "selection_changed",
+            "fingerprint" => "model_revision_changed",
+            _ => "no_intent",
+        };
+        assert_eq!(
+            reason, wanted,
+            "why an invalid {case} intent restored nothing"
+        );
     }
     let fixture = Restoring::new();
     fixture.seed();
@@ -888,13 +943,16 @@ async fn apply_persists_stop_clears_and_unapplied_start_leaves_intent_alone() {
         "person stop kept the intent"
     );
     fixture.reopen().await;
-    let before = serde_json::to_value(fixture.manager.snapshot()).unwrap();
+    let before = state_of(fixture.manager.snapshot());
     fixture.restore(true).unwrap();
     assert_eq!(fixture.starts(), 3);
+    let after = fixture.manager.snapshot();
     assert_eq!(
-        serde_json::to_value(fixture.manager.snapshot()).unwrap(),
-        before
+        reason_of(&after),
+        "no_intent",
+        "why the start after the window's stop restored nothing"
     );
+    assert_eq!(state_of(after), before);
 }
 
 #[tokio::test]
@@ -1010,10 +1068,12 @@ async fn concurrent_restores_share_one_operation_and_block_manual_start() {
 }
 
 #[tokio::test]
-async fn failed_restore_keeps_its_reason_clears_intent_and_never_retries() {
+async fn a_failed_restore_keeps_its_reason_and_is_tried_again_at_each_start_up_to_its_limit() {
     let mut fixture = Restoring::new();
     fixture.seed();
-    fixture.tell("fail", 1);
+    for number in 1..=3 {
+        fixture.tell("fail", number);
+    }
     let starting = fixture.restore(true).unwrap();
     assert!(
         starting
@@ -1030,7 +1090,10 @@ async fn failed_restore_keeps_its_reason_clears_intent_and_never_retries() {
     assert_eq!(failed.server.error, Some(reason));
     assert!(!failed.server.checked);
     assert_eq!(fixture.starts(), 1);
-    assert!(!fixture.intent_path().exists());
+    assert!(
+        fixture.intent_path().is_file(),
+        "a restore that did not come up lost the press it restores"
+    );
     let attempts = fixture.recorded().await;
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0]["result"], reason);
@@ -1039,22 +1102,51 @@ async fn failed_restore_keeps_its_reason_clears_intent_and_never_retries() {
     assert_eq!(
         fixture.starts(),
         1,
-        "failed restore retried after the clock moved"
+        "failed restore retried within the same start"
     );
+    // The next window starts try the press's model again, each once.
+    for start in 2..=3 {
+        fixture.reopen().await;
+        fixture.restore(true).unwrap();
+        let failed = crate::tests::settled_snapshot(&fixture.manager).await;
+        assert_eq!(
+            fixture.starts(),
+            start,
+            "window start {start} did not try the press's model again"
+        );
+        assert_eq!(failed.server.state, "failed");
+    }
+    // A model that failed three starts running is left to the person.
     fixture.reopen().await;
     fixture.restore(true).unwrap();
     assert_eq!(
         fixture.starts(),
-        1,
-        "failed restore retried on the next boot"
+        3,
+        "a fourth window start tried a model that failed three starts running"
     );
-    assert!(fixture.manager.snapshot().operation.is_none());
+    let stopped = fixture.manager.snapshot();
+    assert!(stopped.operation.is_none());
+    assert_eq!(reason_of(&stopped), "model_restore_failed");
+    let attempts = fixture.attempts();
+    assert_eq!(
+        attempts
+            .last()
+            .map(|attempt| (attempt["result"].clone(), attempt["reason"].clone())),
+        Some((json!("skipped"), json!("model_restore_failed"))),
+        "{attempts:?}"
+    );
+    // The person's press brings it back and starts the count again.
     fixture.press().await;
-    assert_eq!(fixture.starts(), 2);
+    assert_eq!(fixture.starts(), 4);
     assert!(
         fixture.intent_path().is_file(),
         "person apply did not reopen restoration"
     );
+    fixture.reopen().await;
+    fixture.restore(true).unwrap();
+    let restored = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert_eq!(fixture.starts(), 5);
+    assert_eq!(restored.server.state, "ready");
 }
 
 #[tokio::test]
@@ -1160,6 +1252,184 @@ async fn a_runtime_exit_after_the_check_fails_restoration() {
         failed.operation.as_ref().unwrap().error,
         Some(Error::RuntimeFailed.token())
     );
-    assert!(!fixture.intent_path().exists());
+    assert!(
+        fixture.intent_path().is_file(),
+        "a restore whose runtime ended lost the press it restores"
+    );
     assert_eq!(fixture.starts(), 1);
+}
+
+#[tokio::test]
+async fn every_stop_this_side_makes_is_kept_with_what_made_it() {
+    for by in ["press", "cancel", "switch", "app_exit"] {
+        let fixture = Restoring::new();
+        let (server, provider) = fixture.press().await;
+        match by {
+            "press" => {
+                fixture.manager.stop(&server).unwrap();
+            }
+            "cancel" => {
+                let operation = fixture.checking(&server).await;
+                fixture.manager.cancel(&operation).unwrap();
+                crate::tests::settled_snapshot(&fixture.manager).await;
+            }
+            "switch" => {
+                let target = fixture.models[1].clone();
+                let settings = fixture.settings.clone();
+                let instance = fixture.manager.snapshot().instance_id;
+                fixture
+                    .manager
+                    .switch_model(
+                        &target.id,
+                        &target.revision,
+                        &server,
+                        &provider.identity(),
+                        &instance,
+                        move |provider, expected, binding| {
+                            save(&settings, provider, expected, binding)
+                        },
+                    )
+                    .unwrap();
+                let switched = crate::tests::settled_snapshot(&fixture.manager).await;
+                assert_eq!(
+                    switched.applied_model_id.as_deref(),
+                    Some(target.id.as_str()),
+                    "{:?}",
+                    switched
+                        .operation
+                        .as_ref()
+                        .and_then(|operation| operation.error)
+                );
+            }
+            _ => fixture.manager.shutdown(),
+        }
+        let stops = fixture.kept("stop");
+        assert_eq!(stops.len(), 1, "{by}: {stops:?}");
+        assert_eq!(
+            (
+                &stops[0]["by"],
+                &stops[0]["serverId"],
+                &stops[0]["modelId"],
+                &stops[0]["cause"]
+            ),
+            (
+                &json!(by),
+                &json!(server),
+                &json!(fixture.models[0].id),
+                &json!("server_stopped")
+            ),
+            "{by}"
+        );
+        assert!(
+            stops[0]["atMs"].as_u64().is_some_and(|at| at > 0),
+            "{by}: {stops:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_end_no_window_saw_is_kept_when_the_next_window_opens_the_store() {
+    let fixture = Restoring::new();
+    let (server, _) = fixture.press().await;
+    let applied = fixture.kept("apply");
+    assert_eq!(
+        applied.len(),
+        1,
+        "the press's apply was not kept: {applied:?}"
+    );
+    assert_eq!(
+        (&applied[0]["by"], &applied[0]["serverId"]),
+        (&json!("press"), &json!(server))
+    );
+    // The window that runs it dies without its own end; the next window finds
+    // the server it last saw come up with no end after it, and keeps that end
+    // as one nobody saw.
+    fixture.next_window().shutdown();
+    let unseen = fixture.kept("unseen");
+    assert_eq!(unseen.len(), 1, "{unseen:?}");
+    assert_eq!(
+        (&unseen[0]["sinceMs"], &unseen[0]["modelId"]),
+        (&applied[0]["atMs"], &json!(fixture.models[0].id))
+    );
+    // The window after that finds the end kept and adds none.
+    fixture.next_window().shutdown();
+    assert_eq!(fixture.kept("unseen").len(), 1);
+}
+
+#[tokio::test]
+async fn a_server_an_older_window_restored_and_never_saw_end_is_kept_as_unseen() {
+    // The record as the window kept it on 10-21: its last line a ready
+    // restore, and no end after it.
+    let fixture = Restoring::new();
+    let restored = json!({
+        "atMs": 1_000_u64,
+        "kind": "restore",
+        "modelId": fixture.models[0].id,
+        "generation": 0,
+        "port": 9,
+        "result": "ready",
+    });
+    fs::write(
+        fixture.data.join("managed-judgment/server-exits.jsonl"),
+        format!("{restored}\n"),
+    )
+    .unwrap();
+    let opened = fixture.next_window();
+    let unseen = fixture.kept("unseen");
+    assert_eq!(unseen.len(), 1, "{unseen:?}");
+    assert_eq!(unseen[0]["sinceMs"], 1000);
+    assert!(
+        unseen[0]["atMs"].as_u64().is_some_and(|at| at > 1000),
+        "{unseen:?}"
+    );
+    let status = serde_json::to_value(opened.snapshot()).unwrap();
+    let ended = &status["supervision"]["lastEnd"];
+    assert_eq!(
+        (&ended["kind"], &ended["sinceMs"]),
+        (&json!("unseen"), &json!(1000)),
+        "{status}"
+    );
+    opened.shutdown();
+}
+
+#[tokio::test]
+async fn every_start_that_restores_nothing_keeps_why() {
+    for (case, why) in [
+        ("stopped", Some("no_intent")),
+        ("off", Some("jev_off")),
+        ("missing_runtime", Some("runtime_missing")),
+        ("uncatalogued_model", Some("unknown_model")),
+        ("unmanaged", None),
+    ] {
+        let mut fixture = Restoring::new();
+        fixture.seed();
+        match case {
+            "stopped" => {
+                let (server, _) = fixture.press().await;
+                fixture.manager.stop(&server).unwrap();
+                fixture.reopen().await;
+            }
+            "missing_runtime" => {
+                fs::remove_dir_all(fixture.data.join("managed-judgment/runtime")).unwrap();
+            }
+            "uncatalogued_model" => {
+                fixture.models.clear();
+                fixture.reopen_with_runtime(true);
+            }
+            "unmanaged" => fs::write(&fixture.settings, b"{}").unwrap(),
+            _ => {}
+        }
+        let starts = fixture.starts();
+        fixture.restore(case != "off").unwrap();
+        assert_eq!(fixture.starts(), starts, "{case} started a runtime");
+        let kept = fixture.attempts();
+        let said = kept
+            .last()
+            .map(|record| (record["result"].clone(), record["reason"].clone()));
+        assert_eq!(
+            said,
+            why.map(|why| (json!("skipped"), json!(why))),
+            "what the start kept for {case}: {kept:?}"
+        );
+    }
 }

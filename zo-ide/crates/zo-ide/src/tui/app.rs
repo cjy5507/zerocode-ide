@@ -570,6 +570,11 @@ struct Ui {
     /// Latest owned snapshot from the asynchronous manifest/transcript watcher.
     /// Paint code only formats these values; it never performs I/O.
     subagent_progress: Vec<SubagentProgress>,
+    /// The ledger workers of the same snapshot: CLIs of their own in window
+    /// tabs of their own. Their spawn cells, the wave and the rows under the
+    /// Working line show them (t-69472); the agents overview, which stops and
+    /// messages a helper, keeps to the helpers above.
+    ledger_helpers: Vec<SubagentProgress>,
     /// Helpers observed in the current foreground wave. Finished helpers leave
     /// the running snapshot but stay in this count until the turn ends.
     subagent_wave: SubagentWave,
@@ -964,7 +969,22 @@ fn status_detail_for(kind: &ToolKind) -> String {
 /// is THIS one doing", so the count leads and the label — already in the cell
 /// header above the row — is left out.
 fn subagent_cell_progress(progress: &SubagentProgress) -> String {
+    if progress.ledger {
+        return ledger_helper_line(progress);
+    }
     subagent_progress_line(progress, true)
+}
+
+/// A ledger worker's row, in its spawn cell and under `Working` alike: its
+/// work is in its own tab, so the row says so and nothing its parent cannot
+/// see (t-69472).
+fn ledger_helper_line(progress: &SubagentProgress) -> String {
+    let label = crate::util::ansi::sanitize_inline(&progress.label);
+    let model = progress
+        .model
+        .as_deref()
+        .map(crate::util::ansi::sanitize_inline);
+    super::strings::ledger_helper(&label, model.as_deref(), progress.elapsed)
 }
 
 /// One helper's line under `Working`: `label · activity · elapsed`, then the
@@ -972,6 +992,9 @@ fn subagent_cell_progress(progress: &SubagentProgress) -> String {
 /// uses"), then a quiet warning. The count is what moves while the activity
 /// line stands still, so a person can tell a helper at work from one stuck.
 fn subagent_status_detail(progress: &SubagentProgress) -> String {
+    if progress.ledger {
+        return ledger_helper_line(progress);
+    }
     let mut line = subagent_progress_line(progress, false);
     if let Some(quiet) = progress.no_new_output_for {
         line.push_str(core_types::helper_run::FACT_SEPARATOR);
@@ -1519,12 +1542,17 @@ impl Ui {
     /// bounded details area while any are live; the ordinary tool context is
     /// restored as soon as the snapshot becomes empty.
     fn set_subagent_progress(&mut self, progress: Vec<SubagentProgress>) {
+        // The wave counts a ledger worker too; the agents overview, which
+        // stops and messages a helper, keeps to the helpers of this process.
+        self.subagent_wave.refresh(&progress);
+        let (ledger_helpers, progress): (Vec<_>, Vec<_>) =
+            progress.into_iter().partition(|helper| helper.ledger);
+        self.ledger_helpers = ledger_helpers;
         if subagent_event_arrived(&self.subagent_progress, &progress) {
             if let Some(status) = self.status.as_mut() {
                 status.note_activity_event();
             }
         }
-        self.subagent_wave.refresh(&progress);
         self.subagent_progress = progress;
         if let Some(overview) = self.agents.as_mut() {
             overview.refresh(self.subagent_progress.clone());
@@ -1543,15 +1571,21 @@ impl Ui {
         if !self.tool_cell.as_ref().is_some_and(ToolGroup::is_spawning) {
             return;
         }
-        let rows: Vec<(String, String)> = self
-            .subagent_progress
-            .iter()
+        let helpers = || self.subagent_progress.iter().chain(&self.ledger_helpers);
+        let rows: Vec<(String, String)> = helpers()
             .filter_map(|row| {
                 Some((row.tool_call_id.clone()?, subagent_cell_progress(row)))
             })
             .collect();
+        // The file each helper writes its report to, for its finished cell.
+        let reports: Vec<(String, String)> = helpers()
+            .filter_map(|row| {
+                Some((row.tool_call_id.clone()?, row.report.as_ref()?.display().to_string()))
+            })
+            .collect();
         if let Some(cell) = self.tool_cell.as_mut() {
             cell.set_spawn_progress(&rows);
+            cell.set_spawn_reports(&reports);
         }
     }
 
@@ -1564,7 +1598,12 @@ impl Ui {
                 .as_ref()
                 .is_some_and(|cell| cell.is_spawning() && cell.is_active());
             if !spawn_cell_owns_rows {
-                details.extend(self.subagent_progress.iter().map(subagent_status_detail));
+                details.extend(
+                    self.subagent_progress
+                        .iter()
+                        .chain(&self.ledger_helpers)
+                        .map(subagent_status_detail),
+                );
             }
         } else {
             details.extend(self.tool_status_detail.iter().cloned());
@@ -1631,6 +1670,7 @@ impl Ui {
         self.status = None;
         self.tool_status_detail = None;
         self.subagent_progress.clear();
+        self.ledger_helpers.clear();
         self.subagent_wave = SubagentWave::default();
         self.published_activity = PublishedActivity::Never;
         self.parked = None;
@@ -4626,6 +4666,7 @@ impl App {
                 status: None,
                 tool_status_detail: None,
                 subagent_progress: Vec::new(),
+                ledger_helpers: Vec::new(),
                 subagent_wave: SubagentWave::default(),
                 published_activity: PublishedActivity::Never,
                 reasoning_scan: None,
@@ -6491,6 +6532,7 @@ fn test_ui() -> Ui {
         status: None,
         tool_status_detail: None,
         subagent_progress: Vec::new(),
+        ledger_helpers: Vec::new(),
         subagent_wave: SubagentWave::default(),
         published_activity: PublishedActivity::Never,
         reasoning_scan: None,
@@ -6606,6 +6648,8 @@ mod tests {
             pane: None,
             last_receipt: None,
             in_tool: false,
+            report: None,
+            ledger: false,
         }
     }
 
@@ -7247,6 +7291,100 @@ mod tests {
         );
     }
 
+    /// t-69472: a ChatGPT, OpenAI-compatible or Gemini stream that drops and
+    /// opens again inside a request says so with a reconnect notice. Its
+    /// warning row stands in the transcript as before, and now the Working
+    /// line and the window's activity card say the turn is reconnecting —
+    /// the attempt and the pause, counted down — until the answer's text
+    /// comes again. A quiet stretch after a reconnect is a live stream too:
+    /// the model is reasoning, and the line says that instead.
+    #[test]
+    fn a_reconnect_inside_a_stream_stands_on_the_working_line_until_text_comes_again() {
+        use runtime::message_stream::types::StreamPhase;
+
+        let (mut ui, captured) = hooked_ui();
+        let ids = BlockIdGen::default();
+        let reconnect = |attempt: u32, delay_secs: u64| core_types::StreamRetryNotice {
+            kind: core_types::StreamNoticeKind::Reconnect,
+            label: "transient provider error",
+            attempt,
+            max_attempts: 7,
+            delay: Duration::from_secs(delay_secs),
+            no_progress: None,
+        };
+        let text = ids.next();
+        tick(&mut ui, 30);
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::RequestSent { attempt: 1 }));
+        arrive(
+            &mut ui,
+            RenderBlock::TextDelta {
+                id: text,
+                text: "C69472 the answer starts".to_string(),
+                done: false,
+            },
+        );
+        for block in crate::session::runtime_bridge::stream_notice_blocks(&reconnect(1, 4), &ids) {
+            arrive(&mut ui, block);
+        }
+        assert_eq!(
+            working_line(&ui),
+            "• Working (30s • esc to interrupt) · reconnecting · attempt 2 in 4s",
+            "the stream's reconnect is what the turn waits on now"
+        );
+        // The warning row and the Working line count the same request: the
+        // one this reconnect sends, the first one included.
+        let history: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
+        assert!(
+            history.iter().any(|row| row.contains("reconnecting in 4s (attempt 2/8)")),
+            "the warning row names the attempt the Working line does: {history:#?}"
+        );
+        let card = published_card(&ui).expect("the reconnect's activity card");
+        assert_eq!(card.verb, crate::tui::strings::ACTIVITY_RECONNECTING);
+        assert_eq!(card.target.as_deref(), Some("attempt 2 in 4s"));
+
+        tick(&mut ui, 33);
+        assert_eq!(
+            working_line(&ui),
+            "• Working (33s • esc to interrupt) · reconnecting · attempt 2 in 1s"
+        );
+
+        arrive(
+            &mut ui,
+            RenderBlock::TextDelta {
+                id: text,
+                text: " and goes on".to_string(),
+                done: false,
+            },
+        );
+        assert_eq!(
+            working_line(&ui),
+            "• Working (33s • esc to interrupt)",
+            "the text that came again ends the reconnect"
+        );
+        assert!(
+            published_card(&ui).is_none_or(|card| card.verb != crate::tui::strings::ACTIVITY_RECONNECTING),
+            "{:?}",
+            published_card(&ui)
+        );
+
+        tick(&mut ui, 100);
+        for block in crate::session::runtime_bridge::stream_notice_blocks(&reconnect(2, 8), &ids) {
+            arrive(&mut ui, block);
+        }
+        assert_eq!(
+            working_line(&ui),
+            "• Working (1m 40s • esc to interrupt) · reconnecting · attempt 3 in 8s"
+        );
+        tick(&mut ui, 170);
+        arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::QuietReasoning { since_secs: 61 }));
+        assert_eq!(
+            working_line(&ui),
+            "• Working (2m 50s • esc to interrupt) · model reasoning silently · 1m 01s",
+            "a quiet stretch after a reconnect is a live stream, not a reconnect"
+        );
+        assert!(hook_events(&captured).is_empty(), "{:?}", hook_events(&captured));
+    }
+
     #[test]
     fn a_question_hooks_its_tool_once_and_keeps_waiting_quietly() {
         use runtime::message_stream::{QuestionOption, UserQuestionPrompt};
@@ -7451,6 +7589,8 @@ mod tests {
                 pane: None,
                 last_receipt: None,
                 in_tool: false,
+                report: None,
+                ledger: false,
             }]})
             .expect("roster change");
 
@@ -8624,6 +8764,162 @@ mod tests {
         assert!(cell.is_spawning(), "the read must not evict a live helper");
         assert!(cell.is_active(), "and it must not close it as failed");
         assert!(cell.contains_call("spawn-1"));
+    }
+
+    /// An `Agent` call announced the way the turn announces one.
+    fn announce_agent(ui: &mut super::Ui, ids: &BlockIdGen, call_id: &str, description: &str) {
+        let input = json!({
+            "description": description,
+            "prompt": "Read the parser and report.",
+            "subagent_type": "general-purpose"
+        });
+        let preview = preview_tool_input("Agent", &input);
+        let summary = preview_summary(&preview);
+        ui.block(RenderBlock::ToolCall {
+            id: ids.next(),
+            tool_call_id: ToolCallId(call_id.to_string()),
+            name: "Agent".to_string(),
+            summary,
+            preview,
+            input_print: None,
+            status: ToolCallStatus::Running,
+        });
+    }
+
+    /// t-69472: a finished helper's cell says where its whole report is. Its
+    /// live row named the file it writes (the manifest's `outputFile`), and
+    /// the `Completed` cell's body names that file on one line after the
+    /// answer's preview. The body stays within the five rows a terminal that
+    /// does not know the fold markers shows open, at any width.
+    #[test]
+    fn a_finished_helpers_cell_names_its_report_file_in_five_rows_at_most() {
+        let report = "/workspace/.zo/agents/agent-c69472.md";
+        let answer = format!(
+            "C69472 helper report: {}",
+            "the parser reads its tokens in three passes and keeps the spans. ".repeat(8)
+        );
+        let finished = json!({
+            "agentId": "agent-c69472",
+            "name": "survey-the-parser",
+            "subagentType": "general-purpose",
+            "status": "completed",
+            "result": answer,
+            "structured": null,
+            "error": null,
+            "summary": "4 tool uses · 12s",
+            "outputFile": report,
+        })
+        .to_string();
+        for cols in [120, 40] {
+            let mut ui = test_ui();
+            ui.resize(cols, 24);
+            ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(12)));
+            let ids = BlockIdGen::default();
+            announce_agent(&mut ui, &ids, "toolu_c69472", "survey the parser");
+            let mut helper = running_helper("agent-c69472", "survey the parser", "Read · src/parser.rs", 4, 12);
+            helper.tool_call_id = Some("toolu_c69472".to_string());
+            helper.report = Some(std::path::PathBuf::from(report));
+            ui.set_subagent_progress(vec![helper]);
+            // The helper is done: the live rows no longer name it.
+            ui.set_subagent_progress(Vec::new());
+            ui.block(RenderBlock::ToolResult {
+                id: ids.next(),
+                tool_call_id: ToolCallId("toolu_c69472".to_string()),
+                is_error: false,
+                body: format_tool_result_from_raw("Agent", &finished, false),
+            });
+            // The finished cell goes to history with the turn's next cell.
+            ui.flush_tool_cell();
+
+            let history: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
+            // The body is the answer's preview and what follows it: a narrow
+            // row hangs the rest of its target above it first.
+            let preview = history
+                .iter()
+                .position(|row| row.starts_with("  └ Completed - C69472 helper report"))
+                .unwrap_or_else(|| panic!("the answer's preview is not in the cell at {cols} columns: {history:#?}"));
+            let body = &history[preview..];
+            let said: String = body.iter().map(|row| row.trim()).collect();
+            assert!(
+                said.contains(report),
+                "the body names the report file at {cols} columns: {body:#?}"
+            );
+            assert!(
+                body.len() <= 5,
+                "the body is {} rows at {cols} columns: {body:#?}",
+                body.len()
+            );
+        }
+    }
+
+    /// t-69472: inside ZeroCode a general-purpose `Agent` call opens a ledger
+    /// worker — a CLI of its own in a window tab of its own — and its spawn
+    /// cell stood empty for as long as it ran. The turn's watcher now hands
+    /// the screen its row, and the row says what the parent can know of it:
+    /// the helper, its model, how long it has run, and that it runs in its own
+    /// tab. A helper of this process keeps its full row beside it.
+    #[test]
+    fn a_ledger_workers_row_stands_in_its_spawn_cell() {
+        let mut ui = test_ui();
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(95)));
+        let ids = BlockIdGen::default();
+        announce_agent(&mut ui, &ids, "toolu_ledger", "survey the parser");
+        announce_agent(&mut ui, &ids, "toolu_inline", "read the lexer");
+        let mut ledger = running_helper("agent-ledger", "survey the parser", "working", 0, 95);
+        ledger.tool_call_id = Some("toolu_ledger".to_string());
+        ledger.model = Some("claude-opus-5-5".to_string());
+        ledger.pane = Some("%9".to_string());
+        ledger.ledger = true;
+        let mut inline = running_helper("agent-inline", "read the lexer", "Read · src/lexer.rs", 3, 40);
+        inline.tool_call_id = Some("toolu_inline".to_string());
+        ui.set_subagent_progress(vec![inline, ledger]);
+
+        let cell = ui.tool_cell.as_ref().expect("the spawns keep the live cell");
+        let rows: Vec<String> = cell.lines(120, Duration::ZERO).iter().map(Line::plain).collect();
+        assert!(
+            rows.iter().any(|row| row
+                == "  └ survey the parser · claude-opus-5-5 · 1m 35s · running in its own tab"),
+            "the ledger worker's row stands in its spawn cell: {rows:#?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.starts_with("  └ read the lexer · 3 tool uses · 40s")),
+            "the helper of this process keeps its row: {rows:#?}"
+        );
+    }
+
+    /// t-69472: the interactive TUI detaches an `Agent` call by default, so
+    /// its spawn cell is done at once and a running helper's row stands under
+    /// the Working line instead. A ledger worker's does too: the wave counts
+    /// it, and its row says what its parent can know of it.
+    #[test]
+    fn a_detached_ledger_workers_row_stands_under_the_working_line() {
+        let mut ui = test_ui();
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(95)));
+        let mut ledger = running_helper("agent-ledger", "survey the parser", "working", 0, 95);
+        ledger.tool_call_id = Some("toolu_ledger".to_string());
+        ledger.model = Some("claude-opus-5-5".to_string());
+        ledger.pane = Some("%9".to_string());
+        ledger.ledger = true;
+        let mut inline = running_helper("agent-inline", "read the lexer", "Read · src/lexer.rs", 3, 40);
+        inline.tool_call_id = Some("toolu_inline".to_string());
+        ui.set_subagent_progress(vec![inline, ledger]);
+
+        let details = &ui.status.as_ref().expect("working status").details;
+        assert_eq!(
+            details.first().map(String::as_str),
+            Some("agents 2 · running 2 · done 0"),
+            "the wave counts the ledger worker: {details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|row| row == "survey the parser · claude-opus-5-5 · 1m 35s · running in its own tab"),
+            "the ledger worker's row stands under the Working line: {details:#?}"
+        );
+        assert!(
+            details.iter().any(|row| row.starts_with("read the lexer · 3 tool uses · 40s")),
+            "the helper of this process keeps its row: {details:#?}"
+        );
     }
 
     /// Everything the frame put on screen, without its colours and cursor
