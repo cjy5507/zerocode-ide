@@ -31,7 +31,7 @@ import { testKnowledgeLive } from "./knowledge-live.mjs";
 import { testArtifactBand, testArtifactBeside, testArtifactFollowed, testArtifactOtherProject, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership, testArtifactWordFacedCards } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
-import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
+import { testUsageGoogleLogin, testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
 import { testTerminalDoor } from "./terminal-door.mjs";
 import { testWaitingList } from "./waiting-list.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
@@ -264,6 +264,9 @@ suite("usage-refresh", async ({ browser, origin, ok }) => {
   await testUsageRefresh(browser, origin, standBackend, ok);
   await testUsageWords(browser, origin, standBackend, ok);
 });
+/* The Antigravity switch and the bar stand together, and with no Google login
+ * the bar names the missing login (t-70039). */
+suite("usage-google-login", ({ browser, origin, ok }) => testUsageGoogleLogin(browser, origin, standBackend, ok));
 suite("terminal-door", ({ browser, origin, ok }) => testTerminalDoor(browser, origin, standBackend, ok));
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("waiting-list", ({ browser, origin, ok }) => testWaitingList(browser, origin, standBackend, ok));

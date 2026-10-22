@@ -160,6 +160,18 @@ pub(crate) fn credentials_path_from(
         .map(|root| root.join("credentials.json"))
 }
 
+/// Whether this machine has the login on file at all — the question a
+/// default asks (the status bar's, `settings_runtime`), which needs no token
+/// and no clock. A file that cannot be read is no login.
+pub(crate) fn on_file(path: Option<&Path>) -> bool {
+    path.is_some_and(|path| matches!(read(path), Ok(Some(_))))
+}
+
+/// [`on_file`] at this machine's own store.
+pub(crate) fn on_this_machine() -> bool {
+    on_file(credentials_path().as_deref())
+}
+
 /// The login on file, `None` when the file or the key is absent.
 pub(crate) fn read(path: &Path) -> Result<Option<Credentials>, String> {
     match read_root(path)?.get(OAUTH_KEY) {
@@ -886,6 +898,32 @@ mod tests {
         std::fs::write(&path, "not json").expect("break it");
         let broken = standing(Some(&path), None, now_ms);
         assert!(!broken.signed_in && broken.error.is_some());
+    }
+
+    /// The status bar's question — is there a Google login on this machine at
+    /// all (t-70039) — answered off the file alone: no home, no file, a file
+    /// holding only other products' logins, and a file that is not JSON are
+    /// all no login; the entry is one, whatever its clock.
+    #[test]
+    fn a_login_is_on_file_only_when_its_entry_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        assert!(!on_file(None), "a machine with no home read as signed in");
+        assert!(!on_file(Some(&path)), "a missing file read as signed in");
+
+        std::fs::write(&path, r#"{"oauth": {"accessToken": "claude"}}"#).expect("seed");
+        assert!(
+            !on_file(Some(&path)),
+            "another product's login read as the Google one"
+        );
+
+        let mut spent = credentials();
+        spent.expires_at = Some(1);
+        save(&path, &spent).expect("save");
+        assert!(on_file(Some(&path)), "a Google login on file did not count");
+
+        std::fs::write(&path, "not json").expect("break it");
+        assert!(!on_file(Some(&path)), "a broken file read as signed in");
     }
 
     /// The hand-rolled form body escapes what a token may legally carry.

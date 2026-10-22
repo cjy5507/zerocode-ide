@@ -888,17 +888,17 @@ pub(crate) fn set_status_bar_item(
         &app,
         &webview,
         &state,
-        &[setting_key::STATUS_BAR_ITEMS],
+        &[
+            setting_key::STATUS_BAR_ITEMS,
+            setting_key::STATUS_BAR_ITEMS_OFF,
+        ],
         move |settings| {
-            if enabled {
-                if !settings.status_bar_items.contains(&item) {
-                    settings.status_bar_items.push(item);
-                }
-            } else {
-                settings.status_bar_items.retain(|held| held != &item);
-            }
-            settings.status_bar_items =
-                normalize_status_bar_items(std::mem::take(&mut settings.status_bar_items));
+            switch_status_bar_item(
+                &mut settings.status_bar_items,
+                &mut settings.status_bar_items_off,
+                &item,
+                enabled,
+            );
             Ok(())
         },
     )

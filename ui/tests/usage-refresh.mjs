@@ -382,3 +382,98 @@ export async function testUsageWords(browser, origin, standBackend, ok) {
   }
   await page.close();
 }
+
+/* t-70039 — 사람이 두 번 「agy 게이지 없네」라고 했다(10-21·10-22). 설정의 체크와
+ * 상태 표시줄이 같은 것을 말하는가: 켜면 그 자리에서 서고, 끄면 사라지고 묻지
+ * 않으며, Google 로그인이 없으면 빠진 것이 Google 로그인이라고 말한다(Kimi·Grok의
+ * 칩과 같은 조각). 켜짐·꺼짐의 결정은 백엔드의 것이고 Rust 시험이 잰다
+ * (`main_unit_tests.rs`의 세 장면); 여기는 창이 그 결정을 그리는 쪽이다. 창의
+ * 포커스 물음은 재는 동안 물러난다 — 막대가 서는 까닭이 스위치뿐이도록. */
+export async function testUsageGoogleLogin(browser, origin, standBackend, ok) {
+  const page = await browser.newPage();
+  await standBackend(page);
+  await page.goto(`${origin}/index.html`);
+  await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+
+  const seen = await page.evaluate(async () => {
+    window.removeEventListener("focus", noteWindowFocused);
+    const frames = async () => {
+      for (let at = 0; at < 6; at += 1) await new Promise(requestAnimationFrame);
+    };
+    // A read lands a few frames after its ask, more under load; bounded.
+    const until = async (test, most = 120) => {
+      for (let at = 0; at < most && !test(); at += 1) await new Promise(requestAnimationFrame);
+    };
+    const resetsAt = Date.now() + 3_600_000;
+    const reading = {
+      provider: "antigravity",
+      session: { used_percent: 30, window_minutes: 60, resets_at: resetsAt },
+      weekly: null, fable_weekly: null, monthly: null,
+      buckets: [{ name: "3.1 Pro", used_percent: 30, window_minutes: 60, resets_at: resetsAt }],
+      updated_at: Date.now(), error: null, status: "ok", failure_kind: null, retry_at_ms: null,
+      plan_type: null, reset_credits: null, account: null,
+    };
+    // The gauge's answer, swapped per scene; `__ANSWER__` is consulted before
+    // the stub's own table, so this stands in for the backend's read.
+    const asked = { count: 0 };
+    let answer = reading;
+    window.__ANSWER__.antigravity_usage = () => {
+      asked.count += 1;
+      return { usage: answer, fetching: false };
+    };
+    const toggle = document.getElementById("status-bar-antigravity");
+    const look = () => {
+      const figure = document.getElementById("sb-antigravity-pct");
+      return {
+        checked: toggle.checked,
+        shown: !document.getElementById("sb-antigravity").hidden,
+        said: figure.hidden ? "" : figure.textContent.trim(),
+        warn: !document.getElementById("sb-antigravity-warn").hidden,
+        tip: document.getElementById("sb-antigravity").dataset.tip ?? "",
+      };
+    };
+    // The boot document stands with Antigravity off and never read: the person's
+    // bar before they tick it.
+    const before = look();
+    toggle.click();
+    await until(() => !document.getElementById("sb-antigravity").hidden);
+    await frames();
+    const switchedOn = { ...look(), asks: asked.count };
+    toggle.click();
+    asked.count = 0;
+    askEveryProviderUsage();
+    await frames();
+    const switchedOff = { ...look(), asks: asked.count };
+    // No Google login on this machine: the backend's answer, word for word.
+    const sentence = "Google 로그인 필요 — 설정 > AI 제공자 계정";
+    answer = { ...reading, session: null, buckets: null, status: "signed_out", error: sentence };
+    toggle.click();
+    await refreshProviderUsage(usageProvider("antigravity"), false);
+    await frames();
+    const noLogin = {
+      ...look(),
+      sentence,
+      expected: t("usage.signedOutOf", "{{provider}} 로그인 필요", { provider: "Google" }),
+    };
+    return { before, switchedOn, switchedOff, noLogin };
+  });
+  ok(
+    "a status-bar gauge switched on stands on the bar at once, as its checkbox says",
+    !seen.before.checked && !seen.before.shown &&
+      seen.switchedOn.checked && seen.switchedOn.shown && seen.switchedOn.asks >= 1 &&
+      seen.switchedOn.said.includes("30%") && !seen.switchedOn.warn,
+    JSON.stringify({ before: seen.before, switchedOn: seen.switchedOn }),
+  );
+  ok(
+    "a status-bar gauge switched off leaves the bar and is not asked",
+    !seen.switchedOff.checked && !seen.switchedOff.shown && seen.switchedOff.asks === 0,
+    JSON.stringify(seen.switchedOff),
+  );
+  ok(
+    "with no Google login the Antigravity gauge names the missing login on the bar, with the triangle and the road on hover",
+    seen.noLogin.checked && seen.noLogin.shown && seen.noLogin.said === seen.noLogin.expected &&
+      seen.noLogin.warn && seen.noLogin.tip === seen.noLogin.sentence,
+    JSON.stringify(seen.noLogin),
+  );
+  await page.close();
+}

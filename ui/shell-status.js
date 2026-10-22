@@ -206,12 +206,32 @@ function paintStatusBarPreferences() {
 }
 
 function setStatusBarItem(item, enabled) {
+  const before = statusBarItems;
   const next = new Set(statusBarItems);
   if (enabled) next.add(item);
   else next.delete(item);
   statusBarItems = normalizedStatusBarItems([...next]);
   paintStatusBarPreferences();
+  askGaugesSwitchedOn(before);
   void commitSetting(`status_bar_items.${item}`, "set_status_bar_item", { item, enabled });
+}
+
+/* 켜진 게이지는 그 자리에서 묻는다(t-70039). 막대는 체크를 따라 서야 하는데, 한
+ * 번도 읽지 않은 게이지는 숨은 채 다음 물음 — 창 포커스, 에이전트의 턴, 15분
+ * 박자 — 을 기다렸다: 체크는 켜졌는데 막대에는 아무것도 없는 몇 분. 무강제로
+ * 묻으므로 나갈지는 백엔드의 바닥(`usage_scan_holds`)이 정한다.
+ *
+ * 읽기가 이미 나가 있는 게이지는 다시 묻지 않는다. 그 읽기의 다음 물음은 이미
+ * 걸려 있고(`usageAskTimers`), 막대는 창이 든 그 읽기(「확인 중…」)로 스위치와
+ * 함께 바로 선다. 다시 물으면 같은 읽기를 한 번 더 묻고 그 사슬을 새로 걸 뿐이며,
+ * 그 답이 스위치가 방금 되살린 조각을 다시 칠한다 — 결합 게이트 l68b의 창 시험에서는
+ * 그 읽기를 모르는 답(값도, 읽는 중도 없음)이 끄고 다시 켠 Codex를 막대에서 지웠다. */
+function askGaugesSwitchedOn(before) {
+  for (const provider of USAGE_PROVIDERS) {
+    if (before.has(provider.id) || !statusBarItemEnabled(provider.id)) continue;
+    if (provider.read().fetching) continue;
+    void refreshProviderUsage(provider, false);
+  }
 }
 
 function setUsagePercentageDisplay(display) {
@@ -1027,6 +1047,9 @@ const USAGE_PROVIDERS = [
     // 동안 세그먼트는 「Antigravity 로그인 필요」라고만 말하고 사람을
     // 터미널의 `zo login google` 로 보냈다.
     signIn: () => showProviderAccounts(),
+    // 이 게이지가 읽는 로그인은 Google의 것이다 — 그 카드도 「Google」이다. 로그인이
+    // 없을 때 막대의 낱말은 빠진 로그인을 부른다(t-70039).
+    login: "Google",
     alwaysShown: false,
   },
   // Kimi reads a credentials file the CLI owns and never writes it back
@@ -1158,13 +1181,17 @@ function usageProgramName(provider) {
  * 2026-09-02 「가독성이 떨어짐」)는 교훈이 여기 모든 낱말에 든다. */
 function usageSegmentWord(provider, usage, state) {
   const vars = { provider: provider.name, program: usageProgramName(provider) };
-  const word = (held) => t(held.key, held.said, vars);
+  const word = (held, named = vars) => t(held.key, held.said, named);
   switch (state.kind) {
     case "loading":
       return { said: state.says, tip: state.says };
     case "sign-in":
-      // 왜인지는 호버가 말한다. 스캔이 읽은 화면의 문장을 그대로 옮긴다.
-      return { said: word(USAGE_SIGNED_OUT_WORD), tip: usage.error ?? t("usage.signedOut", "로그인 필요") };
+      // 왜인지는 호버가 말한다. 스캔이 읽은 화면의 문장을 그대로 옮긴다. 낱말이
+      // 부르는 것은 빠진 로그인이다 — 공급자 기록이 그 이름을 들면 그것(`login`).
+      return {
+        said: word(USAGE_SIGNED_OUT_WORD, { ...vars, provider: provider.login ?? provider.name }),
+        tip: usage.error ?? t("usage.signedOut", "로그인 필요"),
+      };
     case "error":
       return {
         said: word(
