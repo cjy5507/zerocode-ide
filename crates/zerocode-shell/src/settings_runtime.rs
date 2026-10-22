@@ -144,6 +144,7 @@ pub(super) mod setting_key {
     pub const NOTIFICATIONS: &str = "notifications";
     pub const BROWSER: &str = "browser";
     pub const STATUS_BAR_ITEMS: &str = "status_bar_items";
+    pub const STATUS_BAR_ITEMS_OFF: &str = "status_bar_items_off";
     pub const USAGE_PERCENTAGE_DISPLAY: &str = "usage_percentage_display";
     pub const STATUS_BAR_USAGE_MODE: &str = "status_bar_usage_mode";
     pub const USAGE_ANALYTICS_OFF: &str = "usage_analytics_off";
@@ -194,11 +195,22 @@ pub(super) const STATUS_BAR_ITEMS: &[&str] = &[
     "resource-usage",
     "ports",
 ];
-/// The names the catalog took back and then restored (t-62187: withdrawn on
-/// 2026-10-17, restored on 2026-10-19). A document normalised while one of them
-/// was withdrawn recorded its offer WITHOUT that name, so the name's absence from
-/// `seen` says nothing about a choice: the stored list decides.
+/// The names the catalog took back and then restored (t-62187: withdrawn in
+/// v1.1.75 on 2026-10-17, restored in v1.1.80 on 2026-10-19). While one was
+/// withdrawn, every load normalised it out of the stored list AND out of
+/// `seen`, whether or not the person had it on; the restore then wrote the
+/// offer back into `seen` alone. So in a document from before the person's own
+/// record (`status_bar_items_off`), such a name's absence is the window's
+/// writing as often as the person's choice: it is read as neither, and its
+/// login decides it, once ([`record_status_bar_switches`], t-70039).
 const WITHDRAWN_THEN_RESTORED: &[&str] = &["antigravity"];
+/// Whether one login is on this machine, asked of the module that owns it.
+type LoginOnFile = fn() -> bool;
+/// The login a status-bar item reads, where this window can see it without a
+/// keychain or a process — what decides a withdrawn-then-restored name
+/// ([`record_status_bar_switches`]). Each row asks the module that owns that
+/// login; an item with no row reads no login of its own here.
+const STATUS_BAR_LOGINS: &[(&str, LoginOnFile)] = &[("antigravity", google_login::on_this_machine)];
 pub(super) const DEFAULT_APP_FONT_FAMILY: &str = "Geist";
 
 pub(super) fn default_status_bar_items() -> Vec<String> {
@@ -216,7 +228,12 @@ pub(super) fn normalize_status_bar_items(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Turn on every catalog item this document has never been offered.
+fn holds_item(list: &[String], item: &str) -> bool {
+    list.iter().any(|held| held == item)
+}
+
+/// Turn on every catalog item this document has never been offered, and keep
+/// every item the person switched off, off.
 ///
 /// [`normalize_status_bar_items`] intersects, which means a name missing from
 /// a stored list is indistinguishable from one the person switched off — and
@@ -230,9 +247,20 @@ pub(super) fn normalize_status_bar_items(items: Vec<String>) -> Vec<String> {
 /// So the document remembers what it was OFFERED, separately from what is on.
 /// A name in the catalog but not in `seen` has never been put in front of
 /// this person: it arrives ON, which is how every one of them shipped
-/// (`status-bar-defaults.ts:3-15` — all of them on out of the box). A name in
-/// `seen` and not in the list was switched off deliberately and stays off
-/// forever.
+/// (`status-bar-defaults.ts:3-15` — all of them on out of the box), and with
+/// no login behind it the bar says which login it needs. A name in `seen`
+/// and not in the list stays off.
+///
+/// What the person switched off is also its own record (`switched_off`),
+/// because an absence cannot say who made it: a gauge withdrawn and restored
+/// comes back as a name never offered, and only that record keeps it off for
+/// the person who had switched it off. A name on the list is on whatever the
+/// record says, and the record lets it go: only a build that keeps no record
+/// puts a switched-off name back on the list, and that switch is the later
+/// one. A document from before the record keeps its old reading here — a
+/// withdrawn-then-restored name it does not list is not offered again, since
+/// that absence may be a choice — until a load reads the record off it
+/// ([`record_status_bar_switches`]).
 ///
 /// The first run under this code has an empty `seen`, so every catalog item
 /// counts as new and comes on once. That is deliberate and the cost is
@@ -240,18 +268,22 @@ pub(super) fn normalize_status_bar_items(items: Vec<String>) -> Vec<String> {
 /// (`status == "unavailable"`), so the only visible effect is on a machine
 /// that genuinely has that provider configured — which is the machine that
 /// wanted the gauge.
-pub(super) fn adopt_unseen_status_bar_items(items: &mut Vec<String>, seen: &mut Vec<String>) {
-    for name in STATUS_BAR_ITEMS {
-        if seen.iter().any(|held| held == name) {
-            continue;
-        }
-        // An offer recorded without a withdrawn-then-restored name is not a
-        // first offer of it: the stored list says whether it is on.
-        if !seen.is_empty() && WITHDRAWN_THEN_RESTORED.contains(name) {
-            continue;
-        }
-        if !items.iter().any(|held| held == name) {
-            items.push((*name).to_string());
+pub(super) fn adopt_unseen_status_bar_items(
+    items: &mut Vec<String>,
+    seen: &mut Vec<String>,
+    switched_off: &mut Option<Vec<String>>,
+) {
+    let unrecorded = switched_off.is_none() && !seen.is_empty();
+    for &name in STATUS_BAR_ITEMS {
+        let switched = switched_off
+            .as_deref()
+            .is_some_and(|off| holds_item(off, name));
+        // An older document's withdrawn-then-restored name counts as offered:
+        // its absence may be a choice.
+        let offered =
+            holds_item(seen, name) || (unrecorded && WITHDRAWN_THEN_RESTORED.contains(&name));
+        if !(holds_item(items, name) || switched || offered) {
+            items.push(name.to_string());
         }
     }
     *items = normalize_status_bar_items(std::mem::take(items));
@@ -259,6 +291,83 @@ pub(super) fn adopt_unseen_status_bar_items(items: &mut Vec<String>, seen: &mut 
         .iter()
         .map(|name| (*name).to_string())
         .collect();
+    if let Some(off) = switched_off {
+        off.retain(|name| !holds_item(items, name));
+        off.sort();
+        off.dedup();
+    }
+}
+
+/// Read the person's own record off a document from before it existed, once,
+/// at a load.
+///
+/// A name offered (`seen`) and not on was switched off by the person: theirs
+/// was the only road that took a name out of the list. Not so a
+/// withdrawn-then-restored name — the withdrawal took it out too — so its
+/// absence is read as neither, and its login decides it (`signed_in`): on when
+/// that login is on this machine, as a gauge the person had on would be, and
+/// otherwise off and unrecorded, as a gauge nobody asked for. A document never
+/// offered anything has no switch to read; its names arrive on as new
+/// ([`adopt_unseen_status_bar_items`]).
+///
+/// A document that has the record is left alone, so every load after the
+/// first writes nothing and asks no login.
+pub(super) fn record_status_bar_switches(
+    items: &mut Vec<String>,
+    seen: &mut Vec<String>,
+    switched_off: &mut Option<Vec<String>>,
+    signed_in: &dyn Fn(&str) -> bool,
+) {
+    if switched_off.is_some() {
+        return;
+    }
+    let mut off = Vec::new();
+    if !seen.is_empty() {
+        for &name in STATUS_BAR_ITEMS {
+            if holds_item(items, name) {
+                continue;
+            }
+            if WITHDRAWN_THEN_RESTORED.contains(&name) {
+                if signed_in(name) {
+                    items.push(name.to_string());
+                }
+                // Decided here either way, never again as a new name.
+                if !holds_item(seen, name) {
+                    seen.push(name.to_string());
+                }
+            } else if holds_item(seen, name) {
+                off.push(name.to_string());
+            }
+        }
+    }
+    *switched_off = Some(off);
+}
+
+/// [`record_status_bar_switches`]' question on this machine.
+pub(super) fn status_bar_login_on_file(item: &str) -> bool {
+    STATUS_BAR_LOGINS
+        .iter()
+        .find(|(name, _)| *name == item)
+        .is_none_or(|(_, on_file)| on_file())
+}
+
+/// A person's own switch of one status-bar item: on, it goes into the list and
+/// out of their off record; off, the other way round.
+pub(super) fn switch_status_bar_item(
+    items: &mut Vec<String>,
+    switched_off: &mut Option<Vec<String>>,
+    item: &str,
+    enabled: bool,
+) {
+    let off = switched_off.get_or_insert_with(Vec::new);
+    items.retain(|held| held != item);
+    off.retain(|held| held != item);
+    if enabled {
+        items.push(item.to_string());
+    } else {
+        off.push(item.to_string());
+    }
+    *items = normalize_status_bar_items(std::mem::take(items));
 }
 
 /// Which side of a provider quota is drawn. Orca uses the same value for the
@@ -2200,6 +2309,14 @@ pub(super) struct SettingsDocument {
     /// [`adopt_unseen_status_bar_items`] for why "on" alone cannot answer.
     #[serde(default)]
     pub(super) status_bar_items_seen: Vec<String>,
+    /// The status-bar items the person switched off with their own hand — the
+    /// one record of that choice. Neither list above says why a name is
+    /// missing; this one is written by the person's switch alone
+    /// ([`switch_status_bar_item`]). `None` only in a document from before it
+    /// existed, whose record the first load reads off the two lists
+    /// ([`record_status_bar_switches`], t-70039).
+    #[serde(default)]
+    pub(super) status_bar_items_off: Option<Vec<String>>,
     #[serde(default)]
     pub(super) usage_percentage_display: UsagePercentageDisplay,
     #[serde(default)]
@@ -2498,6 +2615,7 @@ impl Default for SettingsDocument {
             app_font_family: default_app_font_family(),
             status_bar_items: default_status_bar_items(),
             status_bar_items_seen: default_status_bar_items(),
+            status_bar_items_off: Some(Vec::new()),
             usage_percentage_display: UsagePercentageDisplay::Used,
             status_bar_usage_mode: StatusBarUsageMode::Verbose,
             usage_analytics_off: Vec::new(),
@@ -2613,6 +2731,19 @@ impl SettingsDocument {
         .normalized()
     }
 
+    /// The document as a load from disk settles it: the person's status-bar
+    /// record read off it if it predates one (`signed_in` deciding what the
+    /// lists cannot), then normalised.
+    pub(super) fn loaded(mut self, signed_in: &dyn Fn(&str) -> bool) -> Self {
+        record_status_bar_switches(
+            &mut self.status_bar_items,
+            &mut self.status_bar_items_seen,
+            &mut self.status_bar_items_off,
+            signed_in,
+        );
+        self.normalized()
+    }
+
     pub(super) fn normalized(mut self) -> Self {
         if !LOCALES.contains(&self.locale.as_str()) {
             self.locale = "system".to_string();
@@ -2626,7 +2757,11 @@ impl SettingsDocument {
                 zerocode_core::vault::Limits::DEFAULT.session_limit(Some(self.vault_session_limit));
         }
         self.app_font_family = normalized_app_font_family(&self.app_font_family);
-        adopt_unseen_status_bar_items(&mut self.status_bar_items, &mut self.status_bar_items_seen);
+        adopt_unseen_status_bar_items(
+            &mut self.status_bar_items,
+            &mut self.status_bar_items_seen,
+            &mut self.status_bar_items_off,
+        );
         self.left_sidebar_tint_color =
             normalized_left_sidebar_tint_color(&self.left_sidebar_tint_color);
         self.left_sidebar_tint_opacity =
@@ -2861,6 +2996,16 @@ pub(super) fn record_settings_migration(
 pub(super) fn load_settings(
     repository: &settings::SettingsRepository,
 ) -> Result<SettingsSnapshot, String> {
+    load_settings_asking(repository, &status_bar_login_on_file)
+}
+
+/// [`load_settings`] with the status bar's login question in the caller's
+/// hands (`signed_in`, [`record_status_bar_switches`]), so a test can stand a
+/// machine with or without a login and never read this one's.
+pub(super) fn load_settings_asking(
+    repository: &settings::SettingsRepository,
+    signed_in: &dyn Fn(&str) -> bool,
+) -> Result<SettingsSnapshot, String> {
     let _io = crumbs::MainIo::enter("settings_runtime::load_settings", SETTINGS_DOCUMENT_FILE);
     let read = repository
         .read_json::<SettingsDocument>(SETTINGS_DOCUMENT_FILE)
@@ -2868,7 +3013,7 @@ pub(super) fn load_settings(
     let needs_commit = read
         .value
         .as_ref()
-        .is_none_or(|document| document.clone().normalized() != *document);
+        .is_none_or(|document| document.clone().loaded(signed_in) != *document);
     if needs_commit {
         let seed = settings_migration_seed(repository)?;
         // Re-read and normalize under the repository lock. Another process
@@ -2879,7 +3024,7 @@ pub(super) fn load_settings(
                 SETTINGS_DOCUMENT_FILE,
                 || seed,
                 |fresh| {
-                    *fresh = fresh.clone().normalized();
+                    *fresh = fresh.clone().loaded(signed_in);
                 },
             )
             .map_err(|error| error.to_string())?;

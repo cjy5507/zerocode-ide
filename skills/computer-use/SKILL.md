@@ -301,7 +301,11 @@ row's `reason` says which of four. Take them in this order:
   press by point (`click --mark N --look <id>` on an OCR mark, `click --app
   <app> --x X --y Y`), or go as a person does through the app's own name
   box and keys: the box, the address, `press-key Enter`, the value,
-  `press-key Enter`.
+  `press-key Enter`. On a work browser tab the same two roads are
+  `zerocode-browser type <pane> <name-box css> B3`, `zerocode-browser
+  press <pane> enter`, `type` into the formula bar, `press <pane> enter`;
+  or `screenshot <pane>`, `click <pane> --at X,Y` on the cell's pixels,
+  then `press` its keys and `enter`.
 - `look_timeout`: the look ran out of time. Look once more, once.
 - `look_refused`: a door refused the look; the row's `refusal` is the
   door's own code (`workspace_actor_required`, `permission_denied`, …).
@@ -332,6 +336,8 @@ zerocode-browser click <pane-label> --mark <n> --workspace-revision <revision> #
 zerocode-browser click <pane-label> --mark <n> --settle-later --workspace-revision <revision> # the next marks finishes the settle
 zerocode-browser type <pane-label> <css> <text> --workspace-revision <revision>
 zerocode-browser type <pane-label> <css> --workspace-revision <revision> --value-stdin # the value stays on stdin
+zerocode-browser press <pane-label> <key> [css] --workspace-revision <revision> # one key, press-key's names (enter, tab, escape, left, shift+tab, cmdorctrl+a, a character), to the focus or to css focused first
+zerocode-browser click <pane-label> --at <x>,<y> --workspace-revision <revision> # a point of the pane's screenshot, in its pixels: a canvas grid's cell
 zerocode-browser wait <pane-label> <css> [timeout-ms]
 zerocode-browser screenshot <pane-label> [--out <path>] [--json] [--marks]
 zerocode-browser console <pane-label> [--since N] [--level error|warn|all]

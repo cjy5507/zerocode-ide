@@ -553,7 +553,9 @@ impl AsyncApiClient for LiveAsyncApiClient {
             let restart_ids = ids.clone();
             let restart_tx = render_tx.clone();
             let stream = stream.with_stream_retry_notice(move |notice| {
-                let _ = restart_tx.try_send(stream_notice_block(&notice, &restart_ids));
+                for block in stream_notice_blocks(&notice, &restart_ids) {
+                    let _ = restart_tx.try_send(block);
+                }
             });
 
             let source = HttpSource::new(stream);
@@ -624,6 +626,31 @@ fn stream_notice_block(
             }
         }
     }
+}
+
+/// Everything one stream notice puts on the turn's channel: its row or its
+/// phase ([`stream_notice_block`]), and for a reconnect the `Retrying` phase a
+/// turn's own retry sends too (t-69472). The Working line and the window's
+/// activity card then say the turn is reconnecting — the attempt, and the
+/// pause counted down — until the stream's text or a quiet-reasoning notice
+/// says it is live again.
+pub(crate) fn stream_notice_blocks(
+    notice: &core_types::StreamRetryNotice,
+    ids: &runtime::message_stream::types::BlockIdGen,
+) -> Vec<RenderBlock> {
+    let mut blocks = vec![stream_notice_block(notice, ids)];
+    if notice.kind == core_types::StreamNoticeKind::Reconnect {
+        // Whole seconds rounded up, as the row says them.
+        let delay_secs = notice.delay.as_secs() + u64::from(notice.delay.subsec_nanos() > 0);
+        blocks.push(RenderBlock::StreamPhase(
+            runtime::message_stream::types::StreamPhase::Retrying {
+                // The row's count: the requests sent, the first one included.
+                attempt: notice.attempt.saturating_add(1),
+                delay_secs,
+            },
+        ));
+    }
+    blocks
 }
 
 fn stream_notice_row(notice: &core_types::StreamRetryNotice) -> (SystemLevel, String) {

@@ -787,6 +787,14 @@ pub enum RuntimeRequest {
         receipt: Box<zerocode_core::orchestration::land_batch::LandBatchReceipt>,
         now_ms: i64,
     },
+    /// The person pressed a settle over what is left behind, through the window's own door
+    /// (t-71220): the ledger acts on each named task it still reads the way the press was drawn.
+    PersonSettle {
+        press: zerocode_core::orchestration::settle::SettlePress,
+        named: Vec<zerocode_core::orchestration::settle::Named>,
+        by: zerocode_core::orchestration::land_batch::PressedBy,
+        now_ms: i64,
+    },
     /// A pane the plan asked for never opened: the worker row it minted
     /// goes back, durably — the third host fact, and the rollback half of
     /// the effect round trip.
@@ -1329,6 +1337,18 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("phase", &receipt.record.phase())
                 .field("now_ms", now_ms)
                 .finish(),
+            // A count: the names are the person's own tasks.
+            Self::PersonSettle {
+                press,
+                named,
+                now_ms,
+                ..
+            } => formatter
+                .debug_struct("RuntimeRequest::PersonSettle")
+                .field("press", press)
+                .field("named", &named.len())
+                .field("now_ms", now_ms)
+                .finish(),
             Self::FinishSleepingReseat {
                 worker,
                 reason,
@@ -1552,6 +1572,12 @@ pub enum RuntimeReply {
     /// `moved: false` is a real answer: the seat had nothing left to
     /// settle, and the revision did not move for it.
     Settled { moved: bool, revision: u64 },
+    /// What a person's settle did, task by task — made durable iff it moved
+    /// anything (t-71220).
+    PersonSettled {
+        settled: zerocode_core::orchestration::settle::Settled,
+        revision: u64,
+    },
     /// A reservation's answer — a handover's or a continuation's: the
     /// receipt row's id, made durable — or `None`, the ledger's own refusal
     /// (the attempt ended, a person took the pane, the ceiling), with nothing
@@ -1611,7 +1637,8 @@ impl RuntimeReply {
             | Self::Retention { revision, .. }
             | Self::Reserved { revision, .. }
             | Self::Witnessed { revision, .. }
-            | Self::ProjectReach { revision, .. } => *revision,
+            | Self::ProjectReach { revision, .. }
+            | Self::PersonSettled { revision, .. } => *revision,
             Self::View(image) => image.revision,
         }
     }
@@ -1756,6 +1783,9 @@ pub enum RuntimeError {
     /// The ledger refused an integration batch's record, in its own words (t-45315).
     #[error("{0}")]
     LandBatchRefused(String),
+    /// The ledger refused a person's settle, in its own words (t-71220).
+    #[error("{0}")]
+    PersonSettleRefused(String),
     #[error("the seat this worker sits in is open on the host")]
     SeatStillOpen,
     #[error("the runtime revision is stale or non-monotonic")]
@@ -3003,6 +3033,27 @@ impl RuntimeActor {
         }
     }
 
+    /// A person's settle over what is left behind (t-71220). Answers what it did, task by task,
+    /// and the revision; a press the ledger does not take comes back as
+    /// [`RuntimeError::PersonSettleRefused`] with its reason, with nothing written.
+    pub fn person_settle(
+        &self,
+        press: zerocode_core::orchestration::settle::SettlePress,
+        named: Vec<zerocode_core::orchestration::settle::Named>,
+        by: zerocode_core::orchestration::land_batch::PressedBy,
+        now_ms: i64,
+    ) -> Result<(zerocode_core::orchestration::settle::Settled, u64), RuntimeError> {
+        match self.request(RuntimeRequest::PersonSettle {
+            press,
+            named,
+            by,
+            now_ms,
+        })? {
+            RuntimeReply::PersonSettled { settled, revision } => Ok((settled, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// A pane the plan asked for never opened; the worker row goes back.
     pub fn seat_never_opened(
         &self,
@@ -3914,6 +3965,12 @@ impl RuntimeState {
             RuntimeRequest::GateJudged { receipt, now_ms } => self.gate_judged(&receipt, now_ms),
             RuntimeRequest::LandCheck { receipt, now_ms } => self.land_checked(&receipt, now_ms),
             RuntimeRequest::LandBatch { receipt, now_ms } => self.land_batched(&receipt, now_ms),
+            RuntimeRequest::PersonSettle {
+                press,
+                named,
+                by,
+                now_ms,
+            } => self.person_settled(press, &named, &by, now_ms),
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -5002,6 +5059,39 @@ impl RuntimeState {
             moved: true,
             revision,
         })
+    }
+
+    fn person_settled(
+        &mut self,
+        press: zerocode_core::orchestration::settle::SettlePress,
+        named: &[zerocode_core::orchestration::settle::Named],
+        by: &zerocode_core::orchestration::land_batch::PressedBy,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || named.iter().any(|one| {
+                [&one.run, &one.task]
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > MAX_NAME)
+            })
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let settled = self
+            .ledger
+            .person_settle(press, named, by, now_ms)
+            .map_err(RuntimeError::PersonSettleRefused)?;
+        if !settled.moved() {
+            return Ok(RuntimeReply::PersonSettled {
+                settled,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::PersonSettled { settled, revision })
     }
 
     fn gate_judged(

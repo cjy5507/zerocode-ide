@@ -364,6 +364,8 @@ const WORK_STAGES = Object.freeze({
   superseded: { key: "board.superseded", word: "다음 시도로 넘어감", phase: "superseded", landing: null, live: "superseded" },
   failed: { key: "board.desk.stageFailed", word: "실패", phase: "", landing: "failed", live: "failed" },
   unreviewable: { key: "board.noReviewRecord", word: "종료 — 검토 자료 없음", phase: "unreviewable", landing: "failed", live: "unreviewable" },
+  // 사람이 검토를 생략한 일(t-71220): 아무도 기다리지 않는 것은 검토 기록 없음과 같고, 말만 다르다.
+  waived: { key: "board.reviewWaived", word: "종료 — 검토 생략(사람)", phase: "unreviewable", landing: "failed", live: "waived" },
   verified: { key: "board.verified", word: "검증됨", phase: "vouched", landing: "landWait", live: "verified" },
   nothing_to_land: { key: "board.nothingToLand", word: "완료 — 착지할 것 없음", phase: "vouched", landing: "nothing", live: "nothing-to-land" },
   merged: { key: "board.merged", word: "병합됨", phase: "vouched", landing: "landed", live: "merged" },

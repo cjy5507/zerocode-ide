@@ -6353,8 +6353,8 @@ fn every_browser_verb_has_its_evidence_row() {
             "list" | "read" | "console" | "network" | "tabs" | "diagnose" | "fields" => None,
             // `marks` numbers the controls; the frame is `screenshot --marks`.
             "open" | "close" | "marks" => Some(false),
-            "goto" | "eval" | "click" | "type" | "fill" | "wait" | "screenshot" | "viewport"
-            | "scroll" | "find" => Some(true),
+            "goto" | "eval" | "click" | "type" | "press" | "fill" | "wait" | "screenshot"
+            | "viewport" | "scroll" | "find" => Some(true),
             other => panic!("`{other}` joined VERBS without an evidence row in this table"),
         };
         assert_eq!(
@@ -6363,6 +6363,13 @@ fn every_browser_verb_has_its_evidence_row() {
             "captures(\"browser\", \"{verb}\") drifted from the table"
         );
     }
+}
+
+/// A key press is a step with its frame (t-70755): a Flow saved from the log
+/// keeps the Enter that committed a canvas grid's cell, and replays it.
+#[test]
+fn a_key_press_in_a_page_leaves_a_line_and_a_frame() {
+    assert_eq!(run_evidence::captures("browser", "press"), Some(true));
 }
 
 /// The page's self-report is parsed without being believed.
@@ -7467,7 +7474,9 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
         "ports".to_string(),
     ];
     let mut seen = Vec::new();
-    adopt_unseen_status_bar_items(&mut items, &mut seen);
+    let mut off = None;
+    record_status_bar_switches(&mut items, &mut seen, &mut off, &|_: &str| false);
+    adopt_unseen_status_bar_items(&mut items, &mut seen, &mut off);
     for gauge in ["antigravity", "kimi", "grok", "opencode-go"] {
         assert!(
             items.iter().any(|held| held == gauge),
@@ -7481,11 +7490,15 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
         "the document did not record what it was offered, so the next \
          launch would offer it all again"
     );
+    assert_eq!(
+        off,
+        Some(Vec::new()),
+        "a document never offered anything was read as the person switching items off"
+    );
 
-    // And once offered, a name switched off stays off — the whole reason
-    // `seen` exists rather than simply unioning with the catalog.
+    // And once offered, a name switched off stays off.
     let mut chosen = vec!["claude".to_string()];
-    adopt_unseen_status_bar_items(&mut chosen, &mut seen);
+    adopt_unseen_status_bar_items(&mut chosen, &mut seen, &mut off);
     assert_eq!(
         chosen,
         vec!["claude".to_string()],
@@ -7496,7 +7509,7 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
     // arrived in — the bar draws in this order and two documents that
     // agree about which items are on must agree about the drawing too.
     let mut shuffled = vec!["ports".to_string(), "claude".to_string()];
-    adopt_unseen_status_bar_items(&mut shuffled, &mut seen);
+    adopt_unseen_status_bar_items(&mut shuffled, &mut seen, &mut off);
     assert_eq!(
         shuffled,
         vec!["claude".to_string(), "ports".to_string()],
@@ -7504,34 +7517,270 @@ fn a_status_bar_item_that_ships_later_still_reaches_an_older_list() {
     );
 }
 
-/// A document normalised while the Antigravity gauge was withdrawn (v1.1.75 to
-/// v1.1.78) recorded its offer WITHOUT that name. The restored gauge is not new
-/// to such a document: its stored list decides, and a gauge the person never
-/// ticked does not start asking Google on the first run after the restore.
+/// A status-bar document from before the person's own record, as v1.1.75 to
+/// v1.1.84 wrote one (t-70039) — built here, never read off the person's file.
+fn status_bar_document_before_the_record(items: &[&str], seen: &[&str]) -> SettingsDocument {
+    let mut document =
+        serde_json::to_value(SettingsDocument::default()).expect("serialize the default");
+    let fields = document.as_object_mut().expect("a document is an object");
+    fields.remove("status_bar_items_off");
+    fields.insert("status_bar_items".to_string(), serde_json::json!(items));
+    fields.insert("status_bar_items_seen".to_string(), serde_json::json!(seen));
+    serde_json::from_value(document).expect("an older status-bar document reads")
+}
+
+/// The list the 2026-10-17 withdrawal left behind: every item but Antigravity.
+const STATUS_BAR_WITHOUT_ANTIGRAVITY: &[&str] = &[
+    "claude",
+    "codex",
+    "kimi",
+    "grok",
+    "opencode-go",
+    "resource-usage",
+    "ports",
+];
+
+fn on_the_bar(document: &SettingsDocument, item: &str) -> bool {
+    document.status_bar_items.iter().any(|held| held == item)
+}
+
+/// Scene one (t-70039): the gauge the 2026-10-17 withdrawal took out of an older
+/// document comes back on when its login is on this machine — whether that
+/// document's `seen` lost the name as well (saved by v1.1.75 to v1.1.79) or got
+/// it back without the list (v1.1.80 on, the shape the person's own file has) —
+/// and no switch the person never made is written down for them.
 #[test]
-fn a_gauge_restored_after_withdrawal_stays_as_the_stored_list_has_it() {
-    let mut items = vec![
-        "claude".to_string(),
-        "codex".to_string(),
-        "ports".to_string(),
-    ];
-    let mut seen: Vec<String> = [
-        "claude",
-        "codex",
-        "kimi",
-        "grok",
-        "opencode-go",
-        "resource-usage",
-        "ports",
-    ]
-    .iter()
-    .map(|name| (*name).to_string())
-    .collect();
-    adopt_unseen_status_bar_items(&mut items, &mut seen);
+fn a_gauge_the_withdrawal_took_comes_back_on_with_its_login() {
+    for seen in [STATUS_BAR_ITEMS, STATUS_BAR_WITHOUT_ANTIGRAVITY] {
+        let settled = status_bar_document_before_the_record(STATUS_BAR_WITHOUT_ANTIGRAVITY, seen)
+            .loaded(&|item: &str| item == "antigravity");
+        assert_eq!(
+            settled.status_bar_items,
+            default_status_bar_items(),
+            "with the Google login on file the gauge stayed off (seen {seen:?})"
+        );
+        assert_eq!(
+            settled.status_bar_items_off,
+            Some(Vec::new()),
+            "a switch the person never made was written down (seen {seen:?})"
+        );
+    }
+}
+
+/// Scene two: a gauge the person switched off stays off with its login on
+/// file, through every later load and save; an older document's other
+/// absences are read as the person's switches; and the record tells a
+/// person's switch from a withdrawal's absence — the next gauge withdrawn and
+/// restored comes back to whoever had it on, and stays off for whoever had
+/// switched it off.
+#[test]
+fn a_gauge_the_person_switched_off_stays_off_with_its_login_on_file() {
+    let signed_in = |_: &str| true;
+    let mut document = SettingsDocument::default();
+    switch_status_bar_item(
+        &mut document.status_bar_items,
+        &mut document.status_bar_items_off,
+        "antigravity",
+        false,
+    );
+    let settled = document.loaded(&signed_in).normalized().loaded(&signed_in);
     assert!(
-        !items.iter().any(|held| held == "antigravity"),
-        "the restored gauge switched itself on for a document that had offered the \
-         catalog without it: {items:?}"
+        !on_the_bar(&settled, "antigravity"),
+        "the gauge the person switched off came back: {:?}",
+        settled.status_bar_items
+    );
+    assert_eq!(
+        settled.status_bar_items_off,
+        Some(vec!["antigravity".to_string()]),
+        "the person's switch is not on record"
+    );
+
+    let mut back = settled.clone();
+    switch_status_bar_item(
+        &mut back.status_bar_items,
+        &mut back.status_bar_items_off,
+        "antigravity",
+        true,
+    );
+    let back = back.loaded(&signed_in);
+    assert!(
+        on_the_bar(&back, "antigravity") && back.status_bar_items_off == Some(Vec::new()),
+        "switched back on, the gauge is not the person's again: {:?} off {:?}",
+        back.status_bar_items,
+        back.status_bar_items_off
+    );
+
+    let older = status_bar_document_before_the_record(
+        &["claude", "codex", "antigravity", "grok", "opencode-go", "resource-usage", "ports"],
+        STATUS_BAR_ITEMS,
+    )
+    .loaded(&signed_in);
+    assert!(
+        !on_the_bar(&older, "kimi") && on_the_bar(&older, "antigravity"),
+        "an older document's own switch was not kept: {:?}",
+        older.status_bar_items
+    );
+    assert_eq!(
+        older.status_bar_items_off,
+        Some(vec!["kimi".to_string()]),
+        "an older document's switch is not on record"
+    );
+
+    // A build that keeps no record switched the gauge back on: the list is the
+    // later word, so the gauge is on and the record lets it go.
+    let overlap = SettingsDocument {
+        status_bar_items_off: Some(vec!["antigravity".to_string()]),
+        ..SettingsDocument::default()
+    }
+    .loaded(&signed_in);
+    assert!(
+        on_the_bar(&overlap, "antigravity") && overlap.status_bar_items_off == Some(Vec::new()),
+        "a gauge switched back on by a build without the record was taken off: {:?} off {:?}",
+        overlap.status_bar_items,
+        overlap.status_bar_items_off
+    );
+
+    // A withdrawal empties both lists of a name; the record still says whose
+    // absence it was.
+    for (had, switched_off) in [(settled, true), (back, false)] {
+        let mut withdrawn = had;
+        withdrawn.status_bar_items.retain(|held| held != "antigravity");
+        withdrawn.status_bar_items_seen.retain(|held| held != "antigravity");
+        let restored = withdrawn.loaded(&signed_in);
+        assert_eq!(
+            on_the_bar(&restored, "antigravity"),
+            !switched_off,
+            "a withdrawn-and-restored gauge did not come back as the person had it"
+        );
+    }
+}
+
+/// Scene three: with no Google login on this machine nothing is switched on
+/// for the person. The older document's gauge stays off, unrecorded, and the
+/// login is not asked again; a fresh install's gauge arrives on like every new
+/// item; and a gauge on when its login goes stays on — the bar then names the
+/// missing login (the window's half: `usage-google-login` in window.mjs).
+#[test]
+fn without_the_login_no_gauge_is_switched_on_for_the_person() {
+    let asked = std::cell::Cell::new(0);
+    let signed_out = |_: &str| {
+        asked.set(asked.get() + 1);
+        false
+    };
+    let waiting = status_bar_document_before_the_record(STATUS_BAR_WITHOUT_ANTIGRAVITY, STATUS_BAR_ITEMS)
+        .loaded(&signed_out);
+    assert!(
+        !on_the_bar(&waiting, "antigravity"),
+        "the gauge came on with no login on file: {:?}",
+        waiting.status_bar_items
+    );
+    assert_eq!(
+        waiting.status_bar_items_off,
+        Some(Vec::new()),
+        "a gauge nobody switched off was recorded as the person's switch"
+    );
+    assert_eq!(
+        asked.get(),
+        1,
+        "the login was asked for more than the one name the lists cannot decide"
+    );
+    let again = waiting.loaded(&signed_out);
+    assert!(!on_the_bar(&again, "antigravity"));
+    assert_eq!(asked.get(), 1, "a settled document asked for the login again");
+
+    let fresh = SettingsDocument::default().loaded(&signed_out);
+    assert_eq!(
+        fresh.status_bar_items,
+        default_status_bar_items(),
+        "a fresh install held a new item back for want of a login"
+    );
+
+    let kept = SettingsDocument::default()
+        .loaded(&|_: &str| true)
+        .loaded(&signed_out);
+    assert!(
+        on_the_bar(&kept, "antigravity"),
+        "a gauge on when its login went was switched off for the person"
+    );
+}
+
+/// The person's file is settled once (t-70039): the first load after the update
+/// writes the record and decides the withdrawn gauge; every load and save
+/// after it reads back the same document, writes nothing on a load, and asks
+/// no login. A synthetic file in a sandbox, never the person's.
+#[test]
+fn an_older_status_bar_file_settles_once_and_stays_settled() {
+    let directory = tempfile::tempdir().expect("status-bar settle sandbox");
+    let repository = settings::SettingsRepository::new(directory.path());
+    let mut older = serde_json::to_value(status_bar_document_before_the_record(
+        STATUS_BAR_WITHOUT_ANTIGRAVITY,
+        STATUS_BAR_ITEMS,
+    ))
+    .expect("serialize the older document");
+    older
+        .as_object_mut()
+        .expect("a document is an object")
+        .remove("status_bar_items_off");
+    repository
+        .mutate_json(SETTINGS_DOCUMENT_FILE, || older, |_: &mut serde_json::Value| {})
+        .expect("write the older document");
+
+    let asked = std::cell::Cell::new(0);
+    let signed_in = |item: &str| {
+        asked.set(asked.get() + 1);
+        item == "antigravity"
+    };
+    let first = load_settings_asking(&repository, &signed_in).expect("the first load");
+    assert_eq!(
+        first.document.status_bar_items,
+        default_status_bar_items(),
+        "the first load did not bring the withdrawn gauge back"
+    );
+    let asked_by_the_first = asked.get();
+    assert!(asked_by_the_first > 0, "the first load never asked for the login");
+    let second = load_settings_asking(&repository, &signed_in).expect("the second load");
+    assert_eq!(
+        second.revision, first.revision,
+        "a settled document was written again on a load"
+    );
+    assert_eq!(
+        asked.get(),
+        asked_by_the_first,
+        "a settled document asked for the login again"
+    );
+
+    let saved = mutate_settings(&repository, |_| Ok(())).expect("a save with no change");
+    assert!(
+        saved.document == first.document,
+        "a save turned the settled document into another"
+    );
+    let gone = load_settings_asking(&repository, &|_: &str| false).expect("a load, login gone");
+    assert!(
+        gone.document == first.document && gone.revision == saved.revision,
+        "a load after the login went rewrote the settled document"
+    );
+}
+
+/// The load the window boots on asks this machine's own Google login, through
+/// the module that owns it, for the one name the lists cannot decide — and the
+/// person's switch writes their own record beside the list (t-70039).
+#[test]
+fn the_status_bar_record_is_the_persons_and_the_login_decides_only_the_rest() {
+    let backend = shipped_backend();
+    assert!(
+        block_after(backend, "fn load_settings(")
+            .contains("load_settings_asking(repository, &status_bar_login_on_file)"),
+        "the window's load does not ask this machine's login"
+    );
+    assert!(
+        backend.contains("&[(\"antigravity\", google_login::on_this_machine)]"),
+        "the Antigravity gauge's login is not the Google login the card makes"
+    );
+    let setter = block_after(backend, "fn set_status_bar_item(");
+    assert!(
+        setter.contains("setting_key::STATUS_BAR_ITEMS_OFF")
+            && setter.contains("switch_status_bar_item("),
+        "the person's switch does not write their own record:\n{setter}"
     );
 }
 

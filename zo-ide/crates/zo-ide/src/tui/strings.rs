@@ -161,6 +161,26 @@ pub fn helper(
     parts.join(core_types::helper_run::FACT_SEPARATOR)
 }
 
+/// Where a ledger worker runs: a CLI of its own in a window tab of its own.
+pub const LEDGER_HELPER_WHERE: &str = "running in its own tab";
+
+/// A ledger worker's row (t-69472): what its parent can know of it — the
+/// helper, its model, how long it has run, and where its work is. Its tool
+/// calls and its words are in its own tab, so the row counts and quotes none.
+#[must_use]
+pub fn ledger_helper(label: &str, model: Option<&str>, elapsed: Duration) -> String {
+    let mut parts: Vec<String> = vec![label.to_string()];
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        parts.push(model.to_string());
+    }
+    parts.push(fmt_elapsed_compact(elapsed.as_secs()));
+    parts.push(LEDGER_HELPER_WHERE.to_string());
+    parts.join(core_types::helper_run::FACT_SEPARATOR)
+}
+
+/// The word before the report file a finished helper's cell names (t-69472).
+pub const SPAWN_REPORT: &str = "full report";
+
 /// What a helper's row adds once it has been quiet past the bar outside any
 /// tool call (t-11354): a doubt, and the one place to stop or message just
 /// that helper.

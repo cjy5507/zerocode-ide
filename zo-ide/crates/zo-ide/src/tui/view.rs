@@ -266,6 +266,9 @@ impl Status {
                 self.retry = Some((attempt, self.elapsed + Duration::from_secs(delay_secs)));
             }
             StreamPhase::QuietReasoning { since_secs } => {
+                // The stream that says it is reasoning is live: a reconnect
+                // it went through is over (t-69472).
+                self.retry = None;
                 self.quiet_reasoning_since =
                     Some(self.elapsed.saturating_sub(Duration::from_secs(since_secs)));
             }

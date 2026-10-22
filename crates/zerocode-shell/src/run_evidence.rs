@@ -129,8 +129,8 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
         ("emulator", "screenshot")
         | (
             "browser",
-            "goto" | "click" | "type" | "fill" | "eval" | "wait" | "screenshot" | "viewport"
-            | "scroll" | "find",
+            "goto" | "click" | "type" | "press" | "fill" | "eval" | "wait" | "screenshot"
+            | "viewport" | "scroll" | "find",
         )
         | (
             "computer",

@@ -665,6 +665,8 @@ mod tests {
             pane: None,
             last_receipt: None,
             in_tool: false,
+            report: None,
+            ledger: false,
         }
     }
 

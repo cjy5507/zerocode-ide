@@ -95,6 +95,7 @@ const BOARD_SCHEDULE_TASK_STATES = Object.freeze({
   merged: "done",
   deployed: "done",
   nothing_to_land: "done",
+  waived: "done",
   failed: "failed",
 });
 

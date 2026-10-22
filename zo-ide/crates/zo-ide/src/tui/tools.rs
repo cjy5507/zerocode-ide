@@ -105,6 +105,10 @@ pub enum ToolKind {
         /// own several rows. The poller rewrites them once a second at most;
         /// the cell repaints every frame, so the strings are not built here.
         progress: Vec<String>,
+        /// The report files the call's helpers write, each as its live row
+        /// first named it, kept after the helper leaves the live rows: the
+        /// finished cell names the file when there is one (t-69472).
+        reports: Vec<String>,
     },
     /// A re-injected sub-agent report. `Completed` / `Failed`, with a larger
     /// body budget, and what the run cost when the helper reported it.
@@ -249,6 +253,7 @@ fn spawn_kind(summary: &str) -> ToolKind {
             .filter(|request| !request.is_empty()),
         prompt: sanitize(prompt, ""),
         progress: Vec::new(),
+        reports: Vec::new(),
     }
 }
 
@@ -259,6 +264,8 @@ struct SpawnCell<'a> {
     request: Option<&'a str>,
     prompt: &'a str,
     progress: &'a [String],
+    /// The one report file the call's helper wrote, when it is one helper's.
+    report: Option<&'a str>,
 }
 
 /// `Exploring`/`Explored` 목록의 한 항목 — codex `ParsedCommand` 의 세 갈래.
@@ -570,6 +577,26 @@ impl ToolGroup {
         continues_exploration || continues_compact_group
     }
 
+    /// Keep the report file each running helper writes, keyed by the
+    /// `tool_use` id of its spawn call (t-69472). A file stays once named: the
+    /// helper leaves the live rows when it finishes, and its finished cell
+    /// names what it wrote.
+    pub(super) fn set_spawn_reports(&mut self, reports: &[(String, String)]) {
+        for call in &mut self.calls {
+            if call.done.is_some() {
+                continue;
+            }
+            let ToolKind::Spawn { reports: kept, .. } = &mut call.kind else {
+                continue;
+            };
+            for (_, report) in reports.iter().filter(|(id, _)| *id == call.id) {
+                if !kept.contains(report) {
+                    kept.push(report.clone());
+                }
+            }
+        }
+    }
+
     /// Install the newest live rows, keyed by the `tool_use` id each helper
     /// stamped on its own manifest. A call whose helper is not in `rows` loses
     /// its row rather than keeping a stale one.
@@ -736,6 +763,7 @@ impl ToolGroup {
                 request,
                 prompt,
                 progress,
+                reports,
             } => self.spawn_lines(
                 call,
                 &SpawnCell {
@@ -744,6 +772,10 @@ impl ToolGroup {
                     request: request.as_deref(),
                     prompt,
                     progress,
+                    report: match reports.as_slice() {
+                        [report] => Some(report.as_str()),
+                        _ => None,
+                    },
                 },
                 width,
                 elapsed,
@@ -989,8 +1021,9 @@ impl ToolGroup {
             out.extend(output_block(&done.output, width));
         } else if let Some(preview) = call.done.as_ref().and_then(|done| completed_preview(&done.output)) {
             // The helper answered in this call: codex's `Completed - <message>`
-            // row (`multi_agents.rs::status_summary_spans`) takes the slot.
-            out.extend(prefixed(&[preview], width, &Prefix::tool_output(), true));
+            // row (`multi_agents.rs::status_summary_spans`) takes the slot, and
+            // the file its whole report is in follows it (t-69472).
+            out.extend(completed_body(preview, spawn.report, width));
         } else if !spawn.prompt.is_empty() {
             out.extend(prefixed(
                 &[Line::from_text(truncate_text(spawn.prompt, COLLAB_PROMPT_PREVIEW_GRAPHEMES))],
@@ -1473,6 +1506,35 @@ fn completed_preview(output: &str) -> Option<Line> {
         Span::dim(" - "),
         Span::raw(preview),
     ]))
+}
+
+/// A finished spawn's body: the `Completed - <message>` row and, when the
+/// helper wrote one, the line naming its report file (t-69472). The body is a
+/// fold's, and a terminal that does not know the fold markers shows it open,
+/// so the two together keep to [`OUTPUT_MAX_ROWS`] rows: the message gives up
+/// rows to the file, and a file that needs more than the message leaves it
+/// at least two is not named at that width.
+fn completed_body(preview: Line, report: Option<&str>, width: usize) -> Vec<Line> {
+    let report_rows = report
+        .map(|report| {
+            let line = Line::new(vec![
+                Span::dim(format!("{} ", super::strings::SPAWN_REPORT)),
+                Span::raw(report.to_string()),
+            ]);
+            prefixed(&[line], width, &Prefix::tool_output(), false)
+        })
+        .filter(|rows| rows.len() + 2 <= OUTPUT_MAX_ROWS)
+        .unwrap_or_default();
+    let room = OUTPUT_MAX_ROWS - report_rows.len();
+    let mut rows = prefixed(&[preview], width, &Prefix::tool_output(), true);
+    if rows.len() > room {
+        rows = limit_from_start(&rows, room - 1);
+        if let Some(count) = rows.last_mut() {
+            count.spans.insert(0, Span::raw(" ".repeat(HANG_COLUMNS)));
+        }
+    }
+    rows.extend(report_rows);
+    rows
 }
 
 /// codex `text_formatting::truncate_text`: the first `max` units of `text`

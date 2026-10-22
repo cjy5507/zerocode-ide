@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use telemetry::SessionTracer;
 
+use super::compaction::say_local_summary_on_stderr;
 use super::{
     ApiClient, ApiRequest, CompactionConfig, ContentBlock, ConversationMessage,
     ConversationRuntime, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MEMORY_RECALL_LIMIT, MemoryRetriever,
@@ -508,15 +509,18 @@ where
             return Ok(());
         }
         let guard_t = profile.then(std::time::Instant::now);
-        // Emergency overflow compaction is not user-directed: no focus.
-        let result = self.compact_with_api_fallback(
+        // Emergency overflow compaction is not user-directed: no focus. A
+        // local summary that stood in says so, as an auto round's does.
+        let (result, local_summary) = self.compact_with_api_fallback_explained(
             CompactionConfig {
                 max_estimated_tokens: 0,
                 ..CompactionConfig::default()
             },
             None,
         );
-        self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER);
+        if self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER) {
+            say_local_summary_on_stderr(local_summary.as_ref());
+        }
 
         // Re-check after compaction — if still over budget, aggressively
         // trim preserved messages down to the most recent pair. A pair can
@@ -525,14 +529,16 @@ where
         if self.estimated_request_context_with_reminders(wire_reminders) > budget
             && self.session.messages.len() > 2
         {
-            let result = self.compact_with_api_fallback(
+            let (result, local_summary) = self.compact_with_api_fallback_explained(
                 CompactionConfig {
                     max_estimated_tokens: 0,
                     preserve_recent_messages: 2,
                 },
                 None,
             );
-            self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER);
+            if self.finish_compaction_swap(result, super::POST_COMPACTION_SYSTEM_REMINDER) {
+                say_local_summary_on_stderr(local_summary.as_ref());
+            }
         }
         if let Some(t) = guard_t {
             log_build_segment("overflow_guard_compaction (BLOCKING LLM)", t);
