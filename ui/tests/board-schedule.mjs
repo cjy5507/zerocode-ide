@@ -646,6 +646,20 @@ export async function testBoardSchedule(browser, origin, ok) {
         && hours.every((hour, index) => index === 0 || hour === (hours[index - 1] + 1) % 24)
         && drawn.chip === "지금" && drawn.title === "지금 도는 일",
       JSON.stringify({ ticks: drawn.ticks, chip: drawn.chip, title: drawn.title, asked: drawn.asked.slice(-2) }));
+    // The draft's chip stands beside 「10:00」, never on it: an hour the chip would sit on keeps its line on the
+    // track and hides its words, and every hour's words that show stand clear of the chip.
+    const beside = await page.evaluate(() => {
+      const host = document.querySelector("#board-view .task-board-schedule");
+      const chip = host.querySelector(".board-schedule-now").getBoundingClientRect();
+      return [...host.querySelectorAll(".board-schedule-tick")].map((tick) => {
+        const box = tick.getBoundingClientRect();
+        return { label: tick.textContent, shown: getComputedStyle(tick).visibility !== "hidden",
+          apart: Math.round(Math.max(chip.left - box.right, box.left - chip.right)) };
+      });
+    });
+    ok("the 「지금」 chip covers no hour's words: an hour under it keeps its line and hides its label",
+      beside.filter((one) => one.shown).length >= 3 && beside.every((one) => !one.shown || one.apart > 4),
+      JSON.stringify(beside));
     const legend = await page.evaluate(() => document.querySelector("#board-view .board-schedule-legend")?.textContent ?? "");
     ok("the card's head says how a bar reads, in the draft's words, and every group is named alone",
       legend === "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"
@@ -674,9 +688,17 @@ export async function testBoardSchedule(browser, origin, ok) {
       /째$/.test(carried?.eta ?? "") && carried.sub.startsWith("도는 중 · ") && reviewing?.eta === "대기"
         && reviewing.etaSub === "기다린 지 45분" && reviewing.aheadLabel === "보고됨",
       JSON.stringify({ carried, reviewing }));
-    const look = await page.evaluate(() => {
+    const look = await page.evaluate(async () => {
       const host = document.querySelector("#board-view .task-board-schedule");
       if (!host.querySelector(".board-schedule-legend")) return { sizes: [], dark: { drawn: NaN }, bright: { drawn: NaN } };
+      // A theme flip eases every colour that carries a transition (the group head's, 150 ms): the words are
+      // read once those have settled, not in the frame the flip asked for them. `getAnimations()` flushes the
+      // styles first, so the transitions the flip starts are among the ones waited on.
+      const settled = () => Promise.race([
+        Promise.all(document.getAnimations().filter((one) => one instanceof CSSTransition)
+          .map((one) => one.finished.catch(() => null))),
+        new Promise((done) => setTimeout(done, 2000)),
+      ]);
       const parse = (said) => {
         const rgb = said.match(/^rgba?\(([^)]+)\)$/);
         if (rgb) {
@@ -735,10 +757,13 @@ export async function testBoardSchedule(browser, origin, ok) {
           if (style.content.startsWith("attr(") || /^".+"$/.test(style.content)) sizes.add(style.fontSize);
         }
       }
+      await settled();
       const dark = read();
       document.documentElement.setAttribute("data-theme", "light");
+      await settled();
       const bright = read();
       document.documentElement.removeAttribute("data-theme");
+      await settled();
       probe.remove();
       return { sizes: [...sizes].sort(), dark, bright };
     });
