@@ -13240,6 +13240,16 @@ pub(crate) fn federation_serve(host: &dyn Host, home: &str, body: &serde_json::V
                     Err(why) => return refuse(why),
                 }
             };
+            if let Err(why) = project_scope::place_federation_run(
+                host,
+                &held,
+                &fed_run,
+                &team_id,
+                &leader_pane,
+                now_ms,
+            ) {
+                return refuse(why);
+            }
             let mut argv = vec![
                 "worker-start".to_string(),
                 "--run".to_string(),
@@ -13403,6 +13413,26 @@ pub(crate) fn federation_serve(host: &dyn Host, home: &str, body: &serde_json::V
                 Ok(FederationAnswer::Run(id)) => id,
                 _ => String::new(),
             };
+            if let Err(why) = project_scope::place_federation_run(
+                host,
+                &held,
+                &fed_run,
+                &team_id,
+                &leader_pane,
+                now_ms,
+            ) {
+                let _ = call(FederationCall::StopUnknown {
+                    dispatch: dispatch.clone(),
+                    home: home.to_string(),
+                    now_ms,
+                });
+                return serde_json::json!({
+                    "dispatchId": dispatch,
+                    "state": "stop_unknown",
+                    "lastError": why,
+                })
+                .to_string();
+            }
             let argv = vec![
                 "worker-release".to_string(),
                 "--run".to_string(),

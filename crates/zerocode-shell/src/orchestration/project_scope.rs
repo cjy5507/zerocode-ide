@@ -231,6 +231,64 @@ fn unidentified(verb: &str, run: &str) -> String {
     )
 }
 
+/// A federation run has no coordinator. Its explicit host team supplies the
+/// initial project; an older run must first agree with its recorded workers.
+/// The actor only fills an absent project, so a later host cannot move it.
+pub(super) fn place_federation_run(
+    host: &dyn Host,
+    held: &LiveRuntime,
+    run: &str,
+    team: &str,
+    pane: &str,
+    now_ms: i64,
+) -> Result<(), String> {
+    let image = held.actor.view().map_err(|_| unidentified("attach", run))?;
+    let rows = image.projection();
+    let current = rows
+        .runs
+        .iter()
+        .find(|row| row.id == run)
+        .ok_or_else(|| unidentified("attach", run))?;
+    if current.project.is_some() {
+        return Ok(());
+    }
+    let workers: Vec<_> = rows
+        .workers
+        .iter()
+        .filter(|worker| worker.run == run)
+        .collect();
+    let (root, source, seat) = if workers.is_empty() {
+        let term = crate::agent_teams::teams()
+            .get(team)
+            .and_then(|held| held.term_of(pane));
+        let root = term
+            .and_then(|term| pane_root(host, term))
+            .ok_or_else(|| unidentified("attach", run))?;
+        (root, ProjectSource::Seat, Some(format!("{team}/{pane}")))
+    } else {
+        let mut roots = workers.iter().map(|worker| {
+            worker
+                .checkout
+                .as_deref()
+                .and_then(|path| root_of(Path::new(path)))
+        });
+        let root = roots
+            .next()
+            .flatten()
+            .ok_or_else(|| unidentified("attach", run))?;
+        if roots.any(|other| other.as_deref() != Some(root.as_str())) {
+            return Err(unidentified("attach", run));
+        }
+        (root, ProjectSource::Workers, None)
+    };
+    let (moved, _) = held
+        .actor
+        .note_run_project(run, root, source, seat, now_ms)
+        .map_err(|_| unidentified("attach", run))?;
+    rang(moved);
+    Ok(())
+}
+
 /// The run is not the whole destination: an explicit pane or a reply can
 /// name a participant whose pane has since moved to another project.
 fn recipient_gate(
