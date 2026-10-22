@@ -34,13 +34,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::agent_browser::{
-    BROWSER_SETTLE_KEY, BROWSER_SETTLE_LATER_FLAG, TYPE_VALUE_FLAG, settle_said_ready,
-    settle_unheard,
+    BROWSER_SETTLE_KEY, BROWSER_SETTLE_LATER_FLAG, TYPE_VALUE_FLAG, WORKSPACE_LOOK_UNANSWERED,
+    settle_said_ready, settle_unheard,
 };
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
 use zerocode_core::computer_use::{
-    EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS, WALK_WAIT_MS,
+    EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS, WALK_WAIT_MS, walk_words,
 };
+use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
 use zerocode_core::screen_action::{Navigation, snapshot};
 use zerocode_core::type_value::{FieldLook, ValueInput};
@@ -48,7 +49,7 @@ use zerocode_hookd::TeamAnswer;
 
 use super::value::{ValueWriter, Values, held, window_values};
 use super::{
-    NO_FIELD, NO_TYPING, PRESS_REFUSED, Saved, Screen, Seen, Settled, Snapshot, Surface,
+    Missed, NO_FIELD, NO_TYPING, PRESS_REFUSED, Saved, Screen, Seen, Settled, Snapshot, Surface,
     TYPE_REFUSED, Typed, ValueSource, World,
 };
 
@@ -133,6 +134,87 @@ fn answer_value(answer: &TeamAnswer) -> Option<Value> {
         return None;
     }
     Some(said.get("result").cloned().unwrap_or(said))
+}
+
+/// Why a look's answer held no screen (t-70425), in the walk's four words:
+/// an answer that came back says what stood in its numbers' place
+/// ([`unnumbered`]); a refusal says its code — off its envelope, or first on
+/// a line its CLI said it on — or, where the browser's door has no code for
+/// it, a pane it cannot reach or a page that did not answer in time.
+pub(super) fn missed_of(answer: &TeamAnswer) -> Missed {
+    use crate::cmd::browser::{PAGE_GONE, PAGE_SEND_FAILED, PAGE_TIMED_OUT};
+    if let Some(said) = answer_value(answer) {
+        return unnumbered(&said);
+    }
+    let envelope = |text: &str| {
+        let said: Value = serde_json::from_str(text.trim()).ok()?;
+        said.pointer("/error/code")?.as_str().map(str::to_string)
+    };
+    if let Some(code) = envelope(&answer.stderr).or_else(|| envelope(&answer.stdout)) {
+        return missed_by(&code);
+    }
+    let unreached = crate::agent_tools_runtime::NOT_A_PANE.trim();
+    for line in answer.stderr.lines().chain(answer.stdout.lines()) {
+        // `<cli>: <words>`: the words after the CLI's own name.
+        let words = line
+            .split_once(": ")
+            .map_or(line, |(_, words)| words)
+            .trim();
+        if line.trim() == unreached || [PAGE_GONE, PAGE_SEND_FAILED].contains(&words) {
+            return Missed::said(walk_words::NO_WINDOW);
+        }
+        if words == PAGE_TIMED_OUT {
+            return Missed::said(walk_words::LOOK_TIMEOUT);
+        }
+        if let Some(code) = code_word(words) {
+            return missed_by(code);
+        }
+    }
+    Missed::refused(error_code::UNANSWERED)
+}
+
+/// A refusal by its code: the surface's own not-found and out-of-time codes
+/// are its own reasons — a page that did not answer its look among them, as
+/// a look a second later may see it — and every other code is a door's.
+fn missed_by(code: &str) -> Missed {
+    match code {
+        error_code::APP_NOT_FOUND | error_code::WINDOW_NOT_FOUND => {
+            Missed::said(walk_words::NO_WINDOW)
+        }
+        error_code::TIMEOUT | error_code::ACTION_TIMEOUT | WORKSPACE_LOOK_UNANSWERED => {
+            Missed::said(walk_words::LOOK_TIMEOUT)
+        }
+        code => Missed::refused(code),
+    }
+}
+
+/// The code a refusal's words begin with — `workspace_actor_required: …`,
+/// `workspace_paused[resume=person]: …` — when its first word is one:
+/// lowercase letters, digits and underscores, ended by `:` or `[`.
+fn code_word(words: &str) -> Option<&str> {
+    let code = &words[..words.find([':', '['])?];
+    (code.starts_with(|first: char| first.is_ascii_lowercase())
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'))
+    .then_some(code)
+}
+
+/// What a look that came back without its numbers said in their place: an
+/// app's marked look says it under `marks.unavailable` — no window on its
+/// picture to mark, or a tree with nothing to number and no picture to read
+/// one from (t-66753 C1). Any other look that answered and numbered nothing
+/// stood with nothing to number.
+fn unnumbered(said: &Value) -> Missed {
+    let windowless = said
+        .pointer("/marks/unavailable")
+        .and_then(Value::as_str)
+        .is_some_and(|why| why.starts_with(error_code::WINDOW_NOT_FOUND));
+    Missed::said(if windowless {
+        walk_words::NO_WINDOW
+    } else {
+        walk_words::EMPTY_TREE
+    })
 }
 
 fn read_unjudged(
@@ -461,6 +543,8 @@ pub struct GoalWorld<'a, Road> {
     pixel_baseline: Option<Option<bool>>,
     background: bool,
     background_interrupted: bool,
+    /// Why the last look came back with nothing (t-70425).
+    missed: Option<Missed>,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -532,6 +616,7 @@ impl<'a, Road> GoalWorld<'a, Road> {
             pixel_baseline: None,
             background: false,
             background_interrupted: false,
+            missed: None,
         }
     }
 
@@ -721,7 +806,9 @@ where
     Road: FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
 {
     fn look(&mut self) -> Option<Screen> {
+        self.missed = None;
         if self.background_interrupted {
+            self.missed = Some(Missed::refused(walk_words::BACKGROUND_INTERRUPTED));
             return None;
         }
         if let Some((screen, look)) = self.kept.take() {
@@ -736,13 +823,19 @@ where
             argv.push("--ocr".into());
         }
         let answer = read_unjudged(self.road, self.aim.tool(), &argv);
-        let said = answer_value(&answer)?;
+        let Some(said) = answer_value(&answer) else {
+            self.missed = Some(missed_of(&answer));
+            return None;
+        };
         self.pixels |=
             said.pointer("/marks/perception").and_then(Value::as_str) == Some("accessibility+ocr");
         // A CLI answer is `{ ok, result }` when it went through the door's
         // envelope and the bare answer when it did not; both are read here so
         // the walk is not one envelope's prisoner.
-        let (mut screen, look) = screen_of(&self.aim, &said)?;
+        let Some((mut screen, look)) = screen_of(&self.aim, &said) else {
+            self.missed = Some(unnumbered(&said));
+            return None;
+        };
         self.scroll_window = (|| {
             let window = said.pointer("/tree/window")?;
             let identifier = window.get("id")?.as_u64()?;
@@ -783,6 +876,12 @@ where
             self.pixel_baseline = Some(self.reached());
         }
         Some(screen)
+    }
+
+    fn missed(&mut self) -> Missed {
+        self.missed
+            .take()
+            .unwrap_or_else(|| Missed::refused(error_code::UNANSWERED))
     }
 
     fn press(&mut self, mark: usize) -> bool {
