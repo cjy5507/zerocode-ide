@@ -38,6 +38,10 @@ pub enum WorkStage {
     /// Completed, and every attempt ended handing nothing in: no review can
     /// ever be written ([`ReviewFacts::unreviewable`]). Over, not verified.
     Unreviewable,
+    /// Completed, and the person waived its review through the window's own
+    /// door: 검토 생략(사람) ([`ReviewFacts::waived`], t-71220). Over, not
+    /// verified.
+    Waived,
     /// A coordinator reviewed an earlier attempt, or an earlier commit than the
     /// one this attempt handed in, naming the source it read: the review does
     /// not stand for this work.
@@ -62,11 +66,12 @@ pub enum WorkStage {
 
 impl WorkStage {
     /// Every stage, each once.
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Working,
         Self::ReportOnly,
         Self::Failed,
         Self::Unreviewable,
+        Self::Waived,
         Self::Stale,
         Self::Superseded,
         Self::Verified,
@@ -85,6 +90,7 @@ impl WorkStage {
             Self::ReportOnly => "report_only",
             Self::Failed => "failed",
             Self::Unreviewable => "unreviewable",
+            Self::Waived => "waived",
             Self::Stale => "stale",
             Self::Superseded => "superseded",
             Self::Verified => "verified",
@@ -213,6 +219,7 @@ impl Run {
             }
             WorkStage::Working
             | WorkStage::Unreviewable
+            | WorkStage::Waived
             | WorkStage::Superseded
             | WorkStage::NothingToLand
             | WorkStage::Merged
@@ -251,7 +258,8 @@ fn command_line(mut argv: Vec<String>, task: &str) -> String {
 /// The stage, and the worker's claim beside a report. Closed first; then an
 /// attempt older than `newest`, by its own end alone; then a coordinator's
 /// facts, in the order they supersede each other, believed only with the
-/// source they were written against; then what no review can be written for;
+/// source they were written against; then the person's waiver, bound the
+/// same way; then what no review can be written for;
 /// then the attempt itself. A review that no longer stands reads stale only
 /// where the coordinator's record carried review keys and named the source it
 /// read: one that named no source is unknown, whatever attempt it named, and a
@@ -291,6 +299,9 @@ fn stage_of(
             .as_deref()
             .is_some_and(|named| !named.trim().is_empty());
         return (if bound { stage } else { WorkStage::Unknown }, None);
+    }
+    if review.waived {
+        return (WorkStage::Waived, None);
     }
     if review.unreviewable {
         return (WorkStage::Unreviewable, None);

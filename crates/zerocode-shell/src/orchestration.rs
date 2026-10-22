@@ -2069,6 +2069,25 @@ pub(crate) fn press_land_batch(
         .map_err(|_| format!("the integration queue answered what is not JSON: {said}"))
 }
 
+/// A person's settle over what is left behind (t-71220): the ledger reads each task the window
+/// drew again ([`zerocode_core::orchestration::settle::left_behind`]), acts where its reading
+/// still agrees and answers the rest as kept. `by` comes from the board's command, the one place
+/// a press is the person's.
+pub(crate) fn press_settle(
+    press: zerocode_core::orchestration::settle::SettlePress,
+    named: Vec<zerocode_core::orchestration::settle::Named>,
+    by: zerocode_core::orchestration::land_batch::PressedBy,
+    now_ms: i64,
+) -> Result<zerocode_core::orchestration::settle::Settled, String> {
+    let held = runtime().ok_or(NO_RUNTIME)?;
+    let (settled, _) = held
+        .actor
+        .person_settle(press, named, by, now_ms)
+        .map_err(|why| why.to_string())?;
+    rang(settled.moved());
+    Ok(settled)
+}
+
 /// The integration queue's next run at the window's start (t-45315): every run's batches settled
 /// and swept as the next `land-batch` call would, on a thread of its own — git is a process.
 pub(crate) fn settle_land_batches_at_start(now_ms: i64) {

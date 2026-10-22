@@ -383,7 +383,7 @@ fn a_closed_task_reads_closed_with_its_reason_and_is_never_called_failed() {
     }
     // The backend's stage list is the order the desk draws; closed is last.
     let desk = shell_source("orchestration/desk.rs");
-    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 15] = [");
+    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 16] = [");
     assert!(
         table
             .find("\"failed\"")
@@ -505,7 +505,7 @@ fn a_completed_task_nothing_can_review_reads_no_review_record_and_never_awaiting
     );
 
     // The window draws the backend's stages, in the backend's order.
-    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 15] = [");
+    let table = block_after(&desk, "pub(crate) const STAGES: [&str; 16] = [");
     let backend: Vec<&str> = table
         .split("];")
         .next()

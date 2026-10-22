@@ -277,7 +277,7 @@ async function fullBoard(page) {
 
 /* The draft's scene, with the facts the desk reads on its slow beat asked at once: the lane's
  * status, the schedule's reading, the workers' checkouts and their models. */
-async function draftScene(page, options = {}) {
+export async function draftScene(page, options = {}) {
   await page.evaluate(draftBoardOverlay, options);
   await page.evaluate(async () => {
     await askReleaseStatus();

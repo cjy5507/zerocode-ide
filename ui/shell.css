@@ -35322,6 +35322,31 @@ details.task-board-section > summary {
   box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
 }
 
+/* 남은 일의 무더기 (t-71220) — 끝난 과업의 접힘과 같은 줄: 이름과 수, 무엇이 드는지의 메모, 그
+ * 곁에 원장의 답 한 줄 · 되돌리기 · 누름 단추. 메모는 문장이라 고정폭이 아니다. */
+.board-goal.is-left .board-goal-note {
+  min-width: 0;
+  font: var(--type-label-13);
+}
+
+.board-left-said {
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.board-left-said[data-tone="halt"] {
+  color: var(--signal-halt-ink);
+}
+
+.board-left-press {
+  margin-left: auto;
+}
+
+.board-left-said[hidden],
+.board-left-undo[hidden] {
+  display: none;
+}
+
 /* 멈춘 행의 원문 — 시안의 원문 줄: 룰 하나 위의 고정폭 글. */
 .board-run-rawline {
   padding: var(--space-2) var(--space-4);
@@ -48934,6 +48959,86 @@ button.jev-token:hover {
   font: var(--type-label-12);
 }
 
+/* 남은 일의 무더기 (t-71220) — 「지금」 아래 같은 선 위의 접힌 줄. 발행 줄의 결 그대로이고, 누름
+ * 단추가 접힘 곁에 나란히 선다(단추 안에 단추를 두지 않는다). */
+.artifact-flow-pile { position: relative; }
+
+.artifact-flow-pile-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-right: var(--space-4);
+}
+
+.artifact-flow-pile-fold {
+  display: grid;
+  flex: 1;
+  grid-template-columns: var(--icon-size) auto auto minmax(0, 1fr) var(--icon-size);
+  align-items: center;
+  column-gap: var(--space-3);
+  min-width: 0;
+  min-height: calc(var(--artifact-task-row-height) * 1px - var(--space-3));
+  padding: var(--space-2) var(--space-4);
+  border: 0;
+  background: transparent;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.artifact-flow-pile-fold:hover { background: var(--row-hover); }
+.artifact-flow-pile-fold:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+.artifact-flow-pile-fold .artifact-flow-node { grid-row: auto; margin-top: 0; }
+/* 무더기의 이름은 판 이름이 아니라 말이다 — 고정폭이 아니다. */
+.artifact-flow-pile-fold .artifact-flow-release-name { font: var(--type-label-13); font-weight: 600; }
+.artifact-flow-pile-fold > .icon { color: var(--ink-mist); }
+.artifact-flow-pile-fold[aria-expanded="true"] > .icon--twist { transform: rotate(90deg); }
+
+.artifact-flow-pile[aria-expanded="true"] > .artifact-flow-pile-head {
+  background: var(--surface-deck);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+.artifact-flow-pile-press { flex: none; }
+
+.artifact-flow-pile-press[hidden],
+.artifact-flow-pile-said[hidden],
+.artifact-flow-pile-undo[hidden] { display: none; }
+
+/* 누른 뒤의 한 줄 — 원장이 돌려준 답, 그 곁에 잠시 되돌리기. */
+.artifact-flow-pile-said {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-2) calc(var(--space-4) + var(--icon-size) + var(--space-3));
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+}
+
+.artifact-flow-pile-said[data-tone="halt"] { color: var(--signal-halt-ink); }
+
+.artifact-flow-pile-undo {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--artifact-press-min);
+  font: var(--type-label-12);
+}
+
+/* 펼친 무더기의 줄 — 누르는 줄이 아니다: 과업의 말 · 런과 나이 · 번호, 열린 채 남을 줄은 그 말. */
+.artifact-flow-item.is-pile-row { cursor: default; }
+.artifact-flow-item.is-pile-row .artifact-flow-said { color: var(--ink-mist); font-weight: 400; }
+
+.artifact-flow-pile-look {
+  color: var(--ink-chalk);
+  font: var(--type-label-12);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
 /* 빈 프로젝트 — 무엇이 없는지와 다음에 할 일을 한 자리에 */
 .artifact-flow-empty {
   display: flex;
@@ -49056,6 +49161,11 @@ button.jev-token:hover {
 }
 
 .artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) :is(.artifact-flow-release-digest, .artifact-flow-release-count) { display: none; }
+
+.artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-pile-fold {
+  grid-template-columns: var(--icon-size) minmax(0, 1fr) var(--icon-size);
+  padding-inline: var(--space-3);
+}
 .artifacts-view.is-tab-flow.is-flow-reading:not(.is-tier-wide) .artifact-flow-group-head { padding-inline: var(--space-3); }
 .artifacts-view.is-tab-flow.is-flow-reading :is(.artifact-flow-who, .artifact-flow-id, .artifact-flow-more) { display: none; }
 
@@ -49083,6 +49193,11 @@ button.jev-token:hover {
 }
 
 .artifacts-view.is-tier-compact .artifact-flow-release-digest { display: none; }
+
+.artifacts-view.is-tier-compact .artifact-flow-pile-fold {
+  grid-template-columns: var(--icon-size) auto minmax(0, 1fr) var(--icon-size);
+  padding-inline: var(--space-3);
+}
 .artifacts-view.is-tier-compact .artifact-flow-group-head { padding-inline: var(--space-3); }
 .artifacts-view.is-tier-compact .artifact-flow-context { margin-inline: var(--space-4); }
 
@@ -49091,7 +49206,8 @@ button.jev-token:hover {
   .artifact-flow-item,
   .artifact-flow-chip,
   .artifact-flow-more,
-  .artifact-flow-release-head {
+  .artifact-flow-release-head,
+  .artifact-flow-pile-fold {
     transition: none;
   }
 }

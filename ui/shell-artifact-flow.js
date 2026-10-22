@@ -43,6 +43,7 @@ const ARTIFACT_FLOW_STAGES = Object.freeze({
   deployed: { key: "artifacts.flow.stageDeployed", word: "발행됨", shape: "check", signal: "done", at: null },
   failed: ARTIFACT_FLOW_HALTED,
   unreviewable: { key: "artifacts.flow.stageUnreviewable", word: "끝남 · 검토 기록 없음", shape: "check", signal: "quiet", at: null, skip: ["review", "land", "ship"] },
+  waived: { key: "artifacts.flow.stageWaived", word: "끝남 · 검토 생략(사람)", shape: "check", signal: "quiet", at: null, skip: ["review", "land", "ship"] },
   nothing_to_land: { key: "artifacts.flow.stageNothingToLand", word: "끝남 · 착지할 것 없음", shape: "check", signal: "done", at: null, skip: ["land", "ship"] },
   unknown: { key: "artifacts.flow.stageUnknown", word: "확인 안 됨", shape: "wait", signal: "quiet", at: null, unread: true },
   closed: { key: "artifacts.flow.stageClosed", word: "닫힘", shape: "skip", signal: "quiet", at: null, skip: ["try", "handin", "review", "land", "ship"] },
@@ -121,10 +122,12 @@ let artifactFlowSaid = "";
 let artifactFlowAskedFor = "";
 let artifactFlowAsking = false;
 let artifactFlowAgain = false;
-/* 사람이 펼친 것 — 줄(과업 id), 발행(판 이름), 「기록」(묶음 이름). 판이 다시 그려져도 남는다. */
+/* 사람이 펼친 것 — 줄(과업 id), 발행(판 이름), 「기록」(묶음 이름), 남은 일의 무더기(`SETTLE_PILES`의
+ * 종류). 판이 다시 그려져도 남는다. */
 const artifactFlowOpen = new Set();
 const artifactFlowReleasesOpen = new Set();
 const artifactFlowRecordsOpen = new Set();
+const artifactFlowPilesOpen = new Set();
 /* 읽는 칸에 선 것 — 누른 칩의 줄과 종류(`{ task, chip }`, 「기록」은 `{ record }`). */
 let artifactFlowReading = null;
 /* 하네스가 세는 수 — 줄 노드가 몇 번 만들어졌는가. */
@@ -223,7 +226,7 @@ function artifactFlowLine(task) {
 function artifactFlowIsEmpty() {
   const flow = artifactFlowAnswer;
   if (!flow) return true;
-  const groups = [flow.now, flow.next, ...(flow.releases ?? [])];
+  const groups = [flow.now, flow.next, ...(flow.releases ?? []), flow.left, flow.unreviewed];
   return groups.every((group) => (group?.tasks?.length ?? 0) === 0 && (group?.records?.length ?? 0) === 0);
 }
 
@@ -952,6 +955,154 @@ function artifactFlowReleasePrototype() {
   return item;
 }
 
+/* ---- 남은 일의 무더기 (t-71220) ---------------------------------------------
+ *
+ * 「지금」 아래의 접힌 줄 둘 — 정리 필요 · 검토 없이 끝남. 줄과 수, 누를 이름은 런타임이 실은
+ * 그대로이고(`left`·`unreviewed`, core `settle::left_behind`), 낱말과 누름은 상황판과 같은 한
+ * 곳이다(`SETTLE_PILES`·`pressSettlePile`, shell-board-now.js). 펼치면 오래된 것부터 과업 · 런 ·
+ * 나이가 한 줄씩 선다. 거르개가 걸린 동안은 맞는 줄만 서고 누름은 물러난다 — 누름은 무더기 전부의
+ * 것이다. */
+
+/* 서 있을 무더기와 그 줄들. 든 일이 없어도 방금 누른 답(되돌리기)이 서 있으면 선다. */
+function artifactFlowPiles(flow, admitted, narrowed) {
+  const now = Date.now();
+  return SETTLE_PILES.map((pile) => {
+    const held = flow?.[pile.flow];
+    const lines = admitted(held);
+    const count = narrowed ? lines.length : (held?.tasks?.length ?? 0) + (held?.more ?? 0);
+    return { pile, held, lines, count, key: `flow:${pile.kind}` };
+  }).filter(({ key, count, lines }) => (narrowed ? lines.length > 0 : settlePileStands(key, count, now)));
+}
+
+/* 무더기 줄의 원형 — 접힘 단추(표식 · 이름 · 수 · 메모 · 갈매기)와 누름 단추, 그 아래 답의 한 줄과
+ * 되돌리기. 단추 안에 단추를 두지 않는다: 접힘과 누름은 나란한 둘이다. */
+function artifactFlowPilePrototype() {
+  const item = document.createElement("li");
+  item.className = "artifact-flow-pile";
+  const head = document.createElement("div");
+  head.className = "artifact-flow-pile-head";
+  const fold = document.createElement("button");
+  fold.type = "button";
+  fold.className = "artifact-flow-pile-fold";
+  const mark = document.createElement("span");
+  mark.className = "artifact-flow-node";
+  mark.setAttribute("aria-hidden", "true");
+  fold.append(
+    mark,
+    artifactLine("span", "artifact-flow-release-name", ""),
+    artifactLine("span", "artifact-flow-release-count", ""),
+    artifactLine("span", "artifact-flow-release-digest", ""),
+    artifactFlowIcon("chevron"),
+  );
+  const press = document.createElement("button");
+  press.type = "button";
+  press.className = "btn artifact-flow-pile-press";
+  head.append(fold, press);
+  const said = document.createElement("p");
+  said.className = "artifact-flow-pile-said";
+  const undo = document.createElement("button");
+  undo.type = "button";
+  undo.className = "board-link artifact-flow-pile-undo";
+  said.append(artifactLine("span", "artifact-flow-pile-words", ""), undo);
+  item.append(head, said);
+  return item;
+}
+
+/* 무더기 한 줄. 머리는 그릴 때마다 입고(답의 한 줄이 시간에 따라 접힌다), 펼친 줄들은 열쇠의 노드로
+ * 다시 맞춘다. */
+function artifactFlowPileRow(view, { pile, held, lines, count, key }, narrowed) {
+  const pool = view._artifactFlowPiles ?? (view._artifactFlowPiles = new Map());
+  let item = pool.get(pile.kind);
+  if (!item) {
+    item = artifactFlowClone("pile", artifactFlowPilePrototype);
+    item.dataset.pile = pile.kind;
+    item.querySelector(".artifact-flow-pile-fold").dataset.flowPile = pile.kind;
+    item.querySelector(".artifact-flow-pile-press").dataset.flowPilePress = pile.kind;
+    item.querySelector(".artifact-flow-pile-undo").dataset.flowPileUndo = pile.kind;
+    pool.set(pile.kind, item);
+  }
+  const open = artifactFlowPilesOpen.has(pile.kind);
+  const flow = artifactFlowAnswer;
+  const now = Date.now();
+  writeAttribute(item, "aria-expanded", open ? "true" : "false");
+  const fold = item.querySelector(".artifact-flow-pile-fold");
+  writeAttribute(fold, "aria-expanded", open ? "true" : "false");
+  dressArtifactFlowMark(fold.querySelector(".artifact-flow-node"), pile.press === "waive" ? "check" : "wait", "quiet");
+  const [, name, tally, note] = fold.children;
+  writeTextContent(name, t(pile.key, pile.word));
+  writeTextContent(tally, t("artifacts.flow.releaseCount", "과업 {{n}}", { n: artifactCountWord(count) }));
+  writeTextContent(note, settlePileNote(pile, Number(flow?.quiet_days) || 0));
+  const names = held?.named ?? [];
+  const pressMax = Number(flow?.press_max) || 0;
+  const press = item.querySelector(".artifact-flow-pile-press");
+  writeTextContent(press, settlePressWords(pile, names.length, pressMax));
+  writeHidden(press, narrowed || names.length === 0);
+  writeDisabled(press, settlePresses.get(key)?.sending === true);
+  const answer = settleSaid(key, now);
+  const said = item.querySelector(".artifact-flow-pile-said");
+  writeHidden(said, answer.said === "");
+  writeAttribute(said, "data-tone", answer.tone);
+  writeTextContent(said.firstElementChild, answer.said);
+  const undo = said.lastElementChild;
+  writeTextContent(undo, t("board.settle.undo", "되돌리기"));
+  writeHidden(undo, !answer.undo);
+  let rows = item.querySelector(":scope > .artifact-flow-release-rows");
+  if (!open) {
+    rows?.remove();
+    return item;
+  }
+  if (!rows) {
+    rows = document.createElement("ul");
+    rows.className = "artifact-flow-release-rows";
+    item.appendChild(rows);
+  }
+  const shown = lines.map((line) => artifactFlowKept(view, `pile:${line.task}`,
+    [line.left, line.said, line.run, line.last_ms, artifactLocaleCode(), Math.floor(now / 60_000)].join("\n"), () => {
+      const row = document.createElement("li");
+      row.className = "artifact-flow-item is-pile-row";
+      row.dataset.pileTask = line.task;
+      const look = line.left === "look";
+      const meta = document.createElement("div");
+      meta.className = "artifact-flow-meta";
+      meta.append(
+        artifactLine("span", "artifact-flow-who", settleRowWhere(line, now)),
+        artifactLine("span", "artifact-flow-id", line.task),
+      );
+      if (look) meta.prepend(artifactLine("span", "artifact-flow-pile-look", t(SETTLE_LEFT_WORDS.look.key, SETTLE_LEFT_WORDS.look.word)));
+      row.append(artifactFlowMark("artifact-flow-node", look ? "half" : pile.press === "waive" ? "check" : "wait", look ? "wait" : "quiet"),
+        artifactLine("p", "artifact-flow-said", line.said), meta);
+      return row;
+    }));
+  const unseen = narrowed ? 0 : held?.more ?? 0;
+  if (unseen > 0) {
+    shown.push(artifactFlowKept(view, `pile-more:${pile.kind}`, [unseen, artifactLocaleCode()].join("\n"), () => {
+      const line = document.createElement("li");
+      line.className = "artifact-flow-older";
+      line.append(artifactFlowIcon("archive"), t("board.settle.more", "그 밖에 {{count}}건", { count: unseen }));
+      return line;
+    }));
+  }
+  reconcileElementOrder(rows, shown);
+  return item;
+}
+
+/* 펼친 무더기 한 줄의 「어디 · 언제」 — 런과 마지막으로 손댄 지 얼마. */
+function settleRowWhere(line, now) {
+  return [line.run ?? "", t("board.desk.mailAge", "{{time}} 전", { time: agoWord(Number(line.last_ms) || 0, now) })]
+    .filter(Boolean).join(" · ");
+}
+
+/* 무더기의 누름 — 확인 창에 처음 몇 줄(닫히거나 생략될 일)의 과업 · 런 · 나이를 싣는다. */
+function pressArtifactFlowPile(view, kind) {
+  const pile = SETTLE_PILES.find((one) => one.kind === kind);
+  const flow = artifactFlowAnswer;
+  const held = pile ? flow?.[pile.flow] : null;
+  if (!held) return;
+  const rows = (held.tasks ?? []).filter((line) => line.left === pile.names)
+    .map((line) => ({ task: line.task, run: line.run ?? "", words: line.said, touched: Number(line.last_ms) || 0 }));
+  void pressSettlePile(`flow:${kind}`, pile, rows, held.named ?? [], Number(flow.press_max) || 0, () => paintArtifactFlow(view));
+}
+
 /* 지난 발행의 한 줄 — 판의 범위 · 언제까지 · 든 과업의 수. */
 function artifactFlowOlderRow(view, older) {
   const versions = older.releases > 1 ? `${older.oldest} ~ ${older.newest}` : older.newest;
@@ -999,7 +1150,8 @@ function paintArtifactFlowList(view) {
   const releases = (flow?.releases ?? [])
     .map((release) => ({ release, lines: admitted(release) }))
     .filter(({ release, lines }) => lines.length > 0 || (!narrowed && (release.records?.length ?? 0) > 0));
-  const nothing = now.length === 0 && next.length === 0 && nextRecords.length === 0 && releases.length === 0;
+  const piles = artifactFlowPiles(flow, admitted, narrowed);
+  const nothing = now.length === 0 && piles.length === 0 && next.length === 0 && nextRecords.length === 0 && releases.length === 0;
   writeHidden(empty, !nothing);
   writeHidden(list, nothing);
   if (nothing) {
@@ -1012,11 +1164,15 @@ function paintArtifactFlowList(view) {
   }
   const sections = [];
   const [nowGroup, nextGroup, shippedGroup] = ARTIFACT_FLOW_GROUPS;
-  if (now.length > 0) {
-    // 「지금」의 메모는 그 묶음이 담는 상태의 말 셋이다 — 상태의 표에서 읽는다.
+  if (now.length > 0 || piles.length > 0) {
+    // 「지금」의 메모는 그 묶음이 담는 상태의 말 셋이다 — 상태의 표에서 읽는다. 남은 일의 무더기는
+    // 그 아래 접힌 줄로 서고, 「지금」의 수에 들지 않는다(t-71220).
     const note = ARTIFACT_FLOW_NOW_STAGES.map((stage) => t(ARTIFACT_FLOW_STAGES[stage].key, ARTIFACT_FLOW_STAGES[stage].word)).join(" · ");
-    const head = artifactFlowGroupHead(list, nowGroup.group, t(nowGroup.key, nowGroup.word), now.length + (flow.now.more ?? 0), note);
-    sections.push(artifactFlowSection(list, nowGroup.group, head, artifactFlowRows(view, now)));
+    const head = artifactFlowGroupHead(list, nowGroup.group, t(nowGroup.key, nowGroup.word), now.length + (flow.now?.more ?? 0), note);
+    sections.push(artifactFlowSection(list, nowGroup.group, head, [
+      ...artifactFlowRows(view, now),
+      ...piles.map((held) => artifactFlowPileRow(view, held, narrowed)),
+    ]));
   }
   if (next.length > 0 || nextRecords.length > 0) {
     const newest = flow.releases?.[0]?.version ?? "";
@@ -1223,6 +1379,24 @@ function wireArtifactFlow(view) {
     }
     if (chip && row) {
       void openArtifactFlowChip(view, row.dataset.task, chip.dataset.flowChip);
+      return;
+    }
+    const pile = event.target.closest("[data-flow-pile]");
+    if (pile) {
+      const kind = pile.dataset.flowPile;
+      if (artifactFlowPilesOpen.has(kind)) artifactFlowPilesOpen.delete(kind);
+      else artifactFlowPilesOpen.add(kind);
+      paintArtifactFlow(view);
+      return;
+    }
+    const pilePress = event.target.closest("[data-flow-pile-press]");
+    if (pilePress) {
+      pressArtifactFlowPile(view, pilePress.dataset.flowPilePress);
+      return;
+    }
+    const pileUndo = event.target.closest("[data-flow-pile-undo]");
+    if (pileUndo) {
+      undoSettle(`flow:${pileUndo.dataset.flowPileUndo}`, () => paintArtifactFlow(view));
       return;
     }
     const release = event.target.closest("[data-flow-release]");
