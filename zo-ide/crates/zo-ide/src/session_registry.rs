@@ -141,78 +141,90 @@ fn recent_session_candidates(
     Ok(candidates)
 }
 
-/// Like [`list_managed_sessions`] but, when `limit` is `Some(n)`, reads only
-/// the `n` most-recently-modified session files — and only their heads.
-///
-/// The modification time comes from a cheap `stat` (no file contents read),
-/// so at most `n` files are opened at all; each of those is read through
-/// [`TranscriptHead::read`], which stops at the first user message. A row's
-/// cost no longer depends on how long its transcript is (t-2947): the picker
-/// used to parse the twenty newest sessions whole, and the newest are the
-/// long ones.
+/// Fill a page with actual conversations. Empty or unreadable heads do not
+/// spend a row, and an image prompt is independent of its text preview.
+/// Only transcript heads are read, stopping once enough usable rows exist.
 pub(crate) fn list_managed_sessions_limited(
     limit: Option<usize>,
 ) -> Result<Vec<ManagedSessionSummary>, Box<dyn std::error::Error>> {
-    let candidates = recent_session_candidates(limit)?;
-
-    // Phase 2 — read the heads of the retained candidates only.
-    let mut sessions = Vec::with_capacity(candidates.len());
-    for (path, modified_epoch_millis) in candidates {
-        let (id, name, parent_session_id, branch_name, first_user_text, created_epoch_millis) =
-            match TranscriptHead::read(
-                &path,
-                Some(crate::resume::limits::FIRST_PROMPT_PREVIEW_CHARS),
-            ) {
-                Ok(head) => {
-                    let parent_session_id = head
-                        .fork
-                        .as_ref()
-                        .map(|fork| fork.parent_session_id.clone());
-                    let branch_name = head.fork.and_then(|fork| fork.branch_name);
-                    (
-                        head.session_id,
-                        head.name,
-                        parent_session_id,
-                        branch_name,
-                        head.first_user_text,
-                        u128::from(head.created_at_ms),
-                    )
-                }
-                // 파일을 못 읽으면 생성 시각도 없다. 수정 시각으로 떨어뜨린다 —
-                // `/resume` 의 `Sort: [Created]` 가 그 행만 0 으로 밀어 목록
-                // 맨 아래에 처박는 것보다, 그 행이 아는 유일한 시각으로 서는
-                // 편이 사람에게 맞다.
-                Err(_) => (
-                    path.file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    modified_epoch_millis,
-                ),
-            };
-        sessions.push(ManagedSessionSummary {
-            id,
-            name,
-            path,
-            modified_epoch_millis,
-            created_epoch_millis,
-            parent_session_id,
-            branch_name,
-            first_user_text,
-        });
+    if limit == Some(0) {
+        return Ok(Vec::new());
     }
+    let mut sessions = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (path, modified) in recent_session_candidates(None)? {
+        let session = session_summary(path, modified);
+        if !session.has_user_input || session.id.ends_with(".system-prompt") || !seen.insert(session.id.clone()) {
+            continue;
+        }
+        sessions.push(session);
+        if limit == Some(sessions.len()) {
+            break;
+        }
+    }
+    order_session_summaries(&mut sessions);
+    Ok(sessions)
+}
+
+fn session_summary(path: PathBuf, modified_epoch_millis: u128) -> ManagedSessionSummary {
+    let (id, name, parent_session_id, branch_name, first_user_text, has_user_input, created_epoch_millis) =
+        match TranscriptHead::read(
+            &path,
+            Some(crate::resume::limits::FIRST_PROMPT_PREVIEW_CHARS),
+        ) {
+            Ok(head) => {
+                let parent_session_id = head
+                    .fork
+                    .as_ref()
+                    .map(|fork| fork.parent_session_id.clone());
+                let branch_name = head.fork.and_then(|fork| fork.branch_name);
+                (
+                    head.session_id,
+                    head.name,
+                    parent_session_id,
+                    branch_name,
+                    head.first_user_text,
+                    head.has_user_input == Some(true),
+                    u128::from(head.created_at_ms),
+                )
+            }
+            // 파일을 못 읽으면 생성 시각도 없다. 수정 시각으로 떨어뜨린다 —
+            // `/resume` 의 `Sort: [Created]` 가 그 행만 0 으로 밀어 목록
+            // 맨 아래에 처박는 것보다, 그 행이 아는 유일한 시각으로 서는
+            // 편이 사람에게 맞다.
+            Err(_) => (
+                path.file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                modified_epoch_millis,
+            ),
+        };
+    ManagedSessionSummary {
+        id,
+        name,
+        path,
+        modified_epoch_millis,
+        created_epoch_millis,
+        parent_session_id,
+        branch_name,
+        first_user_text,
+        has_user_input,
+    }
+}
+
+fn order_session_summaries(sessions: &mut [ManagedSessionSummary]) {
     sessions.sort_by(|left, right| {
         right
             .modified_epoch_millis
             .cmp(&left.modified_epoch_millis)
             .then_with(|| right.id.cmp(&left.id))
     });
-    sessions.dedup_by(|left, right| left.id == right.id);
-    Ok(sessions)
 }
 
 fn latest_managed_session() -> Result<ManagedSessionSummary, Box<dyn std::error::Error>> {
@@ -658,14 +670,10 @@ mod tests {
     }
 
 
-    /// Cold-start guard: `list_managed_sessions_limited(Some(n))` truncates the
-    /// candidate set *before* the expensive [`Session::load_from_path`] parse, so
-    /// at most `n` sessions are ever read from disk — the whole point of the cap
-    /// the `/resume` picker and launchpad rely on. The cap holds regardless of
-    /// how many other sessions exist in the search dirs (only truncation, then a
-    /// dedup that can shrink but never grow the result, runs after).
+    /// The page limit counts usable conversations. A bound of zero reads no
+    /// heads, and empty or damaged files do not consume the returned page.
     #[test]
-    fn limited_listing_caps_the_number_of_sessions_parsed() {
+    fn limited_listing_fills_the_page_with_conversations() {
         use super::list_managed_sessions_limited;
 
         let _guard = crate::test_cwd_lock()
@@ -679,10 +687,13 @@ mod tests {
         let root = std::env::temp_dir().join(format!("zo-lmls-root-{}", std::process::id()));
         let dir = root.join("sessions");
         std::fs::create_dir_all(&dir).expect("session dir");
-        // Five managed session files; an Err parse still yields a summary, so
-        // even minimal `{}` content counts toward the candidate set.
         for index in 0..5 {
-            std::fs::write(dir.join(format!("s{index}.jsonl")), "{}\n").expect("session file");
+            let session = serde_json::json!({"version":1, "session_id":format!("s{index}"),
+                "messages":[{"role":"user", "blocks":[{"type":"text", "text":"A real task"}]}]});
+            std::fs::write(dir.join(format!("s{index}.json")), session.to_string()).expect("session file");
+        }
+        for index in 0..25 {
+            std::fs::write(dir.join(format!("empty{index}.jsonl")), "{}\n").expect("unusable head");
         }
         std::env::set_var("ZO_CONFIG_HOME", &home);
         std::env::set_var("ZO_SESSION_ROOT", &root);
@@ -703,17 +714,9 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&root);
 
-        assert!(
-            capped.len() <= 2,
-            "Some(2) must parse at most 2 sessions, got {}",
-            capped.len()
-        );
+        assert_eq!(capped.len(), 2, "the usable page must be filled");
         assert!(none.is_empty(), "Some(0) reads nothing");
-        assert!(
-            all.len() >= 5,
-            "None must surface every session on disk, got {}",
-            all.len()
-        );
+        assert_eq!(all.len(), 5, "only the conversations belong in the list");
     }
 
     /// t-2947 — the listing reads transcript heads, and every row it shows
@@ -735,44 +738,33 @@ mod tests {
         );
         let pin = crate::SessionRootPin::new("identity", &session_corpus::CorpusSpec::REAL_MIX);
         let oracle = |limit: Option<usize>| -> Vec<Row> {
-            let mut rows: Vec<Row> = recent_session_candidates(limit)
+            let mut rows: Vec<Row> = recent_session_candidates(None)
                 .expect("candidates")
                 .into_iter()
-                .map(|(path, modified)| match Session::load_from_path(&path) {
-                    Ok(session) => (
-                        session.session_id.clone(),
-                        session.name.clone(),
-                        modified,
+                .filter_map(|(path, modified)| {
+                    let session = Session::load_from_path(&path).ok()?;
+                    let prompt = session.messages.iter().find(|message| {
+                        message.role == MessageRole::User && !message.holds_tool_result()
+                            && message.blocks.iter().any(|block| match block {
+                                ContentBlock::Text { text } => !text.trim().is_empty(),
+                                ContentBlock::Image { data, .. } => !data.is_empty(),
+                                _ => false,
+                            })
+                    })?;
+                    let preview = prompt.blocks.iter().find_map(|block| match block {
+                        ContentBlock::Text { text } if !text.trim().is_empty() => Some(text.trim_start().chars().take(60).collect()),
+                        _ => None,
+                    });
+                    Some((session.session_id.clone(), session.name.clone(), modified,
                         u128::from(session.created_at_ms),
                         session.fork.as_ref().map(|fork| fork.parent_session_id.clone()),
-                        session.fork.as_ref().and_then(|fork| fork.branch_name.clone()),
-                        session
-                            .messages
-                            .iter()
-                            .find(|message| message.role == MessageRole::User)
-                            .and_then(|message| {
-                                message.blocks.iter().find_map(|block| match block {
-                                    ContentBlock::Text { text } => {
-                                        let cut: String = text.chars().take(60).collect();
-                                        (!cut.is_empty()).then_some(cut)
-                                    }
-                                    _ => None,
-                                })
-                            }),
-                    ),
-                    Err(_) => (
-                        path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string(),
-                        None,
-                        modified,
-                        modified,
-                        None,
-                        None,
-                        None,
-                    ),
+                        session.fork.as_ref().and_then(|fork| fork.branch_name.clone()), preview))
                 })
                 .collect();
             rows.sort_by(|l, r| r.2.cmp(&l.2).then_with(|| r.0.cmp(&l.0)));
-            rows.dedup_by(|l, r| l.0 == r.0);
+            let mut seen = std::collections::HashSet::new();
+            rows.retain(|row| seen.insert(row.0.clone()));
+            if let Some(limit) = limit { rows.truncate(limit); }
             rows
         };
         for limit in [Some(crate::resume::DEFAULT_LIST_LIMIT), None] {
@@ -785,6 +777,6 @@ mod tests {
             assert_eq!(listed.len(), expected.len(), "limit {limit:?}");
             assert_eq!(listed, expected, "limit {limit:?}");
         }
-        assert_eq!(oracle(None).len(), pin.manifest.len());
+        assert_eq!(recent_session_candidates(None).unwrap().len(), pin.manifest.len());
     }
 }

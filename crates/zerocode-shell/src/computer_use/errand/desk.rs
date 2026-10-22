@@ -39,7 +39,8 @@ use zerocode_core::agent_browser::{
 };
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
 use zerocode_core::computer_use::{
-    EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS, WALK_WAIT_MS, walk_words,
+    DOOR_UNREACHED, EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS, WALK_WAIT_MS,
+    walk_words,
 };
 use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
@@ -140,9 +141,14 @@ fn answer_value(answer: &TeamAnswer) -> Option<Value> {
 /// an answer that came back says what stood in its numbers' place
 /// ([`unnumbered`]); a refusal says its code — off its envelope, or first on
 /// a line its CLI said it on — or, where the browser's door has no code for
-/// it, a pane it cannot reach or a page that did not answer in time.
+/// it, a pane it cannot reach or a page that did not answer in time or
+/// answered nothing it could read, which a look a second later may see. A
+/// door that could not reach the window says so in a code of its own
+/// (t-70855).
 pub(super) fn missed_of(answer: &TeamAnswer) -> Missed {
-    use crate::cmd::browser::{PAGE_GONE, PAGE_SEND_FAILED, PAGE_TIMED_OUT};
+    use crate::cmd::browser::{
+        PAGE_ANSWER_UNREADABLE, PAGE_GONE, PAGE_SEND_FAILED, PAGE_TIMED_OUT,
+    };
     if let Some(said) = answer_value(answer) {
         return unnumbered(&said);
     }
@@ -163,8 +169,11 @@ pub(super) fn missed_of(answer: &TeamAnswer) -> Missed {
         if line.trim() == unreached || [PAGE_GONE, PAGE_SEND_FAILED].contains(&words) {
             return Missed::said(walk_words::NO_WINDOW);
         }
-        if words == PAGE_TIMED_OUT {
+        if [PAGE_TIMED_OUT, PAGE_ANSWER_UNREADABLE].contains(&words) {
             return Missed::said(walk_words::LOOK_TIMEOUT);
+        }
+        if unconnected(words) {
+            return Missed::refused(walk_words::DOOR_CONNECTION_FAILED);
         }
         if let Some(code) = code_word(words) {
             return missed_by(code);
@@ -188,6 +197,19 @@ fn missed_by(code: &str) -> Missed {
     }
 }
 
+/// How curl, the POSIX door's road to the window, begins the words of its
+/// own failure: its exit status in parentheses (`curl: (7) Failed to
+/// connect …`).
+const CURL_FAILED: &str = "curl: (";
+
+/// Whether a refusal's words are its door's own connection failing — the
+/// door's sentence for it, or its transport's words relayed after the
+/// door's name — words that carry no code of the window's: the `curl`
+/// before their colon is a program, not a refusal (t-70855).
+fn unconnected(words: &str) -> bool {
+    words == DOOR_UNREACHED || words.starts_with(CURL_FAILED)
+}
+
 /// The code a refusal's words begin with — `workspace_actor_required: …`,
 /// `workspace_paused[resume=person]: …` — when its first word is one:
 /// lowercase letters, digits and underscores, ended by `:` or `[`.
@@ -201,20 +223,25 @@ fn code_word(words: &str) -> Option<&str> {
 }
 
 /// What a look that came back without its numbers said in their place: an
-/// app's marked look says it under `marks.unavailable` — no window on its
-/// picture to mark, or a tree with nothing to number and no picture to read
-/// one from (t-66753 C1). Any other look that answered and numbered nothing
-/// stood with nothing to number.
+/// app's marked look says it under `marks.unavailable`, in words its code
+/// begins (`window_not_found: …`, `permission_denied: …`) or in the
+/// helper's picture status (`{state, code}`). That code is the look's reason
+/// as a refusal's code would be — no window on its picture to mark, or a
+/// helper that refused the look, its code beside (t-70855) — and only a look
+/// that says no code, or none but a picture that could not be read, stood
+/// with nothing to number (t-66753 C1): the skill sends that one to the
+/// picture and the app's name box, where a helper's refusal would be met
+/// again.
 fn unnumbered(said: &Value) -> Missed {
-    let windowless = said
-        .pointer("/marks/unavailable")
+    let unavailable = said.pointer("/marks/unavailable");
+    match unavailable
         .and_then(Value::as_str)
-        .is_some_and(|why| why.starts_with(error_code::WINDOW_NOT_FOUND));
-    Missed::said(if windowless {
-        walk_words::NO_WINDOW
-    } else {
-        walk_words::EMPTY_TREE
-    })
+        .and_then(code_word)
+        .or_else(|| unavailable?.get("code")?.as_str())
+    {
+        None | Some(error_code::SCREENSHOT_FAILED) => Missed::said(walk_words::EMPTY_TREE),
+        Some(code) => missed_by(code),
+    }
 }
 
 fn read_unjudged(
