@@ -36,6 +36,7 @@ use zerocode_core::computer_use::{
     COMPUTER_BRIDGE_GRACE_MS, COMPUTER_MARKS_ENV, WALK_OVERLAP_FLAG, WALK_REPLAY_FLAG, WALK_RESCUE_FLAG, WALK_STEPS_MAX,
     WATCH_UNTIL,
 };
+use zerocode_core::agent_browser::{BROWSER_CLI, WORKSPACE_REVISION_FLAG, WORKSPACE_REVISION_KEY};
 use zerocode_core::jev::{JevMode, GOAL_CHAR_CAP};
 use zerocode_core::surface_execution::SurfaceExecution;
 use zerocode_core::screen_action::GIVE_UP;
@@ -78,6 +79,13 @@ const ELEMENT_CLICK: &str = "left_click";
 /// document's identity, or the title alone when the window gives none.
 const REPICK_COMPARED_DOCUMENT: &str = "title and document";
 const REPICK_COMPARED_TITLE: &str = "title only";
+/// Why a re-pick kept the window's refusal, by name (t-70459): the window
+/// shows another document than the model's last look at it did, or one of
+/// the two gave the document's identity and the other did not — a web area
+/// that has no address yet — so the document is not confirmed. Both lead
+/// to the same next step: observe the window again.
+const REPICK_DOCUMENT_CHANGED: &str = "document_changed";
+const REPICK_DOCUMENT_UNCONFIRMED: &str = "document_unconfirmed";
 /// The action that leaves no window of its app to look at after it.
 const QUIT_ACTION: &str = "quit";
 /// Actions whose answer names places on the screen: before the first of them
@@ -513,7 +521,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             for change or quiet without pictures. recipe_save keeps successful steps; recipe_run substitutes \
             params for {{names}}, reports where it stopped and start for resuming. walk {goal: one sentence, \
             app|pane|(platform,device), until: success text, max_steps} runs the window's judgment loop and \
-            returns status. CAPTCHA/password (secure_input): handoff {text: what the person must do}. \
+            returns status; after no_look/stuck its ladder looks again: continue from relooked, else take its \
+            roads in order, the person last. CAPTCHA/password (secure_input): handoff {text: what the person must do}. \
             One-time code: handoff {ask_code: true, into: input command words, e.g. \
             [\"set-value\",\"--app\",\"A\",\"--element-index\",\"3\"]}: the window types it, you never receive it, \
             and a look after may show it. stopped means stop/report. Payment/transfer/delete \
@@ -1905,13 +1914,16 @@ pub(crate) enum WalkStatus {
     /// walk: look once to confirm, nothing more.
     NeedsVerification,
     /// The walk could not go on — the seat off, no judge, recording only, the
-    /// judgment unsure or unanswered, nothing to press: plan from the reason.
+    /// judgment unsure or unanswered, nothing to press — or its look came
+    /// back empty and so did zo's own (t-70459): plan from the reason, or
+    /// take the ladder's roads in order.
     NeedsFallback,
     /// A person's stop, a guard's refusal, or the budget spent: end as a stop
     /// ends.
     Stopped,
     /// A press or a look failed, or the screen would not move: recover from
-    /// the step it names.
+    /// the step it names — after `no_look` or `stuck`, from the tree zo's
+    /// own look read.
     Failed,
 }
 
@@ -1970,6 +1982,11 @@ pub(crate) struct WalkRead {
     pub steps_left: u64,
     /// The last step whose look the judgment answered on.
     pub last_observed_step: Option<u64>,
+    /// What a `no_look` row's reason says its look ran into, when it says
+    /// anything (t-70459), and — when a door refused that look — the door's
+    /// own code beside it.
+    pub cause: Option<String>,
+    pub refusal: Option<String>,
 }
 
 /// Read the window's answer to a walk whose budget was `budget` steps.
@@ -1990,6 +2007,8 @@ pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
             .rev()
             .find(|row| word(row, walk_words::OUTCOME).as_deref() == Some(zerocode_core::jev::summary::ANSWERED))
             .and_then(|row| row.get(walk_words::ATTEMPT)?.as_u64()),
+        cause: None,
+        refusal: None,
     };
     if let Some(refused) = refusal(answer) {
         read.status = if WALK_STOPS.contains(&refused.code.as_str()) {
@@ -2004,7 +2023,7 @@ pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
     }
     if said.pointer("/background/interrupted") == Some(&Value::Bool(true)) {
         read.status = WalkStatus::Stopped;
-        read.reason = Some("background_interrupted".into());
+        read.reason = Some(BACKGROUND_INTERRUPTED.into());
         return read;
     }
     let last = rows.last();
@@ -2031,6 +2050,8 @@ pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
         let barred = word(row, zerocode_core::jev::summary::BARRED.canonical);
         let why = word(row, walk_words::REASON);
         if let Some(outcome) = outcome.clone().filter(|outcome| [walk_words::STUCK, walk_words::NO_LOOK].contains(&outcome.as_str())) {
+            read.cause = why.filter(|why| !why.trim().is_empty());
+            read.refusal = word(row, REFUSAL).filter(|code| !code.trim().is_empty());
             (WalkStatus::Failed, Some(outcome))
         } else if let Some(barred) = barred {
             let status = if barred == walk_words::LOW_CONFIDENCE { WalkStatus::NeedsFallback } else { WalkStatus::Stopped };
@@ -2058,25 +2079,28 @@ pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
 /// down the shim — the window walks it, observing, choosing, pressing and
 /// checking on its own marks — and one answer. No picture goes before it (a
 /// walk speaks in no pixels) and none after, unless it pressed at an app and
-/// ended on a screen nobody read.
+/// ended on a screen nobody read, or the ladder after `no_look` or `stuck`
+/// looks once more ([`climb`]) — then that look is the one after.
 fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRoad, settle: bool) -> Result<String, ToolError> {
     let argv = argv_for(input)?;
     let command = zerocode_core::computer_use::parse_command(&argv).map_err(ToolError::InvalidInput)?;
     let budget = u64::try_from(walk_steps(&command.params)).unwrap_or(u64::MAX);
     let answer = call_shim(road, &argv, ctx.cwd.as_deref())?;
-    let walked = read_walk(&answer, budget);
+    let mut walked = read_walk(&answer, budget);
+    let ladder = climb(input, &mut walked, ctx, road);
+    let relooked = ladder.as_ref().is_some_and(|ladder| ladder.get(RELOOKED).is_some());
     let (surface, target) = [("app", &input.app), ("pane", &input.pane), ("device", &input.device)]
         .into_iter()
         .find_map(|(surface, target)| target.as_deref().map(|target| (surface, target)))
         .unwrap_or_default();
-    let looked_after = (LOOK_AFTER_ACT && walked.pressed > 0 && walked.status.leaves_an_unread_screen() && input.app.is_some())
+    let looked_after = (LOOK_AFTER_ACT && walked.pressed > 0 && walked.status.leaves_an_unread_screen() && input.app.is_some() && !relooked)
         .then(|| look_after(road, ctx, settle, target_of(input).as_ref()));
     let mut result = answer.get("result").cloned().unwrap_or(Value::Null);
     let last = result.get(walk_words::ROWS).and_then(Value::as_array).and_then(|rows| rows.last()).cloned();
     if let Some(result) = result.as_object_mut() {
         result.remove(walk_words::ROWS);
     }
-    to_pretty_json(json!({
+    let mut said = json!({
         "action": WALK_ACTION,
         "status": walked.status.word(),
         "reason": walked.reason,
@@ -2088,7 +2112,229 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
         "result": result,
         "lastRow": last,
         "looked_after": looked_after,
-    }))
+    });
+    if let Some(ladder) = ladder {
+        said["ladder"] = ladder;
+    }
+    to_pretty_json(said)
+}
+
+/// The words a `no_look` row carries about the look it lacked (t-70425, the
+/// window's; the core's `walk_words` once they land there), spelled in this
+/// one place. Its reason: no window to look at; a window whose tree is empty
+/// — a canvas, a remote screen; the clock; or a door that refused the look,
+/// whose code is beside it in `refusal` (`error` when the window could not
+/// read it). The first three are the helper's own roads, which the ladder
+/// climbs; a refused look — or a reason outside the four — a second look
+/// meets again. One refusal is no door's failure: the person took the
+/// foreground from a background walk, which stops for them.
+const NO_WINDOW: &str = "no_window";
+const EMPTY_TREE: &str = "empty_tree";
+const LOOK_TIMEOUT: &str = "look_timeout";
+const LOOK_REFUSED: &str = "look_refused";
+const REFUSAL: &str = "refusal";
+const BACKGROUND_INTERRUPTED: &str = "background_interrupted";
+/// The ladder's own words (t-70459): why the walk ended, the look zo took,
+/// and what to do next.
+const NO_LOOK_WHY: &str = "no look came back";
+const STUCK_WHY: &str = "the screen did not move";
+const RELOOKED: &str = "relooked";
+const LADDER_CONTINUE: &str =
+    "zo looked once more and read the window's tree: continue from relooked — press by element_index, or by label and role";
+const LADDER_ROADS: &str = "take the roads in order; asking the person is the last";
+const LADDER_STOP: &str = "a second look meets the same door: stop and report it";
+const LADDER_DOOR_ROAD: &str = "the pane's own door may still look and press: take its road, and report the refusal";
+const PERSON_TOOK_OVER: &str = "the person took the foreground; the background walk stopped";
+const LADDER_PERSONS_TURN: &str = "the screen is the person's now: ask them with handoff before going on";
+/// What the person is asked: the ladder's last road, and the one road left
+/// when they took the foreground from the walk.
+const ASK_THE_DESKTOP_APP: &str = "<what the person must do, e.g. open the document in its desktop app>";
+const ASK_TO_GO_ON: &str = "<ask the person to let the walk go on, or to finish the step themselves>";
+
+/// The ladder after a walk that ended `no_look` or `stuck`, climbed before
+/// anyone asks the person (t-70459), by the cause its last row names. A
+/// door's refusal is reported and never looked through again — at a pane
+/// its own door's road stays. A pane's look is its door's, which zo's road
+/// does not reach: its roads, in that door's words. At an app zo looks once
+/// more — after finding a window that was not found, and never at a tree
+/// already said to be empty — and a look that reads the window's tree is
+/// the model's to continue from; otherwise the roads, in order, the person
+/// last. A device's walk keeps its answer: no look of zo's reaches it, and
+/// it has no desktop app to be opened in. `None`: no ladder to climb.
+fn climb(input: &ComputerInput, walked: &mut WalkRead, ctx: &ToolContext, road: &ComputerRoad) -> Option<Value> {
+    let after = walked
+        .reason
+        .clone()
+        .filter(|reason| walked.status == WalkStatus::Failed && [walk_words::NO_LOOK, walk_words::STUCK].contains(&reason.as_str()))?;
+    let why = if after == walk_words::STUCK { STUCK_WHY } else { NO_LOOK_WHY };
+    let cause = walked.cause.clone();
+    let mut ladder = json!({ "after": after, "cause": cause, "why": why });
+    if let Some(cause) = cause.as_deref().filter(|cause| ![NO_WINDOW, EMPTY_TREE, LOOK_TIMEOUT].contains(cause)) {
+        ladder[REFUSAL] = json!(walked.refusal);
+        // The person took the foreground: no door failed, and the walk goes
+        // on only when they say so.
+        if cause == LOOK_REFUSED && walked.refusal.as_deref() == Some(BACKGROUND_INTERRUPTED) {
+            walked.status = WalkStatus::Stopped;
+            ladder["report"] = json!(PERSON_TOOK_OVER);
+            ladder["roads"] = json!([person_road(ASK_TO_GO_ON)]);
+            ladder["next"] = json!(LADDER_PERSONS_TURN);
+            return Some(ladder);
+        }
+        // A refused look names its door's code beside it; a reason outside
+        // the four is its own name.
+        let code = if cause == LOOK_REFUSED { walked.refusal.as_deref() } else { Some(cause) };
+        let door = code.map_or_else(String::new, |code| format!(" {code}"));
+        ladder["report"] = json!(format!("door refusal{door}: report it as a defect"));
+        if let Some(pane) = input.pane.as_deref() {
+            walked.status = WalkStatus::NeedsFallback;
+            ladder["roads"] = pane_roads(pane, false);
+            ladder["next"] = json!(LADDER_DOOR_ROAD);
+        } else {
+            walked.status = WalkStatus::Stopped;
+            ladder["next"] = json!(LADDER_STOP);
+        }
+        return Some(ladder);
+    }
+    if let Some(pane) = input.pane.as_deref() {
+        walked.status = WalkStatus::NeedsFallback;
+        ladder["roads"] = pane_roads(pane, true);
+        ladder["next"] = json!(LADDER_ROADS);
+        return Some(ladder);
+    }
+    let app = input.app.as_deref()?;
+    let mut window_id = None;
+    if cause.as_deref() == Some(NO_WINDOW) {
+        let refound = refind(app, ctx, road);
+        window_id = refound.pointer("/windows/0/id").and_then(Value::as_u64);
+        ladder["refound"] = refound;
+    }
+    if cause.as_deref() != Some(EMPTY_TREE) {
+        let mut look = json!({ "action": "observe", "app": app });
+        if let Some(window_id) = window_id {
+            look["window_id"] = json!(window_id);
+        }
+        if input.background == Some(true) {
+            look["background"] = json!(true);
+        }
+        let relooked = run_computer_inner(&look, ctx, road)
+            .and_then(|seen| serde_json::from_str::<Value>(&seen.text).map_err(ToolError::from))
+            .unwrap_or_else(|error| json!({ "error": error.to_string() }));
+        window_id = checked_window(&relooked, None).ok().flatten().or(window_id);
+        let tree = relooked.pointer("/result/tree");
+        let reads_tree = tree.and_then(|tree| tree.get("elementCount")).and_then(Value::as_u64).is_some_and(|count| count > 0)
+            || tree.and_then(|tree| tree.get("text")).and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty());
+        ladder[RELOOKED] = relooked;
+        if reads_tree {
+            ladder["next"] = json!(LADDER_CONTINUE);
+            return Some(ladder);
+        }
+    }
+    walked.status = WalkStatus::NeedsFallback;
+    ladder["roads"] = app_roads(app, window_id, input.background == Some(true));
+    ladder["next"] = json!(LADDER_ROADS);
+    Some(ladder)
+}
+
+/// The walk's app's windows found again, before a look at a window the walk
+/// did not find: each window's id and title — never its place, which no
+/// picture has framed for the model.
+fn refind(app: &str, ctx: &ToolContext, road: &ComputerRoad) -> Value {
+    let list = ComputerInput { action: LIST_WINDOWS_ACTION.into(), app: Some(app.to_string()), ..ComputerInput::default() };
+    let answer = match argv_for(&list).and_then(|argv| call_shim(road, &argv, ctx.cwd.as_deref())) {
+        Ok(answer) => answer,
+        Err(error) => return json!({ "error": error.to_string() }),
+    };
+    if let Some(refused) = refusal(&answer) {
+        return json!({ "error": ToolError::from(refused).to_string() });
+    }
+    let windows: Vec<Value> = answer
+        .pointer("/result/windows")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .filter(|window| window_of_app(window, app))
+        .map(|window| json!({ "id": window.get("id"), "title": window.get("title") }))
+        .collect();
+    json!({ "windows": windows })
+}
+
+/// The person, asked by `text`: the ladder's last road, never its first.
+fn person_road(text: &str) -> Value {
+    json!({ "road": "person", "calls": [{ "action": "handoff", "text": text }] })
+}
+
+/// The roads at an app after a look that read no tree, in the order to take
+/// them, each in the tool's own calls at the walk's window and in its
+/// background — `<…>` is what the model fills in: the picture, pressed by its
+/// marks before its pixels; the page's own address field — a spreadsheet's
+/// name box, a search field — and the keys; the person last.
+fn app_roads(app: &str, window_id: Option<u64>, background: bool) -> Value {
+    let at = |mut call: Value| {
+        call["app"] = json!(app);
+        if let Some(window_id) = window_id {
+            call["window_id"] = json!(window_id);
+        }
+        if background {
+            call["background"] = json!(true);
+        }
+        call
+    };
+    let mut mark = json!({ "action": "left_click", "mark": "<its number on that picture's marks>" });
+    if background {
+        mark["background"] = json!(true);
+    }
+    // A press by the picture's pixels is held to the window that picture is of.
+    let mut pixels = at(json!({ "action": "left_click", "coordinate": "<[x, y] in that picture's pixels, where no mark is>" }));
+    if window_id.is_none() {
+        pixels["window_id"] = json!("<the window_id the screenshot answered>");
+    }
+    json!([
+        { "road": "picture", "calls": [
+            at(json!({ "action": "screenshot" })),
+            mark,
+            pixels,
+        ] },
+        { "road": "address_field", "calls": [
+            at(json!({ "action": "find", "label": "<the page's own address field: a spreadsheet's name box, a search field>" })),
+            at(json!({ "action": "left_click", "label": "<that field's label>", "role": "<its role>" })),
+            at(json!({ "action": "type", "text": "<the cell or the words to go to>" })),
+            at(json!({ "action": "key", "text": "Return" })),
+        ] },
+        person_road(ASK_THE_DESKTOP_APP),
+    ])
+}
+
+/// The roads at a browser pane, in the work browser's own door, which zo
+/// runs as its browser road: zo's Computer road does not look at a pane (the
+/// CLI's `observe` and `screenshot` take none), and that door looks and
+/// presses there — its numbered controls and their picture, pressed by
+/// number; the page's own fields — a spreadsheet's name box, a search field
+/// — and the typing; the person last. After a door refused the walk's look,
+/// the pane's own door is the one road left (`all` false).
+fn pane_roads(pane: &str, all: bool) -> Value {
+    let door = |words: String| json!(format!("{BROWSER_CLI} {words}"));
+    let revision = format!("{WORKSPACE_REVISION_FLAG} <revision>");
+    let picture = json!({ "road": "picture", "calls": [
+        door(format!("marks {pane} --json")),
+        door(format!("screenshot {pane} --marks")),
+        door(format!("click {pane} --mark <n> {revision}")),
+    ], "fill": format!(
+        "<n>: an item's mark in the marks answer's {ITEMS_KEY}; <revision>: that answer's {WORKSPACE_REVISION_KEY}"
+    ) });
+    if !all {
+        return json!([picture]);
+    }
+    json!([
+        picture,
+        { "road": "address_field", "calls": [
+            door(format!("fields {pane} --json")),
+            door(format!("type {pane} <css> <text> {revision}")),
+        ], "fill": format!(
+            "<css>: the field's handle in the fields answer — a spreadsheet's name box, a search field; \
+             <text>: the cell or the words to go to; <revision>: that answer's {WORKSPACE_REVISION_KEY}"
+        ) },
+        person_road(ASK_THE_DESKTOP_APP),
+    ])
 }
 
 /// `list_windows {app}`: keep the windows `app` names — by its name in any
@@ -2103,18 +2349,8 @@ fn filter_windows_by_app(answer: &mut Value, app: &str) {
         return;
     };
     let wanted = app.trim();
-    let pid = wanted.strip_prefix("pid:").and_then(|pid| pid.trim().parse::<u64>().ok());
     let of = windows.len();
-    let kept: Vec<Value> = windows
-        .iter()
-        .filter(|window| {
-            let owner = window.get("app");
-            let named = owner.and_then(|owner| owner.get("name")).and_then(Value::as_str);
-            named.is_some_and(|name| name.trim().eq_ignore_ascii_case(wanted))
-                || pid.is_some_and(|pid| owner.and_then(|owner| owner.get("pid")).and_then(Value::as_u64) == Some(pid))
-        })
-        .cloned()
-        .collect();
+    let kept: Vec<Value> = windows.iter().filter(|window| window_of_app(window, wanted)).cloned().collect();
     let filter = if kept.is_empty() {
         json!({ "app": wanted, "state": "fell_back", "reason": "no window of that app is on the desktop; the whole list is shown", "of": of })
     } else {
@@ -2124,6 +2360,17 @@ fn filter_windows_by_app(answer: &mut Value, app: &str) {
         *windows = kept;
     }
     result.insert("app_filter".into(), filter);
+}
+
+/// Whether a listed window is `app`'s: by the app's name in any case, or by
+/// `pid:<n>`.
+fn window_of_app(window: &Value, app: &str) -> bool {
+    let wanted = app.trim();
+    let pid = wanted.strip_prefix("pid:").and_then(|pid| pid.trim().parse::<u64>().ok());
+    let owner = window.get("app");
+    let named = owner.and_then(|owner| owner.get("name")).and_then(Value::as_str);
+    named.is_some_and(|name| name.trim().eq_ignore_ascii_case(wanted))
+        || pid.is_some_and(|pid| owner.and_then(|owner| owner.get("pid")).and_then(Value::as_u64) == Some(pid))
 }
 
 #[cfg(test)]
@@ -2250,8 +2497,9 @@ fn run_computer_inner(input: &Value, ctx: &ToolContext, road: &ComputerRoad) -> 
 /// the control again on the press's own tree and refuses none or several, so
 /// a tree that moved after the read is never pressed by the read's index. No
 /// look at the window, another document, no control or several: the refusal
-/// stands, with the candidates named when there are several. One read, one
-/// press — never a loop.
+/// stands, with the candidates named when there are several. Another
+/// document, or one whose identity only one side gave, is named by its word
+/// with the look to take next (t-70459). One read, one press — never a loop.
 fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &ComputerRoad) -> Result<(Value, Value), ToolError> {
     let reading = (input.label.is_some() || input.role.is_some()) && input.ocr != Some(true);
     let (Some(app), Some(window_id)) = (input.app.as_deref(), input.window_id) else {
@@ -2279,8 +2527,20 @@ fn repick(input: &ComputerInput, refused: Refusal, ctx: &ToolContext, road: &Com
     else {
         return Err(refused.into());
     };
-    if window_title(&found) != looked.title || window_document(&found) != looked.document {
-        let message = format!("{}; the window's document changed since your last look at it, so no other control was chosen — observe it again", refused.message);
+    let document = window_document(&found);
+    let kept = if window_title(&found) != looked.title || (document.is_some() && looked.document.is_some() && document != looked.document) {
+        Some((REPICK_DOCUMENT_CHANGED, "the window's document changed since your last look at it"))
+    } else if document.is_some() != looked.document.is_some() {
+        Some((REPICK_DOCUMENT_UNCONFIRMED, "only one of your last look at the window and this read of it gave the document's identity, so it is not confirmed"))
+    } else {
+        None
+    };
+    if let Some((word, why)) = kept {
+        let mut look = json!({ "action": "observe", "app": app, "window_id": window_id });
+        if input.background == Some(true) {
+            look["background"] = json!(true);
+        }
+        let message = format!("{}; {word}: {why} — no other control was chosen; observe it again with {look}, then send the click again", refused.message);
         return Err(Refusal { message, ..refused }.into());
     }
     let matches = found.pointer("/result/matches").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
@@ -5152,6 +5412,17 @@ printf '%s
         assert_eq!(said["status"], WalkStatus::NeedsFallback.word(), "stuck at a pane: {said}");
         assert_eq!(road_names(&said), ["picture", "address_field", "person"], "stuck at a pane: the roads in order, the person last: {said}");
         pane_roads_are_the_browser_doors(&said);
+    }
+
+    /// The six words of a `no_look` row, letter for letter as the window
+    /// writes them (t-70425) — spelled in one place in zo, so a word the
+    /// core renames is changed there and here (t-70459).
+    #[test]
+    fn the_no_look_rows_words_are_spelled_as_the_window_writes_them() {
+        assert_eq!(
+            [NO_WINDOW, EMPTY_TREE, LOOK_TIMEOUT, LOOK_REFUSED, REFUSAL, BACKGROUND_INTERRUPTED],
+            ["no_window", "empty_tree", "look_timeout", "look_refused", "refusal", "background_interrupted"]
+        );
     }
 
     /// The tool's own words say the ladder (t-70459): after `no_look` or
