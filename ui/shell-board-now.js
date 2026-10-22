@@ -325,6 +325,8 @@ function boardAsks(ledger) {
     asks.push({ kind: "question", key: `question:${deskLetterKey(letter)}`, letter, at: Number(letter.created_ms) || 0 });
   }
   for (const task of Array.isArray(ledger?.tasks) ? ledger.tasks : []) {
+    // 아무도 돌아오지 않는 일은 누구의 차례도 아니다 — 남은 일의 무더기에 선다(`paintDeskLeft`).
+    if (task.left) continue;
     if (task.stage === "gate" && task.gate) {
       asks.push({ kind: "hold", key: `hold:${task.run}/${task.gate.id}`, task, at: Number(task.created_ms) || 0 });
     } else if (task.stage === "reported") {
@@ -682,6 +684,156 @@ function paintDeskAsks(block, now, view) {
   return true;
 }
 
+/* ---- 남은 일: 정리 필요 · 검토 없이 끝남 (t-71220) ------------------------------
+ *
+ * 사람 10-22: 흐름의 「지금」에 몇 주 된 과업이 「차례 기다림」·「검토 대기」로 남아 끝나지
+ * 않았다. 어느 과업이 아무도 돌아오지 않는 일인지는 원장이 한 번 고른다(core
+ * `settle::left_behind`) — 데스크는 그 판정을 행마다(`task.left`)와 무더기마다(`left`)로, 흐름은
+ * 무더기 둘(`left`·`unreviewed`)로 싣는다. 이 화면은 고르지도 세지도 않는다: 무더기의 이름과 수,
+ * 확인 창의 말, 누름과 그 답을 그린다. 누름은 창의 사람 문(`board_settle`) 하나로 가고, 줄은
+ * 원장이 적은 뒤에만 빠진다. 낱말과 누름은 여기 한 곳이다 — 상황판과 흐름이 같이 쓴다. */
+
+/* 무더기 둘, 그리는 차례대로. `press`는 원장의 누름 낱말(`SettlePress`), `left`는 그 무더기에
+ * 드는 판정(`Left`)이고 `names`는 누름이 이름을 대는 판정이다 — 정리 필요에는 닫힐 일과 열린 채
+ * 남을 일이 같이 서고, 누름은 닫힐 일만 이름 댄다. `flow`는 흐름의 답에서 그 무더기의 열쇠다. */
+const SETTLE_PILES = Object.freeze([
+  {
+    kind: "settle", press: "settle", left: ["settle", "look"], names: "settle", flow: "left", key: "board.settle.pileSettle", word: "정리 필요",
+    note: { key: "board.settle.pileSettleNote", word: "코디 자리가 비었거나 {{days}}일 넘게 손대지 않은 일 · 「지금」에 세지 않음" },
+  },
+  {
+    kind: "unreviewed", press: "waive", left: ["unreviewed"], names: "unreviewed", flow: "unreviewed", key: "board.settle.pileUnreviewed", word: "검토 없이 끝남",
+    note: { key: "board.settle.pileUnreviewedNote", word: "넘겼지만 검토할 코디가 없거나 {{days}}일 넘게 손대지 않은 일" },
+  },
+]);
+/* 줄 하나의 상태 말 — 원장의 판정(`Left`)마다. 열린 채 남는 줄은 사람이 볼 일이다. */
+const SETTLE_LEFT_WORDS = Object.freeze({
+  settle: { key: "board.settle.pileSettle", word: "정리 필요" },
+  look: { key: "board.settle.look", word: "검토 필요" },
+  unreviewed: { key: "board.settle.pileUnreviewed", word: "검토 없이 끝남" },
+});
+/* 확인 창에 이름으로 서는 줄 수 — 그 밖은 수로만 선다. */
+const SETTLE_ASK_ROWS = 3;
+/* 정리한 뒤 「되돌리기」를 내미는 시간, 그리고 답의 한 줄이 서 있는 시간. */
+const SETTLE_UNDO_MS = 60_000;
+
+/* 누른 것 — 표면과 무더기마다(`board:settle`, `flow:unreviewed`…): 보내는 중인가, 원장의 답, 틀린
+ * 말, 답이 서 있는 끝. 판이 다시 그려져도 남는다. */
+const settlePresses = new Map();
+
+/* 줄 하나의 말 — 과업 · 런 · 손댄 지 얼마. 확인 창과 펼친 무더기가 같이 읽는다. `row`는
+ * `{ task, run, words, touched }`다. */
+function settleRowWords(row, now) {
+  return t("board.settle.askRow", "{{task}} · {{run}} · {{age}} — {{title}}", {
+    task: row.task, run: row.run, title: row.words,
+    age: t("board.desk.mailAge", "{{time}} 전", { time: agoWord(row.touched, now) }),
+  });
+}
+
+/* 무더기의 메모 — 무엇이 이 무더기에 드는지, 원장의 조용한 날수(`quiet_days`) 그대로. */
+function settlePileNote(pile, quietDays) {
+  return t(pile.note.key, pile.note.word, { days: quietDays });
+}
+
+/* 누름 단추의 말 — 몇 건에 무엇을 하는지. 한 번에 원장이 받는 수(`press_max`)를 넘으면 그만큼. */
+function settlePressWords(pile, count, pressMax) {
+  const taken = Math.min(count, pressMax);
+  return pile.press === "waive"
+    ? t("board.settle.pressWaive", "{{count}}건 검토 생략", { count: taken })
+    : t("board.settle.pressSettle", "{{count}}건 닫기", { count: taken });
+}
+
+/* 확인 창 — 몇 건을, 처음 몇 줄의 과업 · 런 · 나이와 함께. 원장이 한 번에 받는 수를 넘으면
+ * 오래된 것부터 그만큼이라고 말한다. */
+function settlePileAsk(pile, rows, count, pressMax, now) {
+  const taken = Math.min(count, pressMax);
+  const shown = rows.slice(0, Math.min(SETTLE_ASK_ROWS, taken)).map((row) => settleRowWords(row, now));
+  if (taken > shown.length) {
+    shown.push(t("board.settle.askMoreRows", "… 그 밖에 {{count}}건", { count: taken - shown.length }));
+  }
+  const waive = pile.press === "waive";
+  const title = count > taken
+    ? waive
+      ? t("board.settle.askWaiveMax", "{{count}}건 가운데 오래된 {{max}}건의 검토를 생략할까요?", { count, max: taken })
+      : t("board.settle.askSettleMax", "{{count}}건 가운데 오래된 {{max}}건을 닫을까요?", { count, max: taken })
+    : waive
+      ? t("board.settle.askWaiveTitle", "{{count}}건의 검토를 생략할까요?", { count })
+      : t("board.settle.askSettleTitle", "{{count}}건을 닫을까요?", { count });
+  return {
+    title,
+    body: shown.join("\n"),
+    detail: waive
+      ? t("board.settle.askWaiveDetail", "검토 기록 대신 「검토 생략(사람)」을 원장에 남깁니다 — 검증이 아닙니다. 과업은 끝난 채 남고, 새로 넘기면 다시 검토 대기가 됩니다.")
+      : t("board.settle.askSettleDetail", "원장이 과업마다 다시 읽어 아무것도 넘기지 않은 열린 과업만 「낡음」으로 닫습니다. 넘긴 것이 있거나 다른 과업이 기다리는 과업은 열린 채 남습니다. 닫은 뒤 {{seconds}}초 동안 되돌릴 수 있습니다.",
+        { seconds: Math.round(SETTLE_UNDO_MS / 1000) }),
+    confirm: settlePressWords(pile, count, pressMax),
+    deny: t("board.batch.askKeep", "그대로 두기"),
+    cancel: false,
+  };
+}
+
+/* 누른다 — 사람이 확인 창에서 「예」라고 해야만 창의 사람 문을 부른다. 원장은 이름 하나하나를
+ * 다시 읽어 그 판정이 그대로일 때만 쓰고, 나머지는 그대로 둔 까닭과 함께 돌려준다. 같은 무더기는
+ * 보내는 동안 다시 눌리지 않는다. `names`는 원장이 고른 그 무더기의 과업 전부, 오래된 것부터다. */
+async function pressSettlePile(key, pile, rows, names, pressMax, repaint) {
+  if (settlePresses.get(key)?.sending || names.length === 0) return;
+  const said = await askConfirm(settlePileAsk(pile, rows, names.length, pressMax, Date.now()));
+  if (said !== true) return;
+  await sendSettle(key, pile.press, names.slice(0, pressMax), repaint);
+}
+
+/* 정리가 닫았다고 답한 과업들을 그 답의 상태 그대로 되돌린다 — 정리한 뒤 잠시만. */
+function undoSettle(key, repaint) {
+  const held = settlePresses.get(key);
+  const closed = held?.answer?.closed ?? [];
+  if (!held || held.sending || held.press !== "settle" || closed.length === 0 || Date.now() >= held.until) return;
+  void sendSettle(key, "undo", closed, repaint);
+}
+
+async function sendSettle(key, press, tasks, repaint) {
+  const held = { sending: true, press, answer: null, error: "", until: 0 };
+  settlePresses.set(key, held);
+  repaint();
+  try {
+    held.answer = await invoke("board_settle", { press, tasks });
+  } catch (error) {
+    held.error = String(error);
+  } finally {
+    held.sending = false;
+    held.until = Date.now() + SETTLE_UNDO_MS;
+    // 답의 한 줄과 되돌리기는 그 시간이 지나면 접힌다 — 그때 한 번 다시 그린다.
+    setTimeout(repaint, SETTLE_UNDO_MS);
+    repaint();
+  }
+}
+
+/* 무더기 곁의 한 줄 — 원장이 돌려준 답 그대로, 그리고 되돌릴 수 있는가. */
+function settleSaid(key, now) {
+  const held = settlePresses.get(key);
+  if (!held) return { said: "", tone: "", undo: false };
+  if (held.sending) return { said: t("board.batch.saidSending", "보내는 중…"), tone: "sending", undo: false };
+  if (now >= held.until) return { said: "", tone: "", undo: false };
+  if (held.error) return { said: t("board.batch.saidRefused", "안 됨 — {{why}}", { why: held.error }), tone: "halt", undo: false };
+  const answer = held.answer ?? {};
+  const count = (list) => (Array.isArray(list) ? list.length : 0);
+  const kept = Array.isArray(answer.kept) ? answer.kept : [];
+  const look = kept.filter((one) => one.why === "look").length;
+  const said = [
+    count(answer.closed) > 0 ? t("board.settle.saidClosed", "{{count}}건을 닫았습니다", { count: count(answer.closed) }) : "",
+    count(answer.waived) > 0 ? t("board.settle.saidWaived", "{{count}}건의 검토를 생략했습니다", { count: count(answer.waived) }) : "",
+    count(answer.reopened) > 0 ? t("board.settle.saidReopened", "{{count}}건을 되돌렸습니다", { count: count(answer.reopened) }) : "",
+    look > 0 ? t("board.settle.saidKeptLook", "{{count}}건은 넘긴 것이 있어 열어 둠", { count: look }) : "",
+    kept.length > look ? t("board.settle.saidKeptMoved", "{{count}}건은 그새 움직여 그대로 둠", { count: kept.length - look }) : "",
+  ].filter(Boolean).join(" · ");
+  return { said, tone: "done", undo: held.press === "settle" && count(answer.closed) > 0 };
+}
+
+/* 무더기가 서 있어야 하는가 — 든 일이 있거나, 방금 누른 답(되돌리기)이 아직 서 있다. */
+function settlePileStands(key, count, now) {
+  const held = settlePresses.get(key);
+  return count > 0 || Boolean(held && (held.sending || now < held.until));
+}
+
 /* ---- 지금 도는 일 -----------------------------------------------------------
  *
  * 원장의 과업을 목표(`parent`)별로 묶은 표. 행 하나 = 이름과 id · 상태 점과 낱말 · 하는 일
@@ -694,7 +846,7 @@ function boardRunRows(ledger, now, view) {
   const rows = [];
   for (const task of Array.isArray(ledger?.tasks) ? ledger.tasks : []) {
     const state = BOARD_RUN_OF_STAGE[task.stage];
-    if (!state) continue;
+    if (!state || task.left) continue;
     const carrier = deskTaskCarrier(task);
     const health = carrier && (state === "run" || state === "halt") ? deskWorkerHealth(carrier, null, now) : null;
     const halted = state === "run" && health && (health.id === "gone" || health.id === "walled") ? "halt" : state;
@@ -978,6 +1130,138 @@ function paintDeskRunning(block, now, view) {
     ? t("board.now.runsToday", "오늘 끝난 일 {{count}}개", { count: today })
     : t("board.now.runsTodayNone", "오늘 끝난 일은 아직 없습니다"));
   writeTextContent(foot.lastElementChild, t("board.now.toHistory", "기록에서 보기"));
+  return true;
+}
+
+/* ---- 남은 일의 무더기 (상황판) ----------------------------------------------
+ *
+ * 「지금 도는 일」 아래의 접힌 줄 둘 — 정리 필요 · 검토 없이 끝남. 수와 누를 이름은 데스크가
+ * 무더기마다 실은 그대로이고(`left`), 펼친 행은 데스크가 단계마다 따로 실은 남은 일의
+ * 행이다(`task.left`). 누름은 이 창의 사람 문이라 코디 자리를 묻지 않는다 — 자리가 빈 런이야말로
+ * 이 무더기의 일이다. */
+function boardLeftRows(ledger, pile) {
+  return (Array.isArray(ledger?.tasks) ? ledger.tasks : [])
+    .filter((task) => pile.left.includes(task.left))
+    .sort((a, b) => (Number(a.touched_ms) || 0) - (Number(b.touched_ms) || 0));
+}
+
+/* 무더기 하나의 수 — 데스크가 판정마다 실은 이름의 수를 더한 것. */
+function boardLeftCount(left, pile) {
+  return pile.left.reduce((sum, kind) => sum + (Array.isArray(left?.[kind]) ? left[kind].length : 0), 0);
+}
+
+function boardLeftHead(view) {
+  const head = deskElement("div", "board-goal is-done is-left");
+  head.setAttribute("role", "row");
+  const fold = deskElement("button", "board-goal-fold");
+  fold.type = "button";
+  fold.innerHTML = icon("chevron", false);
+  fold.append(deskElement("span", "board-goal-name"));
+  fold.onclick = () => {
+    const key = head.dataset.goal;
+    if (boardNowChoice.folded.has(key)) boardNowChoice.folded.delete(key);
+    else boardNowChoice.folded.add(key);
+    paintCoordinatorDesk(view);
+  };
+  const undo = deskElement("button", "board-link board-left-undo");
+  undo.type = "button";
+  const press = deskElement("button", "board-btn board-left-press");
+  press.type = "button";
+  head.append(fold, deskElement("span", "board-goal-note"), deskElement("span", "board-left-said"), undo, press);
+  return head;
+}
+
+/* 남은 일의 행 하나 — 「지금 도는 일」의 행과 같은 여섯 칸: 이름과 id · 판정의 말 · 런 · 워커 ·
+ * 가지 · 손댄 지 얼마. */
+function paintBoardLeftRow(node, task, now, runs) {
+  writeClassName(node, `board-run is-left is-${task.left}`);
+  writeAttribute(node, "data-task", `${task.run}/${task.id}`);
+  writeTextContent(node.querySelector(".board-run-name"), task.title);
+  writeTextContent(node.querySelector(".board-run-id"), task.id);
+  const said = SETTLE_LEFT_WORDS[task.left] ?? SETTLE_LEFT_WORDS.settle;
+  writeTextContent(node.querySelector(".board-run-state"), t(said.key, said.word));
+  const run = runs.get(task.run);
+  paintBoardRunWork(node, { task, state: "left" }, run?.name ? `${run.name} · ${task.run}` : task.run);
+  writeTextContent(node.querySelector(".board-run-who"), "");
+  const branchCell = node.querySelector(".board-run-branch");
+  writeClassName(branchCell, "board-run-branch is-empty");
+  writeTrailingText(branchCell, "");
+  writeTextContent(node.querySelector(".board-run-end"),
+    t("board.desk.mailAge", "{{time}} 전", { time: agoWord(Number(task.touched_ms) || 0, now) }));
+}
+
+function paintDeskLeft(block, now, view) {
+  const ledger = deskLedger;
+  const left = ledger?.left;
+  if (!left) return false;
+  const piles = SETTLE_PILES
+    .map((pile) => ({ pile, key: `board:${pile.kind}`, count: boardLeftCount(left, pile) }))
+    .filter(({ key, count }) => settlePileStands(key, count, now));
+  if (piles.length === 0) return false;
+  const head = block.firstElementChild;
+  writeTextContent(head, t("board.settle.head", "남은 일"));
+  const body = block.lastElementChild;
+  let table = body.querySelector(":scope > .board-runs");
+  if (!table) {
+    table = deskElement("div", "board-runs");
+    table.setAttribute("role", "table");
+    body.replaceChildren(table);
+  }
+  writeAttribute(table, "aria-label", t("board.settle.head", "남은 일"));
+  const runs = new Map((ledger.runs ?? []).map((run) => [run.run, run]));
+  const quietDays = Number(left.quiet_days) || 0;
+  const pressMax = Number(left.press_max) || 0;
+  const repaint = () => paintCoordinatorDesk(view);
+  const held = new Map([...table.children].map((node) => [node.dataset.key, node]));
+  const wanted = [];
+  const take = (key, make) => {
+    const node = held.get(key) ?? make();
+    writeAttribute(node, "data-key", key);
+    wanted.push(node);
+    return node;
+  };
+  for (const { pile, key, count } of piles) {
+    const open = boardNowChoice.folded.has(key);
+    const pileHead = take(`left:${pile.kind}`, () => boardLeftHead(view));
+    writeAttribute(pileHead, "data-goal", key);
+    const fold = pileHead.querySelector(".board-goal-fold");
+    writeAttribute(fold, "aria-expanded", String(open));
+    fold.querySelector(".icon")?.classList.toggle("is-open", open);
+    writeTextContent(fold.querySelector(".board-goal-name"), `${t(pile.key, pile.word)} ${count}`);
+    writeTextContent(pileHead.querySelector(".board-goal-note"), settlePileNote(pile, quietDays));
+    const names = Array.isArray(left[pile.names]) ? left[pile.names] : [];
+    const rows = boardLeftRows(ledger, pile);
+    const press = pileHead.querySelector(".board-left-press");
+    const answer = settleSaid(key, now);
+    writeTextContent(press, settlePressWords(pile, names.length, pressMax));
+    writeHidden(press, names.length === 0 || isPopout);
+    writeDisabled(press, settlePresses.get(key)?.sending === true);
+    press.onclick = () => void pressSettlePile(key, pile,
+      rows.filter((task) => task.left === pile.names)
+        .map((task) => ({ task: task.id, run: task.run, words: task.title, touched: Number(task.touched_ms) || 0 })),
+      names, pressMax, repaint);
+    const said = pileHead.querySelector(".board-left-said");
+    writeTextContent(said, answer.said);
+    writeAttribute(said, "data-tone", answer.tone);
+    writeHidden(said, answer.said === "");
+    const undo = pileHead.querySelector(".board-left-undo");
+    writeTextContent(undo, t("board.settle.undo", "되돌리기"));
+    writeHidden(undo, !answer.undo || isPopout);
+    undo.onclick = () => undoSettle(key, repaint);
+    if (!open) continue;
+    for (const task of rows) paintBoardLeftRow(take(`leftrow:${task.run}/${task.id}`, () => boardRunRow(view)), task, now, runs);
+    const unseen = count - rows.length;
+    if (unseen > 0) {
+      const more = take(`leftmore:${pile.kind}`, () => {
+        const line = deskElement("div", "board-goal-more");
+        line.setAttribute("role", "row");
+        line.append(deskElement("span", "board-goal-note"));
+        return line;
+      });
+      writeTextContent(more.firstElementChild, t("board.settle.more", "그 밖에 {{count}}건", { count: unseen }));
+    }
+  }
+  reconcileElementOrder(table, wanted);
   return true;
 }
 

@@ -345,3 +345,65 @@ fn a_start_refused_while_another_pane_is_cut_is_asked_again() {
     let retry = |args: &Vec<String>| args[args.iter().position(|word| word == "--retry-request").unwrap() + 1].clone();
     assert_ne!(retry(&starts[0]), retry(&starts[1]), "the second ask reused the refused request's name");
 }
+
+/// What a launch left in the store the screen reads: the manifest's JSON.
+fn stored_manifest(manifest: &AgentOutput) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(&manifest.manifest_file).unwrap()).unwrap()
+}
+
+/// t-69472: the parent's spawn cell finds a running helper through the
+/// manifest it reads in the session's store: `running`, under the session,
+/// with the `tool_use` id of the call that spawned it. A general-purpose
+/// `Agent` call that runs in this process leaves one.
+#[test]
+fn an_agent_call_in_this_process_leaves_a_running_manifest_with_its_call() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report the fixture","subagent_type":"general-purpose"})).unwrap();
+    input.tool_call_id = Some("toolu_c69472_inline".into());
+    input.parent_session_id = Some("session-c69472".into());
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("session-c69472", &root.path().join("store")));
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input, |_job| Ok(()), None, None, None)
+        .unwrap_or_else(|failure| panic!("{failure}"));
+    let stored = stored_manifest(&manifest);
+    assert_eq!(stored["status"], "running", "{stored}");
+    assert_eq!(stored["toolCallId"], "toolu_c69472_inline", "{stored}");
+    assert_eq!(stored["parentSessionId"], "session-c69472", "{stored}");
+    assert_ne!(stored["execution"], "ledger", "{stored}");
+}
+
+/// t-69472: the same call inside ZeroCode opens a ledger worker, and leaves
+/// the same manifest while the worker runs — `running`, under the session,
+/// with the call's `tool_use` id — and `execution: ledger`, which tells the
+/// screen the helper runs in a tab of its own.
+#[cfg(unix)]
+#[test]
+fn an_agent_call_that_opens_a_ledger_worker_leaves_a_running_manifest_with_its_call() {
+    let _lock = crate::tests::env_lock().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let root = tempfile::tempdir().unwrap();
+    // A worker that keeps running until it is stopped: it never reports.
+    let client = fake_door(root.path(), "running", true);
+    let mut input: AgentInput = serde_json::from_value(json!({"description":"survey fixture","prompt":"report the fixture","subagent_type":"general-purpose","agent":"codex","model":"exact-model","effort":"low","worktree":true})).unwrap();
+    input.launch.selected = true;
+    input.tool_call_id = Some("toolu_c69472_ledger".into());
+    input.parent_session_id = Some("session-c69472".into());
+    input.registry = Some(super::super::AgentRegistry::at_root_for_tests("session-c69472", &root.path().join("store")));
+    let launch = input.launch.clone();
+    let cancel = std::sync::Arc::new(Mutex::new(None));
+    let kept = std::sync::Arc::clone(&cancel);
+    let manifest = super::super::execute_agent_with_spawn_and_parent_model_and_hooks(input, move |job| {
+        *kept.lock().unwrap() = Some(job.cancel_signal.clone());
+        spawn(&client, &launch, Some("exact-model".into()), job)
+    }, None, None, None)
+    .unwrap_or_else(|failure| panic!("{failure}"));
+    let stored = stored_manifest(&manifest);
+    assert_eq!(stored["status"], "running", "{stored}");
+    assert_eq!(stored["toolCallId"], "toolu_c69472_ledger", "{stored}");
+    assert_eq!(stored["parentSessionId"], "session-c69472", "{stored}");
+    assert_eq!(stored["execution"], "ledger", "{stored}");
+
+    // The worker is stopped, and its watch ends, before the store goes.
+    cancel.lock().unwrap().take().expect("the launch's cancel signal").abort();
+    let results = super::super::wait_for_agent_completions(std::slice::from_ref(&manifest.agent_id), Duration::from_secs(10));
+    assert_eq!(results.len(), 1, "{results:?}");
+}

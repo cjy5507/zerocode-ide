@@ -888,17 +888,17 @@ pub(crate) fn set_status_bar_item(
         &app,
         &webview,
         &state,
-        &[setting_key::STATUS_BAR_ITEMS],
+        &[
+            setting_key::STATUS_BAR_ITEMS,
+            setting_key::STATUS_BAR_ITEMS_OFF,
+        ],
         move |settings| {
-            if enabled {
-                if !settings.status_bar_items.contains(&item) {
-                    settings.status_bar_items.push(item);
-                }
-            } else {
-                settings.status_bar_items.retain(|held| held != &item);
-            }
-            settings.status_bar_items =
-                normalize_status_bar_items(std::mem::take(&mut settings.status_bar_items));
+            switch_status_bar_item(
+                &mut settings.status_bar_items,
+                &mut settings.status_bar_items_off,
+                &item,
+                enabled,
+            );
             Ok(())
         },
     )
@@ -1003,13 +1003,30 @@ pub(crate) fn take_census(app: &AppHandle) -> crate::orchestration::restart_cens
 ///
 /// `door` is the button the window restarted from (t-6428), said back in
 /// the goodbye's line; a word no door wears is a restart all the same.
-#[tauri::command]
+///
+/// Not a command of the window's (t-67936): every restart reaches this road
+/// through [`leave`], after its notice stood on the screen — a restart the
+/// window could invoke here directly would be one nobody saw coming. Before
+/// it goes it says its door's line (whose hand, the choice, how long the
+/// notice stood) and leaves the note the next window says it came back by.
 pub(crate) fn relaunch_window(app: AppHandle, door: Option<String>) {
     let _crumb = crate::crumbs::Command::enter("relaunch_window");
     let road = crate::exit_runtime::begin(crate::exit_runtime::ExitRoad::Restart(
         door.as_deref()
             .and_then(crate::exit_runtime::RestartDoor::named),
     ));
+    let root = app.state::<AppState>().local_data_root().to_path_buf();
+    if let Some(line) = crate::exit_runtime::door_line(road) {
+        crate::note_window_event(&root, &line);
+    }
+    let note = crate::exit_runtime::restart_note_of(
+        road,
+        &update_runtime::build_stamp(),
+        crate::now_epoch_ms(),
+    );
+    if let Err(error) = crate::exit_runtime::leave_restart_note(&root, &note) {
+        crate::note_window_event(&root, &format!("exit: restart note not left: {error}"));
+    }
     // The ledger's goodbye first (t-3058): every seated worker sleeps with
     // its dispatch open, so the panes this restart takes settle nothing. Then
     // the screens and statuses the next window restores from (t-7812 D) —
@@ -1117,15 +1134,17 @@ impl exit_runtime::Closing for MainWindowClose {
 
 /// 「끝나면」: wait on this road for the first gap (t-6428), answering the
 /// line the wait stands as from its first second — the census as it is.
+/// `by` is the window's word for the hand that armed it (t-67936).
 #[tauri::command(async)]
 pub(crate) fn leave_when_idle(
     app: AppHandle,
     road: String,
     door: Option<String>,
+    by: Option<String>,
 ) -> Result<exit_runtime::WaitLine, String> {
     let _crumb = crate::crumbs::Command::enter("leave_when_idle");
     let asking = asking_of(&road, door.as_deref())?;
-    exit_runtime::arm(asking, crate::now_epoch_ms());
+    exit_runtime::arm(asking, crate::now_epoch_ms(), by.as_deref());
     Ok(exit_runtime::WaitLine::of(
         asking,
         take_census(&app).busy(),
@@ -1133,21 +1152,88 @@ pub(crate) fn leave_when_idle(
     ))
 }
 
-/// 「지금」: this road goes now, and the goodbye says it was chosen.
+/// 「지금」: this road goes, and the goodbye says it was chosen — or, with
+/// `unasked`, that a door went without asking because nothing it would cut
+/// was running. A restart goes by its notice (t-67936): the notice's first
+/// line is the answer, and the beat takes the road when it ends. `None` is
+/// a road that went at once.
 #[tauri::command]
-pub(crate) fn leave_now(app: AppHandle, road: String, door: Option<String>) -> Result<(), String> {
+pub(crate) fn leave_now(
+    app: AppHandle,
+    road: String,
+    door: Option<String>,
+    by: Option<String>,
+    unasked: Option<bool>,
+) -> Result<Option<exit_runtime::NoticeLine>, String> {
     let _crumb = crate::crumbs::Command::enter("leave_now");
     let asking = asking_of(&road, door.as_deref())?;
-    exit_runtime::leave_now(asking);
-    leave(&app, asking);
-    Ok(())
+    let choice = if unasked == Some(true) {
+        exit_runtime::Choice::Unasked
+    } else {
+        exit_runtime::Choice::Now
+    };
+    let line = exit_runtime::leave_now(asking, choice, by.as_deref(), crate::now_epoch_ms());
+    if line.is_none() {
+        leave(&app, asking);
+    }
+    Ok(line)
 }
 
-/// 「취소」: nothing waits and no question stands.
+/// 「취소」: nothing waits, no question stands and no notice runs.
 #[tauri::command]
 pub(crate) fn leave_cancel() {
     let _crumb = crate::crumbs::Command::enter("leave_cancel");
     exit_runtime::cancel();
+}
+
+/// The person's hands moved `ago_ms` ago, as the window saw them, while a
+/// notice stood (t-67936): the notice holds its road until they have rested.
+#[tauri::command]
+pub(crate) fn leave_hold(ago_ms: i64) {
+    let _crumb = crate::crumbs::Command::enter("leave_hold");
+    exit_runtime::hands_moved(crate::now_epoch_ms().saturating_sub(ago_ms.max(0)));
+}
+
+/// What a restart left for the window it started (t-67936), beside the
+/// build this window runs: taken once, by the main window, so the person
+/// reads once which build it came back as and which door it went by. `None`
+/// when this start was not a restart.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RestartBack {
+    door: Option<String>,
+    from_version: String,
+    from_commit: String,
+    version: String,
+    commit: String,
+}
+
+#[tauri::command]
+pub(crate) fn boot_after_restart(webview: tauri::Webview, app: AppHandle) -> Option<RestartBack> {
+    let _crumb = crate::crumbs::Command::enter("boot_after_restart");
+    crate::from_the_main_webview(&webview).ok()?;
+    let root = app.state::<AppState>().local_data_root().to_path_buf();
+    let note = exit_runtime::take_restart_note(&root, crate::now_epoch_ms())?;
+    let stamp = update_runtime::build_stamp();
+    crate::note_window_event(
+        &root,
+        &format!(
+            "boot after exit door restart:{} · by {} · {} {} → {} {}",
+            note.door.as_deref().unwrap_or("unnamed"),
+            note.by.as_deref().unwrap_or("unsaid"),
+            note.from_version,
+            note.from_commit,
+            stamp.version,
+            stamp.commit,
+        ),
+    );
+    Some(RestartBack {
+        door: note.door,
+        from_version: note.from_version,
+        from_commit: note.from_commit,
+        version: stamp.version,
+        commit: stamp.commit,
+    })
 }
 
 /// The way out on the beat's second (t-6428). Nothing is read unless a wait
@@ -1156,7 +1242,9 @@ pub(crate) fn leave_cancel() {
 /// when the table's time runs out; a question nobody answers goes when its
 /// own time does. A wait's census that does not answer within
 /// [`exit_runtime::LEDGER_PATIENCE`] is unknown, and unknown counts as busy:
-/// the wait stands, said once in the window's log (t-49062).
+/// the wait stands, said once in the window's log (t-49062). A restart
+/// decided shows its notice first and says its line each whole second; the
+/// road goes when the notice ends (t-67936).
 pub(crate) fn beat_leaving(app: &AppHandle) {
     if !exit_runtime::watching() {
         return;
@@ -1166,6 +1254,9 @@ pub(crate) fn beat_leaving(app: &AppHandle) {
         exit_runtime::ExitBeat::Nothing => {}
         exit_runtime::ExitBeat::Tell(line) => {
             let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:waiting", line);
+        }
+        exit_runtime::ExitBeat::Notice(line) => {
+            let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:notice", line);
         }
         exit_runtime::ExitBeat::AskAgain(asking) => {
             let _ = app.emit_to(

@@ -32,6 +32,20 @@ pub enum Platform {
     Windows,
 }
 
+impl Platform {
+    /// The platform this build runs on — where a page in the window's own
+    /// browser hears a chord (`agent_browser::page_press`): macOS, or the
+    /// Ctrl-primary meaning everywhere else.
+    #[must_use]
+    pub const fn of_this_machine() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::MacOs
+        } else {
+            Self::Windows
+        }
+    }
+}
+
 impl Modifier {
     #[must_use]
     pub fn parse(part: &str) -> Option<Self> {

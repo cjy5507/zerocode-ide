@@ -550,6 +550,8 @@ mod tests {
             pane: None,
             last_receipt: None,
             in_tool,
+            report: None,
+            ledger: false,
         }
     }
 

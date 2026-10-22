@@ -654,3 +654,402 @@ async fn compact_streaming_stops_waiting_for_a_summary_that_never_ends() {
     let reason = done.local_summary_reason.expect("the reason the local summary stood in");
     assert!(reason.contains("not done after"), "the reason names the deadline: {reason}");
 }
+
+// ── t-69472: the sync road's summary has the same deadline ──────────────────
+//
+// A helper's own turns run on the sync road (`run_turn`), and so do their
+// compactions: the summary was waited on with no deadline at all. The client
+// is now asked to give the request up at t-68694's deadline
+// (`ApiClient::stream_within`); the local summary folds the conversation, one
+// line on stderr — the sync road's only screen — says so, and the turn goes on.
+
+/// Set in the child run of the sync turn's test: the child runs the turn, and
+/// the parent reads the child's stderr.
+const SYNC_TURN_CHILD_ENV: &str = "ZO_C69472_SYNC_TURN_CHILD";
+
+/// The test the child runs, by its exact name.
+const SYNC_TURN_TEST: &str =
+    "an_endless_summary_in_a_sync_turn_is_cut_at_its_deadline_and_the_turn_goes_on";
+
+/// How long the child's turn may take before it counts as stuck: the summary
+/// is waited out on a paused clock, so a turn that ends ends at once.
+const STUCK_AFTER: Duration = Duration::from_secs(30);
+
+/// A sync client the way a helper's own client is one: it drives each request
+/// as a future on a runtime of its own — here one whose clock is paused, so
+/// ten minutes cost no real time. A turn's first request calls a helper with
+/// the context near full; every later one answers at once. A summary request
+/// never ends: `stream` waits on it for ever, and `stream_within` gives it up
+/// when its deadline passes on that clock.
+struct EndlessSummarySyncApi {
+    clock: tokio::runtime::Runtime,
+    turn_requests: Arc<AtomicUsize>,
+    /// The deadline the summary request was given, once it was asked.
+    summary_deadline: Arc<std::sync::Mutex<Option<Duration>>>,
+}
+
+impl EndlessSummarySyncApi {
+    fn answer(&self) -> Vec<AssistantEvent> {
+        if self.turn_requests.fetch_add(1, Ordering::SeqCst) == 0 {
+            return vec![
+                AssistantEvent::ToolUse {
+                    id: "toolu_c69472".to_string(),
+                    name: "Agent".to_string(),
+                    input: r#"{"description":"survey the parser","prompt":"Read the parser and report."}"#
+                        .to_string(),
+                },
+                AssistantEvent::Usage(usage(1_000, 119_000)),
+                AssistantEvent::MessageStop,
+            ];
+        }
+        vec![
+            AssistantEvent::TextDelta("C69472 the turn goes on".to_string()),
+            AssistantEvent::Usage(usage(2_000, 0)),
+            AssistantEvent::MessageStop,
+        ]
+    }
+}
+
+impl ApiClient for EndlessSummarySyncApi {
+    fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        if is_summary_request(&request) {
+            // A call that only blocks cannot be given up: it waits for ever.
+            return self.clock.block_on(std::future::pending());
+        }
+        Ok(self.answer())
+    }
+
+    fn stream_within(
+        &mut self,
+        request: ApiRequest,
+        deadline: Duration,
+    ) -> Result<Option<Vec<AssistantEvent>>, RuntimeError> {
+        if !is_summary_request(&request) {
+            return self.stream(request).map(Some);
+        }
+        *self.summary_deadline.lock().expect("mutex") = Some(deadline);
+        let waited = self.clock.block_on(async {
+            let asked = tokio::time::Instant::now();
+            let _ = tokio::time::timeout(deadline, std::future::pending::<()>()).await;
+            asked.elapsed()
+        });
+        assert!(waited >= deadline, "the summary was given up {waited:?} in, before its deadline");
+        Ok(None)
+    }
+}
+
+/// The child's run: a sync turn whose compaction's summary never ends, on a
+/// thread of its own, so a turn that never ends fails the run instead of
+/// holding it.
+fn run_a_sync_turn_with_an_endless_summary() {
+    let turn_requests = Arc::new(AtomicUsize::new(0));
+    let summary_deadline = Arc::new(std::sync::Mutex::new(None));
+    let api = EndlessSummarySyncApi {
+        clock: tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .start_paused(true)
+            .build()
+            .expect("a runtime on a paused clock"),
+        turn_requests: Arc::clone(&turn_requests),
+        summary_deadline: Arc::clone(&summary_deadline),
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut runtime = ConversationRuntime::new(
+            earlier_conversation(),
+            api,
+            StaticToolExecutor::new().register("Agent", |_input| Ok(HELPER_REPORT.to_string())),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        )
+        .with_auto_compaction_input_tokens_threshold(100_000);
+        let summary = runtime.run_turn("C69472 survey", None);
+        let _ = done_tx.send((summary, Arc::clone(&runtime.session().messages)));
+    });
+    let (summary, messages) = done_rx
+        .recv_timeout(STUCK_AFTER)
+        .expect("the sync turn was still waiting on the compaction's summary");
+
+    let summary = summary.expect("the turn ends without an error");
+    assert_eq!(
+        *summary_deadline.lock().expect("mutex"),
+        Some(runtime::COMPACTION_SUMMARY_DEADLINE),
+        "the summary request is given t-68694's deadline"
+    );
+    let compaction = summary
+        .auto_compaction
+        .expect("the local summary still folds the conversation");
+    assert!(compaction.removed_message_count > 0, "{compaction:?}");
+    assert_eq!(
+        turn_requests.load(Ordering::SeqCst),
+        2,
+        "the turn asks again after the compaction"
+    );
+    assert!(
+        messages.iter().any(|message| message.blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::ToolResult { output, .. } if output.contains(HELPER_REPORT)
+        ))),
+        "the finished helper's report is still in the conversation"
+    );
+    assert!(
+        messages.last().is_some_and(|message| message.blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text.contains("C69472 the turn goes on")
+        ))),
+        "the turn reached its answer after the compaction"
+    );
+}
+
+/// The person's case on the sync road: a helper's own turn compacted, and the
+/// summary never came. The wait ends at t-68694's deadline there too — the
+/// client gives the request up, the local summary folds the conversation, one
+/// line says what happened, and the turn goes on to its answer with the
+/// finished helper's report kept.
+///
+/// The sync road has no render channel: its line is a `[zo]` line on stderr,
+/// so the test runs the turn in a child of its own binary and reads it there.
+#[test]
+fn an_endless_summary_in_a_sync_turn_is_cut_at_its_deadline_and_the_turn_goes_on() {
+    if std::env::var_os(SYNC_TURN_CHILD_ENV).is_some() {
+        run_a_sync_turn_with_an_endless_summary();
+        return;
+    }
+    let child = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", SYNC_TURN_TEST, "--nocapture", "--test-threads=1"])
+        .env(SYNC_TURN_CHILD_ENV, "1")
+        .output()
+        .expect("the sync turn runs in a child");
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert!(
+        child.status.success(),
+        "the sync turn did not end well ({}):\n{stderr}",
+        child.status
+    );
+    let said: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("summary did not come"))
+        .collect();
+    assert_eq!(said.len(), 1, "one line says what happened:\n{stderr}");
+    let line = said[0];
+    assert!(
+        line.starts_with("[zo] Compaction: ")
+            && line.contains("not done after")
+            && line.ends_with("the local summary stands in"),
+        "the line names the deadline and what stood in: {line}"
+    );
+}
+
+/// What a turn's own request answers once it is done.
+const LONG_ANSWER: &str = "C69472 a long answer";
+
+/// Longer than a summary's deadline: a long reasoning turn's request.
+fn longer_than_the_summary_deadline() -> Duration {
+    runtime::COMPACTION_SUMMARY_DEADLINE + Duration::from_secs(60)
+}
+
+fn a_long_answer() -> Vec<AssistantEvent> {
+    vec![
+        AssistantEvent::TextDelta(LONG_ANSWER.to_string()),
+        AssistantEvent::Usage(usage(2_000, 0)),
+        AssistantEvent::MessageStop,
+    ]
+}
+
+fn ends_with_the_long_answer(messages: &[ConversationMessage]) -> bool {
+    messages.last().is_some_and(|message| {
+        message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text.contains(LONG_ANSWER))
+        })
+    })
+}
+
+/// A sync client whose turn request takes longer than a summary's deadline
+/// on a paused clock, and then answers. Every deadline it is given is kept.
+struct SlowTurnSyncApi {
+    clock: tokio::runtime::Runtime,
+    deadlines: Arc<std::sync::Mutex<Vec<Duration>>>,
+    /// How long the turn's request took, on the paused clock.
+    took: Arc<std::sync::Mutex<Option<Duration>>>,
+}
+
+impl ApiClient for SlowTurnSyncApi {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        let took = self.clock.block_on(async {
+            let asked = tokio::time::Instant::now();
+            tokio::time::sleep(longer_than_the_summary_deadline()).await;
+            asked.elapsed()
+        });
+        *self.took.lock().expect("mutex") = Some(took);
+        Ok(a_long_answer())
+    }
+
+    fn stream_within(
+        &mut self,
+        request: ApiRequest,
+        deadline: Duration,
+    ) -> Result<Option<Vec<AssistantEvent>>, RuntimeError> {
+        self.deadlines.lock().expect("mutex").push(deadline);
+        self.stream(request).map(Some)
+    }
+}
+
+/// t-69472: the deadline is the summary's alone. A sync turn's own request —
+/// a long reasoning turn's, here longer than the summary's deadline — is
+/// given none, and its answer is the turn's whenever it comes.
+#[test]
+fn a_sync_turn_request_longer_than_the_summary_deadline_is_not_cut() {
+    let deadlines = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let took = Arc::new(std::sync::Mutex::new(None));
+    let mut conversation = ConversationRuntime::new(
+        earlier_conversation(),
+        SlowTurnSyncApi {
+            clock: tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .start_paused(true)
+                .build()
+                .expect("a runtime on a paused clock"),
+            deadlines: Arc::clone(&deadlines),
+            took: Arc::clone(&took),
+        },
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    conversation
+        .run_turn("C69472 think it through", None)
+        .expect("the long turn ends with its answer");
+
+    assert!(
+        deadlines.lock().expect("mutex").is_empty(),
+        "a turn's own request was given a deadline: {:?}",
+        deadlines.lock().expect("mutex")
+    );
+    let took = took.lock().expect("mutex").expect("the turn asked");
+    assert!(took > runtime::COMPACTION_SUMMARY_DEADLINE, "the request took {took:?}");
+    assert!(
+        ends_with_the_long_answer(&conversation.session().messages),
+        "the answer that came after the summary's deadline is the turn's"
+    );
+}
+
+/// An async client whose turn request takes longer than a summary's deadline
+/// on the test's paused clock, and then answers.
+struct SlowTurnAsyncApi {
+    requests: AtomicUsize,
+}
+impl AsyncApiClient for SlowTurnAsyncApi {
+    fn stream_async<'a>(
+        &'a self,
+        _request: ApiRequest,
+        _render_tx: mpsc::Sender<RenderBlock>,
+        _text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(longer_than_the_summary_deadline()).await;
+            Ok(a_long_answer())
+        })
+    }
+}
+
+/// t-69472: the same on the async road — t-68694's deadline holds the
+/// summary's wait only, and a turn's request longer than it is neither cut
+/// nor asked again.
+#[tokio::test(start_paused = true)]
+async fn a_streaming_turn_request_longer_than_the_summary_deadline_is_not_cut() {
+    let api = Arc::new(SlowTurnAsyncApi {
+        requests: AtomicUsize::new(0),
+    });
+    let mut conversation = turn_runtime(api.clone() as Arc<dyn AsyncApiClient>);
+    let (tx, rx) = mpsc::channel::<RenderBlock>(256);
+    let collected = tokio::spawn(drain(rx));
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowPrompter);
+    let asked = tokio::time::Instant::now();
+    tokio::time::timeout(AN_HOUR, conversation.run_turn_streaming("C69472 think it through", tx, prompter))
+        .await
+        .expect("the long turn was still going an hour later")
+        .expect("the long turn ends with its answer");
+    let _ = collected.await;
+
+    assert!(
+        asked.elapsed() > runtime::COMPACTION_SUMMARY_DEADLINE,
+        "the turn took {:?}",
+        asked.elapsed()
+    );
+    assert_eq!(api.requests.load(Ordering::SeqCst), 1, "the long request is asked once");
+    assert!(
+        ends_with_the_long_answer(&conversation.session().messages),
+        "the answer that came after the summary's deadline is the turn's"
+    );
+}
+
+// ── t-69472: a summary that fails for another reason says so too ──────────
+
+/// What the provider said when it refused the summary request: its own
+/// words, which no line the person reads may carry.
+const PROVIDER_SAID: &str = "prompt is too long: 1200000 tokens > 1000000 maximum";
+
+/// A turn's request answers at once with the context near full. A summary
+/// request is refused the way a provider refuses a conversation too long for
+/// it, in the provider's own words.
+struct RefusedSummaryApi;
+impl AsyncApiClient for RefusedSummaryApi {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        _render_tx: mpsc::Sender<RenderBlock>,
+        _text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            if is_summary_request(&request) {
+                return Err(RuntimeError::with_provider_error_class(
+                    PROVIDER_SAID,
+                    runtime::ProviderErrorClass::ContextOverflow,
+                ));
+            }
+            Ok(vec![
+                AssistantEvent::TextDelta("done".to_string()),
+                AssistantEvent::Usage(usage(1_000, 119_000)),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+/// t-69472: a summary that fails inside a turn for another reason than its
+/// deadline — here the provider refuses the request — still lets the local
+/// summary fold the conversation, and the turn says so in one line of its
+/// own: the kind of failure only, never the provider's words, and not the
+/// deadline's line.
+#[tokio::test]
+async fn an_in_turn_summary_that_fails_says_its_kind_in_one_line() {
+    let mut conversation = turn_runtime(Arc::new(RefusedSummaryApi) as Arc<dyn AsyncApiClient>);
+    let (tx, rx) = mpsc::channel::<RenderBlock>(256);
+    let collected = tokio::spawn(drain(rx));
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(AllowPrompter);
+    let summary = conversation
+        .run_turn_streaming("C69472 survey", tx, prompter)
+        .await
+        .expect("the turn ends without an error");
+    let blocks = collected.await.expect("the channel drains");
+    assert!(
+        summary.auto_compaction.is_some(),
+        "the local summary folds the conversation"
+    );
+
+    let rows = system_rows(&blocks);
+    let said: Vec<&(SystemLevel, &str)> = rows
+        .iter()
+        .filter(|(_, text)| text.contains("the local summary stands in"))
+        .collect();
+    assert_eq!(said.len(), 1, "one line says the local summary stood in: {rows:?}");
+    let (level, line) = said[0];
+    assert_eq!(*level, SystemLevel::Warn, "{line}");
+    assert_eq!(
+        *line,
+        "Compaction: the model's summary could not be used (the conversation is too long for the summary request); the local summary stands in",
+        "the line names the kind of failure, apart from the deadline's line"
+    );
+    assert!(!line.contains(PROVIDER_SAID), "the provider's words stay out of the line: {line}");
+}

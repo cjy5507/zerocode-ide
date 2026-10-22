@@ -1392,6 +1392,7 @@ fn a_running_agent_keeps_only_the_latest_bounded_progress_rows() {
             request: None,
             prompt: String::new(),
             progress: (0..20).map(|index| format!("progress {index}")).collect(),
+            reports: Vec::new(),
         },
     ));
 

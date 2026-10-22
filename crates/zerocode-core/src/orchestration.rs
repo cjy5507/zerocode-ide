@@ -47,6 +47,7 @@ pub mod landing_watch;
 mod progress;
 pub mod project_scope;
 mod session_history;
+pub mod settle;
 pub mod task_cost;
 
 pub use progress::{WorkProgress, WorkStage};
@@ -813,6 +814,18 @@ pub enum ResultAuthor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verified_ms: Option<i64>,
     },
+    /// The person, through the window's own door ([`settle`], t-71220). The
+    /// one record this road writes is 검토 생략(사람): a decision that
+    /// finished work will take no review, never a review itself
+    /// ([`ReviewFacts::waived`]). Bound to the newest attempt and what it
+    /// handed in when it was written, as a coordinator's review is, so a
+    /// later hand-in is not waived by it ([`Run::review_of`]).
+    Person {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
     /// The ledger's own note — a stop, an abandon, a death it witnessed.
     Ledger,
 }
@@ -824,6 +837,7 @@ impl ResultAuthor {
         match self {
             Self::Worker { .. } => ReviewAuthor::Worker,
             Self::Coordinator { .. } => ReviewAuthor::Coordinator,
+            Self::Person { .. } => ReviewAuthor::Person,
             Self::Ledger => ReviewAuthor::Ledger,
         }
     }
@@ -835,6 +849,8 @@ impl ResultAuthor {
 pub enum ReviewAuthor {
     Coordinator,
     Worker,
+    /// The person's own door — a waiver, never a review ([`ResultAuthor::Person`]).
+    Person,
     Ledger,
     /// A row written before authorship was recorded.
     #[default]
@@ -935,6 +951,13 @@ pub struct ReviewFacts {
     /// window sent, which reads as `false`.
     #[serde(default)]
     pub unreviewable: bool,
+    /// The person waived the review of this work through the window's own
+    /// door: 검토 생략(사람) ([`settle::waive_record`], t-71220). Not a
+    /// review — none of the keys above is ever read from the person's
+    /// record — and, like a review, withheld once the attempt or the source
+    /// it was written against has moved ([`Run::review_of`]).
+    #[serde(default)]
+    pub waived: bool,
 }
 
 impl ReviewFacts {
@@ -960,6 +983,15 @@ impl ReviewFacts {
                 source: source.clone(),
                 verified_ms: verified_ms.filter(|_| read.verified),
                 ..read
+            },
+            // The person's door writes one thing, and it is no review: the
+            // keys a coordinator writes are not read from it at all.
+            Some(ResultAuthor::Person { attempt, source }) => Self {
+                author: ReviewAuthor::Person,
+                attempt: attempt.clone(),
+                source: source.clone(),
+                waived: settle::waived_in(result),
+                ..Self::default()
             },
             other => Self {
                 claimed_verified: read.verified,
@@ -3633,7 +3665,12 @@ impl Run {
             unreviewable: task.status == TaskStatus::Completed && self.handed_nothing_in(task),
             ..ReviewFacts::written_by(&task.result, task.result_author.as_ref())
         };
-        if facts.author != ReviewAuthor::Coordinator {
+        // A coordinator's review and the person's waiver are each bound to
+        // what they were written against; nothing else names an attempt.
+        if !matches!(
+            facts.author,
+            ReviewAuthor::Coordinator | ReviewAuthor::Person
+        ) {
             return facts;
         }
         let newest = self.newest_attempt(&task.id);
@@ -3661,6 +3698,7 @@ impl Run {
             nothing_to_land: false,
             verified_ms: None,
             written: false,
+            waived: false,
             superseded_by: attempt_moved
                 .then(|| newest_id.map(str::to_string))
                 .flatten(),
@@ -24352,8 +24390,11 @@ fn closure_asked(words: &Words, status: Option<TaskStatus>) -> Result<Option<Clo
     Ok(Some(closure))
 }
 
-/// When a task was last touched: written, or an attempt on it began or ended.
-fn last_touched_ms(run: &Run, task: &Task) -> i64 {
+/// When a task was last touched: written, or an attempt on it began or ended —
+/// the moment the settle passes measure quiet from, and the age a pile of
+/// left-behind work says ([`settle::left_behind`]).
+#[must_use]
+pub fn last_touched_ms(run: &Run, task: &Task) -> i64 {
     run.dispatches
         .iter()
         .filter(|held| held.task == task.id)

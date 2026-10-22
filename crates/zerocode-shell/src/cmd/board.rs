@@ -417,6 +417,30 @@ pub(crate) async fn desk_review_pass(
     .map_err(|error| error.to_string())?
 }
 
+/// 「정리」, 「검토 생략」 and 「되돌리기」 on the piles of work nobody is coming back to,
+/// on the board and in the artifact tab's flow (t-71220, `press_settle`): the main window only,
+/// after the renderer's own confirm. The press is the person's — no seat is asked for, because
+/// the runs it clears are the ones nobody sits in — and the ledger acts only on the tasks it
+/// still reads the way the window drew them, answering the rest as kept.
+#[tauri::command]
+pub(crate) async fn board_settle(
+    webview: tauri::Webview,
+    press: zerocode_core::orchestration::settle::SettlePress,
+    tasks: Vec<zerocode_core::orchestration::settle::Named>,
+) -> Result<zerocode_core::orchestration::settle::Settled, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_settle(
+            press,
+            tasks,
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// 「지금 다시 시도」 on a quota-wall chip (t-39771): type one continuation at a
 /// worker standing at its wall, through the ledger's resume road
 /// (`wall_press::retry`). The main window only, and only after the renderer's
@@ -995,21 +1019,27 @@ pub(crate) fn set_watched_terms(
 /// typing`) fit with room.
 const STAGE_ROAD_MAX: usize = 80;
 
-/// One black-box line for one declaration: `watch <label>: [terms]`, sorted,
-/// and ` by <road>` when the window said why the stage moved (t-69526). The
-/// road is the window's word for the move — a person's gesture, a backend
-/// event, a restore — kept to the letters such a word is spelled in and
-/// bounded, so the line cannot be made to carry anything else.
-pub(crate) fn watch_line(label: &str, terms: &[TermId], road: Option<&str>) -> String {
-    let mut said: Vec<TermId> = terms.to_vec();
-    said.sort_unstable();
-    let road: String = road
+/// The window's own word for what moved something — a person's gesture, a
+/// backend event, a restore (t-69526), the hand that pressed a way out of
+/// the window (t-67936) — kept to the letters such a word is spelled in and
+/// bounded, so a black-box line cannot be made to carry anything else.
+pub(crate) fn window_word(raw: Option<&str>) -> String {
+    let word: String = raw
         .unwrap_or_default()
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || " :._+-".contains(*ch))
         .take(STAGE_ROAD_MAX)
         .collect();
-    let road = road.trim();
+    word.trim().to_string()
+}
+
+/// One black-box line for one declaration: `watch <label>: [terms]`, sorted,
+/// and ` by <road>` when the window said why the stage moved (t-69526). The
+/// road is the window's word for the move ([`window_word`]).
+pub(crate) fn watch_line(label: &str, terms: &[TermId], road: Option<&str>) -> String {
+    let mut said: Vec<TermId> = terms.to_vec();
+    said.sort_unstable();
+    let road = window_word(road);
     if road.is_empty() {
         format!("watch {label}: {said:?}")
     } else {

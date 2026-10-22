@@ -232,6 +232,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "app_font_family": "Geist",
   "status_bar_items": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
   "status_bar_items_seen": ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
+  "status_bar_items_off": [],
   "usage_percentage_display": "used",
   "status_bar_usage_mode": "verbose",
   "usage_analytics_off": [],
@@ -1163,11 +1164,20 @@ class StatefulBackend {
       case "set_status_bar_item": {
         const available = ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"];
         if (!available.includes(args.item)) throw new Error(`unknown status-bar item: ${args.item}`);
+        // The person's own switch, as Rust's `switch_status_bar_item` keeps it:
+        // on goes into the list and out of the off record, off the other way.
         const enabled = new Set(this.settings.status_bar_items);
-        if (args.enabled === true) enabled.add(args.item);
-        else enabled.delete(args.item);
+        const off = new Set(this.settings.status_bar_items_off ?? []);
+        if (args.enabled === true) {
+          enabled.add(args.item);
+          off.delete(args.item);
+        } else {
+          enabled.delete(args.item);
+          off.add(args.item);
+        }
         this.settings.status_bar_items = available.filter((item) => enabled.has(item));
-        keys = ["status_bar_items"];
+        this.settings.status_bar_items_off = [...off].sort();
+        keys = ["status_bar_items", "status_bar_items_off"];
         break;
       }
       case "set_usage_percentage_display":
@@ -1993,6 +2003,9 @@ class StatefulBackend {
       // gauge's period (t-3005). This fixture's machine has no lane: two
       // nulls and no notice, which is what a fresh install answers.
       case "release_status": return { status: null, installed: null, notice: null };
+      // What a restart left for the window it started (t-67936): this
+      // fixture's window was started fresh, so nothing.
+      case "boot_after_restart": return null;
       // The update feed (t-3191): this fixture's build stands idle — the
       // backend judges the knock and this machine has nothing published.
       case "update_check":
@@ -4830,7 +4843,7 @@ await test("the provider accounts pane carries a Google card whose login the win
   const consentOpened = await backend.waitForCall("A", "open_url", signingIn);
   await backend.waitForCall("A", "google_login_finish", signingIn);
   // The forced Antigravity re-read is what keeps the status bar from standing
-  // under a fresh login saying 「Antigravity 로그인 필요」.
+  // under a fresh login saying 「Google 로그인 필요」.
   await backend.waitForCall("A", "antigravity_usage", signingIn);
   await renderSettled(pageA);
   assertEqual(
@@ -11990,11 +12003,12 @@ await test("stale windows preserve disjoint status-bar item patches", async () =
     "canonical status visibility did not survive a settings reopen",
   );
 
-  // Back to the fresh-install document the suite booted with — six items,
-  // the serialized Rust default.
+  // Back to the fresh-install document the suite booted with — every item,
+  // the serialized Rust default, and no switch of the person's on record.
   await backend.externalPatch({
-    status_bar_items: ["claude", "codex", "antigravity", "kimi", "grok", "opencode-go", "resource-usage", "ports"],
-  }, ["status_bar_items"]);
+    status_bar_items: RUST_DEFAULT_DOCUMENT.status_bar_items,
+    status_bar_items_off: RUST_DEFAULT_DOCUMENT.status_bar_items_off,
+  }, ["status_bar_items", "status_bar_items_off"]);
 });
 
 await test("a stored status-bar id the catalog no longer offers is skipped, never painted", async () => {
@@ -12033,6 +12047,66 @@ await test("a stored status-bar id the catalog no longer offers is skipped, neve
         status_bar_items_seen: RUST_DEFAULT_DOCUMENT.status_bar_items_seen,
       },
       ["status_bar_items", "status_bar_items_seen"],
+    );
+  }
+});
+
+/* t-70039: the Antigravity switch and the bar stand together. The person said
+ * twice that the gauge was gone (10-21, 10-22): their document had it off, and
+ * ticking it back showed nothing until the window's next look — the gauge was
+ * asked only on focus, on an agent's turn, or every fifteen minutes. Off is
+ * one item patch the backend keeps as the person's own record
+ * (`status_bar_items_off`); on asks the gauge at once. The window's focus
+ * listener stands down for the measure, so only the switch can ask. */
+await test("a status-bar gauge switched on is asked at once, and switched off is the person's record", async () => {
+  await pageA.evaluate(() => window.removeEventListener("focus", noteWindowFocused));
+  try {
+    await backend.externalPatch(
+      {
+        status_bar_items: RUST_DEFAULT_DOCUMENT.status_bar_items,
+        status_bar_items_off: RUST_DEFAULT_DOCUMENT.status_bar_items_off,
+      },
+      ["status_bar_items", "status_bar_items_off"],
+    );
+    await openSettings(pageA, "appearance");
+    assert(
+      await pageA.isChecked("#status-bar-antigravity"),
+      "the Antigravity switch does not stand as the document has it",
+    );
+
+    let from = backend.calls.length;
+    await pageA.uncheck("#status-bar-antigravity");
+    const off = await backend.waitForCall("A", "set_status_bar_item", from);
+    assertEqual(off.args, { item: "antigravity", enabled: false }, "Antigravity off sent sibling state");
+    assertEqual(
+      backend.settings.status_bar_items_off,
+      ["antigravity"],
+      "the switch off is not kept as the person's own record",
+    );
+    assertEqual(
+      await pageA.evaluate(() => document.getElementById("sb-antigravity").hidden),
+      true,
+      "the bar kept a gauge its switch turned off",
+    );
+
+    from = backend.calls.length;
+    await pageA.check("#status-bar-antigravity");
+    await backend.waitForCall("A", "antigravity_usage", from);
+    const on = await backend.waitForCall("A", "set_status_bar_item", from);
+    assertEqual(on.args, { item: "antigravity", enabled: true }, "Antigravity on sent sibling state");
+    assertEqual(
+      backend.settings.status_bar_items_off,
+      [],
+      "switching the gauge back on left it on the person's off record",
+    );
+  } finally {
+    await pageA.evaluate(() => window.addEventListener("focus", noteWindowFocused));
+    await backend.externalPatch(
+      {
+        status_bar_items: RUST_DEFAULT_DOCUMENT.status_bar_items,
+        status_bar_items_off: RUST_DEFAULT_DOCUMENT.status_bar_items_off,
+      },
+      ["status_bar_items", "status_bar_items_off"],
     );
   }
 });

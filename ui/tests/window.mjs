@@ -31,7 +31,7 @@ import { testKnowledgeLive } from "./knowledge-live.mjs";
 import { testArtifactBand, testArtifactBeside, testArtifactFollowed, testArtifactOtherProject, testArtifactCatalog, testArtifactChrome, testArtifactFirstScreen, testArtifactNewMenu, testArtifactPages, testArtifactProvenance, testArtifactRecall, testArtifactStudio, testArtifactStudioLayout, testArtifactStudioOwnership, testArtifactWordFacedCards } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
-import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
+import { testUsageGoogleLogin, testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
 import { testTerminalDoor } from "./terminal-door.mjs";
 import { testWaitingList } from "./waiting-list.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
@@ -118,6 +118,7 @@ import { testSidebarReviewState } from "./sidebar-review-state.mjs";
 import { testSidebarLandingState } from "./sidebar-landing-state.mjs";
 import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
+import { testCloseGuard, testRestartNotice } from "./close-guard.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testSidebarTeam } from "./sidebar-team.mjs";
 import { testSidebarTeamSettled } from "./sidebar-team-settled.mjs";
@@ -264,6 +265,9 @@ suite("usage-refresh", async ({ browser, origin, ok }) => {
   await testUsageRefresh(browser, origin, standBackend, ok);
   await testUsageWords(browser, origin, standBackend, ok);
 });
+/* The Antigravity switch and the bar stand together, and with no Google login
+ * the bar names the missing login (t-70039). */
+suite("usage-google-login", ({ browser, origin, ok }) => testUsageGoogleLogin(browser, origin, standBackend, ok));
 suite("terminal-door", ({ browser, origin, ok }) => testTerminalDoor(browser, origin, standBackend, ok));
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("waiting-list", ({ browser, origin, ok }) => testWaitingList(browser, origin, standBackend, ok));
@@ -380,6 +384,9 @@ suite("sidebar-landing-state", testSidebarLandingState);
 suite("sidebar-activity", testSidebarActivity);
 // Who is the coordinator, a worker or the person, read off the sidebar, the tabs and the desk (t-45938).
 suite("sidebar-roles", testSidebarRoles);
+// A tab holding a coordinator's or a worker's seat asks before it closes, and a restart stands its notice first (t-67936).
+suite("close-guard", testCloseGuard);
+suite("restart-notice", testRestartNotice);
 // One task, one sidebar row: the checkouts a worker cut beside its own fold under it (t-45336).
 suite("sidebar-task-fold", testSidebarTaskFold);
 // The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
@@ -54166,7 +54173,8 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   ];
   try {
     for (const note of document.querySelectorAll(".toast")) note.remove();
-    const before = window.__COUNTS__.relaunch_window ?? 0;
+    // A door goes by the way out's `leave_now`, whose restart stands its notice first (t-67936).
+    const before = window.__COUNTS__.leave_now ?? 0;
     // ① The version moved: one toast, however many times the clock asks —
     // the version sentence, the sha dim after it, the one button.
     window.__ANSWER__.release_status = () => answer(drift, null);
@@ -54183,7 +54191,7 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
     seen.actionWord = t("update.restart", "다시 시작");
     toasts[0]?.querySelector(".toast-action")?.click();
     await tick();
-    seen.restartedByToast = (window.__COUNTS__.relaunch_window ?? 0) - before;
+    seen.restartedByToast = (window.__COUNTS__.leave_now ?? 0) - before;
     // ② The settings notice says the same sentence, the sha dim beside it,
     // the running line under it (t-3191's one key), and the same road.
     showSettingsPane("general");
@@ -54199,7 +54207,7 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
     document.getElementById("update-relaunch").click();
     await tick();
     seen.restartedBySettings =
-      (window.__COUNTS__.relaunch_window ?? 0) - before - seen.restartedByToast;
+      (window.__COUNTS__.leave_now ?? 0) - before - seen.restartedByToast;
     // ③ The same version again: the build sentence carries the sha itself
     // and nothing dim — on the toast and on the notice.
     window.__ANSWER__.release_status = () => answer(sameVersion, null);
@@ -54470,11 +54478,13 @@ const restartAsked = await page.evaluate(async () => {
     window.__ANSWER__.leave_when_idle = (args) => { calls.push(["arm", args]); return line({ road: args.road }); };
     window.__ANSWER__.leave_now = (args) => { calls.push(["now", args]); return null; };
     window.__ANSWER__.leave_cancel = () => { calls.push(["cancel", {}]); return null; };
-    // ① Nothing a restart would cut: the door goes at once, naming itself.
+    // ① Nothing a restart would cut: the door goes unasked, naming itself — by
+    // the way out's notice, never the restart road itself (t-67936).
     window.__ANSWER__.busy_census = census(idle);
     await askBeforeRestart("update-toast");
     await tick();
-    seen.idleRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "update-toast");
+    seen.idleRestarted = calls.some(([kind, args]) => kind === "now" && args?.door === "update-toast" && args?.unasked === true);
+    seen.idleRoadless = !calls.some(([kind]) => kind === "relaunch");
     seen.idleAsked = shown();
     seen.idleCensusDoor = called("census", "restart", "update-toast");
     // ② Work in progress: the question, never the restart.
@@ -54482,7 +54492,7 @@ const restartAsked = await page.evaluate(async () => {
     const asked = askBeforeRestart("window-material");
     await tick();
     seen.busyAsked = shown();
-    seen.busyRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "window-material");
+    seen.busyRestarted = calls.some(([kind, args]) => (kind === "relaunch" || kind === "now") && args?.door === "window-material");
     seen.title = document.getElementById("ask-title").textContent
       === t("exit.restartTitle", "다시 시작하면 도는 일이 끊깁니다");
     const body = document.getElementById("ask-body").textContent;
@@ -54539,7 +54549,7 @@ const restartAsked = await page.evaluate(async () => {
     document.getElementById("ask-cancel").click();
     await unread;
     await tick();
-    seen.unreadRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "update-install");
+    seen.unreadRestarted = calls.some(([kind, args]) => (kind === "relaunch" || kind === "now") && args?.door === "update-install");
     // ⑦ Five catalogs.
     const KEYS = [
       "exit.restartTitle", "exit.restartNote", "exit.whenIdleRestart", "exit.nowRestart", "exit.unread",
@@ -54565,10 +54575,11 @@ const restartAsked = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "every restart door asks the one census first (t-6428): nothing busy restarts at once by that door; work in progress asks with the census's words and the backend's patience, 「끝나면 다시 시작」 arms the backend's wait and stands one line that follows the beat and cancels, 「지금 다시 시작」 goes now, a wait run out asks again saying so, an unread census is asked about as busy — in five catalogs",
+  "every restart door asks the one census first (t-6428): nothing busy goes unasked by that door's notice, never the restart road itself (t-67936); work in progress asks with the census's words and the backend's patience, 「끝나면 다시 시작」 arms the backend's wait and stands one line that follows the beat and cancels, 「지금 다시 시작」 goes now, a wait run out asks again saying so, an unread census is asked about as busy — in five catalogs",
   !restartAsked.error &&
     !restartAsked.cleanupError &&
     restartAsked.idleRestarted &&
+    restartAsked.idleRoadless &&
     !restartAsked.idleAsked &&
     restartAsked.idleCensusDoor &&
     restartAsked.busyAsked &&
@@ -54748,7 +54759,8 @@ const updatePane = await page.evaluate(async () => {
   const section = document.querySelector('.settings-pane[data-pane="update"]');
   const wore = locale;
   const pane = settingsPane;
-  const before = window.__COUNTS__.relaunch_window ?? 0;
+  // A door goes by the way out's `leave_now`, whose restart stands its notice first (t-67936).
+  const before = window.__COUNTS__.leave_now ?? 0;
   const knocks = [];
   const patches = [];
   const KEYS = [
@@ -54857,7 +54869,7 @@ const updatePane = await page.evaluate(async () => {
     await tick();
     readyToast?.querySelector(".toast-action")?.click();
     await tick();
-    seen.restarts = (window.__COUNTS__.relaunch_window ?? 0) - before;
+    seen.restarts = (window.__COUNTS__.leave_now ?? 0) - before;
 
     // ③ The failure words, the platform word, the dev-build word.
     updateReport = null;
