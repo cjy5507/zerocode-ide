@@ -8863,6 +8863,41 @@ mod tests {
         );
     }
 
+    /// t-69472: the interactive TUI detaches an `Agent` call by default, so
+    /// its spawn cell is done at once and a running helper's row stands under
+    /// the Working line instead. A ledger worker's does too: the wave counts
+    /// it, and its row says what its parent can know of it.
+    #[test]
+    fn a_detached_ledger_workers_row_stands_under_the_working_line() {
+        let mut ui = test_ui();
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(95)));
+        let mut ledger = running_helper("agent-ledger", "survey the parser", "working", 0, 95);
+        ledger.tool_call_id = Some("toolu_ledger".to_string());
+        ledger.model = Some("claude-opus-5-5".to_string());
+        ledger.pane = Some("%9".to_string());
+        ledger.ledger = true;
+        let mut inline = running_helper("agent-inline", "read the lexer", "Read · src/lexer.rs", 3, 40);
+        inline.tool_call_id = Some("toolu_inline".to_string());
+        ui.set_subagent_progress(vec![inline, ledger]);
+
+        let details = &ui.status.as_ref().expect("working status").details;
+        assert_eq!(
+            details.first().map(String::as_str),
+            Some("agents 2 · running 2 · done 0"),
+            "the wave counts the ledger worker: {details:#?}"
+        );
+        assert!(
+            details
+                .iter()
+                .any(|row| row == "survey the parser · claude-opus-5-5 · 1m 35s · running in its own tab"),
+            "the ledger worker's row stands under the Working line: {details:#?}"
+        );
+        assert!(
+            details.iter().any(|row| row.starts_with("read the lexer · 3 tool uses · 40s")),
+            "the helper of this process keeps its row: {details:#?}"
+        );
+    }
+
     /// Everything the frame put on screen, without its colours and cursor
     /// moves — what a person reads.
     fn plain_frame(frame: &str) -> String {
