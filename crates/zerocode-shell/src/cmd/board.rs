@@ -567,8 +567,9 @@ pub(crate) async fn land_batch_cancel(
 }
 
 /// The task board's worker roster's git facts (t-6588): commits past the
-/// base and changed files for each worker checkout this window catalogues
-/// (`desk_checkout_facts`). git is a process, so the blocking pool.
+/// base, changed files and the lines since the fork (t-70264) for each worker
+/// checkout this window catalogues (`desk_checkout_facts`). git is a process,
+/// so the blocking pool.
 #[tauri::command]
 pub(crate) async fn desk_checkouts(
     state: State<'_, AppState>,

@@ -910,9 +910,28 @@ impl Orchestrator {
         worktree: impl AsRef<Path>,
         base: &str,
     ) -> Result<Option<LinesBeyond>, OrchestratorError> {
-        // Red (t-70264): the tree's lines are not read yet.
-        let _ = (worktree.as_ref(), base);
-        Ok(None)
+        let worktree = worktree.as_ref();
+        let Some(base) = self.commit_of(worktree, base)? else {
+            return Ok(None);
+        };
+        let forked = run(&self.git, worktree, ["merge-base", base.as_str(), "HEAD"])?;
+        let fork = forked.stdout.trim();
+        if !forked.ok || fork.is_empty() {
+            return Ok(None);
+        }
+        let mut args = vec![NO_OPTIONAL_LOCKS];
+        args.extend(NO_DIFF_REFRESH);
+        args.extend(["diff", "--numstat", "--find-renames", "-z", fork, "--"]);
+        let output = run(&self.git, worktree, args)?;
+        if !output.ok {
+            return Err(self.failure("diff --numstat (since the fork)", &output));
+        }
+        let (added, removed) = parse_numstat(&output.stdout)
+            .into_values()
+            .fold((0, 0), |(added, removed), (more, fewer)| {
+                (added + more, removed + fewer)
+            });
+        Ok(Some(LinesBeyond { added, removed }))
     }
 
     /// The commit one name stands for, or `None` when this repository has no
