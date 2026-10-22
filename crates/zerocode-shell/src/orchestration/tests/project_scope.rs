@@ -512,6 +512,35 @@ fn known_runs_refuse_a_pane_whose_project_is_no_longer_known() {
     crate::agent_teams::forget_term(A);
 }
 
+#[test]
+fn an_unscoped_runs_own_coordinator_can_establish_its_project() {
+    const OWNER: u32 = 712_680;
+    const OTHER: u32 = 712_681;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_690);
+    let owner = "team-project-legacy-owner";
+    let other = "team-project-legacy-other";
+    a_leader(&host, owner, OWNER, None);
+    a_leader(&host, other, OTHER, Some(&disk.a_task));
+    let run = a_run_from(&host, owner, "legacy-placement");
+    let stranger = from_leader(&host, other, &format!("run-show --run {run}"));
+    assert_eq!(
+        stranger.exit_code, 1,
+        "a stranger adopted an unidentified run"
+    );
+    host.place(OWNER, &disk.a);
+    let first = shown_project(&host, owner, &run);
+    assert_eq!(first["root"], disk.a_root());
+    assert_eq!(
+        first["source"], "seat",
+        "a legacy project was falsely marked as newly created"
+    );
+    assert_eq!(shown_project(&host, owner, &run)["source"], "confirmed");
+    crate::agent_teams::forget_term(OWNER);
+    crate::agent_teams::forget_term(OTHER);
+}
+
 /// The case the person saw: a pane of project B holds the seat of a run that
 /// project A made, and mail for the run's coordinator lands. Before t-65286
 /// the pointer was typed into B's pane, where another project's agent read

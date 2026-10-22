@@ -199,7 +199,7 @@ pub(super) fn verb_gate(
                 .note_run_project(
                     run_id,
                     caller,
-                    ProjectSource::Created,
+                    ProjectSource::Seat,
                     Some(seat.clone()),
                     now_ms,
                 )
