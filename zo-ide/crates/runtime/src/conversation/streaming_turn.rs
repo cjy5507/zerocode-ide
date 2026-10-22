@@ -24,7 +24,7 @@ use super::{
     merge_hook_feedback,
     normalize_empty_assistant_stream,
     parallel_waves, pre_hook_denial_outcome, ConcurrentResultDispatchFn,
-    overload_demotion_warn, quota_fallback_swap_warn, quota_wait_hold_warn,
+    demotion_warn, quota_fallback_swap_warn, quota_wait_hold_warn,
     refusal_surfaced_message, surfaced_refusal_notice,
     sleep_tool_cut_short, sleep_tool_execution_input,
     agent_notification_text, steering_message, tool_execution_input,
@@ -1726,7 +1726,7 @@ where
                                         .send(RenderBlock::System {
                                             id: id_gen.next(),
                                             level: SystemLevel::Warn,
-                                            text: overload_demotion_warn(&shed, &model),
+                                            text: demotion_warn(&error, &shed, &model),
                                         })
                                         .await;
                                     continue 'outer;
@@ -1866,7 +1866,7 @@ where
                                         .send(RenderBlock::System {
                                             id: id_gen.next(),
                                             level: SystemLevel::Warn,
-                                            text: overload_demotion_warn(&shed, &model),
+                                            text: demotion_warn(&error, &shed, &model),
                                         })
                                         .await;
                                     continue 'outer;
