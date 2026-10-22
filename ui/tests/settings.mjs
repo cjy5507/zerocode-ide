@@ -3137,7 +3137,7 @@ class StatefulBackend {
         if (args.expectedProviderIdentity && args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (this.typesafeSetFailure) throw { kind: "failed", message: "fixture refused the model" };
         const provider = clone(args.provider);
-        if (!provider.model?.trim() || provider.protocol !== "system_one") {
+        if (!provider.model?.trim() || !["system_one", "openai_json"].includes(provider.protocol)) {
           throw { kind: "failed", message: "invalid decision provider" };
         }
         const endpoint = new URL(provider.baseUrl);
@@ -3158,7 +3158,10 @@ class StatefulBackend {
         this.zoSettings.smart = smart;
         return this.typesafeSettings();
       }
-      case "judgment_models": return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
+      case "judgment_models": {
+        if (this.judgmentModelsError) throw this.judgmentModelsError;
+        return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
+      }
       case "preflight_judgment_provider": {
         if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (args.provider.kind === "jev" && !jevModelPin(args.provider.model)) throw "provider_model";
@@ -7758,6 +7761,59 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
     backend.managedModelState = previousManaged;
   }
   return "real Enter · 5 locales × 2 themes · supported 720×480 minimum and wider viewports · model actions grouped";
+});
+
+await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 검증해 적용한다", async () => {
+  await openJudgmentSettings(pageA);
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "remote");
+    assertEqual(await pageA.locator("#judgment-protocol").count(), 1, "a custom server has no protocol choice");
+    await pageA.selectOption("#judgment-protocol", "openai_json");
+    await pageA.fill("#judgment-endpoint", "https://decisions.example.com/v1");
+    await pageA.fill("#typesafe-model-input", "");
+    await pageA.fill("#typesafe-key-input", "decision-fixture-key");
+    const began = backend.calls.length;
+    await pageA.click("#judgment-refresh-models");
+    await backend.waitForCall("A", "judgment_models", began);
+    await pageA.waitForFunction(() => !judgmentProviderController.loading);
+    const calls = backend.calls.slice(began).filter((call) => ["save_typesafe_key", "judgment_models"].includes(call.command));
+    assertEqual(calls.map((call) => call.command), ["save_typesafe_key", "judgment_models"], "discovery did not use the entered key");
+    assertEqual(calls[0].args.provider.protocol, "openai_json");
+    assertEqual(await pageA.inputValue("#typesafe-key-input"), "", "the saved key remained in the form");
+    assertEqual(backend.typesafeSettings().provider.kind, "jev", "discovery applied the candidate before its answer was checked");
+    await pageA.selectOption("#judgment-listed-model", "fixture-decision-b");
+    const applyAt = backend.calls.length;
+    await pageA.click("#judgment-save-provider");
+    await backend.waitForCall("A", "set_judgment_provider", applyAt);
+    assertEqual(backend.typesafeSettings().provider.model, "fixture-decision-b");
+    assertEqual(backend.typesafeSettings().provider.protocol, "openai_json");
+  } finally {
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "entered key → model discovery → selected model → checked apply";
+});
+
+await test("판단 서버 주소 오류는 고칠 방법을 말하고 현재 모델은 유지한다", async () => {
+  await openJudgmentSettings(pageA);
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const identity = backend.typesafeSettings().providerIdentity;
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "remote");
+    await pageA.fill("#judgment-endpoint", "http://gateway.example.com/v1");
+    backend.judgmentModelsError = "provider_https_required";
+    await pageA.click("#judgment-refresh-models");
+    await pageA.waitForFunction(() => !judgmentProviderController.loading);
+    const status = await pageA.locator("#judgment-model-status").textContent();
+    assert(status.includes("HTTPS") && !status.includes("provider_https_required"), "the address refusal is still an unexplained token", status);
+    assertEqual(backend.typesafeSettings().providerIdentity, identity, "failed discovery changed the current provider");
+  } finally {
+    delete backend.judgmentModelsError;
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "actionable address failure · current selection unchanged";
 });
 
 await test("다른 서버의 키를 모델 선택 전에 저장하고 늦은 목록은 새 선택을 덮지 않는다", async () => {
