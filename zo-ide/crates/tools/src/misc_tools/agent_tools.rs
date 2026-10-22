@@ -963,7 +963,7 @@ pub(crate) fn execute_agent_with_parent_model_and_hooks(
     }
     if input.launch.agent.as_deref().is_some_and(|agent| agent != "zo")
         || input.launch.effort.is_some() || input.launch.worktree.is_some() {
-        return Err(ToolError::Execution("the requested agent/effort/worktree requires a ZeroCode ledger grant and zerocode-orc on PATH".into()));
+        return Err(ledger::unavailable_launch());
     }
     match spawn_mode_for(runtime::subagent_panes::mode(), input.subagent_type.as_deref()) {
         runtime::subagent_panes::SubagentMode::Panes => {
