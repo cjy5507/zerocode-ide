@@ -388,7 +388,7 @@ fn fetch_quota(
 fn signed_out(now: i64) -> ProviderUsage {
     answer(
         "signed_out",
-        Some("Antigravity 로그인 필요 — 설정 > AI 제공자 계정".to_string()),
+        Some("Google 로그인 필요 — 설정 > AI 제공자 계정".to_string()),
         now,
     )
 }

@@ -204,12 +204,13 @@ pub(super) const STATUS_BAR_ITEMS: &[&str] = &[
 /// writing as often as the person's choice: it is read as neither, and its
 /// login decides it, once ([`record_status_bar_switches`], t-70039).
 const WITHDRAWN_THEN_RESTORED: &[&str] = &["antigravity"];
+/// Whether one login is on this machine, asked of the module that owns it.
+type LoginOnFile = fn() -> bool;
 /// The login a status-bar item reads, where this window can see it without a
 /// keychain or a process — what decides a withdrawn-then-restored name
 /// ([`record_status_bar_switches`]). Each row asks the module that owns that
 /// login; an item with no row reads no login of its own here.
-const STATUS_BAR_LOGINS: &[(&str, fn() -> bool)] =
-    &[("antigravity", google_login::on_this_machine)];
+const STATUS_BAR_LOGINS: &[(&str, LoginOnFile)] = &[("antigravity", google_login::on_this_machine)];
 pub(super) const DEFAULT_APP_FONT_FAMILY: &str = "Geist";
 
 pub(super) fn default_status_bar_items() -> Vec<String> {
@@ -253,10 +254,13 @@ fn holds_item(list: &[String], item: &str) -> bool {
 /// What the person switched off is also its own record (`switched_off`),
 /// because an absence cannot say who made it: a gauge withdrawn and restored
 /// comes back as a name never offered, and only that record keeps it off for
-/// the person who had switched it off. A document from before the record
-/// keeps its old reading here — a withdrawn-then-restored name it does not
-/// list is not offered again, since that absence may be a choice — until a
-/// load reads the record off it ([`record_status_bar_switches`]).
+/// the person who had switched it off. A name on the list is on whatever the
+/// record says, and the record lets it go: only a build that keeps no record
+/// puts a switched-off name back on the list, and that switch is the later
+/// one. A document from before the record keeps its old reading here — a
+/// withdrawn-then-restored name it does not list is not offered again, since
+/// that absence may be a choice — until a load reads the record off it
+/// ([`record_status_bar_switches`]).
 ///
 /// The first run under this code has an empty `seen`, so every catalog item
 /// counts as new and comes on once. That is deliberate and the cost is
@@ -269,17 +273,17 @@ pub(super) fn adopt_unseen_status_bar_items(
     seen: &mut Vec<String>,
     switched_off: &mut Option<Vec<String>>,
 ) {
-    // t-70039 red: the record is not read; the old reading stands.
-    let _ = switched_off;
-    for name in STATUS_BAR_ITEMS {
-        if seen.iter().any(|held| held == name) {
-            continue;
-        }
-        if !seen.is_empty() && WITHDRAWN_THEN_RESTORED.contains(name) {
-            continue;
-        }
-        if !items.iter().any(|held| held == name) {
-            items.push((*name).to_string());
+    let unrecorded = switched_off.is_none() && !seen.is_empty();
+    for &name in STATUS_BAR_ITEMS {
+        let switched = switched_off
+            .as_deref()
+            .is_some_and(|off| holds_item(off, name));
+        // An older document's withdrawn-then-restored name counts as offered:
+        // its absence may be a choice.
+        let offered =
+            holds_item(seen, name) || (unrecorded && WITHDRAWN_THEN_RESTORED.contains(&name));
+        if !(holds_item(items, name) || switched || offered) {
+            items.push(name.to_string());
         }
     }
     *items = normalize_status_bar_items(std::mem::take(items));
@@ -287,6 +291,11 @@ pub(super) fn adopt_unseen_status_bar_items(
         .iter()
         .map(|name| (*name).to_string())
         .collect();
+    if let Some(off) = switched_off {
+        off.retain(|name| !holds_item(items, name));
+        off.sort();
+        off.dedup();
+    }
 }
 
 /// Read the person's own record off a document from before it existed, once,
@@ -309,8 +318,29 @@ pub(super) fn record_status_bar_switches(
     switched_off: &mut Option<Vec<String>>,
     signed_in: &dyn Fn(&str) -> bool,
 ) {
-    // t-70039 red: nothing is recorded and no login is asked.
-    let _ = (items, seen, switched_off, signed_in);
+    if switched_off.is_some() {
+        return;
+    }
+    let mut off = Vec::new();
+    if !seen.is_empty() {
+        for &name in STATUS_BAR_ITEMS {
+            if holds_item(items, name) {
+                continue;
+            }
+            if WITHDRAWN_THEN_RESTORED.contains(&name) {
+                if signed_in(name) {
+                    items.push(name.to_string());
+                }
+                // Decided here either way, never again as a new name.
+                if !holds_item(seen, name) {
+                    seen.push(name.to_string());
+                }
+            } else if holds_item(seen, name) {
+                off.push(name.to_string());
+            }
+        }
+    }
+    *switched_off = Some(off);
 }
 
 /// [`record_status_bar_switches`]' question on this machine.
@@ -329,14 +359,13 @@ pub(super) fn switch_status_bar_item(
     item: &str,
     enabled: bool,
 ) {
-    // t-70039 red: the list alone, as before.
-    let _ = switched_off;
+    let off = switched_off.get_or_insert_with(Vec::new);
+    items.retain(|held| held != item);
+    off.retain(|held| held != item);
     if enabled {
-        if !holds_item(items, item) {
-            items.push(item.to_string());
-        }
+        items.push(item.to_string());
     } else {
-        items.retain(|held| held != item);
+        off.push(item.to_string());
     }
     *items = normalize_status_bar_items(std::mem::take(items));
 }

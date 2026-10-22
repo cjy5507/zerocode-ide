@@ -225,11 +225,16 @@ function applyAppearanceSettingsSnapshot(snapshot, first) {
       paintScm();
     }
   }
+  let itemsBefore = null;
   if (hasSetting(snapshot, "status_bar_items")) {
+    itemsBefore = statusBarItems;
     statusBarItems = normalizedStatusBarItems(snapshot.status_bar_items);
     repaintStatusBar = true;
   }
   if (repaintStatusBar) paintStatusBarPreferences();
+  // A gauge switched on in another window stands on this bar as this window's
+  // own switch would.
+  if (itemsBefore) askGaugesSwitchedOn(itemsBefore);
 }
 
 function applyEditingSettingsSnapshot(snapshot, first) {
@@ -5884,7 +5889,7 @@ async function googleLogout() {
 /* The Claude and Codex pair are `claudeLoginMoved` and `codexLoginMoved`, and
  * this is the same hand for the same reason: the bar's Antigravity figure is
  * a fact about THIS login, and without a forced re-read the segment keeps the
- * previous one's word — 「Antigravity 로그인 필요」 standing under an account
+ * previous one's word — 「Google 로그인 필요」 standing under an account
  * that just signed in — until an agent stirs or the fifteen-minute poll comes
  * round. The verbs above all wait for the backend to finish writing before
  * they answer, so by the time this runs the new login is on disk. */
