@@ -1148,6 +1148,18 @@ const USAGE_READ_FAILED_WORD = { key: "usage.readFailedOf", said: "{{provider}} 
  * 다시 해 보라고 하지 않는다 — 같은 물음은 백엔드가 되풀이하지 않는다. */
 const USAGE_UNVERIFIED_WORD = { key: "usage.unverifiedOf", said: "{{provider}} 확인 불가" };
 const USAGE_REFUSED = "refused";
+/* 「프로젝트 미설정」: Google이 이 로그인의 Antigravity 프로젝트를 알려 주지 않았고,
+ * 게이지가 읽을 수 있는 곳(zo가 같은 로그인으로 정해 둔 기록, 설정이 이름 붙인
+ * 프로젝트)에도 없다(t-72144). 이것도 답이다 — 왜인지와 무엇이 프로젝트를 만드는지는
+ * 백엔드의 문장이 호버에 든다. */
+const USAGE_NO_PROJECT_WORD = { key: "usage.noProjectOf", said: "{{provider}} 프로젝트 미설정" };
+const USAGE_NO_PROJECT = "no_project";
+/* 실패가 아니라 답인 읽기 — 상태마다 낱말 하나. 다시 해 보라고 하지 않고, 사람의
+ * 손이 필요하니 삼각형은 선다. */
+const USAGE_ANSWER_WORDS = new Map([
+  [USAGE_REFUSED, USAGE_UNVERIFIED_WORD],
+  [USAGE_NO_PROJECT, USAGE_NO_PROJECT_WORD],
+]);
 const USAGE_SIGNED_OUT_WORD = { key: "usage.signedOutOf", said: "{{provider}} 로그인 필요" };
 const USAGE_DELEGATED_REFRESH = "delegated-refresh-required";
 const USAGE_FAILURE_WORDS = {
@@ -1195,9 +1207,8 @@ function usageSegmentWord(provider, usage, state) {
     case "error":
       return {
         said: word(
-          usage.status === USAGE_REFUSED
-            ? USAGE_UNVERIFIED_WORD
-            : (USAGE_FAILURE_WORDS[usage.failure_kind] ?? USAGE_READ_FAILED_WORD),
+          USAGE_ANSWER_WORDS.get(usage.status) ??
+            USAGE_FAILURE_WORDS[usage.failure_kind] ?? USAGE_READ_FAILED_WORD,
         ),
         tip: state.says,
       };
@@ -1282,7 +1293,7 @@ function paintProviderSegment(provider) {
   // 여기서는 정말로 손이 필요하다(설정의 그 행이 「다시 로그인」을 들고 있다).
   const stale = usage && Date.now() - usage.updated_at > USAGE_STALE_MS && !fetching;
   el(`${provider.prefix}-warn`).hidden = !(
-    usage?.status === "error" || usage?.status === USAGE_REFUSED || stale || signedOut
+    usage?.status === "error" || USAGE_ANSWER_WORDS.has(usage?.status) || stale || signedOut
   );
   if (state.kind !== "usage") {
     const { said, tip } = usageSegmentWord(provider, usage, state);

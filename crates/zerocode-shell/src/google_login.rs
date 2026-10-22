@@ -14,8 +14,9 @@
 //! So this module owns BOTH halves of that one login and nothing else does:
 //! the store's path, key and shape, the OAuth client, the consent round trip,
 //! and the reading that turns what is on disk into what a card can say. The
-//! gauge asks it for the path, the credentials and a token refresh; the
-//! commands in `cmd/usage.rs` ask it for the login flow. Neither owns a copy.
+//! gauge asks it for the path, the credentials, a token refresh and the Code
+//! Assist project zo recorded for the login; the commands in `cmd/usage.rs`
+//! ask it for the login flow. Neither owns a copy.
 //!
 //! The write side follows zo's own protocol rather than inventing one
 //! (`zo-ide/crates/api/src/oauth_store.rs`): the advisory lock on
@@ -262,33 +263,93 @@ fn hold_lock(path: &Path) -> Result<std::fs::File, String> {
 }
 
 /* ---- the Code Assist project zo resolved for it ------------------------- */
+//
+// zo resolves the Code Assist project a login's requests are billed to once,
+// and keeps the answer beside the login so the next process need not ask
+// again (`oauth_store.rs`, `google_code_assist_project`). The gauge reads that
+// record when Google's own answer names no project (t-72144). Read only: zo
+// writes the record, replaces it, and clears it with the login.
+
+/// The key zo files the project record under — zo's
+/// `GOOGLE_CODE_ASSIST_PROJECT_KEY`. One record at a time: resolving for
+/// another login or configuration replaces it.
+const PROJECT_KEY: &str = "google_code_assist_project";
+
+/// The record's field naming the configured project it was resolved under —
+/// zo's `CONFIGURED_PROJECT_FIELD`. A record without it predates the field,
+/// and zo trusts none of those.
+const CONFIGURED_PROJECT_FIELD: &str = "configured_project";
 
 /// Hex digits of the refresh token's SHA-256 that name a grant — zo's
-/// `GRANT_FINGERPRINT_LEN`.
+/// `GRANT_FINGERPRINT_LEN`. Google refresh tokens do not rotate, so this
+/// names one login across processes and holds nothing a reader could use.
 const GRANT_FINGERPRINT_LEN: usize = 16;
 
-/// The name zo files a login's Code Assist project under.
+/// The variables zo reads its configured project from, in zo's order
+/// (`google_cloud_project`, `providers/gemini_code_assist.rs`).
+const CONFIGURED_PROJECT_VARIABLES: [&str; 2] = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID"];
+
+/// The name zo files a login's project under.
 pub(crate) fn grant_fingerprint(refresh_token: &str) -> String {
     crate::artifact_runtime::sha256_hex(refresh_token.as_bytes())[..GRANT_FINGERPRINT_LEN]
         .to_string()
 }
 
-/// The Code Assist project the configuration names. Red: not read yet.
+/// The Code Assist project this process's configuration names.
+///
+/// The window's own environment, which is launchd's when it was opened from
+/// the Dock: a project named only in a shell profile is not seen here, and a
+/// record zo made under it is then another configuration's.
 pub(crate) fn configured_project() -> Option<String> {
     configured_project_from(|name| std::env::var(name).ok())
 }
 
-pub(crate) fn configured_project_from(_lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
-    None
+/// The configured project as zo reads it: the first of its variables that is
+/// SET, trimmed, a blank one being none without asking the next. A bare
+/// project number zo refuses outright, so it is no project here either.
+///
+/// Read through `lookup`, so the tests never touch the process environment.
+pub(crate) fn configured_project_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    CONFIGURED_PROJECT_VARIABLES
+        .into_iter()
+        .find_map(lookup)
+        .map(|value| value.trim().to_string())
+        .filter(|project| {
+            !project.is_empty() && !project.chars().all(|glyph| glyph.is_ascii_digit())
+        })
 }
 
-/// The Code Assist project zo resolved for this login. Red: not read yet.
+/// The Code Assist project zo resolved for the login `held` while the
+/// configuration named `configured`, read the way zo reads its record before
+/// trusting it: the record is this login's (its grant) under this
+/// configuration (its configured project), and names a project. No record,
+/// another login's or another configuration's, a record of no project, a
+/// login with no refresh token to name it by, or a file that does not read —
+/// each is no project.
 pub(crate) fn remembered_project(
-    _path: &Path,
-    _held: &Credentials,
-    _configured: Option<&str>,
+    path: &Path,
+    held: &Credentials,
+    configured: Option<&str>,
 ) -> Option<String> {
-    None
+    let grant = grant_fingerprint(held.refresh_token.as_deref()?);
+    let root = read_root(path).ok()?;
+    let record = root.get(PROJECT_KEY)?;
+    if record.get("grant").and_then(serde_json::Value::as_str) != Some(grant.as_str()) {
+        return None;
+    }
+    let recorded = match record.get(CONFIGURED_PROJECT_FIELD)? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(project) => Some(project.as_str()),
+        _ => return None,
+    };
+    if recorded != configured {
+        return None;
+    }
+    record
+        .get("project")
+        .and_then(serde_json::Value::as_str)
+        .filter(|project| !project.is_empty())
+        .map(str::to_string)
 }
 
 /* ---- what a card says about it ------------------------------------------ */
@@ -974,7 +1035,7 @@ mod tests {
             configured_project_from(|name| {
                 set.iter()
                     .find(|(variable, _)| *variable == name)
-                    .map(|(_, value)| (*value).to_string())
+                    .map(|&(_, value)| value.to_string())
             })
         };
         assert_eq!(from(&[]), None);

@@ -5,6 +5,11 @@
 //! OAuth client and the refresh, and this module is the quota reader on top
 //! of it. A refreshed access token lives only for this scan — the login on
 //! disk is written by the settings card and by zo, never by a gauge.
+//!
+//! The quota is asked for the project Google's answer names, and when it
+//! names none, for the one zo resolved for the same login and keeps on file
+//! (t-72144). The gauge never makes a project: a login with none to read gets
+//! a sentence saying why and what makes one, never 「read failed — retry」.
 
 use std::path::Path;
 
@@ -123,51 +128,178 @@ fn refused_answer(now: i64) -> ProviderUsage {
     )
 }
 
-/// The Code Assist project this login's quota is billed to. The client metadata
+/// What Google says about this login's Code Assist project. The client metadata
 /// names no IDE and no platform: every field is optional in Google's public
 /// schema, and the unspecified values are the ones its own CLI sends outside an
 /// IDE. `pluginType` is left out, because it names the Gemini plugin and this
 /// client is not that plugin.
-fn load_project_id(
+fn load_code_assist(
     wire: &mut impl Wire,
     access_token: &str,
     headers: &AntigravityHeaders,
     now: i64,
-) -> Result<String, Stop> {
-    let body = wire
-        .post_json(
-            LOAD_CODE_ASSIST_URL,
-            access_token,
-            headers,
-            &serde_json::json!({
-                "metadata": {
-                    "ideType": "IDE_UNSPECIFIED",
-                    "platform": "PLATFORM_UNSPECIFIED"
-                }
-            }),
+) -> Result<serde_json::Value, Stop> {
+    wire.post_json(
+        LOAD_CODE_ASSIST_URL,
+        access_token,
+        headers,
+        &serde_json::json!({
+            "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED"
+            }
+        }),
+        now,
+    )
+    .map_err(|failure| match refusal_of(&failure, LOAD_CODE_ASSIST) {
+        Some(refusal) => Stop::Refused(refusal),
+        None => Stop::Failed(Box::new(answer(
+            "error",
+            Some(format!(
+                "Antigravity 프로젝트 ID를 읽지 못했습니다 ({})",
+                failure.message
+            )),
             now,
-        )
-        .map_err(|failure| match refusal_of(&failure, LOAD_CODE_ASSIST) {
-            Some(refusal) => Stop::Refused(refusal),
-            None => Stop::Failed(Box::new(answer(
-                "error",
-                Some(format!(
-                    "Antigravity 프로젝트 ID를 읽지 못했습니다 ({})",
-                    failure.message
-                )),
-                now,
-            ))),
-        })?;
-    body.get("cloudaicompanionProject")
-        .and_then(serde_json::Value::as_str)
+        ))),
+    })
+}
+
+/// The tier Google gives a personal login at no charge — the one zo takes for
+/// a login with no tier yet without a project of its own.
+const FREE_TIER: &str = "free-tier";
+
+/// The project Google's answer names: the id itself, or an object carrying it
+/// (`{"id": …}`). An empty id names none.
+fn answered_project(load: &serde_json::Value) -> Option<String> {
+    let named = load.get("cloudaicompanionProject")?;
+    named
+        .as_str()
+        .or_else(|| named.get("id").and_then(serde_json::Value::as_str))
+        .filter(|project| !project.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| {
-            Stop::Failed(Box::new(answer(
-                "error",
-                Some("Antigravity 프로젝트 ID가 응답에 없습니다".to_string()),
-                now,
-            )))
+}
+
+/// Whether Google's answer gives this login a tier now.
+fn has_current_tier(load: &serde_json::Value) -> bool {
+    load.get("currentTier").is_some_and(|tier| !tier.is_null())
+}
+
+/// The Code Assist project this login's quota is billed to, read and never
+/// made: the project Google's answer names; else the one zo resolved for this
+/// login under this configuration and keeps on file; else, for a login Google
+/// gives a tier, the project the configuration names — zo's own answer for
+/// such a login (`setup_user_from_load_response`). A login with no tier yet
+/// takes one through `onboardUser`, a write that zo and Antigravity send and
+/// this gauge never does.
+fn project_of(
+    load: &serde_json::Value,
+    remembered: impl FnOnce() -> Option<String>,
+    configured: Option<&str>,
+) -> Result<String, NoProject> {
+    answered_project(load)
+        .or_else(remembered)
+        .or_else(|| {
+            configured
+                .filter(|_| has_current_tier(load))
+                .map(str::to_string)
         })
+        .ok_or_else(|| NoProject::of(load, configured))
+}
+
+/// Why no project could be read, in the words of Google's own answer.
+#[derive(Debug)]
+enum NoProject {
+    /// Google names no project — for a login it gives a tier, or with nothing
+    /// to say at all — and zo has recorded none for this login either.
+    Unnamed,
+    /// No tier yet, and one on offer that zo would take for this login.
+    NotOnboarded,
+    /// No tier on offer, and Google's reasons against the ones it lists.
+    NotEligible(String),
+}
+
+impl NoProject {
+    /// Read off the answer the way zo decides what a login with no project
+    /// needs (`setup_user_from_load_response`): a login with a tier lacks only
+    /// its project; one without takes the default tier on offer when that is
+    /// the free tier or a project is configured; otherwise Google's reasons,
+    /// when it gives any, say why not.
+    fn of(load: &serde_json::Value, configured: Option<&str>) -> Self {
+        if has_current_tier(load) {
+            return Self::Unnamed;
+        }
+        let takes_a_tier = default_allowed_tier(load).is_some_and(|tier| {
+            configured.is_some()
+                || tier.get("id").and_then(serde_json::Value::as_str) == Some(FREE_TIER)
+        });
+        if takes_a_tier {
+            return Self::NotOnboarded;
+        }
+        ineligible_reasons(load).map_or(Self::Unnamed, Self::NotEligible)
+    }
+
+    /// What the bar's hover and the usage panel say: what is missing, and
+    /// what makes it. zo records a login's project the first time it sends a
+    /// Gemini request with that login, and the next read finds it.
+    fn sentence(&self) -> String {
+        match self {
+            Self::Unnamed => "Google이 이 로그인의 Antigravity 프로젝트를 알려 주지 않았고 zo에도 기록이 없습니다 — zo에서 Gemini 모델을 한 번 쓰면 zo가 프로젝트를 기록합니다".to_string(),
+            Self::NotOnboarded => "이 Google 로그인은 아직 Antigravity 프로젝트가 없습니다 — zo에서 Gemini 모델을 한 번 쓰면 만들어집니다".to_string(),
+            Self::NotEligible(reasons) => {
+                format!("Google이 이 계정에 Antigravity 프로젝트를 주지 않습니다 — {reasons}")
+            }
+        }
+    }
+}
+
+/// The tier Google offers by default: the one marked default, else the first
+/// (zo's `default_allowed_tier`).
+fn default_allowed_tier(load: &serde_json::Value) -> Option<&serde_json::Value> {
+    let tiers = load.get("allowedTiers")?.as_array()?;
+    tiers
+        .iter()
+        .find(|tier| {
+            tier.get("isDefault")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .or_else(|| tiers.first())
+}
+
+/// Google's reasons against the tiers this login may not take, worded as zo
+/// words them (`ineligible_or_project_required`): `tier: reason`, joined by
+/// `; `. `None` when it lists none.
+fn ineligible_reasons(load: &serde_json::Value) -> Option<String> {
+    let said: Vec<String> = load
+        .get("ineligibleTiers")?
+        .as_array()?
+        .iter()
+        .map(|tier| {
+            let name = tier
+                .get("tierName")
+                .or_else(|| tier.get("tierId"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tier");
+            let reason = tier
+                .get("reasonMessage")
+                .or_else(|| tier.get("validationErrorMessage"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("ineligible");
+            format!("{name}: {reason}")
+        })
+        .collect();
+    (!said.is_empty()).then(|| said.join("; "))
+}
+
+/// The status of a reading with no project to read. Its own word: the bar says
+/// it as neither a failure nor a refusal.
+const NO_PROJECT: &str = "no_project";
+
+/// Google named no project and none can be read. Not a failure — the read went
+/// through, and this is its answer — so it names no failure kind and asks for
+/// no retry: the bar says the project is not set, and the sentence says why.
+fn no_project(missing: &NoProject, now: i64) -> ProviderUsage {
+    answer(NO_PROJECT, Some(missing.sentence()), now)
 }
 
 /// One quota bucket as the API speaks it, shape-checked the way Orca
@@ -409,9 +541,11 @@ fn access_token(
 
 /// One read: the reading, and the refusal behind it when Google refused a call.
 /// A refused login is not renewed and the refused call is not sent again.
+/// `configured` is the project the configuration names, which also picks the
+/// record of zo's that answers for it.
 fn scan_with(
     path: Option<&Path>,
-    _configured: Option<&str>,
+    configured: Option<&str>,
     now: i64,
     wire: &mut impl Wire,
 ) -> (ProviderUsage, Option<Refusal>) {
@@ -434,9 +568,14 @@ fn scan_with(
         );
     };
     let headers = AntigravityHeaders::new();
-    let project = match load_project_id(wire, &access_token, &headers, now) {
-        Ok(project) => project,
+    let load = match load_code_assist(wire, &access_token, &headers, now) {
+        Ok(load) => load,
         Err(stop) => return stop.into_read(now),
+    };
+    let remembered = || google_login::remembered_project(path, &credentials, configured);
+    let project = match project_of(&load, remembered, configured) {
+        Ok(project) => project,
+        Err(missing) => return (no_project(&missing, now), None),
     };
     match fetch_quota(wire, &access_token, &project, &headers, now) {
         Ok(usage) => (usage, None),
