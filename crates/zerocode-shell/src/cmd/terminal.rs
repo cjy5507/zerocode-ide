@@ -1582,6 +1582,7 @@ pub(crate) fn launch_agent_tab(
 /// These roads must not make a worker look person-owned.
 #[tauri::command(async)]
 pub(crate) fn term_text(
+    app: AppHandle,
     state: State<'_, AppState>,
     term: TermId,
     text: String,
@@ -1595,7 +1596,8 @@ pub(crate) fn term_text(
             })
         })?;
         if theirs {
-            let seat = orchestration::pane_taken_over(term, now_epoch_ms());
+            let seat = orchestration::pane_taken_over(term, "ime", now_epoch_ms());
+            tell_window_taken(&app, term, seat.as_deref());
             note_takeover(state.local_data_root(), term, seat, "ime");
         }
     } else {
@@ -1634,8 +1636,10 @@ pub(crate) fn term_key(
     // there, and takes nothing (t-17644); nor does a key that adds no words,
     // or a composer chip's own key (t-57712).
     if theirs {
-        let seat = orchestration::pane_taken_over(term, now_epoch_ms());
-        note_takeover(state.local_data_root(), term, seat, &key_kind(&press));
+        let hand = key_kind(&press);
+        let seat = orchestration::pane_taken_over(term, &hand, now_epoch_ms());
+        tell_window_taken(&app, term, seat.as_deref());
+        note_takeover(state.local_data_root(), term, seat, &hand);
     }
     if let Some(road) = road {
         note_chip(state.local_data_root(), term, road);
@@ -1676,6 +1680,22 @@ pub(crate) fn term_key(
 pub(crate) enum ChipRoad {
     Model,
     Permission,
+}
+
+/// The person's own sentence for a takeover (t-69526): their words went into
+/// a worker's pane, said once by the window's toast where they are looking —
+/// the run's letter is the ledger's, and nobody else would tell them. Nothing
+/// when this report marked no seat.
+fn tell_window_taken(app: &AppHandle, term: TermId, seat: Option<&str>) {
+    if seat.is_none() {
+        return;
+    }
+    if let Some(worker) = orchestration::worker_at_term(term) {
+        let _ = app.emit(
+            orchestration::TAKEN_OVER_EVENT,
+            serde_json::json!({ "term": term, "worker": worker }),
+        );
+    }
 }
 
 /// One window-log line per takeover (t-57712): the terminal, the seat the
@@ -1941,7 +1961,8 @@ pub(crate) fn term_paste(
     // A person's paste is their words as much as a typed key is, and takes a
     // worker's pane over the same way (t-57712).
     if theirs {
-        let seat = orchestration::pane_taken_over(term, now_epoch_ms());
+        let seat = orchestration::pane_taken_over(term, "paste", now_epoch_ms());
+        tell_window_taken(&app, term, seat.as_deref());
         note_takeover(state.local_data_root(), term, seat, "paste");
     }
     if let Some(road) = road {

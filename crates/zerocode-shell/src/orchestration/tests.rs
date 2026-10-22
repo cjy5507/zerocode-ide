@@ -3837,7 +3837,7 @@ fn behind_a_working_hook_the_handovers_own_refusals_hold() {
 
     // A pane the person took after the dialog's notice.
     let stood = paused(86_600);
-    super::pane_taken_over(86_601, stood.began + 21_000);
+    super::pane_taken_over(86_601, "words", stood.began + 21_000);
     stood
         .host
         .declined(86_601, a_printed_decline(Some("cyber"), "decline-record-1"));
@@ -10417,7 +10417,7 @@ fn a_persons_key_takes_the_workers_pane_over_durably() {
     let team = format!("team-taken-{LEADER}");
     let (run_id, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
 
-    super::pane_taken_over(WORKER, clock());
+    super::pane_taken_over(WORKER, "words", clock());
     let taken = |projection: &zerocode_core::orchestration::LedgerProjectionV1| {
         projection
             .workers
@@ -10429,7 +10429,7 @@ fn a_persons_key_takes_the_workers_pane_over_durably() {
     assert!(taken(&the_rows()), "the key never reached the ledger");
     // The gate holds: a second report is a probe, not a round trip, and
     // the row stays exactly as taken as it was.
-    super::pane_taken_over(WORKER, clock());
+    super::pane_taken_over(WORKER, "words", clock());
     assert!(taken(&the_rows()));
     // The number's next life starts unclaimed — the ledger row keeps its
     // fact, but a fresh incarnation may be reported again.
@@ -10468,7 +10468,7 @@ fn worker_return_reopens_the_key_gate_on_the_next_beat() {
             .unwrap_or_else(|held| held.into_inner())
             .contains(&WORKER)
     };
-    super::pane_taken_over(WORKER, clock());
+    super::pane_taken_over(WORKER, "words", clock());
     assert!(taken() && gated());
     let held =
         crate::agent_teams::current_pane_capability(&team, &pane).expect("the worker capability");
@@ -10499,7 +10499,7 @@ fn worker_return_reopens_the_key_gate_on_the_next_beat() {
     assert!(!taken(), "worker-return left the pane the person's");
     super::forget_returned_terms();
     assert!(!gated(), "the gate still swallows the next takeover");
-    super::pane_taken_over(WORKER, clock());
+    super::pane_taken_over(WORKER, "words", clock());
     assert!(taken(), "the person's next words took nothing over");
     crate::agent_teams::forget_term(WORKER);
     crate::agent_teams::forget_term(LEADER);
@@ -10515,7 +10515,7 @@ fn worker_return_is_refused_over_the_persons_own_draft() {
     let team = format!("team-return-{LEADER}");
     let (run_id, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
     let leader = zerocode_core::agent_teams::LEADER_PANE;
-    super::pane_taken_over(WORKER, clock());
+    super::pane_taken_over(WORKER, "words", clock());
     crate::human_input::forget_term(WORKER);
     crate::human_input::typed(WORKER);
     let give_back = || {
@@ -10549,6 +10549,103 @@ fn worker_return_is_refused_over_the_persons_own_draft() {
             .taken_over
     );
     crate::human_input::forget_term(WORKER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+}
+
+/// `worker-return`'s refusal names the one road a taken pane comes back by
+/// (t-69526): the verb itself, once the person's words on the line are sent
+/// or cleared. It used to add that the pane comes back "when the worker
+/// writes to the ledger again", which the ledger never does (t-17644 made the
+/// person's pane stay theirs however much the worker speaks) — a coordinator
+/// who believed it waited for a letter that could not change anything.
+#[test]
+fn worker_return_refusal_names_the_only_road_back() {
+    const LEADER: u32 = 69_522;
+    const WORKER: u32 = 69_523;
+    let _window = the_window();
+    let team = format!("team-road-back-{LEADER}");
+    let (_run_id, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    super::pane_taken_over(WORKER, "words", clock());
+    crate::human_input::forget_term(WORKER);
+    crate::human_input::typed(WORKER);
+    let refused = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!("worker-return --worker {worker}")),
+        clock(),
+    );
+    assert_ne!(refused.exit_code, 0, "a draft's pane was handed back");
+    assert!(
+        !refused.stderr.contains("writes to the ledger"),
+        "the refusal promises the worker's own letter hands the pane back: {}",
+        refused.stderr
+    );
+    assert!(
+        refused.stderr.contains("worker-return"),
+        "the refusal does not name the verb that hands the pane back: {}",
+        refused.stderr
+    );
+    crate::human_input::forget_term(WORKER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+}
+
+/// The moment a person's hand takes a worker's pane, the run hears it in one
+/// letter from the ledger (t-69526): which worker, which terminal and seat,
+/// when, and by which kind of hand — never what it typed — and the verb that
+/// gives the pane back when no person meant to type there. Before this, the
+/// coordinator learned of a takeover only when its next letter came back
+/// unpointed, and believed the mark (w-68712, five hours, 2026-10-21). Once
+/// per takeover: a second key in the same pane adds no second letter.
+#[test]
+fn a_takeover_tells_the_run_once_with_the_road_back() {
+    const LEADER: u32 = 69_520;
+    const WORKER: u32 = 69_521;
+    let _window = the_window();
+    let team = format!("team-told-taken-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let letters = || {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.run == run_id
+                    && row.from == zerocode_core::orchestration::LEDGER_ITSELF
+                    && row.to == format!("run:{run_id}")
+                    && row.subject.as_str().starts_with("taken-over:")
+            })
+            .map(|row| row.body.as_str().to_string())
+            .collect::<Vec<_>>()
+    };
+    let at = clock();
+    super::pane_taken_over(WORKER, "ime", at);
+    let told = letters();
+    assert_eq!(
+        told.len(),
+        1,
+        "the run was not told, once, that the pane is the person's: {told:?}"
+    );
+    let letter = &told[0];
+    for fact in [
+        format!("worker {worker}"),
+        format!("terminal {WORKER}"),
+        format!("{team}/{pane}"),
+        zerocode_core::civil::iso_utc_of(at),
+        "by ime".to_string(),
+        format!("worker-return --worker {worker}"),
+    ] {
+        assert!(
+            letter.contains(&fact),
+            "the letter does not say {fact:?}: {letter}"
+        );
+    }
+    super::pane_taken_over(WORKER, "words", clock());
+    assert_eq!(letters().len(), 1, "a second key told the run again");
     crate::agent_teams::forget_term(WORKER);
     crate::agent_teams::forget_term(LEADER);
 }
@@ -13854,7 +13951,7 @@ fn a_taken_over_worker_with_unread_mail_is_told_to_its_coordinator_and_never_typ
     };
     super::pane_turn_began(LEADER, clock());
     super::pane_turn_began(WORKER, clock());
-    super::pane_taken_over(WORKER, clock());
+    super::pane_taken_over(WORKER, "words", clock());
     let rested = clock();
     super::pane_lead_rested(WORKER, rested, true);
     let review = as_leader(format!(
@@ -20919,7 +21016,7 @@ fn stop_rejects_respawn_and_human_takeover_between_plan_and_effect_without_settl
                 );
             }
             "taken" => {
-                actor.pane_taken_over(94_201, clock()).unwrap();
+                actor.pane_taken_over(94_201, "words", clock()).unwrap();
             }
             _ => unreachable!(),
         }
@@ -21123,7 +21220,7 @@ fn takeover_or_recovery_before_stop_revokes_the_walk_and_keeps_the_attempt_open(
         let door = Recording::through(&stood.host, Ok(None)).change_on_wall(3, || match change {
             "human" => {
                 held.actor
-                    .pane_taken_over(94_601, stood.began + 20_000)
+                    .pane_taken_over(94_601, "words", stood.began + 20_000)
                     .unwrap();
             }
             "recovery" => {
@@ -22753,7 +22850,7 @@ fn a_busy_composer_and_a_taken_over_pane_get_no_effort_keys() {
     assert!(stood.sent_at_worker().is_empty());
 
     // A person takes the pane: the seat reads nothing more of it.
-    super::pane_taken_over(stood.host.worker_term, began + 6_500);
+    super::pane_taken_over(stood.host.worker_term, "words", began + 6_500);
     let mut third = next.clone();
     third.extend(a_stuck_turn("and again", "medium"));
     a_turn_runs_then_ends(&stood, &third, began + 7_000, began + 8_000);
@@ -24496,7 +24593,7 @@ fn a_persons_panes_keep_their_login_and_a_line_with_their_words_waits() {
     let (taken, taken_term) = (stood.worker.clone(), stood.leader + 1);
     let (drafted, drafted_term) = stood.walled_more[0].clone();
     let (working, working_term) = stood.working[0].clone();
-    super::pane_taken_over(taken_term, at - 1);
+    super::pane_taken_over(taken_term, "words", at - 1);
     assert!(stood.row(&taken).taken_over);
     stood.host.drafts.lock().unwrap().insert(drafted_term);
     // The person's own Claude pane, no worker's.
@@ -27715,7 +27812,7 @@ fn mail_for_a_taken_over_workers_pane_is_told_to_its_sender_once() {
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let host = Pointing::default();
     crate::orchestration::forget_taken_term(WORKER);
-    super::pane_taken_over(WORKER, clock());
+    super::pane_taken_over(WORKER, "words", clock());
     said_at(
         &host,
         &team,
