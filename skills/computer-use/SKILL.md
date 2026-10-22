@@ -283,6 +283,8 @@ presses, an `ok` or the judgment's own `done` alone:
     door's own code (`workspace_actor_required`, `permission_denied`, …).
     Looking again will not open it: report the code as a defect, with
     `at.step`.
+    `background_interrupted` is no defect: the person took over the
+    foreground. Do not look again; stop and say so.
   Asking the person to open the file in a desktop app comes last, after all
   four.
 
