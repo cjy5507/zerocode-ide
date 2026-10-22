@@ -3207,6 +3207,25 @@ pub(crate) mod test_support {
         drop(waiting);
     }
 
+    /// Ends the running server's runtime and takes its exit status before
+    /// the manager can read it, as another reaper in the app would.
+    #[cfg(unix)]
+    pub fn lose_status(manager: &Manager) {
+        let engine = lock(&manager.inner)
+            .running
+            .as_ref()
+            .map(|running| running.engine.clone());
+        if let Some(engine) = engine {
+            engine.lose_status();
+        }
+    }
+
+    /// Ends the operation `id` as its own work would once done.
+    #[cfg(unix)]
+    pub fn end_operation(manager: &Manager, id: &str) {
+        manager.finish(id, Ok(()));
+    }
+
     #[cfg(unix)]
     pub fn replace_engine_factory(manager: &Manager, factory: EngineFactory) {
         *lock(&manager.engine_factory) = Some(factory);

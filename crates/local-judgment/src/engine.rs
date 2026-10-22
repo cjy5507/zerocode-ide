@@ -637,6 +637,24 @@ impl Engine {
         command.process_group(0);
         Self::from_command_kind(command, true)
     }
+
+    /// Kills the runtime and takes its exit status before this side reads
+    /// it, as another reaper in the process would: from then on its end can
+    /// no longer be read.
+    #[cfg(all(test, unix))]
+    pub(crate) fn lose_status(&self) {
+        // Held throughout, so neither of this side's watchers reads the
+        // status in between.
+        let child = lock(&self.child);
+        let pid = libc::pid_t::try_from(child.id()).expect("a child's id is a pid");
+        let mut status = 0;
+        // SAFETY: the pid is this engine's own child, not yet waited for, and
+        // the lock held keeps every other wait on it out until it is gone.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut status, 0);
+        }
+    }
 }
 
 fn kill_owned(child: &mut Child, owns_group: bool) {
