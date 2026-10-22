@@ -248,7 +248,13 @@ walk is not a reason to repeat the same goal unchanged.
 ```
 
 zo's `walk` answers one `status` beside what the window said — never the
-presses, an `ok` or the judgment's own `done` alone:
+presses, an `ok` or the judgment's own `done` alone. A walk at an app or a
+pane that ends `no_look` or `stuck` does not come back bare: zo climbs a
+ladder first and the answer carries it as `ladder` — at an app zo looks
+once more (finding a window that was not found first; never again at a tree
+said to be empty, nor at a look a door refused, which answers `stopped` at
+once), and `ladder.why` says what ended the walk. A device's walk has no
+ladder.
 
 - `verified`: the `until` text was read on the screen, and read as the walk's
   doing (absent before it, or absent at a check between presses). Report.
@@ -262,29 +268,50 @@ presses, an `ok` or the judgment's own `done` alone:
   the judgment was unsure or unanswered, or nothing on the screen fit.
   `reason` says which; plan the next step yourself from the last look
   (`lastObservedStep`). Do not send the same walk again, and never turn a
-  setting on for the person.
+  setting on for the person. After `no_look` or `stuck` it means no tree
+  came back to zo either (its own look read none, or the tree was said to
+  be empty), or the walk was at a pane: take `ladder.roads` in order — the
+  picture, pressed by its marks before its pixels; the page's own address
+  field and keys; asking the person last. Each road's calls are written out
+  with `<…>` for what you fill in, and a pane's roads say in `fill` which
+  answer each value comes from. When a door refused the look at a pane, the
+  one road is that pane's own door, and `ladder.report` names the code to
+  report as a defect.
 - `stopped`: the person stopped it, a guard refused a screen, or the budget
-  ran out (`stepsLeft`). Stop and report as any stop.
+  ran out (`stepsLeft`). Stop and report as any stop. After `no_look` it is
+  also a door that refused the look at an app: `ladder.report` names the
+  door's code; report it as a defect. When the person took the foreground
+  from a background walk (`ladder.refusal` is `background_interrupted`), it
+  is no defect: the one road is asking the person, by `handoff`, whether to
+  go on.
 - `failed`: a press or a look failed, or the screen would not move. `at.step`
-  names where; recover from there. A look that came back with nothing ends
-  the walk on a row whose `outcome` is `no_look` (`lastRow`; the last of
-  `steps` from `zerocode-computer walk --json`), and the row's `reason` says
-  which of four. Take them in this order:
-  - `no_window`: the app, window or pane was not found. Find it again first
-    (`list-windows`, `zerocode-browser tabs`), then walk again.
-  - `empty_tree`: it stood with nothing a look numbers (a canvas grid, a
-    remote screen). Look by its picture (`observe --app <app> --ocr`) and
-    press by point (`click --mark N --look <id>` on an OCR mark, `click --app
-    <app> --x X --y Y`), or go as a person does through the app's own name
-    box and keys: the box, the address, `press-key Enter`, the value,
-    `press-key Enter`.
-  - `look_timeout`: the look ran out of time. Look once more, once.
-  - `look_refused`: a door refused the look; the row's `refusal` is the
-    door's own code (`workspace_actor_required`, `permission_denied`, …).
-    Looking again will not open it: report the code as a defect, with
-    `at.step`.
-  Asking the person to open the file in a desktop app comes last, after all
-  four.
+  names where; recover from there. At an app, after `no_look` or `stuck`, it
+  means zo's second look read the window's tree: continue from
+  `ladder.relooked` (press by `element_index`, or by label and role).
+
+Without zo's ladder — a device's walk, or `zerocode-computer walk --json`
+called directly — a look that came back with nothing ends the walk on a row
+whose `outcome` is `no_look` (`lastRow`; the last of `steps`), and the
+row's `reason` says which of four. Take them in this order:
+
+- `no_window`: the app, window or pane was not found. Find it again first
+  (`list-windows`, `zerocode-browser tabs`), then walk again.
+- `empty_tree`: it stood with nothing a look numbers (a canvas grid, a
+  remote screen). Look by its picture (`observe --app <app> --ocr`) and
+  press by point (`click --mark N --look <id>` on an OCR mark, `click --app
+  <app> --x X --y Y`), or go as a person does through the app's own name
+  box and keys: the box, the address, `press-key Enter`, the value,
+  `press-key Enter`.
+- `look_timeout`: the look ran out of time. Look once more, once.
+- `look_refused`: a door refused the look; the row's `refusal` is the
+  door's own code (`workspace_actor_required`, `permission_denied`, …).
+  Looking again will not open it: report the code as a defect, with
+  `at.step`.
+  `background_interrupted` is no defect: the person took over the
+  foreground. Do not look again; stop and say so.
+
+Asking the person to open the file in a desktop app comes last, after all
+four.
 
 ## Built-in browser
 

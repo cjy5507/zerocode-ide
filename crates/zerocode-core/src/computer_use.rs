@@ -2003,6 +2003,12 @@ pub mod walk_words {
     /// The refusal a background walk's own look says once the person took
     /// the foreground from it: it looks no more.
     pub const BACKGROUND_INTERRUPTED: &str = "background_interrupted";
+    /// The refusal a look says when its door could not reach the window at
+    /// all (t-70855) — the door's own sentence for it
+    /// ([`super::DOOR_UNREACHED`]), or its transport's words relayed after
+    /// the door's name (`curl: (7) Failed to connect …`), whose `curl` is a
+    /// program and no code of the window's.
+    pub const DOOR_CONNECTION_FAILED: &str = "door_connection_failed";
     /// The one barred word that is the judgment's own doubt rather than a
     /// stop: its confidence under the seat's press floor.
     pub const LOW_CONFIDENCE: &str = "low_confidence";
@@ -5028,6 +5034,14 @@ fn computer_route_shim<'a>(
     }
 }
 
+/// What a door says after its own name when it could not reach the window at
+/// all — every door the bridge shim below renders, POSIX or PowerShell: no
+/// answer of the window's, not even a refusal, came back (`zerocode-computer:
+/// could not reach the window`). A walk reads it as its door's connection
+/// failing ([`walk_words::DOOR_CONNECTION_FAILED`]), never as the window's
+/// refusal.
+pub const DOOR_UNREACHED: &str = "could not reach the window";
+
 /// The same door for a shell that cannot read a shebang.
 ///
 /// On Windows an agent's tool call arrives from one of three hosts: Git Bash
@@ -5213,7 +5227,7 @@ fi
   {execution_capture}--max-time {deadline_seconds} -w '\n%{{http_code}}' \
   -K "$headers" -H "content-type: application/octet-stream" --data-binary @- \
   "http://127.0.0.1:$port{route}" 2>/dev/null) || {{
-  echo "{command}: could not reach the window" >&2
+  echo "{command}: {DOOR_UNREACHED}" >&2
   exit 1
 }}
 code="${{out##*
@@ -5390,7 +5404,7 @@ try {{
     [Console]::Error.Write($reader.ReadToEnd())
     exit 1
   }}
-  [Console]::Error.WriteLine('{command}: could not reach the window')
+  [Console]::Error.WriteLine('{command}: {DOOR_UNREACHED}')
   exit 1
 }}
 "#
