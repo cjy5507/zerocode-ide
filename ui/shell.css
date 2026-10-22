@@ -34151,6 +34151,11 @@ details.task-board-section > summary {
   font: var(--type-label-12-mono);
 }
 
+/* 「지금」 칩 밑에 들 눈금은 글만 감춘다 — 그 시의 선(`--schedule-grid`)은 트랙에 남는다. */
+.board-schedule-tick.is-covered {
+  visibility: hidden;
+}
+
 .board-schedule-now {
   z-index: 1;
   inset-inline-start: calc(var(--now) * 1%);
@@ -34456,9 +34461,11 @@ details.task-board-section > summary {
   white-space: pre;
 }
 
-/* 좁은 그릇(「지금 도는 일」 단 하나, 320 px 판): 이름과 끝 칸이 막대 위 한 줄로 올라가고,
- * 트랙과 축은 그릇의 폭을 다 쓴다. */
-@container board-schedule (max-width: 479px) {
+/* 좁은 그릇: 이름과 끝 칸이 막대 위 한 줄로 올라가고, 트랙과 축은 그릇의 폭을 다 쓴다. 경계는
+ * 시안 v2가 타임라인을 한 열로 쌓는 760 px(47.5rem, 이름·끝 칸과 함께 글자 크기를 따른다)다 —
+ * 그보다 좁으면 이름 칸(15rem)과 끝 칸(8rem) 곁의 축에 정시 글 다섯이 설 자리(360 px)가 없다
+ * (t-71840: 상황판이 터미널 곁에 선 1280 px 창의 그릇 약 620 px에 축이 170 px였다). */
+@container board-schedule (max-width: 47.5rem) {
   .board-schedule-chart {
     --schedule-label: 0px;
     --schedule-said: 0px;

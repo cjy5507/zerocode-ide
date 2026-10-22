@@ -26,27 +26,32 @@ const BOARD_SCHEDULE = Object.freeze({
   /* 세 확대: 지금 앞뒤로 보이는 길이. 뒤쪽은 가장 늦은 예상 끝까지 늘어나되 상한이
    * 있다(`mostAfterMs`). */
   zooms: Object.freeze({
-    /* 눈금 간격의 후보(`ticksMs`): 축의 폭에 눈금 글이 들어가는 가장 촘촘한 것을 고른다.
-     * 지금 앞뒤와 하루는 시각으로, 한 주는 날짜로 읽는다. */
+    /* 눈금 간격의 후보(`ticksMs`): 축의 폭에 눈금 글이 들어가는 가장 촘촘한 것을 고른다. 축의 폭을
+     * 눈금 글 하나의 자리(`tickRoomPx`, CSS px)로 나눈 수만큼 눈금이 선다. 지금 앞뒤와 하루는 시각
+     * (「09:00」, 고정폭 12 px로 약 36 px)으로, 한 주는 날짜(「10. 21. (수)」, 다섯 언어 가운데 가장
+     * 넓어 약 84 px)로 읽는다 — 어느 쪽이든 두 글 사이에 12 px 넘게 남는다(t-71840). */
     /* 지금 앞뒤 — 처음 여는 확대(t-71840): 사람이 통과시킨 상황판 시안 v2(p-7c4a751fccf3359d)의
      * 「지금 도는 일」 축 그대로, 정시에 맞춰(`alignMs`) 지금의 한 시간 앞에서 네 시간. 가장 늦은
      * 예상 끝이 그 뒤면 정시 단위로 늘어난다. */
     now: Object.freeze({
       alignMs: 3_600_000, beforeMs: 3_600_000, afterMs: 3 * 3_600_000, mostAfterMs: 11 * 3_600_000,
-      ticksMs: Object.freeze([3_600_000, 2 * 3_600_000, 3 * 3_600_000]),
+      ticksMs: Object.freeze([3_600_000, 2 * 3_600_000, 3 * 3_600_000]), tickRoomPx: 72,
     }),
     day: Object.freeze({
       beforeMs: 16 * 3_600_000, afterMs: 8 * 3_600_000, mostAfterMs: 24 * 3_600_000,
       ticksMs: Object.freeze([3_600_000, 2 * 3_600_000, 3 * 3_600_000, 6 * 3_600_000, 12 * 3_600_000]),
+      tickRoomPx: 72,
     }),
     // Four days apart stands only on a narrow axis: a date in the board's monospace is wider than an hour.
     week: Object.freeze({
       beforeMs: 5 * 86_400_000, afterMs: 2 * 86_400_000, mostAfterMs: 4 * 86_400_000,
-      ticksMs: Object.freeze([86_400_000, 2 * 86_400_000, 4 * 86_400_000]),
+      ticksMs: Object.freeze([86_400_000, 2 * 86_400_000, 4 * 86_400_000]), tickRoomPx: 96,
     }),
   }),
-  /* 눈금 글 하나가 차지하는 폭(CSS px): 축의 폭을 이것으로 나눈 수만큼 눈금이 선다. */
-  tickRoomPx: 72,
+  /* 축 위 「지금」 칩의 자리(CSS px): 두 글자와 안쪽 여백(약 40 px)에 틈. 칩과 눈금 글의 반폭을 더한
+   * 거리 안에 선 눈금은 글을 감추고 시간 선만 남긴다 — 시안 v2의 칩은 정시 글 곁에 서지, 그 위에
+   * 겹치지 않는다(t-71840). */
+  nowChipPx: 48,
   /* 끝난 것은 묶음마다 가장 최근에 끝난 이만큼만 행으로 서고, 나머지는 「+N 끝남」 접힌 줄 하나다 —
    * 사람이 그 줄을 누르면 다 선다. 도는 것·기다리는 것은 늘 다 선다. 네 묶음이 같은 규칙이다(t-71840;
    * 빌드 줄의 끝난 일감이 먼저 이렇게 섰다). */
@@ -674,9 +679,9 @@ function boardScheduleTaskRow({ task, landing, start, end, known }, now) {
 }
 
 /* 눈금: 축의 폭에 들어가는 가장 촘촘한 간격으로, 그 간격의 현지 시각 경계마다. */
-function boardScheduleTicks(from, to, width, steps) {
-  const room = Math.max(2, Math.floor(width / BOARD_SCHEDULE.tickRoomPx));
-  const step = steps.find((ms) => (to - from) / ms <= room) ?? steps.at(-1);
+function boardScheduleTicks(from, to, width, zoom) {
+  const room = Math.max(2, Math.floor(width / zoom.tickRoomPx));
+  const step = zoom.ticksMs.find((ms) => (to - from) / ms <= room) ?? zoom.ticksMs.at(-1);
   const day = step >= 86_400_000;
   const first = new Date(from);
   first.setMinutes(0, 0, 0);
@@ -766,8 +771,12 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
   });
   const heading = zoom === BOARD_SCHEDULE.zooms.now
     ? t("board.now.running", "지금 도는 일") : boardScheduleZoomWord(choice.zoom);
-  return { from, to, now, nowAt: percent(now), ticks: boardScheduleTicks(from, to, width, zoom.ticksMs).map((tick) =>
-    ({ ...tick, at: percent(tick.at) })), groups, stall, heading };
+  const nowAt = percent(now);
+  const covers = (zoom.tickRoomPx + BOARD_SCHEDULE.nowChipPx) / 2;
+  return { from, to, now, nowAt, ticks: boardScheduleTicks(from, to, width, zoom).map((tick) => {
+    const at = percent(tick.at);
+    return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * width < covers };
+  }), groups, stall, heading };
 }
 
 /* ---- 그림 ----------------------------------------------------------------------- */
@@ -922,7 +931,7 @@ function paintBoardScheduleRow(node, row) {
   writeAttribute(bar, "data-ahead-label", row.aheadLabel);
 }
 
-/* 그릇 하나를 그린다. 답·데스크·분·고른 것·언어·눈금 수가 지난번과 같으면 아무것도
+/* 그릇 하나를 그린다. 답·데스크·분·고른 것·언어·축의 폭이 지난번과 같으면 아무것도
  * 쓰지 않는다 — 조용한 박자는 DOM을 건드리지 않는다. 막대와 「지금」 선은 분 단위의
  * 지금에 선다: 같은 분 안의 박자는 바뀐 행만 고쳐 쓰고 막대 하나 옮기지 않는다
  * (t-67482: 밀리초의 지금으로는 박자마다 막대 몇 개가 반올림 경계를 넘어 다시 쓰였다).
@@ -942,7 +951,7 @@ function paintBoardScheduleHost(host, view, now) {
   const machine = typeof deskMachine === "undefined" ? null : deskMachine;
   const minute = Math.floor(now / BOARD_SCHEDULE.clockMs) * BOARD_SCHEDULE.clockMs;
   const said = [boardScheduleAnswer, desk, machine, minute, boardScheduleChoiceRevision,
-    document.documentElement.lang, Math.floor(width / BOARD_SCHEDULE.tickRoomPx)];
+    document.documentElement.lang, width];
   const before = boardSchedulePainted.get(host);
   if (before && before.every((one, at) => one === said[at])) return;
   boardSchedulePainted.set(host, said);
@@ -958,6 +967,7 @@ function paintBoardScheduleHost(host, view, now) {
     const node = ticks[at] ?? boardScheduleElement("span", "board-schedule-tick");
     writeTextContent(node, tick.label);
     writeCustomProperty(node, "--at", tick.at.toFixed(2));
+    writeClass(node, "is-covered", tick.covered);
     return node;
   }), axis.__now]);
   writeTextContent(axis.__now, t("board.schedule.nowLine", "지금"));
