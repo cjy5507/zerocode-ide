@@ -8037,6 +8037,8 @@ async fn dispatch_browser_command(
         // `click <label> <css>` presses the first element a selector names;
         // `click <label> --mark <n>` presses the control numbered n on the
         // pane's last `marks`, pinned so a moved or changed control is refused;
+        // `click <label> --at <x>,<y>` presses a point of the pane's picture,
+        // what no look numbers (t-70755: a canvas grid's cell);
         // `--settle-later` answers at once with the page the press changed, its
         // settle finished by the pane's next `marks` (t-9712) — a press that
         // left the legend as it was settles first, as a plain one does (t-9876).
@@ -8048,6 +8050,9 @@ async fn dispatch_browser_command(
                 }
                 Ok(ClickTarget::Mark(mark)) => {
                     cmd::browser::automate_click_mark(app, &state, &argv[1], mark).await
+                }
+                Ok(ClickTarget::At(point)) => {
+                    cmd::browser::automate_click_at(app, &state, &argv[1], point).await
                 }
                 Ok(ClickTarget::MarkSettleLater(mark)) => {
                     let later =
@@ -8106,6 +8111,27 @@ async fn dispatch_browser_command(
                 cmd::browser::automate_type(app, &state, label, css, text, road).await,
                 dispatched,
             )
+        }
+        // `press <label> <key> [css]` presses one key, in the desktop's own
+        // names, into the element that has the focus — or into the one a
+        // selector names, focused first (t-70755: a name box commits on Enter).
+        ("press", 3) | ("press", 4) => {
+            let press = match zerocode_core::agent_browser::parse_press(argv) {
+                Ok(press) => press,
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
+            };
+            match cmd::browser::automate_press(app, &state, &argv[1], &press).await {
+                Ok(report) => {
+                    crate::browser_read::label_press(&argv[1], "press", &report);
+                    browser_said(format!(
+                        "{}\n",
+                        cmd::browser::input_said(cmd::browser::PRESSED_SAID, &report)
+                    ))
+                }
+                Err(refusal) => executor_refused(dispatched, refusal),
+            }
         }
         ("wait", 3) | ("wait", 4) => {
             let timeout_ms = match argv.get(3) {
