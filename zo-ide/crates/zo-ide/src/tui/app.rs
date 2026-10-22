@@ -571,8 +571,9 @@ struct Ui {
     /// Paint code only formats these values; it never performs I/O.
     subagent_progress: Vec<SubagentProgress>,
     /// The ledger workers of the same snapshot: CLIs of their own in window
-    /// tabs of their own. Only their spawn cells show them (t-69472); the
-    /// wave, the details and the agents overview keep to the helpers above.
+    /// tabs of their own. Their spawn cells, the wave and the rows under the
+    /// Working line show them (t-69472); the agents overview, which stops and
+    /// messages a helper, keeps to the helpers above.
     ledger_helpers: Vec<SubagentProgress>,
     /// Helpers observed in the current foreground wave. Finished helpers leave
     /// the running snapshot but stay in this count until the turn ends.
@@ -969,16 +970,21 @@ fn status_detail_for(kind: &ToolKind) -> String {
 /// header above the row — is left out.
 fn subagent_cell_progress(progress: &SubagentProgress) -> String {
     if progress.ledger {
-        // A ledger worker's work is in its own tab: its row says so and
-        // nothing its parent cannot see (t-69472).
-        let label = crate::util::ansi::sanitize_inline(&progress.label);
-        let model = progress
-            .model
-            .as_deref()
-            .map(crate::util::ansi::sanitize_inline);
-        return super::strings::ledger_helper(&label, model.as_deref(), progress.elapsed);
+        return ledger_helper_line(progress);
     }
     subagent_progress_line(progress, true)
+}
+
+/// A ledger worker's row, in its spawn cell and under `Working` alike: its
+/// work is in its own tab, so the row says so and nothing its parent cannot
+/// see (t-69472).
+fn ledger_helper_line(progress: &SubagentProgress) -> String {
+    let label = crate::util::ansi::sanitize_inline(&progress.label);
+    let model = progress
+        .model
+        .as_deref()
+        .map(crate::util::ansi::sanitize_inline);
+    super::strings::ledger_helper(&label, model.as_deref(), progress.elapsed)
 }
 
 /// One helper's line under `Working`: `label · activity · elapsed`, then the
@@ -986,6 +992,9 @@ fn subagent_cell_progress(progress: &SubagentProgress) -> String {
 /// uses"), then a quiet warning. The count is what moves while the activity
 /// line stands still, so a person can tell a helper at work from one stuck.
 fn subagent_status_detail(progress: &SubagentProgress) -> String {
+    if progress.ledger {
+        return ledger_helper_line(progress);
+    }
     let mut line = subagent_progress_line(progress, false);
     if let Some(quiet) = progress.no_new_output_for {
         line.push_str(core_types::helper_run::FACT_SEPARATOR);
@@ -1533,6 +1542,9 @@ impl Ui {
     /// bounded details area while any are live; the ordinary tool context is
     /// restored as soon as the snapshot becomes empty.
     fn set_subagent_progress(&mut self, progress: Vec<SubagentProgress>) {
+        // The wave counts a ledger worker too; the agents overview, which
+        // stops and messages a helper, keeps to the helpers of this process.
+        self.subagent_wave.refresh(&progress);
         let (ledger_helpers, progress): (Vec<_>, Vec<_>) =
             progress.into_iter().partition(|helper| helper.ledger);
         self.ledger_helpers = ledger_helpers;
@@ -1541,7 +1553,6 @@ impl Ui {
                 status.note_activity_event();
             }
         }
-        self.subagent_wave.refresh(&progress);
         self.subagent_progress = progress;
         if let Some(overview) = self.agents.as_mut() {
             overview.refresh(self.subagent_progress.clone());
@@ -1587,7 +1598,12 @@ impl Ui {
                 .as_ref()
                 .is_some_and(|cell| cell.is_spawning() && cell.is_active());
             if !spawn_cell_owns_rows {
-                details.extend(self.subagent_progress.iter().map(subagent_status_detail));
+                details.extend(
+                    self.subagent_progress
+                        .iter()
+                        .chain(&self.ledger_helpers)
+                        .map(subagent_status_detail),
+                );
             }
         } else {
             details.extend(self.tool_status_detail.iter().cloned());
