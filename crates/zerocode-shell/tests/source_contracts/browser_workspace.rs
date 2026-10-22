@@ -460,6 +460,13 @@ fn only_a_refusal_before_dispatch_is_known_to_have_no_effect() {
             "(\"screenshot\", _) =>",
             "automate_fill(",
         ),
+        // A key press (t-70755): a key or a selector it cannot use is
+        // refused unsent; the page's answer is the executor's to judge.
+        (
+            "(\"press\", 3) | (\"press\", 4) =>",
+            "(\"tabs\", 1) =>",
+            "automate_press(",
+        ),
     ] {
         let arm = arm(dispatch, opens, next);
         let sent = arm.find(sent).unwrap_or_else(|| panic!("{opens}"));

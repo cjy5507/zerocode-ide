@@ -8112,6 +8112,23 @@ async fn dispatch_browser_command(
                 dispatched,
             )
         }
+        ("wait", 3) | ("wait", 4) => {
+            let timeout_ms = match argv.get(3) {
+                Some(raw) => match raw.parse::<u64>() {
+                    Ok(timeout) => Some(timeout),
+                    Err(_) => {
+                        return browser_refused(
+                            "zerocode-browser: 대기 시간은 밀리초 정수여야 합니다\n",
+                        );
+                    }
+                },
+                None => None,
+            };
+            match cmd::browser::automate_wait(app, &state, &argv[1], &argv[2], timeout_ms).await {
+                Ok(()) => browser_said("조건이 충족됐습니다\n"),
+                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
+            }
+        }
         // `press <label> <key> [css]` presses one key, in the desktop's own
         // names, into the element that has the focus — or into the one a
         // selector names, focused first (t-70755: a name box commits on Enter).
@@ -8131,23 +8148,6 @@ async fn dispatch_browser_command(
                     ))
                 }
                 Err(refusal) => executor_refused(dispatched, refusal),
-            }
-        }
-        ("wait", 3) | ("wait", 4) => {
-            let timeout_ms = match argv.get(3) {
-                Some(raw) => match raw.parse::<u64>() {
-                    Ok(timeout) => Some(timeout),
-                    Err(_) => {
-                        return browser_refused(
-                            "zerocode-browser: 대기 시간은 밀리초 정수여야 합니다\n",
-                        );
-                    }
-                },
-                None => None,
-            };
-            match cmd::browser::automate_wait(app, &state, &argv[1], &argv[2], timeout_ms).await {
-                Ok(()) => browser_said("조건이 충족됐습니다\n"),
-                Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
         ("tabs", 1) => {
