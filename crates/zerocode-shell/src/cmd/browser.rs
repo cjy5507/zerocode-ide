@@ -36,6 +36,7 @@ pub(crate) const BROWSER_WAIT_POLL: Duration =
 /// --marks` draws with no code of its own.
 use crate::computer_use::marks::draw_badges;
 use crate::computer_use::screenshot_png::RgbaImage;
+use zerocode_core::computer_use_protocol::keys::ChordWrites;
 /// `wait`'s refusal when the selector never showed — a walk reads it apart
 /// from a dead pane or a wrong label (a Flow's baseline and oracle).
 pub(crate) const WAIT_TIMED_OUT: &str = "시간 안에 셀렉터가 보이지 않았습니다";
@@ -54,8 +55,9 @@ pub(crate) struct BrowserReadReport {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserInputReport {
-    /// `dom-activation`, `editing-command`, `synthetic-events`, or the stdin
-    /// road's `value-setter`.
+    /// `dom-activation`, `editing-command`, `synthetic-events`, the stdin
+    /// road's `value-setter`, a key press's `synthetic-keys` or a point
+    /// press's `dom-point` (t-70755).
     pub(crate) method: String,
     /// Whether the path is expected to produce engine-trusted input events.
     pub(crate) trusted_events: bool,
@@ -117,6 +119,7 @@ pub(crate) struct SettleReport {
 /// browser step sees the door's words, not the report.
 pub(crate) const CLICK_SAID: &str = "클릭 이벤트를 보냈습니다";
 pub(crate) const TYPED_SAID: &str = "입력했습니다";
+pub(crate) const PRESSED_SAID: &str = "키 이벤트를 보냈습니다";
 const INPUT_RECT_KEY: &str = "rect";
 const INPUT_DPR_KEY: &str = "dpr";
 /// The key the click and type scripts answer the element's landmark chain
@@ -878,6 +881,9 @@ pub(crate) fn page_failure(reply: &serde_json::Value) -> String {
         }
         "value_changed" => "그 칸의 값이 marks 때와 다릅니다 — 다시 `zerocode-browser marks`",
         "text_too_long" => "입력 글이 요소의 최대 길이를 넘습니다",
+        "point_outside" => {
+            "그 점은 판에 보이는 영역 밖입니다 — screenshot 사진 안의 픽셀 좌표(x,y)를 쓰세요"
+        }
         "frame_sealed" => "그 틀은 다른 출처이거나 sandbox여서 칸을 가리킬 수 없습니다",
         "form_stale" => "양식이 읽은 뒤 바뀌었습니다 — 다시 fields로 읽으세요",
         "async_value" => "비동기 값은 이 eval 왕복에서 돌려줄 수 없습니다",
@@ -905,12 +911,13 @@ pub(crate) fn page_value(reply: serde_json::Value) -> Result<serde_json::Value, 
 /// The codes an input script answers before it sends the page any event
 /// (t-66200): a selector or a frame it cannot use, a control hidden,
 /// covered, disabled or not one to write in, a text too long for it, a look
-/// the page has moved on from. Every body that answers one returns it before
-/// its first event — a source contract holds `CLICK_BODY`, `TYPE_BODY` and
-/// `BROWSER_SCROLL_BODY` to that; any other failure (the script's own throw,
-/// an option missing after the focus, an input the page cancelled) may come
-/// after an event the page already heard.
-pub(crate) const UNSENT_PAGE_CODES: [&str; 12] = [
+/// the page has moved on from, a point off the pane's picture (t-70755).
+/// Every body that answers one returns it before its first event — a source
+/// contract holds `CLICK_BODY`, `TYPE_BODY`, `BROWSER_SCROLL_BODY`,
+/// `KEY_PRESS_BODY` and `POINT_PRESS_BODY` to that; any other failure (the
+/// script's own throw, an option missing after the focus, an input the page
+/// cancelled) may come after an event the page already heard.
+pub(crate) const UNSENT_PAGE_CODES: [&str; 13] = [
     "invalid_selector",
     "selector_not_found",
     "element_not_visible",
@@ -923,6 +930,7 @@ pub(crate) const UNSENT_PAGE_CODES: [&str; 12] = [
     "form_stale",
     "document_replaced",
     "value_changed",
+    "point_outside",
 ];
 
 /// An input script's answer: its value, or its refusal — `Unsent` for a
@@ -960,6 +968,20 @@ pub(crate) fn input_report(
             ),
         ),
         "editing-command" => (true, None),
+        "synthetic-keys" => (
+            false,
+            Some(
+                "합성 키 이벤트는 isTrusted 검사를 요구하는 페이지에서 거부될 수 있고, 글 넣기·초점 이동·양식 제출 같은 브라우저 기본 동작은 하지 않습니다 — 페이지의 키 처리기만 듣습니다"
+                    .to_string(),
+            ),
+        ),
+        "dom-point" => (
+            false,
+            Some(
+                "한 점의 DOM 포인터 이벤트는 isTrusted 검사를 요구하는 페이지에서 거부될 수 있습니다"
+                    .to_string(),
+            ),
+        ),
         "synthetic-events" => (
             false,
             Some(
@@ -1014,31 +1036,51 @@ pub(crate) fn typed_report(
     value: serde_json::Value,
     road: TypeRoad,
 ) -> Result<BrowserInputReport, BrowserRefusal> {
+    if road == TypeRoad::Keys {
+        held_at_secret_field(&value, ChordWrites::Character)?;
+    }
+    input_report(value, road.methods()).map_err(BrowserRefusal::Sent)
+}
+
+/// A key press's answer judged (t-70755) by the same table as the typing's
+/// keys: a key that writes — a character, the paste chord — held at a
+/// password field is the person's to type; any other key goes.
+pub(crate) fn pressed_report(
+    value: serde_json::Value,
+    writes: ChordWrites,
+) -> Result<BrowserInputReport, BrowserRefusal> {
+    held_at_secret_field(&value, writes)?;
+    input_report(value, &["synthetic-keys"]).map_err(BrowserRefusal::Sent)
+}
+
+/// Keys that write held at a password field, as the page said before its
+/// first event: refused by the core's one secret-entry table, the page sent
+/// nothing (t-66200). Keys that write nothing — a Tab, an Enter — go.
+fn held_at_secret_field(
+    value: &serde_json::Value,
+    writes: ChordWrites,
+) -> Result<(), BrowserRefusal> {
     use zerocode_core::computer_use_protocol::validate::{
         SecretEntryFacts, SecretEntryVerdict, secret_entry,
     };
-    if road == TypeRoad::Keys {
-        let secure_field = value
-            .get("secureField")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let verdict = secret_entry(SecretEntryFacts {
-            writes_text: true,
-            pastes: false,
-            secure_field,
-            secure_input_on: false,
-            secure_input_by_receiver: false,
-            focus_read: true,
-        });
-        // The keys road held its keys at a password field and said so before
-        // its first event: the page was sent nothing (t-66200).
-        if verdict == SecretEntryVerdict::PersonsEntry {
-            return Err(BrowserRefusal::Unsent(page_failure(
-                &serde_json::json!({ "code": verdict.as_str() }),
-            )));
-        }
+    let secure_field = value
+        .get("secureField")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let verdict = secret_entry(SecretEntryFacts {
+        writes_text: writes == ChordWrites::Character,
+        pastes: writes == ChordWrites::Clipboard,
+        secure_field,
+        secure_input_on: false,
+        secure_input_by_receiver: false,
+        focus_read: true,
+    });
+    if verdict == SecretEntryVerdict::PersonsEntry {
+        return Err(BrowserRefusal::Unsent(page_failure(
+            &serde_json::json!({ "code": verdict.as_str() }),
+        )));
     }
-    input_report(value, road.methods()).map_err(BrowserRefusal::Sent)
+    Ok(())
 }
 
 pub(crate) fn checked_selector(selector: &str) -> Result<(), String> {
@@ -3789,11 +3831,19 @@ async fn press(
     .await?;
     let report =
         input_report(input_value(reply)?, &["dom-activation"]).map_err(BrowserRefusal::Sent)?;
+    mark_pressed(pane, &report);
+    Ok(report)
+}
+
+/// A press the page measured moves the shield's mark there, for the person
+/// watching the pane (t-66513).
+fn mark_pressed(pane: &BrowserPane, report: &BrowserInputReport) {
     #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
     if let (Some(rect), Some(dpr)) = (report.rect, report.dpr) {
         pane.mark_press(rect, dpr);
     }
-    Ok(report)
+    #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
+    let _ = (pane, report);
 }
 
 /// The click's page script: the first element the selector names that a
@@ -3847,6 +3897,232 @@ if (typeof element.click === "function") {
 return zcEncode({ ok: true, value: { method: "dom-activation",
   rect: [rect.left, rect.top, rect.width, rect.height], dpr: window.devicePixelRatio,
   blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href),
+  pressedAt: performance.now() } });
+"#;
+
+/// One key to the page (t-70755): the chord in the desktop's own names, as
+/// the page hears it on this machine, to the element that has the focus — or
+/// to the one a selector names, focused first. A key that writes is held at a
+/// password field, refused by the typing's table ([`pressed_report`]).
+pub(crate) async fn automate_press(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+    press: &zerocode_core::agent_browser::PressCommand,
+) -> Result<BrowserInputReport, BrowserRefusal> {
+    use zerocode_core::computer_use_protocol::keys::Platform;
+    let platform = Platform::of_this_machine();
+    let keys = zerocode_core::agent_browser::page_press(&press.chord, platform)
+        .ok_or_else(|| format!("`{}` is not a key a page hears", press.chord.key));
+    let checked = keys.and_then(|keys| {
+        if let Some(selector) = &press.selector {
+            checked_selector(selector)?;
+        }
+        Ok(keys)
+    });
+    send_after_checks(
+        checked,
+        || browser_pane_of(app, state, label),
+        |keys, pane| async move {
+            let request = serde_json::json!({
+                "selector": press.selector,
+                "writes": keys.writes.as_str(),
+                "press": keys,
+                "blockRoots": block_roots(),
+            });
+            let reply = page_json(
+                &pane,
+                automation_script(&request, KEY_PRESS_BODY),
+                BROWSER_CALLBACK_DEADLINE,
+            )
+            .await?;
+            pressed_report(input_value(reply)?, keys.writes)
+        },
+    )
+    .await
+}
+
+/// A press at a point of the pane's picture (t-70755): what is on top there,
+/// for a control no look numbers — a canvas grid's cell.
+pub(crate) async fn automate_click_at(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+    point: zerocode_core::agent_browser::PicturePoint,
+) -> Result<BrowserInputReport, BrowserRefusal> {
+    send_after_checks(
+        Ok(()),
+        || browser_pane_of(app, state, label),
+        |(), pane| async move {
+            let request = serde_json::json!({
+                "x": point.x,
+                "y": point.y,
+                "blockRoots": block_roots(),
+            });
+            let reply = page_json(
+                &pane,
+                automation_script(&request, POINT_PRESS_BODY),
+                BROWSER_CALLBACK_DEADLINE,
+            )
+            .await?;
+            let report =
+                input_report(input_value(reply)?, &["dom-point"]).map_err(BrowserRefusal::Sent)?;
+            mark_pressed(&pane, &report);
+            Ok::<_, BrowserRefusal>(report)
+        },
+    )
+    .await
+}
+
+/// The key press's page script. The element a key goes to is the one the
+/// browser routes it to — the focused element, into frames of the page's own
+/// origin and open shadow roots; one inside a frame of another origin is out
+/// of a page script's reach (`frame_sealed`). A selector names the element to
+/// focus first; one that does not take the focus hears the keys itself. A key
+/// that writes is held at a password field before any event, as the typing's
+/// keys are. The events are a keyboard's, each to the element that has the
+/// focus as it goes: the modifiers down, the key's keydown, a keypress for a
+/// key that writes (and for Enter) unless the keydown was cancelled, its
+/// keyup, the modifiers up — with the legacy codes pages still read.
+pub(crate) const KEY_PRESS_BODY: &str = r#"
+const zcFocused = () => {
+  let at = document.activeElement || document.body;
+  for (;;) {
+    if (at && /^(iframe|frame)$/i.test(at.tagName)) {
+      let inner = null;
+      try { inner = at.contentDocument; } catch (_) {}
+      if (!inner) return { element: at, sealed: true };
+      at = inner.activeElement || inner.body;
+    } else if (at && at.shadowRoot && at.shadowRoot.activeElement) {
+      at = at.shadowRoot.activeElement;
+    } else {
+      return { element: at || document.documentElement, sealed: false };
+    }
+  }
+};
+let target;
+if (request.selector !== null) {
+  const selected = zcSelect(request.selector);
+  if (selected.code) return zcFail(selected.code);
+  target = selected.element;
+  if (!zcVisible(target)) return zcFail("element_not_visible");
+  if (target.matches && target.matches(":disabled")) return zcFail("element_disabled");
+} else {
+  const focused = zcFocused();
+  if (focused.sealed) return zcFail("frame_sealed");
+  target = focused.element;
+}
+const secureField = zcSecretField(target);
+if (request.writes !== "nothing" && secureField) {
+  return zcEncode({ ok: true, value: { method: "held", secureField } });
+}
+if (request.selector !== null) {
+  target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+  if (typeof target.focus === "function") target.focus({ preventScroll: true });
+}
+const pinned = request.selector !== null && zcFocused().element !== target;
+const flags = { ctrlKey: false, shiftKey: false, altKey: false, metaKey: false };
+const send = (type, one, charCode) => {
+  const at = pinned ? target : zcFocused().element;
+  const view = (at.ownerDocument && at.ownerDocument.defaultView) || window;
+  const legacy = type === "keypress" ? charCode : one.keyCode;
+  const event = new view.KeyboardEvent(type, { ...flags, key: one.key, code: one.code,
+    location: /Left$/.test(one.code) ? 1 : 0, repeat: false, bubbles: true, cancelable: true,
+    composed: true, view, keyCode: legacy, which: legacy, charCode });
+  for (const [name, value] of [["keyCode", legacy], ["which", legacy], ["charCode", charCode]]) {
+    if (event[name] !== value) Object.defineProperty(event, name, { get: () => value });
+  }
+  return at.dispatchEvent(event);
+};
+const press = request.press;
+for (const held of press.held) {
+  flags[held.flag] = true;
+  send("keydown", held, 0);
+}
+const heard = send("keydown", press.key, 0);
+if (heard && press.text) send("keypress", press.key, press.text);
+send("keyup", press.key, 0);
+for (const held of [...press.held].reverse()) {
+  flags[held.flag] = false;
+  send("keyup", held, 0);
+}
+return zcEncode({ ok: true, value: { method: "synthetic-keys", secureField,
+  blockPath: zcStructuralChain(target, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
+"#;
+
+/// The point press's page script. The picture is the visual viewport at the
+/// page's device ratio — the page's zoom is inside that ratio — so a pixel of
+/// it is a CSS pixel of the layout viewport once divided by the ratio and the
+/// pinch scale and moved by the visual viewport's offset; the scroll is the
+/// page's own. The press lands on what is on top at that point, into open
+/// shadow roots and frames of the page's own origin, as a pointer's does:
+/// over, move, down, the focus the down gives what it landed in (unless the
+/// page took the down), up, click — and answers the point, in CSS pixels of
+/// the page's viewport, as the rect it pressed.
+pub(crate) const POINT_PRESS_BODY: &str = r#"
+const ratio = window.devicePixelRatio || 1;
+const visual = window.visualViewport;
+const scale = visual && visual.scale > 0 ? visual.scale : 1;
+const clientX = (visual ? visual.offsetLeft : 0) + request.x / ratio / scale;
+const clientY = (visual ? visual.offsetTop : 0) + request.y / ratio / scale;
+if (!(clientX >= 0 && clientY >= 0 && clientX < window.innerWidth && clientY < window.innerHeight)) {
+  return zcFail("point_outside");
+}
+let doc = document;
+let x = clientX;
+let y = clientY;
+let hit = doc.elementFromPoint(x, y);
+for (;;) {
+  const inner = hit && hit.shadowRoot ? hit.shadowRoot.elementFromPoint(x, y) : null;
+  if (inner && inner !== hit) {
+    hit = inner;
+  } else if (hit && /^(iframe|frame)$/i.test(hit.tagName)) {
+    let framed = null;
+    try { framed = hit.contentDocument; } catch (_) {}
+    if (!framed) return zcFail("frame_sealed");
+    const box = hit.getBoundingClientRect();
+    x -= box.left + hit.clientLeft;
+    y -= box.top + hit.clientTop;
+    doc = framed;
+    hit = doc.elementFromPoint(x, y);
+  } else {
+    break;
+  }
+}
+if (!hit) return zcFail("point_outside");
+const view = doc.defaultView || window;
+const common = { bubbles: true, cancelable: true, composed: true, view, clientX: x, clientY: y,
+  button: 0, buttons: 0 };
+const pointer = { pointerId: 1, pointerType: "mouse", isPrimary: true };
+const Pointer = typeof view.PointerEvent === "function" ? view.PointerEvent : null;
+if (Pointer) {
+  hit.dispatchEvent(new Pointer("pointerover", { ...common, ...pointer }));
+  hit.dispatchEvent(new Pointer("pointerenter", { ...common, ...pointer, bubbles: false }));
+}
+hit.dispatchEvent(new view.MouseEvent("mouseover", common));
+hit.dispatchEvent(new view.MouseEvent("mouseenter", { ...common, bubbles: false }));
+if (Pointer) hit.dispatchEvent(new Pointer("pointermove", { ...common, ...pointer }));
+hit.dispatchEvent(new view.MouseEvent("mousemove", common));
+if (Pointer) hit.dispatchEvent(new Pointer("pointerdown", { ...common, ...pointer, buttons: 1 }));
+const down = hit.dispatchEvent(new view.MouseEvent("mousedown", { ...common, buttons: 1, detail: 1 }));
+if (down) {
+  let node = hit;
+  while (node && !(node.nodeType === 1
+    && (node.tabIndex >= 0 || node.hasAttribute("tabindex") || node.isContentEditable))) {
+    node = node.parentElement || (node.getRootNode && node.getRootNode().host) || null;
+  }
+  if (node && typeof node.focus === "function") {
+    node.focus({ preventScroll: true });
+  } else if (doc.activeElement && doc.activeElement !== doc.body && typeof doc.activeElement.blur === "function") {
+    doc.activeElement.blur();
+  }
+}
+if (Pointer) hit.dispatchEvent(new Pointer("pointerup", { ...common, ...pointer }));
+hit.dispatchEvent(new view.MouseEvent("mouseup", { ...common, detail: 1 }));
+hit.dispatchEvent(new view.MouseEvent("click", { ...common, detail: 1 }));
+return zcEncode({ ok: true, value: { method: "dom-point",
+  rect: [clientX, clientY, 0, 0], dpr: ratio,
+  blockPath: zcStructuralChain(hit, request.blockRoots), pageUrl: zcSafeUrl(location.href),
   pressedAt: performance.now() } });
 "#;
 

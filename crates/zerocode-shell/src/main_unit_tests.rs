@@ -6353,8 +6353,8 @@ fn every_browser_verb_has_its_evidence_row() {
             "list" | "read" | "console" | "network" | "tabs" | "diagnose" | "fields" => None,
             // `marks` numbers the controls; the frame is `screenshot --marks`.
             "open" | "close" | "marks" => Some(false),
-            "goto" | "eval" | "click" | "type" | "fill" | "wait" | "screenshot" | "viewport"
-            | "scroll" | "find" => Some(true),
+            "goto" | "eval" | "click" | "type" | "press" | "fill" | "wait" | "screenshot"
+            | "viewport" | "scroll" | "find" => Some(true),
             other => panic!("`{other}` joined VERBS without an evidence row in this table"),
         };
         assert_eq!(
@@ -6363,6 +6363,13 @@ fn every_browser_verb_has_its_evidence_row() {
             "captures(\"browser\", \"{verb}\") drifted from the table"
         );
     }
+}
+
+/// A key press is a step with its frame (t-70755): a Flow saved from the log
+/// keeps the Enter that committed a canvas grid's cell, and replays it.
+#[test]
+fn a_key_press_in_a_page_leaves_a_line_and_a_frame() {
+    assert_eq!(run_evidence::captures("browser", "press"), Some(true));
 }
 
 /// The page's self-report is parsed without being believed.

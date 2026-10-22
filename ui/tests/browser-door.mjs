@@ -3312,6 +3312,190 @@ await test("the_typing_body_answers_without_the_value_it_typed_in_the_page_and_i
   return `${answers.length} answers`;
 });
 
+/* A canvas grid (t-70755): the scene a person showed — a web spreadsheet written through Computer Use. Its
+ * cells are pixels on a canvas, and its name box and formula bar commit on Enter alone, as the real ones do;
+ * the page says what it holds in its title (`grid B3=42`). The fixture is the one the window's own walk was
+ * measured on. The typing alone writes no cell; a key press after each entry writes every one; a point of the
+ * pane's picture — device pixels, the page scrolled — selects a cell, and keys write it. A key press reaches
+ * the page as a keyboard's does, keydown → keypress → keyup, its modifiers down before it and up after, and
+ * a key that writes is held at a password field. The bodies and the key tables are read from the Rust. */
+const GRID = await readFile(resolve(UI, "../crates/zerocode-shell/tests/fixtures/canvas-grid.html"), "utf8");
+const GRID_CELLS = [["B3", "42"], ["C5", "hi"], ["H20", "end"]];
+const rustBody = (name) => {
+  const body = rustText(DOOR, name);
+  if (!body) throw new Error(`${name} is not in the Rust the pane runs`);
+  return body;
+};
+/* `PAGE_KEYS` and `PAGE_MODIFIERS` (agent_browser.rs): `("name", "key", "code", keyCode)` rows. */
+const rustRows = (name) => {
+  const held = CORE.match(new RegExp(`const ${name}: [^=]*=\\s*&?\\[([\\s\\S]*?)\\];\\n`));
+  if (!held) throw new Error(`${name} is not in the Rust the pane runs`);
+  return [...held[1].matchAll(/\(\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)",\s*(\d+),?\s*\)/g)]
+    .map((row) => [JSON.parse(`"${row[1]}"`), JSON.parse(`"${row[2]}"`), JSON.parse(`"${row[3]}"`), Number(row[4])]);
+};
+/* `page_press` (agent_browser.rs) for the chords these checks press on this machine's road (macOS: Cmd is the
+ * primary modifier, and Shift and Option write a character): a letter or a digit by its glyph, a named key by the
+ * table, the text a keypress carries for a key that writes a character, and for Enter with nothing but Shift. */
+const pagePress = (spec) => {
+  const parts = spec.split("+");
+  const name = parts.pop();
+  const flagOf = { shift: "shiftKey", ctrl: "ctrlKey", alt: "altKey", cmd: "metaKey", cmdorctrl: "metaKey" };
+  const modifiers = rustRows("PAGE_MODIFIERS");
+  const held = parts.map((part) => {
+    const row = modifiers.find(([flag]) => flag === flagOf[part]);
+    return { flag: row[0], key: row[1], code: row[2], keyCode: row[3] };
+  });
+  const shift = parts.includes("shift");
+  let key;
+  if (/^[a-z]$/.test(name)) key = { key: shift ? name.toUpperCase() : name, code: `Key${name.toUpperCase()}`, keyCode: name.toUpperCase().charCodeAt(0) };
+  else if (/^[0-9]$/.test(name)) key = { key: name, code: `Digit${name}`, keyCode: name.charCodeAt(0) };
+  else {
+    const row = rustRows("PAGE_KEYS").find(([one]) => one === name);
+    key = { key: row[1], code: row[2], keyCode: row[3] };
+  }
+  const onlyShift = parts.every((part) => part === "shift");
+  const character = parts.every((part) => part === "shift" || part === "alt") && (name === "space" || [...name].length === 1);
+  const text = character ? key.key.charCodeAt(0) : onlyShift && key.key === "Enter" ? key.keyCode : 0;
+  return { held, key, text, writes: character ? "character" : "nothing" };
+};
+const keyScript = (spec, selector = null) => {
+  const { writes, ...press } = pagePress(spec);
+  return script({ selector, writes, press, blockRoots: BLOCK_ROOTS.join(",") }, rustBody("KEY_PRESS_BODY"));
+};
+const pointScript = (x, y) => script({ x, y, blockRoots: BLOCK_ROOTS.join(",") }, rustBody("POINT_PRESS_BODY"));
+const typeInto = (selector, text) => script({ selector, text, road: "keys", blockRoots: BLOCK_ROOTS.join(",") }, TYPE_BODY);
+const timed = async (target, source) => {
+  const started = performance.now();
+  const answer = await evalJson(target, source);
+  return { answer, ms: performance.now() - started };
+};
+const median = (values) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+const gridPage = async (options = {}) => {
+  const grid = await browser.newPage({ viewport: { width: 900, height: 600 }, ...options });
+  await grid.setContent(GRID);
+  return grid;
+};
+const written = (title) => GRID_CELLS.filter(([cell, value]) => title.split(" ").includes(`${cell}=${value}`)).length;
+
+await test("a_canvas_grid_takes_no_cell_from_the_typing_alone_the_name_box_and_formula_bar_wait_for_enter", async () => {
+  const grid = await gridPage();
+  try {
+    const ms = [];
+    for (const [cell, value] of GRID_CELLS) {
+      const named = await timed(grid, typeInto("#name-box", cell));
+      const typed = await timed(grid, typeInto("#formula-bar", value));
+      assert(named.answer.ok && typed.answer.ok, "the typing itself went in", { named, typed });
+      ms.push(named.ms + typed.ms);
+    }
+    const title = await grid.title();
+    assert(written(title) === 0, "a cell was written without Enter", title);
+    return `0/${GRID_CELLS.length} cells (title "${title}"), ${median(ms).toFixed(1)} ms a cell (two typings)`;
+  } finally { await grid.close(); }
+});
+
+await test("a_canvas_grid_takes_every_cell_through_its_name_box_enter_its_formula_bar_and_enter", async () => {
+  const grid = await gridPage();
+  try {
+    const ms = [];
+    for (const [cell, value] of GRID_CELLS) {
+      let took = 0;
+      for (const source of [typeInto("#name-box", cell), keyScript("enter"), typeInto("#formula-bar", value), keyScript("enter")]) {
+        const step = await timed(grid, source);
+        assert(step.answer.ok, "a step of the entry was refused", step.answer);
+        took += step.ms;
+      }
+      ms.push(took);
+    }
+    const title = await grid.title();
+    assert(written(title) === GRID_CELLS.length, "not every cell was written", title);
+    const answer = await evalJson(grid, keyScript("enter"));
+    assert(answer.value.method === "synthetic-keys" && answer.value.secureField === false, "a press says its road", answer);
+    return `${written(title)}/${GRID_CELLS.length} cells (title "${title}"), ${median(ms).toFixed(1)} ms a cell (two typings, two presses)`;
+  } finally { await grid.close(); }
+});
+
+await test("a_point_of_the_panes_picture_selects_the_cell_under_it_at_device_ratio_two_on_a_scrolled_page_and_keys_write_it", async () => {
+  // A short viewport scrolled down: the picture shows the grid's lower rows, at two device pixels a CSS pixel.
+  const grid = await gridPage({ viewport: { width: 900, height: 320 }, deviceScaleFactor: 2 });
+  try {
+    await grid.evaluate(() => window.scrollTo(0, 200));
+    const facts = await grid.evaluate(() => {
+      const box = document.getElementById("grid").getBoundingClientRect();
+      return { left: box.left, top: box.top, ratio: window.devicePixelRatio, scrolled: window.scrollY };
+    });
+    assert(facts.ratio === 2 && facts.scrolled === 200, "the page is not at ratio 2, scrolled", facts);
+    // The fixture's own grid: a 40 px head and 90 px columns across, a 24 px head and 24 px rows down.
+    const centre = (column, row) => [
+      Math.round((facts.left + 40 + 90 * column + 45) * facts.ratio),
+      Math.round((facts.top + 24 + 24 * row + 12) * facts.ratio),
+    ];
+    const ms = [];
+    for (const [cell, value, column, row] of [["B12", "42", 1, 11], ["D15", "7", 3, 14]]) {
+      const [x, y] = centre(column, row);
+      const point = await timed(grid, pointScript(x, y));
+      assert(point.answer.ok && point.answer.value.method === "dom-point", "the point press was refused", point.answer);
+      const at = await grid.evaluate(() => document.getElementById("name-box").value);
+      assert(at === cell, "the press selected another cell", { cell, at, x, y });
+      let took = point.ms;
+      for (const key of [...value, "enter"]) {
+        const step = await timed(grid, keyScript(key));
+        assert(step.answer.ok, "a key was refused", step.answer);
+        took += step.ms;
+      }
+      ms.push(took);
+    }
+    const title = await grid.title();
+    assert(title.includes("B12=42") && title.includes("D15=7"), "the keys after a point press wrote no cell", title);
+    const outside = await evalJson(grid, pointScript(900 * 2 + 10, 10));
+    assert(!outside.ok && outside.code === "point_outside", "a point off the picture is refused before any event", outside);
+    return `2/2 cells (title "${title}"), ${median(ms).toFixed(1)} ms a cell (a point press, the keys, Enter)`;
+  } finally { await grid.close(); }
+});
+
+await test("a_key_press_reaches_the_page_as_a_keyboard_does_keydown_keypress_keyup_and_its_modifiers_around_it", async () => {
+  const keys = await browser.newPage();
+  try {
+    await keys.setContent(`<input id="one"><input id="two"><script>
+      window.heard = [];
+      for (const type of ["keydown", "keypress", "keyup"]) document.addEventListener(type, (event) => window.heard.push(
+        [type, event.key, event.code, event.keyCode, event.charCode, event.shiftKey, event.metaKey, event.target.id].join(" ")), true);
+    </script>`);
+    await keys.focus("#one");
+    const heard = async (source) => {
+      await keys.evaluate(() => { window.heard = []; });
+      const answer = await evalJson(keys, source);
+      assert(answer.ok, "the press was refused", answer);
+      return keys.evaluate(() => window.heard);
+    };
+    const enter = await heard(keyScript("enter"));
+    assert(JSON.stringify(enter) === JSON.stringify(["keydown Enter Enter 13 0 false false one", "keypress Enter Enter 13 13 false false one", "keyup Enter Enter 13 0 false false one"]), "Enter", enter);
+    const tab = await heard(keyScript("shift+tab", "#two"));
+    assert(JSON.stringify(tab) === JSON.stringify(["keydown Shift ShiftLeft 16 0 true false two", "keydown Tab Tab 9 0 true false two", "keyup Tab Tab 9 0 true false two", "keyup Shift ShiftLeft 16 0 false false two"]), "Shift+Tab, at the selector's element, which took the focus", tab);
+    assert(await keys.evaluate(() => document.activeElement.id) === "two", "the selector's element did not take the focus");
+    const letter = await heard(keyScript("shift+a"));
+    assert(letter.length === 5 && letter[2] === "keypress A KeyA 65 65 true false two", "Shift+A writes a capital", letter);
+    const chord = await heard(keyScript("cmdorctrl+a"));
+    assert(chord.length === 4 && chord.every((line) => !line.startsWith("keypress")), "a chord with the primary modifier writes nothing", chord);
+    return `${enter.length + tab.length + letter.length + chord.length} events in order`;
+  } finally { await keys.close(); }
+});
+
+await test("a_key_that_writes_is_held_at_a_password_field_before_its_first_event_and_enter_is_not", async () => {
+  const secret = await browser.newPage();
+  try {
+    await secret.setContent(`<input id="pw" type="password"><script>
+      window.heard = 0; document.addEventListener("keydown", () => { window.heard += 1; }, true);
+    </script>`);
+    await secret.focus("#pw");
+    const held = await evalJson(secret, keyScript("a"));
+    assert(held.ok && held.value.method === "held" && held.value.secureField === true, "a letter into a password field is held", held);
+    assert(await secret.evaluate(() => window.heard) === 0, "the page heard a key it was held from");
+    const enter = await evalJson(secret, keyScript("enter"));
+    assert(enter.ok && enter.value.method === "synthetic-keys", "Enter writes nothing, and goes", enter);
+    return "held, then Enter";
+  } finally { await secret.close(); }
+});
+
 await browser.close();
 
 let failed = 0;

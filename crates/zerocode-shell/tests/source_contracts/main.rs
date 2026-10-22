@@ -9930,6 +9930,8 @@ mod tests {
             "automate_read(app, &state",
             "automate_click(app, &state",
             "automate_type(app, &state",
+            "automate_press(app, &state",
+            "automate_click_at(app, &state",
             "automate_wait(app, &state",
             "automate_console(app, &state",
             "automate_network(app, &state",
