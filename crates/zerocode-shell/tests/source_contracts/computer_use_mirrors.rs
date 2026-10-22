@@ -971,3 +971,39 @@ fn the_skill_names_every_no_look_reason_in_the_order_they_are_taken() {
         "the skill does not put the person's desktop app after the four: {teaching}"
     );
 }
+
+/// t-70855: a background walk the person took the foreground from ends on a
+/// refused look whose code is `background_interrupted` — the person's own
+/// hand on their screen, no door's defect. The skill says so where it
+/// teaches a refused look as a defect to report, or a model reports the
+/// person taking over as a defect, or looks again under their hand (zo's
+/// ladder stops there, t-70459).
+#[test]
+fn the_skill_says_a_walk_the_person_took_over_stops_and_is_no_defect() {
+    use zerocode_core::computer_use::walk_words;
+    let skill = include_str!("../../../../skills/computer-use/SKILL.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let start = skill
+        .find(&format!("- `{}`: ", walk_words::LOOK_REFUSED))
+        .expect("the skill says what a refused look means");
+    let end = skill[start..]
+        .find("desktop app comes last")
+        .map_or(skill.len(), |at| start + at);
+    let refused = &skill[start..end];
+    let taken = refused
+        .find(&format!("`{}`", walk_words::BACKGROUND_INTERRUPTED))
+        .unwrap_or_else(|| {
+            panic!(
+                "the skill's refused look does not name `{}`: {refused}",
+                walk_words::BACKGROUND_INTERRUPTED
+            )
+        });
+    for said in ["no defect", "Do not look again; stop"] {
+        assert!(
+            refused[taken..].contains(said),
+            "the skill does not say {said:?} of a walk the person took over: {refused}"
+        );
+    }
+}

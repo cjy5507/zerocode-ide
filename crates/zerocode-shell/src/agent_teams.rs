@@ -52,9 +52,9 @@ const SHIMS: &[(&str, &str, &str)] = &[
 ];
 
 /// What an agent types to reach the ledger.
-pub(crate) const ORC_SHIM_NAME: &str = "zerocode-orc";
+pub(crate) const ORC_SHIM_NAME: &str = zerocode_core::agent_shims::ORCHESTRATION_COMMAND;
 /// Where it lives — its own directory, for the reason above.
-pub(crate) const ORC_DIR_NAME: &str = "orchestration-bin";
+pub(crate) const ORC_DIR_NAME: &str = zerocode_core::agent_shims::ORCHESTRATION_DIR_NAME;
 
 /// Every team this window has open, by id.
 ///
