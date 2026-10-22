@@ -968,9 +968,12 @@ fn with_cached_run<T>(run_id: &str, read: impl FnOnce(Option<&Run>) -> T) -> Res
 /// here. A gate the run does not hold is left to the ledger, which refuses
 /// what it cannot find.
 fn hold_takes_words(run: &Run, gate: &str) -> Result<(), String> {
-    // Red (t-70028): the rule lands with the next commit — today every decision takes words.
-    let _ = (run, gate);
-    Ok(())
+    match run.gates.iter().find(|one| one.id == gate) {
+        Some(one) if one.held_for.is_some() => {
+            Err("a hold the ledger opened takes harvest or dispatch, not free words".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Answer a question put to `run_id`'s coordinator, as that seat — the
@@ -1073,6 +1076,11 @@ pub(crate) fn resolve_hold(
             .map(|(_, words)| *words)
             .ok_or_else(|| format!("a hold takes harvest or dispatch, not {act:?}"))?
     };
+    if act == "answer" {
+        with_cached_run(run_id, |run| {
+            run.map_or(Ok(()), |run| hold_takes_words(run, gate))
+        })??;
+    }
     as_the_coordinator(
         run_id,
         [
