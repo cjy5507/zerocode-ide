@@ -19,6 +19,9 @@ pub(super) struct WithTable {
 }
 
 impl Host for WithTable {
+    fn worktree_of(&self, term: u32) -> Option<std::path::PathBuf> {
+        self.inner.worktree_of(term)
+    }
     fn split(
         &self,
         team: &str,

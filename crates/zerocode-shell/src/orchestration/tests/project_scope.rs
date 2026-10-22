@@ -547,6 +547,58 @@ fn an_unscoped_runs_own_coordinator_can_establish_its_project() {
     crate::agent_teams::forget_term(OTHER);
 }
 
+#[test]
+fn a_federation_run_stays_in_the_project_of_its_named_host() {
+    const A: u32 = 712_710;
+    const B: u32 = 712_711;
+    let (_window, _store) = PrivateWindow::boot();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_720);
+    let first = "team-project-federation-first";
+    let second = "team-project-federation-second";
+    a_leader(&host, first, A, Some(&disk.a));
+    a_leader(&host, second, B, Some(&disk.b));
+    let root = super::super::federation_root().expect("federation root");
+    std::fs::create_dir_all(&root).expect("federation directory");
+    let file = root.join("host-team");
+    let previous = std::fs::read(&file).ok();
+    let attach = |dispatch: &str| -> serde_json::Value {
+        serde_json::from_str(&super::super::federation_serve(
+            &host,
+            "project-fixture-home",
+            &serde_json::json!({
+                "verb": "attach", "dispatch": dispatch,
+                "agent": "claude", "prompt": "fixture work"
+            }),
+        ))
+        .expect("federation response")
+    };
+    std::fs::write(&file, first).expect("first host");
+    let accepted = attach("project-fixture-first");
+    assert_eq!(accepted["state"], "ready", "{accepted}");
+    assert_eq!(host.spawned(), 1);
+    let run = accepted["run"].as_str().expect("run");
+    assert_eq!(shown_project(&host, first, run)["root"], disk.a_root());
+
+    std::fs::write(&file, second).expect("second host");
+    let refused = attach("project-fixture-second");
+    assert!(
+        refused["refused"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not answered across projects")),
+        "{refused}"
+    );
+    assert_eq!(host.spawned(), 1, "a foreign host opened another worker");
+    assert_eq!(shown_project(&host, first, run)["root"], disk.a_root());
+    match previous {
+        Some(bytes) => std::fs::write(file, bytes).expect("restore host"),
+        None => std::fs::remove_file(file).expect("remove fixture host"),
+    }
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(B);
+    crate::agent_teams::forget_term(712_720);
+}
+
 /// The case the person saw: a pane of project B holds the seat of a run that
 /// project A made, and mail for the run's coordinator lands. Before t-65286
 /// the pointer was typed into B's pane, where another project's agent read
