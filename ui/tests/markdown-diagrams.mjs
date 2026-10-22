@@ -10,9 +10,16 @@
  *   4. a layout already made is drawn as the words are painted: no request, no frame of code;
  *   5. a refused or empty layout keeps every fence that waited on it as code and writes one line to
  *      the window log for its one request, without the source; and it is asked again next time.
+ * Then the six panels, each in its own column: a CI check's output, a notebook's Markdown cell and
+ * output, and the GitHub and GitLab bodies and comment cards draw the fence where it stood, its
+ * label holding `<img src=x onerror=...>` as text (these are someone else's words), the drawing kept
+ * in the panel's column and legible at the window's caption size; the check pane and the GitHub item,
+ * painted again, draw in that paint with no request; and a remote body whose layout is refused keeps
+ * its fence as code with one line in the window log.
  *
- * Checked on bodies the checks paint themselves, with `render_mermaid` answered here (the layout
- * itself is tested in Rust). A fence is named by its first node's label up to its first space or `<`,
+ * Checked on bodies the checks paint themselves and on the panels' own painters, with
+ * `render_mermaid` answered here (the layout itself is tested in Rust). A fence is named by its first
+ * node's label up to its first space or `<`,
  * and the drawing carries that label whole as its node's text. Every wait is a condition read once a
  * frame, bounded; an answer the test needs to hold is held until the test releases it. Every read of
  * the page is defensive (`?.`, `?? null`): on a tree that does not draw these diagrams the checks fail
@@ -25,8 +32,9 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * second): the answers here come at once or when released, so a green tree meets each in a few. */
 const FRAMES = 240;
 
-/* The diagrams the backend answers with and the hands the checks share — stood in the page once. */
-function standDiagrams(page) {
+/* The diagrams the backend answers with and the hands the checks share — stood in the page once
+ * (and in the conversation's, `conversation-diagrams.mjs`). */
+export function standDiagrams(page) {
   return page.evaluate((frames) => {
     const seen = (window.__DIAGRAMS__ = { asked: [], waiting: [], hold: false, empty: false, logged: [], most: 0 });
     const labelOf = (source) => /\[([^\]]+)\]/.exec(source)?.[1] ?? "";
@@ -96,7 +104,43 @@ function standDiagrams(page) {
     window.__FENCE__ = (label) => ["```mermaid", "flowchart LR", `  A[${label}] --> B[끝]`, "```", ""].join("\n");
     window.__CODE__ = (body) => body?.querySelectorAll('pre.md-block[data-language="mermaid"]').length ?? null;
     window.__DRAWN__ = (body) => body?.querySelectorAll(".mmd-block svg.mmd").length ?? null;
+    // What a hostile label carries: an image with a handler. Remote bodies (a check's output, an
+    // issue, a comment) are someone else's words, so it must arrive as text.
+    window.__HOSTILE__ = `<img src=x onerror="window.__PWNED__ = 7">`;
+    // A body's words around a diagram named `name`, its label carrying the hostile markup.
+    window.__AROUND__ = (before, name, after) => [before, "", window.__FENCE__(`${name} ${window.__HOSTILE__}`), after, ""].join("\n");
+    // What one painted body shows of the diagram named `name`: whether it stands where its fence stood,
+    // its label as text, no code of it left, the drawing kept in the body's column (fitted, or
+    // scrolling inside its own block) and legible at the window's caption size, and no markup run.
+    window.__READ_DIAGRAM__ = (body, name) => {
+      const svg = [...(body?.querySelectorAll(".mmd-block svg.mmd") ?? [])]
+        .find((one) => nameOf(one.querySelector("text.mmd-label")?.textContent ?? "") === name) ?? null;
+      const block = svg?.closest(".mmd-block") ?? null;
+      const width = svg?.getBoundingClientRect().width ?? 0;
+      const natural = svg?.viewBox.baseVal.width ?? 0;
+      const sizes = [...(svg?.querySelectorAll("text") ?? [])].map((text) => parseFloat(getComputedStyle(text).fontSize));
+      const caption = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-3xs"));
+      return {
+        drawn: svg !== null,
+        labelled: svg?.querySelector("text.mmd-label")?.textContent === `${name} ${window.__HOSTILE__}`,
+        before: block?.previousElementSibling?.textContent.trim() ?? null,
+        after: block?.nextElementSibling?.textContent.trim() ?? null,
+        codeLeft: [...(body?.querySelectorAll('pre.md-block[data-language="mermaid"]') ?? [])].filter((pre) => pre.textContent.includes(name)).length,
+        contained: svg !== null && width > 0 && (block.clientWidth >= width - 1 || block.scrollWidth > block.clientWidth + 1)
+          && body.scrollWidth <= body.clientWidth + 1,
+        legible: natural > 0 && sizes.length > 0 && caption > 0 && (Math.min(...sizes) * width) / natural >= caption - 0.05,
+        markup: body?.querySelectorAll("img, script").length ?? null,
+        pwned: window.__PWNED__ ?? null,
+      };
+    };
   }, FRAMES);
+}
+
+/* A panel's diagram, read: drawn where its fence stood between the words before and after it, its
+ * label text, no code of it left, kept in its column, legible, nothing run. */
+function readsRight(read, before, after) {
+  return read.drawn && read.labelled && read.before === before && read.after === after && read.codeLeft === 0
+    && read.contained && read.legible && read.markup === 0 && read.pwned === null;
 }
 
 export async function testMarkdownDiagrams(browser, origin, ok) {
@@ -282,6 +326,176 @@ export async function testMarkdownDiagrams(browser, origin, ok) {
       "a failed layout is not remembered: the same diagram painted again is asked again, once, and draws",
       failed.retried.drawn && failed.retried.asks === 1,
       JSON.stringify(failed.retried),
+    );
+
+    /* ---- the six panels: each its own column ------------------------------------------------ */
+    await page.setViewportSize({ width: 1440, height: 900 });
+
+    // A CI check's output in the source-control column (`checkOutputEl`): the pane is built again
+    // with each paint of the list — a poll whose answer changed, a row opened — so the diagram must
+    // stand in that paint, with no request.
+    const check = await page.evaluate(async () => {
+      const seen = window.__DIAGRAMS__;
+      seen.hold = false;
+      const summary = window.__AROUND__("검사 앞 문단.", "검사-그림", "검사 뒤 문단.");
+      window.__CHECKS__ = {
+        review: { number: 42, title: "그림 검사", url: "https://github.com/o/r/pull/42", state: "open", draft: false, head_sha: "abc", owner_repo: "o/r" },
+        checks: [{ name: "lint (diagram)", status: "completed", conclusion: "failure", url: "https://github.com/o/r/actions/runs/1", check_run_id: 11, workflow_run_id: 1 }],
+        at_page_limit: false,
+      };
+      window.__CHECK_DETAILS__ = {
+        "lint (diagram)": { name: "lint (diagram)", status: "completed", conclusion: "failure", title: "그림 하나", summary, annotations: [], jobs: [] },
+      };
+      revealActivity("checks");
+      const row = () => document.querySelector("#checks-list .check-row");
+      const listed = await window.__UNTIL__(() => row());
+      row()?.click();
+      const prose = () => document.querySelector("#checks-list .check-pane .check-prose");
+      const stood = await window.__UNTIL__(() => prose()?.textContent.includes("검사 뒤 문단."));
+      await window.__UNTIL__(() => window.__DRAWN__(prose()) === 1);
+      const drawn = window.__READ_DIAGRAM__(prose(), "검사-그림");
+      const asks = seen.asked.length;
+      paintChecks();
+      const again = { drawn: window.__DRAWN__(prose()), code: window.__CODE__(prose()) };
+      await window.__FRAMES__(3);
+      again.asked = seen.asked.length - asks;
+      const list = document.getElementById("checks-list");
+      return { listed: Boolean(listed), stood, drawn, again, listSideways: list ? list.scrollWidth > list.clientWidth + 1 : null };
+    });
+    ok(
+      "a CI check's output draws its ```mermaid fence as a diagram where the fence stood, its label holding <img src=x onerror=...> as text, kept in the check pane's column and legible, the list not pushed sideways",
+      check.listed && check.stood && readsRight(check.drawn, "검사 앞 문단.", "검사 뒤 문단.") && check.listSideways === false,
+      JSON.stringify(check),
+    );
+    ok(
+      "the check pane, built again with each paint of the list, stands with its diagram drawn in that paint and asks nothing",
+      check.again.drawn === 1 && check.again.code === 0 && check.again.asked === 0,
+      JSON.stringify(check.again),
+    );
+
+    // A notebook: a Markdown cell and a Markdown output (`notebookCellEl`, `notebookItemEl`).
+    const notebook = await page.evaluate(async () => {
+      const book = {
+        nbformat: 4,
+        metadata: { kernelspec: { display_name: "Python 3", language: "python" } },
+        cells: [
+          { cell_type: "markdown", source: window.__AROUND__("셀 앞 문단.", "셀-그림", "셀 뒤 문단.") },
+          { cell_type: "code", execution_count: 1, source: "show()\n", outputs: [
+            { output_type: "display_data", data: { "text/markdown": window.__AROUND__("출력 앞 문단.", "넓은출력-그림", "출력 뒤 문단.") } },
+          ] },
+        ],
+      };
+      const read = window.__ANSWER__.read_text_file;
+      window.__ANSWER__.read_text_file = (args) => (args.path === "/w/repo/diagrams.ipynb" ? { text: JSON.stringify(book), version: 1 } : read?.(args));
+      await openPath("/w/repo/diagrams.ipynb");
+      const board = () => [...document.querySelectorAll(".ipynb-view")].find((one) => !one.hidden)?.querySelector(".ipynb-page") ?? null;
+      const stood = await window.__UNTIL__(() => board()?.textContent.includes("출력 뒤 문단."));
+      await window.__UNTIL__(() => window.__DRAWN__(board()) === 2);
+      const boxes = [...(board()?.querySelectorAll(".nb-md") ?? [])];
+      const seen = {
+        stood,
+        cell: window.__READ_DIAGRAM__(boxes[0] ?? null, "셀-그림"),
+        output: window.__READ_DIAGRAM__(boxes[1] ?? null, "넓은출력-그림"),
+        boardSideways: board() ? board().scrollWidth > board().clientWidth + 1 : null,
+      };
+      window.__ANSWER__.read_text_file = read;
+      return seen;
+    });
+    ok(
+      "a notebook's Markdown cell and its Markdown output draw their fences as diagrams where they stood, labels as text, each kept in its cell's column and legible, a drawing wider than the cell scrolling inside its block",
+      notebook.stood && readsRight(notebook.cell, "셀 앞 문단.", "셀 뒤 문단.") && readsRight(notebook.output, "출력 앞 문단.", "출력 뒤 문단.")
+        && notebook.boardSideways === false,
+      JSON.stringify(notebook),
+    );
+
+    // A GitHub issue's body and a comment on it (`paintGithubItem`, `itemVoiceCard`), and the item
+    // painted again from what it told.
+    const github = await page.evaluate(async () => {
+      const seen = window.__DIAGRAMS__;
+      const body = window.__AROUND__("본문 앞 문단.", "넓은깃허브-그림", "본문 뒤 문단.");
+      const comment = window.__AROUND__("댓글 앞 문단.", "깃허브댓글-그림", "댓글 뒤 문단.");
+      const item = { kind: "issue", number: 7, title: "그림이 든 이슈", url: "https://github.com/acme/app/issues/7", state: "open", author: "kim" };
+      window.__ANSWER__.github_work_item_detail = () => ({
+        ...item, opened_at: "2026-08-01T09:00:00Z", body,
+        comments: [{ author: "lee", written_at: "2026-08-02T10:00:00Z", body: comment }],
+      });
+      openGithubItem(item);
+      const card = () => el("gh-item-comments")?.querySelector(".gh-item-comment-body") ?? null;
+      const stood = await window.__UNTIL__(() => el("gh-item-body")?.textContent.includes("본문 뒤 문단.") && card()?.textContent.includes("댓글 뒤 문단."));
+      await window.__UNTIL__(() => window.__DRAWN__(el("gh-item-body")) === 1 && window.__DRAWN__(card()) === 1);
+      const read = { body: window.__READ_DIAGRAM__(el("gh-item-body"), "넓은깃허브-그림"), comment: window.__READ_DIAGRAM__(card(), "깃허브댓글-그림") };
+      const asks = seen.asked.length;
+      if (ghItem?.told) paintGithubItem(ghItem.told);
+      const again = { body: window.__DRAWN__(el("gh-item-body")), comment: window.__DRAWN__(card()) };
+      await window.__FRAMES__(3);
+      again.asked = seen.asked.length - asks;
+      closeGithubItem();
+      delete window.__ANSWER__.github_work_item_detail;
+      return { stood, ...read, again };
+    });
+    ok(
+      "a GitHub issue's body and its comment card draw their fences as diagrams where they stood, labels holding <img src=x onerror=...> as text, kept in the dialog's column and legible",
+      github.stood && readsRight(github.body, "본문 앞 문단.", "본문 뒤 문단.") && readsRight(github.comment, "댓글 앞 문단.", "댓글 뒤 문단."),
+      JSON.stringify(github),
+    );
+    ok(
+      "the GitHub item painted again from what it told stands with both diagrams drawn in that paint and asks nothing",
+      github.again.body === 1 && github.again.comment === 1 && github.again.asked === 0,
+      JSON.stringify(github.again),
+    );
+
+    // A GitLab merge request's body and a comment on it (`paintGitlabItem`, `itemVoiceCard`); then
+    // one whose layout is refused.
+    const gitlab = await page.evaluate(async () => {
+      const seen = window.__DIAGRAMS__;
+      const lines = () => seen.logged.filter((line) => line.startsWith("mermaid"));
+      const asks = () => window.__COUNTS__.render_mermaid ?? 0;
+      const item = (number, body, comments) => ({
+        kind: "mr", number, title: `그림이 든 MR ${number}`, state: "opened", author: "hana", created_at: "2026-08-01T09:00:00Z",
+        url: `https://gitlab.com/acme/app/-/merge_requests/${number}`, labels: [], body, comments,
+      });
+      const card = () => el("gl-item-comments")?.querySelector(".gl-item-comment-body") ?? null;
+      let detail = item(42, window.__AROUND__("본문 앞 문단.", "깃랩-그림", "본문 뒤 문단."), [
+        { author: "lee", created_at: "2026-08-02T10:00:00Z", body: window.__AROUND__("댓글 앞 문단.", "넓은깃랩댓글-그림", "댓글 뒤 문단."), resolved: null },
+      ]);
+      window.__ANSWER__.gitlab_item_detail = () => detail;
+      openGitlabItem({ kind: "mr", number: 42, title: detail.title, state: "opened", url: detail.url });
+      const stood = await window.__UNTIL__(() => el("gl-item-body")?.textContent.includes("본문 뒤 문단.") && card()?.textContent.includes("댓글 뒤 문단."));
+      await window.__UNTIL__(() => window.__DRAWN__(el("gl-item-body")) === 1 && window.__DRAWN__(card()) === 1);
+      const read = { body: window.__READ_DIAGRAM__(el("gl-item-body"), "깃랩-그림"), comment: window.__READ_DIAGRAM__(card(), "넓은깃랩댓글-그림") };
+      closeGitlabItem();
+      // The dialog closes animated; the next item opens once it has gone.
+      await window.__UNTIL__(() => el("gl-item-scrim")?.hidden === true);
+      // Refused: the body's fence stays code, one line in the window log for the one request, without the source.
+      seen.logged.length = 0;
+      detail = item(43, window.__AROUND__("거절 앞 문단.", "거절본문-그림", "거절 뒤 문단."), []);
+      window.__FAIL__.add("render_mermaid");
+      const before = asks();
+      openGitlabItem({ kind: "mr", number: 43, title: detail.title, state: "opened", url: detail.url });
+      const refusedStood = await window.__UNTIL__(() => el("gl-item-body")?.textContent.includes("거절 뒤 문단."));
+      const logged = await window.__UNTIL__(() => lines().length > 0);
+      await window.__FRAMES__(3);
+      window.__FAIL__.delete("render_mermaid");
+      const fence = [...(el("gl-item-body")?.querySelectorAll('pre.md-block[data-language="mermaid"]') ?? [])].find((pre) => pre.textContent.includes("거절본문-그림")) ?? null;
+      const refused = {
+        stood: refusedStood, logged, asks: asks() - before, lines: lines().length,
+        code: Boolean(fence && fence.getBoundingClientRect().height > 0), drawn: window.__DRAWN__(el("gl-item-body")),
+        sourceless: lines().every((line) => !line.includes("거절본문-그림")),
+      };
+      closeGitlabItem();
+      delete window.__ANSWER__.gitlab_item_detail;
+      return { stood, ...read, refused };
+    });
+    ok(
+      "a GitLab merge request's body and its comment card draw their fences as diagrams where they stood, labels holding <img src=x onerror=...> as text, kept in the dialog's column and legible",
+      gitlab.stood && readsRight(gitlab.body, "본문 앞 문단.", "본문 뒤 문단.") && readsRight(gitlab.comment, "댓글 앞 문단.", "댓글 뒤 문단."),
+      JSON.stringify(gitlab),
+    );
+    ok(
+      "a remote body whose layout is refused keeps its fence as code, visible, with one line in the window log for the one request and no source in it",
+      gitlab.refused.stood && gitlab.refused.logged && gitlab.refused.asks === 1 && gitlab.refused.lines === 1 && gitlab.refused.code
+        && gitlab.refused.drawn === 0 && gitlab.refused.sourceless,
+      JSON.stringify(gitlab.refused),
     );
 
     ok("the markdown-diagrams window raised no errors", faults.length === 0, faults.slice(0, 3).join(" | "));
