@@ -95,6 +95,9 @@ impl NativeTray {
                 );
                 state.native_tray().begin_exit();
                 let road = crate::exit_runtime::begin(crate::exit_runtime::ExitRoad::Tray);
+                if let Some(line) = crate::exit_runtime::door_line(road) {
+                    crate::note_window_event(state.local_data_root(), &line);
+                }
                 let census = app.clone();
                 crate::orchestration::goodbye_within(crate::now_epoch_ms(), road, move || {
                     crate::cmd::appearance::take_census(&census)
