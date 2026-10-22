@@ -644,7 +644,8 @@ pub(crate) fn stream_notice_blocks(
         let delay_secs = notice.delay.as_secs() + u64::from(notice.delay.subsec_nanos() > 0);
         blocks.push(RenderBlock::StreamPhase(
             runtime::message_stream::types::StreamPhase::Retrying {
-                attempt: notice.attempt,
+                // The row's count: the requests sent, the first one included.
+                attempt: notice.attempt.saturating_add(1),
                 delay_secs,
             },
         ));

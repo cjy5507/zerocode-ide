@@ -7310,6 +7310,7 @@ mod tests {
             attempt,
             max_attempts: 7,
             delay: Duration::from_secs(delay_secs),
+            no_progress: None,
         };
         let text = ids.next();
         tick(&mut ui, 30);
@@ -7327,17 +7328,24 @@ mod tests {
         }
         assert_eq!(
             working_line(&ui),
-            "• Working (30s • esc to interrupt) · reconnecting · attempt 1 in 4s",
+            "• Working (30s • esc to interrupt) · reconnecting · attempt 2 in 4s",
             "the stream's reconnect is what the turn waits on now"
+        );
+        // The warning row and the Working line count the same request: the
+        // one this reconnect sends, the first one included.
+        let history: Vec<String> = ui.pending_history.iter().map(Line::plain).collect();
+        assert!(
+            history.iter().any(|row| row.contains("reconnecting in 4s (attempt 2/8)")),
+            "the warning row names the attempt the Working line does: {history:#?}"
         );
         let card = published_card(&ui).expect("the reconnect's activity card");
         assert_eq!(card.verb, crate::tui::strings::ACTIVITY_RECONNECTING);
-        assert_eq!(card.target.as_deref(), Some("attempt 1 in 4s"));
+        assert_eq!(card.target.as_deref(), Some("attempt 2 in 4s"));
 
         tick(&mut ui, 33);
         assert_eq!(
             working_line(&ui),
-            "• Working (33s • esc to interrupt) · reconnecting · attempt 1 in 1s"
+            "• Working (33s • esc to interrupt) · reconnecting · attempt 2 in 1s"
         );
 
         arrive(
@@ -7365,7 +7373,7 @@ mod tests {
         }
         assert_eq!(
             working_line(&ui),
-            "• Working (1m 40s • esc to interrupt) · reconnecting · attempt 2 in 8s"
+            "• Working (1m 40s • esc to interrupt) · reconnecting · attempt 3 in 8s"
         );
         tick(&mut ui, 170);
         arrive(&mut ui, RenderBlock::StreamPhase(StreamPhase::QuietReasoning { since_secs: 61 }));
