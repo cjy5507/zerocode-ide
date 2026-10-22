@@ -56,6 +56,12 @@ pub const RESUME_PERSON: &str = "person";
 /// 「다시 맡기기」 — only the person lifts it, so a `--json` answer carries
 /// `error.resume` = [`RESUME_PERSON`] as a paused one does.
 pub const WORKSPACE_PERSON_CONTROLLED: &str = "workspace_person_controlled";
+/// The word of a look its page did not answer — it timed out, went away or
+/// answered nothing readable — on a tab still in its agent's hands
+/// (t-67064): looking again a second later may see it, so a walk reads it as
+/// a look that ran out of time, never as a door that will not open
+/// (t-70425).
+pub const WORKSPACE_LOOK_UNANSWERED: &str = "workspace_look_unanswered";
 /// Who holds a work browser, as a `tabs` line says it (t-67064): its agent,
 /// the person by hand, or nobody — paused.
 pub const TAB_MODE_AGENT: &str = "agent";
@@ -1670,6 +1676,7 @@ fn bridge_shim<'a>(
         deadline_seconds: u64::from(SHIM_DEADLINE_SECONDS),
         stdin_flags: true,
         pane_header: Some(PANE_HEADER),
+        pane_verbs: &[],
         cwd_verbs: &[],
         cwd_flag: None,
         pane_flag: None,

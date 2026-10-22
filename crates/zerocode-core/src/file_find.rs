@@ -137,6 +137,7 @@ fn door<'a>(
         deadline_seconds: FIND_SHIM_TIMEOUT_SECS,
         stdin_flags: false,
         pane_header: None,
+        pane_verbs: &[],
         cwd_verbs: &[],
         cwd_flag: Some(CWD_FLAG),
         pane_flag: Some(PANE_FLAG),

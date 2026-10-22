@@ -2098,3 +2098,77 @@ fn sync_run_turn_demotes_a_spent_5xx_ladder() {
         .join("\n");
     assert!(history.contains("lighter sync answer"), "got {history:?}");
 }
+
+// --- A request zo stopped sending for no progress → one-tier demotion (t-68710) ---
+
+/// What a ChatGPT turn hands up once zo cut the same request twice in a row because its
+/// model made no progress for the stall window.
+const SPENT_NO_PROGRESS: &str = "provider stream: transport error: api failed after 2 attempts: \
+     api stream error (stream_startup_no_progress): gpt-5.6-sol made no progress for 240s, \
+     so zo cut the request (2/2) and stopped sending it; transport keep-alives are not progress; \
+     attempt 1 heard response.created, then keep-alives only; \
+     attempt 2 heard response.created, then keep-alives only";
+
+/// A runtime on `model` whose main client is `main`.
+fn runtime_on(
+    main: Arc<dyn AsyncApiClient>,
+    model: &str,
+) -> ConversationRuntime<ExplodingSyncApi, StaticToolExecutor> {
+    let mut runtime = quota_runtime(main);
+    runtime.set_context_model(model);
+    runtime
+}
+
+/// (1) The reported turn's shape: the ChatGPT stream stopped sending the request after two
+/// cuts. The turn continues one tier down instead of failing, and its one warning names the
+/// model, the wait and the cut — not a provider's capacity.
+#[tokio::test]
+async fn a_request_stopped_for_no_progress_continues_the_turn_one_tier_down_and_says_why() {
+    let _env = hermetic_env();
+    let main = Arc::new(ServerFaultingAsyncApi::new(
+        SPENT_NO_PROGRESS,
+        ProviderErrorClass::Transient,
+        "lighter answer",
+    ));
+    let mut runtime = runtime_on(main.clone(), "gpt-5.6-sol");
+
+    let (result, blocks) = run_turn_reporting(&mut runtime, "turn one").await;
+    assert_eq!(result, Ok(2), "the stopped request costs one extra iteration, not the turn");
+    let overrides = main.overrides();
+    assert_eq!(overrides.len(), 2, "exactly one demotion: {overrides:?}");
+    assert_eq!(overrides[0], None, "the turn starts on the model the person chose");
+    let lighter = overrides[1].clone().expect("the second request names the lighter tier");
+    assert!(lighter.contains("luna"), "a sol turn continues on luna: {overrides:?}");
+    assert!(history_text(&runtime).contains("lighter answer"));
+    assert_eq!(
+        warn_texts(&blocks),
+        vec![format!(
+            "gpt-5.6-sol made no progress for 240s, so zo cut the request (2/2) and \
+             stopped sending it; this turn continues on {lighter}. The next turn starts on \
+             gpt-5.6-sol again."
+        )],
+        "one line names the model, the wait and the step"
+    );
+}
+
+/// (2) With no lighter tier the turn stops, and the words it ends with name the model, the
+/// wait and the cut.
+#[tokio::test]
+async fn a_request_stopped_for_no_progress_on_the_bottom_rung_ends_the_turn_in_its_words() {
+    let _env = hermetic_env();
+    let main = Arc::new(ServerFaultingAsyncApi::new(
+        SPENT_NO_PROGRESS,
+        ProviderErrorClass::Transient,
+        "never",
+    ));
+    let mut runtime = runtime_on(main.clone(), "gpt-5.6-luna");
+
+    let (result, blocks) = run_turn_reporting(&mut runtime, "hi").await;
+    let error = result.expect_err("the bottom rung has no lighter tier: the turn stops");
+    assert!(
+        error.contains("made no progress for 240s, so zo cut the request (2/2)"),
+        "{error}"
+    );
+    assert_eq!(main.overrides(), vec![None], "no second request");
+    assert!(warn_texts(&blocks).is_empty(), "{blocks:?}");
+}

@@ -938,22 +938,42 @@ fn as_the_coordinator(
     argv: Vec<String>,
     now_ms: i64,
 ) -> Result<serde_json::Value, String> {
-    let seat = {
-        let held = super::runtime().ok_or("orchestration runtime unavailable")?;
-        let image = held.actor.view().map_err(|error| format!("{error:?}"))?;
-        let ledger = super::cached_ledger(&held, &image).map_err(|error| format!("{error:?}"))?;
-        ledger
-            .run(run_id)
-            .and_then(Run::coordinator_live)
+    let seat = with_cached_run(run_id, |run| {
+        run.and_then(Run::coordinator_live)
             .map(|seat| seat.seat.clone())
-            .ok_or("the run has no live coordinator seat")?
-    };
+    })?
+    .ok_or("the run has no live coordinator seat")?;
     let (team, pane) = seat
         .split_once('/')
         .ok_or("the coordinator seat names no pane")?;
     let capability = crate::agent_teams::current_pane_capability(team, pane)
         .ok_or("this window does not hold the run's coordinator seat")?;
     super::coordinator_handover::command(team, pane, capability, argv, now_ms)
+}
+
+/// `run_id` as the cached ledger has it — the image the desk itself draws
+/// from — handed to `read`, `None` for a run the ledger does not know.
+fn with_cached_run<T>(run_id: &str, read: impl FnOnce(Option<&Run>) -> T) -> Result<T, String> {
+    let held = super::runtime().ok_or("orchestration runtime unavailable")?;
+    let image = held.actor.view().map_err(|error| format!("{error:?}"))?;
+    let ledger = super::cached_ledger(&held, &image).map_err(|error| format!("{error:?}"))?;
+    Ok(read(ledger.run(run_id)))
+}
+
+/// Whether a decision takes the person's own words (review t-68962 P3 ⑤):
+/// one somebody put in front of a task does — its resolution is free text by
+/// design — and a hold the ledger opened (`held_for`) does not. That one
+/// takes one of the ledger's two answers ([`HOLD_ACTS`]), the rule the board
+/// keeps by never offering 직접 답하기 there; a hand-made call is held to it
+/// here. A gate the run does not hold is left to the ledger, which refuses
+/// what it cannot find.
+fn hold_takes_words(run: &Run, gate: &str) -> Result<(), String> {
+    match run.gates.iter().find(|one| one.id == gate) {
+        Some(one) if one.held_for.is_some() => {
+            Err("a hold the ledger opened takes harvest or dispatch, not free words".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Answer a question put to `run_id`'s coordinator, as that seat — the
@@ -1029,9 +1049,10 @@ pub(crate) fn acknowledge(
 /// — the ledger's `gate-resolve`. A hold the ledger opened takes one of the
 /// two answers the ledger itself offers ([`HOLD_ACTS`]); a decision somebody
 /// put in front of a task takes the person's own words (`answer`), since its
-/// resolution is free text by design. Any other act is refused here rather
-/// than sent. Only on the person's press; the answer the ledger gives back is
-/// what the row shows.
+/// resolution is free text by design — and only such a decision does
+/// ([`hold_takes_words`]). Any other act is refused here rather than sent.
+/// Only on the person's press; the answer the ledger gives back is what the
+/// row shows.
 pub(crate) fn resolve_hold(
     run_id: &str,
     gate: &str,
@@ -1055,6 +1076,11 @@ pub(crate) fn resolve_hold(
             .map(|(_, words)| *words)
             .ok_or_else(|| format!("a hold takes harvest or dispatch, not {act:?}"))?
     };
+    if act == "answer" {
+        with_cached_run(run_id, |run| {
+            run.map_or(Ok(()), |run| hold_takes_words(run, gate))
+        })??;
+    }
     as_the_coordinator(
         run_id,
         [
@@ -2546,6 +2572,58 @@ mod tests {
         assert_eq!(after["examined"]["commits"], 2, "{after}");
         assert_eq!(after["examined"]["branch"], "wt/left-behind", "{after}");
         assert_eq!(after["examined"]["base"], "main", "{after}");
+    }
+
+    /// Free words answer a decision somebody opened, never a hold the ledger
+    /// opened (review t-68962 P3 ⑤): the worker that exited before reporting
+    /// left a hold that takes harvest or dispatch; the person's own question
+    /// takes their words.
+    #[test]
+    fn free_words_answer_somebodys_decision_and_never_a_ledger_hold() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("holds", 1);
+        let held = ledger
+            .create_task(&run, "do held".to_string(), "held".into(), vec![], None, 10)
+            .expect("a task");
+        let asked = ledger
+            .create_task(
+                &run,
+                "do asked".to_string(),
+                "asked".into(),
+                vec![],
+                None,
+                11,
+            )
+            .expect("a task");
+        ledger
+            .seat_coordinator(&run, "team-desk/%1", None, 12)
+            .expect("a coordinator");
+        ledger
+            .start_worker(&run, "codex", ("team-desk", "%2"), Some(&held), 20)
+            .expect("a worker carries it");
+        assert!(ledger.worker_seated(("team-desk", "%2"), "/wt/left-behind"));
+        ledger
+            .terminal_gone_with_archive("team-desk", "%2", None, 30)
+            .expect("a death before reporting");
+        let opened = ledger
+            .create_gate(&run, &asked, "rpc or rest?".into(), vec![], 31)
+            .expect("a gate somebody opened");
+        let the_run = ledger.run(&run).expect("the run");
+        let hold = the_run
+            .gates
+            .iter()
+            .find(|gate| gate.held_for.is_some())
+            .map(|gate| gate.id.clone())
+            .expect("the ledger held the task for its checkout");
+        let refused =
+            hold_takes_words(the_run, &hold).expect_err("free words on the ledger's hold");
+        assert!(refused.contains("harvest or dispatch"), "{refused}");
+        assert_eq!(hold_takes_words(the_run, &opened), Ok(()));
+        assert_eq!(
+            hold_takes_words(the_run, "gate-unknown"),
+            Ok(()),
+            "left to the ledger"
+        );
     }
 
     /// The two answers a hold takes from the board are the core's own words,
