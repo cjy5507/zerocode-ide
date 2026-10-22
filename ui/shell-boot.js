@@ -11,7 +11,26 @@
  * past silently (제품 원칙 5). */
 
 const { invoke, Channel: TauriChannel } = window.__TAURI__.core;
-const { listen } = window.__TAURI__.event;
+const { listen: listenToBackend } = window.__TAURI__.event;
+
+/* The backend event this window is answering right now, by name — what the
+ * black box says moved the stage when a program did (t-69526: a worker's pane
+ * came in front at 19:46:01 and the log could not say by which road). Only a
+ * handler's synchronous half is covered; what runs after its first `await` is
+ * the clock's to name. */
+let backendEventNow = "";
+
+const listen = (name, handler) => {
+  return listenToBackend(name, (event) => {
+    const outer = backendEventNow;
+    backendEventNow = name;
+    try {
+      return handler(event);
+    } finally {
+      backendEventNow = outer;
+    }
+  });
+};
 const TERMINAL_CLIPBOARD_WRITE_EVENT = "terminal:clipboard-write";
 
 /* ---- 웹뷰 오류의 착륙장 (1-fm) ----

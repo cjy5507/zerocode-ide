@@ -5866,8 +5866,45 @@ function syncWatchedTerms() {
   // is one a person may now be reading (t-6342) — a check of a map that is
   // empty on every switch but the few after a summons, and no IPC of its own.
   notePlacedWorkersSeen();
+  noteStageRoad();
   watchTail = watchTail.then(declareWatchedTerms, declareWatchedTerms);
   return watchTail;
+}
+
+/* Why what this window reads last changed (t-69526), asked while the move
+ * that changed it is still being answered — a person's own event, a backend
+ * event, a restore (`stageRoad`) — and said with the declaration it causes.
+ * The declarations run one behind another, so the reason is kept with the set
+ * it produced: a later repaint that moved nothing does not overwrite it. */
+let stageRoadSaid = { reading: "", road: "" };
+
+/* The stored set a restore is putting in front, by its road — `restore-front`,
+ * `visit` — while it does. */
+let stageRestoreRoad = "";
+
+function noteStageRoad() {
+  noteBackendMovedTheKeyboard();
+  const reading = [...readingTerms()].sort((a, b) => a - b).join(",");
+  if (reading === stageRoadSaid.reading) return;
+  stageRoadSaid = { reading, road: stageRoad() };
+}
+
+/* What typing the stage moved under could not deliver, as one black-box line
+ * (t-69526): where the run began, where the stage went, and how many of each
+ * kind — `ime 4`, `key Enter 1`, `key chord 1` — never a letter (t-11740). */
+function sayTypingHeldOff(from, to, kinds) {
+  const counted = [...kinds].map(([kind, count]) => `${kind} ${count}`).join(" · ");
+  tellWindowLog(
+    `typing not sent: the stage moved from ${heldPlace(from)} to ${heldPlace(to)} under it · ${counted}`,
+  );
+}
+
+function heldPlace(target) {
+  if (target === null) return "nothing";
+  if (target.kind === "term") return `terminal ${target.term}`;
+  if (target.kind === "lane") return "a lane";
+  if (target.kind === "emulator") return "a device";
+  return "a text field";
 }
 
 async function declareWatchedTerms() {
@@ -5880,8 +5917,9 @@ async function declareWatchedTerms() {
   // The black box hears this door on the OTHER side: `set_watched_terms`
   // writes every arrived declaration down, which is the whole forensic
   // record of "보고 있는데 안 그려지는 터미널". No second log line from here —
-  // the switch path's IPC budget is exactly six and every one is load-bearing.
-  await invoke("set_watched_terms", { terms: [...next] }).catch(() => {});
+  // the switch path's IPC budget is exactly six and every one is load-bearing;
+  // why the stage moved rides the same request (t-69526).
+  await invoke("set_watched_terms", { terms: [...next], road: stageRoadSaid.road }).catch(() => {});
   // 선언이 닿은 뒤의 당김이라야 새 셸의 바닥을 받는다.
   const floor = fresh.length > 0 ? await awaitTermPull() : null;
   // 전속력으로 올라간 화면은 미리보기 집합에서 내려와야 한다 — 한 화면이
@@ -6042,6 +6080,23 @@ listen("term:mail-waiting", (event) => {
 });
 listen("term:mail-waiting-cleared", (event) => {
   forgetMailWaiting(event.payload?.term);
+});
+
+/* 사람의 글이 워커의 판에 들어가 그 판이 사람의 것이 되었다 (t-69526). 원장은
+ * run에 편지로 알리고, 사람에게는 여기서 한 번 말한다 — 화면이 사람 모르게
+ * 워커 판으로 바뀐 뒤라면, 그 글이 어디로 갔는지 아는 길은 이것뿐이다. 판과
+ * 워커 한 쌍에 한 번이고, 판이 끝나면 잊는다(`forgetTakenOver`). */
+const takenOverSaid = new Set();
+function forgetTakenOver(term) {
+  for (const said of takenOverSaid) if (said.startsWith(`${term}:`)) takenOverSaid.delete(said);
+}
+listen("term:taken-over", (event) => {
+  const { term, worker } = event.payload ?? {};
+  if (typeof term !== "number" || typeof worker !== "string" || worker === "") return;
+  const said = `${term}:${worker}`;
+  if (takenOverSaid.has(said)) return;
+  takenOverSaid.add(said);
+  toast(t("term.takenOver", "워커 {{worker}}의 판에 보냈습니다", { worker }));
 });
 
 /* 백엔드가 이 셸의 꼬리를 보냈다.
@@ -8350,7 +8405,7 @@ async function restoreWorktreeLayouts(
       tabs.find((tab) => tab.id === marked) ??
       tabs.find((tab) => tab.id === activeTabByWorktree.get(worktree) && tab.worktree === worktree) ??
       owned[owned.length - 1];
-    setActiveTab(eye.id);
+    putRestoredEyeInFront(eye, road);
     wakeStoredConversations(worktree, owned, eye);
     return true;
   }
@@ -8388,9 +8443,20 @@ async function restoreWorktreeLayouts(
     (tab) => tab.id === activeTabByWorktree.get(worktree) && tab.worktree === worktree && tab.kind !== "term",
   );
   const eye = looked >= 0 ? made[looked] : onDocument ? null : made[made.length - 1];
-  if (eye) setActiveTab(eye.id);
+  if (eye) putRestoredEyeInFront(eye, road);
   wakeStoredConversations(worktree, made, eye);
   return true;
+}
+
+/* The restore's own move of the stage, said as the restore's in the black box
+ * (t-69526): the record's eye back in front, on the road that brought it. */
+function putRestoredEyeInFront(eye, road) {
+  stageRestoreRoad = road;
+  try {
+    setActiveTab(eye.id);
+  } finally {
+    stageRestoreRoad = "";
+  }
 }
 
 /* A tab that held a CONVERSATION does not stay asleep.

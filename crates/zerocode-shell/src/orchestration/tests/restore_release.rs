@@ -189,7 +189,7 @@ fn a_restart_brings_no_ledger_pane_back_on_a_superseded_release() {
         "--agent claude --model claude-fable-5 --effort xhigh",
         Some(TAKEN_SESSION),
     );
-    super::super::pane_taken_over(taken_term, clock());
+    super::super::pane_taken_over(taken_term, "words", clock());
     assert!(
         super::restore::row(&taken).taken_over,
         "the person's key never reached the row"

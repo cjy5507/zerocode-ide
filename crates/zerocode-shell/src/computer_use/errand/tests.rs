@@ -1380,6 +1380,26 @@ fn a_screen_that_cannot_be_read_or_shows_nothing_presses_nothing() {
     assert!(judge.asked.is_empty() && bare.presses.is_empty());
 }
 
+/// A look that came back with nothing says why on its row (t-70425): the
+/// person's two walks on a work browser (10-22 10:47·11:27) ended at a bare
+/// `no_look`, and their agent read it as a screen it could not see and asked
+/// for a desktop app instead. The reason is never empty: a world that cannot
+/// say why says its look was refused, in the protocol's word for an answer
+/// with no envelope beside it.
+#[test]
+fn a_look_that_came_back_with_nothing_names_its_reason() {
+    let mut judge = FakeJudge::chose(&[1]);
+    let mut blind = FakeWorld::showing(&[1]);
+    blind.screen = None;
+    let walked = run(Mode::On, true, &goal(4), &mut judge, &mut blind);
+    assert_eq!(walked.rows.len(), 1);
+    assert_eq!(walked.rows[0]["outcome"], json!("no_look"));
+    assert_eq!(walked.rows[0]["reason"], json!("look_refused"));
+    assert_eq!(walked.rows[0]["refusal"], json!("error"));
+    assert_eq!(no_press_reason(&walked.rows), Some("look_refused"));
+    assert!(judge.asked.is_empty() && blind.presses.is_empty());
+}
+
 #[test]
 fn the_mode_word_is_read_the_way_the_router_card_reads_its_own() {
     let word = |word: &str| BROWSER.mode_of(Some(&json!(word)));

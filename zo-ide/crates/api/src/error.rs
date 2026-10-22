@@ -250,6 +250,39 @@ impl ApiError {
         }
     }
 
+    /// The stream's own cut of an attempt whose `model` made no progress for
+    /// `budget`: a [`Self::stream_startup_no_progress`] that names the model and
+    /// what the cut attempts `heard`. `stop` is the number of cuts in a row when
+    /// this one ends the run and zo stops sending the request. `heard` holds
+    /// words only, because the text classifiers read every digit of an error
+    /// (`429`, `529`); the counts go to the restart log.
+    #[must_use]
+    pub fn stream_no_progress(
+        model: &str,
+        budget: Duration,
+        bundle: &str,
+        stop: Option<u32>,
+        heard: &str,
+    ) -> Self {
+        let after = if bundle.is_empty() {
+            String::new()
+        } else {
+            format!(" after {bundle}")
+        };
+        let stop = stop.map_or_else(String::new, |cuts| {
+            format!(", {}", core_types::retry_signal::no_progress_stop_words(cuts))
+        });
+        Self::StreamApi {
+            error_type: Some("stream_startup_no_progress".to_string()),
+            message: Some(format!(
+                "{}{stop}; transport keep-alives are not progress; {heard}",
+                core_types::retry_signal::no_progress_words(model, budget, &after)
+            )),
+            body: String::new(),
+            retryable: true,
+        }
+    }
+
     /// A pre-commit stream restart could not re-establish the connection
     /// within the remaining restart wall-clock budget (the reopen request was
     /// accepted but never answered). Retryable for parity with
