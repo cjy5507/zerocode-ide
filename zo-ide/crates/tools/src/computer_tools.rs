@@ -2023,7 +2023,7 @@ pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
     }
     if said.pointer("/background/interrupted") == Some(&Value::Bool(true)) {
         read.status = WalkStatus::Stopped;
-        read.reason = Some(BACKGROUND_INTERRUPTED.into());
+        read.reason = Some(walk_words::BACKGROUND_INTERRUPTED.into());
         return read;
     }
     let last = rows.last();
@@ -2051,7 +2051,7 @@ pub(crate) fn read_walk(answer: &Value, budget: u64) -> WalkRead {
         let why = word(row, walk_words::REASON);
         if let Some(outcome) = outcome.clone().filter(|outcome| [walk_words::STUCK, walk_words::NO_LOOK].contains(&outcome.as_str())) {
             read.cause = why.filter(|why| !why.trim().is_empty());
-            read.refusal = word(row, REFUSAL).filter(|code| !code.trim().is_empty());
+            read.refusal = word(row, walk_words::REFUSAL).filter(|code| !code.trim().is_empty());
             (WalkStatus::Failed, Some(outcome))
         } else if let Some(barred) = barred {
             let status = if barred == walk_words::LOW_CONFIDENCE { WalkStatus::NeedsFallback } else { WalkStatus::Stopped };
@@ -2119,21 +2119,13 @@ fn run_computer_walk(input: &ComputerInput, ctx: &ToolContext, road: &ComputerRo
     to_pretty_json(said)
 }
 
-/// The words a `no_look` row carries about the look it lacked (t-70425, the
-/// window's; the core's `walk_words` once they land there), spelled in this
-/// one place. Its reason: no window to look at; a window whose tree is empty
-/// — a canvas, a remote screen; the clock; or a door that refused the look,
-/// whose code is beside it in `refusal` (`error` when the window could not
-/// read it). The first three are the helper's own roads, which the ladder
-/// climbs; a refused look — or a reason outside the four — a second look
-/// meets again. One refusal is no door's failure: the person took the
-/// foreground from a background walk, which stops for them.
-const NO_WINDOW: &str = "no_window";
-const EMPTY_TREE: &str = "empty_tree";
-const LOOK_TIMEOUT: &str = "look_timeout";
-const LOOK_REFUSED: &str = "look_refused";
-const REFUSAL: &str = "refusal";
-const BACKGROUND_INTERRUPTED: &str = "background_interrupted";
+/// A door's refusal zo reads as any other, reported as that door's defect,
+/// which a test names: the window's own command road could not reach the
+/// window (t-70855). The rest of a `no_look` row's words are the core's
+/// `walk_words` (t-70425); the core spells this one beside them once t-70855
+/// lands.
+#[cfg(test)]
+const DOOR_CONNECTION_FAILED: &str = "door_connection_failed";
 /// The ladder's own words (t-70459): why the walk ended, the look zo took,
 /// and what to do next.
 const NO_LOOK_WHY: &str = "no look came back";
@@ -2169,11 +2161,11 @@ fn climb(input: &ComputerInput, walked: &mut WalkRead, ctx: &ToolContext, road: 
     let why = if after == walk_words::STUCK { STUCK_WHY } else { NO_LOOK_WHY };
     let cause = walked.cause.clone();
     let mut ladder = json!({ "after": after, "cause": cause, "why": why });
-    if let Some(cause) = cause.as_deref().filter(|cause| ![NO_WINDOW, EMPTY_TREE, LOOK_TIMEOUT].contains(cause)) {
-        ladder[REFUSAL] = json!(walked.refusal);
+    if let Some(cause) = cause.as_deref().filter(|cause| ![walk_words::NO_WINDOW, walk_words::EMPTY_TREE, walk_words::LOOK_TIMEOUT].contains(cause)) {
+        ladder[walk_words::REFUSAL] = json!(walked.refusal);
         // The person took the foreground: no door failed, and the walk goes
         // on only when they say so.
-        if cause == LOOK_REFUSED && walked.refusal.as_deref() == Some(BACKGROUND_INTERRUPTED) {
+        if cause == walk_words::LOOK_REFUSED && walked.refusal.as_deref() == Some(walk_words::BACKGROUND_INTERRUPTED) {
             walked.status = WalkStatus::Stopped;
             ladder["report"] = json!(PERSON_TOOK_OVER);
             ladder["roads"] = json!([person_road(ASK_TO_GO_ON)]);
@@ -2182,7 +2174,7 @@ fn climb(input: &ComputerInput, walked: &mut WalkRead, ctx: &ToolContext, road: 
         }
         // A refused look names its door's code beside it; a reason outside
         // the four is its own name.
-        let code = if cause == LOOK_REFUSED { walked.refusal.as_deref() } else { Some(cause) };
+        let code = if cause == walk_words::LOOK_REFUSED { walked.refusal.as_deref() } else { Some(cause) };
         let door = code.map_or_else(String::new, |code| format!(" {code}"));
         ladder["report"] = json!(format!("door refusal{door}: report it as a defect"));
         if let Some(pane) = input.pane.as_deref() {
@@ -2203,12 +2195,12 @@ fn climb(input: &ComputerInput, walked: &mut WalkRead, ctx: &ToolContext, road: 
     }
     let app = input.app.as_deref()?;
     let mut window_id = None;
-    if cause.as_deref() == Some(NO_WINDOW) {
+    if cause.as_deref() == Some(walk_words::NO_WINDOW) {
         let refound = refind(app, ctx, road);
         window_id = refound.pointer("/windows/0/id").and_then(Value::as_u64);
         ladder["refound"] = refound;
     }
-    if cause.as_deref() != Some(EMPTY_TREE) {
+    if cause.as_deref() != Some(walk_words::EMPTY_TREE) {
         let mut look = json!({ "action": "observe", "app": app });
         if let Some(window_id) = window_id {
             look["window_id"] = json!(window_id);
@@ -5376,6 +5368,28 @@ printf '%s
         app_roads_are_the_tools_own(&said);
     }
 
+    /// The window's own command road could not reach the window (t-70855:
+    /// "could not reach the window", or curl's `(7)`), and the row says
+    /// `look_refused`, `door_connection_failed` beside it. A second look would
+    /// go down the same road: the walk at an app stops, and the answer
+    /// reports the code as the door's defect (t-70459).
+    #[cfg(unix)]
+    #[test]
+    fn a_no_look_walk_whose_door_could_not_reach_the_window_stops_and_reports_the_door() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        no_look_walk(dir.path(), Some(walk_words::LOOK_REFUSED), Some(DOOR_CONNECTION_FAILED));
+        let said = walked(&ctx, &road, &photo_walk());
+        assert_eq!(calls(dir.path()), ["walk"], "door_connection_failed: no second look down a road that did not reach the window: {said}");
+        assert_eq!(said["status"], WalkStatus::Stopped.word(), "door_connection_failed: the walk stops: {said}");
+        assert_eq!(
+            said["ladder"]["report"], "door refusal door_connection_failed: report it as a defect",
+            "door_connection_failed: reported as the door's defect, by its code: {said}"
+        );
+        assert!(said["ladder"]["roads"].is_null(), "door_connection_failed: no road at an app: {said}");
+    }
+
     /// A walk that ends `stuck` climbs the same ladder and says why: the
     /// screen did not move (t-70459). At an app zo's one look after it is
     /// the ladder's, with its tree — not a second; at a pane the roads are
@@ -5414,14 +5428,23 @@ printf '%s
         pane_roads_are_the_browser_doors(&said);
     }
 
-    /// The six words of a `no_look` row, letter for letter as the window
-    /// writes them (t-70425) — spelled in one place in zo, so a word the
-    /// core renames is changed there and here (t-70459).
+    /// The words of a `no_look` row zo climbs by, letter for letter as the
+    /// window writes them: the core's walk words (t-70425), and the one
+    /// refusal zo names before the core does (t-70855) — so a word renamed
+    /// on either side shows here (t-70459).
     #[test]
     fn the_no_look_rows_words_are_spelled_as_the_window_writes_them() {
         assert_eq!(
-            [NO_WINDOW, EMPTY_TREE, LOOK_TIMEOUT, LOOK_REFUSED, REFUSAL, BACKGROUND_INTERRUPTED],
-            ["no_window", "empty_tree", "look_timeout", "look_refused", "refusal", "background_interrupted"]
+            [
+                walk_words::NO_WINDOW,
+                walk_words::EMPTY_TREE,
+                walk_words::LOOK_TIMEOUT,
+                walk_words::LOOK_REFUSED,
+                walk_words::REFUSAL,
+                walk_words::BACKGROUND_INTERRUPTED,
+                DOOR_CONNECTION_FAILED,
+            ],
+            ["no_window", "empty_tree", "look_timeout", "look_refused", "refusal", "background_interrupted", "door_connection_failed"]
         );
     }
 
