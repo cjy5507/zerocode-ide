@@ -107,6 +107,8 @@ const TALL = 2400;
 const WANT_PHASE = {
   working: "", report_only: "review", stale: "review", superseded: "superseded", failed: "", unreviewable: "unreviewable",
   verified: "vouched", nothing_to_land: "vouched", merged: "vouched", deployed: "vouched", closed: "closed",
+  // A person's waiver ends the work without a review: never counted as vouched (t-71220).
+  waived: "unreviewable",
   unknown: "",
 };
 
