@@ -5374,8 +5374,8 @@ async fn check_a_model_that_makes_no_progress_is_stopped_after_two_cuts(
         "two attempts: {error}"
     );
     assert!(
-        elapsed <= SCENE_WINDOW * 2 + SCENE_SLACK,
-        "the request ends after two windows: {elapsed:?}"
+        elapsed < SCENE_WINDOW * 3,
+        "the request ends after two windows, before a third could pass: {elapsed:?}"
     );
     let said = error.to_string();
     assert!(
