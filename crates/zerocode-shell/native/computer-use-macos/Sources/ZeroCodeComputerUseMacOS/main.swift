@@ -2,6 +2,7 @@ import AppKit
 @preconcurrency import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
+import CryptoKit
 import Darwin
 import Foundation
 import ImageIO
@@ -244,7 +245,13 @@ enum WindowDocument {
     /// The identity of `document`, else of `webAreaURL`; `nil` when the
     /// window gives neither.
     static func identity(document: String?, webAreaURL: String?) -> String? {
-        nil
+        guard let shown = [document, webAreaURL].lazy.compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
+            return nil
+        }
+        return SHA256.hash(data: Data(shown.utf8))
+            .prefix(digits / 2)
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }
 
@@ -1060,6 +1067,13 @@ final class Provider {
             compactBrowserTabs: app.isKnownBrowser
         )
         renderer.render(window)
+        // What tells this window from another of its title (t-69973): its
+        // own document — the one read a look adds — else the page its first
+        // web area showed the walk above.
+        let document = WindowDocument.identity(
+            document: stringAttribute(window, kAXDocumentAttribute as String),
+            webAreaURL: renderer.firstWebAreaURL
+        )
         let screenshot = includeScreenshot ? capture.screenshotPayload() : nil
         let screenshotStatus: ScreenshotStatus = if screenshot != nil {
             .captured
@@ -1079,7 +1093,7 @@ final class Provider {
             windowBounds: capture.bounds,
             windowId: capture.windowId,
             windowLayer: capture.layer,
-            document: nil,
+            document: document,
             treeText: renderTreeText(app: app, title: title, bounds: capture.bounds, lines: renderer.lines, focused: renderer.focusedSummary),
             focusedElementId: renderer.focusedElementId,
             screenshot: screenshot,
@@ -2816,6 +2830,10 @@ private final class TreeRenderer {
     var focusedElementId: Int?
     var truncated = false
     var maxDepthReached = false
+    /// The address the walk's first web area reads (`AXURL`): the page a
+    /// window shows when it names no document of its own (t-69973).
+    private(set) var firstWebAreaURL: String?
+    private var metWebArea = false
     private let reader = AXSnapshotReader()
     private var nextIndex = 0
     static let maxNodes = 1200
@@ -2875,6 +2893,12 @@ private final class TreeRenderer {
         let localFrame = reader.frame(element, windowBounds: windowBounds)
         let traits = reader.traitsFor(element, role: role)
         let webAreaDepth = reader.webAreaDepth(role: role, ancestors: ancestors)
+        // The first web area the walk meets (a depth of 0 is the area itself)
+        // is the page shown; its address came with the node's other reads.
+        if webAreaDepth == 0, !metWebArea {
+            metWebArea = true
+            firstWebAreaURL = url
+        }
         let summary = reader.genericTextSummary(element, role: role, name: name, actions: meaningful, traits: traits)
         let node = SnapshotRenderNode(
             role: role,
