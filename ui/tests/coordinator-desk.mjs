@@ -455,7 +455,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the questions to answer wait under 당신 차례 with the decisions and the reports, oldest first, four at a time",
       shut.asksHead === "당신 차례" && shut.asks.length === 4 && shut.asksMore === "10개 더 보기" &&
       shut.title === "답할 일 14개 — 나머지는 저절로 돕니다" &&
-      shut.asksFoot === "이 밖에 당신을 기다리는 결정은 없습니다", JSON.stringify(shut));
+      shut.asksFoot === "이 밖에 당신을 기다리는 결정은 없습니다.", JSON.stringify(shut));
     await page.click('#board-view [data-desk-block="asks"] .board-asks-more');
     await settleMail();
     const asked = await readMail();
@@ -481,8 +481,11 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     const letter = (id) => [...questions, ...mail.letters].find((one) => one.key === `run-desk/${id}`);
     ok("opened, the news is all fourteen, and one quiet episode is one line",
       mail.news.length === 14 && mail.more === "접기", JSON.stringify(mail));
+    // A question under 당신 차례 carries the draft's line instead of its first one (t-70028): the task,
+    // the asking worker's model, its age — the inbox's word stays on the row, out of sight.
     ok("each letter says its kind, whom it concerns, its age and where it stands in the coordinator's inbox",
-      letter("m-901")?.kind === "질문" && letter("m-901").who === "w-1 · 데스크 과업 1" &&
+      letter("m-901")?.kind === "질문" && letter("m-901").who.startsWith("데스크 과업 1 ") &&
+      /· \d+(분|시간) 전$/.test(letter("m-901").who) &&
       /^\d+(분|시간) 전$/.test(letter("m-901").age) && letter("m-901").body.startsWith("질문 1:") &&
       letter("m-901").delivery === "배달 전" && letter("m-901").deliveryTip === "배달 전 · 코디네이터가 아직 안 읽음" &&
       letter("m-902")?.kind === "조용해짐" && letter("m-902").body === "판이 보이지 않음 · 알림 3통" &&
@@ -1349,61 +1352,70 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
     await settleDesk();
 
-    /* ---- 빌드 줄(릴리즈 레인): 레인의 `status.json` 그대로, 「지금」 탭의 카드 (t-67607) ---- */
+    /* ---- 빌드 줄(릴리즈 레인): 레인의 `status.json` 그대로, 「지금」 탭의 카드 (t-67607 → 시안의
+     * 카드 t-70028: 상태는 오른쪽 끝의 점과 낱말, 단계는 레인 이름의 우리말, 기록은 펼쳐야 선다) ---- */
     await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
-    const release = await page.evaluate(() => {
+    // The record is built for whoever opens it — open it once, read, and fold it back.
+    const readRelease = () => page.evaluate(() => {
       const card = document.querySelector('#board-view [data-desk-block="release"]');
-      return {
+      const log = card?.querySelector(".board-desk-release-log");
+      if (log) log.open = true;
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const said = {
         shown: Boolean(card) && !card.hidden,
         head: card?.querySelector(".board-desk-head-word")?.textContent,
         version: card?.querySelector(".board-desk-release-version")?.textContent,
         sha: card?.querySelector(".board-desk-release-sha")?.textContent,
-        verdict: card?.querySelector(".board-desk-release-verdict")?.textContent,
-        clock: card?.querySelector(".board-desk-release-clock")?.textContent,
+        status: card?.querySelector(".board-desk-release-status")?.textContent,
+        cls: card?.querySelector(".board-desk-release")?.className,
+        took: card?.querySelector(".board-desk-release-took")?.textContent,
         phases: [...(card?.querySelectorAll(".board-desk-release-phase") ?? [])]
           .map((node) => [node.querySelector(".board-desk-release-step").textContent,
             node.querySelector(".board-desk-release-step-word").textContent]),
         running: card?.querySelector(".board-desk-release-phase.is-running .board-desk-release-step")?.textContent,
         runningFor: card?.querySelector(".board-desk-release-phase.is-running .board-desk-release-step-word")?.textContent,
+        failed: (() => {
+          const failed = card?.querySelector(".board-desk-release-phase.is-failed");
+          return failed ? [failed.querySelector(".board-desk-release-step").textContent,
+            failed.querySelector(".board-desk-release-step-word").textContent] : null;
+        })(),
         log: card?.querySelector(".board-desk-release-log .board-raw-text")?.textContent,
         skips: [...(card?.querySelectorAll(".board-desk-release-skips li") ?? [])].map((node) => node.textContent),
+        reason: card?.querySelector(".board-desk-release-reason")?.textContent,
         reasonHidden: card?.querySelector(".board-desk-release-reason")?.hidden,
       };
+      if (log) log.open = false;
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      return said;
     });
+    const release = await readRelease();
     ok("the build line card reads the lane's own status: version, sha, the step running and how long it has run",
-      release.shown && release.head === "빌드 줄" && release.version === "v1.1.20" && release.sha === "ccb6e1bd" &&
-      release.verdict === "진행 중 · build-app" && release.clock === "" &&
-      release.running === "build-app" && /^(\d+분째|방금 시작)$/.test(release.runningFor ?? ""),
+      release.shown && release.head === "빌드 줄" && release.version === "v1.1.20" && release.sha === "ccb6e1bda" &&
+      release.status === "도는 중" && release.cls === "board-desk-release is-running" &&
+      release.running === "앱 빌드" && /^(\d+분째|방금 시작)$/.test(release.runningFor ?? ""),
       JSON.stringify(release));
     ok("a finished step says done, a skipped one says so and why, its seconds are behind the record, and a running lane invents no verdict",
-      JSON.stringify(release.phases.slice(0, 2)) === JSON.stringify([["archive", "끝"], ["gate-root", "건너뜀"]]) &&
+      JSON.stringify(release.phases.slice(0, 2)) === JSON.stringify([["소스 묶기", "끝"], ["결합 시험", "건너뜀"]]) &&
       release.log?.includes("archive rc=0 1s") &&
-      release.skips.length === 2 && release.skips[0].startsWith("gate-root: root tree unchanged") &&
+      release.skips.length === 2 && release.skips[0].startsWith("결합 시험: root tree unchanged") &&
       release.reasonHidden === true, JSON.stringify(release));
-    const ended = await page.evaluate(async () => {
+    await page.evaluate(async () => {
       window.__RELEASE__ = { ...window.__RELEASE__, outcome: "red", reason: "gate-zo rc=101",
         phases: [...window.__RELEASE__.phases, { name: "build-app", rc: 101, secs: 288 }] };
       await askReleaseStatus();
-      paintCoordinatorDesk(document.querySelector("#board-view"));
-      const card = document.querySelector('#board-view [data-desk-block="release"]');
-      const failed = card.querySelector(".board-desk-release-phase.is-failed");
-      const red = { verdict: card.querySelector(".board-desk-release-verdict").textContent,
-        reason: card.querySelector(".board-desk-release-reason").textContent,
-        reasonShown: !card.querySelector(".board-desk-release-reason").hidden,
-        failed: failed ? [failed.querySelector(".board-desk-release-step").textContent,
-          failed.querySelector(".board-desk-release-step-word").textContent] : null,
-        log: card.querySelector(".board-desk-release-log .board-raw-text").textContent,
-        mark: card.querySelector(".agent-graph-node-state").className,
-        clock: card.querySelector(".board-desk-release-clock").textContent };
+    });
+    const red = await readRelease();
+    const gone = await page.evaluate(async () => {
       window.__RELEASE__ = null;
       await askReleaseStatus();
       paintCoordinatorDesk(document.querySelector("#board-view"));
-      return { red, gone: card.hidden };
+      return document.querySelector('#board-view [data-desk-block="release"]').hidden;
     });
-    ok("a red lane says red with the lane's reason and the failed step; no lane folds the card",
-      ended.red.verdict === "빨강" && ended.red.reasonShown && ended.red.reason === "gate-zo rc=101" &&
-      JSON.stringify(ended.red.failed) === JSON.stringify(["build-app", "실패"]) && ended.red.log.includes("build-app rc=101 288s") &&
-      ended.red.mark.includes("is-failed") && ended.red.clock.includes("걸림") && ended.gone, JSON.stringify(ended));
+    ok("a red lane says red, when it ended and how long it took, with the lane's reason and the failed step; no lane folds the card",
+      /^빨강 · .+ 끝남$/.test(red.status ?? "") && red.cls === "board-desk-release is-red is-folded" && !red.reasonHidden &&
+      red.reason === "gate-zo rc=101" && JSON.stringify(red.phases) === JSON.stringify([["앱 빌드", "실패"]]) &&
+      JSON.stringify(red.failed) === JSON.stringify(["앱 빌드", "실패"]) && red.log.includes("build-app rc=101 288s") &&
+      red.took.includes("걸림") && gone, JSON.stringify({ red, gone }));
 
     /* ---- 계속 판정 (t-26583): 워커 줄 밑의 판정 한 줄과 그 근거 ------------------
      *

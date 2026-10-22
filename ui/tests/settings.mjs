@@ -13,7 +13,7 @@ import { PLATFORM_OVERRIDE, reportedPlatformScript, TEST_PLATFORM } from "./test
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -6078,6 +6078,14 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assert(await toggle.isVisible(), "the card has no switch");
   assert(!(await toggle.isChecked()), "a machine that never met Jev reads as using it");
   assert(await partial.isHidden(), "a switch that is off says where it is used");
+  // The library's filter stands over the library's rows (t-69998): the
+  // fixture's one catalog model is not received and no server answers with
+  // it, so this computer holds no model and has nothing to filter.
+  await pageA.waitForFunction(() => managedJudgmentController.snapshot);
+  assertEqual(await pageA.evaluate(() => ({
+    catalog: managedJudgmentController.snapshot.models.map((model) => [model.id, model.installed]),
+    rows: document.querySelectorAll("#managed-judgment-models > .managed-judgment-model").length,
+  })), { catalog: [["fixture-decision", false]], rows: 0 }, "a catalog model this computer does not hold stands as a library row");
   // A closed fold keeps its body's boxes (content-visibility) while nobody
   // sees them, so what is folded away is counted as out of sight.
   const selects = await pageA.locator("#typesafe-card select").evaluateAll((all) => ({
@@ -6086,8 +6094,8 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   }));
   assertEqual(selects, {
     ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-listed-model", "route-classifier-select"],
-    visible: ["managed-judgment-filter", "judgment-provider-kind"],
-  }, "model filters and the provider are visible while classifier and inactive server choices stay folded");
+    visible: ["judgment-provider-kind"],
+  }, "the provider is visible, the library filter stands only over library rows, and classifier and inactive server choices stay folded");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
@@ -6658,26 +6666,27 @@ await test("지원하지 않는 주소는 결과 줄에서 이유와 다음 행�
   return "reason in the result row · retry and folder route · active model kept";
 }));
 
-await test("실행 검증 전 라이브러리 모델은 주소 확인으로 같은 결과 줄에 불러온다", async () => withJudgmentStatus(async (page) => {
+await test("실행 검증 전 카탈로그 후보는 주소 확인으로 같은 결과 줄에 불러온다", async () => withJudgmentStatus(async (page) => {
   const native = nativeSourceInspection(backend.managedJudgmentSettings()).model;
   backend.managedModelState.models.push({ ...native, origin: "bundled" });
   backend.managedModelState.revision += 1;
   backend.managedSourceResult = nativeSourceInspection(backend.managedJudgmentSettings());
   await backend.emitManaged(backend.managedJudgmentSettings());
-  await page.waitForFunction(() => managedJudgmentController.rows.has("fixture-native"));
-  const state = await page.evaluate(() => [managedJudgmentController.rows.get("fixture-native").state.textContent,
-    t("settings.managed.downloadOnlyState", "이 컴퓨터의 직접 실행은 아직 검증 전입니다. 모델 주소로 확인하면 파일만 받아 둘 수 있습니다.")]);
-  assertEqual(state[0], state[1], "the library row said download was impossible");
-  const button = page.locator('#managed-judgment-models button[data-model-action="inspect-source"][data-model-id="fixture-native"]');
-  assert(!(await button.evaluate((element) => element.hidden || element.disabled)), "the library row has no way to its download-only action");
+  assertEqual(await page.locator("#managed-judgment-candidate-list").count(), 1, "the catalog models not received have no list of their own");
+  await page.waitForFunction(() => managedJudgmentController.candidates.has("fixture-native"));
+  assert(!(await page.evaluate(() => managedJudgmentController.rows.has("fixture-native"))), "a model whose files were never received stood as a library row");
+  const candidate = page.locator('#managed-judgment-candidate-list [data-model-id="fixture-native"]');
+  const button = candidate.locator('button[data-model-action="inspect-source"]');
+  assert(!(await button.evaluate((element) => element.hidden || element.disabled)), "the candidate has no way to its download-only action");
+  assert(await candidate.locator('button[data-model-action="install"]').evaluate((element) => element.hidden), "a download-only candidate offers a download that cannot run");
   const at = backend.calls.length;
   await button.evaluate((element) => element.click());
   const inspected = await backend.waitForCall("judgment-status", "managed_judgment_inspect_source", at);
   assertEqual(inspected.args.source, { kind: "hugging_face", repository: native.source });
   assertEqual(await page.locator("#judgment-source-repository").inputValue(), native.source);
   await page.waitForFunction(() => judgmentModelSourceController.inspection?.readyForDownload && !judgmentModelSourceController.inspecting);
-  assert(!backend.calls.slice(at).some((entry) => ["managed_judgment_install", "managed_judgment_install_source"].includes(entry.command)), "the library row downloaded before the person chose to");
-  return "library row explains download-only · routes into the same inspected row · no download before the explicit action";
+  assert(!backend.calls.slice(at).some((entry) => ["managed_judgment_install", "managed_judgment_install_source"].includes(entry.command)), "the candidate downloaded before the person chose to");
+  return "candidate, not a row · address check only · routes into the same inspected row · no download before the explicit action";
 }));
 
 await test("주소를 고쳐도 다른 요청이 시작한 모델 확인을 취소하지 않는다", async () => withJudgmentStatus(async (page, provider) => {
@@ -6918,8 +6927,11 @@ await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이�
     assert(await pageA.locator("#managed-judgment-panel").isVisible(), "local selection does not offer managed models");
     assert(await pageA.locator("#judgment-endpoint").isHidden(), "local setup still starts with an empty server address");
     const applied = clone(backend.typesafeSettings().provider);
+    // A model not received yet is a candidate, folded under the library (t-69998).
+    assertEqual(await pageA.locator("#managed-judgment-candidates").count(), 1, "the catalog models not received have no folded line");
+    await pageA.locator("#managed-judgment-candidates > summary").click();
     const downloadedAt = backend.calls.length;
-    await pageA.click('[data-model-action="install"]');
+    await pageA.click('#managed-judgment-candidate-list [data-model-id="fixture-decision"] [data-model-action="install"]');
     const request = await backend.waitForCall("A", "managed_judgment_install", downloadedAt);
     assertEqual(request.args, { modelId: "fixture-decision", revision: "fixture-revision" }, "download did not bind the catalog revision");
     await pageA.waitForFunction(() => !document.getElementById("managed-judgment-progress").hidden);
@@ -6940,13 +6952,20 @@ await test("로컬 모델은 서버 주소 대신 다운로드 상태를 보이�
     await pageA.waitForFunction(() => document.getElementById("managed-judgment-progress").hidden);
     assertEqual(backend.typesafeSettings().provider, applied, "download or cancellation changed the applied model");
     assert(!backend.managedModelState.models[0].installed, "a cancelled download was shown as installed");
+    assert(await pageA.evaluate(() => managedJudgmentController.candidates.has("fixture-decision") && !managedJudgmentController.rows.has("fixture-decision")),
+      "a cancelled download left the candidates for the library");
     assert(!backend.calls.slice(downloadedAt).some((entry) => entry.command === "managed_judgment_apply"), "download silently applied a model");
   } finally {
     backend.zoSettings.smart = previous;
     delete backend.managedPendingKinds;
-    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+    await pageA.evaluate(() => {
+      const fold = document.getElementById("managed-judgment-candidates");
+      if (fold) fold.open = false;
+      judgmentProviderController.draft = null;
+      return refreshApiRouters();
+    });
   }
-  return "no server field · revision-bound download · stale event ignored · cancellation is not installation";
+  return "no server field · candidate's revision-bound download · stale event ignored · cancellation is not installation";
 });
 
 await test("로컬 모델은 준비와 응답 확인을 마친 같은 서버만 명시적으로 적용한다", async () => {
@@ -7205,14 +7224,25 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
   const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
   delete backend.managedModelState;
   backend.managedJudgmentSettings();
+  // Both models are this computer's (t-69998): the local one received, the
+  // server one's files kept though it cannot run here.
   const local = backend.managedModelState.models[0];
   local.local = { supported: true, reason: null };
   local.existingServer = { supported: true, protocol: "system_one", modelId: local.id, requiresCheck: true };
+  local.installed = true;
   backend.managedModelState.models.push({
     ...clone(local), id: "fixture-server-decision", label: "Example Decision Server", engine: "transformers_system_one",
     serverModelId: "acme/decision", compatibility: "unsupported", compatibilityReason: "engine_not_supported",
-    local: { supported: false, reason: "engine_not_supported" },
+    local: { supported: false, downloadOnly: true, reason: "engine_not_supported" },
     existingServer: { supported: true, protocol: "system_one", modelId: "acme/decision", requiresCheck: true },
+  });
+  // Not received, unable to run here and with no files to keep: its server is
+  // its one way in.
+  backend.managedModelState.models.push({
+    ...clone(local), id: "fixture-server-only", label: "Fixture Server Only", engine: "transformers_system_one", installed: false,
+    serverModelId: "acme/server-only", compatibility: "unsupported", compatibilityReason: "engine_not_supported",
+    local: { supported: false, downloadOnly: false, reason: "engine_not_supported" },
+    existingServer: { supported: true, protocol: "system_one", modelId: "acme/server-only", requiresCheck: true },
   });
   await openJudgmentSettings(pageA);
   await pageA.evaluate(() => {
@@ -7223,7 +7253,7 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
   });
   try {
     await pageA.selectOption("#judgment-provider-kind", "local");
-    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
     assertEqual(await pageA.locator("#managed-judgment-search").count(), 1, "a multi-model library has no search control");
     const before = clone(backend.typesafeSettings().provider);
     const requestsAt = backend.calls.length;
@@ -7231,8 +7261,15 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
     assert(await pageA.locator('[data-model-id="fixture-decision"].managed-judgment-model').isHidden(), "search did not filter unrelated models");
     const server = pageA.locator('[data-model-id="fixture-server-decision"].managed-judgment-model');
     assert(await server.isVisible(), "search is not case-insensitive");
-    assert(await server.locator('[data-model-action="install"]').isHidden(), "an unsupported local adapter offers a download that cannot run");
+    assert(await server.locator('[data-model-action="activate"]').isHidden(), "an unsupported local adapter offers to run here");
     assert(await server.locator('[data-model-action="connect"]').isVisible(), "a compatible server model has no connection path");
+    assertEqual(await pageA.locator('[data-model-id="fixture-server-only"].managed-judgment-model').count(), 0, "a model not received here stands as a library row");
+    await pageA.locator("#managed-judgment-candidates > summary").click();
+    const serverOnly = pageA.locator('#managed-judgment-candidate-list > [data-model-id="fixture-server-only"]');
+    for (const action of ["install", "inspect-source", "import"]) {
+      assert(await serverOnly.locator(`[data-model-action="${action}"]`).isHidden(), `a candidate that cannot run or be kept here offers ${action}`);
+    }
+    assert(await serverOnly.locator('[data-model-action="connect"]').isVisible(), "a candidate reached only through its server has no connection path");
     await pageA.fill("#managed-judgment-search", "");
     await pageA.selectOption("#managed-judgment-filter", "local");
     assert(await server.isHidden(), "the local filter includes server-only models");
@@ -7254,10 +7291,256 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
       managedJudgmentController.query = "";
       managedJudgmentController.filter = "all";
       judgmentProviderController.draft = null;
+      document.getElementById("managed-judgment-candidates").open = false;
       return refreshApiRouters();
     });
   }
-  return "search and support filters · no backend polling · no fake local download · exact server ID and address preserved";
+  return "search and support filters · no backend polling · no local run for an unsupported adapter · a server-only candidate offers its server alone · exact server ID and address preserved";
+});
+
+/* The settings › 판단 모델 picture the person sent on 10-22 (t-69998): the
+ * bundled catalog plus the address they had checked, with only Laya received.
+ * Written to `MANAGED_JUDGMENT_SHOTS` beside what the library drew, so the
+ * same run makes the before and the after of a change. */
+async function photographManagedLibrary(folder) {
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  const manifests = resolve(UI, "..", "crates", "local-judgment", "manifests");
+  const bundled = [];
+  for (const name of ["models.json", "native-models.json"]) bundled.push(...JSON.parse(await readFile(resolve(manifests, name), "utf8")).models);
+  const entry = (model, installed) => {
+    const local = model.engine === "laya";
+    return {
+      id: model.id, label: model.label, engine: model.engine, protocol: model.protocol, revision: model.revision, license: model.license,
+      source: model.source, quality: model.quality, origin: "bundled", serverModelId: model.serverModelId ?? null, nativeFormat: model.nativeFormat ?? null,
+      downloadBytes: model.files.reduce((sum, file) => sum + file.bytes, 0),
+      weightsBytes: model.weightsBytes ?? model.files.filter((file) => file.path.endsWith(".safetensors")).reduce((sum, file) => sum + file.bytes, 0),
+      local: { supported: local, downloadOnly: !local, reason: local ? null : "engine_unverified", inputs: ["text", "json"], unsupportedInputs: ["images", "videos"] },
+      existingServer: { supported: true, protocol: model.protocol, modelId: model.serverModelId ?? null, requiresCheck: true },
+      runtime: { state: local ? "ready" : "unverified", downloadBytes: 0, reason: local ? null : "engine_unverified" },
+      installed, installedDirectory: installed ? `/Users/dev/Library/Application Support/dev.zerocode.app/managed-judgment/models/${model.id}` : null,
+      compatibility: local ? "supported" : "unsupported", compatibilityReason: local ? null : "engine_unverified",
+    };
+  };
+  const [laya, d3] = ["laya-multilingual-322m", "d3-lite"].map((id) => bundled.find((model) => model.id === id));
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  backend.managedModelState.runtime.state = "ready";
+  backend.managedModelState.models = [entry(laya, true), entry(d3, false),
+    { ...entry(d3, false), id: "native-checked-address", label: d3.serverModelId, revision: "checked-address-revision", origin: "registered", quality: "source_inspected_unverified" }];
+  const page = await context.newPage();
+  await installTauri(page, "managed-photo");
+  attachFaultRecorder(page, "managed-photo");
+  try {
+    await page.setViewportSize({ width: 1280, height: 2400 });
+    await bootPage(page, "managed-photo");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
+    await renderSettled(page);
+    const drawn = await page.evaluate(() => ({
+      rows: [...document.querySelectorAll("#managed-judgment-models > .managed-judgment-model h4")].map((title) => title.textContent),
+      pinnedFolds: [...document.querySelectorAll("#managed-judgment-panel details > summary")]
+        .filter((summary) => summary.textContent === t("settings.managed.details", "모델 출처와 고정 버전")).length,
+      candidates: [...document.querySelectorAll("#managed-judgment-candidate-list > li .managed-judgment-candidate-name")].map((name) => name.textContent),
+    }));
+    await mkdir(folder, { recursive: true });
+    await writeFile(resolve(folder, "library.json"), `${JSON.stringify(drawn, null, 2)}\n`);
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(page, theme);
+      await renderSettled(page);
+      await page.locator("#managed-judgment-panel").screenshot({ path: resolve(folder, `library-${theme}.png`), animations: "disabled" });
+      const fold = page.locator("#managed-judgment-candidates");
+      if (!(await fold.isVisible())) continue;
+      await fold.evaluate((element) => { element.open = true; });
+      await renderSettled(page);
+      await page.locator("#managed-judgment-panel").screenshot({ path: resolve(folder, `library-${theme}-unfolded.png`), animations: "disabled" });
+      await fold.evaluate((element) => { element.open = false; });
+    }
+  } finally {
+    await page.close();
+    backend.managedModelState = previousManaged;
+  }
+}
+
+await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈로그 모델은 「받을 수 있는 모델」 접힘 한 줄로 간다", async () => {
+  if (process.env.MANAGED_JUDGMENT_SHOTS) await photographManagedLibrary(process.env.MANAGED_JUDGMENT_SHOTS);
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  // The person's photo of 10-22 (t-69998): a catalog of three, one of them
+  // received. Beside it stand a model this computer can run and a
+  // download-only one that a System One server can answer with.
+  const held = backend.managedModelState;
+  const base = held.models[0];
+  held.runtime.state = "ready";
+  held.models = [
+    { ...clone(base), id: "fixture-laya", label: "Fixture Laya 322M", engine: "laya", revision: "laya-revision", weightsBytes: 643_835_514,
+      local: { supported: true, downloadOnly: false, reason: null }, installed: true, installedDirectory: "/models/managed/fixture-laya" },
+    { ...clone(base), id: "fixture-local-candidate", label: "Fixture Local Candidate", revision: "local-candidate-revision", weightsBytes: 1_073_741_824,
+      local: { supported: true, downloadOnly: false, reason: null } },
+    { ...clone(base), id: "fixture-d3", label: "Fixture D3 lite", engine: "transformers_system_one", revision: "d3-revision", serverModelId: "acme/d3",
+      source: "https://huggingface.co/acme/d3/tree/d3-revision", weightsBytes: 1_707_072_248, compatibility: "unsupported", compatibilityReason: "engine_unverified",
+      local: { supported: false, downloadOnly: true, reason: "engine_unverified" },
+      existingServer: { supported: true, protocol: "system_one", modelId: "acme/d3", requiresCheck: true } },
+  ];
+  const page = await context.newPage();
+  await installTauri(page, "managed-library");
+  attachFaultRecorder(page, "managed-library");
+  try {
+    await bootPage(page, "managed-library");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
+    assertEqual(await page.locator("#managed-judgment-candidates").count(), 1, "the catalog models not received have no folded line");
+    const words = await page.evaluate(() => ({
+      details: t("settings.managed.details", "모델 출처와 고정 버전"),
+      source: t("settings.managed.detailsSource", "모델 출처"),
+      connected: t("settings.managed.connectedApplied", "기존 판단 서버로 연결됨 · 현재 적용됨"),
+      offered: [2, 1].map((count) => t("settings.managed.availableCount", "받을 수 있는 모델 {{count}}개", { count })),
+      counted: [1, 2, 3].map((total) => t("settings.managed.libraryCount", "모델 {{shown}}개 표시 · 전체 {{total}}개", { shown: total, total })),
+      download: t("settings.managed.download", "다운로드"),
+      register: t("settings.managed.import", "기존 파일 등록"),
+      inspect: t("settings.managed.inspectSource", "주소로 확인"),
+      connect: t("settings.managed.connectServer", "이 모델의 서버 연결"),
+      sizes: [1_073_741_824, 1_707_072_248].map((bytes) => bytesLabel(bytes)),
+    }));
+    const library = () => page.evaluate(() => [...document.querySelectorAll("#managed-judgment-models > .managed-judgment-model")].map((row) => row.dataset.modelId));
+    const said = () => page.evaluate(() => ({
+      count: document.getElementById("managed-judgment-library-summary").textContent,
+      fold: document.getElementById("managed-judgment-candidates").hidden ? null : document.querySelector("#managed-judgment-candidates > summary").textContent.trim(),
+    }));
+    const fold = page.locator("#managed-judgment-candidates");
+    assertEqual(await library(), ["fixture-laya"], "a catalog model not received here stood as a library row");
+    assertEqual(await said(), { count: words.counted[0], fold: words.offered[0] }, "the library is not counted by its rows, or the candidates by theirs");
+    assert(!(await fold.evaluate((element) => element.open)), "the candidates start unfolded");
+    assert(await fold.locator(".settings-notice").isHidden(), "the experimental notice stands while the candidates are folded");
+    assert(await page.locator("#managed-judgment-none").isHidden(), "a library holding a model says it holds none");
+    // A pinned revision is a fact of received files alone.
+    const pinned = await page.evaluate((details) => {
+      const panel = document.getElementById("managed-judgment-panel");
+      return {
+        folds: [...panel.querySelectorAll("details > summary")].filter((summary) => summary.textContent === details)
+          .map((summary) => summary.closest("[data-model-id]")?.dataset.modelId ?? null),
+        revisions: ["laya-revision", "local-candidate-revision", "d3-revision"].filter((revision) => panel.textContent.includes(revision)),
+      };
+    }, words.details);
+    assertEqual(pinned, { folds: ["fixture-laya"], revisions: ["laya-revision"] }, "a model not received here shows a source and pinned revision");
+
+    await fold.locator("summary").click();
+    assert(await fold.evaluate((element) => element.open), "the folded line did not open");
+    assert(await fold.locator(".settings-notice").isVisible(), "the unfolded candidates lost the experimental notice");
+    const offered = await page.evaluate(() => [...document.querySelectorAll("#managed-judgment-candidate-list > li")].map((item) => ({
+      id: item.dataset.modelId,
+      name: item.querySelector(".managed-judgment-candidate-name").textContent,
+      size: item.querySelector(".managed-judgment-candidate-name ~ span").textContent,
+      actions: [...item.querySelectorAll("button[data-model-action]")].filter((button) => !button.hidden).map((button) => [button.dataset.modelAction, button.textContent]),
+      folds: item.querySelectorAll("details").length,
+    })));
+    assertEqual(offered, [
+      { id: "fixture-local-candidate", name: "Fixture Local Candidate", size: words.sizes[0], actions: [["install", words.download], ["import", words.register]], folds: 0 },
+      { id: "fixture-d3", name: "Fixture D3 lite", size: words.sizes[1], actions: [["inspect-source", words.inspect], ["connect", words.connect]], folds: 0 },
+    ], "an unfolded candidate is not one line of its name, its size and the ways to have it");
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(page, theme);
+      await renderSettled(page);
+      assertEqual(await axeViolations(page, AxeBuilder, "#managed-judgment-panel"), [], `${theme} unfolded candidates accessibility`);
+    }
+    await page.setViewportSize(SETTINGS_QUALITY_SPEC.viewport);
+    await renderSettled(page);
+    const geometry = await page.locator("#managed-judgment-panel").evaluate((panel) => ({ client: panel.clientWidth, scroll: panel.scrollWidth }));
+    assert(geometry.client > 0 && geometry.scroll <= geometry.client + 1, "the unfolded candidates overflow the narrowest settings pane", geometry);
+
+    // Received, a candidate joins the library with the revision it was pinned to.
+    const installedAt = backend.calls.length;
+    await page.click('#managed-judgment-candidate-list [data-model-id="fixture-local-candidate"] [data-model-action="install"]');
+    const request = await backend.waitForCall("managed-library", "managed_judgment_install", installedAt);
+    assertEqual(request.args, { modelId: "fixture-local-candidate", revision: "local-candidate-revision" }, "the candidate's download did not bind its catalog revision");
+    await page.waitForFunction(() => managedJudgmentController.rows.has("fixture-local-candidate") && !managedJudgmentController.busy);
+    assertEqual(await library(), ["fixture-laya", "fixture-local-candidate"], "a received candidate did not join the library");
+    assertEqual(await said(), { count: words.counted[1], fold: words.offered[1] }, "receiving a candidate did not move it from one count to the other");
+    assert(await page.evaluate(() => managedJudgmentController.rows.get("fixture-local-candidate").identity.textContent.includes("local-candidate-revision")),
+      "the received model does not show the revision it was pinned to");
+
+    // A server of the person's own answering with the download-only model
+    // makes it a row, with no revision it cannot know. The address the person
+    // checked for the same model answers with the same server model ID: one
+    // connection is one row, and the other entry stays a candidate.
+    const checked = { ...clone(held.models.find((model) => model.id === "fixture-d3")), id: "fixture-d3-checked", label: "acme/d3", revision: "d3-checked-revision", origin: "registered" };
+    held.models.push(checked);
+    held.revision += 1;
+    backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32105", model: "acme/d3", requiresAuth: false } };
+    await page.evaluate(() => refreshTypeSafe());
+    await page.waitForFunction(() => managedJudgmentController.rows.has("fixture-d3") && managedJudgmentController.snapshot?.models.length === 4);
+    const answering = () => page.evaluate((connected) => ({
+      rows: [...document.querySelectorAll("#managed-judgment-models > .managed-judgment-model")].filter((row) => row.textContent.includes(connected)).map((row) => row.dataset.modelId),
+      candidates: [...document.querySelectorAll("#managed-judgment-candidate-list > li")].map((item) => item.dataset.modelId),
+    }), words.connected);
+    assertEqual(await answering(), { rows: ["fixture-d3"], candidates: ["fixture-d3-checked"] }, "two catalog entries of one server model stand as two connected rows");
+    assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3"], "the model a connected server answers with is not in the library");
+    const served = await page.evaluate(() => {
+      const row = managedJudgmentController.rows.get("fixture-d3");
+      return { summary: row.summary.textContent, identity: row.identity.textContent, state: row.state.textContent };
+    });
+    assertEqual(served, { summary: words.source, identity: "acme/d3 · transformers_system_one", state: words.connected },
+      "the connected server's model claims a pinned revision it cannot know, or hides that it is connected");
+    assertEqual(await said(), { count: words.counted[2], fold: words.offered[1] }, "the connected server model is not counted as one row beside one candidate");
+    // Files received for the checked address make it the connection's row,
+    // and the bundled entry goes back to the candidates.
+    checked.installed = true;
+    checked.installedDirectory = "/models/managed/fixture-d3-checked";
+    held.revision += 1;
+    await page.evaluate(() => refreshTypeSafe());
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.some((model) => model.id === "fixture-d3-checked" && model.installed));
+    assertEqual(await answering(), { rows: ["fixture-d3-checked"], candidates: ["fixture-d3"] }, "the connection's row is not the entry whose files are here");
+    assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3-checked"], "a connected server model stands as more than one row");
+  } finally {
+    await page.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
+  return "catalog 3 · received 1 → 1 row + 「2 to add」 folded · revision only on received files · unfolded: name, size, ways · axe 2 themes · download joins the library · connected server model is a row without a revision · two entries of one server model ID → 1 row + 1 candidate, the received one the row";
+});
+
+await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 상태 한 줄만 보이고 후보는 접혀 있다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const previousManaged = backend.managedModelState === undefined ? undefined : clone(backend.managedModelState);
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  const page = await context.newPage();
+  await installTauri(page, "managed-none");
+  attachFaultRecorder(page, "managed-none");
+  try {
+    await bootPage(page, "managed-none");
+    await openSettings(page, "judgment-models");
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 1);
+    assertEqual(await page.locator("#managed-judgment-none").count(), 1, "the library has no line for holding nothing");
+    const seen = () => page.evaluate(() => {
+      const shown = (node) => Boolean(node && !node.parentElement.closest("details:not([open])") && node.getClientRects().length > 0);
+      return {
+        rows: document.querySelectorAll("#managed-judgment-models > .managed-judgment-model").length,
+        lines: ["managed-judgment-library-tools", "managed-judgment-library-summary", "managed-judgment-no-matches", "managed-judgment-none", "managed-judgment-empty", "managed-judgment-candidates"]
+          .filter((id) => shown(document.getElementById(id))),
+        notice: shown(document.querySelector("#managed-judgment-candidates .settings-notice")),
+        open: document.getElementById("managed-judgment-candidates").open,
+        pinned: document.getElementById("managed-judgment-panel").textContent.includes("fixture-revision"),
+      };
+    });
+    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-none", "managed-judgment-candidates"], notice: false, open: false, pinned: false },
+      "a computer holding no model shows more than one line and the folded candidates");
+    assertEqual(await page.locator("#managed-judgment-none").textContent(),
+      await page.evaluate(() => t("settings.managed.noneReceived", "받은 판단 모델이 없습니다 — 아래에서 불러오세요")), "the empty library does not point at the candidates below");
+    // With nothing in the catalog either, the line left is the server one.
+    backend.managedModelState.models = [];
+    backend.managedModelState.revision += 1;
+    await page.evaluate(() => managedJudgmentController.refresh());
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 0);
+    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-empty"], notice: false, open: false, pinned: false },
+      "an empty catalog still points at candidates that are not there");
+  } finally {
+    await page.close();
+    backend.zoSettings.smart = previous;
+    backend.managedModelState = previousManaged;
+  }
+  return "received 0 · server 0 → 0 rows, one line and the candidates folded · no search, count or notice · an empty catalog keeps its server line";
 });
 
 await test("로컬 모델 실패는 실제 원인과 다음 행동을 안내하고 적용된 모델을 보존한다", async () => {

@@ -266,7 +266,25 @@ presses, an `ok` or the judgment's own `done` alone:
 - `stopped`: the person stopped it, a guard refused a screen, or the budget
   ran out (`stepsLeft`). Stop and report as any stop.
 - `failed`: a press or a look failed, or the screen would not move. `at.step`
-  names where; recover from there.
+  names where; recover from there. A look that came back with nothing ends
+  the walk on a row whose `outcome` is `no_look` (`lastRow`; the last of
+  `steps` from `zerocode-computer walk --json`), and the row's `reason` says
+  which of four. Take them in this order:
+  - `no_window`: the app, window or pane was not found. Find it again first
+    (`list-windows`, `zerocode-browser tabs`), then walk again.
+  - `empty_tree`: it stood with nothing a look numbers (a canvas grid, a
+    remote screen). Look by its picture (`observe --app <app> --ocr`) and
+    press by point (`click --mark N --look <id>` on an OCR mark, `click --app
+    <app> --x X --y Y`), or go as a person does through the app's own name
+    box and keys: the box, the address, `press-key Enter`, the value,
+    `press-key Enter`.
+  - `look_timeout`: the look ran out of time. Look once more, once.
+  - `look_refused`: a door refused the look; the row's `refusal` is the
+    door's own code (`workspace_actor_required`, `permission_denied`, …).
+    Looking again will not open it: report the code as a defect, with
+    `at.step`.
+  Asking the person to open the file in a desktop app comes last, after all
+  four.
 
 ## Built-in browser
 

@@ -926,3 +926,48 @@ fn the_skill_says_a_look_that_cannot_be_compared_is_unknown_not_nothing() {
         "the skill's diff does not say that `changed: null` is unknown, not nothing: {teaching}"
     );
 }
+
+/// t-70425: a walk that ends at `no_look` says which of four reasons on its
+/// row, a door's refusal with its own code beside, in the core's words
+/// (`walk_words`). The skill names each where it teaches what a `failed`
+/// walk means, in the order a caller takes them, and puts the person's
+/// desktop app last — or a model reads a refused look as a screen it cannot
+/// see and asks the person for a desktop app first (10-22 11:3x).
+#[test]
+fn the_skill_names_every_no_look_reason_in_the_order_they_are_taken() {
+    use zerocode_core::computer_use::walk_words;
+    let skill = include_str!("../../../../skills/computer-use/SKILL.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let start = skill
+        .find("- `failed`: ")
+        .expect("the skill says what a failed walk means");
+    let end = skill[start..]
+        .find("## ")
+        .map_or(skill.len(), |at| start + at);
+    let teaching = &skill[start..end];
+    let mut at = 0;
+    for reason in [
+        walk_words::NO_WINDOW,
+        walk_words::EMPTY_TREE,
+        walk_words::LOOK_TIMEOUT,
+        walk_words::LOOK_REFUSED,
+    ] {
+        at += teaching[at..]
+            .find(&format!("- `{reason}`: "))
+            .unwrap_or_else(|| {
+                panic!("the skill does not name `{reason}` after the reasons before it: {teaching}")
+            });
+    }
+    for word in [walk_words::NO_LOOK, walk_words::REFUSAL] {
+        assert!(
+            teaching.contains(&format!("`{word}`")),
+            "the skill's failed walk does not name `{word}`: {teaching}"
+        );
+    }
+    assert!(
+        teaching[at..].contains("desktop app comes last"),
+        "the skill does not put the person's desktop app after the four: {teaching}"
+    );
+}

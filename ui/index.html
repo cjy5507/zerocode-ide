@@ -4379,7 +4379,7 @@
             <p class="settings-status" id="judgment-source-status" role="status" aria-live="polite"></p>
           </section>
             <section id="managed-judgment-panel" data-i18n-aria="settings.managed.panel" aria-label="로컬 판단 모델 관리" hidden>
-              <div class="managed-judgment-library-tools">
+              <div class="managed-judgment-library-tools" id="managed-judgment-library-tools">
                 <label class="settings-field" data-field="lg" for="managed-judgment-search">
                   <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.search">판단 모델 찾기</span></span>
                   <input type="search" class="settings-input" id="managed-judgment-search" autocomplete="off" spellcheck="false" />
@@ -4400,15 +4400,26 @@
                 <button type="button" class="btn" id="managed-judgment-prepare" data-i18n="settings.managed.prepare" disabled>실행 환경 설치</button>
                 <button type="button" class="btn" id="managed-judgment-refresh" data-i18n="settings.managed.refresh">상태 새로고침</button>
               </div>
-              <p class="settings-notice" data-i18n="settings.managed.experimental">실험용 판단 모델입니다. 다운로드나 연결 확인은 작업 정확도 검증이 아닙니다. 설치만으로 현재 모델이 바뀌지는 않습니다.</p>
               <div id="managed-judgment-progress" hidden>
                 <p id="managed-judgment-progress-label" role="status" aria-live="polite"></p>
                 <progress aria-labelledby="managed-judgment-progress-label"></progress>
                 <button type="button" class="btn" id="managed-judgment-cancel" data-i18n="settings.managed.cancel">취소</button>
               </div>
+              <!-- The library is what this computer holds: a model whose files
+                   were received, or one the setting or a server is bound to.
+                   Any other catalog model waits folded below, so a model that
+                   is not here shows no pinned revision (t-69998). -->
               <div id="managed-judgment-models"></div>
               <p class="settings-row-desc" id="managed-judgment-no-matches" data-i18n="settings.managed.noMatches" hidden>조건에 맞는 모델이 없습니다. 검색어나 사용 방법을 바꿔보세요.</p>
+              <p class="settings-row-desc" id="managed-judgment-none" data-i18n="settings.managed.noneReceived" hidden>받은 판단 모델이 없습니다 — 아래에서 불러오세요</p>
               <p class="settings-row-desc" id="managed-judgment-empty" data-i18n="settings.managed.empty" hidden>설치할 수 있는 모델이 없습니다. 이미 실행 중인 판단 서버를 연결할 수 있습니다.</p>
+              <details class="settings-fold" id="managed-judgment-candidates" hidden>
+                <summary id="managed-judgment-candidates-count"></summary>
+                <div class="managed-judgment-candidates">
+                  <p class="settings-notice" data-i18n="settings.managed.experimental">실험용 판단 모델입니다. 다운로드나 연결 확인은 작업 정확도 검증이 아닙니다. 설치만으로 현재 모델이 바뀌지는 않습니다.</p>
+                  <ul id="managed-judgment-candidate-list"></ul>
+                </div>
+              </details>
               <details class="settings-fold" id="managed-judgment-register" hidden>
                 <summary data-i18n="settings.managed.addCatalog">다른 모델 목록 추가</summary>
                 <p class="settings-row-desc" data-i18n="settings.managed.catalogHint">호환 모델의 카탈로그 파일을 선택하세요. 출처·고정 버전·파일 무결성을 검사하며, 실행 코드나 새 엔진은 등록하지 않습니다.</p>
