@@ -3167,6 +3167,7 @@ class StatefulBackend {
         return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
       }
       case "preflight_judgment_provider": {
+        if (this.judgmentPreflightError) throw this.judgmentPreflightError;
         if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (args.provider.kind === "jev" && !jevModelPin(args.provider.model)) throw "provider_model";
         const check = await (this.judgmentPreflightWait ?? this.judgmentPreflight ?? {
@@ -7877,8 +7878,16 @@ await test("판단 서버 주소 오류는 고칠 방법을 말하고 현재 모
     const status = await pageA.locator("#judgment-model-status").textContent();
     assert(status.includes("HTTPS") && !status.includes("provider_https_required"), "the address refusal is still an unexplained token", status);
     assertEqual(backend.typesafeSettings().providerIdentity, identity, "failed discovery changed the current provider");
+    backend.judgmentPreflightError = "provider_https_required";
+    await pageA.fill("#typesafe-model-input", "fixture-decision");
+    await pageA.click("#judgment-save-provider");
+    await pageA.waitForFunction(() => !typesafeBusy);
+    const said = await pageA.locator("#typesafe-status .settings-status-said").textContent();
+    assert(said.includes("HTTPS") && !said.includes("provider_https_required"), "apply displayed the raw address token", said);
+    assertEqual(backend.typesafeSettings().providerIdentity, identity, "failed apply changed the current provider");
   } finally {
     delete backend.judgmentModelsError;
+    delete backend.judgmentPreflightError;
     backend.zoSettings.smart = previous;
     await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
   }

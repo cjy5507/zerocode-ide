@@ -7047,7 +7047,7 @@ function paintTypeSafeSave() {
 }
 
 function paintTypeSafeStatus(text, evidence = {}) {
-  paintSettingsStatus(el("typesafe-status"), text, evidence);
+  paintSettingsStatus(el("typesafe-status"), judgmentProviderController.failure(text) ?? text, evidence);
 }
 
 /* This card's hands, for the step every key card runs (`runKeyCardStep`). */
