@@ -81,17 +81,13 @@ body {
   background: color-mix(in srgb, var(--ai-accent) 34%, transparent);
 }
 
-/* The material pass is intentionally structural: ambient light is strongest
- * at the navigation edge, becomes almost invisible on the work surface, and
- * returns as a soft rim on transient dialogs. It adds depth without spending
- * semantic colour on decoration. */
+/* The material pass is intentionally structural: the work surface keeps an
+ * almost invisible wash and transient dialogs a soft rim. It adds depth
+ * without spending semantic colour on decoration. The left column is one flat
+ * Geist panel (t-70028, review t-68962 P3 ①): the 5% lane wash it kept from
+ * the obsidian atelier was the one gradient left on the window's chrome. */
 body .threads {
   background-color: var(--nav-plane);
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--lane-1) 5%, transparent),
-    transparent 28%
-  );
   box-shadow:
     inset -1px 0 var(--edge-rule),
     var(--shadow-nav-edge);
@@ -21479,6 +21475,54 @@ button.helper-sib:hover {
   margin-inline: 0;
 }
 
+/* The catalog models this computer has not received (t-69998), folded under
+ * the library: one ruled line each, the name and size, then the ways to have
+ * it. The list takes the panel's width, unlike a fold's prose. */
+.settings-fold > .managed-judgment-candidates {
+  max-width: none;
+}
+
+.managed-judgment-candidates > .settings-notice {
+  margin-inline: 0;
+}
+
+#managed-judgment-candidate-list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.managed-judgment-candidate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding-block: var(--space-2);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.managed-judgment-candidate-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.managed-judgment-candidate-name {
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+#managed-judgment-panel .managed-judgment-candidate > .settings-action-row {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 #typesafe-card .settings-fold > summary {
   min-height: 32px;
   box-sizing: border-box;
@@ -29827,6 +29871,12 @@ input[type="search"]::-webkit-search-cancel-button {
   background: var(--workbench-ambient), var(--surface-deck);
 }
 
+/* 작업 상황판의 머리는 시안 B의 머리 띠처럼 판 바탕 한 장이다(t-70028) — 작업대의 주변광은
+ * 관계 탭과 다른 작업대 화면의 것이다. */
+.is-task-board .agent-graph-head {
+  background: var(--surface-deck);
+}
+
 .agent-graph-heading {
   display: flex;
   flex: none;
@@ -31028,11 +31078,13 @@ input[type="search"]::-webkit-search-cancel-button {
   cursor: default;
 }
 
+/* 안내 글은 글이다 — 낱말의 바닥 12px(`--text-2xs`, 검토 t-68962 P3 ④). 11px(`--text-3xs`)은 배지
+ * 안의 수와 그림의 범례 몫이다. */
 .agent-orbit-legend {
   display: none;
   margin: 0;
   color: var(--ink-mist);
-  font-size: var(--text-3xs);
+  font-size: var(--text-2xs);
 }
 
 .agent-board.is-orbit .agent-orbit-legend {
@@ -32818,23 +32870,21 @@ input[type="search"]::-webkit-search-cancel-button {
   display: inline-flex;
 }
 
+/* The board fills the width it is given (t-70028, the person on 10-22 at
+ * 2000px: 「화면 크기에 맞추고」). Every tab's blocks run gutter to gutter and
+ * the draft's grid divides that width — two columns at 2fr and 1fr, the table
+ * across both — instead of the old 76em column centred in an empty floor.
+ * The gutter is the draft's page gutter, 24px at every width. */
 .task-board-surface {
+  --board-gutter: var(--space-5);
   min-width: 0;
   min-height: 0;
-  padding: var(--space-6);
+  padding: var(--board-gutter);
   overflow: auto;
   /* Geist's page floor (t-67607): the cards are background-100 panels standing
    * a step above it. */
   background: var(--surface-abyss);
   scrollbar-gutter: stable;
-}
-
-.task-board-intro,
-.task-board-filters,
-.task-board-sections,
-.task-board-empty {
-  max-width: 76em;
-  margin-inline: auto;
 }
 
 .task-board-intro h2 {
@@ -33163,7 +33213,6 @@ details.task-board-section > summary {
 
 @container board (max-width: 1099px) {
   .is-task-board.is-inspector-open .agent-graph-layout { grid-template-columns: minmax(0, 1fr); }
-  .task-board-surface { padding: var(--space-4); }
 }
 
 @container board (max-width: 699px) {
@@ -33180,17 +33229,16 @@ details.task-board-section > summary {
  * 데스크는 상황판의 탭 위에 선다(사람이 통과시킨 시안 B). 「지금」 탭은 두 단과
  * 넓은 한 단이다: 왼쪽 넓은 열에 당신 차례, 오른쪽에 빌드 줄, 그 아래 통합 묶음과
  * 지금 도는 일이 판의 폭 전체를 쓴다. 한 장만 서면 그 장이 행을 다 쓴다. 「워커」와
- * 「기록」은 한 열이다. 목록과 같은 폭(76em)이고, 빈 블록은 접히고 나머지가 차례대로
+ * 「기록」은 한 열이다. 판의 폭을 다 쓰고(t-70028), 빈 블록은 접히고 나머지가 차례대로
  * 자리를 채운다 — 숨은 블록은 자리를 차지하지 않으므로 행 사이는 격자의 간격 하나다.
- * 좁은 판(`board-desk` 컨테이너 720 미만)에서는 한 열이다. 상태 표식은 다섯 상태의
- * 것을 빌리되 돌지 않는다 — 도는 것은 작업 행의 표식 하나다(3차). */
+ * 좁은 판(`board-desk` 컨테이너 720 미만)에서는 한 열이다. 상태는 낱말 곁의 채운 점
+ * 하나다(`.board-dot`, 시안 B) — 도는 것은 시간 글자이고 1분 박자가 고친다. */
 .task-board-desk {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
   align-items: stretch;
   gap: var(--space-5);
-  max-width: 76em;
-  margin: var(--space-5) auto 0;
+  margin: var(--board-intro-after) 0 0;
 }
 
 .task-board-desk[hidden],
@@ -33930,20 +33978,6 @@ details.task-board-section > summary {
   font-size: var(--text-xs);
 }
 
-.board-desk-release-verdict {
-  font-weight: 600;
-}
-
-.board-desk-release.is-running .board-desk-release-verdict { color: var(--signal-ready); }
-.board-desk-release.is-green .board-desk-release-verdict { color: var(--signal-done); }
-.board-desk-release.is-red .board-desk-release-verdict { color: var(--signal-halt-ink); }
-
-.board-desk-release-clock {
-  color: var(--ink-label);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-}
-
 .board-desk-release-phases {
   display: flex;
   flex-wrap: wrap;
@@ -34009,8 +34043,7 @@ details.task-board-section > summary {
   --schedule-said: 12em;
   --schedule-gap: var(--space-2);
   container: board-schedule / inline-size;
-  max-width: 76em;
-  margin: var(--space-5) auto 0;
+  margin: var(--board-intro-after) 0 0;
 }
 
 .task-board-schedule[hidden],
@@ -34410,8 +34443,9 @@ details.task-board-section > summary {
 .board-batch-said[data-tone="ok"] { color: var(--signal-done); }
 .board-batch-said[data-tone="refused"] { color: var(--signal-halt-ink); }
 
-@container board (max-width: 699px) {
-  /* 목록 티어: 한 열, DOM 차례 (t-7448 → t-67607). */
+/* 한 열, DOM 차례 (t-7448 → t-67607 → t-70028): 시안 B의 문턱 그대로 — 1012 px 아래에서 두 카드는
+ * 위아래로 선다(시안 `.g-grid`의 `max-width: 1011.98px`). 그 위에서만 2 : 1로 나란히. */
+@container board (max-width: 1011px) {
   .task-board-desk {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -34421,12 +34455,12 @@ details.task-board-section > summary {
   }
 }
 
-/* ---- 작업 상황판 · 시안 B (t-67607) ------------------------------------------
+/* ---- 작업 상황판 · 시안 B (t-67607 → t-70028) --------------------------------
  *
- * 사람이 통과시킨 Geist 언어의 상황판: 밑줄 탭 넷(일정은 t-67482), 24px 머리 문장
- * 하나, 1px 고리 그림자를 두른 카드, 상태 표식 곁의 낱말, 행 안의 단추. 값은 모두
- * tokens.css의 역할과 Geist 묶음 글꼴(`--type-*`)이다. 파랑(`--signal-you`)은 당신
- * 차례 한 곳에만 쓴다. */
+ * 사람이 통과시킨 Geist 언어의 상황판: 판 머리의 띠에 밑줄 탭 넷(일정은 t-67482), 24px
+ * 머리 문장 하나, 1px 고리 그림자를 두른 카드, 상태 점 곁의 낱말, 행 안의 단추. 값은 모두
+ * tokens.css의 역할과 Geist 묶음 글꼴(`--type-*`)이다. 파랑은 당신 차례에만 쓴다. 치수는
+ * 시안의 것 그대로다(reports/t-67561/b.html, 사람 10-22 「시안대로」). */
 
 /* 탭이 보이는 블록을 정한다 — 블록마다 제 탭(`data-board-tab-of`), 표면에 고른 탭
  * 하나(`data-board-tab`). 원장이 없는 창에는 나눌 것이 없어 탭도 머리 문장도 서지
@@ -34440,17 +34474,26 @@ details.task-board-section > summary {
   display: none;
 }
 
+/* 탭 막대는 시안의 머리 띠다: 판의 폭 끝에서 끝까지 판(패널) 바탕에 밑줄 하나, 48px.
+ * 표면의 위 여백과 옆 여백을 되물려 띠가 판의 가장자리에 붙고, 탭은 그 안에서 머리 문장과
+ * 같은 왼쪽 선에 선다. */
 .board-now-tabs {
   display: flex;
   flex-wrap: wrap;
-  max-width: 76em;
-  margin: calc(-1 * var(--space-4)) auto 0;
+  align-items: stretch;
+  min-height: var(--board-tab-height);
+  margin: calc(-1 * var(--board-gutter)) calc(-1 * var(--board-gutter)) 0;
+  padding: 0 var(--board-gutter);
+  background: var(--surface-deck);
   box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
 }
 
 .board-now-tab {
   position: relative;
-  padding: var(--space-3);
+  isolation: isolate;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
@@ -34458,6 +34501,22 @@ details.task-board-section > summary {
   font: var(--type-label-14);
   cursor: pointer;
   transition: color var(--motion-fast) var(--ease-standard);
+}
+
+/* 가리킨 탭은 낱말 둘레에 옅은 알약이 선다 — 시안의 탭이 낱말 상자에 6px을 둘러 칠하는
+ * 그 모양: 32px 줄 상자 더하기 위아래 6px, 옆으로 6px. */
+.board-now-tab::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: calc((var(--board-tab-height) - var(--control-height-md)) / 2 - var(--board-gap-small))
+    calc(var(--space-3) - var(--board-gap-small));
+  border-radius: var(--radius-xl);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-now-tab:hover::before {
+  background: var(--gray-alpha-100);
 }
 
 .board-now-tab:hover,
@@ -34493,8 +34552,7 @@ details.task-board-section > summary {
 }
 
 .task-board-tally {
-  max-width: 76em;
-  margin: var(--space-5) auto 0;
+  margin: var(--board-intro-after) 0 0;
   color: var(--ink-mist);
   font: var(--type-label-13);
   font-variant-numeric: tabular-nums;
@@ -34532,6 +34590,11 @@ details.task-board-section > summary {
   letter-spacing: 0;
 }
 
+/* 지금 도는 일의 머리: 한 줄은 제목 바로 곁에 서고, 오른쪽 끝은 범례다(시안). */
+.board-desk-block[data-desk-block="running"] .board-desk-head-note {
+  margin-left: 0;
+}
+
 /* 당신 차례의 머리 앞 점 — 파랑 하나가 이 카드를 가리킨다. 모양(원)과 낱말이 같이 선다. */
 .board-desk-block[data-desk-block="asks"] > .board-desk-head::before {
   content: "";
@@ -34539,7 +34602,43 @@ details.task-board-section > summary {
   width: var(--status-dot-size);
   height: var(--status-dot-size);
   border-radius: var(--radius-pill);
-  background: var(--signal-you);
+  background: var(--status-dot-you);
+}
+
+/* 상태 점 (t-70028, 시안 B): 낱말 곁의 채운 점 하나. 색은 tokens.css의 `--status-dot-*`,
+ * 차례 기다림의 회색 점만 1px 룰을 두른다. 점은 돌지 않는다 — 움직이는 것은 시간 글자다.
+ * 행·범례·빌드 줄의 점은 제 칸의 `::before`다(행 하나에 요소 하나를 더 들고 다니지 않게). */
+.board-dot,
+.board-run-state::before,
+.board-legend > li::before,
+.board-desk-release-status::before {
+  content: "";
+  display: inline-block;
+  flex: none;
+  width: var(--status-dot-size);
+  height: var(--status-dot-size);
+  border-radius: var(--radius-pill);
+  background: var(--status-dot-queue);
+  box-shadow: inset 0 0 0 var(--rule-width) var(--edge-rule);
+}
+
+:is(.board-dot.is-run, .board-run.is-run .board-run-state, .board-legend > li.is-run,
+  .board-desk-release.is-running .board-desk-release-status)::before,
+.board-dot.is-run {
+  background: var(--status-dot-run);
+  box-shadow: none;
+}
+
+:is(.board-run.is-halt .board-run-state, .board-legend > li.is-halt,
+  .board-desk-release.is-red .board-desk-release-status)::before {
+  background: var(--status-dot-halt);
+  box-shadow: none;
+}
+
+:is(.board-run.is-done .board-run-state, .board-legend > li.is-done,
+  .board-desk-release.is-green .board-desk-release-status)::before {
+  background: var(--status-dot-done);
+  box-shadow: none;
 }
 
 .board-desk-block:is([data-desk-block="asks"], [data-desk-block="release"], [data-desk-block="running"]) > .board-desk-body {
@@ -34555,9 +34654,9 @@ details.task-board-section > summary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-1);
+  gap: var(--board-gap-small);
   min-height: var(--control-height-md);
-  padding: 0 var(--space-3);
+  padding: 0 var(--control-pad-inline);
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--surface-deck);
@@ -34620,7 +34719,7 @@ details.task-board-section > summary {
 }
 
 /* 당신 차례의 행 — 왼쪽에 종류 배지·제목·한 줄, 오른쪽에 단추. 배지는 Geist의 둥근
- * 배지를 파랑 바탕으로: 사람이 답할 것이라는 표시다. */
+ * 배지, 파랑 바탕에 흰 글자(시안의 blue-solid): 사람이 답할 것이라는 표시다. */
 .board-asks {
   margin: 0;
   padding: 0;
@@ -34631,9 +34730,9 @@ details.task-board-section > summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   column-gap: var(--space-4);
-  row-gap: var(--space-1);
+  row-gap: var(--board-gap-small);
   align-items: start;
-  padding: var(--space-4);
+  padding: var(--board-ask-pad-block) var(--space-4);
   border: 0;
   border-radius: 0;
   background: none;
@@ -34644,8 +34743,7 @@ details.task-board-section > summary {
   box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
 }
 
-.board-ask-line,
-.board-asks > li .board-desk-letter-line {
+.board-ask-line {
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
@@ -34668,10 +34766,10 @@ details.task-board-section > summary {
   flex: none;
   align-items: center;
   min-height: var(--badge-height);
-  padding: 0 var(--space-3);
+  padding: 0 var(--control-pad-inline);
   border-radius: var(--radius-pill);
-  background: var(--signal-you-ground);
-  color: var(--signal-you);
+  background: var(--signal-you-solid);
+  color: var(--ink-on-solid);
   font: var(--type-label-12);
   font-weight: 500;
 }
@@ -34688,24 +34786,47 @@ details.task-board-section > summary {
   font: var(--type-label-13);
 }
 
-/* 질문 행은 답할 우편의 편지 그대로다(`paintDeskLetter`): 첫 줄의 누구·받은편지함·나이는
- * 보조 글, 둘째 줄의 질문이 제목이고 그 끝에 답하기 단추가 선다. */
-.board-asks > li :is(.board-desk-letter-who, .board-desk-letter-delivery, .board-desk-letter-age) {
-  color: var(--ink-mist);
-  font: var(--type-label-13);
+/* 한 줄의 이름 — 과업 id는 시안처럼 고정폭이다(`paintBoardMeta`). */
+.board-meta-id {
+  font-family: var(--font-mono);
 }
 
-.board-asks > li .board-desk-letter-lead {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-4);
-  grid-column: 1 / -1;
-  margin: 0;
+/* 질문 행은 답할 우편의 편지 그대로다(`paintDeskLetter`) — 마크업은 기록 탭의 소식과 같고,
+ * 여기서 시안의 한 행으로 다시 앉는다: 배지와 질문이 첫 줄, 그 밑에 목표·과업·모델·나이의
+ * 한 줄, 오른쪽에 답하기 단추. 편지의 두 줄 상자는 자리를 내주고(`display: contents`), 받은
+ * 편지함 낱말과 나이 칸은 한 줄이 대신 말하므로 물러난다. */
+.board-asks > li.board-desk-letter {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: var(--space-2);
+}
+
+.board-asks > li > :is(.board-desk-letter-line, .board-desk-letter-lead) {
+  display: contents;
+}
+
+.board-asks > li .board-desk-letter-kind {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.board-asks > li :is(.board-desk-letter-delivery, .board-desk-letter-age) {
+  display: none;
+}
+
+.board-asks > li .board-desk-letter-who {
+  grid-column: 1 / 3;
+  grid-row: 2;
+  min-width: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  white-space: normal;
 }
 
 .board-asks > li .board-desk-letter-body {
-  flex: 1 1 auto;
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
+  padding-top: calc(var(--space-1) / 2);
   color: var(--ink-chalk);
   font: var(--type-label-14);
   font-weight: 500;
@@ -34713,8 +34834,11 @@ details.task-board-section > summary {
 }
 
 .board-asks > li .board-desk-letter-act {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  margin-left: var(--space-2);
   min-height: var(--control-height-md);
-  padding: 0 var(--space-3);
+  padding: 0 var(--control-pad-inline);
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--ink-chalk);
@@ -34784,7 +34908,8 @@ details.task-board-section > summary {
 }
 
 .board-asks-foot,
-.board-runs-foot {
+.board-runs-foot,
+.board-line-foot {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -34795,8 +34920,21 @@ details.task-board-section > summary {
   font: var(--type-label-13);
 }
 
-.board-runs-foot > .board-link {
-  margin-left: auto;
+/* 시안의 발 한 줄: 「오늘 끝난 일 6개 · 기록에서 보기」 — 글과 문이 한 글줄로 흐른다. */
+.board-runs-foot {
+  display: block;
+}
+
+.board-line-foot[hidden] {
+  display: none;
+}
+
+/* 발의 체크 원 — 시안의 회색 16px 아이콘(gray-700). 끝남의 색이 아니라 「더 없음」의 표시다. */
+.board-asks-foot > .icon {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--gray-700);
 }
 
 /* 원문 보기 — 원장의 문장은 접힌 안쪽에만, 고정폭 글꼴로. */
@@ -34832,11 +34970,34 @@ details.task-board-section > summary {
   word-break: normal;
 }
 
-/* 빌드 줄 — 한 줄의 레인과 그 단계. 단계는 세로 목록이다: 표식 · 이름 · 오른쪽 낱말
- * (끝 · 도는 단계의 경과 · 건너뜀 · 실패). */
-.board-desk-block[data-desk-block="release"] .board-desk-release-line {
-  color: var(--ink-mist);
-  font: var(--type-label-13);
+/* 빌드 줄 — 시안의 카드(t-70028): 첫 줄은 이름 · 버전 · 오른쪽 끝의 상태(점과 낱말), 둘째
+ * 줄은 커밋과 차례(「네 단계 중 셋째」)나 걸린 시간, 그 아래 단계 목록 — 표식 · 이름 · 오른쪽
+ * 낱말(끝 · 도는 단계의 경과 · 대기 · 건너뜀 · 실패). 끝난 레인은 두 줄로 접히고(「초록 · 07:31
+ * 끝남」), 단계는 「단계별 시간 · 원문 로그」 안에 있다. 그 밑의 발은 줄의 다음 차례다. */
+.board-desk-block[data-desk-block="release"] .board-desk-release {
+  display: grid;
+  gap: 0;
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  border: 0;
+  background: none;
+}
+
+.board-desk-block[data-desk-block="release"] .board-desk-release.is-folded {
+  padding-bottom: var(--space-3);
+}
+
+.board-desk-release-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.board-desk-release-title {
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+  font-weight: 500;
 }
 
 .board-desk-block[data-desk-block="release"] .board-desk-release-version {
@@ -34844,25 +35005,51 @@ details.task-board-section > summary {
   font: var(--type-label-13-mono);
 }
 
-.board-desk-block[data-desk-block="release"] .board-desk-release-sha {
-  font: var(--type-label-12-mono);
-}
-
-.board-desk-block[data-desk-block="release"] .board-desk-release-verdict {
+.board-desk-release-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-left: auto;
   color: var(--ink-chalk);
   font: var(--type-label-14);
+  white-space: nowrap;
+}
+
+.board-desk-release-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--board-gap-small);
+  margin: var(--space-1) 0 0;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+.board-desk-release-meta > .icon {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+}
+
+.board-desk-block[data-desk-block="release"] .board-desk-release-sha {
+  font: var(--type-label-13-mono);
 }
 
 .board-desk-block[data-desk-block="release"] .board-desk-release-phases {
   display: grid;
   gap: 0;
-  margin: 0;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-desk-block[data-desk-block="release"] .board-desk-release-phases[hidden] {
+  display: none;
 }
 
 .board-desk-block[data-desk-block="release"] .board-desk-release-phase {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: var(--space-4) minmax(0, 1fr) auto;
   column-gap: var(--space-2);
   align-items: center;
   padding: var(--space-1) 0;
@@ -34872,7 +35059,27 @@ details.task-board-section > summary {
   font: var(--type-label-14);
 }
 
-.board-desk-block[data-desk-block="release"] .board-desk-release-phase.is-skipped,
+/* 단계의 표식 칸(16px): 끝남은 체크 원, 도는 단계는 호박 점, 대기는 빈 원, 실패는 ✕ 원,
+ * 건너뜀은 끊긴 원 — 시안의 아이콘과 같은 굵기의 묶음 아이콘이다. */
+.board-desk-release-phase > .icon {
+  width: var(--space-4);
+  height: var(--space-4);
+  color: var(--ink-mist);
+}
+
+.board-desk-release-phase > .board-dot {
+  justify-self: center;
+}
+
+.board-desk-release-phase.is-ahead > .icon {
+  color: var(--gray-700);
+}
+
+.board-desk-release-phase.is-failed > .icon {
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-block[data-desk-block="release"] .board-desk-release-phase:is(.is-skipped, .is-ahead),
 .board-desk-block[data-desk-block="release"] .board-desk-release-phase.is-skipped .board-desk-release-step-word {
   color: var(--ink-mist);
 }
@@ -34895,23 +35102,9 @@ details.task-board-section > summary {
   color: var(--signal-halt-ink);
 }
 
-/* 빌드 줄 — 한 줄의 레인. */
-.board-desk-block[data-desk-block="release"] .board-desk-release {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  border: 0;
-  background: none;
-}
-
-.board-desk-release-title {
-  color: var(--ink-chalk);
-  font: var(--type-label-14);
-  font-weight: 500;
-}
-
+/* 단계별 시간 · 원문 로그 — 카드의 폭 끝에서 끝까지 룰 하나 위에, 꺾쇠가 펼치면 돈다. */
 .board-desk-release-log {
-  padding-top: var(--space-2);
+  padding: var(--space-2) var(--space-4) var(--space-3);
   box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
 }
 
@@ -34919,7 +35112,46 @@ details.task-board-section > summary {
   display: none;
 }
 
-/* 지금 도는 일 — 배포 목록처럼: 이름 · 상태 표식과 낱말 · 하는 일 · 워커 · 폴더 · 끝. */
+.board-desk-release-log > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--board-gap-small);
+  list-style: none;
+}
+
+.board-desk-release-log > summary::-webkit-details-marker {
+  display: none;
+}
+
+.board-desk-release-log > summary > .icon {
+  width: var(--space-4);
+  height: var(--space-4);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.board-desk-release-log[open] > summary > .icon {
+  transform: rotate(90deg);
+}
+
+.board-desk-release-times {
+  width: 100%;
+  margin: var(--space-2) 0 0;
+  border-collapse: collapse;
+  font: var(--type-label-13);
+}
+
+.board-desk-release-times td {
+  padding: var(--board-gap-small) 0;
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+.board-desk-release-step-time {
+  color: var(--ink-mist);
+  font: var(--type-label-13-mono);
+  text-align: right;
+}
+
+/* 지금 도는 일 — 배포 목록처럼: 이름 · 상태 점과 낱말 · 하는 일 · 워커 · 가지 · 끝. */
 .board-legend {
   display: flex;
   flex-wrap: wrap;
@@ -34935,7 +35167,7 @@ details.task-board-section > summary {
 .board-legend > li {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--board-gap-small);
 }
 
 .board-runs {
@@ -34957,6 +35189,7 @@ details.task-board-section > summary {
   background: none;
 }
 
+/* 목표의 이름과 끝난 과업의 접힘은 시안이 그린 그대로 label-14다. */
 .board-goal-fold {
   display: inline-flex;
   align-items: center;
@@ -34966,15 +35199,13 @@ details.task-board-section > summary {
   border-radius: var(--radius-xs);
   background: none;
   color: var(--ink-chalk);
-  font: var(--type-label-13);
-  font-weight: 500;
+  font: var(--type-label-14);
   cursor: pointer;
   transition: color var(--motion-fast) var(--ease-standard);
 }
 
-.board-goal.is-done .board-goal-fold {
+.board-goal-fold > .icon {
   color: var(--ink-mist);
-  font-weight: 400;
 }
 
 .board-goal-fold:hover {
@@ -34983,16 +35214,16 @@ details.task-board-section > summary {
 
 .board-goal-note {
   color: var(--ink-mist);
-  font: var(--type-label-12-mono);
+  font: var(--type-label-13-mono);
 }
 
 .board-run {
   display: grid;
-  /* 시안 B의 배포 목록 열 폭: 이름 · 상태 · 하는 일(남는 폭) · 워커 · 폴더 · 끝. */
-  grid-template-columns: minmax(0, 15rem) 8rem minmax(0, 1fr) 7rem 9rem 5rem;
+  /* 시안 B의 배포 목록 열 폭: 이름 · 상태 · 하는 일(남는 폭) · 워커 · 가지 · 끝. */
+  grid-template-columns: minmax(0, 15rem) 8rem minmax(0, 1fr) 6rem 9rem 5rem;
   column-gap: var(--space-4);
   align-items: center;
-  padding: var(--space-3) var(--space-4);
+  padding: var(--board-row-pad-block) var(--space-4);
   box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
   color: var(--ink-mist);
   font: var(--type-label-13);
@@ -35000,7 +35231,7 @@ details.task-board-section > summary {
 }
 
 .board-run:hover {
-  background: var(--row-hover);
+  background: var(--gray-alpha-100);
 }
 
 .board-run-title {
@@ -35020,10 +35251,9 @@ details.task-board-section > summary {
   text-overflow: ellipsis;
 }
 
-.board-run-id,
-.board-run-branch {
+.board-run-id {
   color: var(--ink-mist);
-  font: var(--type-label-12-mono);
+  font: var(--type-label-13-mono);
 }
 
 .board-run-state {
@@ -35036,17 +35266,54 @@ details.task-board-section > summary {
 }
 
 .board-run-work,
-.board-run-who,
-.board-run-branch {
+.board-run-who {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* 멈춘 행의 끝 칸은 「원문 보기」 단추다 — 멈춤은 상태 칸이 이미 말한다. */
+/* 멈춘 행의 하는 일은 우리말 한 줄과 그 곁의 「원문 보기」다 — 글이 길면 글만 줄어든다. */
+.board-run-work.has-raw {
+  display: flex;
+  align-items: baseline;
+  gap: var(--board-gap-small);
+}
+
+.board-run-work-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .board-run-raw {
+  flex: none;
+  color: var(--signal-you);
+}
+
+/* 가지 칸 — 가지 아이콘과 가지 이름(고정폭). 가지를 모르는 행은 아이콘도 서지 않는다. */
+.board-run-branch {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
   color: var(--ink-mist);
+  font: var(--type-label-13-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The icon stands in the name's own line (the window's icons are blocks), so the cell stays one
+ * line that ellipsizes the name. */
+.board-run-branch > .icon {
+  display: inline-block;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-right: var(--board-gap-small);
+  vertical-align: text-bottom;
+}
+
+.board-run-branch.is-empty > .icon {
+  display: none;
 }
 
 /* 한 목표의 다섯 행 뒤 「N개 더 보기」 — 행과 같은 들여쓰기, 선 하나 위에. */
@@ -35055,12 +35322,18 @@ details.task-board-section > summary {
   box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
 }
 
+/* 멈춘 행의 원문 — 시안의 원문 줄: 룰 하나 위의 고정폭 글. */
 .board-run-rawline {
-  padding: 0 var(--space-4) var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
 }
 
 .board-run-rawline > .board-raw-text {
   margin: 0;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  font: var(--type-label-13-mono);
 }
 
 .board-run-end {
@@ -35074,13 +35347,6 @@ details.task-board-section > summary {
 .board-run.is-done .board-run-name,
 .board-run.is-done .board-run-state {
   color: var(--ink-mist);
-}
-
-/* 차례 기다림은 기다림의 호박이다 — 시안 B의 회색 점에서 바꾼 것(코디 m-67792): 창 전체에서
- * 호박이 이미 기다림·주의라서. 모양은 빈 점 그대로이고 「차례 기다림」 낱말이 곁에 선다. */
-.board-run.is-queue .agent-graph-node-state::before,
-.board-legend > li[data-state="queue"] .agent-graph-node-state::before {
-  border-color: var(--signal-wait);
 }
 
 @container board (max-width: 1011px) {
@@ -44513,8 +44779,8 @@ h4.knowledge-inspector-head::after {
 /* A person's own decisions (t-62170 stage 3, DESIGN 3): 「새 결정」 on the
    switch line takes no height of its own, so a person with none sees no new
    line; the part between the charts and the table lists each decision with
-   its mode as radios; the drawer they are written in stands at the window's
-   right edge, the whole width on a phone. */
+   its mode as radios; the editor stands near the centre with room to write,
+   and fits the available width and height on a phone. */
 .jev-switch .jev-custom-guide {
   flex: none;
   align-self: center;
@@ -44652,22 +44918,28 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-custom-scrim {
-  place-items: stretch end;
-  padding: 0;
+  place-items: center;
+  padding: var(--space-4);
 }
 
 .jev-custom-drawer {
   display: flex;
   flex-direction: column;
-  width: min(var(--jev-drawer-width), 100%);
+  width: min(var(--jev-custom-editor-width), 100%);
+  height: min(var(--jev-custom-editor-height), 100%);
+  min-width: 0;
   min-height: 0;
-  border-left: var(--jev-line) solid var(--edge-rule);
+  max-height: 100%;
+  overflow: hidden;
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-xl);
   background: var(--surface-deck);
   color: var(--ink-chalk);
   box-shadow: var(--shadow-2);
 }
 
 .jev-custom-drawer-head {
+  flex: none;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -44684,6 +44956,7 @@ h4.knowledge-inspector-head::after {
 .jev-custom-form {
   flex: 1 1 auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--space-4);
   min-height: 0;
@@ -44722,6 +44995,21 @@ h4.knowledge-inspector-head::after {
 
 .jev-custom-area {
   resize: vertical;
+}
+
+.jev-custom-input::placeholder, .jev-custom-area::placeholder {
+  color: var(--ink-mist);
+  opacity: 1;
+}
+
+.jev-custom-example {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  line-height: var(--leading-body);
 }
 
 .jev-custom-number {
@@ -44846,6 +45134,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-custom-foot {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;

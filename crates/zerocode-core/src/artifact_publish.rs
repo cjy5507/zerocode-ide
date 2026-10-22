@@ -807,6 +807,7 @@ pub fn shim_script(port_var: &str, hook_token_var: &str, powershell: bool) -> St
         deadline_seconds: ARTIFACT_SHIM_TIMEOUT_SECS,
         stdin_flags: false,
         pane_header: None,
+        pane_verbs: &[],
         cwd_verbs: &[],
         cwd_flag: Some("--cwd"),
         pane_flag: Some("--pane"),
