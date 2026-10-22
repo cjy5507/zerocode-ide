@@ -75,6 +75,13 @@ pub(crate) struct SubagentProgress {
     /// [`NO_NEW_OUTPUT_AFTER`] outside any tool may be stuck
     /// ([`Self::may_be_stuck`]).
     pub(crate) in_tool: bool,
+    /// The file the helper writes its whole report to (the manifest's
+    /// `outputFile`), while that file is there (t-69472).
+    pub(crate) report: Option<PathBuf>,
+    /// A ledger worker: a CLI of its own in a window tab of its own, whose
+    /// work its parent does not see (t-11962). Only the turn's own watcher
+    /// lists one (t-69472).
+    pub(crate) ledger: bool,
 }
 
 impl SubagentProgress {
@@ -204,6 +211,9 @@ impl SubagentProgressWatcher {
     ) -> Self {
         let registry_id = registry.session_id().map(str::to_string);
         let notes_roster = started_at_floor.is_none();
+        // The same intent as the roster's: the session-wide watcher feeds the
+        // window, and the turn's own floored one feeds the pane (t-69472).
+        let rows = if notes_roster { Rows::Window } else { Rows::Pane };
         let (sender, receiver) = watch::channel(RosterSnapshot::default());
         let scans = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&scans);
@@ -219,7 +229,8 @@ impl SubagentProgressWatcher {
                 let cache = Arc::clone(&cache);
                 let scan = tokio::task::spawn_blocking(move || {
                     let mut cache = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let agents = scan_registry(
+                    let agents = scan_rows(
+                        rows,
                         &registry,
                         &session_id,
                         epoch_seconds_now(),
@@ -356,6 +367,9 @@ struct AgentManifest {
     /// (another flattened lifecycle key).
     #[serde(default)]
     transcript: Option<PathBuf>,
+    /// The file the helper writes its whole report to (t-69472).
+    #[serde(rename = "outputFile", default)]
+    output_file: Option<PathBuf>,
 }
 
 /// What this process last read of each manifest file, whichever watcher
@@ -552,11 +566,45 @@ fn read_manifest(path: &Path, metadata: &std::fs::Metadata) -> Option<AgentManif
     serde_json::from_str::<AgentManifest>(&contents).ok()
 }
 
+/// Whose rows a scan makes (t-69472).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// Rows that may reach the window: its frames and the background list. A
+    /// ledger worker is never one — the window lists the worker itself, and a
+    /// second row for it doubled the sidebar (t-11962).
+    Window,
+    /// The parent pane's own rows: its spawn cell shows a ledger worker too,
+    /// by what the parent can know of it.
+    Pane,
+}
+
 /// Every running child of `parent_session_id` across the registry's stores
 /// (root first, then adopted mirrors; a duplicated id resolved to its canonical
 /// copy by the registry), sorted by `(started_at, agent_id)` — a stable order
-/// that two same-labelled helpers cannot swap.
+/// that two same-labelled helpers cannot swap. These are the rows that may
+/// reach the window ([`Rows::Window`]).
 fn scan_registry(
+    registry: &AgentRegistry,
+    parent_session_id: &str,
+    now_epoch_seconds: u64,
+    started_at_floor: Option<u64>,
+    cache: &mut ManifestCache,
+    observed_at: SystemTime,
+) -> Vec<SubagentProgress> {
+    scan_rows(
+        Rows::Window,
+        registry,
+        parent_session_id,
+        now_epoch_seconds,
+        started_at_floor,
+        cache,
+        observed_at,
+    )
+}
+
+/// [`scan_registry`], for whoever `rows` names.
+fn scan_rows(
+    rows: Rows,
     registry: &AgentRegistry,
     parent_session_id: &str,
     now_epoch_seconds: u64,
@@ -579,8 +627,9 @@ fn scan_registry(
         let Some(manifest) = manifest else {
             continue;
         };
+        let ledger = manifest.execution.as_deref() == Some("ledger");
         if manifest.status != "running"
-            || manifest.execution.as_deref() == Some("ledger")
+            || (ledger && rows == Rows::Window)
             || manifest.subagent_type.as_deref() == Some("classifier")
             || manifest.parent_session_id.as_deref() != Some(parent_session_id)
         {
@@ -616,32 +665,8 @@ fn scan_registry(
             .or(manifest.last_activity_at)
             .unwrap_or(started_at);
         let quiet = Duration::from_secs(now_epoch_seconds.saturating_sub(last_output_at));
-        // `activity` means observable runtime state, not the task's static
-        // assignment. `description` never changes and made a live row flicker
-        // between "Read …" and "summarize Cargo.toml" whenever the worker
-        // cleared currentTool between calls. Prefer the detailed matching tool
-        // stamp, then the live tool/phase, and use a neutral fact when none has
-        // landed yet.
-        // A pane child's running call, when its transcript shows one, is
-        // what it is doing; the manifest has nothing newer for it.
         let running_tool = tally.as_ref().and_then(|tally| tally.running.clone());
-        let activity = running_tool
-            .clone()
-            .or_else(|| {
-                manifest
-                    .current_tool
-                    .as_deref()
-                    .and_then(|tool| {
-                        manifest
-                            .recent_tools
-                            .last()
-                            .filter(|recent| recent.starts_with(tool))
-                    })
-                    .cloned()
-            })
-            .or_else(|| manifest.current_tool.clone())
-            .or_else(|| manifest.current_phase.clone())
-            .unwrap_or_else(|| "working".to_string());
+        let activity = helper_activity(&manifest, running_tool.as_deref());
         let label = manifest
             .label
             .clone()
@@ -658,7 +683,9 @@ fn scan_registry(
             output_tail: manifest.output_tail.clone(),
             started_epoch: started_at,
             elapsed: Duration::from_secs(now_epoch_seconds.saturating_sub(started_at)),
-            no_new_output_for: (quiet >= NO_NEW_OUTPUT_AFTER).then_some(quiet),
+            // A ledger worker's output is in its own tab, out of this
+            // manifest's sight: its quiet here would be no fact (t-69472).
+            no_new_output_for: (!ledger && quiet >= NO_NEW_OUTPUT_AFTER).then_some(quiet),
             transcript_path,
             pane: manifest.pane.clone(),
             last_receipt: manifest.last_receipt.clone(),
@@ -667,6 +694,8 @@ fn scan_registry(
             } else {
                 manifest.current_tool.is_some()
             },
+            report: manifest.output_file.clone().filter(|report| report.is_file()),
+            ledger,
         });
     }
     ManifestFiles::keep_only(files, &seen, &stores);
@@ -677,6 +706,35 @@ fn scan_registry(
             .then_with(|| left.agent_id.cmp(&right.agent_id))
     });
     progress
+}
+
+/// What a running helper is doing now, as its row says it.
+fn helper_activity(manifest: &AgentManifest, running_tool: Option<&str>) -> String {
+    // `activity` means observable runtime state, not the task's static
+    // assignment. `description` never changes and made a live row flicker
+    // between "Read …" and "summarize Cargo.toml" whenever the worker
+    // cleared currentTool between calls. Prefer the detailed matching tool
+    // stamp, then the live tool/phase, and use a neutral fact when none has
+    // landed yet.
+    // A pane child's running call, when its transcript shows one, is
+    // what it is doing; the manifest has nothing newer for it.
+    running_tool
+        .map(str::to_string)
+        .or_else(|| {
+            manifest
+                .current_tool
+                .as_deref()
+                .and_then(|tool| {
+                    manifest
+                        .recent_tools
+                        .last()
+                        .filter(|recent| recent.starts_with(tool))
+                })
+                .cloned()
+        })
+        .or_else(|| manifest.current_tool.clone())
+        .or_else(|| manifest.current_phase.clone())
+        .unwrap_or_else(|| "working".to_string())
 }
 
 /// The test seam the store-level scan keeps: one directory, no registry.
@@ -863,8 +921,8 @@ mod tests {
     use tools::AgentRegistry;
 
     use super::{
-        epoch_seconds_now, scan_registry, scan_store, ManifestCache, Pulse, SubagentProgressWatcher,
-        NO_NEW_OUTPUT_AFTER,
+        background_tasks_for_session, epoch_seconds_now, scan_registry, scan_store, ManifestCache,
+        Pulse, SubagentProgress, SubagentProgressWatcher, NO_NEW_OUTPUT_AFTER,
     };
 
     /// One line of a zo session transcript, as the session writes it.
@@ -1629,5 +1687,120 @@ mod tests {
         let rows = watcher.receiver.borrow().agents.clone();
         assert_eq!(rows.len(), 1, "a helper another zo started was not seen within the quiet interval: {rows:?}");
         assert_eq!(rows[0].agent_id, "agent-elsewhere");
+    }
+
+    /// t-69472: a running helper's row names the file its whole report goes
+    /// to — the manifest's `outputFile` — while that file is there, and names
+    /// none when it is not.
+    #[test]
+    fn a_row_names_the_report_file_while_it_is_there() {
+        let store = tempfile::tempdir().expect("store");
+        let written = store.path().join("agent-with-report.md");
+        fs::write(&written, "# Agent Task\n").expect("report file");
+        for (id, report) in [
+            ("agent-with-report", written.clone()),
+            ("agent-without-file", store.path().join("agent-without-file.md")),
+        ] {
+            fs::write(
+                store.path().join(format!("{id}.json")),
+                serde_json::to_vec(&json!({
+                    "agentId": id,
+                    "parentSessionId": "session-a",
+                    "toolCallId": format!("toolu_{id}"),
+                    "name": id,
+                    "status": "running",
+                    "startedAt": "100",
+                    "outputFile": report,
+                }))
+                .expect("manifest json"),
+            )
+            .expect("write manifest");
+        }
+
+        let rows = scan_store(store.path(), "session-a", 200, None);
+        let report_of = |id: &str| {
+            rows.iter()
+                .find(|row| row.agent_id == id)
+                .unwrap_or_else(|| panic!("{id} is not a row: {rows:?}"))
+                .report
+                .clone()
+        };
+        assert_eq!(
+            report_of("agent-with-report").as_deref(),
+            Some(written.as_path()),
+            "the row names the report file the helper writes"
+        );
+        assert_eq!(report_of("agent-without-file"), None, "a file that is not there is not named");
+    }
+
+    /// t-69472: the turn's own watcher — the TUI's, whose spawn cell is where
+    /// the parent pane shows a helper — lists a ledger worker beside a helper
+    /// of this process, marked, and says nothing its parent cannot see: no
+    /// quiet warning, however old its manifest's last activity. The session's
+    /// watcher, whose rows become the window's frames, and the background list
+    /// leave it out: the window lists the worker itself (t-11962).
+    #[tokio::test]
+    async fn a_ledger_worker_is_a_row_of_the_turns_watcher_and_never_of_the_windows() {
+        let store = tempfile::tempdir().expect("store");
+        let started = epoch_seconds_now() + 5;
+        for (id, execution) in [("agent-in-process", None), ("agent-ledger", Some("ledger"))] {
+            let mut manifest = json!({
+                "agentId": id,
+                "parentSessionId": "session-c69472",
+                "toolCallId": format!("toolu_{id}"),
+                "name": id,
+                "subagentType": "general-purpose",
+                "status": "running",
+                "startedAt": started.to_string(),
+                "lastActivityAt": 100,
+            });
+            if let Some(execution) = execution {
+                manifest["execution"] = json!(execution);
+                manifest["pane"] = json!("%9");
+            }
+            fs::write(
+                store.path().join(format!("{id}.json")),
+                serde_json::to_vec(&manifest).expect("manifest json"),
+            )
+            .expect("write manifest");
+        }
+        let registry = AgentRegistry::at_root_for_tests("session-c69472", store.path());
+        let ids = |rows: &[SubagentProgress]| -> Vec<String> {
+            rows.iter().map(|row| row.agent_id.clone()).collect()
+        };
+
+        let mut turn = SubagentProgressWatcher::start(
+            std::sync::Arc::clone(&registry),
+            "session-c69472".to_string(),
+        );
+        let rows = tokio::time::timeout(Duration::from_secs(10), turn.changed())
+            .await
+            .expect("the turn's watcher looked")
+            .expect("the turn's rows");
+        assert_eq!(
+            ids(&rows),
+            ["agent-in-process", "agent-ledger"],
+            "the turn's watcher lists the ledger worker too"
+        );
+        assert!(!rows[0].ledger, "{:?}", rows[0]);
+        let ledger = &rows[1];
+        assert!(ledger.ledger, "the ledger worker's row is marked: {ledger:?}");
+        assert_eq!(ledger.tool_call_id.as_deref(), Some("toolu_agent-ledger"));
+        assert_eq!(ledger.no_new_output_for, None, "its parent cannot see its output: {ledger:?}");
+
+        let mut session = SubagentProgressWatcher::start_for_session(
+            std::sync::Arc::clone(&registry),
+            "session-c69472".to_string(),
+        );
+        let rows = tokio::time::timeout(Duration::from_secs(10), session.changed())
+            .await
+            .expect("the session's watcher looked")
+            .expect("the session's rows");
+        assert_eq!(ids(&rows), ["agent-in-process"], "the window's rows leave the ledger worker out");
+        let background: Vec<String> = background_tasks_for_session(&registry, "session-c69472")
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+        assert_eq!(background, ["agent-in-process"], "the background list leaves it out");
     }
 }
