@@ -1191,7 +1191,7 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("the model is named once, over the table, and a row names a version only when it is another",
       opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 "))),
       JSON.stringify({ caption: opened.caption }));
-    ok("the switch stands over the table as the card's, in use from some folders, and no feature offers a mode",
+    ok("the global switch stands over the table while per-feature edits use their own dialog",
       opened.switchOver !== null && opened.switchOver.checked === true && opened.switchOver.id === null
         && opened.switchOver.partial && opened.switchOver.said === "일부 폴더(4개)에서만 사용 중입니다."
         && opened.switchOver.beforeTable && opened.tableSelects === 0,
@@ -2979,7 +2979,7 @@ export async function testJevCustomDecisions(browser, origin, ok) {
         fixed: drawer.querySelector("[data-jev-drawer-fixed]")?.textContent.trim() ?? "",
       };
     });
-    ok("the built-in table names no row for a person's decisions and no select, even while they ask, the strip still counts their requests, and a built-in drawer offers nothing to write",
+    ok("the built-in table excludes personal decisions, counts their requests, and keeps its detail drawer informational",
       !builtIn.listed && builtIn.rows === BUILT_IN && builtIn.selects === 0 && builtIn.after === builtIn.before + 7
         && builtIn.open && builtIn.fields === 0 && builtIn.fixed.length > 0,
       JSON.stringify(builtIn));

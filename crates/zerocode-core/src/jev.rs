@@ -29,6 +29,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub mod batch;
+pub mod builtin;
 pub mod challenger;
 pub mod choice;
 pub mod claim;
@@ -4971,6 +4972,9 @@ impl JevUse {
         }
     }
 
+    /// A saved built-in decision is read first: deletion is off, and edited
+    /// wording starts recording until the person explicitly enables it.
+    ///
     /// This use's mode in a settings document: the word a person wrote for
     /// it ([`Self::word_in`] — its own, or the one written for the use it
     /// was split from) — theirs, whatever the switch says, and read by
@@ -4980,6 +4984,9 @@ impl JevUse {
     /// it. A machine that has never met Jev asks nothing.
     #[must_use]
     pub fn mode_in(&self, root: &Value) -> JevMode {
+        if let Some(mode) = builtin::in_root(root, self.id).and_then(|saved| saved.mode(self)) {
+            return mode;
+        }
         match self.word_in(root) {
             Some(word) => self.mode_of(Some(word)),
             None if door::switched_on(root) => self.recommended,

@@ -381,7 +381,9 @@ enum Rubric {
 impl Rubric {
     /// The rubric `row` names under [`RUBRIC_VERSION`].
     fn of(row: &Value) -> Self {
-        RUBRIC_VERSION.read(row).map_or(Self::Absent, Self::from)
+        row.get(super::builtin::RUBRIC_KEY)
+            .or_else(|| RUBRIC_VERSION.read(row))
+            .map_or(Self::Absent, Self::from)
     }
 
     /// The version a rubric reads as, when it reads as one.
@@ -427,8 +429,12 @@ fn is_mark(row: &Value) -> bool {
 /// because a label spelling a newer version fences nothing, and neither
 /// does a request spelling something that is not a version.
 fn fences(seat: &JevUse, row: &Value) -> bool {
+    // Saved wording identities are hashes, not increasing release versions.
+    // Either direction of a wording change starts a new series.
+    let edited = seat.rubric_version & super::builtin::EDITED_RUBRIC_FLAG != 0;
     is_asked(row)
-        && matches!(Rubric::of(row), Rubric::Named(version) if version > seat.rubric_version)
+        && matches!(Rubric::of(row), Rubric::Named(version)
+            if version > seat.rubric_version || (edited && version != seat.rubric_version))
 }
 
 /// The name a request carries and a label repeats: a number as the writer
@@ -634,7 +640,20 @@ pub fn on_the_newest_version<'rows>(seat: &JevUse, rows: &'rows [Value]) -> OnVe
         let Some(version) = Rubric::of(&rows[request]).version() else {
             continue;
         };
-        if matches!(spelled, Rubric::Named(own) if own != version) {
+        // Existing label writers name the shipped code rubric. The request
+        // carries a user's edited wording identity; an exact request match
+        // may inherit that identity only when their code rubrics agree.
+        let expected = if row.get(super::builtin::RUBRIC_KEY).is_none()
+            && rows[request].get(super::builtin::RUBRIC_KEY).is_some()
+        {
+            RUBRIC_VERSION
+                .read(&rows[request])
+                .map(Rubric::from)
+                .and_then(|rubric| rubric.version())
+        } else {
+            Some(version)
+        };
+        if matches!(spelled, Rubric::Named(own) if Some(own) != expected) {
             continue;
         }
         // Nor may it spell a version its request was not answered by.
@@ -2088,6 +2107,12 @@ fn spells_a_key(line: &str, keys: &[String]) -> bool {
 /// what every spelling opens with, then the spellings at that spot: a line
 /// is searched once, not once per spelling.
 fn may_fence_as_spelled(seat: &JevUse, line: &str, keys: &[String]) -> bool {
+    if seat.rubric_version & super::builtin::EDITED_RUBRIC_FLAG != 0
+        || line.contains(super::builtin::RUBRIC_KEY)
+    {
+        return true;
+    }
+
     line.match_indices(RUBRIC_KEY_OPENS).any(|(at, _)| {
         let opens = &line[at..];
         let Some(key) = keys.iter().find(|key| opens.starts_with(key.as_str())) else {

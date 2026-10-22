@@ -1345,7 +1345,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
     };
     let now_ms = crate::usage_runtime::epoch_ms_now();
     let at = u64::try_from(now_ms).unwrap_or_default();
-    let (row, verdict, confidence, route) = match question {
+    let (row, verdict, confidence, route, rubric) = match question {
         Question::Command {
             judged,
             attempt,
@@ -1357,7 +1357,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
             moment,
         } => {
             let questions = command_questions(noul::question);
-            let (asked, route) = put_nouls(
+            let (asked, route, rubric) = put_nouls(
                 wire,
                 guard,
                 &cwd,
@@ -1383,7 +1383,13 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
                 pane: pane.place(),
                 asked,
             };
-            (serde_json::to_value(row).ok(), verdict, confidence, route)
+            (
+                serde_json::to_value(row).ok(),
+                verdict,
+                confidence,
+                route,
+                rubric,
+            )
         }
         Question::Text {
             judged,
@@ -1393,7 +1399,7 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
             text,
         } => {
             let questions = text_questions(noul::question);
-            let (asked, route) = put_nouls(
+            let (asked, route, rubric) = put_nouls(
                 wire,
                 guard,
                 &pane.worktree,
@@ -1419,12 +1425,19 @@ fn ask_guard(guards: &'static Mutex<Guards>, wire: &Wire, pane: &Pane, question:
                 pane: pane.place(),
                 asked,
             };
-            (serde_json::to_value(row).ok(), verdict, confidence, route)
+            (
+                serde_json::to_value(row).ok(),
+                verdict,
+                confidence,
+                route,
+                rubric,
+            )
         }
         Question::Claim { .. } | Question::FilePick { .. } | Question::ProjectRules(_) => return,
     };
     if let Some(mut row) = row {
         systemone::stamp_route(&mut row, route.as_deref());
+        systemone::stamp_decision_rubric(&mut row, rubric);
         systemone::record_rows(guard.seat, &ledger, &[row], now_ms);
     }
     settle(guards, wire, pane, judged, verdict, confidence);
@@ -1486,6 +1499,7 @@ fn ask_claim(
         pane: pane.place(),
         cached: false,
     };
+    let mut decision_rubric = None;
     let mut verdicts = claim::code_verdicts(&claims);
     let questions = claim::questions(&claims, choice::question);
     if !questions.is_empty() {
@@ -1499,6 +1513,7 @@ fn ask_claim(
                 claim::read_choices(answers, questions.keys()).ok_or_else(|| SCHEMA.to_string())
             },
         );
+        decision_rubric = trip.decision_rubric;
         row.outcome = trip.outcome;
         row.elapsed_ms = trip.elapsed_ms;
         row.requests = trip.requests;
@@ -1526,7 +1541,8 @@ fn ask_claim(
     .to_string();
     let compared = claim::compared(&row.outcome, u64::try_from(row.code_settled).ok());
     let (verdict, confidence) = (row.verdict.clone(), row.confidence);
-    if let Ok(value) = serde_json::to_value(&row) {
+    if let Ok(mut value) = serde_json::to_value(&row) {
+        systemone::stamp_decision_rubric(&mut value, decision_rubric);
         systemone::record_rows(&CLAIM, &ledger, &[value], now_ms);
     }
     settle_claim(
@@ -1564,7 +1580,7 @@ fn ask_file_pick(
         return;
     };
     let (batch, candidate_elapsed_ms) = candidates(&root, &request, edited);
-    let (mut row, selected) = put_pick(
+    let (mut row, selected, rubric) = put_pick(
         wire,
         pane,
         mode,
@@ -1585,7 +1601,7 @@ fn ask_file_pick(
         .map(|hint| hint.text);
     row.applied = offer_brief(guards, pane, judged, line);
     row.noted = row.applied;
-    file_pick_row(guards, wire, pane, judged, &row, (root, ledger));
+    file_pick_row(guards, wire, pane, judged, &row, (root, ledger, rubric));
 }
 
 /// A pick to put to the seat: its name and turn, the words, and the
@@ -1628,7 +1644,7 @@ fn put_pick(
     pane: &Pane,
     mode: JevMode,
     ask: &PickAsk<'_>,
-) -> (FilePickRow, Option<Vec<String>>) {
+) -> (FilePickRow, Option<Vec<String>>, Option<u32>) {
     let scoped = pane
         .session
         .as_deref()
@@ -1682,7 +1698,7 @@ fn put_pick(
         row.route_use = mode.key().to_string();
         selected
     });
-    (row, selected)
+    (row, selected, trip.decision_rubric)
 }
 
 /// Write a pick's row in the pane's project ledger (`at`: the folder it was
@@ -1694,13 +1710,14 @@ fn file_pick_row(
     pane: &Pane,
     judged: u64,
     row: &FilePickRow,
-    at: (PathBuf, PathBuf),
+    at: (PathBuf, PathBuf, Option<u32>),
 ) {
-    let Ok(value) = serde_json::to_value(row) else {
+    let Ok(mut value) = serde_json::to_value(row) else {
         settle_pick(guards, wire, pane, judged, None);
         return;
     };
-    let (root, ledger) = at;
+    let (root, ledger, rubric) = at;
+    systemone::stamp_decision_rubric(&mut value, rubric);
     systemone::record_rows(
         &FILE_PICK,
         &ledger,
@@ -1796,14 +1813,14 @@ pub(crate) fn find_in(
                         batch: &files,
                         candidate_elapsed_ms,
                     };
-                    let (mut row, _) = put_pick(&wire, &pane, mode, &pick);
+                    let (mut row, _, rubric) = put_pick(&wire, &pane, mode, &pick);
                     row.moment = Some(file_find::ASKED.to_string());
-                    file_pick_row(guards, &wire, &pane, judged, &row, (root, ledger));
+                    file_pick_row(guards, &wire, &pane, judged, &row, (root, ledger, rubric));
                 }),
         );
         return Ok(file_find::listing(&today));
     }
-    let (mut row, selected) = put_pick(wire, &pane, mode, &pick);
+    let (mut row, selected, rubric) = put_pick(wire, &pane, mode, &pick);
     row.moment = Some(file_find::ASKED.to_string());
     let chosen: Vec<FilePickCandidate> = selected
         .unwrap_or_default()
@@ -1812,7 +1829,7 @@ pub(crate) fn find_in(
         .collect();
     row.applied = !chosen.is_empty();
     row.noted = row.applied;
-    file_pick_row(guards, wire, &pane, judged, &row, (root, ledger));
+    file_pick_row(guards, wire, &pane, judged, &row, (root, ledger, rubric));
     Ok(file_find::listing(if chosen.is_empty() {
         &today
     } else {
@@ -1861,6 +1878,7 @@ fn searched(root: &Path, terms: &[String]) -> Vec<String> {
 /// the window writes for a pane carries, whatever its seat.
 #[derive(Debug, Default)]
 struct Trip {
+    decision_rubric: Option<u32>,
     outcome: String,
     elapsed_ms: u64,
     requests: u32,
@@ -1911,6 +1929,7 @@ fn put<R>(
     );
     let cached = answered.memo.as_ref().is_some_and(|memoed| memoed.answered);
     let mut trip = Trip {
+        decision_rubric: answered.spent.decision_rubric,
         elapsed_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
         requests: answered.spent.requests,
         redacted_lines: u32::try_from(answered.spent.redacted_lines).unwrap_or(u32::MAX),
@@ -1965,7 +1984,7 @@ fn put_nouls(
     state: Value,
     questions: &BTreeMap<String, Value>,
     mode: JevMode,
-) -> (Asked, Option<String>) {
+) -> (Asked, Option<String>, Option<u32>) {
     let (trip, answers) = put(wire, guard.seat, workspace, state, questions, |answers| {
         questions
             .keys()
@@ -1997,7 +2016,7 @@ fn put_nouls(
         rejected: trip.rejected,
         cached: trip.cached,
     };
-    (asked, trip.route)
+    (asked, trip.route, trip.decision_rubric)
 }
 
 /// The verdict of the call `judged` names has answered — or has not: one

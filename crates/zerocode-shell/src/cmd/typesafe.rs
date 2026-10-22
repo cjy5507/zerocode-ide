@@ -145,11 +145,59 @@ pub(crate) fn jev_review_outcome(
 
 /// Turn Jev on or off — the one switch the card and the dashboard wear
 /// (docs/design/jev-settings-20260917.md §6.1). On consents every folder and
-/// hands every feature its recommended mode; off sends nothing.
+/// preserves saved decisions and otherwise uses recommended modes; off sends nothing.
 #[tauri::command(async)]
 pub(crate) fn set_jev_enabled(on: bool) -> Result<TypeSafeSettings, RouterRefusal> {
     typesafe_settings::set_enabled(&settings_path()?, on)?;
     settings_now()
+}
+
+#[tauri::command(async)]
+pub(crate) fn update_builtin_decision(
+    id: String,
+    action: String,
+    expected: zerocode_core::jev::builtin::Decision,
+    draft: Option<zerocode_core::jev::builtin::Decision>,
+) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::update_builtin_decision(&settings_path()?, &id, &action, &expected, draft)?;
+    settings_now()
+}
+
+#[tauri::command(async)]
+pub(crate) fn builtin_decision_definition(
+    id: String,
+) -> Result<typesafe_settings::BuiltinDecisionEditor, RouterRefusal> {
+    use zerocode_core::jev::builtin;
+    builtin::seat(&id)
+        .ok_or_else(|| RouterRefusal::from("builtin_decision_missing".to_string()))?;
+    let words = match builtin::default_words(&id) {
+        Some(words) => words,
+        None => {
+            let home = dirs::home_dir().ok_or_else(|| {
+                RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
+            })?;
+            let bin = crate::zo_companion::zo_path_under(&home);
+            let output = crate::proc::quiet_command(&bin)
+                .args(["jev", "definition", &id, "--json"])
+                .output()
+                .map_err(|_| {
+                    RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
+                })?;
+            let words = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .filter(|_| output.status.success())
+                .and_then(|body| {
+                    body.get("words")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+            words.ok_or_else(|| {
+                RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
+            })?
+        }
+    };
+    typesafe_settings::builtin_decision_editor(&settings_path()?, &id, &words)
+        .map_err(RouterRefusal::from)
 }
 
 /// Move the routing classifier — the gate in front of the routing seat. Its

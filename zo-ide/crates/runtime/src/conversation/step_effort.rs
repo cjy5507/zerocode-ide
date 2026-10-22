@@ -1080,6 +1080,13 @@ fn plan_move(
     None
 }
 
+/// The shipped wording used by the built-in decision editor and version check.
+#[must_use]
+pub fn step_rubric_words() -> String {
+    let questions = serde_json::to_string(step_questions()).expect("the questions serialize");
+    [questions, STEP_STATE_KEYS.join(","), STEP_SIGNAL_KEYS.join(",")].join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,14 +1398,6 @@ mod tests {
         // Carried, but the judgment said what the table said: nothing to grade.
         let same = graded_after(RouteTaskComplexity::Small, true, None);
         assert_eq!((same.agreed, same.not_compared), (None, Some(SAME_AS_RULE)));
-    }
-
-    /// Every word the seat asks, as one string: the questions as they go on
-    /// the wire — each one's instructions and every option's words — and the
-    /// keys of the state they read.
-    fn step_rubric_words() -> String {
-        let questions = serde_json::to_string(step_questions()).expect("the questions serialize");
-        [questions, STEP_STATE_KEYS.join(","), STEP_SIGNAL_KEYS.join(",")].join("\n")
     }
 
     /// The seat's words are pinned to its version (t-10010): a question, an

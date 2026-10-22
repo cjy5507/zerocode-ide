@@ -108,6 +108,8 @@ impl ModeChoice {
 #[serde(rename_all = "camelCase")]
 pub struct SwitchRow {
     pub id: &'static str,
+    #[serde(skip_serializing_if = "zerocode_core::jev::builtin::Decision::is_empty")]
+    pub decision: zerocode_core::jev::builtin::Decision,
     pub setting: &'static str,
     pub mode: &'static str,
     pub modes: Vec<ModeChoice>,
@@ -339,6 +341,8 @@ pub fn read_settings(
             .iter()
             .map(|row| SwitchRow {
                 id: row.id,
+                decision: zerocode_core::jev::builtin::in_root(&document, row.id)
+                    .unwrap_or_default(),
                 setting: row.setting,
                 mode: row.mode_in(&document).key(),
                 modes: choices(row),
@@ -684,6 +688,150 @@ fn update_smart(
             ));
         };
         change(smart)
+    })
+}
+
+/// The built-in editor reads the shipped words and the saved override apart.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinDecisionEditor {
+    pub id: String,
+    pub saved: zerocode_core::jev::builtin::Decision,
+    pub question: String,
+    pub criteria: String,
+    pub can_edit_prompt: bool,
+    pub dynamic: bool,
+    pub mode: String,
+    pub default_mode: String,
+    pub modes: Vec<ModeChoice>,
+    pub name_max: usize,
+    pub question_max: usize,
+    pub criteria_max: usize,
+}
+
+pub fn builtin_decision_editor(
+    path: &Path,
+    id: &str,
+    words: &str,
+) -> Result<BuiltinDecisionEditor, String> {
+    use zerocode_core::jev::builtin;
+    let row = builtin::seat(id).ok_or("builtin_decision_missing")?;
+    let document = Value::Object(crate::api_routers::read_zo_settings_root(path)?);
+    let mut defaults = document.clone();
+    if let Some(choices) = defaults
+        .get_mut(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get_mut(builtin::SETTING))
+        .and_then(Value::as_object_mut)
+    {
+        choices.remove(id);
+    }
+    if let Some(smart) = defaults
+        .get_mut(SMART_SETTINGS_KEY)
+        .and_then(Value::as_object_mut)
+    {
+        smart.remove(row.setting);
+    }
+    let (question, criteria) = words.split_once('\n').unwrap_or((words, ""));
+    Ok(BuiltinDecisionEditor {
+        id: id.to_string(),
+        saved: builtin::in_root(&document, id).unwrap_or_default(),
+        question: question.to_string(),
+        criteria: criteria.to_string(),
+        can_edit_prompt: id != zerocode_core::jev::JUDGMENT_CACHE.id,
+        dynamic: words.is_empty(),
+        mode: row.mode_in(&document).key().to_string(),
+        default_mode: row.mode_in(&defaults).key().to_string(),
+        modes: choices(row),
+        name_max: builtin::NAME_MAX,
+        question_max: builtin::QUESTION_MAX,
+        criteria_max: builtin::CRITERIA_MAX,
+    })
+}
+
+/// One settings lock covers the stale-editor check and the whole edit.
+/// Deletion is a persistent tombstone; reset alone forgets the override.
+pub fn update_builtin_decision(
+    path: &Path,
+    id: &str,
+    action: &str,
+    expected: &zerocode_core::jev::builtin::Decision,
+    draft: Option<zerocode_core::jev::builtin::Decision>,
+) -> Result<(), String> {
+    use zerocode_core::jev::builtin;
+    let row = builtin::seat(id).ok_or("builtin_decision_missing")?;
+    update_smart(path, |smart| {
+        let root = serde_json::json!({(SMART_SETTINGS_KEY): &*smart});
+        let current = builtin::in_root(&root, id).unwrap_or_default();
+        if &current != expected {
+            return Err("builtin_decision_changed".to_string());
+        }
+        let mut next = match action {
+            "save" => draft.ok_or("builtin_decision_draft")?,
+            "delete" => builtin::Decision {
+                deleted: true,
+                ..current.clone()
+            },
+            "restore" => builtin::Decision {
+                deleted: false,
+                ..current.clone()
+            },
+            "reset" => builtin::Decision::default(),
+            _ => return Err("builtin_decision_action".to_string()),
+        };
+        if action == "delete" && next.mode.is_none() {
+            next.mode = row
+                .word_in(&root)
+                .map(|word| row.mode_of(Some(word)).key().to_string());
+        }
+        if action == "save" {
+            next.deleted = false;
+            for text in [&mut next.name, &mut next.question, &mut next.criteria] {
+                *text = text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string);
+            }
+            // A changed question starts recording. Its previous automatic
+            // promotion says nothing about these new evaluation criteria.
+            if (next.question != current.question || next.criteria != current.criteria)
+                && next.edited()
+            {
+                next.mode = Some(
+                    if row.modes.contains(&JevMode::Shadow) {
+                        JevMode::Shadow
+                    } else {
+                        JevMode::Off
+                    }
+                    .key()
+                    .to_string(),
+                );
+            }
+        }
+        builtin::validate(id, &next).map_err(str::to_string)?;
+        let legacy = next.legacy_mode(row);
+        let decisions = smart
+            .entry(builtin::SETTING)
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("builtin_decision_settings")?;
+        if next.is_empty() {
+            decisions.remove(id);
+        } else {
+            decisions.insert(
+                id.to_string(),
+                serde_json::to_value(next).map_err(|error| error.to_string())?,
+            );
+        }
+        if action == "reset" || legacy.is_none() {
+            smart.remove(row.setting);
+        } else if let Some(mode) = legacy {
+            smart.insert(
+                row.setting.to_string(),
+                Value::String(mode.key().to_string()),
+            );
+        }
+        Ok(())
     })
 }
 
@@ -1490,6 +1638,9 @@ pub fn set_custom_decision_mode_at(
 mod provider_tests;
 
 #[cfg(test)]
+mod builtin_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2068,8 +2219,8 @@ mod tests {
             "the advanced fold starts closed"
         );
         assert!(
-            !page.contains("data-jev-seat"),
-            "a feature's mode is chosen on the page"
+            page.contains("id=\"jev-builtin-form\""),
+            "built-in decisions have their own editor"
         );
 
         let main = include_str!("main.rs");
@@ -2094,6 +2245,8 @@ mod tests {
             "save_typesafe_key",
             "remove_typesafe_key",
             "set_jev_enabled",
+            "builtin_decision_definition",
+            "update_builtin_decision",
             "set_route_classifier",
             "set_judgment_provider",
             "judgment_models",

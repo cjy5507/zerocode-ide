@@ -999,3 +999,16 @@ fn the_summary_names_each_decision_and_counts_its_versions_apart() {
         assert_eq!(earlier, [(&json!(first), &json!(2))], "{one}");
     });
 }
+
+
+#[test]
+fn every_builtin_definition_is_read_without_running_a_judgment() {
+    for seat in zerocode_core::jev::JEV_USES.iter().filter(|row| row.id != zerocode_core::jev::CUSTOM_DECISIONS.id) {
+        let args = vec!["definition".to_string(), seat.id.to_string(), "--json".to_string()];
+        let report = super::run(&args, std::path::Path::new("."), 0, 0).expect("shipped definition");
+        assert_eq!(report.exit, 0);
+        let value: serde_json::Value = serde_json::from_str(&report.text).unwrap();
+        assert_eq!(value["id"], seat.id);
+        assert!(value["words"].is_string());
+    }
+}

@@ -719,6 +719,7 @@ fn expiration_before_sending_is_not_recorded_as_real_model_use() {
 #[test]
 fn a_rider_names_its_requests_client_and_shards_on_two_clients_name_none() {
     let on = |route: Option<&str>, requests: u32| Spent {
+        decision_rubric: None,
         requests,
         input_tokens: Some(10),
         output_tokens: Some(0),
@@ -755,12 +756,14 @@ fn a_rider_names_its_requests_client_and_shards_on_two_clients_name_none() {
 #[test]
 fn shared_and_cached_answers_add_no_new_usage() {
     let sent = Spent {
+        decision_rubric: None,
         requests: 1,
         input_tokens: Some(212),
         output_tokens: Some(2),
         ..Spent::default()
     };
     let shared = Spent {
+        decision_rubric: None,
         requests: 0,
         ..sent.clone()
     };
@@ -906,11 +909,13 @@ fn a_late_window_answer_rechecks_settings_without_losing_its_actual_bill() {
 #[test]
 fn a_request_without_usage_keeps_a_combined_bill_unknown() {
     let known = Spent {
+        decision_rubric: None,
         requests: 1,
         input_tokens: Some(100),
         ..Spent::default()
     };
     let unknown = Spent {
+        decision_rubric: None,
         requests: 1,
         ..Spent::default()
     };
@@ -1114,6 +1119,7 @@ fn a_row_riding_another_rows_request_is_charged_nothing_and_a_batch_is_counted_o
     use zerocode_core::jev::summary::MODEL;
 
     let paid = Spent {
+        decision_rubric: None,
         requests: 1,
         redacted_lines: 2,
         input_tokens: Some(1_200),
@@ -1298,3 +1304,29 @@ fn codes(text: &str) -> Vec<&str> {
 
 /// Which connection a question rides (t-13199).
 mod socket;
+
+#[test]
+fn a_builtin_edit_with_the_same_mode_invalidates_the_windows_pending_response() {
+    use zerocode_core::jev::{JevMode, PLACEMENT, builtin};
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("settings.json");
+    let mut root = serde_json::json!({"smart":{
+        "jev":{"enabled":true,"workspaces":[folder.path().to_string_lossy()]},
+        (PLACEMENT.setting):JevMode::On.key()
+    }});
+    std::fs::write(&path, root.to_string()).unwrap();
+    let wire = Wire::at("http://127.0.0.1:9", "fixture-key", Some(path.clone()));
+    let allowed = JevSettings::from_root(&root).resolved();
+    assert!(wire.response_is_current(&PLACEMENT, Some(folder.path()), &allowed, JevMode::On));
+    root["smart"][builtin::SETTING] =
+        serde_json::json!({(PLACEMENT.id):{"question":"A changed question","mode":"on"}});
+    std::fs::write(&path, root.to_string()).unwrap();
+    assert!(!wire.response_is_current(&PLACEMENT, Some(folder.path()), &allowed, JevMode::On));
+    let spent = Spent {
+        decision_rubric: Some(1 << 31),
+        ..Spent::default()
+    };
+    let mut row = serde_json::json!({});
+    spent.rider().stamp(&mut row);
+    assert_eq!(row[builtin::RUBRIC_KEY], 1_u32 << 31);
+}

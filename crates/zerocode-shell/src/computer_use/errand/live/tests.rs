@@ -398,6 +398,7 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
     assert_eq!(
         judge.spent(),
         Some(Spent {
+            decision_rubric: None,
             requests: 1,
             redacted_lines: 3,
             input_tokens: Some(120),
@@ -595,6 +596,7 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
     assert_eq!(
         judge.spent(),
         Some(Spent {
+            decision_rubric: None,
             requests: 1,
             redacted_lines: 0,
             input_tokens: Some(140),
@@ -816,6 +818,7 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
     assert_eq!(
         judge.spent(),
         Some(Spent {
+            decision_rubric: None,
             requests: 0,
             redacted_lines: 0,
             input_tokens: Some(0),
