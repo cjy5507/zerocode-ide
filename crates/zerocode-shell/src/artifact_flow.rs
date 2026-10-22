@@ -39,9 +39,10 @@ use serde_json::Value;
 use zerocode_core::artifact::Artifact;
 use zerocode_core::host::Host;
 use zerocode_core::orchestration::attempt_time::task_time;
+use zerocode_core::orchestration::settle::{Left, Named, PRESS_TASKS_MAX, left_behind};
 use zerocode_core::orchestration::{
-    Dispatch, Ledger, Message, MessageKind, ResultAuthor, Run, Task, TaskStatus, commit_named,
-    summary_of_body, worker_summary_in,
+    Dispatch, Ledger, Message, MessageKind, ResultAuthor, Run, SETTLE_QUIET_DAYS, Task, TaskStatus,
+    commit_named, summary_of_body, worker_summary_in,
 };
 
 use crate::artifact_runtime::Chips;
@@ -151,6 +152,17 @@ pub(crate) struct Flow {
     pub(crate) releases: Vec<FlowRelease>,
     /// The releases past the kept ones that the walk saw, as one line.
     pub(crate) older: Option<FlowOlder>,
+    /// Open work nobody is coming back to (t-71220, [`left_behind`]): what a
+    /// 「정리」 closes, and what stays open for a look. Not 「지금」.
+    pub(crate) left: FlowPile,
+    /// Finished work no review stands for, and nobody is coming back to
+    /// write one: what a 「검토 생략」 waives. Not 「지금」.
+    pub(crate) unreviewed: FlowPile,
+    /// How many tasks one press may name ([`PRESS_TASKS_MAX`]): a longer
+    /// pile is cleared that many at a time, oldest first.
+    pub(crate) press_max: usize,
+    /// The quiet time the piles are read with ([`SETTLE_QUIET_DAYS`]), in days.
+    pub(crate) quiet_days: i64,
     /// Whether this window's ledger answered. Without it the flow is git's alone.
     pub(crate) ledger: bool,
     /// Whether git was asked — only in a repository this window lists.
@@ -166,6 +178,17 @@ pub(crate) struct FlowGroup {
     /// Tasks past [`FlowTable::group_tasks_max`].
     pub(crate) more: usize,
     pub(crate) records: Vec<Artifact>,
+}
+
+/// A pile of work nobody is coming back to (t-71220): its lines, oldest first
+/// and at most [`FlowTable::group_tasks_max`], how many more, and every task a
+/// press over it names — all of a finished pile's, and the ones a settle
+/// closes of an open one ([`Left::Settle`]).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub(crate) struct FlowPile {
+    pub(crate) tasks: Vec<FlowTask>,
+    pub(crate) more: usize,
+    pub(crate) named: Vec<Named>,
 }
 
 /// One release and the work it shipped.
@@ -222,6 +245,9 @@ pub(crate) struct FlowTask {
     /// The stage word as the ledger alone says it; `None` for a task only git
     /// names.
     pub(crate) ledger_stage: Option<&'static str>,
+    /// The pile it stands in when nobody is coming back to it (t-71220);
+    /// `None` on every line of 「지금」 and of the groups after it.
+    pub(crate) left: Option<Left>,
     pub(crate) three: Option<Three>,
     /// The hand-in's words, bounded — what the line opens to when its report
     /// has no three lines.
@@ -1007,6 +1033,7 @@ fn ledger_line(index: &RunIndex<'_>, task: &Task, table: &FlowTable) -> FlowTask
         gain: gain_of(numbers.as_ref(), summary.as_deref(), table.gain_chars),
         stage,
         ledger_stage: Some(stage),
+        left: None,
         three: None,
         summary: summary
             .as_deref()
@@ -1055,6 +1082,7 @@ fn git_line(task: &str, merge: &GitMerge, table: &FlowTable) -> FlowTask {
         gain: None,
         stage: STAGE_MERGED,
         ledger_stage: None,
+        left: None,
         three: None,
         summary: None,
         opened_ms: None,
@@ -1095,6 +1123,9 @@ const NOW_STAGES: [&str; 8] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Place {
     Now,
+    /// Left behind, open ([`Flow::left`]) or finished ([`Flow::unreviewed`]).
+    Left,
+    Unreviewed,
     Next,
     Release(usize),
     /// Shipped in a release past the kept ones.
@@ -1204,6 +1235,15 @@ fn place_of(line: &FlowTask, git: &GitFacts, table: &FlowTable) -> Option<Place>
     if line.stage == STAGE_CLOSED {
         return None;
     }
+    // Work nobody is coming back to stands in its pile — until git says it
+    // landed, which moves it on like any other line.
+    if NOW_STAGES.contains(&line.stage) {
+        match line.left {
+            Some(Left::Unreviewed) => return Some(Place::Unreviewed),
+            Some(Left::Settle | Left::Look) => return Some(Place::Left),
+            None => {}
+        }
+    }
     if let Some(ship) = &line.ship {
         // A release the walk did not reach is older than every one it did.
         return Some(
@@ -1239,6 +1279,9 @@ pub(crate) struct Reading<'a> {
     pub(crate) ledger: Option<&'a Ledger>,
     pub(crate) git: &'a GitFacts,
     pub(crate) table: &'a FlowTable,
+    /// The moment the read is made: what a task left behind is measured
+    /// against ([`left_behind`]).
+    pub(crate) now_ms: i64,
 }
 
 /// The flow of one project, as the ledger and git say it — before the catalog
@@ -1250,6 +1293,7 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
         ledger,
         git,
         table,
+        now_ms,
     } = *reading;
     let indexes: Vec<RunIndex<'_>> = ledger.map_or_else(Vec::new, |ledger| {
         ledger.runs().iter().map(RunIndex::of).collect()
@@ -1281,15 +1325,23 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
     let mut lines: Vec<(Place, FlowTask)> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for index in indexes.iter().filter(|index| ours(index)) {
+        let left = left_behind(index.run, now_ms);
         for task in &index.run.tasks {
             let named = by_task.get(task.id.as_str()).copied();
             let recent = horizon_ms
                 .is_none_or(|horizon| last_moment(task, index.attempts_of(&task.id)) >= horizon);
-            let in_view = recent || named.is_some() || task.status == TaskStatus::Dispatched;
+            // Work left behind stands in its pile however old it is: the pile
+            // is where a person clears it.
+            let behind = left.get(task.id.as_str()).copied();
+            let in_view = recent
+                || named.is_some()
+                || task.status == TaskStatus::Dispatched
+                || behind.is_some();
             if !in_view {
                 continue;
             }
             let mut line = ledger_line(index, task, table);
+            line.left = behind;
             let merged = named.or_else(|| {
                 line.land
                     .as_ref()
@@ -1301,6 +1353,9 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
             }
             seen.insert(task.id.as_str());
             if let Some(place) = place_of(&line, git, table) {
+                if !matches!(place, Place::Left | Place::Unreviewed) {
+                    line.left = None;
+                }
                 lines.push((place, line));
             }
         }
@@ -1352,12 +1407,16 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
                 group: FlowGroup::default(),
             })
             .collect(),
+        press_max: PRESS_TASKS_MAX,
+        quiet_days: SETTLE_QUIET_DAYS,
         ..Flow::default()
     };
     let mut older_tasks = 0;
     for (place, line) in lines {
         match place {
             Place::Now => flow.now.tasks.push(line),
+            Place::Left => flow.left.tasks.push(line),
+            Place::Unreviewed => flow.unreviewed.tasks.push(line),
             Place::Next => flow.next.tasks.push(line),
             Place::Release(at) => flow.releases[at].group.tasks.push(line),
             Place::Older => older_tasks += 1,
@@ -1387,6 +1446,8 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
         group.more = group.tasks.len().saturating_sub(table.group_tasks_max);
         group.tasks.truncate(table.group_tasks_max);
     }
+    pile_up(&mut flow.left, Some(Left::Settle), table);
+    pile_up(&mut flow.unreviewed, None, table);
     let past = &git.releases[table.releases_kept.min(git.releases.len())..];
     if let (Some(newest), Some(oldest)) = (past.first(), past.last()) {
         flow.older = Some(FlowOlder {
@@ -1399,6 +1460,28 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
     }
     flow.sources = sources_of(&flow);
     flow
+}
+
+/// A pile in its order — oldest first, the work that has waited longest on
+/// top — with every task a press over it names (`closes`: only those a settle
+/// closes; `None`: all of them), and its lines bounded like a group's.
+fn pile_up(pile: &mut FlowPile, closes: Option<Left>, table: &FlowTable) {
+    pile.tasks
+        .sort_by(|a, b| a.last_ms.cmp(&b.last_ms).then_with(|| a.task.cmp(&b.task)));
+    pile.named = pile
+        .tasks
+        .iter()
+        .filter(|line| closes.is_none_or(|closes| line.left == Some(closes)))
+        .filter_map(|line| {
+            Some(Named {
+                run: line.run.clone()?,
+                task: line.task.clone(),
+                was: None,
+            })
+        })
+        .collect();
+    pile.more = pile.tasks.len().saturating_sub(table.group_tasks_max);
+    pile.tasks.truncate(table.group_tasks_max);
 }
 
 /// Every line of a flow.
@@ -1623,6 +1706,7 @@ pub(crate) fn read(ask: &FlowAsk, listed: &[PathBuf], now_ms: i64) -> Flow {
         ledger: ledger.as_deref(),
         git: &git,
         table: &FLOW,
+        now_ms,
     });
     if vouched.repo.is_none() {
         flow.git = GitAsked::Outside;

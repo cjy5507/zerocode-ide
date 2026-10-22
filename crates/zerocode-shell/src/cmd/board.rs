@@ -417,6 +417,30 @@ pub(crate) async fn desk_review_pass(
     .map_err(|error| error.to_string())?
 }
 
+/// 「정리」, 「검토 생략」 and 「되돌리기」 on the piles of work nobody is coming back to,
+/// on the board and in the artifact tab's flow (t-71220, `press_settle`): the main window only,
+/// after the renderer's own confirm. The press is the person's — no seat is asked for, because
+/// the runs it clears are the ones nobody sits in — and the ledger acts only on the tasks it
+/// still reads the way the window drew them, answering the rest as kept.
+#[tauri::command]
+pub(crate) async fn board_settle(
+    webview: tauri::Webview,
+    press: zerocode_core::orchestration::settle::SettlePress,
+    tasks: Vec<zerocode_core::orchestration::settle::Named>,
+) -> Result<zerocode_core::orchestration::settle::Settled, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::press_settle(
+            press,
+            tasks,
+            zerocode_core::orchestration::land_batch::person_press(),
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// 「지금 다시 시도」 on a quota-wall chip (t-39771): type one continuation at a
 /// worker standing at its wall, through the ledger's resume road
 /// (`wall_press::retry`). The main window only, and only after the renderer's

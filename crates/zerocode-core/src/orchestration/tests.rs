@@ -25290,6 +25290,9 @@ mod question_expiry;
 mod restore;
 /// t-7812: the transitions those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
+/// t-71220: work nobody is coming back to, and the person's one press that
+/// clears it (`tests/settle.rs`).
+mod settle;
 /// t-19328: the board stops counting work nothing can review as 검증 대기
 /// (`tests/unreviewable.rs`).
 mod unreviewable;

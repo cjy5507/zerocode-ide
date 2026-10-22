@@ -50,10 +50,10 @@ fn quoted(block: &str) -> Vec<&str> {
 #[test]
 fn every_stage_the_desk_gives_a_task_has_the_flows_words() {
     let desk = shell_source("orchestration/desk.rs");
-    let stages = quoted(list_after(&desk, "pub(crate) const STAGES: [&str; 15] = ["));
+    let stages = quoted(list_after(&desk, "pub(crate) const STAGES: [&str; 16] = ["));
     assert_eq!(
         stages.len(),
-        15,
+        16,
         "the desk's stage words could not be read: {stages:?}"
     );
     let flow = ui_source("shell-artifact-flow.js");
