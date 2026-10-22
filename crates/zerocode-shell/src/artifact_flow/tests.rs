@@ -1337,7 +1337,9 @@ fn the_persons_ledger_counts_now_before_and_after_the_piles() {
     for (name, project, git) in [
         (
             "work",
-            "/Users/work".to_string(),
+            // The person's work root comes from the environment; no machine path is committed.
+            std::env::var("ZEROCODE_LEDGER_COPY_WORK_ROOT")
+                .unwrap_or_else(|_| "/Users/dev/work".to_string()),
             Arc::new(GitFacts::default()),
         ),
         ("zerocode", zerocode, git_facts(&repo, now)),
