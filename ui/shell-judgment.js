@@ -250,7 +250,7 @@ const judgmentProviderController = {
     this.drafts.set(this.draft.kind, this.copy(this.draft));
     const kind = el("judgment-provider-kind").value;
     const provider = kind === "jev" ? this.state.jevProvider :
-      this.drafts.get(kind) ?? { kind, protocol: "openai_json", baseUrl: "", model: "", requiresAuth: kind === "remote" };
+      this.drafts.get(kind) ?? { kind, protocol: kind === "remote" ? "openai_json" : "system_one", baseUrl: "", model: "", requiresAuth: kind === "remote" };
     if (!provider) return;
     this.reset(provider);
     this.render();

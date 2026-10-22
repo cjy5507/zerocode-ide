@@ -21344,6 +21344,14 @@ button.helper-sib:hover {
   min-width: 0;
 }
 
+/* The generic fold measures prose at 60ch. This fold contains a connection
+ * form, so its fields and actions use the same row width as the API router. */
+.judgment-connection-settings > #judgment-provider-editor,
+.judgment-connection-settings > .settings-judgment-actions,
+.judgment-connection-settings > .settings-status {
+  max-width: none;
+}
+
 .judgment-model-source h4 {
   font-size: var(--text-sm);
   margin-block: var(--space-3);

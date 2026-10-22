@@ -6096,9 +6096,9 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     visible: all.filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0).map((select) => select.id),
   }));
   assertEqual(selects, {
-    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-listed-model", "route-classifier-select"],
-    visible: ["judgment-provider-kind"],
-  }, "the provider is visible, the library filter stands only over library rows, and classifier and inactive server choices stay folded");
+    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model", "route-classifier-select"],
+    visible: ["managed-judgment-filter", "judgment-provider-kind"],
+  }, "the provider and candidate filter are visible; protocol and inactive choices stay folded");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
@@ -7267,6 +7267,7 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
     assert(await server.locator('[data-model-action="activate"]').isHidden(), "an unsupported local adapter offers to run here");
     assert(await server.locator('[data-model-action="connect"]').isVisible(), "a compatible server model has no connection path");
     assertEqual(await pageA.locator('[data-model-id="fixture-server-only"].managed-judgment-model').count(), 0, "a model not received here stands as a library row");
+    await pageA.fill("#managed-judgment-search", "");
     await pageA.locator("#managed-judgment-candidates > summary").click();
     const serverOnly = pageA.locator('#managed-judgment-candidate-list > [data-model-id="fixture-server-only"]');
     for (const action of ["install", "inspect-source", "import"]) {
@@ -7444,8 +7445,8 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
     ], "an unfolded candidate is not one line of its name, its size and the ways to have it");
     assert(await page.locator('[data-model-id="fixture-d3"] .managed-judgment-candidate-reason').isVisible(), "a download-only candidate does not explain its limitation");
     await page.fill("#managed-judgment-search", "fixture-d3");
-    assert(await page.locator('#managed-judgment-candidate-list [data-model-id="fixture-d3"]').isVisible(), "search cannot find a model not downloaded yet");
-    assert(await page.locator('#managed-judgment-candidate-list [data-model-id="fixture-local-candidate"]').isHidden(), "candidate search ignored the query");
+    assert(await page.locator('#managed-judgment-candidate-list > li[data-model-id="fixture-d3"]').isVisible(), "search cannot find a model not downloaded yet");
+    assert(await page.locator('#managed-judgment-candidate-list > li[data-model-id="fixture-local-candidate"]').isHidden(), "candidate search ignored the query");
     assert(await page.locator("#managed-judgment-no-matches").isHidden(), "a matching candidate is reported as no matches");
     await page.fill("#managed-judgment-search", "");
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
