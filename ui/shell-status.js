@@ -4743,12 +4743,27 @@ function paintTabNode(node, tab) {
   const tip =
     tab.kind === "lane"
       ? (lane?.session_id ?? "")
-      : tab.kind === "term" && tab.resumed
-        ? t("session.resumedTab", "이어서 — {{agent}}", {
-            agent: tab.agent || agentName(tabAgentSlug(tab) || ""),
-          })
+      : tab.kind === "term"
+        ? termTabTip(tab)
         : (tab.path ?? "");
   if (node.dataset.tip !== tip) node.dataset.tip = tip;
+}
+
+/* What a terminal tab's tip says (t-67936): for a tab holding a seat, or a
+ * restored tab not woken yet, what it holds — the seats by name, the other
+ * agents, the conversations it will wake — and the folder it stands in, so
+ * it says before it is closed what closing it would end; and, for a tab
+ * whose conversation came back, the agent it came back as. Any other tab's
+ * label already names its one agent, and a plain shell says nothing. */
+function termTabTip(tab) {
+  const held = tabHoldings(tab);
+  const resumed = tab.resumed
+    ? t("session.resumedTab", "이어서 — {{agent}}", {
+        agent: tab.agent || agentName(tabAgentSlug(tab) || ""),
+      })
+    : "";
+  if (!holdsSeat(held) && !held.stored) return resumed;
+  return [holdingWords(held), basename(tab.worktree ?? ""), resumed].filter(Boolean).join(" · ");
 }
 
 /* ＋ 옆의 조용한 숫자 — 지금 **판 없이 도는** 에이전트가 몇인가.
@@ -5734,6 +5749,154 @@ async function askAboutRunning(tab, terms) {
   return answer === true;
 }
 
+/* ---- 코디·워커 자리는 닫기 전에 묻는다 (t-67936) ----
+ *
+ * 2026-10-21 13:24:35 one tab closed by close-tab took two coordinators with
+ * it — the tab the 12:37 restart had put back (`term:asleep:4`), its two
+ * panes the seats of two runs — and six workers lost their coordinator. The
+ * person saw 「갑자기 꺼짐」 and said they had closed nothing. The question
+ * above asks about a foreground process alone, and that person had told it
+ * not to ask again; a seat was never its subject. A coordinator's or a
+ * worker's seat is the ledger's, not the shell's: ending it orphans a run's
+ * workers, or the task a coordinator waits on. So a tab holding one asks
+ * first, whatever that switch says, in one line naming what it holds; a
+ * close carried by an event no hand made is refused outright; and every
+ * close of a terminal tab leaves one black-box line — the road it came by,
+ * whose hand, where the pointer was, whether Computer Use was acting, what
+ * the tab held and what became of it — so the next close nobody remembers
+ * names its cause. */
+
+/* What a terminal tab holds: the coordinators sitting in its panes (their
+ * seats), the ledger's workers, the other agents — and, for a tab not woken
+ * yet, whether its record holds conversations to wake (the restore's own
+ * judgment, `storedLayoutsHoldProgram`). */
+function tabHoldings(tab) {
+  const held = { coordinators: [], workers: [], agents: 0, stored: false };
+  if (tab.asleep) {
+    held.stored = storedLayoutsHoldProgram([tab.asleep]);
+    return held;
+  }
+  for (const term of paneLeaves(tab.layout)) {
+    const role = paneRole(term);
+    if (role?.kind === "coordinator") held.coordinators.push(...role.seats);
+    else if (role?.kind === "worker") held.workers.push(role.facts);
+    else if (termHoldsAgent(term)) held.agents += 1;
+  }
+  return held;
+}
+
+function holdsSeat(held) {
+  return held.coordinators.length + held.workers.length > 0;
+}
+
+/* What a tab holds, as its question and its tip say it — 「코디 판 2개(ZO·
+ * run-4275)」, 「워커 판 1개(w-71164)」, 「에이전트 판 1개」, 「다시 열 대화」 —
+ * or nothing, for a plain shell. */
+function holdingWords(held) {
+  const parts = [];
+  if (held.coordinators.length > 0) {
+    parts.push(t("terminal.holdsCoordinators", "코디 판 {{n}}개({{names}})", {
+      n: held.coordinators.length,
+      names: held.coordinators.map((seat) => seat.name || seat.run).join("·"),
+    }));
+  }
+  if (held.workers.length > 0) {
+    parts.push(t("terminal.holdsWorkers", "워커 판 {{n}}개({{names}})", {
+      n: held.workers.length,
+      names: held.workers.map((facts) => facts.worker).join("·"),
+    }));
+  }
+  if (held.agents > 0) parts.push(t("terminal.holdsAgents", "에이전트 판 {{n}}개", { n: held.agents }));
+  if (held.stored) parts.push(t("terminal.holdsStored", "다시 열 대화"));
+  return parts.join(", ");
+}
+
+/* The one line asked before a seat goes. No "don't ask again": the switch
+ * that silences the running question is about processes, and a seat is not
+ * one. */
+async function askAboutSeats(held) {
+  const answer = await askConfirm({
+    title: t("terminal.holdsTitle", "{{held}}가 들어 있습니다 — 닫을까요?", { held: holdingWords(held) }),
+    body: "",
+    confirm: t("tab.close", "탭 닫기"),
+    deny: t("app.cancel", "취소"),
+    cancel: false,
+    danger: true,
+  });
+  return answer === true;
+}
+
+/* The roads a close comes by, read off the element its event landed on —
+ * the strip's ×, a row of the pane's menu, of the palette, of any other menu.
+ * A middle click and the keys are read off the event's own kind. */
+const CLOSE_ROADS = [
+  [".tab-close", "button"],
+  [".term-menu-row", "pane-menu"],
+  [".tc-row", "palette"],
+  ['[role="menu"]', "menu"],
+];
+
+/* Which road this close came by, whose hand it was (`handSaid`), where the
+ * pointer stood, and whether the event that carried it was one no hand made. */
+function closeRoadNow() {
+  const event = window.event ?? null;
+  const landed = event?.target instanceof Element ? event.target : null;
+  let road = "program";
+  if (event?.type === "auxclick") road = "aux";
+  else if (event?.type === "keydown") road = event.key === "Escape" ? "escape" : "keyboard";
+  else if (event) road = CLOSE_ROADS.find(([selector]) => landed?.closest(selector))?.[1] ?? event.type;
+  const pointer = Number.isFinite(event?.clientX)
+    ? ` at ${Math.round(event.clientX)},${Math.round(event.clientY)}`
+    : "";
+  return { road, hand: handSaid(), pointer, synthetic: event !== null && !event.isTrusted };
+}
+
+/* Whether Computer Use was acting when the close came: its band's own
+ * reading — the operator's last verb — or idle. */
+function computerActingWord() {
+  return computerBandState.active ? `cu acting ${computerBandState.verb ?? ""}`.trim() : "cu idle";
+}
+
+/* One black-box line per close of a terminal tab: the tab, the road and the
+ * hand, the pointer, Computer Use, the seats and agents it held — run and
+ * worker ids and counts, never a title or a prompt — and its outcome. */
+function noteCloseRoad(tab, road, held, outcome) {
+  const holds = [
+    ...held.coordinators.map((seat) => `coordinator ${seat.run}`),
+    ...held.workers.map((facts) => `worker ${facts.worker}`),
+    ...(held.agents > 0 ? [`agents ${held.agents}`] : []),
+    ...(held.stored ? ["stored conversations"] : []),
+  ].join(", ") || "nothing";
+  void invoke("log_window_error", {
+    message: `close tab ${tab.id} by ${road.road} · ${road.hand}${road.pointer} · ${computerActingWord()} · holds ${holds} → ${outcome}`,
+  }).catch(() => {});
+}
+
+/* A close no hand made, of a tab holding a seat: refused, said in the black
+ * box, and said to the person — something tried to end a seat. */
+function refuseSyntheticClose(tab, road, held) {
+  noteCloseRoad(tab, road, held, "refused: no hand made the event");
+  toast(
+    t("terminal.closeRefused", "사람 손이 아닌 입력이 탭을 닫으려 해서 막았습니다 — {{held}}", {
+      held: holdingWords(held),
+    }),
+    "halt",
+  );
+}
+
+/* A close's question answered (or nothing to ask, after a look): said in the
+ * black box, and the close goes on through the same door with its one
+ * consumed pass — or stops here. */
+function passCloseCheck(tab, road, held, asked, proceed) {
+  closeChecks.delete(tab.id);
+  const standing = tabs.some((one) => one.id === tab.id);
+  const outcome = !standing ? "gone meanwhile" : !proceed ? "kept" : asked ? "closed after asking" : "closed";
+  noteCloseRoad(tab, road, held, outcome);
+  if (!standing || !proceed) return;
+  closeConfirmed.add(tab.id);
+  closeTab(tab.id);
+}
+
 /* One-shot passes for a close the person already confirmed — consumed by the
  * re-entry, so the next close of the same tab asks again. */
 const closeConfirmed = new Set();
@@ -5776,18 +5939,32 @@ function closeTab(id) {
   if (tab.kind === "term") {
     // Measure every pane before killing any of them. Re-entry carries one
     // consumed pass so the query and dialog cannot duplicate themselves.
-    if (confirmCloseRunning && !closeConfirmed.has(id)) {
+    if (!closeConfirmed.has(id)) {
       if (closeChecks.has(id)) return;
-      const terms = paneLeaves(tab.layout);
-      closeChecks.add(id);
-      void terminalCloseNeedsConfirmation(terms).then(async (needsConfirmation) => {
-        closeChecks.delete(id);
-        if (!tabs.some((held) => held.id === id)) return;
-        if (needsConfirmation && !(await askAboutRunning(tab, terms))) return;
-        closeConfirmed.add(id);
-        closeTab(id);
-      });
-      return;
+      const road = closeRoadNow();
+      const held = tabHoldings(tab);
+      // A seat goes on a person's word alone, whatever the running switch
+      // says (t-67936) — and never on an event no hand made.
+      if (holdsSeat(held)) {
+        if (road.synthetic) {
+          refuseSyntheticClose(tab, road, held);
+          return;
+        }
+        closeChecks.add(id);
+        void askAboutSeats(held).then((proceed) => passCloseCheck(tab, road, held, true, proceed));
+        return;
+      }
+      if (confirmCloseRunning) {
+        const terms = paneLeaves(tab.layout);
+        closeChecks.add(id);
+        void terminalCloseNeedsConfirmation(terms).then(async (needsConfirmation) => {
+          const asking = needsConfirmation && tabs.some((one) => one.id === id);
+          const proceed = !asking || (await askAboutRunning(tab, terms));
+          passCloseCheck(tab, road, held, asking, proceed);
+        });
+        return;
+      }
+      noteCloseRoad(tab, road, held, "closed");
     }
     closeChecks.delete(id);
     closeConfirmed.delete(id);
