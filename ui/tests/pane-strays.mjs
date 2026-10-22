@@ -54,7 +54,10 @@ export async function exercisePaneStrays() {
   await settle();
   const lines = [];
   window.__ANSWER__.log_window_error = (args) => {
-    lines.push(String(args?.message ?? ""));
+    const line = String(args?.message ?? "");
+    // A tab close's own road line (`close tab … by …`, t-67936) is another
+    // record, read by its own suite (`close-guard`); these are the panes'.
+    if (!line.startsWith("close tab ")) lines.push(line);
     return null;
   };
   const held = (term) => Boolean(tabOfTerm(term)) || detachedAgents.has(term);
