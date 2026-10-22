@@ -38,17 +38,27 @@
 //! Precedence stays what the catalog bridge already defines: an operator
 //! export first, then settings, then what was discovered, then the shipped
 //! rows. Discovery never edits a row the shipped catalog carries; it only adds
-//! ids the binary predates and moves aliases forward. `modelUpdatePolicy` in
-//! settings decides how far: `auto` (default) publishes both, `notify` adds the
-//! ids but leaves aliases where they are and reports what it would have moved,
-//! `pinned` publishes nothing at all.
+//! ids the binary predates and moves aliases forward — except under a Google
+//! (Antigravity) login, whose registry is the list a Gemini pick is made from
+//! (t-71998: "agy에 없는 3.1 pro 모델 프리뷰 같은 하드코딩 모델이 선택되는 것
+//! 같아"). There every release the registry serves is a row, a shipped one
+//! included, sent under the registry's own tier ids; the Gemini aliases land
+//! on its releases; a shipped id it serves under another name keeps going to
+//! that release; and one it serves under no name, and the Google key's list
+//! does not name, left the login ([`antigravity_reach_in`]). The shipped rows
+//! still say what the registry does not — a window, a name — and a pick goes
+//! where it went before: the login first, the key only for what only the
+//! key's list names. `modelUpdatePolicy` in settings decides how far: `auto`
+//! (default) publishes both, `notify` adds the ids but leaves aliases where
+//! they are and reports what it would have moved, `pinned` publishes nothing
+//! at all.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, Once, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, Once, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -150,8 +160,11 @@ pub struct Source {
     /// Ask the source, blocking.
     pub ask: fn() -> SourceAnswer,
     /// The answer is every model the login may use — so a shipped row of the
-    /// provider it does not name was withdrawn ([`Withdrawn`]). A registry
-    /// that folds tiered ids, or a key list beside an OAuth route, is not.
+    /// provider it does not name was withdrawn ([`Withdrawn`]). A key list
+    /// beside an OAuth route is not. The Antigravity registry is (t-71998):
+    /// a shipped Gemini id it serves under no name, whose wire it does not
+    /// serve either and the key list does not name, left the Google login
+    /// ([`antigravity_reach_in`]).
     pub lists_every_model: bool,
     /// Refusals the endpoint spells for itself: a marker its body carries,
     /// and the words a report says instead of the raw body — xAI's
@@ -233,7 +246,7 @@ pub const SOURCES: [Source; 6] = [
         models_url: antigravity_models_url,
         configured: api::google_code_assist_oauth_present,
         ask: antigravity_models,
-        lists_every_model: false,
+        lists_every_model: true,
         refusals: &[],
     },
     Source {
@@ -741,7 +754,9 @@ pub fn refresh_with(
 /// longer names. An answer — live, cached or carried unchanged — decides
 /// afresh, keeping the date of the first omission; a failed source keeps
 /// the marks it had, as it keeps its rows; a skipped one knows nothing and
-/// marks nothing.
+/// marks nothing. The Antigravity registry withdraws only what the login
+/// cannot reach at all: a shipped id it serves under another name, or one
+/// the Google key's list names, stays (t-71998).
 #[must_use]
 pub fn withdraw_shipped(
     mut fresh: DiscoveredCatalog,
@@ -762,7 +777,8 @@ pub fn withdraw_shipped(
                 .collect();
             let answered_at = if report.fetched_at == 0 { now_secs } else { report.fetched_at };
             for id in shipped_canonicals(source.provider) {
-                if listed.contains(&id.to_ascii_lowercase()) {
+                let reached = source.key == ANTIGRAVITY_SOURCE && registry_reach(&fresh.models, id) != Reach::Unserved;
+                if listed.contains(&id.to_ascii_lowercase()) || reached {
                     continue;
                 }
                 let since = previous
@@ -1002,48 +1018,229 @@ fn drop_api_key_duplicates(models: &mut Vec<DiscoveredModel>) {
 // The Google login's list (t-71998)
 // ---------------------------------------------------------------------------
 
-/// How the Google (Antigravity) login reaches one Gemini id. Red scaffold
-/// for t-71998: today nothing judges, so every id is `Unjudged`.
+/// How the Google (Antigravity) login reaches one Gemini id, by the lists
+/// the last refresh holds — what the `/model` picker and the status line say
+/// beside a pick that goes over the login. Asked of a Google id only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AntigravityReach {
+    /// No list decides: no Google login, or a registry that never answered —
+    /// the shipped catalog stands, as it did before there was a list.
     Unjudged,
+    /// The registry serves it under this name.
     Listed,
+    /// The registry serves the release it names under another name: every id
+    /// its wire sends is that release's, and a pick lands on the release.
     Renamed(String),
+    /// Only the Google key's list names it. The pick goes where it always
+    /// went; nothing here stops it.
     KeyOnly,
+    /// Nothing serves it — neither the registry, under any name, nor the
+    /// key's list — since these unix seconds. The login cannot take it.
     Unserved { since: u64 },
 }
 
-/// What the Google (Antigravity) login's list is. Red scaffold for t-71998:
-/// today there is no list, so it is always `NoLogin`.
+/// What the Google (Antigravity) login's list is, as the last refresh left
+/// it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AntigravityList {
+    /// No Google login here: a Gemini pick goes over the key, as before.
     NoLogin,
+    /// The registry answered at these unix seconds.
     Read(u64),
+    /// The last refresh could not read the registry: the list it read at
+    /// these unix seconds stands — or, `None`, none was ever read and the
+    /// shipped catalog stands.
     Unconfirmed(Option<u64>),
 }
 
-/// Red scaffold for t-71998: today's answer, `Unjudged`.
-#[must_use]
-pub fn antigravity_reach_in(_catalog: &DiscoveredCatalog, _id: &str) -> AntigravityReach {
-    AntigravityReach::Unjudged
+/// [`AntigravityReach`] without the date — what the rows alone say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Reach {
+    Listed,
+    Renamed(String),
+    KeyOnly,
+    Unserved,
 }
 
-/// Red scaffold for t-71998: today's answer, `Unjudged`.
-#[must_use]
-pub fn antigravity_reach(_id: &str) -> AntigravityReach {
-    AntigravityReach::Unjudged
+/// How `id` is reached by the registry rows and the key's rows in `models`.
+fn registry_reach(models: &[DiscoveredModel], id: &str) -> Reach {
+    let releases = || {
+        models
+            .iter()
+            .filter(|model| model.unlisted_since.is_none() && same_source(&model.source, ANTIGRAVITY_SOURCE))
+    };
+    if releases().any(|release| release.id.eq_ignore_ascii_case(id)) {
+        return Reach::Listed;
+    }
+    // What the id is sent under: its own row's wire — a release the registry
+    // stopped listing — else the shipped row's, else the id itself.
+    let sent = models
+        .iter()
+        .find(|model| model.wire.is_some() && model.id.eq_ignore_ascii_case(id))
+        .and_then(|model| model.wire.as_ref())
+        .map(wire_ids)
+        .or_else(|| shipped_row(id).and_then(|row| row.wire.clone()))
+        .unwrap_or_else(|| vec![id.trim().to_ascii_lowercase()]);
+    // The release that serves the most of what it sends — its own release
+    // number first, when its ids are split across two releases.
+    let owner = releases()
+        .filter_map(|release| {
+            let serves = release.wire.as_ref().map_or(0, |wire| {
+                wire_ids(wire).iter().filter(|wire_id| sent.contains(*wire_id)).count()
+            });
+            (serves > 0).then_some((release, serves))
+        })
+        .max_by_key(|(release, serves)| (rank(&release.id) == rank(id), *serves));
+    if let Some((release, _)) = owner {
+        return Reach::Renamed(release.id.clone());
+    }
+    let keyed = models.iter().any(|model| {
+        model.unlisted_since.is_none()
+            && same_source(&model.source, GOOGLE_API_SOURCE)
+            && model.id.eq_ignore_ascii_case(id)
+    });
+    if keyed {
+        Reach::KeyOnly
+    } else {
+        Reach::Unserved
+    }
 }
 
-/// Red scaffold for t-71998: today's answer, `NoLogin`.
-#[must_use]
-pub fn antigravity_list_in(_catalog: Option<&DiscoveredCatalog>, _login: impl FnOnce() -> bool) -> AntigravityList {
-    AntigravityList::NoLogin
+/// Whether the registry's list decides the Google rows: it answered — now,
+/// or kept from the last answer — or its withdrawals stand. A row kept only
+/// because a session had it selected (`unlisted_since`) is no answer: after
+/// a sign-out it is all that is left.
+fn registry_decides(catalog: &DiscoveredCatalog) -> bool {
+    catalog
+        .models
+        .iter()
+        .any(|model| model.unlisted_since.is_none() && same_source(&model.source, ANTIGRAVITY_SOURCE))
+        || catalog.withdrawn.iter().any(|row| row.source == ANTIGRAVITY_SOURCE)
 }
 
-/// Red scaffold for t-71998: today's answer, `NoLogin`.
+/// The ids a catalog `wire` value names, lowercase.
+fn wire_ids(wire: &Value) -> Vec<String> {
+    match wire {
+        Value::String(id) => vec![id.trim().to_ascii_lowercase()],
+        Value::Object(rungs) => rungs
+            .values()
+            .filter_map(Value::as_str)
+            .map(|id| id.trim().to_ascii_lowercase())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// What one shipped catalog row states — read from the shipped bytes, never
+/// the published catalog, which this module's own rows restate.
+struct ShippedRow {
+    /// Its ids, lowercase.
+    ids: Vec<String>,
+    /// The ids its `wire` names, lowercase; `None` when it declares none.
+    wire: Option<Vec<String>>,
+    /// Whether it states a context window, a max output, a display name.
+    window: bool,
+    max_output: bool,
+    name: bool,
+}
+
+/// The shipped row naming `id`.
+fn shipped_row(id: &str) -> Option<&'static ShippedRow> {
+    static ROWS: OnceLock<Vec<ShippedRow>> = OnceLock::new();
+    let rows = ROWS.get_or_init(|| {
+        let document: Value = serde_json::from_str(api::builtin_model_catalog_json()).unwrap_or_default();
+        document.get("models").and_then(Value::as_array).map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(ShippedRow {
+                        ids: row
+                            .get("ids")?
+                            .as_array()?
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(|id| id.trim().to_ascii_lowercase())
+                            .collect(),
+                        wire: row.get("wire").map(wire_ids),
+                        window: row.get("context_window").and_then(Value::as_u64).is_some_and(|window| window > 0),
+                        max_output: row.get("max_output_tokens").and_then(Value::as_u64).is_some(),
+                        name: row
+                            .get("display_name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| !name.trim().is_empty()),
+                    })
+                })
+                .collect()
+        })
+    });
+    let lower = id.trim().to_ascii_lowercase();
+    rows.iter().find(|row| row.ids.contains(&lower))
+}
+
+/// When `catalog`'s registry list was last read, else when the catalog was.
+fn registry_read_at(catalog: &DiscoveredCatalog) -> u64 {
+    catalog
+        .reports
+        .iter()
+        .find(|report| report.source == ANTIGRAVITY_SOURCE)
+        .map_or(catalog.fetched_at, |report| report.fetched_at)
+}
+
+/// How the Google (Antigravity) login reaches `id` by `catalog`'s lists.
+#[must_use]
+pub fn antigravity_reach_in(catalog: &DiscoveredCatalog, id: &str) -> AntigravityReach {
+    if !registry_decides(catalog) {
+        return AntigravityReach::Unjudged;
+    }
+    match registry_reach(&catalog.models, id) {
+        Reach::Listed => AntigravityReach::Listed,
+        Reach::Renamed(release) => AntigravityReach::Renamed(release),
+        Reach::KeyOnly => AntigravityReach::KeyOnly,
+        Reach::Unserved => AntigravityReach::Unserved {
+            since: withdrawn_since_in(catalog, id)
+                .or_else(|| {
+                    catalog
+                        .models
+                        .iter()
+                        .find(|model| model.id.eq_ignore_ascii_case(id))
+                        .and_then(|model| model.unlisted_since)
+                })
+                .unwrap_or_else(|| registry_read_at(catalog)),
+        },
+    }
+}
+
+/// [`antigravity_reach_in`] over the process snapshot.
+#[must_use]
+pub fn antigravity_reach(id: &str) -> AntigravityReach {
+    current().map_or(AntigravityReach::Unjudged, |catalog| antigravity_reach_in(&catalog, id))
+}
+
+/// What the Google (Antigravity) login's list is in `catalog`. `login` is
+/// asked only when the catalog holds no answer of the registry's own — none
+/// yet, or a skip another process may have written without the login this
+/// one holds (t-6248).
+#[must_use]
+pub fn antigravity_list_in(catalog: Option<&DiscoveredCatalog>, login: impl FnOnce() -> bool) -> AntigravityList {
+    let report = catalog.and_then(|catalog| catalog.reports.iter().find(|report| report.source == ANTIGRAVITY_SOURCE));
+    match report {
+        Some(report) if report.ok => AntigravityList::Read(report.fetched_at),
+        Some(report) if !report.skipped() => {
+            AntigravityList::Unconfirmed((report.origin == ORIGIN_PREVIOUS).then_some(report.fetched_at))
+        }
+        _ => {
+            if login() {
+                AntigravityList::Unconfirmed(None)
+            } else {
+                AntigravityList::NoLogin
+            }
+        }
+    }
+}
+
+/// [`antigravity_list_in`] over the process snapshot and this process's login.
 #[must_use]
 pub fn antigravity_list() -> AntigravityList {
-    AntigravityList::NoLogin
+    antigravity_list_in(current().as_deref(), api::google_code_assist_oauth_present)
 }
 
 // ---------------------------------------------------------------------------
@@ -2084,35 +2281,159 @@ fn split_antigravity_tier(lower: &str) -> Option<(&'static str, String)> {
     })
 }
 
+/// The tier labels a registry display name ends in, and the rung each names.
+/// A label is the only place the registry spells the rung of an id that
+/// carries none in itself: `gemini-pro-agent` is `Gemini 3.1 Pro (High)`.
+const ANTIGRAVITY_TIER_LABELS: [(&str, &str); 4] = [
+    ("(Extra Low)", "low"),
+    ("(Low)", "low"),
+    ("(Medium)", "medium"),
+    ("(High)", "high"),
+];
+
 /// `Gemini 3.6 Flash (High)` → `Gemini 3.6 Flash`.
 fn strip_tier_label(name: &str) -> String {
     let trimmed = name.trim();
-    let base = ["(Low)", "(Medium)", "(High)", "(Extra Low)"]
+    ANTIGRAVITY_TIER_LABELS
         .iter()
-        .find_map(|label| trimmed.strip_suffix(label))
-        .unwrap_or(trimmed);
-    base.trim().to_string()
+        .find_map(|(label, _)| trimmed.strip_suffix(label))
+        .unwrap_or(trimmed)
+        .trim()
+        .to_string()
+}
+
+/// `Gemini 3.1 Pro (High)` → `("Gemini 3.1 Pro", "high")`.
+fn split_tier_label(name: &str) -> Option<(String, &'static str)> {
+    let trimmed = name.trim();
+    ANTIGRAVITY_TIER_LABELS.iter().find_map(|(label, rung)| {
+        trimmed
+            .strip_suffix(label)
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+            .map(|base| (base.to_string(), *rung))
+    })
+}
+
+/// A release id spelled from its registry name: `Gemini 3.5 Pro` →
+/// `gemini-3.5-pro`. Only a versioned Gemini name qualifies, as for a tiered
+/// id.
+fn release_id_from_name(name: &str) -> Option<String> {
+    let id = name.split_whitespace().collect::<Vec<_>>().join("-").to_ascii_lowercase();
+    let versioned = id
+        .strip_prefix("gemini-")
+        .is_some_and(|rest| rest.starts_with(|first: char| first.is_ascii_digit()));
+    (versioned && id.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-'))).then_some(id)
 }
 
 /// One release's tier rungs: `tier` → (wire id, its registry entry).
 type TierIds<'a> = HashMap<&'static str, (String, &'a Value)>;
 
-/// Rows from an Antigravity `fetchAvailableModels` document: the tiered Gemini
-/// ids folded back into one selection id per release, each carrying the wire
-/// map the request path resolves an effort through. Explicit tier ids win
-/// over a `-tiered` id when a release publishes both (they are the proven
-/// path); a release that publishes only `-tiered` rides it for every effort.
+/// One release as the registry's entries fold into it: the rungs its tiered
+/// ids name, and the rungs the labels of its untiered ids name.
+struct Release<'a> {
+    id: String,
+    tiers: TierIds<'a>,
+    labelled: TierIds<'a>,
+}
+
+impl<'a> Release<'a> {
+    /// The release's place in `releases`, added when it is not there yet.
+    fn at(releases: &mut Vec<Self>, id: String) -> usize {
+        releases.iter().position(|release| release.id == id).unwrap_or_else(|| {
+            releases.push(Self {
+                id,
+                tiers: HashMap::new(),
+                labelled: HashMap::new(),
+            });
+            releases.len() - 1
+        })
+    }
+
+    /// Every entry of the release, the strongest rung first — on one rung,
+    /// the tiered id before the labelled one.
+    fn entries(&self) -> impl Iterator<Item = &(String, &'a Value)> + '_ {
+        ["high", "tiered", "medium", "low", "extra-low"]
+            .into_iter()
+            .flat_map(|rung| self.tiers.get(rung).into_iter().chain(self.labelled.get(rung)))
+    }
+
+    /// The registry's name for the release, without a tier label.
+    fn name(&self) -> String {
+        self.entries()
+            .filter_map(|(_, entry)| entry.get("displayName").and_then(Value::as_str))
+            .map(strip_tier_label)
+            .find(|name| !name.is_empty())
+            .unwrap_or_else(|| api::display_name_from_id(api::ProviderKind::Google, &self.id))
+    }
+
+    /// The wire map an effort resolves through: the tiered ids' rungs, a
+    /// labelled id where no tiered id names the rung, and the `-tiered` id
+    /// alone for a release that publishes nothing else. Explicit tier ids
+    /// win over a `-tiered` id when a release publishes both (they are the
+    /// proven path); `-extra-low` is the low rung and `-low` then the medium.
+    fn wire(&self) -> Option<Value> {
+        let pick = |tier: &str| self.tiers.get(tier).map(|(wire, _)| wire.clone());
+        let label = |rung: &str| self.labelled.get(rung).map(|(wire, _)| wire.clone());
+        let rungs = [
+            ("low", pick("extra-low").or_else(|| pick("low")).or_else(|| label("low"))),
+            (
+                "medium",
+                pick("medium")
+                    .or_else(|| pick("extra-low").and_then(|_| pick("low")))
+                    .or_else(|| label("medium")),
+            ),
+            ("high", pick("high").or_else(|| label("high"))),
+        ];
+        if rungs.iter().all(|(_, wire)| wire.is_none()) {
+            return pick("tiered").map(Value::String);
+        }
+        Some(Value::Object(
+            rungs
+                .into_iter()
+                .filter_map(|(rung, wire)| Some((rung.to_string(), Value::String(wire?))))
+                .collect(),
+        ))
+    }
+}
+
+/// One registry release as a discovered row.
+fn registry_row(id: String, display_name: String, entry: &Value, wire: Value, source: &str) -> DiscoveredModel {
+    DiscoveredModel {
+        provider: "google".to_string(),
+        id,
+        display_name,
+        class: None,
+        context_window: entry.get("maxTokens").and_then(Value::as_u64),
+        max_output_tokens: entry.get("maxOutputTokens").and_then(Value::as_u64),
+        effort_levels: Vec::new(),
+        speed_tiers: Vec::new(),
+        released: 0,
+        prominence: 0,
+        source: source.to_string(),
+        api_key_only: false,
+        wire: Some(wire),
+        unlisted_since: None,
+    }
+}
+
+/// Rows from an Antigravity `fetchAvailableModels` document — the Google
+/// login's whole list (t-71998): the tiered Gemini ids folded back into one
+/// selection id per release, each carrying the wire map the request path
+/// resolves an effort through. An id with no tier of its own joins the
+/// release its display label names, on the rung the label names
+/// (`gemini-pro-agent`, `Gemini 3.1 Pro (High)`, is 3.1 Pro's high), or
+/// founds that release when no tiered id did. An untiered id the shipped
+/// catalog carries is served under its own name.
 #[must_use]
 pub fn antigravity_rows(document: &Value, source: &str) -> Vec<DiscoveredModel> {
     let Some(models) = document.get("models").and_then(Value::as_object) else {
         return Vec::new();
     };
-    let mut families: Vec<(String, TierIds<'_>)> = Vec::new();
+    let shipped = shipped_canonicals("google");
+    let mut releases: Vec<Release<'_>> = Vec::new();
+    let mut labelled: Vec<(&String, &Value, String, &'static str)> = Vec::new();
+    let mut own_names: Vec<(&String, &Value)> = Vec::new();
     for (wire_id, entry) in models {
-        let lower = wire_id.to_ascii_lowercase();
-        let Some((tier, base)) = split_antigravity_tier(&lower) else {
-            continue;
-        };
         let foreign = entry
             .get("modelProvider")
             .and_then(Value::as_str)
@@ -2120,62 +2441,47 @@ pub fn antigravity_rows(document: &Value, source: &str) -> Vec<DiscoveredModel> 
         if foreign {
             continue;
         }
-        let at = families
-            .iter()
-            .position(|(id, _)| *id == base)
-            .unwrap_or_else(|| {
-                families.push((base, HashMap::new()));
-                families.len() - 1
-            });
-        families[at].1.entry(tier).or_insert((wire_id.clone(), entry));
+        let lower = wire_id.to_ascii_lowercase();
+        if let Some((tier, base)) = split_antigravity_tier(&lower) {
+            let at = Release::at(&mut releases, base);
+            releases[at].tiers.entry(tier).or_insert((wire_id.clone(), entry));
+        } else if let Some((name, rung)) = entry.get("displayName").and_then(Value::as_str).and_then(split_tier_label) {
+            labelled.push((wire_id, entry, name, rung));
+        } else if shipped.iter().any(|id| id.eq_ignore_ascii_case(&lower)) {
+            own_names.push((wire_id, entry));
+        }
     }
-    families
-        .into_iter()
-        .enumerate()
-        .filter_map(|(index, (id, tiers))| {
-            let pick = |tier: &str| tiers.get(tier).map(|(wire, _)| wire.clone());
-            let explicit_low = pick("extra-low").or_else(|| pick("low"));
-            let explicit_medium = pick("medium").or_else(|| pick("extra-low").and_then(|_| pick("low")));
-            let explicit_high = pick("high");
-            let wire = if explicit_low.is_some() || explicit_medium.is_some() || explicit_high.is_some() {
-                let mut by_effort = Map::new();
-                for (rung, wire_id) in [("low", explicit_low), ("medium", explicit_medium), ("high", explicit_high)] {
-                    if let Some(wire_id) = wire_id {
-                        by_effort.insert(rung.to_string(), json!(wire_id));
-                    }
-                }
-                Value::Object(by_effort)
-            } else {
-                json!(pick("tiered")?)
-            };
-            let entry = ["high", "tiered", "medium", "low", "extra-low"]
-                .iter()
-                .find_map(|tier| tiers.get(tier).map(|(_, entry)| *entry))?;
-            let display_name = ["high", "medium", "low", "extra-low", "tiered"]
-                .iter()
-                .filter_map(|tier| tiers.get(tier))
-                .filter_map(|(_, entry)| entry.get("displayName").and_then(Value::as_str))
-                .map(strip_tier_label)
-                .find(|name| !name.is_empty())
-                .unwrap_or_else(|| api::display_name_from_id(api::ProviderKind::Google, &id));
-            Some(DiscoveredModel {
-                provider: "google".to_string(),
-                id,
-                display_name,
-                class: None,
-                context_window: entry.get("maxTokens").and_then(Value::as_u64),
-                max_output_tokens: entry.get("maxOutputTokens").and_then(Value::as_u64),
-                effort_levels: Vec::new(),
-                speed_tiers: Vec::new(),
-                released: 0,
-                prominence: u32::try_from(index).unwrap_or(u32::MAX),
-                source: source.to_string(),
-                api_key_only: false,
-                wire: Some(wire),
-                unlisted_since: None,
-            })
+    for (wire_id, entry, name, rung) in labelled {
+        let named = releases.iter().position(|release| release.name().eq_ignore_ascii_case(&name));
+        let Some(at) = named.or_else(|| release_id_from_name(&name).map(|id| Release::at(&mut releases, id))) else {
+            continue;
+        };
+        releases[at].labelled.entry(rung).or_insert((wire_id.clone(), entry));
+    }
+    let mut rows: Vec<DiscoveredModel> = releases
+        .iter()
+        .filter_map(|release| {
+            let wire = release.wire()?;
+            let (_, entry) = release.entries().next()?;
+            Some(registry_row(release.id.clone(), release.name(), entry, wire, source))
         })
-        .collect()
+        .collect();
+    for (wire_id, entry) in own_names {
+        if rows.iter().any(|row| row.id.eq_ignore_ascii_case(wire_id)) {
+            continue;
+        }
+        let name = entry
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| api::display_name_from_id(api::ProviderKind::Google, wire_id), str::to_string);
+        rows.push(registry_row(wire_id.clone(), name, entry, json!(wire_id), source));
+    }
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.prominence = u32::try_from(index).unwrap_or(u32::MAX);
+    }
+    rows
 }
 
 // ---------------------------------------------------------------------------
@@ -2359,10 +2665,26 @@ pub fn new_models(catalog: &DiscoveredCatalog) -> Vec<DiscoveredModel> {
     rows
 }
 
-/// Red scaffold for t-71998: today's rows, [`new_models`].
+/// The discovered rows a catalog lists beside the shipped ones: the news
+/// ([`new_models`]), and under the Google login every release its registry
+/// serves that the shipped catalog does not carry — the registry's own name
+/// for a shipped release (`gemini-3.1-pro`) is no news, and still the name a
+/// pick is made by (t-71998).
 #[must_use]
 pub fn listed_models(catalog: &DiscoveredCatalog) -> Vec<DiscoveredModel> {
-    new_models(catalog)
+    let mut rows = new_models(catalog);
+    if registry_decides(catalog) {
+        let shipped = shipped();
+        for model in catalog.models.iter().filter(|model| same_source(&model.source, ANTIGRAVITY_SOURCE)) {
+            let named = rows
+                .iter()
+                .any(|row| row.provider == model.provider && row.id.eq_ignore_ascii_case(&model.id));
+            if !named && !shipped.ids.contains(&model.id.to_ascii_lowercase()) {
+                rows.push(model.clone());
+            }
+        }
+    }
+    rows
 }
 
 /// The discovered difference under `policy`.
@@ -2376,30 +2698,16 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
     let mut models = Vec::new();
     let mut aliases = Vec::new();
     for model in &fresh {
-        let family = family_key(&model.provider, &model.id);
-        let provider = shipped_provider(&model.provider);
-        let head = provider.zip(family.as_ref()).and_then(|(provider, family)| {
-            shipped.heads.get(&(provider, family.clone())).cloned()
-        });
-        let prior = head
-            .clone()
-            .or_else(|| provider.and_then(|provider| shipped.pointers.get(provider).cloned()));
-        models.push(discovered_row(
-            model,
-            family.as_deref(),
-            head.as_deref(),
-            prior.as_deref(),
-            catalog.fetched_at,
-        ));
-        aliases.push(json!({
-            "alias": model.id,
-            "canonical": model.id,
-            "provider": model.provider,
-        }));
+        push_release(&shipped, model, catalog.fetched_at, &mut models, &mut aliases);
     }
 
-    let mut moves = family_alias_moves(&fresh, policy);
-    let orphaned = follow_withdrawn_aliases(catalog, &fresh, policy, &mut moves, &mut models, &mut aliases);
+    // Under the Google login a Gemini alias lands only on a release the
+    // registry serves (t-71998).
+    let list = GoogleList::of(catalog);
+    let targets: Vec<DiscoveredModel> = fresh.iter().filter(|model| list.admits(model)).cloned().collect();
+    let mut moves = family_alias_moves(&targets, policy);
+    let orphaned = follow_withdrawn_aliases(catalog, &fresh, &list, policy, &mut moves, &mut models, &mut aliases);
+    restate_registry_rows(catalog, &list, &shipped, &mut models, &mut aliases);
     aliases.extend(moves.rows);
     let alias_updates = moves.updates;
     let alias_candidates = moves.candidates;
@@ -2416,18 +2724,169 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
     }
 }
 
-/// Every alias that names a withdrawn shipped release ([`Withdrawn`]) and no
-/// release itself (a versioned name is a pin, and stays): a family alias
-/// follows the newest release of its family the lists still name, a
-/// provider pointer the newest of its provider short of a rung below its own
-/// family — older or newer, the living one is the answer — unless a newer
-/// release already moved it. One with
-/// nothing to follow is returned, for the catalog to say so. A target the
-/// shipped catalog does not carry and that is not news (`fresh`) gets its row
-/// here, so the alias does not name an id nothing describes.
+/// A release the shipped catalog does not carry, as its row and its own
+/// name.
+fn push_release(
+    shipped: &Shipped,
+    model: &DiscoveredModel,
+    fetched_at: u64,
+    models: &mut Vec<Value>,
+    aliases: &mut Vec<Value>,
+) {
+    let family = family_key(&model.provider, &model.id);
+    let provider = shipped_provider(&model.provider);
+    let head = provider
+        .zip(family.as_ref())
+        .and_then(|(provider, family)| shipped.heads.get(&(provider, family.clone())).cloned());
+    let prior = head
+        .clone()
+        .or_else(|| provider.and_then(|provider| shipped.pointers.get(provider).cloned()));
+    models.push(discovered_row(model, family.as_deref(), head.as_deref(), prior.as_deref(), fetched_at));
+    aliases.push(json!({
+        "alias": model.id,
+        "canonical": model.id,
+        "provider": model.provider,
+    }));
+}
+
+/// Whether `models` already holds a row naming `id`.
+fn published(models: &[Value], id: &str) -> bool {
+    models.iter().any(|row| {
+        row["ids"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().filter_map(Value::as_str).any(|named| named.eq_ignore_ascii_case(id)))
+    })
+}
+
+/// The Google login's list as the overlay reads it (t-71998): once the
+/// registry decides, a Gemini alias lands only on a release it serves, and
+/// a Gemini alias whose release it does not serve under that name moves.
+struct GoogleList<'a> {
+    decides: bool,
+    /// Every registry row, kept unlisted ones included.
+    releases: Vec<&'a DiscoveredModel>,
+}
+
+impl<'a> GoogleList<'a> {
+    fn of(catalog: &'a DiscoveredCatalog) -> Self {
+        Self {
+            decides: registry_decides(catalog),
+            releases: catalog
+                .models
+                .iter()
+                .filter(|model| same_source(&model.source, ANTIGRAVITY_SOURCE))
+                .collect(),
+        }
+    }
+
+    /// Whether an alias may land on `model`: any release of another
+    /// provider, and a Gemini one the registry serves once it decides.
+    fn admits(&self, model: &DiscoveredModel) -> bool {
+        !self.decides
+            || model.provider != row(ANTIGRAVITY_SOURCE).provider
+            || (model.unlisted_since.is_none() && same_source(&model.source, ANTIGRAVITY_SOURCE))
+    }
+
+    /// Whether the registry decides and serves no release named `id` of
+    /// `provider`'s.
+    fn left(&self, provider: &str, id: &str) -> bool {
+        self.decides
+            && provider == row(ANTIGRAVITY_SOURCE).provider
+            && !self
+                .releases
+                .iter()
+                .any(|release| release.unlisted_since.is_none() && release.id.eq_ignore_ascii_case(id))
+    }
+}
+
+/// Under the Google login every release the registry serves is a row, sent
+/// under the registry's own tier ids (t-71998): one the shipped catalog does
+/// not carry gets its row and its own name, as news does; a shipped one
+/// gets the registry's wire, and its name and window where the shipped row
+/// states none; and a shipped id the registry serves under another name is
+/// sent as that release is, so no rung of it falls on an id the registry
+/// does not serve.
+fn restate_registry_rows(
+    catalog: &DiscoveredCatalog,
+    list: &GoogleList<'_>,
+    shipped: &Shipped,
+    models: &mut Vec<Value>,
+    aliases: &mut Vec<Value>,
+) {
+    if !list.decides {
+        return;
+    }
+    for release in &list.releases {
+        if published(models, &release.id) {
+            continue;
+        }
+        if shipped.ids.contains(&release.id.to_ascii_lowercase()) {
+            models.push(registry_wire_row(release, &release.id, catalog.fetched_at));
+        } else {
+            push_release(shipped, release, catalog.fetched_at, models, aliases);
+        }
+    }
+    for id in shipped_canonicals(row(ANTIGRAVITY_SOURCE).provider) {
+        let Reach::Renamed(to) = registry_reach(&catalog.models, id) else {
+            continue;
+        };
+        if published(models, id) {
+            continue;
+        }
+        if let Some(release) = list.releases.iter().find(|release| release.id.eq_ignore_ascii_case(&to)) {
+            models.push(registry_wire_row(release, id, catalog.fetched_at));
+        }
+    }
+}
+
+/// The registry's word on a shipped `id` it serves: the wire `release` is
+/// sent under — and, when `id` is that release, the name and window the
+/// registry states where the shipped row states none.
+fn registry_wire_row(release: &DiscoveredModel, id: &str, fetched_at: u64) -> Value {
+    let mut row = Map::new();
+    row.insert("provider".to_string(), json!(release.provider));
+    row.insert("ids".to_string(), json!([id]));
+    if let Some(wire) = &release.wire {
+        row.insert("wire".to_string(), wire.clone());
+    }
+    if release.id.eq_ignore_ascii_case(id) {
+        let stated = shipped_row(id);
+        if let Some(window) = release.context_window.filter(|_| !stated.is_some_and(|row| row.window)) {
+            row.insert("context_window".to_string(), json!(window));
+        }
+        if let Some(max_output) = release.max_output_tokens.filter(|_| !stated.is_some_and(|row| row.max_output)) {
+            row.insert("max_output_tokens".to_string(), json!(max_output));
+        }
+        if !stated.is_some_and(|row| row.name) {
+            row.insert("display_name".to_string(), json!(release.display_name));
+        }
+    }
+    row.insert(
+        "source".to_string(),
+        json!(format!(
+            "discovered via {} at {fetched_at}; the registry serves {id} as {}",
+            release.source, release.id
+        )),
+    );
+    Value::Object(row)
+}
+
+/// Every alias that names a withdrawn shipped release ([`Withdrawn`]) — or,
+/// under the Google login, a Gemini release the registry does not serve
+/// under that name (t-71998) — and no release itself (a versioned name that
+/// names its own release is a pin, and stays; `gemini-3.5-pro`, naming
+/// `gemini-3.1-pro-preview`, is its family's): a family alias follows the
+/// newest release of its family the lists still name, a provider pointer the
+/// newest of its provider short of a rung below its own family — older or
+/// newer, the living one is the answer — unless a newer release already
+/// moved it. One with nothing to follow is returned, for the catalog to say
+/// so. A target the shipped catalog does not carry and that is not news
+/// (`fresh`) gets its row here, so the alias does not name an id nothing
+/// describes.
 fn follow_withdrawn_aliases(
     catalog: &DiscoveredCatalog,
     fresh: &[DiscoveredModel],
+    list: &GoogleList<'_>,
     policy: UpdatePolicy,
     moves: &mut AliasMoves,
     models: &mut Vec<Value>,
@@ -2439,7 +2898,10 @@ fn follow_withdrawn_aliases(
         let Some(provider) = provider_key(entry.provider) else {
             continue;
         };
-        if rank(entry.alias) > 0 || withdrawn_since_in(catalog, entry.canonical_model_id).is_none() {
+        let pin = rank(entry.alias) > 0 && rank(entry.alias) == rank(entry.canonical_model_id);
+        let left = withdrawn_since_in(catalog, entry.canonical_model_id).is_some()
+            || list.left(provider, entry.canonical_model_id);
+        if pin || !left {
             continue;
         }
         let names_it = |update: &AliasUpdate| update.alias.eq_ignore_ascii_case(entry.alias);
@@ -2455,7 +2917,7 @@ fn follow_withdrawn_aliases(
             .models
             .iter()
             .filter(|model| model.provider == provider && model.unlisted_since.is_none())
-            .filter(|model| withdrawn_since_in(catalog, &model.id).is_none())
+            .filter(|model| withdrawn_since_in(catalog, &model.id).is_none() && list.admits(model))
             .filter(|model| is_pointer || family.is_some() && family_key(provider, &model.id) == family)
             .filter(not_below_the_pointer(provider, family.as_deref().filter(|_| is_pointer)))
             .max_by_key(|model| recency(model));
@@ -2469,21 +2931,10 @@ fn follow_withdrawn_aliases(
             continue;
         };
         let described = shipped.ids.contains(&living.id.to_ascii_lowercase())
-            || fresh.iter().any(|model| model.id.eq_ignore_ascii_case(&living.id));
+            || fresh.iter().any(|model| model.id.eq_ignore_ascii_case(&living.id))
+            || published(models, &living.id);
         if !described && policy == UpdatePolicy::Auto {
-            let living_family = family_key(provider, &living.id);
-            let head = living_family
-                .as_ref()
-                .and_then(|family| shipped.heads.get(&(provider, family.clone())).cloned());
-            let prior = head.clone().or_else(|| shipped.pointers.get(provider).cloned());
-            models.push(discovered_row(
-                living,
-                living_family.as_deref(),
-                head.as_deref(),
-                prior.as_deref(),
-                catalog.fetched_at,
-            ));
-            aliases.push(json!({"alias": living.id, "canonical": living.id, "provider": provider}));
+            push_release(&shipped, living, catalog.fetched_at, models, aliases);
         }
         moves.record(policy, entry.alias, provider, entry.canonical_model_id, living, Some(entry));
     }

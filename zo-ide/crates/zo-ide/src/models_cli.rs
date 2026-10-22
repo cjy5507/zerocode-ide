@@ -228,8 +228,12 @@ impl Report<'_> {
                 api::AuthRoute::OAuth | api::AuthRoute::Auto => "",
             };
             let unlisted = self
-                .unlisted_since(row)
-                .map(|since| format!(" · {}", crate::tui::strings::unlisted_since(&crate::tui::models::local_clock(since))))
+                .login_word(row)
+                .or_else(|| {
+                    self.unlisted_since(row)
+                        .map(|since| crate::tui::strings::unlisted_since(&crate::tui::models::local_clock(since)))
+                })
+                .map(|word| format!(" · {word}"))
                 .unwrap_or_default();
             let _ = writeln!(
                 out,
@@ -288,6 +292,27 @@ impl Report<'_> {
             }
         }
         out.trim_end().to_string()
+    }
+
+    /// The Google login's word on a Gemini row that goes over it (t-71998),
+    /// in the picker's words: its registry serves the release under another
+    /// name, or nothing the login has serves it.
+    fn login_word(&self, row: &CatalogRow) -> Option<String> {
+        if row.provider != CatalogProvider::Google
+            || row.auth_route == api::AuthRoute::ApiKey
+            || self.policy == UpdatePolicy::Pinned
+        {
+            return None;
+        }
+        match model_discovery::antigravity_reach_in(self.catalog, &row.id) {
+            model_discovery::AntigravityReach::Renamed(release) => {
+                Some(crate::tui::strings::antigravity_renamed(&release))
+            }
+            model_discovery::AntigravityReach::Unserved { .. } => {
+                Some(crate::tui::strings::ANTIGRAVITY_UNLISTED.to_string())
+            }
+            _ => None,
+        }
     }
 
     /// When the provider's list stopped naming the row — a discovered row a

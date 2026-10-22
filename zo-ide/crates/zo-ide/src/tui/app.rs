@@ -655,6 +655,14 @@ struct Ui {
     /// why. Set by `RenderBlock::WireModel`; cleared when a request goes out
     /// on the session model again, or when the person picks a model.
     wire: Option<super::wire_model::Badge>,
+    /// The footer's word beside a model that goes over the Google
+    /// (Antigravity) login (t-71998): its registry list could not be read,
+    /// or the registry serves the pick under another name, or not at all.
+    /// Asked again only when the model or the discovery snapshot changes
+    /// ([`Ui::refresh_login_note`]).
+    login_note: Option<String>,
+    /// The model and the discovery snapshot `login_note` was asked for.
+    login_note_for: Option<(String, u64)>,
     /// provider 모델 id에서 분리한 TUI fast 표시 상태.
     fast: bool,
     effort: String,
@@ -2833,11 +2841,12 @@ impl Ui {
     /// 전환 직전의 실제 푸터 한 줄. 이 값을 잡아 둬야 Codex처럼 옛 모델/effort가
     /// 오른쪽으로 밀려난 뒤 새 줄이 돌아온다.
     /// The footer's model field and its note: the model on the wire with the
-    /// footer's word for the swap while one stands, else the session model.
+    /// footer's word for the swap while one stands, else the session model
+    /// with the Google login's word on it, if any (t-71998).
     fn footer_model(&self) -> (&str, Option<&str>) {
         match &self.wire {
             Some(badge) => (badge.model.as_str(), Some(badge.label)),
-            None => (self.model.as_str(), None),
+            None => (self.model.as_str(), self.login_note.as_deref()),
         }
     }
 
@@ -2884,6 +2893,22 @@ impl Ui {
         // A pick (or a session resync) is the setting again; a swap that is
         // still on the wire announces itself anew with the next request.
         self.wire = None;
+        self.refresh_login_note();
+    }
+
+    /// Ask the Google login's word for the footer again when the model or
+    /// the discovery snapshot changed since it was last asked (t-71998) — a
+    /// refresh that landed after the pick can say the list was not read.
+    fn refresh_login_note(&mut self) {
+        let fetched_at = runtime::model_discovery::current().map_or(0, |catalog| catalog.fetched_at);
+        let asked = self
+            .login_note_for
+            .as_ref()
+            .is_some_and(|(model, at)| *model == self.model && *at == fetched_at);
+        if !asked {
+            self.login_note = models::login_note(&self.model);
+            self.login_note_for = Some((self.model.clone(), fetched_at));
+        }
     }
 
     /// 현재 화면 상태에서 fast를 토글하고, 실제 session 변경은 App이 턴
@@ -2919,7 +2944,9 @@ impl Ui {
                         || model.description.clone(),
                         super::strings::unlisted_since,
                     ),
-                    dim: unlisted.is_some(),
+                    // A row Enter does not take as itself is dimmed, and its
+                    // description says why (t-71998).
+                    dim: unlisted.is_some() || model.pick != models::Pick::Takes,
                 }
             })
             .collect();
@@ -3078,7 +3105,18 @@ impl Ui {
                 let Some(choice) = picker.models.get(picker.view.selected) else {
                     return KeyOutcome::Nothing;
                 };
-                let id = choice.id.clone();
+                // The Google login's word on the row (t-71998): a saved Gemini
+                // name the registry serves under another takes that release;
+                // one nothing serves takes nothing, and the row says why.
+                let id = match &choice.pick {
+                    models::Pick::Takes => choice.id.clone(),
+                    models::Pick::LandsOn(release) => release.clone(),
+                    models::Pick::Refused => {
+                        let text = format!("{}: {}", choice.id, choice.description);
+                        self.note(SystemLevel::Info, &text);
+                        return KeyOutcome::Nothing;
+                    }
+                };
                 picker.view = Self::effort_view(&id, current_effort);
                 picker.stage = Stage::Effort;
                 picker.chosen = Some(id);
@@ -3774,11 +3812,16 @@ impl Ui {
             // `/model <alias>` 도 화면은 즉시다 — 피커 확정과 같은 길이라야
             // 한다(codex 는 둘 다 `UpdateModel` 하나로 흐른다). 별칭은 세션을
             // 안 건드리고도 풀 수 있으므로 푸터·다음 카드가 바로 새 이름을
-            // 읽는다. 문구는 없다: codex 가 안 찍는다.
-            Some(Slash::Model) => {
-                self.sync_model_display(arg);
-                self.deferred.push(Deferred::Slash(command.to_string()));
-            }
+            // 읽는다. 문구는 없다: codex 가 안 찍는다. 구글 로그인의 말은
+            // 피커와 같다(t-71998): 다른 이름이면 그 판을, 아무것도 내주지
+            // 않으면 고르지 않고 까닭을 남긴다.
+            Some(Slash::Model) => match models::typed_pick(arg) {
+                Ok(model) => {
+                    self.sync_model_display(&model);
+                    self.deferred.push(Deferred::Slash(format!("/model {model}")));
+                }
+                Err(text) => self.note(SystemLevel::Info, &text),
+            },
             Some(Slash::Fast) => {
                 if let Some(enabled) = self.toggle_fast_display() {
                     self.deferred.push(Deferred::Fast(enabled));
@@ -4692,6 +4735,8 @@ impl App {
                 model,
                 fast,
                 wire: None,
+                login_note: None,
+                login_note_for: None,
                 effort,
                 effort_tier,
                 effort_effect: None,
@@ -4783,6 +4828,9 @@ impl App {
             for text in crate::runtime_support::drain_catalog_notices() {
                 self.ui.note(SystemLevel::Info, &text);
             }
+            // A discovery refresh that landed since may change what the
+            // footer says beside a Gemini over the Google login (t-71998).
+            self.ui.refresh_login_note();
             let next_wakeup = self.session().next_autonomy_wakeup();
             tokio::select! {
                 biased;
@@ -5287,7 +5335,12 @@ impl App {
                     self.ui.open_model_picker();
                     return;
                 }
-                self.set_model(arg);
+                // The Google login's word on a Gemini name, as the picker's
+                // (t-71998).
+                match models::typed_pick(arg) {
+                    Ok(model) => self.set_model(&model),
+                    Err(text) => self.ui.note(SystemLevel::Info, &text),
+                }
             }
             Some(Slash::Fast) => {
                 let enabled = !self.ui.fast;
@@ -6561,6 +6614,8 @@ fn test_ui() -> Ui {
         model: "test-model".to_string(),
         fast: false,
         wire: None,
+        login_note: None,
+        login_note_for: None,
         effort: String::new(),
         effort_tier: None,
         effort_effect: None,
