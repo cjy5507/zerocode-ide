@@ -319,11 +319,11 @@ export function jevDashboardFixture(real = null) {
   window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [], custom };
   const builtin = { saved: {}, calls: [], failNext: false };
   window.__JEV__.builtin = builtin;
-  const provider = { kind: "jev", protocol: "system_one", baseUrl: "https://api.typesafe.ai", model: "jev-1.13.0", requiresAuth: true };
+  const provider = { kind: "jev", protocol: "system_one", baseUrl: "https://api.typesafe.ai", model: "jev-latest", requiresAuth: true };
   const settings = () => ({
     keysKeptHere: true, keySaved: true, jev: { ...jev }, customDecisions: structuredClone(rules),
     provider: { ...provider }, jevProvider: { ...provider }, providerIdentity: "jev-fixture",
-    model: { model: provider.model, alias: "jev-latest", pinned: true },
+    model: { model: provider.model, alias: "jev-latest", pinned: false },
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
     // And the wall the model tier feature's paragraph names
@@ -1191,6 +1191,18 @@ export async function testJevDashboard(browser, origin, ok) {
         && fixed.consent.focus === "jev-enabled" && fixed.consent.said.includes("「모든 폴더에서 사용」")
         && fixed.back === "jev",
       JSON.stringify(fixed));
+    const legacyProvider = await page.evaluate(() => {
+      const saved = typesafeState;
+      paintTypeSafe({ ...saved, provider: null, providerIdentity: null });
+      const result = {
+        disabled: el("typesafe-key-input").disabled,
+        reason: el("judgment-active-model").textContent,
+      };
+      paintTypeSafe(saved);
+      return result;
+    });
+    ok("an old response without provider details explains why connection editing is unavailable",
+      legacyProvider.disabled && legacyProvider.reason.includes("현재 적용된 모델을 읽지 못했습니다"), JSON.stringify(legacyProvider));
     ok("the model is named once, over the table, and a row names a version only when it is another",
       opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 "))),
       JSON.stringify({ caption: opened.caption }));
@@ -1742,11 +1754,11 @@ export async function testJevDashboard(browser, origin, ok) {
         });
         const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
         const scrollAfter = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
-        const hiddenImport = card.find((row) => row.target === "#managed-judgment-import-path");
-        ok(`${theme}: a control under a hidden provider panel is recorded as unmeasured, not passed`,
-          hiddenImport?.verdict === "hidden" && hiddenImport.ratio === null
-            && hiddenImport.why === "display:none at #managed-judgment-panel",
-          JSON.stringify(hiddenImport));
+        const hiddenEndpoint = card.find((row) => row.target === "#judgment-endpoint");
+        ok(`${theme}: the endpoint hidden for the built-in provider is unmeasured, not passed`,
+          hiddenEndpoint?.verdict === "hidden" && hiddenEndpoint.ratio === null
+            && hiddenEndpoint.why === "display:none at #judgment-endpoint-field",
+          JSON.stringify(hiddenEndpoint));
         const key = card.find((row) => row.target === "#typesafe-key-input");
         ok(`${theme}: the offscreen key placeholder is measured and the card's scroll is restored`,
           clipped && key?.ratio >= CONTRAST_FLOOR && key.fg !== null && key.bg !== null
