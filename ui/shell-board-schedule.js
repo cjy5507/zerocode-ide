@@ -387,10 +387,10 @@ function boardScheduleMoment(ms) {
   return Number.isFinite(moment) ? moment : null;
 }
 
-/* 끝난 것 가운데 행이 될 것: 가장 최근에 끝난 `endedShown`개 — 사람이 그 묶음의 접힌 줄을 폈으면 다 —
- * 와, 그 수를 넘는 끝난 것의 수(`more`). 네 묶음이 이 하나로 접는다(t-71840). */
-function boardScheduleEndedKept(ended, endOf, opened) {
-  const newest = [...ended].sort((a, b) => endOf(b) - endOf(a));
+/* 끝난 것 가운데 행이 될 것: 가장 최근에 끝난(`end`) `endedShown`개 — 사람이 그 묶음의 접힌 줄을
+ * 폈으면 다 — 와, 그 수를 넘는 끝난 것의 수(`more`). 네 묶음이 이 하나로 접는다(t-71840). */
+function boardScheduleEndedKept(ended, opened) {
+  const newest = [...ended].sort((a, b) => b.end - a.end);
   return {
     kept: opened ? newest : newest.slice(0, BOARD_SCHEDULE.endedShown),
     more: Math.max(0, newest.length - BOARD_SCHEDULE.endedShown),
@@ -577,10 +577,12 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
 function boardScheduleLineRows(jobs, plan, now, stall, from, opened) {
   const outside = jobs.filter((job) => !job.gate);
   const moving = (job) => ["running", "waiting", "held", "lost"].includes(job.state);
-  const ended = outside.filter((job) => !moving(job) && (Number(job.end_ms) || 0) >= from);
-  const { kept, more } = boardScheduleEndedKept(ended, (job) => Number(job.end_ms) || 0, opened);
+  const ended = outside.filter((job) => !moving(job) && (Number(job.end_ms) || 0) >= from)
+    .map((job) => ({ job, end: Number(job.end_ms) || 0 }));
+  const { kept, more } = boardScheduleEndedKept(ended, opened);
   return {
-    rows: [...kept, ...outside.filter(moving)].map((job) => boardScheduleJobRow(job, plan, now, stall, 0)),
+    rows: [...kept.map((one) => one.job), ...outside.filter(moving)]
+      .map((job) => boardScheduleJobRow(job, plan, now, stall, 0)),
     more,
   };
 }
@@ -615,7 +617,7 @@ function boardScheduleTaskRows(tasks, now, landings, from, opened) {
     const end = Math.max(start, at ?? start);
     if (end >= from) ended.push({ task, landing, start, end, known: at !== null });
   }
-  const { kept, more } = boardScheduleEndedKept(ended, (one) => one.end, opened);
+  const { kept, more } = boardScheduleEndedKept(ended, opened);
   return { rows: [...kept, ...moving].map((one) => boardScheduleTaskRow(one, now)), more };
 }
 
@@ -734,8 +736,9 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
     entries = entries.filter((entry) => seen(entry.head));
     if (more === null) {
       const ended = (entry) => BOARD_SCHEDULE_ENDED_STATES.includes(entry.head.state);
-      const folded = boardScheduleEndedKept(entries.filter(ended), (entry) => entry.head.end, opened(group.id));
-      const kept = new Set(folded.kept);
+      const folded = boardScheduleEndedKept(entries.filter(ended).map((entry) => ({ entry, end: entry.head.end })),
+        opened(group.id));
+      const kept = new Set(folded.kept.map((one) => one.entry));
       entries = entries.filter((entry) => !ended(entry) || kept.has(entry));
       more = folded.more;
     }
