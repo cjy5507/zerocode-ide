@@ -924,7 +924,7 @@ impl ApiClient for ProviderRuntimeClient {
     fn stream(&mut self, request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
         // No deadline: a turn's request ends with its answer or an error, so
         // it never comes back empty-handed for a deadline it was not given.
-        self.stream_until(request, None).map(Option::unwrap_or_default)
+        self.stream_until(&request, None).map(Option::unwrap_or_default)
     }
 
     /// Only a compaction's summary is asked this way (t-69472): it is given up
@@ -934,7 +934,7 @@ impl ApiClient for ProviderRuntimeClient {
         request: ApiRequest,
         deadline: std::time::Duration,
     ) -> Result<Option<Vec<AssistantEvent>>, RuntimeError> {
-        self.stream_until(request, Some(deadline))
+        self.stream_until(&request, Some(deadline))
     }
 }
 
@@ -951,7 +951,7 @@ impl ProviderRuntimeClient {
     #[allow(clippy::too_many_lines)]
     fn stream_until(
         &mut self,
-        request: ApiRequest,
+        request: &ApiRequest,
         deadline: Option<std::time::Duration>,
     ) -> Result<Option<Vec<AssistantEvent>>, RuntimeError> {
         let mut tools = agent_tool_definitions(&self.allowed_tools, self.structured_schema.as_ref());
