@@ -813,6 +813,11 @@ impl Recovering {
             .collect()
     }
 
+    /// What a status read says of the supervision, as the window reads it.
+    fn supervision(&self) -> Value {
+        serde_json::to_value(self.manager.snapshot()).unwrap()["supervision"].clone()
+    }
+
     /// The end of `server` wherever the window or the store keeps it, each
     /// place with the exit it holds and the whole of its text: the snapshots
     /// the manager told by itself, the store's server-exits.jsonl, and the
@@ -1222,10 +1227,30 @@ async fn a_deadline_stop_like_the_one_at_1935_comes_back_once_and_a_second_stays
     );
     assert_eq!(fixture.manager.snapshot().server.state, "failed");
     assert_eq!(fixture.recoveries(), [json!("restart"), json!("guard")]);
+    // The status says the press is needed and why, while the settings still
+    // send every judgment to the stopped server.
+    let guarded = fixture.supervision();
+    assert_eq!(
+        (
+            &guarded["next"],
+            &guarded["reason"],
+            &guarded["selectedButStopped"]
+        ),
+        (&json!("press"), &json!("guard"), &json!(true)),
+        "{guarded}"
+    );
+    assert_eq!(
+        (
+            &guarded["lastEnd"]["cause"],
+            &guarded["lastEnd"]["recovery"]
+        ),
+        (&json!("runtime_timeout"), &json!("guard")),
+        "{guarded}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_memory_guards_stop_comes_back_once_per_press_and_never_in_a_loop() {
+async fn the_memory_guards_stop_comes_back_once_in_ten_minutes_and_never_in_a_loop() {
     let fixture = recovering();
     let (server, _) = fixture.press().await;
     fixture.end(1, "code 75");
@@ -1237,22 +1262,36 @@ async fn the_memory_guards_stop_comes_back_once_per_press_and_never_in_a_loop() 
     assert_eq!(waiting["server"]["exit"]["cause"], "runtime_memory_limit");
     fixture.clock.advance(SECOND);
     let second = fixture.back(&server).await.server.id.unwrap();
-    // An hour on, the guard stops it again under the same press: a guard's
-    // second stop is never restarted, however far apart.
+    // An hour on, the guard stops it again under the same press, as at 11:06
+    // on 10-21: past ten minutes of its last restart, it comes back once
+    // more instead of staying stopped until the person presses.
     fixture.clock.advance(HOUR);
     fixture.end(2, "code 75");
-    let stopped = fixture.ended(&second).await;
+    let again = fixture.ended(&second).await;
+    assert_eq!(
+        again["server"]["state"], "starting",
+        "a guard stop an hour after the last restart was left stopped: {again}"
+    );
+    fixture.clock.advance(SECOND);
+    let third = fixture.back(&second).await.server.id.unwrap();
+    // Inside ten minutes the guard stops it again: a guard's second stop in
+    // the window is never restarted, so no guard feeds a loop.
+    fixture.end(3, "code 75");
+    let stopped = fixture.ended(&third).await;
     assert_eq!(
         stopped["server"]["state"], "failed",
-        "a second guard stop under one press was planned again: {stopped}"
+        "a second guard stop inside ten minutes was planned again: {stopped}"
     );
     assert_eq!(stopped["server"]["exit"]["cause"], "runtime_memory_limit");
     fixture.clock.advance(HOUR);
-    assert_eq!(fixture.starts(), 2, "a second guard stop was started again");
-    assert_eq!(fixture.recoveries(), [json!("restart"), json!("guard")]);
+    assert_eq!(fixture.starts(), 3, "a second guard stop was started again");
+    assert_eq!(
+        fixture.recoveries(),
+        [json!("restart"), json!("restart"), json!("guard")]
+    );
     // The person's next press starts a new budget.
     let (pressed, _) = fixture.press().await;
-    fixture.end(3, "code 75");
+    fixture.end(4, "code 75");
     let waiting = fixture.ended(&pressed).await;
     assert_eq!(
         waiting["server"]["state"], "starting",
@@ -1437,27 +1476,27 @@ async fn a_selection_changed_elsewhere_ends_the_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_that_comes_due_while_another_operation_runs_stands_down() {
+async fn a_restart_that_comes_due_while_another_operation_runs_waits_for_it_and_then_runs() {
     let fixture = recovering();
-    let (server, _) = fixture.press().await;
+    let (server, provider) = fixture.press().await;
     fixture.end(1, "code 7");
     let waiting = fixture.ended(&server).await;
     assert_eq!(
         waiting["server"]["state"], "starting",
         "the end of the server the person's press applied was not taken up: {waiting}"
     );
-    test_support::begin_registration_blocker(&fixture.manager);
+    let blocker = test_support::begin_registration_blocker(&fixture.manager);
     fixture.clock.advance(SECOND);
-    let stood_down = fixture.manager.snapshot();
+    let held = fixture.manager.snapshot();
     assert_eq!(
-        (fixture.starts(), stood_down.server.state),
-        (1, "failed"),
-        "a restart ran beside another operation"
+        (fixture.starts(), held.server.state),
+        (1, "starting"),
+        "a restart ran beside another operation, or stood down for good"
     );
     assert_eq!(
-        stood_down.server.exit.as_ref().map(|exit| exit.cause),
+        held.server.exit.as_ref().map(|exit| exit.cause),
         Some("runtime_exited"),
-        "the stopped server lost its reason"
+        "the waiting server lost its reason"
     );
     assert_eq!(
         fixture
@@ -1465,6 +1504,28 @@ async fn a_restart_that_comes_due_while_another_operation_runs_stands_down() {
             .last()
             .map(|attempt| attempt["result"].clone()),
         Some(json!("operation_busy"))
+    );
+    let said = serde_json::to_value(&held).unwrap()["supervision"].clone();
+    assert_eq!(
+        (&said["next"], &said["reason"]),
+        (&json!("after_operation"), &json!("operation_busy")),
+        "{said}"
+    );
+    // The other operation ends: the restart runs at once, on the same port.
+    test_support::end_operation(&fixture.manager, &blocker);
+    let back = fixture.back(&server).await;
+    assert_eq!(fixture.starts(), 2);
+    assert_eq!(
+        back.server.provider.as_ref().map(Provider::identity),
+        Some(provider.identity()),
+        "the restart that waited moved the port or the provider"
+    );
+    assert_eq!(
+        fixture
+            .attempts()
+            .last()
+            .map(|attempt| attempt["result"].clone()),
+        Some(json!("ready"))
     );
 }
 
@@ -1795,4 +1856,180 @@ async fn a_runtime_that_ends_before_it_is_asked_anything_keeps_its_masked_tail_e
             "{place} counts lines withheld from a runtime never asked anything: {exit}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_whose_status_another_reaper_took_is_kept_and_taken_up() {
+    let fixture = recovering();
+    let (server, provider) = fixture.press().await;
+    test_support::lose_status(&fixture.manager);
+    let began = Instant::now();
+    let noticed = loop {
+        let status = fixture.manager.snapshot();
+        if status.server.state != "ready" {
+            break status;
+        }
+        assert!(
+            began.elapsed() < SETTLE,
+            "the manager never noticed the end of {server}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    // The manager's own watch may have taken the end first and keep its row
+    // just after the state changed: wait for the row, as kept_end does.
+    let exits = loop {
+        let exits = fixture.exits();
+        if !exits.is_empty() || began.elapsed() >= SETTLE {
+            break exits;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(
+        exits
+            .last()
+            .map(|exit| (exit["cause"].clone(), exit["recovery"].clone())),
+        Some((json!("runtime_end_unknown"), json!("restart"))),
+        "an end whose status was taken elsewhere left no record, or was not taken up: {exits:?}"
+    );
+    assert_eq!(
+        noticed.server.exit.as_ref().map(|exit| exit.cause),
+        Some("runtime_end_unknown")
+    );
+    assert_eq!(
+        noticed.server.state, "starting",
+        "{:?}",
+        noticed.server.error
+    );
+    fixture.clock.advance(SECOND);
+    let back = fixture.back(&server).await;
+    assert_eq!(
+        back.server.provider.as_ref().map(Provider::identity),
+        Some(provider.identity())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_says_whether_it_is_up_how_it_last_ended_and_what_brings_it_back() {
+    let fixture = recovering();
+    // Settings that choose no managed model: nothing to bring back.
+    let idle = fixture.supervision();
+    assert_eq!(
+        (
+            &idle["up"],
+            &idle["next"],
+            &idle["selectedButStopped"],
+            &idle["lastEnd"]
+        ),
+        (&json!(false), &json!("none"), &json!(false), &Value::Null),
+        "{idle}"
+    );
+    let (server, _) = fixture.press().await;
+    let up = fixture.supervision();
+    assert_eq!(
+        (
+            &up["up"],
+            &up["next"],
+            &up["selectedButStopped"],
+            &up["restoresAtStart"]
+        ),
+        (&json!(true), &json!("none"), &json!(false), &json!(true)),
+        "{up}"
+    );
+    // Its runtime ends: a restart is planned, and the last end says why.
+    fixture.end(1, "code 7");
+    fixture.ended(&server).await;
+    let planned = fixture.supervision();
+    assert_eq!(
+        (
+            &planned["up"],
+            &planned["next"],
+            &planned["selectedButStopped"],
+            &planned["reason"]
+        ),
+        (&json!(false), &json!("restart"), &json!(true), &Value::Null),
+        "{planned}"
+    );
+    assert!(planned["nextAtMs"].as_u64().is_some(), "{planned}");
+    let ended = &planned["lastEnd"];
+    assert_eq!(
+        (
+            &ended["kind"],
+            &ended["cause"],
+            &ended["code"],
+            &ended["recovery"]
+        ),
+        (
+            &json!("exit"),
+            &json!("runtime_exited"),
+            &json!(7),
+            &json!("restart")
+        ),
+        "{planned}"
+    );
+    fixture.clock.advance(SECOND);
+    let second = fixture.back(&server).await.server.id.unwrap();
+    let back = fixture.supervision();
+    assert_eq!(
+        (&back["up"], &back["next"], &back["lastEnd"]["cause"]),
+        (&json!(true), &json!("none"), &json!("runtime_exited")),
+        "{back}"
+    );
+    // A restart that does not come up: the last end stays the runtime's own,
+    // and the reason is the restart's own error.
+    fixture.tell("fail", 3, "");
+    fixture.end(2, "code 7");
+    fixture.ended(&second).await;
+    fixture.clock.advance(Duration::from_secs(5));
+    let failed = crate::tests::settled_snapshot(&fixture.manager).await;
+    assert!(
+        failed.server.error.is_some(),
+        "the restart that did not come up said no error"
+    );
+    let gave_up = serde_json::to_value(&failed).unwrap()["supervision"].clone();
+    assert_eq!(
+        (
+            &gave_up["next"],
+            &gave_up["reason"],
+            &gave_up["selectedButStopped"],
+            &gave_up["lastEnd"]["cause"]
+        ),
+        (
+            &json!("press"),
+            &json!(failed.server.error),
+            &json!(true),
+            &json!("runtime_exited")
+        ),
+        "{gave_up}"
+    );
+    // The window's stop command: it stays stopped, the next window start
+    // leaves it so, and the last end names the command that made it.
+    let (third, _) = fixture.press().await;
+    fixture.manager.stop(&third).unwrap();
+    let stopped = fixture.supervision();
+    assert_eq!(
+        (
+            &stopped["up"],
+            &stopped["next"],
+            &stopped["reason"],
+            &stopped["selectedButStopped"],
+            &stopped["restoresAtStart"]
+        ),
+        (
+            &json!(false),
+            &json!("press"),
+            &json!("stopped"),
+            &json!(true),
+            &json!(false)
+        ),
+        "{stopped}"
+    );
+    assert_eq!(
+        (
+            &stopped["lastEnd"]["kind"],
+            &stopped["lastEnd"]["by"],
+            &stopped["lastEnd"]["cause"]
+        ),
+        (&json!("stop"), &json!("press"), &json!("server_stopped")),
+        "{stopped}"
+    );
 }
