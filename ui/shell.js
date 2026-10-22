@@ -13839,14 +13839,19 @@ function updateHelperStatus(line, run) {
  * it names there; an image stays its caption; and a renderer that trips on a
  * line leaves the words standing as text rather than a blank turn. Bare paths
  * and addresses become the same doors a markdown link is (t-2973). Its code
- * takes its colours (`colourCodeIn`, t-22095) — unless `colour` is false: the
- * block still being written, which the next frame draws again. */
+ * takes its colours (`colourCodeIn`, t-22095) and its ```mermaid fences their
+ * diagrams (`paintMarkdownDiagrams`, t-58437) — unless `colour` is false: the
+ * block still being written, which the next frame draws again. So a fence
+ * draws once it has settled, and is laid out once: the settled part is drawn
+ * once (`settledCut`). The diagrams come after the doors, which walk the words
+ * and would walk a drawing's labels too. */
 function paintHelperProse(host, text, base, { colour = true } = {}) {
   const previous = mdWhere;
   mdWhere = { base, page: null };
   try {
     paintMarkdown(host, text);
     linkifyHelperProse(host);
+    if (colour) paintMarkdownDiagrams(host);
     // Each code block wears the extension's copy over its corner (A9).
     dressCodeCopies(host);
   } catch {

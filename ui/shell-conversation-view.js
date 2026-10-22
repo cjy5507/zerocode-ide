@@ -850,6 +850,16 @@ function keepToFoot(list) {
     noteChatScroll(list, state);
     paintFootDoor(list);
   }, { passive: true });
+  // A diagram that lands after its row was drawn (t-58437) changes the row's
+  // height in the frame it lands in, before that frame is painted, and its
+  // block says by how much (`grew`, from what the block's own observer read):
+  // a list that follows its foot keeps to it, and one its reader left moves by
+  // what a diagram above the view grew, so what they read stays put — the
+  // shelf's rule (`dressWaiting`).
+  list.addEventListener("mmd-landed", (event) => {
+    if (!state.away) carryToFoot(list);
+    else if (event.target.getBoundingClientRect().bottom - event.grew <= list.getBoundingClientRect().top) list.scrollTop += event.grew;
+  });
   // The list's own box: the first one places it (`standChatPlace`), and a
   // list that follows its foot keeps to it when the box changes size — a
   // shorter window, a notice standing over it. Its border box: the room kept
