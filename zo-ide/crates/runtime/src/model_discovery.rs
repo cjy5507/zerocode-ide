@@ -969,12 +969,18 @@ pub fn selected_models() -> Vec<String> {
 #[must_use]
 pub fn unlisted_since(id: &str) -> Option<u64> {
     let catalog = current()?;
+    unlisted_since_in(&catalog, id)
+}
+
+/// [`unlisted_since`] in `catalog`.
+#[must_use]
+pub fn unlisted_since_in(catalog: &DiscoveredCatalog, id: &str) -> Option<u64> {
     catalog
         .models
         .iter()
         .find(|model| model.id.eq_ignore_ascii_case(id))
         .and_then(|model| model.unlisted_since)
-        .or_else(|| withdrawn_since_in(&catalog, id))
+        .or_else(|| withdrawn_since_in(catalog, id))
 }
 
 /// One row per id: when the OAuth registry and the API-key list both name a
@@ -990,6 +996,54 @@ fn drop_api_key_duplicates(models: &mut Vec<DiscoveredModel>) {
         !model.api_key_only
             || !reachable.contains(&(model.provider.clone(), model.id.to_ascii_lowercase()))
     });
+}
+
+// ---------------------------------------------------------------------------
+// The Google login's list (t-71998)
+// ---------------------------------------------------------------------------
+
+/// How the Google (Antigravity) login reaches one Gemini id. Red scaffold
+/// for t-71998: today nothing judges, so every id is `Unjudged`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AntigravityReach {
+    Unjudged,
+    Listed,
+    Renamed(String),
+    KeyOnly,
+    Unserved { since: u64 },
+}
+
+/// What the Google (Antigravity) login's list is. Red scaffold for t-71998:
+/// today there is no list, so it is always `NoLogin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AntigravityList {
+    NoLogin,
+    Read(u64),
+    Unconfirmed(Option<u64>),
+}
+
+/// Red scaffold for t-71998: today's answer, `Unjudged`.
+#[must_use]
+pub fn antigravity_reach_in(_catalog: &DiscoveredCatalog, _id: &str) -> AntigravityReach {
+    AntigravityReach::Unjudged
+}
+
+/// Red scaffold for t-71998: today's answer, `Unjudged`.
+#[must_use]
+pub fn antigravity_reach(_id: &str) -> AntigravityReach {
+    AntigravityReach::Unjudged
+}
+
+/// Red scaffold for t-71998: today's answer, `NoLogin`.
+#[must_use]
+pub fn antigravity_list_in(_catalog: Option<&DiscoveredCatalog>, _login: impl FnOnce() -> bool) -> AntigravityList {
+    AntigravityList::NoLogin
+}
+
+/// Red scaffold for t-71998: today's answer, `NoLogin`.
+#[must_use]
+pub fn antigravity_list() -> AntigravityList {
+    AntigravityList::NoLogin
 }
 
 // ---------------------------------------------------------------------------
@@ -2303,6 +2357,12 @@ pub fn new_models(catalog: &DiscoveredCatalog) -> Vec<DiscoveredModel> {
             .then_with(|| recency(right).cmp(&recency(left)))
     });
     rows
+}
+
+/// Red scaffold for t-71998: today's rows, [`new_models`].
+#[must_use]
+pub fn listed_models(catalog: &DiscoveredCatalog) -> Vec<DiscoveredModel> {
+    new_models(catalog)
 }
 
 /// The discovered difference under `policy`.
@@ -4654,7 +4714,12 @@ mod tests {
         let by_id: HashMap<&str, &DiscoveredModel> = rows.iter().map(|row| (row.id.as_str(), row)).collect();
         let mut ids: Vec<&str> = by_id.keys().copied().collect();
         ids.sort_unstable();
-        assert_eq!(ids, vec!["gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"]);
+        // `gemini-pro-agent` carries no tier of its own; its label names 3.1
+        // Pro's high rung, and with no tiered 3.1 Pro id here it founds that
+        // release (t-71998). An untiered id the shipped catalog does not carry
+        // (`gemini-2.5-flash`) is still no release.
+        assert_eq!(ids, vec!["gemini-3.1-pro", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.7-flash"]);
+        assert_eq!(by_id["gemini-3.1-pro"].wire, Some(json!({"high": "gemini-pro-agent"})));
 
         let flash37 = by_id["gemini-3.7-flash"];
         assert_eq!(flash37.wire, Some(json!("gemini-3.7-flash-tiered")), "only a -tiered id: fixed for every effort");
@@ -4674,8 +4739,8 @@ mod tests {
         let flash35 = by_id["gemini-3.5-flash"];
         assert_eq!(
             flash35.wire,
-            Some(json!({"low": "gemini-3.5-flash-extra-low", "medium": "gemini-3.5-flash-low"})),
-            "extra-low is the low rung and low the medium; no high is invented"
+            Some(json!({"low": "gemini-3.5-flash-extra-low", "medium": "gemini-3.5-flash-low", "high": "gemini-3-flash-agent"})),
+            "extra-low is the low rung and low the medium; the high is the id the registry labels `Gemini 3.5 Flash (High)`"
         );
     }
 
@@ -4731,5 +4796,290 @@ mod tests {
         drop_api_key_duplicates(&mut models);
         let sources: Vec<&str> = models.iter().map(|model| model.source.as_str()).collect();
         assert_eq!(sources, vec!["antigravity-registry", "google-api"]);
+    }
+
+    /// The Google login's list as a synthetic registry answers it (t-71998):
+    /// no `gemini-3.1-pro-preview` — 3.1 Pro is served as `gemini-3.1-pro-low`
+    /// and the agent id labelled its High — a Flash newer than the shipped
+    /// one, the 3.5 Flash rungs, and a row of another provider's. Nothing
+    /// serves the shipped `gemini-3.6-flash`, `gemini-3-flash` or
+    /// `gemini-3.1-flash-lite`.
+    fn registry_document() -> Value {
+        json!({"models": {
+            "gemini-3.1-pro-low": {"displayName": "Gemini 3.1 Pro (Low)", "maxTokens": 1_048_576, "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-pro-agent": {"displayName": "Gemini 3.1 Pro (High)", "maxTokens": 1_048_576, "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-3.8-flash-low": {"displayName": "Gemini 3.8 Flash (Low)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-3.8-flash-medium": {"displayName": "Gemini 3.8 Flash (Medium)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-3.8-flash-high": {"displayName": "Gemini 3.8 Flash (High)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-3.5-flash-extra-low": {"displayName": "Gemini 3.5 Flash (Low)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-3.5-flash-low": {"displayName": "Gemini 3.5 Flash (Medium)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-3-flash-agent": {"displayName": "Gemini 3.5 Flash (High)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "claude-sonnet-4-6": {"displayName": "Claude Sonnet 4.6 (Thinking)", "modelProvider": "MODEL_PROVIDER_ANTHROPIC"}
+        }})
+    }
+
+    /// A Google key's list (synthetic): the shipped Pro's API name, and a
+    /// Pro the registry does not serve at all.
+    fn key_list() -> Vec<DiscoveredModel> {
+        google_rows(
+            &json!({"models": [
+                {"name": "models/gemini-3.1-pro-preview", "displayName": "Gemini 3.1 Pro Preview", "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/gemini-3.7-pro-preview", "displayName": "Gemini 3.7 Pro Preview", "supportedGenerationMethods": ["generateContent"]}
+            ]}),
+            super::GOOGLE_API_SOURCE,
+        )
+    }
+
+    /// One refresh at `now`: the registry answers `registry` (or says the
+    /// `Err` words — a failure, or a `skipped:` for no login), the key's
+    /// list answers `keyed` (or is skipped), every other source is skipped.
+    fn google_refresh(
+        previous: Option<&DiscoveredCatalog>,
+        registry: Result<&Value, &str>,
+        keyed: Option<&[DiscoveredModel]>,
+        now: u64,
+    ) -> DiscoveredCatalog {
+        google_refresh_holding(previous, registry, keyed, &[], now)
+    }
+
+    /// [`google_refresh`] for a process whose sessions hold `selected`.
+    fn google_refresh_holding(
+        previous: Option<&DiscoveredCatalog>,
+        registry: Result<&Value, &str>,
+        keyed: Option<&[DiscoveredModel]>,
+        selected: &[String],
+        now: u64,
+    ) -> DiscoveredCatalog {
+        let every: Vec<&'static str> = super::SOURCES.iter().map(|source| source.key).collect();
+        let answered = |source: &str, models: Vec<DiscoveredModel>| super::Answered {
+            source: source.to_string(),
+            models,
+            origin: super::ORIGIN_LIVE.to_string(),
+            fetched_at: now,
+            note: None,
+        };
+        super::refresh_with(previous, &every, now, selected, |source| match (source, registry, keyed) {
+            (super::ANTIGRAVITY_SOURCE, Ok(document), _) => Ok(answered(source, antigravity_rows(document, source))),
+            (super::ANTIGRAVITY_SOURCE, Err(words), _) => Err((source.to_string(), words.to_string())),
+            (super::GOOGLE_API_SOURCE, _, Some(rows)) => Ok(answered(source, rows.to_vec())),
+            (other, _, _) => Err((other.to_string(), "skipped: not asked in this test".to_string())),
+        })
+    }
+
+    fn alias_target(overlay: &Value, alias: &str) -> Option<String> {
+        overlay["aliases"]
+            .as_array()?
+            .iter()
+            .find(|row| row["alias"] == alias)
+            .and_then(|row| row["canonical"].as_str())
+            .map(str::to_string)
+    }
+
+    fn model_row<'v>(overlay: &'v Value, id: &str) -> Option<&'v Value> {
+        overlay["models"].as_array()?.iter().find(|row| row["ids"][0] == id)
+    }
+
+    /// (c) Every rung the registry folds is an id it serves (t-71998): an id
+    /// with no tier of its own joins the release its label names, so 3.1
+    /// Pro's high is the agent id labelled `Gemini 3.1 Pro (High)`.
+    #[test]
+    fn every_rung_the_registry_folds_is_an_id_it_serves() {
+        let document = registry_document();
+        let rows = antigravity_rows(&document, super::ANTIGRAVITY_SOURCE);
+        let pro = rows.iter().find(|row| row.id == "gemini-3.1-pro").expect("3.1 Pro is a release");
+        assert_eq!(
+            pro.wire,
+            Some(json!({"low": "gemini-3.1-pro-low", "high": "gemini-pro-agent"})),
+            "the agent id labelled High is 3.1 Pro's high rung"
+        );
+        assert_eq!(pro.display_name, "Gemini 3.1 Pro");
+        let served: HashSet<&str> = document["models"].as_object().unwrap().keys().map(String::as_str).collect();
+        for row in &rows {
+            let sent: Vec<&str> = match row.wire.as_ref() {
+                Some(Value::String(id)) => vec![id.as_str()],
+                Some(Value::Object(rungs)) => rungs.values().filter_map(Value::as_str).collect(),
+                other => panic!("{} carries no wire: {other:?}", row.id),
+            };
+            for id in sent {
+                assert!(served.contains(id), "{} sends {id}, which the registry does not serve", row.id);
+            }
+        }
+    }
+
+    /// (a)(b) Under the Google login the registry is the list (t-71998). The
+    /// shipped `gemini-3.1-pro-preview`, which it does not name, is sent as
+    /// the release it serves under another name and keeps a saved pick's
+    /// name; the Gemini aliases and the demotion rung land on its releases;
+    /// a shipped id nothing serves leaves the login.
+    #[test]
+    fn under_the_google_login_the_gemini_aliases_land_on_the_registrys_releases() {
+        use super::AntigravityReach::{Listed, Renamed, Unserved};
+        let now = 1_792_700_000;
+        let catalog = google_refresh(None, Ok(&registry_document()), None, now);
+        let reach = |id: &str| super::antigravity_reach_in(&catalog, id);
+        assert_eq!(reach("gemini-3.1-pro-preview"), Renamed("gemini-3.1-pro".to_string()));
+        assert_eq!(reach("gemini-3-pro-preview"), Renamed("gemini-3.1-pro".to_string()));
+        assert_eq!(reach("gemini-3.1-pro"), Listed);
+        assert_eq!(reach("gemini-3.5-flash"), Listed, "a shipped release the registry serves under its name");
+        assert_eq!(reach("gemini-3-flash"), Unserved { since: now });
+        assert_eq!(reach("gemini-3.6-flash"), Unserved { since: now });
+        let withdrawn: Vec<(&str, &str)> =
+            catalog.withdrawn.iter().map(|row| (row.id.as_str(), row.source.as_str())).collect();
+        assert!(withdrawn.contains(&("gemini-3-flash", super::ANTIGRAVITY_SOURCE)), "{withdrawn:?}");
+        assert!(
+            !withdrawn.iter().any(|(id, _)| *id == "gemini-3.1-pro-preview"),
+            "a renamed id is reached, not withdrawn: {withdrawn:?}"
+        );
+
+        let value = overlay_value(&catalog, UpdatePolicy::Auto);
+        assert_eq!(alias_target(&value, "gemini-pro").as_deref(), Some("gemini-3.1-pro"));
+        assert_eq!(alias_target(&value, "gemini-3.5-pro").as_deref(), Some("gemini-3.1-pro"));
+        assert_eq!(alias_target(&value, "gemini-flash").as_deref(), Some("gemini-3.8-flash"));
+        assert_eq!(alias_target(&value, "google-latest").as_deref(), Some("gemini-3.8-flash"));
+        assert_eq!(alias_target(&value, "gemini-3.1-pro-preview"), None, "a saved pick keeps its name");
+        let gemini_pro = value["aliases"].as_array().unwrap().iter().find(|row| row["alias"] == "gemini-pro").unwrap();
+        assert_eq!(gemini_pro["demotes_to"], "gemini-flash", "the moved alias keeps its demotion rung");
+
+        let pro_wire = json!({"low": "gemini-3.1-pro-low", "high": "gemini-pro-agent"});
+        assert_eq!(model_row(&value, "gemini-3.1-pro").map(|row| &row["wire"]), Some(&pro_wire));
+        assert_eq!(model_row(&value, "gemini-3.1-pro").map(|row| &row["display_name"]), Some(&json!("Gemini 3.1 Pro")));
+        assert_eq!(
+            model_row(&value, "gemini-3.1-pro-preview").map(|row| &row["wire"]),
+            Some(&pro_wire),
+            "a renamed id is sent as the release it names"
+        );
+        assert_eq!(
+            model_row(&value, "gemini-3.5-flash").map(|row| &row["wire"]),
+            Some(&json!({"low": "gemini-3.5-flash-extra-low", "medium": "gemini-3.5-flash-low", "high": "gemini-3-flash-agent"})),
+            "a shipped release is sent under the registry's tiers"
+        );
+        assert!(model_row(&value, "gemini-3-flash").is_none(), "nothing restates an id nothing serves");
+    }
+
+    /// (d) A registry that cannot be read leaves the last list standing — its
+    /// rows, its withdrawals, the aliases on them — and the list says when
+    /// it was read; one never read leaves the shipped catalog and says that.
+    #[test]
+    fn an_unread_registry_keeps_the_last_list_and_says_when_it_was_read() {
+        use super::AntigravityList::{NoLogin, Read, Unconfirmed};
+        let read_at = 1_792_700_000;
+        let now = read_at + 2 * super::LIVE_TTL_SECS;
+        let read = google_refresh(None, Ok(&registry_document()), None, read_at);
+        assert_eq!(super::antigravity_list_in(Some(&read), || unreachable!("an answer asks no login")), Read(read_at));
+
+        let unread = google_refresh(Some(&read), Err("HTTP 503: unavailable"), None, now);
+        assert_eq!(super::antigravity_list_in(Some(&unread), || true), Unconfirmed(Some(read_at)));
+        assert_eq!(
+            super::antigravity_reach_in(&unread, "gemini-3.1-pro-preview"),
+            super::AntigravityReach::Renamed("gemini-3.1-pro".to_string())
+        );
+        assert_eq!(super::withdrawn_since_in(&unread, "gemini-3-flash"), Some(read_at));
+        assert_eq!(
+            alias_target(&overlay_value(&unread, UpdatePolicy::Auto), "gemini-pro").as_deref(),
+            Some("gemini-3.1-pro"),
+            "the last list still decides"
+        );
+
+        let never = google_refresh(None, Err("HTTP 503: unavailable"), None, now);
+        assert_eq!(super::antigravity_list_in(Some(&never), || true), Unconfirmed(None));
+        assert_eq!(super::antigravity_reach_in(&never, "gemini-3.1-pro-preview"), super::AntigravityReach::Unjudged);
+        assert!(never.withdrawn.is_empty(), "the shipped catalog stands: {:?}", never.withdrawn);
+
+        let no_login = google_refresh(None, Err("skipped: no Google (Antigravity) login"), None, now);
+        assert_eq!(super::antigravity_list_in(Some(&no_login), || false), NoLogin);
+        assert_eq!(super::antigravity_list_in(Some(&no_login), || true), Unconfirmed(None), "a skip another process wrote");
+        assert_eq!(super::antigravity_list_in(None, || false), NoLogin);
+    }
+
+    /// (e) Without a Google login nothing here applies: a key's Gemini list
+    /// moves the Gemini aliases as it did and withdraws nothing, and no other
+    /// provider's row or alias changes when the login's list arrives.
+    #[test]
+    fn the_key_and_the_other_providers_stay_as_they_were() {
+        let now = 1_792_700_000;
+        let keyed = google_refresh(None, Err("skipped: no Google (Antigravity) login"), Some(key_list().as_slice()), now);
+        assert_eq!(super::antigravity_reach_in(&keyed, "gemini-3.1-pro-preview"), super::AntigravityReach::Unjudged);
+        assert!(keyed.withdrawn.is_empty(), "{:?}", keyed.withdrawn);
+        let value = overlay_value(&keyed, UpdatePolicy::Auto);
+        assert_eq!(alias_target(&value, "gemini-pro").as_deref(), Some("gemini-3.7-pro-preview"), "the key's newest Pro");
+        assert_eq!(alias_target(&value, "gemini-3.5-pro"), None, "a versioned name stays where it was");
+
+        // A sign-out leaves only the release a session had selected; that
+        // kept row is no list, and the key decides as it did.
+        let held = ["gemini-3.1-pro".to_string()];
+        let signed_in = google_refresh_holding(None, Ok(&registry_document()), Some(key_list().as_slice()), &held, now);
+        let signed_out = google_refresh_holding(
+            Some(&signed_in),
+            Err("skipped: no Google (Antigravity) login"),
+            Some(key_list().as_slice()),
+            &held,
+            now + 60,
+        );
+        assert!(
+            signed_out.models.iter().any(|model| model.id == "gemini-3.1-pro" && model.unlisted_since == Some(now + 60)),
+            "the selected release is kept: {:?}",
+            signed_out.models
+        );
+        assert_eq!(super::antigravity_reach_in(&signed_out, "gemini-3.1-pro-preview"), super::AntigravityReach::Unjudged);
+        assert_eq!(
+            alias_target(&overlay_value(&signed_out, UpdatePolicy::Auto), "gemini-pro").as_deref(),
+            Some("gemini-3.7-pro-preview")
+        );
+
+        let mut astra = model("openai", "gpt-6-astra", 0);
+        astra.source = super::OPENAI_SOURCE.to_string();
+        let mut alone = catalog(vec![astra.clone()]);
+        alone.fetched_at = now;
+        let mut beside = google_refresh(None, Ok(&registry_document()), None, now);
+        beside.models.push(astra);
+        let not_google = |overlay: &Value, key: &str| -> Vec<Value> {
+            overlay[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["provider"] != "google")
+                .cloned()
+                .collect()
+        };
+        let (alone, beside) = (overlay_value(&alone, UpdatePolicy::Auto), overlay_value(&beside, UpdatePolicy::Auto));
+        assert_eq!(not_google(&beside, "models"), not_google(&alone, "models"));
+        assert_eq!(not_google(&beside, "aliases"), not_google(&alone, "aliases"));
+        assert_eq!(alias_target(&beside, "gemini-pro").as_deref(), Some("gemini-3.1-pro"), "only the Gemini aliases moved");
+    }
+
+    /// (f) With both the login and a key the way a pick goes does not change
+    /// (t-71998): a Gemini only the key's list names stays a pick and goes
+    /// over the key; a shipped id whose wire the registry serves stays the
+    /// login's — no key row stands for it and it is not withdrawn — even when
+    /// the key's list names it too. A guard: zo answered the same before.
+    #[test]
+    fn with_a_login_and_a_key_a_pick_goes_where_it_went() {
+        let both = google_refresh(None, Ok(&registry_document()), Some(key_list().as_slice()), 1_792_700_000);
+        let listed = super::listed_models(&both);
+        let keyed = listed.iter().find(|row| row.id == "gemini-3.7-pro-preview").expect("the key's own Pro is listed");
+        assert!(keyed.api_key_only, "and goes over the key");
+        let value = overlay_value(&both, UpdatePolicy::Auto);
+        assert_eq!(alias_target(&value, "gemini-3.7-pro-preview").as_deref(), Some("gemini-3.7-pro-preview"));
+        assert!(!both.withdrawn.iter().any(|row| row.id == "gemini-3.1-pro-preview"));
+        assert!(
+            !listed.iter().any(|row| row.id == "gemini-3.1-pro-preview"),
+            "no key row stands for the shipped id: it stays the login's"
+        );
+    }
+
+    /// (f) With both the login and a key a Gemini alias lands on the login's
+    /// release, never on one only the key's list names (t-71998). Before,
+    /// `gemini-pro` moved to the key's newer Pro, and with it from the login
+    /// to the key. The reach says which way each name goes.
+    #[test]
+    fn with_a_login_and_a_key_the_gemini_aliases_stay_on_the_logins_releases() {
+        let both = google_refresh(None, Ok(&registry_document()), Some(key_list().as_slice()), 1_792_700_000);
+        let value = overlay_value(&both, UpdatePolicy::Auto);
+        assert_eq!(alias_target(&value, "gemini-pro").as_deref(), Some("gemini-3.1-pro"), "the login's Pro, not the key's");
+        assert_eq!(super::antigravity_reach_in(&both, "gemini-3.7-pro-preview"), super::AntigravityReach::KeyOnly);
+        assert_eq!(
+            super::antigravity_reach_in(&both, "gemini-3.1-pro-preview"),
+            super::AntigravityReach::Renamed("gemini-3.1-pro".to_string())
+        );
     }
 }

@@ -2788,7 +2788,7 @@ impl Ui {
         // live for this list, and the sources that have gone quiet for the
         // TTL are asked again for the next one (t-3054).
         crate::runtime_support::model_picker_opening();
-        let models = models::choices();
+        let models = models::choices(&self.model);
         if models.is_empty() {
             self.note(
                 SystemLevel::Info,
