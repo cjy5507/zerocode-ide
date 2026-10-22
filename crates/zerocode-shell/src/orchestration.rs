@@ -5936,8 +5936,10 @@ fn reported_sessions() -> &'static Mutex<ReportedSessions> {
 /// until the beat sees the pane returned ([`forget_returned_terms`]).
 ///
 /// Answers the seat this report marked, `team/pane`, for the window log's
-/// takeover line (t-57712), and `None` when it marked nothing.
-pub(crate) fn pane_taken_over(term: u32, now_ms: i64) -> Option<String> {
+/// takeover line (t-57712), and `None` when it marked nothing. `hand` is
+/// that line's kind of hand — `key <Name>`, `words`, `paste`, `ime` — and
+/// never what it typed.
+pub(crate) fn pane_taken_over(term: u32, hand: &str, now_ms: i64) -> Option<String> {
     {
         let mut taken = taken_terms()
             .lock()
@@ -5950,7 +5952,7 @@ pub(crate) fn pane_taken_over(term: u32, now_ms: i64) -> Option<String> {
         return None;
     }
     let held = runtime()?;
-    let (moved, _) = held.actor.pane_taken_over(term, now_ms).ok()?;
+    let (moved, _) = held.actor.pane_taken_over(term, hand, now_ms).ok()?;
     rang(moved);
     let mut seat = None;
     if moved {
@@ -5959,6 +5961,20 @@ pub(crate) fn pane_taken_over(term: u32, now_ms: i64) -> Option<String> {
         });
     }
     seat
+}
+
+/// The window event that tells the person their words went into a worker's
+/// pane and made it theirs (t-69526): `{ term, worker }`, said once per
+/// takeover through the window's toast.
+pub(crate) const TAKEN_OVER_EVENT: &str = "term:taken-over";
+
+/// The live worker seated at `term`, by id — the toast's name for the pane a
+/// takeover just marked (t-69526). `None` where no worker of a run sits.
+pub(crate) fn worker_at_term(term: u32) -> Option<String> {
+    let (_, address) = seat_of_term(term)?;
+    address
+        .strip_prefix(zerocode_core::orchestration::WORKER_ADDRESS_PREFIX)
+        .map(str::to_string)
 }
 
 /// The terminal a live worker sits in, read from its row and the seats.
@@ -5988,11 +6004,13 @@ fn return_refused(argv: &[String]) -> Option<String> {
         .map(|pair| pair[1].as_str())?;
     let term =
         with_ledger_seats(|ledger, seats| term_of_worker(ledger, seats, worker)).flatten()?;
+    // The verb itself is the only road back (t-17644): a worker's own letters
+    // leave the pane the person's (t-69526).
     crate::human_input::holds_own_words(term).then(|| {
         format!(
             "worker {worker}'s pane holds words the person typed and has not sent — \
-             it is still theirs; it comes back when they send or clear them, or \
-             when the worker writes to the ledger again"
+             it is still theirs; once they send or clear them, `worker-return --worker \
+             {worker}` gives it back"
         )
     })
 }

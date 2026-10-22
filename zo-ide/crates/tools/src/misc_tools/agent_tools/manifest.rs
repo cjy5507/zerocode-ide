@@ -1494,6 +1494,7 @@ mod activity_tests {
                 attempt: 0,
                 max_attempts: 0,
                 delay: std::time::Duration::from_secs(60),
+                no_progress: None,
             },
         );
 

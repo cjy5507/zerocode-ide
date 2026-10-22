@@ -2719,6 +2719,93 @@ fn a_4xx_a_silent_stream_or_a_dropped_connection_is_not_demoted() {
     assert!(unclassified.overload_demotion_model.is_none());
 }
 
+/// What a ChatGPT turn hands up once zo cut the same request twice in a row because
+/// its model made no progress for the stall window (t-68710), as the stream road
+/// delivers it.
+const NO_PROGRESS_STOP: &str = "runtime: provider stream: transport error: api failed after 2 attempts: \
+     api stream error (stream_startup_no_progress): gpt-5.6-sol made no progress for 240s, \
+     so zo cut the request (2/2) and stopped sending it; transport keep-alives are not progress; \
+     attempt 1 heard response.created, then keep-alives only; \
+     attempt 2 heard response.created, then keep-alives only";
+
+/// A runtime on `model`, with no cross-provider client installed.
+fn runtime_on(model: &str) -> ConversationRuntime<NoopApiClient, StaticToolExecutor> {
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        NoopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_context_model(model);
+    runtime
+}
+
+/// A request zo stopped sending because its model made no progress takes the road a
+/// spent 5xx ladder takes (t-15565): one tier down the same provider, once per turn.
+/// Sending the same bytes again bought nothing in the reported turn: eight cuts of
+/// 240 s, 33 minutes, no output (t-68710).
+#[test]
+fn a_request_stopped_for_no_progress_continues_one_tier_down_once_per_turn() {
+    let stopped = || {
+        RuntimeError::with_provider_error_class(NO_PROGRESS_STOP, api::ProviderErrorClass::Transient)
+    };
+    let mut runtime = runtime_on("gpt-5.6-sol");
+    let QuotaEscape::Lighter(lighter) = runtime.decide_quota_escape_with_gate(&stopped(), |_| false)
+    else {
+        panic!("a request zo stopped sending for no progress must continue one tier down");
+    };
+    assert!(lighter.contains("luna"), "sol continues on luna: {lighter}");
+    assert_eq!(
+        runtime.bound_client_model_override().as_deref(),
+        Some(lighter.as_str()),
+        "the demotion rides the turn's requests"
+    );
+    assert!(
+        matches!(
+            runtime.decide_quota_escape_with_gate(&stopped(), |_| false),
+            QuotaEscape::None
+        ),
+        "one demotion per turn; with no fallback client the turn then stops"
+    );
+}
+
+/// What does NOT take that road: a run the bundle ceiling ended after other failures
+/// (one cut, not two in a row), the words zo wrote before t-68710 (which name no stop),
+/// and a stopped request on the bottom rung, which has no lighter tier. These fail the
+/// turn as before.
+#[test]
+fn a_ceiling_stop_or_the_bottom_rung_is_not_demoted_for_no_progress() {
+    for text in [
+        "runtime: provider stream: transport error: api failed after 4 attempts: api stream error \
+         (stream_startup_no_progress): gpt-5.6-sol made no progress for 30s after \
+         server_error x3; transport keep-alives are not progress; attempt 4 heard keep-alives only",
+        "runtime: provider stream: transport error: api failed after 8 attempts: api stream error \
+         (stream_startup_no_progress): no response event within 240s; transport keep-alives are \
+         not progress",
+    ] {
+        let mut runtime = runtime_on("gpt-5.6-sol");
+        let error = RuntimeError::with_provider_error_class(text, api::ProviderErrorClass::Transient);
+        assert!(
+            matches!(
+                runtime.decide_quota_escape_with_gate(&error, |_| false),
+                QuotaEscape::None
+            ),
+            "{text}"
+        );
+    }
+    let mut bottom = runtime_on("gpt-5.6-luna");
+    let stopped =
+        RuntimeError::with_provider_error_class(NO_PROGRESS_STOP, api::ProviderErrorClass::Transient);
+    assert!(
+        matches!(
+            bottom.decide_quota_escape_with_gate(&stopped, |_| false),
+            QuotaEscape::None
+        ),
+        "luna has no lighter tier, so the turn stops"
+    );
+}
+
 /// The 5xx demotion is scoped to the turn that needed it, as a 529's is: the next turn
 /// starts on the model the person chose, and may demote again if its own ladder is spent.
 #[test]

@@ -16464,6 +16464,7 @@ listen("term:exited", (event) => {
   forgetManagedTerminalSession(term);
   forgetCodexPtyFallback(term);
   forgetMailWaiting(term);
+  forgetTakenOver(term);
   paneUsage.delete(term);
   orphanWorkersOf(term);
   if (term === FLOAT_TERM) {

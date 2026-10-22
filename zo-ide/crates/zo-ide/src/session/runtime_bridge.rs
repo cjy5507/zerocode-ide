@@ -638,13 +638,26 @@ fn stream_notice_row(notice: &core_types::StreamRetryNotice) -> (SystemLevel, St
         ),
         core_types::StreamNoticeKind::Reconnect => (
             SystemLevel::Warn,
-            format!(
-                "{}; reconnecting in {:.0}s (attempt {}/{})",
-                notice.label,
-                notice.delay.as_secs_f64().ceil(),
-                notice.attempt,
-                notice.max_attempts
-            ),
+            match &notice.no_progress {
+                // zo cut the attempt itself: the row names the model and the wait,
+                // and where the cut stands before zo stops sending the request.
+                Some(cut) => format!(
+                    "{}, {}; sending it again in {:.0}s",
+                    core_types::retry_signal::no_progress_words(&cut.model, cut.waited, ""),
+                    core_types::retry_signal::no_progress_cut_words(cut.cut, cut.of),
+                    notice.delay.as_secs_f64().ceil(),
+                ),
+                // The notice counts restarts; the row counts the requests sent, the
+                // first one included — the count the error names once the ladder is
+                // spent.
+                None => format!(
+                    "{}; reconnecting in {:.0}s (attempt {}/{})",
+                    notice.label,
+                    notice.delay.as_secs_f64().ceil(),
+                    notice.attempt.saturating_add(1),
+                    notice.max_attempts.saturating_add(1)
+                ),
+            },
         ),
     }
 }
@@ -1211,6 +1224,7 @@ pub(in crate::session) mod tests {
             attempt: 0,
             max_attempts: 0,
             delay: std::time::Duration::from_secs(61),
+            no_progress: None,
         };
         // A quiet stretch is a PHASE the status line wears, never a transcript
         // row: a long turn left five such rows behind (2026-09-07).
@@ -1230,10 +1244,40 @@ pub(in crate::session) mod tests {
             attempt: 2,
             max_attempts: 3,
             delay: std::time::Duration::from_secs(4),
+            no_progress: None,
         };
         let (level, text) = stream_notice_row(&reconnect);
         assert_eq!(level, SystemLevel::Warn);
-        assert!(text.contains("reconnecting in 4s (attempt 2/3)"), "text: {text}");
+        // The notice counts restarts; the row counts the requests sent, the first
+        // one included — the count the error names once the ladder is spent.
+        assert!(text.contains("reconnecting in 4s (attempt 3/4)"), "text: {text}");
+    }
+
+    /// An attempt zo cut because its model made no progress in time is named by that
+    /// model and the wait, with the cut's place in the run after which zo stops
+    /// sending the request — never as a transient provider error (t-68710).
+    #[test]
+    fn a_cut_for_no_progress_names_the_model_and_the_wait() {
+        let cut = core_types::StreamRetryNotice {
+            kind: core_types::StreamNoticeKind::Reconnect,
+            label: "no progress from the model",
+            attempt: 1,
+            max_attempts: 7,
+            delay: std::time::Duration::from_millis(1_200),
+            no_progress: Some(core_types::NoProgressCut {
+                model: "gpt-6.1-sol".to_string(),
+                waited: std::time::Duration::from_secs(240),
+                cut: 1,
+                of: 2,
+            }),
+        };
+        let (level, text) = stream_notice_row(&cut);
+        assert_eq!(level, SystemLevel::Warn);
+        assert_eq!(
+            text,
+            "gpt-6.1-sol made no progress for 240s, so zo cut the request (1/2); \
+             sending it again in 2s"
+        );
     }
 
     #[test]

@@ -330,6 +330,19 @@ pub(super) fn overload_demotion_warn(shed: &str, lighter: &str) -> String {
     )
 }
 
+/// Warn line for a turn continuing on a lighter tier after `error`. A request zo
+/// stopped sending because its model made no progress is named by that model and
+/// the wait (t-68710); calling it a capacity refusal would blame the provider for
+/// a stall zo measured itself.
+pub(super) fn demotion_warn(error: &RuntimeError, shed: &str, lighter: &str) -> String {
+    match core_types::retry_signal::no_progress_stop(&error.to_string()) {
+        Some(stop) => format!(
+            "{stop}; this turn continues on {lighter}. The next turn starts on {shed} again."
+        ),
+        None => overload_demotion_warn(shed, lighter),
+    }
+}
+
 pub(super) fn quota_wait_hold_warn(model: &str, wait: std::time::Duration) -> String {
     let human = human_wait(wait);
     // Starts with the shared prefix so the TUI can flip the spinner into the
@@ -1639,6 +1652,17 @@ where
             // lighter tier answers — so the text has to name the server too.
             Some(::api::ProviderErrorClass::Transient)
                 if core_types::retry_signal::is_server_fault(&error.to_string()) =>
+            {
+                (None, ::api::CapacityScope::Provider)
+            }
+            // The one stalled stream that takes the same road: a request zo
+            // stopped sending after its model made no progress for two windows
+            // in a row (t-68710). The same bytes got the same stall, so sending
+            // them again buys nothing; the reported turn did it eight times in 33
+            // minutes. A stream the restart ceiling ended names no stop and still
+            // fails the turn.
+            Some(::api::ProviderErrorClass::Transient)
+                if core_types::retry_signal::no_progress_stop(&error.to_string()).is_some() =>
             {
                 (None, ::api::CapacityScope::Provider)
             }
