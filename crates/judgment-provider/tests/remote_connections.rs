@@ -12,10 +12,16 @@ fn remote(base_url: String, protocol: Protocol) -> Provider {
 
 #[test]
 fn remote_structured_decisions_use_the_selected_https_endpoint() {
-    let provider = remote("https://gateway.example.com/v1/".into(), Protocol::OpenaiJson)
-        .validated()
-        .expect("an explicitly selected structured decision server");
-    assert_eq!(provider.request_url(), "https://gateway.example.com/v1/chat/completions");
+    let provider = remote(
+        "https://gateway.example.com/v1/".into(),
+        Protocol::OpenaiJson,
+    )
+    .validated()
+    .expect("an explicitly selected structured decision server");
+    assert_eq!(
+        provider.request_url(),
+        "https://gateway.example.com/v1/chat/completions"
+    );
     assert!(!provider.ready_with_key(None));
     assert_ne!(provider.key_env(), Provider::jev("jev-latest").key_env());
 }
@@ -30,7 +36,10 @@ fn an_explicit_private_network_connection_accepts_http_for_both_protocols() {
     ] {
         for protocol in [Protocol::SystemOne, Protocol::OpenaiJson] {
             let provider = remote(format!("http://{address}:4000/v1"), protocol);
-            assert!(provider.validated().is_ok(), "private connection refused: {protocol:?}");
+            assert!(
+                provider.validated().is_ok(),
+                "private connection refused: {protocol:?}"
+            );
         }
     }
 }
@@ -43,20 +52,28 @@ fn a_remote_public_address_still_requires_https() {
         "http://localhost.example.com/v1",
     ] {
         for protocol in [Protocol::SystemOne, Protocol::OpenaiJson] {
-            assert_eq!(remote(address.into(), protocol).validated(), Err(Refusal::RemoteAddress));
+            assert_eq!(
+                remote(address.into(), protocol).validated(),
+                Err(Refusal::RemoteAddress)
+            );
         }
     }
 }
 
 #[test]
 fn remote_structured_decisions_preserve_strict_response_validation() {
-    let provider = remote("https://gateway.example.com/v1".into(), Protocol::OpenaiJson)
-        .validated()
-        .expect("structured decision server");
+    let provider = remote(
+        "https://gateway.example.com/v1".into(),
+        Protocol::OpenaiJson,
+    )
+    .validated()
+    .expect("structured decision server");
     let request = serde_json::json!({
         "model": provider.identity(), "state": {"ready": true},
         "questions": {"ready": {"type": "noul", "instructions": "Is the page ready?"}}
-    }).to_string().into_bytes();
+    })
+    .to_string()
+    .into_bytes();
     let prepared = provider.prepare(request).expect("decision request");
     let sent: serde_json::Value = serde_json::from_slice(&prepared.body).expect("request JSON");
     assert_eq!(sent["response_format"]["json_schema"]["strict"], true);

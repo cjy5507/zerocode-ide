@@ -21218,6 +21218,11 @@ button.helper-sib:hover {
   flex-wrap: wrap;
 }
 
+.managed-judgment-candidate-reason {
+  flex-basis: 100%;
+  word-break: keep-all;
+}
+
 .judgment-setup-hint {
   margin: var(--space-3) var(--space-4);
   overflow-wrap: anywhere;

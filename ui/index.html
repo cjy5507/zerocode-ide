@@ -4466,15 +4466,20 @@
               <button type="button" class="btn" id="judgment-local-manual" aria-pressed="false" data-i18n="settings.managed.manual">이미 실행 중인 서버 연결</button>
             </div>
             <div id="judgment-manual-fields">
-            <ol class="settings-steps">
-              <li data-i18n="settings.judgment.stepServer">서버 주소와 필요한 API 키를 입력합니다.</li>
-              <li data-i18n="settings.judgment.stepModel">서버에서 모델 목록을 읽고 모델을 선택합니다. 정확한 ID를 직접 입력해도 됩니다.</li>
-              <li data-i18n="settings.judgment.stepUse">확인하고 사용을 누릅니다. 응답을 확인하지 못하면 기존 모델을 유지합니다.</li>
-            </ol>
+            <label class="settings-field" data-field="lg" id="judgment-protocol-field" for="judgment-protocol" hidden>
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="settings.judgment.protocol">연결 방식</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.protocolHint">API 라우터·일반 모델 서버는 OpenAI 호환을 선택하세요. 구조화된 판단 응답을 지원해야 합니다.</span>
+              </span>
+              <select class="settings-input" id="judgment-protocol" disabled>
+                <option value="openai_json" data-i18n="settings.judgment.openaiProtocol">OpenAI 호환 · 구조화된 응답</option>
+                <option value="system_one" data-i18n="settings.judgment.systemOneProtocol">System One · 판단 전용</option>
+              </select>
+            </label>
             <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
-                <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">System One 호환 판단 인터페이스를 사용합니다. 로컬은 이 컴퓨터의 주소만, 원격은 HTTPS만 허용합니다.</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">API 라우터처럼 기본 URL을 입력하세요. 외부 서버는 HTTPS, 이 컴퓨터와 사설망 IP는 HTTP로도 연결할 수 있습니다.</span>
               </span>
               <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
             </label>
@@ -4493,6 +4498,9 @@
               <input class="settings-input" id="typesafe-key-input" type="password"
                      autocomplete="off" spellcheck="false" placeholder="apikey_..." />
             </label>
+            <div class="settings-action-row judgment-connect-actions">
+              <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>연결하고 모델 불러오기</button>
+            </div>
             <label class="settings-field" data-field="md" for="typesafe-model-input">
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.model">판단 모델</span>
@@ -4506,13 +4514,12 @@
               <select class="settings-input" id="judgment-listed-model"></select>
             </label>
             <p class="settings-row-desc" id="judgment-provider-scope"></p>
-            <p class="settings-notice" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 응답을 확인하기 전에는 현재 모델을 바꾸지 않습니다.</p>
+            <p class="settings-row-desc" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 응답을 확인하기 전에는 현재 모델을 바꾸지 않습니다.</p>
             <p class="settings-row-desc" id="judgment-model-status" role="status" aria-live="polite"></p>
             </div>
           </section>
           <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
           <div class="settings-action-row settings-judgment-actions">
-            <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>모델 목록 새로고침</button>
             <button class="btn" id="typesafe-check-btn" type="button" disabled data-i18n="settings.typesafe.check">연결 확인</button>
             <button class="btn" id="typesafe-remove-btn" type="button" disabled data-i18n="settings.typesafe.remove">키 지우기</button>
             <button class="btn" id="typesafe-save-btn" type="button" disabled data-i18n="settings.judgment.saveKey">키 저장</button>

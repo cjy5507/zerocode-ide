@@ -7442,6 +7442,12 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
       { id: "fixture-local-candidate", name: "Fixture Local Candidate", size: words.sizes[0], actions: [["install", words.download], ["import", words.register]], folds: 0 },
       { id: "fixture-d3", name: "Fixture D3 lite", size: words.sizes[1], actions: [["inspect-source", words.inspect], ["connect", words.connect]], folds: 0 },
     ], "an unfolded candidate is not one line of its name, its size and the ways to have it");
+    assert(await page.locator('[data-model-id="fixture-d3"] .managed-judgment-candidate-reason').isVisible(), "a download-only candidate does not explain its limitation");
+    await page.fill("#managed-judgment-search", "fixture-d3");
+    assert(await page.locator('#managed-judgment-candidate-list [data-model-id="fixture-d3"]').isVisible(), "search cannot find a model not downloaded yet");
+    assert(await page.locator('#managed-judgment-candidate-list [data-model-id="fixture-local-candidate"]').isHidden(), "candidate search ignored the query");
+    assert(await page.locator("#managed-judgment-no-matches").isHidden(), "a matching candidate is reported as no matches");
+    await page.fill("#managed-judgment-search", "");
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
       await setQualityTheme(page, theme);
       await renderSettled(page);
@@ -7478,6 +7484,7 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
       candidates: [...document.querySelectorAll("#managed-judgment-candidate-list > li")].map((item) => item.dataset.modelId),
     }), words.connected);
     assertEqual(await answering(), { rows: ["fixture-d3"], candidates: ["fixture-d3-checked"] }, "two catalog entries of one server model stand as two connected rows");
+    assert(await page.locator('#managed-judgment-candidate-list [data-model-id="fixture-d3-checked"] [data-model-action="connect"]').isDisabled(), "the same connected server is offered as a new connection");
     assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3"], "the model a connected server answers with is not in the library");
     const served = await page.evaluate(() => {
       const row = managedJudgmentController.rows.get("fixture-d3");
@@ -7486,6 +7493,12 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
     assertEqual(served, { summary: words.source, identity: "acme/d3 · transformers_system_one", state: words.connected },
       "the connected server's model claims a pinned revision it cannot know, or hides that it is connected");
     assertEqual(await said(), { count: words.counted[2], fold: words.offered[1] }, "the connected server model is not counted as one row beside one candidate");
+    held.configuredModelId = checked.id;
+    held.revision += 1;
+    await page.evaluate(() => refreshTypeSafe());
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.configuredModelId === "fixture-d3-checked");
+    assertEqual(await answering(), { rows: ["fixture-d3-checked"], candidates: ["fixture-d3"] }, "a connection bound to the second entry still selected the first");
+    held.configuredModelId = null;
     // Files received for the checked address make it the connection's row,
     // and the bundled entry goes back to the candidates.
     checked.installed = true;
@@ -7527,8 +7540,8 @@ await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 
         pinned: document.getElementById("managed-judgment-panel").textContent.includes("fixture-revision"),
       };
     });
-    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-none", "managed-judgment-candidates"], notice: false, open: false, pinned: false },
-      "a computer holding no model shows more than one line and the folded candidates");
+    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-library-tools", "managed-judgment-none", "managed-judgment-candidates"], notice: false, open: false, pinned: false },
+      "a computer holding no model cannot search the available candidates");
     assertEqual(await page.locator("#managed-judgment-none").textContent(),
       await page.evaluate(() => t("settings.managed.noneReceived", "받은 판단 모델이 없습니다 — 아래에서 불러오세요")), "the empty library does not point at the candidates below");
     // With nothing in the catalog either, the line left is the server one.
@@ -7783,6 +7796,15 @@ await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 
     assertEqual(await pageA.inputValue("#typesafe-key-input"), "", "the saved key remained in the form");
     assertEqual(backend.typesafeSettings().provider.kind, "jev", "discovery applied the candidate before its answer was checked");
     await pageA.selectOption("#judgment-listed-model", "fixture-decision-b");
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      await renderSettled(pageA);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#judgment-connection-settings"), [], `${theme} custom connection accessibility`);
+      if (process.env.JUDGMENT_CONNECTION_SHOTS) {
+        await mkdir(process.env.JUDGMENT_CONNECTION_SHOTS, { recursive: true });
+        await pageA.locator("#judgment-connection-settings").screenshot({ path: resolve(process.env.JUDGMENT_CONNECTION_SHOTS, `connection-${theme}.png`), animations: "disabled" });
+      }
+    }
     const applyAt = backend.calls.length;
     await pageA.click("#judgment-save-provider");
     await backend.waitForCall("A", "set_judgment_provider", applyAt);
@@ -14023,7 +14045,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
           // A notice's own action (the switch's 「모든 폴더에서 사용」) is the
           // notice's, not a button loose above the card's footer.
           buttonsOutside: [...box.querySelectorAll(".btn")]
-            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice") && !one.closest("#judgment-local-mode, #managed-judgment-panel, .judgment-model-source"))
+            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice") && !one.closest("#judgment-local-mode, #managed-judgment-panel, .judgment-model-source, .judgment-connect-actions"))
             .map((one) => one.id),
           filled,
         };

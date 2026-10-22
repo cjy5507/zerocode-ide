@@ -6728,7 +6728,7 @@ function initTypeSafeEvents() {
   if (typesafeInitialized) return;
   typesafeInitialized = true;
   judgmentProviderController.init();
-  el("typesafe-key-input")?.addEventListener("input", paintTypeSafeSave);
+  el("typesafe-key-input")?.addEventListener("input", () => judgmentProviderController.controls());
   el("typesafe-save-btn")?.addEventListener("click", () => {
     void saveTypeSafeKey();
   });
@@ -7087,7 +7087,7 @@ async function saveTypeSafeKey() {
 
 async function checkTypeSafeKey() {
   if (typesafeBusy) return;
-  if (judgmentProviderController.dirty()) return judgmentProviderController.checkDraft();
+  if (judgmentProviderController.dirty() || el("typesafe-key-input")?.value.trim()) return judgmentProviderController.checkDraft();
   const identity = typesafeState?.providerIdentity;
   typesafeBusy = true;
   if (typesafeState) paintTypeSafe(typesafeState);
@@ -7137,7 +7137,8 @@ function typesafeCheckFailure(token) {
 
 /* This card says a refusal as every key card does (`keyStoreRefusal`). */
 function typesafeRefusal(error) {
-  return keyStoreRefusal(error);
+  const token = typeof error === "string" ? error : error?.message;
+  return judgmentProviderController.failure(token) ?? keyStoreRefusal(error);
 }
 
 function typesafeRefusalEvidence(error) {
