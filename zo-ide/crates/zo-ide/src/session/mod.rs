@@ -65,4 +65,6 @@ pub struct ManagedSessionSummary {
     pub parent_session_id: Option<String>,
     pub branch_name: Option<String>,
     pub first_user_text: Option<String>,
+    /// A meaningful user prompt exists, even when it has no text preview.
+    pub has_user_input: bool,
 }

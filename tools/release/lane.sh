@@ -6,7 +6,9 @@
 # lock, drains the queue oldest-first — a queued sha whose descendant is also
 # queued is `superseded`, never gated (t-4123) — and for each sha: refuses on missing
 # tools or a low disk, clones the sha into a scratch, trims any target over the
-# cap, completes the root gate before the zo gate, judges known flakes solo, pushes
+# cap, completes the root gate before the zo gate (each running only what the
+# coordinator's gate receipt for the sha's tree left owed, when the sha carries
+# one — t-47516), judges known flakes solo, pushes
 # <sha>:main, builds the app and zo in parallel, swaps each beside-then-mv,
 # bundles the signed updater feed (bundle-updater), publishes the GitHub
 # release when asked (publish; docs/design/versioned-auto-update.md §2.6), and
@@ -54,6 +56,12 @@ export CARGO_INCREMENTAL=0  # every cargo the lane runs, gates and solo judgment
 # The files a release commit always touches (bump.sh): a diff that changes only
 # their version lines is the stamp, not a change to either tree.
 RELEASE_STAMP_FILES="Cargo.toml Cargo.lock crates/zerocode-shell/tauri.conf.json zo-ide/Cargo.toml zo-ide/Cargo.lock"
+# …and the release notes, where bump.sh opens the version's section. Of the gates'
+# recipes only NOTES_READERS read them: pii-check scans every tracked file, and no
+# test, build script or harness opens CHANGELOG.md (git grep, 2026-10-22). A
+# coordinator's receipt for the tree before the notes leaves exactly these owed.
+RELEASE_NOTES=CHANGELOG.md
+NOTES_READERS=pii-check
 TOOLS="cargo just node npm git swift codesign ditto python3 cmake ninja"   # python3 renders latest.json (updater_feed.py); gh only when publishing
 LAUNCHD_LABEL=dev.zerocode.release
 LAUNCHD_PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"   # sbin: sysctl (the load reading)
@@ -104,6 +112,14 @@ UPDATER_KEY=${UPDATER_KEY:-$RELEASE_HOME/keys/updater.key}   # `tauri signer gen
 UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   # optional; absent means the key has no password
 FEED_PY=$SELF_DIR/updater_feed.py
 UNITS_PY=$SELF_DIR/workspace_units.py   # drops the repository's own build units from a target (trim_targets)
+RECEIPT_PY=$SELF_DIR/coord_receipt.py   # reads a coordinator's gate receipt again (receipt_cover); enqueue.sh reads it at the door
+# A receipt's jobs are ones the coordinator's build line ran: their files in its done/, each
+# started and ended green in its runner.log — the queue under the project's workspace folder,
+# where the window's board reads it too (crates/zerocode-shell/src/schedule_timeline.rs
+# LINE_FOLDER). Their owner and run are only what the jobs say of themselves, held to the
+# coordinator's: coord-<label> of RELEASE_COORD_RUN (t-47516).
+RELEASE_BUILD_LINE=${RELEASE_BUILD_LINE:-$HOME/zerocode/workspaces/$(basename "$RELEASE_REPO")/build-line/build-queue}
+RELEASE_COORD_RUN=${RELEASE_COORD_RUN:-run-4275}
 LEGACY_INSTALL_SH=$SELF_DIR/legacy/install.sh   # the old CLI's installer, verbatim (§2.7)
 APP_INSTALL_SH=$SELF_DIR/install.sh             # the app's installer: reads the feed beside it, so it goes up with every release
 # -------------------------------------------------------------------------------
@@ -120,12 +136,14 @@ STATUS=$RELEASE_HOME/status.json
 INSTALLED=$RELEASE_HOME/installed.json
 INSTALLED_PREV=$RELEASE_HOME/installed.prev.json
 UNLISTED=$RELEASE_HOME/unlisted.txt   # every unlisted red the lane judged solo, with its result: the evidence a flakes.txt line is written from
+RECEIPTS=$RELEASE_HOME/receipts       # <sha>.json: the coordinator's gate receipt a queued sha carries (enqueue.sh --receipt)
 
 if [ "${1:-}" = "--table" ]; then
   for k in DISK_FLOOR_GB TARGET_CAP_GB RECLAIM_BELOW_GB POLL_SECS THROTTLE_SECS ZO_PROFILE SOLO_RUNS CALM_LOAD CALM_WAIT_SECS \
            CALM_POLL_SECS PHASES TARGET_LANES CARGO_INCREMENTAL TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
-           RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED UI_SUITE_CHOOSER \
+           RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS RECEIPT_PY \
+           RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
            RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
            UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS; do
     eval "printf \"%s='%s'\\n\" \"$k\" \"\$$k\""
@@ -162,6 +180,7 @@ kill_children() {
 SHA=; SHA8=; SCRATCH=; LOG=; QUEUE_FILE=; STARTED_AT=; PHASE=; PHASE_T0=0
 PHASES_JSON=; DISK_FREE_GB=0; OUTCOME=null; REASON=; SWEPT=1; LOCK_HELD=0
 VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=   # SKIP: why the phase being ended did nothing; WHY: a step's red in words
+ONLY=; RECEIPT=   # a gate's recipes a coordinator's receipt left owed, and what that receipt did (receipt_cover)
 
 measure_disk() {
   if is_dry; then
@@ -216,13 +235,14 @@ write_status() {
     > "$STATUS.tmp" && mv -f "$STATUS.tmp" "$STATUS"
 }
 phase_begin() { PHASE=$1; PHASE_T0=$(now_s); write_status; log "== $PHASE"; }
-phase_end() { # NAME RC [SECS] — a phase that set SKIP did nothing, and says why
-  local name=$1 rc=$2 secs=${3:-$(( $(now_s) - PHASE_T0 ))} skipped=
-  [ -z "$SKIP" ] || skipped=",\"skipped\":\"$(json_str "$SKIP")\""
-  PHASES_JSON="${PHASES_JSON:+$PHASES_JSON,}{\"name\":\"$name\",\"rc\":$rc,\"secs\":$secs$skipped}"
+phase_end() { # NAME RC [SECS] — a phase that set SKIP did nothing, and says why; a gate a receipt shaped says what it did (RECEIPT)
+  local name=$1 rc=$2 secs=${3:-$(( $(now_s) - PHASE_T0 ))} said=
+  if [ -n "$SKIP" ]; then said=",\"skipped\":\"$(json_str "$SKIP")\""
+  elif [ -n "$RECEIPT" ]; then said=",\"receipt\":\"$(json_str "$RECEIPT")\""; fi
+  PHASES_JSON="${PHASES_JSON:+$PHASES_JSON,}{\"name\":\"$name\",\"rc\":$rc,\"secs\":$secs$said}"
   measure_disk; write_status
-  log "$name rc=$rc ${secs}s free=${DISK_FREE_GB}G load=$(load_now | tr ' ' /)${SKIP:+ skipped: $SKIP}"
-  SKIP=
+  log "$name rc=$rc ${secs}s free=${DISK_FREE_GB}G load=$(load_now | tr ' ' /)${SKIP:+ skipped: $SKIP}${RECEIPT:+ receipt: $RECEIPT}"
+  SKIP=; RECEIPT=
 }
 # A successful step that used up the disk can resume after space is freed.
 # A failed step stays red: low disk must not hide its failure or requeue the
@@ -369,12 +389,14 @@ do_archive() {
     && ln -s "$RELEASE_NODE_MODULES" "$SCRATCH/node_modules"
 }
 
-# gate LANE — runs in the background; writes "rc secs" to $WORK/gate-LANE.result
+# gate LANE — runs in the background; writes "rc secs" to $WORK/gate-LANE.result.
+# Every recipe of the gate, or ONLY those a coordinator's receipt left owed.
+gate_dir() { case $1 in root) printf . ;; zo) printf zo-ide ;; esac; }   # the gate's justfile, in the scratch
 run_gate() {
   local lane=$1 t0 rc log="$OUT/gate-$1-$SHA8.log" target
   target=$(target_dir "$lane-gate"); t0=$(now_s)
   if is_dry; then
-    stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset}"
+    stub_log "gate $lane target=$target incremental=${CARGO_INCREMENTAL-unset}${ONLY:+ only=$ONLY}"
     sleep "$(stub "GATE_$(upper "$lane")_SLEEP" 0)"
     rc=$(stub "GATE_$(upper "$lane")_RC" 0)
     { echo "stub gate $lane"; if [ "$rc" != 0 ]; then echo "==> verify recipe test"; echo "failures:"; local f; for f in $(stub "GATE_$(upper "$lane")_FAILS"); do echo "    $f"; done; echo "test result: FAILED."; fi
@@ -383,10 +405,7 @@ run_gate() {
       local u; u=$(stub "GATE_$(upper "$lane")_UNNAMED" ""); [ -z "$u" ] || { echo "==> verify recipe $u"; echo "error: recipe \`$u\` failed on line 43 with exit code 101"; }
     } > "$log"
   else
-    case $lane in
-      root) ( cd "$SCRATCH" && CARGO_TARGET_DIR=$target "$SELF_DIR/verify-every-recipe.sh" ) > "$log" 2>&1; rc=$? ;;
-      zo)   ( cd "$SCRATCH/zo-ide" && CARGO_TARGET_DIR=$target "$SELF_DIR/verify-every-recipe.sh" ) > "$log" 2>&1; rc=$? ;;
-    esac
+    ( cd "$SCRATCH/$(gate_dir "$lane")" && CARGO_TARGET_DIR=$target "$SELF_DIR/verify-every-recipe.sh" ${ONLY:+--only "$ONLY"} ) > "$log" 2>&1; rc=$?
   fi
   echo "$rc $(( $(now_s) - t0 ))" > "$WORK/gate-$lane.result"
   stub_log "gate $lane done rc=$rc"
@@ -868,24 +887,130 @@ stamp_only() { # PATH SINCE — the file changed in version lines only
   ! printf '%s\n' "$diff" \
     | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' | grep -qvE '^[+-][[:space:]]*"?version"?[[:space:]]*[:=]'
 }
+# real_changes SINCE STUB [DEFAULT] — REAL: the paths SINCE..SHA changed, one a line,
+# but the stamp files whose diff is version lines alone; CHANGED: how many paths
+# changed in all. 1 when the lane cannot tell (git not answering, a path with a space
+# or a control character in it). The dry run reads the paths from the stub.
+real_changes() {
+  local since=$1 changed path
+  REAL=; CHANGED=0
+  if is_dry; then changed=$(stub "$2" "${3-}" | tr ' ' '\n')
+  else changed=$(git -C "$SCRATCH" diff --name-only -z "$since" "$SHA" 2>/dev/null | tr '\n\0' '\001\n'
+                 exit "${PIPESTATUS[0]}") || return 1; fi
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    CHANGED=$(( CHANGED + 1 ))
+    case $path in *[[:space:]]*|*[[:cntrl:]]*) return 1 ;; esac
+    case " $RELEASE_STAMP_FILES " in *" $path "*) stamp_only "$path" "$since" && continue ;; esac
+    REAL="$REAL$path"$'\n'
+  done <<< "$changed"
+  return 0
+}
 gate_owed() { # root|zo — 0 when the gate must run; otherwise SKIP says why and 1
-  local lane=$1 half since changed path n=0
+  local lane=$1 half since
   case $lane in root) half=app ;; zo) half=zo ;; esac
   since=$(installed_part "$INSTALLED" "$half"); since=${since%% *}
   [ -n "$since" ] || return 0
   # The dry default names a shared crate, so every gate a stub run does not
   # speak about is owed — as before this rule existed.
-  if is_dry; then changed=$(stub CHANGED_PATHS "crates/zerocode-core/src/lib.rs" | tr ' ' '\n')
-  else changed=$(git -C "$SCRATCH" diff --name-only -z "$since" "$SHA" 2>/dev/null | tr '\n\0' '\001\n'
-                 exit "${PIPESTATUS[0]}") || return 0; fi
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    n=$(( n + 1 ))
-    case $path in *[[:space:]]*|*[[:cntrl:]]*) return 0 ;; esac
-    case " $RELEASE_STAMP_FILES " in *" $path "*) stamp_only "$path" "$since" && continue ;; esac
-    return 0
-  done <<< "$changed"
-  SKIP="$lane tree unchanged since ${since:0:8} — $n path(s) changed, none its own"
+  real_changes "$since" CHANGED_PATHS "crates/zerocode-core/src/lib.rs" || return 0
+  [ -z "$REAL" ] || return 0
+  SKIP="$lane tree unchanged since ${since:0:8} — $CHANGED path(s) changed, none its own"
+  return 1
+}
+
+# ------------------------------------------- the coordinator's gate receipt --
+# A sha cut from a tree the coordinator already gated on its build line carries
+# that gate's receipt (enqueue.sh --receipt, kept as $RECEIPTS/<sha>.json). The
+# receipt only locates the build line's evidence and seals its bytes; coord_receipt.py
+# reads all of it again — each job's rc file, the head and tree its log opened with,
+# one green RC line and one log per entry, a verdict of no red, one owner, run and
+# folder — holds every job to RELEASE_BUILD_LINE (in its done/, started and ended green
+# in its runner.log) and the jobs' own word on owner and run to the coordinator's
+# (coord-<label> of RELEASE_COORD_RUN), and counts a recipe as gated only where an
+# entry ran exactly `just <recipe>` in that gate's folder from the top of the checkout.
+# The receipt stands for this sha when git finds every job's head to hold the tree its
+# jobs printed, and that tree to be the sha's apart from the stamp's version lines and
+# the release notes edited in place (whose readers are then owed again), and every job
+# ended after its head was committed. The gate then runs only what the receipt left
+# owed — nothing, and the phase is skipped aloud, when it left nothing. Without a
+# receipt, or with one refused, the gate runs whole, and the phase line and status.json
+# say why. v1.1.84's lane spent 3168 + 1719 s on the tree the coordinator's l64 had
+# gated green an hour before (t-47516).
+gate_recipes() { # LANE -> the recipes its gate runs, one a line, as verify-every-recipe.sh lists them
+  if is_dry; then stub "GATE_$(upper "$1")_RECIPES" test | tr ' ' '\n'; return 0; fi
+  ( cd "$SCRATCH/$(gate_dir "$1")" && "$SELF_DIR/verify-every-recipe.sh" --list ) 2>/dev/null
+}
+commit_time() { # SHA -> its committer time, epoch seconds
+  if is_dry; then stub COMMIT_TIME 0; return 0; fi
+  git -C "$SCRATCH" show -s --format=%ct "$1" 2>/dev/null
+}
+tree_of() { # SHA PRINTED -> the tree git finds SHA to hold; the dry run says PRINTED, the tree its jobs printed
+  if is_dry; then stub HEAD_TREE "${2-}"; return 0; fi
+  git -C "$SCRATCH" rev-parse --verify --quiet "$1^{tree}" 2>/dev/null
+}
+# notes_edited SINCE — 0 when SINCE..SHA changed the release notes in place: modified
+# (--diff-filter=M), a plain file (100644) on both sides. --name-only shows a link, a
+# removal and a mode change as the same one path, and a linked notes file is what
+# updater_feed.py would follow into the release (ZO's review of t-47516, P3-1).
+notes_edited() {
+  local raw
+  if is_dry; then raw=$(stub NOTES_RAW ":100644 100644 1111111 2222222 M"$'\t'"$RELEASE_NOTES")
+  else raw=$(git -C "$SCRATCH" diff-tree -r --raw --diff-filter=M "$1" "$SHA" -- "$RELEASE_NOTES" 2>/dev/null) || return 1; fi
+  case $raw in ":100644 100644 "*" M"$'\t'"$RELEASE_NOTES") return 0 ;; esac
+  return 1
+}
+receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left owed; 1 when there is none or it is refused (RECEIPT says why)
+  local lane=$1 file="$RECEIPTS/$SHA.json" facts kind rest head ended committed recipes r who= run= tree= logs= heads= covered= owed= notes= n=0 total=0
+  ONLY=; RECEIPT=
+  [ -f "$file" ] || return 1
+  facts=$(python3 "$RECEIPT_PY" read --receipt "$file" --dir "$(gate_dir "$lane")" \
+            --line "$RELEASE_BUILD_LINE" --run "$RELEASE_COORD_RUN" 2>&1) \
+    || { RECEIPT="refused: $facts"; return 1; }
+  while read -r kind rest; do
+    case $kind in
+      who) who=$rest ;;
+      run) run=$rest ;;
+      tree) tree=$rest ;;
+      logs) logs=$rest ;;
+      recipe) covered="$covered $rest " ;;
+      head) heads="$heads$rest"$'\n' ;;
+    esac
+  done <<< "$facts"
+  [ -n "$tree" ] && [ -n "$heads" ] || { RECEIPT="refused: the receipt names no tree or head"; return 1; }
+  while read -r head ended; do
+    [ -n "$head" ] || continue
+    real_changes "$head" RECEIPT_CHANGED_PATHS || { RECEIPT="refused: git cannot compare ${head:0:8} with $SHA8"; return 1; }
+    [ "$(tree_of "$head" "$tree")" = "$tree" ] \
+      || { RECEIPT="refused: ${head:0:8} does not hold the tree its jobs printed (${tree:0:8})"; return 1; }
+    case $REAL in
+      '') ;;
+      "$RELEASE_NOTES"$'\n')
+        notes_edited "$head" || { RECEIPT="refused: $RELEASE_NOTES is not a plain file edited in place since ${head:0:8}"; return 1; }
+        notes=1 ;;
+      *) RECEIPT="refused: ${head:0:8} holds another tree ($(printf '%s' "$REAL" | head -3 | tr '\n' ' ')…)"; return 1 ;;
+    esac
+    committed=$(commit_time "$head")
+    [ "${ended:-0}" -gt "${committed:-x}" ] 2>/dev/null \
+      || { RECEIPT="refused: a job on ${head:0:8} ended before that head was committed"; return 1; }
+  done <<< "$heads"
+  recipes=$(gate_recipes "$lane")
+  [ -n "$recipes" ] || { RECEIPT="unused: the $lane gate's recipes are unknown (verify-every-recipe.sh --list)"; return 1; }
+  for r in $recipes; do
+    total=$(( total + 1 ))
+    case $covered in
+      *" $r "*) case "${notes:+ $NOTES_READERS }" in *" $r "*) ;; *) n=$(( n + 1 )); continue ;; esac ;;
+    esac
+    owed="$owed $r"
+  done
+  ONLY=${owed# }
+  RECEIPT="$who of $run as its jobs say (the lane's coordinator run), tree ${tree:0:8}: $n/$total $lane recipes green${notes:+, the notes changed}${ONLY:+, owes $ONLY} — logs $logs"
+  return 0
+}
+gate_left() { # LANE — 0 when the gate still runs: whole, or ONLY what a receipt left; 1 when a receipt covered it all (SKIP says so)
+  receipt_cover "$1" || { ONLY=; return 0; }
+  [ -z "$ONLY" ] || return 0
+  SKIP="receipt $RECEIPT"; RECEIPT=
   return 1
 }
 
@@ -921,21 +1046,22 @@ judge_sha() {
   # This is a scheduling contract, not a switch to re-enable parallel gates.
   bow_out_if_superseded gate-root || return 1
   phase_begin gate-root
-  if gate_owed root; then
+  if gate_owed root && gate_left root; then
     heavy wait_for_calm gate-root
     heavy run_gate root
     read_result "$WORK/gate-root.result"; root_rc=$RES_RC
     [ "$root_rc" = 0 ] && release_gate_target root-gate   # no root solo will need it
     step_done gate-root "$RES_RC" "$RES_SECS" || return $?
   else
-    # A gate not owed leaves an empty log: the flake judgment below reads
-    # nothing from it, and the phase line says why it did not run.
+    # A gate not owed — the tree unchanged since the last install, or every
+    # recipe green in the coordinator's receipt — leaves an empty log: the flake
+    # judgment below reads nothing from it, and the phase line says why it did not run.
     root_rc=0; : > "$OUT/gate-root-$SHA8.log"; stub_log "gate root not owed"
     step_done gate-root 0 0 || return $?
   fi
   bow_out_if_superseded gate-zo || return 1
   phase_begin gate-zo
-  if gate_owed zo; then
+  if gate_owed zo && gate_left zo; then
     heavy wait_for_calm gate-zo
     heavy run_gate zo
     read_result "$WORK/gate-zo.result"; zo_rc=$RES_RC
@@ -1048,6 +1174,11 @@ sweep_sha() {
   phase_begin sweep
   kill_children
   [ "$OUTCOME" = null ] && red "exit before an outcome"
+  # The receipt is kept beside the lane log; it stays queued with a sha that may run again.
+  if [ -f "$RECEIPTS/$SHA.json" ]; then
+    cp -f "$RECEIPTS/$SHA.json" "$OUT/receipt-$SHA8.json"
+    case $OUTCOME in green|superseded) rm -f "$RECEIPTS/$SHA.json" ;; esac
+  fi
   rm -rf "$SCRATCH" "$WORK"
   is_dry || git -C "$RELEASE_REPO" worktree prune > /dev/null 2>&1
   stub_log "sweep"
@@ -1058,7 +1189,7 @@ run_sha() { # SHA [QUEUE_FILE]
   SHA=$1; SHA8=$(printf '%s' "$1" | cut -c1-8); QUEUE_FILE=${2:-}
   SCRATCH=$RELEASE_SCRATCH_ROOT/gate-$SHA8; LOG=$OUT/lane-$SHA8.log
   STARTED_AT=$(now_iso); PHASES_JSON=; OUTCOME=null; REASON=; SWEPT=0
-  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=
+  VERSION=; UPDATER_PUBKEY=; SKIP=; WHY=; ONLY=; RECEIPT=
   rm -rf "$WORK"; mkdir -p "$WORK"
   log "== lane $SHA8 start (dry=$RELEASE_DRY_RUN)"
   [ -d "$SCRATCH" ] && log "stale scratch $SCRATCH — swept on the way out"
