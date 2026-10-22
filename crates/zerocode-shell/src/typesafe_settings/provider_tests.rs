@@ -534,6 +534,7 @@ fn a_candidate_an_apply_would_refuse_is_refused_before_anything_is_sent() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
     let mut remote = candidate(endpoint.base());
     remote.kind = ProviderKind::Remote;
+    remote.base_url = "http://gateway.example.com/v1".to_string();
     let mut unpinned = Provider::jev(DEFAULT_MODEL);
     unpinned.model = "two words".to_string();
     for (refused, token) in [
@@ -553,6 +554,29 @@ fn a_candidate_an_apply_would_refuse_is_refused_before_anything_is_sent() {
     }
     assert!(endpoint.asked().is_empty());
     assert_eq!(std::fs::read_to_string(&path).expect("settings"), before);
+}
+
+#[test]
+fn a_remote_loopback_candidate_can_be_checked_then_applied() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (selected, before) = selected_with_managed_model(&path);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut remote = candidate(endpoint.base());
+    remote.kind = ProviderKind::Remote;
+    let check = preflight_provider(
+        &path,
+        remote.clone(),
+        &selected.identity(),
+        &HeldKeys::default(),
+        &settings_wire(&path),
+    )
+    .expect("an explicit loopback HTTP connection");
+    assert!(check.answered, "{check:?}");
+    assert_eq!(endpoint.count(), 1);
+    assert_eq!(std::fs::read_to_string(&path).expect("settings"), before);
+    set_provider_if_identity(&path, remote.clone(), &selected.identity(), None).expect("apply");
+    assert_eq!(selected_provider(&path).expect("provider"), remote);
 }
 
 /// A preflight of the very provider the settings select sends a real request

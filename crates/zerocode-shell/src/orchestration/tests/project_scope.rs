@@ -501,6 +501,11 @@ fn known_runs_refuse_a_pane_whose_project_is_no_longer_known() {
         read.exit_code, 1,
         "missing placement bypassed the project boundary"
     );
+    assert!(
+        read.stderr.contains("not identified"),
+        "the scope lookup must succeed and explain the refusal: {}",
+        read.stderr
+    );
     let runs = json_from_leader(&host, team, "run-list");
     assert!(
         runs["runs"]
@@ -524,6 +529,7 @@ fn an_unscoped_runs_own_coordinator_can_establish_its_project() {
     a_leader(&host, owner, OWNER, None);
     a_leader(&host, other, OTHER, Some(&disk.a_task));
     let run = a_run_from(&host, owner, "legacy-placement");
+    assert!(shown_project(&host, owner, &run).is_null());
     let stranger = from_leader(&host, other, &format!("run-show --run {run}"));
     assert_eq!(
         stranger.exit_code, 1,

@@ -2825,7 +2825,9 @@ impl RuntimeActor {
     /// Where a verb from the pane `team/pane`, working in the project `root`,
     /// reaches (t-65286) — read by this actor off the ledger it holds, so the
     /// window's door asks one question per verb rather than copying the
-    /// ledger to answer it.
+    /// ledger to answer it. An empty root means an unidentified pane: the
+    /// reach still reports its run so the boundary can refuse known projects
+    /// while allowing an existing participant of an unscoped legacy run.
     pub fn project_reach(
         &self,
         argv: &[String],
@@ -2842,7 +2844,6 @@ impl RuntimeActor {
             || team.len() > MAX_NAME
             || pane.len() > MAX_NAME
             || actor.is_some_and(|actor| actor.len() > MAX_NAME)
-            || root.is_empty()
             || root.len() > PROJECT_ROOT_MAX
         {
             return Err(RuntimeError::InvalidInput);
