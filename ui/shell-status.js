@@ -219,12 +219,18 @@ function setStatusBarItem(item, enabled) {
 /* 켜진 게이지는 그 자리에서 묻는다(t-70039). 막대는 체크를 따라 서야 하는데, 한
  * 번도 읽지 않은 게이지는 숨은 채 다음 물음 — 창 포커스, 에이전트의 턴, 15분
  * 박자 — 을 기다렸다: 체크는 켜졌는데 막대에는 아무것도 없는 몇 분. 무강제로
- * 묻으므로 나갈지는 백엔드의 바닥(`usage_scan_holds`)이 정한다. */
+ * 묻으므로 나갈지는 백엔드의 바닥(`usage_scan_holds`)이 정한다.
+ *
+ * 읽기가 이미 나가 있는 게이지는 다시 묻지 않는다. 그 읽기의 다음 물음은 이미
+ * 걸려 있고(`usageAskTimers`), 막대는 창이 든 그 읽기(「확인 중…」)로 스위치와
+ * 함께 바로 선다. 다시 물으면 같은 읽기를 한 번 더 묻고 그 사슬을 새로 걸 뿐이며,
+ * 그 답이 스위치가 방금 되살린 조각을 다시 칠한다 — 결합 게이트 l68b의 창 시험에서는
+ * 그 읽기를 모르는 답(값도, 읽는 중도 없음)이 끄고 다시 켠 Codex를 막대에서 지웠다. */
 function askGaugesSwitchedOn(before) {
   for (const provider of USAGE_PROVIDERS) {
-    if (!before.has(provider.id) && statusBarItemEnabled(provider.id)) {
-      void refreshProviderUsage(provider, false);
-    }
+    if (before.has(provider.id) || !statusBarItemEnabled(provider.id)) continue;
+    if (provider.read().fetching) continue;
+    void refreshProviderUsage(provider, false);
   }
 }
 
