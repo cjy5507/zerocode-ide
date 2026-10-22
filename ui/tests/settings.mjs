@@ -7777,6 +7777,40 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
   return "real Enter · 5 locales × 2 themes · supported 720×480 minimum and wider viewports · model actions grouped";
 });
 
+await test("판단 연결 시험은 입력 키를 임시로 쓰고 실패해도 기존 키를 바꾸지 않는다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const provider = { kind: "remote", protocol: "openai_json", baseUrl: "https://decision-key.example.com/v1", model: "acme/decision", requiresAuth: true };
+  const service = backend.judgmentService(provider);
+  const previousKey = backend.keychain.get(service);
+  backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: provider };
+  backend.keychain.set(service, "kept-fixture-key");
+  const identity = backend.typesafeSettings().providerIdentity;
+  try {
+    await openJudgmentSettings(pageA);
+    backend.judgmentModelsError = "unauthorized";
+    backend.judgmentPreflight = { candidateIdentity: "fixture-candidate", activeProviderIdentity: identity, answered: false, failure: "unauthorized" };
+    for (const [button, command] of [["judgment-refresh-models", "judgment_models"], ["typesafe-check-btn", "preflight_judgment_provider"]]) {
+      await pageA.fill("#typesafe-key-input", "rejected-fixture-key");
+      const began = backend.calls.length;
+      await pageA.click(`#${button}`);
+      const call = await backend.waitForCall("A", command, began);
+      await pageA.waitForFunction(() => !typesafeBusy && !judgmentProviderController.loading);
+      assertEqual(backend.keychain.get(service), "kept-fixture-key", "a failed connection test replaced the active credential");
+      assertEqual(call.args.key, "rejected-fixture-key", "the test did not use the entered candidate credential");
+      assert(!backend.calls.slice(began).some((one) => ["save_typesafe_key", "set_judgment_provider"].includes(one.command)), "a read-only connection test wrote settings or a key");
+      assertEqual(backend.typesafeSettings().providerIdentity, identity);
+    }
+  } finally {
+    delete backend.judgmentModelsError;
+    delete backend.judgmentPreflight;
+    if (previousKey === undefined) backend.keychain.delete(service);
+    else backend.keychain.set(service, previousKey);
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "discovery and preflight are read-only · the current credential survives failure";
+});
+
 await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 검증해 적용한다", async () => {
   await openJudgmentSettings(pageA);
   const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
@@ -7787,6 +7821,7 @@ await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 
     await pageA.fill("#judgment-endpoint", "https://decisions.example.com/v1");
     await pageA.fill("#typesafe-model-input", "");
     await pageA.fill("#typesafe-key-input", "decision-fixture-key");
+    assertEqual(await pageA.locator("#typesafe-status").textContent(), "", "the new connection still claims a previous model was checked or applied");
     const began = backend.calls.length;
     await pageA.click("#judgment-refresh-models");
     await backend.waitForCall("A", "judgment_models", began);
@@ -7811,6 +7846,7 @@ await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 
     await backend.waitForCall("A", "set_judgment_provider", applyAt);
     assertEqual(backend.typesafeSettings().provider.model, "fixture-decision-b");
     assertEqual(backend.typesafeSettings().provider.protocol, "openai_json");
+    await pageA.waitForFunction(() => !typesafeBusy && !typesafeRefreshing);
   } finally {
     backend.zoSettings.smart = previous;
     await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
