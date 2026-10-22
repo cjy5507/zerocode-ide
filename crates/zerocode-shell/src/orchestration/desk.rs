@@ -14,7 +14,9 @@ use std::path::Path;
 
 use serde::Serialize;
 use zerocode_core::orchestration::evidence::{TaskHandIn, hand_in_of};
-use zerocode_core::orchestration::settle::{Left, Named, PRESS_TASKS_MAX, left_behind};
+use zerocode_core::orchestration::settle::{
+    Left, Named, PRESS_TASKS_MAX, awaits_review, left_behind_by,
+};
 use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
     Closure, Delivery, Gate, GateStatus, LEDGER_ITSELF, Ledger, Message, MessageKind, Run,
@@ -795,6 +797,16 @@ const fn completed_stage(work: WorkStage) -> &'static str {
     }
 }
 
+/// Whether a stage word says finished work waits on a review — the desk's word
+/// for [`awaits_review`], read through the one mapping of a work stage to its
+/// word ([`completed_stage`]), so the flow can ask it of the stage a line read
+/// (t-71220).
+pub(crate) fn word_awaits_review(word: &str) -> bool {
+    WorkStage::ALL
+        .into_iter()
+        .any(|stage| awaits_review(stage) && completed_stage(stage) == word)
+}
+
 /// A task's one stage word ([`STAGES`]) — the reading the desk, the board and
 /// the artifact tab's flow (t-68458) all draw, so no surface keeps a second one.
 pub(crate) fn stage_of(run: &Run, task: &Task) -> &'static str {
@@ -866,9 +878,24 @@ pub(crate) fn desk_snapshot(
         let term = live.and_then(|held| seat_term(&held.seat));
         let tasks_before = staged_tasks.len();
         let examined = examined_holds(run);
-        let left = left_behind(run, now_ms);
-        for task in &run.tasks {
-            let (stage, progress) = staged(run, task);
+        // Each task's stage is read once: who is coming back to finished work
+        // is read off the progress its stage was read from (t-71220).
+        let read: Vec<(&Task, (&'static str, Option<WorkProgress>))> = run
+            .tasks
+            .iter()
+            .map(|task| (task, staged(run, task)))
+            .collect();
+        let awaiting: HashSet<&str> = read
+            .iter()
+            .filter(|(_, (_, progress))| {
+                progress
+                    .as_ref()
+                    .is_some_and(|progress| awaits_review(progress.stage))
+            })
+            .map(|(task, _)| task.id.as_str())
+            .collect();
+        let left = left_behind_by(run, now_ms, |task| awaiting.contains(task.id.as_str()));
+        for (task, (stage, progress)) in read {
             staged_tasks.push((
                 run,
                 task,
@@ -2935,6 +2962,7 @@ mod tests {
                 ("stale", 0),
                 ("failed", 1),
                 ("unreviewable", 0),
+                ("waived", 0),
                 ("nothing_to_land", 0),
                 ("unknown", 0),
                 ("closed", 1),
@@ -3170,10 +3198,10 @@ mod tests {
         };
         assert_eq!(counted("ready"), Some((2, 1)));
         assert_eq!(counted("reported"), Some((1, 1)));
-        let ids = |pile: &[Named]| pile.iter().map(|one| one.task.clone()).collect::<Vec<_>>();
-        assert_eq!(ids(&desk.left.settle), [old.clone()]);
+        let ids = |pile: &[Named]| pile.iter().map(|one| one.task.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids(&desk.left.settle), [old.as_str()]);
         assert!(desk.left.look.is_empty());
-        assert_eq!(ids(&desk.left.unreviewed), [done.clone()]);
+        assert_eq!(ids(&desk.left.unreviewed), [done.as_str()]);
         assert_eq!(
             (desk.left.press_max, desk.left.quiet_days),
             (PRESS_TASKS_MAX, SETTLE_QUIET_DAYS)

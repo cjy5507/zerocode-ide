@@ -1099,7 +1099,7 @@ function pressArtifactFlowPile(view, kind) {
   const held = pile ? flow?.[pile.flow] : null;
   if (!held) return;
   const rows = (held.tasks ?? []).filter((line) => line.left === pile.names)
-    .map((line) => ({ task: line.task, run: line.run ?? "", title: line.said, touched: Number(line.last_ms) || 0 }));
+    .map((line) => ({ task: line.task, run: line.run ?? "", words: line.said, touched: Number(line.last_ms) || 0 }));
   void pressSettlePile(`flow:${kind}`, pile, rows, held.named ?? [], Number(flow.press_max) || 0, () => paintArtifactFlow(view));
 }
 

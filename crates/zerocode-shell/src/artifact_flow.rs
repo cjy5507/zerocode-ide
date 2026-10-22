@@ -29,7 +29,7 @@
 //!
 //! [`ledger_image`]: crate::orchestration::ledger_image
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -39,7 +39,7 @@ use serde_json::Value;
 use zerocode_core::artifact::Artifact;
 use zerocode_core::host::Host;
 use zerocode_core::orchestration::attempt_time::task_time;
-use zerocode_core::orchestration::settle::{Left, Named, PRESS_TASKS_MAX, left_behind};
+use zerocode_core::orchestration::settle::{Left, Named, PRESS_TASKS_MAX, left_behind_by};
 use zerocode_core::orchestration::{
     Dispatch, Ledger, Message, MessageKind, ResultAuthor, Run, SETTLE_QUIET_DAYS, Task, TaskStatus,
     commit_named, summary_of_body, worker_summary_in,
@@ -47,6 +47,7 @@ use zerocode_core::orchestration::{
 
 use crate::artifact_runtime::Chips;
 use crate::orchestration::desk::stage_of;
+use crate::orchestration::desk::word_awaits_review;
 
 /// Every number the flow has, in one place.
 pub(crate) struct FlowTable {
@@ -1325,23 +1326,44 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
     let mut lines: Vec<(Place, FlowTask)> = Vec::new();
     let mut seen: BTreeSet<&str> = BTreeSet::new();
     for index in indexes.iter().filter(|index| ours(index)) {
-        let left = left_behind(index.run, now_ms);
-        for task in &index.run.tasks {
-            let named = by_task.get(task.id.as_str()).copied();
-            let recent = horizon_ms
-                .is_none_or(|horizon| last_moment(task, index.attempts_of(&task.id)) >= horizon);
-            // Work left behind stands in its pile however old it is: the pile
-            // is where a person clears it.
+        // The lines in view are read first, each with its stage, and finished
+        // work waits on a review by the stage its line read — no stage is read
+        // twice (t-71220). Work out of view never stood in 「지금」: of it, only
+        // an open task joins a pile, which is where a person clears it.
+        let read: Vec<(&Task, Option<FlowTask>)> = index
+            .run
+            .tasks
+            .iter()
+            .map(|task| {
+                let recent = horizon_ms.is_none_or(|horizon| {
+                    last_moment(task, index.attempts_of(&task.id)) >= horizon
+                });
+                let in_view = recent
+                    || by_task.contains_key(task.id.as_str())
+                    || task.status == TaskStatus::Dispatched;
+                (task, in_view.then(|| ledger_line(index, task, table)))
+            })
+            .collect();
+        let awaiting: HashSet<&str> = read
+            .iter()
+            .filter(|(_, line)| {
+                line.as_ref()
+                    .and_then(|line| line.ledger_stage)
+                    .is_some_and(word_awaits_review)
+            })
+            .map(|(task, _)| task.id.as_str())
+            .collect();
+        let left = left_behind_by(index.run, now_ms, |task| {
+            awaiting.contains(task.id.as_str())
+        });
+        for (task, line) in read {
             let behind = left.get(task.id.as_str()).copied();
-            let in_view = recent
-                || named.is_some()
-                || task.status == TaskStatus::Dispatched
-                || behind.is_some();
-            if !in_view {
+            let Some(mut line) = line.or_else(|| behind.map(|_| ledger_line(index, task, table)))
+            else {
                 continue;
-            }
-            let mut line = ledger_line(index, task, table);
+            };
             line.left = behind;
+            let named = by_task.get(task.id.as_str()).copied();
             let merged = named.or_else(|| {
                 line.land
                     .as_ref()

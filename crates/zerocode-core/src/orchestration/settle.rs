@@ -94,8 +94,35 @@ impl Left {
 /// somebody's, kept for a look when it is kept — walked until nothing moves,
 /// since keeping one task keeps what it waits on. Two tasks left together go
 /// together.
+///
+/// Finished work is read by the ledger's own reading of where it stands
+/// ([`Run::progress_of`], [`awaits_review`]); a caller that already read each
+/// task's stage passes what it read instead ([`left_behind_by`]).
 #[must_use]
 pub fn left_behind(run: &Run, now_ms: i64) -> HashMap<&str, Left> {
+    left_behind_by(run, now_ms, |task| {
+        awaits_review(run.progress_of(task).stage)
+    })
+}
+
+/// Whether finished work at `stage` waits on a review nobody has written —
+/// handed in and not reviewed, or reviewed against older work. The one
+/// statement of it: the press, the desk and the flow all ask it.
+#[must_use]
+pub const fn awaits_review(stage: WorkStage) -> bool {
+    matches!(stage, WorkStage::ReportOnly | WorkStage::Stale)
+}
+
+/// [`left_behind`] over a reading the caller already made: `awaits` answers
+/// for a completed task whether its work waits on a review — the stage the
+/// caller read for it, asked through [`awaits_review`] — so no stage is read
+/// twice.
+#[must_use]
+pub fn left_behind_by<'a>(
+    run: &'a Run,
+    now_ms: i64,
+    awaits: impl Fn(&Task) -> bool,
+) -> HashMap<&'a str, Left> {
     let live = run.coordinator_live().is_some();
     let owned = |task: &Task| live && now_ms.saturating_sub(last_touched_ms(run, task)) < QUIET_MS;
     let mut left: HashMap<&str, Left> = HashMap::new();
@@ -128,12 +155,7 @@ pub fn left_behind(run: &Run, now_ms: i64) -> HashMap<&str, Left> {
                     Some(Left::Settle)
                 }
             }
-            TaskStatus::Completed => (!owned(task)
-                && matches!(
-                    run.progress_of(task).stage,
-                    WorkStage::ReportOnly | WorkStage::Stale
-                ))
-            .then_some(Left::Unreviewed),
+            TaskStatus::Completed => (!owned(task) && awaits(task)).then_some(Left::Unreviewed),
             TaskStatus::Failed | TaskStatus::Closed => None,
         };
         if let Some(reading) = reading {

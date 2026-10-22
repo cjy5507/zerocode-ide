@@ -699,11 +699,11 @@ function paintDeskAsks(block, now, view) {
 const SETTLE_PILES = Object.freeze([
   {
     kind: "settle", press: "settle", left: ["settle", "look"], names: "settle", flow: "left", key: "board.settle.pileSettle", word: "정리 필요",
-    noteKey: "board.settle.pileSettleNote", note: "코디 자리가 비었거나 {{days}}일 넘게 손대지 않은 일 · 「지금」에 세지 않음",
+    note: { key: "board.settle.pileSettleNote", word: "코디 자리가 비었거나 {{days}}일 넘게 손대지 않은 일 · 「지금」에 세지 않음" },
   },
   {
     kind: "unreviewed", press: "waive", left: ["unreviewed"], names: "unreviewed", flow: "unreviewed", key: "board.settle.pileUnreviewed", word: "검토 없이 끝남",
-    noteKey: "board.settle.pileUnreviewedNote", note: "넘겼지만 검토할 코디가 없거나 {{days}}일 넘게 손대지 않은 일",
+    note: { key: "board.settle.pileUnreviewedNote", word: "넘겼지만 검토할 코디가 없거나 {{days}}일 넘게 손대지 않은 일" },
   },
 ]);
 /* 줄 하나의 상태 말 — 원장의 판정(`Left`)마다. 열린 채 남는 줄은 사람이 볼 일이다. */
@@ -722,17 +722,17 @@ const SETTLE_UNDO_MS = 60_000;
 const settlePresses = new Map();
 
 /* 줄 하나의 말 — 과업 · 런 · 손댄 지 얼마. 확인 창과 펼친 무더기가 같이 읽는다. `row`는
- * `{ task, run, title, touched }`다. */
+ * `{ task, run, words, touched }`다. */
 function settleRowWords(row, now) {
   return t("board.settle.askRow", "{{task}} · {{run}} · {{age}} — {{title}}", {
-    task: row.task, run: row.run, title: row.title,
+    task: row.task, run: row.run, title: row.words,
     age: t("board.desk.mailAge", "{{time}} 전", { time: agoWord(row.touched, now) }),
   });
 }
 
 /* 무더기의 메모 — 무엇이 이 무더기에 드는지, 원장의 조용한 날수(`quiet_days`) 그대로. */
 function settlePileNote(pile, quietDays) {
-  return t(pile.noteKey, pile.note, { days: quietDays });
+  return t(pile.note.key, pile.note.word, { days: quietDays });
 }
 
 /* 누름 단추의 말 — 몇 건에 무엇을 하는지. 한 번에 원장이 받는 수(`press_max`)를 넘으면 그만큼. */
@@ -1238,7 +1238,7 @@ function paintDeskLeft(block, now, view) {
     writeDisabled(press, settlePresses.get(key)?.sending === true);
     press.onclick = () => void pressSettlePile(key, pile,
       rows.filter((task) => task.left === pile.names)
-        .map((task) => ({ task: task.id, run: task.run, title: task.title, touched: Number(task.touched_ms) || 0 })),
+        .map((task) => ({ task: task.id, run: task.run, words: task.title, touched: Number(task.touched_ms) || 0 })),
       names, pressMax, repaint);
     const said = pileHead.querySelector(".board-left-said");
     writeTextContent(said, answer.said);
