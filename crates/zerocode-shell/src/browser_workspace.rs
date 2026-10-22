@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use zerocode_core::agent_browser::{
-    BROWSER_CLI, TAB_MODE_AGENT, TAB_MODE_PAUSED, TAB_MODE_PERSON, WORKSPACE_PAUSED,
-    WORKSPACE_PERSON_CONTROLLED,
+    BROWSER_CLI, TAB_MODE_AGENT, TAB_MODE_PAUSED, TAB_MODE_PERSON, WORKSPACE_LOOK_UNANSWERED,
+    WORKSPACE_PAUSED, WORKSPACE_PERSON_CONTROLLED,
 };
 
 #[cfg(test)]
@@ -1158,7 +1158,7 @@ fn look_unanswered(label: &str, loading: bool) -> String {
         "페이지가 답하지 않았습니다"
     };
     format!(
-        "workspace_look_unanswered: {why} — 1초 뒤 {}로 다시 보세요. 다시 답이 없으면 {BROWSER_CLI} tabs로 상태를 보고 사람에게 알리세요",
+        "{WORKSPACE_LOOK_UNANSWERED}: {why} — 1초 뒤 {}로 다시 보세요. 다시 답이 없으면 {BROWSER_CLI} tabs로 상태를 보고 사람에게 알리세요",
         look_at(label)
     )
 }

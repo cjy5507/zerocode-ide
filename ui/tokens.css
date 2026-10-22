@@ -544,6 +544,36 @@
   --status-dot-size: 10px;
   --focus-ring: 2px solid var(--ink-chalk);
   --focus-ring-offset: 2px;
+  /* The rest of the draft's own measures (t-70028, the person on 10-22: 「시안대로
+   * 디자인이 안 나옴」), read off reports/t-67561/b.html: a small button and a
+   * badge are padded 10px a side, a row of 「당신 차례」 20px above and below,
+   * a row of 「지금 도는 일」 10px, the sentence on top keeps 20px under it,
+   * the tab bar stands 48px, and a meta line or an icon keeps 6px off its
+   * neighbour. */
+  --control-pad-inline: 10px;
+  --board-ask-pad-block: 20px;
+  --board-row-pad-block: 10px;
+  --board-intro-after: 20px;
+  --board-tab-height: 48px;
+  --board-gap-small: 6px;
+  /* The draft's status dots (t-70028): a filled dot beside its word, the way
+   * the Vercel deployment list the draft quotes draws a state — running in
+   * Geist's "warning" amber, waiting its turn in accents-2 grey ringed by the
+   * 1px rule, stopped in "error" red, finished in "ready" cyan, yours in
+   * blue-700. The word beside each says the state too, so the colour never
+   * speaks alone. The earlier build's green ring for running (coordinator
+   * m-67644) and amber ring for waiting (m-67792) gave way here: the person
+   * asked for the draft as drawn. */
+  --status-dot-run: #f5a623;
+  --status-dot-queue: #333333;
+  --status-dot-halt: #ff0000;
+  --status-dot-done: var(--cyan-700);
+  --status-dot-you: var(--blue-700);
+  /* The draft's solid badge (질문 · 검토 · 결정): Geist's blue-800 under white
+   * words, 5.73:1 — the same in both treatments, as the draft draws it. */
+  --blue-800: #0062d1;
+  --signal-you-solid: var(--blue-800);
+  --ink-on-solid: #ffffff;
   --leading-body: 1.55;
   --leading-tight: 1.25;
   --tracking-label: 0.08em;
@@ -3018,6 +3048,10 @@
   --signal-ready: var(--green-900);
   --signal-wait: var(--amber-900);
   --signal-halt: var(--red-900);
+  /* The draft's light dots (t-70028): accents-2 and error take their light
+   * values; the amber, the cyan and the blue are the same dot in both. */
+  --status-dot-queue: #eaeaea;
+  --status-dot-halt: #ee0000;
   /* The person's blue as words on its own tint: blue-900 falls to 4.34:1 on a
    * 14% blue ground and 3.72:1 on 24%, so the ink is that blue a quarter of
    * the way to this block's ink — #0654a6, 6.08:1 and 5.22:1 there, 7.45:1 on
@@ -3422,6 +3456,10 @@
      table's first columns in view beside it. */
   --jev-drawer-width: 420px;
   --jev-drawer-title-size: var(--text-lg);
+  /* Writing a decision needs room for a question and its answer examples.
+     Centre this editor separately from the table's read-only inspector. */
+  --jev-custom-editor-width: 720px;
+  --jev-custom-editor-height: 880px;
   /* One rhythm for every row and chip (t-6277 D10): the cells' padding and
      leading, the weights the page speaks in, the tints a tone is laid on
      with, and the trend's stroke. */

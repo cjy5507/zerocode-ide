@@ -358,6 +358,7 @@ suite("editor-selection", ({ browser, origin, ok }) => testEditorSelection(brows
 suite("editor-recovery", ({ browser, origin, ok }) => testEditorRecovery(browser, origin, ok));
 suite("ime-broken-commit", ({ browser, origin, ok }) => testImeBrokenCommit(browser, origin, ok));
 suite("ime-korean-regression", ({ browser, origin, ok }) => testImeKoreanRegression(browser, origin, ok));
+suite("ime-stage-switch", async ({ browser, origin, ok }) => (await import("./ime-stage-switch.mjs")).testImeStageSwitch(browser, origin, ok));
 suite("vault", async ({ browser, origin }) => {
   const { page } = await openWindowTestPage(browser, origin, {
     before: (surface) => surface.addInitScript(() => { window.__GEMINI_VENDOR_FIXTURE__ = true; }),
@@ -696,13 +697,16 @@ const titaniumMaterial = await page.evaluate(async () => {
  * backgrounds where the obsidian atelier had five steps: the floor and the
  * recess cut into a panel are background-200, a panel and the left column are
  * background-100, and gray-100 is what rises off them. The depth is that
- * ladder plus the 1px rule, so the equal pairs are pinned as equal. */
+ * ladder plus the 1px rule, so the equal pairs are pinned as equal. And every
+ * piece of the chrome is flat (t-70028, review t-68962 P3 ①): the left column
+ * kept a 5% lane wash from the atelier while this line looked at the
+ * titlebar's image alone. */
 ok(
-  "dark chrome is one Geist material with legible depth: floor and recess, then panels and the left column, then raised",
+  "dark chrome is one flat Geist material with legible depth: floor and recess, then panels and the left column, then raised",
   titaniumMaterial.chrome.every(
     ({ background }) => background === titaniumMaterial.chrome[0].background,
   ) &&
-    titaniumMaterial.chrome[0].image === "none" &&
+    titaniumMaterial.chrome.every(({ image }) => image === "none") &&
     titaniumMaterial.veilAlpha >= 0.9 && titaniumMaterial.veilAlpha < 1 &&
     titaniumMaterial.body === "rgba(0, 0, 0, 0)" &&
     titaniumMaterial.stage === titaniumMaterial.surfaces.abyss &&

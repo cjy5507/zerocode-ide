@@ -110,7 +110,7 @@ use verify_treadmill::{batch_had_successful_mutation, is_verify_class_tool};
 pub(crate) use verified_state::receipt_in;
 // Refusal/quota-fallback items the sync + streaming turn loops still reference.
 use fallback::{
-    is_refusal_stop_reason, overload_demotion_warn, quota_fallback_swap_warn,
+    demotion_warn, is_refusal_stop_reason, quota_fallback_swap_warn,
     quota_wait_hold_warn,
     refusal_surfaced_message, surfaced_refusal_notice, QuotaEscape, RefusalDecision,
     REFUSAL_CONTEXT_CLEANED_WARN,
@@ -2667,7 +2667,7 @@ where
                                 .context_model
                                 .clone()
                                 .unwrap_or_else(|| "the main model".to_string());
-                            eprintln!("[zo] {}", overload_demotion_warn(&shed, &model));
+                            eprintln!("[zo] {}", demotion_warn(&error, &shed, &model));
                             continue;
                         }
                         QuotaEscape::None => {}

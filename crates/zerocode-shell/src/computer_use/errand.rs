@@ -530,6 +530,12 @@ pub trait World {
     /// The screen and the controls it is showing now, or `None` when the
     /// screen cannot be read (a walk that cannot see does not press).
     fn look(&mut self) -> Option<Screen>;
+    /// Why the last [`Self::look`] came back with nothing (t-70425), as the
+    /// `no_look` row says it. A world that cannot tell says its look was
+    /// refused, in the protocol's word for an answer with no envelope.
+    fn missed(&mut self) -> Missed {
+        Missed::refused(zerocode_core::computer_use_protocol::error_code::UNANSWERED)
+    }
     /// Press one number down the ordinary door. `true` when the door took it;
     /// a stale pin, a host outside the recording and a shut door are all
     /// `false`, and none of them is retried.
@@ -637,6 +643,48 @@ pub const NO_TYPING: &str = "no_typing";
 pub const NO_FIELD: &str = "no_field";
 pub const PRESS_REFUSED: &str = "press_refused";
 pub const TYPE_REFUSED: &str = "type_refused";
+
+/// Why a look came back with nothing (t-70425): the surface's own reason —
+/// no window, nothing to number, out of time — or a door's refusal, with the
+/// door's own code (`walk_words`: `NO_WINDOW`, `EMPTY_TREE`, `LOOK_TIMEOUT`,
+/// `LOOK_REFUSED` and `REFUSAL`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Missed {
+    pub reason: &'static str,
+    pub refusal: Option<String>,
+}
+
+impl Missed {
+    /// The surface's own reason.
+    #[must_use]
+    pub const fn said(reason: &'static str) -> Self {
+        Self {
+            reason,
+            refusal: None,
+        }
+    }
+
+    /// A door's refusal, by its own code.
+    #[must_use]
+    pub fn refused(code: impl Into<String>) -> Self {
+        Self {
+            reason: walk_words::LOOK_REFUSED,
+            refusal: Some(code.into()),
+        }
+    }
+
+    /// The `no_look` row's own words for it.
+    fn row(&self) -> Value {
+        let mut said = json!({
+            (walk_words::OUTCOME): walk_words::NO_LOOK,
+            (walk_words::REASON): self.reason,
+        });
+        if let Some(code) = &self.refusal {
+            said[walk_words::REFUSAL] = json!(code);
+        }
+        said
+    }
+}
 
 /// Where a typed value came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1251,12 +1299,9 @@ fn walk(
         }
         let looking = std::time::Instant::now();
         let Some(screen) = world.look() else {
-            walked.rows.push(row(
-                mode,
-                at,
-                attempt,
-                json!({ (walk_words::OUTCOME): walk_words::NO_LOOK }),
-            ));
+            walked
+                .rows
+                .push(row(mode, at, attempt, world.missed().row()));
             return walked;
         };
         let look_ms = u64::try_from(looking.elapsed().as_millis()).unwrap_or(u64::MAX);

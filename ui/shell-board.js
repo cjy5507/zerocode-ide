@@ -132,9 +132,13 @@ function refreshDeskAmbient() {
   // that did not move tells the desk nothing — so the rows are read again on the
   // slow beat, unless a read is already out (a first paint asks for one itself).
   if (!deskLedgerAsking) refreshDeskLedger();
-  void askReleaseStatus().then(scheduleDeskPaint);
+  // A lane that moved repaints the desk itself (`absorbReleaseStatus`).
+  void askReleaseStatus();
   void askMachineLoad();
   void askDeskCheckouts();
+  // The build line's next turn and the running lane's steps ahead — the 빌드 줄 card's foot and
+  // list (t-70028) — are the schedule's reading, asked on this beat while 「지금」 stands.
+  if (boardNowTab === "now") refreshBoardSchedule();
 }
 
 /* 워커 체크아웃마다 앞선 커밋과 바뀐 파일을 묻는다 — 판 위의 워커가 든 것만. */
@@ -590,15 +594,18 @@ async function ackDeskBatch(view, letter) {
   }
 }
 
-function paintDeskLetter(row, letter, seat, now, view) {
+/* `meta`는 당신 차례 카드가 그 편지의 첫 줄 대신 세우는 한 줄의 조각이다(`boardMetaPieces`,
+ * t-70028) — 기록 탭의 소식은 워커와 과업 그대로다. */
+function paintDeskLetter(row, letter, seat, now, view, meta = null) {
   row.__letter = letter;
   writeAttribute(row, "data-letter", deskLetterKey(letter));
   const kind = DESK_MAIL[letter.kind];
   writeClassName(row, `board-desk-letter is-${letter.kind} is-${letter.delivery}`);
   dressAgentGraphStateMark(row.querySelector(".agent-graph-node-state"), kind?.state ?? "idle");
   writeTextContent(row.querySelector(".board-desk-letter-kind"), kind ? t(kind.key, kind.word) : String(letter.kind));
-  const who = [letter.worker, letter.task].filter(Boolean).join(" · ");
-  writeTextContent(row.querySelector(".board-desk-letter-who"), who);
+  const whoLine = row.querySelector(".board-desk-letter-who");
+  if (meta) paintBoardMeta(whoLine, meta);
+  else writeTextContent(whoLine, [letter.worker, letter.task].filter(Boolean).join(" · "));
   writeTextContent(row.querySelector(".board-desk-letter-age"),
     t("board.desk.mailAge", "{{time}} 전", { time: agoWord(letter.created_ms, now) }));
   const detail = deskLetterDetail(letter, now);
@@ -2147,11 +2154,18 @@ function paintDeskPipeline(block, now, view) {
  * 레인이 적은 `outcome` 그대로 — 끝나지 않은 레인은 진행 중이고, 여기서 초록을
  * 지어내지 않는다. */
 
-/* 판정 셋의 낱말과 상태 표식. 다섯 상태의 표식을 빌린다 — 보드만의 색은 없다. */
+/* 시안 B의 카드 (t-70028): 첫 줄은 「새 버전 발행 v1.1.84 … ● 도는 중」, 둘째 줄은 커밋과
+ * 차례(「네 단계 중 셋째」), 그 아래 단계 목록 — 끝난 단계·도는 단계·남은 단계(「대기」). 남은
+ * 단계와 그 평소 소요는 일정의 답이 안다(`deskReleaseAhead`, t-67482) — 그 답이 없으면 레인
+ * 파일이 말한 단계만 선다. 끝난 레인은 접힌다: 「● 초록 · 07:31 끝남」과 커밋 · 걸린 시간의 두
+ * 줄이고, 단계는 「단계별 시간 · 원문 로그」 안에 있다(빨강 레인은 실패한 단계를 남긴다). 카드의
+ * 발은 빌드 줄의 다음 차례다(`deskLineFoot`). */
+
+/* 판정 셋의 낱말과 상태 점. */
 const DESK_RELEASE_VERDICTS = Object.freeze({
-  running: { state: "working", key: "board.desk.releaseRunning", word: "진행 중 · {{phase}}" },
-  green: { state: "done", key: "board.desk.releaseGreen", word: "초록" },
-  red: { state: "failed", key: "board.desk.releaseRed", word: "빨강" },
+  running: { dot: "run", key: "board.now.stateRun", word: "도는 중" },
+  green: { dot: "done", key: "board.desk.releaseGreen", word: "초록" },
+  red: { dot: "halt", key: "board.desk.releaseRed", word: "빨강" },
 });
 
 function deskReleaseVerdict(status) {
@@ -2166,42 +2180,165 @@ function deskReleasePhaseState(phase) {
   return phase.rc === 0 ? "done" : "failed";
 }
 
-/* 한 단계의 표식과 오른쪽 낱말 (t-67607, 시안 B의 단계 목록): 끝난 단계는 「끝」, 도는
- * 단계는 제 경과 — 레인이 시작한 때에서 앞선 단계가 쓴 초를 뺀 때부터. 단계마다 걸린
- * 초는 「단계별 시간 · 원문」 안에 있다. */
+/* 단계마다 표식(묶음 아이콘, 도는 단계는 호박 점)과 오른쪽 낱말: 끝난 단계는 「끝」, 도는 단계는
+ * 제 경과, 남은 단계는 「대기」. 단계마다 걸린 시간은 「단계별 시간 · 원문 로그」 안에 있다. */
 const DESK_RELEASE_STEPS = Object.freeze({
-  done: { mark: "done", key: "board.now.stepDone", word: "끝" },
-  skipped: { mark: "idle", key: "board.now.stepSkipped", word: "건너뜀" },
-  failed: { mark: "failed", key: "board.now.stepFailed", word: "실패" },
-  running: { mark: "working" },
+  done: { icon: "circle-check", key: "board.now.stepDone", word: "끝" },
+  skipped: { icon: "circle-dashed", key: "board.now.stepSkipped", word: "건너뜀" },
+  failed: { icon: "circle-x", key: "board.now.stepFailed", word: "실패" },
+  ahead: { icon: "circle", key: "board.now.stepAhead", word: "대기" },
+  running: { icon: null },
 });
 
-function deskReleaseStepWord(state, status, phases, now) {
-  const step = DESK_RELEASE_STEPS[state];
-  if (state !== "running") return t(step.key, step.word);
-  const started = Date.parse(status.started_at);
-  const spent = phases.reduce((sum, phase) => sum + (Number(phase.secs) || 0), 0) * 1000;
-  const from = Number.isFinite(started) ? started + spent : now;
-  return runningWord(from, now) ?? t("board.desk.releaseJustStarted", "방금 시작");
+/* 레인 단계의 우리말 이름 — 레인(tools/release/lane.sh의 `PHASES`)이 적는 이름마다 하나. 이 표가
+ * 모르는 단계는 레인이 적은 이름 그대로 서고, 원문 로그는 언제나 레인의 이름이다. */
+const DESK_RELEASE_PHASES = Object.freeze({
+  archive: { key: "board.now.phaseArchive", word: "소스 묶기" },
+  "gate-root": { key: "board.now.phaseGateRoot", word: "결합 시험" },
+  "gate-zo": { key: "board.now.phaseGateZo", word: "zo 시험" },
+  flakes: { key: "board.now.phaseFlakes", word: "흔들린 시험 다시" },
+  push: { key: "board.now.phasePush", word: "올리기" },
+  "build-app": { key: "board.now.phaseBuildApp", word: "앱 빌드" },
+  "swap-app": { key: "board.now.phaseSwapApp", word: "앱 바꿔 넣기" },
+  "build-zo": { key: "board.now.phaseBuildZo", word: "zo 빌드" },
+  "swap-zo": { key: "board.now.phaseSwapZo", word: "zo 바꿔 넣기" },
+  "bundle-updater": { key: "board.now.phaseBundle", word: "업데이트 묶기" },
+  publish: { key: "board.now.phasePublish", word: "발행" },
+  sweep: { key: "board.now.phaseSweep", word: "정리" },
+});
+
+function deskReleasePhaseWord(name) {
+  const known = DESK_RELEASE_PHASES[name];
+  return known ? t(known.key, known.word) : String(name);
 }
 
-function deskReleaseClock(status, verdict, now) {
-  const started = Date.parse(status.started_at);
-  if (!Number.isFinite(started)) return "";
-  if (verdict === "running") {
-    return runningWord(started, now) ?? t("board.desk.releaseJustStarted", "방금 시작");
+/* 「네 단계 중 셋째」 — 시안은 차례를 숫자 대신 우리말 셈으로 적는다. 셈말은 말마다 번역 목록이
+ * 가진다(`board.orbit.particle`처럼 `|`로 가른 목록): 한국어만 낱말이 있고, 다른 말과 목록을 넘는
+ * 수는 숫자다. */
+function deskStepOfWords(at, total) {
+  const tally = t("board.now.lineTally",
+    "|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열|열한|열두|열세|열네|열다섯|열여섯|열일곱|열여덟|열아홉|스무").split("|");
+  const ordinal = t("board.now.lineOrdinal",
+    "|첫째|둘째|셋째|넷째|다섯째|여섯째|일곱째|여덟째|아홉째|열째|열한째|열두째|열셋째|열넷째|열다섯째|열여섯째"
+    + "|열일곱째|열여덟째|열아홉째|스무째").split("|");
+  const said = tally[total] && ordinal[at] ? { at: ordinal[at], total: tally[total] } : { at, total };
+  return t("board.now.lineStepOf", "{{total}} 단계 중 {{at}}", said);
+}
+
+/* 일정의 답에서 이 레인 — 같은 sha로 지금 도는 것. 지금 단계부터 남은 단계와 그 평소 소요(지난
+ * 초록 레인들의 가운데 값)를 든다(`schedule_timeline`의 `ahead`). */
+function deskReleaseAhead(status) {
+  const lanes = Array.isArray(boardScheduleAnswer?.lanes) ? boardScheduleAnswer.lanes : [];
+  const lane = lanes.find((one) => one.running && String(status.sha).startsWith(String(one.sha)));
+  return lane && Array.isArray(lane.ahead) && lane.ahead.length > 0 ? lane : null;
+}
+
+/* 길이 한 마디: 1분이 안 되면 그렇다고. */
+function deskSpanWords(ms) {
+  return ms >= 60_000 ? usageDuration(ms) : t("board.desk.underMinute", "1분 미만");
+}
+
+/* 단계별 시간의 한 칸: 끝난 단계는 걸린 시간, 도는 단계는 경과와 평소, 남은 단계는 평소. */
+function deskReleaseTime(step, now) {
+  const usual = Number(step.expected?.samples) > 0 ? deskSpanWords(Number(step.expected.secs) * 1000) : "";
+  if (step.state === "running") {
+    const ran = runningWord(step.from, now) ?? t("board.desk.releaseJustStarted", "방금 시작");
+    return usual ? t("board.now.lineRanUsual", "{{ran}} · 평소 {{usual}}", { ran, usual }) : ran;
   }
-  const updated = Date.parse(status.updated_at);
-  if (!Number.isFinite(updated)) return "";
-  const took = usageDuration(Math.max(0, updated - started)) ?? t("board.desk.underMinute", "1분 미만");
-  return t("board.desk.releaseTook", "{{took}} 걸림 · {{at}} 끝남", { took, at: knowledgeClock(updated, now) });
+  if (step.state === "ahead") return usual ? t("board.now.lineAbout", "약 {{time}}", { time: usual }) : "—";
+  if (step.state === "skipped") return t("board.now.stepSkipped", "건너뜀");
+  const took = deskSpanWords((Number(step.secs) || 0) * 1000);
+  return step.state === "failed" ? t("board.now.lineFailedTook", "실패 · {{time}}", { time: took }) : took;
+}
+
+/* 한 단계의 표식 — 행의 첫 칸, 상태가 바뀔 때만 다시 짓는다: 묶음 아이콘이거나 도는 단계의 점. */
+function dressDeskStepMark(item, state) {
+  if (item.dataset.mark === state) return;
+  item.dataset.mark = state;
+  const glyph = DESK_RELEASE_STEPS[state].icon;
+  const holder = document.createElement("template");
+  holder.innerHTML = glyph ? icon(glyph) : '<span class="board-dot is-run" aria-hidden="true"></span>';
+  item.firstElementChild.replaceWith(holder.content.firstElementChild);
+}
+
+/* 단계별 시간 — 펼친 사람에게만 짓는다: 접힌 기록은 그 표와 원문을 들고 다니지 않는다. */
+function paintDeskReleaseTimes(log, steps, phases, now) {
+  if (!log.open) {
+    for (const node of log.querySelectorAll(":scope > :not(summary)")) node.remove();
+    return;
+  }
+  let times = log.querySelector(":scope > .board-desk-release-times");
+  if (!times) {
+    times = deskElement("table", "board-desk-release-times");
+    times.append(deskElement("tbody", ""));
+    log.append(times, deskElement("pre", "board-raw-text"));
+  }
+  const rows = times.firstElementChild;
+  const heldRows = new Map([...rows.children].map((node) => [node.dataset.phase, node]));
+  reconcileElementOrder(rows, steps.map((step) => {
+    let row = heldRows.get(step.name);
+    if (!row) {
+      row = deskElement("tr", "");
+      row.append(deskElement("td", ""), deskElement("td", "board-desk-release-step-time"));
+    }
+    writeAttribute(row, "data-phase", step.name);
+    writeTextContent(row.firstElementChild, deskReleasePhaseWord(step.name));
+    writeTextContent(row.lastElementChild, deskReleaseTime(step, now));
+    return row;
+  }));
+  // The lane's own words for each step, as its status file wrote them — the name, its exit
+  // code or skip, its seconds — for whoever opens the record.
+  writeTextContent(log.querySelector(":scope > .board-raw-text"), phases.map((phase) => [
+    phase.name, phase.skipped ? `skipped ${phase.skipped}` : `rc=${phase.rc}`,
+    Number.isFinite(phase.secs) ? `${phase.secs}s` : "",
+  ].filter(Boolean).join(" ")).join("\n"));
+}
+
+/* 빌드 줄의 발: 레인 말고 줄이 무엇을 하는가 — 기다리는 일감이 있으면 실행기의 차례대로 그 첫째
+ * (`boardScheduleQueuePlan`), 도는 일감만 있으면 그것, 아무것도 없으면 「줄 비어 있음」. 일정의
+ * 답이 아직 없으면 발은 서지 않는다 — 모르는 것을 비었다고 하지 않는다. */
+/* 발의 글은 일정의 답 하나에 한 번 — 답이 바뀔 때만 다시 센다(줄의 첫째는 넣은 차례가 정한다). */
+const deskLineFeet = new WeakMap();
+
+function deskLineFoot(now) {
+  const answer = boardScheduleAnswer;
+  if (!answer || !Array.isArray(answer.jobs)) return "";
+  const said = deskLineFeet.get(answer);
+  if (said?.language === document.documentElement.lang && said.ledger === deskLedger) return said.words;
+  const words = deskLineFootWords(answer, now);
+  deskLineFeet.set(answer, { words, language: document.documentElement.lang, ledger: deskLedger });
+  return words;
+}
+
+function deskLineFootWords(answer, now) {
+  const waiting = answer.jobs.filter((job) => job.state === "waiting");
+  if (waiting.length > 0) {
+    const lanes = Array.isArray(answer.line?.runner_lanes) ? answer.line.runner_lanes : [];
+    const plan = boardScheduleQueuePlan(answer.jobs, lanes, now);
+    const next = waiting.reduce((first, job) =>
+      ((plan.get(job.name)?.start ?? Infinity) < (plan.get(first.name)?.start ?? Infinity) ? job : first));
+    return answer.line?.paused === true
+      ? t("board.now.lineNextPaused", "다음 차례 — {{job}}(줄이 멈춘 동안 기다림)", { job: deskLineJobWords(next) })
+      : t("board.now.lineNext", "다음 차례 — {{job}}", { job: deskLineJobWords(next) });
+  }
+  const running = answer.jobs.find((job) => job.state === "running");
+  return running
+    ? t("board.now.lineBusy", "줄에서 도는 일감 — {{job}}", { job: deskLineJobWords(running) })
+    : t("board.now.lineEmpty", "줄 비어 있음");
+}
+
+/* 일감 하나의 이름: 결합 게이트의 일감은 그 게이트, 과업 id를 단 일감은 원장의 과업 이름, 그 밖에는
+ * 일감 이름(차례와 넣은 시각을 뗀 것). */
+function deskLineJobWords(job) {
+  if (job.gate) return t("board.now.lineGate", "결합 게이트 {{gate}}", { gate: job.gate });
+  const id = /(?:^|[^a-z0-9])t-?(\d{4,})/i.exec(`${job.who ?? ""} ${job.name}`);
+  const task = id ? (deskLedger?.tasks ?? []).find((one) => one.id === `t-${id[1]}`) : null;
+  return task?.title ?? (id ? `t-${id[1]}` : boardScheduleJobLabel(job.name));
 }
 
 function paintDeskRelease(block, now) {
   const status = releaseLane;
   if (!status || typeof status !== "object" || !status.sha) return false;
-  // The draft B card (t-67607): 「빌드 줄」, one lane at a time, its steps, and the
-  // lane's own record of each step behind 「단계별 시간 · 원문」.
   const head = block.firstElementChild;
   if (!head.firstElementChild) {
     head.append(deskElement("span", "board-desk-head-word"), deskElement("span", "board-desk-head-note"));
@@ -2209,83 +2346,108 @@ function paintDeskRelease(block, now) {
   writeTextContent(head.firstElementChild, t("board.now.line", "빌드 줄"));
   writeTextContent(head.lastElementChild, t("board.now.lineHint", "한 번에 하나씩"));
   const body = block.lastElementChild;
-  let card = body.firstElementChild;
+  let card = body.querySelector(":scope > .board-desk-release");
   if (!card) {
     card = deskElement("div", "board-desk-release");
     const line = deskElement("p", "board-desk-release-line");
-    line.append(agentGraphStateMark("working"), deskElement("span", "board-desk-release-title"),
-      deskElement("strong", "board-desk-release-version"),
-      deskElement("code", "board-desk-release-sha"), deskElement("span", "board-desk-release-verdict"),
-      deskElement("span", "board-desk-release-clock"));
+    line.append(deskElement("span", "board-desk-release-title"), deskElement("strong", "board-desk-release-version"),
+      deskElement("span", "board-desk-release-status"));
+    const meta = deskElement("p", "board-desk-release-meta");
+    meta.append(deskElement("code", "board-desk-release-sha"), deskElement("span", "board-desk-release-took"));
+    card.append(line, meta, deskElement("ol", "board-desk-release-phases"),
+      deskElement("p", "board-desk-release-reason"), deskElement("ul", "board-desk-release-skips"));
     const log = deskElement("details", "board-desk-release-log");
-    log.append(deskElement("summary", "board-raw-head"), deskElement("pre", "board-raw-text"));
-    card.append(line, deskElement("ol", "board-desk-release-phases"),
-      deskElement("p", "board-desk-release-reason"), deskElement("ul", "board-desk-release-skips"), log);
-    body.replaceChildren(card);
+    const summary = deskElement("summary", "board-raw-head");
+    summary.insertAdjacentHTML("afterbegin", icon("chevron"));
+    log.append(summary);
+    log.ontoggle = () => scheduleDeskPaint();
+    body.replaceChildren(card, log, deskElement("p", "board-line-foot"));
   }
+  const [, log, foot] = body.children;
   writeTextContent(card.querySelector(".board-desk-release-title"), t("board.now.lineRelease", "새 버전 발행"));
   const verdict = deskReleaseVerdict(status);
   const said = DESK_RELEASE_VERDICTS[verdict];
-  dressAgentGraphStateMark(card.querySelector(".agent-graph-node-state"), said.state);
-  writeClassName(card, `board-desk-release is-${verdict}`);
+  const phases = Array.isArray(status.phases) ? status.phases.filter((one) => one && one.name) : [];
+  const failed = phases.filter((phase) => deskReleasePhaseState(phase) === "failed");
+  // A finished lane folds to its verdict and when it ended; a red one keeps the step that failed.
+  const folded = verdict !== "running";
+  writeClassName(card, `board-desk-release is-${verdict}${folded ? " is-folded" : ""}`);
   // A version is a name, and reads as one: `v1.1.84`.
   writeTextContent(card.querySelector(".board-desk-release-version"), status.version ? `v${status.version}` : "");
-  writeTextContent(card.querySelector(".board-desk-release-sha"), String(status.sha).slice(0, 8));
-  writeTextContent(card.querySelector(".board-desk-release-verdict"),
-    t(said.key, said.word, { phase: status.phase || "" }));
-  // A running lane's clock is its running step's (below); a finished one says how long it took.
-  writeTextContent(card.querySelector(".board-desk-release-clock"),
-    verdict === "running" ? "" : deskReleaseClock(status, verdict, now));
-  const phases = Array.isArray(status.phases) ? status.phases.filter((one) => one && one.name) : [];
-  const running = verdict === "running" && status.phase && !phases.some((one) => one.name === status.phase)
-    ? [{ name: String(status.phase), running: true }] : [];
+  const started = Date.parse(status.started_at);
+  const updated = Date.parse(status.updated_at);
+  // 「● 도는 중」, or a finished lane's 「● 초록 · 07:31 끝남」 — the dot is the status's own ::before.
+  writeTextContent(card.querySelector(".board-desk-release-status"), folded && Number.isFinite(updated)
+    ? t("board.now.lineEnded", "{{verdict}} · {{at}} 끝남", { verdict: t(said.key, said.word), at: boardClock(updated, now) })
+    : t(said.key, said.word));
+  writeTextContent(card.querySelector(".board-desk-release-sha"), String(status.sha).slice(0, SHORT_COMMIT_LENGTH));
+  // The running step started when the steps before it had spent their seconds.
+  const from = (Number.isFinite(started) ? started : now) + phases.reduce((sum, phase) => sum + (Number(phase.secs) || 0), 0) * 1000;
+  const lane = folded ? null : deskReleaseAhead(status);
+  const current = !folded && status.phase && !phases.some((one) => one.name === status.phase) ? String(status.phase) : "";
+  const steps = phases.map((phase) => ({ ...phase, state: deskReleasePhaseState(phase) }));
+  if (current) steps.push({ name: current, state: "running", from, expected: lane?.ahead[0]?.expected ?? null });
+  for (const ahead of lane?.ahead.slice(current ? 1 : 0) ?? []) steps.push({ name: ahead.name, state: "ahead", expected: ahead.expected });
+  const took = folded && Number.isFinite(started) && Number.isFinite(updated)
+    ? t("board.desk.releaseTookShort", "· {{took}} 걸림", { took: deskSpanWords(Math.max(0, updated - started)) }) : "";
+  const at = steps.findIndex((step) => step.state === "running");
+  writeTextContent(card.querySelector(".board-desk-release-took"), folded ? took
+    : lane && at >= 0 ? `· ${deskStepOfWords(at + 1, steps.length)}` : "");
   const list = card.querySelector(".board-desk-release-phases");
+  const shown = folded ? steps.filter((step) => step.state === "failed") : steps;
+  writeHidden(list, shown.length === 0);
   const held = new Map([...list.children].map((node) => [node.dataset.phase, node]));
-  reconcileElementOrder(list, [...phases, ...running].map((phase) => {
-    let item = held.get(phase.name);
+  reconcileElementOrder(list, shown.map((step) => {
+    let item = held.get(step.name);
     if (!item) {
       item = deskElement("li", "");
-      item.append(agentGraphStateMark("idle"), deskElement("span", "board-desk-release-step"),
+      item.append(deskElement("span", ""), deskElement("span", "board-desk-release-step"),
         deskElement("span", "board-desk-release-step-word"));
     }
-    writeAttribute(item, "data-phase", phase.name);
-    const state = phase.running ? "running" : deskReleasePhaseState(phase);
-    writeClassName(item, `board-desk-release-phase is-${state}`);
-    dressAgentGraphStateMark(item.firstElementChild, DESK_RELEASE_STEPS[state].mark);
-    writeTextContent(item.children[1], phase.name);
-    writeTextContent(item.children[2], deskReleaseStepWord(state, status, phases, now));
+    writeAttribute(item, "data-phase", step.name);
+    writeClassName(item, `board-desk-release-phase is-${step.state}`);
+    dressDeskStepMark(item, step.state);
+    writeTextContent(item.children[1], deskReleasePhaseWord(step.name));
+    writeTextContent(item.children[2], step.state === "running"
+      ? runningWord(step.from, now) ?? t("board.desk.releaseJustStarted", "방금 시작")
+      : t(DESK_RELEASE_STEPS[step.state].key, DESK_RELEASE_STEPS[step.state].word));
     return item;
   }));
   const reason = card.querySelector(".board-desk-release-reason");
   writeHidden(reason, verdict !== "red" || !status.reason);
   writeTextContent(reason, verdict === "red" ? String(status.reason || "") : "");
   const skips = card.querySelector(".board-desk-release-skips");
-  const skipped = phases.filter((phase) => phase.skipped);
+  const skipped = folded ? [] : phases.filter((phase) => phase.skipped);
   writeHidden(skips, skipped.length === 0);
   const heldSkips = new Map([...skips.children].map((node) => [node.dataset.phase, node]));
   reconcileElementOrder(skips, skipped.map((phase) => {
     const item = heldSkips.get(phase.name) ?? deskElement("li", "");
     writeAttribute(item, "data-phase", phase.name);
     writeTextContent(item, t("board.desk.skipReason", "{{name}}: {{reason}}",
-      { name: phase.name, reason: String(phase.skipped) }));
+      { name: deskReleasePhaseWord(phase.name), reason: String(phase.skipped) }));
     return item;
   }));
-  // The lane's own words for each step, as its status file wrote them — the
-  // name, its exit code or skip, its seconds — for whoever opens the record.
-  const log = card.querySelector(".board-desk-release-log");
-  writeTextContent(log.firstElementChild, t("board.now.lineLog", "단계별 시간 · 원문"));
-  writeTextContent(log.lastElementChild, phases.map((phase) => [
-    phase.name, phase.skipped ? `skipped ${phase.skipped}` : `rc=${phase.rc}`,
-    Number.isFinite(phase.secs) ? `${phase.secs}s` : "",
-  ].filter(Boolean).join(" ")).join("\n"));
-  writeHidden(log, phases.length === 0);
+  writeTrailingText(log.firstElementChild, t("board.now.lineLog", "단계별 시간 · 원문 로그"));
+  paintDeskReleaseTimes(log, steps, phases, now);
+  writeHidden(log, steps.length === 0);
+  const next = deskLineFoot(now);
+  writeTextContent(foot, next);
+  writeHidden(foot, next === "");
   return true;
 }
 
-/* 데스크가 보이는 동안의 느린 박자. 상태 바의 박자와 같은 문을 부른다. */
+/* 데스크가 보이는 동안의 1분 박자 하나 (t-67607 → t-70028). 느린 사실을 다시 묻고, 그 답을
+ * 기다리지 않고 판을 한 번 다시 그린다 — 「N분째」·「N분 전」·단계의 경과는 원장이 움직이지 않아도
+ * 1분마다 바뀌는 글자다. 그림은 바뀐 글자 노드만 쓰고(`writeTextContent`), 창이 숨었거나 작업
+ * 보기가 서 있지 않으면 박자도 서지 않는다(`idlePoller`). 상태 바의 박자와 같은 문을 부른다. */
+function deskMinute() {
+  refreshDeskAmbient();
+  scheduleDeskPaint();
+}
+
 const deskAmbient = idlePoller({
   wanted: () => deskViews().length > 0,
   every: DESK.ambientEveryMs,
-  tick: refreshDeskAmbient,
-  onResume: refreshDeskAmbient,
+  tick: deskMinute,
+  onResume: deskMinute,
 });

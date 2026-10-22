@@ -2,6 +2,7 @@ import AppKit
 @preconcurrency import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
+import CryptoKit
 import Darwin
 import Foundation
 import ImageIO
@@ -195,6 +196,9 @@ struct Snapshot {
     let windowBounds: CGRect
     let windowId: CGWindowID
     let windowLayer: Int
+    /// The identity of the document the window shows (`WindowDocument`),
+    /// never its path or address.
+    let document: String?
     let treeText: String
     let focusedElementId: Int?
     let screenshot: ScreenshotPayload?
@@ -213,6 +217,7 @@ struct Snapshot {
             windowBounds: windowBounds,
             windowId: windowId,
             windowLayer: windowLayer,
+            document: document,
             treeText: treeText,
             focusedElementId: focusedElementId,
             screenshot: nil,
@@ -224,6 +229,57 @@ struct Snapshot {
             maxDepthReached: maxDepthReached
         )
     }
+}
+
+/// The document a window shows, said only as its identity (t-69973): the
+/// first 16 hex digits of the SHA-256 of the window's `AXDocument`, else of
+/// the address its first web area reads (`AXURL`). Two windows under one
+/// title tell apart by it; the path or the address itself stays here, in no
+/// answer, line or kept snapshot.
+enum WindowDocument {
+    /// The key a window object carries the identity under.
+    static let key = "document"
+    /// How many hex digits of the digest the identity keeps.
+    static let digits = 16
+
+    /// The identity of `document`, else of `webAreaURL`; `nil` when the
+    /// window gives neither.
+    static func identity(document: String?, webAreaURL: String?) -> String? {
+        guard let shown = [document, webAreaURL].lazy.compactMap({ $0 }).first(where: { !$0.isEmpty }) else {
+            return nil
+        }
+        return SHA256.hash(data: Data(shown.utf8))
+            .prefix(digits / 2)
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+}
+
+/// The window an answer is of, by what tells it apart: its id, its title
+/// and, when the window gives one, its document's identity. `find` answers
+/// it as it is.
+func namedWindow(_ snapshot: Snapshot) -> [String: Any] {
+    var window: [String: Any] = ["id": Int(snapshot.windowId), "title": snapshot.windowTitle]
+    if let document = snapshot.document {
+        window[WindowDocument.key] = document
+    }
+    return window
+}
+
+/// The window a look is of: what names it (`namedWindow`) and where it stands.
+func placedWindow(_ snapshot: Snapshot) -> [String: Any] {
+    namedWindow(snapshot).merging([
+        "x": Int(snapshot.windowBounds.origin.x.rounded()),
+        "y": Int(snapshot.windowBounds.origin.y.rounded()),
+        "width": Int(snapshot.windowBounds.width.rounded()),
+        "height": Int(snapshot.windowBounds.height.rounded()),
+        "isMinimized": false,
+        "isOffscreen": false,
+        "screenIndex": jsonNullable(screenIndex(for: snapshot.windowBounds)),
+        "platform": [
+            "layer": snapshot.windowLayer,
+        ],
+    ]) { named, _ in named }
 }
 
 struct ScreenshotPayload {
@@ -1011,6 +1067,13 @@ final class Provider {
             compactBrowserTabs: app.isKnownBrowser
         )
         renderer.render(window)
+        // What tells this window from another of its title (t-69973): its
+        // own document — the one read a look adds — else the page its first
+        // web area showed the walk above.
+        let document = WindowDocument.identity(
+            document: stringAttribute(window, kAXDocumentAttribute as String),
+            webAreaURL: renderer.firstWebAreaURL
+        )
         let screenshot = includeScreenshot ? capture.screenshotPayload() : nil
         let screenshotStatus: ScreenshotStatus = if screenshot != nil {
             .captured
@@ -1030,6 +1093,7 @@ final class Provider {
             windowBounds: capture.bounds,
             windowId: capture.windowId,
             windowLayer: capture.layer,
+            document: document,
             treeText: renderTreeText(app: app, title: title, bounds: capture.bounds, lines: renderer.lines, focused: renderer.focusedSummary),
             focusedElementId: renderer.focusedElementId,
             screenshot: screenshot,
@@ -1061,20 +1125,7 @@ final class Provider {
                     "bundleId": jsonNullable(snapshot.app.bundleId),
                     "pid": Int(snapshot.app.pid),
                 ],
-                "window": [
-                    "id": Int(snapshot.windowId),
-                    "title": snapshot.windowTitle,
-                    "x": Int(snapshot.windowBounds.origin.x.rounded()),
-                    "y": Int(snapshot.windowBounds.origin.y.rounded()),
-                    "width": Int(snapshot.windowBounds.width.rounded()),
-                    "height": Int(snapshot.windowBounds.height.rounded()),
-                    "isMinimized": false,
-                    "isOffscreen": false,
-                    "screenIndex": jsonNullable(screenIndex(for: snapshot.windowBounds)),
-                    "platform": [
-                        "layer": snapshot.windowLayer,
-                    ],
-                ],
+                "window": placedWindow(snapshot),
                 "coordinateSpace": "window",
                 "treeText": snapshot.treeText,
                 "elementCount": snapshot.elements.count,
@@ -2779,6 +2830,10 @@ private final class TreeRenderer {
     var focusedElementId: Int?
     var truncated = false
     var maxDepthReached = false
+    /// The address the walk's first web area reads (`AXURL`): the page a
+    /// window shows when it names no document of its own (t-69973).
+    private(set) var firstWebAreaURL: String?
+    private var metWebArea = false
     private let reader = AXSnapshotReader()
     private var nextIndex = 0
     static let maxNodes = 1200
@@ -2838,6 +2893,12 @@ private final class TreeRenderer {
         let localFrame = reader.frame(element, windowBounds: windowBounds)
         let traits = reader.traitsFor(element, role: role)
         let webAreaDepth = reader.webAreaDepth(role: role, ancestors: ancestors)
+        // The first web area the walk meets (a depth of 0 is the area itself)
+        // is the page shown; its address came with the node's other reads.
+        if webAreaDepth == 0, !metWebArea {
+            metWebArea = true
+            firstWebAreaURL = url
+        }
         let summary = reader.genericTextSummary(element, role: role, name: name, actions: meaningful, traits: traits)
         let node = SnapshotRenderNode(
             role: role,
@@ -6023,7 +6084,7 @@ extension Provider {
             "coordinateSpace": "screen",
             "snapshotId": snapshot.id,
             "app": snapshot.app.name,
-            "window": ["id": Int(snapshot.windowId), "title": snapshot.windowTitle],
+            "window": namedWindow(snapshot),
             "matches": matches,
             "truncated": seen > Self.findMatchLimit,
             "elementCount": snapshot.elements.count,

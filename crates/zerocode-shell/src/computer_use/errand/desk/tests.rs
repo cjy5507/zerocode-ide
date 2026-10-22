@@ -2332,3 +2332,121 @@ fn the_panes_key_turns_typing_on_for_the_walks_after_it() {
     );
     assert_eq!((typed_before, typed_after), (0, WALKS));
 }
+
+/// A walk whose first look came back with nothing ends there, and its row
+/// says why in the four words a caller's next step turns on (t-70425): the
+/// window or pane was not found, it stood with nothing its look numbers, the
+/// look ran out of time — or a door refused it, with the door's own code
+/// beside, since looking again will not open that door. The person's two
+/// walks on a work browser (10-22 10:47·11:27) ended on a door that refused
+/// every look for want of its actor, and the bare `no_look` said none of it.
+#[test]
+fn a_look_that_came_back_with_nothing_says_which_of_four_reasons() {
+    let pane = || Aim::Pane {
+        label: "browser-1".into(),
+    };
+    let app = || Aim::App {
+        name: "Fixture".into(),
+    };
+    let failed = |stderr: &str| TeamAnswer {
+        exit_code: 1,
+        stdout: String::new(),
+        stderr: stderr.to_string(),
+    };
+    let desktop_refused = |code: &str| {
+        failed(&json!({ "ok": false, "error": { "code": code, "message": "said" } }).to_string())
+    };
+    let cases = [
+        (
+            pane(),
+            failed(
+                "zerocode-browser: workspace_actor_required: 현재 창이 보유한 에이전트 판이 필요합니다 — 이 창이 띄운 에이전트 판에서 zerocode-browser 명령을 다시 보내세요\n",
+            ),
+            "look_refused",
+            Some("workspace_actor_required"),
+        ),
+        (
+            pane(),
+            failed(
+                "zerocode-browser: workspace_paused[resume=person]: 작업 브라우저 browser-1: 일시정지됐습니다 — 자동으로 재시도하지 마세요.\n",
+            ),
+            "look_refused",
+            Some("workspace_paused"),
+        ),
+        (
+            pane(),
+            failed(
+                &json!({ "ok": false, "error": { "code": "workspace_person_controlled", "resume": "person", "message": "said" } })
+                    .to_string(),
+            ),
+            "look_refused",
+            Some("workspace_person_controlled"),
+        ),
+        (
+            pane(),
+            failed(&format!(
+                "zerocode-browser: {}\nzerocode-browser: workspace_look_unanswered: 페이지가 답하지 않았습니다 — 1초 뒤 zerocode-browser marks browser-1로 다시 보세요\n",
+                crate::cmd::browser::PAGE_TIMED_OUT
+            )),
+            "look_timeout",
+            None,
+        ),
+        (app(), desktop_refused("app_not_found"), "no_window", None),
+        (app(), desktop_refused("window_not_found"), "no_window", None),
+        (app(), desktop_refused("timeout"), "look_timeout", None),
+        (
+            app(),
+            desktop_refused("permission_denied"),
+            "look_refused",
+            Some("permission_denied"),
+        ),
+        (
+            app(),
+            ok(&json!({ "ok": true, "result": {
+                "tree": { "window": { "title": "Fixture" } },
+                "marks": { "unavailable": { "state": "failed", "code": "screenshot_failed" } },
+            } })
+            .to_string()),
+            "empty_tree",
+            None,
+        ),
+        (
+            app(),
+            ok(&json!({ "ok": true, "result": {
+                "marks": { "unavailable": "window_not_found: no window on this picture is one to mark" },
+            } })
+            .to_string()),
+            "no_window",
+            None,
+        ),
+        (
+            app(),
+            failed("zerocode-computer: the window dropped the command\n"),
+            "look_refused",
+            Some("error"),
+        ),
+    ];
+    for (aim, answer, reason, refusal) in cases {
+        let said = answer.stderr.clone();
+        let road = Road::new(move |_| answer.clone());
+        let mut send = road.road();
+        let mut world = GoalWorld::new(&mut send, aim, Seen::default(), None, 60_000, 0);
+        let mut judge = FakeJudge::chose(&[1]);
+        let walked = run(Mode::On, true, &goal(4), &mut judge, &mut world);
+        assert_eq!(walked.rows.len(), 1, "{said}");
+        let row = &walked.rows[0];
+        assert_eq!(row["outcome"], json!("no_look"), "{said}");
+        assert_eq!(row["reason"], json!(reason), "{said}");
+        assert_eq!(
+            row.get("refusal").and_then(Value::as_str),
+            refusal,
+            "{said}"
+        );
+        assert_eq!(walked.pressed, 0, "{said}");
+        assert_eq!(
+            road.said.borrow().len(),
+            1,
+            "one look, nothing after it: {said}"
+        );
+    }
+}

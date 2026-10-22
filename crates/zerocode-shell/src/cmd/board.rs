@@ -957,15 +957,15 @@ pub(crate) fn set_watched_terms(
     webview: tauri::Webview,
     state: State<'_, AppState>,
     terms: Vec<TermId>,
+    road: Option<String>,
 ) {
     // The declaration itself goes in the black box: the failure this door
     // exists to prevent is a terminal that silently stops painting, and the
     // ledger of who declared what, when, is the whole forensic record of it.
-    let mut said: Vec<TermId> = terms.clone();
-    said.sort_unstable();
+    // So does why the stage moved (t-69526), when the window said.
     note_window_event(
         state.local_data_root(),
-        &format!("watch {}: {said:?}", webview.label()),
+        &watch_line(webview.label(), &terms, road.as_deref()),
     );
     let label = webview.label().to_string();
     let next: HashSet<TermId> = terms.into_iter().collect();
@@ -988,6 +988,33 @@ pub(crate) fn set_watched_terms(
         }
     }
     watched.insert(label, next);
+}
+
+/// The longest reason a declaration's line carries — the window's own words
+/// (`person keydown ArrowDown +120ms`, `program notify:activate under
+/// typing`) fit with room.
+const STAGE_ROAD_MAX: usize = 80;
+
+/// One black-box line for one declaration: `watch <label>: [terms]`, sorted,
+/// and ` by <road>` when the window said why the stage moved (t-69526). The
+/// road is the window's word for the move — a person's gesture, a backend
+/// event, a restore — kept to the letters such a word is spelled in and
+/// bounded, so the line cannot be made to carry anything else.
+pub(crate) fn watch_line(label: &str, terms: &[TermId], road: Option<&str>) -> String {
+    let mut said: Vec<TermId> = terms.to_vec();
+    said.sort_unstable();
+    let road: String = road
+        .unwrap_or_default()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || " :._+-".contains(*ch))
+        .take(STAGE_ROAD_MAX)
+        .collect();
+    let road = road.trim();
+    if road.is_empty() {
+        format!("watch {label}: {said:?}")
+    } else {
+        format!("watch {label}: {said:?} by {road}")
+    }
 }
 
 /// What one pull answers: the frames each shell owes this window, in order,
