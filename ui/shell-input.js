@@ -432,7 +432,269 @@ document.addEventListener("keydown", rearmKeySink, true);
  * before typing can begin instead of on the keystroke that needed it. */
 window.addEventListener("focus", rearmKeySink);
 
+/* ---- 치는 손 밑에서 키보드가 옮겨 가지 않는다 (t-69526) ----
+ *
+ * The keyboard follows the screen — `frontKeyboardTarget` answers "the
+ * visible tab in the focused leaf" — and that answer used to be asked afresh
+ * for every key. So whatever moved the screen moved the person's typing with
+ * it, mid-word. On 2026-10-21 19:46:01 the stage turned to a worker's pane
+ * (`watch main: [6]`); 1.4 s later the Korean the person was composing, then
+ * two lines and their Enters, went into that worker's zo, which became the
+ * person's and heard nothing for five hours. Nothing the person did was aimed
+ * at that pane, and nothing in the black box said what moved the screen.
+ *
+ * So typing comes in RUNS. A run begins with the first key aimed at a pane —
+ * or typed into a field — and lasts while the keys keep coming, at most
+ * `TYPING_RUN_GAP_MS` apart, and while a composition, a held half letter or a
+ * self-composed word it began is unfinished. Two things follow:
+ *   · a composition's letters go to the pane it began in, never where the
+ *     screen went since; that pane gone or out of sight, they go nowhere;
+ *   · when the screen's answer was moved by the BACKEND while a run lasted —
+ *     a hook taking a pane's conversation view down from under its composer,
+ *     a summoned pane split in beside, a bell's pane put in front — the rest
+ *     of the run stays with its own pane while that pane is on screen, and
+ *     goes nowhere while it is not: counted, and said once
+ *     (`typingNotSent`), never sent to the pane in front now.
+ * A move of the person's own ends the run at once: a pointer press anywhere,
+ * a ⌘ chord, Ctrl+Tab, a key aimed at the window rather than at a pane (a
+ * row's arrow, the Escape that closes a document), a paste. So a click on a
+ * tab and the typing right after it land together. A pause ends it too, and
+ * so does the end of its pane: the next key goes where the screen is.
+ *
+ * One second, the beat the rescue below trusts for the same question: longer
+ * than any gap between the keys of a word, shorter than a person's look at a
+ * screen that changed under them. */
+const TYPING_RUN_GAP_MS = 1000;
+
+/* The run in progress: `{ target, at, closed, moved }` — where it began, its
+ * last key's moment, whether a move of the person's has ended it (only its
+ * unfinished composition may still finish there), and whether the backend
+ * moved the screen's answer away from it. `null` between runs. */
+let typingRun = null;
+
+/* What typing into a field holds in place of a pane: a target no terminal key
+ * can match, so a backend move that pulls the keyboard out of a field
+ * mid-word sends the rest of the word nowhere rather than into a terminal. */
+const TYPED_INTO_A_FIELD = Object.freeze({ kind: "field" });
+const TYPING_FIELDS = "input, textarea, select, [contenteditable], [data-keyboard-owner]";
+
+/* The person's last move of the keyboard, for the stage's black-box line:
+ * what it was — `pointerdown`, `keydown Escape`, never a letter — and when. */
+let handMoved = { said: "", at: -Infinity };
+
+function typedTextPending() {
+  return composing || halfLetter !== "" || wordJamos.length > 0 || rescueJamos.length > 0;
+}
+
+function typingRunHolds(run, now = performance.now()) {
+  if (run === null) return false;
+  if (typedTextPending()) return true;
+  return !run.closed && now - run.at < TYPING_RUN_GAP_MS;
+}
+
+/* Whether a run's own place still exists: its terminal's screen, or the field
+ * it was typed in. A run whose pane ended has nowhere to hold the keys for. */
+function typedPaneAlive(target) {
+  if (target.kind === "field") return true;
+  if (target.kind !== "term") return false;
+  return target.term === FLOAT_TERM || termViews.has(target.term);
+}
+
+/* A key, a composition or an insertion aimed at a pane: the run's next beat,
+ * or its first one. */
+function noteTypingAtPane() {
+  const now = performance.now();
+  const run = typingRun;
+  const pending = typedTextPending();
+  if (
+    run !== null && !run.closed && now - run.at < TYPING_RUN_GAP_MS &&
+    (pending || typedPaneAlive(run.target))
+  ) {
+    run.at = now;
+    return;
+  }
+  // What a composition began, it finishes where it began — however long it
+  // stays open and whatever moved meanwhile.
+  if (run !== null && pending) return;
+  const front = frontInputTarget();
+  typingRun = front === null ? null : { target: front, at: now, closed: false, moved: false };
+}
+
+/* The person moved the keyboard themselves: the run ends, all but what its
+ * composition still has to finish. */
+function noteHandMoved(said) {
+  handMoved = { said, at: performance.now() };
+  if (typingRun === null) return;
+  if (typedTextPending()) typingRun.closed = true;
+  else typingRun = null;
+}
+
+/* The stage just settled inside a backend event's answer (`syncWatchedTerms`
+ * asks): if that took the screen's answer away from a pane's run, the rest of
+ * the run is held. A backend repaint that moved nothing marks nothing. */
+function noteBackendMovedTheKeyboard() {
+  const run = typingRun;
+  if (!backendEventNow || run === null || run.moved || run.target.kind === "field") return;
+  if (typingRunHolds(run) && !sameInputTarget(run.target, frontInputTarget())) run.moved = true;
+}
+
+/* A field's run is moved by focus, not by the stage: a backend event's answer
+ * that takes the keyboard out of the field the person is typing in — a hook
+ * standing a conversation's composer behind its terminal, a tab put in front
+ * that focuses the terminal — holds the rest of the run off every terminal. */
+document.addEventListener("focusout", (event) => {
+  const run = typingRun;
+  if (!backendEventNow || run === null || run.moved || run.target.kind !== "field") return;
+  if (event.target !== keySink && event.target?.closest?.(TYPING_FIELDS) && typingRunHolds(run)) run.moved = true;
+}, true);
+
+/* A key the black box may name: one of the platform's named keys — `Enter`,
+ * `ArrowLeft`, `F1`, an ASCII name that starts upper case. Anything else is a
+ * character somebody typed, whatever its length in UTF-16 (an emoji, a
+ * character outside the basic plane), and stays out of the log (t-11740). */
+const NAMED_KEY = /^[A-Z][A-Za-z0-9]+$/;
+
+/* How a gesture is named in the black box — the event, and a key only by its
+ * name. */
+function handWord(event) {
+  if (event.type !== "keydown") return event.type;
+  return NAMED_KEY.test(event.key) ? `keydown ${event.key}` : "keydown";
+}
+
+/* Every key, before anything else in this window hears it — ahead of the
+ * Ctrl+Tab switcher, which consumes its chord. A key typed into a field
+ * starts a field's run; a key that reaches a pane is the run's beat; any
+ * other key a hand pressed is a move of the keyboard: a chord, a row's
+ * arrow, the Escape that closes a document. */
+function noteKeyHand(event) {
+  if (event.key === "Shift" || event.key === "Control" || event.key === "Alt" || event.key === "Meta") return;
+  const at = event.target;
+  const chord = hasPrimaryModifier(event) || isCtrlTabSwitcherChord(event);
+  if (!chord && at !== keySink && at?.closest?.(TYPING_FIELDS)) {
+    typingRun = { target: TYPED_INTO_A_FIELD, at: performance.now(), closed: false, moved: false };
+    return;
+  }
+  if (!chord && (at === keySink || at === document.body) && frontInputTarget() !== null) {
+    noteTypingAtPane();
+    return;
+  }
+  if (event.isTrusted) noteHandMoved(handWord(event));
+}
+
+function notePointerHand(event) {
+  if (event.isTrusted) noteHandMoved(handWord(event));
+}
+
+window.addEventListener("keydown", noteKeyHand, { capture: true });
+window.addEventListener("pointerdown", notePointerHand, { capture: true });
+
+function frontInputTarget() {
+  const device = frontEmulatorKeyboardTarget();
+  if (device) return { kind: "emulator", udid: device.udid };
+  return frontKeyboardTarget();
+}
+
+function sameInputTarget(one, other) {
+  if (one === null || other === null || one.kind !== other.kind) return false;
+  if (one.kind === "term") return one.term === other.term;
+  if (one.kind === "lane") return one.id === other.id;
+  if (one.kind === "emulator") return one.udid === other.udid;
+  return false;
+}
+
+/* Whether a run's terminal is still on screen — in another leaf, the float,
+ * the peek — and not covered whole. A lane, a device or a field is never a
+ * terminal a held key may reach. */
+function typedPaneShown(target) {
+  if (target.kind !== "term") return false;
+  if (target.term === FLOAT_TERM) return !termFloat.hidden;
+  if (target.term === peekTerm && !el("peek-scrim").hidden) return true;
+  if (!settingsView.hidden || !taskView.hidden || workspaceBoardOpen) return false;
+  const view = termViews.get(target.term);
+  return view !== undefined && termShown(view);
+}
+
+/* What the typing in progress makes of the screen's answer `front`:
+ * `undefined` when the keyboard simply follows the screen, else the run's
+ * own pane — or `null`, nowhere, when that pane is out of sight. */
+function typingHold(front) {
+  const run = typingRun;
+  if (!typingRunHolds(run) || sameInputTarget(run.target, front)) return undefined;
+  if (!typedTextPending() && (!run.moved || !typedPaneAlive(run.target))) return undefined;
+  return typedPaneShown(run.target) ? run.target : null;
+}
+
+/* The one answer every key, text and paste asks: the screen's, unless a run
+ * of typing holds back from where the screen went. */
 function keyboardTarget() {
+  const front = frontKeyboardTarget();
+  const held = typingHold(front);
+  return held === undefined ? front : held;
+}
+
+/* What a run could not deliver, counted until the run is over and then said
+ * in one black-box line — the kinds and how many, never a letter — and to the
+ * person at the first one, once, so they can type it again. */
+let typingUnsent = null;
+
+function typingHeldOff() {
+  return typingHold(frontInputTarget()) === null;
+}
+
+function typingNotSent(kind, count) {
+  if (!typingHeldOff()) return;
+  if (typingUnsent === null) {
+    typingUnsent = { from: typingRun.target, to: frontInputTarget(), kinds: new Map(), timer: 0 };
+    toast(t("term.typingNotSent", "화면이 바뀌어 친 글자를 보내지 않았습니다"));
+  }
+  typingUnsent.kinds.set(kind, (typingUnsent.kinds.get(kind) ?? 0) + count);
+  clearTimeout(typingUnsent.timer);
+  typingUnsent.timer = setTimeout(sayTypingNotSent, TYPING_RUN_GAP_MS);
+}
+
+/* The run is over: its count goes to the stage's black-box line
+ * (`sayTypingHeldOff`), which names places and kinds and no letter — the
+ * husk stays this file's one way into the window log. */
+function sayTypingNotSent() {
+  const said = typingUnsent;
+  typingUnsent = null;
+  if (said === null) return;
+  sayTypingHeldOff(said.from, said.to, said.kinds);
+}
+
+/* A key the router would have sent to a pane, held off by the run: it goes
+ * nowhere, and is counted. Printable text reaches the sink and is counted on
+ * the text road (`routeText`); a key with no name is counted as `key chord`,
+ * without its character. */
+function holdOffKey(event) {
+  if (!typingHeldOff()) return;
+  const active = document.activeElement;
+  if (active !== keySink && active !== document.body) return;
+  const plain = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey;
+  if (plain && active === keySink) return;
+  event.preventDefault();
+  typingNotSent(NAMED_KEY.test(event.key) ? `key ${event.key}` : "key chord", 1);
+}
+
+/* Why the stage moved, said with the shells it now reads (t-69526):
+ * `person <gesture>` inside a person's own event, `person <gesture> +<ms>ms`
+ * just after one (the await a click's road takes), `restore <road>`,
+ * `program <backend event>` inside a backend event's answer, `program`
+ * otherwise — and ` under typing` on a program's move while a run lasts. */
+const HAND_ECHO_MS = 3000;
+
+function stageRoad() {
+  const event = window.event;
+  if (event?.isTrusted) return `person ${handWord(event)}`;
+  if (restoringStage || stageRestoreRoad) return `restore ${stageRestoreRoad || "stage"}`;
+  const under = typingRunHolds(typingRun) ? " under typing" : "";
+  if (backendEventNow) return `program ${backendEventNow}${under}`;
+  const since = performance.now() - handMoved.at;
+  if (since < HAND_ECHO_MS) return `person ${handMoved.said} +${Math.round(since)}ms`;
+  return `program${under}`;
+}
+
+function frontKeyboardTarget() {
   // Drawn above every surface in this window, so it keeps its keys whatever
   // is open underneath it.
   if (!termFloat.hidden) return { kind: "term", term: FLOAT_TERM };
@@ -458,12 +720,19 @@ function keyboardTarget() {
   return null;
 }
 
-function emulatorKeyboardTarget() {
+function frontEmulatorKeyboardTarget() {
   if (!termFloat.hidden || !settingsView.hidden || !taskView.hidden || workspaceBoardOpen)
     return null;
   const tab = currentTab();
   if (tab?.kind !== "emulator" || !tab.live || !tab.interactive) return null;
   return tab;
+}
+
+/* The device in front, unless a run of typing holds back from it. */
+function emulatorKeyboardTarget() {
+  const tab = frontEmulatorKeyboardTarget();
+  if (tab === null) return null;
+  return typingHold({ kind: "emulator", udid: tab.udid }) === undefined ? tab : null;
 }
 
 function terminalViewForTarget(target) {
@@ -514,7 +783,10 @@ function routeText(text) {
     return;
   }
   const target = keyboardTarget();
-  if (target === null) return;
+  if (target === null) {
+    typingNotSent("ime", [...text].length);
+    return;
+  }
   hideTerminalPointerForInput(target);
   if (target.kind === "term") {
     noteTyped();
@@ -543,6 +815,7 @@ function routeCommittedEnter() {
   }
   const target = keyboardTarget();
   if (target !== null) routeKeyPress(target, { key: "Enter", ctrl: false, alt: false });
+  else typingNotSent("key Enter", 1);
 }
 
 /* One door for a named key, wherever it was decided: the document router and
@@ -1386,9 +1659,13 @@ window.addEventListener("keydown", (event) => {
   }
   // Reading, not typing — a file or a diff keeps its keys on the page instead
   // of sending them to a terminal the person cannot even see. Asked as "is
-  // anything listening" rather than as a list of surfaces that are not.
+  // anything listening" rather than as a list of surfaces that are not. A key
+  // of a run whose pane left the screen goes nowhere either (t-69526).
   const target = keyboardTarget();
-  if (target === null) return;
+  if (target === null) {
+    holdOffKey(event);
+    return;
+  }
   // Whatever has focus owns its keys, and the sink is the one thing that
   // means "the terminal". Asked that way round rather than as a list of
   // element types: the rows in this window are tab stops now, and a focused
@@ -1645,11 +1922,16 @@ function flushWord() {
   wordTimer = 0;
   if (!wordJamos.length) return;
   const text = foldHangul(wordJamos);
-  wordJamos = [];
   traceIme(`word.flush out=${text}`);
   if (STRAY_JAMO.test(text)) reportStrayJamo("word.flush", text);
   clearPreedit();
-  routeText(text);
+  // Held until it has left, so it leaves for the pane its run began in
+  // (t-69526).
+  try {
+    routeText(text);
+  } finally {
+    wordJamos = [];
+  }
 }
 
 /* How long a self-composed syllable may sit before it is committed to the
@@ -1671,12 +1953,19 @@ function flushRescue() {
   rescueTimer = 0;
   rescueWaits = 0;
   const text = foldHangul(rescueJamos);
-  rescueJamos = [];
-  if (!text) return;
+  if (!text) {
+    rescueJamos = [];
+    return;
+  }
   traceIme(`rescue.flush out=${text}`);
   if (STRAY_JAMO.test(text)) reportStrayJamo("rescue.flush", text);
   clearPreedit();
-  routeText(text);
+  // Held until it has left, like the word above (t-69526).
+  try {
+    routeText(text);
+  } finally {
+    rescueJamos = [];
+  }
 }
 
 function settleRescue() {
@@ -2009,14 +2298,20 @@ function escortHalfLetter() {
   clearTimeout(halfLetterTimer);
   halfLetterTimer = 0;
   const text = halfLetter;
-  halfLetter = "";
   if (performance.now() - halfLetterAt > HALF_LETTER_ESCORT_MS) {
+    halfLetter = "";
     traceIme(`half.dropped ${text}`);
     return;
   }
   traceIme(`half.escort out=${text}`);
   reportStrayJamo("escort", text);
-  routeText(text);
+  // Held until it has left, so the half letter goes where its composition
+  // began (t-69526).
+  try {
+    routeText(text);
+  } finally {
+    halfLetter = "";
+  }
 }
 
 function drainKeySink() {
@@ -2069,6 +2364,9 @@ keySink.addEventListener("compositionstart", () => {
   // Whatever this composition commits comes after the half letter the last
   // one left behind, never before it.
   escortHalfLetter();
+  // And it belongs to the run of typing it opens in: its letters go to that
+  // pane, wherever the screen goes before they commit (t-69526).
+  noteTypingAtPane();
   // The input context has arrived — mid-word, possibly mid-syllable. What
   // the rescue holds must NOT go to the pty here: 로 typed across this seam
   // used to land as "ㄹ" then "ㅗ" (reported). The half-word waits beside
@@ -2101,15 +2399,21 @@ keySink.addEventListener("compositionupdate", (event) => {
 
 keySink.addEventListener("compositionend", () => {
   traceIme("comp.end");
-  composing = false;
+  // Drained before the flag comes down: the run this composition began holds
+  // through its own text and the Enter that committed it (t-69526).
   drainKeySink();
+  composing = false;
 });
 
 keySink.addEventListener("input", () => {
   // A composition's own trailing input finds the sink already drained — that
   // is the engine finishing, not the person starting, and it must not be what
-  // lets a held half letter out. Text standing here is a real insertion.
-  if (keySink.value !== "") escortHalfLetter();
+  // lets a held half letter out. Text standing here is a real insertion, and a
+  // beat of the run of typing it lands in (t-69526).
+  if (keySink.value !== "") {
+    escortHalfLetter();
+    noteTypingAtPane();
+  }
   if (composing) return;
   // A finished composition never looks like this: bare compatibility jamo
   // (ㄴ, ㅏ — U+3130-318F) landing OUTSIDE a composition are keystrokes the
@@ -2152,6 +2456,9 @@ document.addEventListener("paste", (event) => {
   if (event.target === keySink) {
     event.preventDefault();
     event.stopImmediatePropagation();
+    // A paste is the person's own act, wherever the screen just went: it ends
+    // the run of typing before it asks where it goes (t-69526).
+    if (event.isTrusted) noteHandMoved("paste");
     const target = keyboardTarget();
     const emulator = emulatorKeyboardTarget();
     if (emulator) {

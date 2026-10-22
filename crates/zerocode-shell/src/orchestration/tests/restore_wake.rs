@@ -391,7 +391,7 @@ fn a_restored_pane_is_pointed_at_once_its_composer_stands_and_never_under_a_pers
     }
     door.settle();
     // A person's key in the third restored pane.
-    super::super::pane_taken_over(TAKEN, clock());
+    super::super::pane_taken_over(TAKEN, "words", clock());
     coordinator_back(&host, "mounting", OLD_LEADER, NEW_LEADER);
     let back = back_team("mounting", NEW_LEADER);
     for (worker, ..) in &workers {

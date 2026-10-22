@@ -321,7 +321,7 @@ fn a_taken_over_sleeper_comes_back_through_the_ledgers_reseat_as_the_same_worker
         "--agent claude --model claude-fable-5-1 --effort xhigh",
         Some(session),
     );
-    super::super::pane_taken_over(term, clock());
+    super::super::pane_taken_over(term, "words", clock());
     assert!(
         row(&worker).taken_over,
         "the person's key never reached the row"
@@ -694,8 +694,8 @@ fn eight_tabs_come_back_as_seven_conversations_and_one_notice() {
     let w4 = summon(codex, Some("session-t7812-manifest-w4"));
     let w5 = summon(codex, None);
     let w6 = summon(codex, Some("session-t7812-manifest-w6"));
-    super::super::pane_taken_over(w1.2, clock());
-    super::super::pane_taken_over(w4.2, clock());
+    super::super::pane_taken_over(w1.2, "words", clock());
+    super::super::pane_taken_over(w4.2, "words", clock());
     say(
         &*host,
         &team,
