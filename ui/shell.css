@@ -21479,6 +21479,54 @@ button.helper-sib:hover {
   margin-inline: 0;
 }
 
+/* The catalog models this computer has not received (t-69998), folded under
+ * the library: one ruled line each, the name and size, then the ways to have
+ * it. The list takes the panel's width, unlike a fold's prose. */
+.settings-fold > .managed-judgment-candidates {
+  max-width: none;
+}
+
+.managed-judgment-candidates > .settings-notice {
+  margin-inline: 0;
+}
+
+#managed-judgment-candidate-list {
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.managed-judgment-candidate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  padding-block: var(--space-2);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.managed-judgment-candidate-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.managed-judgment-candidate-name {
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+#managed-judgment-panel .managed-judgment-candidate > .settings-action-row {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 #typesafe-card .settings-fold > summary {
   min-height: 32px;
   box-sizing: border-box;
