@@ -3154,6 +3154,10 @@ class StatefulBackend {
           if (pin === JEV_MODEL_ALIAS) delete smart[JEV_MODEL_SETTING];
           else smart[JEV_MODEL_SETTING] = pin;
         }
+        if (args.key?.trim()) {
+          if (!provider.requiresAuth) throw { kind: "failed", message: "provider_auth_not_required" };
+          this.keychain.set(this.judgmentService(provider), args.key.trim());
+        }
         smart.judgmentProvider = provider;
         this.zoSettings.smart = smart;
         return this.typesafeSettings();
@@ -7822,14 +7826,18 @@ await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 
     await pageA.fill("#typesafe-model-input", "");
     await pageA.fill("#typesafe-key-input", "decision-fixture-key");
     assertEqual(await pageA.locator("#typesafe-status").textContent(), "", "the new connection still claims a previous model was checked or applied");
+    const candidate = await pageA.evaluate(() => judgmentProviderController.current());
+    const service = backend.judgmentService(candidate);
+    const storedBefore = backend.keychain.get(service);
     const began = backend.calls.length;
     await pageA.click("#judgment-refresh-models");
     await backend.waitForCall("A", "judgment_models", began);
     await pageA.waitForFunction(() => !judgmentProviderController.loading);
     const calls = backend.calls.slice(began).filter((call) => ["save_typesafe_key", "judgment_models"].includes(call.command));
-    assertEqual(calls.map((call) => call.command), ["save_typesafe_key", "judgment_models"], "discovery did not use the entered key");
+    assertEqual(calls.map((call) => call.command), ["judgment_models"], "discovery wrote a credential before the connection was applied");
     assertEqual(calls[0].args.provider.protocol, "openai_json");
-    assertEqual(await pageA.inputValue("#typesafe-key-input"), "", "the saved key remained in the form");
+    assertEqual(calls[0].args.key, "decision-fixture-key", "discovery did not use the entered credential");
+    assertEqual(backend.keychain.get(service), storedBefore, "discovery replaced the stored credential");
     assertEqual(backend.typesafeSettings().provider.kind, "jev", "discovery applied the candidate before its answer was checked");
     await pageA.selectOption("#judgment-listed-model", "fixture-decision-b");
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
@@ -7847,11 +7855,13 @@ await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 
     assertEqual(backend.typesafeSettings().provider.model, "fixture-decision-b");
     assertEqual(backend.typesafeSettings().provider.protocol, "openai_json");
     await pageA.waitForFunction(() => !typesafeBusy && !typesafeRefreshing);
+    assertEqual(backend.keychain.get(service), "decision-fixture-key", "applying the checked connection did not keep its credential");
+    assertEqual(await pageA.inputValue("#typesafe-key-input"), "", "the applied key remained in the form");
   } finally {
     backend.zoSettings.smart = previous;
     await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
   }
-  return "entered key → model discovery → selected model → checked apply";
+  return "temporary key → model discovery → selected model → checked settings and key commit";
 });
 
 await test("판단 서버 주소 오류는 고칠 방법을 말하고 현재 모델은 유지한다", async () => {

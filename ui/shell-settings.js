@@ -6728,7 +6728,7 @@ function initTypeSafeEvents() {
   if (typesafeInitialized) return;
   typesafeInitialized = true;
   judgmentProviderController.init();
-  el("typesafe-key-input")?.addEventListener("input", () => judgmentProviderController.controls());
+  el("typesafe-key-input")?.addEventListener("input", () => judgmentProviderController.keyEdited());
   el("typesafe-save-btn")?.addEventListener("click", () => {
     void saveTypeSafeKey();
   });

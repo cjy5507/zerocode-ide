@@ -471,12 +471,39 @@ pub fn save_selected_key(
     key: &str,
     keys: &dyn RouterKeys,
 ) -> Result<(), RouterRefusal> {
-    let service = selected_key_service(path, expected)?;
-    if service == typesafe_keychain_service() {
-        save_key(key, keys)
-    } else {
-        save_key_at(&service, key, "API 키가 비어 있습니다", keys)
-    }
+    with_provider_locked(path, || {
+        Ok(selected_key_service(path, expected).and_then(|service| {
+            if service == typesafe_keychain_service() {
+                save_key(key, keys)
+            } else {
+                save_key_at(&service, key, "API 키가 비어 있습니다", keys)
+            }
+        }))
+    })
+    .map_err(RouterRefusal::from)?
+}
+
+pub(crate) fn save_candidate_key(
+    path: &Path,
+    provider: &judgment_provider::Provider,
+    expected: Option<&str>,
+    key: &str,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
+    with_provider_locked(path, || {
+        Ok(selected_provider(path).and_then(|current| {
+            if let Some(expected) = expected {
+                require_provider(&current, Some(expected))?;
+            }
+            save_key_at(
+                &provider_keychain_service(provider),
+                key,
+                "API 키가 비어 있습니다",
+                keys,
+            )
+        }))
+    })
+    .map_err(RouterRefusal::from)?
 }
 
 pub fn remove_selected_key(
@@ -484,12 +511,16 @@ pub fn remove_selected_key(
     expected: Option<&str>,
     keys: &dyn RouterKeys,
 ) -> Result<(), RouterRefusal> {
-    let service = selected_key_service(path, expected)?;
-    if service == typesafe_keychain_service() {
-        remove_key(keys)
-    } else {
-        remove_key_at(&service, keys)
-    }
+    with_provider_locked(path, || {
+        Ok(selected_key_service(path, expected).and_then(|service| {
+            if service == typesafe_keychain_service() {
+                remove_key(keys)
+            } else {
+                remove_key_at(&service, keys)
+            }
+        }))
+    })
+    .map_err(RouterRefusal::from)?
 }
 
 pub fn set_provider(path: &Path, provider: judgment_provider::Provider) -> Result<(), String> {
@@ -503,6 +534,38 @@ pub(crate) fn set_provider_if_identity(
     binding: Option<&local_judgment::Binding>,
 ) -> Result<(), String> {
     set_provider_checked(path, provider, Some(expected), binding)
+}
+
+/// Commit an explicitly applied connection and its tested key together.
+/// The active-provider check runs before the key is touched, under the same
+/// settings lock the router uses, and a failed file write restores the key.
+pub(crate) fn set_provider_with_key_if_identity(
+    path: &Path,
+    provider: judgment_provider::Provider,
+    expected: &str,
+    key: &str,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
+    let provider = applicable(provider)?;
+    let key = key.trim();
+    if !provider.requires_auth || key.is_empty() {
+        return Err("provider_auth_not_required".to_string().into());
+    }
+    crate::api_routers::update_zo_settings_root_with_key(
+        path,
+        &provider_keychain_service(&provider),
+        key,
+        keys,
+        |root| {
+            let smart = root
+                .entry(SMART_SETTINGS_KEY)
+                .or_insert_with(|| Value::Object(Map::new()));
+            let smart = smart
+                .as_object_mut()
+                .ok_or_else(|| "provider_settings".to_string())?;
+            write_provider_to_smart(smart, &provider, Some(expected), None)
+        },
+    )
 }
 
 pub(crate) fn with_provider_locked<R>(
@@ -538,38 +601,46 @@ fn set_provider_checked(
         return Err("managed_model_binding".to_string());
     }
     update_smart(path, |smart| {
-        if let Some(expected) = expected {
-            let current =
-                judgment_provider::Provider::from_root(&serde_json::json!({"smart":smart}))
-                    .map_err(|reason| reason.to_string())?;
-            if current.identity() != expected {
-                return Err("settings_changed".to_string());
-            }
-        }
-        if provider.kind == judgment_provider::ProviderKind::Jev {
-            if provider.model == DEFAULT_MODEL {
-                smart.remove(MODEL_SETTING);
-            } else {
-                smart.insert(
-                    MODEL_SETTING.to_string(),
-                    Value::String(provider.model.clone()),
-                );
-            }
-        }
-        smart.insert(
-            judgment_provider::SETTINGS_KEY.to_string(),
-            serde_json::to_value(&provider).map_err(|error| error.to_string())?,
-        );
-        if let Some(binding) = binding {
-            smart.insert(
-                local_judgment::MANAGED_MODEL_KEY.to_string(),
-                serde_json::to_value(binding).map_err(|error| error.to_string())?,
-            );
-        } else {
-            smart.remove(local_judgment::MANAGED_MODEL_KEY);
-        }
-        Ok(())
+        write_provider_to_smart(smart, &provider, expected, binding)
     })
+}
+
+fn write_provider_to_smart(
+    smart: &mut Map<String, Value>,
+    provider: &judgment_provider::Provider,
+    expected: Option<&str>,
+    binding: Option<&local_judgment::Binding>,
+) -> Result<(), String> {
+    if let Some(expected) = expected {
+        let current = judgment_provider::Provider::from_root(&serde_json::json!({"smart":smart}))
+            .map_err(|reason| reason.to_string())?;
+        if current.identity() != expected {
+            return Err("settings_changed".to_string());
+        }
+    }
+    if provider.kind == judgment_provider::ProviderKind::Jev {
+        if provider.model == DEFAULT_MODEL {
+            smart.remove(MODEL_SETTING);
+        } else {
+            smart.insert(
+                MODEL_SETTING.to_string(),
+                Value::String(provider.model.clone()),
+            );
+        }
+    }
+    smart.insert(
+        judgment_provider::SETTINGS_KEY.to_string(),
+        serde_json::to_value(provider).map_err(|error| error.to_string())?,
+    );
+    if let Some(binding) = binding {
+        smart.insert(
+            local_judgment::MANAGED_MODEL_KEY.to_string(),
+            serde_json::to_value(binding).map_err(|error| error.to_string())?,
+        );
+    } else {
+        smart.remove(local_judgment::MANAGED_MODEL_KEY);
+    }
+    Ok(())
 }
 
 /// Turn Jev on or off (§6.1) in zo's settings file, under the window's
@@ -849,6 +920,19 @@ pub fn preflight_provider(
     keys: &dyn RouterKeys,
     wire: &crate::systemone::Wire,
 ) -> Result<ProviderPreflight, String> {
+    preflight_provider_with_key(path, candidate, expected, keys, wire, None)
+}
+
+/// An entered key is temporary evidence for this check. It is never written
+/// to the credential store; applying a successful connection owns that write.
+pub fn preflight_provider_with_key(
+    path: &Path,
+    candidate: judgment_provider::Provider,
+    expected: &str,
+    keys: &dyn RouterKeys,
+    wire: &crate::systemone::Wire,
+    entered_key: Option<&str>,
+) -> Result<ProviderPreflight, String> {
     let candidate = applicable(candidate)?;
     let still_selected = || {
         require_provider(
@@ -858,10 +942,14 @@ pub fn preflight_provider(
     };
     still_selected()?;
     let key = if candidate.requires_auth {
-        keys.read(&provider_keychain_service(&candidate))
-            .map_err(|refusal| refusal.message)?
-            .map(|key| key.trim().to_string())
-            .filter(|key| !key.is_empty())
+        if let Some(key) = entered_key.map(str::trim).filter(|key| !key.is_empty()) {
+            Some(key.to_string())
+        } else {
+            keys.read(&provider_keychain_service(&candidate))
+                .map_err(|refusal| refusal.message)?
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty())
+        }
     } else {
         None
     };
@@ -1960,6 +2048,7 @@ mod tests {
             [
                 "managed-judgment-filter",
                 "judgment-provider-kind",
+                "judgment-protocol",
                 "judgment-listed-model",
                 "route-classifier-select",
             ],
