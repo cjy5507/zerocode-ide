@@ -958,12 +958,19 @@ pub(crate) fn execute_agent_with_parent_model_and_hooks(
 ) -> Result<AgentOutput, ToolError> {
     let internal_classifier = input.subagent_type.as_deref() == Some("classifier")
         && input.tool_call_id.is_none() && !input.workflow_member && input.launch.agent.is_none();
-    if ledger::available() && !internal_classifier {
+    // A file grant does not widen this session's permissions. Plain restricted
+    // delegation keeps its native executor; explicit ledger choices still go
+    // through the ledger's permission check without substitution.
+    let explicit_ledger = input.launch.agent.is_some()
+        || input.launch.effort.is_some() || input.launch.worktree.is_some();
+    let unrestricted = input.parent_permission_mode
+        .is_none_or(|mode| mode == PermissionMode::DangerFullAccess);
+    if (unrestricted || explicit_ledger) && ledger::available() && !internal_classifier {
         return ledger::execute(input, parent_model, parent_lsp, hook_config);
     }
     if input.launch.agent.as_deref().is_some_and(|agent| agent != "zo")
         || input.launch.effort.is_some() || input.launch.worktree.is_some() {
-        return Err(ToolError::Execution("the requested agent/effort/worktree requires a ZeroCode ledger grant and zerocode-orc on PATH".into()));
+        return Err(ledger::unavailable_launch());
     }
     match spawn_mode_for(runtime::subagent_panes::mode(), input.subagent_type.as_deref()) {
         runtime::subagent_panes::SubagentMode::Panes => {

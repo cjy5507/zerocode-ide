@@ -2340,6 +2340,15 @@ fn the_panes_key_turns_typing_on_for_the_walks_after_it() {
 /// beside, since looking again will not open that door. The person's two
 /// walks on a work browser (10-22 10:47·11:27) ended on a door that refused
 /// every look for want of its actor, and the bare `no_look` said none of it.
+///
+/// An app's look that came back with its tree and no numbers says why under
+/// `marks.unavailable`, its code first on its words (t-70855): a helper that
+/// refused that look is the helper's refusal, code and all, and only a look
+/// with no code, or none but a picture that could not be read, stood with
+/// nothing to number — `empty_tree` sends a caller to the picture, where a
+/// refusal would only be met again. A page that answered nothing readable
+/// is a look a second later may see, and a door that could not reach the
+/// window says so in a code of its own, never the `curl` of a relayed line.
 #[test]
 fn a_look_that_came_back_with_nothing_says_which_of_four_reasons() {
     let pane = || Aim::Pane {
@@ -2425,9 +2434,87 @@ fn a_look_that_came_back_with_nothing_says_which_of_four_reasons() {
             "look_refused",
             Some("error"),
         ),
+        (
+            app(),
+            ok(&json!({ "ok": true, "result": {
+                "tree": { "window": { "title": "Fixture" } },
+                "marks": { "unavailable": "permission_denied: said" },
+            } })
+            .to_string()),
+            "look_refused",
+            Some("permission_denied"),
+        ),
+        (
+            app(),
+            ok(&json!({ "ok": true, "result": {
+                "tree": { "window": { "title": "Fixture" } },
+                "marks": { "unavailable": "provider_incompatible: the provider answered no element faces (an older helper?)" },
+            } })
+            .to_string()),
+            "look_refused",
+            Some("provider_incompatible"),
+        ),
+        (
+            app(),
+            ok(&json!({ "ok": true, "result": {
+                "marks": { "unavailable": "timeout: said" },
+            } })
+            .to_string()),
+            "look_timeout",
+            None,
+        ),
+        (
+            app(),
+            ok(&json!({ "ok": true, "result": {
+                "tree": { "window": { "title": "Fixture" } },
+                "marks": { "unavailable": "screenshot_failed: the frame could not be read" },
+            } })
+            .to_string()),
+            "empty_tree",
+            None,
+        ),
+        (
+            app(),
+            ok(&json!({ "ok": true, "result": {
+                "tree": { "window": { "title": "Fixture" } },
+                "marks": { "unavailable": { "state": "skipped", "reason": "no_screenshot_flag" } },
+            } })
+            .to_string()),
+            "empty_tree",
+            None,
+        ),
+        (
+            pane(),
+            failed(&format!(
+                "zerocode-browser: {}\n",
+                crate::cmd::browser::PAGE_ANSWER_UNREADABLE
+            )),
+            "look_timeout",
+            None,
+        ),
+        (
+            app(),
+            failed("zerocode-computer: could not reach the window\n"),
+            "look_refused",
+            Some("door_connection_failed"),
+        ),
+        (
+            app(),
+            failed(
+                "zerocode-computer: curl: (7) Failed to connect to 127.0.0.1 port 1234 after 0 ms: Couldn't connect to server\n",
+            ),
+            "look_refused",
+            Some("door_connection_failed"),
+        ),
     ];
+    let mut read = Vec::new();
+    let mut want = Vec::new();
     for (aim, answer, reason, refusal) in cases {
-        let said = answer.stderr.clone();
+        let said = if answer.stderr.is_empty() {
+            answer.stdout.clone()
+        } else {
+            answer.stderr.clone()
+        };
         let road = Road::new(move |_| answer.clone());
         let mut send = road.road();
         let mut world = GoalWorld::new(&mut send, aim, Seen::default(), None, 60_000, 0);
@@ -2436,17 +2523,21 @@ fn a_look_that_came_back_with_nothing_says_which_of_four_reasons() {
         assert_eq!(walked.rows.len(), 1, "{said}");
         let row = &walked.rows[0];
         assert_eq!(row["outcome"], json!("no_look"), "{said}");
-        assert_eq!(row["reason"], json!(reason), "{said}");
-        assert_eq!(
-            row.get("refusal").and_then(Value::as_str),
-            refusal,
-            "{said}"
-        );
         assert_eq!(walked.pressed, 0, "{said}");
         assert_eq!(
             road.said.borrow().len(),
             1,
             "one look, nothing after it: {said}"
         );
+        read.push((
+            said.clone(),
+            row["reason"].clone(),
+            row.get("refusal")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        ));
+        want.push((said, json!(reason), refusal.map(str::to_string)));
     }
+    // Every row at once, so a misread names each row it misreads.
+    assert_eq!(read, want);
 }
