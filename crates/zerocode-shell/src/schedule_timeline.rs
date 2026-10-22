@@ -22,7 +22,7 @@
 //! window's to place (`ui/shell-board-schedule.js`): that moves with the
 //! time, and this answer moves only when a file does.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::{File, Metadata};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
@@ -31,6 +31,8 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+
+use crate::artifact_flow::Landed;
 
 #[cfg(test)]
 mod tests;
@@ -165,6 +167,12 @@ pub(crate) struct Timeline {
     pub(crate) line: LineFacts,
     pub(crate) jobs: Vec<Job>,
     pub(crate) lanes: Vec<LaneRun>,
+    /// When the board's tasks landed and shipped, as git at the open
+    /// repository says it, by task (t-71840, [`crate::artifact_flow::landings`]):
+    /// the window ends a finished task's bar there before the times the desk
+    /// carries. A task git says nothing of is not here.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) landings: BTreeMap<String, Landed>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) log: Option<LogTail>,
 }
@@ -325,11 +333,18 @@ pub(crate) fn workspaces_of(
 }
 
 /// Read the schedule as of `now_ms`, local clocks being `offset_secs` east of
-/// UTC. Blocking: the command calls it off the main thread.
-pub(crate) fn read(roots: &Roots, ask: &Ask, now_ms: i64, offset_secs: i64) -> Timeline {
-    BOOK.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .read(roots, ask, now_ms, offset_secs)
+/// UTC, with what git says of the board's tasks (`landings`, t-71840).
+/// Blocking: the command calls it off the main thread.
+pub(crate) fn read(
+    roots: &Roots,
+    ask: &Ask,
+    landings: BTreeMap<String, Landed>,
+    now_ms: i64,
+    offset_secs: i64,
+) -> Timeline {
+    let mut book = BOOK.lock().unwrap_or_else(PoisonError::into_inner);
+    book.land(landings);
+    book.read(roots, ask, now_ms, offset_secs)
 }
 
 /// What one look keeps for the next: the runner log read so far and what it
@@ -341,16 +356,30 @@ struct Book {
     headers: HashMap<String, (FileStamp, Header)>,
     floor: Option<(FileStamp, Option<u32>)>,
     lanes: LaneBook,
+    /// What git said of the board's tasks at the last look, and its hash: a
+    /// landing moves the revision as a file does (t-71840).
+    landings: BTreeMap<String, Landed>,
+    landed: u64,
     signature: u64,
     revision: u64,
 }
 
 impl Book {
+    /// What git says of the board's tasks now, kept for the next look.
+    fn land(&mut self, landings: BTreeMap<String, Landed>) {
+        let mut hasher = DefaultHasher::new();
+        landings.hash(&mut hasher);
+        self.landed = hasher.finish();
+        self.landings = landings;
+    }
+
     fn read(&mut self, roots: &Roots, ask: &Ask, now_ms: i64, offset_secs: i64) -> Timeline {
         if self.roots != *roots {
             *self = Self {
                 roots: roots.clone(),
                 revision: self.revision,
+                landings: std::mem::take(&mut self.landings),
+                landed: self.landed,
                 ..Self::default()
             };
         }
@@ -368,7 +397,7 @@ impl Book {
             .map(|release| release.join(crate::update_runtime::STATUS_FILE));
         let status_stamp = status_file.as_deref().and_then(stamp);
         self.lanes.look(lanes_folder.as_deref(), now_ms);
-        let signature = signature_of(queue.as_ref(), &self.lanes, status_stamp);
+        let signature = signature_of(queue.as_ref(), &self.lanes, status_stamp, self.landed);
         if signature != self.signature || self.revision == 0 {
             self.signature = signature;
             self.revision += 1;
@@ -427,6 +456,7 @@ impl Book {
                 .filter(|run| run.running || run.end_ms.unwrap_or(run.start_ms) >= from_ms)
                 .cloned()
                 .collect(),
+            landings: self.landings.clone(),
             log,
         }
     }
@@ -785,7 +815,12 @@ fn read_floor(path: &Path) -> Option<u32> {
 
 /// What a look compares with the last: every stamp, listing and flag it read.
 /// The same signature is the same reading.
-fn signature_of(queue: Option<&QueueLook>, lanes: &LaneBook, status: Option<FileStamp>) -> u64 {
+fn signature_of(
+    queue: Option<&QueueLook>,
+    lanes: &LaneBook,
+    status: Option<FileStamp>,
+    landed: u64,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     if let Some(queue) = queue {
         queue.found.hash(&mut hasher);
@@ -808,6 +843,7 @@ fn signature_of(queue: Option<&QueueLook>, lanes: &LaneBook, status: Option<File
         held.hash(&mut hasher);
     }
     status.hash(&mut hasher);
+    landed.hash(&mut hasher);
     hasher.finish()
 }
 

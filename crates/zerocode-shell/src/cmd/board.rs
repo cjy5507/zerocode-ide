@@ -654,6 +654,30 @@ fn schedule_look(
     let repo = orchestrator
         .as_ref()
         .map(|open| open.repo_root().to_path_buf());
+    // When the board's tasks landed and shipped, as git at the open repository
+    // says it (t-71840): asked of the desk the board draws, found the way the
+    // artifacts tab's flow finds it, git's answer kept by the base's commit.
+    let desk = crate::orchestration::board_ledger_snapshot();
+    let landings = match repo.as_deref() {
+        Some(root) if !desk.desk.tasks.is_empty() => crate::artifact_flow::landings(
+            &crate::artifact_flow::git_facts(root, now_ms),
+            desk.desk
+                .tasks
+                .iter()
+                .map(|task| crate::artifact_flow::LandingAsk {
+                    task: &task.id,
+                    merge_head: task
+                        .progress
+                        .as_ref()
+                        .and_then(|progress| progress.merge_head.as_deref()),
+                    release: task
+                        .times
+                        .as_ref()
+                        .and_then(|times| times.release.as_deref()),
+                }),
+        ),
+        _ => std::collections::BTreeMap::new(),
+    };
     let workspaces = crate::schedule_timeline::workspaces_of(
         repo.as_deref(),
         ask.known.is_none(),
@@ -672,6 +696,7 @@ fn schedule_look(
     crate::schedule_timeline::read(
         &roots,
         ask,
+        landings,
         now_ms,
         crate::automation_runtime::local_offset_secs(),
     )

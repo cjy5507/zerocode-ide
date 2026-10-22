@@ -39,8 +39,10 @@ const BOARD_SCHEDULE = Object.freeze({
   }),
   /* 눈금 글 하나가 차지하는 폭(CSS px): 축의 폭을 이것으로 나눈 수만큼 눈금이 선다. */
   tickRoomPx: 72,
-  /* 게이트 밖 일감 가운데 끝난 것은 가장 최근의 이만큼만 행으로 선다. 나머지는 수다. */
-  lineShown: 12,
+  /* 끝난 것은 묶음마다 가장 최근에 끝난 이만큼만 행으로 서고, 나머지는 「+N 끝남」 접힌 줄 하나다 —
+   * 사람이 그 줄을 누르면 다 선다. 도는 것·기다리는 것은 늘 다 선다. 네 묶음이 같은 규칙이다(t-71840;
+   * 빌드 줄의 끝난 일감이 먼저 이렇게 섰다). */
+  endedShown: 12,
   /* 가장 늦은 예상 끝 뒤에 남기는 여백. */
   tailMs: 30 * 60_000,
 });
@@ -68,6 +70,10 @@ const BOARD_SCHEDULE_JOB_STATES = Object.freeze({
 
 /* 실행기의 세 차례(0- · 보통 · 9-): 기다리는 일감이 줄에 서는 순서. */
 const BOARD_SCHEDULE_CLASS_RANK = Object.freeze({ first: 0, plain: 1, last: 2 });
+
+/* 끝난 막대의 상태: 묶음마다 최근 몇만 행이 되고 나머지는 접힌다(`boardScheduleEndedKept`). 끝 기록이
+ * 없는 것(`idle`)은 도는 것처럼 늘 선다 — 볼 일이다. */
+const BOARD_SCHEDULE_ENDED_STATES = Object.freeze(["done", "failed"]);
 
 /* 워커 과업의 단계(데스크의 `DESK_STAGES` 낱말)마다 막대의 상태. */
 const BOARD_SCHEDULE_TASK_STATES = Object.freeze({
@@ -334,6 +340,28 @@ function boardScheduleRow(fields) {
   return { depth: 0, basis: "history", marks: null, act: null, ...fields };
 }
 
+/* 원장이나 git이 적은 순간 하나, 적지 않았으면 null. `Number(null)`은 0 — 1970년의 한 순간이다. */
+function boardScheduleMoment(ms) {
+  const moment = ms == null ? NaN : Number(ms);
+  return Number.isFinite(moment) ? moment : null;
+}
+
+/* 끝난 것 가운데 행이 될 것: 가장 최근에 끝난 `endedShown`개 — 사람이 그 묶음의 접힌 줄을 폈으면 다 —
+ * 와, 그 수를 넘는 끝난 것의 수(`more`). 네 묶음이 이 하나로 접는다(t-71840). */
+function boardScheduleEndedKept(ended, endOf, opened) {
+  const newest = [...ended].sort((a, b) => endOf(b) - endOf(a));
+  return {
+    kept: opened ? newest : newest.slice(0, BOARD_SCHEDULE.endedShown),
+    more: Math.max(0, newest.length - BOARD_SCHEDULE.endedShown),
+  };
+}
+
+/* 한 묶음 안의 차례: 시작 차례, 같으면 키 차례 — 네 묶음이 같다(t-71840). 게이트의 일감은 제 머리 바로
+ * 아래에 같은 차례로 선다. */
+function boardScheduleOrder(a, b) {
+  return a.start - b.start || a.key.localeCompare(b.key);
+}
+
 /* 일감 이름에서 차례(`0-`·`9-`)와 넣은 시각(epoch)을 뗀 것: 행의 이름은 그것이면 된다. */
 function boardScheduleJobLabel(name) {
   return String(name).replace(/^[09]-/, "").replace(/^\d{9,11}-/, "");
@@ -398,8 +426,8 @@ function boardScheduleLaneRows(lanes, now) {
   });
 }
 
-/* 결합 게이트: 이름의 `-l<NN>` 토막마다 한 행, 시작 차례로. 펴면 그 일감들이 바로
- * 아래에 선다. 도는 일감이나 기다리는 일감이 있는 게이트는 처음부터 펴져 있다. */
+/* 결합 게이트: 이름의 `-l<NN>` 토막마다 머리 한 행과, 펴면 바로 아래에 서는 그 일감들. 도는 일감이나
+ * 기다리는 일감이 있는 게이트는 처음부터 펴져 있다. */
 function boardScheduleGateRows(jobs, plan, now, choice, stall) {
   const gates = new Map();
   for (const job of jobs) {
@@ -448,59 +476,92 @@ function boardScheduleGateRows(jobs, plan, now, choice, stall) {
         basis: placed.some((row) => row.basis === "cap") ? "cap" : "history", said,
         act: { fold: gate, opened }, opened, paused: Boolean(stall) && state === "waiting",
       }),
-      rows: opened ? placed.sort((a, b) => a.start - b.start) : [],
+      rows: opened ? placed : [],
     });
   }
-  return entries.sort((a, b) => a.head.start - b.head.start).flatMap((entry) => [entry.head, ...entry.rows]);
+  return entries;
 }
 
-/* 게이트 밖의 일감: 도는 것·기다리는 것은 다, 끝난 것은 가장 최근의 몇만. */
-function boardScheduleLineRows(jobs, plan, now, stall, from) {
+/* 게이트 밖의 일감: 도는 것·기다리는 것은 다, 끝난 것은 범위 안에서 가장 최근에 끝난 몇만 — 나머지는
+ * 수다. 끝난 것은 접은 뒤에 행으로 짓는다: 답 하나가 일감 수백을 싣는다. */
+function boardScheduleLineRows(jobs, plan, now, stall, from, opened) {
   const outside = jobs.filter((job) => !job.gate);
-  const open = outside.filter((job) => ["running", "waiting", "held", "lost"].includes(job.state));
-  const ended = outside.filter((job) => !open.includes(job) && (Number(job.end_ms) || 0) >= from)
-    .sort((a, b) => (Number(b.end_ms) || 0) - (Number(a.end_ms) || 0));
-  const shown = [...ended.slice(0, BOARD_SCHEDULE.lineShown), ...open];
+  const moving = (job) => ["running", "waiting", "held", "lost"].includes(job.state);
+  const ended = outside.filter((job) => !moving(job) && (Number(job.end_ms) || 0) >= from);
+  const { kept, more } = boardScheduleEndedKept(ended, (job) => Number(job.end_ms) || 0, opened);
   return {
-    rows: shown.map((job) => boardScheduleJobRow(job, plan, now, stall, 0)).sort((a, b) => a.start - b.start),
-    more: Math.max(0, ended.length - BOARD_SCHEDULE.lineShown),
+    rows: [...kept, ...outside.filter(moving)].map((job) => boardScheduleJobRow(job, plan, now, stall, 0)),
+    more,
   };
 }
 
-/* 워커 과업: 데스크가 읽은 원장의 과업 가운데 시각을 가진 것. 막대는 첫 시도의
- * 시작부터 착지까지(아직이면 지금까지), 그 안에 넘김과 검증의 자리를 표시한다. */
-function boardScheduleTaskRows(tasks, now) {
-  const rows = [];
+/* 끝난 과업의 끝(t-71840): git이 말한 착지(병합 커밋의 시각), 그것이 없으면 그 일이 실린 발행, 그것도
+ * 없으면 원장이 적은 완료·검증·넘김·시도 끝 가운데 가장 늦은 것. 아무것도 적히지 않았으면 null이다 —
+ * 끝난 일에 지금을 쓰면 막대가 「지금」 선까지 늘어나고 「N일 걸림」이 부푼다(사람 10-23 사진의 t-66760). */
+function boardScheduleTaskEnd(times, landing) {
+  const told = boardScheduleMoment(landing?.landed_ms) ?? boardScheduleMoment(landing?.released_ms);
+  if (told !== null) return told;
+  const written = [times?.landed_ms, times?.verified_ms, times?.handed_ms, times?.ended_ms]
+    .map(boardScheduleMoment).filter((ms) => ms !== null);
+  return written.length > 0 ? Math.max(...written) : null;
+}
+
+/* 워커 과업: 데스크가 읽은 원장의 과업 가운데 시각을 가진 것. 막대는 첫 시도의 시작부터 — 도는 것과
+ * 기다리는 것은 지금까지, 끝난 것은 그 끝(`boardScheduleTaskEnd`)까지 — 서고, 그 안에 넘김과 검증의
+ * 자리를 표시한다. 끝난 것은 범위 안에서 가장 최근에 끝난 몇만 행이 되고 나머지는 수다. `landings`는
+ * 일정의 답이 git에서 읽어 온 착지·발행이다(과업 id마다). */
+function boardScheduleTaskRows(tasks, now, landings, from, opened) {
+  const moving = [];
+  const ended = [];
   for (const task of Array.isArray(tasks) ? tasks : []) {
-    const times = task?.times;
-    // `Number(null)` is 0, a moment in 1970: a time the ledger has not written is no time.
-    const start = Number(times?.started_ms ?? NaN);
-    if (!Number.isFinite(start) || !(task.stage in BOARD_SCHEDULE_TASK_STATES)) continue;
-    const landed = Number(times.landed_ms ?? NaN);
-    const end = Number.isFinite(landed) ? landed : now;
-    const stage = DESK_STAGES.find((one) => one.id === task.stage);
-    const word = stage ? t(stage.key, stage.word) : String(task.stage);
-    const since = Math.max(Number(times.verified_ms) || 0, Number(times.handed_ms) || 0, start);
-    const state = BOARD_SCHEDULE_TASK_STATES[task.stage];
-    const said = state === "done"
-      ? t("board.schedule.taskLanded", "{{stage}} · {{time}} 걸림", { stage: word, time: boardScheduleSpan(end - start) })
-      : state === "running"
-        ? t("board.schedule.taskRunning", "{{stage}} · {{time}}째", { stage: word, time: boardScheduleSpan(now - start) })
-        : t("board.schedule.taskWaiting", "{{stage}} · 기다린 지 {{time}}", { stage: word, time: boardScheduleSpan(now - since) });
-    const at = (ms) => (ms != null && Number.isFinite(Number(ms)) && end > start ? (Number(ms) - start) / (end - start) : null);
-    const clock = (ms) => (ms != null && Number.isFinite(Number(ms)) ? boardScheduleClock(Number(ms), now) : "—");
-    rows.push(boardScheduleRow({
-      key: `task:${task.run}/${task.id}`, label: `${task.id} · ${task.title}`,
-      tip: [`${task.id} · ${task.title}`, task.run, t("board.schedule.tipTask",
-        "시작 {{start}} · 넘김 {{handed}} · 검증 {{verified}} · 착지 {{landed}}", {
-          start: clock(times.started_ms), handed: clock(times.handed_ms),
-          verified: clock(times.verified_ms), landed: clock(times.landed_ms),
-        })].filter(Boolean).join(" · "),
-      start, end, state, said, marks: { handed: at(times.handed_ms), verified: at(times.verified_ms) },
-      act: { task: { run: task.run, id: task.id, stage: task.stage } },
-    }));
+    const start = boardScheduleMoment(task?.times?.started_ms);
+    if (start === null || !(task.stage in BOARD_SCHEDULE_TASK_STATES)) continue;
+    const landing = landings?.[task.id] ?? null;
+    if (!BOARD_SCHEDULE_ENDED_STATES.includes(BOARD_SCHEDULE_TASK_STATES[task.stage])) {
+      moving.push({ task, landing, start, end: now, known: true });
+      continue;
+    }
+    const at = boardScheduleTaskEnd(task.times, landing);
+    const end = Math.max(start, at ?? start);
+    if (end >= from) ended.push({ task, landing, start, end, known: at !== null });
   }
-  return rows.sort((a, b) => a.start - b.start);
+  const { kept, more } = boardScheduleEndedKept(ended, (one) => one.end, opened);
+  return { rows: [...kept, ...moving].map((one) => boardScheduleTaskRow(one, now)), more };
+}
+
+function boardScheduleTaskRow({ task, landing, start, end, known }, now) {
+  const times = task.times;
+  const stage = DESK_STAGES.find((one) => one.id === task.stage);
+  const word = stage ? t(stage.key, stage.word) : String(task.stage);
+  const since = Math.max(Number(times.verified_ms) || 0, Number(times.handed_ms) || 0, start);
+  const state = BOARD_SCHEDULE_TASK_STATES[task.stage];
+  const said = state === "running"
+    ? t("board.schedule.taskRunning", "{{stage}} · {{time}}째", { stage: word, time: boardScheduleSpan(now - start) })
+    : state === "waiting"
+      ? t("board.schedule.taskWaiting", "{{stage}} · 기다린 지 {{time}}", { stage: word, time: boardScheduleSpan(now - since) })
+      : known
+        ? t("board.schedule.taskLanded", "{{stage}} · {{time}} 걸림", { stage: word, time: boardScheduleSpan(end - start) })
+        : t("board.schedule.taskNoEnd", "{{stage}} · 끝 기록 없음", { stage: word });
+  // A mark stands on the bar or not at all: a review written after git's landing has no place on it.
+  const at = (ms) => {
+    const moment = boardScheduleMoment(ms);
+    const share = moment !== null && end > start ? (moment - start) / (end - start) : null;
+    return share !== null && share >= 0 && share <= 1 ? share : null;
+  };
+  const clock = (ms) => {
+    const moment = boardScheduleMoment(ms);
+    return moment === null ? "—" : boardScheduleClock(moment, now);
+  };
+  return boardScheduleRow({
+    key: `task:${task.run}/${task.id}`, label: `${task.id} · ${task.title}`,
+    tip: [`${task.id} · ${task.title}`, task.run, t("board.schedule.tipTask",
+      "시작 {{start}} · 넘김 {{handed}} · 검증 {{verified}} · 착지 {{landed}} · 발행 {{released}}", {
+        start: clock(times.started_ms), handed: clock(times.handed_ms), verified: clock(times.verified_ms),
+        landed: clock(landing?.landed_ms ?? times.landed_ms), released: clock(landing?.released_ms),
+      })].filter(Boolean).join(" · "),
+    start, end, state, said, marks: { handed: at(times.handed_ms), verified: at(times.verified_ms) },
+    act: { task: { run: task.run, id: task.id, stage: task.stage } },
+  });
 }
 
 /* 눈금: 축의 폭에 들어가는 가장 촘촘한 간격으로, 그 간격의 현지 시각 경계마다. */
@@ -539,20 +600,37 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
   const stall = boardScheduleStall(facts, runnerLanes);
   const plan = boardScheduleQueuePlan(jobs, runnerLanes, now);
   const from = now - zoom.beforeMs;
-  const line = boardScheduleLineRows(jobs, plan, now, stall, from);
+  const opened = (group) => choice.opened.has(`ended:${group}`);
+  // The line and the workers fold their finished rows before they build them; lanes and gates are few.
+  const line = boardScheduleLineRows(jobs, plan, now, stall, from, opened("line"));
+  const workers = boardScheduleTaskRows(tasks, now, answer?.landings, from, opened("workers"));
+  // Each group as entries: a row, and the rows standing under it (a gate's jobs).
+  const alone = (row) => ({ head: row, rows: [] });
   const built = {
-    lanes: boardScheduleLaneRows(lanes, now),
-    gates: boardScheduleGateRows(jobs, plan, now, choice, stall),
-    line: line.rows,
-    workers: boardScheduleTaskRows(tasks, now),
+    lanes: { entries: boardScheduleLaneRows(lanes, now).map(alone), more: null },
+    gates: { entries: boardScheduleGateRows(jobs, plan, now, choice, stall), more: null },
+    line: { entries: line.rows.map(alone), more: line.more },
+    workers: { entries: workers.rows.map(alone), more: workers.more },
   };
-  const latest = Math.max(now, ...Object.values(built).flat()
+  const latest = Math.max(now, ...Object.values(built).flatMap((group) => group.entries)
+    .flatMap((entry) => [entry.head, ...entry.rows])
     .filter((row) => ["running", "waiting", "held"].includes(row.state)).map((row) => row.end));
   const to = Math.min(now + zoom.mostAfterMs, Math.max(now + zoom.afterMs, latest + BOARD_SCHEDULE.tailMs));
   const span = Math.max(1, to - from);
   const percent = (ms) => Math.min(100, Math.max(0, ((ms - from) / span) * 100));
+  const seen = (row) => row.end >= from && row.start <= to;
   const groups = BOARD_SCHEDULE_GROUPS.map((group) => {
-    const rows = built[group.id].filter((row) => row.end >= from && row.start <= to).map((row) => ({
+    let { entries, more } = built[group.id];
+    entries = entries.filter((entry) => seen(entry.head));
+    if (more === null) {
+      const ended = (entry) => BOARD_SCHEDULE_ENDED_STATES.includes(entry.head.state);
+      const folded = boardScheduleEndedKept(entries.filter(ended), (entry) => entry.head.end, opened(group.id));
+      const kept = new Set(folded.kept);
+      entries = entries.filter((entry) => !ended(entry) || kept.has(entry));
+      more = folded.more;
+    }
+    const rows = entries.sort((a, b) => boardScheduleOrder(a.head, b.head))
+      .flatMap((entry) => [entry.head, ...entry.rows.filter(seen).sort(boardScheduleOrder)]).map((row) => ({
       ...row,
       // 기계가 붐비면(1분 부하 > 코어 수, 데스크의 기계 띠와 같은 판정) 앞으로 남은 예상 곁에 그렇다고만
       // 적는다 — 값은 바꾸지 않는다(코디 m-67652).
@@ -569,7 +647,8 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
       folded: choice.folded.has(group.id),
       count: rows.filter((row) => row.depth === 0).length,
       rows,
-      more: group.id === "line" ? line.more : 0,
+      more,
+      moreOpened: opened(group.id),
     };
   });
   return { from, to, now, nowAt: percent(now), ticks: boardScheduleTicks(from, to, width, zoom.ticksMs).map((tick) =>
@@ -623,7 +702,17 @@ function boardScheduleSkeleton(host) {
       paintBoardScheduleHosts();
     };
     const rows = boardScheduleElement("div", "board-schedule-rows");
-    box.append(fold, rows, boardScheduleElement("p", "board-schedule-more"));
+    // The group's folded line of finished rows (t-71840): a press shows them all, a second folds them again.
+    const more = boardScheduleElement("button", "board-schedule-more");
+    more.type = "button";
+    more.onclick = () => {
+      const key = `ended:${group.id}`;
+      if (boardScheduleChoice.opened.has(key)) boardScheduleChoice.opened.delete(key);
+      else boardScheduleChoice.opened.add(key);
+      noteBoardScheduleChoice();
+      paintBoardScheduleHosts();
+    };
+    box.append(fold, rows, more);
     chart.append(box);
   }
   const log = boardScheduleElement("section", "board-schedule-log");
@@ -759,9 +848,12 @@ function paintBoardScheduleHost(host, view, now) {
       return node;
     }));
     writeHidden(list, rows.length === 0);
-    const moreWords = group.more > 0 && !group.folded
-      ? t("board.schedule.more", "끝난 일감 {{count}}개 더 — 이 범위의 더 이른 것", { count: group.more }) : "";
+    const moreWords = group.more === 0 || group.folded ? ""
+      : group.moreOpened
+        ? t("board.schedule.lessEnded", "끝난 {{count}}개 접기", { count: group.more })
+        : t("board.schedule.moreEnded", "+{{count}} 끝남", { count: group.more });
     writeTextContent(more, moreWords);
+    writeAttribute(more, "aria-expanded", String(group.moreOpened));
     writeHidden(more, moreWords === "");
     shown += group.rows.length;
   }

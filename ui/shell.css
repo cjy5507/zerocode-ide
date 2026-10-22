@@ -34281,6 +34281,27 @@ details.task-board-section > summary {
   font-size: var(--text-xs);
 }
 
+/* 묶음마다 접힌 끝난 행들의 줄(「+N 끝남」, t-71840): 누르면 펴고 다시 누르면 접는다. */
+.board-schedule-more {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  text-align: start;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.board-schedule-more:hover {
+  color: var(--ink-chalk);
+}
+
+.board-schedule-more:focus-visible {
+  outline: var(--accent-rule) solid var(--ink-chalk);
+  outline-offset: var(--rule-width);
+}
+
 .board-schedule-log {
   margin-top: var(--space-4);
   border: var(--rule-width) solid var(--edge-rule);
