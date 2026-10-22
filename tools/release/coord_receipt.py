@@ -10,19 +10,26 @@ it leaves owed (t-47516: v1.1.84's lane spent 3168 + 1719 s on gates the coordin
 run green on the same tree an hour before).
 
     coord_receipt.py make JOB.job [JOB.job ...] > receipt.json
-    coord_receipt.py read --receipt FILE [--dir DIR]
+    coord_receipt.py read --receipt FILE --line QUEUE --run RUN [--dir DIR]
 
 The receipt only locates the evidence and seals its bytes (the sha256 of every file read).
 `read` reads all of it again: a job counts when its rc file says 0, its log opened with a
 head and a tree, every entry it ran closed with a green RC line and left its own log, and
 its verdict counted no red; every job carries the receipt's owner and run and names one
-tree, and the receipt was made after the last job ended. It prints facts, one a line:
+tree and one folder it ran in, and the receipt was made after the last job ended. Every job
+must be one the build line QUEUE ran: its files sit in QUEUE's done/, and the runner's log
+there started it under its owner and last ended it with rc 0. Owner and run are only what
+the jobs say of themselves (`# who:`, `# run:`) — nothing signs them — so they are held to
+the lane's own: a coordinator's `coord-<label>` of RUN. It prints facts, one a line:
 
-    who <owner> · run <run> · tree <tree> · logs <folder>
+    who <owner> · run <run> · tree <tree> · logs <folder> · cwd <the folder the jobs ran in>
     head <sha> <the earliest end, epoch seconds, of a job on that head>
     recipe <name>    with --dir: a recipe of that folder an entry ran exactly as `just <name>`
 
-and exits 1 with one line saying why when the receipt does not stand. How the tree
+and exits 1 with one line saying why when the receipt does not stand. An entry's `just` is
+placed only when the jobs ran at the top of their checkout (their folder holds its .git): a
+bare `just <name>` is then the top's recipe, and `<shell> -c 'cd <folder> && just <name>'`
+that folder's — from zo-ide a bare `just test` is zo's, never the root's. How the tree
 relates to the sha being cut, and which recipes a gate runs, are the lane's to judge
 (git and verify-every-recipe.sh --list); so is anything an entry ran other than a recipe.
 """
@@ -47,6 +54,10 @@ LOGGED = re.compile(r'"\$@" > (\S+)/\$key\.log ')     # where `entry()` sends ea
 IN_FOLDER = re.compile(r"cd (\S+) && just ([A-Za-z0-9_][A-Za-z0-9_-]*)")
 RECIPE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
 SHELLS = {"zsh", "bash", "sh"}
+FACTS = ("who", "run", "tree", "logs", "cwd")   # what every job of a receipt names alike
+COORDINATOR = re.compile(r"coord-[A-Za-z0-9]+")   # the coordinator's own jobs: coord-<the landing's label>
+STARTED = re.compile(r"RUN (\S+) who=(\S*) .*")    # the runner's log: RUN <name> who=<who> lane=<n> cap=<n>s <time>
+ENDED = re.compile(r"DONE (\S+) rc=(\S+) .*")      # …and DONE <name> rc=<rc> <n>s lane=<n> <time> load=<n>
 
 
 class Refused(Exception):
@@ -72,7 +83,7 @@ def job_stem(path):
 
 
 def job(stem):
-    """One build-line job, read: owner, run, head, tree, end, entries, logs folder and the bytes that showed them."""
+    """One build-line job, read: owner, run, folder, head, tree, end, entries, logs folder and the bytes that showed them."""
     name, seen, text = os.path.basename(stem), {}, {}
     for kind in ("job", "rc", "log"):
         data, mtime = plain_bytes(f"{stem}.{kind}")
@@ -101,8 +112,8 @@ def job(stem):
             if len(words) < 3 or words[1] in entries:
                 raise Refused(f"job {name} has an entry without a command, or one key twice")
             entries[words[1]] = words[2:]
-    if not header.get("who") or not header.get("run"):
-        raise Refused(f"job {name} names no owner or run")
+    if not header.get("who") or not header.get("run") or not header.get("cwd"):
+        raise Refused(f"job {name} names no owner, run or folder")
     if not entries:
         raise Refused(f"job {name} ran no entry")
     if len(logs) != 1:
@@ -132,25 +143,58 @@ def job(stem):
     for key in entries:
         data, _ = plain_bytes(os.path.join(folder, f"{key}.log"))
         seen[os.path.join(folder, f"{key}.log")] = hashlib.sha256(data).hexdigest()
-    return {"name": name, "who": header["who"], "run": header["run"], "head": opening[1], "tree": opening[2],
-            "ended": ended, "entries": entries, "logs": folder, "seen": seen}
+    return {"name": name, "stem": stem, "who": header["who"], "run": header["run"], "cwd": header["cwd"],
+            "head": opening[1], "tree": opening[2], "ended": ended, "entries": entries, "logs": folder, "seen": seen}
 
 
 def agreed(jobs):
-    """The owner, run, tree and logs folder every job names; refused when they differ."""
+    """The owner, run, tree, logs folder and folder run in that every job names; refused when they differ."""
     if not jobs:
         raise Refused("the receipt names no job")
     if len({one["name"] for one in jobs}) != len(jobs):
         raise Refused("the receipt names a job twice")
-    for key in ("who", "run", "tree", "logs"):
+    for key in FACTS:
         values = sorted({one[key] for one in jobs})
         if len(values) != 1:
             raise Refused(f"the jobs name more than one {key}: {' '.join(values)}")
-    return {key: jobs[0][key] for key in ("who", "run", "tree", "logs")}
+    return {key: jobs[0][key] for key in FACTS}
+
+
+def on_the_line(jobs, queue):
+    """Every job is one the build line QUEUE ran: its files sit in QUEUE's done/, and the
+    runner's log there started it under the job's owner and last ended it with rc 0."""
+    done = os.path.realpath(os.path.join(queue, "done"))
+    for one in jobs:
+        if os.path.realpath(os.path.dirname(one["stem"])) != done:
+            raise Refused(f"job {one['name']} is not in {done}")
+    data, _ = plain_bytes(os.path.join(queue, "runner.log"))
+    owner, last = {}, {}
+    for line in data.decode("utf-8", errors="replace").splitlines():
+        started, ended = STARTED.fullmatch(line), ENDED.fullmatch(line)
+        if started:
+            owner[started[1]] = started[2]
+        elif ended:
+            last[ended[1]] = (ended[2], owner.get(ended[1]))
+    for one in jobs:
+        if last.get(one["name"]) != ("0", one["who"]):
+            raise Refused(f"the build line's runner.log never ended job {one['name']} green under {one['who']}")
+
+
+def held_to(facts, run):
+    """The jobs say they are a coordinator's (coord-<label>) of RUN, the lane's own run."""
+    if facts["run"] != run:
+        raise Refused(f"the jobs say run {facts['run']}, not {run}")
+    if not COORDINATOR.fullmatch(facts["who"]):
+        raise Refused(f"the jobs say {facts['who']}, not a coordinator's coord-<label>")
+
+
+def at_top(folder):
+    """FOLDER is the top of a checkout: it holds the checkout's .git (a worktree's file, a clone's folder)."""
+    return os.path.lexists(os.path.join(folder, ".git"))
 
 
 def recipe_of(command, folder):
-    """The recipe an entry ran in FOLDER when it ran exactly `just <recipe>` there, else None."""
+    """The recipe an entry run from the checkout's top ran in FOLDER when it ran exactly `just <recipe>` there, else None."""
     folder = os.path.normpath(folder)
     if folder == "." and len(command) == 2 and command[0] == "just" and RECIPE.fullmatch(command[1]):
         return command[1]
@@ -171,7 +215,9 @@ def make(paths):
             "jobs": [job_stem(path) for path in paths], "sealed": seen}
 
 
-def read(path, folder=None):
+def read(path, folder=None, line=None, run=None):
+    """What a receipt stands for. LINE and RUN — the build line its jobs ran on and the run they
+    must say — are the lane's, and the CLI asks for both; without them only the evidence is read."""
     data, _ = plain_bytes(path)
     try:
         receipt = json.loads(data)
@@ -196,12 +242,16 @@ def read(path, folder=None):
         raise Refused(f"{changed[0]} is not what the receipt sealed")
     if made < int(max(one["ended"] for one in jobs)):
         raise Refused("the receipt was made before its last job ended")
+    if line is not None:
+        on_the_line(jobs, line)
+    if run is not None:
+        held_to(facts, run)
     heads = {}
     for one in jobs:
         heads[one["head"]] = min(heads.get(one["head"], one["ended"]), one["ended"])
     said = [f"{key} {value}" for key, value in facts.items()]
     said += [f"head {head} {int(ended)}" for head, ended in sorted(heads.items())]
-    if folder is not None:
+    if folder is not None and at_top(facts["cwd"]):
         recipes = {recipe_of(command, folder) for one in jobs for command in one["entries"].values()}
         said += [f"recipe {name}" for name in sorted(recipes - {None})]
     return said
@@ -214,13 +264,15 @@ def main(argv=None):
     making.add_argument("jobs", nargs="+", help="the jobs' .job files; their .rc and .log sit beside them")
     reading = actions.add_parser("read", help="read a receipt's evidence again and print what it stands for")
     reading.add_argument("--receipt", required=True)
+    reading.add_argument("--line", required=True, help="the build line's queue folder: every job sits in its done/ and its runner.log")
+    reading.add_argument("--run", required=True, help="the run every job must say it is of (the lane's RELEASE_COORD_RUN)")
     reading.add_argument("--dir", help="a gate's folder in the checkout (. or zo-ide): also print the recipes it covers")
     args = parser.parse_args(argv)
     try:
         if args.action == "make":
             print(json.dumps(make(args.jobs), indent=1, sort_keys=True, ensure_ascii=False))
         else:
-            print("\n".join(read(args.receipt, args.dir)))
+            print("\n".join(read(args.receipt, args.dir, args.line, args.run)))
     except Refused as why:
         print(" ".join(str(why).split()))
         return 1

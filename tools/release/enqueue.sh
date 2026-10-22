@@ -7,9 +7,11 @@
 #
 # --receipt carries the coordinator's gate receipt for the tree the sha was cut
 # from (coord_receipt.py make): the lane then runs only the gate recipes it left
-# owed (t-47516). It is read here once — a receipt that does not stand is refused
-# and nothing is queued — and kept as <receipts>/<sha>.json before the queue file
-# appears, so the lane never takes the sha without it.
+# owed (t-47516). It is read here once, as the lane reads it — of jobs the build
+# line ran (RELEASE_BUILD_LINE) that say they are the coordinator's (RELEASE_COORD_RUN);
+# a receipt that does not stand is refused and nothing is queued — and kept as
+# <receipts>/<sha>.json before the queue file appears, so the lane never takes the
+# sha without it.
 set -u
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 eval "$(bash "$SELF_DIR/lane.sh" --table)"
@@ -34,7 +36,7 @@ else
 fi
 short=$(printf '%s' "$full" | cut -c1-8)
 if [ -n "$receipt" ]; then
-  said=$(python3 "$RECEIPT_PY" read --receipt "$receipt" 2>&1) \
+  said=$(python3 "$RECEIPT_PY" read --receipt "$receipt" --line "$RELEASE_BUILD_LINE" --run "$RELEASE_COORD_RUN" 2>&1) \
     || { echo "enqueue: the receipt is refused — $said; nothing queued"; exit 1; }
   mkdir -p "$RECEIPTS" && cp "$receipt" "$RECEIPTS/$full.json.tmp" && mv -f "$RECEIPTS/$full.json.tmp" "$RECEIPTS/$full.json" \
     || { echo "enqueue: the receipt could not be kept under $RECEIPTS; nothing queued"; exit 1; }

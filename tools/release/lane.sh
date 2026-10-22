@@ -113,6 +113,13 @@ UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   
 FEED_PY=$SELF_DIR/updater_feed.py
 UNITS_PY=$SELF_DIR/workspace_units.py   # drops the repository's own build units from a target (trim_targets)
 RECEIPT_PY=$SELF_DIR/coord_receipt.py   # reads a coordinator's gate receipt again (receipt_cover); enqueue.sh reads it at the door
+# A receipt's jobs are ones the coordinator's build line ran: their files in its done/, each
+# started and ended green in its runner.log — the queue under the project's workspace folder,
+# where the window's board reads it too (crates/zerocode-shell/src/schedule_timeline.rs
+# LINE_FOLDER). Their owner and run are only what the jobs say of themselves, held to the
+# coordinator's: coord-<label> of RELEASE_COORD_RUN (t-47516).
+RELEASE_BUILD_LINE=${RELEASE_BUILD_LINE:-$HOME/zerocode/workspaces/$(basename "$RELEASE_REPO")/build-line/build-queue}
+RELEASE_COORD_RUN=${RELEASE_COORD_RUN:-run-4275}
 LEGACY_INSTALL_SH=$SELF_DIR/legacy/install.sh   # the old CLI's installer, verbatim (§2.7)
 APP_INSTALL_SH=$SELF_DIR/install.sh             # the app's installer: reads the feed beside it, so it goes up with every release
 # -------------------------------------------------------------------------------
@@ -136,7 +143,7 @@ if [ "${1:-}" = "--table" ]; then
            CALM_POLL_SECS PHASES TARGET_LANES CARGO_INCREMENTAL TOOLS \
            LAUNCHD_LABEL LAUNCHD_PATH APP_NAME RELEASE_REPO RELEASE_HOME RELEASE_SCRATCH_ROOT RELEASE_APP_DIR \
            RELEASE_ZO_BIN RELEASE_FLAKES_FILE QUEUE LOCK OUT STATUS INSTALLED INSTALLED_PREV UNLISTED RECEIPTS RECEIPT_PY \
-           RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
+           RELEASE_BUILD_LINE RELEASE_COORD_RUN RELEASE_NOTES NOTES_READERS UI_SUITE_CHOOSER \
            RELEASE_GITHUB_REPO RELEASE_PUBLISH RELEASE_CHANNEL RELEASE_LEGACY_MANIFEST UPDATER_KEY \
            UPDATER_PLATFORM UPDATER_ARCH UPDATER_FEED ZO_BUILD_TARGETS COMPUTER_USE_HELPER APP_SIBLING_BINS; do
     eval "printf \"%s='%s'\\n\" \"$k\" \"\$$k\""
@@ -917,15 +924,19 @@ gate_owed() { # root|zo — 0 when the gate must run; otherwise SKIP says why an
 # that gate's receipt (enqueue.sh --receipt, kept as $RECEIPTS/<sha>.json). The
 # receipt only locates the build line's evidence and seals its bytes; coord_receipt.py
 # reads all of it again — each job's rc file, the head and tree its log opened with,
-# one green RC line and one log per entry, a verdict of no red, one owner and run —
-# and counts a recipe as gated only where an entry ran exactly `just <recipe>` in that
-# gate's folder. The receipt stands for this sha when git finds every job's head to
-# hold the sha's tree apart from the stamp's version lines and the release notes (whose
-# readers are then owed again), and every job ended after its head was committed.
-# The gate then runs only what the receipt left owed — nothing, and the phase is
-# skipped aloud, when it left nothing. Without a receipt, or with one refused, the
-# gate runs whole, and the phase line and status.json say why. v1.1.84's lane spent
-# 3168 + 1719 s on the tree the coordinator's l64 had gated green an hour before (t-47516).
+# one green RC line and one log per entry, a verdict of no red, one owner, run and
+# folder — holds every job to RELEASE_BUILD_LINE (in its done/, started and ended green
+# in its runner.log) and the jobs' own word on owner and run to the coordinator's
+# (coord-<label> of RELEASE_COORD_RUN), and counts a recipe as gated only where an
+# entry ran exactly `just <recipe>` in that gate's folder from the top of the checkout.
+# The receipt stands for this sha when git finds every job's head to hold the tree its
+# jobs printed, and that tree to be the sha's apart from the stamp's version lines and
+# the release notes edited in place (whose readers are then owed again), and every job
+# ended after its head was committed. The gate then runs only what the receipt left
+# owed — nothing, and the phase is skipped aloud, when it left nothing. Without a
+# receipt, or with one refused, the gate runs whole, and the phase line and status.json
+# say why. v1.1.84's lane spent 3168 + 1719 s on the tree the coordinator's l64 had
+# gated green an hour before (t-47516).
 gate_recipes() { # LANE -> the recipes its gate runs, one a line, as verify-every-recipe.sh lists them
   if is_dry; then stub "GATE_$(upper "$1")_RECIPES" test | tr ' ' '\n'; return 0; fi
   ( cd "$SCRATCH/$(gate_dir "$1")" && "$SELF_DIR/verify-every-recipe.sh" --list ) 2>/dev/null
@@ -934,11 +945,27 @@ commit_time() { # SHA -> its committer time, epoch seconds
   if is_dry; then stub COMMIT_TIME 0; return 0; fi
   git -C "$SCRATCH" show -s --format=%ct "$1" 2>/dev/null
 }
+tree_of() { # SHA PRINTED -> the tree git finds SHA to hold; the dry run says PRINTED, the tree its jobs printed
+  if is_dry; then stub HEAD_TREE "${2-}"; return 0; fi
+  git -C "$SCRATCH" rev-parse --verify --quiet "$1^{tree}" 2>/dev/null
+}
+# notes_edited SINCE — 0 when SINCE..SHA changed the release notes in place: modified
+# (--diff-filter=M), a plain file (100644) on both sides. --name-only shows a link, a
+# removal and a mode change as the same one path, and a linked notes file is what
+# updater_feed.py would follow into the release (ZO's review of t-47516, P3-1).
+notes_edited() {
+  local raw
+  if is_dry; then raw=$(stub NOTES_RAW ":100644 100644 1111111 2222222 M"$'\t'"$RELEASE_NOTES")
+  else raw=$(git -C "$SCRATCH" diff-tree -r --raw --diff-filter=M "$1" "$SHA" -- "$RELEASE_NOTES" 2>/dev/null) || return 1; fi
+  case $raw in ":100644 100644 "*" M"$'\t'"$RELEASE_NOTES") return 0 ;; esac
+  return 1
+}
 receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left owed; 1 when there is none or it is refused (RECEIPT says why)
-  local lane=$1 file="$RECEIPTS/$SHA.json" facts kind rest head ended committed recipes r who= run= tree= logs= covered= owed= notes= n=0 total=0
+  local lane=$1 file="$RECEIPTS/$SHA.json" facts kind rest head ended committed recipes r who= run= tree= logs= heads= covered= owed= notes= n=0 total=0
   ONLY=; RECEIPT=
   [ -f "$file" ] || return 1
-  facts=$(python3 "$RECEIPT_PY" read --receipt "$file" --dir "$(gate_dir "$lane")" 2>&1) \
+  facts=$(python3 "$RECEIPT_PY" read --receipt "$file" --dir "$(gate_dir "$lane")" \
+            --line "$RELEASE_BUILD_LINE" --run "$RELEASE_COORD_RUN" 2>&1) \
     || { RECEIPT="refused: $facts"; return 1; }
   while read -r kind rest; do
     case $kind in
@@ -947,19 +974,26 @@ receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left
       tree) tree=$rest ;;
       logs) logs=$rest ;;
       recipe) covered="$covered $rest " ;;
-      head)
-        read -r head ended <<< "$rest"
-        real_changes "$head" RECEIPT_CHANGED_PATHS || { RECEIPT="refused: git cannot compare ${head:0:8} with $SHA8"; return 1; }
-        case $REAL in
-          '') ;;
-          "$RELEASE_NOTES"$'\n') notes=1 ;;
-          *) RECEIPT="refused: ${head:0:8} holds another tree ($(printf '%s' "$REAL" | head -3 | tr '\n' ' ')…)"; return 1 ;;
-        esac
-        committed=$(commit_time "$head")
-        [ "${ended:-0}" -gt "${committed:-x}" ] 2>/dev/null \
-          || { RECEIPT="refused: a job on ${head:0:8} ended before that head was committed"; return 1; } ;;
+      head) heads="$heads$rest"$'\n' ;;
     esac
   done <<< "$facts"
+  [ -n "$tree" ] && [ -n "$heads" ] || { RECEIPT="refused: the receipt names no tree or head"; return 1; }
+  while read -r head ended; do
+    [ -n "$head" ] || continue
+    real_changes "$head" RECEIPT_CHANGED_PATHS || { RECEIPT="refused: git cannot compare ${head:0:8} with $SHA8"; return 1; }
+    [ "$(tree_of "$head" "$tree")" = "$tree" ] \
+      || { RECEIPT="refused: ${head:0:8} does not hold the tree its jobs printed (${tree:0:8})"; return 1; }
+    case $REAL in
+      '') ;;
+      "$RELEASE_NOTES"$'\n')
+        notes_edited "$head" || { RECEIPT="refused: $RELEASE_NOTES is not a plain file edited in place since ${head:0:8}"; return 1; }
+        notes=1 ;;
+      *) RECEIPT="refused: ${head:0:8} holds another tree ($(printf '%s' "$REAL" | head -3 | tr '\n' ' ')…)"; return 1 ;;
+    esac
+    committed=$(commit_time "$head")
+    [ "${ended:-0}" -gt "${committed:-x}" ] 2>/dev/null \
+      || { RECEIPT="refused: a job on ${head:0:8} ended before that head was committed"; return 1; }
+  done <<< "$heads"
   recipes=$(gate_recipes "$lane")
   [ -n "$recipes" ] || { RECEIPT="unused: the $lane gate's recipes are unknown (verify-every-recipe.sh --list)"; return 1; }
   for r in $recipes; do
@@ -970,7 +1004,7 @@ receipt_cover() { # LANE — 0 when this sha's receipt stands, ONLY what it left
     owed="$owed $r"
   done
   ONLY=${owed# }
-  RECEIPT="$who ($run) tree ${tree:0:8}: $n/$total $lane recipes green${notes:+, the notes changed}${ONLY:+, owes $ONLY} — logs $logs"
+  RECEIPT="$who of $run as its jobs say (the lane's coordinator run), tree ${tree:0:8}: $n/$total $lane recipes green${notes:+, the notes changed}${ONLY:+, owes $ONLY} — logs $logs"
   return 0
 }
 gate_left() { # LANE — 0 when the gate still runs: whole, or ONLY what a receipt left; 1 when a receipt covered it all (SKIP says so)
