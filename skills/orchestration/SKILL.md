@@ -509,8 +509,16 @@ standing order for THAT worker's wall later on: it is written on the worker
 row (`worker-show.onQuotaWall`), and if the worker is witnessed at its
 wall the beat hands its task to exactly that alternative — see the
 handover paragraph below. For auditing there are `run-show`, `inbox`
-(every run's mail, nothing moves) and `reset` (exactly one scope, and
-receipts survive it).
+(this project's runs' mail, nothing moves) and `reset` (exactly one scope,
+refused if it would touch another project's runs; receipts survive it).
+
+The ledger is shared by the window, but a pane's commands and mail stay in
+its project. Worktrees sharing one repository are one project; its runs can
+write to each other. `--run` does not cross that boundary. Direct pane
+recipients and replies are checked against the recipient's current project
+as well. A refusal says which project does not match; ask from that project's
+pane rather than changing a scope switch. Legacy runs whose project is not
+known are visible only to their own seated participants.
 
 `send --to` takes one address or a whole set. `@all` is every live worker
 but you, `@idle` every live worker with no dispatch in flight, and

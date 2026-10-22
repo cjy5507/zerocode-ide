@@ -8546,6 +8546,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                                 &run.address(),
                                 team.leader_term,
                             ) {
+                                project_scope::PaneScope::Unknown => {}
                                 project_scope::PaneScope::Held(project, root) => {
                                     project_scope::note_chair_held(
                                         &run.id,
@@ -8600,24 +8601,33 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                  * is no seat for its mail and sits in none of its chairs
                  * (t-65286): the run's project was stated where it was made,
                  * and a letter for its coordinator typed here would be read by
-                 * another project's agent. A run whose project was only
-                 * inferred is written down and pointed as before. */
-                if leader_bound
-                    && let project_scope::PaneScope::Held(project, root) = project_scope::pane_scope(
+                 * another project's agent. Inferred projects hold the same
+                 * boundary; a placed pane cannot receive an unscoped run. */
+                if leader_bound {
+                    match project_scope::pane_scope(
                         host,
                         &mut roots,
                         run,
                         &run.address(),
                         team.leader_term,
-                    )
-                {
-                    if bound_here && run.coordinator_live().is_none() {
-                        project_scope::note_chair_held(&run.id, team.leader_term, project, &root);
+                    ) {
+                        project_scope::PaneScope::Unknown => continue,
+                        project_scope::PaneScope::Held(project, root) => {
+                            if bound_here && run.coordinator_live().is_none() {
+                                project_scope::note_chair_held(
+                                    &run.id,
+                                    team.leader_term,
+                                    project,
+                                    &root,
+                                );
+                            }
+                            if held_leader.is_none() {
+                                held_leader = Some((team.leader_term, project, root));
+                            }
+                            continue;
+                        }
+                        project_scope::PaneScope::Noted | project_scope::PaneScope::Pass => {}
                     }
-                    if held_leader.is_none() {
-                        held_leader = Some((team.leader_term, project, root));
-                    }
-                    continue;
                 }
                 if leader_bound {
                     leader_seated = true;
@@ -8700,6 +8710,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     Some(term) => {
                         let address = zerocode_core::orchestration::worker_address(&worker.id);
                         match project_scope::pane_scope(host, &mut roots, run, &address, term) {
+                            project_scope::PaneScope::Unknown => {}
                             project_scope::PaneScope::Held(project, root) => {
                                 crossed.push((address, term, project, root));
                             }
@@ -10708,7 +10719,7 @@ fn run_seated(
     };
     let command =
         match PlanCommand::checked(argv.to_vec(), team_id, pane, pane_token, caller, now_ms)
-            .and_then(|command| command.with_project(gate.root.clone()))
+            .and_then(|command| command.with_project_scope(gate.root.clone()))
         {
             Ok(command) => command.with_receipts(read_receipts(argv)),
             Err(why) => return refused_by_runtime(why),

@@ -19117,7 +19117,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "inbox",
-        "[--limit <n>] [--address <a>] · every run's mail, newest first — an audit, never a delivery",
+        "[--limit <n>] [--address <a>] · this project's mail, newest first — an audit, never a delivery",
         Doing::FreshRead,
     ),
     (
@@ -21044,6 +21044,8 @@ fn plan_inner(
     };
     within_bounds(&words)?;
 
+    project_scope::require_project(ledger, argv, &team.id, pane, actor, project)?;
+
     // A retry is answered with the first answer, not by doing the thing again.
     // Every mutation carries this: an agent whose connection dropped mid-verb
     // does not know whether the worker started, and the only safe way to ask
@@ -21642,7 +21644,12 @@ fn plan_inner(
                 Some(raw) => Some(page_limit(raw)?),
                 None => None,
             };
-            let newest: Vec<&Run> = ledger.runs().iter().rev().collect();
+            let newest: Vec<&Run> = ledger
+                .runs()
+                .iter()
+                .rev()
+                .filter(|run| project_scope::visible_to(run, project, &team.id, pane))
+                .collect();
             let from = match words.value("--cursor") {
                 Some(after) => {
                     newest
@@ -23961,7 +23968,11 @@ fn plan_inner(
             };
             let address = words.value("--address");
             let mut held: Vec<(&Run, &Message)> = Vec::new();
-            for run in ledger.runs() {
+            for run in ledger
+                .runs()
+                .iter()
+                .filter(|run| project_scope::visible_to(run, project, &team.id, pane))
+            {
                 for message in run.messages() {
                     if address.is_some_and(|named| message.to != named && message.from != named) {
                         continue;

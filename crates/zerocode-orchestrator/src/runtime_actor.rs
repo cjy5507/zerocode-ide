@@ -194,7 +194,19 @@ impl PlanCommand {
         Ok(self)
     }
 
-    /// The project the caller's pane works in, when the window knows it.
+    /// A command from a pane always has a scope. An unidentified pane carries
+    /// an explicit empty scope, distinct from an internal/window-owned
+    /// command's None. An empty scope cannot match or create a project root.
+    pub fn with_project_scope(self, project: Option<String>) -> Result<Self, RuntimeError> {
+        let mut command = self.with_project(project)?;
+        if command.project.is_none() {
+            command.project = Some(String::new());
+        }
+        Ok(command)
+    }
+
+    /// The project context: None for internal operations, Some("") for an
+    /// unidentified pane, or the known project's root.
     #[must_use]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
