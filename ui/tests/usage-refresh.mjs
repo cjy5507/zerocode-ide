@@ -455,7 +455,19 @@ export async function testUsageGoogleLogin(browser, origin, standBackend, ok) {
       sentence,
       expected: t("usage.signedOutOf", "{{provider}} 로그인 필요", { provider: "Google" }),
     };
-    return { before, switchedOn, switchedOff, noLogin };
+    // Google named no project for the login and none could be read (t-72144):
+    // the backend's answer as it lands, its sentence synthetic.
+    const reason = "합성 문장: Google이 이 로그인의 프로젝트를 알려 주지 않았습니다";
+    answer = { ...reading, session: null, buckets: null, status: "no_project", error: reason };
+    await refreshProviderUsage(usageProvider("antigravity"), false);
+    await frames();
+    const noProject = {
+      ...look(),
+      reason,
+      expected: t("usage.noProjectOf", "{{provider}} 프로젝트 미설정", { provider: "Antigravity" }),
+      readFailed: t("usage.readFailedOf", "{{provider}} 읽기 실패 — 다시 시도", { provider: "Antigravity" }),
+    };
+    return { before, switchedOn, switchedOff, noLogin, noProject };
   });
   ok(
     "a status-bar gauge switched on stands on the bar at once, as its checkbox says",
@@ -474,6 +486,13 @@ export async function testUsageGoogleLogin(browser, origin, standBackend, ok) {
     seen.noLogin.checked && seen.noLogin.shown && seen.noLogin.said === seen.noLogin.expected &&
       seen.noLogin.warn && seen.noLogin.tip === seen.noLogin.sentence,
     JSON.stringify(seen.noLogin),
+  );
+  ok(
+    "an Antigravity read with no project to read says the project is not set, never read failed, with the triangle and the reason on hover",
+    seen.noProject.shown && seen.noProject.said === seen.noProject.expected &&
+      seen.noProject.said !== seen.noProject.readFailed &&
+      seen.noProject.warn && seen.noProject.tip === seen.noProject.reason,
+    JSON.stringify(seen.noProject),
   );
   await page.close();
 }
