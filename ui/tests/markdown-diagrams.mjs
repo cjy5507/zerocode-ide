@@ -85,6 +85,15 @@ export function standDiagrams(page) {
     window.__FRAMES__ = async (count) => {
       for (let at = 0; at < count; at += 1) await new Promise(requestAnimationFrame);
     };
+    // A dialog stands still: its entrance (`surface-enter`, a 0.95 scale over --motion-dialog) has
+    // ended on the scrim and on its card, and neither wears a transform, so a size read is the size a
+    // person sees — not one scaled mid-entrance.
+    window.__STILL__ = (scrim) => window.__UNTIL__(() => {
+      const card = scrim?.querySelector(".qo") ?? null;
+      if (!scrim || !card || scrim.hidden) return false;
+      const moving = [scrim, card].some((node) => node.getAnimations().some((one) => one.playState === "running" || one.playState === "pending"));
+      return !moving && getComputedStyle(card).transform === "none" && scrim.style.transform === "";
+    });
     window.__RELEASE__ = (name) => {
       const at = seen.waiting.findIndex((one) => one.name === name);
       if (at < 0) return false;
@@ -131,6 +140,11 @@ export function standDiagrams(page) {
         legible: natural > 0 && sizes.length > 0 && caption > 0 && (Math.min(...sizes) * width) / natural >= caption - 0.05,
         markup: body?.querySelectorAll("img, script").length ?? null,
         pwned: window.__PWNED__ ?? null,
+        // The sizes the reads above came from, for a reader of a failure.
+        sizes: {
+          svg: Math.round(width * 10) / 10, natural, block: [block?.clientWidth ?? null, block?.scrollWidth ?? null],
+          body: [body?.clientWidth ?? null, body?.scrollWidth ?? null], smallestPx: sizes.length ? Math.min(...sizes) : null, caption,
+        },
       };
     };
   }, FRAMES);
@@ -423,7 +437,9 @@ export async function testMarkdownDiagrams(browser, origin, ok) {
       const card = () => el("gh-item-comments")?.querySelector(".gh-item-comment-body") ?? null;
       const stood = await window.__UNTIL__(() => el("gh-item-body")?.textContent.includes("본문 뒤 문단.") && card()?.textContent.includes("댓글 뒤 문단."));
       await window.__UNTIL__(() => window.__DRAWN__(el("gh-item-body")) === 1 && window.__DRAWN__(card()) === 1);
-      const read = { body: window.__READ_DIAGRAM__(el("gh-item-body"), "넓은깃허브-그림"), comment: window.__READ_DIAGRAM__(card(), "깃허브댓글-그림") };
+      // Sizes are read once the dialog has finished arriving, as a person reads it.
+      const still = await window.__STILL__(el("gh-item-scrim"));
+      const read = { still, body: window.__READ_DIAGRAM__(el("gh-item-body"), "넓은깃허브-그림"), comment: window.__READ_DIAGRAM__(card(), "깃허브댓글-그림") };
       const asks = seen.asked.length;
       if (ghItem?.told) paintGithubItem(ghItem.told);
       const again = { body: window.__DRAWN__(el("gh-item-body")), comment: window.__DRAWN__(card()) };
@@ -435,7 +451,7 @@ export async function testMarkdownDiagrams(browser, origin, ok) {
     });
     ok(
       "a GitHub issue's body and its comment card draw their fences as diagrams where they stood, labels holding <img src=x onerror=...> as text, kept in the dialog's column and legible",
-      github.stood && readsRight(github.body, "본문 앞 문단.", "본문 뒤 문단.") && readsRight(github.comment, "댓글 앞 문단.", "댓글 뒤 문단."),
+      github.stood && github.still && readsRight(github.body, "본문 앞 문단.", "본문 뒤 문단.") && readsRight(github.comment, "댓글 앞 문단.", "댓글 뒤 문단."),
       JSON.stringify(github),
     );
     ok(
@@ -462,7 +478,14 @@ export async function testMarkdownDiagrams(browser, origin, ok) {
       openGitlabItem({ kind: "mr", number: 42, title: detail.title, state: "opened", url: detail.url });
       const stood = await window.__UNTIL__(() => el("gl-item-body")?.textContent.includes("본문 뒤 문단.") && card()?.textContent.includes("댓글 뒤 문단."));
       await window.__UNTIL__(() => window.__DRAWN__(el("gl-item-body")) === 1 && window.__DRAWN__(card()) === 1);
-      const read = { body: window.__READ_DIAGRAM__(el("gl-item-body"), "깃랩-그림"), comment: window.__READ_DIAGRAM__(card(), "넓은깃랩댓글-그림") };
+      // Sizes are read once the dialog has finished arriving. The body stands on the first tab; the
+      // comments stand on 「대화」, which a person presses to read them.
+      const still = await window.__STILL__(el("gl-item-scrim"));
+      const body = window.__READ_DIAGRAM__(el("gl-item-body"), "깃랩-그림");
+      el("gl-item-tab-talk")?.click();
+      const talk = await window.__UNTIL__(() => el("gl-item-pane-talk")?.hidden === false && (card()?.getBoundingClientRect().width ?? 0) > 0);
+      await window.__FRAMES__(2);
+      const read = { still, talk, body, comment: window.__READ_DIAGRAM__(card(), "넓은깃랩댓글-그림") };
       closeGitlabItem();
       // The dialog closes animated; the next item opens once it has gone.
       await window.__UNTIL__(() => el("gl-item-scrim")?.hidden === true);
@@ -488,7 +511,8 @@ export async function testMarkdownDiagrams(browser, origin, ok) {
     });
     ok(
       "a GitLab merge request's body and its comment card draw their fences as diagrams where they stood, labels holding <img src=x onerror=...> as text, kept in the dialog's column and legible",
-      gitlab.stood && readsRight(gitlab.body, "본문 앞 문단.", "본문 뒤 문단.") && readsRight(gitlab.comment, "댓글 앞 문단.", "댓글 뒤 문단."),
+      gitlab.stood && gitlab.still && gitlab.talk && readsRight(gitlab.body, "본문 앞 문단.", "본문 뒤 문단.")
+        && readsRight(gitlab.comment, "댓글 앞 문단.", "댓글 뒤 문단."),
       JSON.stringify(gitlab),
     );
     ok(

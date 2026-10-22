@@ -72,9 +72,11 @@ export async function testConversationDiagrams(browser, origin, ok) {
           // The stream is painted once a frame (`paintLiveAnswer`); this frame's paint has run.
           await new Promise(requestAnimationFrame);
           const tail = streaming()?.querySelector(".helper-said-tail") ?? null;
+          // The open fence is code whatever its info string says so far: a frame can end on
+          // "```mer", whose block is not yet named mermaid.
           frames.push({
             open: fenceOpen(words), asks: seen.asked.length - asks,
-            tailDrawn: Boolean(tail?.querySelector(".mmd-block, svg.mmd")), tailCode: window.__CODE__(tail),
+            tailDrawn: Boolean(tail?.querySelector(".mmd-block, svg.mmd")), tailCode: tail?.querySelectorAll("pre.md-block").length ?? null,
           });
         }
         await window.__FRAMES__(3);
@@ -181,15 +183,23 @@ export async function testConversationDiagrams(browser, origin, ok) {
           return read ? { turn: read.dataset.turn, offset: read.getBoundingClientRect().top - top } : null;
         };
         const drift = (from, to) => (from && to && from.turn === to.turn ? Math.abs(to.offset - from.offset) : null);
-        // One move up, as a reader drags the list: the row's foot one screen above the view's top,
-        // within the shelf's reach (two screens), so it takes its body back before it is seen and
-        // asks for its layout.
+        // The shelf has nothing left to dress: every row it found within reach has its body.
+        const shelfStill = () => window.__UNTIL__(() => list && !list.__shelfFrame && !(list.__shelfWaiting?.size > 0));
+        // To the top, as a reader drags the list there: the row stands in the view, takes its body
+        // back and asks for its layout, whose answer is held.
         seen.hold = true;
-        if (row && list) list.scrollTop += row.getBoundingClientRect().bottom - list.getBoundingClientRect().top + list.clientHeight;
+        if (list) list.scrollTop = 0;
         const asked = await window.__UNTIL__(() => waits());
         await frames(2);
-        const above = row && list ? row.getBoundingClientRect().bottom <= list.getBoundingClientRect().top : null;
+        // Down until the row's foot stands half a screen above the view: within the shelf's reach
+        // (two screens), so it keeps its body, while its layout is still on its way.
+        if (row && list) list.scrollTop += row.getBoundingClientRect().bottom - list.getBoundingClientRect().top + list.clientHeight / 2;
+        await frames(2);
+        const settled = await shelfStill();
+        const held = { body: Boolean(row) && !row.__shelved, code: window.__CODE__(row), waiting: waits(), settled };
         const before = reading();
+        // Where the row stands as its layout lands: above the view, its foot at or over the view's top.
+        const aboveAtRelease = row && list ? row.getBoundingClientRect().bottom <= list.getBoundingClientRect().top : null;
         let grew = null;
         list?.addEventListener("mmd-landed", (event) => {
           grew = event.grew;
@@ -200,25 +210,25 @@ export async function testConversationDiagrams(browser, origin, ok) {
         await frames(2);
         const after = reading();
         const place = list?.scrollTop ?? 0;
-        // Sent back to the shelf: the reader goes to the foot, far past reach, and comes back.
+        // Sent back to the shelf: the reader goes to the foot, far past reach, until the row has given
+        // up its body; then back to where they read.
         const asks = seen.asked.length;
         if (list) list.scrollTop = list.scrollHeight;
-        await frames(4);
-        await new Promise((done) => setTimeout(done, 150));
-        await frames(2);
-        const shelvedAgain = Boolean(row?.__shelved);
+        const shelvedAgain = await window.__UNTIL__(() => Boolean(row?.__shelved));
         if (list) list.scrollTop = place;
         const dressed = await window.__UNTIL__(() => row && !row.__shelved && window.__DRAWN__(row) === 1);
         await frames(2);
+        await shelfStill();
         const back = reading();
         return {
-          born, asked, above, grew, landed, drift: drift(before, after),
+          born, asked, held, aboveAtRelease, grew, landed, drift: drift(before, after),
           shelf: { shelvedAgain, dressed, asked: seen.asked.length - asks, code: window.__CODE__(row), drift: drift(after, back) },
         };
       });
       ok(
         "a reader who left the foot keeps the row they read where it stood when a diagram lands in a row above the view",
-        reader.born.found && reader.born.shelved && reader.asked && reader.above === true && reader.landed
+        reader.born.found && reader.born.shelved && reader.asked && reader.held.body && reader.held.code === 1 && reader.held.waiting
+          && reader.held.settled && reader.aboveAtRelease === true && reader.landed
           && typeof reader.grew === "number" && reader.grew > 0 && reader.drift !== null && reader.drift <= 1,
         JSON.stringify(reader),
       );
