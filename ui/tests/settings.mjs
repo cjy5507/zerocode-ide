@@ -6078,18 +6078,23 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assert(await toggle.isVisible(), "the card has no switch");
   assert(!(await toggle.isChecked()), "a machine that never met Jev reads as using it");
   assert(await partial.isHidden(), "a switch that is off says where it is used");
+  // The library's filter stands over the library's rows (t-69998): the
+  // fixture's one catalog model is not received and no server answers with
+  // it, so this computer holds no model and has nothing to filter.
+  await pageA.waitForFunction(() => managedJudgmentController.snapshot);
+  assertEqual(await pageA.evaluate(() => ({
+    catalog: managedJudgmentController.snapshot.models.map((model) => [model.id, model.installed]),
+    rows: document.querySelectorAll("#managed-judgment-models > .managed-judgment-model").length,
+  })), { catalog: [["fixture-decision", false]], rows: 0 }, "a catalog model this computer does not hold stands as a library row");
   // A closed fold keeps its body's boxes (content-visibility) while nobody
   // sees them, so what is folded away is counted as out of sight.
   const selects = await pageA.locator("#typesafe-card select").evaluateAll((all) => ({
     ids: all.map((select) => select.id),
     visible: all.filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0).map((select) => select.id),
   }));
-  // The library's filter stands over the library's rows: a computer holding
-  // no model has nothing to filter (t-69998).
-  const libraryRows = await pageA.evaluate(() => managedJudgmentController.rows.size);
   assertEqual(selects, {
     ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-listed-model", "route-classifier-select"],
-    visible: libraryRows > 0 ? ["managed-judgment-filter", "judgment-provider-kind"] : ["judgment-provider-kind"],
+    visible: ["judgment-provider-kind"],
   }, "the provider is visible, the library filter stands only over library rows, and classifier and inactive server choices stay folded");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
@@ -7231,6 +7236,14 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
     local: { supported: false, downloadOnly: true, reason: "engine_not_supported" },
     existingServer: { supported: true, protocol: "system_one", modelId: "acme/decision", requiresCheck: true },
   });
+  // Not received, unable to run here and with no files to keep: its server is
+  // its one way in.
+  backend.managedModelState.models.push({
+    ...clone(local), id: "fixture-server-only", label: "Fixture Server Only", engine: "transformers_system_one", installed: false,
+    serverModelId: "acme/server-only", compatibility: "unsupported", compatibilityReason: "engine_not_supported",
+    local: { supported: false, downloadOnly: false, reason: "engine_not_supported" },
+    existingServer: { supported: true, protocol: "system_one", modelId: "acme/server-only", requiresCheck: true },
+  });
   await openJudgmentSettings(pageA);
   await pageA.evaluate(() => {
     managedJudgmentController.snapshot = null;
@@ -7240,7 +7253,7 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
   });
   try {
     await pageA.selectOption("#judgment-provider-kind", "local");
-    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 2);
+    await pageA.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
     assertEqual(await pageA.locator("#managed-judgment-search").count(), 1, "a multi-model library has no search control");
     const before = clone(backend.typesafeSettings().provider);
     const requestsAt = backend.calls.length;
@@ -7250,6 +7263,13 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
     assert(await server.isVisible(), "search is not case-insensitive");
     assert(await server.locator('[data-model-action="activate"]').isHidden(), "an unsupported local adapter offers to run here");
     assert(await server.locator('[data-model-action="connect"]').isVisible(), "a compatible server model has no connection path");
+    assertEqual(await pageA.locator('[data-model-id="fixture-server-only"].managed-judgment-model').count(), 0, "a model not received here stands as a library row");
+    await pageA.locator("#managed-judgment-candidates > summary").click();
+    const serverOnly = pageA.locator('#managed-judgment-candidate-list > [data-model-id="fixture-server-only"]');
+    for (const action of ["install", "inspect-source", "import"]) {
+      assert(await serverOnly.locator(`[data-model-action="${action}"]`).isHidden(), `a candidate that cannot run or be kept here offers ${action}`);
+    }
+    assert(await serverOnly.locator('[data-model-action="connect"]').isVisible(), "a candidate reached only through its server has no connection path");
     await pageA.fill("#managed-judgment-search", "");
     await pageA.selectOption("#managed-judgment-filter", "local");
     assert(await server.isHidden(), "the local filter includes server-only models");
@@ -7271,10 +7291,11 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
       managedJudgmentController.query = "";
       managedJudgmentController.filter = "all";
       judgmentProviderController.draft = null;
+      document.getElementById("managed-judgment-candidates").open = false;
       return refreshApiRouters();
     });
   }
-  return "search and support filters · no backend polling · no local run for an unsupported adapter · exact server ID and address preserved";
+  return "search and support filters · no backend polling · no local run for an unsupported adapter · a server-only candidate offers its server alone · exact server ID and address preserved";
 });
 
 /* The settings › 판단 모델 picture the person sent on 10-22 (t-69998): the
@@ -7440,10 +7461,20 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
       "the received model does not show the revision it was pinned to");
 
     // A server of the person's own answering with the download-only model
-    // makes it a row, with no revision it cannot know.
+    // makes it a row, with no revision it cannot know. The address the person
+    // checked for the same model answers with the same server model ID: one
+    // connection is one row, and the other entry stays a candidate.
+    const checked = { ...clone(held.models.find((model) => model.id === "fixture-d3")), id: "fixture-d3-checked", label: "acme/d3", revision: "d3-checked-revision", origin: "registered" };
+    held.models.push(checked);
+    held.revision += 1;
     backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32105", model: "acme/d3", requiresAuth: false } };
     await page.evaluate(() => refreshTypeSafe());
-    await page.waitForFunction(() => managedJudgmentController.rows.has("fixture-d3"));
+    await page.waitForFunction(() => managedJudgmentController.rows.has("fixture-d3") && managedJudgmentController.snapshot?.models.length === 4);
+    const answering = () => page.evaluate((connected) => ({
+      rows: [...document.querySelectorAll("#managed-judgment-models > .managed-judgment-model")].filter((row) => row.textContent.includes(connected)).map((row) => row.dataset.modelId),
+      candidates: [...document.querySelectorAll("#managed-judgment-candidate-list > li")].map((item) => item.dataset.modelId),
+    }), words.connected);
+    assertEqual(await answering(), { rows: ["fixture-d3"], candidates: ["fixture-d3-checked"] }, "two catalog entries of one server model stand as two connected rows");
     assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3"], "the model a connected server answers with is not in the library");
     const served = await page.evaluate(() => {
       const row = managedJudgmentController.rows.get("fixture-d3");
@@ -7451,13 +7482,22 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
     });
     assertEqual(served, { summary: words.source, identity: "acme/d3 · transformers_system_one", state: words.connected },
       "the connected server's model claims a pinned revision it cannot know, or hides that it is connected");
-    assertEqual(await said(), { count: words.counted[2], fold: null }, "the connected model is still offered as a candidate");
+    assertEqual(await said(), { count: words.counted[2], fold: words.offered[1] }, "the connected server model is not counted as one row beside one candidate");
+    // Files received for the checked address make it the connection's row,
+    // and the bundled entry goes back to the candidates.
+    checked.installed = true;
+    checked.installedDirectory = "/models/managed/fixture-d3-checked";
+    held.revision += 1;
+    await page.evaluate(() => refreshTypeSafe());
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.models.some((model) => model.id === "fixture-d3-checked" && model.installed));
+    assertEqual(await answering(), { rows: ["fixture-d3-checked"], candidates: ["fixture-d3"] }, "the connection's row is not the entry whose files are here");
+    assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3-checked"], "a connected server model stands as more than one row");
   } finally {
     await page.close();
     backend.zoSettings.smart = previous;
     backend.managedModelState = previousManaged;
   }
-  return "catalog 3 · received 1 → 1 row + 「2 to add」 folded · revision only on received files · unfolded: name, size, ways · axe 2 themes · download joins the library · connected server model is a row without a revision";
+  return "catalog 3 · received 1 → 1 row + 「2 to add」 folded · revision only on received files · unfolded: name, size, ways · axe 2 themes · download joins the library · connected server model is a row without a revision · two entries of one server model ID → 1 row + 1 candidate, the received one the row";
 });
 
 await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 상태 한 줄만 보이고 후보는 접혀 있다", async () => {
