@@ -17,9 +17,39 @@
 
 use std::path::Path;
 
+use runtime::todo_progress::TodoStatus;
+
+use crate::autonomy::loops::LoopPhase;
+use crate::goal::GoalPhase;
+
 /// Marks the reminder. Set or cleared on every turn by replace-by-prefix, so
 /// it rides the one turn it was decided for.
 pub(crate) const TASK_CONTINUITY_REMINDER_PREFIX: &str = "[zo:task-continuity]";
+
+/// The person's words a reminder quotes, newest last: an instruction and the
+/// question or two after it, which is what an interjected question looks like.
+const WORDS_KEPT: usize = 3;
+
+/// The characters one quoted word or plan item keeps; a longer one keeps its
+/// two ends.
+const WORD_CHARS: usize = 240;
+
+/// The open plan items a reminder names, the one in progress first.
+const OPEN_ITEMS_NAMED: usize = 3;
+
+/// The goal controller's label; a loop's is its id, a cron's [`cron_label`].
+pub(crate) const GOAL_LABEL: &str = "goal";
+
+/// A cron turn is one run at its minute: once it ran, it has nothing to resume.
+const CRON_PHASE: &str = "finished";
+
+/// How the window's line begins every reminder it gets.
+const MAIL_LINE: &str = "This turn began with a line the ZeroCode window typed to point at \
+orchestration mail waiting for you; it is not a request from the person. Read the mail first.";
+
+/// What the person's first words after a stop are told.
+const STOPPED_BEFORE: &str = "The person interrupted the previous turn: treat that work as \
+stopped unless this message asks to go on.";
 
 /// Who a turn's input came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,9 +78,37 @@ pub(crate) struct ControllerStanding {
     pub(crate) held: bool,
 }
 
-/// What this process saw of the person's work in one session.
+impl ControllerStanding {
+    /// `is paused: the reason` — how it stands, in words.
+    fn stands(&self) -> String {
+        match &self.reason {
+            Some(reason) => format!("is {}: {reason}", self.phase),
+            None => format!("is {}", self.phase),
+        }
+    }
+}
+
+/// What a turn's reminder is made of, read from this session alone.
 #[derive(Debug, Default)]
-pub(crate) struct TaskContinuity {}
+struct WorkFacts {
+    /// The session plan's open items, the one in progress first.
+    open_items: Vec<String>,
+    /// How the controller stands whose unattended turn is the latest work.
+    controller: Option<ControllerStanding>,
+}
+
+/// What this process saw of the person's work in one session. Nothing of it
+/// is stored: a session opened again starts with none, as its loops come
+/// back paused.
+#[derive(Debug, Default)]
+pub(crate) struct TaskContinuity {
+    /// The person's own words, newest last.
+    words: Vec<String>,
+    /// The person interrupted the latest turn that was not an unattended one.
+    stopped: bool,
+    /// The controller of an unattended turn that ran after the person's words.
+    unattended: Option<String>,
+}
 
 impl TaskContinuity {
     /// Begin a turn on `runtime`: say who `input` is from, put the turn's
@@ -59,31 +117,251 @@ impl TaskContinuity {
     /// answers how a controller stands, by its label.
     pub(crate) fn begin_turn<C, T>(
         &mut self,
-        _runtime: &mut runtime::ConversationRuntime<C, T>,
-        _input: &str,
-        _cwd: &Path,
-        _standing: impl FnOnce(&str) -> Option<ControllerStanding>,
+        runtime: &mut runtime::ConversationRuntime<C, T>,
+        input: &str,
+        cwd: &Path,
+        standing: impl FnOnce(&str) -> Option<ControllerStanding>,
     ) -> (TurnOrigin, Option<String>)
     where
         C: runtime::ApiClient,
         T: runtime::ToolExecutor,
     {
-        (TurnOrigin::Person, None)
+        let origin = self.observe(input, runtime.is_autonomous_surface());
+        let facts = if matches!(origin, TurnOrigin::MailPointer | TurnOrigin::Person) {
+            WorkFacts {
+                open_items: open_items(cwd, &runtime.session().session_id),
+                controller: self.unattended.as_deref().and_then(standing),
+            }
+        } else {
+            WorkFacts::default()
+        };
+        runtime.replace_transient_system_reminder_by_prefix(
+            TASK_CONTINUITY_REMINDER_PREFIX,
+            self.reminder(origin, &facts).as_deref(),
+        );
+        (origin, held_line(origin, &facts))
     }
 
-    /// The scheduler is about to run `label`'s unattended turn.
-    pub(crate) fn unattended_dispatched(&mut self, _label: String) {}
+    /// Who `input` is from. The person's words are kept, and they are newer
+    /// than any unattended turn before them.
+    fn observe(&mut self, input: &str, unattended: bool) -> TurnOrigin {
+        let said = input.trim();
+        let origin = if unattended {
+            TurnOrigin::Unattended
+        } else if zerocode_core::orchestration::is_pointer_text(said) {
+            TurnOrigin::MailPointer
+        } else if super::agent_completion_pump::is_followup_text(said) {
+            TurnOrigin::HostNotice
+        } else {
+            TurnOrigin::Person
+        };
+        if origin == TurnOrigin::Person {
+            if self.words.len() == WORDS_KEPT {
+                self.words.remove(0);
+            }
+            self.words.push(one_line(said));
+            self.unattended = None;
+        }
+        origin
+    }
 
-    /// A turn ended; `stopped_by_person` when the person interrupted it.
-    pub(crate) fn end_turn(&mut self, _origin: TurnOrigin, _stopped_by_person: bool) {}
+    /// The scheduler is about to run `label`'s unattended turn: from now on
+    /// that is the latest work, until the person writes.
+    pub(crate) fn unattended_dispatched(&mut self, label: String) {
+        self.unattended = Some(label);
+    }
+
+    /// A turn ended; `stopped_by_person` when the person interrupted it. A
+    /// stop holds the window's lines back until the person writes again; an
+    /// unattended turn's interruption is its controller's to keep.
+    pub(crate) fn end_turn(&mut self, origin: TurnOrigin, stopped_by_person: bool) {
+        match origin {
+            TurnOrigin::Person => self.stopped = stopped_by_person,
+            TurnOrigin::MailPointer | TurnOrigin::HostNotice => self.stopped |= stopped_by_person,
+            TurnOrigin::Unattended => {}
+        }
+    }
+
+    /// The turn's reminder, or `None` when it has nothing to be told.
+    fn reminder(&self, origin: TurnOrigin, facts: &WorkFacts) -> Option<String> {
+        let said = match origin {
+            TurnOrigin::MailPointer => self.after_the_mail(facts),
+            TurnOrigin::Person => self.after_the_question(facts)?,
+            TurnOrigin::Unattended | TurnOrigin::HostNotice => return None,
+        };
+        Some(format!(
+            "{TASK_CONTINUITY_REMINDER_PREFIX} <system-reminder>{said}</system-reminder>"
+        ))
+    }
+
+    /// The window's line: the mail first, then the person's work — unless it
+    /// is not this line's to go back to.
+    fn after_the_mail(&self, facts: &WorkFacts) -> String {
+        let then = if let Some(controller) = &facts.controller {
+            format!(
+                "The latest work in this session was {label}, an unattended turn, and it \
+                 {stands}. A mail line does not resume it or do its work: after the mail, end \
+                 the turn and leave it as it is.",
+                label = controller.label,
+                stands = controller.stands(),
+            )
+        } else if self.stopped {
+            "The person stopped the latest work by interrupting its turn. Do not restart it: \
+             after the mail, end the turn."
+                .to_string()
+        } else if self.words.is_empty() {
+            "The person has not written since this session was opened here, so no earlier \
+             work is resumed from this line: after the mail, end the turn."
+                .to_string()
+        } else {
+            format!(
+                "Then go back to the person's latest work in this session and continue it in \
+                 this same turn if it is not finished — unless the person or the mail stopped \
+                 or changed it, or going on needs an approval or crosses a limit; then stop \
+                 and say why in one line. If it is finished, end with the mail.{words}{items}",
+                words = quoted(" The person's latest words, oldest first:", &self.words),
+                items = named(&facts.open_items),
+            )
+        };
+        format!("{MAIL_LINE} {then}")
+    }
+
+    /// The person's own message while their earlier work is open: answer it,
+    /// then go on — unless the message stops or changes the work. `None` when
+    /// nothing of theirs is open, or nothing they wrote here came before.
+    fn after_the_question(&self, facts: &WorkFacts) -> Option<String> {
+        if self.stopped {
+            return Some(STOPPED_BEFORE.to_string());
+        }
+        let earlier = self.words.len().saturating_sub(1);
+        if earlier == 0 || facts.open_items.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "Work you were doing for the person in this session is not finished.{items}{words} \
+             If this message only asks or remarks and does not stop, pause, change or replace \
+             that work, answer it, then continue the work in this same turn. Otherwise follow \
+             this message.",
+            items = named(&facts.open_items),
+            words = quoted(" Their earlier words, oldest first:", &self.words[..earlier]),
+        ))
+    }
 }
 
-/// How the controller `label` names stands now.
+/// The one line the screen shows when the window's line finds the latest work
+/// held by its controller: why it is not resumed.
+fn held_line(origin: TurnOrigin, facts: &WorkFacts) -> Option<String> {
+    let controller = facts.controller.as_ref().filter(|controller| controller.held)?;
+    (origin == TurnOrigin::MailPointer).then(|| {
+        format!(
+            "{} {}; the mail line does not resume it",
+            controller.label,
+            controller.stands()
+        )
+    })
+}
+
+/// How the controller `label` names stands now: a loop by its id, the goal,
+/// or a cron. `None` for a label no controller holds any more.
 pub(crate) fn controller_standing(
-    _autonomy: &crate::autonomy::Autonomy,
-    _label: &str,
+    autonomy: &crate::autonomy::Autonomy,
+    label: &str,
 ) -> Option<ControllerStanding> {
-    None
+    if label == GOAL_LABEL {
+        let status = autonomy.goal.autonomy_status()?;
+        let held = autonomy
+            .goal
+            .reminder_state()
+            .is_some_and(|(_, phase)| phase == GoalPhase::Paused);
+        return Some(ControllerStanding {
+            label: label.to_string(),
+            phase: status.phase,
+            reason: status.pause_reason,
+            held,
+        });
+    }
+    if label
+        .strip_prefix(crate::autonomy::crons::TURN_LABEL)
+        .is_some_and(|id| id.starts_with(' '))
+    {
+        return Some(ControllerStanding {
+            label: label.to_string(),
+            phase: CRON_PHASE.to_string(),
+            reason: None,
+            held: false,
+        });
+    }
+    let status = autonomy
+        .loops
+        .autonomy_status()
+        .into_iter()
+        .find(|status| status.id == label)?;
+    let held = matches!(
+        autonomy.loops.phase(label),
+        Some(LoopPhase::Paused | LoopPhase::Stopped)
+    );
+    Some(ControllerStanding {
+        label: status.id,
+        phase: status.phase,
+        reason: status.reason,
+        held,
+    })
+}
+
+/// A cron turn's controller label, as its receipt names it.
+pub(crate) fn cron_label(id: &str) -> String {
+    format!("{} {id}", crate::autonomy::crons::TURN_LABEL)
+}
+
+/// The open items of session `session_id`'s plan, the one in progress first —
+/// read through the store rule every plan reader shares, so another session's
+/// plan, or another project's, is never this one's.
+fn open_items(cwd: &Path, session_id: &str) -> Vec<String> {
+    let mut open: Vec<_> = runtime::todo_progress::current_todos(cwd, session_id)
+        .into_iter()
+        .filter(|todo| todo.status != TodoStatus::Completed)
+        .collect();
+    open.sort_by_key(|todo| todo.status != TodoStatus::InProgress);
+    open.into_iter()
+        .map(|todo| format!("{} ({})", one_line(&todo.content), todo.status.token()))
+        .collect()
+}
+
+/// `text` on one line, a long one kept by its two ends.
+fn one_line(text: &str) -> String {
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    core_types::text::elide_middle(&joined, WORD_CHARS)
+}
+
+/// ` Lead: 1) "…" 2) "…".` — the person's words as a reminder quotes them.
+fn quoted(lead: &str, words: &[String]) -> String {
+    let listed = words
+        .iter()
+        .enumerate()
+        .map(|(index, said)| format!("{}) \"{said}\"", index + 1))
+        .collect::<Vec<_>>();
+    if listed.is_empty() {
+        String::new()
+    } else {
+        format!("{lead} {}.", listed.join(" "))
+    }
+}
+
+/// ` Open items of this session's plan: a; b.` — at most [`OPEN_ITEMS_NAMED`].
+fn named(items: &[String]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let listed = items
+        .iter()
+        .take(OPEN_ITEMS_NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("; ");
+    match items.len().saturating_sub(OPEN_ITEMS_NAMED) {
+        0 => format!(" Open items of this session's plan: {listed}."),
+        more => format!(" Open items of this session's plan: {listed}; and {more} more."),
+    }
 }
 
 #[cfg(test)]

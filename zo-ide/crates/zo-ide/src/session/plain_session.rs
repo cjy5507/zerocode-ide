@@ -22,6 +22,7 @@ use super::agent_completion_pump::{
 };
 use super::mcp_runtime::discover_pending_mcp_tools_in_background;
 use super::stream::drive_render_stream;
+use super::task_continuity::{TaskContinuity, TurnOrigin};
 use super::{BuiltRuntime, SessionHandle, TurnHarness};
 use crate::cli_args::{AllowedToolSet, DisallowedToolSet};
 use crate::effort::Effort;
@@ -199,6 +200,10 @@ pub struct PlainSession {
     /// The turn's route facts for the interactive front (t-5872): what the
     /// routing judgment and the step governor decided, as they decide it.
     route_fact: super::route_fact::RouteFactSender,
+    /// What this process saw of the person's work, told to the turns the
+    /// person did not ask for — the window's mail line — and to their
+    /// questions between turns (t-72017).
+    continuity: TaskContinuity,
 }
 
 /// `PlainSession::open` 에 들어간 런치 플래그의 되읽기 — `/resume` 으로 세션을
@@ -739,6 +744,7 @@ impl PlainSession {
             headless: options.headless,
             autonomy_notices: Vec::new(),
             route_fact: super::route_fact::channel(),
+            continuity: TaskContinuity::default(),
         };
         // A new session has no file yet, so this publishes its initial
         // snapshot. A resumed session is already persistence-bound and clean;
@@ -927,6 +933,7 @@ impl PlainSession {
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
         self.sync_project_rule_advice();
+        let origin = self.begin_task_continuity(input, &block_tx).await;
         self.runtime
             .set_hook_abort_signal(hook_abort_signal.clone());
         self.install_turn_stop(&hook_abort_signal);
@@ -1030,9 +1037,42 @@ impl PlainSession {
         if let Some(plan) = plan_turn {
             plan.finish(&self.cwd, &self.handle.id, &result);
         }
+        self.continuity.end_turn(origin, user_cancel_requested.load(Ordering::SeqCst));
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         Ok(summary)
+    }
+
+    /// Who this turn's input is from, and what the model is told on the way
+    /// in about the person's unfinished work (t-72017): the window's mail
+    /// line goes back to it after the mail, a question between turns is
+    /// answered and the work goes on. The screen's one line — why held work
+    /// stays held — goes out before the turn's first block. With no runtime
+    /// the turn cannot run, and nothing is recorded of it.
+    async fn begin_task_continuity(
+        &mut self,
+        input: &str,
+        block_tx: &tokio::sync::mpsc::Sender<RenderBlock>,
+    ) -> TurnOrigin {
+        let (origin, held) = {
+            let Some(inner) = self.runtime.try_runtime_mut() else {
+                return TurnOrigin::HostNotice;
+            };
+            let autonomy = &self.autonomy;
+            self.continuity.begin_turn(inner, input, &self.cwd, |label| {
+                super::task_continuity::controller_standing(autonomy, label)
+            })
+        };
+        if let Some(text) = held {
+            let _ = block_tx
+                .send(RenderBlock::System {
+                    id: runtime::message_stream::BlockIdGen::default().next(),
+                    level: runtime::message_stream::SystemLevel::Info,
+                    text,
+                })
+                .await;
+        }
+        origin
     }
 
     async fn prepare_measured_plan(
@@ -1561,6 +1601,10 @@ impl PlainSession {
         if result.is_ok() {
             self.sync_goal_reminder();
         }
+        if matches!(result, Ok(Some(_))) {
+            self.continuity
+                .unattended_dispatched(super::task_continuity::GOAL_LABEL.to_string());
+        }
         result
     }
 
@@ -1646,7 +1690,11 @@ impl PlainSession {
             self.autonomy.loops.pause_for_session_limit(&reason)?;
             return Ok(None);
         }
-        self.autonomy.loops.dispatch_due(now_unix_ms(), &self.cwd)
+        let turn = self.autonomy.loops.dispatch_due(now_unix_ms(), &self.cwd)?;
+        if let Some(turn) = &turn {
+            self.continuity.unattended_dispatched(turn.id.clone());
+        }
+        Ok(turn)
     }
 
     /// The `ScheduleWakeup` records this session's tools wrote since the last
@@ -1764,7 +1812,12 @@ impl PlainSession {
                 None => Ok(None),
             };
         }
-        Ok(crate::autonomy::crons::dispatch_due(&registry, now))
+        let turn = crate::autonomy::crons::dispatch_due(&registry, now);
+        if let Some(turn) = &turn {
+            self.continuity
+                .unattended_dispatched(super::task_continuity::cron_label(&turn.id));
+        }
+        Ok(turn)
     }
 
     /// Charge a cron turn to the session budget and word its receipt.
