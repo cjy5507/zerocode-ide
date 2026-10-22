@@ -665,32 +665,8 @@ fn scan_rows(
             .or(manifest.last_activity_at)
             .unwrap_or(started_at);
         let quiet = Duration::from_secs(now_epoch_seconds.saturating_sub(last_output_at));
-        // `activity` means observable runtime state, not the task's static
-        // assignment. `description` never changes and made a live row flicker
-        // between "Read …" and "summarize Cargo.toml" whenever the worker
-        // cleared currentTool between calls. Prefer the detailed matching tool
-        // stamp, then the live tool/phase, and use a neutral fact when none has
-        // landed yet.
-        // A pane child's running call, when its transcript shows one, is
-        // what it is doing; the manifest has nothing newer for it.
         let running_tool = tally.as_ref().and_then(|tally| tally.running.clone());
-        let activity = running_tool
-            .clone()
-            .or_else(|| {
-                manifest
-                    .current_tool
-                    .as_deref()
-                    .and_then(|tool| {
-                        manifest
-                            .recent_tools
-                            .last()
-                            .filter(|recent| recent.starts_with(tool))
-                    })
-                    .cloned()
-            })
-            .or_else(|| manifest.current_tool.clone())
-            .or_else(|| manifest.current_phase.clone())
-            .unwrap_or_else(|| "working".to_string());
+        let activity = helper_activity(&manifest, running_tool.as_deref());
         let label = manifest
             .label
             .clone()
@@ -730,6 +706,35 @@ fn scan_rows(
             .then_with(|| left.agent_id.cmp(&right.agent_id))
     });
     progress
+}
+
+/// What a running helper is doing now, as its row says it.
+fn helper_activity(manifest: &AgentManifest, running_tool: Option<&str>) -> String {
+    // `activity` means observable runtime state, not the task's static
+    // assignment. `description` never changes and made a live row flicker
+    // between "Read …" and "summarize Cargo.toml" whenever the worker
+    // cleared currentTool between calls. Prefer the detailed matching tool
+    // stamp, then the live tool/phase, and use a neutral fact when none has
+    // landed yet.
+    // A pane child's running call, when its transcript shows one, is
+    // what it is doing; the manifest has nothing newer for it.
+    running_tool
+        .map(str::to_string)
+        .or_else(|| {
+            manifest
+                .current_tool
+                .as_deref()
+                .and_then(|tool| {
+                    manifest
+                        .recent_tools
+                        .last()
+                        .filter(|recent| recent.starts_with(tool))
+                })
+                .cloned()
+        })
+        .or_else(|| manifest.current_tool.clone())
+        .or_else(|| manifest.current_phase.clone())
+        .unwrap_or_else(|| "working".to_string())
 }
 
 /// The test seam the store-level scan keeps: one directory, no registry.
