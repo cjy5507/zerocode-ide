@@ -4,8 +4,9 @@
  * 과업 행은 러스트 측정(`orchestration::desk::tests::the_schedule_over_the_ledger_that_already_happened`)이
  * 원장의 읽기 전용 사본에서 이 빌드의 데스크로 뽑은 것(id·단계·시각만 — 제목·본문·경로는 없다)이고,
  * `landings`는 그때 이 저장소의 git이 말한 착지·발행이다. 고치기 전의 일정은 `--before`에 준 그 판의
- * `shell-board-schedule.js`를 창이 싣는 대신 받는다(같은 창, 같은 답 — 일정 파일 하나만 다르다). 두 확대
- * (하루·한 주)마다 일정 모델(`boardScheduleModel`)이 세운 워커 과업의 행을 센다:
+ * `shell-board-schedule.js`를 창이 싣는 대신 받는다(같은 창, 같은 답 — 일정 파일 하나만 다르다). 그 판의
+ * 확대마다(고치기 전은 하루·한 주, 뒤는 지금 앞뒤까지) 일정 모델(`boardScheduleModel`)이 세운 워커 과업의
+ * 행을 센다:
  *
  *   rows       묶음에 선 행
  *   ended      그 가운데 끝난 것(배포·병합·착지할 것 없음·실패)
@@ -35,7 +36,8 @@ export async function countScheduleOverReplay(browser, origin, replay, source = 
       const answer = { revision: 1, unchanged: false, read_ms: replay.now_ms, line: {}, jobs: [], lanes: [],
         landings: replay.landings };
       const counted = {};
-      for (const zoom of ["day", "week"]) {
+      // Every zoom the schedule of that tree has: day and week before the change, 「지금 앞뒤」 too after it.
+      for (const zoom of Object.keys(BOARD_SCHEDULE.zooms)) {
         const choice = { zoom, folded: new Set(), opened: new Set(), log: null };
         const model = boardScheduleModel(answer, replay.tasks, replay.now_ms, choice, 900);
         const workers = model.groups.find((group) => group.id === "workers");

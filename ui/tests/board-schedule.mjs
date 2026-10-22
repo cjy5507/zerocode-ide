@@ -95,9 +95,15 @@ export async function readBoardSchedule(page) {
           return {
             key: row.dataset.key, state: row.dataset.barState, basis: row.dataset.basis, depth: row.dataset.depth,
             expanded: row.getAttribute("aria-expanded"), paused: row.classList.contains("is-paused"),
-            marks: row.dataset.marks ?? "",
             label: row.querySelector(".board-schedule-label").textContent,
-            said: row.querySelector(".board-schedule-said").textContent,
+            // The row's sentence; before the draft's cells (t-71840) it was the words cell's own text.
+            said: row.dataset.said ?? row.querySelector(".board-schedule-said").textContent,
+            // The passed draft's cells (t-71840): the line under the name, the end cell's two lines, the bar's two names.
+            sub: row.querySelector(".board-schedule-label").dataset.sub ?? "",
+            eta: row.querySelector(".board-schedule-said").textContent,
+            etaSub: row.querySelector(".board-schedule-said").dataset.sub ?? "",
+            nowLabel: bar.dataset.nowLabel ?? "",
+            aheadLabel: bar.dataset.aheadLabel ?? "",
             from: Number(bar.style.getPropertyValue("--from")), to: Number(bar.style.getPropertyValue("--to")),
             done: Number(bar.style.getPropertyValue("--done")),
           };
@@ -106,6 +112,8 @@ export async function readBoardSchedule(page) {
     }
     return {
       groups,
+      title: host.querySelector(".board-schedule-title")?.textContent ?? "",
+      chip: host.querySelector(".board-schedule-now")?.textContent ?? "",
       now: Number(chart.style.getPropertyValue("--now")),
       ticks: [...host.querySelectorAll(".board-schedule-tick")].map((tick) => tick.textContent),
       note: host.querySelector(".board-schedule-note").hidden ? "" : host.querySelector(".board-schedule-note").textContent,
@@ -219,6 +227,9 @@ function placed(ms, from, to) {
 
 const near = (a, b, within = 0.02) => Math.abs(a - b) <= within;
 
+/* A release lane's row by its version — rows are named the passed draft's way, 「v1.1.83 레인」. */
+const laneOf = (rows, version) => rows.find((row) => row.label.startsWith(`v${version} `));
+
 export async function testBoardSchedule(browser, origin, ok) {
   const fixture = await boardScheduleFixture();
   const { page, faults } = await openWindowTestPage(browser, origin);
@@ -289,19 +300,19 @@ export async function testBoardSchedule(browser, origin, ok) {
     /* ---- 발행 레인: 끝난 v1.1.82와 루트 게이트에 있는 v1.1.83 -------------------- */
     const lanes = drawn.groups.lanes.rows;
     ok("the day view holds the two lanes that ended or run after its left edge",
-      lanes.map((row) => row.label).join(",") === "v1.1.82,v1.1.83", JSON.stringify(lanes.map((row) => row.label)));
+      lanes.map((row) => row.label).join(",") === "v1.1.82 레인,v1.1.83 레인", JSON.stringify(lanes.map((row) => row.label)));
     const running = answer.lanes.find((run) => run.running);
     const current = running.stages[running.stages.length - 1];
     const due = current.start_ms + running.ahead[0].expected.secs * 1000;
     const laneEnd = Math.max(SCHEDULE_NOW, due) + running.ahead.slice(1).reduce((sum, stage) => sum + stage.expected.secs * 1000, 0);
-    const lane = lanes.find((row) => row.label === "v1.1.83");
+    const lane = laneOf(lanes, "1.1.83");
     ok("the running lane's bar ends where its stages' medians end: the root gate's from its start, then each stage after it",
       lane?.state === "running" && near(lane.to, placed(laneEnd, from, to)) && near(lane.from, placed(running.start_ms, from, to)),
       JSON.stringify({ lane, laneEnd: new Date(laneEnd).toISOString() }));
     ok("v1.1.83 is expected to end near 11:34 KST, and says the stage it is in and the time left",
       Math.abs(laneEnd - (SCHEDULE_NOW + 104 * 60_000)) <= 5 * 60_000 && lane?.said.includes("gate-root"),
       JSON.stringify({ end: new Date(laneEnd).toISOString(), said: lane?.said }));
-    const ended = lanes.find((row) => row.label === "v1.1.82");
+    const ended = laneOf(lanes, "1.1.82");
     const v82 = answer.lanes.find((run) => run.version === "1.1.82");
     ok("an ended lane's bar is its start to its verdict, and says green",
       ended?.state === "done" && near(ended.from, placed(v82.start_ms, from, to)) && near(ended.to, placed(v82.end_ms, from, to)),
@@ -350,9 +361,10 @@ export async function testBoardSchedule(browser, origin, ok) {
       JSON.stringify(workers.map((row) => row.key)));
     const landed = workers.find((row) => row.key.endsWith("t-67064"));
     const landedTask = fixture.desk.tasks.find((one) => one.id === "t-67064");
-    ok("a landed task's bar runs from its first start to its landing, its hand-in and verification marked on it",
+    ok("a landed task's bar runs from its first start to its landing, and its end cell says it ended and how long it took",
       landed?.state === "done" && near(landed.from, placed(landedTask.times.started_ms, from, to))
-        && near(landed.to, placed(landedTask.times.landed_ms, from, to)) && landed.marks === "handed verified",
+        && near(landed.to, placed(landedTask.times.landed_ms, from, to)) && landed.eta === "끝"
+        && landed.etaSub === "5시간 15분 걸림",
       JSON.stringify(landed));
     const reported = workers.find((row) => row.key.endsWith("t-67102"));
     ok("a reported task says how long it has waited for its review",
@@ -462,7 +474,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       drawn.asked.some((one) => one.known === null && one.fromMs === SCHEDULE_NOW - 5 * DAY), JSON.stringify(drawn.asked.slice(-3)));
     ok("the week view holds every lane run since — v1.1.77's three runs are three rows",
       drawn.groups.lanes.rows.length === answer.lanes.length
-        && drawn.groups.lanes.rows.filter((row) => row.label === "v1.1.77").length === 3,
+        && drawn.groups.lanes.rows.filter((row) => row.label.startsWith("v1.1.77 ")).length === 3,
       JSON.stringify(drawn.groups.lanes.rows.map((row) => row.label)));
     ok("the week's ticks are days, not hours", drawn.ticks.length > 0 && drawn.ticks.every((tick) => !tick.includes(":")),
       JSON.stringify(drawn.ticks));
@@ -525,7 +537,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
     });
     drawn = await readBoardSchedule(page);
-    const lateLane = drawn.groups.lanes.rows.find((row) => row.label === "v1.1.83");
+    const lateLane = laneOf(drawn.groups.lanes.rows, "1.1.83");
     const lateEnd = later + running.ahead.slice(1).reduce((sum, stage) => sum + stage.expected.secs * 1000, 0);
     ok("a stage past its median is tagged late, and its lane's end is redrawn from now plus the stages ahead",
       lateLane?.said.startsWith("gate-root · +5분 지연 중 · ") && lateLane.paused === false
@@ -545,9 +557,9 @@ export async function testBoardSchedule(browser, origin, ok) {
     };
     const quietLoad = await loudRead(false);
     const busyLoad = await loudRead(true);
-    const busyLane = busyLoad.groups.lanes.rows.find((row) => row.label === "v1.1.83");
-    const quietLane = quietLoad.groups.lanes.rows.find((row) => row.label === "v1.1.83");
-    const endedLane = busyLoad.groups.lanes.rows.find((row) => row.label === "v1.1.82");
+    const busyLane = laneOf(busyLoad.groups.lanes.rows, "1.1.83");
+    const quietLane = laneOf(quietLoad.groups.lanes.rows, "1.1.83");
+    const endedLane = laneOf(busyLoad.groups.lanes.rows, "1.1.82");
     ok("with the load over the cores a lane still ahead says so beside its estimate, and its bar does not move",
       busyLane?.said === `${quietLane?.said} · 부하 높음·늦어질 수 있음` && near(busyLane.to, quietLane.to)
         && !endedLane?.said.includes("부하"),
@@ -574,8 +586,7 @@ export async function testBoardSchedule(browser, origin, ok) {
       JSON.stringify(deployed));
     const nothing = row("t-80002");
     ok("a task with nothing to land ends at the last moment the ledger wrote for it — here its verification",
-      near(nothing?.to, at(-4)) && nothing.said === "완료 — 착지할 것 없음 · 2시간 걸림"
-        && nothing.marks === "handed verified",
+      near(nothing?.to, at(-4)) && nothing.said === "완료 — 착지할 것 없음 · 2시간 걸림",
       JSON.stringify(nothing));
     const failedTask = row("t-80003");
     ok("a failed task ends where its last attempt ended, and says how long it took",
@@ -615,6 +626,128 @@ export async function testBoardSchedule(browser, origin, ok) {
     ok("a second press folds them away", refolded.groups.workers.rows.length === 14
       && refolded.groups.workers.more === "+7 끝남" && refolded.groups.workers.moreExpanded === "false",
     JSON.stringify({ rows: refolded.groups.workers.rows.length, more: refolded.groups.workers.more }));
+
+    /* ---- 시안 v2의 「지금 도는 일」 타임라인 (t-71840 C) ------------------------------------------- */
+    // 사람이 통과시킨 상황판 시안 v2(p-7c4a751fccf3359d)의 타임라인 그대로, 입은 것은 시안 B의 토큰과 부품뿐:
+    // 정시에 맞춘 지금 앞뒤 축과 「지금」 칩, 카드 머리의 범례, 묶음 머리의 이름, 행의 둘째 줄(상태 점과 낱말),
+    // 막대 안의 지금 단계와 앞의 단계 이름, 끝 칸의 굵은 시각과 그 밑 한 줄.
+    drawn = await moveScheduleTasks(page, { tasks: fixture.desk.tasks, landings: {} });
+    await page.evaluate(async () => {
+      document.querySelector('#board-view [data-schedule-zoom="now"]')?.click();
+      await window.__UNTIL__(() => !boardScheduleAsking, "the window's answer");
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    });
+    drawn = await readBoardSchedule(page);
+    const hourFrom = Math.floor(SCHEDULE_NOW / HOUR) * HOUR - HOUR;
+    const hours = drawn.ticks.map((tick) => Number(tick.slice(0, 2)));
+    ok("「지금 앞뒤」 asks from the hour before the hour now is in, and its axis reads whole hours on the 24-hour clock",
+      drawn.asked.some((one) => one.known === null && one.fromMs === hourFrom) && drawn.ticks.length >= 4
+        && drawn.ticks.every((tick) => /^\d{2}:00$/.test(tick))
+        && hours.every((hour, index) => index === 0 || hour === (hours[index - 1] + 1) % 24)
+        && drawn.chip === "지금" && drawn.title === "지금 도는 일",
+      JSON.stringify({ ticks: drawn.ticks, chip: drawn.chip, title: drawn.title, asked: drawn.asked.slice(-2) }));
+    const legend = await page.evaluate(() => document.querySelector("#board-view .board-schedule-legend")?.textContent ?? "");
+    ok("the card's head says how a bar reads, in the draft's words, and every group is named alone",
+      legend === "막대 끝 = 지난 소요로 잰 예상 · 빗금 = 아직 안 온 구간 · 점선 = 근거 없음"
+        && drawn.groups.lanes.head === "발행" && drawn.groups.gates.head === "게이트"
+        && drawn.groups.line.head === "빌드 줄" && drawn.groups.workers.head === "워커 과업",
+      JSON.stringify({ legend, heads: Object.values(drawn.groups).map((group) => group.head) }));
+    const nowLane = laneOf(drawn.groups.lanes.rows, "1.1.83");
+    ok("the running lane names the stage it is in inside its bar and the stages ahead in its stripes, the end on the right",
+      drawn.groups.lanes.rows.length === 1 && nowLane?.nowLabel === "gate-root"
+        && nowLane.aheadLabel === "gate-zo · build-app · publish" && nowLane.sub.startsWith("도는 중 · gate-root ")
+        && nowLane.sub.endsWith(" · 다음 gate-zo") && /^\d{2}:\d{2}$/.test(nowLane.eta) && /^1시간 \d+분 남음$/.test(nowLane.etaSub),
+      JSON.stringify(nowLane));
+    const passedGate = drawn.groups.gates.rows.find((one) => one.key === "gate:l60");
+    const runningGate = drawn.groups.gates.rows.find((one) => one.key === "gate:l61");
+    ok("a finished gate is one line that says how many went green, that it ended and how long it took",
+      passedGate?.label === "l60 결합 게이트" && /^\d+개 초록$/.test(passedGate.nowLabel) && passedGate.eta === "끝"
+        && passedGate.etaSub.endsWith(" 걸림") && passedGate.sub.startsWith("끝남 · "),
+      JSON.stringify(passedGate));
+    ok("the gate in play names its running step and the steps after it, and when it is expected to end",
+      runningGate?.nowLabel === "g3a-zo-lint" && runningGate.aheadLabel.includes("g1-build")
+        && /^\d{2}:\d{2}$/.test(runningGate.eta) && runningGate.etaSub.endsWith(" 남음"),
+      JSON.stringify(runningGate));
+    const carried = drawn.groups.workers.rows.find((one) => one.key.endsWith("t-63492"));
+    const reviewing = drawn.groups.workers.rows.find((one) => one.key.endsWith("t-67102"));
+    ok("a worker task's end cell speaks as the Now tab's does: how long it has run, or that it waits and for how long",
+      /째$/.test(carried?.eta ?? "") && carried.sub.startsWith("도는 중 · ") && reviewing?.eta === "대기"
+        && reviewing.etaSub === "기다린 지 45분" && reviewing.aheadLabel === "보고됨",
+      JSON.stringify({ carried, reviewing }));
+    const look = await page.evaluate(() => {
+      const host = document.querySelector("#board-view .task-board-schedule");
+      if (!host.querySelector(".board-schedule-legend")) return { sizes: [], dark: { drawn: NaN }, bright: { drawn: NaN } };
+      const parse = (said) => {
+        const rgb = said.match(/^rgba?\(([^)]+)\)$/);
+        if (rgb) {
+          const [r, g, b, a = "1"] = rgb[1].split(/[\s,/]+/).filter(Boolean);
+          return [Number(r) / 255, Number(g) / 255, Number(b) / 255, Number(a)];
+        }
+        const srgb = said.match(/^color\(srgb ([^)]+)\)$/);
+        if (srgb) {
+          const [r, g, b, slash, a] = srgb[1].split(/\s+/);
+          return [Number(r), Number(g), Number(b), slash === "/" ? Number(a) : 1];
+        }
+        return null;
+      };
+      const over = (top, under) => top.slice(0, 3).map((part, at) => part * top[3] + under[at] * (1 - top[3]));
+      const light = (rgb) => rgb.map((part) => (part <= 0.04045 ? part / 12.92 : ((part + 0.055) / 1.055) ** 2.4))
+        .reduce((sum, part, at) => sum + part * [0.2126, 0.7152, 0.0722][at], 0);
+      const ratio = (ink, ground) => {
+        const under = parse(ground);
+        const shown = over(parse(ink), under);
+        const [a, b] = [light(shown), light(under.slice(0, 3))].sort((x, y) => y - x);
+        return (a + 0.05) / (b + 0.05);
+      };
+      const probe = document.createElement("span");
+      host.append(probe);
+      const fill = (token) => {
+        probe.style.background = `var(${token})`;
+        return getComputedStyle(probe).backgroundColor;
+      };
+      const pick = (selector, pseudo = null) => getComputedStyle(host.querySelector(selector), pseudo);
+      const read = () => {
+        const deck = getComputedStyle(host.querySelector(".board-schedule-chart")).backgroundColor;
+        const band = pick(".board-schedule-group-head").backgroundColor;
+        return {
+          name: ratio(pick(".board-schedule-label").color, deck),
+          sub: ratio(pick(".board-schedule-label", "::after").color, deck),
+          end: ratio(pick(".board-schedule-said").color, deck),
+          endSub: ratio(pick(".board-schedule-said", "::after").color, deck),
+          legend: ratio(pick(".board-schedule-legend").color, deck),
+          group: ratio(pick(".board-schedule-group-head").color, band),
+          tick: ratio(pick(".board-schedule-tick").color, band),
+          chip: ratio(pick(".board-schedule-now").color, pick(".board-schedule-now").backgroundColor),
+          running: ratio(pick(".board-schedule-bar", "::before").color, fill("--schedule-run-fill")),
+          done: ratio(pick(".board-schedule-bar", "::before").color, fill("--schedule-done-fill")),
+          halted: ratio(pick(".board-schedule-bar", "::before").color, fill("--schedule-halt-fill")),
+          ahead: ratio(pick(".board-schedule-bar", "::after").color, fill("--surface-well")),
+        };
+      };
+      const sizes = new Set();
+      for (const node of host.querySelectorAll("*")) {
+        if (!node.checkVisibility()) continue;
+        if (node.childNodes.length > 0 && [...node.childNodes].some((one) => one.nodeType === Node.TEXT_NODE && one.data.trim())) {
+          sizes.add(getComputedStyle(node).fontSize);
+        }
+        for (const pseudo of ["::before", "::after"]) {
+          const style = getComputedStyle(node, pseudo);
+          if (style.content.startsWith("attr(") || /^".+"$/.test(style.content)) sizes.add(style.fontSize);
+        }
+      }
+      const dark = read();
+      document.documentElement.setAttribute("data-theme", "light");
+      const bright = read();
+      document.documentElement.removeAttribute("data-theme");
+      probe.remove();
+      return { sizes: [...sizes].sort(), dark, bright };
+    });
+    const faint = Object.entries({ ...Object.fromEntries(Object.entries(look.dark).map(([key, value]) => [`dark ${key}`, value])),
+      ...Object.fromEntries(Object.entries(look.bright).map(([key, value]) => [`light ${key}`, value])) })
+      .filter(([, value]) => !(value >= 4.5));
+    ok("every word on the schedule reads at 4.5 : 1 or more in both themes, the bar's names on their fills included",
+      faint.length === 0, JSON.stringify({ faint, dark: look.dark, light: look.bright }));
+    ok("the schedule speaks in at most four type sizes", look.sizes.length <= 4, JSON.stringify(look.sizes));
 
     ok("the schedule raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
