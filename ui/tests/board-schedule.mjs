@@ -89,6 +89,7 @@ export async function readBoardSchedule(page) {
         expanded: head.getAttribute("aria-expanded"),
         head: head.textContent,
         more: box.querySelector(".board-schedule-more").hidden ? "" : box.querySelector(".board-schedule-more").textContent,
+        moreExpanded: box.querySelector(".board-schedule-more").getAttribute("aria-expanded"),
         rows: [...box.querySelectorAll(".board-schedule-row")].map((row) => {
           const bar = row.querySelector(".board-schedule-bar");
           return {
@@ -124,6 +125,71 @@ async function moveScheduleLine(page, facts) {
     await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
     await new Promise((done) => requestAnimationFrame(done));
   }, facts);
+  return readBoardSchedule(page);
+}
+
+/* Finished worker tasks around `now` (t-71840), each ending the one way the person's photo showed wrong —
+ * no landing in the ledger — and an answer saying what git says of them: t-80001 deployed, git merged it
+ * seven hours ago; t-80002 nothing to land, verified four hours ago; t-80003 failed, its attempt ended two
+ * hours ago; t-80004 deployed, git names no merge but the release it shipped in, nine hours ago; t-80005
+ * deployed with no end written anywhere. Fourteen merged ones from fifteen hours back fill the range, and
+ * one task runs and one waits. */
+export function boardScheduleEnds(now) {
+  const hour = 3_600_000;
+  const minute = 60_000;
+  const task = (id, stage, times) => ({
+    run: "run-4275", id, title: `끝 ${id}`, stage, gate: null, blocked_by: [], closed: null,
+    created_ms: times.started_ms - minute, cost: null, writing: null,
+    times: { handed_ms: null, verified_ms: null, landed_ms: null, ended_ms: null, release: null, ...times },
+  });
+  const tasks = [
+    task("t-80001", "deployed", { started_ms: now - 10 * hour, handed_ms: now - 8 * hour, ended_ms: now - 8 * hour }),
+    task("t-80002", "nothing_to_land", {
+      started_ms: now - 6 * hour, handed_ms: now - 5 * hour, verified_ms: now - 4 * hour, ended_ms: now - 5 * hour,
+    }),
+    task("t-80003", "failed", { started_ms: now - 3 * hour, ended_ms: now - 2 * hour }),
+    task("t-80004", "deployed", {
+      started_ms: now - 12 * hour, handed_ms: now - 11 * hour, ended_ms: now - 11 * hour, release: "v1.1.83",
+    }),
+    task("t-80005", "deployed", { started_ms: now - 5 * hour }),
+    task("t-80010", "dispatched", { started_ms: now - hour }),
+    task("t-80011", "reported", { started_ms: now - 2 * hour, handed_ms: now - 30 * minute, ended_ms: now - 30 * minute }),
+    ...Array.from({ length: 14 }, (_, index) => {
+      const start = now - 15 * hour + index * 30 * minute;
+      return task(`t-801${String(index).padStart(2, "0")}`, "merged", {
+        started_ms: start, handed_ms: start + 10 * minute, verified_ms: start + 15 * minute,
+        landed_ms: start + 20 * minute, ended_ms: start + 10 * minute,
+      });
+    }),
+  ];
+  const landings = {
+    "t-80001": { landed_ms: now - 7 * hour, released_ms: now - 5 * hour },
+    "t-80004": { landed_ms: null, released_ms: now - 9 * hour },
+  };
+  return { tasks, landings };
+}
+
+/* The desk and the answer move together: a new revision carrying `landings`, a desk holding `tasks`.
+ * The view asks again, and what it drew once both stood is read. */
+async function moveScheduleTasks(page, { tasks, landings }) {
+  await page.evaluate(async ({ tasks, landings }) => {
+    window.__SCHEDULE__ = { ...window.__SCHEDULE__, revision: window.__SCHEDULE__.revision + 1, landings };
+    window.__DESK__ = { ...window.__DESK__, tasks };
+    deskLedger = window.__DESK__;
+    refreshBoardSchedule();
+    await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+    paintBoardScheduleHosts();
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, { tasks, landings });
+  return readBoardSchedule(page);
+}
+
+/* A press on a group's folded line of finished rows, and what the schedule drew after it. */
+async function pressScheduleMore(page, group) {
+  await page.evaluate(async (group) => {
+    document.querySelector(`#board-view [data-group="${group}"] .board-schedule-more`).click();
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, group);
   return readBoardSchedule(page);
 }
 
@@ -487,6 +553,68 @@ export async function testBoardSchedule(browser, origin, ok) {
         && !endedLane?.said.includes("부하"),
       JSON.stringify({ busyLane, quietLane, endedLane }));
     await loudRead(false);
+
+    /* ---- 끝난 과업의 끝 (t-71840): git의 착지 → 발행 → 원장의 마지막 기록, 지금은 아니다 ------------ */
+    // 사람 10-23 사진: 착지 기록이 없는 끝난 과업(배포됨·착지할 것 없음·실패)의 막대가 「지금」 선까지
+    // 늘어나고 「N일 걸림」이 지금까지로 부풀었다. 끝은 git이 말한 착지(병합 커밋의 시각), 그것이 없으면
+    // 그 일이 실린 발행, 그것도 없으면 원장이 적은 완료·검증·넘김·시도 끝 가운데 가장 늦은 것이고, 아무
+    // 기록이 없으면 끝을 말하지 않는다.
+    const ends = boardScheduleEnds(SCHEDULE_NOW);
+    drawn = await moveScheduleTasks(page, ends);
+    const workerRows = drawn.groups.workers.rows;
+    const row = (id) => workerRows.find((one) => one.key === `task:run-4275/${id}`);
+    const at = (hours) => placed(SCHEDULE_NOW + hours * HOUR, from, to);
+    const over = workerRows.filter((one) => one.state === "done" || one.state === "failed");
+    ok("no finished task's bar reaches 「now」",
+      over.length > 0 && over.every((one) => one.to < drawn.now - 0.5),
+      JSON.stringify(over.filter((one) => one.to >= drawn.now - 0.5).map((one) => [one.key, one.to, one.said])));
+    const deployed = row("t-80001");
+    ok("a deployed task with no landing in the ledger ends where git merged it, and took that long",
+      deployed?.state === "done" && near(deployed.to, at(-7)) && deployed.said === "배포됨 · 3시간 걸림",
+      JSON.stringify(deployed));
+    const nothing = row("t-80002");
+    ok("a task with nothing to land ends at the last moment the ledger wrote for it — here its verification",
+      near(nothing?.to, at(-4)) && nothing.said === "완료 — 착지할 것 없음 · 2시간 걸림"
+        && nothing.marks === "handed verified",
+      JSON.stringify(nothing));
+    const failedTask = row("t-80003");
+    ok("a failed task ends where its last attempt ended, and says how long it took",
+      failedTask?.state === "failed" && near(failedTask.to, at(-2)) && failedTask.said === "실패 · 1시간 걸림",
+      JSON.stringify(failedTask));
+    const released = row("t-80004");
+    ok("a deployed task git names no merge for ends at the release it shipped in",
+      near(released?.to, at(-9)) && released.said === "배포됨 · 3시간 걸림", JSON.stringify(released));
+    const unknown = row("t-80005");
+    ok("a finished task with no end recorded anywhere says so, and its bar does not run to 「now」",
+      near(unknown?.to, unknown?.from) && near(unknown.from, at(-5)) && unknown.said === "배포됨 · 끝 기록 없음",
+      JSON.stringify(unknown));
+
+    /* ---- 끝난 일은 접힌다: 최근에 끝난 몇만, 도는·기다리는 일은 다 (t-71840) ------------------------- */
+    const newest = ["t-80003", "t-80002", "t-80005", "t-80001", "t-80113", "t-80112", "t-80004", "t-80111", "t-80110",
+      "t-80109", "t-80108", "t-80107"].map((id) => `task:run-4275/${id}`).sort();
+    ok("of nineteen finished tasks the twelve that ended last stand, beside every task still moving",
+      JSON.stringify(over.map((one) => one.key).sort()) === JSON.stringify(newest)
+        && workerRows.some((one) => one.key.endsWith("t-80010") && one.state === "running")
+        && workerRows.some((one) => one.key.endsWith("t-80011") && one.state === "waiting")
+        && workerRows.length === 14,
+      JSON.stringify(workerRows.map((one) => [one.key, one.state])));
+    ok("the seven finished earlier are one folded line, in the words the build line's folded jobs use",
+      drawn.groups.workers.more === "+7 끝남" && /^\+\d+ 끝남$/.test(drawn.groups.line.more),
+      JSON.stringify({ workers: drawn.groups.workers.more, line: drawn.groups.line.more }));
+    ok("every group's rows stand in the order they started",
+      Object.values(drawn.groups).every((group) => group.rows.filter((one) => one.depth === "0")
+        .every((one, index, rows) => index === 0 || rows[index - 1].from <= one.from)),
+      JSON.stringify(Object.fromEntries(Object.entries(drawn.groups).map(([id, group]) =>
+        [id, group.rows.filter((one) => one.depth === "0").map((one) => one.from)]))));
+    const unfolded = await pressScheduleMore(page, "workers");
+    ok("the folded line opens on a press: every finished task in the range stands, and the line folds them again",
+      unfolded.groups.workers.rows.length === 21 && unfolded.groups.workers.more === "끝난 7개 접기"
+        && unfolded.groups.workers.moreExpanded === "true",
+      JSON.stringify({ rows: unfolded.groups.workers.rows.length, more: unfolded.groups.workers.more }));
+    const refolded = await pressScheduleMore(page, "workers");
+    ok("a second press folds them away", refolded.groups.workers.rows.length === 14
+      && refolded.groups.workers.more === "+7 끝남" && refolded.groups.workers.moreExpanded === "false",
+    JSON.stringify({ rows: refolded.groups.workers.rows.length, more: refolded.groups.workers.more }));
 
     ok("the schedule raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
