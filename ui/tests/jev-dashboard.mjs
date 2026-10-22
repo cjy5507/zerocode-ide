@@ -319,8 +319,11 @@ export function jevDashboardFixture(real = null) {
   window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [], custom };
   const builtin = { saved: {}, calls: [], failNext: false };
   window.__JEV__.builtin = builtin;
+  const provider = { kind: "jev", protocol: "system_one", baseUrl: "https://api.typesafe.ai", model: "jev-1.13.0", requiresAuth: true };
   const settings = () => ({
     keysKeptHere: true, keySaved: true, jev: { ...jev }, customDecisions: structuredClone(rules),
+    provider: { ...provider }, jevProvider: { ...provider }, providerIdentity: "jev-fixture",
+    model: { model: provider.model, alias: "jev-latest", pinned: true },
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
     // And the wall the model tier feature's paragraph names
