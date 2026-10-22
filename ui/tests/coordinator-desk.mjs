@@ -790,7 +790,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await page.evaluate(async () => {
       agentGraphSelectedKey = null;
       setAgentGraphInspectorOpen(document.querySelector("#board-view"), false);
-      deskChoice.workersOpen.clear();
+      // A board without the tables (a red tree) has no opened rows to forget.
+      deskChoice.workersOpen?.clear();
       await paintBoardView(boardTab(), { force: true });
     });
     const turned = await page.evaluate(async () => {

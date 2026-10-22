@@ -635,8 +635,9 @@ export async function testBoardNow(browser, origin, ok) {
               opened === 1 && tabContrast.below.length === 0 && tabContrast.min >= 4.5 && sizes.length <= 4,
               JSON.stringify({ opened, tabContrast, sizes }));
             await page.evaluate(() => {
-              deskChoice.workersOpen.clear();
-              deskChoice.todayOpen.clear();
+              // A board without the tables (a red tree) has no opened rows to forget.
+              deskChoice.workersOpen?.clear();
+              deskChoice.todayOpen?.clear();
               paintCoordinatorDesk(document.querySelector("#board-view"));
             });
           }
