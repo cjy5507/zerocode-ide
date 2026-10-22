@@ -282,7 +282,7 @@ enum Recovery {
         generation: u64,
         wait: Duration,
     },
-    /// A guard's second stop under one press.
+    /// A guard's second stop inside [`RESTART_WINDOW`].
     Guard,
     /// The press's restarts in the window are spent.
     Limit,
@@ -2221,7 +2221,7 @@ impl Manager {
 
     /// Brings back, as the window starts, the model the person's last press
     /// applied, unless the window's stop or cancel ended that press, the
-    /// settings moved away from it, or it failed [`BOOT_RESTORE_TRIES`]
+    /// settings moved away from it, or it failed `BOOT_RESTORE_TRIES`
     /// starts running. `allowed` is the window's own switch for judgments.
     /// When the settings choose a managed model, a start that restores
     /// nothing keeps why, in the store's record and in the status.

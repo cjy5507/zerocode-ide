@@ -1875,7 +1875,15 @@ async fn an_end_whose_status_another_reaper_took_is_kept_and_taken_up() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     };
-    let exits = fixture.exits();
+    // The manager's own watch may have taken the end first and keep its row
+    // just after the state changed: wait for the row, as kept_end does.
+    let exits = loop {
+        let exits = fixture.exits();
+        if !exits.is_empty() || began.elapsed() >= SETTLE {
+            break exits;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
     assert_eq!(
         exits
             .last()
