@@ -150,3 +150,72 @@ fn a_press_on_the_board_is_the_seats_and_its_answer_is_drawn() {
         );
     }
 }
+
+/// The type ladder is held by its values (review t-68962 P3 ③, t-70028).
+///
+/// Three window scenes compare a drawn size against the token meant to draw
+/// it — they read `--text-2xs` and its neighbours instead of spelling `11px`,
+/// so a token that moves takes its assertion along and both still agree. The
+/// ladder itself is a decision — the Geist steps the person passed (t-67607):
+/// 11 for a number inside a badge and a figure's legend, 12 for the smallest
+/// words, then 13 · 14 · 16 · 24 — so it is held here, by value, and Geist's
+/// named styles stand on those steps rather than on numbers of their own.
+#[test]
+fn the_type_ladder_is_held_by_its_values() {
+    let tokens = include_str!("../../../../ui/tokens.css");
+    let root = block_after(tokens, ":root {");
+    for step in [
+        "--text-3xs: 11px;",
+        "--text-2xs: 12px;",
+        "--text-xs: 12px;",
+        "--text-sm: 13px;",
+        "--text-md: 14px;",
+        "--text-lg: 16px;",
+        "--text-xl: 24px;",
+    ] {
+        assert!(root.contains(step), "the type ladder moved off `{step}`");
+    }
+    for (style, step) in [
+        ("--type-heading-24:", "var(--text-xl)"),
+        ("--type-heading-14:", "var(--text-md)"),
+        ("--type-label-14:", "var(--text-md)"),
+        ("--type-label-13:", "var(--text-sm)"),
+        ("--type-label-12:", "var(--text-xs)"),
+    ] {
+        let line = root
+            .lines()
+            .find(|line| line.trim_start().starts_with(style))
+            .unwrap_or_default();
+        assert!(
+            line.contains(step),
+            "`{style}` no longer stands on `{step}`: {line}"
+        );
+    }
+}
+
+/// Every step the release lane runs is named in the person's language on the
+/// 빌드 줄 card (t-70028, the draft's 「결합 시험 · 빌드 · zo 시험 · 발행」): the
+/// lane's own list (`PHASES`, tools/release/lane.sh) against the card's table
+/// of names. A step the table does not know stands under the lane's name.
+#[test]
+fn every_release_step_has_its_name_on_the_build_line_card() {
+    let lane = include_str!("../../../../tools/release/lane.sh");
+    let phases = lane
+        .lines()
+        .find_map(|line| line.strip_prefix("PHASES=\""))
+        .and_then(|rest| rest.split('"').next())
+        .expect("tools/release/lane.sh no longer names its PHASES");
+    let window = window_source();
+    let table = block_after(window, "const DESK_RELEASE_PHASES = Object.freeze({");
+    for phase in phases.split_whitespace() {
+        let entry = if phase.contains('-') {
+            format!("\"{phase}\": {{ key: \"board.now.phase")
+        } else {
+            format!("  {phase}: {{ key: \"board.now.phase")
+        };
+        assert!(
+            table.contains(&entry),
+            "the lane's `{phase}` step has no name on the build line card:\n{table}"
+        );
+    }
+}

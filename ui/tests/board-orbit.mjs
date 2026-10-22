@@ -859,7 +859,11 @@ export const orbitClearance = (page) => page.evaluate(() => {
   const lowest = captions.reduce((low, one) => (!low || one.rect.bottom > low.rect.bottom ? one : low), null);
   const said = ({ node }) => node.getAttribute("aria-label")?.split(",")[0] ?? "?";
   const onLegend = legend ? captions.filter(({ rect }) => meet(rect, legend)).map(said) : [];
-  return { overlaps, strays, covers, blocked, tagged, reserved: reserved.length, fit: state.fit,
+  // The guide line under the stage is words, so it stands at the words' floor (review t-68962 P3 ④).
+  const guide = document.querySelector("#board-view .agent-orbit-legend");
+  const type = { guide: guide ? parseFloat(getComputedStyle(guide).fontSize) : null,
+    floor: parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--text-2xs")) };
+  return { overlaps, strays, covers, blocked, tagged, reserved: reserved.length, fit: state.fit, type,
     captions: captions.length, onLegend, legendTop: legend ? Math.round(legend.top - room.top) : null,
     lowest: lowest ? { name: said(lowest), bottom: Math.round(lowest.rect.bottom - room.top),
       onLegend: legend ? meet(lowest.rect, legend) : null } : null };
@@ -1173,6 +1177,9 @@ async function testOrbitSpace(browser, origin, ok) {
     clearOf(({ captions, lowest, legendTop, onLegend }) => ({ captions, lowest, legendTop, onLegend })));
   ok("no agent's name tag stands on a platform's top", crowds.length === 4 && crowds.every(({ clear }) => clear.tagged.length === 0),
     clearOf(({ tagged }) => ({ tagged })));
+  ok("the stage's guide line reads at the words' 12px floor, not the 11px kept for numbers in badges (P3 ④)",
+    crowds.length === 4 && crowds.every(({ clear }) => clear.type.floor === 12 && clear.type.guide === clear.type.floor),
+    clearOf(({ type }) => ({ type })));
 }
 
 /* ⑫ 카메라. 흐를 것이 없는 판 — 방금 오간 우편 0, 작업 중·확인 필요 0(`calm`): 멈춘 카메라의

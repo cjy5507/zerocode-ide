@@ -23,10 +23,12 @@ use std::time::Instant;
 
 use serde_json::Value;
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
+use zerocode_core::computer_use::walk_words;
+use zerocode_core::computer_use_protocol::error_code;
 use zerocode_core::computer_use_protocol::marks::ITEMS_KEY;
 use zerocode_hookd::TeamAnswer;
 
-use super::{Screen, Seen, Snapshot, World};
+use super::{Missed, Screen, Seen, Snapshot, World};
 
 /// The pane's host and path among the pages a desk sees (`Desk::pages`), or
 /// two empty strings when no page answers to that label. The query is
@@ -58,6 +60,8 @@ pub struct WalkWorld<'a, Road, Walk> {
     deadline_ms: u64,
     spent_ms: u64,
     began: Instant,
+    /// Why the last look came back with nothing (t-70425).
+    missed: Option<Missed>,
 }
 
 impl<'a, Road, Walk> WalkWorld<'a, Road, Walk> {
@@ -82,6 +86,7 @@ impl<'a, Road, Walk> WalkWorld<'a, Road, Walk> {
             deadline_ms,
             spent_ms,
             began: Instant::now(),
+            missed: None,
         }
     }
 }
@@ -93,13 +98,22 @@ where
 {
     fn look(&mut self) -> Option<Screen> {
         self.workspace_revision = None;
+        self.missed = None;
         let argv = vec!["marks".to_string(), self.pane.clone(), "--json".to_string()];
         let answer = (self.road)(RecipeTool::Browser, &argv, &argv);
-        if answer.exit_code != 0 {
+        let said = if answer.exit_code == 0 {
+            serde_json::from_str::<Value>(answer.stdout.trim()).ok()
+        } else {
+            None
+        };
+        let Some(said) = said else {
+            self.missed = Some(super::desk::missed_of(&answer));
             return None;
-        }
-        let said = serde_json::from_str::<Value>(answer.stdout.trim()).ok()?;
-        let items = said.get(ITEMS_KEY)?.as_array()?.clone();
+        };
+        let Some(items) = said.get(ITEMS_KEY).and_then(Value::as_array).cloned() else {
+            self.missed = Some(Missed::said(walk_words::EMPTY_TREE));
+            return None;
+        };
         let snapshot = Snapshot::of(&said);
         self.workspace_revision = snapshot.workspace_revision;
         Some(Screen {
@@ -111,6 +125,12 @@ where
             shows: Vec::new(),
             snapshot,
         })
+    }
+
+    fn missed(&mut self) -> Missed {
+        self.missed
+            .take()
+            .unwrap_or_else(|| Missed::refused(error_code::UNANSWERED))
     }
 
     fn press(&mut self, mark: usize) -> bool {

@@ -47,6 +47,14 @@ pub const CWD_VERBS: &[&str] = &[
     ComputerMethod::Walk.verb_name(),
 ];
 
+/// The Computer Use verbs whose request names the pane that asked
+/// ([`crate::agent_browser::PANE_HEADER`]): the walks, whose browser steps the
+/// window takes for that pane — a work browser answers its owner alone, and a
+/// walk that named no pane had its every look refused (10-22,
+/// `workspace_actor_required`, t-70425). No other verb names one: the door
+/// opens nothing the person sees.
+pub const PANE_VERBS: &[&str] = CWD_VERBS;
+
 /// [`CWD_HEADER`]'s value for `cwd` — its UTF-8 bytes as lowercase hex, the
 /// spelling the door's `od` writes.
 #[must_use]
@@ -1978,6 +1986,23 @@ pub mod walk_words {
     /// move for the same-screen limit, or no look came back.
     pub const STUCK: &str = "stuck";
     pub const NO_LOOK: &str = "no_look";
+    /// Why no look came back, as a `no_look` row's [`REASON`] says it
+    /// (t-70425) — the surface's own three: the window, app or pane it named
+    /// was not found; it stood with nothing its look numbers (no tree, no
+    /// picture to read); the look ran out of time. Or a door refused the
+    /// look, and its own code rides beside under [`REFUSAL`]: looking again
+    /// does not open that door.
+    pub const NO_WINDOW: &str = "no_window";
+    pub const EMPTY_TREE: &str = "empty_tree";
+    pub const LOOK_TIMEOUT: &str = "look_timeout";
+    pub const LOOK_REFUSED: &str = "look_refused";
+    /// The key a `look_refused` row carries the door's own code under, as
+    /// the door said it (`workspace_actor_required`, `permission_denied`, …),
+    /// or the protocol's word for an answer with no envelope.
+    pub const REFUSAL: &str = "refusal";
+    /// The refusal a background walk's own look says once the person took
+    /// the foreground from it: it looks no more.
+    pub const BACKGROUND_INTERRUPTED: &str = "background_interrupted";
     /// The one barred word that is the judgment's own doubt rather than a
     /// stop: its confidence under the seat's press floor.
     pub const LOW_CONFIDENCE: &str = "low_confidence";
@@ -4830,6 +4855,8 @@ pub fn shim_script(port_var: &str, computer_token_var: &str, hook_token_var: &st
 /// window judges by that folder ([`CWD_VERBS`]): a recipe walk is asked
 /// through it, and a stopped walk is judged only for a workspace the person
 /// consented to. The emulator and terminal doors have no use for the folder.
+/// For the same walks it names the pane that asked ([`PANE_VERBS`]), whose
+/// browser steps are that pane's own.
 fn computer_door<'a>(
     manual: &'a str,
     port_var: &'a str,
@@ -4838,6 +4865,7 @@ fn computer_door<'a>(
 ) -> PowerShellBridgeShim<'a> {
     PowerShellBridgeShim {
         cwd_verbs: CWD_VERBS,
+        pane_verbs: PANE_VERBS,
         ..computer_route_shim(
             COMPUTER_CLI,
             manual,
@@ -4993,6 +5021,7 @@ fn computer_route_shim<'a>(
         deadline_seconds: COMPUTER_LONGEST_DEADLINE_MS.div_ceil(1_000),
         stdin_flags: true,
         pane_header: None,
+        pane_verbs: &[],
         cwd_verbs: &[],
         cwd_flag: None,
         pane_flag: None,
@@ -5031,6 +5060,11 @@ pub(crate) struct PowerShellBridgeShim<'a> {
     /// emulator doors seat an agent-opened tab in the asking pane's
     /// checkout).
     pub pane_header: Option<&'a str>,
+    /// The verbs whose request names the pane in the browser door's own
+    /// header, at a door that names none for the rest — the Computer Use
+    /// door's walks, whose browser steps are the asking pane's own
+    /// ([`PANE_VERBS`]). Empty for every other door.
+    pub pane_verbs: &'a [&'a str],
     /// The verbs whose request carries the shell's working directory as a
     /// header ([`CWD_HEADER`], spelled in hex) — for a window that must know
     /// which workspace such a command was asked from. Empty for a door whose
@@ -5084,13 +5118,26 @@ impl PowerShellBridgeShim<'_> {
             )
         });
         // The pane key rides as a header where the door seats a pane (the
-        // browser's), through the same guarded file as the tokens.
-        let pane_lines = self.pane_header.map_or(String::new(), |header| {
+        // browser's), through the same guarded file as the tokens — at a door
+        // that seats none, for the verbs that walk for its caller alone.
+        let pane_line = |header: &str, indent: &str| {
             format!(
-                "if [ -n \"${{{pane}:-}}\" ]; then\n  printf 'header = \"{header}: %s\"\\n' \"${pane}\" >> \"$headers\"\nfi\n",
+                "{indent}if [ -n \"${{{pane}:-}}\" ]; then\n{indent}  printf 'header = \"{header}: %s\"\\n' \"${pane}\" >> \"$headers\"\n{indent}fi\n",
                 pane = crate::hook::PANE_KEY_ENV
             )
-        });
+        };
+        let pane_lines = self
+            .pane_header
+            .map_or(String::new(), |header| pane_line(header, ""));
+        let pane_verb_lines = if self.pane_verbs.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "case \"${{1:-}}\" in\n  {verbs})\n{named}    ;;\nesac\n",
+                verbs = self.pane_verbs.join("|"),
+                named = pane_line(crate::agent_browser::PANE_HEADER, "    ")
+            )
+        };
         // Where the caller stands rides the same file, for the verbs the
         // window judges by it, as hex digits only: `od -v` spells every byte
         // (never a `*` for a repeated line) and `tr` joins its lines. A
@@ -5162,7 +5209,7 @@ chmod 600 "$headers"
 if [ -n "${{{RUN_EVIDENCE_DIR_ENV}:-}}" ]; then
   printf 'header = "{RUN_EVIDENCE_HEADER}: %s"\n' "${RUN_EVIDENCE_DIR_ENV}" >> "$headers"
 fi
-{pane_lines}{cwd_lines}{revision_header}{execution_header}out=$(printf '%s' "$body" | curl -q -sS --noproxy '*' --proto =http \
+{pane_lines}{pane_verb_lines}{cwd_lines}{revision_header}{execution_header}out=$(printf '%s' "$body" | curl -q -sS --noproxy '*' --proto =http \
   {execution_capture}--max-time {deadline_seconds} -w '\n%{{http_code}}' \
   -K "$headers" -H "content-type: application/octet-stream" --data-binary @- \
   "http://127.0.0.1:$port{route}" 2>/dev/null) || {{
@@ -5196,6 +5243,7 @@ fi
             deadline_seconds,
             stdin_flags,
             pane_header,
+            pane_verbs,
             cwd_verbs,
             cwd_flag,
             pane_flag,
@@ -5225,12 +5273,28 @@ fi
         } else {
             ""
         };
-        let pane_lines = pane_header.map_or(String::new(), |header| {
+        let pane_line = |header: &str, indent: &str| {
             format!(
-                "  $pane = $env:{PANE_KEY_ENV}\n  if ($pane) {{ $request.Headers.Add('{header}', $pane) }}\n",
+                "{indent}$pane = $env:{PANE_KEY_ENV}\n{indent}if ($pane) {{ $request.Headers.Add('{header}', $pane) }}\n",
                 PANE_KEY_ENV = crate::hook::PANE_KEY_ENV
             )
-        });
+        };
+        let pane_lines = pane_header.map_or(String::new(), |header| pane_line(header, "  "));
+        // A walk's verbs name the pane at a door that names none for the
+        // rest, matched as `case` matches them (with case).
+        let pane_verb_lines = if pane_verbs.is_empty() {
+            String::new()
+        } else {
+            let verbs = pane_verbs
+                .iter()
+                .map(|verb| format!("'{verb}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "  if (@({verbs}) -ccontains [string]$args[0]) {{\n{named}  }}\n",
+                named = pane_line(crate::agent_browser::PANE_HEADER, "    ")
+            )
+        };
         // The same verbs, matched as `case` matches them (with case), and the
         // filesystem's spelling of the location (a mapped drive's root, not
         // its name) as hex digits in capitals.
@@ -5302,7 +5366,7 @@ try {{
   $request.Headers.Add('{capability_header}', $capability)
   $evidence = $env:{RUN_EVIDENCE_DIR_ENV}
   if ($evidence) {{ $request.Headers.Add('{RUN_EVIDENCE_HEADER}', $evidence) }}
-{pane_lines}{cwd_lines}{revision_header}{execution_header}  $asking = $request.GetRequestStream()
+{pane_lines}{pane_verb_lines}{cwd_lines}{revision_header}{execution_header}  $asking = $request.GetRequestStream()
   $asking.Write($bytes, 0, $bytes.Length)
   $asking.Close()
   $response = $request.GetResponse()
@@ -5433,9 +5497,19 @@ mod windows_shim_tests {
             !computer.contains("curl"),
             "the PowerShell door posts in-process"
         );
+        // The Computer Use door opens nothing the person sees: it names the
+        // asking pane for a walk alone, whose browser steps the window takes
+        // for that pane (t-70425), inside the walk verbs' own test.
         assert!(
-            !computer.contains("x-zerocode-pane"),
-            "the Computer Use door opens nothing the person sees, so it seats no pane"
+            computer.contains(
+                "  if (@('recipe-run', 'walk') -ccontains [string]$args[0]) {\n    $pane = $env:ZEROCODE_PANE_KEY\n    if ($pane) { $request.Headers.Add('x-zerocode-pane', $pane) }\n  }\n"
+            ),
+            "the Computer Use door does not name the pane for a walk:\n{computer}"
+        );
+        assert_eq!(
+            computer.matches("x-zerocode-pane").count(),
+            1,
+            "the Computer Use door names the pane outside a walk:\n{computer}"
         );
         assert!(computer.contains("$body = ''"));
 
@@ -7569,11 +7643,14 @@ mod tests {
     /// pane's checkout instead of beside whatever the person is looking at
     /// (09-23 14:14·14:34·14:49, three mirrors on another project's stage).
     /// The name rides the guarded header file like the tokens, only when the
-    /// shell has one; the Computer Use door opens nothing the person sees
-    /// and still names no pane.
+    /// shell has one. The Computer Use door opens nothing the person sees and
+    /// names no pane — but for a walk (`walk`, `recipe-run`), whose browser
+    /// steps the window takes for the pane that asked: a work browser answers
+    /// its owner alone, and a walk that named no pane had its every look
+    /// refused (10-22 10:47·11:27, `workspace_actor_required`, t-70425).
     #[cfg(unix)]
     #[test]
-    fn the_emulator_door_names_the_pane_that_asked_and_the_computer_door_does_not() {
+    fn the_emulator_door_names_the_pane_that_asked_and_the_computer_door_only_for_a_walk() {
         use crate::agent_browser::PANE_HEADER;
         let rig = DoorRig::new();
         let emulator = rig.install(
@@ -7604,6 +7681,32 @@ mod tests {
             &asked,
         );
         assert!(!desktop.contains(PANE_HEADER), "{desktop}");
+        let walks: [&[&str]; 2] = [
+            &[
+                ComputerMethod::Walk.verb_name(),
+                "--pane",
+                "browser-1",
+                "--goal",
+                "g",
+                "--json",
+            ],
+            &[
+                ComputerMethod::RecipeRun.verb_name(),
+                "--name",
+                "r",
+                "--json",
+            ],
+        ];
+        for walk in walks {
+            let walked = rig.headers(&computer, rig.path(), walk, &asked);
+            assert!(
+                walked.lines().any(|line| line == named),
+                "the computer door did not name the pane that asked for `{}`:\n{walked}",
+                walk[0]
+            );
+            let nameless = rig.headers(&computer, rig.path(), walk, &[]);
+            assert!(!nameless.contains(PANE_HEADER), "{nameless}");
+        }
         let powershell = emulator_shim_script_powershell("P", "C", "H");
         assert!(
             powershell.contains(&format!("'{PANE_HEADER}', $pane")),

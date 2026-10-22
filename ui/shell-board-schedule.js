@@ -162,7 +162,11 @@ function refreshBoardSchedule({ fresh = false } = {}) {
   const known = fresh || !boardScheduleAnswer ? null : boardScheduleAnswer.revision;
   invoke("schedule_timeline", { known, fromMs: boardScheduleFrom() })
     .then((answer) => {
-      if (answer && typeof answer === "object" && !answer.unchanged) boardScheduleAnswer = answer;
+      if (answer && typeof answer === "object" && !answer.unchanged) {
+        boardScheduleAnswer = answer;
+        // The 지금 tab's 빌드 줄 card reads the same answer (its foot, the lane's steps ahead, t-70028).
+        if (boardNowTab === "now") scheduleDeskPaint();
+      }
       paintBoardScheduleHosts();
     })
     .catch(() => {})
