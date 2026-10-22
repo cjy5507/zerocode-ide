@@ -753,4 +753,23 @@ mod tests {
         assert!(!said.contains("task notification"), "{said}");
         assert!(!said.contains("parsing dates"), "{said}");
     }
+
+    /// A person's message that holds the window's sentence among words of
+    /// their own is the person's: only the window's line, alone, is the
+    /// window's.
+    #[test]
+    fn a_persons_message_holding_the_mail_sentence_among_other_words_is_the_persons() {
+        let _env = crate::test_env_lock();
+        let stores = Stores::new();
+        let mut session = Synthetic::open(&stores.project("work"), "session-h");
+        session.person("Profile the importer.");
+        session.plan(&[("Profile the importer", "in_progress")]);
+        let mixed = format!("{} Then also run the importer's tests.", pointer(2));
+
+        let own = session.person(&mixed).reminder.unwrap_or_default();
+        assert!(!own.contains("not a request from the person"), "the person's turn: {own}");
+
+        let said = session.turn(&pointer(1), |_| None, false).reminder.unwrap_or_default();
+        assert!(said.contains("Then also run the importer's tests."), "kept as the person's words: {said}");
+    }
 }
