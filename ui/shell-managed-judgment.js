@@ -202,11 +202,19 @@ const managedJudgmentController = {
 
   // The applied setting is a server of the person's own that answers with this
   // model — not the managed server, whose model is held by its own files.
+  // Entries sharing a server model ID (a bundled model and the address the
+  // person checked for it) are one connection, so one of them counts: the
+  // entry the setting is bound to, else the one received here, else the first.
   connected(model) {
+    const snapshot = this.snapshot;
     const provider = judgmentProviderController.state?.provider;
     const modelId = this.serverModel(model);
-    return Boolean(modelId && provider && provider.kind !== "jev" && provider.protocol === "system_one" &&
-      provider.model === modelId && !judgmentProviderController.managedServer());
+    if (!snapshot || !modelId || !provider || provider.kind === "jev" || provider.protocol !== "system_one" ||
+        provider.model !== modelId || judgmentProviderController.managedServer()) return false;
+    const same = snapshot.models.filter((entry) => this.serverModel(entry) === modelId);
+    const bound = [snapshot.configuredModelId, snapshot.appliedModelId];
+    const answering = same.find((entry) => bound.includes(entry.id)) ?? same.find((entry) => entry.installed) ?? same[0];
+    return answering?.id === model.id;
   },
 
   // A row of the library is a model this computer holds (t-69998): its files
