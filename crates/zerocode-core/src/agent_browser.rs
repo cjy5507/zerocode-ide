@@ -2427,6 +2427,47 @@ printf 'ok\n200'
         assert!(parse_click(&argv(&["click", "b", "--other"])).is_err());
     }
 
+    /// A canvas grid (t-70755): its cells are pixels and commit on Enter, so
+    /// the door presses a key — `press <label> <key> [css]`, the desktop's
+    /// own key names — and a point of the pane's picture —
+    /// `click <label> --at <x>,<y>`, whole pixels. Both act on their page.
+    #[test]
+    fn a_canvas_grid_is_written_by_a_key_press_and_a_point_press() {
+        let argv = |line: &[&str]| line.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        for ok in [
+            &["press", "b", "enter"][..],
+            &["press", "b", "shift+tab", "#name-box"],
+            &["press", "b", "enter", WORKSPACE_REVISION_FLAG, "7"],
+            &["click", "b", "--at", "350,254"],
+        ] {
+            assert_eq!(arity_ok(&argv(ok)), Ok(()), "{ok:?}");
+        }
+        for refused in [&["press", "b"][..], &["press", "b", "enter", "#a", "x"]] {
+            assert!(arity_ok(&argv(refused)).is_err(), "{refused:?}");
+        }
+        assert!(
+            acts("press"),
+            "a press acts: a Flow binds it to its recording"
+        );
+        assert_eq!(holds_ms("press"), Some(BROWSER_CALLBACK_DEADLINE_MS));
+        assert!(parse_click(&argv(&["click", "b", "--at", "350,254"])).is_ok());
+        assert!(parse_click(&argv(&["click", "b", "--at", "0,0"])).is_ok());
+        for point in ["", "350", "350,", "-1,2", "1.5,2", "1,2,3", "x,y", " 1,2"] {
+            assert!(
+                parse_click(&argv(&["click", "b", "--at", point])).is_err(),
+                "{point:?}"
+            );
+        }
+        assert!(parse_click(&argv(&["click", "b", "--at"])).is_err());
+        let manual = usage();
+        for line in [
+            "zerocode-browser press <label> <key> [css]",
+            "zerocode-browser click <label> --at <x>,<y>",
+        ] {
+            assert!(manual.contains(line), "the manual does not teach `{line}`");
+        }
+    }
+
     /// The form pair (t-37883): `fields` is a read like `marks`; `fill` acts,
     /// holds the door's budget for the passes an earlier value brings, and
     /// takes its bundle as one word or after `--value` (the stdin road).
