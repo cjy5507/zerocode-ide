@@ -1,23 +1,26 @@
 /* ---- 작업 상황판 「지금」 (t-67607) ------------------------------------------
  *
  * 사람이 통과시킨 시안 B(Vercel Geist 언어, 아티팩트 p-90883818b247d08e v2)의
- * 정보 구조. 상황판은 세 탭이다: 「지금」은 맨 위 한 문장(답할 일 N개 · 다음에
+ * 정보 구조. 상황판은 네 탭이다: 「지금」은 맨 위 한 문장(답할 일 N개 · 다음에
  * 끝나는 일), 「당신 차례」 카드(질문·결정·검토, 행 안에 첫 행동), 「빌드 줄」
- * 카드(릴리즈 레인), 「지금 도는 일」 표(목표별로 접힘). 「워커」는 모델·판·비용·
- * 호출·바뀐 파일을 여기서만 보이고, 「기록」은 소식·과업 흐름의 지난 수·에이전트
- * 작업 목록이다. 수는 첫 화면에서 빠져 기록으로 갔다 — 지금 일과 겨루지 않게.
+ * 카드(릴리즈 레인), 「지금 도는 일」 표(목표별로 접힘). 「일정」은 빌드 줄·결합
+ * 게이트·발행 레인·워커 과업의 시간축이다(shell-board-schedule.js, t-67482).
+ * 「워커」는 모델·판·비용·호출·바뀐 파일을 여기서만 보이고, 「기록」은 소식·과업
+ * 흐름의 지난 수·에이전트 작업 목록이다. 수는 첫 화면에서 빠져 기록으로 갔다 — 지금
+ * 일과 겨루지 않게.
  *
  * 그리는 사실은 데스크가 이미 읽은 한 벌뿐이다(`deskLedger`·`deskAgents`·
  * `releaseLane`, shell-board.js). 여기는 그 사실에 붙는 낱말과 차례를 정한다 —
  * 원장의 영어 문장은 행에 서지 않는다: 게이트는 종류(`gate.kind`)마다 우리말 한
  * 줄이고, 원문은 「원문 보기」 안에 있다. */
 
-/* 세 탭, 읽는 차례대로. 고른 탭은 창의 기억이다 — 판이 다시 그려져도 남는다. 낱말은
+/* 네 탭, 읽는 차례대로. 고른 탭은 창의 기억이다 — 판이 다시 그려져도 남는다. 낱말은
  * 마크업의 것이다(ui/index.html, 탭 단추의 `data-i18n`). 이름이 `boardNowTab`인 것은
  * shell.js의 `boardTab()`(보드를 든 창 탭)과 한 전역 이름을 나누면 늦게 실린 파일이
  * 통째로 서지 못하기 때문이다. */
 const BOARD_TABS = Object.freeze([
   { id: "now" },
+  { id: "schedule" },
   { id: "workers" },
   { id: "history" },
 ]);
@@ -38,14 +41,14 @@ const boardNowChoice = {
 const boardPresses = new Map();
 
 /* 탭의 단추를 그 탭에 맞게 — 표면의 `data-board-tab` 하나가 어느 블록이 보이는지
- * 정한다(shell.css 「작업 상황판 · 세 탭」). 블록의 `hidden`은 「쓸 것이 없음」의 뜻
+ * 정한다(shell.css 「작업 상황판 · 시안 B」). 블록의 `hidden`은 「쓸 것이 없음」의 뜻
  * 그대로 남는다. */
 function paintBoardTabs(view) {
   const surface = view.querySelector(".task-board-surface");
   const strip = surface?.querySelector(".board-now-tabs");
   if (!strip) return;
   writeAttribute(surface, "data-board-tab", boardNowTab);
-  // 원장의 런이 하나도 없는 창(코디네이터 없이 에이전트만 쓰는 사람)에는 세 탭이 나눌 것이
+  // 원장의 런이 하나도 없는 창(코디네이터 없이 에이전트만 쓰는 사람)에는 탭이 나눌 것이
   // 없다: 탭과 맨 위 문장은 접히고, 에이전트 작업 목록이 예전처럼 판 전체에 선다.
   writeAttribute(surface, "data-board-ledger", (deskLedger?.runs?.length ?? 0) > 0 ? "on" : "none");
   if (!strip.__wired) {
@@ -81,21 +84,13 @@ function chooseBoardTab(view, id, focus) {
 
 /* ---- 끝나는 시각 ----------------------------------------------------------
  *
- * 일정 부품(t-67482)이 과업마다 끝날 시각을 실어 오면(`task.times`) 그 값을 읽는
- * 자리는 여기 하나다. 아직 오지 않은 동안은 모른다고 하고 시각을 지어내지 않는다 —
- * 도는 일은 「N분째」, 기다리는 일은 「차례 기다림」으로 선다. */
+ * 과업 행의 `times`(데스크, t-67482)는 시작·넘김·검증·착지 시각을 싣는다. 끝날
+ * 시각(`times.eta_ms`)이 실려 오면 그 값을 읽는 자리는 여기 하나다. 아직 오지 않은
+ * 동안은 모른다고 하고 시각을 지어내지 않는다 — 도는 일은 「N분째」, 기다리는 일은
+ * 「차례 기다림」으로 선다. */
 function deskTaskEta(task, now) {
   const eta = Number(task?.times?.eta_ms);
   return Number.isFinite(eta) && eta > now ? eta : null;
-}
-
-/* 「지금 도는 일」 표 위에 일정 부품이 설 자리. 부품(`paintBoardSchedule`)이 실린
- * 창에서만 그리고, 없으면 자리는 접힌다. 부품은 아직 이 창에 없는 이름이라 이름으로
- * 부르지 않고 있을 때만 손에 쥔다. */
-function paintBoardScheduleSlot(host) {
-  const draw = typeof paintBoardSchedule === "function" ? paintBoardSchedule : null;
-  writeHidden(host, draw === null);
-  draw?.(host);
 }
 
 /* ---- 게이트의 우리말 한 줄 -------------------------------------------------
@@ -751,17 +746,14 @@ function paintDeskRunning(block, now, view) {
   if (!table) {
     table = deskElement("div", "board-runs");
     table.setAttribute("role", "table");
-    const schedule = deskElement("div", "board-now-schedule");
-    schedule.hidden = true;
     const foot = deskElement("p", "board-runs-foot");
     const toHistory = deskElement("button", "board-link");
     toHistory.type = "button";
     toHistory.onclick = () => chooseBoardTab(view, "history", false);
     foot.append(deskElement("span", ""), toHistory);
-    body.replaceChildren(schedule, table, foot);
+    body.replaceChildren(table, foot);
   }
   writeAttribute(table, "aria-label", t("board.now.running", "지금 도는 일"));
-  paintBoardScheduleSlot(body.querySelector(":scope > .board-now-schedule"));
   const goals = boardGoals(rows);
   const held = new Map([...table.children].map((node) => [node.dataset.key, node]));
   const wanted = [];

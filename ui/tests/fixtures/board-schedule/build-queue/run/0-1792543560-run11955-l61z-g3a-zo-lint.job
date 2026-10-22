@@ -1,0 +1,8 @@
+# who: run11955-l61z
+# cwd: /work/zerocode/integration-l61
+# run: run-4275
+# notify: run:run-4275
+# what: l61 결합 게이트 g3a — zo lint(clippy, no run)
+# cap: 1800
+set -e
+cargo clippy --all-targets -- -D warnings

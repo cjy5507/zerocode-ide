@@ -45,7 +45,7 @@ mod kept;
 mod tasks;
 
 pub(crate) use kept::KeptFile;
-pub(crate) use tasks::{Bundle, TaskListing};
+pub(crate) use tasks::{Bundle, Chips, TaskListing};
 
 /// The store's folder under the local data root.
 pub(crate) const STORE_DIR_NAME: &str = "artifacts";

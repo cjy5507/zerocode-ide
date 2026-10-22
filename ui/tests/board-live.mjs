@@ -1726,7 +1726,7 @@ async function testLiveLedgerBounds(browser, origin, ok) {
         const handles = agentGraphLiveHandles();
         return { timers: handles.timers, pulses: handles.pulses,
           beats: document.querySelectorAll(".agent-board [data-live-beat]").length,
-          frames: agentGraphEdgeFrames.has(view) || agentGraphFitFrames.has(view) };
+          frames: agentGraphEdgeFrames.has(view) };
       };
       /* 문을 지나는 동안 문서와 창에 새로 걸리는 귀. */
       let heard = 0;

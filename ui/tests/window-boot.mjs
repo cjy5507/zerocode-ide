@@ -1356,6 +1356,9 @@ const stubBackend = ({ boot, pollers }) => {
        종류 탭으로 서고, 줄과 묶음과 커밋의 반영은 그 탭의 스위트가 제 답을 갖다 놓는다. */
     artifact_tasks: () => ({ tasks: [], total: 0, truncated: false, unlinked: null }),
     artifact_bundle: () => null,
+    /* 흐름(t-68458): 이 픽스처의 런타임은 흐름을 답하지 않는다 — 탭은 흐름이 생기기 전처럼 행이
+       있는 첫 탭으로 선다. 흐름을 보는 스위트(artifact-flow)가 제 답을 갖다 놓는다. */
+    artifact_flow: () => null,
     commit_landings: () => ({}),
     artifact_counts: () => {
       const rows = window.__buildArtifacts__(window.__ARTIFACTS__ ?? { count: 0 });

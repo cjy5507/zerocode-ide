@@ -6074,13 +6074,16 @@ const ARTIFACT_VERDICT_WORDS = Object.freeze({
   intended: { glyph: "✕", key: "artifacts.status.intended", word: "의도한 실패" },
   unknown: { glyph: "◌", key: "artifacts.status.unknown", word: "확인 안 됨" },
 });
-/* 탭. 맨 앞은 작업별(t-36910 2단계) — 종류의 창고가 아니라 작업 하나로 읽는 탭이고, 카드가
- * 아니라 작업의 줄이 선다(`kinds`가 비었다: 런타임이 줄을 따로 답한다). 그 뒤로 종류의 탭이
- * 보고서 · 증거 · 페이지·문서 순으로 서고, 기타는 행이 있을 때만 선다. 작업이 하나도 없는
- * 카탈로그는 작업별 탭이 생기기 전처럼 열린다(`artifactFallbackTab`). `kinds`는 백엔드
+/* 탭. 맨 앞은 흐름(t-68458) — 지금 보는 프로젝트에서 무슨 일이 있었는지를 과업마다 한 줄로,
+ * 지금 · 다음 발행 전 · 발행된 것의 묶음 셋에 세운다(shell-artifact-flow.js, 런타임이 원장과 git에서
+ * 따로 답한다). 그다음은 과업별(t-36910 2단계) — 종류의 창고가 아니라 과업 하나로 읽는 탭이고,
+ * 카드가 아니라 과업의 줄이 선다. 둘 다 `kinds`가 비었다. 그 뒤로 종류의 탭이 보고서 · 증거 ·
+ * 페이지·문서 순으로 서고(지금 창의 전체 목록), 기타는 행이 있을 때만 선다. 흐름도 과업도 없는
+ * 카탈로그는 그 탭들이 생기기 전처럼 열린다(`artifactFallbackTab`). `kinds`는 백엔드
  * `Filter.kinds`의 낱말이다. */
 const ARTIFACT_TABS = Object.freeze([
-  { tab: "tasks", kinds: [], key: "artifacts.tab.tasks", word: "작업별" },
+  { tab: "flow", kinds: [], key: "artifacts.tab.flow", word: "흐름" },
+  { tab: "tasks", kinds: [], key: "artifacts.tab.tasks", word: "과업별" },
   // 글이 얼굴인 탭: 그림이 없는 종류의 카드는 아이콘 얼굴 없이 글 세 줄로 선다(`plain`). 보고서와
   // 증거(스크린샷 포함)는 그림을 띄우지 못하니 얼굴이 빈 자리였다(t-43931).
   { tab: "reports", kinds: ["report"], key: "artifacts.kind.report", word: "보고서", plain: true },
@@ -6092,6 +6095,8 @@ const ARTIFACT_TABS = Object.freeze([
  * 카탈로그가 서는 탭(늘 서 있는 탭이기도 하다). */
 const ARTIFACT_TASKS_TAB = "tasks";
 const ARTIFACT_PAGES_TAB = "pages";
+/* 흐름의 탭(t-68458) — 아티팩트 탭이 처음 서는 보기이고, 수를 달지 않는다(첫 화면의 수는 묶음의 머리에만). */
+const ARTIFACT_FLOW_TAB = "flow";
 const ARTIFACT_TAB_OF_KIND = new Map(ARTIFACT_TABS.flatMap((row) => row.kinds.map((kind) => [kind, row.tab])));
 /* 기간과 날의 무리는 한 표다: 무리는 새것부터 오늘 → 이번 주 → 이전이고,
  * 기간 고르개는 그중 앞의 둘까지 좁힌다. 이번 주는 달력의 주가 아니라
@@ -6111,6 +6116,9 @@ const ARTIFACT_PICKS = Object.freeze([
   { pick: "task", key: "artifacts.pick.task", word: "작업" },
 ]);
 const ARTIFACT_PICK_ALL = Object.freeze({ key: "artifacts.pick.all", word: "전체" });
+/* 검색 칸의 말 — 종류의 탭은 제목과 본문을, 흐름은 한 일과 과업을 찾는다(t-68458). */
+const ARTIFACT_SEARCH = Object.freeze({ key: "artifacts.search", word: "제목·본문 검색 (Enter: 본문까지)" });
+const ARTIFACT_FLOW_SEARCH = Object.freeze({ key: "artifacts.flow.search", word: "한 일 · 제목 · 과업 번호 검색" });
 /* 작업 고르개의 「작업에 연결 안 된 것」 칸의 값 — 작업 id(`t-…`)와 겹칠 수 없는 글자로 시작한다. */
 const ARTIFACT_TASK_UNLINKED = ":unlinked";
 const ARTIFACT_TASK_UNLINKED_WORD = Object.freeze({ key: "artifacts.task.unlinked", word: "작업에 연결 안 된 것" });
@@ -6186,10 +6194,11 @@ let artifactOrder = [];
 /* `artifactOrder`를 날로 가른 무리 — `{ period, start, count }`, 새것부터. 정렬이
  * 이미 시각 순이라 무리는 늘 이어진 한 토막이다. */
 let artifactGroups = [];
-/* 고르개의 기본값은 좁히지 않는 것이다: 프로젝트·에이전트·기간 전체, 사라진
- * 파일은 숨김. 탭은 작업별로 선다. */
+/* 고르개의 기본값은 좁히지 않는 것이다: 프로젝트·에이전트·기간 전체, 사라진 파일은 숨김 — 지금 창의
+ * 전체 목록 그대로다. 탭은 흐름으로 서고, 흐름은 고른 프로젝트가 없으면 지금 보는 프로젝트의 것이다
+ * (`artifactFlowProject`, t-68458). */
 const artifactFilter = {
-  query: "", tab: ARTIFACT_TASKS_TAB, origin: null, project: null, agent: null, period: "all", showMissing: false,
+  query: "", tab: ARTIFACT_FLOW_TAB, origin: null, project: null, agent: null, period: "all", showMissing: false,
 };
 /* 사람이 탭을 골랐는가. 고르기 전에는, 페이지가 하나도 없는 카탈로그가 빈 탭이
  * 아니라 행이 있는 첫 탭으로 열린다. */
@@ -6381,8 +6390,9 @@ async function refreshArtifacts() {
   const landing = artifactLanding;
   try {
     let filter = artifactQuery();
-    // 작업의 줄은 행과 함께 묻는다 — 어느 탭으로 설지는 둘의 답이 정한다.
+    // 작업의 줄과 흐름은 행과 함께 묻는다 — 어느 탭으로 설지는 셋의 답이 정한다.
     const tasksAsked = askArtifactTasks();
+    const flowAsked = askArtifactFlow();
     let answer = await invoke("artifacts_list", { filter });
     // 잘렸다는 것을 처음 안 답은 전부의 답이었다 — 거르개를 실어 한 번 더 묻고,
     // 이 창은 그 뒤로 거르개가 바뀔 때마다 묻는다.
@@ -6417,6 +6427,7 @@ async function refreshArtifacts() {
     indexArtifactTasks();
     forgetArtifactBundles();
     noteArtifactTasks(await tasksAsked);
+    noteArtifactFlow(await flowAsked);
     artifactError = null;
   } catch (error) {
     artifactError = String(error);
@@ -6458,9 +6469,15 @@ async function refreshArtifacts() {
   }
 }
 
-/* 선 탭에 설 것이 하나도 없는가 — 작업별 탭은 줄을, 나머지는 카드를 센다. */
+/* 선 탭에 설 것이 하나도 없는가 — 흐름은 제 줄과 기록을, 과업별 탭은 줄을, 나머지는 카드를 센다. */
 function artifactTabIsEmpty() {
+  if (artifactFilter.tab === ARTIFACT_FLOW_TAB) return artifactFlowIsEmpty();
   return artifactFilter.tab === ARTIFACT_TASKS_TAB ? artifactTaskLines.length === 0 : artifactOrder.length === 0;
+}
+
+/* 과업 하나를 읽는 칸에 세우는 탭인가 — 과업별, 그리고 흐름(칩이 그 과업의 묶음을 연다). */
+function artifactTabReadsTask(tab = artifactFilter.tab) {
+  return tab === ARTIFACT_TASKS_TAB || tab === ARTIFACT_FLOW_TAB;
 }
 
 /* 사람이 고르기 전의 탭이 비었을 때 설 탭. 작업이 하나도 없는 카탈로그는 작업별 탭이 생기기
@@ -6469,6 +6486,9 @@ function artifactTabIsEmpty() {
 function artifactFallbackTab() {
   const has = (row) => (artifactTabCounts.get(row.tab) ?? 0) > 0;
   const pages = artifactTabRow(ARTIFACT_PAGES_TAB);
+  // 답한 흐름은 비어도 제자리에 남는다 — 그 프로젝트에 무엇이 없고 무엇이 쌓일지 제 말로 한다(시안의
+  // 빈 프로젝트). 답이 없으면(흐름을 모르는 런타임 · 창이 아는 프로젝트가 없다) 행이 있는 탭으로 간다.
+  if (artifactFilter.tab === ARTIFACT_FLOW_TAB) return artifactFlowAnswer ? null : [pages, ...ARTIFACT_TABS].find(has) ?? null;
   if (artifactFilter.tab !== ARTIFACT_TASKS_TAB) return ARTIFACT_TABS.find(has) ?? null;
   return [pages, ...ARTIFACT_TABS].find(has) ?? pages;
 }
@@ -6477,16 +6497,21 @@ function artifactFallbackTab() {
  * 잘린 창이면 런타임에 다시 묻는다 — 그 답이 오면 그림이 따라온다. 작업의 줄은 런타임이
  * 세므로 늘 다시 묻는다(탭의 수가 거르개를 따라가야 한다). */
 function changeArtifactFilter(view) {
-  // 작업별 탭을 떠나면 읽는 칸의 작업도 닫힌다 — 다른 탭의 서랍은 고른 카드의 것이다.
-  if (artifactFilter.tab !== ARTIFACT_TASKS_TAB && artifactTaskOpen !== null) closeArtifactTask();
+  // 흐름을 떠나면 흐름의 읽기가, 과업을 읽는 탭을 떠나면 읽는 칸의 과업도 닫힌다 — 다른 탭의 서랍은
+  // 고른 카드의 것이다.
+  if (artifactFilter.tab !== ARTIFACT_FLOW_TAB) closeArtifactFlowReading();
+  if (!artifactTabReadsTask() && artifactTaskOpen !== null) closeArtifactTask();
   applyArtifactFilter();
   view.querySelector(".artifacts-grid").scrollTop = 0;
   paintArtifactCards(view);
   paintArtifactHead(view);
   paintArtifactTasks(view);
+  paintArtifactFlow(view);
   paintArtifactDrawer(view);
   if (artifactListing.filtered) void refreshArtifacts();
   else void refreshArtifactTasks(view);
+  // 흐름은 프로젝트 하나의 것이다 — 그 물음이 달라졌으면(프로젝트를 바꿨다) 다시 묻는다.
+  if (JSON.stringify(artifactFlowAsk()) !== artifactFlowAskedFor) void refreshArtifactFlow(view);
 }
 
 /* 출처별 수 — 원장이 움직일 때와 카탈로그가 움직일 때 다시 읽는다. 폴러가 아니다. */
@@ -6760,7 +6785,7 @@ function artifactVisibleTabs() {
     for (const [kind, n] of Object.entries(artifactListing.byKind)) if (n > 0) held.add(ARTIFACT_TAB_OF_KIND.get(kind) ?? "other");
   }
   if (artifactTaskListing.total > 0) held.add(ARTIFACT_TASKS_TAB);
-  return ARTIFACT_TABS.filter((row) => row.tab === ARTIFACT_PAGES_TAB || held.has(row.tab));
+  return ARTIFACT_TABS.filter((row) => row.tab === ARTIFACT_PAGES_TAB || row.tab === ARTIFACT_FLOW_TAB || held.has(row.tab));
 }
 
 /* 범위를 들고 온 도착이 설 탭 — 그 범위에 행이 있는 첫 탭. */
@@ -6807,9 +6832,10 @@ function artifactInRoots(row, roots) {
 }
 
 /* 프로젝트 고르개의 칸. 창이 아는 프로젝트는 뿌리와 워크트리들을 함께 들고
- * (행의 워크트리는 프로젝트 폴더 밖에 산다), 창이 모르는 경로는 제 이름으로
- * 선다. 수가 많은 것부터. 표 상한에 잘린 창은 든 행이 탭 하나의 것이라, 앞서
- * 본 칸을 버리지 않는다. */
+ * (행의 워크트리는 프로젝트 폴더 밖에 산다) 행이 하나도 없어도 선다 — 흐름은 아티팩트가 아니라
+ * 과업의 것이라(t-68458), 아직 낸 것이 없는 프로젝트도 고를 수 있어야 한다. 창이 모르는 경로는 제
+ * 이름으로 선다. 수가 많은 것부터. 표 상한에 잘린 창은 든 행이 탭 하나의 것이라, 앞서 본 칸을
+ * 버리지 않는다. */
 function artifactProjectChoices() {
   const known = projects.map((project) => ({
     value: project.path,
@@ -6831,7 +6857,7 @@ function artifactProjectChoices() {
     held.n += 1;
     stray.set(path, held);
   }
-  const choices = [...known.filter((choice) => choice.n > 0), ...stray.values()];
+  const choices = [...known, ...stray.values()];
   for (const previous of artifactProjects) {
     const keep = artifactListing.filtered || previous.value === artifactFilter.project;
     if (keep && !choices.some((choice) => choice.value === previous.value)) choices.push({ ...previous, n: 0 });
@@ -6895,7 +6921,7 @@ function applyArtifactFilter() {
   counts.set(ARTIFACT_TASKS_TAB, artifactTaskListing.total);
   artifactTabCounts = counts;
   artifactUnlinkedCounts = unlinked;
-  artifactMissingCount = tab === ARTIFACT_TASKS_TAB ? 0 : missing;
+  artifactMissingCount = artifactTabReadsTask(tab) ? 0 : missing;
   kept.sort((a, b) => (b.modified_ms - a.modified_ms) || (a.id < b.id ? -1 : 1));
   artifactOrder = kept.map((row) => row.id);
   const today = artifactDayStart(0);
@@ -6907,8 +6933,8 @@ function applyArtifactFilter() {
     if (last?.period === period) last.count += 1;
     else artifactGroups.push({ period, start: at, count: 1 });
   });
-  // 작업별 탭의 고른 행은 연 작업의 것이다 — 카드의 차례에 없다고 놓지 않는다.
-  if (tab !== ARTIFACT_TASKS_TAB && artifactSelectedId && !artifactOrder.includes(artifactSelectedId)
+  // 과업별 탭과 흐름의 고른 행은 연 과업의 것이다 — 카드의 차례에 없다고 놓지 않는다.
+  if (!artifactTabReadsTask(tab) && artifactSelectedId && !artifactOrder.includes(artifactSelectedId)
       && artifactLanding?.select !== artifactSelectedId) artifactSelectedId = null;
 }
 
@@ -7250,17 +7276,34 @@ function buildArtifactsView() {
 
   const head = document.createElement("header");
   head.className = "artifacts-head";
-  const name = document.createElement("span");
-  name.className = "artifacts-name";
-  name.dataset.i18n = "artifacts.title";
-  name.textContent = t("artifacts.title", "아티팩트");
+  // 프로젝트가 머리의 맨 앞이다(t-68458): 폴더 · 이름 · 갈매기 위에 투명한 고르개가 덮인다 — 누르면 기본
+  // select가 열리고(키보드 · 보조 기술이 거저 온다), 보이는 이름은 그 값이다. 곁의 말은 그것이 지금
+  // 보는 프로젝트인지 말한다.
+  const projectPick = ARTIFACT_PICKS.find((row) => row.pick === "project");
+  const project = document.createElement("label");
+  project.className = "artifacts-project";
+  project.innerHTML = icon("folder");
+  const projectName = document.createElement("span");
+  projectName.className = "artifacts-project-name";
+  const projectChevron = document.createElement("span");
+  projectChevron.className = "artifacts-project-chevron";
+  projectChevron.setAttribute("aria-hidden", "true");
+  projectChevron.innerHTML = icon("chevron");
+  const projectSelect = document.createElement("select");
+  projectSelect.className = "artifacts-project-select";
+  projectSelect.dataset.artifactPick = projectPick.pick;
+  projectSelect.dataset.i18nAria = projectPick.key;
+  projectSelect.setAttribute("aria-label", t(projectPick.key, projectPick.word));
+  project.append(projectName, projectChevron, projectSelect);
+  const here = document.createElement("span");
+  here.className = "artifacts-here";
   const query = document.createElement("input");
   query.className = "settings-input artifacts-query";
   query.type = "search";
-  query.dataset.i18nPlaceholder = "artifacts.search";
-  query.placeholder = t("artifacts.search", "제목·본문 검색 (Enter: 본문까지)");
-  query.dataset.i18nAria = "artifacts.search";
-  query.setAttribute("aria-label", t("artifacts.search", "제목·본문 검색 (Enter: 본문까지)"));
+  query.dataset.i18nPlaceholder = ARTIFACT_SEARCH.key;
+  query.placeholder = t(ARTIFACT_SEARCH.key, ARTIFACT_SEARCH.word);
+  query.dataset.i18nAria = ARTIFACT_SEARCH.key;
+  query.setAttribute("aria-label", t(ARTIFACT_SEARCH.key, ARTIFACT_SEARCH.word));
   const kinds = document.createElement("div");
   kinds.className = "artifacts-tabs";
   kinds.setAttribute("role", "tablist");
@@ -7284,8 +7327,8 @@ function buildArtifactsView() {
     one.append(word, count);
     kinds.appendChild(one);
   }
-  // 고르개 셋은 제 이름표를 단 기본 select다 — 키보드·보조 기술이 거저 온다.
-  const picks = ARTIFACT_PICKS.map((row) => {
+  // 고르개 셋은 제 이름표를 단 기본 select다 — 키보드·보조 기술이 거저 온다. 프로젝트는 머리의 맨 앞에 섰다.
+  const picks = ARTIFACT_PICKS.filter((row) => row !== projectPick).map((row) => {
     const label = document.createElement("label");
     label.className = "artifacts-pick";
     const name = document.createElement("span");
@@ -7341,7 +7384,7 @@ function buildArtifactsView() {
   freshChevron.setAttribute("aria-hidden", "true");
   freshChevron.innerHTML = icon("chevron-down");
   fresh.append(freshWord, freshChevron);
-  head.append(name, kinds, ...picks, query, origins, gap, stat, refresh, fresh);
+  head.append(project, here, kinds, ...picks, query, origins, gap, stat, refresh, fresh);
 
   const trouble = document.createElement("p");
   trouble.className = "artifacts-error";
@@ -7417,7 +7460,7 @@ function buildArtifactsView() {
   grid.append(spacer, cards, empty);
   const main = document.createElement("div");
   main.className = "artifacts-main";
-  main.append(...buildArtifactTaskList(), grid, unlinked, missing);
+  main.append(buildArtifactFlow(), ...buildArtifactTaskList(), grid, unlinked, missing);
   body.append(main, buildArtifactDrawer());
   root.append(head, buildArtifactStudio(), trouble, body, buildArtifactNewMenu());
   return root;
@@ -7652,6 +7695,8 @@ function buildArtifactDrawer() {
 
   // 작업별 탭의 읽는 칸: 제목 아래에 그 작업의 묶음(빠진 것 · 증거 · 전후 비교 · 페이지)이 선다.
   detail.append(bar, facts, title, buildArtifactBundle(), outline, preview, writing);
+  // 흐름에서 연 읽기(t-68458): 머리의 「어느 걸음의 무엇」과 상태, 제목 위의 그 과업 한 줄.
+  buildArtifactFlowReader(bar, detail);
   drawer.append(empty, detail);
   return drawer;
 }
@@ -7709,6 +7754,7 @@ function wireArtifactsView(view) {
       applyArtifactFilter();
       paintArtifactCards(view);
       paintArtifactHead(view);
+      paintArtifactFlow(view);
       paintArtifactDrawer(view);
       // 작업별 탭에서 검색어는 작업의 줄에게 묻는다 — 런타임이 답한다.
       void refreshArtifactTasks(view);
@@ -7828,6 +7874,7 @@ function wireArtifactsView(view) {
   });
   wireArtifactDrawer(view);
   wireArtifactTasks(view);
+  wireArtifactFlow(view);
   // 판의 폭이 열의 수다: 관찰자 하나가 다시 앉힌다. 서랍의 폭이 바뀌면 글이 다시 접히므로
   // 재어 둔 머리말의 자리도 버린다 — 다음 스크롤이 한 번 다시 잰다.
   if (typeof ResizeObserver === "function") {
@@ -7868,10 +7915,14 @@ function wireArtifactDrawer(view) {
     if (artifactRows.has(event.currentTarget.value)) selectArtifact(view, event.currentTarget.value, { reveal: true });
   });
   drawer.querySelector(".artifact-detail-back").addEventListener("click", () => {
-    closeArtifactTask();
+    // 흐름에서 연 읽기는 흐름으로 돌아간다 — 읽는 칸이 흐름을 덮는 좁은 판(t-68458).
+    const flow = artifactFilter.tab === ARTIFACT_FLOW_TAB;
+    if (flow) closeArtifactFlowReading();
+    else closeArtifactTask();
     paintArtifactTasks(view);
+    paintArtifactFlow(view);
     paintArtifactDrawer(view);
-    view.querySelector(".artifacts-tasks").focus({ preventScroll: true });
+    view.querySelector(flow ? ".artifact-flow-list" : ".artifacts-tasks").focus({ preventScroll: true });
   });
   drawer.querySelector(".artifact-detail-open").addEventListener("click", () => {
     if (artifactSelectedId) void artifactAction(view, "open", artifactSelectedId);
@@ -7927,6 +7978,7 @@ function paintArtifactsView(tab = artifactsTab()) {
   paintArtifactTier(view);
   paintArtifactHead(view);
   paintArtifactTasks(view);
+  paintArtifactFlow(view);
   paintArtifactCards(view);
   paintArtifactDrawer(view);
 }
@@ -7962,11 +8014,27 @@ function paintArtifactHead(view) {
     button.hidden = !shownTabs.has(tab) && !on;
     button.setAttribute("aria-selected", on ? "true" : "false");
     button.tabIndex = on ? 0 : -1;
-    button.querySelector(".artifacts-tab-count").textContent = String(artifactTabCounts.get(tab) ?? 0);
+    // 흐름의 탭은 수를 달지 않고, 흐름이 선 동안은 다른 탭도 수를 접는다 — 첫 화면의 수는 묶음의
+    // 머리에만 선다(t-68458).
+    const count = button.querySelector(".artifacts-tab-count");
+    writeTextContent(count, tab === ARTIFACT_FLOW_TAB ? "" : String(artifactTabCounts.get(tab) ?? 0));
+    writeHidden(count, artifactFilter.tab === ARTIFACT_FLOW_TAB);
   }
   paintArtifactPicks(view);
-  // 작업의 고르개는 종류의 탭의 것이다 — 작업별 탭에서는 줄을 고르는 것이 곧 그 고르기다.
-  view.querySelector('[data-artifact-pick="task"]').parentElement.hidden = artifactFilter.tab === ARTIFACT_TASKS_TAB;
+  paintArtifactProject(view);
+  const flow = artifactFilter.tab === ARTIFACT_FLOW_TAB;
+  // 작업의 고르개는 종류의 탭의 것이다 — 과업별 탭과 흐름에서는 줄을 고르는 것이 곧 그 고르기다. 기간은
+  // 흐름의 묶음이 이미 말한다.
+  view.querySelector('[data-artifact-pick="task"]').parentElement.hidden = artifactTabReadsTask();
+  view.querySelector('[data-artifact-pick="period"]').parentElement.hidden = flow;
+  const query = view.querySelector(".artifacts-query");
+  const search = flow ? ARTIFACT_FLOW_SEARCH : ARTIFACT_SEARCH;
+  if (query.dataset.i18nPlaceholder !== search.key) {
+    query.dataset.i18nPlaceholder = search.key;
+    query.dataset.i18nAria = search.key;
+    query.placeholder = t(search.key, search.word);
+    query.setAttribute("aria-label", t(search.key, search.word));
+  }
   const missing = view.querySelector(".artifacts-missing");
   missing.hidden = artifactMissingCount === 0;
   if (artifactMissingCount > 0) {
@@ -8013,7 +8081,7 @@ function paintArtifactHead(view) {
 function artifactEmptiedByTask() {
   const origin = artifactFilter.origin;
   // 작업별 탭은 작업을 거르지 않는다 — 카드가 없는 것은 그 탭의 모양이지 비운 것이 아니다.
-  return artifactFilter.tab !== ARTIFACT_TASKS_TAB && origin?.field === "task" && origin.value !== ""
+  return !artifactTabReadsTask() && origin?.field === "task" && origin.value !== ""
     && artifactOrder.length === 0 && artifactError === null;
 }
 
@@ -8051,8 +8119,10 @@ function paintArtifactPicks(view) {
   } else if (tasks.value !== picked) {
     tasks.value = picked;
   }
+  // 흐름에서는 흐름이 선 프로젝트가 고른 값이다 — 머리에 보이는 이름과 고르개가 같은 것을 말한다(t-68458).
   const project = view.querySelector('[data-artifact-pick="project"]');
-  fill(project, artifactProjects.map((row) => [row.value, row.label]), artifactFilter.project);
+  const projectValue = artifactFilter.tab === ARTIFACT_FLOW_TAB ? artifactFlowProject()?.value ?? null : artifactFilter.project;
+  fill(project, artifactProjects.map((row) => [row.value, row.label]), projectValue);
   fill(
     view.querySelector('[data-artifact-pick="agent"]'),
     artifactAgentChoices().map((agent) => [agent, agentName(agent)]),
@@ -8063,6 +8133,24 @@ function paintArtifactPicks(view) {
     ARTIFACT_PERIODS.slice(0, 2).map((row) => [row.period, t(row.key, row.word)]),
     artifactFilter.period === "all" ? "" : artifactFilter.period,
   );
+}
+
+/* 머리 맨 앞의 프로젝트(t-68458): 보이는 이름은 고른 값이고 — 흐름에서는 흐름이 선 프로젝트,
+ * 종류의 탭에서는 거르개(「전체」일 수 있다) — 곁의 말은 그것이 사이드바가 지금 보는 프로젝트인지,
+ * 다른 프로젝트인지 말한다. */
+function paintArtifactProject(view) {
+  const flow = artifactFilter.tab === ARTIFACT_FLOW_TAB;
+  const picked = flow ? artifactFlowProject() : artifactProjects.find((row) => row.value === artifactFilter.project) ?? null;
+  writeTextContent(view.querySelector(".artifacts-project-name"), picked?.label ?? t(ARTIFACT_PICK_ALL.key, ARTIFACT_PICK_ALL.word));
+  const here = view.querySelector(".artifacts-here");
+  const viewed = projects.find((one) => one.path === activeProjectPath) ?? null;
+  const said = !picked || !viewed
+    ? ""
+    : picked.value === viewed.path
+      ? t("artifacts.here", "지금 보는 프로젝트")
+      : t("artifacts.hereElsewhere", "다른 프로젝트 — 사이드바는 {{name}}", { name: viewed.name ?? basename(viewed.path) });
+  writeTextContent(here, said);
+  writeHidden(here, said === "");
 }
 
 function artifactColumns(view) {
@@ -8702,6 +8790,7 @@ function paintArtifactDrawer(view) {
   }
   const landed = artifactReaderLandingSay(row);
   paintArtifactBar(drawer, row, landed);
+  paintArtifactFlowReader(drawer, row);
   writeTextContent(drawer.querySelector(".artifact-detail-title"), row.title);
   const put = (key, value) => {
     const cell = drawer.querySelector(`.artifact-meta [data-meta="${key}"]`);

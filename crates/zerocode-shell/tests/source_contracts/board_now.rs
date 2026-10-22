@@ -1,7 +1,8 @@
 //! The task board in the Geist language the person passed (t-67607, draft B,
-//! artifact p-90883818b247d08e v2): three tabs, one sentence on top, the
-//! 「당신 차례」 card, the 「빌드 줄」 card and the 「지금 도는 일」 table — and
-//! not one of the ledger's English sentences on a row.
+//! artifact p-90883818b247d08e v2): four tabs (the schedule's is t-67482's),
+//! one sentence on top, the 「당신 차례」 card, the 「빌드 줄」 card and the
+//! 「지금 도는 일」 table — and not one of the ledger's English sentences on a
+//! row.
 
 use std::path::Path;
 
@@ -70,26 +71,36 @@ fn every_hold_the_desk_sends_is_said_in_the_persons_language() {
     );
 }
 
-/// The board's three tabs are one list, and the markup carries exactly them.
+/// The board's four tabs are one list — 지금 · 일정 · 워커 · 기록, the
+/// schedule's since t-67482 — and the markup and the stylesheet carry
+/// exactly them: a tab with no rule in shell.css would leave every other
+/// tab's blocks standing under it.
 #[test]
-fn the_three_tabs_are_one_list_and_the_markup_carries_them() {
+fn the_four_tabs_are_one_list_and_the_markup_carries_them() {
     let window = window_source();
     let markup = include_str!("../../../../ui/index.html");
+    let styles = include_str!("../../../../ui/shell.css");
     let tabs = block_after(window, "const BOARD_TABS = Object.freeze([");
     let ids: Vec<&str> = tabs
         .split("{ id: \"")
         .skip(1)
         .filter_map(|tail| tail.split('"').next())
         .collect();
-    assert_eq!(ids, ["now", "workers", "history"], "{tabs}");
+    assert_eq!(ids, ["now", "schedule", "workers", "history"], "{tabs}");
     for id in &ids {
         assert!(
             markup.contains(&format!("data-board-tab-button=\"{id}\"")),
             "the `{id}` tab has no button in ui/index.html"
         );
+        assert!(
+            styles.contains(&format!(
+                "[data-board-tab=\"{id}\"] [data-board-tab-of]:not([data-board-tab-of=\"{id}\"])"
+            )),
+            "the `{id}` tab hides no other tab's blocks in ui/shell.css"
+        );
     }
     // Each desk block names the tab it stands on, and every tab it names is
-    // one of the three.
+    // one of the four.
     let blocks = block_after(window, "const DESK_BLOCKS = Object.freeze([");
     for named in blocks.split("tab: \"").skip(1) {
         let tab = named.split('"').next().unwrap_or_default();

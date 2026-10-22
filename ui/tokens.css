@@ -823,27 +823,14 @@
    * banners. A column count is a layout; a column WIDTH is a reading measure. */
   /* Agent ontology graph. Geometry lives here so the renderer measures the
    * actual DOM and never carries a second pixel vocabulary in JavaScript. */
-  --agent-graph-context-width: 116px;
   --agent-graph-agent-width: 172px;
   --agent-graph-inspector-width: 300px;
-  --agent-graph-layer-gap: 20px;
-  --agent-graph-row-gap: var(--space-3);
-  --agent-graph-row-min-height: 64px;
   --agent-graph-search-width: 320px;
   --agent-graph-inspector-stack-min-height: 220px;
-  /* The measured lanes above are the baseline: the width Orca hands a node
-   * that carries a title and one line under it. This surface's agent card also
-   * carries a live wire — three tool calls, each a verb and a path — and a path
-   * clipped at 172px says nothing at all. So the DRAWN lane is the measured one
-   * times a density, and the measure stays the measure: the widening is a
-   * number somebody can read and argue with rather than a redefinition.
-   *
-   * The zoom multiplies the same measures a second time, and the tokens that
-   * DO that multiplication live on `.agent-graph-surface` rather than here —
-   * see the note there. Only the measures are here, where a measure belongs. */
-  --agent-graph-density: 1.55;
-  --agent-graph-band-head-height: 34px;
-  --agent-graph-lane-height: 22px;
+  /* 172 is the width Orca hands a node that carries a title and one line under
+   * it — the orbit's name tags read it (`--agent-orbit-label-*`). The card
+   * picture no longer has lanes (direction E2, t-68475): its columns are the
+   * team geometry further down. */
   /* 「지금 무엇을 하는가」가 쓰는 수들 (t-2374). 여덟 칸의 띠와 가는 미터는
    * 이 표면에만 있는 모양이라 제 토큰을 갖는다 — `--space-*`가 맞는 자리는
    * 그것을 쓴다. 여덟이라는 **개수**는 여기 없다: 그것은 데이터의 양이라
@@ -868,21 +855,17 @@
    * 한 번 여기서 읽는다.
    *
    * 바닥 0.45는 낱말이 아니라 **모양**을 보는 자리이고(사람이 청해야 간다),
-   * 1.6 위로는 노드가 커지기만 한다. 저절로 앉는 판의 바닥 0.65는 밀도의
-   * 역수 — 카드가 도구 호출의 경로를 담으려고 덧입은 것을 도로 내어놓는
-   * 자리이며, 실측 레인 172px보다 좁아지는 일은 하지 않는다.
+   * 1.6 위로는 노드가 커지기만 한다. 코디별 줄기(방향 E2, t-68475)의 카드 그림에는
+   * 배율이 없으므로 이 범위는 입체의 것이고, 방향 D의 LOD 문턱·저절로 앉는 바닥·
+   * 레일 구슬은 그림과 함께 물러났다.
    *
    * `unitless` 라 `px`가 붙지 않는다: 배율은 길이가 아니다. `--agent-graph-edge-stub`
-   * 만 길이이고, 그것은 간선이 카드를 비껴 도는 거리다. */
+   * 만 길이이고, 그것은 같은 열의 두 카드를 잇는 오버레이 선이 열 밖으로 비켜 도는
+   * 거리다. */
   --agent-graph-zoom-min: 0.45;
   --agent-graph-zoom-max: 1.6;
   --agent-graph-zoom-step: 0.15;
-  --agent-graph-lod: 0.6;
-  --agent-graph-fit-floor: 0.65;
   --agent-graph-edge-stub: 12px;
-  /* 레일 끝 구슬의 반지름 — 스크립트가 원의 `r`로 쓰고(`agentGraphTuning`), 구슬은 자식 카드의
-   * 왼쪽 모서리 바로 밖에 앉는다. */
-  --agent-graph-rail-bead: 4px;
   --agent-graph-tier-side: 1100px;
   --agent-graph-tier-list: 700px;
   --agent-graph-tier-tight: 400px;
@@ -895,9 +878,9 @@
    * `--space-*`가 맞는 자리는 그것을 쓴다. 아래는 그 사다리에 없는, 이 표면만의
    * 수들이다 — 카드 안의 6px 줄 간격(칸이 아니라 **줄** 사이라 8px은 넓다),
    * 알약 칩의 1px/6px 안쪽, 캔버스 모눈의 24px 눈금, 그리고 낱말이 더 줄지
-   * 않는 세 바닥. 마지막 셋이 토큰인 것은 저절로 앉는 맞춤의 바닥
-   * (`--agent-graph-fit-floor`)이 바로 그 셋에서 나온 수이기 때문이다: 두
-   * 곳에 적혀 있으면 한쪽만 움직이는 날 그림이 읽을 수 없게 된다. */
+   * 않는 세 바닥. 마지막 셋이 토큰인 것은 입체의 이름표와 그림의 축척
+   * (`--agent-graph-text-*`)이 같은 바닥을 읽기 때문이다: 두 곳에 적혀 있으면
+   * 한쪽만 움직이는 날 그림이 읽을 수 없게 된다. */
   --agent-graph-gap: 6px;
   --agent-graph-gap-tight: 2px;
   --agent-graph-chip-inset: 1px 6px;
@@ -931,7 +914,6 @@
   --agent-graph-live-dash: 6 10;
   --radius-pill: 999px;
   --agent-graph-tick-size: 9px;
-  --agent-graph-tick-gap: 3px;
   --agent-graph-meter-height: 3px;
   --agent-graph-mark-size: 6px;
   /* ---- round three: 원장처럼 읽히는 판 ----
@@ -954,8 +936,22 @@
   --agent-relations-rail-width: 172px;
   --agent-relations-rail-width-drawer: 155px;
   --agent-graph-card-radius: var(--radius-md);
-  --agent-graph-card-inset: var(--space-3) var(--space-4) var(--space-3) var(--space-4);
-  --agent-graph-icon-tile: 24px;
+  /* ---- 코디별 줄기 (방향 E2, t-68475) ----
+   *
+   * 시안 p-2259b7961aa24a46 v1 ③ E2의 수 그대로다. 열은 340px에서 판의 몫까지 자라되 한 열이
+   * 720px를 넘지 않고(질문 한 줄이 눕지 않는 폭), 열 사이는 24px다. 줄기의 홈은 마디(16px)가
+   * 서는 왼쪽 자리라 32 + 12, 헬퍼 줄기의 홈은 그보다 한 단 좁다. 타일은 카드 20px · 머리 24px,
+   * 상태 표식은 10px. 열이 한 열로 쌓이는 그림의 폭(760)은 컨테이너 쿼리의 조건이라 토큰이 될 수
+   * 없어 shell.css의 `@container graph` 한 곳에만 선다. */
+  --agent-graph-team-width: 340px;
+  --agent-graph-team-max: 720px;
+  --agent-graph-team-gap: var(--space-5);
+  --agent-graph-spine-gutter: calc(var(--space-6) + var(--space-3));
+  --agent-graph-sub-gutter: 28px;
+  --agent-graph-joint: 16px;
+  --agent-graph-tile: 20px;
+  --agent-graph-head-tile: 24px;
+  --agent-graph-signal-size: var(--status-dot-size);
   --agent-graph-stream-height: 320px;
   --agent-graph-screen-rows: 9;
   --agent-graph-screen-text: 11px;
