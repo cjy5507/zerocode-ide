@@ -1,7 +1,16 @@
 //! Installed surface shims, including the window's private-token loaders.
 //! Installers and surface metadata consumers share these exact bytes.
 
+mod pane_grant;
+
+pub use pane_grant::{PaneTeamGrant, orchestration_program, read_pane_team_grant};
+
 const PANE_GRANTS_DIR_NAME: &str = "panes";
+
+/// The installed ledger command has its own directory, separate from tmux.
+pub const ORCHESTRATION_DIR_NAME: &str = "orchestration-bin";
+/// The ledger command's name before a platform launcher suffix.
+pub const ORCHESTRATION_COMMAND: &str = "zerocode-orc";
 
 /// Surface command whose installed bytes can attest host metadata.
 #[derive(Clone, Copy, Debug)]

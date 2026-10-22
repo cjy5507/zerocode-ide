@@ -1,10 +1,12 @@
 #!/bin/bash
 # tools/release/status.sh [--wait <sha>] [--timeout <secs>] — one line from status.json.
 #
-#   <sha8> <phase> <elapsed> <outcome> [v<version>] [<reason>] [skipped=<phase>(<why>),…] [unlisted=<n>(unlisted.txt)]
+#   <sha8> <phase> <elapsed> <outcome> [v<version>] [<reason>] [skipped=<phase>(<why>),…] [receipt=<phase>(<what>),…] [unlisted=<n>(unlisted.txt)]
 #
 # A phase the lane skipped aloud — bundle-updater without a key, publish
-# without RELEASE_PUBLISH=1 — is named at the end with its reason. A red
+# without RELEASE_PUBLISH=1, a gate the coordinator's receipt covered — is named
+# at the end with its reason; a gate that ran only what a receipt left owed, or
+# ran whole because the receipt was refused, says so as receipt=. A red
 # outside flakes.txt the lane judged solo for this sha is counted last; the
 # names and their judgments are in unlisted.txt beside installed.json (t-9741).
 #
@@ -33,21 +35,21 @@ elapsed() { # since started_at, as Xm YYs
   start=$(date -j -u -f %Y-%m-%dT%H:%M:%SZ "$1" +%s 2>/dev/null) || { echo "?"; return; }
   now=$(date +%s); printf '%dm%02ds' $(( (now - start) / 60 )) $(( (now - start) % 60 ))
 }
-skipped() { # -> "name(why),name(why)" or nothing
-  grep -o '{"name":"[^"]*","rc":[0-9]*,"secs":[0-9]*,"skipped":"[^"]*"}' "$STATUS" 2>/dev/null \
-    | sed 's/{"name":"\([^"]*\)".*"skipped":"\([^"]*\)"}/\1(\2)/' | paste -sd, -
+said() { # KEY -> "name(text),name(text)" for each phase carrying KEY (skipped, receipt), or nothing
+  grep -o '{"name":"[^"]*","rc":[0-9]*,"secs":[0-9]*,"'"$1"'":"[^"]*"}' "$STATUS" 2>/dev/null \
+    | sed 's/{"name":"\([^"]*\)".*"'"$1"'":"\([^"]*\)"}/\1(\2)/' | paste -sd, -
 }
 unlisted() { # SHA8 -> how many unlisted reds the lane judged for it, or nothing
   local n; n=$(grep -c "^[^ ]* $1 " "$UNLISTED" 2>/dev/null)
   [ "${n:-0}" -gt 0 ] && printf '%s(%s)' "$n" "$(basename "$UNLISTED")"
 }
 line() {
-  local sha phase outcome reason version skips judged
+  local sha phase outcome reason version skips receipts judged
   sha=$(field sha); phase=$(field phase); outcome=$(raw outcome | tr -d '"'); reason=$(field reason)
-  version=$(field version); skips=$(skipped); judged=$(unlisted "$(printf '%s' "$sha" | cut -c1-8)")
+  version=$(field version); skips=$(said skipped); receipts=$(said receipt); judged=$(unlisted "$(printf '%s' "$sha" | cut -c1-8)")
   [ "$outcome" = null ] && outcome=running
-  printf '%s %s %s %s%s%s%s%s\n' "$(printf '%s' "$sha" | cut -c1-8)" "$phase" "$(elapsed "$(field started_at)")" "$outcome" \
-    "${version:+ v$version}" "${reason:+ $reason}" "${skips:+ skipped=$skips}" "${judged:+ unlisted=$judged}"
+  printf '%s %s %s %s%s%s%s%s%s\n' "$(printf '%s' "$sha" | cut -c1-8)" "$phase" "$(elapsed "$(field started_at)")" "$outcome" \
+    "${version:+ v$version}" "${reason:+ $reason}" "${skips:+ skipped=$skips}" "${receipts:+ receipt=$receipts}" "${judged:+ unlisted=$judged}"
 }
 if [ -z "$want" ]; then
   [ -f "$STATUS" ] || { echo "no status yet ($STATUS)"; exit 1; }

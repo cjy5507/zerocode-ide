@@ -111,6 +111,66 @@ Measured before the rule (three green runs): gate-root 1105–1615 s, gate-zo
 GateOwed` pins the rule with stubs (`CHANGED_PATHS`, `STAMP_REAL_CHANGES`);
 `GateOwedOnGit` runs `gate_owed` and `stamp_only` on a real repository.
 
+## A coordinator's gate receipt (2026-10-22, t-47516)
+
+The coordinator gates each landing on its build line before it cuts a release
+from it, so the lane's gates ran the same recipes on the same tree a second
+time: v1.1.84 (`b0965106`) spent 3168 s in gate-root and 1719 s in gate-zo on
+the tree the coordinator's l64 had gated green an hour before. A cut can now
+carry that gate's receipt:
+
+    python3 tools/release/coord_receipt.py make <build-queue>/done/0-*-coord-<label>-*.job > receipt.json
+    tools/release/enqueue.sh <sha> --receipt receipt.json
+
+`make` reads every job the build line ran — the rc file, the `head <sha> tree
+<tree>` its log opened with, one green `RC <key>=<rc>` line and one log per
+`entry`, a `verdict: bad=0`, one owner (`# who:`), run (`# run:`) and folder
+(`# cwd:`) for all — and seals the bytes it read (sha256). `enqueue.sh` reads the
+receipt once, as the lane does (a receipt that does not stand queues nothing),
+and keeps it as `receipts/<sha>.json` before the queue file appears. At each gate
+the lane reads all of it again and:
+
+- refuses it — the gate runs whole, and the phase says why (`"receipt":"refused:
+  …"` in status.json, `receipt=` from status.sh) — when a job is red or capped,
+  the jobs name two trees, owners, runs or folders, a sealed byte changed, the
+  receipt is older than its last job, a job is not one the build line ran (its
+  files outside `RELEASE_BUILD_LINE`'s `done/`, or no `RUN` and green `DONE` line
+  of it under its owner in that line's `runner.log`), the jobs say another run
+  than `RELEASE_COORD_RUN` or an owner other than a coordinator's
+  `coord-<label>`, git finds a job's head not to hold the tree its jobs printed,
+  or that tree to differ from the sha's apart from the stamp's version lines and
+  the release notes edited in place (modified, a plain `100644` file on both
+  sides — never linked, removed or given another mode), or a job ended before
+  its head was committed;
+- counts a recipe as gated only where an entry ran exactly `just <recipe>` in the
+  gate's folder from the top of the checkout — a bare `just <recipe>` for the
+  root, `zsh -c 'cd zo-ide && just <recipe>'` for zo, and nothing at all when the
+  jobs ran anywhere but the top (their `# cwd:` holds no `.git`): from zo-ide a
+  bare `just test` is zo's — weighed against the gate's own list
+  (`verify-every-recipe.sh --list`): the lane's strict `win-check` is never
+  covered by `win-check-if-available`, which says SKIPPED on a cold target, and
+  zo's tests run by package are no `just test`;
+- owes `NOTES_READERS` again when the release notes changed since the gated tree
+  — bump.sh writes them into every release commit, and only pii-check reads them;
+- runs only what is left owed (`verify-every-recipe.sh --only`), and skips the
+  phase aloud when nothing is: `gate-root rc=0 0s … skipped: receipt
+  coord-<label> of <run> as its jobs say (the lane's coordinator run), tree
+  <tree8>: 16/16 root recipes green — logs <folder>`.
+
+Nothing in a receipt is signed. The owner and run are what the jobs say of
+themselves (`# who:`, `# run:`), held only to the lane's own values; the seal says
+the bytes did not change after `make`, not who made them; and every file read —
+the jobs, the runner's log, the entry logs — is one any agent of the same user can
+write. The checks stop a job copied by hand, refused or never run by the line, one
+of another run or owner, a head and tree that disagree, and a gate of another tree
+(ZO's review of t-47516); they do not stop one who writes all of those files on
+purpose.
+
+The receipt is kept beside the lane log as `out/receipt-<sha8>.json`; a sha that
+ends red or refused keeps it for its next turn. `tests/test_coord_receipt.py`
+pins the reading; `tests/test_lane.py Receipt` pins the lane with stubs and
+`ReceiptOnGit` the same on a real repository.
+
 ## The warm targets
 
 Each gate and build keeps its own cargo target under

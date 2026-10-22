@@ -13,6 +13,8 @@ use serde_json::Value;
 use super::{AgentInput, AgentJob, AgentOutput, completion::AgentCompletion};
 use crate::ToolError;
 
+mod availability;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct Launch {
     pub agent: Option<String>,
@@ -71,6 +73,8 @@ impl Client {
         command.args(words);
         #[cfg(test)]
         command.env_clear();
+        #[cfg(not(test))]
+        availability::apply_current(&mut command).map_err(|why| error(format!("ledger launch unavailable: {why}")))?;
         if let Some(run) = &self.run {
             command.args(["--run", run]);
         }
@@ -108,14 +112,6 @@ fn command_for(program: &Path, windows: bool) -> Command {
     }
 }
 
-fn program_on_path() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|directory| {
-        let program = directory.join(if cfg!(windows) { "zerocode-orc.ps1" } else { "zerocode-orc" });
-        program.is_file().then_some(program)
-    })
-}
-
 fn has_grant(lookup: impl Fn(&str) -> Option<String>) -> bool {
     let held = |key| lookup(key).is_some_and(|value| !value.is_empty());
     held("ZEROCODE_AGENT_TEAM_ID")
@@ -123,13 +119,22 @@ fn has_grant(lookup: impl Fn(&str) -> Option<String>) -> bool {
         && (held("ZEROCODE_AGENT_TEAM_TOKEN") || held("ZEROCODE_AGENT_TEAM_TOKEN_FILE"))
 }
 
+#[cfg(test)]
 fn available_from(lookup: impl Fn(&str) -> Option<String>, executable: bool) -> bool {
     executable && has_grant(lookup)
 }
 
 pub(crate) fn available() -> bool {
     // 크레이트 시험이 사람의 창에서 물려받은 권한으로 판을 열면 안 된다.
-    !cfg!(test) && available_from(|key| std::env::var(key).ok(), program_on_path().is_some())
+    !cfg!(test) && availability::current().is_ok()
+}
+
+pub(crate) fn unavailable_launch() -> ToolError {
+    let why = availability::current().err().map_or_else(
+        || "ledger context changed; try the request again".to_string(),
+        |why| why.to_string(),
+    );
+    error(format!("the requested agent/effort/worktree requires the ZeroCode ledger: {why}"))
 }
 
 fn required(value: &Value, key: &str) -> Result<String, ToolError> {
@@ -231,7 +236,8 @@ pub(crate) fn execute(
     input.launch.selected = true;
     let launch = input.launch.clone();
     let model = launch.model(&input);
-    let client = Client { program: program_on_path().ok_or_else(|| error("zerocode-orc is unavailable"))?, run: None };
+    let door = availability::current().map_err(|why| error(format!("ledger launch unavailable: {why}")))?;
+    let client = Client { program: door.program, run: None };
     validate_catalog(&client, &launch, model.as_deref())?;
     super::execute_agent_with_spawn_and_parent_model_and_hooks(input, move |job| spawn(&client, &launch, model, job), parent, lsp, hooks)
 }
@@ -468,7 +474,8 @@ fn watch(client: &Client, seat: &Seat, job: &AgentJob) {
 }
 
 pub(crate) fn steer(seat: &Seat, text: &str) -> Result<(), ToolError> {
-    let client = Client { program: program_on_path().ok_or_else(|| error("zerocode-orc is unavailable"))?, run: Some(seat.run.clone()) };
+    let door = availability::current().map_err(|why| error(format!("ledger launch unavailable: {why}")))?;
+    let client = Client { program: door.program, run: Some(seat.run.clone()) };
     client.change(&["send", "--to", &zerocode_core::orchestration::worker_address(&seat.worker), "--type", "status", "--body", text], &format!("zo-steer-{}", super::make_agent_id())).map(|_| ())
 }
 

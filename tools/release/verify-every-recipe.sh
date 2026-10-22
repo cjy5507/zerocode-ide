@@ -11,19 +11,41 @@
 # `--as-written` is for a public CI leg (t-21326): the same every-recipe run,
 # but with the recipes the justfile names — the leg has no cargo-xwin, so its
 # `win-check-if-available` says SKIPPED aloud where the lane's would refuse.
+#
+# `--list` prints the recipes a run would run, one a line, and runs none; it
+# fails when the justfile's `verify` is not a plain list. `--only "<a> <b>"`
+# runs those of them alone, in the list's order: the release lane runs what a
+# coordinator's receipt left owed (t-47516). A name outside the list is refused.
 set -u
-strict_win_check=1
-[ "${1-}" = --as-written ] && strict_win_check=0
+strict_win_check=1 list=0 only= only_given=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --as-written) strict_win_check=0; shift ;;
+    --list) list=1; shift ;;
+    --only) only=${2-}; only_given=1; shift 2 2>/dev/null || shift ;;
+    *) echo "verify-every-recipe: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
 recipes=$(sed -n 's/^verify:[[:space:]]*//p' justfile)
 case $recipes in
-  ''|*'('*|*'&&'*) exec just verify ;;   # no plain dependency list: the whole recipe, as before
+  ''|*'('*|*'&&'*)   # no plain dependency list: the whole recipe, as before
+    [ "$list" = 0 ] && [ "$only_given" = 0 ] || { echo "verify-every-recipe: verify is not a plain list" >&2; exit 2; }
+    exec just verify ;;
 esac
+# Log the strict name so the lane classifies a failed cross-check as a real
+# recipe failure, rather than the development gate's skipped success.
+[ "$strict_win_check" = 1 ] && recipes=$(printf '%s\n' $recipes | sed 's/^win-check-if-available$/win-check/')
+if [ "$list" = 1 ]; then printf '%s\n' $recipes; exit 0; fi
+if [ "$only_given" = 1 ]; then
+  [ -n "$only" ] || { echo "verify-every-recipe: --only names no recipe" >&2; exit 2; }
+  for recipe in $only; do
+    case " $(printf '%s ' $recipes)" in *" $recipe "*) ;; *) echo "verify-every-recipe: $recipe is not a verify recipe" >&2; exit 2 ;; esac
+  done
+fi
 rc=0
 red=
 for recipe in $recipes; do
-  # Log the strict name so the lane classifies a failed cross-check as a
-  # real recipe failure, rather than the development gate's skipped success.
-  case $recipe in win-check-if-available) [ "$strict_win_check" = 1 ] && recipe=win-check ;; esac
+  [ "$only_given" = 0 ] || case " $only " in *" $recipe "*) ;; *) continue ;; esac
   # The lane reads each failure against the recipe it came from (failed_tests):
   # a recipe that failed without naming a test is a red of its own.
   echo "==> verify recipe $recipe"
