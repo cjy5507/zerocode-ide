@@ -23777,6 +23777,150 @@ pub(crate) mod computer_desktop_wait {
         );
     }
 
+    /// The helper's identity of the document a window shows (t-69973)
+    /// reaches the agent as the helper wrote it: `find`'s `window`,
+    /// `get-app-state`'s `snapshot.window` and a tree look's `tree.window`
+    /// are the helper's object whole, `document` and all — the window adds
+    /// nothing and takes nothing away. Two windows of one title, two
+    /// documents: by title alone the agent cannot tell them apart; by title
+    /// and document it can.
+    #[test]
+    fn the_helpers_document_identity_reaches_the_agent_as_written() {
+        /// What the helper names two windows of one title by.
+        const DOCUMENTS: [(u64, &str); 2] = [(41, "df603275387c0478"), (42, "cd05fe9df2968931")];
+        /// `find`'s window as the helper writes it.
+        fn named(id: u64) -> serde_json::Value {
+            let document = DOCUMENTS
+                .iter()
+                .find(|(window, _)| *window == id)
+                .map(|(_, document)| *document);
+            serde_json::json!({ "id": id, "title": "notes.txt", "document": document })
+        }
+        /// A look's window as the helper writes it: named, and placed.
+        fn placed(id: u64) -> serde_json::Value {
+            let mut window = named(id);
+            if let (Some(window), serde_json::Value::Object(place)) = (
+                window.as_object_mut(),
+                serde_json::json!({
+                    "x": 40, "y": 60, "width": 800, "height": 600,
+                    "isMinimized": false, "isOffscreen": false, "screenIndex": 0,
+                    "platform": { "layer": 0 },
+                }),
+            ) {
+                window.extend(place);
+            }
+            window
+        }
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        let _helper = crate::computer_use::test_helper::stand(|method, params| {
+            let id = params
+                .get("windowId")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default();
+            Ok(match method {
+                "findElements" => serde_json::json!({
+                    "source": "accessibility",
+                    "coordinateSpace": "screen",
+                    "snapshotId": format!("fixture-snapshot-{id}"),
+                    "app": "Fixture",
+                    "window": named(id),
+                    "matches": [{ "index": 7, "role": "AXButton", "label": "Save" }],
+                    "truncated": false,
+                    "elementCount": 9,
+                }),
+                "getAppState" => serde_json::json!({
+                    "snapshot": {
+                        "id": format!("fixture-snapshot-{id}"),
+                        "app": {
+                            "name": "Fixture", "bundleId": "dev.zerocode.fixture", "pid": 4242,
+                        },
+                        "window": placed(id),
+                        "coordinateSpace": "window",
+                        "treeText": "Window: \"notes.txt\", App: Fixture.",
+                        "elementCount": 9,
+                        "focusedElementId": null,
+                        "truncation": {
+                            "truncated": false, "maxNodes": 1200, "maxDepth": 64,
+                            "maxDepthReached": false,
+                        },
+                    },
+                    "screenshot": null,
+                    "screenshotStatus": { "state": "skipped", "reason": "no_screenshot_flag" },
+                }),
+                _ => serde_json::json!({ "stopped": false }),
+            })
+        });
+        let mut found = Vec::new();
+        for (id, document) in DOCUMENTS {
+            let window_id = id.to_string();
+            for (argv, at, written) in [
+                (
+                    vec![
+                        "find", "--app", "Fixture", "--window-id", window_id.as_str(), "--label",
+                        "Save", "--json",
+                    ],
+                    "/result/window",
+                    named(id),
+                ),
+                (
+                    vec![
+                        "get-app-state", "--app", "Fixture", "--window-id", window_id.as_str(),
+                        "--no-screenshot", "--json",
+                    ],
+                    "/result/snapshot/window",
+                    placed(id),
+                ),
+                (
+                    vec![
+                        "observe", "--app", "Fixture", "--window-id", window_id.as_str(),
+                        "--no-screenshot", "--json",
+                    ],
+                    "/result/tree/window",
+                    placed(id),
+                ),
+            ] {
+                let answer = answer_computer_command(&words(&argv));
+                let said = envelope(&answer);
+                assert_eq!(answer.exit_code, 0, "{argv:?}: {said}");
+                assert_eq!(
+                    said.pointer(at),
+                    Some(&written),
+                    "{argv:?}: the agent reads the helper's window object whole: {said}"
+                );
+                assert_eq!(
+                    said.pointer(&format!("{at}/document"))
+                        .and_then(serde_json::Value::as_str),
+                    Some(document),
+                    "{argv:?}: the document's identity reaches the agent as written: {said}"
+                );
+                if argv[0] == "find" {
+                    found.push(written);
+                }
+            }
+        }
+        // The windows another window of the scene shares a name with.
+        let alike = |name: &dyn Fn(&serde_json::Value) -> String| {
+            let names: Vec<String> = found.iter().map(name).collect();
+            names
+                .iter()
+                .filter(|mine| names.iter().filter(|other| other == mine).count() > 1)
+                .count()
+        };
+        let by_title = alike(&|window: &serde_json::Value| window["title"].to_string());
+        let by_document = alike(&|window: &serde_json::Value| {
+            format!("{}\u{1f}{}", window["title"], window["document"])
+        });
+        println!(
+            "measured: two windows of one title through the window — alike by title alone {by_title}, by title and document {by_document}, of {}",
+            found.len()
+        );
+        assert_eq!(by_title, 2, "two windows under one title");
+        assert_eq!(by_document, 0, "the document tells the two apart");
+    }
+
     /// A batch's wait that would run past the time the batch has left is
     /// clipped to it, and its line says so (t-66760 b2) — it is not the
     /// batch's end: the rest of the room is the wait's.

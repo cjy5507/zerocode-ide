@@ -195,6 +195,9 @@ struct Snapshot {
     let windowBounds: CGRect
     let windowId: CGWindowID
     let windowLayer: Int
+    /// The identity of the document the window shows (`WindowDocument`),
+    /// never its path or address.
+    let document: String?
     let treeText: String
     let focusedElementId: Int?
     let screenshot: ScreenshotPayload?
@@ -213,6 +216,7 @@ struct Snapshot {
             windowBounds: windowBounds,
             windowId: windowId,
             windowLayer: windowLayer,
+            document: document,
             treeText: treeText,
             focusedElementId: focusedElementId,
             screenshot: nil,
@@ -224,6 +228,51 @@ struct Snapshot {
             maxDepthReached: maxDepthReached
         )
     }
+}
+
+/// The document a window shows, said only as its identity (t-69973): the
+/// first 16 hex digits of the SHA-256 of the window's `AXDocument`, else of
+/// the address its first web area reads (`AXURL`). Two windows under one
+/// title tell apart by it; the path or the address itself stays here, in no
+/// answer, line or kept snapshot.
+enum WindowDocument {
+    /// The key a window object carries the identity under.
+    static let key = "document"
+    /// How many hex digits of the digest the identity keeps.
+    static let digits = 16
+
+    /// The identity of `document`, else of `webAreaURL`; `nil` when the
+    /// window gives neither.
+    static func identity(document: String?, webAreaURL: String?) -> String? {
+        nil
+    }
+}
+
+/// The window an answer is of, by what tells it apart: its id, its title
+/// and, when the window gives one, its document's identity. `find` answers
+/// it as it is.
+func namedWindow(_ snapshot: Snapshot) -> [String: Any] {
+    var window: [String: Any] = ["id": Int(snapshot.windowId), "title": snapshot.windowTitle]
+    if let document = snapshot.document {
+        window[WindowDocument.key] = document
+    }
+    return window
+}
+
+/// The window a look is of: what names it (`namedWindow`) and where it stands.
+func placedWindow(_ snapshot: Snapshot) -> [String: Any] {
+    namedWindow(snapshot).merging([
+        "x": Int(snapshot.windowBounds.origin.x.rounded()),
+        "y": Int(snapshot.windowBounds.origin.y.rounded()),
+        "width": Int(snapshot.windowBounds.width.rounded()),
+        "height": Int(snapshot.windowBounds.height.rounded()),
+        "isMinimized": false,
+        "isOffscreen": false,
+        "screenIndex": jsonNullable(screenIndex(for: snapshot.windowBounds)),
+        "platform": [
+            "layer": snapshot.windowLayer,
+        ],
+    ]) { named, _ in named }
 }
 
 struct ScreenshotPayload {
@@ -1030,6 +1079,7 @@ final class Provider {
             windowBounds: capture.bounds,
             windowId: capture.windowId,
             windowLayer: capture.layer,
+            document: nil,
             treeText: renderTreeText(app: app, title: title, bounds: capture.bounds, lines: renderer.lines, focused: renderer.focusedSummary),
             focusedElementId: renderer.focusedElementId,
             screenshot: screenshot,
@@ -1061,20 +1111,7 @@ final class Provider {
                     "bundleId": jsonNullable(snapshot.app.bundleId),
                     "pid": Int(snapshot.app.pid),
                 ],
-                "window": [
-                    "id": Int(snapshot.windowId),
-                    "title": snapshot.windowTitle,
-                    "x": Int(snapshot.windowBounds.origin.x.rounded()),
-                    "y": Int(snapshot.windowBounds.origin.y.rounded()),
-                    "width": Int(snapshot.windowBounds.width.rounded()),
-                    "height": Int(snapshot.windowBounds.height.rounded()),
-                    "isMinimized": false,
-                    "isOffscreen": false,
-                    "screenIndex": jsonNullable(screenIndex(for: snapshot.windowBounds)),
-                    "platform": [
-                        "layer": snapshot.windowLayer,
-                    ],
-                ],
+                "window": placedWindow(snapshot),
                 "coordinateSpace": "window",
                 "treeText": snapshot.treeText,
                 "elementCount": snapshot.elements.count,
@@ -6023,7 +6060,7 @@ extension Provider {
             "coordinateSpace": "screen",
             "snapshotId": snapshot.id,
             "app": snapshot.app.name,
-            "window": ["id": Int(snapshot.windowId), "title": snapshot.windowTitle],
+            "window": namedWindow(snapshot),
             "matches": matches,
             "truncated": seen > Self.findMatchLimit,
             "elementCount": snapshot.elements.count,
