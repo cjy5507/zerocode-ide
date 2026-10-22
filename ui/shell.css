@@ -44513,8 +44513,8 @@ h4.knowledge-inspector-head::after {
 /* A person's own decisions (t-62170 stage 3, DESIGN 3): 「새 결정」 on the
    switch line takes no height of its own, so a person with none sees no new
    line; the part between the charts and the table lists each decision with
-   its mode as radios; the drawer they are written in stands at the window's
-   right edge, the whole width on a phone. */
+   its mode as radios; the editor stands near the centre with room to write,
+   and fits the available width and height on a phone. */
 .jev-switch .jev-custom-guide {
   flex: none;
   align-self: center;
@@ -44652,22 +44652,28 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-custom-scrim {
-  place-items: stretch end;
-  padding: 0;
+  place-items: center;
+  padding: var(--space-4);
 }
 
 .jev-custom-drawer {
   display: flex;
   flex-direction: column;
-  width: min(var(--jev-drawer-width), 100%);
+  width: min(var(--jev-custom-editor-width), 100%);
+  height: min(var(--jev-custom-editor-height), 100%);
+  min-width: 0;
   min-height: 0;
-  border-left: var(--jev-line) solid var(--edge-rule);
+  max-height: 100%;
+  overflow: hidden;
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-xl);
   background: var(--surface-deck);
   color: var(--ink-chalk);
   box-shadow: var(--shadow-2);
 }
 
 .jev-custom-drawer-head {
+  flex: none;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -44684,6 +44690,7 @@ h4.knowledge-inspector-head::after {
 .jev-custom-form {
   flex: 1 1 auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--space-4);
   min-height: 0;
@@ -44722,6 +44729,21 @@ h4.knowledge-inspector-head::after {
 
 .jev-custom-area {
   resize: vertical;
+}
+
+.jev-custom-input::placeholder, .jev-custom-area::placeholder {
+  color: var(--ink-mist);
+  opacity: 1;
+}
+
+.jev-custom-example {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  line-height: var(--leading-body);
 }
 
 .jev-custom-number {
@@ -44846,6 +44868,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-custom-foot {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;

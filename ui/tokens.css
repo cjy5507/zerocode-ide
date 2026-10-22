@@ -3422,6 +3422,10 @@
      table's first columns in view beside it. */
   --jev-drawer-width: 420px;
   --jev-drawer-title-size: var(--text-lg);
+  /* Writing a decision needs room for a question and its answer examples.
+     Centre this editor separately from the table's read-only inspector. */
+  --jev-custom-editor-width: 720px;
+  --jev-custom-editor-height: 880px;
   /* One rhythm for every row and chip (t-6277 D10): the cells' padding and
      leading, the weights the page speaks in, the tints a tone is laid on
      with, and the trend's stroke. */

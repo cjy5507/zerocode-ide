@@ -3404,6 +3404,7 @@ function jevCustomAnswerFields(form, answer, rules) {
       jevCustomAbout("jev.custom.yesNoAbout", "예와 아니오가 각각 무엇을 뜻하는지 적습니다. 각 {{meaningMax}}자까지입니다."),
       jevNode("label", "jev-custom-label", jevText("jev.custom.yesMeans", "「예」의 뜻"), area("yes", answer.yes)),
       jevNode("label", "jev-custom-label", jevText("jev.custom.noMeans", "「아니오」의 뜻"), area("no", answer.no)));
+    jevCustomExamples(form, answer.kind);
     return;
   }
   const named = answer.kind === "choice";
@@ -3437,6 +3438,43 @@ function jevCustomAnswerFields(form, answer, rules) {
       : jevCustomAbout("jev.custom.levelsAbout", "가장 낮은 단계부터 각 단계가 무엇을 뜻하는지 적습니다. {{optionsLeast}}~{{optionsMost}}단계, 뜻은 각 {{meaningMax}}자까지입니다."),
     jevNode("ol", "jev-custom-options", ...rows), add);
   jevCustomOptionsCounted(form, rules);
+  jevCustomExamples(form, answer.kind);
+}
+
+/* Examples describe the chosen answer shape without becoming draft values.
+ * Keep the source beside each placeholder so a locale change translates it
+ * without replacing anything the person has written. */
+function jevCustomExamples(form, kind) {
+  const hint = (node, { key, source }) => {
+    if (!node) return;
+    node.dataset.i18nPlaceholder = key;
+    node.dataset.i18nSourceplaceholder = source;
+    node.placeholder = t(key, source);
+  };
+  const field = (name, words) => hint(form.querySelector(`[name="${name}"]`), words);
+  field("name", { key: "jev.custom.example.name", source: "예: 추가 확인 필요, 요청 분류, 난이도 판단" });
+  let example;
+  if (kind === "choice") {
+    field("question", { key: "jev.custom.example.choiceQuestion", source: "예: 이 요청에서 가장 먼저 할 일은 무엇인가요?" });
+    example = jevText("jev.custom.example.choice", "예시 · 요청 분류: ‘코드 수정’은 기능을 추가하거나 바꾸는 요청, ‘원인 조사’는 오류의 이유를 찾는 요청입니다. 보기마다 구별되는 기준을 적어 주세요.", "p", "jev-custom-example");
+    form.querySelectorAll("[data-jev-custom-option]").forEach((row) => {
+      hint(row.querySelector("[name='option_name']"), { key: "jev.custom.example.optionName", source: "예: 코드 수정 / 원인 조사" });
+      hint(row.querySelector("[name='meaning']"), { key: "jev.custom.example.optionMeaning", source: "예: ‘코드 수정’ — 기능을 추가하거나 기존 동작을 바꾸는 요청" });
+    });
+  } else if (kind === "score") {
+    field("question", { key: "jev.custom.example.scoreQuestion", source: "예: 이 요청을 구현하는 난이도는 어느 정도인가요?" });
+    example = jevText("jev.custom.example.score", "예시 · 난이도 판단: 1단계는 한 파일의 작은 수정, 2단계는 여러 파일의 동작 변경, 3단계는 구조를 바꾸는 작업입니다. 낮은 단계부터 기준을 적어 주세요.", "p", "jev-custom-example");
+    form.querySelectorAll("[name='level']").forEach((node) => {
+      hint(node, { key: "jev.custom.example.level", source: "예: 한 파일의 작은 수정 / 여러 파일의 동작 변경 / 구조 변경" });
+    });
+  } else {
+    field("question", { key: "jev.custom.example.yesNoQuestion", source: "예: 이 요청을 진행하려면 사용자에게 정보를 더 물어봐야 하나요?" });
+    field("yes", { key: "jev.custom.example.yes", source: "예: 목표나 조건이 빠져 있어 추가 확인이 필요하다" });
+    field("no", { key: "jev.custom.example.no", source: "예: 목표와 조건이 충분해서 바로 진행할 수 있다" });
+    example = jevText("jev.custom.example.yesNo", "예시 · 추가 확인 필요: 요청에 정보가 빠졌으면 ‘예’, 바로 진행할 수 있으면 ‘아니오’입니다. 두 답을 가르는 기준을 적어 주세요.", "p", "jev-custom-example");
+  }
+  const holder = form.querySelector("[data-jev-custom-field='answer']");
+  holder.insertBefore(example, holder.children[2]);
 }
 
 /* The options' labels and presses after one was added or taken away: each
