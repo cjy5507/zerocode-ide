@@ -2022,9 +2022,11 @@ document.addEventListener("keydown", (event) => {
       event.target.closest("input, textarea, [contenteditable='true']"))) {
     // The hand tool is the Space of the graph's own view. A line, a button or
     // a keyboard owner on another surface — a step's line on a conversation
-    // page in the next leaf — keeps the Space that is its own.
-    if (event.target instanceof Element && !view.contains(event.target) &&
-        event.target.closest("summary, button, [role='button'], [data-keyboard-owner]")) return;
+    // page in the next leaf — keeps the Space that is its own, and so does a
+    // keyboard owner inside this view: the scope rail's button in the
+    // relations toolbar is pressed with Space like any button (t-69978).
+    if (event.target instanceof Element && (event.target.closest("[data-keyboard-owner]") ||
+        (!view.contains(event.target) && event.target.closest("summary, button, [role='button']")))) return;
     agentGraphSpaceHeld = true;
     event.preventDefault();
     return;
