@@ -18,6 +18,10 @@ fn at(hours: i64) -> i64 {
     T0 + hours * HOUR_MS
 }
 
+/// When the fixture is read: a little after its newest moment (the carried
+/// task's attempt, at hour 131), so every task of its seated run is somebody's.
+const READ_AT: i64 = 140;
+
 /// The flow's own table with two releases kept, so a third folds.
 fn table() -> FlowTable {
     FlowTable {
@@ -125,6 +129,9 @@ fn fixture() -> Fixture {
     let mut ledger = Ledger::new();
     let run = ledger.create_run("acme-app", at(0));
     assert!(ledger.state_run_project(&run, PROJECT, SEAT, at(0)));
+    ledger
+        .seat_coordinator(&run, SEAT, None, at(0))
+        .expect("acme-app's coordinator sits");
     let other_run = ledger.create_run("acme-docs", at(0));
     assert!(ledger.state_run_project(&other_run, ELSEWHERE, SEAT, at(0)));
     let mut ids = BTreeMap::new();
@@ -324,6 +331,7 @@ fn flow_of(fixture: &Fixture, table: &FlowTable) -> Flow {
         ledger: Some(&fixture.ledger),
         git: &fixture.git,
         table,
+        now_ms: at(READ_AT),
     })
 }
 
@@ -577,6 +585,135 @@ fn the_flow_places_every_task_where_the_ledger_and_git_put_it() {
     assert_eq!(line(&flow, "t-9001").ledger_stage, None);
 }
 
+/// Work nobody is coming back to stands in its piles, oldest first, and not in
+/// 「지금」 (t-71220, the person's 10-22 picture): in a run whose coordinator seat
+/// is live, a task touched within the quiet week is that coordinator's turn and
+/// one untouched for longer is left; in a run nobody sits in, every open task is
+/// left — closed by a settle when nothing is on record, kept for a look when
+/// something was handed in — and finished work no review was written for is
+/// left apart. A task a current one waits on is current with it, and a press
+/// names only what it would act on.
+#[test]
+fn work_nobody_is_coming_back_to_stands_in_its_piles_and_not_in_now() {
+    let mut ledger = Ledger::new();
+    let seated = ledger.create_run("acme-seated", at(-400));
+    assert!(ledger.state_run_project(&seated, PROJECT, SEAT, at(-400)));
+    ledger
+        .seat_coordinator(&seated, SEAT, None, at(-400))
+        .expect("the coordinator sits");
+    let empty = ledger.create_run("acme-left", at(-400));
+    assert!(ledger.state_run_project(&empty, PROJECT, SEAT, at(-400)));
+    let task = |ledger: &mut Ledger, run: &str, name: &str, deps: Vec<String>, hours: i64| {
+        ledger
+            .create_task(
+                run,
+                format!("do {name}"),
+                name.to_string(),
+                deps,
+                None,
+                at(hours),
+            )
+            .expect("a task")
+    };
+    // The seated run: a fresh turn, one a week and more old, and an old one a
+    // fresh task waits on.
+    let fresh = task(&mut ledger, &seated, "fresh", vec![], 100);
+    let quiet = task(&mut ledger, &seated, "quiet", vec![], -100);
+    let waited = task(&mut ledger, &seated, "waited on", vec![], -90);
+    let waiting = task(&mut ledger, &seated, "waiting", vec![waited.clone()], 110);
+    // The run nobody sits in: written yesterday and never started, handed in
+    // and put back, and finished with no review.
+    let never = task(&mut ledger, &empty, "never started", vec![], 120);
+    let back = task(&mut ledger, &empty, "handed and put back", vec![], -50);
+    handed(
+        &mut ledger,
+        &empty,
+        &back,
+        "%2",
+        (-49, -48),
+        r#"{"ok":true,"head":"b1b1b1b"}"#,
+    );
+    ledger
+        .update_task(
+            &empty,
+            &back,
+            Some(TaskStatus::Ready),
+            None,
+            coordinator(None, None),
+            at(-47),
+        )
+        .expect("back to ready");
+    let unreviewed = task(&mut ledger, &empty, "finished, never reviewed", vec![], -30);
+    handed(
+        &mut ledger,
+        &empty,
+        &unreviewed,
+        "%3",
+        (-29, -28),
+        r#"{"ok":true,"head":"c1c1c1c"}"#,
+    );
+    let git = GitFacts::default();
+    let flow = assemble(&Reading {
+        root: "/acme/app",
+        project: Some(PROJECT),
+        ledger: Some(&ledger),
+        git: &git,
+        table: &table(),
+        now_ms: at(READ_AT),
+    });
+    let mut now = ids(&flow.now);
+    now.sort_unstable();
+    let mut expected = vec![fresh.as_str(), waited.as_str(), waiting.as_str()];
+    expected.sort_unstable();
+    assert_eq!(now, expected, "{flow:#?}");
+    let pile = |pile: &FlowPile| -> Vec<(String, Option<Left>)> {
+        pile.tasks
+            .iter()
+            .map(|line| (line.task.clone(), line.left))
+            .collect()
+    };
+    assert_eq!(
+        pile(&flow.left),
+        [
+            (quiet.clone(), Some(Left::Settle)),
+            (back.clone(), Some(Left::Look)),
+            (never.clone(), Some(Left::Settle)),
+        ],
+        "oldest first"
+    );
+    assert_eq!(
+        pile(&flow.unreviewed),
+        [(unreviewed.clone(), Some(Left::Unreviewed))]
+    );
+    let named = |pile: &FlowPile| -> Vec<(String, String)> {
+        pile.named
+            .iter()
+            .map(|one| (one.run.clone(), one.task.clone()))
+            .collect()
+    };
+    assert_eq!(
+        named(&flow.left),
+        [
+            (seated.clone(), quiet.clone()),
+            (empty.clone(), never.clone())
+        ],
+        "a settle names what it closes, never what it keeps for a look"
+    );
+    assert_eq!(
+        named(&flow.unreviewed),
+        [(empty.clone(), unreviewed.clone())]
+    );
+    assert!(
+        lines_of(&flow).all(|line| line.left.is_none()),
+        "no line of the groups carries a pile"
+    );
+    assert_eq!(flow.press_max, PRESS_TASKS_MAX);
+    let json = serde_json::to_value(&flow).expect("the flow serializes");
+    assert_eq!(json["left"]["tasks"][0]["left"], "settle");
+    assert_eq!(json["left"]["named"][0]["task"], quiet.as_str());
+    assert_eq!(json["unreviewed"]["tasks"][0]["left"], "unreviewed");
+}
+
 /// The ledger stamps no moment for a landing or a release (`AfterReport`'s
 /// `merged_ms` and `deployed_ms` are always empty): git's merge commit and
 /// release say when, and the line says git told it.
@@ -729,6 +866,7 @@ fn a_flow_without_the_ledger_is_gits_alone() {
         ledger: None,
         git: &fixture.git,
         table: &table(),
+        now_ms: at(READ_AT),
     });
     assert!(!flow.ledger);
     assert!(flow.now.tasks.is_empty());
@@ -1019,6 +1157,9 @@ fn a_read_of_thirty_tasks_and_twelve_releases_costs_at_most_fifty_ms() {
     let mut ledger = Ledger::new();
     let run = ledger.create_run("acme-measure", now - HOUR_MS);
     assert!(ledger.state_run_project(&run, &project, SEAT, now - HOUR_MS));
+    ledger
+        .seat_coordinator(&run, SEAT, None, now - HOUR_MS)
+        .expect("the coordinator sits");
     for n in 0..TASKS {
         let moment = now - i64::from(TASKS - n) * MINUTE_MS;
         let task = ledger
@@ -1072,6 +1213,7 @@ fn a_read_of_thirty_tasks_and_twelve_releases_costs_at_most_fifty_ms() {
             ledger: Some(&ledger),
             git: &git,
             table: &FLOW,
+            now_ms: now,
         });
         (cold, ms(started.elapsed()), git, flow)
     };
@@ -1153,5 +1295,166 @@ fn a_read_of_thirty_tasks_and_twelve_releases_costs_at_most_fifty_ms() {
         cold + assembled <= BUDGET_MS,
         "a cold read took {:.1} ms (the middle of {ROUNDS})",
         cold + assembled
+    );
+}
+
+/// The person's own ledger, read from a read-only copy (t-71220, the person's
+/// 10-22 picture of the work project's 「지금 · 36」): what each project's
+/// 「지금」 held under the rule before the piles and what it holds now, what
+/// the piles hold and what a press over them names, and the board's desk over
+/// the same ledger — its 「지금 도는 일」 rows and its 「답할 일」 before and
+/// after. The copy is made with `sqlite3 "file:<store>?mode=ro" ".backup
+/// <copy>"` and named by `ZEROCODE_DESK_REPLAY_STORE`; it is read through the
+/// desk's own reader ([`crate::orchestration::desk::projection_at_rest`]), which
+/// snapshots it again into a scratch file and writes nothing to it.
+///
+/// ```text
+/// ZEROCODE_DESK_REPLAY_STORE=<copy> cargo test -p zerocode-shell --bin zerocode-shell \
+///   -- --ignored --nocapture artifact_flow::tests::the_persons_ledger
+/// ```
+#[test]
+#[ignore = "a measurement over a copy of the person's own ledger, printed (t-71220)"]
+fn the_persons_ledger_counts_now_before_and_after_the_piles() {
+    use zerocode_core::orchestration::settle::left_behind;
+    use zerocode_core::orchestration::task_cost::TaskCost;
+    let store = std::env::var("ZEROCODE_DESK_REPLAY_STORE")
+        .expect("ZEROCODE_DESK_REPLAY_STORE names the copy of the store");
+    let ledger = Ledger::rebuild(crate::orchestration::desk::projection_at_rest(&store))
+        .expect("the ledger as it stands");
+    let now = crate::project_runtime::now_epoch_ms();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("the repository");
+    let zerocode = zerocode_core::git_dir::project_root(&repo)
+        .map(|project| project.to_string_lossy().into_owned())
+        .expect("a git repository");
+    // Every line drawn: the before is counted off the piles' own lines.
+    let table = FlowTable {
+        group_tasks_max: usize::MAX,
+        ..FLOW
+    };
+    for (name, project, git) in [
+        (
+            "work",
+            // The person's work root comes from the environment; no machine path is committed.
+            std::env::var("ZEROCODE_LEDGER_COPY_WORK_ROOT")
+                .unwrap_or_else(|_| "/Users/dev/work".to_string()),
+            Arc::new(GitFacts::default()),
+        ),
+        ("zerocode", zerocode, git_facts(&repo, now)),
+    ] {
+        let started = Instant::now();
+        let flow = assemble(&Reading {
+            root: &project,
+            project: Some(&project),
+            ledger: Some(&ledger),
+            git: &git,
+            table: &table,
+            now_ms: now,
+        });
+        let spent = started.elapsed().as_secs_f64() * 1000.0;
+        // Before the piles, a line stood in 「지금」 when it was in view: touched
+        // since the oldest kept release, or every line where git kept none.
+        let horizon = git
+            .releases
+            .get(FLOW.releases_kept)
+            .map(|release| release.at_ms);
+        let seen = |pile: &FlowPile| {
+            pile.tasks
+                .iter()
+                .filter(|line| horizon.is_none_or(|horizon| line.last_ms >= horizon))
+                .count()
+        };
+        let looks = flow
+            .left
+            .tasks
+            .iter()
+            .filter(|line| line.left == Some(Left::Look))
+            .count();
+        println!(
+            "LEDGER-COPY {name}: 지금 {} → {} · 정리 필요 {} (a settle closes {}, keeps {looks} for a look) · \
+             검토 없이 끝남 {} (a waiver names {}) · assembled in {spent:.1} ms",
+            flow.now.tasks.len() + seen(&flow.left) + seen(&flow.unreviewed),
+            flow.now.tasks.len(),
+            flow.left.tasks.len(),
+            flow.left.named.len(),
+            flow.unreviewed.tasks.len(),
+            flow.unreviewed.named.len(),
+        );
+        for line in flow.left.tasks.iter().chain(&flow.unreviewed.tasks) {
+            println!(
+                "LEDGER-COPY {name} pile {:?} {} {} {:.0} days — {}",
+                line.left,
+                line.run.as_deref().unwrap_or("-"),
+                line.task,
+                now.saturating_sub(line.last_ms) as f64 / 86_400_000.0,
+                line.title
+            );
+        }
+    }
+    // What the reading itself costs over every run the ledger holds: the desk's beat and every
+    // flow read now take it beside the stages they read already.
+    let rounds: Vec<f64> = (0..5)
+        .map(|_| {
+            let started = Instant::now();
+            let left: usize = ledger
+                .runs()
+                .iter()
+                .map(|run| left_behind(run, now).len())
+                .sum();
+            assert!(left > 0, "the copy holds work nobody is coming back to");
+            started.elapsed().as_secs_f64() * 1000.0
+        })
+        .collect();
+    let mut sorted = rounds.clone();
+    sorted.sort_by(f64::total_cmp);
+    println!(
+        "LEDGER-COPY left_behind over {} runs and {} tasks: p50 {:.2} ms ({})",
+        ledger.runs().len(),
+        ledger
+            .runs()
+            .iter()
+            .map(|run| run.tasks.len())
+            .sum::<usize>(),
+        sorted[sorted.len() / 2],
+        rounds
+            .iter()
+            .map(|one| format!("{one:.2}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let started = Instant::now();
+    let desk =
+        crate::orchestration::desk::desk_snapshot(&ledger, |_| None, |_, _| TaskCost::default());
+    let spent = started.elapsed().as_secs_f64() * 1000.0;
+    let stage = |name: &str| {
+        desk.stages
+            .iter()
+            .find(|one| one.stage == name)
+            .map_or((0, 0), |one| (one.count, one.left))
+    };
+    let running = [
+        "pending",
+        "ready",
+        "dispatched",
+        "gate",
+        "blocked",
+        "failed",
+    ];
+    let (rows, left_rows) = running.iter().fold((0, 0), |(all, left), name| {
+        let (count, behind) = stage(name);
+        (all + count, left + behind)
+    });
+    let (reported, reported_left) = stage("reported");
+    let owed = desk.counts.mail + stage("gate").0 + reported;
+    println!(
+        "LEDGER-COPY desk: 지금 도는 일 {rows} → {} · 답할 일 {owed} → {} · 정리 필요 {} (closes {}) · \
+             검토 없이 끝남 {} · desk read in {spent:.1} ms",
+        rows - left_rows,
+        owed - reported_left,
+        desk.left.settle.len() + desk.left.look.len(),
+        desk.left.settle.len(),
+        desk.left.unreviewed.len(),
     );
 }

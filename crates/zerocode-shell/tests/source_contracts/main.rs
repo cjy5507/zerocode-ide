@@ -11,6 +11,7 @@ mod browser_route;
 mod browser_workspace;
 mod bundle_resources;
 mod cli_login;
+mod close_guard;
 mod computer_progress;
 mod computer_use_mirrors;
 mod computer_use_tcc;
@@ -113,19 +114,24 @@ mod tests {
         // One question before every restart (t-6428): the four doors — the
         // update toast's action, the update pane's `restartToInstall`
         // (t-3191), the settings notice's button and the window material's
-        // relaunch — each ask `askBeforeRestart` with their own word, and
-        // only it reaches the one restart road, when nothing is busy.
+        // relaunch — each ask `askBeforeRestart` with their own word. And no
+        // door reaches the restart road itself (t-67936): nothing busy goes
+        // by the way out's `leave_now`, unasked, whose restart stands its
+        // notice on the screen first — the window invokes `relaunch_window`
+        // nowhere.
         assert_eq!(
             window.matches("invoke(\"relaunch_window\"").count(),
-            1,
-            "a door restarts without the one question"
+            0,
+            "a door restarts the window with no notice on the screen"
         );
         let asking = block_after(window, "async function askBeforeRestart(");
         assert!(
             asking.contains("invoke(\"busy_census\", { road: \"restart\", door })")
                 && asking.contains("if (census && !census.busy?.busy) {")
-                && asking.contains("invoke(\"relaunch_window\", { door })"),
-            "the restart question lost its census or its road:\n{asking}"
+                && asking.contains(
+                    "invoke(\"leave_now\", { road: \"restart\", door, by, unasked: true })"
+                ),
+            "the restart question lost its census or its notice:\n{asking}"
         );
         let doors = include_str!("../../src/exit_runtime.rs");
         for door in [
@@ -9930,6 +9936,8 @@ mod tests {
             "automate_read(app, &state",
             "automate_click(app, &state",
             "automate_type(app, &state",
+            "automate_press(app, &state",
+            "automate_click_at(app, &state",
             "automate_wait(app, &state",
             "automate_console(app, &state",
             "automate_network(app, &state",
@@ -25661,7 +25669,7 @@ mod tests {
         // And the third card in that pane, whose login this window MAKES.
         // Its gauge reads the credential file directly rather than a
         // per-account snapshot, so the forced re-read is the only thing
-        // standing between a fresh sign-in and 「Antigravity 로그인 필요」
+        // standing between a fresh sign-in and 「Google 로그인 필요」
         // sitting under it for fifteen minutes.
         let picking = block_after(window, "async function startGoogleLogin(");
         assert!(
@@ -27201,7 +27209,7 @@ mod tests {
         // surface that MAKES one, rather than at a zo command in a terminal.
         assert!(
             fetching.contains("\"signed_out\"")
-                && fetching.contains("Antigravity 로그인 필요 — 설정 > AI 제공자 계정")
+                && fetching.contains("Google 로그인 필요 — 설정 > AI 제공자 계정")
                 && !fetching.contains("zo login google"),
             "the signed-out sentence no longer names the card that fixes it"
         );

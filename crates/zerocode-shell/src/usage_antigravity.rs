@@ -378,14 +378,17 @@ fn fetch_quota(
 
 /// No login on file at all.
 ///
-/// The sentence names the surface that FIXES it. It used to name a zo command
-/// in a terminal, which sent a person out of the window for something the
-/// settings pane now does — and the status bar shows this sentence as the
-/// segment's tooltip, so it is the only instruction most people ever see.
+/// The sentence names the login that is missing and the surface that FIXES
+/// it. It used to name a zo command in a terminal, which sent a person out of
+/// the window for something the settings pane now does — and the status bar
+/// shows this sentence as the segment's tooltip, so it is the only instruction
+/// most people ever see. The login is Google's, not Antigravity's: the card
+/// that makes it is the Google card, and the bar's word says the same
+/// (t-70039).
 fn signed_out(now: i64) -> ProviderUsage {
     answer(
         "signed_out",
-        Some("Antigravity 로그인 필요 — 설정 > AI 제공자 계정".to_string()),
+        Some("Google 로그인 필요 — 설정 > AI 제공자 계정".to_string()),
         now,
     )
 }
@@ -614,7 +617,7 @@ mod tests {
         // is what the status bar shows on hover.
         assert_eq!(
             held.error.as_deref(),
-            Some("Antigravity 로그인 필요 — 설정 > AI 제공자 계정")
+            Some("Google 로그인 필요 — 설정 > AI 제공자 계정")
         );
         assert_eq!(wire.refreshes, 0);
         assert!(wire.posts.is_empty());

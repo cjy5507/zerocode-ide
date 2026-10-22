@@ -204,6 +204,11 @@ enum Stop {
     Owner,
 }
 
+/// The cause an end is kept with when its exit status can no longer be read:
+/// something else in the app waited for the runtime first, so neither its
+/// code nor its signal is known.
+pub(crate) const END_UNKNOWN: &str = "runtime_end_unknown";
+
 /// How a runtime ended: the stop this side made or the runtime's own end,
 /// the code or signal it ended with, the task a deadline stop's request
 /// named, and the last of its stderr, bounded and scrubbed, when it was never
@@ -584,23 +589,29 @@ impl Engine {
 
     /// How the runtime ended, once it has. A stop this side made names the
     /// end only when the runtime ended by this side's kill; any other end is
-    /// the runtime's own.
+    /// the runtime's own. An end whose status something else took first is
+    /// still an end, of a cause nobody knows.
     pub(crate) fn ended(&self) -> Option<Ended> {
-        let status = lock(&self.child).try_wait().ok().flatten()?;
-        let (code, signal) = exit_status(status);
+        let status = match lock(&self.child).try_wait() {
+            Ok(Some(status)) => Some(status),
+            Ok(None) => return None,
+            Err(_) => None,
+        };
+        let (code, signal) = status.map_or((None, None), exit_status);
         let stop = lock(&self.stopped)
             .clone()
             .filter(|_| killed_here(code, signal));
         let (cause, task) = match stop {
-            Some(Stop::Deadline(task)) => (Error::Timeout, task),
-            Some(Stop::Failed) => (Error::RuntimeFailed, None),
-            Some(Stop::Owner) => (Error::ServerStopped, None),
-            None if code == Some(MEMORY_LIMIT_EXIT) => (Error::MemoryLimit, None),
-            None => (Error::RuntimeExited, None),
+            Some(Stop::Deadline(task)) => (Error::Timeout.token(), task),
+            Some(Stop::Failed) => (Error::RuntimeFailed.token(), None),
+            Some(Stop::Owner) => (Error::ServerStopped.token(), None),
+            None if status.is_none() => (END_UNKNOWN, None),
+            None if code == Some(MEMORY_LIMIT_EXIT) => (Error::MemoryLimit.token(), None),
+            None => (Error::RuntimeExited.token(), None),
         };
         let (stderr, stderr_withheld) = self.stderr.settled();
         Some(Ended {
-            cause: cause.token(),
+            cause,
             code,
             signal,
             task,
@@ -636,6 +647,24 @@ impl Engine {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
         Self::from_command_kind(command, true)
+    }
+
+    /// Kills the runtime and takes its exit status before this side reads
+    /// it, as another reaper in the process would: from then on its end can
+    /// no longer be read.
+    #[cfg(all(test, unix))]
+    pub(crate) fn lose_status(&self) {
+        // Held throughout, so neither of this side's watchers reads the
+        // status in between.
+        let child = lock(&self.child);
+        let pid = libc::pid_t::try_from(child.id()).expect("a child's id is a pid");
+        let mut status = 0;
+        // SAFETY: the pid is this engine's own child, not yet waited for, and
+        // the lock held keeps every other wait on it out until it is gone.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+            libc::waitpid(pid, &mut status, 0);
+        }
     }
 }
 

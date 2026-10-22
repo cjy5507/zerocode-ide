@@ -187,6 +187,7 @@ const DESK_BLOCKS = Object.freeze([
   { id: "release", tab: "now", paint: paintDeskRelease },
   { id: "batches", tab: "now", paint: paintDeskBatches },
   { id: "running", tab: "now", paint: paintDeskRunning },
+  { id: "left", tab: "now", paint: paintDeskLeft, quietHead: true },
   { id: "workers", tab: "workers", paint: paintDeskWorkers },
   { id: "machine", tab: "workers", paint: paintDeskMachine, quietHead: true },
   { id: "mail", tab: "history", paint: paintDeskMail },
@@ -232,7 +233,9 @@ function paintCoordinatorDesk(view) {
  * 행은 이 수가 세는 바로 그것들이다(`boardAsks`). */
 function deskOwed(ledger) {
   if (!ledger) return 0;
-  const stages = new Map((ledger.stages ?? []).map((one) => [one.stage, Number(one.count) || 0]));
+  // 아무도 돌아오지 않는 일(남은 일, t-71220)은 누구의 차례도 아니다 — 백엔드가 단계마다 따로 센
+  // 그 수(`left`)를 뺀다.
+  const stages = new Map((ledger.stages ?? []).map((one) => [one.stage, (Number(one.count) || 0) - (Number(one.left) || 0)]));
   return (Number(ledger.counts?.mail) || 0) + (stages.get("gate") ?? 0) + (stages.get("reported") ?? 0);
 }
 
@@ -1897,14 +1900,15 @@ const DESK_STAGES = Object.freeze([
   { id: "stale", flow: false, tone: "wait", key: "board.staleReview", word: "다시 검토 대기" },
   { id: "failed", flow: false, tone: "halt", key: "board.desk.stageFailed", word: "실패" },
   { id: "unreviewable", flow: false, tone: "", key: "board.noReviewRecord", word: "종료 — 검토 자료 없음" },
+  { id: "waived", flow: false, tone: "", key: "board.reviewWaived", word: "종료 — 검토 생략(사람)" },
   { id: "nothing_to_land", flow: false, tone: "", key: "board.nothingToLand", word: "완료 — 착지할 것 없음" },
   { id: "unknown", flow: false, tone: "", key: "board.stageUnknown", word: "상태 모름", evidence: true },
   { id: "closed", flow: false, tone: "", key: "board.closed", word: "닫힘" },
 ]);
 
-/* 흐름을 떠난 단계: 닫힘, 그리고 검토 기록을 영영 받을 수 없어 완료로만 남은 것(t-19328).
- * 「과업 흐름 · N」의 N은 아직 흐름에 있는 과업만 센다. */
-const DESK_OVER_STAGES = Object.freeze(["unreviewable", "nothing_to_land", "unknown", "closed"]);
+/* 흐름을 떠난 단계: 닫힘, 검토 기록을 영영 받을 수 없어 완료로만 남은 것(t-19328), 사람이 검토를
+ * 생략한 것(t-71220). 「과업 흐름 · N」의 N은 아직 흐름에 있는 과업만 센다. */
+const DESK_OVER_STAGES = Object.freeze(["unreviewable", "waived", "nothing_to_land", "unknown", "closed"]);
 
 /* 처음 펼쳐 둘 단계: 멈춰 선 단계 가운데 과업이 있는 첫째. 없으면 아무것도. */
 function deskDefaultStage(counts) {

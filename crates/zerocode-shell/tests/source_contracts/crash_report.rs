@@ -342,8 +342,10 @@ fn no_plain_sync_tauri_command_reads_the_settings_repository() {
         "the waiting list reads the finish setting from the disk again"
     );
     let runtime = std::fs::read_to_string(src.join("settings_runtime.rs")).unwrap();
+    // `load_settings` hands its read to `load_settings_asking` (t-70039), which
+    // is where the disk is read.
     for door in [
-        "pub(super) fn load_settings(",
+        "pub(super) fn load_settings_asking(",
         "pub(super) fn load_settings_resilient(",
         "pub(super) fn mutate_settings(",
     ] {
@@ -364,7 +366,7 @@ fn hang_evidence_names_the_disk_work_the_main_thread_stands_in() {
     assert!(watchdog.contains("\"hang io: {io}\""));
     let runtime = std::fs::read_to_string(src.join("settings_runtime.rs")).unwrap();
     for door in [
-        "pub(super) fn load_settings(",
+        "pub(super) fn load_settings_asking(",
         "pub(super) fn legacy_migration_completed(",
         "pub(super) fn mutate_settings(",
     ] {

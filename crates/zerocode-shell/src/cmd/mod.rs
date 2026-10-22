@@ -101,17 +101,17 @@ pub(crate) use usage::{
 };
 
 pub(crate) use appearance::{
-    apply_ghostty_import, apply_ui_zoom, busy_census, computer_awake_status, leave_cancel,
-    leave_now, leave_when_idle, listening_ports, log_window_error, patch_left_sidebar_appearance,
-    patch_terminal_prefs, preview_ghostty_import, preview_warp_terminal_themes, process_memory,
-    relaunch_window, resource_snapshot, set_agent_activity_display, set_app_font_family,
-    set_compact_worktree_cards, set_computer_awake_mode, set_locale, set_minimize_to_tray_on_close,
-    set_refresh_local_base_ref_on_worktree_create, set_setup_script_launch_mode,
-    set_show_git_ignored_files, set_show_menu_bar_icon, set_show_titlebar_app_name,
-    set_source_control_compare_base, set_source_control_group_order, set_status_bar_item,
-    set_terminal_opacity, set_terminal_prefs, set_terminal_shortcut_policy, set_theme, set_ui_zoom,
-    set_window_blur, stop_workspace_port, terminal_command_argv, terminal_prefs,
-    terminal_windows_status,
+    apply_ghostty_import, apply_ui_zoom, boot_after_restart, busy_census, computer_awake_status,
+    leave_cancel, leave_hold, leave_now, leave_when_idle, listening_ports, log_window_error,
+    patch_left_sidebar_appearance, patch_terminal_prefs, preview_ghostty_import,
+    preview_warp_terminal_themes, process_memory, resource_snapshot, set_agent_activity_display,
+    set_app_font_family, set_compact_worktree_cards, set_computer_awake_mode, set_locale,
+    set_minimize_to_tray_on_close, set_refresh_local_base_ref_on_worktree_create,
+    set_setup_script_launch_mode, set_show_git_ignored_files, set_show_menu_bar_icon,
+    set_show_titlebar_app_name, set_source_control_compare_base, set_source_control_group_order,
+    set_status_bar_item, set_terminal_opacity, set_terminal_prefs, set_terminal_shortcut_policy,
+    set_theme, set_ui_zoom, set_window_blur, stop_workspace_port, terminal_command_argv,
+    terminal_prefs, terminal_windows_status,
 };
 
 pub(crate) use onboarding::{
@@ -127,13 +127,13 @@ pub(crate) use agent_launch::{
 };
 
 pub(crate) use board::{
-    ack_board_agent, agent_icon, board_columns, board_desk, board_snapshot, claim_coordinator_seat,
-    clipboard_has_image, continuation_source, coordinator_handover_status, coordinator_seat_runs,
-    coordinator_seats, create_untitled_markdown, delete_untitled_markdown, desk_ack,
-    desk_checkouts, desk_hold_resolve, desk_reply, desk_review_pass, hooks_report, install_hooks,
-    ledger_agents, machine_load, open_board_popout, orchestration_accuracy, pane_activities,
-    pane_agents, pane_sessions, pane_subagents, quota_wall_handover, quota_wall_retry,
-    release_untitled_markdown, resume_line, resume_session, reveal_board_agent,
+    ack_board_agent, agent_icon, board_columns, board_desk, board_settle, board_snapshot,
+    claim_coordinator_seat, clipboard_has_image, continuation_source, coordinator_handover_status,
+    coordinator_seat_runs, coordinator_seats, create_untitled_markdown, delete_untitled_markdown,
+    desk_ack, desk_checkouts, desk_hold_resolve, desk_reply, desk_review_pass, hooks_report,
+    install_hooks, ledger_agents, machine_load, open_board_popout, orchestration_accuracy,
+    pane_activities, pane_agents, pane_sessions, pane_subagents, quota_wall_handover,
+    quota_wall_retry, release_untitled_markdown, resume_line, resume_session, reveal_board_agent,
     save_clipboard_image, schedule_timeline, set_coordinator_handover, set_dock_badge,
     set_hooks_enabled, set_previewed_terms, set_watched_terms, term_pull, term_snapshot,
     worker_screen,

@@ -822,8 +822,8 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last — the evidence stage 상태 모름 only when its count is not an exact zero",
       pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
       pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
-        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,nothing_to_land:0,closed:0" &&
-      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,완료 — 착지할 것 없음,닫힘",
+        "pending:6,ready:20,dispatched:5,reported:6,verified:0,merged:18,deployed:0,gate:2,blocked:2,stale:0,failed:1,unreviewable:0,waived:0,nothing_to_land:0,closed:0" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,검증됨,병합,배포됨,게이트,막힘,다시 검토 대기,실패,종료 — 검토 자료 없음,종료 — 검토 생략(사람),완료 — 착지할 것 없음,닫힘",
       JSON.stringify(pipeline));
     ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
       pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&

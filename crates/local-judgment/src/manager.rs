@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use judgment_provider::Provider;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::adapter;
@@ -37,6 +37,54 @@ pub struct Snapshot {
     pub applied_model_id: Option<String>,
     pub source_inspection: Option<SourceInspection>,
     pub model_switch: Option<ModelSwitchInfo>,
+    pub supervision: Supervision,
+}
+
+/// What the manager knows of the server the settings send judgments to:
+/// whether one answers, how the last one ended, and what brings one back.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Supervision {
+    /// A server of this manager answers on its port now.
+    pub up: bool,
+    /// The settings choose a managed model, and no server answers at the
+    /// address they name: every judgment sent now fails.
+    pub selected_but_stopped: bool,
+    /// What brings a server back: `none` (one answers, or the settings
+    /// choose no managed model), `restart` (planned, at `next_at_ms`),
+    /// `after_operation` (planned, once the operation that runs ends),
+    /// `loading` (a start runs now) or `press` (only the person's
+    /// 「실행하고 적용」).
+    pub next: &'static str,
+    /// When the planned restart runs, in ms since the epoch.
+    pub next_at_ms: Option<u64>,
+    /// Why no server answers: the stop that ended the press's restarts, the
+    /// restart's or the window start's own error, or why the window start
+    /// restored nothing; `operation_busy` while a restart waits.
+    pub reason: Option<&'static str>,
+    /// The next window start tries to bring the press's model back.
+    pub restores_at_start: bool,
+    /// The last end the store keeps, from this window or an earlier one.
+    pub last_end: Option<LastEnd>,
+}
+
+/// An end as the store's record of exits keeps it.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastEnd {
+    pub at_ms: u64,
+    /// `exit` (the runtime ended or a guard stopped it), `stop` (this side
+    /// stopped it) or `unseen` (no window saw it end).
+    pub kind: &'static str,
+    pub cause: Option<String>,
+    /// What made a stop: the window's `press` of 중지, its `cancel` of a
+    /// check, a `switch` of model, or the app's exit (`app_exit`).
+    pub by: Option<String>,
+    /// For an unseen end, when the server was last known to come up.
+    pub since_ms: Option<u64>,
+    pub recovery: Option<String>,
+    pub code: Option<i64>,
+    pub signal: Option<i64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -188,15 +236,29 @@ const RESTART_WAITS: [Duration; RESTARTS] = [
     Duration::from_secs(5),
     Duration::from_secs(25),
 ];
-/// A guard's stop comes back once per press, so no guard feeds a loop: its
-/// second stop leaves the server stopped with its reason.
+/// A guard's stop comes back once inside [`RESTART_WINDOW`], so no guard
+/// feeds a loop: its second stop inside the window leaves the server stopped
+/// with its reason, and one that comes later is counted anew.
 const GUARD_RESTARTS: usize = 1;
+/// How many window starts in a row may fail to bring the press's model back
+/// before the window stops trying and leaves it to the person: a model that
+/// does not load at three starts running does not load by chance.
+const BOOT_RESTORE_TRIES: usize = 3;
 /// The stops a guard makes: the runtime's memory guard, the request deadline
 /// and a failed pipe.
 const GUARD_STOPS: [Error; 3] = [Error::MemoryLimit, Error::Timeout, Error::RuntimeFailed];
 /// The Retry-After told while the restarted model loads: short, as how long
 /// a load takes is unknown.
 const LOADING_RETRY: Duration = Duration::from_secs(2);
+/// Why nothing brings the server back after the window's stop command, or
+/// its cancel of a check or a restore, ended it.
+const STOPPED: &str = "stopped";
+/// Why a window start restores nothing: no run intent is kept (the window's
+/// stop or cancel, or the model's removal, took it), the settings no longer
+/// choose the press's model, or the window's switch for judgments is off.
+const NO_INTENT: &str = "no_intent";
+const SELECTION_CHANGED: &str = "selection_changed";
+const JEV_OFF: &str = "jev_off";
 
 /// The person's 「실행하고 적용」 the manager keeps a server up for: the model
 /// it applied, the provider identity it wrote, and the restarts it has had.
@@ -205,8 +267,9 @@ struct Intent {
     model_id: String,
     revision: String,
     provider_identity: String,
-    restarts: Vec<Instant>,
-    guard_restarts: usize,
+    /// The restarts inside [`RESTART_WINDOW`], each with whether a guard's
+    /// stop asked for it.
+    restarts: Vec<(Instant, bool)>,
 }
 
 /// What follows a server's end, as its record names it.
@@ -219,7 +282,7 @@ enum Recovery {
         generation: u64,
         wait: Duration,
     },
-    /// A guard's second stop under one press.
+    /// A guard's second stop inside [`RESTART_WINDOW`].
     Guard,
     /// The press's restarts in the window are spent.
     Limit,
@@ -375,6 +438,18 @@ struct Inner {
     /// The ended server whose restart is planned: it keeps its port and
     /// answers `server_restarting` meanwhile.
     recovering: Option<Running>,
+    /// When the planned restart runs, by the wall clock.
+    restart_at_ms: Option<u64>,
+    /// A planned restart that came due while another operation ran: it
+    /// runs once that operation ends.
+    deferred: Option<Planned>,
+    /// Why nothing brings the server back until the person presses, as
+    /// this run of the app last learned it.
+    stood_down: Option<&'static str>,
+    /// The last end the store's record keeps.
+    last_end: Option<LastEnd>,
+    /// Window starts in a row whose restore did not come up.
+    failed_restores: usize,
     clock: Arc<dyn Clock>,
     runtime: Option<tokio::runtime::Handle>,
     serve_limits: engine::Limits,
@@ -496,6 +571,7 @@ impl Manager {
     ) -> Result<Arc<Self>> {
         let store = Store::open(root)?;
         let exits = storage::child(root, "managed-judgment/server-exits.jsonl")?;
+        let (last_end, failed_restores) = open_record(&exits);
         let run_intent_path = storage::child(root, "managed-judgment/run-intent.json")?;
         let bundled_ids = catalog
             .models
@@ -539,6 +615,11 @@ impl Manager {
                 intent: None,
                 generation: 0,
                 recovering: None,
+                restart_at_ms: None,
+                deferred: None,
+                stood_down: None,
+                last_end,
+                failed_restores,
                 clock: Arc::new(Tokio),
                 runtime: None,
                 serve_limits: engine::Limits::DEFAULT,
@@ -552,6 +633,7 @@ impl Manager {
 
     pub fn snapshot(&self) -> Snapshot {
         self.reap();
+        let restores_at_start = RunIntent::read(&self.run_intent_path).is_some();
         let mut inner = lock(&self.inner);
         let catalog = lock(&self.catalog);
         let selected = selection::read(&self.settings);
@@ -586,6 +668,14 @@ impl Manager {
                 Some(running.provider.identity()) == provider_identity && inner.server.checked
             })
             .map(|running| running.model_id.clone());
+        let managed = selected
+            .as_ref()
+            .is_ok_and(|selected| selected.binding.is_some());
+        let served = inner
+            .running
+            .as_ref()
+            .is_some_and(|running| Some(running.provider.identity()) == provider_identity);
+        let supervision = Self::supervision(&inner, managed, served, restores_at_start);
         Snapshot {
             instance_id: self.instance.clone(),
             revision: inner.revision,
@@ -616,6 +706,46 @@ impl Manager {
                 .as_ref()
                 .map(|pending| self.inspection_info(pending)),
             model_switch: inner.model_switch.clone(),
+            supervision,
+        }
+    }
+
+    /// What the supervision says now. `managed` says the settings choose a
+    /// managed model; `served`, that a server of this manager answers at
+    /// the address they name.
+    fn supervision(
+        inner: &Inner,
+        managed: bool,
+        served: bool,
+        restores_at_start: bool,
+    ) -> Supervision {
+        let loading = inner.cancel.is_some()
+            && inner
+                .operation
+                .as_ref()
+                .is_some_and(|operation| matches!(operation.kind, "start" | "restore" | "switch"));
+        let up = inner.running.is_some();
+        let (next, reason) = if up {
+            ("none", None)
+        } else if inner.deferred.is_some() {
+            ("after_operation", Some(Error::Busy.token()))
+        } else if loading {
+            ("loading", None)
+        } else if inner.recovering.is_some() {
+            ("restart", None)
+        } else if managed {
+            ("press", inner.stood_down)
+        } else {
+            ("none", None)
+        };
+        Supervision {
+            up,
+            selected_but_stopped: managed && !served,
+            next,
+            next_at_ms: inner.restart_at_ms.filter(|_| next == "restart"),
+            reason,
+            restores_at_start: restores_at_start && inner.failed_restores < BOOT_RESTORE_TRIES,
+            last_end: inner.last_end.clone(),
         }
     }
 
@@ -935,6 +1065,7 @@ impl Manager {
         let gone = if let Recovery::Restart { generation, wait } = recovery {
             inner.server.state = "starting";
             inner.server.error = Some(Error::Restarting.token());
+            inner.restart_at_ms = Some(now_ms().saturating_add(millis(wait)));
             let clock = inner.clock.clone();
             let due = clock.now() + wait;
             running.restarting(Arc::new(move || {
@@ -979,8 +1110,17 @@ impl Manager {
                 record["generation"] = json!(generation);
                 record["waitMs"] = json!(millis(wait));
             }
-            let _ = keep_exit(&self.exits, &record);
+            self.keep(&record);
         }
+    }
+
+    /// Adds `record` to the store's record of exits; an end it tells of is
+    /// the last end from now on. The caller holds no lock of the manager's.
+    fn keep(&self, record: &Value) {
+        if let Some(end) = end_of(record) {
+            lock(&self.inner).last_end = Some(end);
+        }
+        let _ = keep_exit(&self.exits, record);
     }
 
     /// What follows the end of `ended`: a restart after its wait when the
@@ -989,8 +1129,12 @@ impl Manager {
     /// ends with it.
     fn plan(&self, inner: &mut Inner, ended: &Running, cause: Option<&'static str>) -> Recovery {
         let guard = GUARD_STOPS.iter().any(|stop| Some(stop.token()) == cause);
-        let restartable =
-            inner.runtime.is_some() && (guard || cause == Some(Error::RuntimeExited.token()));
+        // An end nobody could read is taken as the runtime's own: the same
+        // budget covers it, and a status that is lost every time spends it.
+        let restartable = inner.runtime.is_some()
+            && (guard
+                || cause == Some(Error::RuntimeExited.token())
+                || cause == Some(engine::END_UNKNOWN));
         let selected = Provider::read(&self.settings)
             .ok()
             .map(|provider| provider.identity());
@@ -1005,32 +1149,41 @@ impl Manager {
             {
                 intent
                     .restarts
-                    .retain(|at| now.duration_since(*at) < RESTART_WINDOW);
+                    .retain(|restart| now.duration_since(restart.0) < RESTART_WINDOW);
+                let guarded = intent.restarts.iter().filter(|restart| restart.1).count();
                 match RESTART_WAITS.get(intent.restarts.len()) {
-                    _ if guard && intent.guard_restarts >= GUARD_RESTARTS => Recovery::Guard,
+                    _ if guard && guarded >= GUARD_RESTARTS => Recovery::Guard,
                     Some(&wait) => {
-                        intent.restarts.push(now);
-                        intent.guard_restarts += usize::from(guard);
-                        return Recovery::Restart { generation, wait };
+                        intent.restarts.push((now, guard));
+                        Recovery::Restart { generation, wait }
                     }
                     None => Recovery::Limit,
                 }
             }
             _ => Recovery::Ends,
         };
-        drop(Self::forget(inner));
+        inner.stood_down = match recovery {
+            Recovery::Guard => Some("guard"),
+            Recovery::Limit => Some("limit"),
+            Recovery::Ends | Recovery::Restart { .. } => None,
+        };
+        if !matches!(recovery, Recovery::Restart { .. }) {
+            drop(Self::forget(inner));
+        }
         recovery
     }
 
-    /// Records the person's press on `model`, served at `provider_identity`.
+    /// Records the person's press on `model`, served at `provider_identity`:
+    /// a new budget of restarts, and window starts counted from naught.
     fn intend(inner: &mut Inner, model: &Model, provider_identity: String) {
         inner.generation += 1;
+        inner.stood_down = None;
+        inner.failed_restores = 0;
         inner.intent = Some(Intent {
             model_id: model.id.clone(),
             revision: model.revision.clone(),
             provider_identity,
             restarts: Vec::new(),
-            guard_restarts: 0,
         });
     }
 
@@ -1050,6 +1203,8 @@ impl Manager {
     fn forget(inner: &mut Inner) -> Option<Running> {
         inner.generation += 1;
         inner.intent = None;
+        inner.deferred = None;
+        inner.restart_at_ms = None;
         inner.recovering.take()
     }
 
@@ -1068,12 +1223,24 @@ impl Manager {
                 self.emit();
                 attempt.runtime.clone().spawn(self.clone().restart(attempt));
             }
+            // Another operation runs: the restart waits for it to end and
+            // runs then, inside the budget it was planned in, while the ended
+            // server keeps its port.
+            Err(Error::Busy) => {
+                inner.deferred = Some(planned.clone());
+                inner.server.error = Some(Error::Busy.token());
+                inner.revision += 1;
+                drop(inner);
+                self.keep_attempt(&planned, Err(Error::Busy));
+                self.emit();
+            }
             Err(error) => {
                 let waiting = Self::forget(&mut inner);
                 inner.server.state = "failed";
                 inner.server.checked = false;
                 inner.server.provider = None;
                 inner.server.error = Some(error.token());
+                inner.stood_down = Some(error.token());
                 inner.revision += 1;
                 drop(inner);
                 drop(waiting);
@@ -1112,6 +1279,7 @@ impl Manager {
         waiting.restarting(Arc::new(|| LOADING_RETRY.as_secs()));
         let (operation, cancel) = self.reserve(inner, "start", Some(&model), 0)?;
         inner.held_listeners.insert(model.id.clone(), listener);
+        inner.restart_at_ms = None;
         Ok(Attempt {
             operation,
             cancel,
@@ -1159,6 +1327,7 @@ impl Manager {
                 // A restart that did not come up lets its port go, so clients
                 // are refused at once instead of waiting on a port nobody serves.
                 inner.held_listeners.remove(&model.id);
+                inner.stood_down = result.err().map(Error::token);
                 Self::forget(&mut inner)
             } else {
                 None
@@ -1176,19 +1345,16 @@ impl Manager {
     /// Adds the record of a restart attempt: the end it answered, its wait,
     /// the generation it ran under and how it went.
     fn keep_attempt(&self, planned: &Planned, result: Result<()>) {
-        let _ = keep_exit(
-            &self.exits,
-            &json!({
-                "atMs": now_ms(),
-                "kind": "restart",
-                "serverId": planned.server_id,
-                "modelId": planned.model_id,
-                "cause": planned.cause,
-                "waitMs": millis(planned.wait),
-                "generation": planned.generation,
-                "result": result.map_or_else(Error::token, |()| "ready"),
-            }),
-        );
+        self.keep(&json!({
+            "atMs": now_ms(),
+            "kind": "restart",
+            "serverId": planned.server_id,
+            "modelId": planned.model_id,
+            "cause": planned.cause,
+            "waitMs": millis(planned.wait),
+            "generation": planned.generation,
+            "result": result.map_or_else(Error::token, |()| "ready"),
+        }));
     }
 
     pub fn notify_settings_changed(&self) {
@@ -1207,6 +1373,7 @@ impl Manager {
                 cancel.stop();
             }
             drop(Self::forget(&mut inner));
+            inner.stood_down = Some(Error::SettingsChanged.token());
             let _ = storage::remove(&self.run_intent_path);
             if let Some(operation) = &mut inner.operation {
                 operation.state = "cancelling";
@@ -1378,9 +1545,20 @@ impl Manager {
         inner.cancel = None;
         inner.restoring = false;
         inner.revision += 1;
+        let generation = inner.generation;
+        let deferred = inner
+            .deferred
+            .take()
+            .filter(|planned| planned.generation == generation);
         drop(inner);
         drop(pending);
         self.emit();
+        // A restart that came due while this operation ran runs now.
+        if let Some(planned) = deferred
+            && let Some(manager) = self.this.upgrade()
+        {
+            manager.restart_due(planned);
+        }
     }
 
     fn progress(&self, id: &str, added: u64) {
@@ -1446,6 +1624,7 @@ impl Manager {
             let pending = inner.pending_engine.clone();
             if restoring {
                 drop(Self::forget(&mut inner));
+                inner.stood_down = Some(STOPPED);
             }
             if restoring || (checking && !self.closed.load(Ordering::Acquire)) {
                 cleared = storage::remove(&self.run_intent_path);
@@ -1802,6 +1981,7 @@ impl Manager {
             // The person's own start is a new press: it ends a restart that
             // waits, and the same model keeps the ended server's port.
             let mut waiting = Self::forget(&mut inner);
+            inner.stood_down = None;
             if let Some(ended) = waiting.as_mut().filter(|ended| ended.model_id == model.id)
                 && let Ok(listener) = ended.take_listener()
             {
@@ -2039,6 +2219,12 @@ impl Manager {
         RunIntent::read(&self.run_intent_path).map(|intent| intent.provider_identity)
     }
 
+    /// Brings back, as the window starts, the model the person's last press
+    /// applied, unless the window's stop or cancel ended that press, the
+    /// settings moved away from it, or it failed `BOOT_RESTORE_TRIES`
+    /// starts running. `allowed` is the window's own switch for judgments.
+    /// When the settings choose a managed model, a start that restores
+    /// nothing keeps why, in the store's record and in the status.
     pub fn restore_guarded<Apply, Guard>(
         self: &Arc<Self>,
         allowed: bool,
@@ -2048,35 +2234,46 @@ impl Manager {
         Apply: FnOnce(&Provider, &str, &Binding) -> Result<()> + Send + 'static,
         Guard: Fn(&mut dyn FnMut() -> Result<()>) -> Result<()> + Send + Sync + 'static,
     {
-        if !allowed {
-            return Ok(self.snapshot());
-        }
-        let Some(intent) = RunIntent::read(&self.run_intent_path) else {
-            return Ok(self.snapshot());
-        };
-        let Ok(selected) = selection::read(&self.settings) else {
-            return Ok(self.snapshot());
-        };
-        if !intent.matches(&selected) {
-            return Ok(self.snapshot());
-        }
-        let Ok(model) = self.model(&intent.model_id, &intent.revision) else {
-            return Ok(self.snapshot());
-        };
-        let Ok(profile) = self.model_profile(&model).cloned() else {
-            return Ok(self.snapshot());
-        };
-        if !self.store.installed(&model)
-            || !self.store.runtime_ready(&profile)
-            || model.fingerprint().ok().as_ref() != Some(&intent.manifest_fingerprint)
-        {
-            return Ok(self.snapshot());
-        }
+        let selected = selection::read(&self.settings);
+        let found = self.restorable(&selected, allowed);
         let mut inner = lock(&self.inner);
         if inner.restore_tried {
             drop(inner);
             return Ok(self.snapshot());
         }
+        let found = found.and_then(|found| {
+            if inner.failed_restores < BOOT_RESTORE_TRIES {
+                Ok(found)
+            } else {
+                Err(Error::RestoreFailed.token())
+            }
+        });
+        let (intent, model, profile) = match found {
+            Ok(found) => found,
+            Err(reason) => {
+                inner.restore_tried = true;
+                // Only settings that choose a managed model keep why: a
+                // window that never ran one keeps nothing.
+                let managed = selected
+                    .as_ref()
+                    .ok()
+                    .and_then(|selected| selected.binding.as_ref());
+                if managed.is_some() {
+                    inner.stood_down = Some(reason);
+                }
+                drop(inner);
+                if let Some(binding) = managed {
+                    self.keep(&json!({
+                        "atMs": now_ms(),
+                        "kind": "restore",
+                        "modelId": binding.model_id,
+                        "result": "skipped",
+                        "reason": reason,
+                    }));
+                }
+                return Ok(self.snapshot());
+            }
+        };
         if inner.running.is_some() || inner.recovering.is_some() {
             return Err(Error::Busy);
         }
@@ -2099,6 +2296,38 @@ impl Manager {
         let manager = self.clone();
         tokio::spawn(manager.restore_run(operation, cancel, request, callbacks));
         Ok(self.snapshot())
+    }
+
+    /// The run intent, model and runtime the window start would restore, or
+    /// why it restores nothing: what the manager reads itself first, then
+    /// the window's switch for judgments.
+    fn restorable(
+        &self,
+        selected: &Result<selection::Selected>,
+        allowed: bool,
+    ) -> std::result::Result<(RunIntent, Model, RuntimeProfile), &'static str> {
+        let intent = RunIntent::read(&self.run_intent_path).ok_or(NO_INTENT)?;
+        let selected = selected.as_ref().map_err(|_| SELECTION_CHANGED)?;
+        if !intent.matches(selected) {
+            return Err(SELECTION_CHANGED);
+        }
+        let model = self
+            .model(&intent.model_id, &intent.revision)
+            .map_err(Error::token)?;
+        let profile = self.model_profile(&model).cloned().map_err(Error::token)?;
+        if !self.store.installed(&model) {
+            return Err(Error::ModelMissing.token());
+        }
+        if !self.store.runtime_ready(&profile) {
+            return Err(Error::RuntimeMissing.token());
+        }
+        if model.fingerprint().ok().as_ref() != Some(&intent.manifest_fingerprint) {
+            return Err(Error::RevisionChanged.token());
+        }
+        if !allowed {
+            return Err(JEV_OFF);
+        }
+        Ok((intent, model, profile))
     }
 
     fn restore_current(
@@ -2203,7 +2432,19 @@ impl Manager {
                 inner.held_listeners.remove(&request.model.id);
                 let waiting = Self::forget(&mut inner);
                 inner.boot_restore = None;
+                if result != Err(Error::Cancelled) {
+                    inner.stood_down = result.err().map(Error::token);
+                }
+                // A restore that did not come up keeps the press for the
+                // next window start, which tries again within its count. One
+                // the settings moved away from lets the press go; the
+                // window's stop or cancel has let it go already, and the
+                // app's exit keeps it.
+                if !matches!(result, Err(Error::Cancelled | Error::SettingsChanged)) {
+                    inner.failed_restores += 1;
+                }
                 if !self.closed.load(Ordering::Acquire)
+                    && result == Err(Error::SettingsChanged)
                     && let Err(error) = storage::remove(&self.run_intent_path)
                 {
                     result = Err(error);
@@ -2218,17 +2459,14 @@ impl Manager {
             }
             drop(waiting);
         }
-        let _ = keep_exit(
-            &self.exits,
-            &json!({
-                "atMs": now_ms(),
-                "kind": "restore",
-                "modelId": request.model.id,
-                "generation": request.generation,
-                "port": request.intent.port,
-                "result": result.map_or_else(Error::token, |()| "ready"),
-            }),
-        );
+        self.keep(&json!({
+            "atMs": now_ms(),
+            "kind": "restore",
+            "modelId": request.model.id,
+            "generation": request.generation,
+            "port": request.intent.port,
+            "result": result.map_or_else(Error::token, |()| "ready"),
+        }));
         self.finish(&operation, result);
     }
 
@@ -2324,6 +2562,7 @@ impl Manager {
         ProbeResult: std::future::Future<Output = Result<()>> + Send,
     {
         let mut previous = None;
+        let mut applied = None;
         let result = async {
             cancel.check()?;
             self.verify_files(&request.model, cancel).await?;
@@ -2376,6 +2615,11 @@ impl Manager {
                 Ok(())
             })?;
             if let Some(running) = old_running {
+                self.keep(&stop_record(
+                    "switch",
+                    Some(&running.id),
+                    Some(&running.model_id),
+                ));
                 self.retire_running(running).await?;
             }
             if previous.is_some() {
@@ -2441,9 +2685,16 @@ impl Manager {
                 switch.state = "applied";
             }
             Self::complete(&mut inner);
+            applied = inner
+                .running
+                .as_ref()
+                .map(|running| apply_record("switch", running, inner.generation));
             Ok(())
         }
         .await;
+        if let Some(record) = applied {
+            self.keep(&record);
+        }
         if let Err(error) = result {
             if let Some(previous) = previous {
                 self.restore_after_switch(previous, &request.expected, error, guard)
@@ -2545,6 +2796,11 @@ impl Manager {
             return;
         }
         if let Some(running) = stopped.0 {
+            self.keep(&stop_record(
+                "switch",
+                Some(&running.id),
+                Some(&running.model_id),
+            ));
             let _ = self.retire_running(running).await;
         }
         self.emit();
@@ -2552,6 +2808,7 @@ impl Manager {
             return;
         }
         let recovery_cancel = Arc::new(Cancel::new());
+        let mut back = None;
         let restored = async {
             self.start_model(
                 &previous.model,
@@ -2572,6 +2829,7 @@ impl Manager {
             {
                 return Err(Error::ServerChanged);
             }
+            back = Some(apply_record("switch_back", running, inner.generation));
             inner.server.state = "ready";
             inner.server.checked = true;
             inner.server.error = None;
@@ -2583,6 +2841,9 @@ impl Manager {
             Ok(())
         }
         .await;
+        if let Some(record) = back {
+            self.keep(&record);
+        }
         if let Err(error) = restored {
             let stopped = {
                 let mut inner = lock(&self.inner);
@@ -2627,6 +2888,7 @@ impl Manager {
                 _ = cancel.cancelled() => Err(Error::Cancelled),
                 result = native_check(&provider) => result,
             };
+            let mut stopped = None;
             {
                 let mut inner = lock(&manager.inner);
                 if cancel.flag.load(Ordering::Acquire) {
@@ -2640,9 +2902,16 @@ impl Manager {
                     inner.server.checked = result.is_ok();
                     inner.server.error = result.err().map(Error::token);
                     if result == Err(Error::Cancelled) {
-                        inner.running.take();
+                        if let Some(running) = inner.running.take() {
+                            stopped = Some(stop_record(
+                                "cancel",
+                                Some(&running.id),
+                                Some(&running.model_id),
+                            ));
+                        }
                         inner.server.state = "stopped";
                         inner.server.provider = None;
+                        inner.stood_down = Some(STOPPED);
                         drop(Self::forget(&mut inner));
                     }
                     inner.revision += 1;
@@ -2650,6 +2919,9 @@ impl Manager {
                 if result.is_ok() {
                     Self::complete(&mut inner);
                 }
+            }
+            if let Some(record) = stopped {
+                manager.keep(&record);
             }
             manager.finish(&id, result);
         });
@@ -2695,9 +2967,16 @@ impl Manager {
         apply(&provider, expected, &binding)?;
         self.keep_run_intent(&inner, model)?;
         Self::intend(&mut inner, model, binding.provider_identity);
+        let applied = inner
+            .running
+            .as_ref()
+            .map(|running| apply_record("press", running, inner.generation));
         drop(catalog);
         inner.revision += 1;
         drop(inner);
+        if let Some(record) = applied {
+            self.keep(&record);
+        }
         self.emit();
         Ok(self.snapshot())
     }
@@ -2744,6 +3023,25 @@ impl Manager {
             inner.held_listeners.remove(&ended.model_id);
         }
         let running = inner.running.take();
+        // The manager knows only that the window's stop command came, not
+        // whose hand gave it.
+        let stopped = running
+            .as_ref()
+            .or(waiting.as_ref())
+            .map(|server| stop_record("press", Some(&server.id), Some(&server.model_id)))
+            .or_else(|| {
+                restoring.then(|| {
+                    stop_record(
+                        "press",
+                        None,
+                        inner
+                            .operation
+                            .as_ref()
+                            .and_then(|operation| operation.model_id.as_deref()),
+                    )
+                })
+            });
+        inner.stood_down = Some(STOPPED);
         inner.server = ServerInfo {
             state: "stopped",
             ..ServerInfo::default()
@@ -2755,6 +3053,9 @@ impl Manager {
         }
         drop(waiting);
         drop(running);
+        if let Some(record) = stopped {
+            self.keep(&record);
+        }
         self.emit();
         cleared?;
         Ok(self.snapshot())
@@ -2810,6 +3111,10 @@ impl Manager {
         let pending = inner.pending_engine.take();
         let running = inner.running.take();
         let waiting = Self::forget(&mut inner);
+        let stopped = running
+            .as_ref()
+            .or(waiting.as_ref())
+            .map(|server| stop_record("app_exit", Some(&server.id), Some(&server.model_id)));
         inner.held_listeners.clear();
         inner.server = ServerInfo {
             state: "stopped",
@@ -2822,6 +3127,11 @@ impl Manager {
         }
         drop(running);
         drop(waiting);
+        // The app's own end is kept, so the next window start does not take
+        // it for an end nobody saw.
+        if let Some(record) = stopped {
+            self.keep(&record);
+        }
     }
 }
 
@@ -2833,9 +3143,14 @@ async fn wait_ready(engine: &Arc<Engine>, cancel: &Cancel) -> Result<()> {
 /// stopped server's cause outlives the window that saw it.
 const EXIT_RECORD_BYTES: usize = 64 * 1024;
 
+/// Writers of the store's record of exits take turns, so two records kept at
+/// once never cost either its line.
+static EXIT_RECORDS: Mutex<()> = Mutex::new(());
+
 /// Adds one exit record to the store's file of them, one JSON object a line,
 /// letting the oldest go past [`EXIT_RECORD_BYTES`].
-fn keep_exit(path: &Path, record: &serde_json::Value) -> Result<()> {
+fn keep_exit(path: &Path, record: &Value) -> Result<()> {
+    let _turn = lock(&EXIT_RECORDS);
     let kept = storage::bounded_read(path, EXIT_RECORD_BYTES).unwrap_or_default();
     let mut lines: Vec<String> = String::from_utf8_lossy(&kept)
         .lines()
@@ -2859,6 +3174,112 @@ fn keep_exit(path: &Path, record: &serde_json::Value) -> Result<()> {
         .and_then(|mut file| file.write_all(text.as_bytes()))
         .map_err(|_| Error::Storage)?;
     fs::rename(&staged, path).map_err(|_| Error::Storage)
+}
+
+/// The record of a stop this side made of `server`, serving `model`, and
+/// what made it, as far as the manager knows: the window's command (`press`
+/// or `cancel`), a `switch` of model or the app's exit (`app_exit`).
+fn stop_record(by: &str, server: Option<&str>, model: Option<&str>) -> Value {
+    json!({
+        "atMs": now_ms(),
+        "kind": "stop",
+        "by": by,
+        "cause": Error::ServerStopped.token(),
+        "serverId": server,
+        "modelId": model,
+    })
+}
+
+/// The record of `running` coming up as the server the settings name: the
+/// person's press (`press`), a `switch` of model, or the previous model back
+/// after a switch that did not come up (`switch_back`).
+fn apply_record(by: &str, running: &Running, generation: u64) -> Value {
+    json!({
+        "atMs": now_ms(),
+        "kind": "apply",
+        "by": by,
+        "serverId": running.id,
+        "modelId": running.model_id,
+        "port": running.port().ok(),
+        "generation": generation,
+    })
+}
+
+/// Whether a kept record tells of a server that came up: an apply, or a
+/// restore or a restart that went ready.
+fn came_up(record: &Value) -> bool {
+    match record.get("kind").and_then(Value::as_str) {
+        Some("apply") => true,
+        Some("restore" | "restart") => {
+            record.get("result").and_then(Value::as_str) == Some("ready")
+        }
+        _ => false,
+    }
+}
+
+/// The end a kept record tells of, if it tells of one: a runtime's own end
+/// or a guard's stop (a record without a kind), this side's stop, or an end
+/// no window saw.
+fn end_of(record: &Value) -> Option<LastEnd> {
+    let kind = match record.get("kind").and_then(Value::as_str) {
+        None => "exit",
+        Some("stop") => "stop",
+        Some("unseen") => "unseen",
+        Some(_) => return None,
+    };
+    let text = |name: &str| record.get(name).and_then(Value::as_str).map(str::to_owned);
+    Some(LastEnd {
+        at_ms: record.get("atMs").and_then(Value::as_u64)?,
+        kind,
+        cause: text("cause"),
+        by: text("by"),
+        since_ms: record.get("sinceMs").and_then(Value::as_u64),
+        recovery: text("recovery"),
+        code: record.get("code").and_then(Value::as_i64),
+        signal: record.get("signal").and_then(Value::as_i64),
+    })
+}
+
+/// What the store's record of exits says as a window opens it: the last end
+/// it keeps, and how many window starts in a row failed to restore since a
+/// server last came up. A server it last saw come up, with no end kept after
+/// it, ended while no window watched: that end is kept now, as one nobody
+/// saw, since when it was last known up.
+fn open_record(path: &Path) -> (Option<LastEnd>, usize) {
+    let kept = storage::bounded_read(path, EXIT_RECORD_BYTES).unwrap_or_default();
+    let records: Vec<Value> = String::from_utf8_lossy(&kept)
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let mut last_end = None;
+    let mut failed_restores = 0;
+    for record in records.iter().rev() {
+        if came_up(record) {
+            if last_end.is_none() {
+                let unseen = json!({
+                    "atMs": now_ms(),
+                    "kind": "unseen",
+                    "sinceMs": record.get("atMs"),
+                    "modelId": record.get("modelId"),
+                });
+                last_end = end_of(&unseen);
+                let _ = keep_exit(path, &unseen);
+            }
+            break;
+        }
+        if last_end.is_none() {
+            last_end = end_of(record);
+        }
+        if record.get("kind").and_then(Value::as_str) == Some("restore")
+            && !matches!(
+                record.get("result").and_then(Value::as_str),
+                None | Some("skipped" | "cancelled" | "settings_changed")
+            )
+        {
+            failed_restores += 1;
+        }
+    }
+    (last_end, failed_restores)
 }
 
 fn now_ms() -> u64 {
@@ -3205,6 +3626,25 @@ pub(crate) mod test_support {
     pub fn lose_waiting_port(manager: &Manager) {
         let waiting = lock(&manager.inner).recovering.take();
         drop(waiting);
+    }
+
+    /// Ends the running server's runtime and takes its exit status before
+    /// the manager can read it, as another reaper in the app would.
+    #[cfg(unix)]
+    pub fn lose_status(manager: &Manager) {
+        let engine = lock(&manager.inner)
+            .running
+            .as_ref()
+            .map(|running| running.engine.clone());
+        if let Some(engine) = engine {
+            engine.lose_status();
+        }
+    }
+
+    /// Ends the operation `id` as its own work would once done.
+    #[cfg(unix)]
+    pub fn end_operation(manager: &Manager, id: &str) {
+        manager.finish(id, Ok(()));
     }
 
     #[cfg(unix)]

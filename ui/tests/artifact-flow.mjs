@@ -279,7 +279,7 @@ function flowFirstScreen() {
 
 /* The screen rules over the whole tab, as the task tab's suite reads them (artifact-tasks.mjs): text
  * outside pictures at 12 px or more, and everything a person presses at 28 px or more. A page function. */
-function flowScreenRules() {
+export function flowScreenRules() {
   const view = artifactsView();
   const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
   const name = (node) => String(node.className?.baseVal ?? node.className ?? node.tagName).split(" ").slice(0, 2).join(".");

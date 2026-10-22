@@ -52,33 +52,10 @@ pub fn list_recent_sessions() -> Result<Vec<ResumeSession>, Box<dyn std::error::
 }
 
 /// Return at most `limit` recent sessions for the current workspace, newest
-/// first. The registry applies the limit before parsing transcript contents.
+/// first. The registry fills the limit with usable transcript heads, without
+/// loading the conversations in full.
 /// 최근 세션 목록 — `<id>.system-prompt.json` 사이드카는 세션이 아니므로 뺀다.
 pub fn list_recent_sessions_limited(
-    limit: usize,
-) -> Result<Vec<ResumeSession>, Box<dyn std::error::Error>> {
-    Ok(resumable(list_recent_sessions_limited_unfiltered(limit)?))
-}
-
-/// The sessions worth offering back: a transcript is a session, a sidecar is
-/// not, and a session nobody ever spoke into has nothing to resume — every
-/// `zo` that was opened and closed left one, and they crowded the picker
-/// ("resume시 메시지 없는 내역은 안보여도 됨", 2026-09-02). The file stays
-/// resumable by id; it is only not listed.
-fn resumable(sessions: Vec<ResumeSession>) -> Vec<ResumeSession> {
-    sessions
-        .into_iter()
-        .filter(|session| !session.id.ends_with(".system-prompt"))
-        .filter(|session| {
-            session
-                .first_prompt
-                .as_deref()
-                .is_some_and(|prompt| !prompt.trim().is_empty())
-        })
-        .collect()
-}
-
-fn list_recent_sessions_limited_unfiltered(
     limit: usize,
 ) -> Result<Vec<ResumeSession>, Box<dyn std::error::Error>> {
     session_registry::list_managed_sessions_limited(Some(limit)).map(|sessions| {
@@ -90,7 +67,7 @@ fn list_recent_sessions_limited_unfiltered(
                 path: session.path,
                 modified_epoch_millis: session.modified_epoch_millis,
                 created_epoch_millis: session.created_epoch_millis,
-                first_prompt: session.first_user_text,
+                first_prompt: Some(session.first_user_text.unwrap_or_else(|| crate::tui::strings::MCP_IMAGE_ITEM.to_string())),
             })
             .collect()
     })
@@ -114,7 +91,7 @@ pub fn render_recent_sessions(limit: usize) -> Result<String, Box<dyn std::error
     let sessions = list_recent_sessions_limited(limit)?;
     let mut lines = vec![
         "Recent sessions".to_string(),
-        "  Use `zo --resume <id>` to restore one; `zo --continue` chooses the newest.".to_string(),
+        "  Use `zo --resume <id>` to restore one; `zo --continue` chooses the newest conversation.".to_string(),
     ];
     if sessions.is_empty() {
         lines.push("  (none found in the current workspace)".to_string());
