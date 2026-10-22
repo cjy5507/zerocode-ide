@@ -118,11 +118,11 @@ pub const fn awaits_review(stage: WorkStage) -> bool {
 /// caller read for it, asked through [`awaits_review`] — so no stage is read
 /// twice.
 #[must_use]
-pub fn left_behind_by<'a>(
-    run: &'a Run,
+pub fn left_behind_by(
+    run: &Run,
     now_ms: i64,
     awaits: impl Fn(&Task) -> bool,
-) -> HashMap<&'a str, Left> {
+) -> HashMap<&str, Left> {
     let live = run.coordinator_live().is_some();
     let owned = |task: &Task| live && now_ms.saturating_sub(last_touched_ms(run, task)) < QUIET_MS;
     let mut left: HashMap<&str, Left> = HashMap::new();

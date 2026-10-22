@@ -3198,7 +3198,9 @@ mod tests {
         };
         assert_eq!(counted("ready"), Some((2, 1)));
         assert_eq!(counted("reported"), Some((1, 1)));
-        let ids = |pile: &[Named]| pile.iter().map(|one| one.task.as_str()).collect::<Vec<_>>();
+        fn ids(pile: &[Named]) -> Vec<&str> {
+            pile.iter().map(|one| one.task.as_str()).collect()
+        }
         assert_eq!(ids(&desk.left.settle), [old.as_str()]);
         assert!(desk.left.look.is_empty());
         assert_eq!(ids(&desk.left.unreviewed), [done.as_str()]);
