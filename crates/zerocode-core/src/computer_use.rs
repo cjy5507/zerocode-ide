@@ -5433,9 +5433,19 @@ mod windows_shim_tests {
             !computer.contains("curl"),
             "the PowerShell door posts in-process"
         );
+        // The Computer Use door opens nothing the person sees: it names the
+        // asking pane for a walk alone, whose browser steps the window takes
+        // for that pane (t-70425), inside the walk verbs' own test.
         assert!(
-            !computer.contains("x-zerocode-pane"),
-            "the Computer Use door opens nothing the person sees, so it seats no pane"
+            computer.contains(
+                "  if (@('recipe-run', 'walk') -ccontains [string]$args[0]) {\n    $pane = $env:ZEROCODE_PANE_KEY\n    if ($pane) { $request.Headers.Add('x-zerocode-pane', $pane) }\n  }\n"
+            ),
+            "the Computer Use door does not name the pane for a walk:\n{computer}"
+        );
+        assert_eq!(
+            computer.matches("x-zerocode-pane").count(),
+            1,
+            "the Computer Use door names the pane outside a walk:\n{computer}"
         );
         assert!(computer.contains("$body = ''"));
 
@@ -7569,11 +7579,14 @@ mod tests {
     /// pane's checkout instead of beside whatever the person is looking at
     /// (09-23 14:14·14:34·14:49, three mirrors on another project's stage).
     /// The name rides the guarded header file like the tokens, only when the
-    /// shell has one; the Computer Use door opens nothing the person sees
-    /// and still names no pane.
+    /// shell has one. The Computer Use door opens nothing the person sees and
+    /// names no pane — but for a walk (`walk`, `recipe-run`), whose browser
+    /// steps the window takes for the pane that asked: a work browser answers
+    /// its owner alone, and a walk that named no pane had its every look
+    /// refused (10-22 10:47·11:27, `workspace_actor_required`, t-70425).
     #[cfg(unix)]
     #[test]
-    fn the_emulator_door_names_the_pane_that_asked_and_the_computer_door_does_not() {
+    fn the_emulator_door_names_the_pane_that_asked_and_the_computer_door_only_for_a_walk() {
         use crate::agent_browser::PANE_HEADER;
         let rig = DoorRig::new();
         let emulator = rig.install(
@@ -7604,6 +7617,32 @@ mod tests {
             &asked,
         );
         assert!(!desktop.contains(PANE_HEADER), "{desktop}");
+        let walks: [&[&str]; 2] = [
+            &[
+                ComputerMethod::Walk.verb_name(),
+                "--pane",
+                "browser-1",
+                "--goal",
+                "g",
+                "--json",
+            ],
+            &[
+                ComputerMethod::RecipeRun.verb_name(),
+                "--name",
+                "r",
+                "--json",
+            ],
+        ];
+        for walk in walks {
+            let walked = rig.headers(&computer, rig.path(), walk, &asked);
+            assert!(
+                walked.lines().any(|line| line == named),
+                "the computer door did not name the pane that asked for `{}`:\n{walked}",
+                walk[0]
+            );
+            let nameless = rig.headers(&computer, rig.path(), walk, &[]);
+            assert!(!nameless.contains(PANE_HEADER), "{nameless}");
+        }
         let powershell = emulator_shim_script_powershell("P", "C", "H");
         assert!(
             powershell.contains(&format!("'{PANE_HEADER}', $pane")),
