@@ -43,6 +43,7 @@ import { testArtifactCards } from "./artifact-cards.mjs";
 import { testArtifactTasks } from "./artifact-tasks.mjs";
 import { testArtifactReopen } from "./artifact-reopen.mjs";
 import { testArtifactDiagrams } from "./artifact-diagrams.mjs";
+import { testMarkdownDiagrams } from "./markdown-diagrams.mjs";
 import { testArtifactStage2 } from "./artifact-stage2.mjs";
 import { testArtifactFlow } from "./artifact-flow.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
@@ -279,6 +280,9 @@ suite("artifact-cards", ({ browser, origin, ok }) => testArtifactCards(browser, 
 suite("artifact-tasks", ({ browser, origin, ok }) => testArtifactTasks(browser, origin, ok));
 suite("artifact-reopen", ({ browser, origin, ok }) => testArtifactReopen(browser, origin, ok));
 suite("artifact-diagrams", ({ browser, origin, ok }) => testArtifactDiagrams(browser, origin, ok));
+// The seven other Markdown views draw their ```mermaid fences too (t-58437): layouts asked two at a
+// time, once a source, the fences on screen first, and a layout already made drawn as the words are.
+suite("markdown-diagrams", ({ browser, origin, ok }) => testMarkdownDiagrams(browser, origin, ok));
 suite("artifact-stage2", ({ browser, origin, ok }) => testArtifactStage2(browser, origin, ok));
 // The tab's first view: the flow of the project in view (t-68458, draft p-4958d4720ba9e103 v3).
 suite("artifact-flow", ({ browser, origin, ok }) => testArtifactFlow(browser, origin, ok));
