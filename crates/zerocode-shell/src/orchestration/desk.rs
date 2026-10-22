@@ -3521,7 +3521,8 @@ mod tests {
         let git = crate::artifact_flow::git_facts(&repo, now_ms);
         let landings = crate::artifact_flow::landings(
             &git,
-            desk.tasks
+            &desk
+                .tasks
                 .iter()
                 .map(|task| crate::artifact_flow::LandingAsk {
                     task: &task.id,
@@ -3533,7 +3534,8 @@ mod tests {
                         .times
                         .as_ref()
                         .and_then(|times| times.release.as_deref()),
-                }),
+                })
+                .collect::<Vec<_>>(),
         );
         let tasks: Vec<serde_json::Value> = desk
             .tasks

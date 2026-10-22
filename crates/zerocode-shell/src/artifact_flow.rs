@@ -1258,10 +1258,7 @@ pub(crate) struct LandingAsk<'a> {
 /// the coordinator wrote it shipped in, when the walk holds that release. A task
 /// git says nothing of is left out, and the board's schedule ends its bar on the
 /// ledger's own times instead — never on the present.
-pub(crate) fn landings<'a>(
-    git: &GitFacts,
-    tasks: impl IntoIterator<Item = LandingAsk<'a>>,
-) -> BTreeMap<String, Landed> {
+pub(crate) fn landings(git: &GitFacts, tasks: &[LandingAsk<'_>]) -> BTreeMap<String, Landed> {
     let by_task = merges_by_task(git);
     let released = |at: Option<usize>| {
         at.and_then(|at| git.releases.get(at))

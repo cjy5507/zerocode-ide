@@ -661,7 +661,8 @@ fn schedule_look(
     let landings = match repo.as_deref() {
         Some(root) if !desk.desk.tasks.is_empty() => crate::artifact_flow::landings(
             &crate::artifact_flow::git_facts(root, now_ms),
-            desk.desk
+            &desk
+                .desk
                 .tasks
                 .iter()
                 .map(|task| crate::artifact_flow::LandingAsk {
@@ -674,7 +675,8 @@ fn schedule_look(
                         .times
                         .as_ref()
                         .and_then(|times| times.release.as_deref()),
-                }),
+                })
+                .collect::<Vec<_>>(),
         ),
         _ => std::collections::BTreeMap::new(),
     };

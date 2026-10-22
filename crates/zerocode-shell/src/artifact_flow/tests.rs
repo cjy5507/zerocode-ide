@@ -653,7 +653,7 @@ fn the_schedule_reads_each_tasks_landing_and_release_off_git() {
     };
     let found = landings(
         &fixture.git,
-        [
+        &[
             ask(landed, None, None),
             ask(by_head, Some(head.as_str()), None),
             ask(shipped, None, Some("v2.4.0")),
