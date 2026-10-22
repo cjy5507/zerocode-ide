@@ -482,6 +482,10 @@ const TYPING_FIELDS = "input, textarea, select, [contenteditable], [data-keyboar
  * what it was — `pointerdown`, `keydown Escape`, never a letter — and when. */
 let handMoved = { said: "", at: -Infinity };
 
+/* When a person's own key last went down anywhere in the window — a pane, a
+ * field, a chord (t-67936): a restart's notice holds while they type. */
+let handKeyedAt = -Infinity;
+
 function typedTextPending() {
   return composing || halfLetter !== "" || wordJamos.length > 0 || rescueJamos.length > 0;
 }
@@ -568,6 +572,7 @@ function handWord(event) {
  * arrow, the Escape that closes a document. */
 function noteKeyHand(event) {
   if (event.key === "Shift" || event.key === "Control" || event.key === "Alt" || event.key === "Meta") return;
+  if (event.isTrusted) handKeyedAt = performance.now();
   const at = event.target;
   const chord = hasPrimaryModifier(event) || isCtrlTabSwitcherChord(event);
   if (!chord && at !== keySink && at?.closest?.(TYPING_FIELDS)) {
@@ -692,6 +697,22 @@ function stageRoad() {
   const since = performance.now() - handMoved.at;
   if (since < HAND_ECHO_MS) return `person ${handMoved.said} +${Math.round(since)}ms`;
   return `program${under}`;
+}
+
+/* Whose hand a door that ends something was moved by (t-67936): `person
+ * <gesture>` inside a person's own event, `synthetic <type>` inside an event
+ * no hand made — a script's `click()`, a dispatched key — `person <gesture>
+ * +<ms>ms` just after a person's own move (the await an answer takes), and
+ * `program` otherwise. The tab close and the restart doors say it in their
+ * black-box lines; the tab close refuses a synthetic one that would end a
+ * seat. */
+function handSaid() {
+  const event = window.event;
+  if (event?.isTrusted) return `person ${handWord(event)}`;
+  if (event) return `synthetic ${event.type}`;
+  const since = performance.now() - handMoved.at;
+  if (since < HAND_ECHO_MS) return `person ${handMoved.said} +${Math.round(since)}ms`;
+  return "program";
 }
 
 function frontKeyboardTarget() {

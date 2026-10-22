@@ -2003,6 +2003,9 @@ class StatefulBackend {
       // gauge's period (t-3005). This fixture's machine has no lane: two
       // nulls and no notice, which is what a fresh install answers.
       case "release_status": return { status: null, installed: null, notice: null };
+      // What a restart left for the window it started (t-67936): this
+      // fixture's window was started fresh, so nothing.
+      case "boot_after_restart": return null;
       // The update feed (t-3191): this fixture's build stands idle — the
       // backend judges the knock and this machine has nothing published.
       case "update_check":

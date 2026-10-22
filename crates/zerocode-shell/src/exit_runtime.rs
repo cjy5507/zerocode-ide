@@ -10,6 +10,7 @@
 //! `ExitRequested` without a code — none of them through a restart button.
 
 use std::fmt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -117,6 +118,9 @@ impl Asking {
     }
 }
 
+/// A second, in the table's milliseconds.
+pub(crate) const SECOND_MS: i64 = 1_000;
+
 /// A minute, in the table's milliseconds.
 pub(crate) const MINUTE_MS: i64 = 60_000;
 
@@ -132,6 +136,14 @@ pub(crate) struct Patience {
     /// Whether a wait that runs out leaves anyway — the person asked to go —
     /// or asks again.
     pub(crate) overdue_leaves: bool,
+    /// How long the road's notice stands on the screen before it goes, once
+    /// it has been decided (t-67936) — by a press, or by a wait that found
+    /// its gap; `None` goes at once.
+    pub(crate) notice_ms: Option<i64>,
+    /// How long the person's hands must have rested before a standing notice
+    /// may end (t-67936): a key they pressed inside it holds the road until
+    /// they have been still this long.
+    pub(crate) rest_ms: i64,
 }
 
 /// A restart waits half an hour for the first gap, then asks again. Measured
@@ -139,19 +151,35 @@ pub(crate) struct Patience {
 /// commands): half end within 3.2 minutes, nine in ten within 14.7, and 97 %
 /// within 30 — a turn is not waited out (half run past 56 minutes), only
 /// what runs under it.
+///
+/// And it never goes unseen (t-67936). On 2026-10-21 the window restarted
+/// twice by this road (05:05 and 12:37, each a clean exit), and the person
+/// saw both as 「갑자기 꺼짐」: a wait goes at a gap the census finds, which
+/// can come half an hour after the press, in the middle of a sentence. So
+/// the road shows its notice ten seconds first — long enough to read one
+/// line and reach its 취소, short enough that a restart somebody pressed is
+/// still a restart — and a key pressed inside it holds the road until the
+/// hands have rested five seconds: five of the window's typing-run gaps
+/// (`TYPING_RUN_GAP_MS`, the longest pause inside a word), so a person who
+/// stopped that long is reading, not mid-word.
 const RESTART_PATIENCE: Patience = Patience {
     gap_wait_ms: 30 * MINUTE_MS,
     answer_ms: None,
     overdue_leaves: false,
+    notice_ms: Some(10 * SECOND_MS),
+    rest_ms: 5 * SECOND_MS,
 };
 
 /// A close waits ten minutes (82 % of those commands end within it) and then
 /// goes, because closing is the person leaving; and its question stands one
-/// minute, so a close nobody is there to answer still closes.
+/// minute, so a close nobody is there to answer still closes. It shows no
+/// notice: the person pressed the close of the window they are looking at.
 const CLOSE_PATIENCE: Patience = Patience {
     gap_wait_ms: 10 * MINUTE_MS,
     answer_ms: Some(MINUTE_MS),
     overdue_leaves: true,
+    notice_ms: None,
+    rest_ms: 0,
 };
 
 /// What the person chose when asked, said back in the goodbye's line.
@@ -236,12 +264,61 @@ impl WaitLine {
     }
 }
 
+/// A road decided and not gone yet (t-67936): its notice stands on the
+/// screen — which road, what the person chose, when it was raised and the
+/// earliest it may go, and what its line last said (whole seconds left, and
+/// whether the person's typing holds it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Notice {
+    asking: Asking,
+    choice: Choice,
+    raised_ms: i64,
+    due_ms: i64,
+    told: Option<(i64, bool)>,
+}
+
+/// The line a notice stands on the screen as (t-67936): its road and door,
+/// the whole seconds left, and whether the person's typing is holding it.
+/// Said again when either moves, so the window keeps no clock of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NoticeLine {
+    pub(crate) road: &'static str,
+    pub(crate) door: Option<&'static str>,
+    pub(crate) seconds: i64,
+    pub(crate) held: bool,
+}
+
+impl NoticeLine {
+    fn of(asking: Asking, seconds: i64, held: bool) -> Self {
+        Self {
+            road: asking.word(),
+            door: match asking {
+                Asking::Restart(door) => door.map(RestartDoor::word),
+                Asking::Close => None,
+            },
+            seconds,
+            held,
+        }
+    }
+}
+
+/// How a notice ended (t-67936), for the door's line: how long it stood,
+/// and how much of that the person's typing held it past its time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Went {
+    stood_ms: i64,
+    held_ms: i64,
+}
+
 /// What the beat does about the way out, this second.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExitBeat {
     Nothing,
     /// The wait's line moved.
     Tell(WaitLine),
+    /// The notice's line moved — or it was just raised (t-67936).
+    Notice(NoticeLine),
     /// The wait ran out on a road that asks again.
     AskAgain(Asking),
     /// Go, by this road.
@@ -267,6 +344,20 @@ struct Exiting {
     /// is held until it answers, and a second press waits for the same
     /// answer rather than reading it twice.
     reading: bool,
+    /// A road decided and showing its notice (t-67936).
+    notice: Option<Notice>,
+    /// When the person's hands last moved while the notice stood, as the
+    /// window saw them (t-67936).
+    hand_ms: Option<i64>,
+    /// Whose hand pressed or armed a road, in the window's own word
+    /// (`person click`, `person keydown Enter +40ms`, `synthetic click`),
+    /// and the road it was said for — said in the door's line (t-67936).
+    by: Option<(Asking, String)>,
+    /// How the last notice ended, said in the door's line (t-67936).
+    went: Option<Went>,
+    /// Whether the door's line has been said: a road heard twice — a close,
+    /// then the browser's own `app.exit(0)` finishing it — says it once.
+    door_told: bool,
 }
 
 static EXITING: Mutex<Exiting> = Mutex::new(Exiting {
@@ -276,6 +367,11 @@ static EXITING: Mutex<Exiting> = Mutex::new(Exiting {
     choice: Choice::Unasked,
     confirmed: false,
     reading: false,
+    notice: None,
+    hand_ms: None,
+    by: None,
+    went: None,
+    door_told: false,
 });
 
 /// A wait's census still out (t-49062): the beat does not ask the actor a
@@ -371,16 +467,21 @@ pub(crate) fn choice() -> Choice {
     exiting().choice
 }
 
-/// A question stands on this road, from now: the close's minute runs.
+/// A question stands on this road, from now: the close's minute runs — in
+/// place of any wait or notice another road had going.
 fn asked(state: &mut Exiting, asking: Asking, now_ms: i64) {
     state.question = Some((asking, now_ms));
     state.wait = None;
+    state.notice = None;
 }
 
-/// 「끝나면」: wait on this road for the first gap, from now.
-pub(crate) fn arm(asking: Asking, now_ms: i64) {
+/// 「끝나면」: wait on this road for the first gap, from now — armed by
+/// `by`, the window's word for the hand that pressed it (t-67936).
+pub(crate) fn arm(asking: Asking, now_ms: i64, by: Option<&str>) {
     let mut state = exiting();
     state.question = None;
+    state.notice = None;
+    state.by = Some((asking, crate::cmd::board::window_word(by)));
     state.wait = Some(Wait {
         asking,
         since_ms: now_ms,
@@ -389,16 +490,165 @@ pub(crate) fn arm(asking: Asking, now_ms: i64) {
     });
 }
 
-/// 「지금」: this road goes now, and says so.
-pub(crate) fn leave_now(asking: Asking) {
-    let _ = settle(&mut exiting(), asking, Choice::Now);
+/// 「지금」 — or a door that asked nothing, because nothing it would cut was
+/// running (`Choice::Unasked`): this road goes, pressed by `by`. A road that
+/// shows a notice raises it here and answers its first line (t-67936); one
+/// that shows none is settled, and `None` tells the caller to go now.
+pub(crate) fn leave_now(
+    asking: Asking,
+    choice: Choice,
+    by: Option<&str>,
+    now_ms: i64,
+) -> Option<NoticeLine> {
+    let mut state = exiting();
+    state.by = Some((asking, crate::cmd::board::window_word(by)));
+    match go(&mut state, asking, choice, now_ms) {
+        ExitBeat::Notice(line) => Some(line),
+        _ => None,
+    }
 }
 
-/// 「취소」: no question stands and nothing waits.
+/// 「취소」: no question stands, nothing waits and no notice runs.
 pub(crate) fn cancel() {
     let mut state = exiting();
     state.question = None;
     state.wait = None;
+    state.notice = None;
+    state.hand_ms = None;
+    state.by = None;
+}
+
+/// The person's hands moved at `at_ms`, as the window saw them (t-67936): a
+/// standing notice holds its road until they have rested.
+pub(crate) fn hands_moved(at_ms: i64) {
+    hands_at(&mut exiting(), at_ms);
+}
+
+/// [`hands_moved`], on the way out `state` holds. With no notice standing
+/// there is nothing to hold, and nothing is kept.
+fn hands_at(state: &mut Exiting, at_ms: i64) {
+    if state.notice.is_some() {
+        state.hand_ms = Some(state.hand_ms.map_or(at_ms, |held| held.max(at_ms)));
+    }
+}
+
+/// Every road out's own line in the window's log, said once per exit
+/// (t-67936): the road taken, whose hand moved it, what the person chose,
+/// and for a restart how long its notice stood and their typing held it — or
+/// that it went with no notice at all, the line a restart nobody saw coming
+/// would leave. `None` once it has been said.
+pub(crate) fn door_line(road: ExitRoad) -> Option<String> {
+    let mut state = exiting();
+    if std::mem::replace(&mut state.door_told, true) {
+        return None;
+    }
+    Some(door_said(&state, road))
+}
+
+/// The hand a road names when the window said none for it: the restart's is
+/// always said, so a silent one is unsaid; the others are heard from outside
+/// the page — the window's close, a quit, the tray's quit, the window's own
+/// exit — and say which.
+const ROAD_HANDS: [(ExitRoad, &str); 4] = [
+    (ExitRoad::Close, "window close"),
+    (ExitRoad::Terminate, "system quit"),
+    (ExitRoad::Tray, "tray quit"),
+    (ExitRoad::App, "window exit"),
+];
+
+/// [`door_line`], of the way out `state` holds.
+fn door_said(state: &Exiting, road: ExitRoad) -> String {
+    let said = state.by.as_ref().filter(|(asking, by)| {
+        !by.is_empty()
+            && match road {
+                ExitRoad::Restart(_) => matches!(asking, Asking::Restart(_)),
+                ExitRoad::Close => *asking == Asking::Close,
+                _ => false,
+            }
+    });
+    let by = said.map_or_else(
+        || {
+            ROAD_HANDS
+                .iter()
+                .find(|(held, _)| *held == road)
+                .map_or("unsaid", |(_, hand)| *hand)
+        },
+        |(_, by)| by.as_str(),
+    );
+    let notice = match (road, state.went) {
+        (_, Some(went)) => format!(
+            " · notice {} s · held {} s",
+            went.stood_ms / SECOND_MS,
+            went.held_ms / SECOND_MS
+        ),
+        (ExitRoad::Restart(_), None) => " · no notice".to_string(),
+        _ => String::new(),
+    };
+    format!(
+        "exit door {road} · by {by} · choice {}{notice}",
+        state.choice.word()
+    )
+}
+
+/// The note a restart leaves for the window it starts (t-67936): the door it
+/// went by, whose hand, and the build it left — so the next window says once
+/// which build it came back as, and why it went. A restart the person sees
+/// coming and then sees land is not 「갑자기 꺼짐」.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RestartNote {
+    pub(crate) door: Option<String>,
+    pub(crate) by: Option<String>,
+    pub(crate) from_version: String,
+    pub(crate) from_commit: String,
+    pub(crate) at_ms: i64,
+}
+
+/// Where the note waits, under the window's own data root.
+const RESTART_NOTE_FILE: &str = "restart-note.json";
+
+/// How old a note may be and still be the restart that started this window.
+/// A restart is back up in seconds — the slowest start this machine has
+/// logged took half a minute (2026-10-01, t-20078) — so a note ten minutes
+/// old was left by a restart that never came back, and says nothing of this
+/// start.
+const RESTART_NOTE_FRESH_MS: i64 = 10 * MINUTE_MS;
+
+/// The note this road leaves (t-67936): its door, whose hand, and this build.
+pub(crate) fn restart_note_of(
+    road: ExitRoad,
+    stamp: &crate::update_runtime::BuildStamp,
+    now_ms: i64,
+) -> RestartNote {
+    RestartNote {
+        door: match road {
+            ExitRoad::Restart(door) => door.map(|door| door.word().to_string()),
+            _ => None,
+        },
+        by: exiting().by.as_ref().map(|(_, by)| by.clone()),
+        from_version: stamp.version.clone(),
+        from_commit: stamp.commit.clone(),
+        at_ms: now_ms,
+    }
+}
+
+/// Leave the note for the next window, on the restart road right before the
+/// process is replaced (t-67936).
+pub(crate) fn leave_restart_note(root: &Path, note: &RestartNote) -> Result<(), String> {
+    let bytes = serde_json::to_vec(note).map_err(|error| error.to_string())?;
+    crate::durable_file::replace_bytes(&root.join(RESTART_NOTE_FILE), &bytes)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// The note the last window left, taken (t-67936): read once and removed
+/// whatever it says, and answered only when it is fresh.
+pub(crate) fn take_restart_note(root: &Path, now_ms: i64) -> Option<RestartNote> {
+    let path = root.join(RESTART_NOTE_FILE);
+    let bytes = crate::durable_file::read_plain_file(&path).ok()?;
+    let _ = crate::durable_file::remove_file(&path);
+    let note: RestartNote = serde_json::from_slice(&bytes).ok()?;
+    (now_ms.saturating_sub(note.at_ms) <= RESTART_NOTE_FRESH_MS).then_some(note)
 }
 
 /// How long a way out waits on the ledger's actor before it goes on without
@@ -548,11 +798,11 @@ fn holds_close(state: &Exiting) -> bool {
             .is_some_and(|wait| wait.asking == Asking::Close)
 }
 
-/// Whether anything on the way out needs the beat: a question standing or
-/// a wait armed.
+/// Whether anything on the way out needs the beat: a question standing, a
+/// wait armed or a notice running.
 pub(crate) fn watching() -> bool {
     let state = exiting();
-    state.question.is_some() || state.wait.is_some()
+    state.question.is_some() || state.wait.is_some() || state.notice.is_some()
 }
 
 /// The beat's second (t-6428): `read` is the census, read only while a wait
@@ -645,24 +895,27 @@ fn step(
     now_ms: i64,
     busy: Option<crate::orchestration::restart_census::Busy>,
 ) -> ExitBeat {
+    if state.notice.is_some() {
+        return noticed(state, now_ms);
+    }
     if let Some((asking, since_ms)) = state.question
         && asking
             .patience()
             .answer_ms
             .is_some_and(|limit| now_ms.saturating_sub(since_ms) >= limit)
     {
-        return settle(state, asking, Choice::Unanswered);
+        return go(state, asking, Choice::Unanswered, now_ms);
     }
     let (Some(wait), Some(busy)) = (state.wait.clone(), busy) else {
         return ExitBeat::Nothing;
     };
     if busy.gap {
-        return settle(state, wait.asking, Choice::Gap);
+        return go(state, wait.asking, Choice::Gap, now_ms);
     }
     let patience = wait.asking.patience();
     if now_ms.saturating_sub(wait.since_ms) >= patience.gap_wait_ms {
         if patience.overdue_leaves {
-            return settle(state, wait.asking, Choice::Overdue);
+            return go(state, wait.asking, Choice::Overdue, now_ms);
         }
         state.wait = None;
         return ExitBeat::AskAgain(wait.asking);
@@ -678,9 +931,61 @@ fn step(
     ExitBeat::Tell(line)
 }
 
+/// A road decided goes (t-67936): at once when its table shows no notice,
+/// else its notice is raised from now and its first line answered.
+fn go(state: &mut Exiting, asking: Asking, choice: Choice, now_ms: i64) -> ExitBeat {
+    let Some(notice_ms) = asking.patience().notice_ms else {
+        return settle(state, asking, choice);
+    };
+    state.question = None;
+    state.wait = None;
+    state.hand_ms = None;
+    state.notice = Some(Notice {
+        asking,
+        choice,
+        raised_ms: now_ms,
+        due_ms: now_ms.saturating_add(notice_ms),
+        told: None,
+    });
+    noticed(state, now_ms)
+}
+
+/// A standing notice, this second (t-67936): it goes once its time is up and
+/// the person's hands have rested its road's `rest_ms`; until then its line
+/// is told whenever the whole seconds left, or whether typing holds it, move.
+fn noticed(state: &mut Exiting, now_ms: i64) -> ExitBeat {
+    let Some(notice) = state.notice.clone() else {
+        return ExitBeat::Nothing;
+    };
+    let rested_ms = state.hand_ms.map_or(i64::MIN, |at| {
+        at.saturating_add(notice.asking.patience().rest_ms)
+    });
+    let goes_ms = notice.due_ms.max(rested_ms);
+    if now_ms >= goes_ms {
+        state.went = Some(Went {
+            stood_ms: now_ms.saturating_sub(notice.raised_ms),
+            held_ms: goes_ms.saturating_sub(notice.due_ms),
+        });
+        return settle(state, notice.asking, notice.choice);
+    }
+    let left_ms = goes_ms.saturating_sub(now_ms);
+    let told = (
+        left_ms.saturating_add(SECOND_MS - 1) / SECOND_MS,
+        rested_ms > notice.due_ms,
+    );
+    if notice.told == Some(told) {
+        return ExitBeat::Nothing;
+    }
+    if let Some(standing) = state.notice.as_mut() {
+        standing.told = Some(told);
+    }
+    ExitBeat::Notice(NoticeLine::of(notice.asking, told.0, told.1))
+}
+
 fn settle(state: &mut Exiting, asking: Asking, choice: Choice) -> ExitBeat {
     state.question = None;
     state.wait = None;
+    state.notice = None;
     state.choice = choice;
     state.confirmed = true;
     ExitBeat::Leave(asking)
@@ -755,13 +1060,154 @@ mod tests {
         ));
         // A second nobody read a census for says nothing.
         assert_eq!(step(&mut state, MINUTE + 5_000, None), ExitBeat::Nothing);
-        // The first gap: the road armed goes, and the goodbye says why.
+        // The first gap: the road armed raises its notice (t-67936) — the
+        // wait is over, nothing is confirmed yet.
         assert_eq!(
             step(&mut state, MINUTE + 6_000, Some(census(0, 0))),
+            ExitBeat::Notice(NoticeLine {
+                road: "restart",
+                door: Some("update-toast"),
+                seconds: 10,
+                held: false,
+            })
+        );
+        assert!(state.wait.is_none() && state.notice.is_some() && !state.confirmed);
+        // Its ten seconds out, the road goes, and the goodbye says why.
+        assert_eq!(
+            step(&mut state, MINUTE + 16_000, Some(census(2, 0))),
             ExitBeat::Leave(toast)
         );
         assert_eq!(state.choice, Choice::Gap);
-        assert!(state.confirmed && state.wait.is_none());
+        assert!(state.confirmed && state.wait.is_none() && state.notice.is_none());
+    }
+
+    /// t-67936: 2026-10-21's two restarts went by this road at a gap nobody
+    /// was watching for, and the person read both as 「갑자기 꺼짐」. A
+    /// restart decided — pressed, or a wait that found its gap — raises a
+    /// notice of the table's ten seconds first, says it once a second, and a
+    /// key the person presses inside it holds the road until their hands
+    /// have rested the table's five.
+    #[test]
+    fn a_restart_goes_only_after_its_notice_and_the_persons_typing_holds_it() {
+        let toast = Asking::Restart(Some(RestartDoor::UpdateToast));
+        let mut state = Exiting::default();
+        let line = |seconds, held| {
+            ExitBeat::Notice(NoticeLine {
+                road: "restart",
+                door: Some("update-toast"),
+                seconds,
+                held,
+            })
+        };
+        assert_eq!(go(&mut state, toast, Choice::Now, 0), line(10, false));
+        assert!(!state.confirmed && state.notice.is_some());
+        // The same whole second again says nothing; the next one says itself.
+        assert_eq!(step(&mut state, 500, None), ExitBeat::Nothing);
+        assert_eq!(step(&mut state, 1_000, None), line(9, false));
+        // A key at eight seconds: the road holds until the hands have rested
+        // five, and the line says it is held.
+        hands_at(&mut state, 8_000);
+        assert_eq!(step(&mut state, 8_000, None), line(5, true));
+        assert_eq!(step(&mut state, 10_000, None), line(3, true));
+        assert_eq!(step(&mut state, 12_999, None), line(1, true));
+        assert_eq!(step(&mut state, 13_000, None), ExitBeat::Leave(toast));
+        assert_eq!(state.choice, Choice::Now);
+        assert_eq!(
+            state.went,
+            Some(Went {
+                stood_ms: 13_000,
+                held_ms: 3_000,
+            })
+        );
+        assert!(state.confirmed && state.notice.is_none());
+        // Hands with no notice standing hold nothing.
+        let mut idle = Exiting::default();
+        hands_at(&mut idle, 5_000);
+        assert_eq!(idle.hand_ms, None);
+    }
+
+    /// t-67936: a close shows no notice — the person pressed the close of
+    /// the window they are looking at — so 「지금 종료」 and a close's
+    /// unanswered minute still go at once; and a question standing replaces
+    /// a restart's notice rather than leaving it counting under the question.
+    #[test]
+    fn a_close_goes_without_a_notice_and_a_question_takes_a_notices_place() {
+        let mut close = Exiting::default();
+        assert_eq!(
+            go(&mut close, Asking::Close, Choice::Now, 0),
+            ExitBeat::Leave(Asking::Close)
+        );
+        assert!(close.notice.is_none() && close.confirmed);
+        let mut state = Exiting::default();
+        let _ = go(&mut state, Asking::Restart(None), Choice::Unasked, 0);
+        assert!(state.notice.is_some());
+        asked(&mut state, Asking::Close, 1_000);
+        assert!(state.notice.is_none() && state.question.is_some());
+    }
+
+    /// t-67936: every road out's own line says the road, whose hand, the
+    /// choice, and for a restart how long the notice stood and the typing
+    /// held it — a restart that went with no notice says so in so many words,
+    /// a hand said for one road is not borrowed by another, and the line is
+    /// said once however often the road is heard.
+    #[test]
+    fn the_door_line_says_whose_hand_and_how_long_the_notice_stood() {
+        let toast = Asking::Restart(Some(RestartDoor::UpdateToast));
+        let mut state = Exiting {
+            by: Some((toast, "person click".to_string())),
+            choice: Choice::Now,
+            went: Some(Went {
+                stood_ms: 13_400,
+                held_ms: 3_000,
+            }),
+            ..Exiting::default()
+        };
+        assert_eq!(
+            door_said(&state, ExitRoad::Restart(Some(RestartDoor::UpdateToast))),
+            "exit door restart:update-toast · by person click · choice now · notice 13 s · held 3 s"
+        );
+        // The restart's hand is not the close's.
+        state.went = None;
+        assert_eq!(
+            door_said(&state, ExitRoad::Close),
+            "exit door close · by window close · choice now"
+        );
+        state.by = None;
+        assert_eq!(
+            door_said(&state, ExitRoad::Restart(None)),
+            "exit door restart · by unsaid · choice now · no notice"
+        );
+        for (road, hand) in ROAD_HANDS {
+            assert!(door_said(&state, road).contains(&format!(" · by {hand} · ")));
+        }
+        state.by = Some((Asking::Close, "person click +40ms".to_string()));
+        assert_eq!(
+            door_said(&state, ExitRoad::Close),
+            "exit door close · by person click +40ms · choice now"
+        );
+    }
+
+    /// t-67936: the note a restart leaves is taken once by the window it
+    /// starts — and a note too old to be this start's is taken and dropped.
+    #[test]
+    fn a_restart_note_is_taken_once_and_only_while_fresh() {
+        let root = tempfile::tempdir().unwrap();
+        let note = RestartNote {
+            door: Some("update-toast".to_string()),
+            by: Some("person click".to_string()),
+            from_version: "1.1.85".to_string(),
+            from_commit: "9be7b2a47".to_string(),
+            at_ms: 1_000,
+        };
+        leave_restart_note(root.path(), &note).unwrap();
+        assert_eq!(take_restart_note(root.path(), 6_000), Some(note.clone()));
+        assert_eq!(take_restart_note(root.path(), 7_000), None);
+        leave_restart_note(root.path(), &note).unwrap();
+        assert_eq!(
+            take_restart_note(root.path(), 1_000 + RESTART_NOTE_FRESH_MS + 1),
+            None
+        );
+        assert!(!root.path().join(RESTART_NOTE_FILE).exists());
     }
 
     #[test]

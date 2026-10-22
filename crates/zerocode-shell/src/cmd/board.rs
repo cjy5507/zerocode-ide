@@ -995,21 +995,27 @@ pub(crate) fn set_watched_terms(
 /// typing`) fit with room.
 const STAGE_ROAD_MAX: usize = 80;
 
-/// One black-box line for one declaration: `watch <label>: [terms]`, sorted,
-/// and ` by <road>` when the window said why the stage moved (t-69526). The
-/// road is the window's word for the move — a person's gesture, a backend
-/// event, a restore — kept to the letters such a word is spelled in and
-/// bounded, so the line cannot be made to carry anything else.
-pub(crate) fn watch_line(label: &str, terms: &[TermId], road: Option<&str>) -> String {
-    let mut said: Vec<TermId> = terms.to_vec();
-    said.sort_unstable();
-    let road: String = road
+/// The window's own word for what moved something — a person's gesture, a
+/// backend event, a restore (t-69526), the hand that pressed a way out of
+/// the window (t-67936) — kept to the letters such a word is spelled in and
+/// bounded, so a black-box line cannot be made to carry anything else.
+pub(crate) fn window_word(raw: Option<&str>) -> String {
+    let word: String = raw
         .unwrap_or_default()
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || " :._+-".contains(*ch))
         .take(STAGE_ROAD_MAX)
         .collect();
-    let road = road.trim();
+    word.trim().to_string()
+}
+
+/// One black-box line for one declaration: `watch <label>: [terms]`, sorted,
+/// and ` by <road>` when the window said why the stage moved (t-69526). The
+/// road is the window's word for the move ([`window_word`]).
+pub(crate) fn watch_line(label: &str, terms: &[TermId], road: Option<&str>) -> String {
+    let mut said: Vec<TermId> = terms.to_vec();
+    said.sort_unstable();
+    let road = window_word(road);
     if road.is_empty() {
         format!("watch {label}: {said:?}")
     } else {
