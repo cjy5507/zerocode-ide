@@ -25661,7 +25661,7 @@ mod tests {
         // And the third card in that pane, whose login this window MAKES.
         // Its gauge reads the credential file directly rather than a
         // per-account snapshot, so the forced re-read is the only thing
-        // standing between a fresh sign-in and 「Antigravity 로그인 필요」
+        // standing between a fresh sign-in and 「Google 로그인 필요」
         // sitting under it for fifteen minutes.
         let picking = block_after(window, "async function startGoogleLogin(");
         assert!(
@@ -27201,7 +27201,7 @@ mod tests {
         // surface that MAKES one, rather than at a zo command in a terminal.
         assert!(
             fetching.contains("\"signed_out\"")
-                && fetching.contains("Antigravity 로그인 필요 — 설정 > AI 제공자 계정")
+                && fetching.contains("Google 로그인 필요 — 설정 > AI 제공자 계정")
                 && !fetching.contains("zo login google"),
             "the signed-out sentence no longer names the card that fixes it"
         );
