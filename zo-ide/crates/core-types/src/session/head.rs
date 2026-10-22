@@ -23,7 +23,7 @@ use crate::json::JsonValue;
 
 use super::{
     current_time_millis, generate_session_id, parse_jsonl_record, ContentBlock,
-    ConversationMessage, MessageRole, Session, SessionError, SessionFork, SessionJsonlRecord,
+    ConversationMessage, Session, SessionError, SessionFork, SessionJsonlRecord,
 };
 
 /// What a listing shows for one transcript.
@@ -33,11 +33,14 @@ pub struct TranscriptHead {
     pub name: Option<String>,
     pub created_at_ms: u64,
     pub fork: Option<SessionFork>,
-    /// The first non-empty text block of the first user message, cut to the
+    /// The first non-empty text block of the first meaningful user prompt, cut to the
     /// `preview_chars` the reader asked for. `None` when no preview was asked,
     /// when nobody spoke into the session, or when the first user message has
     /// no text (an image alone).
     pub first_user_text: Option<String>,
+    /// Whether a meaningful user prompt was found, independently of a text
+    /// preview. Images count as input. `None` means only the header was read.
+    pub has_user_input: Option<bool>,
 }
 
 impl TranscriptHead {
@@ -92,7 +95,7 @@ impl TranscriptHead {
                     });
                 }
                 SessionJsonlRecord::Message { message, .. } => {
-                    if first_user.is_none() && message.role == MessageRole::User {
+                    if first_user.is_none() && has_user_input(&message) {
                         first_user = Some(preview_chars.and_then(|n| first_text(&message, n)));
                     }
                 }
@@ -108,6 +111,7 @@ impl TranscriptHead {
             name: header.name,
             created_at_ms: header.created_at_ms,
             fork: header.fork,
+            has_user_input: preview_chars.map(|_| first_user.is_some()),
             first_user_text: first_user.flatten(),
         })
     }
@@ -116,25 +120,29 @@ impl TranscriptHead {
     /// streaming read is pinned against, and the road a non-JSONL file takes.
     #[must_use]
     pub fn of_session(session: &Session, preview_chars: Option<usize>) -> Self {
-        let first_user_text = preview_chars.and_then(|n| {
-            session
-                .messages
-                .iter()
-                .find(|message| message.role == MessageRole::User)
-                .and_then(|message| first_text(message, n))
-        });
+        let first_user = preview_chars.and_then(|_| session.messages.iter().find(|message| has_user_input(message)));
+        let first_user_text = preview_chars.and_then(|n| first_user.and_then(|message| first_text(message, n)));
         Self {
             session_id: session.session_id.clone(),
             name: session.name.clone(),
             created_at_ms: session.created_at_ms,
             fork: session.fork.clone(),
             first_user_text,
+            has_user_input: preview_chars.map(|_| first_user.is_some()),
         }
     }
 
     fn from_full_load(path: &Path, preview_chars: Option<usize>) -> Result<Self, SessionError> {
         Session::load_from_path(path).map(|session| Self::of_session(&session, preview_chars))
     }
+}
+
+fn has_user_input(message: &ConversationMessage) -> bool {
+    message.is_user_prompt() && message.blocks.iter().any(|block| match block {
+        ContentBlock::Text { text } => !text.trim().is_empty(),
+        ContentBlock::Image { data, .. } => !data.is_empty(),
+        _ => false,
+    })
 }
 
 struct HeaderFields {
@@ -161,7 +169,7 @@ impl HeaderFields {
 fn first_text(message: &ConversationMessage, chars: usize) -> Option<String> {
     message.blocks.iter().find_map(|block| match block {
         ContentBlock::Text { text } => {
-            let cut: String = text.chars().take(chars).collect();
+            let cut: String = text.trim_start().chars().take(chars).collect();
             (!cut.is_empty()).then_some(cut)
         }
         _ => None,
@@ -268,6 +276,7 @@ mod tests {
 
         let bare = assert_agrees(&path, None);
         assert_eq!(bare.first_user_text, None, "no preview asked, none read");
+        assert_eq!(bare.has_user_input, None, "a header-only read does not judge the messages");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -310,7 +319,9 @@ mod tests {
         ])
         .save_to_path(&image_only)
         .expect("save");
-        assert_eq!(assert_agrees(&image_only, Some(PREVIEW)).first_user_text, None);
+        let head = assert_agrees(&image_only, Some(PREVIEW));
+        assert_eq!(head.first_user_text, None);
+        assert_eq!(head.has_user_input, Some(true));
 
         // An image before the text: the text block is still the preview.
         let mixed = dir.join("mixed.jsonl");
@@ -325,7 +336,28 @@ mod tests {
         // Nobody spoke: header only.
         let empty = dir.join("empty.jsonl");
         session_with(Vec::new()).save_to_path(&empty).expect("save");
-        assert_eq!(assert_agrees(&empty, Some(PREVIEW)).first_user_text, None);
+        let head = assert_agrees(&empty, Some(PREVIEW));
+        assert_eq!(head.first_user_text, None);
+        assert_eq!(head.has_user_input, Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_meaningful_prompt_after_whitespace_still_stops_the_head_read() {
+        let dir = scratch("meaningful-input");
+        let path = dir.join("session.jsonl");
+        session_with(vec![
+            text(MessageRole::User, " \n\t"),
+            text(MessageRole::User, "  keep this task"),
+            text(MessageRole::Assistant, "later reply"),
+        ]).save_to_path(&path).expect("save");
+        let mut contents = std::fs::read_to_string(&path).unwrap();
+        contents.push_str("invalid trailing record\n{}\n");
+        std::fs::write(&path, contents).unwrap();
+        assert!(Session::load_from_path(&path).is_err(), "the full loader reaches the damaged tail");
+        let head = TranscriptHead::read(&path, Some(PREVIEW)).unwrap();
+        assert_eq!(head.has_user_input, Some(true));
+        assert_eq!(head.first_user_text.as_deref(), Some("keep this task"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
