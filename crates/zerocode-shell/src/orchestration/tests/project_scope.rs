@@ -319,6 +319,86 @@ fn a_run_is_the_project_of_the_pane_that_made_it() {
     }
 }
 
+#[test]
+fn project_isolation_is_on_without_a_settings_file() {
+    const A: u32 = 712_580;
+    const B: u32 = 712_581;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_590);
+    let team_a = "team-project-default-a";
+    let team_b = "team-project-default-b";
+    a_leader(&host, team_a, A, Some(&disk.a));
+    a_leader(&host, team_b, B, Some(&disk.b));
+    let a = a_run_from(&host, team_a, "first-project");
+    let b = a_run_from(&host, team_b, "second-project");
+    json_from_leader(
+        &host,
+        team_a,
+        &format!("send --to run:{a} --type status --body own-project"),
+    );
+    for verb in [
+        format!("check --run {a} --peek"),
+        format!("task-list --run {a}"),
+        format!("send --run {a} --to run:{a} --type status --body elsewhere"),
+    ] {
+        let answer = from_leader(&host, team_b, &verb);
+        assert_eq!(
+            answer.exit_code, 1,
+            "project isolation was not the default: {verb}"
+        );
+    }
+    let listed = json_from_leader(&host, team_b, "run-list");
+    let ids: Vec<_> = listed["runs"]
+        .as_array()
+        .expect("runs")
+        .iter()
+        .filter_map(|row| row["runId"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&b.as_str()) && !ids.contains(&a.as_str()),
+        "a different project's run was listed"
+    );
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(B);
+}
+
+#[test]
+fn a_direct_recipient_must_still_work_in_the_senders_project() {
+    const A: u32 = 712_600;
+    const B: u32 = 712_601;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_610);
+    let team_a = "team-project-recipient-a";
+    let team_b = "team-project-recipient-b";
+    a_leader(&host, team_a, A, Some(&disk.a));
+    a_leader(&host, team_b, B, Some(&disk.a_task));
+    let run = a_run_from(&host, team_a, "recipient-project");
+    let question = json_from_leader(
+        &host,
+        team_b,
+        &format!("send --run {run} --to run:{run} --type question --body same-project"),
+    );
+    host.place(B, &disk.b);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    for verb in [
+        format!("send --run {run} --to pane:{team_b}/{leader} --type status --body moved"),
+        format!(
+            "reply --run {run} --to-message {} --body moved",
+            question["messageId"].as_str().expect("message")
+        ),
+    ] {
+        let answer = from_leader(&host, team_a, &verb);
+        assert_eq!(
+            answer.exit_code, 1,
+            "a recipient in another project was accepted: {verb}"
+        );
+    }
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(B);
+}
+
 /// The case the person saw: a pane of project B holds the seat of a run that
 /// project A made, and mail for the run's coordinator lands. Before t-65286
 /// the pointer was typed into B's pane, where another project's agent read
