@@ -30,9 +30,10 @@ elif verb == 'dispatch-show': out={'dispatchId':None,'lifecycle':[]}
 elif verb == 'worker-start':
     assert args[args.index('--agent')+1] == expected['agent']
     assert args[args.index('--model')+1] == expected['model']
-    assert args[args.index('--effort')+1] == expected['effort']
+    if expected['effort'] is None: assert '--effort' not in args
+    else: assert args[args.index('--effort')+1] == expected['effort']
     assert ('--worktree' in args) == expected['worktree']
-    out={'workerId':'w-fixture','dispatchId':'dp-fixture','pane':'%2','worktree':expected['worktree'],'agent':expected['agent'],'model':expected['model'],'effort':expected['effort']}
+    out={'workerId':'w-fixture','dispatchId':'dp-fixture','pane':'%2','worktree':expected['worktree'],'agent':expected['agent'],'model':expected['model'],'effort':expected['effort'] or 'low'}
 elif verb == 'check':
     if '--ack' in args:
         (base/'acked').write_text('yes')
@@ -77,12 +78,7 @@ async fn e2e_delegation_tools_summon_through_a_hermetic_ledger_door() {
     }
 }
 
-/// A hand-started zo has only the pane and endpoint pointers. Its own grant
-/// arrives later by file, and the installed door is outside the shell's PATH.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn e2e_a_hand_started_agent_uses_its_own_file_grant_and_installed_door() {
-    let layout = Layout::new();
-    layout.model_led();
+fn write_hand_started_ledger(layout: &Layout) -> (PathBuf, PathBuf) {
     let application = layout.root.path().join("fixture's application data");
     let hooks = application.join("agent-hooks");
     fs::create_dir_all(hooks.join("panes")).unwrap();
@@ -96,6 +92,16 @@ async fn e2e_a_hand_started_agent_uses_its_own_file_grant_and_installed_door() {
     )).unwrap();
     let door = application.join("orchestration-bin");
     write_ledger_door(&door, &json!({"agent":"zo", "model":"exact-model", "effort":"high", "worktree":false, "tokenFile":token_file}));
+    (endpoint, door)
+}
+
+/// A hand-started zo has only the pane and endpoint pointers. Its own grant
+/// arrives later by file, and the installed door is outside the shell's PATH.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_hand_started_agent_uses_its_own_file_grant_and_installed_door() {
+    let layout = Layout::new();
+    layout.model_led();
+    let (endpoint, door) = write_hand_started_ledger(&layout);
     let input = json!({"description":"survey fixture", "prompt":"report fixture", "model":"exact-model", "effort":"high", "worktree":false, "background":false});
     let service = ScriptedAnthropicService::ledger_spawn("Agent", input).await.unwrap();
     let endpoint = endpoint.to_string_lossy();
@@ -104,4 +110,80 @@ async fn e2e_a_hand_started_agent_uses_its_own_file_grant_and_installed_door() {
         &[("PATH", "/usr/bin:/bin"), ("ZEROCODE_HOOK_ENDPOINT", endpoint.as_ref()), ("ZEROCODE_PANE_KEY", "term-7")]).unwrap();
     assert_one_launch(&door, &output, "pane-file-grant ledger should launch once");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+fn requested_native_task(requests: &[String], task: &str) -> bool {
+    requests.iter().any(|request| {
+        let body: Value = serde_json::from_str(request).unwrap();
+        crate::e2e::scripted::user_text_contains(&body, task)
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_full_access_plain_delegation_uses_the_pane_ledger() {
+    let layout = Layout::new();
+    layout.model_led();
+    let (endpoint, door) = write_hand_started_ledger(&layout);
+    let expected_path = door.join("expected.json");
+    let mut expected: Value = serde_json::from_slice(&fs::read(&expected_path).unwrap()).unwrap();
+    expected["effort"] = Value::Null;
+    expected["worktree"] = json!(true);
+    fs::write(expected_path, expected.to_string()).unwrap();
+    let input = json!({"description":"survey fixture", "prompt":"report fixture",
+        "model":"exact-model", "background":false});
+    let service = ScriptedAnthropicService::ledger_spawn("Agent", input).await.unwrap();
+    let endpoint = endpoint.to_string_lossy();
+    let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+        &["--permission-mode", "danger-full-access"], b"Delegate the fixture survey\n",
+        &[("PATH", "/usr/bin:/bin"), ("ZEROCODE_HOOK_ENDPOINT", endpoint.as_ref()), ("ZEROCODE_PANE_KEY", "term-7")]).unwrap();
+    assert_one_launch(&door, &output, "full-access plain delegation should use the ledger");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_restricted_plain_delegation_stays_native_with_a_pane_grant() {
+    const TASK: &str = "NATIVE_RESTRICTED_CHILD: report the fixture without editing it";
+    // Pin restricted modes explicitly: launch defaults depend on workspace
+    // trust/config, and this temporary workspace otherwise gets Full Access.
+    for mode in ["workspace-write", "read-only"] {
+        let layout = Layout::new();
+        layout.model_led();
+        let (endpoint, door) = write_hand_started_ledger(&layout);
+        let input = json!({"description":"survey fixture", "prompt":TASK,
+            "subagent_type":"Explore", "background":false});
+        let service = ScriptedAnthropicService::ledger_spawn("Agent", input).await.unwrap();
+        let args = ["--model", "claude-sonnet-4-6", "--permission-mode", mode];
+        let endpoint = endpoint.to_string_lossy();
+        let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+            &args, b"Delegate the fixture survey\n",
+            &[("PATH", "/usr/bin:/bin"), ("ZEROCODE_HOOK_ENDPOINT", endpoint.as_ref()), ("ZEROCODE_PANE_KEY", "term-7")]).unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).contains(mode), "fixture did not select {mode}");
+        assert!(requested_native_task(&service.request_bodies().await, TASK),
+            "restricted plain delegation should reach its native child; {}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert!(!door.join("calls.jsonl").exists(), "a restricted native task called the ledger");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_restricted_explicit_ledger_choices_are_refused_without_native_substitution() {
+    const TASK: &str = "RESTRICTED_PINNED_CHILD: report the fixture";
+    for (key, value) in [("agent", json!("zo")), ("effort", json!("high")), ("worktree", json!(false))] {
+        let layout = Layout::new();
+        layout.model_led();
+        let (endpoint, door) = write_hand_started_ledger(&layout);
+        let mut input = json!({"description":"survey fixture", "prompt":TASK,
+            "subagent_type":"Explore", "background":false});
+        input[key] = value;
+        let service = ScriptedAnthropicService::ledger_spawn("Agent", input).await.unwrap();
+        let endpoint = endpoint.to_string_lossy();
+        let output = run_pipe_with_env(&layout.cwd, &layout.home, &layout.sessions, &layout.state, service.base_url(),
+            &["--model", "claude-sonnet-4-6", "--permission-mode", "workspace-write"], b"Delegate the fixture survey\n",
+            &[("PATH", "/usr/bin:/bin"), ("ZEROCODE_HOOK_ENDPOINT", endpoint.as_ref()), ("ZEROCODE_PANE_KEY", "term-7")]).unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("ledger worker launch cannot enforce this session's restricted permission mode"), "{key}: {stdout}");
+        assert!(!requested_native_task(&service.request_bodies().await, TASK), "{key} was silently substituted");
+        assert!(!door.join("calls.jsonl").exists(), "a restricted pinned task called the ledger");
+    }
 }
