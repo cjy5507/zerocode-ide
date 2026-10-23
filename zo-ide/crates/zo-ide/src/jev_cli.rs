@@ -299,7 +299,8 @@ pub fn parts_from_text(text: &str) -> Vec<String> {
 fn builtin_definition_words(id: &str) -> Option<String> {
     use zerocode_core::jev;
     if let Some(words) = jev::builtin::default_words(id) { return Some(words); }
-    let definitions: &[(&str, fn() -> String)] = &[
+    type Definition = (&'static str, fn() -> String);
+    let definitions: &[Definition] = &[
         (jev::RECALL.id, runtime::memory::rerank::rubric_words),
         (jev::SKILLS.id, runtime::skill_rank::search_rubric_words),
         (jev::COMPACTION.id, runtime::compaction_relevance::rubric_words),
