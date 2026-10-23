@@ -364,7 +364,7 @@ mod tests {
         let sampled = sample.len();
         let home = tempfile::tempdir().expect("temporary config home");
         let settings = JevSettings {
-            decisions: Default::default(),
+            decisions: std::collections::BTreeMap::default(),
             enabled: true, workspaces: vec!["/work/zo".to_string()], daily_requests: None,
             model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
         };

@@ -28,7 +28,7 @@ fn door(home: &Path) -> JevDoor {
 
 fn door_as(home: &Path, backend_identity: &str) -> JevDoor {
     let settings = JevSettings {
-        decisions: Default::default(),
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![WORKSPACE.to_string()],
         daily_requests: None,
@@ -260,7 +260,7 @@ fn backend_cache_does_not_bypass_a_withdrawn_door() {
 
     for (enabled, consented) in [(false, true), (true, false)] {
         let settings = JevSettings {
-            decisions: Default::default(),
+            decisions: std::collections::BTreeMap::default(),
             enabled,
             workspaces: if consented { vec![WORKSPACE.to_string()] } else { Vec::new() },
             daily_requests: None,

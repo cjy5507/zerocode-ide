@@ -1680,7 +1680,7 @@ mod tests {
             .expect("a sample row");
         }
         let settings = JevSettings {
-            decisions: Default::default(),
+            decisions: std::collections::BTreeMap::default(),
             enabled: true,
             workspaces: vec!["/work/zo".to_string()],
             daily_requests: None,
@@ -1761,7 +1761,7 @@ mod tests {
         let home = tempfile::tempdir().expect("a config home");
         let door_for = |model: &str| {
             let settings = JevSettings {
-                decisions: Default::default(),
+                decisions: std::collections::BTreeMap::default(),
                 enabled: true,
                 workspaces: vec!["/work/zo".to_string()],
                 daily_requests: None,
