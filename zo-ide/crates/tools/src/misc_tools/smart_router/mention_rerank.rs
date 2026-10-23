@@ -887,5 +887,12 @@ fn judge_detached(ledger: PathBuf) {
     });
 }
 
+/// The editor reads the same instructions and option meanings as the request.
+#[must_use]
+pub fn question_definitions() -> Vec<zerocode_core::jev::builtin::QuestionDefinition> {
+    use zerocode_core::jev::builtin::QuestionDefinition as D;
+    vec![D::choice(QUESTION, INSTRUCTIONS, &[]).dynamic_options()]
+}
+
 #[cfg(test)]
 mod tests;

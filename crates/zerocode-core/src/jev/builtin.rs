@@ -11,11 +11,21 @@ use super::{JEV_USES, JevMode, JevUse};
 
 pub const SETTING: &str = "builtinDecisions";
 pub const NAME_MAX: usize = 80;
-pub const QUESTION_MAX: usize = 2_000;
+pub const LEGACY_QUESTION_MAX: usize = 2_000;
+// Built-in instructions can be longer than a user-created decision's prompt.
+pub const QUESTION_MAX: usize = 4_000;
 pub const CRITERIA_MAX: usize = 8_000;
 pub const RUBRIC_KEY: &str = "decisionRubric";
 pub const EDITED_RUBRIC_FLAG: u32 = 1 << 31;
 const DECISION_STATE_KEY: &str = "__builtinDecision";
+const QUESTION_SCHEMA: u64 = 2;
+
+mod definitions;
+mod schema;
+#[cfg(test)]
+mod schema_tests;
+pub use definitions::default_questions;
+pub use schema::{QuestionDefinition, QuestionEdit, QuestionKind, validate_against};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -25,6 +35,8 @@ pub struct Decision {
     pub criteria: Option<String>,
     pub mode: Option<String>,
     pub deleted: bool,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub questions: BTreeMap<String, QuestionEdit>,
 }
 
 impl Decision {
@@ -35,7 +47,7 @@ impl Decision {
 
     #[must_use]
     pub fn edited(&self) -> bool {
-        self.question.is_some() || self.criteria.is_some()
+        self.question.is_some() || self.criteria.is_some() || !self.questions.is_empty()
     }
 
     /// Custom wording has its own rubric. It must never promote the shipped
@@ -45,7 +57,19 @@ impl Decision {
         if !self.edited() {
             return None;
         }
-        let words = serde_json::to_vec(&(base_version, &self.question, &self.criteria)).ok()?;
+        let words = if self.questions.is_empty() {
+            serde_json::to_vec(&(base_version, &self.question, &self.criteria))
+        } else {
+            let value = serde_json::to_value((
+                base_version,
+                &self.question,
+                &self.criteria,
+                &self.questions,
+            ))
+            .ok()?;
+            serde_json::to_vec(&schema::canonical(&value))
+        }
+        .ok()?;
         let digest = Sha256::digest(words);
         Some(u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) | EDITED_RUBRIC_FLAG)
     }
@@ -103,12 +127,31 @@ pub fn in_root(root: &Value, id: &str) -> Option<Decision> {
     };
     let value = decisions.get(id)?;
     // A malformed saved override must not silently resurrect its decision.
-    Some(
+    let mut decision: Decision =
         serde_json::from_value(value.clone()).unwrap_or_else(|_| Decision {
             deleted: true,
             ..Decision::default()
-        }),
-    )
+        });
+    if let Some(schema) = value.get("questionSchema") {
+        // A still-running older zo sees the legacy tombstone and asks nothing.
+        // Only a client understanding the typed definition reads its real state.
+        decision.deleted = schema.as_u64() != Some(QUESTION_SCHEMA)
+            || decision.questions.is_empty()
+            || value.get("questionDeleted").and_then(Value::as_bool) != Some(false);
+    }
+    Some(decision)
+}
+
+/// Persist typed edits with an off marker older clients already understand.
+/// The editor and current runtime still exchange the logical `Decision`.
+pub fn storage_value(decision: &Decision) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(decision)?;
+    if !decision.questions.is_empty() {
+        value["deleted"] = Value::Bool(true);
+        value["questionSchema"] = Value::from(QUESTION_SCHEMA);
+        value["questionDeleted"] = Value::Bool(decision.deleted);
+    }
+    Ok(value)
 }
 
 #[must_use]
@@ -122,9 +165,19 @@ pub fn read(root: &Value) -> Decisions {
 /// Validate edits at the settings write boundary. Refusals contain no input.
 pub fn validate(id: &str, draft: &Decision) -> Result<(), &'static str> {
     let row = seat(id).ok_or("builtin_decision_missing")?;
+    schema::validate_edits(&draft.questions)?;
+    if !draft.questions.is_empty()
+        && let Some(definitions) = default_questions(id)
+    {
+        schema::validate_against(&draft.questions, &definitions)?;
+    }
     for (value, cap, token) in [
         (&draft.name, NAME_MAX, "builtin_decision_name"),
-        (&draft.question, QUESTION_MAX, "builtin_decision_question"),
+        (
+            &draft.question,
+            LEGACY_QUESTION_MAX,
+            "builtin_decision_question",
+        ),
         (&draft.criteria, CRITERIA_MAX, "builtin_decision_criteria"),
     ] {
         if let Some(value) = value {
@@ -151,13 +204,19 @@ pub fn validate(id: &str, draft: &Decision) -> Result<(), &'static str> {
 /// The request's existing subject and output schema stay intact. The user's
 /// question and criteria replace its evaluation wording, after their own
 /// redaction and bounds; caller context was already cleared by the door.
-pub fn apply(draft: &Decision, body: &mut Value) -> usize {
+pub fn apply(draft: &Decision, body: &mut Value) -> Result<usize, &'static str> {
+    let withheld = apply_legacy(draft, body);
+    schema::apply(&draft.questions, body)?;
+    Ok(withheld)
+}
+
+fn apply_legacy(draft: &Decision, body: &mut Value) -> usize {
     if !draft.edited() {
         return 0;
     }
     let (question, question_withheld) = super::door::clear_text(
         draft.question.as_deref().unwrap_or_default(),
-        super::Cap::Chars(QUESTION_MAX),
+        super::Cap::Chars(LEGACY_QUESTION_MAX),
     );
     let (criteria, criteria_withheld) = super::door::clear_text(
         draft.criteria.as_deref().unwrap_or_default(),
@@ -180,7 +239,17 @@ pub fn apply(draft: &Decision, body: &mut Value) -> usize {
     let Some(questions) = body.get_mut("questions").and_then(Value::as_object_mut) else {
         return question_withheld + criteria_withheld;
     };
-    for field in questions.values_mut().filter_map(Value::as_object_mut) {
+    for (id, field) in questions.iter_mut() {
+        if draft
+            .questions
+            .keys()
+            .any(|pattern| schema::matches_id(pattern, id))
+        {
+            continue;
+        }
+        let Some(field) = field.as_object_mut() else {
+            continue;
+        };
         let original = field.get("instructions").map_or(String::new(), |words| {
             words
                 .as_str()
@@ -277,6 +346,34 @@ mod tests {
     use super::*;
     use crate::jev::{PLACEMENT, door, promote};
     use serde_json::json;
+
+    #[test]
+    fn an_individual_noul_edit_reaches_its_question_and_criteria_only() {
+        let draft: Decision = serde_json::from_value(json!({
+            "questions": {"irreversible": {
+                "type": "noul",
+                "instructions": "Does this operation discard the original data?",
+                "criteria": {"true": "The original data is discarded.", "false": "The original data remains."}
+            }}
+        })).unwrap();
+        let mut body = json!({"state": {"command": "read"}, "questions": {
+            "irreversible": super::super::noul::question("The original question.", "Original yes.", "Original no."),
+            "outside": super::super::noul::question("Does it write outside the project?", "Outside.", "Inside.")
+        }});
+        let outside = body["questions"]["outside"].clone();
+        let _ = apply(&draft, &mut body);
+        assert_eq!(
+            body["questions"]["irreversible"]["instructions"],
+            "Does this operation discard the original data?"
+        );
+        assert_eq!(
+            body["questions"]["irreversible"]["criteria"]["true"],
+            "The original data is discarded."
+        );
+        assert_eq!(body["questions"]["irreversible"]["type"], "noul");
+        assert_eq!(body["questions"]["outside"], outside);
+        assert!(draft.edited());
+    }
 
     #[test]
     fn a_deleted_builtin_stays_off_when_the_global_switch_is_turned_back_on() {
@@ -486,7 +583,7 @@ mod tests {
             Err("builtin_decision_credential")
         );
         let mut body = json!({"state":{},"questions":{"result":{"type":"noul","instructions":"Assess the current item."}}});
-        assert_eq!(apply(&edit, &mut body), 1);
+        assert_eq!(apply(&edit, &mut body), Ok(1));
         assert!(!body.to_string().contains(&secret));
         assert!(
             body["state"][DECISION_STATE_KEY]["criteria"]

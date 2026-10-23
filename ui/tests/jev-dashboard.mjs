@@ -337,9 +337,14 @@ export function jevDashboardFixture(real = null) {
   });
   window.__ANSWER__.typesafe_settings = settings;
   window.__ANSWER__.builtin_decision_definition = ({ id }) => ({
-    id, saved: structuredClone(builtin.saved[id] ?? {}), question: "기본 판단 질문", criteria: "기본 판단 기준",
+    id, saved: structuredClone(builtin.saved[id] ?? {}), questions: id === "judgment_cache" ? [] : id === "command_guard" ? [
+      { id: "irreversible", type: "noul", instructions: "원래 데이터를 되돌릴 수 없나요?", criteria: { true: "원본을 잃는다", false: "원본을 유지한다" } },
+      { id: "outside", type: "noul", instructions: "프로젝트 밖을 바꾸나요?", criteria: { true: "밖을 바꾼다", false: "안에서만 바꾼다" } },
+    ] : id === "placement" ? [
+      { id: "placement", type: "choice", instructions: "어디서 작업하나요?", criteria: { tab: { what: "새 탭", examples: ["검토"] }, split: "옆에서 작업" }, dynamicOptions: true },
+    ] : [{ id: "n*", type: "score", instructions: "기본 판단 질문", criteria: ["낮음", "보통", "높음", "매우 높음"], contextual: true }],
     canEditPrompt: id !== "judgment_cache", dynamic: false, mode: builtin.saved[id]?.mode ?? modeOf[id],
-    defaultMode: modeOf[id], modes, nameMax: 80, questionMax: 2_000, criteriaMax: 8_000,
+    defaultMode: modeOf[id], modes, nameMax: 80, questionMax: 4_000, legacyQuestionMax: 2_000, criteriaMax: 8_000,
   });
   window.__ANSWER__.update_builtin_decision = ({ id, action, expected, draft }) => {
     builtin.calls.push({ id, action, expected: structuredClone(expected), draft: structuredClone(draft) });
@@ -348,7 +353,7 @@ export function jevDashboardFixture(real = null) {
     if (JSON.stringify(before) !== JSON.stringify(expected)) throw { message: "builtin_decision_changed" };
     if (action === "save") {
       const next = structuredClone(draft);
-      if ((next.question || next.criteria) && (next.question !== (before.question ?? null) || next.criteria !== (before.criteria ?? null))) next.mode = "shadow";
+      if ((next.question || next.criteria || Object.keys(next.questions ?? {}).length) && (next.question !== (before.question ?? null) || next.criteria !== (before.criteria ?? null) || JSON.stringify(next.questions ?? {}) !== JSON.stringify(before.questions ?? {}))) next.mode = "shadow";
       builtin.saved[id] = next;
     } else if (action === "delete") builtin.saved[id] = { ...before, deleted: true };
     else if (action === "restore") builtin.saved[id] = { ...before, deleted: false };
@@ -3209,6 +3214,32 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     });
     ok("the part speaks English with no Korean of its own left", english.length > 0 && english.korean.length === 0, JSON.stringify(english));
 
+    await press(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`);
+    await drawerOpen(); await checked();
+    await page.locator('#jev-custom-form [name="kind"][value="choice"]').check();
+    await checked();
+    const options = page.locator('#jev-custom-form [data-jev-custom-option]');
+    await options.nth(0).locator('[name="option_name"]').fill("수정");
+    await options.nth(0).locator('[name="meaning"]').fill("코드 변경 필요");
+    await options.nth(1).locator('[name="option_name"]').fill("조사");
+    await options.nth(1).locator('[name="meaning"]').fill("원인 파악 필요");
+    await page.locator('[data-jev-custom-add="choice"]').click();
+    ok("custom Choice can add and remove an option", await options.count() === 3);
+    await options.nth(2).locator('[data-jev-custom-remove]').click();
+    await checked(); await press("#jev-custom-save"); await drawerClosed();
+    let typed = await page.evaluate(() => window.__JEV__.custom.saves.at(-1));
+    ok("custom Choice saves named options and their meanings", typed.answer.kind === "choice" && typed.answer.options.length === 2 && typed.answer.options[0].means === "코드 변경 필요");
+    await press(`#jev-view [data-jev-custom-row="${firstId}"] [data-jev-custom-edit]`);
+    await drawerOpen(); await checked();
+    await page.locator('#jev-custom-form [name="kind"][value="score"]').check();
+    await page.locator('#jev-custom-form [name="level"]').nth(0).fill("여러 파일");
+    await page.locator('#jev-custom-form [name="level"]').nth(1).fill("한 파일");
+    await page.locator('[data-jev-custom-move="up"]').nth(1).click();
+    ok("moving a score level keeps the keyboard on the moved content", await page.evaluate(() => document.activeElement?.name === "level" && document.activeElement.value === "한 파일"));
+    await checked(); await press("#jev-custom-save"); await drawerClosed();
+    typed = await page.evaluate(() => window.__JEV__.custom.saves.at(-1));
+    ok("custom Score saves the explicitly reordered levels", typed.answer.kind === "score" && typed.answer.levels.join("|") === "한 파일|여러 파일", JSON.stringify(typed));
+
     ok("a person's decisions on the dashboard raise no renderer fault and log no console error",
       faults.length === 0 && consoleErrors.length === 0,
       JSON.stringify({ faults: faults.slice(0, 3), consoleErrors: consoleErrors.slice(0, 3) }));
@@ -3233,8 +3264,9 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     });
     ok("every displayed built-in decision offers edit and delete", actions.rows > 0 && actions.edits === actions.rows && actions.deletes === actions.rows, JSON.stringify(actions));
     if (actions.edits !== actions.rows) return;
-    const open = async () => {
-      await page.locator('#jev-view [data-jev-builtin-edit="recall"]').click();
+    const open = async (id = "recall") => {
+      if (!await page.locator(`#jev-view [data-jev-builtin-edit="${id}"]`).count()) await page.locator("#jev-view .jev-fold").click();
+      await page.locator(`#jev-view [data-jev-builtin-edit="${id}"]`).click();
       await page.waitForFunction(() => !document.getElementById("jev-builtin-name").disabled);
     };
     const save = async () => {
@@ -3242,18 +3274,19 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
       await page.waitForFunction(() => document.getElementById("jev-builtin-scrim").hidden);
     };
     await open();
-    ok("the built-in editor loads the shipped question and criteria", await page.locator("#jev-builtin-question").inputValue() === "기본 판단 질문"
-      && await page.locator("#jev-builtin-criteria").inputValue() === "기본 판단 기준");
+    ok("the built-in editor loads the shipped question and criteria", await page.locator('[data-jev-question-instructions="n*"]').inputValue() === "기본 판단 질문"
+      && await page.locator('[data-jev-question-criterion="0"]').inputValue() === "낮음"
+      && await page.locator('[data-jev-question="n*"]').innerText().then((text) => text.includes("Score")));
     await page.locator("#jev-builtin-name").fill("바꾼 위키 판단");
-    await page.locator("#jev-builtin-question").fill("현재 요청을 직접 뒷받침하는 내용인가?");
-    await page.locator("#jev-builtin-criteria").fill("명시적인 근거가 있는 내용을 우선한다.");
+    await page.locator('[data-jev-question-instructions="n*"]').fill("현재 요청을 직접 뒷받침하는 내용인가?");
+    await page.locator('[data-jev-question-criterion="0"]').fill("명시적인 근거가 있는 내용을 우선한다.");
     await save();
     let saved = await page.evaluate(() => window.__JEV__.builtin.saved.recall);
-    ok("editing a built-in question saves the wording and starts recording", saved.question === "현재 요청을 직접 뒷받침하는 내용인가?"
-      && saved.criteria === "명시적인 근거가 있는 내용을 우선한다." && saved.mode === "shadow", JSON.stringify(saved));
+    ok("editing a built-in question saves the wording and starts recording", saved.questions["n*"].instructions === "현재 요청을 직접 뒷받침하는 내용인가?"
+      && saved.questions["n*"].criteria.join("|") === "명시적인 근거가 있는 내용을 우선한다.|보통|높음|매우 높음" && saved.mode === "shadow", JSON.stringify(saved));
     await open();
     ok("reopening a built-in editor retains the saved wording", await page.locator("#jev-builtin-name").inputValue() === "바꾼 위키 판단"
-      && await page.locator("#jev-builtin-question").inputValue() === saved.question);
+      && await page.locator('[data-jev-question-instructions="n*"]').inputValue() === saved.questions["n*"].instructions);
     const shots = process.env.JEV_BUILTIN_SHOTS;
     const AxeBuilder = axeBuilder();
     for (const theme of ["dark", "light"]) {
@@ -3292,12 +3325,47 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     await page.locator('#jev-view [data-jev-builtin-restore="recall"]').click();
     await page.waitForSelector('#jev-view [data-jev-dash-row="recall"]');
     await open();
-    ok("restoring a deleted built-in decision preserves its saved question", await page.locator("#jev-builtin-question").inputValue() === saved.question);
+    ok("restoring a deleted built-in decision preserves its saved question", await page.locator('[data-jev-question-instructions="n*"]').inputValue() === saved.questions["n*"].instructions);
     await page.locator("#jev-builtin-reset").click();
     await save();
     await open();
-    ok("loading and saving defaults restores the shipped question", await page.locator("#jev-builtin-question").inputValue() === "기본 판단 질문"
+    ok("loading and saving defaults restores the shipped question", await page.locator('[data-jev-question-instructions="n*"]').inputValue() === "기본 판단 질문"
       && await page.evaluate(() => !window.__JEV__.builtin.saved.recall));
+    await page.locator("#jev-builtin-cancel").click();
+    await open("command_guard");
+    const irreversible = page.locator('[data-jev-question="irreversible"]');
+    ok("both command-guard Nouls expose separate yes and no meanings", await page.locator("[data-jev-question]").count() === 2
+      && await irreversible.locator('[data-jev-question-criterion="true"]').inputValue() === "원본을 잃는다"
+      && (await irreversible.innerText()).includes("Noul"));
+    await irreversible.locator('[data-jev-question-criterion="true"]').fill("복원할 방법이 없는 경우");
+    await save();
+    const noul = await page.evaluate(() => window.__JEV__.builtin.saved.command_guard);
+    ok("editing one Noul criterion leaves its neighboring question on defaults", noul.questions.irreversible.criteria.true === "복원할 방법이 없는 경우"
+      && !Object.hasOwn(noul.questions, "outside") && noul.question === null && noul.criteria === null);
+    await open("placement");
+    const choice = page.locator('[data-jev-question="placement"]');
+    const tab = choice.locator('[data-jev-question-criterion="tab"]');
+    ok("Choice shows its keys and preserves a structured option description", (await choice.innerText()).includes("Choice")
+      && JSON.parse(await tab.inputValue()).what === "새 탭");
+    await tab.fill('{"what":"함께 보기","examples":["비교"]}');
+    await save();
+    const chosen = await page.evaluate(() => window.__JEV__.builtin.saved.placement.questions.placement);
+    ok("a structured Choice description stays JSON in the saved draft", chosen.type === "choice"
+      && chosen.criteria.tab.what === "함께 보기" && chosen.criteria.tab.examples[0] === "비교" && !Object.hasOwn(chosen.criteria, "split"));
+    await open("placement");
+    await tab.fill("{");
+    ok("invalid structured content cannot be saved", await page.locator("#jev-builtin-save").isDisabled());
+    await page.locator("#jev-builtin-reset").click();
+    await save();
+    await page.evaluate(() => { window.__JEV__.builtin.saved.recall = { question: "이전 공통 지침", criteria: "이전 공통 기준" }; });
+    await open();
+    ok("legacy common instructions stay visible and are not reinterpreted as typed questions", await page.locator("#jev-builtin-question").inputValue() === "이전 공통 지침"
+      && await page.locator('[data-jev-question-instructions="n*"]').inputValue() === "기본 판단 질문");
+    ok("the legacy prompt keeps its old bound while typed instructions fit the shipped wording", await page.locator("#jev-builtin-question").getAttribute("maxlength") === "2000"
+      && await page.locator('[data-jev-question-instructions="n*"]').getAttribute("maxlength") === "4000");
+    await page.locator("#jev-builtin-reset").click();
+    await save();
+    await open();
     await page.locator("#jev-builtin-name").fill("저장 실패 초안");
     await page.evaluate(() => { window.__JEV__.builtin.failNext = true; });
     await page.locator("#jev-builtin-save").click();

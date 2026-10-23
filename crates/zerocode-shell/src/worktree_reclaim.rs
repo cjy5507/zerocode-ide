@@ -136,6 +136,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -163,8 +164,107 @@ const JUDGMENTS_PER_PASS: usize = 2;
 /// What one pass decided about one checkout, so a refusal that has not
 /// changed is written down once rather than once a second.
 struct Judged {
-    kept: String,
+    reason: ReclaimReason,
     at_ms: i64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ReclaimKind {
+    Active,
+    OpenConversation,
+    Locked,
+    IgnoredFile,
+    NotManaged,
+    Kept,
+}
+
+/// The reclaimer's observation, shared with the catalogue without another
+/// git walk. Transient occupancy never enters the timed refusal cache.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ReclaimReason {
+    kind: ReclaimKind,
+    detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checked_ms: Option<i64>,
+}
+
+static REASON_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn reason_revision() -> u64 {
+    REASON_REVISION.load(Ordering::Relaxed)
+}
+
+fn reason_changed() {
+    REASON_REVISION.fetch_add(1, Ordering::Relaxed);
+}
+
+fn transient_reasons() -> &'static Mutex<HashMap<String, ReclaimReason>> {
+    static REASONS: OnceLock<Mutex<HashMap<String, ReclaimReason>>> = OnceLock::new();
+    REASONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn transient_reason(path: &str, reason: Option<ReclaimReason>) {
+    let mut held = transient_reasons()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
+    if held.get(path) == reason.as_ref() {
+        return;
+    }
+    if let Some(reason) = reason {
+        held.insert(path.to_string(), reason);
+    } else {
+        held.remove(path);
+    }
+    reason_changed();
+}
+
+fn replace_transient_reasons(next: HashMap<String, ReclaimReason>) {
+    let mut held = transient_reasons()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
+    if *held != next {
+        *held = next;
+        reason_changed();
+    }
+}
+
+fn active_reason() -> ReclaimReason {
+    ReclaimReason {
+        kind: ReclaimKind::Active,
+        detail: "the window is showing this checkout".to_string(),
+        checked_ms: None,
+    }
+}
+
+fn occupied_reason(count: usize) -> ReclaimReason {
+    ReclaimReason {
+        kind: ReclaimKind::OpenConversation,
+        detail: format!("this window holds {count} terminal(s) in this checkout"),
+        checked_ms: None,
+    }
+}
+
+pub(crate) fn reason_for(path: &Path) -> Option<ReclaimReason> {
+    let transient = transient_reasons()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
+    if let Some((_, reason)) = transient
+        .iter()
+        .find(|(at, _)| same_worktree_path(Path::new(at), path))
+    {
+        return Some(reason.clone());
+    }
+    drop(transient);
+    judged()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .iter()
+        .find(|(at, _)| same_worktree_path(Path::new(at), path))
+        .map(|(_, held)| ReclaimReason {
+            checked_ms: Some(held.at_ms),
+            ..held.reason.clone()
+        })
 }
 
 /// How a refusal reads. A checkout with work in it is KEPT — the directory
@@ -213,7 +313,7 @@ enum Verdict {
     /// It stays, and this is why. Prose, because the noes are many and each
     /// one is a different fact; they are written to the window log, where the
     /// existing automatic cleanup already writes exactly this news.
-    Keep(String),
+    Keep { because: String, kind: ReclaimKind },
 }
 
 /// What the window is told when a checkout is reclaimed.
@@ -257,6 +357,12 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
         .filter(|one| Path::new(&one.path).is_dir())
         .collect();
     if standing.is_empty() {
+        replace_transient_reasons(HashMap::new());
+        let mut marks = judged().lock().unwrap_or_else(|held| held.into_inner());
+        if !marks.is_empty() {
+            marks.clear();
+            reason_changed();
+        }
         return;
     }
 
@@ -278,20 +384,34 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
     let state = app.state::<AppState>();
     let active = state.active_root();
     let occupied = crate::occupied_checkouts(&state);
+    let mut transient = HashMap::new();
     let standing: Vec<orchestration::SettledCheckout> = standing
         .into_iter()
         .filter(|one| {
-            crate::occupancy_of(&occupied, Path::new(&one.path)) == 0
-                && !same_worktree_path(&active, Path::new(&one.path))
+            let terminals = crate::occupancy_of(&occupied, Path::new(&one.path));
+            let reason = if same_worktree_path(&active, Path::new(&one.path)) {
+                Some(active_reason())
+            } else if terminals > 0 {
+                Some(occupied_reason(terminals))
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                transient.insert(one.path.clone(), reason);
+                false
+            } else {
+                true
+            }
         })
         .collect();
+    replace_transient_reasons(transient);
     // Keep transient occupancy out of the refusal memory even when it
     // removes the last candidate; moving away makes the next beat eligible.
 
-    // Everything below this point runs only on a pass that has something to
-    // do. Which candidates are due is answered from memory alone, so an idle
-    // beat — every beat, most of the time — never reads the settings
-    // document or the project catalog, let alone starts git.
+    // Prune the refusal cache after publishing transient reasons, even when
+    // occupancy excluded every candidate. Which candidates are due is still
+    // answered from memory alone: a pass with none due returns before it
+    // reads settings or the project catalog, let alone starts git.
     let due: Vec<orchestration::SettledCheckout> = {
         let mut marks = judged().lock().unwrap_or_else(|held| held.into_inner());
         // Forget every checkout that stopped being a candidate, so a window
@@ -301,7 +421,11 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
         // when it next settles.
         let live: std::collections::HashSet<&str> =
             standing.iter().map(|one| one.path.as_str()).collect();
+        let before = marks.len();
         marks.retain(|path, _| live.contains(path.as_str()));
+        if marks.len() != before {
+            reason_changed();
+        }
         standing
             .iter()
             .filter(|one| {
@@ -836,6 +960,7 @@ fn settle(
     let path = PathBuf::from(&candidate.path);
     let data_root = here.data_root.as_path();
     if same_worktree_path(&here.active, &path) {
+        transient_reason(&candidate.path, Some(active_reason()));
         judged()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
@@ -851,6 +976,7 @@ fn settle(
         }
         return Settled::Kept;
     }
+    transient_reason(&candidate.path, None);
     // Before git is asked anything: a road taking this directory apart turns
     // every answer below into a reading of a half-deleted tree.
     let Some(held) = CheckoutHeld::take(&path) else {
@@ -926,8 +1052,8 @@ fn settle(
         orchestration::checkout_examined(&candidate.worker, examined, now_ms);
     }
     let (branch, base, takes) = match verdict {
-        Verdict::Keep(because) => {
-            remember(candidate, standing, &because, data_root, now_ms);
+        Verdict::Keep { because, kind } => {
+            remember_as(candidate, standing, &because, kind, data_root, now_ms);
             return Settled::Kept;
         }
         Verdict::Reclaim {
@@ -959,6 +1085,7 @@ fn settle(
     // enough that it will not repeat on a beat.
     let terminals = (recheck.terminals)(&path);
     if terminals > 0 {
+        transient_reason(&candidate.path, Some(occupied_reason(terminals)));
         crate::note_window_event(
             data_root,
             &format!(
@@ -990,6 +1117,15 @@ fn settle(
     }
     match reclaim(&orchestrator, &held, data_root, road.holder()) {
         Ok(()) => {
+            transient_reason(&candidate.path, None);
+            if judged()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .remove(&candidate.path)
+                .is_some()
+            {
+                reason_changed();
+            }
             let took = if takes.is_empty() {
                 "no ignored path with it".to_string()
             } else {
@@ -1032,15 +1168,36 @@ fn remember(
     data_root: &Path,
     now_ms: i64,
 ) {
+    let kind = if matches!(standing, Standing::NotOurs) {
+        ReclaimKind::NotManaged
+    } else {
+        ReclaimKind::Kept
+    };
+    remember_as(candidate, standing, because, kind, data_root, now_ms);
+}
+
+fn remember_as(
+    candidate: &orchestration::SettledCheckout,
+    standing: Standing,
+    because: &str,
+    kind: ReclaimKind,
+    data_root: &Path,
+    now_ms: i64,
+) {
+    let reason = ReclaimReason {
+        kind,
+        detail: because.to_string(),
+        checked_ms: None,
+    };
     let repeat = {
         let mut marks = judged().lock().unwrap_or_else(|held| held.into_inner());
         let repeat = marks
             .get(&candidate.path)
-            .is_some_and(|held| held.kept == because);
+            .is_some_and(|held| held.reason == reason);
         marks.insert(
             candidate.path.clone(),
             Judged {
-                kept: because.to_string(),
+                reason,
                 at_ms: now_ms,
             },
         );
@@ -1049,6 +1206,7 @@ fn remember(
     if repeat {
         return;
     }
+    reason_changed();
     crate::note_window_event(
         data_root,
         &format!(
@@ -1126,8 +1284,15 @@ fn listed_by(cutter: &Orchestrator, path: &Path) -> Result<(Orchestrator, Worktr
 /// A refusal whose reason the ledger's hold carries as "could not be
 /// examined": the verdict and the fact are one sentence.
 fn unknown(because: String) -> (Verdict, Examined) {
+    unknown_as(because, ReclaimKind::Kept)
+}
+
+fn unknown_as(because: String, kind: ReclaimKind) -> (Verdict, Examined) {
     (
-        Verdict::Keep(because.clone()),
+        Verdict::Keep {
+            because: because.clone(),
+            kind,
+        },
         Examined::Unknown { why: because },
     )
 }
@@ -1135,7 +1300,13 @@ fn unknown(because: String) -> (Verdict, Examined) {
 /// A refusal because the checkout is the repository's own or was not cut
 /// by this window: whatever a worker left there stays with its owner.
 fn shared(because: String) -> (Verdict, Examined) {
-    (Verdict::Keep(because), Examined::Shared)
+    (
+        Verdict::Keep {
+            because,
+            kind: ReclaimKind::NotManaged,
+        },
+        Examined::Shared,
+    )
 }
 
 /// The verdict alone, for the tests that only ever asked for it — the beat
@@ -1159,7 +1330,10 @@ fn look(
         return shared("it is the repository's own checkout".to_string());
     }
     if known.locked {
-        return unknown("git reports that the worktree is locked".to_string());
+        return unknown_as(
+            "git reports that the worktree is locked".to_string(),
+            ReclaimKind::Locked,
+        );
     }
     // The same ownership rule the hand-rolled automatic cleanups ask, and for
     // the same reason: a reported path is not authority over a directory, and
@@ -1185,11 +1359,14 @@ fn look(
             let changes = loss.uncommitted_display();
             if !changes.is_empty() {
                 return (
-                    Verdict::Keep(format!(
-                        "{} uncommitted change(s) live only here: {}",
-                        changes.len(),
-                        changes.join(", ")
-                    )),
+                    Verdict::Keep {
+                        because: format!(
+                            "{} uncommitted change(s) live only here: {}",
+                            changes.len(),
+                            changes.join(", ")
+                        ),
+                        kind: ReclaimKind::Kept,
+                    },
                     Examined::Uncommitted {
                         changes: changes.len(),
                     },
@@ -1219,11 +1396,14 @@ fn look(
                 .into_iter()
                 .partition(|one| path.join(one).is_dir());
             if !files.is_empty() {
-                return unknown(format!(
-                    "{} ignored file(s) exist only here and would go with it: {}",
-                    files.len(),
-                    files.join(", ")
-                ));
+                return unknown_as(
+                    format!(
+                        "{} ignored file(s) exist only here and would go with it: {}",
+                        files.len(),
+                        files.join(", ")
+                    ),
+                    ReclaimKind::IgnoredFile,
+                );
             }
             dirs
         }
@@ -1255,9 +1435,10 @@ fn look(
             Examined::Landed,
         ),
         Ok(Some(outstanding)) => (
-            Verdict::Keep(format!(
-                "{outstanding} commit(s) on {branch} are not in {base} yet"
-            )),
+            Verdict::Keep {
+                because: format!("{outstanding} commit(s) on {branch} are not in {base} yet"),
+                kind: ReclaimKind::Kept,
+            },
             Examined::Unlanded {
                 branch: branch.to_string(),
                 base,
@@ -1638,7 +1819,7 @@ mod tests {
         let (verdict, examined) = look(&orchestrator, &bench.listed(&bench.repo), Holding::Base);
         assert_eq!(examined, Examined::Shared);
         assert!(
-            matches!(verdict, Verdict::Keep(ref because) if because.contains("repository's own"))
+            matches!(verdict, Verdict::Keep { ref because, .. } if because.contains("repository's own"))
         );
     }
 
@@ -1696,7 +1877,7 @@ mod tests {
         git(&path, &["commit", "-q", "-m", "ignore the secret too"]);
         git(&bench.repo, &["merge", "-q", "--ff-only", "wt/t-1140"]);
         std::fs::write(path.join(".env"), "TOKEN=real\n").expect("secret");
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&path)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&path)) else {
             panic!("a checkout holding an ignored file was reclaimable");
         };
         assert!(
@@ -1726,7 +1907,7 @@ mod tests {
         // directory is the only place they are.
         let dirty = bench.cut("dirty");
         std::fs::write(dirty.join("notes.txt"), "half a thought\n").expect("write");
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&dirty)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&dirty)) else {
             panic!("a checkout with an untracked file was reclaimable");
         };
         assert!(
@@ -1741,7 +1922,7 @@ mod tests {
         std::fs::write(unlanded.join("work.txt"), "real work\n").expect("write");
         git(&unlanded, &["add", "work.txt"]);
         git(&unlanded, &["commit", "-q", "-m", "real work"]);
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&unlanded)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&unlanded)) else {
             panic!("a checkout holding unlanded commits was reclaimable");
         };
         assert!(
@@ -1756,7 +1937,7 @@ mod tests {
             &unrecorded,
             &["config", "--local", "--unset", "branch.wt/unrecorded.base"],
         );
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&unrecorded)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&unrecorded)) else {
             panic!("a checkout with no recorded base was reclaimable");
         };
         assert!(because.contains("cut from"), "{because}");
@@ -1772,7 +1953,7 @@ mod tests {
                 "a-branch-that-went-away",
             ],
         );
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&orphaned)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&orphaned)) else {
             panic!("a checkout whose base is gone was reclaimable");
         };
         assert!(because.contains("cannot be resolved"), "{because}");
@@ -1783,7 +1964,7 @@ mod tests {
             &bench.repo,
             &["worktree", "lock", &locked.to_string_lossy()],
         );
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&locked)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&locked)) else {
             panic!("a locked checkout was reclaimable");
         };
         assert!(because.contains("locked"), "{because}");
@@ -1814,7 +1995,7 @@ mod tests {
             .output()
             .expect("git merge");
         assert!(!merged.status.success(), "the merge should have conflicted");
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&halfway)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&halfway)) else {
             panic!("a checkout mid-merge was reclaimable");
         };
         assert!(because.contains("in progress"), "{because}");
@@ -1873,7 +2054,7 @@ mod tests {
             ],
         );
 
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&foreign)) else {
+        let Verdict::Keep { because, .. } = judge(&orchestrator, &bench.listed(&foreign)) else {
             panic!("a hand-made checkout was reclaimable");
         };
         assert!(because.contains("ownership is `external`"), "{because}");
@@ -1998,6 +2179,106 @@ mod tests {
             "leaving the checkout did not make it immediately reclaimable"
         );
         assert!(!path.exists());
+    }
+
+    fn catalog_reclaim(bench: &Bench, path: &Path) -> serde_json::Value {
+        serde_json::to_value(crate::WorktreeEntry::new(bench.listed(path), &bench.repo))
+            .expect("the catalogue row")["reclaim"]
+            .clone()
+    }
+
+    #[test]
+    fn the_catalog_reads_transient_reclaim_reasons_without_caching_a_refusal() {
+        let _window = crate::orchestration::tests::the_window();
+        let bench = Bench::open();
+        let path = bench.cut("kept-open");
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-kept-open");
+        let road = Road::Report(bench.orchestrator());
+        let mut here = Where {
+            active: path.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        assert!(matches!(
+            settle(&candidate, &road, &here, &nobody_left(), 1_000),
+            Settled::Kept
+        ));
+        assert_eq!(catalog_reclaim(&bench, &path)["kind"], "active");
+        assert!(!judged().lock().unwrap().contains_key(&candidate.path));
+
+        here.active = bench.repo.clone();
+        let occupied = Recheck {
+            terminals: &|_| 1,
+            ..nobody_left()
+        };
+        assert!(matches!(
+            settle(&candidate, &road, &here, &occupied, 1_001),
+            Settled::Kept
+        ));
+        assert_eq!(catalog_reclaim(&bench, &path)["kind"], "open_conversation");
+        assert!(!judged().lock().unwrap().contains_key(&candidate.path));
+        assert!(matches!(
+            settle(&candidate, &road, &here, &nobody_left(), 1_002),
+            Settled::Reclaimed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_catalog_reads_the_lock_reason_from_reclaim() {
+        let _window = crate::orchestration::tests::the_window();
+        let bench = Bench::open();
+        let path = bench.cut("kept-locked");
+        git(&bench.repo, &["worktree", "lock", path.to_str().unwrap()]);
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-kept-locked");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &nobody_left(),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        let said = catalog_reclaim(&bench, &path);
+        assert_eq!(said["kind"], "locked");
+        assert!(said["detail"].as_str().unwrap().contains("locked"));
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn the_catalog_reads_ignored_files_as_the_reclaim_reason() {
+        let _window = crate::orchestration::tests::the_window();
+        let bench = Bench::open();
+        bench.ignore_on_main("target/\n.notes-local\n");
+        let path = bench.cut("kept-notes");
+        bench.move_in_warm_target(&path);
+        std::fs::write(path.join(".notes-local"), "keep this local note").unwrap();
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-kept-notes");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &nobody_left(),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        let said = catalog_reclaim(&bench, &path);
+        assert_eq!(said["kind"], "ignored_file");
+        assert!(said["detail"].as_str().unwrap().contains(".notes-local"));
+        assert!(path.join(".notes-local").is_file());
     }
 
     /// The accident of 2026-09-28 on a bench (t-12773): a worker reported

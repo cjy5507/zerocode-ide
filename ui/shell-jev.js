@@ -3350,7 +3350,7 @@ function jevCustomFormOf(form, draft, rules) {
   const question = text("textarea", "question", draft.question);
   question.rows = 4;
   const kinds = jevCustomGroup("kind", jevText("jev.custom.kindLegend", "답의 종류", "legend"), null,
-    ...rules.kinds.map((kind) => jevCustomTick("radio", "kind", kind, kind === draft.answer.kind, jevCustomSay("kind", kind))));
+    ...rules.kinds.map((kind) => jevCustomTick("radio", "kind", kind, kind === draft.answer.kind, jevQuestionType(kind))));
   const answer = jevCustomGroup("answer", jevText("jev.custom.answerLegend", "보기", "legend"), null);
   const points = jevCustomGroup("at", jevText("jev.custom.atLegend", "언제 묻나", "legend"), null,
     ...rules.points.map((point) => jevCustomTick("radio", "at", point.at, point.at === draft.at, jevCustomSay("point", point.at),
@@ -3449,7 +3449,16 @@ function jevCustomAnswerFields(form, answer, rules) {
         return input;
       })()), jevNode("label", "jev-custom-label", jevText("jev.custom.optionMeans", "뜻"), area("meaning", option.means))]
       : [jevNode("label", "jev-custom-label", label, area("level", option.means))];
-    const row = jevNode("li", "jev-custom-option", ...controls, remove);
+    const move = (direction, button) => {
+      button.type = "button";
+      button.dataset.jevCustomMove = direction; return button;
+    };
+    const actions = jevNode("div", "jev-custom-actions",
+      ...(!named ? [
+        move("up", jevText("jev.question.moveUp", "위로", "button", "btn")),
+        move("down", jevText("jev.question.moveDown", "아래로", "button", "btn")),
+      ] : []), remove);
+    const row = jevNode("li", "jev-custom-option", ...controls, actions);
     row.dataset.jevCustomOption = "";
     return row;
   });
@@ -3514,6 +3523,10 @@ function jevCustomOptionsCounted(form, rules) {
       ? t("jev.custom.optionName", "보기 {{count}}", { count: jevCount(at + 1) })
       : t("jev.custom.level", "{{count}}단계", { count: jevCount(at + 1) })));
     row.querySelector("[data-jev-custom-remove]").disabled = rows.length <= rules.options.least;
+    const up = row.querySelector('[data-jev-custom-move="up"]');
+    const down = row.querySelector('[data-jev-custom-move="down"]');
+    if (up) up.disabled = at === 0;
+    if (down) down.disabled = at === rows.length - 1;
   });
   const add = holder.querySelector("[data-jev-custom-add]");
   if (add) add.disabled = rows.length >= rules.options.most;
@@ -3598,11 +3611,16 @@ function jevCustomEdited(event) {
 
 /* Add an option or a level, or take one away. */
 function jevCustomOptionPressed(event) {
-  const button = event.target.closest("[data-jev-custom-add], [data-jev-custom-remove]");
+  const button = event.target.closest("[data-jev-custom-add], [data-jev-custom-remove], [data-jev-custom-move]");
   const form = el("jev-custom-form");
   const rules = jevCustomRules();
   if (!button || !jevCustomDrawer || !rules) return;
-  if (button.matches("[data-jev-custom-remove]")) {
+  if (button.dataset.jevCustomMove) {
+    const row = button.closest("[data-jev-custom-option]");
+    if (button.dataset.jevCustomMove === "up" && row.previousElementSibling) row.previousElementSibling.before(row);
+    else if (button.dataset.jevCustomMove === "down" && row.nextElementSibling) row.nextElementSibling.after(row);
+    row.querySelector("textarea")?.focus();
+  } else if (button.matches("[data-jev-custom-remove]")) {
     button.closest("[data-jev-custom-option]").remove();
   } else {
     const draft = jevCustomDraftOf(form);
@@ -3818,6 +3836,9 @@ function jevBuiltinFailure(error) {
     builtin_decision_name: t("jev.builtin.invalidName", "이름이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
     builtin_decision_question: t("jev.builtin.invalidQuestion", "질문이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
     builtin_decision_criteria: t("jev.builtin.invalidCriteria", "판단 기준이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
+    builtin_decision_question_schema: t("jev.question.schemaChanged", "저장된 문항과 현재 앱의 유형·보기가 맞지 않습니다. 기본값을 불러온 뒤 다시 수정하세요."),
+    builtin_decision_question_content: t("jev.question.invalidContent", "질문·보기의 내용이나 길이를 확인하세요."),
+    builtin_decision_options: t("jev.question.invalidOptions", "선택한 유형에 맞는 보기와 단계가 필요합니다."),
     builtin_decision_mode: t("jev.builtin.invalidMode", "이 결정이 지원하는 사용 방식을 골라 주세요. 수정한 기준은 기록만 또는 켜짐으로 사용할 수 있습니다."),
   };
   return words[token] ?? typesafeRefusal(error);
@@ -3861,6 +3882,120 @@ function jevBuiltinPressed(event) {
   return true;
 }
 
+/* Jev's primitives keep their own criteria shape. Built-ins fix the keys
+ * consumed by the app; custom decisions choose their type and option set. */
+function jevQuestionType(kind) {
+  if (kind === "noul" || kind === "yes_no") return t("jev.question.noul", "예/아니요 · Noul");
+  if (kind === "choice") return t("jev.question.choice", "하나 고르기 · Choice");
+  return t("jev.question.score", "단계 점수 · Score");
+}
+
+function jevQuestionSame(a, b) {
+  const ordered = (value) => Array.isArray(value) ? value.map(ordered)
+    : value && typeof value === "object" ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, ordered(value[key])])) : value;
+  return JSON.stringify(ordered(a)) === JSON.stringify(ordered(b));
+}
+
+function jevQuestionValue(label, value, cap) {
+  const area = document.createElement("textarea");
+  area.className = "jev-custom-area"; area.rows = 3;
+  area.value = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  area.maxLength = cap;
+  const format = document.createElement("select");
+  format.className = "jev-custom-input";
+  format.setAttribute("aria-label", t("jev.question.formatFor", "{{name}}의 내용 형식", { name: label }));
+  for (const [key, words] of [["text", t("jev.question.text", "텍스트")], ["json", t("jev.question.json", "구조화된 JSON")]]) {
+    const option = document.createElement("option"); option.value = key; option.textContent = words; format.append(option);
+  }
+  format.value = typeof value === "string" ? "text" : "json";
+  let previous = format.value;
+  format.addEventListener("change", () => {
+    if (format.value === previous) return;
+    if (format.value === "json") area.value = JSON.stringify(area.value);
+    else { try { const value = JSON.parse(area.value); area.value = typeof value === "string" ? value : JSON.stringify(value, null, 2); } catch { /* Keep an invalid draft visible. */ } }
+    previous = format.value;
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const error = jevNode("small", "jev-builtin-status is-error");
+  error.hidden = true; error.setAttribute("aria-live", "polite");
+  const node = jevNode("div", "jev-custom-field jev-question-value",
+    jevNode("label", "jev-custom-label", document.createTextNode(label), area), format, error);
+  return { node, area, format, read() {
+    let value = area.value;
+    try {
+      if (format.value === "json") value = JSON.parse(value);
+      if (value !== null && typeof value !== "string" && typeof value !== "object") throw new Error("shape");
+      if ([...JSON.stringify(value)].length > cap) throw new Error("length");
+      area.setCustomValidity(""); area.removeAttribute("aria-invalid"); error.hidden = true; error.textContent = "";
+      return { valid: true, value };
+    } catch {
+      const words = format.value === "json" ? t("jev.question.invalidJson", "문자열·객체·배열·null 중 하나를 길이 제한 안의 JSON으로 입력하세요.")
+        : t("jev.question.invalidContent", "질문·보기의 내용이나 길이를 확인하세요.");
+      area.setCustomValidity(words); area.setAttribute("aria-invalid", "true");
+      error.textContent = words; error.hidden = false;
+      return { valid: false };
+    }
+  } };
+}
+
+function buildJevBuiltinQuestions() {
+  const editor = jevBuiltinEditor;
+  const definition = editor.definition;
+  editor.fields = [];
+  const saved = editor.reset ? {} : (definition.saved?.questions ?? {});
+  editor.unmatched = Object.keys(saved).some((id) => !(definition.questions ?? []).some((question) => question.id === id));
+  if (editor.unmatched) {
+    el("jev-builtin-status").textContent = t("jev.question.schemaChanged", "저장된 문항과 현재 앱의 유형·보기가 맞지 않습니다. 기본값을 불러온 뒤 다시 수정하세요.");
+    el("jev-builtin-status").classList.add("is-error");
+  } else if (editor.reset) { el("jev-builtin-status").textContent = ""; el("jev-builtin-status").classList.remove("is-error"); }
+  el("jev-builtin-questions").replaceChildren(...(definition.questions ?? []).map((question, index) => {
+    const edit = saved[question.id];
+    const instructions = jevQuestionValue(t("jev.custom.questionLegend", "질문"), edit ? edit.instructions : question.instructions, definition.questionMax);
+    instructions.area.dataset.jevQuestionInstructions = question.id;
+    const criteria = question.type === "score" ? (edit?.criteria ?? question.criteria)
+      : { ...(question.criteria ?? {}), ...(edit?.criteria ?? {}) };
+    const keys = question.type === "noul" ? ["true", "false"] : Object.keys(criteria);
+    const fields = keys.map((key) => {
+      const label = question.type === "noul"
+        ? key === "true" ? t("jev.custom.yesMeans", "「예」의 뜻") : t("jev.custom.noMeans", "「아니오」의 뜻")
+        : question.type === "score" ? t("jev.question.level", "{{count}}단계 · 점수 {{score}}", { count: Number(key) + 1, score: key })
+          : t("jev.question.option", "보기 · {{key}}", { key });
+      const field = jevQuestionValue(label, criteria[key] ?? null, definition.criteriaMax);
+      field.area.dataset.jevQuestionCriterion = key;
+      return { key, ...field };
+    });
+    const help = jevText("jev.question.fixed", "기본 결정은 앱이 사용하는 답의 유형·보기 키·단계 순서를 유지합니다. 질문과 각 보기의 설명을 수정할 수 있습니다.", "p", "jev-custom-about-line");
+    const heading = jevNode("legend", "", document.createTextNode(t("jev.question.number", "문항 {{count}} · {{type}}", { count: index + 1, type: jevQuestionType(question.type) })));
+    const group = jevNode("fieldset", "jev-custom-field jev-builtin-question", heading,
+      jevNode("code", "jev-custom-about-line", document.createTextNode(question.id)), help, instructions.node, ...fields.map((field) => field.node));
+    group.dataset.jevQuestion = question.id;
+    if (question.dynamicOptions) group.append(jevText("jev.question.dynamicOptions", "현재 작업의 후보로 보기가 만들어집니다. 여기서는 고정 보기만 수정하며, 실행 때 제공되지 않은 보기를 추가하지 않습니다.", "p", "jev-custom-example"));
+    if (question.contextual) group.append(jevText("jev.question.contextual", "실행 때 각 문항이 가리키는 항목과 작업 상황은 유지됩니다.", "p", "jev-custom-about-line"));
+    editor.fields.push({ question, instructions, criteria: fields });
+    return group;
+  }));
+  const legacy = el("jev-builtin-legacy");
+  legacy.hidden = !definition.canEditPrompt || (!definition.dynamic && !el("jev-builtin-question").value && !el("jev-builtin-criteria").value);
+  legacy.open = !legacy.hidden;
+}
+
+function jevBuiltinQuestionDraft() {
+  const questions = {};
+  for (const row of jevBuiltinEditor.fields ?? []) {
+    const instructions = row.instructions.read();
+    const entries = row.criteria.map((field) => [field.key, field.read()]);
+    if (!instructions.valid || entries.some(([, field]) => !field.valid)) return null;
+    const original = row.question;
+    const criteria = original.type === "score" ? entries.map(([, field]) => field.value)
+      : Object.fromEntries(entries.filter(([key, field]) => !jevQuestionSame(field.value, original.criteria?.[key] ?? null)).map(([key, field]) => [key, field.value]));
+    const changedCriteria = original.type === "score" ? !jevQuestionSame(criteria, original.criteria) : Object.keys(criteria).length > 0;
+    if (!jevQuestionSame(instructions.value, original.instructions) || changedCriteria) {
+      questions[original.id] = { type: original.type, instructions: instructions.value, criteria, ...(original.contextual ? { contextual: true } : {}) };
+    }
+  }
+  return questions;
+}
+
 function jevBuiltinRaw() {
   return {
     name: el("jev-builtin-name").value,
@@ -3868,6 +4003,7 @@ function jevBuiltinRaw() {
     criteria: el("jev-builtin-criteria").value,
     mode: jevBuiltinEditor?.mode ?? "",
     reset: Boolean(jevBuiltinEditor?.reset),
+    questions: (jevBuiltinEditor?.fields ?? []).map((row) => [row.instructions, ...row.criteria].map((field) => [field.format.value, field.area.value])),
   };
 }
 
@@ -3875,11 +4011,14 @@ function jevBuiltinDraft() {
   const editor = jevBuiltinEditor;
   if (!editor?.definition) return null;
   const raw = jevBuiltinRaw();
+  const questions = jevBuiltinQuestionDraft();
+  if (!questions) return null;
   const changed = (text, original) => text.trim() && text.trim() !== original.trim() ? text.trim() : null;
   return {
     name: changed(raw.name, editor.defaultName),
-    question: changed(raw.question, editor.definition.question),
-    criteria: changed(raw.criteria, editor.definition.criteria),
+    question: changed(raw.question, ""),
+    criteria: changed(raw.criteria, ""),
+    questions,
     mode: raw.mode,
     deleted: false,
   };
@@ -3891,8 +4030,8 @@ function paintJevBuiltinEditor() {
   const ready = Boolean(editor.definition);
   const draft = jevBuiltinDraft();
   const prior = editor.definition?.saved ?? {};
-  const changedQuestion = ready && !editor.reset && (draft.question !== (prior.question ?? null) || draft.criteria !== (prior.criteria ?? null));
-  const edited = Boolean(draft?.question || draft?.criteria);
+  const changedQuestion = ready && draft && !editor.reset && (draft.question !== (prior.question ?? null) || draft.criteria !== (prior.criteria ?? null) || !jevQuestionSame(draft.questions, prior.questions ?? {}));
+  const edited = Boolean(draft?.question || draft?.criteria || Object.keys(draft?.questions ?? {}).length);
   const choices = editor.definition?.modes ?? [];
   const recording = choices.find((choice) => choice.asks && !choice.applies && !choice.automatic) ?? choices[0];
   if (changedQuestion && recording) editor.mode = recording.mode;
@@ -3908,9 +4047,10 @@ function paintJevBuiltinEditor() {
   for (const id of ["name", "question", "criteria"]) {
     el(`jev-builtin-${id}`).disabled = !ready || editor.busy || (id !== "name" && !editor.definition.canEditPrompt);
   }
+  for (const control of el("jev-builtin-questions").querySelectorAll("textarea, select")) control.disabled = !ready || editor.busy;
   el("jev-builtin-form").setAttribute("aria-busy", String(!ready || editor.busy));
   el("jev-builtin-reset").disabled = !ready || editor.busy;
-  el("jev-builtin-save").disabled = !ready || editor.busy || JSON.stringify(jevBuiltinRaw()) === editor.opened;
+  el("jev-builtin-save").disabled = !ready || !draft || editor.unmatched || editor.busy || JSON.stringify(jevBuiltinRaw()) === editor.opened;
   el("jev-builtin-close").disabled = editor.busy;
   el("jev-builtin-cancel").disabled = editor.busy;
 }
@@ -3920,6 +4060,8 @@ async function openJevBuiltinEditor(id, opener) {
   jevBuiltinEditor = editor;
   for (const name of ["name", "question", "criteria"]) el(`jev-builtin-${name}`).value = "";
   el("jev-builtin-mode").replaceChildren();
+  el("jev-builtin-questions").replaceChildren();
+  el("jev-builtin-legacy").hidden = true;
   el("jev-builtin-help").textContent = t("jev.builtin.loading", "기본 질문과 저장한 내용을 읽는 중…");
   el("jev-builtin-status").textContent = "";
   el("jev-builtin-status").classList.remove("is-error");
@@ -3933,16 +4075,17 @@ async function openJevBuiltinEditor(id, opener) {
     editor.mode = definition.mode;
     const saved = definition.saved ?? {};
     for (const [name, value, cap] of [["name", saved.name ?? editor.defaultName, definition.nameMax],
-      ["question", saved.question ?? definition.question, definition.questionMax], ["criteria", saved.criteria ?? definition.criteria, definition.criteriaMax]]) {
+      ["question", saved.question ?? "", definition.legacyQuestionMax ?? definition.questionMax], ["criteria", saved.criteria ?? "", definition.criteriaMax]]) {
       const input = el(`jev-builtin-${name}`);
       input.value = value;
       input.maxLength = cap;
     }
+    buildJevBuiltinQuestions();
     el("jev-builtin-help").textContent = !definition.canEditPrompt
       ? t("jev.builtin.noQuestion", "받은 답을 재사용하는 기능으로, 모델에 보내는 판단 질문은 없습니다. 이름과 사용 방식을 바꾸거나 삭제할 수 있습니다.")
       : definition.dynamic
         ? t("jev.builtin.dynamic", "작업마다 전달되는 질문을 사용합니다. 여기에 적은 질문·기준을 공통 판단 지침으로 적용하며, 비워 두면 작업의 질문을 따릅니다.")
-        : t("jev.builtin.help", "제품의 기본 문구입니다. 질문·판단 기준을 수정하면 현재 입력과 보기 형식에 맞춰 저장한 지침으로 판단합니다. 비워 두면 기본 문구를 따릅니다.");
+        : t("jev.question.help", "실제로 보내는 문항과 유형별 보기입니다. 바꾼 내용은 해당 문항에만 적용되며, 기본값 불러오기로 원래 질문과 보기를 복원할 수 있습니다.");
     el("jev-builtin-mode").replaceChildren(...definition.modes.map((choice) => {
       const button = document.createElement("button");
       button.type = "button";
@@ -3985,6 +4128,7 @@ async function saveJevBuiltinEditor() {
   const editor = jevBuiltinEditor;
   if (!editor?.definition || editor.busy || JSON.stringify(jevBuiltinRaw()) === editor.opened) return;
   const draft = jevBuiltinDraft();
+  if (!draft || editor.unmatched || !el("jev-builtin-form").reportValidity()) return;
   editor.busy = true;
   paintJevBuiltinEditor();
   el("jev-builtin-status").textContent = "";
@@ -4059,8 +4203,9 @@ el("jev-builtin-reset").addEventListener("click", () => {
   const editor = jevBuiltinEditor;
   if (!editor?.definition || editor.busy) return;
   el("jev-builtin-name").value = editor.defaultName;
-  el("jev-builtin-question").value = editor.definition.question;
-  el("jev-builtin-criteria").value = editor.definition.criteria;
+  el("jev-builtin-question").value = "";
+  el("jev-builtin-criteria").value = "";
   editor.mode = editor.definition.defaultMode; editor.reset = true; editor.warned = false;
+  buildJevBuiltinQuestions();
   el("jev-builtin-unsaved").hidden = true; paintJevBuiltinEditor();
 });

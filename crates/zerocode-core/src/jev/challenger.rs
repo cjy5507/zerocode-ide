@@ -990,5 +990,16 @@ pub fn standing(rows: &[Value], role: &str, challenger_model: &str) -> Standing 
     }
 }
 
+/// Structured editor fields, using the same words and answer keys as requests.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    use crate::jev::builtin::QuestionDefinition as D;
+    vec![D::choice(
+        QUESTION,
+        INSTRUCTIONS,
+        &OPTIONS.into_iter().zip(OPTION_MEANS).collect::<Vec<_>>(),
+    )]
+}
+
 #[cfg(test)]
 mod tests;

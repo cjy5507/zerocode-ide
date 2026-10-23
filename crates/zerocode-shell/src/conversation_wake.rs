@@ -102,8 +102,11 @@ pub(crate) enum WakeRoad {
     Visit,
     /// A sleeping tab put on the stage.
     Stage,
-    /// A person reopening the conversation by name: its row in the sidebar,
-    /// or its tab's 「이 대화 다시 열기」.
+    /// A person visiting a stored conversation's row in the sidebar.
+    /// Finished work is read without starting its former agent again.
+    Inspect,
+    /// A person explicitly asking to reopen a conversation, such as its
+    /// tab's 「이 대화 다시 열기」.
     Reopen,
     /// A door that named no road.
     Unnamed,
@@ -111,11 +114,12 @@ pub(crate) enum WakeRoad {
 
 impl WakeRoad {
     /// Every road a door names, in its wire spelling.
-    pub(crate) const NAMED: [WakeRoad; 5] = [
+    pub(crate) const NAMED: [WakeRoad; 6] = [
         Self::RestoreFront,
         Self::RestoreBehind,
         Self::Visit,
         Self::Stage,
+        Self::Inspect,
         Self::Reopen,
     ];
 
@@ -134,17 +138,18 @@ impl WakeRoad {
             Self::RestoreBehind => "restore-behind",
             Self::Visit => "visit",
             Self::Stage => "stage",
+            Self::Inspect => "inspect",
             Self::Reopen => "reopen",
             Self::Unnamed => "none",
         }
     }
 
     /// Whether the conversation was read off the window's stored record of a
-    /// workspace rather than picked by name.
+    /// workspace or its history, rather than explicitly asked to resume.
     pub(crate) const fn reads_a_stored_record(self) -> bool {
         matches!(
             self,
-            Self::RestoreFront | Self::RestoreBehind | Self::Visit | Self::Stage
+            Self::RestoreFront | Self::RestoreBehind | Self::Visit | Self::Stage | Self::Inspect
         )
     }
 }
@@ -396,9 +401,9 @@ mod tests {
     }
 
     /// t-57717: the road a door names, as the webview spells it — a word this
-    /// window does not know is no road — and the four that read the
-    /// conversation off the window's stored record, the only roads a finished
-    /// worker's conversation is declined on.
+    /// window does not know is no road — and the stored-record and inspection
+    /// roads that decline a finished worker's conversation. Explicit reopening
+    /// remains the person's choice.
     #[test]
     fn a_door_names_its_road_and_only_a_stored_records_roads_decline() {
         let spelled: Vec<&str> = WakeRoad::NAMED.into_iter().map(WakeRoad::word).collect();
@@ -409,6 +414,7 @@ mod tests {
                 "restore-behind",
                 "visit",
                 "stage",
+                "inspect",
                 "reopen"
             ]
         );

@@ -581,18 +581,23 @@ function resumableSessionOf(tab) {
  * goes to that pane rather than starting a second writer on its transcript; a
  * pane whose agent was quit back to its shell holds nothing, and reopening that
  * conversation is what the row is for. */
-async function resumeSession(known, worktree = null) {
+async function resumeSession(known, worktree = null, road = "reopen") {
   try {
-    // A person's pick by name (t-57717): its sidebar row or its tab's menu —
-    // the road that still opens a finished worker's conversation.
+    // A sidebar record is a look at finished work. Only an explicit reopen
+    // asks to start its former conversation again.
     const woke = await wakeConversation(
       known.agent,
       known.session,
       spawnGrid({ placement: "tab" }),
       null,
       worktree,
-      "reopen",
+      road,
     );
+    if (woke.finished) {
+      const path = worktree ?? activeWorktreePath;
+      openWorkbenchTasks({ path });
+      return;
+    }
     if (woke.standing) {
       // Held in a tab: that pane is the answer. In none yet: the door that is
       // opening it puts it on the stage itself.
@@ -11285,7 +11290,7 @@ function makeSurvivorRow(one) {
 /* 원장이 끝난 작업으로 든 워커의 한 줄(t-10993) — 판은 은퇴했고 작업은 체크아웃에
  * 남았다. 이름은 과업, 낱말은 원장의 단계(검증 대기·검증됨·병합됨·배포됨·실패 —
  * 보드와 같은 `ledgerReviewWord`), 시계는 시도가 끝난 때. 그 워커의 대화를 이
- * 창이 알면 누르면 되살아나고, 같은 대화의 지난 소식 줄은 이 줄이 대신한다. */
+ * 창이 알면 완료 기록을 여는 문이 되고, 같은 대화의 지난 소식 줄은 이 줄이 대신한다. */
 function makeFinishedWorkRow(path, work) {
   const node = makePastRow({
     agent: work.agent,
@@ -11310,8 +11315,8 @@ function makeFinishedWorkRow(path, work) {
 }
 
 /* 지난 행 하나의 몸 — 재시작 장부의 소식과 원장의 끝난 작업이 같은 옷을 입는다
- * (.is-retained). 되살릴 대화가 있을 때만 문이 된다: 없는 대화는 사실이지
- * 초대가 아니다. */
+ * (.is-retained). 대화를 알 때만 문이 된다. 원장이 끝난 워커로 확인하면 작업
+ * 기록을 열고, 그 밖의 대화는 기존 복원 경로를 따른다. */
 function makePastRow({ agent, name: words, said: word, at, worktree, session }) {
   const canResume = Boolean(session);
   const node = document.createElement(canResume ? "button" : "div");
@@ -11388,7 +11393,7 @@ async function reopenConversationIn(path, known) {
     return;
   }
   await storedWakesSettled(path);
-  await resumeSession(known, path);
+  await resumeSession(known, path, "inspect");
 }
 
 /* The moves `reopenConversationIn` started that are still under way, by

@@ -189,6 +189,20 @@ impl Cause {
     }
 }
 
+/// The editor reads the same question and option meanings as the wire.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    let options = Cause::ALL
+        .into_iter()
+        .map(|one| (one.word(), one.means()))
+        .collect::<Vec<_>>();
+    vec![crate::jev::builtin::QuestionDefinition::choice(
+        QUESTION,
+        INSTRUCTIONS,
+        &options,
+    )]
+}
+
 /// The words that define the question, as one string. The version is pinned
 /// to this, not to a date or to a reviewer's memory.
 #[must_use]

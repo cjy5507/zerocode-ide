@@ -393,7 +393,7 @@ pub enum Refused {
     /// A person's decision has sent the most it sends in an hour, or every
     /// decision together has ([`pass_within_the_hour`], t-62170).
     HourlyBudget,
-    /// The model pin changed after the caller prepared this batch.
+    /// The model pin or a saved question no longer matches the prepared batch.
     SettingsChanged,
     /// The seat rests, so asking now would hold the judgment server for
     /// nothing: its server asked for a wait that has not passed, its smallest
@@ -557,7 +557,8 @@ pub fn may_send(row: &JevUse, asking: &Asking<'_>, mut body: Value) -> Result<Cl
         });
     }
     if let Some(decision) = decision {
-        withheld_lines += super::builtin::apply(decision, &mut body);
+        withheld_lines +=
+            super::builtin::apply(decision, &mut body).map_err(|_| Refused::SettingsChanged)?;
     }
     name_the_model(&mut body, asking.settings);
     Ok(Cleared {

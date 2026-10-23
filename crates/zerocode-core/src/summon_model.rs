@@ -474,6 +474,21 @@ pub fn challenger<'a>(
         .min_by_key(|candidate| ended(&candidate.model))
 }
 
+/// Structured editor fields, using the same words and answer keys as requests.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    use crate::jev::builtin::QuestionDefinition as D;
+    vec![
+        D::choice(
+            &format!("{QUESTION}*"),
+            INSTRUCTIONS,
+            &[(ABSTAIN, ABSTAIN_MEANS)],
+        )
+        .contextual()
+        .dynamic_options(),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

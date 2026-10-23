@@ -1736,7 +1736,8 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     // three came back that way as agent panes nobody had called, each on the
     // first visit to its checkout after a restart. Nothing starts; the door
     // stands a plain shell in its place and keeps no line of it. A person's
-    // pick by name (`reopen`) still opens it, and a ledger that did not
+    // explicit reopen still opens it; a sidebar inspection reads the
+    // finished work without restarting it. A ledger that did not
     // answer stops nobody's conversation here.
     if reseating.is_none()
         && road.reads_a_stored_record()

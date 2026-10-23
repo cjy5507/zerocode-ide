@@ -1253,5 +1253,24 @@ pub fn label_row(
     row
 }
 
+/// Structured editor fields, using the same words and answer keys as requests.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    use crate::jev::builtin::QuestionDefinition as D;
+    let mut definitions = vec![D::choice(
+        REFLEX_DECIDE_QUESTION,
+        REFLEX_DECIDE_ASKS,
+        &REFLEX_DECIDE_OPTIONS,
+    )];
+    definitions.extend(Branch::ALL.map(|branch| {
+        D::choice(
+            &branch.question(),
+            branch.instructions(),
+            &REFLEX_DECIDE_OPTIONS,
+        )
+    }));
+    definitions
+}
+
 #[cfg(test)]
 mod tests;

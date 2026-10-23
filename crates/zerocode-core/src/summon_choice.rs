@@ -445,6 +445,15 @@ pub struct SummonPick {
     pub confidence: f64,
 }
 
+/// The editor reads the same question as the wire; candidates stay live.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    vec![
+        crate::jev::builtin::QuestionDefinition::choice(QUESTION, INSTRUCTIONS, &[])
+            .dynamic_options(),
+    ]
+}
+
 /// The words that define the question, as one string. The version is pinned
 /// to this, not to a date or to a reviewer's memory. An option's words are a
 /// SENTENCE SHAPE rather than a sentence — each option fills it with its own

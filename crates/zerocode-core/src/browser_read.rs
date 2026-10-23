@@ -156,6 +156,22 @@ pub struct ReadAsk {
     asked: Vec<usize>,
 }
 
+/// The editor reads the same question as the wire; candidates stay live.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    vec![
+        crate::jev::builtin::QuestionDefinition::choice(
+            &format!("{QUESTION_ID_PREFIX}*"),
+            INSTRUCTIONS,
+            &[
+                (BROWSER_READ_CONTENT, CONTENT_MEANS),
+                (BROWSER_READ_CHROME, CHROME_MEANS),
+            ],
+        )
+        .contextual(),
+    ]
+}
+
 /// The words that define the question, as one string. The version is pinned
 /// to this, not to a date or to a reviewer's memory.
 #[must_use]

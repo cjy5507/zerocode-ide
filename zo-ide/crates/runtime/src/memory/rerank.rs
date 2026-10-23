@@ -807,6 +807,13 @@ fn judgment_only_order(hits: usize, scores: &[f64]) -> Vec<usize> {
     order
 }
 
+/// The editor reads the same instructions and option meanings as the request.
+#[must_use]
+pub fn question_definitions() -> Vec<zerocode_core::jev::builtin::QuestionDefinition> {
+    use zerocode_core::jev::builtin::QuestionDefinition as D;
+    vec![D::score(&format!("{QUESTION_ID_PREFIX}*"), &rerank_instructions(0), &RERANK_LEVELS).contextual()]
+}
+
 #[cfg(test)]
 mod tests {
     use api::SystemOneQuestionKind;
