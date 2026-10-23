@@ -279,6 +279,34 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn an_individual_noul_edit_reaches_its_question_and_criteria_only() {
+        let draft: Decision = serde_json::from_value(json!({
+            "questions": {"irreversible": {
+                "type": "noul",
+                "instructions": "Does this operation discard the original data?",
+                "criteria": {"true": "The original data is discarded.", "false": "The original data remains."}
+            }}
+        })).unwrap();
+        let mut body = json!({"state": {"command": "read"}, "questions": {
+            "irreversible": super::super::noul::question("The original question.", "Original yes.", "Original no."),
+            "outside": super::super::noul::question("Does it write outside the project?", "Outside.", "Inside.")
+        }});
+        let outside = body["questions"]["outside"].clone();
+        let _ = apply(&draft, &mut body);
+        assert_eq!(
+            body["questions"]["irreversible"]["instructions"],
+            "Does this operation discard the original data?"
+        );
+        assert_eq!(
+            body["questions"]["irreversible"]["criteria"]["true"],
+            "The original data is discarded."
+        );
+        assert_eq!(body["questions"]["irreversible"]["type"], "noul");
+        assert_eq!(body["questions"]["outside"], outside);
+        assert!(draft.edited());
+    }
+
+    #[test]
     fn a_deleted_builtin_stays_off_when_the_global_switch_is_turned_back_on() {
         let root =
             json!({"smart":{"jev":{"enabled":true}, (SETTING):{(PLACEMENT.id):{"deleted":true}}}});

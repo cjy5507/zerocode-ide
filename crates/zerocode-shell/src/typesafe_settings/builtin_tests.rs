@@ -6,6 +6,30 @@ fn document(path: &Path) -> Value {
 }
 
 #[test]
+fn the_command_guard_editor_reads_two_typed_questions_and_their_options() {
+    use zerocode_core::jev::{COMMAND_GUARD, questions};
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("settings.json");
+    let words = builtin::default_words(COMMAND_GUARD.id).unwrap();
+    let editor = builtin_decision_editor(&path, COMMAND_GUARD.id, &words).unwrap();
+    let value = serde_json::to_value(editor).unwrap();
+    let definitions = value["questions"]
+        .as_array()
+        .expect("typed questions, not a flattened fingerprint");
+    assert_eq!(definitions.len(), 2);
+    for [id, instructions, yes, no] in questions::COMMAND_GUARD_QUESTIONS {
+        let question = definitions
+            .iter()
+            .find(|row| row["id"] == id)
+            .expect("each named question");
+        assert_eq!(question["type"], "noul");
+        assert_eq!(question["instructions"], instructions);
+        assert_eq!(question["criteria"]["true"], yes);
+        assert_eq!(question["criteria"]["false"], no);
+    }
+}
+
+#[test]
 fn builtin_edits_delete_restore_and_reset_survive_settings_reloads() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("settings.json");
