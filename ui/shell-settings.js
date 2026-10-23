@@ -12867,7 +12867,8 @@ async function readGithubItem() {
 }
 
 /* 한 목소리의 카드. 두 판(GitHub·GitLab)이 같은 얼굴을 쓴다 — 누가·언제 한 줄,
- * 그 아래 이 창의 마크다운(구성상 안전: 스크립트는 글자로 남는다). 판마다 다른
+ * 그 아래 이 창의 마크다운(구성상 안전: 스크립트는 글자로 남고, ```mermaid
+ * 울타리는 그림으로 서되 그 라벨도 글자로 들어간다 — t-58437). 판마다 다른
  * 것은 옷의 접두사와, 머리에 더 붙는 표 하나뿐이라 그 둘만 받는다.
  *
  * `said`가 함수인 것은 `say`의 규칙 때문이다: 언어가 바뀌면 이 줄은 스스로 다시
@@ -12885,7 +12886,7 @@ function itemVoiceCard(prefix, said, body, badge = null) {
   if (badge) head.appendChild(badge);
   const written = document.createElement("div");
   written.className = `${prefix}-item-comment-body`;
-  if (body.trim()) paintMarkdown(written, body);
+  if (body.trim()) paintMarkdownView(written, body);
   card.append(head, written);
   return card;
 }
@@ -12914,7 +12915,7 @@ function paintGithubItem(detail) {
   const body = el("gh-item-body");
   body.replaceChildren();
   if (detail.body.trim()) {
-    paintMarkdown(body, detail.body);
+    paintMarkdownView(body, detail.body);
   } else {
     const quiet = document.createElement("p");
     quiet.className = "gh-item-quiet";
@@ -14409,7 +14410,7 @@ function paintGitlabItem(detail) {
   const body = el("gl-item-body");
   body.replaceChildren();
   if (detail.body.trim()) {
-    paintMarkdown(body, detail.body);
+    paintMarkdownView(body, detail.body);
   } else {
     const quiet = document.createElement("p");
     quiet.className = "gl-item-quiet";

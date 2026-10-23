@@ -110,6 +110,14 @@ function standDiagrams(page) {
       seen.waiting.splice(at, 1)[0].release();
       return true;
     };
+    // A layout this page has made is remembered by its source (t-58437), so a card opened again draws
+    // at once and asks nothing. The checks that hold a card's answer on its way forget what the page
+    // has drawn before they start, so both cards ask again; what they assert is unchanged.
+    window.__FORGET_LAYOUTS__ = () => {
+      if (typeof mermaidLayout !== "object") return;
+      mermaidLayout.kept.clear();
+      mermaidLayout.keptMarks = 0;
+    };
     // What one painted body shows of its diagram: where the block stands, what it holds, and whether
     // the drawing stays in the body's column — fitted to it, or scrolling inside its own block.
     window.__READ_DIAGRAM__ = (body, label) => {
@@ -246,6 +254,7 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       };
       const waits = (label) => seen.waiting.some((one) => one.label === label);
       const labels = () => [...(md?.querySelectorAll("svg.mmd text.mmd-label") ?? [])].map((one) => one.textContent.split("<")[0]);
+      window.__FORGET_LAYOUTS__();
       seen.hold = true;
       open("t-503");
       const bAsked = await window.__UNTIL__(() => showing("보고서 나 문단.") && waits("나-그림"));
@@ -277,6 +286,7 @@ export async function testArtifactDiagrams(browser, origin, ok) {
       };
       const waits = (label) => seen.waiting.some((one) => one.label === label);
       const labels = () => [...(md?.querySelectorAll("svg.mmd text.mmd-label") ?? [])].map((one) => one.textContent.split("<")[0]);
+      window.__FORGET_LAYOUTS__();
       seen.hold = true;
       open("t-501");
       const away = await window.__UNTIL__(() => showing("한 줄 요약"));
