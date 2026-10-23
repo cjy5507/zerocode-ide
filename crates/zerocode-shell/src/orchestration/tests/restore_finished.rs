@@ -232,7 +232,11 @@ fn reading_finished_work_does_not_reseat_it_for_the_release_sweep() {
     assert!(door.started().is_empty());
     assert!(!door.did.lock().unwrap().contains(&Did::Prepared(DOOR)));
 
-    let releasing = Releasing::quiet();
+    // The beat's host answers the folder each pane works in, as the window's
+    // does. A host that knows no folder stands outside the run's project, and
+    // there the sweep's `worker-release` is refused (t-65286) before it can
+    // close anything.
+    let releasing = Releasing::in_project(&host.checkout);
     super::super::release_finished_panes(&releasing, &[], ended + super::super::RESEAT_GRACE_MS);
     assert_eq!(releasing.closed(), vec![WORKER]);
     assert_eq!(row(&worker).state, WorkerState::Released);
