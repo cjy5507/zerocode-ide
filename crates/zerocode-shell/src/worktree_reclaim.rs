@@ -1987,6 +1987,37 @@ mod tests {
             .remove(&candidate.path);
     }
 
+    #[test]
+    fn leaving_the_active_checkout_does_not_wait_for_a_cached_refusal() {
+        let bench = Bench::open();
+        let path = bench.cut("finished-active");
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-active");
+        let mut here = Where {
+            active: path.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let road = Road::Report(bench.orchestrator());
+        assert!(matches!(
+            settle(&candidate, &road, &here, &nobody_left(), 1_000),
+            Settled::Kept
+        ));
+        assert!(path.is_dir(), "the window's active checkout was removed");
+        assert!(
+            !judged().lock().unwrap().contains_key(&candidate.path),
+            "standing in a checkout left a fifteen-minute refusal behind"
+        );
+        here.active = bench.repo.clone();
+        assert!(
+            matches!(
+                settle(&candidate, &road, &here, &nobody_left(), 1_001),
+                Settled::Reclaimed { .. }
+            ),
+            "leaving the checkout did not make it immediately reclaimable"
+        );
+        assert!(!path.exists());
+    }
+
     /// The accident of 2026-09-28 on a bench (t-12773): a worker reported
     /// `ok:true` holding a commit its base had not taken, screenshots under an
     /// ignored `output/`, and a warmed `target/` its coordinator had moved in.

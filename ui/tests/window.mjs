@@ -120,6 +120,7 @@ import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testCloseGuard, testRestartNotice } from "./close-guard.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
+import { testSidebarFinishedFold } from "./sidebar-finished-fold.mjs";
 import { testSidebarTeam } from "./sidebar-team.mjs";
 import { testSidebarTeamSettled } from "./sidebar-team-settled.mjs";
 import { testSidebarScroll } from "./sidebar-scroll.mjs";
@@ -389,6 +390,7 @@ suite("close-guard", testCloseGuard);
 suite("restart-notice", testRestartNotice);
 // One task, one sidebar row: the checkouts a worker cut beside its own fold under it (t-45336).
 suite("sidebar-task-fold", testSidebarTaskFold);
+suite("sidebar-finished-fold", testSidebarFinishedFold);
 // The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
 suite("sidebar-team", testSidebarTeam);
 // A coordinator's finished sub-agents stand under it in the branch list, whatever the run or the agent (t-66539).
