@@ -148,3 +148,18 @@ fn editing_noul_instructions_does_not_invent_unspecified_criteria() {
     assert_eq!(body["questions"]["asked"]["instructions"], "Changed?");
     assert!(body["questions"]["asked"]["criteria"].is_null());
 }
+
+#[test]
+fn every_shipped_core_definition_fits_the_editing_contract() {
+    for seat in crate::jev::JEV_USES {
+        let Some(definitions) = default_questions(seat.id) else {
+            continue;
+        };
+        let edits = definitions
+            .iter()
+            .map(|row| (row.id.clone(), row.question.clone()))
+            .collect();
+        validate_against(&edits, &definitions)
+            .unwrap_or_else(|error| panic!("{}: {error}", seat.id));
+    }
+}

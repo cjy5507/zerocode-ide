@@ -11,7 +11,8 @@ use super::{JEV_USES, JevMode, JevUse};
 
 pub const SETTING: &str = "builtinDecisions";
 pub const NAME_MAX: usize = 80;
-pub const QUESTION_MAX: usize = 2_000;
+// Built-in instructions can be longer than a user-created decision's prompt.
+pub const QUESTION_MAX: usize = 4_000;
 pub const CRITERIA_MAX: usize = 8_000;
 pub const RUBRIC_KEY: &str = "decisionRubric";
 pub const EDITED_RUBRIC_FLAG: u32 = 1 << 31;
