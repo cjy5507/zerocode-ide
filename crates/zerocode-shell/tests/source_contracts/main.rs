@@ -19787,7 +19787,7 @@ mod tests {
         // would hold gigabytes for a quarter of an hour after the pane went.
         let sweeping = block_after(sweep, "pub(crate) fn sweep(");
         let filtered_at = sweeping
-            .find("crate::occupancy_of(&occupied, Path::new(&one.path)) == 0")
+            .find("let terminals = crate::occupancy_of(&occupied, Path::new(&one.path));")
             .expect("the sweep judges checkouts this window still has panes in");
         let judged_at = sweeping
             .find("judge_and_act(")
@@ -19795,6 +19795,20 @@ mod tests {
         assert!(
             filtered_at < judged_at,
             "the sweep spends git on a checkout it is holding a pane in:\n{sweeping}"
+        );
+        // The count drops the candidate. The reason it names for the sidebar
+        // (t-73173) is transient, and
+        // `a_finished_workers_checkout_is_swept_from_the_beat_and_never_forced`
+        // holds it out of the refusal cache.
+        let filtering: String = strip_rust_comments(&sweeping[filtered_at..judged_at])
+            .split_whitespace()
+            .collect();
+        assert!(
+            filtering.contains("}elseifterminals>0{Some(occupied_reason(terminals))}")
+                && filtering.contains(
+                    "ifletSome(reason)=reason{transient.insert(one.path.clone(),reason);false}else{true}"
+                ),
+            "a checkout this window holds a pane in stays a candidate:\n{sweeping}"
         );
         // And again at the last moment, because every question in between
         // costs a git process and a pane can open inside one. The window
@@ -19820,12 +19834,14 @@ mod tests {
             "the pane question is asked before git has answered, or after the \
              directory is gone:\n{settling}"
         );
-        // That last-minute refusal must NOT be remembered. `remember` starts
-        // the fifteen-minute clock, and the pane it is about may close a
-        // second later.
+        // That last-minute refusal must NOT be remembered. `remember` and
+        // `remember_as` start the fifteen-minute clock, and the pane it is
+        // about may close a second later.
         let late = &settling[rechecked_at..reclaimed_at];
         assert!(
-            !late.contains("remember("),
+            !late.contains("remember(")
+                && !late.contains("remember_as(")
+                && !late.contains("judged()"),
             "a pane that opened mid-judgment now stalls the reclaim for \
              `RE_JUDGE_AFTER`, which is how the disk filled:\n{late}"
         );
@@ -29783,12 +29799,14 @@ mod tests {
         // 끝난 뒤에 묻는다 — 답이 가리키는 판이 탭에 서 있어야 갈 수 있다.
         // 그 활성화는 첫 터미널을 세우지 않는다(t-7812 A): 문이 여는 대화가
         // 그 체크아웃의 첫 터미널이고, 세웠다면 빈 에이전트가 그 옆에 선다.
+        // 그 문은 「inspect」 길을 이름한다(t-73173): 끝난 워커의 대화는 기록으로
+        // 읽힐 뿐 다시 시작되지 않고, 그 판정은 백엔드가 그 길 이름으로 한다.
         let reopening = block_after(window, "async function reopenConversationIn(path, known) {");
         let settled = reopening
             .find("storedWakesSettled(path)")
             .expect("the door asks before the restore it started has landed");
         let asked = reopening
-            .find("resumeSession(known, path)")
+            .find("resumeSession(known, path, \"inspect\")")
             .expect("the door no longer opens through the judged road");
         assert!(
             reopening.contains("activateWorktree(path, { firstTerminal: false })")
@@ -29824,9 +29842,11 @@ mod tests {
             );
         }
         // 「서 있다」는 답은 그 판으로 간다 — 탭 메뉴의 「이 대화 다시 열기」도.
+        // 문이 이름한 길은 그대로 백엔드의 판정까지 간다: 길을 떨구면 사이드바의
+        // 기록 보기가 「reopen」으로 읽혀 끝난 워커를 다시 띄운다.
         let going = block_after(
             window,
-            "async function resumeSession(known, worktree = null) {",
+            "async function resumeSession(known, worktree = null, road = \"reopen\") {",
         );
         let standing_at = going
             .find("if (woke.standing) {")
@@ -29834,12 +29854,14 @@ mod tests {
         let mounted_at = going
             .find("mountTermTab(")
             .expect("an opened pane still gets a tab");
+        let flat: String = going.split_whitespace().collect();
         assert!(
             going.contains("wakeConversation(")
+                && flat.contains("null,worktree,road,);")
                 && going.contains("focusAgentPane(")
                 && standing_at < mounted_at,
-            "a conversation already standing is mounted as a second tab, or \
-             no longer gone to:\n{going}"
+            "a conversation already standing is mounted as a second tab, no \
+             longer gone to, or woken on a road the door did not name:\n{going}"
         );
 
         // 깨우기를 거부당한 대화는 소리를 낸다. 화면이 조용하면 「이어서」는
@@ -33033,9 +33055,11 @@ mod tests {
         // name.
         // Active occupancy is transient: both removal entrances stop it
         // before the cached judgment, so moving away can retry next beat.
+        // The sweep names why it passed the checkout by (t-73173), as a
+        // transient reason the sidebar reads, never as a remembered refusal.
         let sweeping = block_after(sweep, "pub(crate) fn sweep(");
         let active_gate = sweeping
-            .find("!same_worktree_path(&active, Path::new(&one.path))")
+            .find("if same_worktree_path(&active, Path::new(&one.path)) {")
             .expect("the sweep no longer excludes the active checkout");
         let cached = sweeping
             .find("let due:")
@@ -33043,6 +33067,19 @@ mod tests {
         assert!(
             active_gate < cached,
             "active occupancy entered the refusal cache"
+        );
+        let excluding = strip_rust_comments(&sweeping[active_gate..cached]);
+        let flat: String = excluding.split_whitespace().collect();
+        assert!(
+            flat.starts_with(
+                "ifsame_worktree_path(&active,Path::new(&one.path)){Some(active_reason())}"
+            ) && flat.contains(
+                "ifletSome(reason)=reason{transient.insert(one.path.clone(),reason);false}else{true}"
+            ) && flat.contains("replace_transient_reasons(transient);")
+                && !excluding.contains("judged()")
+                && !excluding.contains("remember"),
+            "the active checkout stays a candidate, or its reason entered the \
+             refusal cache:\n{excluding}"
         );
         let entrance = block_after(sweep, "fn settle(");
         let active = block_after(entrance, "if same_worktree_path(&here.active, &path)");

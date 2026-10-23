@@ -155,6 +155,111 @@ fn a_finished_workers_conversation_off_a_stored_record_starts_nothing() {
     }
 }
 
+/// A sidebar visit reads the finished work without making a new process its
+/// owner. Explicit reopening remains covered by the separate control above.
+#[test]
+fn inspecting_a_finished_worker_does_not_resume_its_conversation() {
+    const LEADER: u32 = 724_380;
+    const WORKER: u32 = 724_381;
+    const DOOR: u32 = 724_390;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the finished checkout");
+    let host = Restoring::new(checkout.path(), WORKER, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "inspect-finished");
+    let session = "72437b0c-0000-4000-8000-000000000001";
+    let (_task, worker, _term) = a_worker(&host, &team, "--agent claude", Some(session));
+    say(
+        &host,
+        &team,
+        &format!("worker-stop --worker {worker} --reason reported"),
+    );
+    assert_eq!(row(&worker).state, WorkerState::Released);
+
+    let door = Door::new(checkout.path());
+    door.on_road(WakeRoad::named(Some("inspect")));
+    let answer = door
+        .wake(DOOR, "claude", session)
+        .expect("the record's door");
+    assert_eq!(answer, ConversationWake::finished(DOOR, worker.clone()));
+    assert!(
+        door.started().is_empty(),
+        "reading a finished row started an agent"
+    );
+    assert!(!door.did.lock().unwrap().contains(&Did::Prepared(DOOR)));
+    assert_eq!(row(&worker).state, WorkerState::Released);
+    for pane in [DOOR, WORKER, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// Reading a finished row does not take a fresh worker seat that the next
+/// cleanup beat could close. An explicit reopen belongs to the person too.
+#[test]
+fn reading_finished_work_does_not_reseat_it_for_the_release_sweep() {
+    const LEADER: u32 = 724_400;
+    const WORKER: u32 = 724_401;
+    const DOOR: u32 = 724_410;
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    let checkout = tempfile::tempdir().expect("the finished checkout");
+    let host = Restoring::new(checkout.path(), WORKER, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "inspect-before-release");
+    let session = "72437b0c-0000-4000-8000-000000000002";
+    let (_task, worker, _term) = a_worker(&host, &team, "--agent claude", Some(session));
+    let held = row(&worker);
+    let capability = crate::agent_teams::current_pane_capability(&held.team, &held.pane).unwrap();
+    let ended = clock();
+    let done = run(
+        &host,
+        Vec::new(),
+        &held.team,
+        &held.pane,
+        &capability,
+        &words(
+            "send --type worker_done --body {\"ok\":false} --retry-request inspect-before-release",
+        ),
+        ended,
+    );
+    assert_eq!(done.exit_code, 0, "{}", done.stderr);
+    assert_eq!(row(&worker).state, WorkerState::Reclaimable);
+
+    let door = Door::new(checkout.path());
+    door.on_road(WakeRoad::Inspect);
+    assert_eq!(
+        door.wake(DOOR, "claude", session).expect("read the record"),
+        ConversationWake::finished(DOOR, worker.clone())
+    );
+    assert!(door.started().is_empty());
+    assert!(!door.did.lock().unwrap().contains(&Did::Prepared(DOOR)));
+
+    // The beat's host answers the folder each pane works in, as the window's
+    // does. A host that knows no folder stands outside the run's project, and
+    // there the sweep's `worker-release` is refused (t-65286) before it can
+    // close anything.
+    let releasing = Releasing::in_project(&host.checkout);
+    super::super::release_finished_panes(&releasing, &[], ended + super::super::RESEAT_GRACE_MS);
+    assert_eq!(releasing.closed(), vec![WORKER]);
+    assert_eq!(row(&worker).state, WorkerState::Released);
+
+    door.on_road(WakeRoad::Reopen);
+    assert_eq!(
+        door.wake(DOOR, "claude", session)
+            .expect("the person's explicit reopen"),
+        ConversationWake::opened(DOOR)
+    );
+    super::super::release_finished_panes(
+        &releasing,
+        &[],
+        ended + super::super::RESEAT_GRACE_MS + 1,
+    );
+    assert_eq!(releasing.closed(), vec![WORKER]);
+    assert_eq!(row(&worker).state, WorkerState::Released);
+    assert_eq!(door.started().len(), 1);
+    for pane in [DOOR, WORKER, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
 /// t-57717 red ①, the control: a sleeper's conversation asked for on a
 /// stored-record road comes back as the same worker, seated before its
 /// process starts — the road the decline must not close — and its line says

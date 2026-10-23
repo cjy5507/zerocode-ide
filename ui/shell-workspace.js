@@ -3838,7 +3838,8 @@ function landingShape(landing) {
     // move the chip and its tooltip, so they move the row.
     `.${landing.behind ?? ""}.${landing.far_behind ? 1 : 0}.${landing.conflict ? landing.conflict.total : ""}` +
     `.${(landing.conflict?.files ?? []).join(",")}` +
-    `.${landing.overlap ? landing.overlap.total : ""}.${(landing.overlap?.files ?? []).join(",")}`;
+    `.${landing.overlap ? landing.overlap.total : ""}.${(landing.overlap?.files ?? []).join(",")}` +
+    `.${landing.reclaim?.kind ?? ""}.${landing.reclaim?.detail ?? ""}`;
 }
 
 /* The compare ref without its remote: `origin/main` is 「main」 on a chip that has a few
@@ -3915,6 +3916,17 @@ function worktreeIgnoredWord() {
   return t("worktree.landIgnored", "무시된 파일 남음");
 }
 
+function worktreeReclaimWord(reason) {
+  switch (reason.kind) {
+    case "active": return t("worktree.reclaimActive", "현재 열어 둔 폴더");
+    case "open_conversation": return t("worktree.reclaimConversation", "열린 터미널 있음");
+    case "locked": return t("worktree.reclaimLocked", "워크트리 잠김");
+    case "ignored_file": return t("worktree.reclaimFile", "보존할 파일 있음");
+    case "not_managed": return t("worktree.reclaimNotManaged", "자동 정리 대상 아님");
+    default: return t("worktree.reclaimKept", "정리 보류");
+  }
+}
+
 /* What git says about one checkout's work, in a word and a tooltip (t-22104).
  *
  * It is a second axis beside the ledger's phase: 반영됨 / 미반영 N / 커밋 없음
@@ -3968,7 +3980,8 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     ledgerLine = t("worktree.landGitInLedgerNot", "git에는 {{ref}}에 들어가 있지만 원장에는 병합 기록이 없습니다", { ref });
   }
   const check = ledgerLine !== "" || state === "unknown";
-  const cleanable = gitIn && !landing.dirty && !check && idle && !current;
+  const reclaim = landing.reclaim ?? null;
+  const cleanable = gitIn && !landing.dirty && !check && idle && !current && !reclaim;
   let word;
   let tone;
   // The state's own word, before anything is added to it: what a place with room for one word says
@@ -4013,7 +4026,8 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   // Said of work that is in the compare ref and of nothing else: the backend
   // asks only landed rows, and a row that is in doubt says nothing more.
   const holdsIgnored = gitIn && !check && landing.ignored === true;
-  if (holdsIgnored) word += ` · ${worktreeIgnoredWord()}`;
+  if (reclaim) word += ` · ${worktreeReclaimWord(reclaim)}`;
+  else if (holdsIgnored) word += ` · ${worktreeIgnoredWord()}`;
   // The offer to clean up stands last. The ellipsis cuts the end of a chip — at
   // the sidebar's default width an idle landed checkout's chip is cut after
   // "반영됨 · 무시된 파일" — so what would go with the folder is said before the
@@ -4023,6 +4037,12 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     word += ` · ${offer}`;
   }
   const lines = [];
+  if (reclaim) lines.push(t("worktree.reclaimTip", "자동 정리 보류: {{reason}}", {
+    reason: `${worktreeReclaimWord(reclaim)}${reclaim.detail ? `\n${reclaim.detail}` : ""}`,
+  }));
+  if (reclaim?.checked_ms) lines.push(t("worktree.reclaimChecked", "자동 정리 확인: {{time}}", {
+    time: new Date(reclaim.checked_ms).toLocaleTimeString(),
+  }));
   if (ledgerLine) lines.push(ledgerLine);
   if (state === "landed") {
     lines.push(t("worktree.landTipLanded", "이 작업의 커밋이 모두 {{ref}}에 들어 있습니다 (git 기준)", { ref }));
@@ -4058,7 +4078,7 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
     lines.push(t("worktree.landTipDirty", "추적 중인 파일에 커밋하지 않은 변경이 있습니다"));
     lines.push(...worktreeUnsavedLines(landing, ref));
   }
-  if (holdsIgnored) {
+  if (holdsIgnored && !reclaim) {
     lines.push(t("worktree.landTipIgnored", "git이 무시하는 파일이 남아 있습니다 — 폴더를 지우면 함께 사라집니다. 크기와 폴더는 근거 보기에서 볼 수 있습니다"));
   }
   if (landing.dirty_checked_ms) {
@@ -5609,7 +5629,10 @@ async function refreshWorktrees() {
     worktreeLandings = new Map();
     for (const project of projects) {
       for (const worktree of project.worktrees ?? []) {
-        if (worktree.landing) worktreeLandings.set(worktree.path, worktree.landing);
+        if (worktree.landing) {
+          worktree.landing = { ...worktree.landing, reclaim: worktree.reclaim ?? null };
+          worktreeLandings.set(worktree.path, worktree.landing);
+        }
       }
     }
     paintScmLanding();
