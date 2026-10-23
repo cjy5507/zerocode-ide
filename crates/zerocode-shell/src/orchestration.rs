@@ -8231,6 +8231,92 @@ fn resume_settlement_recorded(
         })
 }
 
+/// A finished report can leave its pane open after a failed attempt or a
+/// delegated summons. Retire one unclaimed pane per beat through the normal
+/// release verb, which rechecks ownership and archives the final screen.
+fn release_finished_panes(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_ms: i64) {
+    struct FinishedPane {
+        run: String,
+        worker: String,
+        dispatch: String,
+        coordinator: String,
+        term: u32,
+        ended_ms: i64,
+    }
+    let Some(mut candidates) = with_ledger_seats(|ledger, seats| {
+        let mut candidates = Vec::new();
+        for run in ledger.runs() {
+            let Some(coordinator) = run
+                .coordinator_live()
+                .filter(|held| seat_term(seats, &held.seat).is_some())
+            else {
+                continue;
+            };
+            let latest = latest_worker_dispatches(run);
+            for worker in &run.workers {
+                if worker.state != WorkerState::Reclaimable || worker.taken_over {
+                    continue;
+                }
+                let Some(dispatch) = latest.get(worker.id.as_str()) else {
+                    continue;
+                };
+                let Some(ended_ms) = dispatch.ended_ms else {
+                    continue;
+                };
+                if now_ms.saturating_sub(ended_ms) < RESEAT_GRACE_MS {
+                    continue;
+                }
+                let Some(term) = seated_term(run, worker, seats) else {
+                    continue;
+                };
+                candidates.push(FinishedPane {
+                    run: run.id.clone(),
+                    worker: worker.id.clone(),
+                    dispatch: dispatch.id.clone(),
+                    coordinator: coordinator.seat.clone(),
+                    term,
+                    ended_ms,
+                });
+            }
+        }
+        candidates
+    }) else {
+        return;
+    };
+    candidates.sort_by_key(|candidate| candidate.ended_ms);
+    for candidate in candidates {
+        if crate::human_input::line_of(candidate.term).0 {
+            continue;
+        }
+        let Some((team, pane)) = candidate.coordinator.split_once('/') else {
+            continue;
+        };
+        let Some(capability) = crate::agent_teams::current_pane_capability(team, pane) else {
+            continue;
+        };
+        // No ledger or pane-table read lock crosses the command. A new
+        // dispatch or a person's takeover makes worker-release refuse it.
+        let _ = run(
+            host,
+            overrides.to_vec(),
+            team,
+            pane,
+            &capability,
+            &[
+                "worker-release".to_string(),
+                "--run".to_string(),
+                candidate.run,
+                "--worker".to_string(),
+                candidate.worker,
+                "--retry-request".to_string(),
+                format!("finished-release-{}", candidate.dispatch),
+            ],
+            now_ms,
+        );
+        break;
+    }
+}
+
 pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_ms: i64) -> usize {
     // The installed scripts leave level-triggered evidence outside the bridge
     // precisely because a broken bridge cannot report itself through that
@@ -8311,6 +8397,7 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     reconcile_pane_liveness(host, now_ms);
     // And the sleepers' grace, on the same beat (t-3058).
     expire_sleepers(host, now_ms);
+    release_finished_panes(host, overrides, now_ms);
     /* And retention, on the same beat.
      *
      * The actor decides whether it is DUE — once an hour, judged against the

@@ -57,6 +57,7 @@ export async function testSidebarTaskFold({ browser, origin, ok, faults }) {
     await page.evaluate(() => { setEveryProjectClosed(false); });
     await page.evaluate(async (scene) => {
       setLocale("ko", { persist: false });
+      openedLandingFolds.add("/r"); // Inspect task-level folds inside the expanded finished group.
       const tell = (name, payload) => {
         for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
       };
