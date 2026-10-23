@@ -481,7 +481,7 @@ impl SubagentWave {
     }
 
     fn summary(&self) -> Option<String> {
-        (!self.seen.is_empty()).then(|| super::strings::helper_wave(self.seen.len(), self.running))
+        (self.running > 0).then(|| super::strings::helper_wave(self.seen.len(), self.running))
     }
 }
 
