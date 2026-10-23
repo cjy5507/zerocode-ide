@@ -2680,10 +2680,11 @@ function paintJevRow(row, id, held, standing, head, latency) {
       jevNode("span", "jev-row-meta", jevNode("span", "jev-row-id")));
   }
   open.textContent = jevSeatName(id);
-  for (const [selector, key, word] of [["[data-jev-builtin-edit]", "jev.builtin.editFor", "「{{name}}」 수정"],
-    ["[data-jev-builtin-delete]", "jev.builtin.deleteFor", "「{{name}}」 삭제"]]) {
+  for (const [selector, label] of [
+    ["[data-jev-builtin-edit]", t("jev.builtin.editFor", "「{{name}}」 수정", { name: jevSeatName(id) })],
+    ["[data-jev-builtin-delete]", t("jev.builtin.deleteFor", "「{{name}}」 삭제", { name: jevSeatName(id) })],
+  ]) {
     const button = seat.querySelector(selector);
-    const label = t(key, word, { name: jevSeatName(id) });
     button.setAttribute("aria-label", label); button.dataset.tip = label;
   }
   open.dataset.tip = jevHintLead(id);
@@ -3810,17 +3811,16 @@ function jevBuiltinDefaultName(id) {
 function jevBuiltinFailure(error) {
   const token = error?.message ?? String(error);
   const words = {
-    builtin_decision_changed: ["jev.builtin.changed", "다른 창에서 이 결정을 바꿨습니다. 닫고 다시 열어 최신 내용을 확인하세요."],
-    builtin_decision_missing: ["jev.builtin.missing", "이 기본 결정을 찾지 못했습니다. 목록을 새로 읽어 주세요."],
-    builtin_decision_definition_unavailable: ["jev.builtin.unavailable", "기본 질문을 불러오지 못했습니다. 앱과 zo를 업데이트한 뒤 다시 열어 주세요."],
-    builtin_decision_credential: ["jev.builtin.credential", "질문이나 기준에 비밀번호·키로 보이는 내용이 있습니다. 지운 뒤 저장하세요."],
-    builtin_decision_name: ["jev.builtin.invalidName", "이름이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."],
-    builtin_decision_question: ["jev.builtin.invalidQuestion", "질문이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."],
-    builtin_decision_criteria: ["jev.builtin.invalidCriteria", "판단 기준이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."],
-    builtin_decision_mode: ["jev.builtin.invalidMode", "이 결정이 지원하는 사용 방식을 골라 주세요. 수정한 기준은 기록만 또는 켜짐으로 사용할 수 있습니다."],
+    builtin_decision_changed: t("jev.builtin.changed", "다른 창에서 이 결정을 바꿨습니다. 닫고 다시 열어 최신 내용을 확인하세요."),
+    builtin_decision_missing: t("jev.builtin.missing", "이 기본 결정을 찾지 못했습니다. 목록을 새로 읽어 주세요."),
+    builtin_decision_definition_unavailable: t("jev.builtin.unavailable", "기본 질문을 불러오지 못했습니다. 앱과 zo를 업데이트한 뒤 다시 열어 주세요."),
+    builtin_decision_credential: t("jev.builtin.credential", "질문이나 기준에 비밀번호·키로 보이는 내용이 있습니다. 지운 뒤 저장하세요."),
+    builtin_decision_name: t("jev.builtin.invalidName", "이름이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
+    builtin_decision_question: t("jev.builtin.invalidQuestion", "질문이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
+    builtin_decision_criteria: t("jev.builtin.invalidCriteria", "판단 기준이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
+    builtin_decision_mode: t("jev.builtin.invalidMode", "이 결정이 지원하는 사용 방식을 골라 주세요. 수정한 기준은 기록만 또는 켜짐으로 사용할 수 있습니다."),
   };
-  const said = words[token];
-  return said ? t(...said) : typesafeRefusal(error);
+  return words[token] ?? typesafeRefusal(error);
 }
 
 function jevBuiltinTrashPart() {
