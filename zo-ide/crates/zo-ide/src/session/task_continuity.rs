@@ -65,6 +65,31 @@ pub(crate) enum TurnOrigin {
     Person,
 }
 
+/// How a turn ended, as far as the person had a hand in it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnEnd {
+    /// It ran to its end, or failed, with no interrupt from the person.
+    Ran,
+    /// The person interrupted it with nothing of theirs waiting: a stop.
+    Stopped,
+    /// The person interrupted it to send the words they typed while it ran —
+    /// the composer's Esc with words waiting. Those words are the next turn,
+    /// and the work is not stopped.
+    SentWords,
+}
+
+impl TurnEnd {
+    /// The end of a turn the person `cancelled`, or did not; `sent_words`
+    /// when the interrupt carried the words they typed while it ran.
+    pub(crate) const fn of(cancelled: bool, sent_words: bool) -> Self {
+        match (cancelled, sent_words) {
+            (false, _) => Self::Ran,
+            (true, false) => Self::Stopped,
+            (true, true) => Self::SentWords,
+        }
+    }
+}
+
 /// How the controller of the latest unattended turn stands at a turn's start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ControllerStanding {
@@ -171,10 +196,11 @@ impl TaskContinuity {
         self.unattended = Some(label);
     }
 
-    /// A turn ended; `stopped_by_person` when the person interrupted it. A
-    /// stop holds the window's lines back until the person writes again; an
-    /// unattended turn's interruption is its controller's to keep.
-    pub(crate) fn end_turn(&mut self, origin: TurnOrigin, stopped_by_person: bool) {
+    /// A turn ended, as `end` says. A stop holds the window's lines back until
+    /// the person writes again; an unattended turn's interruption is its
+    /// controller's to keep.
+    pub(crate) fn end_turn(&mut self, origin: TurnOrigin, end: TurnEnd) {
+        let stopped_by_person = end != TurnEnd::Ran;
         match origin {
             TurnOrigin::Person => self.stopped = stopped_by_person,
             TurnOrigin::MailPointer | TurnOrigin::HostNotice => self.stopped |= stopped_by_person,
@@ -376,7 +402,8 @@ mod tests {
     };
 
     use super::{
-        controller_standing, ControllerStanding, TaskContinuity, TASK_CONTINUITY_REMINDER_PREFIX,
+        controller_standing, ControllerStanding, TaskContinuity, TurnEnd,
+        TASK_CONTINUITY_REMINDER_PREFIX,
     };
     use crate::autonomy::loops::LoopPhase;
 
@@ -528,7 +555,8 @@ mod tests {
                 .cloned();
             let asked = self.provider.sent.lock().expect("the provider's record").len();
             self.runtime.run_turn(input, None).expect("the turn runs");
-            self.continuity.end_turn(origin, stopped_by_person);
+            self.continuity
+                .end_turn(origin, TurnEnd::of(stopped_by_person, false));
             let sent = self.provider.sent.lock().expect("the provider's record");
             let request = sent.get(asked).expect("the turn asked the provider");
             if let Some(reminder) = reminder.as_deref() {
@@ -771,5 +799,33 @@ mod tests {
 
         let said = session.turn(&pointer(1), |_| None, false).reminder.unwrap_or_default();
         assert!(said.contains("Then also run the importer's tests."), "kept as the person's words: {said}");
+    }
+
+    /// The person's Esc that sends the words they typed while the turn ran
+    /// (the composer's "send now"; the helpers keep running) is not a stop:
+    /// those words come next as the person's own turn, and the work goes on
+    /// once they are answered.
+    #[test]
+    fn an_interrupt_that_sends_the_persons_waiting_words_is_not_a_stop() {
+        let _env = crate::test_env_lock();
+        let stores = Stores::new();
+        let mut session = Synthetic::open(&stores.project("work"), "session-i");
+        session.person("Run the full verification and write the report.");
+        session.plan(&[("Run the full verification", "in_progress")]);
+        // The work's next turn ends on the person's Esc with words waiting.
+        let (origin, _) = session.continuity.begin_turn(
+            &mut session.runtime,
+            "Go on with the verification.",
+            &session.cwd,
+            |_| None,
+        );
+        session.continuity.end_turn(origin, TurnEnd::of(true, true));
+
+        let said = session.person("Where does it stand?").reminder.unwrap_or_default();
+
+        assert!(
+            said.contains("answer it, then continue the work in this same turn"),
+            "the words sent with Esc are answered and the work goes on: {said}"
+        );
     }
 }

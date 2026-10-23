@@ -22,7 +22,7 @@ use super::agent_completion_pump::{
 };
 use super::mcp_runtime::discover_pending_mcp_tools_in_background;
 use super::stream::drive_render_stream;
-use super::task_continuity::{TaskContinuity, TurnOrigin};
+use super::task_continuity::{TaskContinuity, TurnEnd, TurnOrigin};
 use super::{BuiltRuntime, SessionHandle, TurnHarness};
 use crate::cli_args::{AllowedToolSet, DisallowedToolSet};
 use crate::effort::Effort;
@@ -1037,10 +1037,16 @@ impl PlainSession {
         if let Some(plan) = plan_turn {
             plan.finish(&self.cwd, &self.handle.id, &result);
         }
-        self.continuity.end_turn(origin, user_cancel_requested.load(Ordering::SeqCst));
+        self.end_task_continuity(origin, user_cancel_requested.load(Ordering::SeqCst));
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         Ok(summary)
+    }
+
+    /// The turn ended: tell the person's work how — run out, or stopped by
+    /// the person (`cancelled`).
+    fn end_task_continuity(&mut self, origin: TurnOrigin, cancelled: bool) {
+        self.continuity.end_turn(origin, TurnEnd::of(cancelled, false));
     }
 
     /// Who this turn's input is from, and what the model is told on the way
