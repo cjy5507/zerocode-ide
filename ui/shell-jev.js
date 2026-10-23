@@ -3449,12 +3449,15 @@ function jevCustomAnswerFields(form, answer, rules) {
         return input;
       })()), jevNode("label", "jev-custom-label", jevText("jev.custom.optionMeans", "뜻"), area("meaning", option.means))]
       : [jevNode("label", "jev-custom-label", label, area("level", option.means))];
-    const move = (direction, key, words) => {
-      const button = jevText(key, words, "button", "btn"); button.type = "button";
+    const move = (direction, button) => {
+      button.type = "button";
       button.dataset.jevCustomMove = direction; return button;
     };
     const actions = jevNode("div", "jev-custom-actions",
-      ...(!named ? [move("up", "jev.question.moveUp", "위로"), move("down", "jev.question.moveDown", "아래로")] : []), remove);
+      ...(!named ? [
+        move("up", jevText("jev.question.moveUp", "위로", "button", "btn")),
+        move("down", jevText("jev.question.moveDown", "아래로", "button", "btn")),
+      ] : []), remove);
     const row = jevNode("li", "jev-custom-option", ...controls, actions);
     row.dataset.jevCustomOption = "";
     return row;
