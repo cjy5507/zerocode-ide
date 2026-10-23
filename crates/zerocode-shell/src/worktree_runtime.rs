@@ -108,10 +108,17 @@ pub(super) struct WorktreeEntry {
     /// it; absent for the repository's own checkout, a folder and a prunable row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) landing: Option<WorktreeLanding>,
+    /// Why automatic cleanup last kept this checkout, from the reclaimer's
+    /// own reading. Files ignored by git are a separate fact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) reclaim: Option<crate::worktree_reclaim::ReclaimReason>,
 }
 
 impl WorktreeEntry {
     pub(super) fn new(worktree: Worktree, active_root: &Path) -> Self {
+        let reclaim = (!worktree.is_main && !worktree.prunable)
+            .then(|| crate::worktree_reclaim::reason_for(&worktree.path))
+            .flatten();
         Self {
             active: worktree.path == active_root,
             path: worktree.path.to_string_lossy().into_owned(),
@@ -136,6 +143,7 @@ impl WorktreeEntry {
             linked_item: None,
             head: worktree.head,
             landing: None,
+            reclaim,
         }
     }
 
@@ -158,6 +166,7 @@ impl WorktreeEntry {
             linked_item: None,
             head: None,
             landing: None,
+            reclaim: None,
         }
     }
 }

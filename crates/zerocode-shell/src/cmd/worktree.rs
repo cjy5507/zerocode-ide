@@ -132,7 +132,11 @@ pub(crate) fn worktree_stamp(
 /// queues the rows behind the list.
 #[tauri::command(async)]
 pub(crate) fn worktree_landing_stamp(roots: Vec<String>) -> String {
-    landing_stamp_of(roots)
+    format!(
+        "{}:reclaim:{}",
+        landing_stamp_of(roots),
+        crate::worktree_reclaim::reason_revision()
+    )
 }
 
 /// The landed state of commits whose checkouts are gone (t-36910): a task in
