@@ -1,10 +1,14 @@
 import { openWindowTestPage } from "./window-boot.mjs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 
 export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
   const { page } = await openWindowTestPage(browser, origin, { faults });
+  const axeModule = createRequire(import.meta.url)("@axe-core/playwright");
+  const AxeBuilder = axeModule.default ?? axeModule;
   try {
+    await page.emulateMedia({ reducedMotion: "reduce" });
     await page.setViewportSize({ width: 1280, height: 1600 });
     await page.waitForFunction(() => projectsRead);
     await page.evaluate(async () => {
@@ -65,14 +69,16 @@ export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
     ok("flat lists keep all checkouts reachable without a project fold", await page.evaluate(() => window.__FINISHED_SHOWN__().length === 10));
     await page.evaluate(async () => { window.__FINISHED_ACTIVE__ = "/r/active"; setSidebarView({ groupBy: "repo" }); await refreshWorktrees(); });
     const shots = process.env.WORKER_FINISH_SHOTS;
-    if (shots) {
-      await mkdir(shots, { recursive: true });
-      for (const theme of ["dark", "light"]) {
-        await page.evaluate((value) => document.documentElement.dataset.theme = value, theme);
-        for (const width of [1280, 320]) {
-          await page.setViewportSize({ width, height: 900 });
-          await page.screenshot({ path: join(shots, `finished-${theme}-${width}.png`) });
-        }
+    if (shots) await mkdir(shots, { recursive: true });
+    for (const treatment of ["dark", "light"]) {
+      await page.setViewportSize({ width: 1280, height: 1600 });
+      await page.evaluate((value) => { theme = value; applyTheme(); }, treatment);
+      const audit = await new AxeBuilder({ page }).include(".wt-landing-fold").withTags(["wcag2a", "wcag2aa"]).analyze();
+      ok(`the pending-landing control is accessible in ${treatment}`, audit.violations.length === 0,
+        JSON.stringify(audit.violations.map((one) => ({ id: one.id, nodes: one.nodes.map((node) => node.target) }))));
+      if (shots) for (const width of [1280, 320]) {
+        await page.setViewportSize({ width, height: 900 });
+        await page.screenshot({ path: join(shots, `finished-${treatment}-${width}.png`), animations: "disabled" });
       }
     }
   } finally {
