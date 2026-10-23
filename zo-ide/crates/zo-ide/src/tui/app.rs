@@ -481,7 +481,7 @@ impl SubagentWave {
     }
 
     fn summary(&self) -> Option<String> {
-        (!self.seen.is_empty()).then(|| super::strings::helper_wave(self.seen.len(), self.running))
+        (self.running > 0).then(|| super::strings::helper_wave(self.seen.len(), self.running))
     }
 }
 
@@ -9055,26 +9055,26 @@ mod tests {
         assert!(frame.contains("✓ Run cargo test"), "{frame}");
     }
 
-    /// The `agents 1 · running 0 · done 1` line under a working header is a
-    /// fact about the running turn: the helper the turn spawned has finished
-    /// while the turn goes on. It is a detail of the status line, so it
-    /// leaves with it — a frame with no status has no agents line, whatever
-    /// the wave remembers (2026-09-07 23:4x screenshot, t-3063).
+    /// Finished helpers no longer occupy the working detail, even while the
+    /// parent turn continues. Their identities remain in the turn's history.
     #[test]
-    fn the_agents_line_is_a_detail_of_the_working_line_and_leaves_with_it() {
+    fn completed_helpers_leave_the_working_line_and_restore_its_tool_detail() {
         let mut ui = test_ui();
         ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(1897)));
+        ui.set_status_detail(Some("Run cargo test".to_string()));
         ui.set_subagent_progress(vec![running_helper("agent-a", "stage-art", "Read · src/a.rs", 3, 9)]);
         ui.set_subagent_progress(Vec::new());
         assert_eq!(
             ui.status.as_ref().expect("working status").details,
-            vec!["agents 1 · running 0 · done 1".to_string()]
+            vec!["Run cargo test".to_string()]
         );
+        ui.set_status_detail(None);
+        assert!(ui.status.as_ref().expect("working status").details.is_empty());
 
         // The turn ends: the status goes first (`run_turn`'s end), and the
         // bottom pane it drew goes with it.
         ui.status = None;
-        assert!(ui.subagent_wave.summary().is_some(), "premise: the wave still remembers the helper");
+        assert!(ui.subagent_wave.seen.contains("agent-a"), "the wave still remembers the helper");
         let composer = crate::tui::composer::Composer::new();
         let frame = crate::tui::view::Frame {
             composer: &composer,
@@ -9115,6 +9115,29 @@ mod tests {
             rows.iter().all(|row| !row.plain().contains("agents 1")),
             "{:?}",
             rows.iter().map(Line::plain).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn partial_helper_completion_stays_visible_and_new_helpers_reopen_the_summary() {
+        let mut ui = test_ui();
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(20)));
+        let helper = |id| running_helper(id, "inspect", "Read · src/a.rs", 1, 2);
+        let mut ledger = helper("ledger-a");
+        ledger.ledger = true;
+        ui.set_subagent_progress(vec![ledger, helper("native-b")]);
+        ui.set_subagent_progress(vec![helper("native-b")]);
+        assert_eq!(
+            ui.status.as_ref().unwrap().details.first().map(String::as_str),
+            Some("agents 2 · running 1 · done 1")
+        );
+        ui.set_subagent_progress(Vec::new());
+        assert!(ui.status.as_ref().unwrap().details.is_empty());
+        assert_eq!(ui.subagent_wave.seen.len(), 2);
+        ui.set_subagent_progress(vec![helper("native-c")]);
+        assert_eq!(
+            ui.status.as_ref().unwrap().details.first().map(String::as_str),
+            Some("agents 3 · running 1 · done 2")
         );
     }
 
