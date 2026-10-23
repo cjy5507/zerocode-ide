@@ -176,25 +176,30 @@ pub fn validate_edits(edits: &BTreeMap<String, QuestionEdit>) -> Result<(), &'st
 }
 
 fn validate_content(value: &Value, cap: usize) -> Result<(), &'static str> {
+    let encoded = value.to_string();
     if !matches!(
         value,
         Value::Null | Value::String(_) | Value::Array(_) | Value::Object(_)
-    ) || value.to_string().chars().count() > cap
+    ) || encoded.chars().count() > cap
     {
         return Err("builtin_decision_question_content");
     }
+    // Authored descriptions can discuss passwords or tokens. The raw-tool
+    // filter rejects even that prose and the fixed choice key `ask_person`.
+    // Read values with the shared value-aware mask, and inspect structured
+    // keys separately so a password value cannot hide behind a JSON key.
     let mut left = vec![value];
     while let Some(value) = left.pop() {
         match value {
-            Value::String(text) if text.lines().any(crate::credential::may_carry_a_credential) => {
+            Value::String(text) if crate::private_data::mask(text).found.credential > 0 => {
                 return Err("builtin_decision_credential");
             }
             Value::Array(values) => left.extend(values),
             Value::Object(values) => {
-                if values
-                    .keys()
-                    .any(|key| crate::credential::may_carry_a_credential(key))
-                {
+                if values.keys().any(|key| {
+                    crate::credential::names_a_credential(key)
+                        || crate::private_data::mask(key).found.credential > 0
+                }) {
                     return Err("builtin_decision_credential");
                 }
                 left.extend(values.values());

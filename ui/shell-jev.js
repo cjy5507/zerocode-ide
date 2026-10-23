@@ -4072,7 +4072,7 @@ async function openJevBuiltinEditor(id, opener) {
     editor.mode = definition.mode;
     const saved = definition.saved ?? {};
     for (const [name, value, cap] of [["name", saved.name ?? editor.defaultName, definition.nameMax],
-      ["question", saved.question ?? "", definition.questionMax], ["criteria", saved.criteria ?? "", definition.criteriaMax]]) {
+      ["question", saved.question ?? "", definition.legacyQuestionMax ?? definition.questionMax], ["criteria", saved.criteria ?? "", definition.criteriaMax]]) {
       const input = el(`jev-builtin-${name}`);
       input.value = value;
       input.maxLength = cap;

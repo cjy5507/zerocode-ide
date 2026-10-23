@@ -705,6 +705,7 @@ pub struct BuiltinDecisionEditor {
     pub modes: Vec<ModeChoice>,
     pub name_max: usize,
     pub question_max: usize,
+    pub legacy_question_max: usize,
     pub criteria_max: usize,
 }
 
@@ -742,6 +743,7 @@ pub fn builtin_decision_editor(
         modes: choices(row),
         name_max: builtin::NAME_MAX,
         question_max: builtin::QUESTION_MAX,
+        legacy_question_max: builtin::LEGACY_QUESTION_MAX,
         criteria_max: builtin::CRITERIA_MAX,
     })
 }

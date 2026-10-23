@@ -128,6 +128,8 @@ fn invalid_builtin_wording_writes_nothing_and_the_editor_reads_shipped_defaults(
     let questions = builtin::default_questions(PLACEMENT.id).unwrap();
     let editor = builtin_decision_editor(&path, PLACEMENT.id, questions.clone()).unwrap();
     assert_eq!(editor.questions, questions);
+    assert_eq!(editor.legacy_question_max, builtin::LEGACY_QUESTION_MAX);
+    assert_eq!(editor.question_max, builtin::QUESTION_MAX);
     assert!(editor.can_edit_prompt);
     assert!(editor.saved.is_empty());
 }

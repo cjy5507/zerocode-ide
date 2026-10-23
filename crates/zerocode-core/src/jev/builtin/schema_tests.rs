@@ -193,3 +193,46 @@ fn a_client_that_cannot_read_typed_edits_stays_off_even_for_an_explicit_on() {
         );
     }
 }
+
+#[test]
+fn credential_descriptions_are_editable_but_credential_values_are_refused() {
+    let mut draft = edit(
+        json!({"recovery": {"type": "choice", "instructions": "Does the dialog ask for a password?",
+        "criteria": {"ask_person": "The person handles their own password."}}}),
+    );
+    assert!(schema::validate_edits(&draft.questions).is_ok());
+    let secret = ["unit", "fixture", "placeholder"].join("-");
+    for value in [
+        json!(format!("Authorization: Bearer {secret}")),
+        json!({"password": secret}),
+        json!({"nested": [{"api_key": secret}]}),
+    ] {
+        draft.questions.get_mut("recovery").unwrap().criteria["ask_person"] = value;
+        assert_eq!(
+            schema::validate_edits(&draft.questions),
+            Err("builtin_decision_credential")
+        );
+    }
+}
+
+#[test]
+fn legacy_wording_keeps_its_wire_bound_when_typed_questions_get_a_larger_editor() {
+    let draft = Decision {
+        question: Some("q".repeat(LEGACY_QUESTION_MAX + 1)),
+        ..Decision::default()
+    };
+    assert_eq!(
+        validate(crate::jev::COMMAND_GUARD.id, &draft),
+        Err("builtin_decision_question")
+    );
+    let mut body = json!({"state": {}, "questions": {"irreversible": {"type": "noul", "instructions": "Before?", "criteria": null}}});
+    apply(&draft, &mut body).unwrap();
+    assert!(
+        body["state"][DECISION_STATE_KEY]["question"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count()
+            <= LEGACY_QUESTION_MAX
+    );
+}

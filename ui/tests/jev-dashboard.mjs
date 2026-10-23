@@ -344,7 +344,7 @@ export function jevDashboardFixture(real = null) {
       { id: "placement", type: "choice", instructions: "어디서 작업하나요?", criteria: { tab: { what: "새 탭", examples: ["검토"] }, split: "옆에서 작업" }, dynamicOptions: true },
     ] : [{ id: "n*", type: "score", instructions: "기본 판단 질문", criteria: ["낮음", "보통", "높음", "매우 높음"], contextual: true }],
     canEditPrompt: id !== "judgment_cache", dynamic: false, mode: builtin.saved[id]?.mode ?? modeOf[id],
-    defaultMode: modeOf[id], modes, nameMax: 80, questionMax: 2_000, criteriaMax: 8_000,
+    defaultMode: modeOf[id], modes, nameMax: 80, questionMax: 4_000, legacyQuestionMax: 2_000, criteriaMax: 8_000,
   });
   window.__ANSWER__.update_builtin_decision = ({ id, action, expected, draft }) => {
     builtin.calls.push({ id, action, expected: structuredClone(expected), draft: structuredClone(draft) });
@@ -3343,6 +3343,8 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     await open();
     ok("legacy common instructions stay visible and are not reinterpreted as typed questions", await page.locator("#jev-builtin-question").inputValue() === "이전 공통 지침"
       && await page.locator('[data-jev-question-instructions="n*"]').inputValue() === "기본 판단 질문");
+    ok("the legacy prompt keeps its old bound while typed instructions fit the shipped wording", await page.locator("#jev-builtin-question").getAttribute("maxlength") === "2000"
+      && await page.locator('[data-jev-question-instructions="n*"]').getAttribute("maxlength") === "4000");
     await page.locator("#jev-builtin-reset").click();
     await save();
     await open();

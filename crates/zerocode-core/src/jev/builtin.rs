@@ -11,6 +11,7 @@ use super::{JEV_USES, JevMode, JevUse};
 
 pub const SETTING: &str = "builtinDecisions";
 pub const NAME_MAX: usize = 80;
+pub const LEGACY_QUESTION_MAX: usize = 2_000;
 // Built-in instructions can be longer than a user-created decision's prompt.
 pub const QUESTION_MAX: usize = 4_000;
 pub const CRITERIA_MAX: usize = 8_000;
@@ -172,7 +173,11 @@ pub fn validate(id: &str, draft: &Decision) -> Result<(), &'static str> {
     }
     for (value, cap, token) in [
         (&draft.name, NAME_MAX, "builtin_decision_name"),
-        (&draft.question, QUESTION_MAX, "builtin_decision_question"),
+        (
+            &draft.question,
+            LEGACY_QUESTION_MAX,
+            "builtin_decision_question",
+        ),
         (&draft.criteria, CRITERIA_MAX, "builtin_decision_criteria"),
     ] {
         if let Some(value) = value {
@@ -211,7 +216,7 @@ fn apply_legacy(draft: &Decision, body: &mut Value) -> usize {
     }
     let (question, question_withheld) = super::door::clear_text(
         draft.question.as_deref().unwrap_or_default(),
-        super::Cap::Chars(QUESTION_MAX),
+        super::Cap::Chars(LEGACY_QUESTION_MAX),
     );
     let (criteria, criteria_withheld) = super::door::clear_text(
         draft.criteria.as_deref().unwrap_or_default(),
