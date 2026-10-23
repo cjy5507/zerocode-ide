@@ -561,7 +561,25 @@ pub fn now_secs() -> u64 {
 /// the merged copy `zo models --refresh` leaves for audit.
 #[must_use]
 pub fn cache_dir() -> PathBuf {
-    crate::default_config_home().join("cache").join(CACHE_DIR)
+    cache_home().join("cache").join(CACHE_DIR)
+}
+
+#[cfg(not(test))]
+fn cache_home() -> PathBuf {
+    crate::default_config_home()
+}
+
+/// A unit test that names no zo home of its own resolves the person's `~/.zo`
+/// (what `conventional_config_home` names). It gets a directory of its process
+/// instead: the person's last refresh neither reaches it nor is written over.
+#[cfg(test)]
+fn cache_home() -> PathBuf {
+    let home = crate::default_config_home();
+    if crate::conventional_config_home().as_deref() == Some(home.as_path()) {
+        std::env::temp_dir().join(format!("zo-runtime-tests-{}", std::process::id()))
+    } else {
+        home
+    }
 }
 
 /// `<zo home>/cache/model-catalog/discovered.json`.
@@ -4593,6 +4611,45 @@ mod tests {
             None,
         );
         assert!(alone.models.is_empty());
+    }
+
+    /// A test that names no zo home of its own resolves the person's `~/.zo`,
+    /// where their last refresh may hold withdrawn rows: read back, a shipped
+    /// row turns retired under the test on that machine alone. Such a test
+    /// neither reads that refresh nor writes over it.
+    #[test]
+    fn a_test_that_names_no_zo_home_neither_reads_nor_writes_the_persons_model_cache() {
+        let person = scratch("person-home");
+        let theirs = person.join(".zo").join("cache").join(super::CACHE_DIR);
+        let withdrawn = super::Withdrawn {
+            provider: "google".to_string(),
+            id: "gemini-3.1-pro-preview".to_string(),
+            source: super::ANTIGRAVITY_SOURCE.to_string(),
+            since: 1_792_727_588,
+        };
+        let refresh = DiscoveredCatalog {
+            fetched_at: 1_792_732_489,
+            withdrawn: vec![withdrawn],
+            ..DiscoveredCatalog::default()
+        };
+        super::save_to(&theirs.join(super::CACHE_FILE), &refresh).unwrap();
+        let _scope = CredentialScope::new(&[
+            ("HOME", Some(person.as_path())),
+            ("ZO_HOME", None),
+            ("ZO_CONFIG_HOME", None),
+        ]);
+
+        assert_eq!(
+            super::load_cached()
+                .and_then(|catalog| super::withdrawn_since_in(&catalog, "gemini-3.1-pro-preview")),
+            None,
+            "a test that names no zo home of its own read the person's model cache"
+        );
+        assert_ne!(
+            super::cache_dir(),
+            theirs,
+            "a test that names no zo home of its own writes its refresh over the person's model cache"
+        );
     }
 
     /// Sets every variable a credential lookup reads for the length of one
