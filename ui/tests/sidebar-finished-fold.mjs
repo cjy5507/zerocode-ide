@@ -57,6 +57,30 @@ export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
     ok("finished unlanded cards fold into one accessible pending-landing row", folded, JSON.stringify(before));
     if (!folded) return;
     ok("failed, active, live, unreported, shell and asking work stays visible", ["failed", "active", "busy", "unreported", "shell", "asking"].every((name) => before.shown.includes(`/r/${name}`)), JSON.stringify(before.shown));
+    const awaiting = await page.evaluate(async () => {
+      for (const [name, claimed] of [["finished-2", false], ["finished-3", true]]) {
+        const row = window.__LEDGER__.find((one) => one.checkout === `/r/${name}`);
+        row.review = { verified: false, merged: false, written: false, claimed_verified: claimed, author: "worker" };
+        row.progress = { stage: "report_only", ...(claimed ? { claimed: "verified" } : {}) };
+      }
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 10 });
+      while (paneLedgerAsking || ledgerAgentsPending) await new Promise((resolve) => setTimeout(resolve, 10));
+      await refreshWorktrees();
+      await window.__PAINTED__();
+      return window.__FINISHED_SHOWN__();
+    });
+    ok("a report awaiting review and a worker's unverified claim remain visible without opening the fold",
+      ["finished-2", "finished-3"].every((name) => awaiting.includes(`/r/${name}`)), JSON.stringify(awaiting));
+    await page.evaluate(async () => {
+      for (const row of window.__LEDGER__.filter((one) => ["/r/finished-2", "/r/finished-3"].includes(one.checkout))) {
+        row.review = { verified: true, merged: false, written: true, author: "coordinator" };
+        row.progress = { stage: "verified", source: "a".repeat(40) };
+      }
+      for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: 11 });
+      while (paneLedgerAsking || ledgerAgentsPending) await new Promise((resolve) => setTimeout(resolve, 10));
+      await refreshWorktrees();
+      await window.__PAINTED__();
+    });
     await page.locator(".wt-landing-fold").click();
     await page.waitForFunction(() => window.__FINISHED_SHOWN__().filter((path) => path.startsWith("/r/finished-")).length === 4);
     const expanded = await page.locator(".wt-landing-fold").getAttribute("aria-expanded");
