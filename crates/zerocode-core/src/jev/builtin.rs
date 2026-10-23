@@ -216,7 +216,8 @@ pub fn apply(draft: &Decision, body: &mut Value) -> usize {
 /// Some zo seats own their words in its runtime; the companion supplies those.
 #[must_use]
 pub fn default_words(id: &str) -> Option<String> {
-    let words: &[(&str, fn() -> String)] = &[
+    type Words = (&'static str, fn() -> String);
+    let words: &[Words] = &[
         (super::ROUTING.id, super::questions::routing_rubric_words),
         (
             super::SKILL_SUGGESTION.id,
