@@ -22625,7 +22625,10 @@ fn plan_inner(
             let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
             let effort = effort.or_else(|| profile.as_ref().map(|p| p.effort.clone()));
             let laddered = chosen
-                .filter(|_| effort.is_none())
+                // An inferred effort needs a selected model to apply to.
+                // With neither a model nor a profile, leave the CLI's dials
+                // open instead of manufacturing an invalid explicit request.
+                .filter(|_| effort.is_none() && model.is_some())
                 .and_then(|d| difficulty_effort(&agent, d));
             let effort = effort.or_else(|| laddered.map(str::to_string));
             // The dials say what set the effort even beside a model the
@@ -22914,7 +22917,14 @@ fn plan_inner(
                     look: difficulty_look,
                     teacher_effort,
                     baseline_high,
-                    receipt: difficulty_receipt,
+                    receipt: difficulty_receipt.map(|mut receipt| {
+                        if model.is_none() {
+                            // The answer set no launch dial when the CLI kept
+                            // its own model and effort defaults.
+                            receipt["applied"] = serde_json::json!(false);
+                        }
+                        receipt
+                    }),
                 });
             prepared_worker_start.summon_shadow = said.map(|words| {
                 let (brief, brief_chars) = crate::summon_choice::brief_shape(words);

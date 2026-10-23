@@ -26515,6 +26515,20 @@ fn a_difficulty_answer_without_a_model_keeps_the_cli_defaults() {
             assert!(said["effort"].is_null());
             assert_eq!(said["dials"]["modelFrom"], DIALS_FROM_CLI_DEFAULT);
             assert_ne!(said["dials"]["why"]["effortRule"], "ladder");
+            let receipt = planned
+                .prepared_worker_start
+                .as_ref()
+                .unwrap()
+                .difficulty_shadow
+                .as_ref()
+                .unwrap()
+                .receipt
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                receipt["applied"], false,
+                "the answer changed no launch dial"
+            );
         } else {
             assert_eq!(planned.reply.exit_code, 1);
             assert!(planned.reply.stderr.contains("--effort requires --model"));

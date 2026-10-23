@@ -776,14 +776,21 @@ impl Wire {
 
     /// This machine's wire, reading nothing yet: the keychain when a question
     /// is asked, the settings file when the door or a switch is read.
+    /// Unit tests have an empty implicit machine. Cases that ask a server
+    /// supply their own keys, settings and socket through `reading` or `at`;
+    /// a developer's keyless local provider must never answer a test's turn.
     #[must_use]
     pub fn of_this_machine() -> Self {
-        Self {
-            keys: KeySource::Keychain,
-            base: base_url(),
-            settings: crate::api_routers::zo_settings_path(),
-            socket: &SOCKET,
-            review_origin: None,
+        if cfg!(test) {
+            Self::reading(&crate::api_routers::HeldKeys::default(), None)
+        } else {
+            Self {
+                keys: KeySource::Keychain,
+                base: base_url(),
+                settings: crate::api_routers::zo_settings_path(),
+                socket: &SOCKET,
+                review_origin: None,
+            }
         }
     }
 
