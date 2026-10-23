@@ -581,18 +581,23 @@ function resumableSessionOf(tab) {
  * goes to that pane rather than starting a second writer on its transcript; a
  * pane whose agent was quit back to its shell holds nothing, and reopening that
  * conversation is what the row is for. */
-async function resumeSession(known, worktree = null) {
+async function resumeSession(known, worktree = null, road = "reopen") {
   try {
-    // A person's pick by name (t-57717): its sidebar row or its tab's menu —
-    // the road that still opens a finished worker's conversation.
+    // A sidebar record is a look at finished work. Only an explicit reopen
+    // asks to start its former conversation again.
     const woke = await wakeConversation(
       known.agent,
       known.session,
       spawnGrid({ placement: "tab" }),
       null,
       worktree,
-      "reopen",
+      road,
     );
+    if (woke.finished) {
+      const path = worktree ?? activeWorktreePath;
+      openWorkbenchTasks({ path });
+      return;
+    }
     if (woke.standing) {
       // Held in a tab: that pane is the answer. In none yet: the door that is
       // opening it puts it on the stage itself.
@@ -11282,7 +11287,7 @@ async function reopenConversationIn(path, known) {
     return;
   }
   await storedWakesSettled(path);
-  await resumeSession(known, path);
+  await resumeSession(known, path, "inspect");
 }
 
 /* The moves `reopenConversationIn` started that are still under way, by
