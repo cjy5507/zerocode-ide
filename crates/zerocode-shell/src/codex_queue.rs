@@ -1517,6 +1517,60 @@ mod tests {
         assert!(CodexQueueError::UnsupportedPlatform.degrades());
     }
 
+    /// Exercise ConPTY itself without a user's CLI installation or login.
+    /// The companion test above holds the agent's model/effort argv fixed;
+    /// this one proves that a refused native route still has a working PTY.
+    #[cfg(windows)]
+    #[test]
+    fn an_unsupported_queue_still_allows_pty_input_output_and_termination() {
+        let directory = tempfile::tempdir().expect("synthetic checkout");
+        let requested = vec!["/Q".to_string(), "/D".to_string()];
+        let mut args = requested.clone();
+        assert!(matches!(
+            prepare(Path::new("cmd.exe"), &mut args, directory.path(), &[]),
+            Err(CodexQueueError::UnsupportedPlatform)
+        ));
+        assert_eq!(args, requested);
+        let mut pty =
+            zerocode_pty::PtyLane::spawn("cmd.exe", &args, Some(directory.path()), &[], 24, 80)
+                .expect("fallback ConPTY");
+        // The answer is absent from the typed bytes, so echoing our input
+        // cannot masquerade as a program that read and answered it.
+        pty.write_input(b"set /a 17*19\r")
+            .expect("input through fallback PTY");
+        let deadline = std::time::Instant::now() + crate::cmd::HAND_OVER_EXIT_WAIT;
+        let mut answered = false;
+        while std::time::Instant::now() < deadline {
+            pty.pump();
+            answered = pty
+                .terminal()
+                .grid()
+                .visible_text()
+                .lines()
+                .any(|line| line.trim() == "323");
+            if answered {
+                break;
+            }
+            std::thread::sleep(crate::cmd::HAND_OVER_EXIT_POLL);
+        }
+        assert!(
+            answered,
+            "the fallback shell never answered input over its PTY"
+        );
+        pty.kill().expect("request fallback child termination");
+        let deadline = std::time::Instant::now() + crate::cmd::HAND_OVER_EXIT_WAIT;
+        loop {
+            if pty.try_wait().expect("read the child's exit").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fallback child remained alive after termination"
+            );
+            std::thread::sleep(crate::cmd::HAND_OVER_EXIT_POLL);
+        }
+    }
+
     /// The production table, under the names the assertions below read with.
     #[cfg(unix)]
     const PRODUCTION: LaunchBudget = LaunchBudget::PRODUCTION;
