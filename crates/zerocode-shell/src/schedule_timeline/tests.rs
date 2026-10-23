@@ -847,6 +847,40 @@ fn a_look_where_nothing_moved_answers_unchanged_and_one_that_moved_does_not() {
     );
 }
 
+/// What git says of the board's tasks rides the answer (t-71840), and a
+/// landing that moved moves the revision as a file does: the window holding
+/// the last revision is told the new one, not `unchanged`; the same landings
+/// again move nothing.
+#[test]
+fn a_landing_rides_the_answer_and_moves_its_revision() {
+    let scratch = copied();
+    let roots = roots_in(scratch.path());
+    let mut book = Book::default();
+    let first = book.read(&roots, &Ask::default(), NOW_MS, KST);
+    assert!(first.landings.is_empty());
+    let landed = Landed {
+        landed_ms: Some(NOW_MS - HOUR_MS),
+        released_ms: None,
+    };
+    let told = || BTreeMap::from([("t-66760".to_string(), landed)]);
+    book.land(told());
+    let known = |revision| Ask {
+        known: Some(revision),
+        ..Ask::default()
+    };
+    let moved = book.read(&roots, &known(first.revision), NOW_MS + 5_000, KST);
+    assert!(!moved.unchanged && moved.revision > first.revision);
+    assert_eq!(moved.landings.get("t-66760"), Some(&landed));
+    assert_eq!(
+        serde_json::to_value(&moved).expect("the answer serializes")["landings"]["t-66760"],
+        serde_json::json!({"landed_ms": NOW_MS - HOUR_MS, "released_ms": null}),
+        "the window reads these keys"
+    );
+    book.land(told());
+    let again = book.read(&roots, &known(moved.revision), NOW_MS + 10_000, KST);
+    assert!(again.unchanged && again.revision == moved.revision);
+}
+
 #[test]
 fn a_log_is_read_only_for_a_job_or_a_lane_this_reading_listed() {
     let scratch = copied();

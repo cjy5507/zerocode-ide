@@ -127,6 +127,8 @@ async function measure(page, { polls, idleSecs }) {
     window.__PANES__ = [];
     window.__LEDGER__ = [];
     agentBoardMode = "tasks";
+    // The fifty rows span the day before now; the tab opens on 「지금 앞뒤」 (t-71840), so the weight is read a day wide.
+    boardScheduleChoice.zoom = "day";
     openBoard();
   }, boardScheduleFiftyRows(Date.now()));
   await page.evaluate(async () => {
