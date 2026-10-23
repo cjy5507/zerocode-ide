@@ -21060,7 +21060,10 @@ mod tests {
         // last a task's other checkouts folded under its row (t-45336, "네비바에
         // … 너무 많아"), with the same exception, and the row the window stands
         // in, inside its clause too.
-        let filtering = block_after(window, "function shownWorktrees(project) {");
+        let filtering = block_after(
+            window,
+            "function shownWorktrees(project, { includeLandingFold = false } = {}) {",
+        );
         let chained = [
             "  return project.worktrees.filter((worktree) =>",
             "    !(hideAutomationWorkspaces && automationBornPaths.has(worktree.path))",
@@ -21070,7 +21073,8 @@ mod tests {
             "    && !(sleepingPaths.has(worktree.path) && !worktree.active",
             "      && !(keepDefaultBranchAwake && worktree.is_main))",
             "    && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0)",
-            "    && !(taskFoldedPaths.has(worktree.path) && !worktree.active && worktreeAgentRows(worktree.path).length === 0));",
+            "    && !(taskFoldedPaths.has(worktree.path) && !worktree.active && worktreeAgentRows(worktree.path).length === 0)",
+            "    && !(sidebarGroupBy === \"repo\" && !includeLandingFold && landingFoldedPaths.has(worktree.path)));",
         ]
         .join("\n");
         assert!(
@@ -33027,9 +33031,33 @@ mod tests {
         // `look` — one reading answering both the verdict and what a dead
         // worker left — and `judge` is the test-only half that keeps its
         // name.
+        // Active occupancy is transient: both removal entrances stop it
+        // before the cached judgment, so moving away can retry next beat.
+        let sweeping = block_after(sweep, "pub(crate) fn sweep(");
+        let active_gate = sweeping
+            .find("!same_worktree_path(&active, Path::new(&one.path))")
+            .expect("the sweep no longer excludes the active checkout");
+        let cached = sweeping
+            .find("let due:")
+            .expect("the sweep's cached candidates");
+        assert!(
+            active_gate < cached,
+            "active occupancy entered the refusal cache"
+        );
+        let entrance = block_after(sweep, "fn settle(");
+        let active = block_after(entrance, "if same_worktree_path(&here.active, &path)");
+        assert!(
+            active.contains(".remove(&candidate.path)") && active.contains("return Settled::Kept")
+        );
+        assert!(
+            entrance
+                .find("same_worktree_path(&here.active, &path)")
+                .unwrap()
+                < entrance.find("CheckoutHeld::take(&path)").unwrap(),
+            "a removal claimed the active checkout"
+        );
         let judging = block_after(sweep, "fn look(");
         for refusal in [
-            "same_worktree_path(active, path)",
             "known.is_main",
             "known.locked",
             "Ownership::ZerocodeManaged",

@@ -9748,7 +9748,8 @@ fn an_agent_carrying_work(
 fn a_finished_pane_is_released_after_grace_without_taking_a_draft() {
     const LEADER: u32 = 98_620;
     const WORKER: u32 = 98_621;
-    let _window = the_window();
+    // Advancing ten minutes must not lift the shared journal's retry clock.
+    let (_window, _store) = PrivateWindow::boot();
     let _turn = one_beat_at_a_time();
     let team = format!("team-finished-{LEADER}");
     let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
@@ -9797,7 +9798,8 @@ fn a_finished_pane_is_released_after_grace_without_taking_a_draft() {
 
 #[test]
 fn the_finished_pane_sweep_preserves_taken_over_and_retained_panes() {
-    let _window = the_window();
+    // Advancing ten minutes must not lift the shared journal's retry clock.
+    let (_window, _store) = PrivateWindow::boot();
     let _turn = one_beat_at_a_time();
     for (leader, term, taken) in [(98_630, 98_631, true), (98_640, 98_641, false)] {
         let team = format!("team-kept-finished-{leader}");
