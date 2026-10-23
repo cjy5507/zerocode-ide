@@ -637,9 +637,9 @@ impl PtyLane {
     ///
     /// # Errors
     ///
-    /// [`PtyError::Io`] if the signal could not be delivered — which includes
-    /// the ordinary case of a child that already exited, so check
-    /// [`Self::try_wait`] first when the two need telling apart.
+    /// [`PtyError::Io`] if the child's status could not be read or a signal
+    /// could not be delivered. An already-reaped child is a no-op: its PID
+    /// may have been reused and no longer grants permission to send a signal.
     pub fn kill(&mut self) -> Result<(), PtyError> {
         kill_known_child(self.child.as_mut()).map_err(PtyError::Io)
     }
@@ -1255,8 +1255,8 @@ fn argv_in(buffer: &[u8]) -> Vec<String> {
 /// lane to something that then refused it leaked that one, because the caller
 /// had already moved it and had no handle left to clean up with.
 ///
-/// The result is ignored on purpose: a child that already exited is the common
-/// case, and in a destructor there is nobody left to tell.
+/// A destructor cannot return an error. Explicit close records the outcome
+/// before forgetting a lane; this last best effort uses the same child guard.
 impl Drop for PtyLane {
     fn drop(&mut self) {
         let _ = kill_known_child(self.child.as_mut());
@@ -1264,7 +1264,13 @@ impl Drop for PtyLane {
 }
 
 fn kill_known_child(child: &mut (impl portable_pty::Child + ?Sized)) -> std::io::Result<()> {
-    child.kill()
+    // portable-pty's Unix ChildKiller sends SIGHUP to Child::id() before
+    // looking at its cached exit status. Never pass it a reaped child: that
+    // number can name another process, even though we still own this handle.
+    match child.try_wait()? {
+        Some(_) => Ok(()),
+        None => child.kill(),
+    }
 }
 
 #[cfg(test)]
