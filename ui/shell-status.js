@@ -5928,7 +5928,7 @@ function refuseSyntheticClose(tab, road, held) {
 function passCloseCheck(tab, road, held, asked, proceed) {
   closeChecks.delete(tab.id);
   const standing = tabs.some((one) => one.id === tab.id);
-  const outcome = !standing ? "gone meanwhile" : !proceed ? "kept" : asked ? "closed after asking" : "closed";
+  const outcome = !standing ? "gone meanwhile" : !proceed ? "kept" : asked ? "close requested after asking" : "close requested";
   noteCloseRoad(tab, road, held, outcome);
   if (!standing || !proceed) return;
   closeConfirmed.add(tab.id);
@@ -6002,20 +6002,17 @@ function closeTab(id) {
         });
         return;
       }
-      noteCloseRoad(tab, road, held, "closed");
+      noteCloseRoad(tab, road, held, "close requested");
     }
     closeChecks.delete(id);
     closeConfirmed.delete(id);
-    noteTabsLeaving([tab], "close-tab");
-    // Every pane in it. A tab that was split holds several shells, and
-    // leaving the ones that were not the tab's first behind would leak a
-    // process with nothing on screen addressing it.
-    for (const term of paneLeaves(tab.layout)) {
-      invoke("close_term", { term }).catch(() => {});
-      dropTermView(term);
-    }
-    dropTab(id);
-    if (termFloat.hidden) keySink.focus();
+    closeChecks.add(id);
+    // Confirm each pane separately. A partial refusal keeps the tab and
+    // only the panes whose programs did not confirm their exit.
+    void closeTerminalTab(tab, "close-tab").finally(() => {
+      closeChecks.delete(id);
+      if (termFloat.hidden && document.activeElement === document.body) keySink.focus();
+    });
     return;
   }
   // A browser tab has nothing unsaved to ask about, and nothing behind it to

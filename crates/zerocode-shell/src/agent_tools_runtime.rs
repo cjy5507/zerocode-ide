@@ -586,7 +586,7 @@ pub(super) fn schedule_completed_worker_cleanup(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let was_present = state.terminals().contains_key(&term);
-        let retired = retire_terminal(&state, term);
+        let retired = retire_terminal(&state, term).unwrap_or(false);
         if retired {
             announce_retired_terminal(&app, term);
         }
@@ -2108,7 +2108,7 @@ impl agent_teams::Host for TeamWindow {
         // (reported 2026-08-30: "이건 계속 멈춰있어"). Announced only when a
         // shell was actually here: a term the reaper already announced is not
         // told twice.
-        if retire_terminal(&state, term) {
+        if retire_terminal(&state, term).unwrap_or(false) {
             state.cadence().wake();
             announce_retired_terminal(&self.app, term);
             true

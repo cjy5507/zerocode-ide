@@ -3152,46 +3152,71 @@ pub(super) fn managed_terminal_session(
     }
 }
 
+/// A stable close refusal the renderer can explain without parsing log prose.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(super) enum TerminalCloseError {
+    JournalUnavailable,
+    JournalFailed,
+    SignalFailed,
+    Unconfirmed,
+    Replaced,
+}
+
 /// Retire one observed shell after its exit is confirmed.
 ///
-/// False keeps a live or unconfirmed shell intact. An already-absent shell
-/// needs no cleanup; the exit pump owns the receipt for that road.
-pub(super) fn retire_terminal(state: &AppState, term: TermId) -> bool {
+/// A refusal keeps the live screen and permits retry. `Ok(false)` means the
+/// shell was already absent; the exit pump owns that road's receipt.
+pub(super) fn retire_terminal(state: &AppState, term: TermId) -> Result<bool, TerminalCloseError> {
     let Some(pty) = state.terminals().handle(term) else {
-        return false;
+        return Ok(false);
     };
     let closed = match (
         orchestration::terminal_exit_journal(),
         orchestration::host_epoch(),
     ) {
         (Some(journal), Some(epoch)) => {
-            durable_lifecycle::terminal::close(journal, epoch, term, &pty)
+            durable_lifecycle::terminal::close(journal, epoch, term, &pty).map_err(|why| {
+                note_window_event(
+                    state.local_data_root(),
+                    &format!("term {term} exit journal: {why}"),
+                );
+                TerminalCloseError::JournalFailed
+            })
         }
-        _ => Err("the terminal exit journal is unavailable".to_string()),
+        _ => Err(TerminalCloseError::JournalUnavailable),
     };
-    if !matches!(
-        closed,
-        Ok(zerocode_orchestrator::terminal_exit::ExitState::Gone)
-    ) {
+    use zerocode_orchestrator::terminal_exit::ExitState;
+    let refusal = match closed {
+        Ok(ExitState::Gone) => None,
+        Ok(ExitState::Failed) => Some(TerminalCloseError::SignalFailed),
+        Ok(ExitState::Requested | ExitState::Unconfirmed) => Some(TerminalCloseError::Unconfirmed),
+        Err(why) => Some(why),
+    };
+    if let Some(why) = refusal {
         note_window_event(
             state.local_data_root(),
-            &format!("term {term} close remains unconfirmed: {closed:?}"),
+            &format!("term {term} close remains unconfirmed: {why:?}"),
         );
         // Keep the handle, screen and launch facts: a refused signal is not
         // permission to forget a running program or reclaim its checkout.
-        return false;
+        return Err(why);
     }
     // A fixed terminal number may have been replaced while exit was being
     // observed. Never remove or forget the new incarnation with old evidence.
     if !state.terminals().remove_exact(term, &pty) {
-        return false;
+        return if state.terminals().contains_key(&term) {
+            Err(TerminalCloseError::Replaced)
+        } else {
+            Ok(false)
+        };
     }
     let screen = lock_pty(&pty).terminal().grid().visible_text();
     drop(pty);
     state.deliveries().remove(&term);
     state.prompt_queue().remove(&term);
     forget_term_state(state, term, TermLedgerSettlement::Recorded(Some(screen)));
-    true
+    Ok(true)
 }
 
 pub(super) fn announce_retired_terminal(app: &AppHandle, term: TermId) {

@@ -16511,6 +16511,12 @@ async function openMirrorPane(term, agent, path) {
   // 안그려지고"). The parent's own grid says what half of this tab actually
   // holds; `renderPanes` still resizes to the real cell box after the split.
   const grid = viewOfTerm(term)?.gridSize() ?? DEFAULT_TERMINAL_GRID;
+  const seat = `${term}:${agent}`;
+  const held = mirrorPanes.get(seat);
+  if (held !== undefined && paneLeaves(tab.layout).includes(held)) {
+    if (!(await closeTermAndView(held, "mirror-replaced"))) return;
+    if (!tabs.includes(tab) || !paneLeaves(tab.layout).includes(term)) return;
+  }
   let mirror;
   try {
     mirror = await invoke("open_mirror_term", {
@@ -16523,16 +16529,12 @@ async function openMirrorPane(term, agent, path) {
     // break the run it was only watching.
     return;
   }
-  const seat = `${term}:${agent}`;
-  const held = mirrorPanes.get(seat);
-  if (held !== undefined && paneLeaves(tab.layout).includes(held)) {
-    invoke("close_term", { term: held }).catch(() => {});
-    tab.layout = prunePanes(
-      tab.layout,
-      new Set(paneLeaves(tab.layout).filter((leaf) => leaf !== held)),
-    );
-    dropTermView(held);
-    noteLeafLeft(held, tab, "mirror-replaced", "closed");
+  if (!tabs.includes(tab) || !paneLeaves(tab.layout).includes(term)) {
+    // The parent left while the mirror was opening. A close refusal still
+    // needs a visible retry door, so mount before requesting its retirement.
+    mountTermTab(mirror, { worktree: tab.worktree }, { focus: false, placement: "tab" });
+    await closeTermAndView(mirror, "mirror-parent-left");
+    return;
   }
   mirrorPanes.set(seat, mirror);
   const source = activePaneOf(tab) ?? paneLeaves(tab.layout)[0];
@@ -16576,6 +16578,8 @@ listen("term:exited", (event) => {
   zoIntegrationRecords.delete(`term-${event.payload.term}`);
   if (event.payload.term === skillsInstallTerm) { skillsNeedsRescan = true; void refreshSkills(true); }
   const { term } = event.payload;
+  const closing = terminalCloseRequests.get(term);
+  if (closing) closing.exited = true;
   forgetManagedTerminalSession(term);
   forgetCodexPtyFallback(term);
   forgetMailWaiting(term);
@@ -16611,30 +16615,13 @@ listen("term:exited", (event) => {
   // tab showing nothing. The tab is found by looking for the shell rather
   // than by deriving an id from it, because only the first pane's id names
   // the tab and any pane can be the one that exits.
-  const holder = tabs.find(
-    (tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(term),
-  );
-  dropTermView(term);
   // No tab holds this shell YET: a restore assigns its layout only after
   // every leaf has spawned, and a resume that dies inside that window would
   // otherwise slip this prune and mount as a pane nothing ever clears. The
   // id is parked and `mountStoredLayout` prunes it before the layout stands.
-  if (!holder) {
+  if (!dropClosedTermLeaf(term, "exit") && waking.size > 0) {
     exitedUnheld.add(term);
-    return;
   }
-  const staying = paneLeaves(holder.layout).filter((held) => held !== term);
-  noteLeafLeft(term, holder, "exit", "exited");
-  if (staying.length === 0) {
-    dropTab(holder.id);
-    return;
-  }
-  holder.layout = prunePanes(holder.layout, new Set(staying));
-  schedulePaneAlignment(holder);
-  if (holder.activePane === term) holder.activePane = staying[0];
-  renderPanes(holder);
-  updateStage();
-  paintRunningCount();
 });
 
 /* An orchestration worker owns a terminal in its resolved worktree.

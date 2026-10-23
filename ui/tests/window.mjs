@@ -6399,7 +6399,7 @@ const selecting = await page.evaluate(async () => {
     cancelable: true,
   }));
   const mouseAfterPress = window.__COUNTS__.term_mouse ?? 0;
-  closePaneLeaf(tabOfTerm(other), other);
+  await closePaneLeaf(tabOfTerm(other), other);
   window.dispatchEvent(new MouseEvent("mouseup", {
     button: 0, bubbles: true, cancelable: true,
   }));
@@ -24457,7 +24457,7 @@ const splitPlain = await page.evaluate(async () => {
   else delete window.__ANSWER__.open_term_tab;
   seen.panes = paneLeaves(tab.layout).length;
   const extra = paneLeaves(tab.layout).find((one) => one !== tab.term);
-  if (extra !== undefined) closePaneLeaf(tab, extra);
+  if (extra !== undefined) await closePaneLeaf(tab, extra);
   return seen;
 });
 ok(
@@ -31522,7 +31522,7 @@ const setupScriptLocation = await page.evaluate(async () => {
     title: paneTitleOf(host, 9302),
     focusKept: host.activePane === leaderTerm && activeTabId === host.id,
   };
-  closePaneLeaf(host, 9302);
+  await closePaneLeaf(host, 9302);
 
   mountSetupTerminal({
     path: activeWorktreePath,
@@ -31536,7 +31536,7 @@ const setupScriptLocation = await page.evaluate(async () => {
     title: paneTitleOf(host, 9303),
     focusKept: host.activePane === leaderTerm && activeTabId === host.id,
   };
-  closePaneLeaf(host, 9303);
+  await closePaneLeaf(host, 9303);
   dropTab(host.id);
   return seen;
 });

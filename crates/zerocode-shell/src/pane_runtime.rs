@@ -970,7 +970,7 @@ pub(super) fn note_automation_completion(app: &AppHandle, report: &hooks::PaneHo
         .into_iter()
         .find(|automation| automation.id == automation_id)
         .is_some_and(|automation| automation.close_when_done);
-    if closes && retire_terminal(&state, report.term) {
+    if closes && retire_terminal(&state, report.term).unwrap_or(false) {
         announce_retired_terminal(app, report.term);
     }
 }

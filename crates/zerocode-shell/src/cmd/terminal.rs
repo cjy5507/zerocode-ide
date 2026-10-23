@@ -825,7 +825,7 @@ pub(crate) fn end_terminal_session(
     state: State<'_, AppState>,
     term: TermId,
 ) -> bool {
-    let retired = retire_terminal(&state, term);
+    let retired = retire_terminal(&state, term).unwrap_or(false);
     if retired {
         announce_retired_terminal(&app, term);
     }
@@ -837,7 +837,7 @@ pub(crate) fn end_all_terminal_sessions(app: AppHandle, state: State<'_, AppStat
     let terms = state.terminals().terms();
     let mut retired = 0;
     for term in terms {
-        if retire_terminal(&state, term) {
+        if retire_terminal(&state, term).unwrap_or(false) {
             announce_retired_terminal(&app, term);
             retired += 1;
         }
@@ -847,8 +847,11 @@ pub(crate) fn end_all_terminal_sessions(app: AppHandle, state: State<'_, AppStat
 
 /// Close one shell. Closing the tab is what ends the process.
 #[tauri::command(async)]
-pub(crate) fn close_term(state: State<'_, AppState>, term: TermId) {
-    retire_terminal(&state, term);
+pub(crate) fn close_term(
+    state: State<'_, AppState>,
+    term: TermId,
+) -> Result<(), TerminalCloseError> {
+    retire_terminal(&state, term).map(|_| ())
 }
 
 /// Hand a prompt to whatever is running in this shell, once it is listening.

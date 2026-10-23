@@ -265,10 +265,10 @@ export async function testCloseGuard({ browser, origin, ok, faults }) {
       lines,
       kept: coordLines.some((line) => / by button · person click at \d+,\d+ · cu idle · holds coordinator run-4275, coordinator run-11955 → kept$/.test(line)),
       refused: coordLines.some((line) => line.includes(" by button · synthetic click") && line.endsWith("→ refused: no hand made the event")),
-      closedAfter: coordLines.some((line) => / by button · person click at \d+,\d+ · cu idle · .* → closed after asking$/.test(line)),
+      closedAfter: coordLines.some((line) => / by button · person click at \d+,\d+ · cu idle · .* → close requested after asking$/.test(line)),
       worker: lines.some((line) => line.startsWith(`close tab ${ids.worker} by program`) && line.includes("holds worker w-9603") && line.endsWith("→ kept")),
-      plain: lines.some((line) => line.startsWith(`close tab ${ids.plain} `) && line.endsWith("holds nothing → closed")),
-      asleep: lines.some((line) => line.startsWith(`close tab ${ids.asleep} `) && line.endsWith("holds stored conversations → closed")),
+      plain: lines.some((line) => line.startsWith(`close tab ${ids.plain} `) && line.endsWith("holds nothing → close requested")),
+      asleep: lines.some((line) => line.startsWith(`close tab ${ids.asleep} `) && line.endsWith("holds stored conversations → close requested")),
       personWords: lines.some((line) => line.includes(PERSON) || line.includes(SEATS[1].name)),
     };
     ok(

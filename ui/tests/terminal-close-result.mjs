@@ -7,6 +7,7 @@ async function scene(browser, origin, split) {
   await opened.page.evaluate(async (split) => {
     confirmCloseRunning = false;
     confirmClosePinnedTab = false;
+    window.__NEXT_TERM__ = Math.max(window.__NEXT_TERM__ ?? 0, 91_000);
     const first = await openTermTab({ placement: "tab", door: "terminal" });
     const tab = tabOfTerm(first);
     if (split) await splitActivePane("row");
@@ -109,5 +110,81 @@ export async function testTerminalCloseResult(browser, origin, ok) {
     await frame(pending.page);
     const after = await inspect(pending.page);
     ok("the screen leaves when its close receipt arrives", !after.exists && !after.view, JSON.stringify(after));
+    const lateExit = await pending.page.evaluate(() => {
+      const term = window.__CLOSE_SCENE__.going;
+      for (const hear of window.__LISTENERS__["term:exited"] ?? []) hear({ payload: { term } });
+      return exitedUnheld.has(term);
+    });
+    ok("a late exit does not retain a closed terminal as an unmounted restore", !lateExit);
   } finally { await pending.page.close(); }
+
+  const race = await scene(browser, origin, false);
+  try {
+    await race.page.evaluate(() => {
+      window.__ANSWER__.close_term = () => new Promise((resolve, reject) => { window.__CLOSE_REJECT__ = reject; });
+      closeTab(window.__CLOSE_SCENE__.tab);
+    });
+    await frame(race.page);
+    await race.page.evaluate(() => {
+      const term = window.__CLOSE_SCENE__.going;
+      for (const hear of window.__LISTENERS__["term:exited"] ?? []) hear({ payload: { term } });
+      window.__CLOSE_REJECT__({ kind: "journal_failed" });
+    });
+    await frame(race.page);
+    const gone = await inspect(race.page);
+    ok("an observed native exit wins over a late failed close reply",
+      !gone.exists && !gone.view && gone.notice === "", JSON.stringify(gone));
+  } finally { await race.page.close(); }
+
+  const removal = await scene(browser, origin, true);
+  try {
+    const kept = await removal.page.evaluate(async () => {
+      const path = activeWorktreePath;
+      const tree = stageTree();
+      stageTrees.set(path, tree);
+      window.__ANSWER__.close_term = () => { throw { kind: "journal_unavailable" }; };
+      const closed = await dropWorktreeSurfaces(path);
+      return { closed, treeKept: stageTrees.get(path) === tree };
+    });
+    const screen = await inspect(removal.page);
+    ok("worktree surface cleanup keeps failed shells and their stage",
+      kept.closed === false && kept.treeKept && screen.sameView && screen.firstView,
+      JSON.stringify({ kept, screen }));
+  } finally { await removal.page.close(); }
+
+  const project = await scene(browser, origin, false);
+  try {
+    const kept = await project.page.evaluate(async () => {
+      const home = activeProjectPath;
+      projects = [...projects, { ...projects[0], path: "/tmp/terminal-close-other", name: "other", worktrees: [] }];
+      let removed = 0;
+      window.__ANSWER__.remove_project = () => { removed += 1; return null; };
+      window.__ANSWER__.close_term = () => { throw { kind: "signal_failed" }; };
+      const previousAsk = askConfirm;
+      askConfirm = async () => true;
+      try { await removeProjectFromList(home); }
+      finally { askConfirm = previousAsk; }
+      return { removed, stillListed: projects.some((one) => one.path === home), sameProject: activeProjectPath === home };
+    });
+    const screen = await inspect(project.page);
+    ok("project removal keeps its catalog entry and retry screen when a shell cannot close",
+      kept.removed === 0 && kept.stillListed && kept.sameProject && screen.sameView,
+      JSON.stringify({ kept, screen }));
+  } finally { await project.page.close(); }
+
+  const mirror = await scene(browser, origin, true);
+  try {
+    const opened = await mirror.page.evaluate(async () => {
+      const scene = window.__CLOSE_SCENE__;
+      mirrorPanes.set(`${scene.first}:codex`, scene.going);
+      let opened = 0;
+      window.__ANSWER__.open_mirror_term = () => { opened += 1; return ++window.__NEXT_TERM__; };
+      window.__ANSWER__.close_term = () => { throw { kind: "unconfirmed" }; };
+      await openMirrorPane(scene.first, "codex", "/tmp/terminal-close-synthetic.ansi");
+      return opened;
+    });
+    const screen = await inspect(mirror.page);
+    ok("a refused mirror replacement keeps the old screen and opens no extra process",
+      opened === 0 && screen.sameView && screen.leaves.length === 2, JSON.stringify(screen));
+  } finally { await mirror.page.close(); }
 }
