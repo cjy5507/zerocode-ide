@@ -16,6 +16,20 @@ mod latest_request;
 mod openai_json;
 mod providers;
 
+#[test]
+fn the_implicit_test_machine_has_no_personal_settings_or_key_source() {
+    let wire = Wire::of_this_machine();
+    assert!(
+        wire.settings.is_none(),
+        "an implicit test wire can read personal settings"
+    );
+    assert!(matches!(&wire.keys, KeySource::Read { key: None, .. }));
+    assert!(
+        !wire.armed(),
+        "an implicit test wire can ask a live judgment server"
+    );
+}
+
 /// The version a fake endpoint's answers name as the one that answered: what
 /// the real endpoint says for a request that asked the alias — a version, not
 /// the alias (docs.typesafe.ai/api; every one of the 3,179 zo rows on this
