@@ -187,4 +187,107 @@ export async function testTerminalCloseResult(browser, origin, ok) {
     ok("a refused mirror replacement keeps the old screen and opens no extra process",
       opened === 0 && screen.sameView && screen.leaves.length === 2, JSON.stringify(screen));
   } finally { await mirror.page.close(); }
+
+  const stored = await scene(browser, origin, false);
+  try {
+    const result = await stored.page.evaluate(async () => {
+      const tab = openStoredTab({ id: 811, root: { type: "leaf" }, agents: {}, running: {} }, activeWorktreePath, "restore");
+      let calls = 0;
+      window.__ANSWER__.close_term = () => { calls += 1; return null; };
+      closeTab(tab.id);
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return { closed: !tabs.includes(tab), calls };
+    });
+    ok("a stored tab with no process closes without a native termination request", result.closed && result.calls === 0, JSON.stringify(result));
+  } finally { await stored.page.close(); }
+
+  const wakingScene = await scene(browser, origin, false);
+  try {
+    await wakingScene.page.evaluate(() => {
+      const tab = openStoredTab({ id: 812, root: { type: "leaf" }, agents: {}, running: {} }, activeWorktreePath, "restore");
+      window.__WAKING_TAB__ = tab;
+      window.__WAKING_CLOSE_CALLS__ = [];
+      window.__ANSWER__.close_term = ({ term }) => { window.__WAKING_CLOSE_CALLS__.push(term); throw { kind: "unconfirmed" }; };
+      waking.set(tab.id, new Promise((resolve) => {
+        window.__FINISH_CLOSE_WAKE__ = () => {
+          const term = ++window.__NEXT_TERM__;
+          tab.term = term;
+          tab.layout = { type: "leaf", term };
+          tab.activePane = term;
+          delete tab.asleep;
+          setActiveTab(tab.id);
+          renderPanes(tab);
+          waking.delete(tab.id);
+          resolve();
+        };
+      }));
+      closeTab(tab.id);
+    });
+    await frame(wakingScene.page);
+    const waiting = await wakingScene.page.evaluate(() => ({ kept: tabs.includes(window.__WAKING_TAB__), calls: window.__WAKING_CLOSE_CALLS__.length }));
+    ok("closing during a stored wake waits for its process identity", waiting.kept && waiting.calls === 0, JSON.stringify(waiting));
+    await wakingScene.page.evaluate(() => window.__FINISH_CLOSE_WAKE__());
+    await frame(wakingScene.page);
+    const result = await wakingScene.page.evaluate(() => {
+      const tab = window.__WAKING_TAB__;
+      return { kept: tabs.includes(tab), screen: !!viewOfTerm(tab.term), calls: window.__WAKING_CLOSE_CALLS__ };
+    });
+    ok("a newly woken process still keeps its screen when termination is unconfirmed", result.kept && result.screen && result.calls.length === 1, JSON.stringify(result));
+  } finally { await wakingScene.page.close(); }
+
+  const late = await scene(browser, origin, true);
+  try {
+    await late.page.evaluate(() => {
+      const home = activeProjectPath;
+      const owned = activeWorktreePath;
+      const other = "/tmp/terminal-close-other";
+      projects = [...projects, { ...projects[0], path: other, name: "other", worktrees: [{ ...projects[0].worktrees[0], path: other, active: true }] }];
+      window.__LATE_OWNER__ = { home, owned };
+      activeProjectPath = other;
+      activeWorktreePath = other;
+      const mirror = ++window.__NEXT_TERM__;
+      window.__LATE_TERM__ = mirror;
+      window.__LATE_REMOVE_CALLS__ = 0;
+      window.__LATE_CLOSE_CALLS__ = [];
+      window.__ANSWER__.open_mirror_term = () => new Promise((resolve) => { window.__LATE_MIRROR_REPLY__ = () => resolve(mirror); });
+      window.__ANSWER__.close_term = ({ term }) => {
+        window.__LATE_CLOSE_CALLS__.push(term);
+        if (term === mirror) throw { kind: "unconfirmed" };
+        return null;
+      };
+      window.__ANSWER__.remove_project = () => {
+        window.__LATE_REMOVE_CALLS__ += 1;
+        return new Promise((resolve) => { window.__LATE_REMOVE_REPLY__ = () => { window.__LATE_REMOVED__ = true; resolve(null); }; });
+      };
+      window.__ANSWER__.project_catalog = () => window.__LATE_REMOVED__ ? projects.filter((one) => one.path !== home) : projects;
+      window.__LATE_MIRROR_JOB__ = openMirrorPane(window.__CLOSE_SCENE__.first, "codex", "/tmp/terminal-close-late.ansi");
+    });
+    await frame(late.page);
+    await late.page.evaluate(async () => {
+      await closeTermAndView(window.__CLOSE_SCENE__.first, "test-parent-left");
+      const previousAsk = askConfirm;
+      askConfirm = async () => true;
+      window.__LATE_REMOVE_JOB__ = removeProjectFromList(window.__LATE_OWNER__.home).finally(() => { askConfirm = previousAsk; });
+    });
+    await frame(late.page);
+    const premature = await late.page.evaluate(() => window.__LATE_REMOVE_CALLS__);
+    ok("project removal waits for a mirror whose native creation reply is still pending", premature === 0, String(premature));
+    await late.page.evaluate(async () => {
+      window.__LATE_MIRROR_REPLY__();
+      await window.__LATE_MIRROR_JOB__;
+      window.__LATE_REMOVE_REPLY__?.();
+      await window.__LATE_REMOVE_JOB__;
+    });
+    const result = await late.page.evaluate(() => {
+      const { home, owned } = window.__LATE_OWNER__;
+      const tab = tabOfTerm(window.__LATE_TERM__);
+      return {
+        listed: projects.some((one) => one.path === home),
+        removed: window.__LATE_REMOVE_CALLS__,
+        retryTab: tab?.worktree === owned,
+        closes: window.__LATE_CLOSE_CALLS__.filter((term) => term === window.__LATE_TERM__).length,
+      };
+    });
+    ok("a late mirror close refusal preserves its project catalog and retry tab", result.listed && result.removed === 0 && result.retryTab && result.closes === 1, JSON.stringify(result));
+  } finally { await late.page.close(); }
 }
