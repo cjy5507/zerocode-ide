@@ -16,6 +16,8 @@
 //! owns, or after the session was opened here and before the person wrote.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use runtime::todo_progress::TodoStatus;
 
@@ -87,6 +89,36 @@ impl TurnEnd {
             (true, false) => Self::Stopped,
             (true, true) => Self::SentWords,
         }
+    }
+}
+
+/// Whether the person's interrupt of the running turn carries the words they
+/// typed while it ran: raised by the turn's scaffold
+/// (`TurnScaffold::interrupt_to_send`), read by the session at the turn's end.
+/// The runtime's steering queue cannot say it — a steer that arrives while
+/// the model writes is drained at once, before the interrupt lands. One flag
+/// a session, lowered for every turn: a flag one turn left up, an Esc that
+/// came as that turn ended on its own, is never the next turn's.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SendWords(Arc<AtomicBool>);
+
+impl SendWords {
+    /// The handle a turn raises it by, lowered first.
+    #[must_use]
+    pub(crate) fn for_turn(&self) -> Self {
+        self.0.store(false, Ordering::SeqCst);
+        self.clone()
+    }
+
+    /// The person's Esc with words waiting: this turn's interrupt sends them.
+    pub(crate) fn raise(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Read at the turn's end, and lowered.
+    #[must_use]
+    pub(crate) fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
     }
 }
 
@@ -197,10 +229,11 @@ impl TaskContinuity {
     }
 
     /// A turn ended, as `end` says. A stop holds the window's lines back until
-    /// the person writes again; an unattended turn's interruption is its
-    /// controller's to keep.
+    /// the person writes again; an interrupt that sent the person's words is
+    /// no stop, and an unattended turn's interruption is its controller's to
+    /// keep.
     pub(crate) fn end_turn(&mut self, origin: TurnOrigin, end: TurnEnd) {
-        let stopped_by_person = end != TurnEnd::Ran;
+        let stopped_by_person = end == TurnEnd::Stopped;
         match origin {
             TurnOrigin::Person => self.stopped = stopped_by_person,
             TurnOrigin::MailPointer | TurnOrigin::HostNotice => self.stopped |= stopped_by_person,
@@ -402,7 +435,7 @@ mod tests {
     };
 
     use super::{
-        controller_standing, ControllerStanding, TaskContinuity, TurnEnd,
+        controller_standing, ControllerStanding, SendWords, TaskContinuity, TurnEnd,
         TASK_CONTINUITY_REMINDER_PREFIX,
     };
     use crate::autonomy::loops::LoopPhase;
@@ -827,5 +860,28 @@ mod tests {
             said.contains("answer it, then continue the work in this same turn"),
             "the words sent with Esc are answered and the work goes on: {said}"
         );
+    }
+
+    /// The send flag never outlives its turn: an Esc with words waiting that
+    /// reached a turn already ending on its own leaves the flag up, and the
+    /// next turn's scaffold lowers it — so that turn's Esc alone is a stop.
+    #[test]
+    fn a_send_flag_a_turn_left_up_does_not_make_the_next_turns_stop_a_send() {
+        let words = SendWords::default();
+        let earlier = words.for_turn();
+        // The earlier turn ended on its own and read its end ...
+        assert!(!words.take(), "nothing was sent");
+        // ... just before the person's Esc with words waiting reached its scaffold.
+        earlier.raise();
+
+        // The next turn starts, and the person stops it with Esc alone.
+        let _next = words.for_turn();
+
+        assert_eq!(
+            TurnEnd::of(true, words.take()),
+            TurnEnd::Stopped,
+            "the earlier turn's flag does not make this stop a send"
+        );
+        assert!(!words.take(), "the end read the flag down");
     }
 }

@@ -22,7 +22,7 @@ use super::agent_completion_pump::{
 };
 use super::mcp_runtime::discover_pending_mcp_tools_in_background;
 use super::stream::drive_render_stream;
-use super::task_continuity::{TaskContinuity, TurnEnd, TurnOrigin};
+use super::task_continuity::{SendWords, TaskContinuity, TurnEnd, TurnOrigin};
 use super::{BuiltRuntime, SessionHandle, TurnHarness};
 use crate::cli_args::{AllowedToolSet, DisallowedToolSet};
 use crate::effort::Effort;
@@ -204,6 +204,9 @@ pub struct PlainSession {
     /// person did not ask for — the window's mail line — and to their
     /// questions between turns (t-72017).
     continuity: TaskContinuity,
+    /// Whether the person's interrupt of the running turn sends the words
+    /// they typed while it ran. Each turn's scaffold takes it lowered.
+    send_words: SendWords,
 }
 
 /// `PlainSession::open` 에 들어간 런치 플래그의 되읽기 — `/resume` 으로 세션을
@@ -745,6 +748,7 @@ impl PlainSession {
             autonomy_notices: Vec::new(),
             route_fact: super::route_fact::channel(),
             continuity: TaskContinuity::default(),
+            send_words: SendWords::default(),
         };
         // A new session has no file yet, so this publishes its initial
         // snapshot. A resumed session is already persistence-bound and clean;
@@ -1043,10 +1047,18 @@ impl PlainSession {
         Ok(summary)
     }
 
-    /// The turn ended: tell the person's work how — run out, or stopped by
-    /// the person (`cancelled`).
+    /// The turn ended: tell the person's work how — run out, stopped by the
+    /// person (`cancelled`), or interrupted to send the words they typed
+    /// while it ran (the scaffold's `interrupt_to_send`).
     fn end_task_continuity(&mut self, origin: TurnOrigin, cancelled: bool) {
-        self.continuity.end_turn(origin, TurnEnd::of(cancelled, false));
+        self.continuity
+            .end_turn(origin, TurnEnd::of(cancelled, self.send_words.take()));
+    }
+
+    /// The flag a turn's interrupt raises when it sends the person's waiting
+    /// words, lowered for this turn.
+    pub(crate) fn send_words_for_turn(&self) -> SendWords {
+        self.send_words.for_turn()
     }
 
     /// Who this turn's input is from, and what the model is told on the way
