@@ -4729,10 +4729,14 @@ fn a_running_terminal_is_measured_and_its_answer_survives_restart() {
         "Manage Sessions has no single native mutation door:\n{retiring}"
     );
     let exited = block_after(window, r#"listen("term:exited", (event) => {"#);
+    // The exit drops its leaf through the one door a close uses too, and
+    // that door drops the view first, whatever tab holds the leaf.
+    let leaf_door = block_after(window, "function dropClosedTermLeaf(term, road) {");
     assert!(
         exited.contains("forgetManagedTerminalSession(term);")
-            && exited.contains("dropTermView(term);"),
-        "a managed terminal can exit without leaving both lists:\n{exited}"
+            && exited.contains(r#"dropClosedTermLeaf(term, "exit")"#)
+            && leaf_door.contains("dropTermView(term);\n  if (!holder) return false;"),
+        "a managed terminal can exit without leaving both lists:\n{exited}\n{leaf_door}"
     );
     assert!(
         exited.contains("forgetMailWaiting(term);"),
