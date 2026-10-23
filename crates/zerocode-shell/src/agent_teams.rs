@@ -1778,6 +1778,7 @@ mod tests {
         /// The production window's close: it walks back into `forget_term`.
         /// The deadlock regression test is the only caller.
         forgetful: bool,
+        lingering: bool,
     }
 
     impl Recorder {
@@ -1793,6 +1794,7 @@ mod tests {
                 refuse: false,
                 refusal_reason: None,
                 forgetful: false,
+                lingering: false,
             }
         }
 
@@ -1862,6 +1864,17 @@ mod tests {
             self.closed.borrow_mut().push(term);
             if self.forgetful {
                 super::forget_term(term);
+            }
+        }
+        fn close_gone(&self, term: u32) -> PaneExit {
+            self.close(term);
+            if self.lingering {
+                PaneExit::Lingering(ExitWitness {
+                    group: term,
+                    started: Some("test-birth".into()),
+                })
+            } else {
+                PaneExit::Gone
             }
         }
         /// Who is sitting there, which the ledger road now requires before it
@@ -2169,6 +2182,37 @@ mod tests {
         assert_eq!(typed.exit_code, 0);
         assert_eq!(host.typed.borrow().last().expect("typed").0, 7002);
         forget_term(7000);
+    }
+
+    #[test]
+    fn a_restart_reports_the_old_shells_unconfirmed_exit() {
+        let (id, mut host) = open(71_000);
+        run(&host, &id, "%1", &words("split-window -h claude"));
+        host.lingering = true;
+        let reply = run(&host, &id, "%1", &words("respawn-pane -k -t %2 claude"));
+        assert_ne!(
+            reply.exit_code, 0,
+            "the old shell still lives; success invents an exit"
+        );
+        assert!(reply.stderr.contains("unconfirmed"), "{}", reply.stderr);
+        assert_eq!(teams().get(&id).unwrap().term_of("%2"), Some(71_002));
+        assert_eq!(
+            *host.closed.borrow(),
+            [71_001],
+            "do not close the new occupant"
+        );
+        forget_term(71_000);
+    }
+
+    #[test]
+    fn a_close_reports_an_unconfirmed_exit_instead_of_success() {
+        let (id, mut host) = open(72_000);
+        run(&host, &id, "%1", &words("split-window -h claude"));
+        host.lingering = true;
+        let reply = run(&host, &id, "%1", &words("kill-pane -t %2"));
+        assert_ne!(reply.exit_code, 0, "the close did not observe an exit");
+        assert!(reply.stderr.contains("unconfirmed"), "{}", reply.stderr);
+        forget_term(72_000);
     }
 
     #[test]
