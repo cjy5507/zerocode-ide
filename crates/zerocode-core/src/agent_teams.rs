@@ -2612,6 +2612,39 @@ mod tests {
         assert!(!orchestration.contains("tmux: curl"));
     }
 
+    /// The keepalive loop is reaped before the shim writes a word (t-72592).
+    ///
+    /// macOS `/bin/sh` is bash 3.2, which takes SIGCHLD without SA_RESTART. A
+    /// loop that is only killed ends whenever it ends, and when that lands while
+    /// the answer's `printf` is blocked on a full pipe — a 13 KB `check --wait`
+    /// read through `$(…)` by a busy caller — the write is cut with
+    /// "Interrupted system call" and the shim exits 1 halfway through the JSON.
+    /// Reaped first, no child is left to end mid-write. Both roads out of the
+    /// wait are pinned: the answer, and the "could not reach" refusal.
+    #[test]
+    fn the_shim_reaps_its_keepalive_before_it_writes_a_word() {
+        let script = shim_script("PORT_V", "TOKEN_V", "orchestration");
+        let kills: Vec<&str> = script
+            .lines()
+            .filter(|line| line.contains(r#"kill "$keep""#))
+            .collect();
+        assert_eq!(
+            kills.len(),
+            2,
+            "the shim no longer ends its keepalive on both roads out of the wait:\n{script}"
+        );
+        for line in kills {
+            let reaped = line
+                .find(r#"kill "$keep""#)
+                .is_some_and(|at| line[at..].contains(r#"wait "$keep""#));
+            assert!(
+                reaped,
+                "the shim writes before it reaps its keepalive: `{}`\n{script}",
+                line.trim()
+            );
+        }
+    }
+
     #[test]
     fn the_powershell_shim_keeps_the_same_contract_without_a_process() {
         let script = shim_script_powershell("PORT_V", "TOKEN_V", "orchestration");
