@@ -198,6 +198,29 @@ fn gemini_wire_reads_the_tier_from_the_catalog() {
     );
 }
 
+/// A window hands its panes the model catalog it published — the person's
+/// settings-declared and discovered models — and a test run from such a pane
+/// inherits it. Run the wire test above under one shaped like that (Flash
+/// declared with no high rung): it must still read the shipped catalog.
+#[test]
+fn a_catalog_the_window_published_does_not_reach_the_wire_test() {
+    let _lock = crate::test_env_lock();
+    let published = r#"{"models":[{"ids":["gemini-3.5-flash"],"provider":"google","context_window":1048576,"wire":{"low":"gemini-3.5-flash-extra-low","medium":"gemini-3.5-flash-low"}}]}"#;
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "providers::gemini_code_assist::tests::gemini_wire_reads_the_tier_from_the_catalog",
+            "--exact",
+        ])
+        .env(crate::MODEL_CONTEXT_WINDOWS_ENV, published)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    assert!(
+        child.status.success() && stdout.contains("1 passed"),
+        "a catalog the window published reached the wire test:\n{stdout}"
+    );
+}
+
 /// The rule that replaced the version-collapsing heuristic: an id the catalog
 /// does not carry is sent unchanged.
 ///
