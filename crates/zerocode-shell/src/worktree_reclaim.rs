@@ -408,10 +408,10 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
     // Keep transient occupancy out of the refusal memory even when it
     // removes the last candidate; moving away makes the next beat eligible.
 
-    // Everything below this point runs only on a pass that has something to
-    // do. Which candidates are due is answered from memory alone, so an idle
-    // beat — every beat, most of the time — never reads the settings
-    // document or the project catalog, let alone starts git.
+    // Prune the refusal cache after publishing transient reasons, even when
+    // occupancy excluded every candidate. Which candidates are due is still
+    // answered from memory alone: a pass with none due returns before it
+    // reads settings or the project catalog, let alone starts git.
     let due: Vec<orchestration::SettledCheckout> = {
         let mut marks = judged().lock().unwrap_or_else(|held| held.into_inner());
         // Forget every checkout that stopped being a candidate, so a window
