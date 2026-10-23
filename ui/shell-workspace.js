@@ -3919,7 +3919,7 @@ function worktreeIgnoredWord() {
 function worktreeReclaimWord(reason) {
   switch (reason.kind) {
     case "active": return t("worktree.reclaimActive", "현재 열어 둔 폴더");
-    case "open_conversation": return t("worktree.reclaimConversation", "열린 대화 있음");
+    case "open_conversation": return t("worktree.reclaimConversation", "열린 터미널 있음");
     case "locked": return t("worktree.reclaimLocked", "워크트리 잠김");
     case "ignored_file": return t("worktree.reclaimFile", "보존할 파일 있음");
     case "not_managed": return t("worktree.reclaimNotManaged", "자동 정리 대상 아님");

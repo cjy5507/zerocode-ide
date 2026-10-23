@@ -19,7 +19,7 @@ export async function testSidebarReclaimReason(browser, origin, ok) {
       await window.__PAINTED__();
     });
     for (const [kind, word, detail] of [
-      ["open_conversation", "열린 대화 있음", "1 terminal still stands in this checkout"],
+      ["open_conversation", "열린 터미널 있음", "1 terminal still stands in this checkout"],
       ["locked", "워크트리 잠김", "git reports that the worktree is locked"],
       ["ignored_file", "보존할 파일 있음", ".notes-local would be removed with the checkout"],
     ]) {
