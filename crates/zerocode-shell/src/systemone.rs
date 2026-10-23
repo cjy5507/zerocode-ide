@@ -782,7 +782,16 @@ impl Wire {
     #[must_use]
     pub fn of_this_machine() -> Self {
         if cfg!(test) {
-            Self::reading(&crate::api_routers::HeldKeys::default(), None)
+            Self {
+                keys: KeySource::Read {
+                    name: String::new(),
+                    key: None,
+                },
+                base: base_url(),
+                settings: None,
+                socket: &SOCKET,
+                review_origin: None,
+            }
         } else {
             Self {
                 keys: KeySource::Keychain,
