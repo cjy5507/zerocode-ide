@@ -334,6 +334,18 @@ impl StallBell {
     }
 }
 
+/// How every notice the host words about a helper begins — the stall and the
+/// starvation notices — so a reader can tell one from the person's words.
+const HOST_NOTICE_LEAD: &str = "[host notice — ";
+
+/// Whether `text` is a turn this pump opens rather than words the person
+/// typed: a helper's result, its mid-run message, or a host notice about it.
+pub(super) fn is_followup_text(text: &str) -> bool {
+    text.starts_with(HOST_NOTICE_LEAD)
+        || text.contains(AGENT_MESSAGE_NOT_USER_INPUT)
+        || crate::tui::tools::persisted_agent_result(text).is_some()
+}
+
 /// The main conversation's word about one helper that may be stuck: who,
 /// how long it has been silent, that it still runs, and the two things the
 /// main can do. Framed as the host's, so it never reads as the person's.
@@ -346,7 +358,7 @@ fn stall_notice(row: &SubagentProgress) -> AgentNotification {
         label: row.label.clone(),
         status: AgentResultStatus::Running,
         text: format!(
-            "[host notice — background agent `{label}` (id: {id}) is still running but has made no tool call and written nothing for {quiet}; it may be stuck. Ask it where it stands with SendMessage, or end it with StopAgent if it is no longer worth its cost. This is not a user message.]",
+            "{HOST_NOTICE_LEAD}background agent `{label}` (id: {id}) is still running but has made no tool call and written nothing for {quiet}; it may be stuck. Ask it where it stands with SendMessage, or end it with StopAgent if it is no longer worth its cost. This is not a user message.]",
             label = row.label,
             id = row.agent_id,
         ),
@@ -423,7 +435,7 @@ fn starvation_notification(completion: &AgentCompletion) -> Option<AgentNotifica
         label: label.to_string(),
         status: AgentResultStatus::Running,
         text: format!(
-            "[host notice — background agent `{label}` (id: {agent_id}) has trouble reaching its model: {detail}. It has not finished; its result, or its failure, still comes back to you when it ends. Nothing is needed now: tell the person if it matters to them, ask the agent where it stands with SendMessage, or end it with StopAgent if the wait is no longer worth it. This is not a user message.]"
+            "{HOST_NOTICE_LEAD}background agent `{label}` (id: {agent_id}) has trouble reaching its model: {detail}. It has not finished; its result, or its failure, still comes back to you when it ends. Nothing is needed now: tell the person if it matters to them, ask the agent where it stands with SendMessage, or end it with StopAgent if the wait is no longer worth it. This is not a user message.]"
         ),
         kind: AgentNotificationKind::Message {
             agent_id: agent_id.to_string(),

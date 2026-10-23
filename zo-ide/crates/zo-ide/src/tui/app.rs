@@ -3692,7 +3692,7 @@ impl Ui {
         if interrupt {
             if self.pending_input.has_pending_steers() {
                 self.pending_input.interrupt_and_submit_steers();
-                turn.cancel_turn();
+                turn.interrupt_to_send();
                 return true;
             }
             turn.cancel_turn();

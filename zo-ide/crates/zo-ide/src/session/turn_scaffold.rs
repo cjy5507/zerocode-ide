@@ -32,6 +32,7 @@ use crate::ide::channel::wire::TurnOutcome;
 use crate::ide::events::{self, EventsChannel};
 use crate::session::permission_bridge::{run_permission_pump, PermissionBridgeError};
 use crate::session::plain_session::{CompactReport, PlainSession};
+use crate::session::task_continuity::SendWords;
 use crate::session::user_question_bridge::install_tui_user_question_channel;
 
 /// 블록 채널 용량 — 두 프런트엔드가 같은 값을 쓴다.
@@ -57,6 +58,9 @@ pub(crate) struct TurnScaffold {
     /// 도는 도구를 끊는 신호. `abort`·`cancel` 은 깃발이라 도구 디스패치의
     /// `select!` 가 읽지 않는다 — 물린 도구를 실제로 놓게 하는 건 이것뿐이다.
     tool_cancel: ToolCancelSignal,
+    /// 끊기가 사람이 턴 중에 친 글을 지금 보내는 것인가 — 세션이 턴 끝에서
+    /// 읽는다. 턴마다 내린 채 받는다([`Self::interrupt_to_send`]).
+    send_words: SendWords,
     /// IDE 채널이 발급한 이번 턴 번호.
     turn_id: Option<u64>,
     /// 권한 요청을 [`RenderBlock::PermissionPrompt`] 로 바꾸는 펌프.
@@ -109,6 +113,7 @@ impl TurnScaffold {
             ide,
             steer: session.steering_handle(),
             tool_cancel: session.tool_cancel_handle(),
+            send_words: session.send_words_for_turn(),
             turn_id,
             pump,
             launch: Some(TurnLaunch {
@@ -147,6 +152,14 @@ impl TurnScaffold {
         // 신호는 물린 포그라운드 bash 에 SIGINT 까지 보낸다(런타임 쪽
         // `interrupt_foreground_bash`) — 끊긴 도구가 뒤에 남지 않는다.
         self.tool_cancel.cancel_running_tools();
+    }
+
+    /// 사람이 턴 중에 친 글을 지금 보내려고 끊는다(입력창의 Esc, 보낼 글이
+    /// 있을 때) — [`Self::cancel_turn`] 과 같이 끊되, 세션이 이 끊기를 멈춤이
+    /// 아니라 「글을 보냄」으로 읽도록 깃발을 **먼저** 세운다(t-72017).
+    pub(crate) fn interrupt_to_send(&self) {
+        self.send_words.raise();
+        self.cancel_turn();
     }
 
     /// 사람이 이 턴을 끊었는가. 화면은 이 답으로 취소와 실패를 가른다 —
