@@ -816,7 +816,7 @@ pub(super) fn capture_scrollback_at_exit(app: &AppHandle) {
 }
 
 #[cfg(test)]
-mod keybinding_input_tests {
+mod tests {
     use super::*;
 
     #[test]
