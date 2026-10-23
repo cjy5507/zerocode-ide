@@ -401,9 +401,9 @@ mod tests {
     }
 
     /// t-57717: the road a door names, as the webview spells it — a word this
-    /// window does not know is no road — and the four that read the
-    /// conversation off the window's stored record, the only roads a finished
-    /// worker's conversation is declined on.
+    /// window does not know is no road — and the stored-record and inspection
+    /// roads that decline a finished worker's conversation. Explicit reopening
+    /// remains the person's choice.
     #[test]
     fn a_door_names_its_road_and_only_a_stored_records_roads_decline() {
         let spelled: Vec<&str> = WakeRoad::NAMED.into_iter().map(WakeRoad::word).collect();
