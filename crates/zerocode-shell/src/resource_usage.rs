@@ -786,6 +786,35 @@ pub(crate) fn process_start_identity(pid: u32) -> Result<String, String> {
         .ok_or_else(|| "프로세스 시작 식별자를 읽을 수 없습니다".to_string())
 }
 
+/// A native exit observation. Access denied and API failures are unknown,
+/// not proof that a process died. The handle pins this process while read.
+#[cfg(windows)]
+pub(crate) fn process_exited(pid: u32) -> Option<bool> {
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: querying an OS-owned process; no borrowed pointer crosses the call.
+    let process = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(process) => process,
+        Err(error)
+            if error.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) =>
+        {
+            return Some(true);
+        }
+        Err(_) => return None,
+    };
+    let mut code = 0;
+    // SAFETY: the process handle remains owned here and `code` is writable.
+    let read = unsafe { GetExitCodeProcess(process, &mut code) };
+    // SAFETY: the handle was opened above and is closed exactly once.
+    let _ = unsafe { CloseHandle(process) };
+    read.ok().map(|()| code != STILL_ACTIVE.0 as u32)
+}
+
 /// Check native-authored launch arguments on one known pid without exposing a
 /// general process query to the renderer.
 pub(crate) fn process_has_args(pid: u32, required: &[&str]) -> Result<bool, String> {
@@ -1132,6 +1161,13 @@ fn unix_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn a_live_windows_process_is_not_reported_as_exited() {
+        assert_eq!(process_exited(std::process::id()), Some(false));
+        assert_eq!(process_exited(0), None);
+    }
+
     use super::*;
 
     fn sample(rows: Vec<ProcessRow>) -> ProcessSample {

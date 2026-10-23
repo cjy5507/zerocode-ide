@@ -411,7 +411,9 @@ pub(crate) fn signal_process_group(process_group: u32, signal: libc::c_int) -> s
 pub(crate) fn process_group_exists(process_group: u32) -> bool {
     match signal_process_group(process_group, 0) {
         Ok(()) => true,
-        Err(error) => error.raw_os_error() == Some(libc::EPERM),
+        // Only ESRCH proves absence. Permission and observation errors must
+        // not become an exit receipt for a still-running process group.
+        Err(error) => error.raw_os_error() != Some(libc::ESRCH),
     }
 }
 
@@ -1493,6 +1495,27 @@ pub(crate) fn reap_stale() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_queue_keeps_the_requested_launch_for_pty_fallback() {
+        let original = vec![
+            "--model",
+            "test-model",
+            "--config",
+            "model_reasoning_effort=high",
+            "resume",
+            "test-session",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let mut args = original.clone();
+        let result = prepare(Path::new("codex.exe"), &mut args, Path::new("."), &[]);
+        assert!(matches!(result, Err(CodexQueueError::UnsupportedPlatform)));
+        assert_eq!(args, original);
+        assert!(CodexQueueError::UnsupportedPlatform.degrades());
+    }
 
     /// The production table, under the names the assertions below read with.
     #[cfg(unix)]

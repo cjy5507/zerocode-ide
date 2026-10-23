@@ -13,10 +13,13 @@
 //! checks only their shape and their place in line. That is the same division
 //! that keeps enum spellings out of the schema: one place holds the words.
 //!
-//! Nothing here is wired to a live road yet. The split lane went live with
-//! the actor cutover; these lanes go live at the LIFECYCLE cutover slice,
-//! when Close/Release/Respawn walk the journal the same way.
+//! The multi-stride lanes below remain reserved for the actor cutover.
+//! [`terminal`] owns live process-exit observations in the same private store.
+//! They cannot use the single-flight effect fence: a process that outlives a
+//! signal must remain observable without stopping every other ledger action.
 #![allow(dead_code)] // Intentionally unwired until the lifecycle cutover slice.
+
+pub(crate) mod terminal;
 
 use zerocode_orchestrator::effect_journal::{
     AuthorityLease, EffectJournal, EffectJournalError, EffectPermit, HostEffectKind,

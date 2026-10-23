@@ -1037,6 +1037,18 @@ pub trait Host {
         PaneExit::Gone
     }
 
+    /// A lifecycle reply may say success only after the host observed exit.
+    /// The window journals the intent and outcome at its common PTY door.
+    fn close_confirmed(&self, term: u32) -> bool {
+        self.close_gone(term) == PaneExit::Gone
+    }
+
+    /// Save an exit intent before a lifecycle changes its seat. Called
+    /// outside the team table; the target is revalidated before any effect.
+    fn prepare_close(&self, _term: u32) -> bool {
+        true
+    }
+
     /// The program running in a pane, read while it stands — what a switch
     /// holds on the worker's row before it closes the pane (t-7538, astra
     /// R3), and what [`Self::exit_seen`] is later asked about. `None` for a
@@ -1432,19 +1444,23 @@ impl std::fmt::Display for HostStartFailure {
  * resolves to nothing instead of to the wrong incarnation, and there is no
  * triple left for a caller to carry. */
 
-/// The command a split or a restart planned from `argv` would launch, read
+/// The host action `argv` would request, read
 /// off a copy of the team so the team itself is planned once, under the guard
 /// that acts on it (t-51380). The table is let go before this answers.
-fn launched_command(
+fn preview_host_effect(
     team_id: &str,
     pane: &str,
     pane_token: &str,
     argv: &[String],
-) -> Option<String> {
+) -> Option<Effect> {
     let mut held = teams();
     let team = authorized_team_mut(&mut held, team_id, pane, pane_token)?;
-    match plan(&mut team.clone(), argv, pane).effect {
-        Effect::Split { command, .. } | Effect::Respawn { command, .. } => Some(command),
+    Some(plan(&mut team.clone(), argv, pane).effect)
+}
+
+fn closing_term(effect: &Effect) -> Option<u32> {
+    match effect {
+        Effect::Close { term, .. } | Effect::Respawn { term, .. } => Some(*term),
         _ => None,
     }
 }
@@ -1464,8 +1480,19 @@ pub fn run(
 ) -> zerocode_hookd::TeamAnswer {
     // The launch a split or a restart here makes waits for its Codex lease
     // now, before the table is taken, never under it (t-51380).
-    let _launch = launched_command(team_id, pane, pane_token, argv)
-        .and_then(|command| host.prepare_launch(&command));
+    let preview = preview_host_effect(team_id, pane, pane_token, argv);
+    let _launch = match preview.as_ref() {
+        Some(Effect::Split { command, .. } | Effect::Respawn { command, .. }) => {
+            host.prepare_launch(command)
+        }
+        _ => None,
+    };
+    let closing = preview.as_ref().and_then(closing_term);
+    if closing.is_some_and(|term| !host.prepare_close(term)) {
+        return answer(zerocode_core::agent_teams::Reply::refused(
+            "the shell's exit intent could not be recorded; the pane was not changed",
+        ));
+    }
     let mut held = teams();
     // Authorization shares the team guard with planning and the effect. A
     // precheck followed by a second lock would let a respawn rotate the token
@@ -1476,6 +1503,11 @@ pub fn run(
         ));
     };
     let planned = plan(team, argv, pane);
+    if closing_term(&planned.effect) != closing {
+        return answer(zerocode_core::agent_teams::Reply::refused(
+            "the pane changed before its exit intent was recorded — ask again",
+        ));
+    }
     match planned.effect.clone() {
         Effect::None => answer(planned.reply),
         Effect::Split {
@@ -1594,18 +1626,11 @@ pub fn run(
                             "the pane changed while it was being restarted — ask again",
                         ));
                     }
-                    /* TODO — the Host's own failure is still unrecorded.
-                     *
-                     * `close` answers nothing, so a window that could not end
-                     * the old shell leaves a ledger saying the attempt is over
-                     * and a terminal that is still there. That is a real
-                     * `Unknown`, and it is deliberately NOT papered over with
-                     * an extra state here: it needs a durable record of the
-                     * effect written before the effect is attempted — the
-                     * lifecycle lanes (`durable_lifecycle`) are that record,
-                     * and wiring them is the lifecycle cutover slice.
-                     */
-                    host.close(old);
+                    if !host.close_confirmed(old) {
+                        return answer(zerocode_core::agent_teams::Reply::refused(
+                            "the replacement pane is open, but the old shell's exit is unconfirmed; inspect the existing pane before restarting again",
+                        ));
+                    }
                     answer(planned.reply)
                 }
                 None => answer(zerocode_core::agent_teams::Reply::refused(
@@ -1685,7 +1710,11 @@ pub fn run(
                     "the pane changed while it was being closed — ask again",
                 ));
             }
-            host.close(term);
+            if !host.close_confirmed(term) {
+                return answer(zerocode_core::agent_teams::Reply::refused(
+                    "the pane was removed, but its shell's exit is unconfirmed",
+                ));
+            }
             answer(planned.reply)
         }
     }
@@ -1779,6 +1808,8 @@ mod tests {
         /// The deadlock regression test is the only caller.
         forgetful: bool,
         lingering: bool,
+        refuse_close_intent: bool,
+        move_during_close_intent: RefCell<Option<(String, String, u32)>>,
     }
 
     impl Recorder {
@@ -1795,6 +1826,8 @@ mod tests {
                 refusal_reason: None,
                 forgetful: false,
                 lingering: false,
+                refuse_close_intent: false,
+                move_during_close_intent: RefCell::new(None),
             }
         }
 
@@ -1885,6 +1918,17 @@ mod tests {
         /// which is the shipped behaviour and not something to work around.
         /// What a test host owes is an ANSWER, so the road it is driving is the
         /// one a seated agent walks.
+        fn prepare_close(&self, _term: u32) -> bool {
+            assert!(
+                !team_table_is_locked(),
+                "journal I/O must be outside the team table"
+            );
+            if let Some((team, pane, term)) = self.move_during_close_intent.borrow_mut().take() {
+                teams().get_mut(&team).unwrap().respawn_pane(&pane, term);
+            }
+            !self.refuse_close_intent
+        }
+
         fn actor_for(&self, term: u32) -> Option<String> {
             Some(format!("actor-of-term-{term}"))
         }
@@ -2213,6 +2257,31 @@ mod tests {
         assert_ne!(reply.exit_code, 0, "the close did not observe an exit");
         assert!(reply.stderr.contains("unconfirmed"), "{}", reply.stderr);
         forget_term(72_000);
+    }
+
+    #[test]
+    fn a_refused_exit_intent_changes_neither_the_seat_nor_its_program() {
+        let (id, mut host) = open(73_000);
+        run(&host, &id, "%1", &words("split-window -h claude"));
+        host.refuse_close_intent = true;
+        let reply = run(&host, &id, "%1", &words("respawn-pane -k -t %2 claude"));
+        assert_ne!(reply.exit_code, 0);
+        assert_eq!(teams().get(&id).unwrap().term_of("%2"), Some(73_001));
+        assert_eq!(host.made.borrow().len(), 1);
+        assert!(host.closed.borrow().is_empty());
+        forget_term(73_000);
+    }
+
+    #[test]
+    fn a_seat_changed_during_exit_intent_cannot_close_the_new_occupant() {
+        let (id, host) = open(74_000);
+        run(&host, &id, "%1", &words("split-window -h claude"));
+        *host.move_during_close_intent.borrow_mut() = Some((id.clone(), "%2".into(), 74_002));
+        let reply = run(&host, &id, "%1", &words("kill-pane -t %2"));
+        assert_ne!(reply.exit_code, 0);
+        assert_eq!(teams().get(&id).unwrap().term_of("%2"), Some(74_002));
+        assert!(host.closed.borrow().is_empty());
+        forget_term(74_000);
     }
 
     #[test]

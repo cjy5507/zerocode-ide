@@ -20838,7 +20838,8 @@ mod tests {
             "fn retire_terminal(state: &AppState, term: TermId) -> bool {",
         );
         assert!(
-            retirement.contains("state.terminals().remove(&term)")
+            retirement.contains("state.terminals().remove_exact(term, &pty)")
+                && retirement.contains("ExitState::Gone")
                 && retirement.contains("state.deliveries().remove(&term);")
                 && retirement.contains(
                     "forget_term_state(state, term, TermLedgerSettlement::Recorded(Some(screen)));"
@@ -20877,13 +20878,18 @@ mod tests {
         // worker's tab on its last frame and its row in the sidebar
         // (reported 2026-08-30: "이건 계속 멈춰있어").
         let shim = shipped
-            .split_once("fn close(&self, term: TermId) {")
+            .split_once("fn close_confirmed(&self, term: TermId) -> bool {")
             .map_or("", |(_, rest)| rest);
         let shim = &shim[..shim.find("\n    }").unwrap_or(shim.len())];
         assert!(
             shim.contains("if retire_terminal(&state, term) {")
                 && shim.contains("announce_retired_terminal(&self.app, term);"),
             "the team shim's close forgets most of a pane, or forgets to say so:\n{shim}"
+        );
+        let close = block_after(shipped, "fn close(&self, term: TermId) {");
+        assert!(
+            close.contains("self.close_confirmed(term)"),
+            "unchecked close bypasses the observed retirement door"
         );
 
         // And the project switch is deliberately NOT a road out of a shell.
@@ -34335,7 +34341,7 @@ mod tests {
 
         let retiring = block_after(backend, "fn retire_terminal(");
         let kill_at = retiring
-            .find("let _ = lock_pty(&pty).kill();")
+            .find("durable_lifecycle::terminal::close(")
             .expect("a deliberately closed Codex process is not stopped before auth sync");
         let cleanup_at = retiring
             .find("forget_term_state(state, term")
@@ -34344,6 +34350,13 @@ mod tests {
             kill_at < cleanup_at,
             "the exit sync runs before the deliberately closed process is stopped"
         );
+        let confirmed_at = retiring
+            .find("ExitState::Gone")
+            .expect("retirement does not require an exit receipt");
+        let exact_at = retiring
+            .find("remove_exact(term, &pty)")
+            .expect("retirement can remove a replacement shell");
+        assert!(kill_at < confirmed_at && confirmed_at < exact_at && exact_at < cleanup_at);
     }
 
     /// Every TOML header read is guarded by the multi-line-string scanner.

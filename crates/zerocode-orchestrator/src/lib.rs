@@ -30,6 +30,7 @@ pub mod ledger_store;
 pub mod naming;
 pub mod publish;
 pub mod runtime_actor;
+pub mod terminal_exit;
 pub mod test_evidence;
 pub mod workflow;
 pub mod workflow_store;

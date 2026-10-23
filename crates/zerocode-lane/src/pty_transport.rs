@@ -112,15 +112,25 @@ pub trait PtyTransport: Send {
 /// SSH channel. The registry and callers still depend only on
 /// [`PtyTransport`]; the box and its concrete type stay private here.
 pub struct PtyHandle {
+    incarnation: u64,
     transport: Box<dyn PtyTransport>,
 }
 
 impl PtyHandle {
     #[must_use]
     pub fn new(transport: impl PtyTransport + 'static) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            incarnation: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             transport: Box::new(transport),
         }
+    }
+
+    /// Identity within this host process, unchanged across registry snapshots.
+    /// Pair with the host epoch before persisting; terminal numbers can be reused.
+    #[must_use]
+    pub const fn incarnation(&self) -> u64 {
+        self.incarnation
     }
 }
 

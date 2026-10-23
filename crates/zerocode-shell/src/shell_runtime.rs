@@ -3152,19 +3152,41 @@ pub(super) fn managed_terminal_session(
     }
 }
 
-/// Remove one shell and every fact that names it.
+/// Retire one observed shell after its exit is confirmed.
 ///
-/// Returning whether a shell was present lets the management commands remain
-/// idempotent when a process exits between list and click.
+/// False keeps a live or unconfirmed shell intact. An already-absent shell
+/// needs no cleanup; the exit pump owns the receipt for that road.
 pub(super) fn retire_terminal(state: &AppState, term: TermId) -> bool {
-    let Some(pty) = state.terminals().remove(&term) else {
+    let Some(pty) = state.terminals().handle(term) else {
         return false;
     };
+    let closed = match (
+        orchestration::terminal_exit_journal(),
+        orchestration::host_epoch(),
+    ) {
+        (Some(journal), Some(epoch)) => {
+            durable_lifecycle::terminal::close(journal, epoch, term, &pty)
+        }
+        _ => Err("the terminal exit journal is unavailable".to_string()),
+    };
+    if !matches!(
+        closed,
+        Ok(zerocode_orchestrator::terminal_exit::ExitState::Gone)
+    ) {
+        note_window_event(
+            state.local_data_root(),
+            &format!("term {term} close remains unconfirmed: {closed:?}"),
+        );
+        // Keep the handle, screen and launch facts: a refused signal is not
+        // permission to forget a running program or reclaim its checkout.
+        return false;
+    }
+    // A fixed terminal number may have been replaced while exit was being
+    // observed. Never remove or forget the new incarnation with old evidence.
+    if !state.terminals().remove_exact(term, &pty) {
+        return false;
+    }
     let screen = lock_pty(&pty).terminal().grid().visible_text();
-    // Stop a deliberately closed process before its final auth sync. The
-    // self-exit and failed-launch roads have already dropped their PTYs before
-    // they reach common cleanup.
-    let _ = lock_pty(&pty).kill();
     drop(pty);
     state.deliveries().remove(&term);
     state.prompt_queue().remove(&term);
