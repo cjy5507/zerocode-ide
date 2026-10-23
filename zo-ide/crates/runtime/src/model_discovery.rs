@@ -561,7 +561,25 @@ pub fn now_secs() -> u64 {
 /// the merged copy `zo models --refresh` leaves for audit.
 #[must_use]
 pub fn cache_dir() -> PathBuf {
-    crate::default_config_home().join("cache").join(CACHE_DIR)
+    cache_home().join("cache").join(CACHE_DIR)
+}
+
+#[cfg(not(test))]
+fn cache_home() -> PathBuf {
+    crate::default_config_home()
+}
+
+/// A unit test that names no zo home of its own resolves the person's `~/.zo`
+/// (what `conventional_config_home` names). It gets a directory of its process
+/// instead: the person's last refresh neither reaches it nor is written over.
+#[cfg(test)]
+fn cache_home() -> PathBuf {
+    let home = crate::default_config_home();
+    if crate::conventional_config_home().as_deref() == Some(home.as_path()) {
+        std::env::temp_dir().join(format!("zo-runtime-tests-{}", std::process::id()))
+    } else {
+        home
+    }
 }
 
 /// `<zo home>/cache/model-catalog/discovered.json`.
