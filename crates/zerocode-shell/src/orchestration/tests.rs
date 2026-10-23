@@ -9744,6 +9744,105 @@ fn an_agent_carrying_work(
     )
 }
 
+#[test]
+fn a_finished_pane_is_released_after_grace_without_taking_a_draft() {
+    const LEADER: u32 = 98_620;
+    const WORKER: u32 = 98_621;
+    // Advancing ten minutes must not lift the shared journal's retry clock.
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-finished-{LEADER}");
+    let (_run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = Releasing::quiet();
+    let capability = crate::agent_teams::current_pane_capability(&team, &pane).unwrap();
+    let ended = clock();
+    let done = run(
+        &host,
+        Vec::new(),
+        &team,
+        &pane,
+        &capability,
+        &words(&format!(
+            "send --type worker_done --body {{\"ok\":false}} --retry-request finished-{worker}"
+        )),
+        ended,
+    );
+    assert_eq!(done.exit_code, 0, "{}", done.stderr);
+    super::tick(&host, &[], ended + super::RESEAT_GRACE_MS - 1);
+    assert!(
+        host.closed().is_empty(),
+        "the report's grace was not preserved"
+    );
+    crate::human_input::typed(WORKER);
+    super::tick(&host, &[], ended + super::RESEAT_GRACE_MS);
+    assert!(
+        host.closed().is_empty(),
+        "a draft on a finished pane was taken"
+    );
+    crate::human_input::forget_term(WORKER);
+    super::tick(&host, &[], ended + super::RESEAT_GRACE_MS + 1);
+    assert_eq!(
+        host.closed(),
+        vec![WORKER],
+        "a finished worker's unclaimed pane remained open after grace"
+    );
+    super::tick(&host, &[], ended + super::RESEAT_GRACE_MS + 2);
+    assert_eq!(
+        host.closed(),
+        vec![WORKER],
+        "a released pane was closed twice"
+    );
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
+#[test]
+fn the_finished_pane_sweep_preserves_taken_over_and_retained_panes() {
+    // Advancing ten minutes must not lift the shared journal's retry clock.
+    let (_window, _store) = PrivateWindow::boot();
+    let _turn = one_beat_at_a_time();
+    for (leader, term, taken) in [(98_630, 98_631, true), (98_640, 98_641, false)] {
+        let team = format!("team-kept-finished-{leader}");
+        let (_run_id, worker, pane) = a_worker_carrying_work(&team, leader, term);
+        let host = Releasing::quiet();
+        let capability = crate::agent_teams::current_pane_capability(&team, &pane).unwrap();
+        let ended = clock();
+        let done = run(
+            &host,
+            Vec::new(),
+            &team,
+            &pane,
+            &capability,
+            &words(&format!(
+                "send --type worker_done --body {{\"ok\":false}} --retry-request finished-{worker}"
+            )),
+            ended,
+        );
+        assert_eq!(done.exit_code, 0, "{}", done.stderr);
+        if taken {
+            super::pane_taken_over(term, "words", ended + 1);
+        } else {
+            let kept = run(
+                &host,
+                Vec::new(),
+                &team,
+                zerocode_core::agent_teams::LEADER_PANE,
+                TEST_CAPABILITY,
+                &words(&format!("worker-retain --worker {worker}")),
+                ended + 1,
+            );
+            assert_eq!(kept.exit_code, 0, "{}", kept.stderr);
+        }
+        super::tick(&host, &[], ended + super::RESEAT_GRACE_MS + 1);
+        assert!(
+            host.closed().is_empty(),
+            "a person's or retained pane was closed"
+        );
+        crate::agent_teams::forget_term(leader);
+        crate::agent_teams::forget_term(term);
+    }
+}
+
 /// A `dispatch --inject` through the whole road: the attach is durable,
 /// the preamble lands on the WORKER's own terminal as one paste, and the
 /// receipt exists only because it did — a typing that never happened

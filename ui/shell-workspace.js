@@ -1839,7 +1839,9 @@ function worktreeListShape(held) {
     const asked = project.external;
     parts.push(
       `P${project.path}|${project.name}|${closedProjects.has(project.path) ? "-" : "+"}` +
-        `|${asked?.prompt ? 1 : 0}|${asked?.inbox?.length ?? 0}`,
+        `|${asked?.prompt ? 1 : 0}|${asked?.inbox?.length ?? 0}` +
+        `|${(landingFolds.get(project.path) ?? []).map((row) => row.path).join(",")}|${openedLandingFolds.has(project.path)}`,
+
     );
     for (const worktree of shownWorktrees(project)) {
       parts.push(
@@ -2413,6 +2415,9 @@ const automationBornPaths = new Set();
 let taskFoldedPaths = new Set();
 let taskFoldsUnder = new Map();
 const openedTaskFolds = new Set();
+let landingFolds = new Map();
+let landingFoldedPaths = new Set();
+const openedLandingFolds = new Set();
 
 /* Where each worktree's session rows are hung, by path. Rebuilt with the
  * list, so it never outlives the nodes it points at. */
@@ -5396,7 +5401,7 @@ function scrollSidebarToPath(path) {
  * Hiding the place hides the work — the person could not find the zo that held
  * their session, opened another and was refused (2026-09-13, "네비바에 안
  * 보여서"). The rows are the same fact the card draws (`worktreeAgentRows`). */
-function shownWorktrees(project) {
+function shownWorktrees(project, { includeLandingFold = false } = {}) {
   return project.worktrees.filter((worktree) =>
     !(hideAutomationWorkspaces && automationBornPaths.has(worktree.path))
     && !(hideDefaultBranchWorkspaces && worktree.is_main)
@@ -5405,7 +5410,56 @@ function shownWorktrees(project) {
     && !(sleepingPaths.has(worktree.path) && !worktree.active
       && !(keepDefaultBranchAwake && worktree.is_main))
     && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0)
-    && !(taskFoldedPaths.has(worktree.path) && !worktree.active && worktreeAgentRows(worktree.path).length === 0));
+    && !(taskFoldedPaths.has(worktree.path) && !worktree.active && worktreeAgentRows(worktree.path).length === 0)
+    && !(sidebarGroupBy === "repo" && !includeLandingFold && landingFoldedPaths.has(worktree.path)));
+
+}
+
+/* A verified checkout keeps its unlanded commits under the project's
+ * pending-landing row. Reports still awaiting the coordinator's review and
+ * a worker's own claims stay visible. A live sibling keeps its task's lead
+ * visible too. Other grouping modes have no project fold. */
+function foldFinishedCheckouts(catalog) {
+  const groups = new Map();
+  const folded = new Set();
+  const openTerminals = new Set(tabs.filter((tab) => tab.kind === "term").map((tab) => tab.worktree));
+  for (const project of catalog) {
+    const liveTasks = new Set((project.worktrees ?? [])
+      .filter((row) => row.active || openTerminals.has(row.path) || worktreeAgentRows(row.path).length > 0)
+      .map((row) => row.task_id).filter(Boolean));
+    const rows = shownWorktrees(project, { includeLandingFold: true }).filter((row) => {
+      const facts = checkoutLedger.get(checkoutKey(row.path));
+      return !row.is_main && !row.is_folder && !row.active && !openTerminals.has(row.path)
+        && worktreeAgentRows(row.path).length === 0 && !liveTasks.has(row.task_id)
+        && facts?.reported === true && facts.failed !== true && facts.takenOver !== true && facts.asking !== true
+        && ledgerLandingStage(facts) === "landWait";
+    });
+    if (rows.length === 0) continue;
+    groups.set(project.path, rows);
+    if (!openedLandingFolds.has(project.path)) for (const row of rows) folded.add(row.path);
+  }
+  landingFolds = groups;
+  landingFoldedPaths = folded;
+}
+
+function finishedCheckoutFold(project) {
+  const rows = landingFolds.get(project.path);
+  if (!rows?.length) return null;
+  const opened = openedLandingFolds.has(project.path);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn wt-more wt-landing-fold";
+  button.textContent = opened
+    ? t("worktree.pendingLandingFold", "착지 대기 {{count}}개 접기", { count: rows.length })
+    : t("worktree.pendingLandingShow", "착지 대기 {{count}}개", { count: rows.length });
+  button.setAttribute("aria-expanded", String(opened));
+  button.dataset.tip = t("worktree.pendingLandingTip", "끝난 작업의 체크아웃을 펼치거나 접습니다. 미반영 커밋과 파일은 보존됩니다.");
+  button.addEventListener("click", () => {
+    if (openedLandingFolds.has(project.path)) openedLandingFolds.delete(project.path);
+    else openedLandingFolds.add(project.path);
+    void refreshWorktrees();
+  });
+  return button;
 }
 
 /* A task's checkouts, folded under one row (t-45336).
@@ -5637,6 +5691,7 @@ async function refreshWorktrees() {
   }
   // One row a task before anything below reads the list (t-45336).
   foldTaskCheckouts(projects);
+  foldFinishedCheckouts(projects);
   const staged = allWorktrees.find((worktree) => worktree.active);
   activeWorktreePath = staged?.path ?? null;
   // The native browser panes hear about the swap NOW — the stage repaint
@@ -5785,7 +5840,8 @@ async function refreshWorktrees() {
     // 저장소의 내용은 지금 보지 않는다"이고, 그 안에서 카드만 새어 나오면 접기가
     // 무엇을 접는지 알 수 없게 된다.
     const card = externalWorktreeCard(project);
-    children.hidden = closedProjects.has(project.path) || (shown.length === 0 && !card);
+    const finished = finishedCheckoutFold(project);
+    children.hidden = closedProjects.has(project.path) || (shown.length === 0 && !card && !finished);
     // A folded repository builds no rows. Orca's own list never creates the
     // children of a collapsed node — it pushes the header and only then asks
     // `if (!isCollapsed)` (`buildRows`, index-ftls8Hg_.js:108091) — where ours
@@ -5798,6 +5854,7 @@ async function refreshWorktrees() {
     const list = windowedWorktreeList(children.hidden ? [] : shown, held);
     if (card) children.appendChild(card);
     children.appendChild(list);
+    if (finished) children.appendChild(finished);
     projectNode.append(makeProjectHeader(project), children);
     worktreeList.appendChild(projectNode);
   }

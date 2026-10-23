@@ -135,6 +135,9 @@ export async function testSidebarActivity({ browser, origin, ok, faults }) {
       }
       setSidebarView({ groupBy: "repo" });
       await refreshWorktrees();
+      // This scene inspects finished detail rows after opening their group.
+      for (const fold of document.querySelectorAll('.wt-landing-fold[aria-expanded="false"]')) fold.click();
+      await refreshWorktrees();
       await window.__PAINTED__();
       // What a person can read of one agent row: its tooltip's words, its status and its clock.
       window.__ROW__ = (term) => {

@@ -305,6 +305,8 @@ async function refreshPaneLedger() {
     if (kept) {
       checkoutLedger.clear();
       for (const [checkout, facts] of settled) checkoutLedger.set(checkout, facts);
+      // A newly finished checkout changes the sidebar's rows, not only a badge.
+      if (projectsRead) queueMicrotask(() => { void refreshWorktrees(); });
     }
     if (reseated) {
       coordinatorSeats = nextSeats;

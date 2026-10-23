@@ -168,8 +168,8 @@ struct Judged {
 }
 
 /// How a refusal reads. A checkout with work in it is KEPT — the directory
-/// stays because of what is in it. A checkout this window is standing in, a
-/// repository's own checkout, or a path no catalogued project lists was never
+/// stays because of what is in it. A repository's own checkout, or a path
+/// no catalogued project lists was never
 /// a candidate: saying it "was kept" read as a leftover where there was none,
 /// once per boot for every worker that ever ran in the main checkout
 /// (2026-09-16, forty such lines for two long-gone workers).
@@ -275,14 +275,18 @@ pub(crate) fn sweep(app: &AppHandle, now_ms: i64) {
     // quarter of an hour after the pane went — the failure that fills the
     // disk. Dropping the candidate instead means it is judged afresh on the
     // first beat after the terminal closes, with no timer and no new state.
-    let occupied = crate::occupied_checkouts(&app.state::<AppState>());
+    let state = app.state::<AppState>();
+    let active = state.active_root();
+    let occupied = crate::occupied_checkouts(&state);
     let standing: Vec<orchestration::SettledCheckout> = standing
         .into_iter()
-        .filter(|one| crate::occupancy_of(&occupied, Path::new(&one.path)) == 0)
+        .filter(|one| {
+            crate::occupancy_of(&occupied, Path::new(&one.path)) == 0
+                && !same_worktree_path(&active, Path::new(&one.path))
+        })
         .collect();
-    if standing.is_empty() {
-        return;
-    }
+    // Keep transient occupancy out of the refusal memory even when it
+    // removes the last candidate; moving away makes the next beat eligible.
 
     // Everything below this point runs only on a pass that has something to
     // do. Which candidates are due is answered from memory alone, so an idle
@@ -831,6 +835,22 @@ fn settle(
 ) -> Settled {
     let path = PathBuf::from(&candidate.path);
     let data_root = here.data_root.as_path();
+    if same_worktree_path(&here.active, &path) {
+        judged()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .remove(&candidate.path);
+        if matches!(road, Road::Report(_)) {
+            crate::note_window_event(
+                data_root,
+                &format!(
+                    "orchestration: the checkout worker {} left at {} is active; the next beat rechecks it after the window moves",
+                    candidate.worker, candidate.path
+                ),
+            );
+        }
+        return Settled::Kept;
+    }
     // Before git is asked anything: a road taking this directory apart turns
     // every answer below into a reading of a half-deleted tree.
     let Some(held) = CheckoutHeld::take(&path) else {
@@ -893,7 +913,7 @@ fn settle(
             return Settled::Kept;
         }
     };
-    let (verdict, examined) = look(&orchestrator, &known, &here.active, road.holding());
+    let (verdict, examined) = look(&orchestrator, &known, road.holding());
     let standing = if matches!(examined, Examined::Shared) {
         Standing::NotOurs
     } else {
@@ -1112,9 +1132,8 @@ fn unknown(because: String) -> (Verdict, Examined) {
     )
 }
 
-/// A refusal because the checkout is not a cut of its own — the window is
-/// standing in it, it is the repository's own, or it is not ours: whatever a
-/// worker left there is already in a tree the coordinator holds.
+/// A refusal because the checkout is the repository's own or was not cut
+/// by this window: whatever a worker left there stays with its owner.
 fn shared(because: String) -> (Verdict, Examined) {
     (Verdict::Keep(because), Examined::Shared)
 }
@@ -1122,8 +1141,8 @@ fn shared(because: String) -> (Verdict, Examined) {
 /// The verdict alone, for the tests that only ever asked for it — the beat
 /// itself reads both halves through `look`.
 #[cfg(test)]
-fn judge(orchestrator: &Orchestrator, known: &Worktree, active: &Path) -> Verdict {
-    look(orchestrator, known, active, Holding::Base).0
+fn judge(orchestrator: &Orchestrator, known: &Worktree) -> Verdict {
+    look(orchestrator, known, Holding::Base).0
 }
 
 /// One reading of a settled checkout, answering two questions from it: what
@@ -1133,13 +1152,9 @@ fn judge(orchestrator: &Orchestrator, known: &Worktree, active: &Path) -> Verdic
 fn look(
     orchestrator: &Orchestrator,
     known: &Worktree,
-    active: &Path,
     holding: Holding<'_>,
 ) -> (Verdict, Examined) {
     let path = known.path.as_path();
-    if same_worktree_path(active, path) {
-        return shared("the window is standing in it".to_string());
-    }
     if known.is_main {
         return shared("it is the repository's own checkout".to_string());
     }
@@ -1569,10 +1584,7 @@ mod tests {
         // And the preferences came with it, which is what makes the ownership
         // rule recognise a checkout this window cut.
         assert!(
-            matches!(
-                judge(&orchestrator, &known, &bench.repo),
-                Verdict::Reclaim { .. }
-            ),
+            matches!(judge(&orchestrator, &known), Verdict::Reclaim { .. }),
             "the resolved orchestrator does not know its own worktree root"
         );
 
@@ -1595,17 +1607,10 @@ mod tests {
     fn a_look_reports_the_same_facts_its_verdict_is_made_of() {
         let bench = Bench::open();
         let orchestrator = bench.orchestrator();
-        let elsewhere = bench.repo.clone();
 
         let landed = bench.cut("landed");
         assert_eq!(
-            look(
-                &orchestrator,
-                &bench.listed(&landed),
-                &elsewhere,
-                Holding::Base
-            )
-            .1,
+            look(&orchestrator, &bench.listed(&landed), Holding::Base).1,
             Examined::Landed
         );
 
@@ -1615,48 +1620,26 @@ mod tests {
         git(&unlanded, &["commit", "-q", "-m", "real work"]);
         assert!(
             matches!(
-                look(
-                    &orchestrator,
-                    &bench.listed(&unlanded),
-                    &elsewhere,
-                    Holding::Base
-                )
-                .1,
+                look(&orchestrator, &bench.listed(&unlanded), Holding::Base).1,
                 Examined::Unlanded { commits: 1, .. }
             ),
             "{:?}",
-            look(
-                &orchestrator,
-                &bench.listed(&unlanded),
-                &elsewhere,
-                Holding::Base
-            )
-            .1
+            look(&orchestrator, &bench.listed(&unlanded), Holding::Base).1
         );
 
         let dirty = bench.cut("dirty-look");
         std::fs::write(dirty.join("notes.txt"), "half a thought\n").expect("write");
         assert_eq!(
-            look(
-                &orchestrator,
-                &bench.listed(&dirty),
-                &elsewhere,
-                Holding::Base
-            )
-            .1,
+            look(&orchestrator, &bench.listed(&dirty), Holding::Base).1,
             Examined::Uncommitted { changes: 1 }
         );
 
-        // Standing in it makes it the coordinator's own tree, not a cut to
-        // harvest — and the verdict says so in the same breath.
-        let (verdict, examined) = look(
-            &orchestrator,
-            &bench.listed(&landed),
-            &landed,
-            Holding::Base,
-        );
+        // The repository's own checkout is shared work, not a worker cut.
+        let (verdict, examined) = look(&orchestrator, &bench.listed(&bench.repo), Holding::Base);
         assert_eq!(examined, Examined::Shared);
-        assert!(matches!(verdict, Verdict::Keep(ref because) if because.contains("standing")));
+        assert!(
+            matches!(verdict, Verdict::Keep(ref because) if because.contains("repository's own"))
+        );
     }
 
     #[test]
@@ -1664,13 +1647,12 @@ mod tests {
         let bench = Bench::open();
         let orchestrator = bench.orchestrator();
         let path = bench.cut("t-1140");
-        let elsewhere = bench.repo.clone();
 
         let Verdict::Reclaim {
             branch,
             base,
             takes,
-        } = judge(&orchestrator, &bench.listed(&path), &elsewhere)
+        } = judge(&orchestrator, &bench.listed(&path))
         else {
             panic!("a clean, landed worker checkout was not reclaimable");
         };
@@ -1698,9 +1680,7 @@ mod tests {
         std::fs::create_dir_all(path.join("target/debug")).expect("build directory");
         std::fs::write(path.join("target/debug/big"), vec![0u8; 4096]).expect("build output");
 
-        let Verdict::Reclaim { takes, .. } =
-            judge(&orchestrator, &bench.listed(&path), &bench.repo)
-        else {
+        let Verdict::Reclaim { takes, .. } = judge(&orchestrator, &bench.listed(&path)) else {
             panic!("a built checkout reads as dirty, so nothing would ever be reclaimed");
         };
         assert_eq!(
@@ -1716,7 +1696,7 @@ mod tests {
         git(&path, &["commit", "-q", "-m", "ignore the secret too"]);
         git(&bench.repo, &["merge", "-q", "--ff-only", "wt/t-1140"]);
         std::fs::write(path.join(".env"), "TOKEN=real\n").expect("secret");
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&path), &bench.repo) else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&path)) else {
             panic!("a checkout holding an ignored file was reclaimable");
         };
         assert!(
@@ -1725,7 +1705,7 @@ mod tests {
         );
         std::fs::remove_file(path.join(".env")).expect("take the secret back out");
         assert!(matches!(
-            judge(&orchestrator, &bench.listed(&path), &bench.repo),
+            judge(&orchestrator, &bench.listed(&path)),
             Verdict::Reclaim { .. }
         ));
         let data_root = tempfile::tempdir().expect("data root");
@@ -1746,8 +1726,7 @@ mod tests {
         // directory is the only place they are.
         let dirty = bench.cut("dirty");
         std::fs::write(dirty.join("notes.txt"), "half a thought\n").expect("write");
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&dirty), &bench.repo)
-        else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&dirty)) else {
             panic!("a checkout with an untracked file was reclaimable");
         };
         assert!(
@@ -1762,8 +1741,7 @@ mod tests {
         std::fs::write(unlanded.join("work.txt"), "real work\n").expect("write");
         git(&unlanded, &["add", "work.txt"]);
         git(&unlanded, &["commit", "-q", "-m", "real work"]);
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&unlanded), &bench.repo)
-        else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&unlanded)) else {
             panic!("a checkout holding unlanded commits was reclaimable");
         };
         assert!(
@@ -1778,8 +1756,7 @@ mod tests {
             &unrecorded,
             &["config", "--local", "--unset", "branch.wt/unrecorded.base"],
         );
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&unrecorded), &bench.repo)
-        else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&unrecorded)) else {
             panic!("a checkout with no recorded base was reclaimable");
         };
         assert!(because.contains("cut from"), "{because}");
@@ -1795,8 +1772,7 @@ mod tests {
                 "a-branch-that-went-away",
             ],
         );
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&orphaned), &bench.repo)
-        else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&orphaned)) else {
             panic!("a checkout whose base is gone was reclaimable");
         };
         assert!(because.contains("cannot be resolved"), "{because}");
@@ -1807,8 +1783,7 @@ mod tests {
             &bench.repo,
             &["worktree", "lock", &locked.to_string_lossy()],
         );
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&locked), &bench.repo)
-        else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&locked)) else {
             panic!("a locked checkout was reclaimable");
         };
         assert!(because.contains("locked"), "{because}");
@@ -1839,8 +1814,7 @@ mod tests {
             .output()
             .expect("git merge");
         assert!(!merged.status.success(), "the merge should have conflicted");
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&halfway), &bench.repo)
-        else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&halfway)) else {
             panic!("a checkout mid-merge was reclaimable");
         };
         assert!(because.contains("in progress"), "{because}");
@@ -1849,8 +1823,17 @@ mod tests {
         let landed = bench.cut("landed");
         assert!(
             matches!(
-                judge(&orchestrator, &bench.listed(&landed), &landed),
-                Verdict::Keep(_)
+                settle(
+                    &finished(&landed, "w-active-kept"),
+                    &Road::Report(orchestrator.clone()),
+                    &Where {
+                        active: landed.clone(),
+                        data_root: bench.repo.clone()
+                    },
+                    &nobody_left(),
+                    1_000
+                ),
+                Settled::Kept
             ),
             "the workspace the window is showing was reclaimable"
         );
@@ -1890,8 +1873,7 @@ mod tests {
             ],
         );
 
-        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&foreign), &bench.repo)
-        else {
+        let Verdict::Keep(because) = judge(&orchestrator, &bench.listed(&foreign)) else {
             panic!("a hand-made checkout was reclaimable");
         };
         assert!(because.contains("ownership is `external`"), "{because}");
@@ -1970,13 +1952,13 @@ mod tests {
         remember(
             &candidate,
             Standing::NotOurs,
-            "the window is standing in it",
+            "it is the repository's own checkout",
             data_root.path(),
             1_000,
         );
         let said = std::fs::read_to_string(&log).expect("the window log");
         assert!(
-            said.contains("left at /repo/main-checkout is not this window's to reclaim: the window is standing in it")
+            said.contains("left at /repo/main-checkout is not this window's to reclaim: it is the repository's own checkout")
                 && !said.contains("was kept"),
             "a checkout that was never a candidate read as a leftover:\n{said}"
         );
@@ -1985,6 +1967,37 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&candidate.path);
+    }
+
+    #[test]
+    fn leaving_the_active_checkout_does_not_wait_for_a_cached_refusal() {
+        let bench = Bench::open();
+        let path = bench.cut("finished-active");
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-active");
+        let mut here = Where {
+            active: path.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let road = Road::Report(bench.orchestrator());
+        assert!(matches!(
+            settle(&candidate, &road, &here, &nobody_left(), 1_000),
+            Settled::Kept
+        ));
+        assert!(path.is_dir(), "the window's active checkout was removed");
+        assert!(
+            !judged().lock().unwrap().contains_key(&candidate.path),
+            "standing in a checkout left a fifteen-minute refusal behind"
+        );
+        here.active = bench.repo.clone();
+        assert!(
+            matches!(
+                settle(&candidate, &road, &here, &nobody_left(), 1_001),
+                Settled::Reclaimed { .. }
+            ),
+            "leaving the checkout did not make it immediately reclaimable"
+        );
+        assert!(!path.exists());
     }
 
     /// The accident of 2026-09-28 on a bench (t-12773): a worker reported

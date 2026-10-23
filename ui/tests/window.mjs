@@ -122,6 +122,7 @@ import { testSidebarActivity } from "./sidebar-activity.mjs";
 import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testCloseGuard, testRestartNotice } from "./close-guard.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
+import { testSidebarFinishedFold } from "./sidebar-finished-fold.mjs";
 import { testSidebarTeam } from "./sidebar-team.mjs";
 import { testSidebarTeamSettled } from "./sidebar-team-settled.mjs";
 import { testSidebarScroll } from "./sidebar-scroll.mjs";
@@ -400,6 +401,7 @@ suite("close-guard", testCloseGuard);
 suite("restart-notice", testRestartNotice);
 // One task, one sidebar row: the checkouts a worker cut beside its own fold under it (t-45336).
 suite("sidebar-task-fold", testSidebarTaskFold);
+suite("sidebar-finished-fold", testSidebarFinishedFold);
 // The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
 suite("sidebar-team", testSidebarTeam);
 // A coordinator's finished sub-agents stand under it in the branch list, whatever the run or the agent (t-66539).
@@ -55586,6 +55588,12 @@ suite("finished-work", async ({ browser, origin, ok }) => {
     const seen = await page.evaluate(async () => {
       const out = { awaiting: window.__FINISHED_READ__() };
       await window.__FINISHED_SETTLE__({ verified: true }, { progress: { stage: "verified" } });
+      // Only verified work belongs to the pending-landing fold. Read its
+      // details through the same control a person uses; awaiting review
+      // above and a worker's claim below keep their original assertions.
+      document.querySelector('.wt-landing-fold[aria-expanded="false"]')?.click();
+      await refreshWorktrees();
+      await window.__PAINTED__();
       out.verified = window.__FINISHED_READ__();
       await window.__FINISHED_SETTLE__({ verified: true, merged: true }, { progress: { stage: "merged" } });
       out.merged = window.__FINISHED_READ__();

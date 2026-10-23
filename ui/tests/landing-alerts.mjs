@@ -121,6 +121,9 @@ export async function testLandingAlerts({ browser, origin, ok, faults }) {
       }
       setSidebarView({ groupBy: "repo" });
       await refreshWorktrees();
+      // This scene inspects finished detail rows after opening their group.
+      for (const fold of document.querySelectorAll('.wt-landing-fold[aria-expanded="false"]')) fold.click();
+      await refreshWorktrees();
       await window.__PAINTED__();
     }, SCENE);
     const rows = await page.evaluate((paths) => Object.fromEntries(paths.map((path) => {

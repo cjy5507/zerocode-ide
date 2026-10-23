@@ -14730,8 +14730,8 @@ impl Ledger {
 /// Facts, in the shape the reclaimer already establishes for its own
 /// verdict — the same `git status` and the same "commits beyond the base"
 /// count — so no second reading of the checkout exists to disagree with the
-/// first. `Unknown` carries the reclaimer's own reason (the window is
-/// standing in it, the base cannot be resolved, git would not answer): not a
+/// first. `Unknown` carries the reclaimer's own reason (the base cannot be
+/// resolved, git would not answer): not a
 /// verdict, and never folded into one.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -14746,8 +14746,8 @@ pub enum Examined {
     },
     /// Changes that exist nowhere but that working tree.
     Uncommitted { changes: usize },
-    /// Not a cut of its own — the window is standing in it, it is the
-    /// repository's own checkout, or it is not ours to reclaim: whatever the
+    /// Not a cut of its own — it is the repository's own checkout, or it is
+    /// not ours to reclaim: whatever the
     /// worker left there is already in a tree the coordinator holds.
     Shared,
     /// The window could not tell, and this is why.
