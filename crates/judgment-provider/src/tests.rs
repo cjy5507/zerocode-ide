@@ -423,6 +423,47 @@ fn all_three_decision_types_share_one_native_request() {
 }
 
 #[test]
+fn compatible_providers_preserve_system_one_instruction_values() {
+    for protocol in [Protocol::SystemOne, Protocol::OpenaiJson] {
+        let mut provider = local();
+        provider.protocol = protocol;
+        for instructions in [
+            json!("Ready?"),
+            json!({"task": "Ready?"}),
+            json!(["Ready?", null]),
+            Value::Null,
+        ] {
+            let mut body: Value = serde_json::from_slice(&request(&provider)).unwrap();
+            body["questions"]["ready"]["instructions"] = instructions.clone();
+            let prepared = provider.prepare(body.to_string().into_bytes()).unwrap();
+            let mut sent: Value = serde_json::from_slice(&prepared.body).unwrap();
+            if protocol == Protocol::OpenaiJson {
+                sent =
+                    serde_json::from_str(sent["messages"][1]["content"].as_str().unwrap()).unwrap();
+            }
+            assert_eq!(sent["questions"]["ready"]["instructions"], instructions);
+        }
+        for instructions in [json!(true), json!(7)] {
+            let mut body: Value = serde_json::from_slice(&request(&provider)).unwrap();
+            body["questions"]["ready"]["instructions"] = instructions;
+            assert!(matches!(
+                provider.prepare(body.to_string().into_bytes()),
+                Err(Refusal::Request)
+            ));
+        }
+        let mut body: Value = serde_json::from_slice(&request(&provider)).unwrap();
+        body["questions"]["ready"]
+            .as_object_mut()
+            .unwrap()
+            .remove("instructions");
+        assert!(matches!(
+            provider.prepare(body.to_string().into_bytes()),
+            Err(Refusal::Request)
+        ));
+    }
+}
+
+#[test]
 fn a_selected_provider_change_refuses_an_old_prepared_goal() {
     let provider = local();
     let old = request(&provider);
