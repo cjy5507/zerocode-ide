@@ -314,7 +314,8 @@ mod tests {
             workspaces: vec![workspace.clone()],
             daily_requests: None,
             model: "fixture-model".into(),
-        };
+        }
+        .resolved();
         let asking = door::Asking {
             key: true,
             settings: &settings,
@@ -415,6 +416,59 @@ mod tests {
         assert_eq!(settings.decisions.len(), 1);
         assert!(settings.decisions[PLACEMENT.id].deleted);
         assert_eq!(PLACEMENT.mode_in(&future), JevMode::Off);
+    }
+
+    #[test]
+    fn shipped_builtin_ids_remain_valid_keys_for_saved_deletions() {
+        // These are persisted keys, not the current table generated again.
+        // Adding a seat is fine; renaming one requires a settings migration.
+        let ids = [
+            "routing",
+            "recall",
+            "skills",
+            "skill_suggestion",
+            "browser",
+            "desktop",
+            "emulator",
+            "cover",
+            "stall",
+            "placement",
+            "summon",
+            "summon_difficulty",
+            "summon_model",
+            "model_tiers",
+            "effort",
+            "step_effort",
+            "compaction",
+            "agent_tool",
+            "project_rules",
+            "browser_read",
+            "notify",
+            "mention_rerank",
+            "branching",
+            "judgment_cache",
+            "mail_triage",
+            "challenger",
+            "patch_review",
+            "claim",
+            "vault_pairs",
+            "file_pick",
+            "command_guard",
+            "tool_text_guard",
+            "reflex_decide",
+        ];
+        let deleted: serde_json::Map<String, Value> = ids
+            .iter()
+            .map(|id| ((*id).to_string(), json!({"deleted": true})))
+            .collect();
+        let mut root = json!({"smart":{(SETTING):deleted}});
+        door::switch_on(root["smart"].as_object_mut().unwrap()).unwrap();
+        for id in ids {
+            let row =
+                seat(id).unwrap_or_else(|| panic!("saved decision id {id} needs a migration"));
+            assert!(in_root(&root, id).unwrap().deleted);
+            assert_eq!(row.mode_in(&root), JevMode::Off, "{id}");
+        }
     }
 
     #[test]

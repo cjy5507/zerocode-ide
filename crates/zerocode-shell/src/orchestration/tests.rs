@@ -17824,6 +17824,23 @@ fn a_returning_conversation_sits_its_empty_chair_on_the_next_beat() {
         0,
         "the chair was sat by typing into the pane"
     );
+    let checked = run(
+        &returned,
+        Vec::new(),
+        &new_team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!("check --run {run_id} --peek")),
+        clock(),
+    );
+    assert_eq!(
+        checked.exit_code, 0,
+        "the restored coordinator's first check: {}",
+        checked.stderr
+    );
+    let mail: serde_json::Value =
+        serde_json::from_str(&checked.stdout).expect("the restored inbox");
+    assert!(mail["messages"].is_array());
     crate::agent_teams::forget_term(NEW_LEADER);
     drop(private);
 }
