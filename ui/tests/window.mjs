@@ -102,6 +102,7 @@ import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testFinishedWorkerResume } from "./finished-worker-resume.mjs";
 import { testSidebarStage } from "./sidebar-stage.mjs";
 import { testKeybindingText } from "./keybinding-text.mjs";
+import { testTerminalCloseResult } from "./terminal-close-result.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
 import { testExplain } from "./explain.mjs";
@@ -366,6 +367,7 @@ suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(br
 suite("finished-worker-resume", ({ browser, origin, ok }) => testFinishedWorkerResume(browser, origin, ok));
 suite("sidebar-stage", ({ browser, origin, ok }) => testSidebarStage(browser, origin, ok));
 suite("keybinding-text", ({ browser, origin, ok }) => testKeybindingText(browser, origin, ok));
+suite("terminal-close-result", ({ browser, origin, ok }) => testTerminalCloseResult(browser, origin, ok));
 suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser, origin, ok));
 // Every question the window puts to the person, in the one popup (t-17514).
 suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok));
