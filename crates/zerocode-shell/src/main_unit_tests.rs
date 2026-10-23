@@ -29454,3 +29454,7 @@ fn managed_judgment_boot_restore_has_one_setup_call() {
     assert!(backend.contains("RESTORE_AT_BOOT.call_once("));
     assert!(backend.contains("tauri::async_runtime::spawn(async move"));
 }
+
+mod keybinding_input_tests {
+    include!("keybinding_input_tests.rs");
+}
