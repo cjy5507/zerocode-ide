@@ -4244,12 +4244,14 @@ function paintAgentRelationsControls(view, full, model) {
   }
   /* 범위 목록의 여닫이 (t-69978) — 누르면 지금 선 쪽의 반대가 사람의 선택이 된다. 편 단추가 제 폭에서
    * 물러나면(이미 두 열이 서는 폭) 초점은 곁의 범위 선택으로 간다: 같은 일을 하는 손이고, 초점이
-   * 몸으로 떨어지면 키보드를 쓰는 사람은 제 자리를 잃는다. */
+   * 몸으로 떨어지면 키보드를 쓰는 사람은 제 자리를 잃는다. 단추가 초점을 쥐었는지는 바꾸기 전에 읽는다 —
+   * 숨는 그 자리에서 브라우저가 초점을 몸으로 내려놓아, 바꾼 뒤에는 쥔 적이 없는 것처럼 보인다. */
   const railToggle = view.querySelector(".agent-relations-rail-toggle");
   if (railToggle) {
     railToggle.onclick = () => {
+      const held = document.activeElement === railToggle;
       setAgentGraphRailChoice(view, view.classList.contains("is-rail-folded") ? "open" : "folded");
-      if (railToggle.hidden && document.activeElement === railToggle) scope?.focus();
+      if (held && railToggle.hidden) scope?.focus();
     };
   }
   /* 레일은 내용이 같으면 손대지 않는다 — 훅 하나마다 지나는 길이고, 항목마다

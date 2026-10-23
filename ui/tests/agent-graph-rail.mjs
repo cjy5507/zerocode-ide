@@ -246,34 +246,15 @@ export async function testAgentGraphRail(browser, origin, ok) {
     const roomyFolded = await resize(roomyWidth);
     await page.evaluate(() => document.querySelector("#board-view .agent-relations-rail-toggle")?.focus());
     const focusedThere = (await page.evaluate(readRail, RAIL_STORE)).toggle?.focused === true;
-    /* 초점의 길을 적는다 — 누르기 직전, 처리기 바로 뒤, 그리고 초점이 들고 난 순서. */
-    await page.evaluate(() => {
-      const toggle = document.querySelector("#board-view .agent-relations-rail-toggle");
-      const name = (node) => {
-        if (node === null || node === undefined) return null;
-        const names = typeof node.className === "string" ? node.className.trim().split(/\s+/).filter(Boolean) : [];
-        return [node.tagName.toLowerCase(), ...names].join(".");
-      };
-      const trace = [];
-      window.__RAIL_FOCUS_TRACE__ = trace;
-      document.addEventListener("click", () => trace.push(`click before handler: active ${name(document.activeElement)}`),
-        { capture: true, once: true });
-      toggle?.addEventListener("click", () => trace.push(`after handler: hidden ${toggle.hidden}, active ${name(document.activeElement)}`),
-        { once: true });
-      for (const type of ["focusin", "focusout"]) {
-        document.addEventListener(type, (event) => trace.push(`${type} ${name(event.target)} (related ${name(event.relatedTarget)})`), true);
-      }
-    });
     if (focusedThere) await page.keyboard.press("Enter");
     const pressedFocus = (await page.evaluate(readRail, RAIL_STORE)).active;
     const handed = await settle();
-    const focusTrace = await page.evaluate(() => window.__RAIL_FOCUS_TRACE__ ?? []);
     ok("a folded choice holds in the roomy window too, and opening it there gives the screen back with the focus on the scope select",
       roomyFolded.stored === "folded" && !roomyFolded.rail && roomyFolded.toggle?.shown === true
         && roomyFolded.toggle.expanded === "false" && roomyFolded.columns >= 2
         && focusedThere && handed.rail && handed.stored === "open" && handed.toggle?.shown === false
         && handed.scopeFocused && handed.columns >= 2,
-      JSON.stringify({ roomyFolded, handed, pressedFocus, focusTrace }));
+      JSON.stringify({ roomyFolded, handed, pressedFocus }));
 
     ok("the folding rail raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
