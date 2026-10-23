@@ -16471,6 +16471,9 @@ listen("worker:done", (event) => {
  * it never touches the layout. */
 const MIRROR_SETTLE_MS = 1200;
 const pendingMirrors = new Map();
+// Timers above have not requested a process yet. This map owns admitted
+// native starts until their replies have been placed or safely closed.
+const openingMirrors = new Map();
 /* One seat per (parent, agent): the next run replaces the last run's tail
  * instead of stacking a new pane beside a dead one. */
 const mirrorPanes = new Map();
@@ -16492,7 +16495,23 @@ listen("worker:mirror_end", (event) => {
   pendingMirrors.delete(path);
 });
 
-async function openMirrorPane(term, agent, path) {
+function openMirrorPane(term, agent, path) {
+  const pending = openingMirrors.get(path);
+  if (pending) return pending.promise;
+  const tab = tabOfTerm(term);
+  if (!tab || tab.kind !== "term") return Promise.resolve();
+  const project = projectOfWorktree(tab.worktree);
+  if (project && removingProjectPaths.has(project.path)) return Promise.resolve();
+  const opening = { worktree: tab.worktree, promise: null };
+  const request = Promise.resolve().then(() => openMirrorPaneNow(term, agent, path)).finally(() => {
+    if (openingMirrors.get(path) === opening) openingMirrors.delete(path);
+  });
+  opening.promise = request;
+  openingMirrors.set(path, opening);
+  return request;
+}
+
+async function openMirrorPaneNow(term, agent, path) {
   const tab = tabOfTerm(term);
   if (!tab || tab.kind !== "term") return;
   // The page yields to the real screen — same run, better window. Closing it
@@ -16533,7 +16552,12 @@ async function openMirrorPane(term, agent, path) {
     // The parent left while the mirror was opening. A close refusal still
     // needs a visible retry door, so mount before requesting its retirement.
     mountTermTab(mirror, { worktree: tab.worktree }, { focus: false, placement: "tab" });
-    await closeTermAndView(mirror, "mirror-parent-left");
+    const project = projectOfWorktree(tab.worktree);
+    // Project removal is already waiting for this start and owns its close.
+    // Otherwise the vanished parent's mirror has no reason to keep running.
+    if (!project || !removingProjectPaths.has(project.path)) {
+      await closeTermAndView(mirror, "mirror-parent-left");
+    }
     return;
   }
   mirrorPanes.set(seat, mirror);

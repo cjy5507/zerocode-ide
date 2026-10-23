@@ -9159,7 +9159,13 @@ function dropClosedTermLeaf(term, road) {
 }
 
 async function closeTerminalTab(tab, road) {
+  const wake = waking.get(tab.id);
+  if (wake) await wake;
   const terms = paneLeaves(tab.layout);
+  if (terms.length === 0 && tab.asleep) {
+    dropTab(tab.id);
+    return true;
+  }
   for (const term of terms) await closeTermAndView(term, road);
   // A newly opened leaf is not part of this close's snapshot either.
   return !tabs.includes(tab);

@@ -9336,6 +9336,27 @@ mod tests {
         assert!(!terminals.contains("dropTermView(") && !terminals.contains("dropTab("));
         let pane = block_after(window, "async function closePaneLeaf(");
         assert!(pane.contains("if (!(await closeTermAndView(going, \"close-pane\"))) return;"));
+        let project = block_after(window, "async function removeProjectFromList(");
+        let fence = project
+            .find("removingProjectPaths.add(path)")
+            .expect("no project start fence");
+        let waiting = project
+            .find("await Promise.all(starting)")
+            .expect("unobserved mirror starts");
+        let remove = project
+            .find("invoke(\"remove_project\"")
+            .expect("no catalog removal");
+        assert!(fence < waiting && waiting < remove);
+        assert!(
+            project.contains("gone.has(opening.worktree)")
+                && project.contains("removingProjectPaths.delete(path)")
+        );
+        let mirror = block_after(window, "function openMirrorPane(");
+        assert!(
+            mirror.contains("removingProjectPaths.has(project.path)")
+                && mirror.contains("openingMirrors.set(path, opening)")
+        );
+        assert!(mirror.contains("openingMirrors.delete(path)"));
     }
 
     /// The embedded Chromium never asks the login keychain for its cookie

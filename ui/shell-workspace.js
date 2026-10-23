@@ -606,7 +606,10 @@ function removableProject(path) {
  * the same way. The step rides the same in-flight guard as every other
  * switch (`switchingProject`): a remove landing in the middle of a move
  * would interleave the repaint with somebody else's. */
+const removingProjectPaths = new Set();
+
 async function removeProjectFromList(path) {
+  if (!removableProject(path) || removingProjectPaths.has(path)) return;
   // Orca asks before it removes (`confirm-remove-folder` →
   // RemoveFolderDialog.tsx: title "Remove Project", "This only removes
   // {{name}} from Orca. It is still on your disk.", Cancel · Remove). The
@@ -626,10 +629,19 @@ async function removeProjectFromList(path) {
     cancel: false,
   });
   if (removing !== true) return;
+  if (!removableProject(path) || removingProjectPaths.has(path)) return;
   const gone = new Set(
     (projects.find((held) => held.path === path)?.worktrees ?? []).map((held) => held.path),
   );
+  removingProjectPaths.add(path);
   try {
+    // Native mirror creation can outlive its parent. Fence new starts, then
+    // let already-admitted starts place their screens before closing them.
+    const starting = [];
+    for (const opening of openingMirrors.values()) {
+      if (gone.has(opening.worktree)) starting.push(opening.promise);
+    }
+    await Promise.all(starting);
     // Keep the project and its retry doors until every selected shell has
     // confirmed exit. Removing the catalog first would strand a refusal.
     for (const held of tabs.filter((one) => one.kind === "term" && gone.has(one.worktree))) {
@@ -651,26 +663,19 @@ async function removeProjectFromList(path) {
       switchingAwayForRemoval = false;
       await switchingProject;
     }
+    if (tabs.some((one) => one.kind === "term" && gone.has(one.worktree))) return;
     await invoke("remove_project", { path });
+    // Shells have already confirmed exit. Other surfaces can now leave the
+    // list, and the start fence stays up until the refreshed catalog arrives.
+    for (const held of tabs.filter((held) => gone.has(held.worktree))) {
+      if (held.kind !== "term") dropTab(held.id);
+    }
+    await refreshWorktrees();
   } catch (error) {
     showError(String(error));
-    return;
+  } finally {
+    removingProjectPaths.delete(path);
   }
-  // The removed project's tabs go with it — every worktree it held. Left
-  // behind they are rows for places the sidebar no longer names, and their
-  // mere existence keeps the empty-stage placeholder suppressed
-  // (`placeholder.hidden = tabs.length > 0`), which is how a removal used to
-  // end on a blank stage that claimed it was showing something.
-  // Read from the list that still remembers the project — the refresh below
-  // is what forgets it.
-  for (const held of tabs.filter((held) => gone.has(held.worktree))) {
-    if (held.kind === "term") {
-      await closeTerminalTab(held, "project-removed");
-      continue;
-    }
-    dropTab(held.id);
-  }
-  await refreshWorktrees();
 }
 
 /* ---- 이 창이 만들지 않은 워크트리 ----
