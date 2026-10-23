@@ -14,8 +14,9 @@
 //! So this module owns BOTH halves of that one login and nothing else does:
 //! the store's path, key and shape, the OAuth client, the consent round trip,
 //! and the reading that turns what is on disk into what a card can say. The
-//! gauge asks it for the path, the credentials and a token refresh; the
-//! commands in `cmd/usage.rs` ask it for the login flow. Neither owns a copy.
+//! gauge asks it for the path, the credentials, a token refresh and the Code
+//! Assist project zo recorded for the login; the commands in `cmd/usage.rs`
+//! ask it for the login flow. Neither owns a copy.
 //!
 //! The write side follows zo's own protocol rather than inventing one
 //! (`zo-ide/crates/api/src/oauth_store.rs`): the advisory lock on
@@ -259,6 +260,96 @@ fn hold_lock(path: &Path) -> Result<std::fs::File, String> {
         }
     }
     Err("zo 자격 증명 파일이 다른 프로세스에 잠겨 있습니다".to_string())
+}
+
+/* ---- the Code Assist project zo resolved for it ------------------------- */
+//
+// zo resolves the Code Assist project a login's requests are billed to once,
+// and keeps the answer beside the login so the next process need not ask
+// again (`oauth_store.rs`, `google_code_assist_project`). The gauge reads that
+// record when Google's own answer names no project (t-72144). Read only: zo
+// writes the record, replaces it, and clears it with the login.
+
+/// The key zo files the project record under — zo's
+/// `GOOGLE_CODE_ASSIST_PROJECT_KEY`. One record at a time: resolving for
+/// another login or configuration replaces it.
+const PROJECT_KEY: &str = "google_code_assist_project";
+
+/// The record's field naming the configured project it was resolved under —
+/// zo's `CONFIGURED_PROJECT_FIELD`. A record without it predates the field,
+/// and zo trusts none of those.
+const CONFIGURED_PROJECT_FIELD: &str = "configured_project";
+
+/// Hex digits of the refresh token's SHA-256 that name a grant — zo's
+/// `GRANT_FINGERPRINT_LEN`. Google refresh tokens do not rotate, so this
+/// names one login across processes and holds nothing a reader could use.
+const GRANT_FINGERPRINT_LEN: usize = 16;
+
+/// The variables zo reads its configured project from, in zo's order
+/// (`google_cloud_project`, `providers/gemini_code_assist.rs`).
+const CONFIGURED_PROJECT_VARIABLES: [&str; 2] = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT_ID"];
+
+/// The name zo files a login's project under.
+pub(crate) fn grant_fingerprint(refresh_token: &str) -> String {
+    crate::artifact_runtime::sha256_hex(refresh_token.as_bytes())[..GRANT_FINGERPRINT_LEN]
+        .to_string()
+}
+
+/// The Code Assist project this process's configuration names.
+///
+/// The window's own environment, which is launchd's when it was opened from
+/// the Dock: a project named only in a shell profile is not seen here, and a
+/// record zo made under it is then another configuration's.
+pub(crate) fn configured_project() -> Option<String> {
+    configured_project_from(|name| std::env::var(name).ok())
+}
+
+/// The configured project as zo reads it: the first of its variables that is
+/// SET, trimmed, a blank one being none without asking the next. A bare
+/// project number zo refuses outright, so it is no project here either.
+///
+/// Read through `lookup`, so the tests never touch the process environment.
+pub(crate) fn configured_project_from(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    CONFIGURED_PROJECT_VARIABLES
+        .into_iter()
+        .find_map(lookup)
+        .map(|value| value.trim().to_string())
+        .filter(|project| {
+            !project.is_empty() && !project.chars().all(|glyph| glyph.is_ascii_digit())
+        })
+}
+
+/// The Code Assist project zo resolved for the login `held` while the
+/// configuration named `configured`, read the way zo reads its record before
+/// trusting it: the record is this login's (its grant) under this
+/// configuration (its configured project), and names a project. No record,
+/// another login's or another configuration's, a record of no project, a
+/// login with no refresh token to name it by, or a file that does not read —
+/// each is no project.
+pub(crate) fn remembered_project(
+    path: &Path,
+    held: &Credentials,
+    configured: Option<&str>,
+) -> Option<String> {
+    let grant = grant_fingerprint(held.refresh_token.as_deref()?);
+    let root = read_root(path).ok()?;
+    let record = root.get(PROJECT_KEY)?;
+    if record.get("grant").and_then(serde_json::Value::as_str) != Some(grant.as_str()) {
+        return None;
+    }
+    let recorded = match record.get(CONFIGURED_PROJECT_FIELD)? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(project) => Some(project.as_str()),
+        _ => return None,
+    };
+    if recorded != configured {
+        return None;
+    }
+    record
+        .get("project")
+        .and_then(serde_json::Value::as_str)
+        .filter(|project| !project.is_empty())
+        .map(str::to_string)
 }
 
 /* ---- what a card says about it ------------------------------------------ */
@@ -924,6 +1015,139 @@ mod tests {
 
         std::fs::write(&path, "not json").expect("break it");
         assert!(!on_file(Some(&path)), "a broken file read as signed in");
+    }
+
+    /// zo names a grant by the first sixteen hex digits of its refresh token's
+    /// SHA-256 (`oauth_store::grant_fingerprint`), so a record it wrote is
+    /// found under exactly that name — pinned here by the digest of a
+    /// synthetic token, not by calling the same function twice.
+    #[test]
+    fn a_grant_is_named_the_way_zo_names_it() {
+        assert_eq!(grant_fingerprint("rt"), "cdffd5dd8ca8126c");
+    }
+
+    /// zo reads its configured project from `GOOGLE_CLOUD_PROJECT`, else
+    /// `GOOGLE_CLOUD_PROJECT_ID` — the first one SET, trimmed, a blank one
+    /// being none (`google_cloud_project`). A bare project number is refused.
+    #[test]
+    fn the_configured_project_is_zos_variable_in_zos_order() {
+        let from = |set: &[(&str, &str)]| {
+            configured_project_from(|name| {
+                set.iter()
+                    .find(|(variable, _)| *variable == name)
+                    .map(|&(_, value)| value.to_string())
+            })
+        };
+        assert_eq!(from(&[]), None);
+        assert_eq!(
+            from(&[("GOOGLE_CLOUD_PROJECT", " my-project ")]).as_deref(),
+            Some("my-project")
+        );
+        assert_eq!(
+            from(&[("GOOGLE_CLOUD_PROJECT_ID", "id-project")]).as_deref(),
+            Some("id-project")
+        );
+        assert_eq!(
+            from(&[
+                ("GOOGLE_CLOUD_PROJECT", "first"),
+                ("GOOGLE_CLOUD_PROJECT_ID", "second"),
+            ])
+            .as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            from(&[
+                ("GOOGLE_CLOUD_PROJECT", "  "),
+                ("GOOGLE_CLOUD_PROJECT_ID", "second"),
+            ]),
+            None,
+            "a blank first variable handed over to the second, which zo does not"
+        );
+        assert_eq!(
+            from(&[("GOOGLE_CLOUD_PROJECT", "123456789012")]),
+            None,
+            "a project number was taken for a project id"
+        );
+    }
+
+    /// zo remembers the project it resolved for a login under the login's
+    /// grant and the project the configuration named then
+    /// (`google_code_assist_project`). The record is THIS login's under THIS
+    /// configuration only — the same match zo makes before it trusts it.
+    #[test]
+    fn zos_project_record_is_read_for_this_login_and_configuration_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        let held = credentials();
+        let grant = grant_fingerprint("rt");
+        let with_record = |record: serde_json::Value| {
+            std::fs::write(
+                &path,
+                serde_json::json!({ "google_code_assist_project": record }).to_string(),
+            )
+            .expect("credentials");
+        };
+
+        assert_eq!(remembered_project(&path, &held, None), None, "no file");
+        with_record(
+            serde_json::json!({ "grant": grant, "configured_project": null, "project": "zo-project" }),
+        );
+        assert_eq!(
+            remembered_project(&path, &held, None).as_deref(),
+            Some("zo-project")
+        );
+        assert_eq!(
+            remembered_project(&path, &held, Some("configured")),
+            None,
+            "a record made under no configured project answered for one"
+        );
+
+        with_record(serde_json::json!({
+            "grant": grant, "configured_project": "configured", "project": "configured-zo-project"
+        }));
+        assert_eq!(
+            remembered_project(&path, &held, Some("configured")).as_deref(),
+            Some("configured-zo-project")
+        );
+        assert_eq!(remembered_project(&path, &held, None), None);
+
+        for (record, why) in [
+            (
+                serde_json::json!({ "grant": "0123456789abcdef", "configured_project": null, "project": "theirs" }),
+                "another login's record",
+            ),
+            (
+                serde_json::json!({ "grant": grant, "project": "before-configurations" }),
+                "a record that names no configuration",
+            ),
+            (
+                serde_json::json!({ "grant": grant, "configured_project": null, "project": null }),
+                "a record of no project",
+            ),
+            (
+                serde_json::json!({ "grant": grant, "configured_project": null, "project": "" }),
+                "a record of an empty project",
+            ),
+        ] {
+            with_record(record);
+            assert_eq!(
+                remembered_project(&path, &held, None),
+                None,
+                "{why} was read"
+            );
+        }
+
+        // A login with no refresh token has no grant: zo keeps its project for
+        // one process only.
+        with_record(
+            serde_json::json!({ "grant": grant, "configured_project": null, "project": "zo-project" }),
+        );
+        let mut bearer_only = credentials();
+        bearer_only.refresh_token = None;
+        assert_eq!(remembered_project(&path, &bearer_only, None), None);
+
+        std::fs::write(&path, "not json").expect("break it");
+        assert_eq!(remembered_project(&path, &held, None), None);
     }
 
     /// The hand-rolled form body escapes what a token may legally carry.

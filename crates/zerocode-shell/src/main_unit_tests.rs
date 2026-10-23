@@ -14700,6 +14700,7 @@ fn the_bar_segment_words_come_off_one_table_in_every_catalog() {
         ("USAGE_EXPIRED_RUN_WORD", "usage.expiredRunOf"),
         ("USAGE_RELOGIN_WORD", "usage.reloginOf"),
         ("USAGE_READ_FAILED_WORD", "usage.readFailedOf"),
+        ("USAGE_NO_PROJECT_WORD", "usage.noProjectOf"),
     ] {
         assert!(
             window.lines().any(|line| {
@@ -14732,6 +14733,9 @@ fn the_bar_segment_words_come_off_one_table_in_every_catalog() {
         "usage.expiredRunOf",
         "usage.reloginOf",
         "usage.readFailedOf",
+        // A gauge Google names no project for says so, not 「read failed」
+        // (t-72144) — in every catalog.
+        "usage.noProjectOf",
         "usage.runOnce",
         "settings.cliLogins.expired",
         "settings.cliLogins.waitingRefresh",
