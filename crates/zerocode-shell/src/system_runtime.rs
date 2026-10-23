@@ -468,16 +468,39 @@ pub(super) const KEYBINDING_ACTIONS: &[(&str, &[&str])] = &[
 /// The identity emitted by the renderer's `chordOf`: `mod`, optional `alt`,
 /// optional `shift`, then one lower-case physical key id.
 pub(super) fn normalize_keybinding_chord(raw: &str) -> Result<String, String> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    let parts: Vec<&str> = normalized.split('+').collect();
-    let valid = matches!(parts.as_slice(), ["mod", key] if !key.is_empty())
-        || matches!(parts.as_slice(), ["mod", "alt", key] if !key.is_empty())
-        || matches!(parts.as_slice(), ["mod", "shift", key] if !key.is_empty())
-        || matches!(parts.as_slice(), ["mod", "alt", "shift", key] if !key.is_empty());
+    // `keyId` emits a literal space for Space. Preserve it while still
+    // accepting whitespace around named keys in an edited settings file.
+    let raw = raw.trim_start();
+    let raw = if raw.ends_with("+ ") {
+        raw
+    } else {
+        raw.trim_end()
+    };
+    let normalized = raw.to_ascii_lowercase();
+    let valid = normalized.strip_prefix("mod+").is_some_and(|key| {
+        let key = key.strip_prefix("alt+").unwrap_or(key);
+        let key = key.strip_prefix("shift+").unwrap_or(key);
+        keybinding_key_id(key)
+    });
     if !valid {
         return Err(format!("{raw}는 이 창이 인식하는 단축키가 아닙니다"));
     }
     Ok(normalized)
+}
+
+/// `KeyboardEvent.key` is either one printable character or a named key
+/// (Enter, ArrowLeft, F24, MediaPlayPause, ...). Validate that grammar rather
+/// than maintaining another platform's list of key names. Both settings
+/// writes and effective-binding reads pass through this one validator.
+fn keybinding_key_id(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if chars.next().is_none() {
+        return !first.is_control();
+    }
+    first.is_ascii_alphabetic() && key.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 pub(super) fn effective_keybinding_chords(
@@ -515,35 +538,74 @@ mod keybinding_input_tests {
 
     #[test]
     fn keybinding_markup_and_control_sequences_are_refused() {
-        for key in ["<b>demo</b>", "&lt;b&gt;", "arrow left", "a\nb", "\0", "\u{1b}[A", "x+y"] {
+        for key in [
+            "<b>demo</b>",
+            "&lt;b&gt;",
+            "arrow left",
+            "a\nb",
+            "\0",
+            "\u{1b}[A",
+            "x+y",
+        ] {
             let chord = format!("mod+{key}");
-            assert!(normalize_keybinding_chord(&chord).is_err(), "accepted {chord:?}");
+            assert!(
+                normalize_keybinding_chord(&chord).is_err(),
+                "accepted {chord:?}"
+            );
         }
     }
 
     #[test]
     fn keybinding_character_and_named_keys_keep_the_renderer_grammar() {
-        for key in ["t", "`", "=", "[", "<", " ", "한", "arrowleft", "enter", "f24", "mediaplaypause"] {
+        for key in [
+            "t",
+            "`",
+            "=",
+            "[",
+            "<",
+            " ",
+            "한",
+            "arrowleft",
+            "enter",
+            "f24",
+            "mediaplaypause",
+        ] {
             for modifiers in ["mod", "mod+alt", "mod+shift", "mod+alt+shift"] {
                 let chord = format!("{modifiers}+{key}");
                 assert_eq!(normalize_keybinding_chord(&chord), Ok(chord.clone()));
             }
         }
-        assert_eq!(normalize_keybinding_chord(" MOD+SHIFT+ENTER "), Ok("mod+shift+enter".into()));
+        assert_eq!(
+            normalize_keybinding_chord(" MOD+SHIFT+ENTER "),
+            Ok("mod+shift+enter".into())
+        );
     }
 
     #[test]
     fn keybinding_read_and_write_use_the_same_validation_without_losing_reset_or_disable() {
         let action = "terminal.newTab";
         let mut overrides = BTreeMap::from([(action.into(), vec!["mod+<b>demo</b>".into()])]);
-        assert_eq!(effective_keybinding_chords(&overrides, action, &["mod+t"]), ["mod+t"]);
+        assert_eq!(
+            effective_keybinding_chords(&overrides, action, &["mod+t"]),
+            ["mod+t"]
+        );
         let before = overrides.clone();
-        assert!(apply_keybinding(&mut overrides, action.into(), Some(vec!["mod+<b>demo</b>".into()])).is_err());
+        assert!(
+            apply_keybinding(
+                &mut overrides,
+                action.into(),
+                Some(vec!["mod+<b>demo</b>".into()])
+            )
+            .is_err()
+        );
         assert_eq!(overrides, before);
         apply_keybinding(&mut overrides, action.into(), Some(vec![])).unwrap();
         assert!(effective_keybinding_chords(&overrides, action, &["mod+t"]).is_empty());
         apply_keybinding(&mut overrides, action.into(), None).unwrap();
-        assert_eq!(effective_keybinding_chords(&overrides, action, &["mod+t"]), ["mod+t"]);
+        assert_eq!(
+            effective_keybinding_chords(&overrides, action, &["mod+t"]),
+            ["mod+t"]
+        );
     }
 }
 

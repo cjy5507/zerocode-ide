@@ -17618,11 +17618,10 @@ function paintStagePlaceholder() {
     }
     placeholder.dataset.i18nHtml = "stage.empty";
     applyLocale(placeholder);
-    // The sentence invites you to press a key, so it has to name the key that
-    // is in force. `applyLocale` writes the catalog text with its `{{chord}}`
-    // still in it — the source is this file's own catalog either way, which is
-    // the same reason assigning `innerHTML` here is not a way in.
-    placeholder.innerHTML = placeholder.innerHTML.replace("{{chord}}", hint);
+    // Only the catalog owns markup. A shortcut may come from an edited
+    // settings file; even an invalid stored value must remain literal text.
+    const key = placeholder.querySelector("kbd");
+    if (key) key.textContent = hint;
     seatStageDoor();
     return;
   }
