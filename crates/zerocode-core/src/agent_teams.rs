@@ -1439,11 +1439,14 @@ header = "x-zerocode-hook-token: $token"
 header = "x-zerocode-team-token: $pane_token"
 EOF
 ) || {{
-  if [ -n "$keep" ]; then kill "$keep" 2>/dev/null || :; fi
+  if [ -n "$keep" ]; then kill "$keep" 2>/dev/null || :; wait "$keep" 2>/dev/null || :; fi
   echo "{voice}: could not reach the window" >&2
   exit 1
 }}
-if [ -n "$keep" ]; then kill "$keep" 2>/dev/null || :; fi
+# Reaped, not only killed: bash 3.2 (macOS sh) takes SIGCHLD without
+# SA_RESTART, so a loop that ends while the answer's write is blocked on a full
+# pipe cuts that write with "Interrupted system call".
+if [ -n "$keep" ]; then kill "$keep" 2>/dev/null || :; wait "$keep" 2>/dev/null || :; fi
 code="${{out##*
 }}"
 said="${{out%
