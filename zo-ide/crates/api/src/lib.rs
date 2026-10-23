@@ -181,6 +181,11 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
         // Unit tests must not detect the developer machine's real OAuth/ADC or
         // other external credential stores when asserting the default gate.
         std::env::set_var("ZO_DISABLE_EXTERNAL_CREDENTIALS", "1");
+        // Nor the model catalog a window hands its panes (the person's declared
+        // and discovered models): a test reads the shipped catalog unless it
+        // declares one itself, which it does under this lock.
+        std::env::remove_var(MODEL_CONTEXT_WINDOWS_ENV);
+        std::env::remove_var(MODEL_EFFORT_CEILINGS_ENV);
         Mutex::new(())
     })
     .lock()
