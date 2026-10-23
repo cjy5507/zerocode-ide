@@ -2000,6 +2000,103 @@ mod tests {
         assert!(!path.exists());
     }
 
+    fn catalog_reclaim(bench: &Bench, path: &Path) -> serde_json::Value {
+        serde_json::to_value(crate::WorktreeEntry::new(bench.listed(path), &bench.repo))
+            .expect("the catalogue row")["reclaim"]
+            .clone()
+    }
+
+    #[test]
+    fn the_catalog_reads_transient_reclaim_reasons_without_caching_a_refusal() {
+        let bench = Bench::open();
+        let path = bench.cut("kept-open");
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-kept-open");
+        let road = Road::Report(bench.orchestrator());
+        let mut here = Where {
+            active: path.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        assert!(matches!(
+            settle(&candidate, &road, &here, &nobody_left(), 1_000),
+            Settled::Kept
+        ));
+        assert_eq!(catalog_reclaim(&bench, &path)["kind"], "active");
+        assert!(!judged().lock().unwrap().contains_key(&candidate.path));
+
+        here.active = bench.repo.clone();
+        let occupied = Recheck {
+            terminals: &|_| 1,
+            ..nobody_left()
+        };
+        assert!(matches!(
+            settle(&candidate, &road, &here, &occupied, 1_001),
+            Settled::Kept
+        ));
+        assert_eq!(catalog_reclaim(&bench, &path)["kind"], "open_conversation");
+        assert!(!judged().lock().unwrap().contains_key(&candidate.path));
+        assert!(matches!(
+            settle(&candidate, &road, &here, &nobody_left(), 1_002),
+            Settled::Reclaimed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_catalog_reads_the_lock_reason_from_reclaim() {
+        let bench = Bench::open();
+        let path = bench.cut("kept-locked");
+        git(&bench.repo, &["worktree", "lock", path.to_str().unwrap()]);
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-kept-locked");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &nobody_left(),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        let said = catalog_reclaim(&bench, &path);
+        assert_eq!(said["kind"], "locked");
+        assert!(said["detail"].as_str().unwrap().contains("locked"));
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn the_catalog_reads_ignored_files_as_the_reclaim_reason() {
+        let bench = Bench::open();
+        bench.ignore_on_main("target/\n.notes-local\n");
+        let path = bench.cut("kept-notes");
+        bench.move_in_warm_target(&path);
+        std::fs::write(path.join(".notes-local"), "keep this local note").unwrap();
+        let data_root = tempfile::tempdir().expect("data root");
+        let candidate = finished(&path, "w-kept-notes");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        assert!(matches!(
+            settle(
+                &candidate,
+                &Road::Report(bench.orchestrator()),
+                &here,
+                &nobody_left(),
+                1_000
+            ),
+            Settled::Kept
+        ));
+        let said = catalog_reclaim(&bench, &path);
+        assert_eq!(said["kind"], "ignored_file");
+        assert!(said["detail"].as_str().unwrap().contains(".notes-local"));
+        assert!(path.join(".notes-local").is_file());
+    }
+
     /// The accident of 2026-09-28 on a bench (t-12773): a worker reported
     /// `ok:true` holding a commit its base had not taken, screenshots under an
     /// ignored `output/`, and a warmed `target/` its coordinator had moved in.
