@@ -208,6 +208,8 @@ fn the_roster_reads_the_ledgers_rows_and_the_trees_own_counts() {
     let facts = block_after(&runtime, "pub(super) fn desk_checkout_facts(");
     for count in [
         ".commits_beyond(&worktree.path, base, branch)",
+        // The worker table's 바뀐 줄 (t-70264): the orchestrator's one count of the tree since the fork.
+        ".lines_beyond(&worktree.path, base)",
         "cleanup_git_evidence(",
         ".take(DESK_CHECKOUTS_MAX)",
         "orchestrator.list()",

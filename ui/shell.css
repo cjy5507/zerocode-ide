@@ -33507,109 +33507,20 @@ details.task-board-section > summary {
   display: none;
 }
 
-/* 워커: 한 사람 한 장, 두 줄 반. 건강 낱말만 제 상태의 잉크를 입고(판 없음은
- * 멈춤, 한도 벽·답 기다림은 기다림, 턴 중은 준비의 초록), 나머지 사실은 조용한
- * 셋째 줄이다. 판을 든 워커는 누르면 그 작업을 인스펙터에 연다. */
-.board-desk-workers {
-  display: grid;
-  gap: var(--space-1);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
+/* 워커 — 시안 B의 표로 옮겼다(t-70264): 칸과 자세히의 모양은 「워커·기록 탭」 절(시안 B 절의 끝)에
+ * 있다. 여기는 행의 자세히에 서는 계속 판정의 줄과, 행 밑에 서는 한도 벽의 띠다. */
 
-.board-desk-worker-main {
-  display: grid;
-  gap: var(--space-1);
-  width: 100%;
-  min-width: 0;
-  padding: var(--space-1) var(--space-3);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-radius: var(--radius-md);
-  background: var(--surface-deck);
-  color: var(--ink-chalk);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color var(--motion-fast) var(--ease-standard);
-}
-
-.board-desk-worker-main:hover:not(:disabled) {
-  border-color: var(--edge-mark);
-}
-
-.board-desk-worker-main:disabled {
-  cursor: default;
-}
-
-.board-desk-worker-line {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-width: 0;
-  font-size: var(--text-xs);
-}
-
-.board-desk-worker-id {
-  color: var(--ink-label);
-  font-family: var(--font-mono);
-  font-size: var(--text-2xs);
-  font-weight: 400;
-}
-
-.board-desk-worker-health {
-  overflow: hidden;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.board-desk-worker.is-gone .board-desk-worker-health { color: var(--signal-halt-ink); }
-.board-desk-worker.is-walled .board-desk-worker-health,
-.board-desk-worker.is-asking .board-desk-worker-health { color: var(--signal-wait-ink); }
-.board-desk-worker.is-turn .board-desk-worker-health { color: var(--signal-ready); }
-.board-desk-worker.is-idle .board-desk-worker-health,
-.board-desk-worker.is-asleep .board-desk-worker-health { color: var(--ink-label); }
-
-.board-desk-worker-age {
-  flex: none;
-  margin-left: auto;
-  color: var(--ink-label);
-  font-variant-numeric: tabular-nums;
-}
-
-.board-desk-worker-what {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0 var(--space-2);
-  min-width: 0;
-}
-
-.board-desk-worker-task {
-  max-width: 100%;
-  overflow: hidden;
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.board-desk-worker-facts {
-  color: var(--ink-label);
-  font-size: var(--text-2xs);
-  overflow-wrap: anywhere;
-}
-
-/* 계속 판정 (t-26583): 워커 줄 밑의 한 줄. 판정 낱말만 제 신호의 잉크를 입고(체크포인트는
+/* 계속 판정 (t-26583): 워커의 자세히에 선 한 줄. 판정 낱말만 제 신호의 잉크를 입고(체크포인트는
  * 준비의 초록, 멈춤은 기다림, 중지는 멈춤), 사유는 본문 잉크, 근거 숫자는 조용한 글씨다 —
- * 「계속」은 아무 색도 입지 않는다. 줄에 움직임이 없으니 줄일 움직임도 없다. */
+ * 「계속」은 아무 색도 입지 않는다. 멈춤·중지는 행의 상태 칸에도 선다. 줄에 움직임이 없으니 줄일
+ * 움직임도 없다. */
 .board-desk-worker-gate {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0 var(--space-2);
   min-width: 0;
-  font-size: var(--text-2xs);
+  font: var(--type-label-13);
 }
 
 .board-desk-worker-gate[hidden],
@@ -33618,35 +33529,37 @@ details.task-board-section > summary {
 }
 
 .board-desk-worker-gate-verdict {
-  color: var(--ink-label);
+  color: var(--ink-mist);
   font-weight: 600;
 }
 
 .board-desk-worker-gate[data-verdict="checkpoint"] .board-desk-worker-gate-verdict { color: var(--signal-ready-ink); }
-.board-desk-worker-gate[data-verdict="pause"] .board-desk-worker-gate-verdict { color: var(--signal-wait-ink); }
-.board-desk-worker-gate[data-verdict="stop"] .board-desk-worker-gate-verdict { color: var(--signal-halt-ink); }
+.board-desk-worker-gate[data-verdict="pause"] .board-desk-worker-gate-verdict,
+.board-desk-worker-verdict[data-verdict="pause"] { color: var(--signal-wait-ink); }
+.board-desk-worker-gate[data-verdict="stop"] .board-desk-worker-gate-verdict,
+.board-desk-worker-verdict[data-verdict="stop"] { color: var(--signal-halt-ink); }
 
 .board-desk-worker-gate-why {
+  color: var(--ink-chalk);
   overflow-wrap: anywhere;
 }
 
 .board-desk-worker-gate-basis {
-  color: var(--ink-label);
+  color: var(--ink-mist);
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
-/* 한도 벽 칩 (t-39771): 워커 줄 밑, 줄 단추 밖의 띠. 칩은 기다림의 잉크, 두 단추는 데스크의
- * 편지 단추(`.board-desk-letter-act`)를 그대로 입고, 안 되는 까닭과 누른 결과는 조용한 글씨로
- * 그 아래에 선다 — 안 됐으면 멈춤의 잉크. */
-.board-desk-worker-wall {
+/* 한도 벽 칩 (t-39771): 워커 행 밑의 행 — 펼치지 않아도 선다. 칩은 기다림의 잉크, 두 단추는 시안의
+ * 작은 단추(`.board-btn`)이고, 안 되는 까닭과 누른 결과는 조용한 글씨로 그 아래에 선다 — 안 됐으면
+ * 멈춤의 잉크. */
+.board-desk-worker-wall-cell {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1) var(--space-2);
   min-width: 0;
-  padding: var(--space-1) var(--space-3) 0;
-  font-size: var(--text-2xs);
+  font: var(--type-label-13);
 }
 
 .board-desk-worker-wall[hidden],
@@ -33660,20 +33573,20 @@ details.task-board-section > summary {
 }
 
 .board-desk-worker-wall-to {
-  min-height: var(--control-height-sm);
+  min-height: var(--control-height-md);
   max-width: 14em;
-  border: var(--rule-width) solid var(--edge-rule);
+  border: 0;
   border-radius: var(--radius-sm);
-  background: var(--surface-well);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border);
   color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-label-14);
 }
 
 .board-desk-worker-wall-why,
 .board-desk-worker-wall-said {
   flex-basis: 100%;
-  color: var(--ink-label);
+  color: var(--ink-mist);
   overflow-wrap: anywhere;
 }
 
@@ -34611,7 +34524,8 @@ details.task-board-section > summary {
 .board-dot,
 .board-run-state::before,
 .board-legend > li::before,
-.board-desk-release-status::before {
+.board-desk-release-status::before,
+.board-state::before {
   content: "";
   display: inline-block;
   flex: none;
@@ -34623,20 +34537,20 @@ details.task-board-section > summary {
 }
 
 :is(.board-dot.is-run, .board-run.is-run .board-run-state, .board-legend > li.is-run,
-  .board-desk-release.is-running .board-desk-release-status)::before,
+  .board-desk-release.is-running .board-desk-release-status, .board-state[data-dot="run"])::before,
 .board-dot.is-run {
   background: var(--status-dot-run);
   box-shadow: none;
 }
 
 :is(.board-run.is-halt .board-run-state, .board-legend > li.is-halt,
-  .board-desk-release.is-red .board-desk-release-status)::before {
+  .board-desk-release.is-red .board-desk-release-status, .board-state[data-dot="halt"])::before {
   background: var(--status-dot-halt);
   box-shadow: none;
 }
 
 :is(.board-run.is-done .board-run-state, .board-legend > li.is-done,
-  .board-desk-release.is-green .board-desk-release-status)::before {
+  .board-desk-release.is-green .board-desk-release-status, .board-state[data-dot="done"])::before {
   background: var(--status-dot-done);
   box-shadow: none;
 }
@@ -34650,7 +34564,8 @@ details.task-board-section > summary {
 
 /* 단추 — Geist의 small 단추: 32px, 6px. 주 단추는 글의 잉크를 바탕으로, 둘째는 판의
  * 바탕에 1px 고리. 행마다 주 단추는 하나다. */
-.board-btn {
+.board-btn,
+[data-desk-block="mail"] .board-desk-letter-act {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -34672,7 +34587,8 @@ details.task-board-section > summary {
     box-shadow var(--motion-fast) var(--ease-standard);
 }
 
-.board-btn:hover {
+.board-btn:hover,
+[data-desk-block="mail"] .board-desk-letter-act:hover {
   background: var(--surface-raised);
 }
 
@@ -34686,12 +34602,14 @@ details.task-board-section > summary {
   background: color-mix(in srgb, var(--ink-chalk) 82%, var(--surface-deck));
 }
 
-.board-btn:disabled {
+.board-btn:disabled,
+[data-desk-block="mail"] .board-desk-letter-act:disabled {
   color: var(--ink-disabled);
   cursor: default;
 }
 
 .board-btn:focus-visible,
+[data-desk-block="mail"] .board-desk-letter-act:focus-visible,
 .board-link:focus-visible,
 .board-goal-fold:focus-visible,
 .board-raw-head:focus-visible {
@@ -35401,6 +35319,374 @@ details.task-board-section > summary {
   .board-desk-head-note,
   .board-legend {
     margin-left: 0;
+  }
+}
+
+/* ---- 워커·기록 탭 — 시안 B의 표 (t-70264) ----------------------------------------
+ *
+ * 두 탭은 시안의 `g-title`과 `g-table`이다: 24px 제목과 그 밑 14px 한 줄, 그리고 1px 고리 그림자를
+ * 두른 카드 안의 표 — 머리 줄은 판의 바닥색 위 13px, 행은 위아래 12px · 옆 16px, 행 사이는 룰 하나,
+ * 가리킨 행은 옅은 바탕. 행을 누르면 그 밑에 자세히가 펼쳐지고 첫 칸의 꺾쇠가 돈다. 상태는 낱말
+ * 곁의 채운 점(`.board-state`, 지금 탭의 점과 같은 규칙)이다. 좁은 판(1012 미만)에서는 시안처럼
+ * 판·과업·수의 칸(`.is-wide`)이 물러난다. 누적·소식·과업 흐름은 지금 탭의 카드와 같은 재질이다. */
+.task-board-surface[data-board-ledger="on"]:is([data-board-tab="workers"], [data-board-tab="history"]) .task-board-desk {
+  margin-top: var(--space-5);
+}
+
+.board-desk-block:is([data-desk-block="workers"], [data-desk-block="today"]) > .board-desk-head {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-24);
+  letter-spacing: var(--tracking-heading-24);
+}
+
+.board-desk-block-note {
+  margin: var(--space-1) 0 var(--board-intro-after);
+  color: var(--ink-mist);
+  font: var(--type-label-14);
+}
+
+.board-table-card {
+  min-width: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  overflow: hidden;
+}
+
+.board-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.board-table th {
+  padding: var(--board-row-pad-block) var(--space-4);
+  background: var(--surface-abyss);
+  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.board-table td {
+  padding: var(--space-3) var(--space-4);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+  vertical-align: middle;
+}
+
+/* 첫 행은 머리 줄의 룰 바로 밑이라 제 룰을 긋지 않는다. 행 밑의 띠와 자세히도 그 행의 것이다. */
+.board-table > tbody:first-of-type > tr:first-child > td,
+.board-table :is(.board-desk-worker-wall, .board-desk-worker-more, .board-today-more) > td {
+  box-shadow: none;
+}
+
+.board-table :is(.board-desk-worker-wall, .board-desk-worker-more, .board-today-more) > td {
+  padding-top: 0;
+}
+
+.board-table .is-number {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.board-table :is(.board-desk-worker-row, .board-today-row) {
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-table :is(.board-desk-worker-row, .board-today-row):hover {
+  background: var(--gray-alpha-100);
+}
+
+/* 첫 칸의 단추 — 꺾쇠 · 이름(14px) · id(13px 고정폭). 행을 펼치는 키보드의 손이다. */
+.board-desk-worker-fold,
+.board-today-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.board-desk-worker-fold > .icon,
+.board-today-fold > .icon {
+  color: var(--ink-mist);
+}
+
+/* 이름은 시안의 500 — 브라우저의 `strong`은 한 단 더 굵어진다. */
+.board-desk-worker-model {
+  font-weight: 500;
+}
+
+.board-desk-worker-fold:focus-visible,
+.board-today-fold:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+
+:is(.board-desk-worker-id, .board-today-id, .board-desk-worker-pane, .board-today-at) {
+  color: var(--ink-mist);
+  font: var(--type-label-13-mono);
+}
+
+.board-desk-worker-lines {
+  font: var(--type-label-13-mono);
+}
+
+.board-today-took {
+  color: var(--ink-mist);
+}
+
+/* 상태 칸 — 점과 낱말(14px), 계속 판정이 워커를 세웠으면 그 낱말이 곁에 선다. */
+.board-desk-worker-state,
+.board-today-result {
+  white-space: nowrap;
+}
+
+.board-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-chalk);
+  font: var(--type-label-14);
+}
+
+.board-state[data-dot="you"]::before {
+  background: var(--status-dot-you);
+  box-shadow: none;
+}
+
+.board-desk-worker-verdict {
+  margin-left: var(--space-1);
+  font: var(--type-label-13);
+  font-weight: 600;
+}
+
+/* 낱말 사이의 가운뎃점 — 「답 기다림 · 멈춤」으로 읽히게(낭독기에도). */
+.board-desk-worker-verdict::before {
+  content: "· ";
+  color: var(--ink-mist);
+  font-weight: 400;
+}
+
+/* 자세히 — 이름 밑에서 시작하는 13px의 줄들: 사실, 마지막 활동, 계속 판정, 남긴 것, 그리고 단추. */
+.board-desk-worker-detail,
+.board-today-detail {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  min-width: 0;
+  padding-left: calc(var(--icon-size-sm) + var(--space-2));
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+.board-desk-worker-detail > p,
+.board-today-detail > p {
+  margin: 0;
+}
+
+.board-desk-worker-facts {
+  overflow-wrap: anywhere;
+}
+
+.board-desk-worker-heard {
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-worker-detail > .board-desk-worker-main {
+  margin-top: var(--space-2);
+}
+
+/* 오늘 끝난 일이 없을 때의 한 줄. */
+.board-today-empty {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  color: var(--ink-mist);
+  font: var(--type-label-14);
+}
+
+/* 누적·소식·과업 흐름 — 지금 탭의 카드와 같은 재질: 판 위의 패널, 머리는 제목과 오른쪽 한 줄. */
+.board-desk-block:is([data-desk-block="totals"], [data-desk-block="mail"], [data-desk-block="pipeline"], [data-desk-block="machine"]) {
+  border-radius: var(--radius-sm);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-border-small);
+  overflow: hidden;
+}
+
+.board-desk-block:is([data-desk-block="totals"], [data-desk-block="mail"], [data-desk-block="pipeline"]) > .board-desk-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  box-shadow: inset 0 calc(-1 * var(--rule-width)) 0 var(--edge-rule);
+  color: var(--ink-chalk);
+  font: var(--type-heading-14);
+  letter-spacing: var(--tracking-heading-14);
+}
+
+/* 누적 — 시안의 수 칸: 13px 낱말 위 24px 수, 칸 사이는 세로 룰. */
+.board-totals {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  margin: 0;
+}
+
+.board-total {
+  min-width: 0;
+  padding: var(--space-4);
+}
+
+.board-total:not(:first-child) {
+  box-shadow: inset var(--rule-width) 0 0 var(--edge-rule);
+}
+
+.board-total-word {
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+.board-total-count {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-chalk);
+  font: var(--type-heading-24);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-heading-24);
+}
+
+/* 소식 — 편지 한 통이 카드의 한 행이다: 상자와 레일 대신 행 사이의 룰, 종류와 둘째 줄은 14px. */
+.board-desk-block[data-desk-block="mail"] > .board-desk-body > p {
+  margin: 0;
+  padding: var(--space-3) var(--space-4) 0;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+.board-desk-block[data-desk-block="mail"] .board-desk-letters {
+  gap: 0;
+  margin: 0;
+}
+
+.board-desk-block[data-desk-block="mail"] .board-desk-letters.is-news .board-desk-letter {
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.board-desk-block[data-desk-block="mail"] .board-desk-letters.is-news .board-desk-letter:not(:first-child) {
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+.board-desk-block[data-desk-block="mail"] :is(.board-desk-letter-line, .board-desk-letter-lead) {
+  font: var(--type-label-13);
+}
+
+.board-desk-block[data-desk-block="mail"] .board-desk-letter-kind {
+  font: var(--type-label-14);
+  font-weight: 500;
+}
+
+.board-desk-block[data-desk-block="mail"] .board-desk-letter-body {
+  font: var(--type-label-14);
+}
+
+.board-desk-block[data-desk-block="mail"] :is(.board-desk-letter-who, .board-desk-letter-delivery, .board-desk-letter-age) {
+  color: var(--ink-mist);
+}
+
+.board-desk-block[data-desk-block="mail"] .board-desk-letters-more {
+  margin: 0 var(--space-4) var(--space-3);
+  color: var(--ink-chalk);
+  font: var(--type-label-13);
+}
+
+.board-desk-block[data-desk-block="mail"] .board-desk-news-folded {
+  padding-bottom: var(--space-3);
+}
+
+/* 과업 흐름 — 머리 밑의 단계 칩 한 줄, 그 밑에 누른 단계의 과업이 카드 폭의 행으로 선다. */
+.board-desk-block[data-desk-block="pipeline"] .board-desk-stages {
+  padding: var(--space-3) var(--space-4);
+}
+
+.board-desk-block[data-desk-block="pipeline"] .board-desk-stage {
+  font: var(--type-label-13);
+}
+
+.board-desk-block[data-desk-block="pipeline"] .board-desk-tasks {
+  gap: 0;
+  max-height: none;
+  margin: 0;
+  overflow: visible;
+}
+
+.board-desk-block[data-desk-block="pipeline"] .board-desk-task {
+  padding: var(--space-3) var(--space-4);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+  font: var(--type-label-13);
+}
+
+.board-desk-block[data-desk-block="pipeline"] .board-desk-task-title {
+  font: var(--type-label-14);
+  font-weight: 500;
+}
+
+.board-desk-block[data-desk-block="pipeline"] .board-desk-more {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
+}
+
+/* 이 기계 — 워커 표 밑의 한 줄짜리 카드. */
+.board-desk-block[data-desk-block="machine"] .board-desk-machine {
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: var(--type-label-13);
+}
+
+@container board (max-width: 1011px) {
+  .board-table .is-wide {
+    display: none;
+  }
+
+  .board-desk-worker-state,
+  .board-today-result {
+    white-space: normal;
+  }
+
+  .board-desk-worker-fold,
+  .board-today-fold {
+    flex-wrap: wrap;
+  }
+
+  .board-totals {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .board-total:not(:first-child) {
+    box-shadow: inset 0 var(--rule-width) 0 var(--edge-rule);
   }
 }
 

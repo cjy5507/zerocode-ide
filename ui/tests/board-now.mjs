@@ -30,9 +30,11 @@ const SHOTS = "output/playwright/board-now";
 
 /* 시안 B의 예시 상황 — 세 목표, 질문 하나·검토 하나, 도는 일 둘·기다림 하나·멈춤
  * 하나, 끝난 일 셋, 발행 레인 하나(결합 시험·앱 빌드 끝, zo 시험 8분째, 발행 대기), 그 뒤 빌드
- * 줄에서 차례를 기다리는 재선택·대기 고침. 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답
- * 손·보드 열기를 맡는다). `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은
- * 07:31 무렵 초록으로 끝났고 빌드 줄은 비어 있다. A page function: no closure. */
+ * 줄에서 차례를 기다리는 재선택·대기 고침. 워커 탭과 기록 탭의 시안 값도 싣는다(t-70264): 워커마다
+ * 계속 판정이 읽은 비용·호출과 갈라져 나온 뒤의 줄, 그리고 오늘 끝난 일 여섯(목표 밖의 셋은 지금
+ * 표에 서지 않는다). 데스크 픽스처가 세운 답 위에 덮는다(그 픽스처가 응답 손·보드 열기를 맡는다).
+ * `extra`는 과업 수를 늘려 성능을 잰다. `lane`이 "green"이면 레인은 07:31 무렵 초록으로 끝났고
+ * 빌드 줄은 비어 있다. A page function: no closure. */
 export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, ledger = true, lane = "running" } = {}) {
   const minute = 60_000;
   const run = "run-desk";
@@ -45,7 +47,12 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
     run, id, title, stage, parent: null, parent_title: null, gate: null, blocked_by: [], closed: null,
     created_ms: now - 90 * minute, cost: null, writing: null, progress: null, ...extra,
   });
-  const landed = { times: { started_ms: now - 5 * 60 * minute, landed_ms: now } };
+  // Finished today at the draft's clock (10:24, 09:42, 08:15, 07:58 seen from 10:30), in the draft's order and
+  // inside today whatever the clock says.
+  const midnight = new Date(now);
+  midnight.setHours(0, 0, 0, 0);
+  const finishedAt = (ago) => Math.max(midnight.getTime() + (600 - ago) * 1000, now - ago * minute);
+  const landed = (ago, took) => ({ times: { started_ms: finishedAt(ago) - took * minute, landed_ms: finishedAt(ago) } });
   const tasks = [
     task("t-66912", "재선택·대기 고침", "ready", ship),
     task("t-67561", "상황판 디자인 시안 2차", "dispatched", { ...board, progress: { stage: "working", attempt: "dp-67562" } }),
@@ -58,9 +65,13 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
       hand_in: { conditions: [{ number: 1, text: "빨강 시험이 초록이 됨", state: "checked" }],
         decisions: "헬퍼가 같은 창을 세 번 보던 것을 한 번으로", blocked: "", next: "" },
     }),
-    task("t-62493", "컴퓨터 사용 실제 입력", "merged", { ...hands, ...landed }),
-    task("t-62872", "패널 정지 하나", "merged", { ...hands, ...landed }),
-    task("t-67064", "작업 브라우저 혼자 쓰기", "deployed", { ...hands, ...landed }),
+    task("t-62493", "컴퓨터 사용 실제 입력", "merged", { ...hands, ...landed(135, 240) }),
+    task("t-62872", "패널 정지 하나", "merged", { ...hands, ...landed(152, 50) }),
+    task("t-67064", "작업 브라우저 혼자 쓰기", "deployed", { ...hands, ...landed(48, 130) }),
+    task("t-63394", "zo가 사람의 결정을 묻기", "deployed", landed(48.2, 180)),
+    task("t-66982", "공급자 오류를 말로", "deployed", landed(48.4, 85)),
+    task("t-67536", "상황판 시안 1차", "nothing_to_land",
+      { times: { started_ms: finishedAt(6) - 35 * minute, verified_ms: finishedAt(6) } }),
   ];
   if (holds) {
     tasks.push(task("t-66500", "남긴 폴더 보기", "gate", {
@@ -79,27 +90,37 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
     tasks.push(task(`t-${70000 + n}`, `더 도는 과업 ${n + 1}`, n % 3 === 0 ? "ready" : "dispatched",
       { ...(n % 2 ? board : hands), progress: { stage: "working", attempt: `dp-${80000 + n}` } }));
   }
+  /* The workers table's numbers (t-70264): what the gate read — spend and calls — and the lines since the fork,
+   * the draft's own; the question's worker waits on its answer, the reviewed one and the one whose work waits
+   * for the build line rest. */
   const workers = [
-    ["w-67562", "t-67561", "상황판 디자인 시안 2차", "claude", "claude-opus-5-5", 241, 21, null],
-    ["w-67491", "t-67490", "일정 타임라인", "claude", "claude-opus-5-5", 239, 48, null],
-    ["w-66791", "t-66790", "헬퍼 회차 A·B·C", "claude", "claude-sonnet-5-5", 233, 64, null],
-    ["w-66789", "t-66788", "반복 관측 줄이기", "claude", "claude-sonnet-5-5", 236, 26, null],
-    ["w-66411", "t-66410", "증거 계약 설계", "codex", "gpt-6-astra", null, 120, now - 30 * minute],
-    ["w-66913", "t-66912", "재선택·대기 고침", "claude", "claude-opus-5-5", 228, 52, null],
-    ["w-66501", "t-66500", "남긴 폴더 보기", "codex", "gpt-6-astra", null, 70, null],
+    ["w-67562", "t-67561", "상황판 디자인 시안 2차", "claude", "claude-opus-5-5", 241, 21, null, "high", 0.84, 46, [1204, 0]],
+    ["w-67491", "t-67490", "일정 타임라인", "claude", "claude-opus-5-5", 239, 48, null, "high", 2.1, 118, [312, 41]],
+    ["w-66791", "t-66790", "헬퍼 회차 A·B·C", "claude", "claude-sonnet-5-5", 233, 64, null, "medium", 1.35, 203, [188, 96]],
+    ["w-66789", "t-66788", "반복 관측 줄이기", "claude", "claude-sonnet-5-5", 236, 26, null, "medium", 0.62, 88, [74, 12]],
+    ["w-66411", "t-66410", "증거 계약 설계", "codex", "gpt-6-astra", null, 120, now - 30 * minute, "high", 1.9, 154, [0, 0]],
+    ["w-66913", "t-66912", "재선택·대기 고침", "claude", "claude-opus-5-5", 228, 52, null, "medium", 1.48, 131, [96, 58]],
+    ["w-66501", "t-66500", "남긴 폴더 보기", "codex", "gpt-6-astra", null, 70, null, "high", 0.4, 30, [12, 3]],
   ];
-  for (let n = 0; n < extra && workers.length < 7; n += 1) workers.push([`w-9${n}`, `t-${70000 + n}`, `더 도는 과업 ${n + 1}`, "claude", "claude-opus-5-5", 260 + n, 5, null]);
-  window.__LEDGER__ = workers.map(([worker, taskId, title, agent, model, term, age, missing]) => ({
+  for (let n = 0; n < extra && workers.length < 7; n += 1) workers.push([`w-9${n}`, `t-${70000 + n}`, `더 도는 과업 ${n + 1}`, "claude", "claude-opus-5-5", 260 + n, 5, null, "high", 0.1, 5, [1, 0]]);
+  const resting = new Set(["w-66791", "w-66913"]);
+  const gateOf = (spent, steps) => ({
+    mode: "notify", verdict: "continue", reasons: [], cost: "read", task_spent_usd: spent, task_limit_usd: null,
+    metrics: { steps, since_checkpoint: steps, checkpoints: 0, rework_permille: 40, rise_permille: null, step_usd: 0.02,
+      spent_usd: spent, unpriced_calls: 0 },
+    day_spent_usd: 9.31, day_limit_usd: null, snapshot: null, at_ms: now,
+  });
+  window.__LEDGER__ = workers.map(([worker, taskId, title, agent, model, term, age, missing, effort, spent, steps]) => ({
     run, worker, agent, state: "working", ledger: "active", hearing: term ? "heard" : "gone", hearing_at: now - minute,
-    checkout: `/repos/zerocode/workspaces/${taskId}`, task: title, task_id: taskId, reported: false,
+    checkout: `/repos/zerocode/workspaces/${taskId}`, task: title, task_id: taskId, reported: worker === "w-66791",
     dispatch_id: `dp-${worker.slice(2)}`, dispatch_started_ms: now - age * minute, retry_of: null,
     review: { verified: false, merged: false, deployed: false, written: false },
-    progress: { stage: "working", attempt: `dp-${worker.slice(2)}` }, term, at: now - 2 * minute,
-    model, effort: "high", pane: `%${term ?? 0}`, asking: false, wall: null, quiet_at: null,
-    pane_missing_since_ms: missing,
+    progress: { stage: worker === "w-66791" ? "report_only" : "working", attempt: `dp-${worker.slice(2)}` },
+    term, at: now - 2 * minute, model, effort, pane: `%${term ?? 0}`, asking: worker === "w-67491", wall: null,
+    quiet_at: null, pane_missing_since_ms: missing, gate: gateOf(spent, steps),
   }));
   window.__COLUMNS__ = [{ bucket: "attention", cards: [] }, { bucket: "working", cards: workers
-    .filter(([, , , , , term]) => term)
+    .filter(([worker, , , , , term]) => term && !resting.has(worker))
     .map(([, taskId, title, agent, , term]) => ({
       pane: `term:${term}`, heading: title, state: "working", agent, project: "/repos/zerocode", worktree: "main",
       task: title, task_id: taskId, ask: "", said: "", you: "", parent: "", ledger: "active",
@@ -112,7 +133,7 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
     batch: 1, notices: 1,
   }];
   const stages = ["pending", "ready", "dispatched", "reported", "verified", "merged", "deployed", "gate", "blocked",
-    "stale", "failed", "unreviewable", "nothing_to_land", "unknown", "closed"];
+    "stale", "failed", "unreviewable", "waived", "nothing_to_land", "unknown", "closed"];
   window.__DESK__ = {
     revision: 1,
     runs: ledger ? [{ run, name: "시안 B", seat: true }] : [],
@@ -164,10 +185,13 @@ export function draftBoardOverlay({ now = Date.now(), holds = false, extra = 0, 
     codex: [{ id: "gpt-6-astra", display_name: "GPT-6-Astra", provider: "openai" }],
   };
   window.__ANSWER__.agent_models = ({ agent }) => catalog[agent] ?? [];
-  // The workers' checkouts as git has them — the draft's branch column.
-  window.__ANSWER__.desk_checkouts = ({ paths }) => paths.map((path) => ({
-    path, branch: `wt/${path.split("/").pop()}`, base: "main", beyond_base: 1, dirty_files: 0,
-  }));
+  // The workers' checkouts as git has them — the draft's branch column and the workers table's lines.
+  const linesOf = new Map(workers.map(([, taskId, , , , , , , , , , moved]) => [taskId, moved]));
+  window.__ANSWER__.desk_checkouts = ({ paths }) => paths.map((path) => {
+    const moved = linesOf.get(path.split("/").pop());
+    return { path, branch: `wt/${path.split("/").pop()}`, base: "main", beyond_base: 1, dirty_files: 0,
+      lines: moved ? { added: moved[0], removed: moved[1] } : null };
+  });
   window.__ANSWER__.desk_hold_resolve = (args) => (window.__DESK_SENT__.push({ verb: "hold", ...args }), { gateId: args.gate });
   window.__ANSWER__.desk_review_pass = (args) => (window.__DESK_SENT__.push({ verb: "pass", ...args }), { taskId: args.task });
   for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: now });
@@ -260,6 +284,22 @@ function nowContrast() {
     }
   }
   return { min: Number(min.toFixed(2)), where, below };
+}
+
+/* The sizes the chosen tab's words stand in, over the same scope as `nowContrast` — the draft's yardstick is
+ * four at most (t-70264). A page function. */
+function boardTypeSizes() {
+  const view = document.querySelector("#board-view");
+  const sizes = new Set();
+  for (const root of view.querySelectorAll(".board-now-tabs, .task-board-intro, .task-board-desk")) {
+    for (const node of [root, ...root.querySelectorAll("*")]) {
+      const own = [...node.childNodes].some((child) => child.nodeType === 3 && child.textContent.trim());
+      if (own && node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+        sizes.add(parseFloat(getComputedStyle(node).fontSize));
+      }
+    }
+  }
+  return [...sizes].sort((a, b) => b - a);
 }
 
 /* The board alone, the window's size, so the first screen is the board's. */
@@ -497,9 +537,11 @@ export async function testBoardNow(browser, origin, ok) {
       JSON.stringify(runs));
     ok("the legend reads running, waiting its turn, stopped and finished",
       JSON.stringify(runs.legend) === JSON.stringify(["도는 중", "차례 기다림", "멈춤", "끝남"]), JSON.stringify(runs.legend));
+    // Today's count is the draft's six (t-70264): the History tab's table holds the same rows — the three under
+    // their goal here, and three finished outside any goal that this table does not draw.
     ok("a report waiting on you is your turn's row, not a finished one: three finished tasks fold, and today's count is the foot",
       !now.reported && JSON.stringify(now.doneFold) === JSON.stringify(["끝난 과업 3개"])
-        && now.runsFoot === "오늘 끝난 일 3개 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
+        && now.runsFoot === "오늘 끝난 일 6개 · 기록에서 보기" && now.runningHint === "목표별 · 먼저 시작한 일부터",
       JSON.stringify(now));
 
     /* ---- 결정: 우리말 한 줄 · 원문은 접힌 안 · 단추는 원장의 두 답 ---- */
@@ -575,6 +617,32 @@ export async function testBoardNow(browser, origin, ok) {
           const contrast = await page.evaluate(nowContrast);
           ok(`every word on the Now tab clears 4.5:1 in ${theme} (lowest ${contrast.min}:1)`, contrast.below.length === 0
             && contrast.min >= 4.5, JSON.stringify(contrast));
+          // The Workers and History tabs (t-70264), each with its first row opened so the details are read too.
+          for (const id of ["workers", "history"]) {
+            await page.evaluate((one) => {
+              const view = document.querySelector("#board-view");
+              chooseBoardTab(view, one, false);
+              view.querySelector(".board-table tbody :is(.board-desk-worker-fold, .board-today-fold)")?.click();
+            }, id);
+            await fullBoard(page);
+            await page.evaluate(() => Promise.all(document.getAnimations()
+              .filter((one) => one instanceof CSSTransition).map((one) => one.finished.catch(() => {}))));
+            const tabContrast = await page.evaluate(nowContrast);
+            const sizes = await page.evaluate(boardTypeSizes);
+            const opened = await page.evaluate(() => document.querySelectorAll(
+              "#board-view .board-table tbody :is(.board-desk-worker-more, .board-today-more):not([hidden])").length);
+            ok(`every word on the ${id} tab clears 4.5:1 in ${theme} and stands in at most four sizes (lowest ${tabContrast.min}:1; ${sizes.join(", ")} px)`,
+              opened === 1 && tabContrast.below.length === 0 && tabContrast.min >= 4.5 && sizes.length <= 4,
+              JSON.stringify({ opened, tabContrast, sizes }));
+            await page.evaluate(() => {
+              // A board without the tables (a red tree) has no opened rows to forget.
+              deskChoice.workersOpen?.clear();
+              deskChoice.todayOpen?.clear();
+              paintCoordinatorDesk(document.querySelector("#board-view"));
+            });
+          }
+          await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
+          await fullBoard(page);
         }
         await page.screenshot({ path: `${SHOTS}/board-${width}-${theme}.png` });
       }
@@ -643,6 +711,32 @@ export async function testBoardNow(browser, origin, ok) {
     ok(`thirty tasks and seven workers paint in at most 3 ms on the low-spec profile (p50 ${p50.toFixed(2)} ms)`,
       weight.tasks >= 30 && weight.workers >= 7 && p50 <= 3, JSON.stringify({ ...weight, paints: paints.map((one) => one.toFixed(2)) }));
     ok(`the board stays within 400 elements (${weight.elements})`, weight.elements <= 400, JSON.stringify(weight));
+
+    /* ---- 워커·기록 탭 (t-70264): 같은 장면, 같은 자 — 그림 ≤ 3 ms · 요소 ≤ 400 ---- */
+    for (const id of ["workers", "history"]) {
+      await page.evaluate((one) => chooseBoardTab(document.querySelector("#board-view"), one, false), id);
+      await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+      const tabPaints = [];
+      for (let round = 0; round < 15; round += 1) {
+        tabPaints.push(await page.evaluate(() => {
+          const view = document.querySelector("#board-view");
+          const from = performance.now();
+          paintCoordinatorDesk(view);
+          return performance.now() - from;
+        }));
+      }
+      await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+      const tabWeight = await page.evaluate(() => ({
+        elements: document.querySelector("#board-view .task-board-surface").querySelectorAll("*").length,
+        rows: document.querySelectorAll("#board-view .board-table tbody").length,
+      }));
+      const tabP50 = median(tabPaints);
+      ok(`the ${id} tab paints in at most 3 ms on the low-spec profile and stays within 400 elements (p50 ${tabP50.toFixed(2)} ms, ${tabWeight.elements} elements)`,
+        tabWeight.rows >= 6 && tabP50 <= 3 && tabWeight.elements <= 400,
+        JSON.stringify({ ...tabWeight, paints: tabPaints.map((one) => one.toFixed(2)) }));
+    }
+    await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
     ok("the board raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
@@ -701,6 +795,25 @@ async function testBoardNowMinute(browser, origin, ok) {
         && ["board-run-end", "board-desk-release-step-word", "", "board-desk-letter-who", "board-desk-letter-age",
           "board-ask-meta"].some((name) => one.endsWith(`:${name}`))),
       JSON.stringify(writes));
+    /* ---- 워커 탭의 1분 (t-70264): 원장이 움직이지 않아도 경과 칸이 오른다 — 쓰는 것은 그 글자와 마지막
+     * 활동의 나이뿐이다 ---- */
+    await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "workers", false));
+    await page.clock.runFor(2_000);
+    const tookWords = () => page.evaluate(() => [...document.querySelectorAll("#board-view .board-desk-worker-took")]
+      .map((node) => node.textContent));
+    const tookBefore = await tookWords();
+    await page.evaluate(() => window.__MINUTE_WRITES__.splice(0));
+    await page.clock.runFor(2 * 60_000);
+    const tookAfter = await tookWords();
+    const tookWrites = await page.evaluate(() => window.__MINUTE_WRITES__.splice(0));
+    ok("on the Workers tab, within two minutes and with no ledger event, every elapsed cell moved on — and only those words and the last word's age were written",
+      tookBefore.length === 7 && tookAfter.length === 7 && tookAfter.every((word, at) => word !== tookBefore[at]) &&
+      tookWrites.length > 0 && tookWrites.every((one) => one.startsWith("childList:") &&
+        ["board-desk-worker-took", "board-desk-worker-age"].some((name) => one.includes(name))),
+      JSON.stringify({ tookBefore, tookAfter, tookWrites }));
+    await page.evaluate(() => chooseBoardTab(document.querySelector("#board-view"), "now", false));
+    await page.clock.runFor(2_000);
+    await page.evaluate(() => window.__MINUTE_WRITES__.splice(0));
     await page.evaluate(() => {
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
       Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
