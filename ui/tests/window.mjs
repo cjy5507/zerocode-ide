@@ -55573,6 +55573,12 @@ suite("finished-work", async ({ browser, origin, ok }) => {
     const seen = await page.evaluate(async () => {
       const out = { awaiting: window.__FINISHED_READ__() };
       await window.__FINISHED_SETTLE__({ verified: true }, { progress: { stage: "verified" } });
+      // Only verified work belongs to the pending-landing fold. Read its
+      // details through the same control a person uses; awaiting review
+      // above and a worker's claim below keep their original assertions.
+      document.querySelector('.wt-landing-fold[aria-expanded="false"]')?.click();
+      await refreshWorktrees();
+      await window.__PAINTED__();
       out.verified = window.__FINISHED_READ__();
       await window.__FINISHED_SETTLE__({ verified: true, merged: true }, { progress: { stage: "merged" } });
       out.merged = window.__FINISHED_READ__();

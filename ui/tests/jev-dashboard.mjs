@@ -555,7 +555,11 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
     await page.setViewportSize({ width: 1900, height: 1400 });
     await page.evaluate(jevDashboardFixture, real);
     await page.evaluate(() => el("nav-jev").click());
-    await page.waitForFunction(() => document.querySelector("#jev-view [data-jev-dash-row] [data-jev-fact=\"week\"]") !== null);
+    // A fresh store has no used feature: its empty row and closed unused
+    // fold are the loaded dashboard, with no week cell on the page yet.
+    await page.waitForFunction(() => document.querySelector("#jev-view [data-jev-dash-row] [data-jev-fact=\"week\"]") !== null
+      || (document.querySelector("#jev-view [data-jev-empty]") !== null
+        && document.querySelector("#jev-view [data-jev-fold] button") !== null));
     await settlePaint(page);
     // One screen means the screen is as large as the page needs, up to a
     // cap: the stage beside the sidebar and the explorer is what a person
@@ -620,6 +624,15 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
     // window of a hundred), so the check does not ride on what this machine
     // happened to count; they are set again as the page is read, so a
     // refresh in between cannot put the machine's back.
+    // The narrow-card checks must actually draw cards even when the real
+    // store counted zero requests. Keep the overview's folded-row assertions
+    // above, then use its real control before measuring these rows.
+    if (await page.locator("#jev-view [data-jev-dash-row]").count() === 0) {
+      await page.locator("#jev-view [data-jev-fold] button").click();
+      await page.waitForSelector("#jev-view [data-jev-dash-row]");
+    }
+    ok("the narrow dashboard measurements include actual feature rows",
+      await page.locator("#jev-view [data-jev-dash-row]").count() > 0);
     await page.evaluate(() => {
       window.__JEV_FIGURES__ = (figures) => {
         for (const row of document.querySelectorAll("#jev-view [data-jev-dash-row]")) {

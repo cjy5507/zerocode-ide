@@ -5415,10 +5415,10 @@ function shownWorktrees(project, { includeLandingFold = false } = {}) {
 
 }
 
-/* A finished checkout keeps its unlanded commits, but needs no standing
- * card until the person opens the project's pending-landing row. A live
- * sibling keeps its task's lead visible too. Other grouping modes have no
- * project fold, so their rows remain directly reachable. */
+/* A verified checkout keeps its unlanded commits under the project's
+ * pending-landing row. Reports still awaiting the coordinator's review and
+ * a worker's own claims stay visible. A live sibling keeps its task's lead
+ * visible too. Other grouping modes have no project fold. */
 function foldFinishedCheckouts(catalog) {
   const groups = new Map();
   const folded = new Set();
@@ -5432,7 +5432,7 @@ function foldFinishedCheckouts(catalog) {
       return !row.is_main && !row.is_folder && !row.active && !openTerminals.has(row.path)
         && worktreeAgentRows(row.path).length === 0 && !liveTasks.has(row.task_id)
         && facts?.reported === true && facts.failed !== true && facts.takenOver !== true && facts.asking !== true
-        && ["handedIn", "reviewing", "landWait"].includes(ledgerLandingStage(facts));
+        && ledgerLandingStage(facts) === "landWait";
     });
     if (rows.length === 0) continue;
     groups.set(project.path, rows);
