@@ -212,6 +212,19 @@ pub struct PlacementChoice {
     pub confidence: f64,
 }
 
+/// The editor reads the same question and option meanings as the wire.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    let options = [Placement::Tab, Placement::Split, Placement::Background]
+        .into_iter()
+        .map(|one| (one.key(), one.means()))
+        .collect::<Vec<_>>();
+    vec![
+        crate::jev::builtin::QuestionDefinition::choice(QUESTION, INSTRUCTIONS, &options)
+            .dynamic_options(),
+    ]
+}
+
 /// The words that define the question, as one string. The version is pinned
 /// to this, not to a date or to a reviewer's memory.
 #[must_use]

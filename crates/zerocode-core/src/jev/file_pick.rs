@@ -790,5 +790,26 @@ pub fn label_row(
     }
 }
 
+/// Structured editor fields, using the same words and answer keys as requests.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    use crate::jev::builtin::QuestionDefinition as D;
+    vec![
+        D::noul(
+            FILE_PICK_ANY_QUESTION,
+            &any_instructions(),
+            FILE_PICK_ANY_YES,
+            FILE_PICK_ANY_NO,
+        ),
+        D::noul(
+            &format!("{FILE_PICK_CANDIDATE_ID_PREFIX}*"),
+            &candidate_instructions("{file}"),
+            FILE_PICK_CANDIDATE_YES,
+            FILE_PICK_CANDIDATE_NO,
+        )
+        .contextual(),
+    ]
+}
+
 #[cfg(test)]
 mod tests;

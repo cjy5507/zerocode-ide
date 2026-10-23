@@ -15,6 +15,7 @@ mod jev_mock;
 #[cfg(test)]
 mod replay_support;
 pub use mention_rerank::rubric_words as mention_rerank_rubric_words;
+pub use mention_rerank::question_definitions as mention_rerank_question_definitions;
 mod mention_rerank;
 mod metadata;
 mod patch_review;

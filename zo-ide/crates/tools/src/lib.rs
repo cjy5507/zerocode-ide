@@ -100,6 +100,7 @@ pub use hunk_attribution::{
 };
 pub use misc_tools::agent_store_dir;
 pub use misc_tools::mention_rerank_rubric_words;
+pub use misc_tools::mention_rerank_question_definitions;
 pub use misc_tools::jev_summary;
 pub use misc_tools::{custom_decide, CustomVerdict};
 pub use misc_tools::{

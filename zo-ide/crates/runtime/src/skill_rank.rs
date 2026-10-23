@@ -676,5 +676,25 @@ fn suggest_skill_names(wanted: &str, names: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The editor reads the same instructions and option meanings as the request.
+#[must_use]
+pub fn search_question_definitions() -> Vec<zerocode_core::jev::builtin::QuestionDefinition> {
+    use zerocode_core::jev::builtin::QuestionDefinition as D;
+    vec![D::score(&format!("{QUESTION_ID_PREFIX}*"), &search_instructions(0), &SKILL_LEVELS).contextual()]
+}
+
 #[cfg(test)]
 mod tests;
+
+/// Turn-boundary suggestions have a choice, three gates and a fit question per item.
+#[must_use]
+pub fn suggestion_question_definitions() -> Vec<zerocode_core::jev::builtin::QuestionDefinition> {
+    use zerocode_core::jev::builtin::QuestionDefinition as D;
+    vec![
+        D::choice(WHICH, SKILL_WIDE_QUESTION, &[(SKILL_NO_MATCH, SKILL_NO_MATCH_CRITERION)]).contextual().dynamic_options(),
+        D::noul(ACTS_ON_SYSTEM, SKILL_ACTS_ON_SYSTEM, SKILL_YES, SKILL_NO),
+        D::noul(FOLLOWS_PROCEDURE, SKILL_FOLLOWS_PROCEDURE, SKILL_YES, SKILL_NO),
+        D::noul(PROSE_SUFFICES, SKILL_PROSE_SUFFICES, SKILL_YES, SKILL_NO),
+        D::noul(&format!("{FITS_PREFIX}*"), SKILL_FITS, SKILL_YES, SKILL_NO).contextual(),
+    ]
+}

@@ -17,6 +17,13 @@ pub const RUBRIC_KEY: &str = "decisionRubric";
 pub const EDITED_RUBRIC_FLAG: u32 = 1 << 31;
 const DECISION_STATE_KEY: &str = "__builtinDecision";
 
+mod definitions;
+mod schema;
+#[cfg(test)]
+mod schema_tests;
+pub use definitions::default_questions;
+pub use schema::{QuestionDefinition, QuestionEdit, QuestionKind, validate_against};
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Decision {
@@ -25,6 +32,8 @@ pub struct Decision {
     pub criteria: Option<String>,
     pub mode: Option<String>,
     pub deleted: bool,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub questions: BTreeMap<String, QuestionEdit>,
 }
 
 impl Decision {
@@ -35,7 +44,7 @@ impl Decision {
 
     #[must_use]
     pub fn edited(&self) -> bool {
-        self.question.is_some() || self.criteria.is_some()
+        self.question.is_some() || self.criteria.is_some() || !self.questions.is_empty()
     }
 
     /// Custom wording has its own rubric. It must never promote the shipped
@@ -45,7 +54,19 @@ impl Decision {
         if !self.edited() {
             return None;
         }
-        let words = serde_json::to_vec(&(base_version, &self.question, &self.criteria)).ok()?;
+        let words = if self.questions.is_empty() {
+            serde_json::to_vec(&(base_version, &self.question, &self.criteria))
+        } else {
+            let value = serde_json::to_value((
+                base_version,
+                &self.question,
+                &self.criteria,
+                &self.questions,
+            ))
+            .ok()?;
+            serde_json::to_vec(&schema::canonical(&value))
+        }
+        .ok()?;
         let digest = Sha256::digest(words);
         Some(u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) | EDITED_RUBRIC_FLAG)
     }
@@ -122,6 +143,12 @@ pub fn read(root: &Value) -> Decisions {
 /// Validate edits at the settings write boundary. Refusals contain no input.
 pub fn validate(id: &str, draft: &Decision) -> Result<(), &'static str> {
     let row = seat(id).ok_or("builtin_decision_missing")?;
+    schema::validate_edits(&draft.questions)?;
+    if !draft.questions.is_empty() {
+        if let Some(definitions) = default_questions(id) {
+            schema::validate_against(&draft.questions, &definitions)?;
+        }
+    }
     for (value, cap, token) in [
         (&draft.name, NAME_MAX, "builtin_decision_name"),
         (&draft.question, QUESTION_MAX, "builtin_decision_question"),
@@ -151,7 +178,13 @@ pub fn validate(id: &str, draft: &Decision) -> Result<(), &'static str> {
 /// The request's existing subject and output schema stay intact. The user's
 /// question and criteria replace its evaluation wording, after their own
 /// redaction and bounds; caller context was already cleared by the door.
-pub fn apply(draft: &Decision, body: &mut Value) -> usize {
+pub fn apply(draft: &Decision, body: &mut Value) -> Result<usize, &'static str> {
+    let withheld = apply_legacy(draft, body);
+    schema::apply(&draft.questions, body)?;
+    Ok(withheld)
+}
+
+fn apply_legacy(draft: &Decision, body: &mut Value) -> usize {
     if !draft.edited() {
         return 0;
     }
@@ -180,7 +213,17 @@ pub fn apply(draft: &Decision, body: &mut Value) -> usize {
     let Some(questions) = body.get_mut("questions").and_then(Value::as_object_mut) else {
         return question_withheld + criteria_withheld;
     };
-    for field in questions.values_mut().filter_map(Value::as_object_mut) {
+    for (id, field) in questions.iter_mut() {
+        if draft
+            .questions
+            .keys()
+            .any(|pattern| schema::matches_id(pattern, id))
+        {
+            continue;
+        }
+        let Some(field) = field.as_object_mut() else {
+            continue;
+        };
         let original = field.get("instructions").map_or(String::new(), |words| {
             words
                 .as_str()
@@ -514,7 +557,7 @@ mod tests {
             Err("builtin_decision_credential")
         );
         let mut body = json!({"state":{},"questions":{"result":{"type":"noul","instructions":"Assess the current item."}}});
-        assert_eq!(apply(&edit, &mut body), 1);
+        assert_eq!(apply(&edit, &mut body), Ok(1));
         assert!(!body.to_string().contains(&secret));
         assert!(
             body["state"][DECISION_STATE_KEY]["criteria"]

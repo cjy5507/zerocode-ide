@@ -225,6 +225,17 @@ pub fn rubric_words() -> String {
         .join("\n")
 }
 
+/// Structured editor fields, using the same words and answer keys as requests.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    use crate::jev::builtin::QuestionDefinition as D;
+    vec![D::choice(
+        QUESTION,
+        INSTRUCTIONS,
+        &LADDER.map(|(key, words, _)| (key, words)),
+    )]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

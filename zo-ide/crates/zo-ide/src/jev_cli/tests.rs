@@ -1012,3 +1012,17 @@ fn every_builtin_definition_is_read_without_running_a_judgment() {
         assert!(value["words"].is_string());
     }
 }
+
+#[test]
+fn every_builtin_editor_exports_typed_questions_and_criteria() {
+    use zerocode_core::jev::{self, builtin};
+    for seat in jev::JEV_USES.iter().filter(|seat| seat.id != jev::CUSTOM_DECISIONS.id) {
+        let args = vec!["definition".to_string(), seat.id.to_string(), "--json".to_string()];
+        let report = super::run(&args, std::path::Path::new("."), 0, 0).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&report.text).unwrap();
+        let questions: Vec<builtin::QuestionDefinition> = serde_json::from_value(value["questions"].clone()).unwrap();
+        assert_eq!(questions.is_empty(), [jev::AGENT_TOOL.id, jev::PROJECT_RULES.id, jev::JUDGMENT_CACHE.id].contains(&seat.id), "{}", seat.id);
+        let edits = questions.iter().map(|question| (question.id.clone(), question.question.clone())).collect();
+        builtin::validate_against(&edits, &questions).unwrap_or_else(|error| panic!("{}: {error}", seat.id));
+    }
+}
