@@ -159,14 +159,14 @@ pub(crate) fn update_builtin_decision(
     expected: zerocode_core::jev::builtin::Decision,
     draft: Option<zerocode_core::jev::builtin::Decision>,
 ) -> Result<TypeSafeSettings, RouterRefusal> {
-    if action == "save" {
-        if let Some(draft) = draft.as_ref().filter(|draft| !draft.questions.is_empty()) {
-            zerocode_core::jev::builtin::validate_against(
-                &draft.questions,
-                &load_builtin_questions(&id)?,
-            )
-            .map_err(|error| RouterRefusal::from(error.to_string()))?;
-        }
+    if action == "save"
+        && let Some(draft) = draft.as_ref().filter(|draft| !draft.questions.is_empty())
+    {
+        zerocode_core::jev::builtin::validate_against(
+            &draft.questions,
+            &load_builtin_questions(&id)?,
+        )
+        .map_err(|error| RouterRefusal::from(error.to_string()))?;
     }
     typesafe_settings::update_builtin_decision(&settings_path()?, &id, &action, &expected, draft)?;
     settings_now()

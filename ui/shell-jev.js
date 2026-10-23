@@ -3616,7 +3616,7 @@ function jevCustomOptionPressed(event) {
     const row = button.closest("[data-jev-custom-option]");
     if (button.dataset.jevCustomMove === "up" && row.previousElementSibling) row.previousElementSibling.before(row);
     else if (button.dataset.jevCustomMove === "down" && row.nextElementSibling) row.nextElementSibling.after(row);
-    button.focus();
+    row.querySelector("textarea")?.focus();
   } else if (button.matches("[data-jev-custom-remove]")) {
     button.closest("[data-jev-custom-option]").remove();
   } else {
@@ -3961,13 +3961,13 @@ function buildJevBuiltinQuestions() {
       field.area.dataset.jevQuestionCriterion = key;
       return { key, ...field };
     });
-    const help = jevText("jev.question.fixed", "기본 결정은 앱이 사용하는 답의 유형·보기 키·단계 순서를 유지합니다. 질문과 각 보기의 설명을 수정할 수 있습니다.", "p", "jev-custom-about");
+    const help = jevText("jev.question.fixed", "기본 결정은 앱이 사용하는 답의 유형·보기 키·단계 순서를 유지합니다. 질문과 각 보기의 설명을 수정할 수 있습니다.", "p", "jev-custom-about-line");
     const heading = jevNode("legend", "", document.createTextNode(t("jev.question.number", "문항 {{count}} · {{type}}", { count: index + 1, type: jevQuestionType(question.type) })));
     const group = jevNode("fieldset", "jev-custom-field jev-builtin-question", heading,
-      jevNode("code", "jev-custom-about", document.createTextNode(question.id)), help, instructions.node, ...fields.map((field) => field.node));
+      jevNode("code", "jev-custom-about-line", document.createTextNode(question.id)), help, instructions.node, ...fields.map((field) => field.node));
     group.dataset.jevQuestion = question.id;
     if (question.dynamicOptions) group.append(jevText("jev.question.dynamicOptions", "현재 작업의 후보로 보기가 만들어집니다. 여기서는 고정 보기만 수정하며, 실행 때 제공되지 않은 보기를 추가하지 않습니다.", "p", "jev-custom-example"));
-    if (question.contextual) group.append(jevText("jev.question.contextual", "실행 때 각 문항이 가리키는 항목과 작업 상황은 유지됩니다.", "p", "jev-custom-about"));
+    if (question.contextual) group.append(jevText("jev.question.contextual", "실행 때 각 문항이 가리키는 항목과 작업 상황은 유지됩니다.", "p", "jev-custom-about-line"));
     editor.fields.push({ question, instructions, criteria: fields });
     return group;
   }));

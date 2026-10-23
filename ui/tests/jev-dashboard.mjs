@@ -3217,6 +3217,7 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     await page.locator('#jev-custom-form [name="level"]').nth(0).fill("여러 파일");
     await page.locator('#jev-custom-form [name="level"]').nth(1).fill("한 파일");
     await page.locator('[data-jev-custom-move="up"]').nth(1).click();
+    ok("moving a score level keeps the keyboard on the moved content", await page.evaluate(() => document.activeElement?.name === "level" && document.activeElement.value === "한 파일"));
     await checked(); await press("#jev-custom-save"); await drawerClosed();
     typed = await page.evaluate(() => window.__JEV__.custom.saves.at(-1));
     ok("custom Score saves the explicitly reordered levels", typed.answer.kind === "score" && typed.answer.levels.join("|") === "한 파일|여러 파일", JSON.stringify(typed));

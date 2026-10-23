@@ -144,10 +144,10 @@ pub fn read(root: &Value) -> Decisions {
 pub fn validate(id: &str, draft: &Decision) -> Result<(), &'static str> {
     let row = seat(id).ok_or("builtin_decision_missing")?;
     schema::validate_edits(&draft.questions)?;
-    if !draft.questions.is_empty() {
-        if let Some(definitions) = default_questions(id) {
-            schema::validate_against(&draft.questions, &definitions)?;
-        }
+    if !draft.questions.is_empty()
+        && let Some(definitions) = default_questions(id)
+    {
+        schema::validate_against(&draft.questions, &definitions)?;
     }
     for (value, cap, token) in [
         (&draft.name, NAME_MAX, "builtin_decision_name"),

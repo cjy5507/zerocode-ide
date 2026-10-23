@@ -138,3 +138,13 @@ fn an_unchanged_decision_preserves_the_request_and_rubric() {
     assert_eq!(body.to_string(), bytes);
     assert_eq!(Decision::default().rubric(1), None);
 }
+
+#[test]
+fn editing_noul_instructions_does_not_invent_unspecified_criteria() {
+    let draft =
+        edit(json!({"asked": {"type": "noul", "instructions": "Changed?", "criteria": {}}}));
+    let mut body = json!({"questions": {"asked": {"type": "noul", "instructions": "Before?", "criteria": null}}});
+    apply(&draft, &mut body).unwrap();
+    assert_eq!(body["questions"]["asked"]["instructions"], "Changed?");
+    assert!(body["questions"]["asked"]["criteria"].is_null());
+}

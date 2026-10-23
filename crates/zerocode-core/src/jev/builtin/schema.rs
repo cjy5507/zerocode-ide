@@ -303,6 +303,9 @@ fn changed_criteria(edit: &QuestionEdit, original: &Value) -> Result<Value, &'st
                 .criteria
                 .as_object()
                 .ok_or("builtin_decision_options")?;
+            if options.is_empty() {
+                return Ok(original.clone());
+            }
             let mut kept = original.as_object().cloned().unwrap_or_default();
             kept.extend(options.clone());
             Ok(Value::Object(kept))
