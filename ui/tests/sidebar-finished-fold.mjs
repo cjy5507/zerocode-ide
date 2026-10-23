@@ -5,16 +5,16 @@ import { join } from "node:path";
 export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
   const { page } = await openWindowTestPage(browser, origin, { faults });
   try {
-    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.setViewportSize({ width: 1280, height: 1600 });
     await page.waitForFunction(() => projectsRead);
     await page.evaluate(async () => {
       setLocale("ko", { persist: false });
       setEveryProjectClosed(false);
-      const names = ["finished-1", "finished-2", "finished-3", "finished-4", "failed", "active", "busy", "unreported"];
+      const names = ["finished-1", "finished-2", "finished-3", "finished-4", "failed", "active", "busy", "unreported", "shell", "asking"];
       window.__LEDGER__ = names.map((name, index) => ({
         run: "run-1", worker: `w-${index}`, agent: "claude", state: "released", ledger: "released",
         checkout: `/r/${name}`, task: name, task_id: `t-${index}`, settled: true,
-        reported: name !== "unreported", failed: name === "failed", at: 1,
+        reported: name !== "unreported", failed: name === "failed", asking: name === "asking", at: 1,
         review: { verified: true, merged: false, written: true, author: "coordinator" },
         progress: { stage: "verified", source: "a".repeat(40) },
       }));
@@ -28,6 +28,7 @@ export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
         })),
       }];
       tabs.push({ kind: "term", worktree: "/r/busy", id: "tab-98650", layout: { type: "leaf", term: 98650 } });
+      tabs.push({ kind: "term", worktree: "/r/shell", id: "tab-98651", layout: { type: "leaf", term: 98651 } });
       paneAgents.set(98650, "claude");
       for (const listener of window.__LISTENERS__["hook:agent"] ?? []) {
         listener({ payload: { term: 98650, state: "working", agent: "claude", session: "s-98650" } });
@@ -51,7 +52,7 @@ export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
       && !before.shown.some((path) => path.startsWith("/r/finished-"));
     ok("finished unlanded cards fold into one accessible pending-landing row", folded, JSON.stringify(before));
     if (!folded) return;
-    ok("failed, active, live and unreported work stays visible", ["failed", "active", "busy", "unreported"].every((name) => before.shown.includes(`/r/${name}`)), JSON.stringify(before.shown));
+    ok("failed, active, live, unreported, shell and asking work stays visible", ["failed", "active", "busy", "unreported", "shell", "asking"].every((name) => before.shown.includes(`/r/${name}`)), JSON.stringify(before.shown));
     await page.locator(".wt-landing-fold").click();
     await page.waitForFunction(() => window.__FINISHED_SHOWN__().filter((path) => path.startsWith("/r/finished-")).length === 4);
     const expanded = await page.locator(".wt-landing-fold").getAttribute("aria-expanded");
@@ -61,7 +62,7 @@ export async function testSidebarFinishedFold({ browser, origin, ok, faults }) {
     await page.evaluate(async () => { window.__FINISHED_ACTIVE__ = "/r/finished-1"; await refreshWorktrees(); });
     ok("selecting a folded checkout immediately makes it visible", await page.evaluate(() => window.__FINISHED_SHOWN__().includes("/r/finished-1")));
     await page.evaluate(async () => { setSidebarView({ groupBy: "none" }); await refreshWorktrees(); });
-    ok("flat lists keep all checkouts reachable without a project fold", await page.evaluate(() => window.__FINISHED_SHOWN__().length === 8));
+    ok("flat lists keep all checkouts reachable without a project fold", await page.evaluate(() => window.__FINISHED_SHOWN__().length === 10));
     await page.evaluate(async () => { window.__FINISHED_ACTIVE__ = "/r/active"; setSidebarView({ groupBy: "repo" }); await refreshWorktrees(); });
     const shots = process.env.WORKER_FINISH_SHOTS;
     if (shots) {

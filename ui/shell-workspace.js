@@ -5422,15 +5422,16 @@ function shownWorktrees(project, { includeLandingFold = false } = {}) {
 function foldFinishedCheckouts(catalog) {
   const groups = new Map();
   const folded = new Set();
+  const openTerminals = new Set(tabs.filter((tab) => tab.kind === "term").map((tab) => tab.worktree));
   for (const project of catalog) {
     const liveTasks = new Set((project.worktrees ?? [])
-      .filter((row) => row.active || worktreeAgentRows(row.path).length > 0)
+      .filter((row) => row.active || openTerminals.has(row.path) || worktreeAgentRows(row.path).length > 0)
       .map((row) => row.task_id).filter(Boolean));
     const rows = shownWorktrees(project, { includeLandingFold: true }).filter((row) => {
       const facts = checkoutLedger.get(checkoutKey(row.path));
-      return !row.is_main && !row.is_folder && !row.active
+      return !row.is_main && !row.is_folder && !row.active && !openTerminals.has(row.path)
         && worktreeAgentRows(row.path).length === 0 && !liveTasks.has(row.task_id)
-        && facts?.reported === true && facts.failed !== true && facts.takenOver !== true
+        && facts?.reported === true && facts.failed !== true && facts.takenOver !== true && facts.asking !== true
         && ["handedIn", "reviewing", "landWait"].includes(ledgerLandingStage(facts));
     });
     if (rows.length === 0) continue;
