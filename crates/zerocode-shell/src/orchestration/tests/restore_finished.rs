@@ -155,6 +155,43 @@ fn a_finished_workers_conversation_off_a_stored_record_starts_nothing() {
     }
 }
 
+/// A sidebar visit reads the finished work without making a new process its
+/// owner. Explicit reopening remains covered by the separate control above.
+#[test]
+fn inspecting_a_finished_worker_does_not_resume_its_conversation() {
+    const LEADER: u32 = 724_380;
+    const WORKER: u32 = 724_381;
+    const DOOR: u32 = 724_390;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the finished checkout");
+    let host = Restoring::new(checkout.path(), WORKER, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "inspect-finished");
+    let session = "72437b0c-0000-4000-8000-000000000001";
+    let (_task, worker, _term) = a_worker(&host, &team, "--agent claude", Some(session));
+    say(
+        &host,
+        &team,
+        &format!("worker-stop --worker {worker} --reason reported"),
+    );
+    assert_eq!(row(&worker).state, WorkerState::Released);
+
+    let door = Door::new(checkout.path());
+    door.on_road(WakeRoad::named(Some("inspect")));
+    let answer = door
+        .wake(DOOR, "claude", session)
+        .expect("the record's door");
+    assert_eq!(answer, ConversationWake::finished(DOOR, worker.clone()));
+    assert!(
+        door.started().is_empty(),
+        "reading a finished row started an agent"
+    );
+    assert!(!door.did.lock().unwrap().contains(&Did::Prepared(DOOR)));
+    assert_eq!(row(&worker).state, WorkerState::Released);
+    for pane in [DOOR, WORKER, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
 /// t-57717 red ①, the control: a sleeper's conversation asked for on a
 /// stored-record road comes back as the same worker, seated before its
 /// process starts — the road the decline must not close — and its line says

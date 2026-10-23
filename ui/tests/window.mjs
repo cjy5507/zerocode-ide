@@ -97,7 +97,7 @@ import { testPaneFollowsCwd } from "./pane-follow.mjs";
 import { testPaneStrays } from "./pane-strays.mjs";
 import { testZoRestore } from "./zo-restore.mjs";
 import { testRestartSamePanes } from "./restart-same-panes.mjs";
-import { testFinishedWorkerResume } from "./finished-worker-resume.mjs";
+import { testFinishedWorkerResume, testFinishedWorkerInspection } from "./finished-worker-resume.mjs";
 import { testSidebarStage } from "./sidebar-stage.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
@@ -352,6 +352,7 @@ suite("zo-restore", ({ browser, origin, ok }) => testZoRestore(browser, origin, 
 // The panes a restart opens again, where they stood, in every workspace (t-14036).
 suite("restart-same-panes", ({ browser, origin, ok }) => testRestartSamePanes(browser, origin, ok));
 suite("finished-worker-resume", ({ browser, origin, ok }) => testFinishedWorkerResume(browser, origin, ok));
+suite("finished-worker-inspection", ({ browser, origin, ok }) => testFinishedWorkerInspection(browser, origin, ok));
 suite("sidebar-stage", ({ browser, origin, ok }) => testSidebarStage(browser, origin, ok));
 suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser, origin, ok));
 // Every question the window puts to the person, in the one popup (t-17514).

@@ -214,3 +214,45 @@ export async function testFinishedWorkerResume(browser, origin, ok) {
     await page.page.close();
   }
 }
+
+export async function testFinishedWorkerInspection(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.waitForFunction(() => projectsRead);
+    await page.evaluate(() => {
+      window.__INSPECTION__ = { resumes: [], launches: 0, terms: [] };
+      window.__ANSWER__.resume_session = (args) => {
+        window.__INSPECTION__.resumes.push(args);
+        return { term: 92437, standing: false, finished: "w-finished" };
+      };
+      window.__ANSWER__.launch_agent_tab = () => { window.__INSPECTION__.launches += 1; return 92438; };
+      const work = {
+        agent: "claude", task: "Read the finished change", taskId: "t-finished", at: Date.now(),
+        reported: true, verified: true, merged: true, written: true,
+        conversation: { key: "session_id", id: "72437b0c-0000-4000-8000-000000000001" },
+      };
+      const row = makeFinishedWorkRow(activeWorktreePath, work);
+      row.id = "inspection-finished-row";
+      document.getElementById("worktrees").append(row);
+      window.__INSPECTION__.path = activeWorktreePath;
+      window.__INSPECTION__.terms = [...termViews.keys()];
+    });
+    await page.locator("#inspection-finished-row").click();
+    await page.waitForFunction(() => window.__INSPECTION__.resumes.length === 1);
+    const seen = await page.evaluate(async () => {
+      await window.__PAINTED__();
+      return {
+        roads: window.__INSPECTION__.resumes.map((one) => one.road),
+        askedPath: window.__INSPECTION__.resumes[0].worktree,
+        path: window.__INSPECTION__.path,
+        scope: workbenchScopes.tasks?.path ?? null,
+        launches: window.__INSPECTION__.launches,
+        forgedPane: termViews.has(92437) || paneSessions.has(92437) || Boolean(tabOfTerm(92437)),
+      };
+    });
+    ok("a finished row inspects its work without reopening the agent or mounting a nonexistent pane",
+      JSON.stringify(seen.roads) === '["inspect"]' && seen.askedPath === seen.path
+        && seen.scope === seen.path && seen.launches === 0 && !seen.forgedPane, JSON.stringify(seen));
+    ok("reading finished work raises no renderer errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
+}
