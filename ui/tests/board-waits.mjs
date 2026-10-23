@@ -12,10 +12,14 @@ export async function installBoardWaits(page) {
         const views = [...document.querySelectorAll("#board-view, .file-view")]
           .filter((view) => !view.hidden && view.querySelector(".agent-graph-layout"));
         // The card picture has no fit of its own any more (direction E2,
-        // t-68475): its columns fold to the board's width, so the one frame
-        // left to wait for is the overlay lines' measure.
+        // t-68475): its columns fold to the board's width, so the frames
+        // left to wait for are the overlay lines' measure and the scope
+        // rail's fold (t-69978), which the size watcher puts on a frame of
+        // its own. A window from before the fold has no such frame — the
+        // before/after pictures read it with these same waits.
         return views.length > 0 && views.every((view) => agentGraphModels.has(view)
-          && !agentGraphEdgeFrames.has(view))
+          && !agentGraphEdgeFrames.has(view)
+          && (typeof agentGraphRailFrames === "undefined" || !agentGraphRailFrames.has(view)))
           && !agentGraphRefreshing && agentPaintFrame === null
           && !["board_snapshot", "pane_agents", "ledger_agents"].some((name) => window.__IN_FLIGHT__.get(name) > 0);
       }, "board snapshot, paint and graph geometry");

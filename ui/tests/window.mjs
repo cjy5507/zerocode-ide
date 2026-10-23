@@ -52,6 +52,7 @@ import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testBoardNow } from "./board-now.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testAgentGraphTeams } from "./agent-graph-teams.mjs";
+import { testAgentGraphRail } from "./agent-graph-rail.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
 import { testBoardSchedule } from "./board-schedule.mjs";
@@ -299,6 +300,10 @@ suite("agent-relations", async ({ browser, origin, ok }) => {
 // The relations tab's card picture, direction E2 (t-68475): one column per
 // coordinator, its workers and helpers hung on the stem by urgency.
 suite("agent-graph-teams", ({ browser, origin, ok }) => testAgentGraphTeams(browser, origin, ok));
+// The same picture in a 1440 window with the left list open (t-69978): the scope
+// rail folds so two coordinators' columns stand side by side, and the person's
+// own choice to open or fold it wins.
+suite("agent-graph-rail", ({ browser, origin, ok }) => testAgentGraphRail(browser, origin, ok));
 // The live coordination map layered over that same graph (t-7288).
 suite("board-live", ({ browser, origin, ok }) => testBoardLive(browser, origin, ok));
 // The orbit view of the same relations picture (t-9444): stars, planets, moons and mail.
@@ -46828,9 +46833,10 @@ const boardFitRamp = await page.evaluate(async () => {
       titleWhole: titles.length > 0 && titles.every((one) => one.scrollWidth <= one.clientWidth + 1),
     };
   };
-  /* 하네스의 기본 보드 — 1440 창에서 왼쪽 목록 · 작업 레일 · 곁의 인스펙터를 뺀 그림의 판(약 640px).
-   * 사람이 1440 창에서 보는 폭이고, 시안의 격자(열 340px 둘)가 들지 않아 열이 하나로 선다. 가로로
-   * 넘치지 않고, 칩과 제목은 잘리지 않는다. */
+  /* 하네스의 기본 보드 — 1440 창에서 왼쪽 목록과 곁의 인스펙터를 뺀 그림의 판. 사람이 1440 창에서
+   * 보는 폭이다. 작업 레일까지 서면 그림 안쪽이 두 열의 문턱(760px) 밑이라 열이 하나로 섰다 — 그래서
+   * 이 폭에서는 레일이 저절로 접히고(t-69978) 열 둘이 선다. 가로로 넘치지 않고, 칩과 제목은 잘리지
+   * 않는다. */
   const seen = { base: await paint(4) };
 
   // 열 둘이 설 보드(1440px — 그림의 판 약 920px). 시안의 격자는 판의 폭으로 열의 수를 정한다.
@@ -46893,7 +46899,7 @@ const boardFitRamp = await page.evaluate(async () => {
 });
 ok(
   "the columns fit the width they have, the stem grows downward, and one type ramp carries every title",
-  boardFitRamp.base.columns === 1 && boardFitRamp.base.overWide <= 1 &&
+  boardFitRamp.base.columns === 2 && boardFitRamp.base.overWide <= 1 &&
     boardFitRamp.base.chipWhole && boardFitRamp.base.titleWhole &&
     boardFitRamp.short.overWide <= 1 && boardFitRamp.tall.overWide <= 1 &&
     boardFitRamp.narrow.overWide <= 1 && boardFitRamp.tall.overTall > 0 &&

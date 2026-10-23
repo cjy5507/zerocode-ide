@@ -29756,6 +29756,30 @@ input[type="search"]::-webkit-search-cancel-button {
   grid-row: 1 / -1;
 }
 
+/* 접힌 레일 (t-69978, 사람 10-22). 카드 보기의 코디 열은 그림 안쪽이 두 열의 문턱
+ * (`--agent-graph-team-stack`)을 넘어야 나란히 서는데, 인스펙터가 곁에 선 판에 레일까지
+ * 서면 그 몫이 모자란 폭이 있다 — 1440 창에서 왼쪽 목록을 펴면 그림 안쪽이 655px였다. 레일이
+ * 하는 일(범위 고르기)은 툴바의 범위 선택이 어느 폭에서나 그대로 하므로, 그 폭에서는 레일이
+ * 물러나고 첫 열은 `auto`라 0으로 내려앉는다. 접을지는 그리는 손이 정하고
+ * (`syncAgentGraphRail`), 사람이 툴바 맨 앞 단추로 펴거나 접은 것이 그보다 이긴다. */
+.agent-board.is-rail-folded > .agent-relations-rail {
+  display: none;
+}
+
+/* 레일을 펴고 접는 단추 — 관계 툴바의 맨 앞, 범위 선택 곁. 레일이 접혀 있거나 접는 폭일 때만
+ * 서고(그리는 손이 `hidden`을 쓴다), 펴진 동안은 범례 단추처럼 눌린 모양이다. 레일이 서지 않는
+ * 목록 티어에서는 펼 것이 없으므로 물러난다. */
+.agent-relations-rail-toggle[aria-expanded="true"] {
+  color: var(--ink-chalk);
+  background: var(--row-hover);
+}
+
+@container board (max-width: 699px) {
+  .agent-relations-toolbar > .agent-relations-rail-toggle {
+    display: none;
+  }
+}
+
 .agent-relations-rail {
   display: flex;
   flex-direction: column;
@@ -31312,15 +31336,28 @@ input[type="search"]::-webkit-search-cancel-button {
   display: none;
 }
 
-/* 상태 줄: 표식(머리만) · 낱말 · 나이 · 칩 … 컨텍스트(오른쪽). 줄기의 카드는 표식을 마디에 둔다. */
+/* 상태 줄: 표식(머리만) · 낱말 · 나이 · 칩 … 컨텍스트(오른쪽). 줄기의 카드는 표식을 마디에 둔다.
+ *
+ * 줄은 칩이 잘리기 전에 바뀐다 (t-69978). 열이 좁으면(1440 창의 두 열은 약 390px) 낱말 · 나이 · 칩 ·
+ * 컨텍스트가 한 줄에 들지 못하고, 한 줄로 서던 줄기의 카드는 칩만 줄여 이름의 꼬리를 잘랐다 — 꼬리가
+ * 워크스페이스의 이름이라 잘린 칩은 같은 과업의 워크스페이스 둘을 가르지 못한다. 머리의 카드는 이미
+ * 줄을 바꾸고 있었다(아래 `.is-head`). */
 .agent-graph-node-status {
   display: flex;
-  gap: var(--space-2);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
   align-items: center;
   min-width: 0;
   color: var(--ink-mist);
   font: var(--type-label-13);
   white-space: nowrap;
+}
+
+/* 칩의 점은 칩 바깥 왼쪽에 서므로, 새 줄의 맨 앞에 선 칩의 점은 줄의 상자 밖이다 — 줄기의 카드에서는
+ * 가로로만 자르는 `clip`이 그것을 거둔다. 머리의 카드는 자르지 않는다: 그 줄의 맨 앞에 선 상태 표식
+ * (당신 차례의 고리)이 상자 밖에 그려지기 때문이다. 줄기의 카드는 표식을 줄이 아니라 마디에 둔다. */
+.agent-graph-node:not(.is-head) .agent-graph-node-status {
+  overflow-x: clip;
 }
 
 .agent-graph-node-status > [hidden],
@@ -31715,7 +31752,6 @@ input[type="search"]::-webkit-search-cancel-button {
 }
 
 .agent-graph-node.is-head .agent-graph-node-status {
-  flex-wrap: wrap;
   white-space: normal;
 }
 
@@ -31983,7 +32019,8 @@ input[type="search"]::-webkit-search-cancel-button {
 
 /* 760px 밑에서는 열이 한 열로 쌓인다 (방향 E2). 기준은 보드가 아니라 그림의 판(`graph`)이다 —
  * 인스펙터가 곁에 선 넓은 보드에서도 그림의 판이 좁으면 쌓인다. 컨테이너 쿼리의 조건에는 `var()`가
- * 들어가지 못하므로 이 수는 토큰이 아니라 여기 한 곳에 선다. */
+ * 들어가지 못하므로 이 수는 토큰 `--agent-graph-team-stack`의 사본이고, 토큰 옆의 주석이 그 사본을
+ * 짊어진다 — 범위 목록을 접는 셈(t-69978)이 그 토큰을 읽는다. */
 @container graph (max-width: 759px) {
   .agent-graph-nodes {
     grid-template-columns: minmax(0, 1fr);
