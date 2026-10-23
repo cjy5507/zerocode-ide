@@ -84,6 +84,32 @@ pub const UNLISTED_SINCE: &str = "공급자 목록에서 빠짐";
 pub fn unlisted_since(when: &str) -> String {
     format!("{UNLISTED_SINCE} · {when}")
 }
+
+/// The words for a Gemini row the Google (Antigravity) login cannot take
+/// (t-71998): nothing it has — its registry, under any name, nor the Google
+/// key's list — serves it. The picker dims the row and Enter takes nothing;
+/// the status line says it beside a saved pick of it; `zo models` says it on
+/// the row.
+pub const ANTIGRAVITY_UNLISTED: &str = "이 계정의 Antigravity 목록에 없음";
+
+/// `Antigravity 목록에 없는 이름 — gemini-3.1-pro로 보냄`: a saved Gemini pick the
+/// login's registry serves under another release's name (t-71998). The pick
+/// still goes, to that release; a new pick is made by its name.
+#[must_use]
+pub fn antigravity_renamed(release: &str) -> String {
+    format!("Antigravity 목록에 없는 이름 — {release}로 보냄")
+}
+
+/// `Antigravity 목록 확인 못 함 · 10-23 05:10 목록`: the login's registry could
+/// not be read, and the list read at that local clock decides (t-71998);
+/// `… · 출하 목록` when none was ever read and the shipped catalog decides.
+#[must_use]
+pub fn antigravity_unconfirmed(read_at: Option<&str>) -> String {
+    match read_at {
+        Some(when) => format!("Antigravity 목록 확인 못 함 · {when} 목록"),
+        None => "Antigravity 목록 확인 못 함 · 출하 목록".to_string(),
+    }
+}
 pub const ACTIVITY_WAITING: &str = "waiting";
 pub const ACTIVITY_RECONNECTING: &str = "reconnecting";
 pub const ACTIVITY_QUIET: &str = "quiet";
