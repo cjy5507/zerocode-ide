@@ -2691,6 +2691,9 @@ impl AtTheWall {
 }
 
 impl Host for AtTheWall {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        Some(self.checkout.into())
+    }
     fn split(
         &self,
         _team: &str,
@@ -9078,6 +9081,7 @@ fn a_leader_that_exits_leaves_no_child_holding_a_dispatch_nobody_can_reach() {
     // hold (`--run` is a global name; the split lands in the caller's
     // own team and the worker row says so).
     let (run_id, watched, _pane) = a_worker_carrying_work(&team, LEADER_TERM, WORKING_TERM);
+    place_test_run(&run_id, crate::test_host::existing_directory());
     let summoned = |host: &dyn Host, from_team: &str, line: &str| {
         let said = run(
             host,
@@ -9093,13 +9097,16 @@ fn a_leader_that_exits_leaves_no_child_holding_a_dispatch_nobody_can_reach() {
         said["workerId"].as_str().expect("a worker id").to_string()
     };
     let idle = summoned(
-        &Splitting::onto(IDLE_TERM),
+        &Splitting::in_project(IDLE_TERM, crate::test_host::existing_directory()),
         &team,
         "worker-start --agent claude",
     );
     // Somebody else's, in a team whose leader is alive and well.
     let bystanding = summoned(
-        &Splitting::onto(BYSTANDING_WORKER_TERM),
+        &Splitting::in_project(
+            BYSTANDING_WORKER_TERM,
+            crate::test_host::existing_directory(),
+        ),
         &bystander,
         &format!("worker-start --agent claude --run {run_id}"),
     );
@@ -9488,6 +9495,7 @@ fn a_beat_names_its_own_request_and_names_it_the_same_way_twice() {
 /// INSIDE `capture`, which is exactly where the release road has let go of
 /// both guards, so the interleaving is produced rather than waited for.
 struct Releasing {
+    project: Option<std::path::PathBuf>,
     captured: Mutex<Vec<u32>>,
     respawn: Option<(String, String, u32)>,
     closed: Mutex<Vec<u32>>,
@@ -9601,8 +9609,15 @@ impl Host for Reading {
 }
 
 impl Releasing {
+    fn in_project(checkout: &str) -> Self {
+        Self {
+            project: Some(checkout.into()),
+            ..Self::quiet()
+        }
+    }
     fn quiet() -> Self {
         Self {
+            project: None,
             captured: Mutex::new(Vec::new()),
             respawn: None,
             closed: Mutex::new(Vec::new()),
@@ -9610,6 +9625,7 @@ impl Releasing {
     }
     fn respawning(team: &str, pane: &str, into: u32) -> Self {
         Self {
+            project: None,
             captured: Mutex::new(Vec::new()),
             respawn: Some((team.to_string(), pane.to_string(), into)),
             closed: Mutex::new(Vec::new()),
@@ -9624,6 +9640,9 @@ impl Releasing {
 }
 
 impl Host for Releasing {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        self.project.clone()
+    }
     fn split(
         &self,
         _team: &str,
@@ -11234,7 +11253,7 @@ fn a_federated_attach_summons_relays_and_stops_through_local_law() {
 
     let host = Seating {
         onto: WORKER,
-        checkout: "/wt/fed",
+        checkout: crate::test_host::existing_directory(),
     };
     let serve = |home: &str, body: serde_json::Value| -> serde_json::Value {
         serde_json::from_str(&super::federation_serve(&host, home, &body))
@@ -11387,7 +11406,7 @@ fn a_federated_stop_releases_through_the_team_that_owns_the_worker() {
 
     let host = Seating {
         onto: WORKER,
-        checkout: "/wt/fed-owner",
+        checkout: crate::test_host::existing_directory(),
     };
     let serve = |home: &str, body: serde_json::Value| -> serde_json::Value {
         serde_json::from_str(&super::federation_serve(&host, home, &body))
@@ -11473,7 +11492,7 @@ fn the_wire_itself_carries_a_federation_round_trip() {
         while let Some(call) = calls.blocking_recv() {
             let host = Seating {
                 onto: WORKER,
-                checkout: "/wt/fedwire",
+                checkout: crate::test_host::existing_directory(),
             };
             let said = super::federation_serve(&host, &call.home, &call.body);
             let _ = call.answer.send(said);
@@ -11482,7 +11501,7 @@ fn the_wire_itself_carries_a_federation_round_trip() {
 
     let host = Seating {
         onto: WORKER,
-        checkout: "/wt/fedwire",
+        checkout: crate::test_host::existing_directory(),
     };
     let say = |line: &str| {
         let answered = run(
@@ -15689,6 +15708,9 @@ struct Seating {
 }
 
 impl Host for Seating {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        Some(self.checkout.into())
+    }
     fn split(
         &self,
         _team: &str,
@@ -16396,6 +16418,9 @@ impl crate::restart_nudge_runtime::WakeReceipts for ContinuationRestore {
 }
 
 impl Host for ContinuationRestore {
+    fn worktree_of(&self, term: u32) -> Option<std::path::PathBuf> {
+        self.base.worktree_of(term)
+    }
     fn split(
         &self,
         team: &str,
@@ -16808,6 +16833,9 @@ fn an_unknown_auto_reseat_is_recorded_once_without_input_or_private_context() {
 }
 
 impl Host for RestorationHost {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        Some((&self.checkout).into())
+    }
     fn split(
         &self,
         _team: &str,
@@ -17673,6 +17701,9 @@ impl Returning {
 }
 
 impl Host for Returning {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        Some(crate::test_host::existing_directory().into())
+    }
     fn split(
         &self,
         _team: &str,
@@ -17793,6 +17824,23 @@ fn a_returning_conversation_sits_its_empty_chair_on_the_next_beat() {
         0,
         "the chair was sat by typing into the pane"
     );
+    let checked = run(
+        &returned,
+        Vec::new(),
+        &new_team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!("check --run {run_id} --peek")),
+        clock(),
+    );
+    assert_eq!(
+        checked.exit_code, 0,
+        "the restored coordinator's first check: {}",
+        checked.stderr
+    );
+    let mail: serde_json::Value =
+        serde_json::from_str(&checked.stdout).expect("the restored inbox");
+    assert!(mail["messages"].is_array());
     crate::agent_teams::forget_term(NEW_LEADER);
     drop(private);
 }
@@ -18358,7 +18406,8 @@ fn a_new_seat_may_wait_on_the_run_address_while_the_old_seats_card_stands() {
     let _window = the_window();
     let old_team = format!("team-seat-wait-old-{OLD_LEADER}");
     let (run_id, _worker, _pane) = a_worker_carrying_work(&old_team, OLD_LEADER, WORKER);
-    let host = Splitting::onto(WORKER + 1);
+    place_test_run(&run_id, crate::test_host::existing_directory());
+    let host = Splitting::in_project(WORKER + 1, crate::test_host::existing_directory());
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let address = format!("run:{run_id}");
     // The old seat is asleep on the run's address.
@@ -18643,17 +18692,44 @@ fn a_settled_checkout_is_one_no_worker_is_coming_back_to() {
     drop(private);
 }
 
+/// Give a legacy test run its explicit fixture project before a different
+/// team takes it over. The unplaced legacy cases live in project_scope.rs.
+fn place_test_run(run: &str, checkout: &str) {
+    let root = zerocode_core::git_dir::project_root(std::path::Path::new(checkout))
+        .expect("the fixture project exists");
+    super::runtime()
+        .expect("the fixture runtime")
+        .actor
+        .note_run_project(
+            run,
+            root.to_string_lossy().into_owned(),
+            zerocode_core::orchestration::ProjectSource::Seat,
+            None,
+            clock(),
+        )
+        .expect("place the legacy fixture run");
+}
+
 /// A host that answers one fixed shell to a split, and remembers what it
 /// was asked to close.
 struct Splitting {
+    project: Option<std::path::PathBuf>,
     spawned: std::sync::atomic::AtomicUsize,
     onto: u32,
     closed: Mutex<Vec<u32>>,
 }
 
 impl Splitting {
+    fn in_project(term: u32, checkout: &str) -> Self {
+        Self {
+            project: Some(checkout.into()),
+            ..Self::onto(term)
+        }
+    }
+
     fn onto(term: u32) -> Self {
         Self {
+            project: None,
             spawned: std::sync::atomic::AtomicUsize::new(0),
             onto: term,
             closed: Mutex::new(Vec::new()),
@@ -18669,6 +18745,9 @@ impl Splitting {
 }
 
 impl Host for Splitting {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        self.project.clone()
+    }
     fn split(
         &self,
         _team: &str,
@@ -20444,6 +20523,9 @@ fn a_degraded_window_files_no_crash_task_and_leaves_no_stamp() {
 
 struct CoordinatorHost(AtTheWall);
 impl Host for CoordinatorHost {
+    fn worktree_of(&self, term: u32) -> Option<std::path::PathBuf> {
+        self.0.worktree_of(term)
+    }
     fn split(
         &self,
         _: &str,
@@ -20844,6 +20926,7 @@ fn adopted_worker_stop_closes_its_own_team_with_or_without_a_caller_pane_collisi
     for collision in [true, false] {
         let (_window, _store) = PrivateWindow::boot();
         let (run_id, worker, pane) = a_worker_carrying_work("stop-origin", 94_000, 94_001);
+        place_test_run(&run_id, crate::test_host::existing_directory());
         let other_worker = if collision {
             let (_, other, other_pane) = a_worker_carrying_work("stop-caller", 94_010, 94_011);
             assert_eq!(other_pane, pane);
@@ -20852,7 +20935,7 @@ fn adopted_worker_stop_closes_its_own_team_with_or_without_a_caller_pane_collisi
             seat_a_team("stop-caller", 94_010);
             None
         };
-        let host = Splitting::onto(94_020);
+        let host = Splitting::in_project(94_020, crate::test_host::existing_directory());
         let takeover = run(
             &host,
             Vec::new(),
@@ -20933,9 +21016,10 @@ fn adopted_worker_stop_closes_its_own_team_with_or_without_a_caller_pane_collisi
 fn adopted_worker_release_archives_the_foreign_terminal_and_preserves_the_collision() {
     let (_window, _store) = PrivateWindow::boot();
     let (run_id, worker, pane) = a_worker_in_a_pane("release-origin", 94_100, 94_101);
+    place_test_run(&run_id, crate::test_host::existing_directory());
     let (_, other, other_pane) = a_worker_carrying_work("release-caller", 94_110, 94_111);
     assert_eq!(other_pane, pane);
-    let host = Releasing::quiet();
+    let host = Releasing::in_project(crate::test_host::existing_directory());
     let taken = run(
         &host,
         Vec::new(),
@@ -21387,7 +21471,7 @@ fn a_handover_split_rechecks_the_order_after_planning_and_rolls_back_its_reserva
             "current" => {}
             _ => unreachable!(),
         }
-        let host = Splitting::onto(94_902);
+        let host = Splitting::in_project(94_902, stood.host.checkout);
         let answer = carried(
             &host,
             &held.actor,
@@ -21453,8 +21537,9 @@ fn an_early_release_refusal_settles_unknown_and_replays_without_reading_or_closi
     for change in ["caller", "missing-incarnation"] {
         let (_window, _store) = PrivateWindow::boot();
         let (run_id, worker, pane) = a_worker_in_a_pane("early-release-origin", 95_000, 95_001);
+        place_test_run(&run_id, crate::test_host::existing_directory());
         seat_a_team("early-release-caller", 95_010);
-        let host = Releasing::quiet();
+        let host = Releasing::in_project(crate::test_host::existing_directory());
         let taken = run(
             &host,
             Vec::new(),

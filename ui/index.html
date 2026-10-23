@@ -4477,15 +4477,20 @@
               <button type="button" class="btn" id="judgment-local-manual" aria-pressed="false" data-i18n="settings.managed.manual">이미 실행 중인 서버 연결</button>
             </div>
             <div id="judgment-manual-fields">
-            <ol class="settings-steps">
-              <li data-i18n="settings.judgment.stepServer">서버 주소와 필요한 API 키를 입력합니다.</li>
-              <li data-i18n="settings.judgment.stepModel">서버에서 모델 목록을 읽고 모델을 선택합니다. 정확한 ID를 직접 입력해도 됩니다.</li>
-              <li data-i18n="settings.judgment.stepUse">확인하고 사용을 누릅니다. 응답을 확인하지 못하면 기존 모델을 유지합니다.</li>
-            </ol>
+            <label class="settings-field" data-field="lg" id="judgment-protocol-field" for="judgment-protocol" hidden>
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="settings.judgment.protocol">연결 방식</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.protocolHint">API 라우터·일반 모델 서버는 OpenAI 호환을 선택하세요. 구조화된 판단 응답을 지원해야 합니다.</span>
+              </span>
+              <select class="settings-input" id="judgment-protocol" disabled>
+                <option value="openai_json" data-i18n="settings.judgment.openaiProtocol">OpenAI 호환 · 구조화된 응답</option>
+                <option value="system_one" data-i18n="settings.judgment.systemOneProtocol">System One · 판단 전용</option>
+              </select>
+            </label>
             <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
-                <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">System One 호환 판단 인터페이스를 사용합니다. 로컬은 이 컴퓨터의 주소만, 원격은 HTTPS만 허용합니다.</span>
+                <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">API 라우터처럼 기본 URL을 입력하세요. 외부 서버는 HTTPS, 이 컴퓨터와 사설망 IP는 HTTP로도 연결할 수 있습니다.</span>
               </span>
               <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
             </label>
@@ -4504,6 +4509,9 @@
               <input class="settings-input" id="typesafe-key-input" type="password"
                      autocomplete="off" spellcheck="false" placeholder="apikey_..." />
             </label>
+            <div class="settings-action-row judgment-connect-actions">
+              <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>연결하고 모델 불러오기</button>
+            </div>
             <label class="settings-field" data-field="md" for="typesafe-model-input">
               <span class="settings-field-copy">
                 <span class="settings-label" data-i18n="settings.judgment.model">판단 모델</span>
@@ -4517,13 +4525,12 @@
               <select class="settings-input" id="judgment-listed-model"></select>
             </label>
             <p class="settings-row-desc" id="judgment-provider-scope"></p>
-            <p class="settings-notice" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 응답을 확인하기 전에는 현재 모델을 바꾸지 않습니다.</p>
+            <p class="settings-row-desc" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 응답을 확인하기 전에는 현재 모델을 바꾸지 않습니다.</p>
             <p class="settings-row-desc" id="judgment-model-status" role="status" aria-live="polite"></p>
             </div>
           </section>
           <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
           <div class="settings-action-row settings-judgment-actions">
-            <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>모델 목록 새로고침</button>
             <button class="btn" id="typesafe-check-btn" type="button" disabled data-i18n="settings.typesafe.check">연결 확인</button>
             <button class="btn" id="typesafe-remove-btn" type="button" disabled data-i18n="settings.typesafe.remove">키 지우기</button>
             <button class="btn" id="typesafe-save-btn" type="button" disabled data-i18n="settings.judgment.saveKey">키 저장</button>
@@ -9276,6 +9283,38 @@
         <div class="perm-actions">
           <button class="btn btn--halt" id="wsclean-confirm-go" type="button"></button>
           <button class="btn btn--halt-quiet" id="wsclean-confirm-cancel" type="button" data-i18n="app.cancel">취소</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="scrim scrim--above jev-custom-scrim" id="jev-builtin-scrim" hidden>
+      <section class="jev-custom-drawer" role="dialog" aria-modal="true" aria-labelledby="jev-builtin-title">
+        <div class="jev-custom-drawer-head">
+          <h2 class="jev-custom-drawer-title" id="jev-builtin-title" data-i18n="jev.builtin.editTitle">기본 결정 수정</h2>
+          <button class="btn" id="jev-builtin-close" type="button" data-i18n="app.close">닫기</button>
+        </div>
+        <form class="jev-custom-form" id="jev-builtin-form" autocomplete="off" aria-busy="false">
+          <p class="jev-custom-example" id="jev-builtin-help"></p>
+          <label class="jev-custom-field" for="jev-builtin-name"><span data-i18n="jev.custom.nameLegend">이름</span>
+            <input class="jev-custom-input" id="jev-builtin-name" type="text" />
+          </label>
+          <label class="jev-custom-field" for="jev-builtin-question"><span data-i18n="jev.custom.questionLegend">질문</span>
+            <textarea class="jev-custom-area" id="jev-builtin-question" rows="4"></textarea>
+          </label>
+          <label class="jev-custom-field" for="jev-builtin-criteria"><span data-i18n="jev.builtin.criteria">판단 기준</span>
+            <textarea class="jev-custom-area" id="jev-builtin-criteria" rows="8"></textarea>
+          </label>
+          <fieldset class="jev-custom-field"><legend data-i18n="jev.builtin.mode">사용 방식</legend>
+            <div class="jev-custom-mode" id="jev-builtin-mode" role="radiogroup" aria-label="사용 방식" data-i18n-aria="jev.builtin.mode"></div>
+          </fieldset>
+          <p class="jev-custom-example" id="jev-builtin-recording" hidden data-i18n="jev.builtin.recording">질문·기준을 바꾸면 기록만으로 시작합니다. 결과를 확인한 뒤 사용 방식을 켜짐으로 바꿀 수 있습니다.</p>
+          <p class="jev-builtin-status" id="jev-builtin-status" role="status"></p>
+        </form>
+        <div class="jev-custom-foot">
+          <p class="jev-custom-unsaved" id="jev-builtin-unsaved" role="status" hidden data-i18n="jev.custom.unsaved">저장하지 않은 내용이 있습니다. 한 번 더 닫으면 버립니다.</p>
+          <button class="btn jev-custom-foot-delete" id="jev-builtin-reset" type="button" data-i18n="jev.builtin.reset">기본값 불러오기</button>
+          <button class="btn" id="jev-builtin-cancel" type="button" data-i18n="app.cancel">취소</button>
+          <button class="btn btn--primary" id="jev-builtin-save" type="button" data-i18n="app.save">저장</button>
         </div>
       </section>
     </div>

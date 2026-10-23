@@ -514,6 +514,15 @@ fn one_with(
             .and_then(|smart| smart.get(judgment_provider::SETTINGS_KEY)).is_none();
     let sessions = if legacy_sessions { sessions } else { None };
     let (found, rows) = rows_of(seat, roots, sessions);
+    // Edited criteria count their own requests in the dashboard. They are
+    // manually enabled and never borrow the shipped question's promotion.
+    let mut effective = *seat;
+    if let Some(rubric) = settings.and_then(|root| zerocode_core::jev::builtin::in_root(root, seat.id)).and_then(|saved| saved.rubric(seat.rubric_version)) {
+        effective.rubric_version = rubric;
+        effective.promotes = false;
+    }
+    let seat = &effective;
+
     // The act line the product reads for the seat: the table beside the
     // ledger the rows came from (t-9468).
     let line = found.as_deref().and_then(|ledger| threshold::line_beside(seat, ledger));
@@ -547,7 +556,9 @@ fn one_with(
     // here from the week: routing reads its agreement off the probe beside
     // the judgment, every other rising seat off the `agreed` marks its own
     // writer left (the window's orchestration seats).
-    let judged = if seat.id == zerocode_core::jev::ROUTING.id {
+    let judged = if !seat.promotes {
+        None
+    } else if seat.id == zerocode_core::jev::ROUTING.id {
         super::decision_shadow::judge_rows_at(&rows, line)
     } else {
         promote::judge_seat_in(seat, &rows, line)

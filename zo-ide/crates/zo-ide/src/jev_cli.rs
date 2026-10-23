@@ -32,6 +32,7 @@ mod learning;
 mod rules;
 
 pub const USAGE: &str = "\
+zo jev definition <feature-id> [--json]
 zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--act-lines] [--json]
 zo jev ask <question> [--context <text>] [--cwd <dir>] [--json]
 zo jev choose <question> (--option <text>... | --stdin) [--context <text>] [--cwd <dir>] [--json]
@@ -146,6 +147,7 @@ struct DecideRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Request {
+    Definition { id: String, json: bool },
     Summary(SummaryRequest),
     Judge(JudgeRequest),
     Decide(DecideRequest),
@@ -161,6 +163,11 @@ fn parse(args: &[String]) -> Result<Request, Refused> {
     match args.first().map(String::as_str) {
         Some("review" | "outcome" | "export" | "archive") => learning::parse(args).map(Request::Learning),
         Some("rules") => rules::parse(&args[1..]).map(Request::Rules),
+        Some("definition") => match &args[1..] {
+            [id] if zerocode_core::jev::builtin::seat(id).is_some() => Ok(Request::Definition { id: id.clone(), json: false }),
+            [id, flag] if flag == "--json" && zerocode_core::jev::builtin::seat(id).is_some() => Ok(Request::Definition { id: id.clone(), json: true }),
+            _ => Err(usage(SUMMARY_REFUSED_EXIT)),
+        },
         Some("summary") => parse_summary(&args[1..]).map(Request::Summary),
         Some("decide") => parse_decide(&args[1..]).map(Request::Decide),
         Some(verb) if JevShape::from_word(verb).is_some() => {
@@ -288,6 +295,24 @@ pub fn parts_from_text(text: &str) -> Vec<String> {
     text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect()
 }
 
+type BuiltinDefinition = (&'static str, fn() -> String);
+
+/// Pure shipped definitions: no model request, credentials, or session read.
+fn builtin_definition_words(id: &str) -> Option<String> {
+    use zerocode_core::jev;
+    if let Some(words) = jev::builtin::default_words(id) { return Some(words); }
+    let definitions: &[BuiltinDefinition] = &[
+        (jev::RECALL.id, runtime::memory::rerank::rubric_words),
+        (jev::SKILLS.id, runtime::skill_rank::search_rubric_words),
+        (jev::COMPACTION.id, runtime::compaction_relevance::rubric_words),
+        (jev::MODEL_TIERS.id, runtime::model_router::tier_rubric_words),
+        (jev::PATCH_REVIEW.id, runtime::patch_review::rubric_words),
+        (jev::MENTION_RERANK.id, tools::mention_rerank_rubric_words),
+        (jev::ZO_STEP_EFFORT.id, runtime::step_rubric_words),
+    ];
+    definitions.iter().find(|(seat, _)| *seat == id).map(|(_, words)| words())
+}
+
 /// What the command printed, and the exit code that says the answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
@@ -301,6 +326,10 @@ pub struct Report {
 /// refusal code.
 pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Report, Refused> {
     match parse(args)? {
+        Request::Definition { id, json } => {
+            let words = builtin_definition_words(&id).ok_or_else(|| Refused { message: "builtin_decision_definition_unavailable".to_string(), exit: SUMMARY_REFUSED_EXIT })?;
+            Ok(Report { text: if json { serde_json::json!({"id": id, "words": words}).to_string() } else { words }, exit: 0 })
+        }
         Request::Learning(request) => learning::run(&request, &runtime::default_config_home(), now_ms),
         Request::Rules(request) => rules::run(&request, cwd, &runtime::default_config_home()),
         Request::Summary(request) => Ok(run_summary(&request, cwd, now_ms, offset_s)),

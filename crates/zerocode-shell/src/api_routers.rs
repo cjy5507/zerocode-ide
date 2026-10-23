@@ -469,6 +469,78 @@ pub(crate) fn update_zo_settings_root(
         .map_err(|err| format!("파일 쓰기 실패: {err}"))
 }
 
+/// Apply a checked settings change and its credential under the same writer
+/// lock. A refused change never touches the key; a failed file write restores
+/// the key that was present when this commit began.
+pub(crate) fn update_zo_settings_root_with_key(
+    path: &Path,
+    service: &str,
+    secret: &str,
+    keys: &dyn RouterKeys,
+    change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
+) -> Result<(), RouterRefusal> {
+    let _guard = ZO_SETTINGS_WRITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut root = read_zo_settings_root(path)?;
+    change(&mut root)?;
+    let updated = render_settings_root(&root)?;
+    let previous = keys.read(service)?;
+    commit_settings_and_key(
+        path,
+        updated.as_bytes(),
+        Some(KeyChange {
+            service,
+            secret: Some(secret),
+            previous: previous.as_deref(),
+        }),
+        keys,
+        |path, bytes| {
+            crate::durable_file::replace_bytes(path, bytes)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+struct KeyChange<'a> {
+    service: &'a str,
+    secret: Option<&'a str>,
+    previous: Option<&'a str>,
+}
+
+fn commit_settings_and_key(
+    path: &Path,
+    updated: &[u8],
+    key: Option<KeyChange<'_>>,
+    keys: &dyn RouterKeys,
+    write: impl FnOnce(&Path, &[u8]) -> Result<(), String>,
+) -> Result<(), RouterRefusal> {
+    let changed = match key.as_ref() {
+        Some(change) => match change.secret {
+            Some(secret) => keys.write(change.service, secret),
+            None => keys.delete(change.service),
+        },
+        None => Ok(()),
+    };
+    if let Err(mut error) = changed.and_then(|()| write(path, updated).map_err(RouterRefusal::from))
+    {
+        if let Some(change) = key {
+            let restored = match change.previous {
+                Some(previous) => keys.write(change.service, previous),
+                None => keys.delete(change.service),
+            };
+            if let Err(rollback) = restored {
+                error
+                    .message
+                    .push_str(&format!("; 키 복구도 실패했습니다: {}", rollback.message));
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Save one router row: the key goes under the row's own variable, the row
 /// into `providers[]`. A key the machine cannot keep refuses the whole save,
 /// before anything is written.
@@ -541,27 +613,17 @@ fn save_router_with_writer(
     };
     let updated = upsert_provider_json_str(&existing, &entry)?;
     let changing_key = secret.is_some() || (first_save && previous_key.is_some());
-    let changed = match secret {
-        Some(secret) => keys.write(&service, secret),
-        None if changing_key => keys.delete(&service),
-        None => Ok(()),
-    };
-    if let Err(mut error) =
-        changed.and_then(|()| write(path, updated.as_bytes()).map_err(RouterRefusal::from))
-    {
-        if changing_key {
-            let restored = match previous_key.as_deref() {
-                Some(previous) => keys.write(&service, previous),
-                None => keys.delete(&service),
-            };
-            if let Err(rollback) = restored {
-                error
-                    .message
-                    .push_str(&format!("; 키 복구도 실패했습니다: {}", rollback.message));
-            }
-        }
-        return Err(error);
-    }
+    commit_settings_and_key(
+        path,
+        updated.as_bytes(),
+        changing_key.then_some(KeyChange {
+            service: &service,
+            secret,
+            previous: previous_key.as_deref(),
+        }),
+        keys,
+        write,
+    )?;
     Ok(read_providers_from_json_str(&updated)?)
 }
 

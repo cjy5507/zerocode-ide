@@ -2617,6 +2617,7 @@ fn the_comparison_on_the_real_wire() {
     let work = tempfile::tempdir().expect("a workspace");
     let cwd = std::fs::canonicalize(work.path()).expect("resolved");
     let settings = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![door::resolved_path(&cwd)],
         daily_requests: Some(4),

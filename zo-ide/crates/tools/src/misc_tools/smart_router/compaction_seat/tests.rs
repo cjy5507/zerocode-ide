@@ -25,6 +25,7 @@ const WORKSPACE: &str = "/work/zo";
 
 fn door(home: &Path) -> JevDoor {
     let settings = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![WORKSPACE.to_string()],
         daily_requests: None,

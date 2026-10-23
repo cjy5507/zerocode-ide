@@ -52,7 +52,21 @@ fn run_create_writes_the_project_of_the_pane_that_made_the_run() {
             seat: Some(SEAT.to_string()),
         })
     );
-    let shown = bench.json(&format!("run-show --run {made}"));
+    bench.clock += 1;
+    let shown = plan_in_project(
+        &mut bench.ledger,
+        &mut bench.team,
+        &bench.launcher,
+        &words(&format!("run-show --run {made}")),
+        agent_teams::LEADER_PANE,
+        bench.clock,
+        Some(&actor),
+        &crate::orchestration::evidence::ReceiptFiles::default(),
+        None,
+        Some(A),
+    );
+    assert_eq!(shown.reply.exit_code, 0, "{}", shown.reply.stderr);
+    let shown: serde_json::Value = serde_json::from_str(&shown.reply.stdout).expect("JSON");
     assert_eq!(
         shown["project"],
         serde_json::json!({
@@ -73,6 +87,46 @@ fn run_create_writes_the_project_of_the_pane_that_made_the_run() {
             .is_some_and(|run| run.project.is_none())
     );
     assert!(bench.json(&format!("run-show --run {}", run_of(&plain)))["project"].is_null());
+}
+
+#[test]
+fn a_project_learned_after_preflight_is_checked_before_mutation() {
+    let mut bench = Bench::new();
+    let run = run_of(&bench.json("run-create --name legacy"));
+    let actor = bench_actor(&bench.team.id, agent_teams::LEADER_PANE);
+    let command = words(&format!(
+        "task-create --run {run} --spec own-work --retry-request scope-race"
+    ));
+    let before = reach(
+        &bench.ledger,
+        &command,
+        &bench.team.id,
+        agent_teams::LEADER_PANE,
+        Some(&actor),
+        A,
+    );
+    assert_eq!(before.run, Some((run.clone(), None)));
+    assert!(bench.ledger.state_run_project(&run, B, SEAT, bench.clock));
+    let planned = plan_in_project(
+        &mut bench.ledger,
+        &mut bench.team,
+        &bench.launcher,
+        &command,
+        agent_teams::LEADER_PANE,
+        bench.clock + 1,
+        Some(&actor),
+        &crate::orchestration::evidence::ReceiptFiles::default(),
+        None,
+        Some(A),
+    );
+    assert_eq!(
+        planned.reply.exit_code, 1,
+        "a changed project was not checked atomically"
+    );
+    assert!(
+        bench.ledger.run(&run).expect("run").tasks.is_empty(),
+        "a refused command created a task"
+    );
 }
 
 /// The run a verb answers in, by the plan's own rule: `--run`, the id
@@ -273,8 +327,8 @@ fn an_inferred_project_is_confirmed_only_by_the_runs_live_coordinator_in_that_pr
     let read = ledger.run(&run).expect("the run");
     assert!(read.project.as_ref().is_some_and(RunProject::inferred));
     assert!(
-        matches!(read.scope(Some(B)), Scope::Crossed(_)) && !read.scope(Some(B)).holds(),
-        "an inferred project held the boundary"
+        matches!(read.scope(Some(B)), Scope::Crossed(_)) && read.scope(Some(B)).holds(),
+        "an inferred project failed to hold the boundary"
     );
 
     assert!(

@@ -296,6 +296,7 @@ impl Teacher {
                     rtt_ms: 150,
                 },
                 Spent {
+                    decision_rubric: None,
                     requests: attempts,
                     redacted_lines: 0,
                     model: answered.then(|| ANSWERING_VERSION.to_string()),

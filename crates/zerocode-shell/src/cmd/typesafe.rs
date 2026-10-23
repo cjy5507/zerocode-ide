@@ -39,10 +39,11 @@ pub(crate) fn save_typesafe_key(
         if !provider.requires_auth {
             return Err("provider_auth_not_required".to_string().into());
         }
-        typesafe_settings::save_key_at(
-            &typesafe_settings::provider_keychain_service(&provider),
+        typesafe_settings::save_candidate_key(
+            &settings_path()?,
+            &provider,
+            provider_identity.as_deref(),
             &key,
-            "API 키가 비어 있습니다",
             &Keychain::of_this_machine(),
         )?;
     } else {
@@ -144,11 +145,59 @@ pub(crate) fn jev_review_outcome(
 
 /// Turn Jev on or off — the one switch the card and the dashboard wear
 /// (docs/design/jev-settings-20260917.md §6.1). On consents every folder and
-/// hands every feature its recommended mode; off sends nothing.
+/// preserves saved decisions and otherwise uses recommended modes; off sends nothing.
 #[tauri::command(async)]
 pub(crate) fn set_jev_enabled(on: bool) -> Result<TypeSafeSettings, RouterRefusal> {
     typesafe_settings::set_enabled(&settings_path()?, on)?;
     settings_now()
+}
+
+#[tauri::command(async)]
+pub(crate) fn update_builtin_decision(
+    id: String,
+    action: String,
+    expected: zerocode_core::jev::builtin::Decision,
+    draft: Option<zerocode_core::jev::builtin::Decision>,
+) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::update_builtin_decision(&settings_path()?, &id, &action, &expected, draft)?;
+    settings_now()
+}
+
+#[tauri::command(async)]
+pub(crate) fn builtin_decision_definition(
+    id: String,
+) -> Result<typesafe_settings::BuiltinDecisionEditor, RouterRefusal> {
+    use zerocode_core::jev::builtin;
+    builtin::seat(&id)
+        .ok_or_else(|| RouterRefusal::from("builtin_decision_missing".to_string()))?;
+    let words = match builtin::default_words(&id) {
+        Some(words) => words,
+        None => {
+            let home = dirs::home_dir().ok_or_else(|| {
+                RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
+            })?;
+            let bin = crate::zo_companion::zo_path_under(&home);
+            let output = crate::proc::quiet_command(&bin)
+                .args(["jev", "definition", &id, "--json"])
+                .output()
+                .map_err(|_| {
+                    RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
+                })?;
+            let words = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+                .ok()
+                .filter(|_| output.status.success())
+                .and_then(|body| {
+                    body.get("words")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+            words.ok_or_else(|| {
+                RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
+            })?
+        }
+    };
+    typesafe_settings::builtin_decision_editor(&settings_path()?, &id, &words)
+        .map_err(RouterRefusal::from)
 }
 
 /// Move the routing classifier — the gate in front of the routing seat. Its
@@ -257,13 +306,27 @@ pub(crate) fn set_custom_decision_mode(
 pub(crate) fn set_judgment_provider(
     provider: judgment_provider::Provider,
     expected_provider_identity: Option<String>,
+    key: Option<String>,
 ) -> Result<TypeSafeSettings, RouterRefusal> {
     let path = settings_path()?;
-    match expected_provider_identity.as_deref() {
-        Some(expected) => {
+    match (
+        expected_provider_identity.as_deref(),
+        key.as_deref().map(str::trim).filter(|key| !key.is_empty()),
+    ) {
+        (Some(expected), Some(key)) => {
+            typesafe_settings::set_provider_with_key_if_identity(
+                &path,
+                provider,
+                expected,
+                key,
+                &Keychain::of_this_machine(),
+            )?;
+        }
+        (None, Some(_)) => return Err("settings_changed".to_string().into()),
+        (Some(expected), None) => {
             typesafe_settings::set_provider_if_identity(&path, provider, expected, None)?;
         }
-        None => typesafe_settings::set_provider(&path, provider)?,
+        (None, None) => typesafe_settings::set_provider(&path, provider)?,
     }
     super::managed_judgment::settings_changed();
     settings_now()
@@ -289,15 +352,29 @@ pub(crate) fn judgment_latest_request() -> crate::systemone::latest::LatestReque
 pub(crate) async fn preflight_judgment_provider(
     provider: judgment_provider::Provider,
     expected_provider_identity: String,
+    key: Option<String>,
 ) -> Result<typesafe_settings::ProviderPreflight, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        typesafe_settings::preflight_provider(
-            &settings_path().map_err(|error| error.message)?,
-            provider,
-            &expected_provider_identity,
-            &Keychain::of_this_machine(),
-            &crate::systemone::Wire::of_this_machine(),
-        )
+        let path = settings_path().map_err(|error| error.message)?;
+        let keys = Keychain::of_this_machine();
+        let wire = crate::systemone::Wire::of_this_machine();
+        match key.as_deref() {
+            Some(key) => typesafe_settings::preflight_provider_with_key(
+                &path,
+                provider,
+                &expected_provider_identity,
+                &keys,
+                &wire,
+                Some(key),
+            ),
+            None => typesafe_settings::preflight_provider(
+                &path,
+                provider,
+                &expected_provider_identity,
+                &keys,
+                &wire,
+            ),
+        }
     })
     .await
     .map_err(|error| error.to_string())?
@@ -306,6 +383,7 @@ pub(crate) async fn preflight_judgment_provider(
 #[tauri::command]
 pub(crate) async fn judgment_models(
     provider: judgment_provider::Provider,
+    key: Option<String>,
 ) -> Result<Vec<judgment_provider::Model>, String> {
     use crate::api_routers::RouterKeys;
 
@@ -323,11 +401,14 @@ pub(crate) async fn judgment_models(
     let client = builder.build().map_err(|_| "transport".to_string())?;
     let mut request = client.get(provider.api_url("models"));
     if provider.requires_auth {
-        let key = Keychain::of_this_machine()
-            .read(&typesafe_settings::provider_keychain_service(&provider))
-            .map_err(|reason| reason.message)?
-            .filter(|key| !key.trim().is_empty())
-            .ok_or_else(|| "no_key".to_string())?;
+        let key = match key.filter(|key| !key.trim().is_empty()) {
+            Some(key) => Some(key),
+            None => Keychain::of_this_machine()
+                .read(&typesafe_settings::provider_keychain_service(&provider))
+                .map_err(|reason| reason.message)?,
+        }
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| "no_key".to_string())?;
         request = request.bearer_auth(key.trim());
     }
     let mut response = request.send().await.map_err(|_| "transport".to_string())?;

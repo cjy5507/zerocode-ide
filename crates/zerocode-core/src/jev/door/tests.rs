@@ -15,6 +15,7 @@ const APP: &str = "/work/app";
 
 fn settings(daily_requests: Option<u64>) -> JevSettings {
     JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![APP.to_string()],
         daily_requests,
@@ -48,6 +49,7 @@ fn routing_body(task: &str) -> Value {
 fn the_door_asks_in_order_and_names_each_refusal() {
     let consented = settings(Some(2));
     let off = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: false,
         ..consented.clone()
     };
@@ -114,6 +116,7 @@ fn a_folder_under_a_consented_root_passes_and_one_beside_it_does_not() {
         assert!(!consented.consents(beside), "{beside:?}");
     }
     let windows = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         workspaces: vec![r"C:\work\app".to_string()],
         ..consented
     };
@@ -134,6 +137,7 @@ fn an_unregistered_git_pointer_cannot_borrow_another_checkouts_consent() {
     )
     .expect("untrusted pointer");
     let consented = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         workspaces: vec![resolved_path(&parent)],
         ..settings(None)
     };
@@ -165,6 +169,7 @@ fn a_symlink_to_a_registered_git_file_does_not_register_its_own_folder() {
     std::os::unix::fs::symlink(registered.join(".git"), stranger.join(".git"))
         .expect("borrowed pointer");
     let consented = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         workspaces: vec![resolved_path(&parent)],
         ..settings(None)
     };
@@ -181,6 +186,7 @@ fn a_symlink_below_a_consented_root_does_not_consent_to_its_outside_target() {
     std::fs::create_dir_all(&stranger).expect("stranger");
     std::os::unix::fs::symlink(&stranger, parent.join("link")).expect("link");
     let consented = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         workspaces: vec![resolved_path(&parent)],
         ..settings(None)
     };
@@ -214,6 +220,7 @@ fn a_worktree_of_a_consented_checkout_is_consented_and_a_strangers_is_not() {
     let strangers = cut_from(&theirs, "side");
 
     let settings = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![resolved_path(&mine)],
         daily_requests: None,
@@ -269,6 +276,7 @@ fn settings_of_the_wrong_shape_never_widen_what_is_sent() {
     assert_eq!(
         absent,
         JevSettings {
+            decisions: std::collections::BTreeMap::default(),
             enabled: true,
             workspaces: Vec::new(),
             daily_requests: None,
@@ -312,6 +320,7 @@ fn settings_of_the_wrong_shape_never_widen_what_is_sent() {
 #[test]
 fn every_folder_consents_to_every_named_workspace_and_is_never_resolved() {
     let everywhere = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         workspaces: vec![EVERY_WORKSPACE.to_string()],
         ..settings(None)
     };
@@ -825,6 +834,7 @@ fn a_key_check_asks_no_consent_but_keeps_the_switch_and_the_budget() {
         Some(Refused::Budget)
     );
     let off = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: false,
         ..capped.clone()
     };

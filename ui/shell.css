@@ -21218,6 +21218,11 @@ button.helper-sib:hover {
   flex-wrap: wrap;
 }
 
+.managed-judgment-candidate-reason {
+  flex-basis: 100%;
+  word-break: keep-all;
+}
+
 .judgment-setup-hint {
   margin: var(--space-3) var(--space-4);
   overflow-wrap: anywhere;
@@ -21337,6 +21342,14 @@ button.helper-sib:hover {
 .judgment-connection-settings {
   margin: var(--space-4);
   min-width: 0;
+}
+
+/* The generic fold measures prose at 60ch. This fold contains a connection
+ * form, so its fields and actions use the same row width as the API router. */
+.judgment-connection-settings > #judgment-provider-editor,
+.judgment-connection-settings > .settings-judgment-actions,
+.judgment-connection-settings > .settings-status {
+  max-width: none;
 }
 
 .judgment-model-source h4 {
@@ -26615,6 +26628,7 @@ select {
 .agent-pill,
 .auto-row,
 .btn,
+.jev-builtin-action,
 .check-open,
 .check-row,
 .checks-grip span,
@@ -51410,3 +51424,13 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .sb-explain-act {
   white-space: nowrap;
 }
+
+/* Built-in decision actions share the name line, preserving the dashboard rows. */
+.jev-builtin-heading { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.jev-builtin-heading > .jev-row-open { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.jev-builtin-actions { display: inline-flex; flex: none; gap: var(--space-1); }
+.jev-builtin-action { display: inline-flex; align-items: center; padding: 0; border: 0; background: none; color: var(--ink-mist); cursor: pointer; }
+.jev-builtin-action:hover { color: var(--ink-chalk); }
+.jev-builtin-status { margin: 0; color: var(--ink-mist); }
+.jev-builtin-status.is-error { color: var(--signal-halt); }
+.jev-builtin-trash { margin: var(--space-3) 0; }

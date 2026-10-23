@@ -985,6 +985,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
         }
         fn spent(&self) -> Option<Spent> {
             Some(Spent {
+                decision_rubric: None,
                 requests: 1,
                 redacted_lines: 2,
                 input_tokens: Some(120),

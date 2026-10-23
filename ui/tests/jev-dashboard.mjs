@@ -317,19 +317,45 @@ export function jevDashboardFixture(real = null) {
   const store = { decisions: [], trash: [], folders: ["/Users/p/project", "/Users/p/shop"], everywhere: false };
   const custom = { rules, store, saves: [], checks: 0, lines: [], modes: [], deletes: [], restores: [], made: 0, deleted: new Map() };
   window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [], custom };
+  const builtin = { saved: {}, calls: [], failNext: false };
+  window.__JEV__.builtin = builtin;
+  const provider = { kind: "jev", protocol: "system_one", baseUrl: "https://api.typesafe.ai", model: "jev-latest", requiresAuth: true };
   const settings = () => ({
     keysKeptHere: true, keySaved: true, jev: { ...jev }, customDecisions: structuredClone(rules),
+    provider: { ...provider }, jevProvider: { ...provider }, providerIdentity: "jev-fixture",
+    model: { model: provider.model, alias: "jev-latest", pinned: false },
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
     // And the wall the model tier feature's paragraph names
     // (`JevUse` → `worded_wall_ms`, t-45961), a number of this fixture's
     // own so the page can only have read it from here.
-    switches: seats.map((id) => ({ id, setting: id, mode: modeOf[id], modes, written: true, agreementRowsWanted: 20,
+    switches: seats.map((id) => ({ id, setting: id, mode: builtin.saved[id]?.deleted ? "off" : (builtin.saved[id]?.mode ?? modeOf[id]),
+      decision: builtin.saved[id], modes, written: true, agreementRowsWanted: 20,
       wallMs: id === "model_tiers" ? 2_500 : null })),
     classifier: { setting: "autoClassifier", mode: "probed", probes: true, gates: seats[0],
       modes: [{ mode: "probed", runs: true, markers: false, probes: true }] },
   });
   window.__ANSWER__.typesafe_settings = settings;
+  window.__ANSWER__.builtin_decision_definition = ({ id }) => ({
+    id, saved: structuredClone(builtin.saved[id] ?? {}), question: "기본 판단 질문", criteria: "기본 판단 기준",
+    canEditPrompt: id !== "judgment_cache", dynamic: false, mode: builtin.saved[id]?.mode ?? modeOf[id],
+    defaultMode: modeOf[id], modes, nameMax: 80, questionMax: 2_000, criteriaMax: 8_000,
+  });
+  window.__ANSWER__.update_builtin_decision = ({ id, action, expected, draft }) => {
+    builtin.calls.push({ id, action, expected: structuredClone(expected), draft: structuredClone(draft) });
+    if (builtin.failNext) { builtin.failNext = false; throw { message: "fixture_write_failed" }; }
+    const before = builtin.saved[id] ?? {};
+    if (JSON.stringify(before) !== JSON.stringify(expected)) throw { message: "builtin_decision_changed" };
+    if (action === "save") {
+      const next = structuredClone(draft);
+      if ((next.question || next.criteria) && (next.question !== (before.question ?? null) || next.criteria !== (before.criteria ?? null))) next.mode = "shadow";
+      builtin.saved[id] = next;
+    } else if (action === "delete") builtin.saved[id] = { ...before, deleted: true };
+    else if (action === "restore") builtin.saved[id] = { ...before, deleted: false };
+    else if (action === "reset") delete builtin.saved[id];
+    return settings();
+  };
+
   // The day's requests from this machine against the person's limit
   // (`jev_day`, t-6243 D1).
   window.__ANSWER__.jev_day = () => ({ sent: 247, most: 500 });
@@ -1165,10 +1191,22 @@ export async function testJevDashboard(browser, origin, ok) {
         && fixed.consent.focus === "jev-enabled" && fixed.consent.said.includes("「모든 폴더에서 사용」")
         && fixed.back === "jev",
       JSON.stringify(fixed));
+    const legacyProvider = await page.evaluate(() => {
+      const saved = typesafeState;
+      paintTypeSafe({ ...saved, provider: null, providerIdentity: null });
+      const result = {
+        disabled: el("typesafe-key-input").disabled,
+        reason: el("judgment-active-model").textContent,
+      };
+      paintTypeSafe(saved);
+      return result;
+    });
+    ok("an old response without provider details explains why connection editing is unavailable",
+      legacyProvider.disabled && legacyProvider.reason.includes("현재 적용된 모델을 읽지 못했습니다"), JSON.stringify(legacyProvider));
     ok("the model is named once, over the table, and a row names a version only when it is another",
       opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 "))),
       JSON.stringify({ caption: opened.caption }));
-    ok("the switch stands over the table as the card's, in use from some folders, and no feature offers a mode",
+    ok("the global switch stands over the table while per-feature edits use their own dialog",
       opened.switchOver !== null && opened.switchOver.checked === true && opened.switchOver.id === null
         && opened.switchOver.partial && opened.switchOver.said === "일부 폴더(4개)에서만 사용 중입니다."
         && opened.switchOver.beforeTable && opened.tableSelects === 0,
@@ -1716,11 +1754,11 @@ export async function testJevDashboard(browser, origin, ok) {
         });
         const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
         const scrollAfter = await frame.evaluate((node) => [node.scrollTop, node.scrollLeft]);
-        const hiddenImport = card.find((row) => row.target === "#managed-judgment-import-path");
-        ok(`${theme}: a control under a hidden provider panel is recorded as unmeasured, not passed`,
-          hiddenImport?.verdict === "hidden" && hiddenImport.ratio === null
-            && hiddenImport.why === "display:none at #managed-judgment-panel",
-          JSON.stringify(hiddenImport));
+        const hiddenEndpoint = card.find((row) => row.target === "#judgment-endpoint");
+        ok(`${theme}: the endpoint hidden for the built-in provider is unmeasured, not passed`,
+          hiddenEndpoint?.verdict === "hidden" && hiddenEndpoint.ratio === null
+            && hiddenEndpoint.why === "display:none at #judgment-endpoint-field",
+          JSON.stringify(hiddenEndpoint));
         const key = card.find((row) => row.target === "#typesafe-key-input");
         ok(`${theme}: the offscreen key placeholder is measured and the card's scroll is restored`,
           clipped && key?.ratio >= CONTRAST_FLOOR && key.fg !== null && key.bg !== null
@@ -2956,7 +2994,7 @@ export async function testJevCustomDecisions(browser, origin, ok) {
         fixed: drawer.querySelector("[data-jev-drawer-fixed]")?.textContent.trim() ?? "",
       };
     });
-    ok("the built-in table names no row for a person's decisions and no select, even while they ask, the strip still counts their requests, and a built-in drawer offers nothing to write",
+    ok("the built-in table excludes personal decisions, counts their requests, and keeps its detail drawer informational",
       !builtIn.listed && builtIn.rows === BUILT_IN && builtIn.selects === 0 && builtIn.after === builtIn.before + 7
         && builtIn.open && builtIn.fields === 0 && builtIn.fixed.length > 0,
       JSON.stringify(builtIn));
@@ -3160,4 +3198,98 @@ export async function testJevCustomDecisions(browser, origin, ok) {
   } finally {
     await page.close();
   }
+}
+
+
+export async function testJevBuiltinDecisions(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(jevDashboardFixture);
+    await page.locator("#nav-jev").click();
+    await page.waitForSelector('#jev-view [data-jev-dash-row="recall"]');
+    const actions = await page.evaluate(() => {
+      const view = document.querySelector("#jev-view");
+      return { rows: view.querySelectorAll("[data-jev-dash-row]").length,
+        edits: view.querySelectorAll("[data-jev-builtin-edit]").length,
+        deletes: view.querySelectorAll("[data-jev-builtin-delete]").length };
+    });
+    ok("every displayed built-in decision offers edit and delete", actions.rows > 0 && actions.edits === actions.rows && actions.deletes === actions.rows, JSON.stringify(actions));
+    if (actions.edits !== actions.rows) return;
+    const open = async () => {
+      await page.locator('#jev-view [data-jev-builtin-edit="recall"]').click();
+      await page.waitForFunction(() => !document.getElementById("jev-builtin-name").disabled);
+    };
+    const save = async () => {
+      await page.locator("#jev-builtin-save").click();
+      await page.waitForFunction(() => document.getElementById("jev-builtin-scrim").hidden);
+    };
+    await open();
+    ok("the built-in editor loads the shipped question and criteria", await page.locator("#jev-builtin-question").inputValue() === "기본 판단 질문"
+      && await page.locator("#jev-builtin-criteria").inputValue() === "기본 판단 기준");
+    await page.locator("#jev-builtin-name").fill("바꾼 위키 판단");
+    await page.locator("#jev-builtin-question").fill("현재 요청을 직접 뒷받침하는 내용인가?");
+    await page.locator("#jev-builtin-criteria").fill("명시적인 근거가 있는 내용을 우선한다.");
+    await save();
+    let saved = await page.evaluate(() => window.__JEV__.builtin.saved.recall);
+    ok("editing a built-in question saves the wording and starts recording", saved.question === "현재 요청을 직접 뒷받침하는 내용인가?"
+      && saved.criteria === "명시적인 근거가 있는 내용을 우선한다." && saved.mode === "shadow", JSON.stringify(saved));
+    await open();
+    ok("reopening a built-in editor retains the saved wording", await page.locator("#jev-builtin-name").inputValue() === "바꾼 위키 판단"
+      && await page.locator("#jev-builtin-question").inputValue() === saved.question);
+    const shots = process.env.JEV_BUILTIN_SHOTS;
+    const AxeBuilder = axeBuilder();
+    for (const theme of ["dark", "light"]) {
+      await setQualityTheme(page, theme);
+      for (const width of [1280, 390]) {
+        await page.setViewportSize({ width, height: 860 });
+        await settlePaint(page);
+        const layout = await page.evaluate(() => {
+          const dialog = document.querySelector("#jev-builtin-scrim [role=dialog]");
+          const box = dialog.getBoundingClientRect();
+          const form = document.getElementById("jev-builtin-form");
+          return { fits: box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight,
+            scroll: form.scrollWidth <= form.clientWidth + 1, save: !document.getElementById("jev-builtin-save").getBoundingClientRect().width };
+        });
+        ok(`the ${theme} built-in editor fits ${width}px with its actions visible`, layout.fits && layout.scroll && !layout.save, JSON.stringify(layout));
+        if (shots) {
+          await mkdir(shots, { recursive: true });
+          await page.screenshot({ path: join(shots, `builtin-${theme}-${width}.png`) });
+        }
+      }
+      if (AxeBuilder) {
+        const results = await new AxeBuilder({ page }).include("#jev-builtin-scrim").analyze();
+        ok(`the ${theme} built-in editor has no accessibility violations`, results.violations.length === 0, JSON.stringify(results.violations.map((v) => v.id)));
+      }
+    }
+    await page.setViewportSize({ width: 1280, height: 860 });
+    await page.locator("#jev-builtin-cancel").click();
+    await page.locator('#jev-view [data-jev-builtin-delete="recall"]').click();
+    await page.locator("#jev-custom-delete-ok").click();
+    await page.waitForFunction(() => !document.querySelector('#jev-view [data-jev-dash-row="recall"]'));
+    ok("deleting a built-in decision removes its row and offers restoration", await page.locator('#jev-view [data-jev-builtin-restore="recall"]').count() === 1);
+    const toggle = page.locator("#jev-view [data-jev-switch]");
+    await toggle.uncheck(); await toggle.check();
+    saved = await page.evaluate(() => window.__JEV__.builtin.saved.recall);
+    ok("turning all decisions on does not resurrect a deleted built-in decision", saved.deleted && await page.locator('#jev-view [data-jev-dash-row="recall"]').count() === 0);
+    await page.locator('#jev-view [data-jev-builtin-restore="recall"]').click();
+    await page.waitForSelector('#jev-view [data-jev-dash-row="recall"]');
+    await open();
+    ok("restoring a deleted built-in decision preserves its saved question", await page.locator("#jev-builtin-question").inputValue() === saved.question);
+    await page.locator("#jev-builtin-reset").click();
+    await save();
+    await open();
+    ok("loading and saving defaults restores the shipped question", await page.locator("#jev-builtin-question").inputValue() === "기본 판단 질문"
+      && await page.evaluate(() => !window.__JEV__.builtin.saved.recall));
+    await page.locator("#jev-builtin-name").fill("저장 실패 초안");
+    await page.evaluate(() => { window.__JEV__.builtin.failNext = true; });
+    await page.locator("#jev-builtin-save").click();
+    await page.waitForSelector("#jev-builtin-status.is-error");
+    ok("a failed built-in save preserves the open draft and persisted state", await page.locator("#jev-builtin-name").inputValue() === "저장 실패 초안"
+      && await page.evaluate(() => !window.__JEV__.builtin.saved.recall));
+    await page.evaluate(() => { window.__JEV__.builtin.saved.recall = { name: "다른 창의 수정" }; });
+    await page.locator("#jev-builtin-save").click();
+    await page.waitForFunction(() => document.getElementById("jev-builtin-status").textContent.includes("다른 창"));
+    ok("a stale built-in editor cannot overwrite another window", await page.evaluate(() => window.__JEV__.builtin.saved.recall.name === "다른 창의 수정"));
+    ok("built-in decision editing raises no JavaScript errors", faults.length === 0, faults.join("\n"));
+  } finally { await page.close(); }
 }

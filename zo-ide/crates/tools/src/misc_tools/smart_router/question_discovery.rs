@@ -313,6 +313,7 @@ fn feature_of(answer: &Value) -> Option<Value> {
 /// only in words the wire withholds; those rows are duplicates to the model.
 fn duplicate_of(row: &Row, seat: Seat) -> String {
     let settings = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![WORKSPACE.to_string()],
         daily_requests: None,
@@ -582,6 +583,7 @@ fn run_with_spend(round: &Round, door: &JevDoor, client: Option<&SystemOneClient
 /// the person's ledgers and day count never move.
 pub(super) fn door(home: &Path) -> JevDoor {
     let settings = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![WORKSPACE.to_string()],
         daily_requests: None,

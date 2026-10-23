@@ -111,6 +111,9 @@ impl Restoring {
 }
 
 impl Host for Restoring {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        Some((&self.checkout).into())
+    }
     fn split(
         &self,
         _team: &str,

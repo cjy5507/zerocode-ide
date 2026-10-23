@@ -67,6 +67,7 @@ pub use deep_gate::{
 #[cfg(test)]
 use compaction::parse_auto_compaction_threshold;
 pub use error::{RuntimeError, StreamingTurnError, ToolError, ToolTextKind};
+pub use step_effort::step_rubric_words;
 pub use step_effort::{
     decide as decide_step_effort, shift as shift_step_effort, step_questions, step_request,
     step_state, EffortStep, RungMove, StepAsk, StepAskContext, StepBatch, StepDecision,
