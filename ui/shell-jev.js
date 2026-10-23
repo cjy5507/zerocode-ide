@@ -3614,8 +3614,8 @@ function jevCustomOptionPressed(event) {
   if (!button || !jevCustomDrawer || !rules) return;
   if (button.dataset.jevCustomMove) {
     const row = button.closest("[data-jev-custom-option]");
-    if (button.dataset.jevCustomMove === "up" && row.previousElementSibling) row.before(row.previousElementSibling);
-    else if (button.dataset.jevCustomMove === "down" && row.nextElementSibling) row.after(row.nextElementSibling);
+    if (button.dataset.jevCustomMove === "up" && row.previousElementSibling) row.previousElementSibling.before(row);
+    else if (button.dataset.jevCustomMove === "down" && row.nextElementSibling) row.nextElementSibling.after(row);
     button.focus();
   } else if (button.matches("[data-jev-custom-remove]")) {
     button.closest("[data-jev-custom-option]").remove();

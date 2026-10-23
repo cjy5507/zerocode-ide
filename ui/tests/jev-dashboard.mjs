@@ -3219,7 +3219,7 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     await page.locator('[data-jev-custom-move="up"]').nth(1).click();
     await checked(); await press("#jev-custom-save"); await drawerClosed();
     typed = await page.evaluate(() => window.__JEV__.custom.saves.at(-1));
-    ok("custom Score saves the explicitly reordered levels", typed.answer.kind === "score" && typed.answer.levels.join("|") === "한 파일|여러 파일");
+    ok("custom Score saves the explicitly reordered levels", typed.answer.kind === "score" && typed.answer.levels.join("|") === "한 파일|여러 파일", JSON.stringify(typed));
 
     ok("a person's decisions on the dashboard raise no renderer fault and log no console error",
       faults.length === 0 && consoleErrors.length === 0,
@@ -3246,6 +3246,7 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     ok("every displayed built-in decision offers edit and delete", actions.rows > 0 && actions.edits === actions.rows && actions.deletes === actions.rows, JSON.stringify(actions));
     if (actions.edits !== actions.rows) return;
     const open = async (id = "recall") => {
+      if (!await page.locator(`#jev-view [data-jev-builtin-edit="${id}"]`).count()) await page.locator("#jev-view .jev-fold").click();
       await page.locator(`#jev-view [data-jev-builtin-edit="${id}"]`).click();
       await page.waitForFunction(() => !document.getElementById("jev-builtin-name").disabled);
     };
