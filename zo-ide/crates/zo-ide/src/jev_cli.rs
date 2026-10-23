@@ -295,12 +295,13 @@ pub fn parts_from_text(text: &str) -> Vec<String> {
     text.lines().map(str::trim).filter(|line| !line.is_empty()).map(str::to_string).collect()
 }
 
+type BuiltinDefinition = (&'static str, fn() -> String);
+
 /// Pure shipped definitions: no model request, credentials, or session read.
 fn builtin_definition_words(id: &str) -> Option<String> {
     use zerocode_core::jev;
     if let Some(words) = jev::builtin::default_words(id) { return Some(words); }
-    type Definition = (&'static str, fn() -> String);
-    let definitions: &[Definition] = &[
+    let definitions: &[BuiltinDefinition] = &[
         (jev::RECALL.id, runtime::memory::rerank::rubric_words),
         (jev::SKILLS.id, runtime::skill_rank::search_rubric_words),
         (jev::COMPACTION.id, runtime::compaction_relevance::rubric_words),
