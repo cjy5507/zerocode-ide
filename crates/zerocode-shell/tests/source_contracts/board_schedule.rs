@@ -223,3 +223,29 @@ fn the_schedule_view_asks_only_while_seen_and_says_every_state() {
         );
     }
 }
+
+/// What git says of the board's tasks (t-71840) is asked at the open
+/// repository alone — the root the window stands in — through the artifacts
+/// tab's own reading, whose answer is kept by the base's commit
+/// (`artifact_flow::git_facts`), and only while the desk holds a task. The
+/// reader of the two folders asks git nothing itself, so a quiet look stays a
+/// look at files.
+#[test]
+fn the_schedule_asks_git_only_at_the_open_repository_through_the_flows_reading() {
+    let board = shell_source("cmd/board.rs");
+    let look = strip_rust_comments(block_after(&board, "fn schedule_look("));
+    assert!(
+        look.contains("match repo.as_deref()")
+            && look.contains("crate::artifact_flow::git_facts(root, now_ms)")
+            && look.contains("crate::artifact_flow::landings(")
+            && look.contains("crate::orchestration::board_ledger_snapshot()"),
+        "the schedule asks git, or finds the desk's tasks, some other way:\n{look}"
+    );
+    let module = strip_rust_comments(&shell_source("schedule_timeline.rs"));
+    for asked in ["git_facts(", "vcs()", "landings("] {
+        assert!(
+            !module.contains(asked),
+            "the schedule's reader asks git or the desk itself (`{asked}`)"
+        );
+    }
+}

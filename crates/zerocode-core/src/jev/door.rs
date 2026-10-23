@@ -138,7 +138,9 @@ pub struct NotAnObject(pub &'static str);
 /// ([`EVERY_WORKSPACE`], the list the person kept replaced by it), and every
 /// use's own word removed, so each stands at its row's recommendation
 /// ([`JevUse::mode_in`]). The day's limit, the model pin and everything else
-/// under `smart` stay as they stood. A second press changes nothing.
+/// under `smart` stay as they stood. Saved built-in edits and deletions keep
+/// their choices, including a legacy off word for clients without the editor.
+/// A second press changes nothing.
 ///
 /// Here rather than in the window that writes it, because this is what the
 /// switch MEANS, and the readers of what it wrote — [`switched_on`],
@@ -153,8 +155,19 @@ pub fn switch_on(smart: &mut Map<String, Value>) -> Result<(), NotAnObject> {
         WORKSPACES_SETTING.to_string(),
         Value::Array(vec![Value::from(EVERY_WORKSPACE)]),
     );
+    let definitions = super::builtin::read(&serde_json::json!({(SMART_SETTINGS_KEY): &*smart}));
     for row in &super::JEV_USES {
-        smart.remove(row.setting);
+        if let Some(mode) = definitions
+            .get(row.id)
+            .and_then(|saved| saved.legacy_mode(row))
+        {
+            smart.insert(
+                row.setting.to_string(),
+                Value::String(mode.key().to_string()),
+            );
+        } else {
+            smart.remove(row.setting);
+        }
     }
     Ok(())
 }
@@ -185,6 +198,8 @@ fn jev_object(smart: &mut Map<String, Value>) -> Result<&mut Map<String, Value>,
 /// The door's settings, as the person's own settings file holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JevSettings {
+    /// Personal built-in decisions, shared by the window and zo request doors.
+    pub decisions: super::builtin::Decisions,
     pub enabled: bool,
     pub workspaces: Vec<String>,
     /// `None` when unset: counted, never refused for the count.
@@ -205,6 +220,7 @@ impl JevSettings {
     /// not one word is no pin.
     #[must_use]
     pub fn from_root(root: &Value) -> Self {
+        let decisions = super::builtin::read(root);
         let model = match judgment_provider::Provider::from_root(root) {
             Ok(provider) if provider.kind != judgment_provider::ProviderKind::Jev => {
                 provider.identity()
@@ -217,6 +233,7 @@ impl JevSettings {
             .and_then(|smart| smart.get(JEV_SETTINGS_KEY))
         else {
             return Self {
+                decisions,
                 enabled: true,
                 workspaces: Vec::new(),
                 daily_requests: None,
@@ -225,6 +242,7 @@ impl JevSettings {
         };
         let Some(jev) = jev.as_object() else {
             return Self {
+                decisions,
                 enabled: false,
                 workspaces: Vec::new(),
                 daily_requests: None,
@@ -250,6 +268,7 @@ impl JevSettings {
             Some(cap) => Some(cap.as_u64().unwrap_or(0)),
         };
         Self {
+            decisions,
             enabled,
             workspaces,
             daily_requests,
@@ -436,12 +455,19 @@ pub struct Asking<'a> {
 /// what is sent were withheld.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cleared {
+    decision_rubric: Option<u32>,
     bytes: Vec<u8>,
     withheld_lines: usize,
     review: Option<super::learning::store::Target>,
 }
 
 impl Cleared {
+    /// The edited decision rubric that actually produced these bytes.
+    #[must_use]
+    pub const fn decision_rubric(&self) -> Option<u32> {
+        self.decision_rubric
+    }
+
     /// Attach local evidence retention only after the host read the existing
     /// label-draft preference. This metadata is never sent to the provider.
     #[must_use]
@@ -516,6 +542,13 @@ pub fn custom_hourly_requests(root: &Value) -> u64 {
 /// The first of the door's four questions the request fails.
 pub fn may_send(row: &JevUse, asking: &Asking<'_>, mut body: Value) -> Result<Cleared, Refused> {
     admit(asking, true)?;
+    let decision = asking.settings.decisions.get(row.id);
+    if decision
+        .and_then(|saved| saved.mode(row))
+        .is_some_and(|mode| !mode.asks())
+    {
+        return Err(Refused::Off);
+    }
     let mut withheld_lines = 0;
     for sent in row.sends {
         let path: Vec<&str> = sent.at.split('/').skip(1).collect();
@@ -523,8 +556,12 @@ pub fn may_send(row: &JevUse, asking: &Asking<'_>, mut body: Value) -> Result<Cl
             withheld_lines += clear(value, sent.cap);
         });
     }
+    if let Some(decision) = decision {
+        withheld_lines += super::builtin::apply(decision, &mut body);
+    }
     name_the_model(&mut body, asking.settings);
     Ok(Cleared {
+        decision_rubric: decision.and_then(|saved| saved.rubric(row.rubric_version)),
         bytes: body.to_string().into_bytes(),
         withheld_lines,
         review: None,
@@ -544,6 +581,7 @@ pub fn may_check_key(asking: &Asking<'_>, body: &Value) -> Result<Cleared, Refus
     let mut body = body.clone();
     name_the_model(&mut body, asking.settings);
     Ok(Cleared {
+        decision_rubric: None,
         bytes: body.to_string().into_bytes(),
         withheld_lines: 0,
         review: None,

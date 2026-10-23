@@ -3840,6 +3840,115 @@ function diagramNote(undrawn) {
   });
 }
 
+/* How the window asks Rust for layouts (t-58437).
+ *
+ * - `inFlight`: the layouts asked at once. The rest wait in line, in the order
+ *   their fences were first looked at — the ones on screen first
+ *   (`lookAtMermaidFences`) — so a page of two dozen diagrams lands them a few
+ *   at a time rather than in one burst.
+ * - `keptMarks`: the layouts remembered by their source, least recently drawn
+ *   let go first; counted in marks, which is what a layout holds. A fence
+ *   painted again with the same source is drawn as it is painted — a check's
+ *   pane rebuilt by its poll, a conversation's row back from the shelf, the
+ *   answer's turn standing where its stream was, a card opened again — with
+ *   no request and no frame in which it stands as code. The source is the
+ *   whole key: `render_mermaid` is given nothing else, and a drawing's colours
+ *   are tokens, so the dark and light treatments share one layout. A layout
+ *   that came to depend on the theme would need the theme in the key. */
+const MERMAID_LAYOUT = Object.freeze({ inFlight: 2, keptMarks: 8192 });
+
+const mermaidLayout = {
+  // What each source's layout came to, least recently drawn first.
+  kept: new Map(),
+  keptMarks: 0,
+  // What a source asked and not answered yet will answer, in line or in
+  // flight: one request a source, however many fences wait for it.
+  asked: new Map(),
+  // The requests waiting for a slot, and the slots taken.
+  line: [],
+  flying: 0,
+};
+
+/* The layout `source` came to, or null — and drawn again, it is the most
+ * recently drawn. */
+function keptMermaidLayout(source) {
+  const kept = mermaidLayout.kept.get(source);
+  if (kept === undefined) return null;
+  mermaidLayout.kept.delete(source);
+  mermaidLayout.kept.set(source, kept);
+  return kept.render;
+}
+
+/* A layout is kept with its marks counted — one more for the answer itself,
+ * so a run of undrawn answers is bounded too. */
+function keepMermaidLayout(source, render) {
+  const held = mermaidLayout.kept.get(source);
+  if (held !== undefined) {
+    mermaidLayout.kept.delete(source);
+    mermaidLayout.keptMarks -= held.marks;
+  }
+  const marks = 1 + (render.drawing?.marks?.length ?? 0);
+  mermaidLayout.kept.set(source, { render, marks });
+  mermaidLayout.keptMarks += marks;
+  for (const [oldest, kept] of mermaidLayout.kept) {
+    if (mermaidLayout.keptMarks <= MERMAID_LAYOUT.keptMarks) break;
+    mermaidLayout.kept.delete(oldest);
+    mermaidLayout.keptMarks -= kept.marks;
+  }
+}
+
+/* The layout of `source`, asked of Rust once however many fences wait for it,
+ * and when a slot is free. It answers the render, or null when there is none to
+ * draw.
+ *
+ * A failed call leaves the source showing. `render_mermaid` reads no files and
+ * touches no state, so the only way it fails is the window going away, and
+ * blanking the text in that moment would be the worst possible answer. The
+ * window log gets one line for it, without the source: that is the author's
+ * text, and the log is not where it belongs. One line a call, not a fence: the
+ * fences that waited on it keep their code together. */
+function mermaidLayoutOf(source, ask) {
+  const asked = mermaidLayout.asked.get(source);
+  if (asked !== undefined) return asked;
+  const answer = new Promise((start) => {
+    mermaidLayout.line.push(start);
+    askNextMermaidLayouts();
+  })
+    .then(ask)
+    .then(
+      (render) => {
+        // An answer that is not a render leaves the source showing, the same as a
+        // failed call. The two are the same situation from here: something went
+        // wrong on the way to a layout, and the text is what the person can still use.
+        if (!render) {
+          tellWindowLog("mermaid: the layout came back empty");
+          return null;
+        }
+        keepMermaidLayout(source, render);
+        return render;
+      },
+      (error) => {
+        tellWindowLog(`mermaid: the layout was refused (${error})`);
+        return null;
+      },
+    )
+    .finally(() => {
+      mermaidLayout.asked.delete(source);
+      mermaidLayout.flying -= 1;
+      askNextMermaidLayouts();
+    });
+  mermaidLayout.asked.set(source, answer);
+  return answer;
+}
+
+/* The requests in line, started while a slot is free. */
+function askNextMermaidLayouts() {
+  while (mermaidLayout.flying < MERMAID_LAYOUT.inFlight && mermaidLayout.line.length > 0) {
+    mermaidLayout.flying += 1;
+    mermaidLayout.line.shift()();
+  }
+}
+
 /* Lay out `source` and put the result in `into`, replacing whatever was there.
  *
  * `into` is passed rather than returned because the call is asynchronous and the
@@ -3847,29 +3956,19 @@ function diagramNote(undrawn) {
  * should appear where it belongs while the rest of the document is readable,
  * not hold the whole preview back.
  *
- * A failed call leaves the source showing. `render_mermaid` reads no files and
- * touches no state, so the only way it fails is the window going away, and
- * blanking the text in that moment would be the worst possible answer. The
- * window log gets one line for it, without the source: that is the author's
- * text, and the log is not where it belongs. */
+ * A layout already made is drawn before this returns: nothing is awaited on that
+ * road, so `into` may still stand in a body that is not in the document yet. A
+ * refused or empty layout leaves the source showing, and `mermaidLayoutOf` has
+ * said so in the window log. */
 async function paintDiagram(into, source) {
-  let render;
-  try {
-    render = await invoke("render_mermaid", { source });
-  } catch (error) {
-    tellWindowLog(`mermaid: the layout was refused (${error})`);
-    return;
+  let render = keptMermaidLayout(source);
+  if (render === null) {
+    render = await mermaidLayoutOf(source, () => invoke("render_mermaid", { source }));
+    if (render === null) return;
+    // The element may have been thrown away while we were waiting — another file
+    // opened, or the mode toggled back to source.
+    if (!into.isConnected) return;
   }
-  // An answer that is not a render leaves the source showing, the same as a
-  // failed call. The two are the same situation from here: something went wrong
-  // on the way to a layout, and the text is what the person can still use.
-  if (!render) {
-    tellWindowLog("mermaid: the layout came back empty");
-    return;
-  }
-  // The element may have been thrown away while we were waiting — another file
-  // opened, or the mode toggled back to source.
-  if (!into.isConnected) return;
   const note = diagramNote(render.undrawn);
   into.replaceChildren();
   into.classList.toggle("mmd-block--undrawn", note !== null);
@@ -3910,9 +4009,10 @@ function paintMermaid(body, source) {
  * so a review note on them stands beside the diagram, not inside the code the
  * diagram replaces.
  *
- * The text paints first: the observer answers after the frame that shows it,
- * and the fences on screen are laid out before the rest, which follow in page
- * order.
+ * The text paints first: the window's one watcher (`lookAtMermaidFences`)
+ * answers after the frame that shows it, and the fences on screen are laid out
+ * before the rest. A fence whose layout was made before is drawn with the
+ * words, for there is no layout to wait for (`MERMAID_LAYOUT.keptMarks`).
  *
  * A drawing wider than its block scrolls in it, and the block wears
  * `mmd-block--wider` while it does, so the stylesheet can fade the edges the
@@ -3920,7 +4020,14 @@ function paintMermaid(body, source) {
  * forcing one: whenever the column changes width, and once the drawing lands.
  * The block is observed afresh then, because a block whose size the drawing
  * left as it was reports nothing; Chromium and WebKit ignore `observe` on a
- * block already observed, hence `unobserve` first. */
+ * block already observed, hence `unobserve` first.
+ *
+ * The frame a drawing lands in also says how much its block's height changed:
+ * the block sends `mmd-landed`, whose `grew` is the change in px, before that
+ * frame is painted. A page that keeps its reader's place by hand — the
+ * conversation, which turns the browser's own anchoring off — moves by it. The
+ * height it stood at is the one this observer read last, so telling measures
+ * nothing more. */
 function paintMarkdownDiagrams(body) {
   const sources = new Map();
   for (const fence of body.querySelectorAll('pre.md-block[data-language="mermaid"]')) {
@@ -3933,22 +4040,61 @@ function paintMarkdownDiagrams(body) {
     sources.set(block, fence.textContent);
   }
   if (sources.size === 0) return;
+  const heights = new Map();
+  const landing = new Set();
   const resized = new ResizeObserver((entries) => {
-    for (const { target } of entries) target.classList.toggle("mmd-block--wider", target.scrollWidth > target.clientWidth);
+    for (const entry of entries) {
+      const block = entry.target;
+      block.classList.toggle("mmd-block--wider", block.scrollWidth > block.clientWidth);
+      const box = entry.borderBoxSize?.[0];
+      const height = box ? box.blockSize : entry.contentRect.height;
+      const stood = heights.get(block);
+      heights.set(block, height);
+      if (landing.delete(block) && stood !== undefined && height !== stood) {
+        block.dispatchEvent(Object.assign(new Event("mmd-landed", { bubbles: true }), { grew: height - stood }));
+      }
+    }
   });
-  const watch = new IntersectionObserver((entries) => {
-    watch.disconnect();
-    const shown = entries.filter((entry) => entry.isIntersecting).map((entry) => entry.target);
-    for (const block of new Set([...shown, ...sources.keys()])) {
-      if (block.isConnected) void paintDiagram(block, sources.get(block)).then(() => {
+  mermaidWatch ??= new IntersectionObserver(lookAtMermaidFences);
+  for (const [block, source] of sources) {
+    resized.observe(block);
+    if (mermaidLayout.kept.has(source)) {
+      void paintDiagram(block, source);
+      continue;
+    }
+    mermaidWaiting.set(block, () => {
+      void paintDiagram(block, source).then(() => {
+        if (!block.isConnected) return;
+        landing.add(block);
         resized.unobserve(block);
         resized.observe(block);
       });
-    }
-  });
-  for (const block of sources.keys()) {
-    watch.observe(block);
-    resized.observe(block);
+    });
+    mermaidWatch.observe(block);
+  }
+}
+
+/* The fences of every markdown body waiting for their first look, and the one
+ * watcher that looks — one for the window rather than one a body, so a fence
+ * on screen is asked first whichever body it stands in: a conversation paints a
+ * body a row. It answers after the frame that shows the words, with every fence
+ * painted since: the ones on screen first, the rest in the order they were
+ * painted. Each is looked at once and let go, so a body thrown away takes its
+ * fences with it. */
+const mermaidWaiting = new WeakMap();
+let mermaidWatch = null;
+
+function lookAtMermaidFences(entries) {
+  const shown = [];
+  const rest = [];
+  for (const entry of entries) {
+    mermaidWatch.unobserve(entry.target);
+    (entry.isIntersecting ? shown : rest).push(entry.target);
+  }
+  for (const block of [...shown, ...rest]) {
+    const ask = mermaidWaiting.get(block);
+    mermaidWaiting.delete(block);
+    if (ask && block.isConnected) ask();
   }
 }
 

@@ -27,6 +27,7 @@ mod wire_ceiling_tests;
 mod smart_runtime;
 pub mod stream;
 pub(crate) mod subagent_progress;
+mod task_continuity;
 mod tool_toggles;
 mod turn_harness;
 pub(crate) mod turn_scaffold;

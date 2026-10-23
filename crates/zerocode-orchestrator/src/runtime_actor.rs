@@ -194,7 +194,19 @@ impl PlanCommand {
         Ok(self)
     }
 
-    /// The project the caller's pane works in, when the window knows it.
+    /// A command from a pane always has a scope. An unidentified pane carries
+    /// an explicit empty scope, distinct from an internal/window-owned
+    /// command's None. An empty scope cannot match or create a project root.
+    pub fn with_project_scope(self, project: Option<String>) -> Result<Self, RuntimeError> {
+        let mut command = self.with_project(project)?;
+        if command.project.is_none() {
+            command.project = Some(String::new());
+        }
+        Ok(command)
+    }
+
+    /// The project context: None for internal operations, Some("") for an
+    /// unidentified pane, or the known project's root.
     #[must_use]
     pub fn project(&self) -> Option<&str> {
         self.project.as_deref()
@@ -2843,7 +2855,9 @@ impl RuntimeActor {
     /// Where a verb from the pane `team/pane`, working in the project `root`,
     /// reaches (t-65286) — read by this actor off the ledger it holds, so the
     /// window's door asks one question per verb rather than copying the
-    /// ledger to answer it.
+    /// ledger to answer it. An empty root means an unidentified pane: the
+    /// reach still reports its run so the boundary can refuse known projects
+    /// while allowing an existing participant of an unscoped legacy run.
     pub fn project_reach(
         &self,
         argv: &[String],
@@ -2860,7 +2874,6 @@ impl RuntimeActor {
             || team.len() > MAX_NAME
             || pane.len() > MAX_NAME
             || actor.is_some_and(|actor| actor.len() > MAX_NAME)
-            || root.is_empty()
             || root.len() > PROJECT_ROOT_MAX
         {
             return Err(RuntimeError::InvalidInput);

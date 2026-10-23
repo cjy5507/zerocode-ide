@@ -202,6 +202,7 @@ impl JevDoor {
     pub fn permits_application_now(&self) -> bool {
         let settings = self.settings_file.as_deref().map_or_else(|| self.settings.clone(), read_settings);
         settings.enabled && settings.model == self.settings.model
+            && settings.decisions == self.settings.decisions
             && self.workspace.as_deref().is_some_and(|workspace| settings.consents(workspace))
     }
 
@@ -233,7 +234,11 @@ impl JevDoor {
     /// ([`model_key`]).
     #[must_use]
     pub fn model_key(&self) -> u64 {
-        model_key(self.model())
+        if self.settings.decisions.is_empty() {
+            model_key(self.model())
+        } else {
+            model_key(&format!("{}\n{}", self.model(), serde_json::to_string(&self.settings.decisions).unwrap_or_default()))
+        }
     }
 
     /// Ask the door about one request of `row`'s whose body is `body`; cleared,
@@ -291,7 +296,7 @@ impl JevDoor {
     fn may_send_now(&self, row: &JevUse, settings: &JevSettings, asking: &door::Asking<'_>, body: Value) -> Result<Cleared, Refused> {
         let cleared = door::may_send(row, asking, body)?;
         if !self.seat_asks_now(row) { Err(Refused::Off) }
-        else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
+        else if settings.model != self.settings.model || settings.decisions != self.settings.decisions { Err(Refused::SettingsChanged) }
         else if self.resting(row) { Err(Refused::Resting) }
         else { Ok(cleared) }
     }
@@ -331,7 +336,7 @@ impl JevDoor {
         };
         let cleared = door::may_send(row, &asking, body)?;
         if !self.seat_asks_now(row) { Err(Refused::Off) }
-        else if settings.model != self.settings.model { Err(Refused::SettingsChanged) }
+        else if settings.model != self.settings.model || settings.decisions != self.settings.decisions { Err(Refused::SettingsChanged) }
         else if self.resting(row) { Err(Refused::Resting) }
         else { Ok(cleared) }
     }
@@ -396,7 +401,7 @@ impl JevDoor {
         if !self.workspace.as_deref().is_some_and(|workspace| settings.consents(workspace)) {
             return Err(Refused::NotConsented);
         }
-        if settings.model != self.settings.model { return Err(Refused::SettingsChanged); }
+        if settings.model != self.settings.model || settings.decisions != self.settings.decisions { return Err(Refused::SettingsChanged); }
         door::count_a_hedge(&settings, &self.requests)
     }
 
@@ -889,6 +894,8 @@ pub fn millis(elapsed: Duration) -> u64 {
 #[allow(clippy::struct_field_names)]
 pub struct ServerSaid {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_rubric: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_refusal: Option<String>,
@@ -909,6 +916,7 @@ impl ServerSaid {
             super::decision_shadow::now_ms().saturating_add(after)
         };
         Self {
+            decision_rubric: call.decision_rubric,
             server_error_code: call.server_error_code.map(str::to_string),
             server_refusal: call.server_refusal.map(str::to_string),
             server_retry_at: call.retry_after.map(until),
@@ -944,7 +952,10 @@ pub struct Beside<R> {
 /// The supplied request has already passed the same settings and consent door.
 #[cfg(test)]
 pub(super) async fn send_once(cleared: Cleared, client: &SystemOneClient, deadline: Duration) -> SystemOneCall {
-    client.decide_body_once(cleared.into_bytes(), deadline).await
+    let rubric = cleared.decision_rubric();
+    let mut call = client.decide_body_once(cleared.into_bytes(), deadline).await;
+    call.decision_rubric = rubric;
+    call
 }
 
 /// A typed request as the body the door reads; `None` for one that does not
@@ -966,7 +977,9 @@ pub async fn send(
     hedge: Option<Duration>,
 ) -> SystemOneCall {
     let review = cleared.prepare_review();
-    let call = client.decide_body(cleared.into_bytes(), deadline, hedge).await;
+    let decision_rubric = cleared.decision_rubric();
+    let mut call = client.decide_body(cleared.into_bytes(), deadline, hedge).await;
+    call.decision_rubric = decision_rubric;
     if let (Some(review), Ok(response)) = (review, &call.outcome) {
         let response = serde_json::json!({"model":response.model,"answers":response.answers});
         let at = super::decision_shadow::now_ms();
@@ -1053,6 +1066,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn edited_rubric_metadata_is_optional_and_contains_only_the_numeric_identity() {
+        let old: ServerSaid = serde_json::from_value(serde_json::json!({
+            "serverErrorCode":"fixture_refusal", "futureMetadata":{"version":2}
+        })).unwrap();
+        assert_eq!(old.decision_rubric, None);
+        assert_eq!(old.server_error_code.as_deref(), Some("fixture_refusal"));
+        let said = ServerSaid { decision_rubric: Some(zerocode_core::jev::builtin::EDITED_RUBRIC_FLAG), ..ServerSaid::default() };
+        assert_eq!(serde_json::to_value(said).unwrap(), serde_json::json!({
+            "decisionRubric":zerocode_core::jev::builtin::EDITED_RUBRIC_FLAG
+        }));
+    }
+
+    #[test]
     fn the_jev_tool_uses_the_existing_switches_for_calls_and_review_retention() {
         use super::super::{agent_tool, jev_mock};
         use zerocode_core::jev::{AGENT_TOOL, learning::store::Store};
@@ -1086,6 +1112,32 @@ mod tests {
             std::fs::write(&path, root.to_string()).unwrap();
             assert!(!ask("third result").answered());
             assert_eq!(endpoint.requests().len(), 2, "off reaches neither the wire nor capture");
+        });
+    }
+
+    #[test]
+    fn editing_a_builtin_question_invalidates_a_prepared_batch_and_its_cache_identity() {
+        use super::super::jev_mock;
+        use zerocode_core::jev::{AGENT_TOOL, builtin};
+        let endpoint = jev_mock::Mock::serving(200, "{}".into());
+        jev_mock::machine(&AGENT_TOOL, "on", &endpoint.base_url, |cwd| {
+            let path = runtime::default_config_home().join("settings.json");
+            let held = JevDoor::open(cwd);
+            let mut root: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            root["smart"][builtin::SETTING] = serde_json::json!({(AGENT_TOOL.id):{"question":"Use the edited question","mode":"on"}});
+            std::fs::write(&path, root.to_string()).unwrap();
+            let body = || serde_json::json!({"state":{},"questions":{"answer":{"type":"noul","instructions":"Original subject"}}});
+            assert_eq!(held.pass(&AGENT_TOOL, true, body()).unwrap_err(), Refused::SettingsChanged);
+            assert_eq!(held.clear(&AGENT_TOOL, true, body()).unwrap_err(), Refused::SettingsChanged);
+            assert_eq!(held.count_a_hedge(), Err(Refused::SettingsChanged));
+            assert!(!held.permits_application_now());
+            let current = JevDoor::open(cwd);
+            assert_ne!(held.model_key(), current.model_key());
+            let cleared = current.pass(&AGENT_TOOL, true, body()).unwrap();
+            let sent: Value = serde_json::from_slice(cleared.bytes()).unwrap();
+            assert_eq!(sent["state"]["__builtinDecision"]["question"], "Use the edited question");
+            assert!(cleared.decision_rubric().is_some());
+            assert!(endpoint.requests().is_empty());
         });
     }
 
@@ -1628,6 +1680,7 @@ mod tests {
             .expect("a sample row");
         }
         let settings = JevSettings {
+            decisions: std::collections::BTreeMap::default(),
             enabled: true,
             workspaces: vec!["/work/zo".to_string()],
             daily_requests: None,
@@ -1708,6 +1761,7 @@ mod tests {
         let home = tempfile::tempdir().expect("a config home");
         let door_for = |model: &str| {
             let settings = JevSettings {
+                decisions: std::collections::BTreeMap::default(),
                 enabled: true,
                 workspaces: vec!["/work/zo".to_string()],
                 daily_requests: None,

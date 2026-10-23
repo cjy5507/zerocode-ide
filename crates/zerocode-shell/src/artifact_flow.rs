@@ -679,7 +679,7 @@ fn walk_and_notes(root: &Path, at: &str) -> (String, HashMap<String, Note>) {
 /// from the usual base while git says which base it is, and keeps that walk
 /// when git names that base at the commit the walk began from; a later read asks
 /// only where the base stands, and walks again only when it moved.
-fn git_facts(root: &Path, now_ms: i64) -> Arc<GitFacts> {
+pub(crate) fn git_facts(root: &Path, now_ms: i64) -> Arc<GitFacts> {
     let known = {
         let held = git_held().lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(one) = held
@@ -892,7 +892,7 @@ pub(crate) fn three_of(text: &str, chars: usize) -> Option<Three> {
 /// The release a coordinator wrote down for a task — the first version word of
 /// its `release`, `shippedIn` or `deployedAs` — read only from a result the
 /// run's coordinator seat wrote, as every review key is.
-fn ledger_release(task: &Task) -> Option<String> {
+pub(crate) fn ledger_release(task: &Task) -> Option<String> {
     if !matches!(task.result_author, Some(ResultAuthor::Coordinator { .. })) {
         return None;
     }
@@ -1270,6 +1270,67 @@ fn place_of(line: &FlowTask, git: &GitFacts, table: &FlowTable) -> Option<Place>
         Some(_) => None,
         None => Some(Place::Next),
     }
+}
+
+/* ---- the schedule's landings (t-71840) ---------------------------------- */
+
+/// When one task's work landed on the base and when it shipped, as git says
+/// it: the merge's commit time and the release's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+pub(crate) struct Landed {
+    pub(crate) landed_ms: Option<i64>,
+    pub(crate) released_ms: Option<i64>,
+}
+
+/// One task as the board's desk carries it: what its landing is found by.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LandingAsk<'a> {
+    pub(crate) task: &'a str,
+    /// The commit the coordinator wrote the work landed as (`mergeHead`).
+    pub(crate) merge_head: Option<&'a str>,
+    /// The release the coordinator wrote it shipped in ([`ledger_release`]).
+    pub(crate) release: Option<&'a str>,
+}
+
+/// When each task landed and shipped, as git says it — found the way the flow
+/// finds it ([`merges_by_task`], [`merge_named`]): the newest merge on the
+/// base's first-parent line that names the task, else the merge its `mergeHead`
+/// names, and the release that merge falls under; with no merge, the release
+/// the coordinator wrote it shipped in, when the walk holds that release. A task
+/// git says nothing of is left out, and the board's schedule ends its bar on the
+/// ledger's own times instead — never on the present.
+pub(crate) fn landings(git: &GitFacts, tasks: &[LandingAsk<'_>]) -> BTreeMap<String, Landed> {
+    let by_task = merges_by_task(git);
+    let released = |at: Option<usize>| {
+        at.and_then(|at| git.releases.get(at))
+            .map(|release| release.at_ms)
+    };
+    let mut landed = BTreeMap::new();
+    for ask in tasks {
+        let merged = by_task
+            .get(ask.task)
+            .copied()
+            .or_else(|| ask.merge_head.and_then(|head| merge_named(git, head)));
+        let found = match merged {
+            Some((release, merge)) => Landed {
+                landed_ms: Some(merge.at_ms),
+                released_ms: released(release),
+            },
+            None => Landed {
+                landed_ms: None,
+                released_ms: ask.release.and_then(|version| {
+                    git.releases
+                        .iter()
+                        .find(|release| bare_version(&release.version) == bare_version(version))
+                        .map(|release| release.at_ms)
+                }),
+            },
+        };
+        if found != Landed::default() {
+            landed.insert(ask.task.to_string(), found);
+        }
+    }
+    landed
 }
 
 /// What a flow is read from.

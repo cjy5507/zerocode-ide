@@ -299,7 +299,7 @@ impl ModelCatalog {
         // stays hidden the same way a hidden built-in does.
         let policy = crate::model_discovery::UpdatePolicy::load_from(&self.settings_path);
         if let Some(discovered) = crate::model_discovery::current() {
-            for model in crate::model_discovery::new_models(&discovered) {
+            for model in crate::model_discovery::listed_models(&discovered) {
                 let Some(provider) = CatalogProvider::from_key(&model.provider) else {
                     continue;
                 };

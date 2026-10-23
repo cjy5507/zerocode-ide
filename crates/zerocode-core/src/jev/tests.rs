@@ -1759,6 +1759,7 @@ fn the_custom_seat_never_rises_and_has_no_auto() {
     }
 
     let settings = door::JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec!["/work/app".to_string()],
         daily_requests: None,

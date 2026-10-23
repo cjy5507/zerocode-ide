@@ -1,8 +1,7 @@
 //! t-65286: every project a window opens shares one ledger, and a run is one
 //! project's. A pane of another project is not pointed at the run's mail and
 //! opens none of its workers' checkouts; a verb it sends into the run is
-//! written down as one the boundary would refuse, and refused once the person
-//! turns the boundary on. Two repositories stand in for two projects, and
+//! refused by default. Two repositories stand in for two projects, and
 //! three checkouts of the first — the main checkout, a worktree beside it and
 //! one under the workspaces folder — for one project in three folders.
 //!
@@ -319,6 +318,287 @@ fn a_run_is_the_project_of_the_pane_that_made_it() {
     }
 }
 
+#[test]
+fn project_isolation_is_on_without_a_settings_file() {
+    const A: u32 = 712_580;
+    const B: u32 = 712_581;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_590);
+    let team_a = "team-project-default-a";
+    let team_b = "team-project-default-b";
+    a_leader(&host, team_a, A, Some(&disk.a));
+    a_leader(&host, team_b, B, Some(&disk.b));
+    let a = a_run_from(&host, team_a, "first-project");
+    let b = a_run_from(&host, team_b, "second-project");
+    json_from_leader(
+        &host,
+        team_a,
+        &format!("send --to run:{a} --type status --body own-project"),
+    );
+    for verb in [
+        format!("check --run {a} --peek"),
+        format!("task-list --run {a}"),
+        format!("send --run {a} --to run:{a} --type status --body elsewhere"),
+    ] {
+        let answer = from_leader(&host, team_b, &verb);
+        assert_eq!(
+            answer.exit_code, 1,
+            "project isolation was not the default: {verb}"
+        );
+    }
+    let listed = json_from_leader(&host, team_b, "run-list");
+    let ids: Vec<_> = listed["runs"]
+        .as_array()
+        .expect("runs")
+        .iter()
+        .filter_map(|row| row["runId"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&b.as_str()) && !ids.contains(&a.as_str()),
+        "a different project's run was listed"
+    );
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(B);
+}
+
+#[test]
+fn a_direct_recipient_must_still_work_in_the_senders_project() {
+    const A: u32 = 712_600;
+    const B: u32 = 712_601;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_610);
+    let team_a = "team-project-recipient-a";
+    let team_b = "team-project-recipient-b";
+    a_leader(&host, team_a, A, Some(&disk.a));
+    a_leader(&host, team_b, B, Some(&disk.a_task));
+    let run = a_run_from(&host, team_a, "recipient-project");
+    let question = json_from_leader(
+        &host,
+        team_b,
+        &format!("send --run {run} --to run:{run} --type question --body same-project"),
+    );
+    host.place(B, &disk.b);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    for verb in [
+        format!("send --run {run} --to pane:{team_b}/{leader} --type status --body moved"),
+        format!(
+            "reply --run {run} --to-message {} --body moved",
+            question["messageId"].as_str().expect("message")
+        ),
+    ] {
+        let answer = from_leader(&host, team_a, &verb);
+        assert_eq!(
+            answer.exit_code, 1,
+            "a recipient in another project was accepted: {verb}"
+        );
+        assert!(
+            answer.stderr.contains(&canonical(&disk.b)),
+            "the refusal did not name the recipient's project: {}",
+            answer.stderr
+        );
+    }
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(B);
+}
+
+#[test]
+fn a_manual_pane_can_exchange_mail_in_its_own_project() {
+    const A: u32 = 712_620;
+    const MANUAL: u32 = 712_621;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_630);
+    let team = "team-project-coordinator";
+    let manual = "team-project-manual";
+    a_leader(&host, team, A, Some(&disk.a));
+    a_leader(&host, manual, MANUAL, Some(&disk.a_task));
+    let run = a_run_from(&host, team, "manual-mail");
+    assert!(json_from_leader(&host, manual, "run-current")["runId"].is_null());
+    let question = json_from_leader(
+        &host,
+        manual,
+        &format!("send --run {run} --to run:{run} --type question --body manual-question"),
+    );
+    json_from_leader(
+        &host,
+        team,
+        &format!(
+            "reply --to-message {} --body manual-answer",
+            question["messageId"].as_str().expect("message")
+        ),
+    );
+    let answer = json_from_leader(&host, manual, &format!("check --run {run} --peek"));
+    assert!(
+        answer["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .any(|message| message["body"] == "manual-answer")
+    );
+    assert!(
+        json_from_leader(&host, manual, "run-current")["runId"].is_null(),
+        "mail bound the manual pane to somebody else's run"
+    );
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(MANUAL);
+}
+
+#[test]
+fn project_pages_find_own_rows_even_when_another_project_has_newer_rows() {
+    const A: u32 = 712_640;
+    const B: u32 = 712_641;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_650);
+    let first = "team-project-page-first";
+    let second = "team-project-page-second";
+    a_leader(&host, first, A, Some(&disk.a));
+    a_leader(&host, second, B, Some(&disk.b));
+    let own = a_run_from(&host, first, "older-own-run");
+    json_from_leader(
+        &host,
+        first,
+        &format!("send --to run:{own} --type status --body older-own-mail"),
+    );
+    let other = a_run_from(&host, second, "newer-other-run");
+    json_from_leader(
+        &host,
+        second,
+        &format!("send --to run:{other} --type status --body newer-other-mail"),
+    );
+    let page = json_from_leader(&host, first, "run-list --limit 1");
+    assert_eq!(
+        page["runs"][0]["runId"], own,
+        "a foreign run consumed the page limit"
+    );
+    assert!(
+        page["nextCursor"].is_null(),
+        "a foreign run created another page"
+    );
+    let mail = json_from_leader(&host, first, "inbox --limit 1");
+    assert_eq!(
+        mail["messages"][0]["body"], "older-own-mail",
+        "a foreign message consumed the inbox limit"
+    );
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(B);
+}
+
+#[test]
+fn known_runs_refuse_a_pane_whose_project_is_no_longer_known() {
+    const A: u32 = 712_660;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_670);
+    let team = "team-project-lost-placement";
+    a_leader(&host, team, A, Some(&disk.a));
+    let run = a_run_from(&host, team, "known-project");
+    host.folders.lock().expect("folders").remove(&A);
+    let read = from_leader(&host, team, &format!("check --run {run}"));
+    assert_eq!(
+        read.exit_code, 1,
+        "missing placement bypassed the project boundary"
+    );
+    assert!(
+        read.stderr.contains("not identified"),
+        "the scope lookup must succeed and explain the refusal: {}",
+        read.stderr
+    );
+    let runs = json_from_leader(&host, team, "run-list");
+    assert!(
+        runs["runs"]
+            .as_array()
+            .expect("runs")
+            .iter()
+            .all(|row| row["runId"] != run)
+    );
+    crate::agent_teams::forget_term(A);
+}
+
+#[test]
+fn an_unscoped_runs_own_coordinator_can_establish_its_project() {
+    const OWNER: u32 = 712_680;
+    const OTHER: u32 = 712_681;
+    let _window = the_window();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_690);
+    let owner = "team-project-legacy-owner";
+    let other = "team-project-legacy-other";
+    a_leader(&host, owner, OWNER, None);
+    a_leader(&host, other, OTHER, Some(&disk.a_task));
+    let run = a_run_from(&host, owner, "legacy-placement");
+    assert!(shown_project(&host, owner, &run).is_null());
+    let stranger = from_leader(&host, other, &format!("run-show --run {run}"));
+    assert_eq!(
+        stranger.exit_code, 1,
+        "a stranger adopted an unidentified run"
+    );
+    host.place(OWNER, &disk.a);
+    let first = shown_project(&host, owner, &run);
+    assert_eq!(first["root"], disk.a_root());
+    assert_eq!(
+        first["source"], "seat",
+        "a legacy project was falsely marked as newly created"
+    );
+    assert_eq!(shown_project(&host, owner, &run)["source"], "confirmed");
+    crate::agent_teams::forget_term(OWNER);
+    crate::agent_teams::forget_term(OTHER);
+}
+
+#[test]
+fn a_federation_run_stays_in_the_project_of_its_named_host() {
+    const A: u32 = 712_710;
+    const B: u32 = 712_711;
+    let (_window, _store) = PrivateWindow::boot();
+    let disk = Projects::lay_out();
+    let host = Placed::new(712_720);
+    let first = "team-project-federation-first";
+    let second = "team-project-federation-second";
+    a_leader(&host, first, A, Some(&disk.a));
+    a_leader(&host, second, B, Some(&disk.b));
+    let root = super::super::federation_root().expect("federation root");
+    std::fs::create_dir_all(&root).expect("federation directory");
+    let file = root.join("host-team");
+    let previous = std::fs::read(&file).ok();
+    let attach = |dispatch: &str| -> serde_json::Value {
+        serde_json::from_str(&super::super::federation_serve(
+            &host,
+            "project-fixture-home",
+            &serde_json::json!({
+                "verb": "attach", "dispatch": dispatch,
+                "agent": "claude", "prompt": "fixture work"
+            }),
+        ))
+        .expect("federation response")
+    };
+    std::fs::write(&file, first).expect("first host");
+    let accepted = attach("project-fixture-first");
+    assert_eq!(accepted["state"], "ready", "{accepted}");
+    assert_eq!(host.spawned(), 1);
+    let run = accepted["run"].as_str().expect("run");
+    assert_eq!(shown_project(&host, first, run)["root"], disk.a_root());
+
+    std::fs::write(&file, second).expect("second host");
+    let refused = attach("project-fixture-second");
+    assert!(
+        refused["refused"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("not answered across projects")),
+        "{refused}"
+    );
+    assert_eq!(host.spawned(), 1, "a foreign host opened another worker");
+    assert_eq!(shown_project(&host, first, run)["root"], disk.a_root());
+    match previous {
+        Some(bytes) => std::fs::write(file, bytes).expect("restore host"),
+        None => std::fs::remove_file(file).expect("remove fixture host"),
+    }
+    crate::agent_teams::forget_term(A);
+    crate::agent_teams::forget_term(B);
+    crate::agent_teams::forget_term(712_720);
+}
+
 /// The case the person saw: a pane of project B holds the seat of a run that
 /// project A made, and mail for the run's coordinator lands. Before t-65286
 /// the pointer was typed into B's pane, where another project's agent read
@@ -336,11 +616,11 @@ fn a_runs_mail_is_not_pointed_at_a_pane_of_another_project_holding_its_seat() {
     let team_a = format!("team-project-pointer-a-{A}");
     let team_b = format!("team-project-pointer-b-{B}");
     a_leader(&host, &team_a, A, Some(&disk.a));
-    a_leader(&host, &team_b, B, Some(&disk.b));
+    a_leader(&host, &team_b, B, Some(&disk.a_task));
     let run_id = a_run_from(&host, &team_a, "pointed");
 
-    // B takes the seat: a verb into another project's run, carried out while
-    // the boundary only writes such verbs down.
+    // Take the seat while still in the run's project, then move the pane
+    // after its mail has been queued. Both the pointer and read must stop.
     let took = from_leader(
         &host,
         &team_b,
@@ -355,6 +635,7 @@ fn a_runs_mail_is_not_pointed_at_a_pane_of_another_project_holding_its_seat() {
         &format!("send --run {run_id} --to run:{run_id} --type status --body landed"),
     );
     assert_eq!(sent.exit_code, 0, "{}", sent.stderr);
+    host.place(B, &disk.b);
     super::super::pane_turn_ended(B, 50, false, clock());
     super::super::tick(&host, &[], clock());
     super::super::tick(&host, &[], clock());
@@ -369,6 +650,12 @@ fn a_runs_mail_is_not_pointed_at_a_pane_of_another_project_holding_its_seat() {
         1,
         "the black box did not say once why {run_id}'s mail was not pointed at terminal {B}"
     );
+    let denied = from_leader(&host, &team_b, &format!("check --run {run_id} --peek"));
+    assert_eq!(
+        denied.exit_code, 1,
+        "the moved pane could still read its former project's mail"
+    );
+    host.place(B, &disk.a_task);
     let read = json_from_leader(&host, &team_b, &format!("check --run {run_id} --peek"));
     assert!(
         read["messages"]
@@ -385,13 +672,10 @@ fn a_runs_mail_is_not_pointed_at_a_pane_of_another_project_holding_its_seat() {
 }
 
 /// A pane of project B reads and writes a run of project A with `--run`.
-/// While the boundary only writes such verbs down, each is carried out and
-/// the black box names the run, the pane, both projects and the verb. Once
-/// the person turns the boundary on, the same verbs are refused in words
-/// that say whose run it is, and B's `inbox` and `run-list` no longer show
-/// A's run.
+/// Refusals name both projects and the verb. A legacy switch cannot opt out
+/// of the boundary, and B's `inbox` and `run-list` never show A's run.
 #[test]
-fn a_verb_from_another_project_is_written_down_and_refused_once_the_boundary_is_on() {
+fn foreign_project_calls_are_refused_even_with_a_legacy_scope_switch() {
     const A: u32 = 65_240;
     const B: u32 = 65_241;
     let _window = the_window();
@@ -404,14 +688,14 @@ fn a_verb_from_another_project_is_written_down_and_refused_once_the_boundary_is_
     let run_id = a_run_from(&host, &team_a, "guarded");
 
     let read = from_leader(&host, &team_b, &format!("check --run {run_id}"));
-    assert_eq!(read.exit_code, 0, "{}", read.stderr);
+    assert_eq!(read.exit_code, 1, "{}", read.stdout);
     assert_eq!(
         logged(&[
             &format!("`check` from terminal {B}"),
             &format!("into {run_id} of"),
             &canonical(&disk.a),
             &canonical(&disk.b),
-            "would be refused once",
+            "refused",
         ])
         .len(),
         1,
@@ -422,9 +706,17 @@ fn a_verb_from_another_project_is_written_down_and_refused_once_the_boundary_is_
         &team_b,
         &format!("send --run {run_id} --to run:{run_id} --type status --body across"),
     );
-    assert_eq!(wrote.exit_code, 0, "{}", wrote.stderr);
+    assert_eq!(wrote.exit_code, 1, "{}", wrote.stdout);
 
     let on = BoundaryOn::turn();
+    std::fs::write(
+        super::super::BLACKBOX
+            .get()
+            .expect("data root")
+            .join(SWITCH),
+        "\"observe\"",
+    )
+    .expect("legacy switch");
     let refused = from_leader(&host, &team_b, &format!("check --run {run_id}"));
     assert_eq!(
         refused.exit_code, 1,
@@ -513,14 +805,12 @@ fn a_worker_is_not_opened_in_another_projects_checkout() {
         summoned.stdout
     );
     assert!(
-        summoned
-            .stderr
-            .contains("a worker's checkout is opened only in its run's project"),
+        summoned.stderr.contains("not answered across projects"),
         "{}",
         summoned.stderr
     );
     assert_eq!(
-        logged(&[&run_id, "was not opened in", &canonical(&disk.b)]).len(),
+        logged(&[&run_id, "`worker-start`", "refused", &canonical(&disk.b)]).len(),
         1,
         "the black box did not say why the worker was not opened"
     );
@@ -533,9 +823,31 @@ fn a_worker_is_not_opened_in_another_projects_checkout() {
     );
     assert_eq!(own.exit_code, 0, "{}", own.stderr);
     assert_eq!(host.spawned(), 1);
+    let started: serde_json::Value = serde_json::from_str(&own.stdout).expect("worker response");
+    let pane = started["pane"].as_str().expect("worker pane");
+    let worker = started["workerId"].as_str().expect("worker id");
+    let term = crate::agent_teams::teams()
+        .get(&team_a)
+        .and_then(|team| team.term_of(pane))
+        .expect("worker terminal");
+    host.place(term, &disk.a_task);
+    let sent = from_leader(
+        &host,
+        &team_a,
+        &format!("send --to worker:{worker} --type status --body own-worker"),
+    );
+    assert_eq!(sent.exit_code, 0, "{}", sent.stderr);
+    let replied = from_worker(
+        &host,
+        &team_a,
+        pane,
+        &format!("send --to run:{run_id} --type status --body own-coordinator"),
+    );
+    assert_eq!(replied.exit_code, 0, "{}", replied.stderr);
 
     crate::agent_teams::forget_term(A);
     crate::agent_teams::forget_term(B);
+    crate::agent_teams::forget_term(term);
 }
 
 /// One project in three folders: a pane in a worktree of A beside its main
@@ -707,7 +1019,20 @@ fn an_older_run_is_read_off_its_workers_and_confirmed_by_its_coordinator() {
     }
 
     super::super::tick(&host, &[], clock());
-    let read = shown_project(&host, &team, &run_id);
+    let (reader_pane, reader_term) = &workers[2];
+    host.place(*reader_term, &disk.a_task);
+    let read_project = || {
+        let answer = from_worker(
+            &host,
+            &team,
+            reader_pane,
+            &format!("run-show --run {run_id}"),
+        );
+        assert_eq!(answer.exit_code, 0, "{}", answer.stderr);
+        serde_json::from_str::<serde_json::Value>(&answer.stdout).expect("run JSON")["project"]
+            .clone()
+    };
+    let read = read_project();
     assert_eq!(
         (read["source"].clone(), read["root"].clone()),
         (
@@ -716,6 +1041,13 @@ fn an_older_run_is_read_off_its_workers_and_confirmed_by_its_coordinator() {
         ),
         "{run_id} was not read off the project most of its workers' checkouts belong to: {read}"
     );
+    let (foreign_pane, foreign_term) = &workers[3];
+    host.place(*foreign_term, &disk.b);
+    let denied = from_worker(&host, &team, foreign_pane, "task-list");
+    assert_eq!(
+        denied.exit_code, 1,
+        "an inferred project still allowed a worker in another project"
+    );
 
     // A worker's own verb confirms nothing, whatever folder its pane is in.
     let (pane, worker_term) = &workers[2];
@@ -723,7 +1055,7 @@ fn an_older_run_is_read_off_its_workers_and_confirmed_by_its_coordinator() {
     let spoke = from_worker(&host, &team, pane, "task-list");
     assert_eq!(spoke.exit_code, 0, "{}", spoke.stderr);
     assert_eq!(
-        shown_project(&host, &team, &run_id)["source"],
+        read_project()["source"],
         "workers",
         "a worker's verb confirmed its run's project"
     );

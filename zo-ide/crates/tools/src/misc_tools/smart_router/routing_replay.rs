@@ -384,6 +384,7 @@ fn the_routing_seat_replayed_on_this_machines_turns() {
 
     let home = tempfile::tempdir().expect("a door home of its own");
     let settings = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![WORKSPACE.to_string()],
         daily_requests: None,

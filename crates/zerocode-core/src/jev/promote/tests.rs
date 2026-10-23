@@ -3878,3 +3878,81 @@ fn a_calibrated_act_line_seat_without_a_pinned_human_bundle_does_not_rise() {
         "a calibrated seat with no pinned human bundle rose: {verdict:?}"
     );
 }
+
+#[test]
+fn a_persons_edited_rubric_fences_the_default_series_in_both_readers() {
+    let seat = crate::jev::PLACEMENT;
+    let mut rows = vec![rose(&seat)];
+    assert_eq!(standing(&seat, &rows), Stand::Applying);
+    let mut edited = asked_by(&seat, 2);
+    edited[crate::jev::builtin::RUBRIC_KEY] = serde_json::json!(1_u32 << 31);
+    rows.push(edited);
+    assert_eq!(standing(&seat, &rows), Stand::Recording);
+    let text = rows
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(standing_in(&seat, &text), Stand::Recording);
+    assert!(on_the_newest_version(&seat, &rows).requests.is_empty());
+}
+
+#[test]
+fn edited_decision_labels_inherit_only_the_exact_requests_matching_code_rubric() {
+    let original = crate::jev::PLACEMENT;
+    let edited = JevUse {
+        rubric_version: 1 << 31,
+        ..original
+    };
+    let mut request = asked_by(&original, 2);
+    request[crate::jev::builtin::RUBRIC_KEY] = serde_json::json!(edited.rubric_version);
+    let label =
+        serde_json::json!({"label":2,"agreed":true,"rubricVersion":original.rubric_version});
+    let rows = vec![request.clone(), label.clone()];
+    let version = on_the_newest_version(&edited, &rows);
+    assert!(version.rows.iter().any(|row| row.get("label").is_some()));
+    let mut wrong = label;
+    wrong["rubricVersion"] = serde_json::json!(original.rubric_version + 1);
+    let rows = vec![request, wrong];
+    assert!(
+        !on_the_newest_version(&edited, &rows)
+            .rows
+            .iter()
+            .any(|row| row.get("label").is_some())
+    );
+}
+
+#[test]
+fn edited_wording_ids_fence_in_both_directions_without_treating_hashes_as_release_numbers() {
+    let flag = crate::jev::builtin::EDITED_RUBRIC_FLAG;
+    for (own, different) in [(flag + 10, flag + 2), (flag + 2, flag + 10), (flag + 10, 2)] {
+        let seat = JevUse {
+            rubric_version: own,
+            ..crate::jev::PLACEMENT
+        };
+        let mut before = asked_by(&seat, 1);
+        before[crate::jev::builtin::RUBRIC_KEY] = serde_json::json!(own);
+        let other = JevUse {
+            rubric_version: different,
+            ..seat
+        };
+        let mut changed = asked_by(&other, 2);
+        if different & flag != 0 {
+            changed[crate::jev::builtin::RUBRIC_KEY] = serde_json::json!(different);
+        }
+        let rows = vec![before, rose(&seat), changed];
+        assert!(on_the_newest_version(&seat, &rows).requests.is_empty());
+        assert_eq!(standing(&seat, &rows), Stand::Recording);
+        let text = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(standing_in(&seat, &text), Stand::Recording);
+        let mut rows = rows;
+        let mut after = asked_by(&seat, 3);
+        after[crate::jev::builtin::RUBRIC_KEY] = serde_json::json!(own);
+        rows.push(after);
+        assert_eq!(on_the_newest_version(&seat, &rows).requests.len(), 1);
+    }
+}

@@ -481,7 +481,7 @@ impl SubagentWave {
     }
 
     fn summary(&self) -> Option<String> {
-        (!self.seen.is_empty()).then(|| super::strings::helper_wave(self.seen.len(), self.running))
+        (self.running > 0).then(|| super::strings::helper_wave(self.seen.len(), self.running))
     }
 }
 
@@ -655,6 +655,14 @@ struct Ui {
     /// why. Set by `RenderBlock::WireModel`; cleared when a request goes out
     /// on the session model again, or when the person picks a model.
     wire: Option<super::wire_model::Badge>,
+    /// The footer's word beside a model that goes over the Google
+    /// (Antigravity) login (t-71998): its registry list could not be read,
+    /// or the registry serves the pick under another name, or not at all.
+    /// Asked again only when the model or the discovery snapshot changes
+    /// ([`Ui::refresh_login_note`]).
+    login_note: Option<String>,
+    /// The model and the discovery snapshot `login_note` was asked for.
+    login_note_for: Option<(String, u64)>,
     /// provider 모델 id에서 분리한 TUI fast 표시 상태.
     fast: bool,
     effort: String,
@@ -2788,7 +2796,7 @@ impl Ui {
         // live for this list, and the sources that have gone quiet for the
         // TTL are asked again for the next one (t-3054).
         crate::runtime_support::model_picker_opening();
-        let models = models::choices();
+        let models = models::choices(&self.model);
         if models.is_empty() {
             self.note(
                 SystemLevel::Info,
@@ -2833,11 +2841,12 @@ impl Ui {
     /// 전환 직전의 실제 푸터 한 줄. 이 값을 잡아 둬야 Codex처럼 옛 모델/effort가
     /// 오른쪽으로 밀려난 뒤 새 줄이 돌아온다.
     /// The footer's model field and its note: the model on the wire with the
-    /// footer's word for the swap while one stands, else the session model.
+    /// footer's word for the swap while one stands, else the session model
+    /// with the Google login's word on it, if any (t-71998).
     fn footer_model(&self) -> (&str, Option<&str>) {
         match &self.wire {
             Some(badge) => (badge.model.as_str(), Some(badge.label)),
-            None => (self.model.as_str(), None),
+            None => (self.model.as_str(), self.login_note.as_deref()),
         }
     }
 
@@ -2884,6 +2893,22 @@ impl Ui {
         // A pick (or a session resync) is the setting again; a swap that is
         // still on the wire announces itself anew with the next request.
         self.wire = None;
+        self.refresh_login_note();
+    }
+
+    /// Ask the Google login's word for the footer again when the model or
+    /// the discovery snapshot changed since it was last asked (t-71998) — a
+    /// refresh that landed after the pick can say the list was not read.
+    fn refresh_login_note(&mut self) {
+        let fetched_at = runtime::model_discovery::current().map_or(0, |catalog| catalog.fetched_at);
+        let asked = self
+            .login_note_for
+            .as_ref()
+            .is_some_and(|(model, at)| *model == self.model && *at == fetched_at);
+        if !asked {
+            self.login_note = models::login_note(&self.model);
+            self.login_note_for = Some((self.model.clone(), fetched_at));
+        }
     }
 
     /// 현재 화면 상태에서 fast를 토글하고, 실제 session 변경은 App이 턴
@@ -2919,7 +2944,9 @@ impl Ui {
                         || model.description.clone(),
                         super::strings::unlisted_since,
                     ),
-                    dim: unlisted.is_some(),
+                    // A row Enter does not take as itself is dimmed, and its
+                    // description says why (t-71998).
+                    dim: unlisted.is_some() || model.pick != models::Pick::Takes,
                 }
             })
             .collect();
@@ -3078,7 +3105,18 @@ impl Ui {
                 let Some(choice) = picker.models.get(picker.view.selected) else {
                     return KeyOutcome::Nothing;
                 };
-                let id = choice.id.clone();
+                // The Google login's word on the row (t-71998): a saved Gemini
+                // name the registry serves under another takes that release;
+                // one nothing serves takes nothing, and the row says why.
+                let id = match &choice.pick {
+                    models::Pick::Takes => choice.id.clone(),
+                    models::Pick::LandsOn(release) => release.clone(),
+                    models::Pick::Refused => {
+                        let text = format!("{}: {}", choice.id, choice.description);
+                        self.note(SystemLevel::Info, &text);
+                        return KeyOutcome::Nothing;
+                    }
+                };
                 picker.view = Self::effort_view(&id, current_effort);
                 picker.stage = Stage::Effort;
                 picker.chosen = Some(id);
@@ -3654,7 +3692,7 @@ impl Ui {
         if interrupt {
             if self.pending_input.has_pending_steers() {
                 self.pending_input.interrupt_and_submit_steers();
-                turn.cancel_turn();
+                turn.interrupt_to_send();
                 return true;
             }
             turn.cancel_turn();
@@ -3774,11 +3812,16 @@ impl Ui {
             // `/model <alias>` 도 화면은 즉시다 — 피커 확정과 같은 길이라야
             // 한다(codex 는 둘 다 `UpdateModel` 하나로 흐른다). 별칭은 세션을
             // 안 건드리고도 풀 수 있으므로 푸터·다음 카드가 바로 새 이름을
-            // 읽는다. 문구는 없다: codex 가 안 찍는다.
-            Some(Slash::Model) => {
-                self.sync_model_display(arg);
-                self.deferred.push(Deferred::Slash(command.to_string()));
-            }
+            // 읽는다. 문구는 없다: codex 가 안 찍는다. 구글 로그인의 말은
+            // 피커와 같다(t-71998): 다른 이름이면 그 판을, 아무것도 내주지
+            // 않으면 고르지 않고 까닭을 남긴다.
+            Some(Slash::Model) => match models::typed_pick(arg) {
+                Ok(model) => {
+                    self.sync_model_display(&model);
+                    self.deferred.push(Deferred::Slash(format!("/model {model}")));
+                }
+                Err(text) => self.note(SystemLevel::Info, &text),
+            },
             Some(Slash::Fast) => {
                 if let Some(enabled) = self.toggle_fast_display() {
                     self.deferred.push(Deferred::Fast(enabled));
@@ -4692,6 +4735,8 @@ impl App {
                 model,
                 fast,
                 wire: None,
+                login_note: None,
+                login_note_for: None,
                 effort,
                 effort_tier,
                 effort_effect: None,
@@ -4783,6 +4828,9 @@ impl App {
             for text in crate::runtime_support::drain_catalog_notices() {
                 self.ui.note(SystemLevel::Info, &text);
             }
+            // A discovery refresh that landed since may change what the
+            // footer says beside a Gemini over the Google login (t-71998).
+            self.ui.refresh_login_note();
             let next_wakeup = self.session().next_autonomy_wakeup();
             tokio::select! {
                 biased;
@@ -5287,7 +5335,12 @@ impl App {
                     self.ui.open_model_picker();
                     return;
                 }
-                self.set_model(arg);
+                // The Google login's word on a Gemini name, as the picker's
+                // (t-71998).
+                match models::typed_pick(arg) {
+                    Ok(model) => self.set_model(&model),
+                    Err(text) => self.ui.note(SystemLevel::Info, &text),
+                }
             }
             Some(Slash::Fast) => {
                 let enabled = !self.ui.fast;
@@ -6561,6 +6614,8 @@ fn test_ui() -> Ui {
         model: "test-model".to_string(),
         fast: false,
         wire: None,
+        login_note: None,
+        login_note_for: None,
         effort: String::new(),
         effort_tier: None,
         effort_effect: None,
@@ -9055,26 +9110,26 @@ mod tests {
         assert!(frame.contains("✓ Run cargo test"), "{frame}");
     }
 
-    /// The `agents 1 · running 0 · done 1` line under a working header is a
-    /// fact about the running turn: the helper the turn spawned has finished
-    /// while the turn goes on. It is a detail of the status line, so it
-    /// leaves with it — a frame with no status has no agents line, whatever
-    /// the wave remembers (2026-09-07 23:4x screenshot, t-3063).
+    /// Finished helpers no longer occupy the working detail, even while the
+    /// parent turn continues. Their identities remain in the turn's history.
     #[test]
-    fn the_agents_line_is_a_detail_of_the_working_line_and_leaves_with_it() {
+    fn completed_helpers_leave_the_working_line_and_restore_its_tool_detail() {
         let mut ui = test_ui();
         ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(1897)));
+        ui.set_status_detail(Some("Run cargo test".to_string()));
         ui.set_subagent_progress(vec![running_helper("agent-a", "stage-art", "Read · src/a.rs", 3, 9)]);
         ui.set_subagent_progress(Vec::new());
         assert_eq!(
             ui.status.as_ref().expect("working status").details,
-            vec!["agents 1 · running 0 · done 1".to_string()]
+            vec!["Run cargo test".to_string()]
         );
+        ui.set_status_detail(None);
+        assert!(ui.status.as_ref().expect("working status").details.is_empty());
 
         // The turn ends: the status goes first (`run_turn`'s end), and the
         // bottom pane it drew goes with it.
         ui.status = None;
-        assert!(ui.subagent_wave.summary().is_some(), "premise: the wave still remembers the helper");
+        assert!(ui.subagent_wave.seen.contains("agent-a"), "the wave still remembers the helper");
         let composer = crate::tui::composer::Composer::new();
         let frame = crate::tui::view::Frame {
             composer: &composer,
@@ -9115,6 +9170,29 @@ mod tests {
             rows.iter().all(|row| !row.plain().contains("agents 1")),
             "{:?}",
             rows.iter().map(Line::plain).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn partial_helper_completion_stays_visible_and_new_helpers_reopen_the_summary() {
+        let mut ui = test_ui();
+        ui.status = Some(crate::tui::view::Status::working(Duration::from_secs(20)));
+        let helper = |id| running_helper(id, "inspect", "Read · src/a.rs", 1, 2);
+        let mut ledger = helper("ledger-a");
+        ledger.ledger = true;
+        ui.set_subagent_progress(vec![ledger, helper("native-b")]);
+        ui.set_subagent_progress(vec![helper("native-b")]);
+        assert_eq!(
+            ui.status.as_ref().unwrap().details.first().map(String::as_str),
+            Some("agents 2 · running 1 · done 1")
+        );
+        ui.set_subagent_progress(Vec::new());
+        assert!(ui.status.as_ref().unwrap().details.is_empty());
+        assert_eq!(ui.subagent_wave.seen.len(), 2);
+        ui.set_subagent_progress(vec![helper("native-c")]);
+        assert_eq!(
+            ui.status.as_ref().unwrap().details.first().map(String::as_str),
+            Some("agents 3 · running 1 · done 2")
         );
     }
 

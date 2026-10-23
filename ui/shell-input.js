@@ -65,6 +65,7 @@ const MODAL_SPECS = Object.freeze({
     cancel: () => closeCleanupConfirm(false),
   },
   "jev-custom-scrim": { initial: "jev-custom-name", cancel: () => closeJevCustomDrawer() },
+  "jev-builtin-scrim": { initial: "jev-builtin-name", cancel: () => closeJevBuiltinEditor() },
   "jev-custom-delete-scrim": {
     initial: "jev-custom-delete-cancel",
     cancel: () => closeJevCustomDelete(),

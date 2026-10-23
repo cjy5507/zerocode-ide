@@ -26473,6 +26473,71 @@ fn a_named_model_says_the_ladder_set_its_effort() {
 }
 
 #[test]
+fn a_difficulty_answer_without_a_model_keeps_the_cli_defaults() {
+    struct DifficultyOnly;
+    impl Launcher for DifficultyOnly {
+        fn command_for(
+            &self,
+            agent: &str,
+            prompt: &str,
+            tuning: &[String],
+        ) -> Result<String, String> {
+            Catalog(&["zo"]).command_for(agent, prompt, tuning)
+        }
+
+        fn choose_assign(
+            &self,
+            _asked: &crate::summon_assign::AssignAsk,
+            _origin: [&str; 3],
+        ) -> crate::summon_assign::Receipts {
+            crate::summon_assign::Receipts {
+                difficulty: Some(serde_json::json!({ "chosen": "low", "applied": true })),
+                ..Default::default()
+            }
+        }
+    }
+
+    for flag in ["", "--effort high"] {
+        let mut bench = Bench::new();
+        bench.json("run-create --name difficulty-without-model");
+        let planned = planned_on(
+            &mut bench.ledger,
+            &mut bench.team,
+            &DifficultyOnly,
+            &format!("worker-start --agent zo --prompt inspect-change {flag}"),
+            bench.clock + 1,
+        );
+        if flag.is_empty() {
+            assert_eq!(planned.reply.exit_code, 0, "{}", planned.reply.stderr);
+            assert!(planned.prepared_worker_start.is_some());
+            let said: serde_json::Value = serde_json::from_str(&planned.reply.stdout).unwrap();
+            assert!(said["model"].is_null());
+            assert!(said["effort"].is_null());
+            assert_eq!(said["dials"]["modelFrom"], DIALS_FROM_CLI_DEFAULT);
+            assert_ne!(said["dials"]["why"]["effortRule"], "ladder");
+            let receipt = planned
+                .prepared_worker_start
+                .as_ref()
+                .unwrap()
+                .difficulty_shadow
+                .as_ref()
+                .unwrap()
+                .receipt
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                receipt["applied"], false,
+                "the answer changed no launch dial"
+            );
+        } else {
+            assert_eq!(planned.reply.exit_code, 1);
+            assert!(planned.reply.stderr.contains("--effort requires --model"));
+            assert!(planned.prepared_worker_start.is_none());
+        }
+    }
+}
+
+#[test]
 fn summon_outcome_requires_receipt_and_bound_landing_and_a_retry_revokes_success() {
     use crate::summon_difficulty::outcomes::observe;
     let mut bench = Bench::new();

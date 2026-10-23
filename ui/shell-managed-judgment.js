@@ -207,14 +207,19 @@ const managedJudgmentController = {
   // entry the setting is bound to, else the one received here, else the first.
   connected(model) {
     const snapshot = this.snapshot;
-    const provider = judgmentProviderController.state?.provider;
     const modelId = this.serverModel(model);
-    if (!snapshot || !modelId || !provider || provider.kind === "jev" || provider.protocol !== "system_one" ||
-        provider.model !== modelId || judgmentProviderController.managedServer()) return false;
+    if (!this.connectionMatches(model)) return false;
     const same = snapshot.models.filter((entry) => this.serverModel(entry) === modelId);
     const bound = [snapshot.configuredModelId, snapshot.appliedModelId];
     const answering = same.find((entry) => bound.includes(entry.id)) ?? same.find((entry) => entry.installed) ?? same[0];
     return answering?.id === model.id;
+  },
+
+  connectionMatches(model) {
+    const provider = judgmentProviderController.state?.provider;
+    const modelId = this.serverModel(model);
+    return Boolean(this.snapshot && modelId && provider && provider.kind !== "jev" && provider.protocol === "system_one" &&
+      provider.model === modelId && !judgmentProviderController.managedServer());
   },
 
   // A row of the library is a model this computer holds (t-69998): its files
@@ -477,7 +482,9 @@ const managedJudgmentController = {
       case "install": return t("settings.managed.download", "다운로드");
       case "activate": return model.installed ? t("settings.managed.activate", "실행하고 적용") : t("settings.models.installUse", "설치하고 사용");
       case "inspect-source": return t("settings.managed.inspectSource", "주소로 확인");
-      case "connect": return t("settings.managed.connectServer", "이 모델의 서버 연결");
+      case "connect": return this.connectionMatches(model)
+        ? t("settings.managed.alreadyConnected", "이미 연결됨")
+        : t("settings.managed.connectServer", "이 모델의 서버 연결");
       case "import": return t("settings.managed.import", "기존 파일 등록");
       case "stop": return t("settings.managed.stop", "중지");
     }
@@ -524,10 +531,12 @@ const managedJudgmentController = {
     const name = document.createElement("span");
     name.className = "managed-judgment-candidate-name";
     const size = document.createElement("span");
-    facts.append(name, " ", size);
+    const reason = document.createElement("span");
+    reason.className = "settings-row-desc managed-judgment-candidate-reason";
+    facts.append(name, " ", size, reason);
     const { row: actions, buttons } = this.makeActions(model, Object.keys(this.ways(model)));
     card.append(facts, actions);
-    return { card, name, size, buttons, signature: null };
+    return { card, name, size, reason, buttons, signature: null };
   },
 
   prune(entries, kept) {
@@ -705,6 +714,7 @@ const managedJudgmentController = {
       row.buttons.import.hidden = model.installed || !ways.import;
       row.buttons.activate.hidden = !local;
       row.buttons.connect.hidden = !ways.connect;
+      row.buttons.connect.disabled ||= this.connectionMatches(model);
       row.buttons["inspect-source"].hidden = model.installed || !ways["inspect-source"];
       row.buttons.activate.disabled ||= applied || !["ready", "missing"].includes(this.runtimeFor(model)?.state);
       row.buttons.stop.hidden = !running || restoring;
@@ -714,6 +724,7 @@ const managedJudgmentController = {
     this.prune(this.rows, kept);
     const list = el("managed-judgment-candidate-list");
     const waiting = new Set();
+    let offeredShown = 0;
     for (const model of offered) {
       waiting.add(model.id);
       let item = this.candidates.get(model.id);
@@ -722,31 +733,38 @@ const managedJudgmentController = {
         this.candidates.set(model.id, item);
         list.append(item.card);
       }
-      const signature = JSON.stringify([model, busy, t("settings.managed.download", "다운로드")]);
+      item.card.hidden = !this.matches(model);
+      if (!item.card.hidden) offeredShown += 1;
+      const connected = this.connectionMatches(model);
+      const signature = JSON.stringify([model, busy, connected, t("settings.managed.download", "다운로드")]);
       if (item.signature === signature) continue;
       item.signature = signature;
       item.name.textContent = model.label;
       item.size.textContent = this.sizeLabel(model);
+      item.reason.hidden = !this.downloadOnly(model);
+      item.reason.textContent = this.downloadOnly(model) ? this.modelState(model) : "";
       const ways = this.ways(model);
       for (const [action, button] of Object.entries(item.buttons)) {
         button.textContent = this.actionWords(action, model);
         button.disabled = busy;
         button.hidden = !ways[action];
       }
+      item.buttons.connect.disabled ||= connected;
     }
     this.prune(this.candidates, waiting);
-    // Counted by rows: with none, the library is one line pointing at the
-    // candidates below it, without a search or a count of nothing.
+    // Search covers both the received library and the candidates, including
+    // a first visit before any model has been downloaded.
     const tools = el("managed-judgment-library-tools");
-    if (held.length === 0 && tools.contains(document.activeElement)) el("managed-judgment-refresh").focus();
-    tools.hidden = held.length === 0;
+    if (catalog.length === 0 && tools.contains(document.activeElement)) el("managed-judgment-refresh").focus();
+    tools.hidden = catalog.length === 0;
     el("managed-judgment-library-summary").hidden = held.length === 0;
     el("managed-judgment-library-summary").textContent = snapshot && held.length > 0
       ? t("settings.managed.libraryCount", "모델 {{shown}}개 표시 · 전체 {{total}}개", { shown, total: held.length }) : "";
-    el("managed-judgment-no-matches").hidden = !snapshot || held.length === 0 || shown > 0;
+    el("managed-judgment-no-matches").hidden = !snapshot || catalog.length === 0 || shown + offeredShown > 0;
     el("managed-judgment-none").hidden = !snapshot || held.length > 0 || offered.length === 0;
     el("managed-judgment-empty").hidden = !snapshot || held.length > 0 || offered.length > 0;
-    el("managed-judgment-candidates").hidden = offered.length === 0;
-    el("managed-judgment-candidates-count").textContent = t("settings.managed.availableCount", "받을 수 있는 모델 {{count}}개", { count: offered.length });
+    el("managed-judgment-candidates").hidden = offeredShown === 0;
+    if (this.query.trim() && offeredShown > 0) el("managed-judgment-candidates").open = true;
+    el("managed-judgment-candidates-count").textContent = t("settings.managed.availableCount", "받을 수 있는 모델 {{count}}개", { count: offeredShown });
   },
 };

@@ -7,6 +7,7 @@ const judgmentProviderController = {
   listedServer: null,
   loading: false,
   sequence: 0,
+  keySequence: 0,
   localMode: "managed",
   usageSnapshot: null,
 
@@ -155,7 +156,18 @@ const judgmentProviderController = {
 
   dirty() {
     return Boolean(this.draft && this.state?.provider &&
-      JSON.stringify(this.draft) !== JSON.stringify(this.copy(this.state.provider)));
+      (JSON.stringify(this.draft) !== JSON.stringify(this.copy(this.state.provider)) || this.enteredKey(this.draft)));
+  },
+
+  enteredKey(provider) {
+    return provider?.requiresAuth ? el("typesafe-key-input")?.value.trim() || null : null;
+  },
+
+  keyEdited() {
+    this.keySequence += 1;
+    this.forgetList(true);
+    paintTypeSafeStatus("");
+    this.controls();
   },
 
   current() {
@@ -182,8 +194,8 @@ const judgmentProviderController = {
       return ["connection", t("settings.judgment.nextConnection", "먼저 연결할 판단 서버 주소를 입력하세요. 모델을 고르기 전까지 현재 설정은 유지됩니다.")];
     }
     const sameServer = this.state?.provider && this.serverKey(this.draft) === this.serverKey(this.state.provider);
-    if (sameServer && this.draft.requiresAuth && !this.state.keySaved) {
-      return ["key", t("settings.judgment.nextKey", "이 서비스의 API 키를 입력하고 키 저장을 누르세요. 키는 이 서비스에만 사용합니다.")];
+    if (sameServer && this.draft.requiresAuth && !this.state.keySaved && !this.enteredKey(this.draft)) {
+      return ["key", t("settings.judgment.nextKey", "이 서비스의 API 키를 입력하고 연결하고 모델 불러오기를 누르세요. 키는 이 서비스에만 사용합니다.")];
     }
     if (!this.draft.model && this.draft.kind !== "jev") {
       return ["model", t("settings.judgment.nextModel", "모델 목록을 읽고 사용할 모델을 고르세요. 모델 ID를 알고 있다면 직접 입력해도 됩니다.")];
@@ -204,12 +216,12 @@ const judgmentProviderController = {
     el("judgment-provider-kind")?.addEventListener("change", () => this.changeKind());
     for (const mode of ["managed", "manual"]) {
       el(`judgment-local-${mode}`)?.addEventListener("click", () => {
-        if (mode === "manual" && this.draft?.protocol === "openai_json") this.reset({ kind: "local", protocol: "system_one", baseUrl: "", model: "", requiresAuth: false });
+        if (mode === "manual" && this.draft?.protocol === "openai_json" && this.managedServer()) this.reset({ kind: "local", protocol: "openai_json", baseUrl: "", model: "", requiresAuth: false });
         this.localMode = mode;
         this.render();
       });
     }
-    for (const name of ["judgment-endpoint", "typesafe-model-input", "judgment-requires-auth"]) {
+    for (const name of ["judgment-endpoint", "judgment-protocol", "typesafe-model-input", "judgment-requires-auth"]) {
       el(name)?.addEventListener("input", () => this.read());
       el(name)?.addEventListener("change", () => this.read());
     }
@@ -222,18 +234,21 @@ const judgmentProviderController = {
     el("judgment-save-provider")?.addEventListener("click", () => void this.apply());
     el("judgment-revert-provider")?.addEventListener("click", () => {
       if (!this.state?.provider) return;
+      el("typesafe-key-input").value = "";
       this.reset(this.state.provider);
       this.render();
     });
   },
 
   reset(provider) {
+    const changed = !this.sameProvider(this.draft, provider);
     const changedServer = !this.draft || this.serverKey(this.draft) !== this.serverKey(provider);
     this.draft = this.copy(provider);
+    if (changed) paintTypeSafeStatus("");
     if (changedServer) this.forgetList();
   },
 
-  forgetList() {
+  forgetList(keepKey = false) {
     this.sequence += 1;
     this.loading = false;
     this.modelIds = [];
@@ -242,7 +257,7 @@ const judgmentProviderController = {
     el("judgment-listed-model")?.replaceChildren();
     if (el("judgment-listed-model-field")) el("judgment-listed-model-field").hidden = true;
     if (el("judgment-model-status")) el("judgment-model-status").textContent = "";
-    if (el("typesafe-key-input")) el("typesafe-key-input").value = "";
+    if (!keepKey && el("typesafe-key-input")) el("typesafe-key-input").value = "";
   },
 
   changeKind() {
@@ -250,7 +265,7 @@ const judgmentProviderController = {
     this.drafts.set(this.draft.kind, this.copy(this.draft));
     const kind = el("judgment-provider-kind").value;
     const provider = kind === "jev" ? this.state.jevProvider :
-      this.drafts.get(kind) ?? { kind, protocol: "system_one", baseUrl: "", model: "", requiresAuth: kind === "remote" };
+      this.drafts.get(kind) ?? { kind, protocol: kind === "remote" ? "openai_json" : "system_one", baseUrl: "", model: "", requiresAuth: kind === "remote" };
     if (!provider) return;
     this.reset(provider);
     this.render();
@@ -274,12 +289,15 @@ const judgmentProviderController = {
 
   read() {
     if (!this.draft) return;
+    const previousDraft = JSON.stringify(this.draft);
     const previous = this.serverKey(this.draft);
     if (this.draft.kind !== "jev") {
       this.draft.baseUrl = el("judgment-endpoint").value.trim();
+      this.draft.protocol = el("judgment-protocol").value;
       this.draft.requiresAuth = el("judgment-requires-auth").checked;
     }
     this.draft.model = el("typesafe-model-input").value.trim();
+    if (previousDraft !== JSON.stringify(this.draft)) paintTypeSafeStatus("");
     if (previous !== this.serverKey(this.draft)) this.forgetList();
     this.controls();
   },
@@ -313,6 +331,8 @@ const judgmentProviderController = {
       el(`judgment-local-${mode}`).setAttribute("aria-pressed", String(this.localMode === mode));
     }
     el("judgment-provider-kind").value = this.draft.kind;
+    el("judgment-protocol").value = this.draft.protocol;
+    el("judgment-protocol-field").hidden = this.draft.kind === "jev";
     if (document.activeElement !== el("judgment-endpoint")) el("judgment-endpoint").value = this.draft.baseUrl;
     if (document.activeElement !== el("typesafe-model-input")) el("typesafe-model-input").value = this.draft.model;
     el("typesafe-model-input").placeholder = this.draft.kind === "jev" ? this.state.model?.alias ?? "" : "";
@@ -334,6 +354,7 @@ const judgmentProviderController = {
     const busy = typesafeBusy || unavailable || managedJudgmentController.activating;
     const managed = this.draft?.kind === "local" && this.localMode === "managed";
     const auth = this.draft?.requiresAuth ?? true;
+    paintKeyField(el("typesafe-key-input"), { busy, kept: this.state?.keysKeptHere });
     this.renderStatus();
     const hint = el("judgment-setup-hint");
     if (hint) {
@@ -341,14 +362,14 @@ const judgmentProviderController = {
       hint.dataset.step = step;
       hint.textContent = words;
     }
-    for (const name of ["judgment-provider-kind", "judgment-endpoint", "typesafe-model-input", "judgment-requires-auth"]) {
+    for (const name of ["judgment-provider-kind", "judgment-endpoint", "judgment-protocol", "typesafe-model-input", "judgment-requires-auth"]) {
       const element = el(name);
       if (element) element.disabled = busy;
     }
     const apply = el("judgment-save-provider");
     if (apply) {
       apply.hidden = managed;
-      apply.disabled = busy || !dirty || !this.draft.baseUrl || (!this.draft.model && this.draft.kind !== "jev");
+      apply.disabled = busy || this.loading || !dirty || !this.draft.baseUrl || (!this.draft.model && this.draft.kind !== "jev");
     }
     const revert = el("judgment-revert-provider");
     if (revert) revert.disabled = busy || !dirty;
@@ -373,7 +394,7 @@ const judgmentProviderController = {
     const check = el("typesafe-check-btn");
     if (check) {
       check.hidden = managed;
-      check.disabled = busy || !this.draft?.baseUrl || (!this.draft?.model && this.draft?.kind !== "jev") || (!dirty && this.state?.provider?.requiresAuth && !this.state.keySaved);
+      check.disabled = busy || !this.draft?.baseUrl || (!this.draft?.model && this.draft?.kind !== "jev") || (!dirty && this.state?.provider?.requiresAuth && !this.state.keySaved && !el("typesafe-key-input")?.value.trim());
     }
     const listed = el("judgment-listed-model");
     if (listed) {
@@ -390,12 +411,14 @@ const judgmentProviderController = {
     if (provider.kind === "jev" && !provider.model) provider.model = this.state.model.alias;
     const expectedProviderIdentity = this.state.providerIdentity;
     const draftIdentity = JSON.stringify(this.current());
+    const key = this.enteredKey(provider);
     let applied = false;
     await runTypeSafe(async () => {
-      const check = await this.probe(provider, expectedProviderIdentity, draftIdentity);
+      const check = await this.probe(provider, expectedProviderIdentity, draftIdentity, key);
       if (!check.answered) throw { kind: "failed", message: typesafeCheckFailure(check.failure) };
-      const state = await invoke("set_judgment_provider", { provider, expectedProviderIdentity });
+      const state = await invoke("set_judgment_provider", { provider, expectedProviderIdentity, key });
       typesafeChecked = null;
+      el("typesafe-key-input").value = "";
       this.reset(state.provider);
       this.state = state;
       applied = true;
@@ -410,9 +433,10 @@ const judgmentProviderController = {
     }
   },
 
-  async probe(provider, expectedProviderIdentity, draftIdentity) {
-    const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity });
-    if (this.state?.providerIdentity !== expectedProviderIdentity || JSON.stringify(this.current()) !== draftIdentity || check.activeProviderIdentity !== expectedProviderIdentity) throw "settings_changed";
+  async probe(provider, expectedProviderIdentity, draftIdentity, key = this.enteredKey(provider)) {
+    const keySequence = this.keySequence;
+    const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity, key });
+    if (keySequence !== this.keySequence || key !== this.enteredKey(provider) || this.state?.providerIdentity !== expectedProviderIdentity || JSON.stringify(this.current()) !== draftIdentity || check.activeProviderIdentity !== expectedProviderIdentity) throw "settings_changed";
     if (typeof check.candidateIdentity !== "string" || !check.candidateIdentity || typeof check.answered !== "boolean") throw "schema";
     return check;
   },
@@ -452,7 +476,7 @@ const judgmentProviderController = {
     this.controls();
     el("judgment-model-status").textContent = t("settings.judgment.loadingModels", "서버의 판단 모델 목록을 읽는 중…");
     try {
-      const models = await invoke("judgment_models", { provider });
+      const models = await invoke("judgment_models", { provider, key: this.enteredKey(provider) });
       if (sequence !== this.sequence || server !== this.serverKey(this.draft)) return;
       this.modelIds = [...new Set(models.map((model) => model.id))];
       this.listedServer = server;
@@ -476,7 +500,7 @@ const judgmentProviderController = {
       el("judgment-model-status").textContent = t("settings.judgment.modelsRead", "모델 {{count}}개를 읽었습니다. 선택한 ID는 그대로 유지합니다.", { count: this.modelIds.length });
     } catch (error) {
       if (sequence !== this.sequence) return;
-      el("judgment-model-status").textContent = t("settings.judgment.modelsUnavailable", "목록을 읽지 못했습니다. 서버와 키를 확인하거나 모델 ID를 직접 입력하세요. {{reason}}", { reason: typesafeRefusal(error) });
+      el("judgment-model-status").textContent = t("settings.judgment.modelsUnavailable", "목록을 읽지 못했습니다. {{reason}}", { reason: typesafeRefusal(error) });
     } finally {
       if (sequence === this.sequence) {
         this.loading = false;

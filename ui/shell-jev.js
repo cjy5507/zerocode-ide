@@ -249,7 +249,7 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
  * and every surface that wears the switch painted from it here. */
 
 /* Turn Jev on or off from any surface that wears the switch: on consents
- * every folder and hands every feature its recommended mode; off sends
+ * every folder and preserves saved choices; other features use their recommended mode. Off sends
  * nothing. The card's own step runner, so a refused press is said the same
  * way wherever it was made. */
 function setJevEnabled(on) {
@@ -263,7 +263,9 @@ function setJevEnabled(on) {
 /* What a press did, in the words of where Jev now stands. */
 function jevEnabledSaid(state) {
   return state.jev?.on
-    ? t("settings.typesafe.turnedOn", "켰습니다. 모든 폴더에서 기능마다 권장 설정으로 판단을 요청합니다.")
+    ? (state.switches?.some((row) => row.decision)
+      ? t("jev.builtin.turnedOn", "켰습니다. 저장한 결정 설정과 삭제 상태를 유지합니다.")
+      : t("settings.typesafe.turnedOn", "켰습니다. 모든 폴더에서 기능마다 권장 설정으로 판단을 요청합니다."))
     : t("settings.typesafe.turnedOffAll", "껐습니다. 아무것도 보내지 않습니다.");
 }
 
@@ -569,10 +571,10 @@ const JEV_TOKENS = Object.freeze({
   not_consented: { key: "jev.token.notConsented", word: "동의 안 된 폴더", fix: "consent" },
   settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
   provider_settings: { key: "jev.token.providerSettings", word: "판단 제공자 설정 오류", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
-  provider_address: { key: "jev.token.providerAddress", word: "판단 제공자 주소 오류" },
-  provider_not_loopback: { key: "jev.token.providerNotLoopback", word: "이 컴퓨터의 주소가 아님" },
-  provider_https_required: { key: "jev.token.providerHttpsRequired", word: "HTTPS 주소 필요" },
-  provider_model: { key: "jev.token.providerModel", word: "판단 모델 이름 오류" },
+  provider_address: { key: "jev.token.providerAddress", word: "판단 제공자 주소 오류", saidKey: "settings.judgment.invalidAddress", said: "http:// 또는 https://로 시작하는 기본 URL을 입력하세요. 키는 주소 대신 API 키 칸에 입력하세요." },
+  provider_not_loopback: { key: "jev.token.providerNotLoopback", word: "이 컴퓨터의 주소가 아님", saidKey: "settings.judgment.notLocal", said: "다른 컴퓨터의 서버는 ‘다른 판단 서버’를 선택하세요. 로컬 연결은 localhost 또는 루프백 IP를 사용합니다." },
+  provider_https_required: { key: "jev.token.providerHttpsRequired", word: "HTTPS 주소 필요", saidKey: "settings.judgment.httpsRequired", said: "이 주소는 HTTPS가 필요합니다. 사설망의 HTTP 서버라면 호스트 이름 대신 사설 IP 주소를 입력하세요." },
+  provider_model: { key: "jev.token.providerModel", word: "판단 모델 이름 오류", saidKey: "settings.judgment.invalidModel", said: "서버에서 모델을 고르거나 정확한 모델 ID를 입력하세요." },
   provider_request: { key: "jev.token.providerRequest", word: "판단 요청 형식 오류" },
   provider_response_too_large: { key: "jev.token.responseTooLarge", word: "판단 응답 크기 초과" },
   provider_context_truncated: { key: "jev.token.contextTruncated", word: "입력 일부 누락", saidKey: "settings.judgment.truncated", said: "모델이 입력 일부를 읽지 못했습니다. 더 긴 입력을 지원하는 판단 모델이나 서버 설정이 필요합니다." },
@@ -853,7 +855,7 @@ function buildJevView() {
   caption.hidden = true;
   const table = jevNode("table", "jev-table", caption, heads, body);
   table.setAttribute("role", "table");
-  root.append(jevNode("div", "jev-table-wrap", table));
+  root.append(jevNode("div", "jev-table-wrap", table), jevBuiltinTrashPart());
 
   return root;
 }
@@ -877,7 +879,7 @@ function jevBuildDrawer() {
   // compared nothing, reason by reason.
   const whyHead = jevNode("p", "jev-drawer-text");
   whyHead.dataset.jevWhyHead = "";
-  const fixed = jevText("jev.drawer.fixed", "내장 결정이라 질문·보기·입력은 고칠 수 없습니다. 위의 「판단 기능 사용」 스위치가 모든 기능을 함께 켜고 끕니다.", "p", "jev-drawer-fixed");
+  const fixed = jevText("jev.builtin.editable", "기본 결정도 수정하거나 삭제할 수 있습니다. 수정한 질문·판단 기준은 이 결정에 적용됩니다.", "p", "jev-drawer-fixed");
   fixed.dataset.jevDrawerFixed = "";
   const drawer = jevNode("aside", "jev-drawer", head,
     jevNode("p", "jev-drawer-summary"), fixed,
@@ -922,6 +924,7 @@ function wireJevView(host) {
     if (choice) void setJevScope(choice.dataset.jevScopeChoice);
   });
   host.querySelector("[data-jev-rows]").addEventListener("click", (event) => {
+    if (jevBuiltinPressed(event)) return;
     const chip = event.target.closest("[data-jev-fix]");
     if (chip) {
       jevFix(chip.dataset.jevFix);
@@ -932,6 +935,7 @@ function wireJevView(host) {
   });
   host.querySelector(".jev-drawer-close").addEventListener("click", () => jevToggleDrawer(host, null));
   wireJevCustom(host);
+  host.querySelector("[data-jev-builtin-trash]")?.addEventListener("click", jevBuiltinPressed);
   host.addEventListener("keydown", (event) => {
     if (event.key === "Escape" && jevDrawerSeat !== null) {
       event.stopPropagation();
@@ -1118,6 +1122,8 @@ function jevHintLead(id) {
 /* A feature's name, in the language in force: the settings markup's
  * (`jevFeature`), so the dashboard carries no second list of names. */
 function jevSeatName(id) {
+  const edited = jevBuiltinSaved(id).name;
+  if (edited) return edited;
   const name = jevFeature(id).name;
   return name ? t(name.key, name.source) : id;
 }
@@ -2203,7 +2209,7 @@ function paintJevView(view) {
   const numbers = jevNumbers ?? [];
   const order = switches.length > 0 ? switches.map((row) => row.id) : numbers.map((row) => row.id);
   const heldOf = new Map(numbers.map((one) => [one.id, one]));
-  const builtIn = order.filter((id) => id !== jevCustomRules()?.feature);
+  const builtIn = order.filter((id) => id !== jevCustomRules()?.feature && !jevBuiltinSaved(id).deleted);
   // A feature zo did not count stands with its dashes, never folded: only a
   // count of nothing says a feature was not used.
   const unused = builtIn.filter((id) => heldOf.get(id)?.week.rows === 0);
@@ -2230,6 +2236,7 @@ function paintJevView(view) {
   jevArrange(body, drawn);
   paintJevCharts(view, inUse, heldOf, numbers);
   paintJevCustom(view);
+  paintJevBuiltinTrash(view);
   // The scope just chosen is being counted: what stands counted the other
   // one, and says so by stepping back until the answer lands (t-9633).
   const stale = jevScope !== null && jevScope.scope !== jevScopeChoice;
@@ -2373,7 +2380,7 @@ function paintJevDrawer(view, id, held) {
   drawer.querySelector(".jev-drawer-title").textContent = name;
   drawer.querySelector(".jev-drawer-id").textContent = id;
   drawer.querySelector(".jev-drawer-summary").textContent = feature.summary ? t(feature.summary.key, feature.summary.source) : "";
-  drawer.querySelector(".jev-drawer-written").hidden = !standing?.written;
+  drawer.querySelector(".jev-drawer-written").hidden = !standing?.written || Boolean(standing?.decision);
   const part = (name) => drawer.querySelector(`[data-jev-drawer-part="${name}"]`);
 
   // What stands between it and automatic use, once zo has counted it
@@ -2658,9 +2665,28 @@ function paintJevRow(row, id, held, standing, head, latency) {
     open = document.createElement("button");
     open.type = "button";
     open.className = "jev-row-open";
-    seat.replaceChildren(open, jevNode("span", "jev-row-meta", jevNode("span", "jev-row-id")));
+    const actions = jevNode("span", "jev-builtin-actions");
+    for (const [action, icon] of [["edit", "i-pencil"], ["delete", "i-trash"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "jev-builtin-action";
+      button.dataset[`jevBuiltin${action === "edit" ? "Edit" : "Delete"}`] = id;
+      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "icon"); svg.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+      use.setAttribute("href", `#${icon}`); svg.append(use); button.append(svg); actions.append(button);
+    }
+    seat.replaceChildren(jevNode("span", "jev-builtin-heading", open, actions),
+      jevNode("span", "jev-row-meta", jevNode("span", "jev-row-id")));
   }
   open.textContent = jevSeatName(id);
+  for (const [selector, label] of [
+    ["[data-jev-builtin-edit]", t("jev.builtin.editFor", "「{{name}}」 수정", { name: jevSeatName(id) })],
+    ["[data-jev-builtin-delete]", t("jev.builtin.deleteFor", "「{{name}}」 삭제", { name: jevSeatName(id) })],
+  ]) {
+    const button = seat.querySelector(selector);
+    button.setAttribute("aria-label", label); button.dataset.tip = label;
+  }
   open.dataset.tip = jevHintLead(id);
   seat.querySelector(".jev-row-id").textContent = id;
   // A feature whose records this computer keeps in one place reads the same
@@ -3717,6 +3743,10 @@ async function confirmJevCustomDelete() {
   const asked = jevCustomDeleting;
   if (!asked) return;
   closeJevCustomDelete();
+  if (asked.kind === "builtin") {
+    await deleteJevBuiltin(asked);
+    return;
+  }
   if (jevCustomDrawer?.kept?.draft.id === asked.kept.draft.id) closeJevCustomDrawer({ saved: true });
   if (!(await jevCustomChange(() => invoke("delete_custom_decision", { id: asked.kept.draft.id })))) return;
   if (document.activeElement === null || document.activeElement === document.body) {
@@ -3764,4 +3794,273 @@ el("jev-custom-delete-ok").addEventListener("click", () => void confirmJevCustom
 el("jev-custom-delete-cancel").addEventListener("click", closeJevCustomDelete);
 el("jev-custom-delete-scrim").addEventListener("mousedown", (event) => {
   if (event.target === el("jev-custom-delete-scrim")) closeJevCustomDelete();
+});
+
+/* Built-in definitions use the same settings authority as their execution. */
+let jevBuiltinEditor = null;
+
+function jevBuiltinSaved(id) {
+  return jevSeat(typesafeState ?? {}, id)?.decision ?? {};
+}
+
+function jevBuiltinDefaultName(id) {
+  const name = jevFeature(id).name;
+  return name ? t(name.key, name.source) : id;
+}
+
+function jevBuiltinFailure(error) {
+  const token = error?.message ?? String(error);
+  const words = {
+    builtin_decision_changed: t("jev.builtin.changed", "다른 창에서 이 결정을 바꿨습니다. 닫고 다시 열어 최신 내용을 확인하세요."),
+    builtin_decision_missing: t("jev.builtin.missing", "이 기본 결정을 찾지 못했습니다. 목록을 새로 읽어 주세요."),
+    builtin_decision_definition_unavailable: t("jev.builtin.unavailable", "기본 질문을 불러오지 못했습니다. 앱과 zo를 업데이트한 뒤 다시 열어 주세요."),
+    builtin_decision_credential: t("jev.builtin.credential", "질문이나 기준에 비밀번호·키로 보이는 내용이 있습니다. 지운 뒤 저장하세요."),
+    builtin_decision_name: t("jev.builtin.invalidName", "이름이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
+    builtin_decision_question: t("jev.builtin.invalidQuestion", "질문이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
+    builtin_decision_criteria: t("jev.builtin.invalidCriteria", "판단 기준이 비어 있거나 너무 깁니다. 입력 칸의 길이 제한을 확인하세요."),
+    builtin_decision_mode: t("jev.builtin.invalidMode", "이 결정이 지원하는 사용 방식을 골라 주세요. 수정한 기준은 기록만 또는 켜짐으로 사용할 수 있습니다."),
+  };
+  return words[token] ?? typesafeRefusal(error);
+}
+
+function jevBuiltinTrashPart() {
+  const fold = jevNode("details", "jev-custom-trash jev-builtin-trash", jevNode("summary"), jevNode("ul", "jev-custom-trash-list"));
+  fold.dataset.jevBuiltinTrash = "";
+  fold.hidden = true;
+  return fold;
+}
+
+function paintJevBuiltinTrash(view) {
+  const fold = view.querySelector("[data-jev-builtin-trash]");
+  const rows = (typesafeState?.switches ?? []).filter((row) => row.decision?.deleted);
+  fold.hidden = rows.length === 0;
+  if (!jevMoved(fold, JSON.stringify(rows), jevLanguage())) return;
+  fold.querySelector("summary").textContent = t("jev.builtin.trash", "삭제한 기본 결정 {{count}}개", { count: jevCount(rows.length) });
+  fold.querySelector("ul").replaceChildren(...rows.map((row) => {
+    const restore = jevText("jev.custom.restore", "되살리기", "button", "btn");
+    restore.type = "button";
+    restore.dataset.jevBuiltinRestore = row.id;
+    return jevNode("li", "jev-custom-trashed", jevNode("span", "jev-custom-name", document.createTextNode(jevSeatName(row.id))), restore);
+  }));
+}
+
+function jevBuiltinPressed(event) {
+  const button = event.target.closest("[data-jev-builtin-edit], [data-jev-builtin-delete], [data-jev-builtin-restore]");
+  if (!button) return false;
+  event.stopPropagation();
+  if (button.disabled) return true;
+  if (button.dataset.jevBuiltinEdit) void openJevBuiltinEditor(button.dataset.jevBuiltinEdit, button);
+  else if (button.dataset.jevBuiltinDelete) openJevBuiltinDelete(button.dataset.jevBuiltinDelete, button);
+  else {
+    button.disabled = true;
+    const id = button.dataset.jevBuiltinRestore;
+    void changeJevBuiltin(id, "restore", jevBuiltinSaved(id)).catch((error) => {
+      toast(jevBuiltinFailure(error), "halt");
+    }).finally(() => { button.disabled = false; });
+  }
+  return true;
+}
+
+function jevBuiltinRaw() {
+  return {
+    name: el("jev-builtin-name").value,
+    question: el("jev-builtin-question").value,
+    criteria: el("jev-builtin-criteria").value,
+    mode: jevBuiltinEditor?.mode ?? "",
+    reset: Boolean(jevBuiltinEditor?.reset),
+  };
+}
+
+function jevBuiltinDraft() {
+  const editor = jevBuiltinEditor;
+  if (!editor?.definition) return null;
+  const raw = jevBuiltinRaw();
+  const changed = (text, original) => text.trim() && text.trim() !== original.trim() ? text.trim() : null;
+  return {
+    name: changed(raw.name, editor.defaultName),
+    question: changed(raw.question, editor.definition.question),
+    criteria: changed(raw.criteria, editor.definition.criteria),
+    mode: raw.mode,
+    deleted: false,
+  };
+}
+
+function paintJevBuiltinEditor() {
+  const editor = jevBuiltinEditor;
+  if (!editor) return;
+  const ready = Boolean(editor.definition);
+  const draft = jevBuiltinDraft();
+  const prior = editor.definition?.saved ?? {};
+  const changedQuestion = ready && !editor.reset && (draft.question !== (prior.question ?? null) || draft.criteria !== (prior.criteria ?? null));
+  const edited = Boolean(draft?.question || draft?.criteria);
+  const choices = editor.definition?.modes ?? [];
+  const recording = choices.find((choice) => choice.asks && !choice.applies && !choice.automatic) ?? choices[0];
+  if (changedQuestion && recording) editor.mode = recording.mode;
+  el("jev-builtin-recording").hidden = !edited && !changedQuestion;
+  for (const button of el("jev-builtin-mode").querySelectorAll("button")) {
+    const choice = choices.find((choice) => choice.mode === button.dataset.mode);
+    button.hidden = edited && Boolean(choice?.automatic);
+    button.disabled = editor.busy || (changedQuestion && button.dataset.mode !== recording?.mode);
+    const checked = button.dataset.mode === editor.mode;
+    button.setAttribute("aria-checked", String(checked));
+    button.tabIndex = checked ? 0 : -1;
+  }
+  for (const id of ["name", "question", "criteria"]) {
+    el(`jev-builtin-${id}`).disabled = !ready || editor.busy || (id !== "name" && !editor.definition.canEditPrompt);
+  }
+  el("jev-builtin-form").setAttribute("aria-busy", String(!ready || editor.busy));
+  el("jev-builtin-reset").disabled = !ready || editor.busy;
+  el("jev-builtin-save").disabled = !ready || editor.busy || JSON.stringify(jevBuiltinRaw()) === editor.opened;
+  el("jev-builtin-close").disabled = editor.busy;
+  el("jev-builtin-cancel").disabled = editor.busy;
+}
+
+async function openJevBuiltinEditor(id, opener) {
+  const editor = { id, opener, definition: null, busy: false, reset: false, mode: "", opened: "", warned: false, defaultName: jevBuiltinDefaultName(id) };
+  jevBuiltinEditor = editor;
+  for (const name of ["name", "question", "criteria"]) el(`jev-builtin-${name}`).value = "";
+  el("jev-builtin-mode").replaceChildren();
+  el("jev-builtin-help").textContent = t("jev.builtin.loading", "기본 질문과 저장한 내용을 읽는 중…");
+  el("jev-builtin-status").textContent = "";
+  el("jev-builtin-status").classList.remove("is-error");
+  el("jev-builtin-unsaved").hidden = true;
+  paintJevBuiltinEditor();
+  showModal(el("jev-builtin-scrim"), { opener, animated: true });
+  try {
+    const definition = await invoke("builtin_decision_definition", { id });
+    if (jevBuiltinEditor !== editor) return;
+    editor.definition = definition;
+    editor.mode = definition.mode;
+    const saved = definition.saved ?? {};
+    for (const [name, value, cap] of [["name", saved.name ?? editor.defaultName, definition.nameMax],
+      ["question", saved.question ?? definition.question, definition.questionMax], ["criteria", saved.criteria ?? definition.criteria, definition.criteriaMax]]) {
+      const input = el(`jev-builtin-${name}`);
+      input.value = value;
+      input.maxLength = cap;
+    }
+    el("jev-builtin-help").textContent = !definition.canEditPrompt
+      ? t("jev.builtin.noQuestion", "받은 답을 재사용하는 기능으로, 모델에 보내는 판단 질문은 없습니다. 이름과 사용 방식을 바꾸거나 삭제할 수 있습니다.")
+      : definition.dynamic
+        ? t("jev.builtin.dynamic", "작업마다 전달되는 질문을 사용합니다. 여기에 적은 질문·기준을 공통 판단 지침으로 적용하며, 비워 두면 작업의 질문을 따릅니다.")
+        : t("jev.builtin.help", "제품의 기본 문구입니다. 질문·판단 기준을 수정하면 현재 입력과 보기 형식에 맞춰 저장한 지침으로 판단합니다. 비워 두면 기본 문구를 따릅니다.");
+    el("jev-builtin-mode").replaceChildren(...definition.modes.map((choice) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "jev-custom-mode-choice";
+      button.setAttribute("role", "radio");
+      button.dataset.mode = choice.mode;
+      button.textContent = choice.automatic ? t("jev.builtin.automatic", "자동") : jevCustomModeWords(choice);
+      return button;
+    }));
+    editor.opened = JSON.stringify(jevBuiltinRaw());
+    paintJevBuiltinEditor();
+    el("jev-builtin-name").focus({ preventScroll: true });
+  } catch (error) {
+    if (jevBuiltinEditor !== editor) return;
+    el("jev-builtin-status").textContent = jevBuiltinFailure(error);
+    el("jev-builtin-status").classList.add("is-error");
+    el("jev-builtin-help").textContent = "";
+  }
+}
+
+function closeJevBuiltinEditor({ saved = false } = {}) {
+  const editor = jevBuiltinEditor;
+  if (!editor || editor.busy) return;
+  if (!saved && editor.definition && JSON.stringify(jevBuiltinRaw()) !== editor.opened && !editor.warned) {
+    editor.warned = true;
+    el("jev-builtin-unsaved").hidden = false;
+    return;
+  }
+  jevBuiltinEditor = null;
+  hideModal(el("jev-builtin-scrim"));
+}
+
+async function changeJevBuiltin(id, action, expected, draft = null) {
+  const state = await invoke("update_builtin_decision", { id, action, expected, draft });
+  paintTypeSafe(state);
+  return jevBuiltinSaved(id);
+}
+
+async function saveJevBuiltinEditor() {
+  const editor = jevBuiltinEditor;
+  if (!editor?.definition || editor.busy || JSON.stringify(jevBuiltinRaw()) === editor.opened) return;
+  const draft = jevBuiltinDraft();
+  editor.busy = true;
+  paintJevBuiltinEditor();
+  el("jev-builtin-status").textContent = "";
+  try {
+    await changeJevBuiltin(editor.id, editor.reset ? "reset" : "save", editor.definition.saved ?? {}, draft);
+    editor.busy = false;
+    if (jevBuiltinEditor === editor) closeJevBuiltinEditor({ saved: true });
+  } catch (error) {
+    if (jevBuiltinEditor !== editor) return;
+    el("jev-builtin-status").textContent = jevBuiltinFailure(error);
+    el("jev-builtin-status").classList.add("is-error");
+  } finally {
+    editor.busy = false;
+    if (jevBuiltinEditor === editor) paintJevBuiltinEditor();
+  }
+}
+
+function openJevBuiltinDelete(id, opener) {
+  const name = jevSeatName(id);
+  jevCustomDeleting = { kind: "builtin", id, name, expected: structuredClone(jevBuiltinSaved(id)), view: opener.closest(".jev-view") };
+  say(el("jev-custom-delete-title"), () => t("jev.custom.deleteTitle", "「{{name}}」 결정을 지울까요?", { name }));
+  say(el("jev-custom-delete-body"), () => t("jev.builtin.deleteBody", "삭제하면 이 결정의 판단 요청이 중지됩니다. 기록은 남고, 삭제한 결정에서 되살릴 수 있습니다. 전체 기능을 다시 켜도 이 결정은 삭제 상태를 유지합니다."));
+  showModal(el("jev-custom-delete-scrim"), { opener, animated: true });
+}
+
+async function deleteJevBuiltin(asked) {
+  try {
+    const deleted = await changeJevBuiltin(asked.id, "delete", asked.expected);
+    if (jevDrawerSeat === asked.id) jevDrawerSeat = null;
+    const fold = asked.view?.querySelector("[data-jev-builtin-trash]");
+    if (fold) { fold.open = true; fold.querySelector("summary").focus({ preventScroll: true }); }
+    let note = null;
+    const leave = () => { if (note?.isConnected) closing(note, () => note.remove()); };
+    note = toast(t("jev.custom.deleted", "결정을 지웠습니다: 「{{name}}」", { name: asked.name }), "", {
+      sticky: true,
+      action: { label: t("jev.custom.undo", "되돌리기"), run: async () => {
+        try { await changeJevBuiltin(asked.id, "restore", deleted); leave(); }
+        catch (error) { toast(jevBuiltinFailure(error), "halt"); }
+      } },
+    });
+    window.setTimeout(leave, JEV_CUSTOM_UNDO_MS);
+  } catch (error) { toast(jevBuiltinFailure(error), "halt"); }
+}
+
+el("jev-builtin-close").addEventListener("click", () => closeJevBuiltinEditor());
+el("jev-builtin-cancel").addEventListener("click", () => closeJevBuiltinEditor());
+el("jev-builtin-save").addEventListener("click", () => void saveJevBuiltinEditor());
+el("jev-builtin-scrim").addEventListener("mousedown", (event) => {
+  if (event.target === el("jev-builtin-scrim")) closeJevBuiltinEditor();
+});
+el("jev-builtin-form").addEventListener("submit", (event) => { event.preventDefault(); void saveJevBuiltinEditor(); });
+el("jev-builtin-form").addEventListener("input", () => {
+  if (!jevBuiltinEditor) return;
+  jevBuiltinEditor.reset = false; jevBuiltinEditor.warned = false;
+  el("jev-builtin-unsaved").hidden = true; paintJevBuiltinEditor();
+});
+el("jev-builtin-mode").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-mode]");
+  if (!button || button.disabled || !jevBuiltinEditor) return;
+  jevBuiltinEditor.mode = button.dataset.mode; jevBuiltinEditor.reset = false;
+  paintJevBuiltinEditor();
+});
+el("jev-builtin-mode").addEventListener("keydown", (event) => {
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+  const choices = [...event.currentTarget.querySelectorAll("button")].filter((button) => !button.hidden && !button.disabled);
+  if (!step || !choices.length) return;
+  event.preventDefault();
+  const next = choices[(choices.indexOf(document.activeElement) + step + choices.length) % choices.length];
+  next.focus(); next.click();
+});
+el("jev-builtin-reset").addEventListener("click", () => {
+  const editor = jevBuiltinEditor;
+  if (!editor?.definition || editor.busy) return;
+  el("jev-builtin-name").value = editor.defaultName;
+  el("jev-builtin-question").value = editor.definition.question;
+  el("jev-builtin-criteria").value = editor.definition.criteria;
+  editor.mode = editor.definition.defaultMode; editor.reset = true; editor.warned = false;
+  el("jev-builtin-unsaved").hidden = true; paintJevBuiltinEditor();
 });

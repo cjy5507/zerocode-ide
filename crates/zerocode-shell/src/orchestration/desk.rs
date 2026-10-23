@@ -551,15 +551,24 @@ pub(crate) struct DeskTask {
 
 /// When a task's work moved, as the ledger keeps it: its first attempt's
 /// start, the newest attempt that ended handing its work in (`worker_done`),
-/// the coordinator's first `verified` of the review that stands, and its
+/// the coordinator's first `verified` of the review that stands, its
 /// landing — the completion the coordinator wrote over a verified, merged
-/// review ([`Run::completion_ms`]). Each is `None` until it happened.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+/// review ([`Run::completion_ms`]) — and the newest end of any attempt. Each
+/// is `None` until it happened. Beside them the release the coordinator wrote
+/// the work shipped in: a version, for when that release was cut is git's to
+/// say (t-71840).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct TaskTimes {
     pub(crate) started_ms: Option<i64>,
     pub(crate) handed_ms: Option<i64>,
     pub(crate) verified_ms: Option<i64>,
     pub(crate) landed_ms: Option<i64>,
+    /// Handed in, failed or stopped: where a finished task's bar ends when
+    /// nothing later was written of it — a failed one's, above all (t-71840).
+    pub(crate) ended_ms: Option<i64>,
+    /// [`crate::artifact_flow::ledger_release`], read only of a review that
+    /// says deployed.
+    pub(crate) release: Option<String>,
 }
 
 /// A task's times, read off its attempts and its review — the readings the
@@ -577,6 +586,11 @@ fn task_times(run: &Run, task: &Task) -> Option<TaskTimes> {
             .max(),
         verified_ms: review.verified_ms.filter(|_| review.verified),
         landed_ms: run.completion_ms(task),
+        ended_ms: attempts.iter().filter_map(|attempt| attempt.ended_ms).max(),
+        release: review
+            .deployed
+            .then(|| crate::artifact_flow::ledger_release(task))
+            .flatten(),
     })
 }
 
@@ -3674,6 +3688,86 @@ mod tests {
         );
     }
 
+    /// The schedule's worker tasks over the ledger that already happened
+    /// (t-71840): a copy of the person's store read into a snapshot, the desk
+    /// this build draws from it, and what git at this checkout's repository
+    /// says of those tasks' landings — written to a file the window's own
+    /// schedule reads, as it stood before the change and after it
+    /// (`ui/tests/board-schedule-ledger.mjs`). Ids, stages and times only: no
+    /// title, body or path leaves.
+    ///
+    /// ```sh
+    /// ZEROCODE_DESK_REPLAY_STORE=<a copy of authority.sqlite> \
+    /// ZEROCODE_SCHEDULE_REPLAY_OUT=<replay.json> \
+    ///   cargo test -p zerocode-shell --bin zerocode-shell \
+    ///   orchestration::desk::tests::the_schedule_over_the_ledger_that_already_happened \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a copy of the person's own ledger, written out; not a check"]
+    fn the_schedule_over_the_ledger_that_already_happened() {
+        let store = std::env::var("ZEROCODE_DESK_REPLAY_STORE")
+            .expect("ZEROCODE_DESK_REPLAY_STORE names a copy of the authority store");
+        let out = std::env::var("ZEROCODE_SCHEDULE_REPLAY_OUT")
+            .expect("ZEROCODE_SCHEDULE_REPLAY_OUT names the replay file");
+        let ledger = Ledger::rebuild(projection_at_rest(&store)).expect("the ledger as it stood");
+        let now_ms = crate::now_epoch_ms();
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let git = crate::artifact_flow::git_facts(&repo, now_ms);
+        let landings = crate::artifact_flow::landings(
+            &git,
+            &desk
+                .tasks
+                .iter()
+                .map(|task| crate::artifact_flow::LandingAsk {
+                    task: &task.id,
+                    merge_head: task
+                        .progress
+                        .as_ref()
+                        .and_then(|progress| progress.merge_head.as_deref()),
+                    release: task
+                        .times
+                        .as_ref()
+                        .and_then(|times| times.release.as_deref()),
+                })
+                .collect::<Vec<_>>(),
+        );
+        let tasks: Vec<serde_json::Value> = desk
+            .tasks
+            .iter()
+            .map(|task| {
+                serde_json::json!({
+                    "run": task.run, "id": task.id, "title": task.id,
+                    "stage": task.stage, "times": task.times,
+                })
+            })
+            .collect();
+        let merges = git.unreleased.len()
+            + git
+                .releases
+                .iter()
+                .map(|release| release.merges.len())
+                .sum::<usize>();
+        let replay = serde_json::json!({
+            "now_ms": now_ms,
+            "tasks": tasks,
+            "landings": landings,
+            "git": { "merges": merges, "releases": git.releases.len() },
+        });
+        std::fs::write(&out, replay.to_string()).expect("the replay is written");
+        println!(
+            "{}",
+            serde_json::json!({
+                "now_ms": now_ms,
+                "tasks": desk.tasks.len(),
+                "timed": desk.tasks.iter().filter(|task| task.times.is_some()).count(),
+                "landings": landings.len(),
+                "git": replay["git"],
+            })
+        );
+    }
+
     /// "Loud" is the harness's line: busier than the cores, not at them.
     #[test]
     fn a_machine_is_loud_only_past_its_cores() {
@@ -3881,7 +3975,7 @@ mod tests {
             desk.tasks
                 .iter()
                 .find(|row| row.id == id)
-                .map(|row| row.times)
+                .map(|row| row.times.clone())
                 .unwrap_or_else(|| panic!("{id} missing"))
         };
         assert_eq!(
@@ -3891,6 +3985,8 @@ mod tests {
                 handed_ms: Some(20),
                 verified_ms: Some(30),
                 landed_ms: Some(30),
+                ended_ms: Some(20),
+                release: None,
             })
         );
         assert_eq!(times(&waiting), None, "nobody carried it");
@@ -3902,8 +3998,132 @@ mod tests {
             .expect("the landed row");
         assert_eq!(
             row["times"],
-            serde_json::json!({"started_ms": 12, "handed_ms": 20, "verified_ms": 30, "landed_ms": 30}),
+            serde_json::json!({
+                "started_ms": 12, "handed_ms": 20, "verified_ms": 30, "landed_ms": 30,
+                "ended_ms": 20, "release": null,
+            }),
             "the window reads these keys"
+        );
+    }
+
+    /// A finished task's bar ends where its work ended (t-71840), so the desk
+    /// carries what the ledger knows of that end beyond a landing: when a
+    /// failed attempt ended, and the release a deployed review names — its
+    /// version only; when that release was cut is git's to say. A review that
+    /// does not say deployed names no release.
+    #[test]
+    fn a_desk_row_carries_where_a_finished_task_ended() {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("ended", 1);
+        let failed = ledger
+            .create_task(&run, "fail it".into(), "failed".into(), vec![], None, 10)
+            .expect("a task");
+        let shipped = ledger
+            .create_task(&run, "ship it".into(), "shipped".into(), vec![], None, 11)
+            .expect("a task");
+        let lost = ledger
+            .start_worker(&run, "claude", ("team-ended", "%2"), Some(&failed), 12)
+            .expect("a worker carries it");
+        // The worker reports it could not finish: that ends its attempt, unhanded.
+        ledger
+            .post(
+                &run,
+                Draft {
+                    from: worker_address(&lost.worker),
+                    to: ledger.run(&run).expect("the run").address(),
+                    kind: MessageKind::WorkerDone,
+                    body: Text::from(r#"{"ok":false}"#.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(failed.clone()),
+                    dispatch: lost.dispatch.clone(),
+                },
+                30,
+            )
+            .expect("the failed report");
+        ledger
+            .update_task(
+                &run,
+                &failed,
+                Some(TaskStatus::Failed),
+                Some(r#"{"ok":false}"#.to_string()),
+                ResultAuthor::Coordinator {
+                    seat: "team-ended/%1".to_string(),
+                    generation: Some(1),
+                    attempt: lost.dispatch.clone(),
+                    source: None,
+                    completed_ms: None,
+                    verified_ms: None,
+                },
+                40,
+            )
+            .expect("a failure");
+        let carried = ledger
+            .start_worker(&run, "claude", ("team-ended", "%3"), Some(&shipped), 13)
+            .expect("a worker carries it");
+        ledger
+            .post(
+                &run,
+                Draft {
+                    from: worker_address(&carried.worker),
+                    to: ledger.run(&run).expect("the run").address(),
+                    kind: MessageKind::WorkerDone,
+                    body: Text::from(r#"{"ok":true,"head":"0123abc"}"#.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(shipped.clone()),
+                    dispatch: carried.dispatch.clone(),
+                },
+                25,
+            )
+            .expect("the report");
+        ledger
+            .update_task(
+                &run,
+                &shipped,
+                Some(TaskStatus::Completed),
+                Some(
+                    r#"{"verified":true,"merged":true,"deployed":true,"release":"v1.2.3"}"#
+                        .to_string(),
+                ),
+                ResultAuthor::Coordinator {
+                    seat: "team-ended/%1".to_string(),
+                    generation: Some(1),
+                    attempt: carried.dispatch.clone(),
+                    source: Some("0123abc".to_string()),
+                    completed_ms: None,
+                    verified_ms: None,
+                },
+                50,
+            )
+            .expect("a review");
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
+        let times = |id: &str| {
+            desk.tasks
+                .iter()
+                .find(|row| row.id == id)
+                .and_then(|row| row.times.clone())
+                .unwrap_or_else(|| panic!("{id} has no times"))
+        };
+        let failed_times = times(&failed);
+        assert_eq!(
+            (
+                failed_times.handed_ms,
+                failed_times.ended_ms,
+                failed_times.release.as_deref()
+            ),
+            (None, Some(30), None),
+            "a failed task handed nothing in, its attempt ended at 30 and it shipped nothing"
+        );
+        let shipped_times = times(&shipped);
+        assert_eq!(
+            (shipped_times.ended_ms, shipped_times.release.as_deref()),
+            (Some(25), Some("v1.2.3")),
+            "{shipped_times:?}"
         );
     }
 }

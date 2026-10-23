@@ -4712,8 +4712,9 @@ function checkOutputEl(details) {
     prose.className = "check-prose";
     // A check's summary is markdown — a linter writes tables and code fences
     // into it — and this window already has one renderer for that. Reusing it
-    // is also what keeps the escaping in one place.
-    paintMarkdown(prose, body);
+    // is also what keeps the escaping in one place, and what draws a
+    // ```mermaid fence as its diagram (t-58437).
+    paintMarkdownView(prose, body);
     host.appendChild(prose);
   }
   return host;
@@ -5654,7 +5655,7 @@ function notebookItemEl(item) {
   if (item.mime === "text/markdown") {
     const box = document.createElement("div");
     box.className = "nb-md";
-    paintMarkdown(box, text());
+    paintMarkdownView(box, text());
     return box;
   }
   if (item.mime.startsWith("text/") || item.mime === "application/javascript") {
@@ -5703,7 +5704,7 @@ function notebookCellEl(cell) {
   if (cell.kind === "markdown") {
     const box = document.createElement("div");
     box.className = "nb-md";
-    paintMarkdown(box, cell.source);
+    paintMarkdownView(box, cell.source);
     card.appendChild(box);
   } else {
     card.appendChild(notebookPre(cell.source, "source"));

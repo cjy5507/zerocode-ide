@@ -1321,6 +1321,7 @@ fn replaying_teacher(rtt_ms: Vec<u64>) -> Asker {
                 rtt_ms: rtt,
             },
             Spent {
+                decision_rubric: None,
                 requests: 1,
                 ..Spent::default()
             },

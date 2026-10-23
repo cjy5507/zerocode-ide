@@ -228,8 +228,12 @@ impl Report<'_> {
                 api::AuthRoute::OAuth | api::AuthRoute::Auto => "",
             };
             let unlisted = self
-                .unlisted_since(row)
-                .map(|since| format!(" · {}", crate::tui::strings::unlisted_since(&crate::tui::models::local_clock(since))))
+                .login_word(row)
+                .or_else(|| {
+                    self.unlisted_since(row)
+                        .map(|since| crate::tui::strings::unlisted_since(&crate::tui::models::local_clock(since)))
+                })
+                .map(|word| format!(" · {word}"))
                 .unwrap_or_default();
             let _ = writeln!(
                 out,
@@ -288,6 +292,27 @@ impl Report<'_> {
             }
         }
         out.trim_end().to_string()
+    }
+
+    /// The Google login's word on a Gemini row that goes over it (t-71998),
+    /// in the picker's words: its registry serves the release under another
+    /// name, or nothing the login has serves it.
+    fn login_word(&self, row: &CatalogRow) -> Option<String> {
+        if row.provider != CatalogProvider::Google
+            || row.auth_route == api::AuthRoute::ApiKey
+            || self.policy == UpdatePolicy::Pinned
+        {
+            return None;
+        }
+        match model_discovery::antigravity_reach_in(self.catalog, &row.id) {
+            model_discovery::AntigravityReach::Renamed(release) => {
+                Some(crate::tui::strings::antigravity_renamed(&release))
+            }
+            model_discovery::AntigravityReach::Unserved { .. } => {
+                Some(crate::tui::strings::ANTIGRAVITY_UNLISTED.to_string())
+            }
+            _ => None,
+        }
     }
 
     /// When the provider's list stopped naming the row — a discovered row a
@@ -664,5 +689,60 @@ mod tests {
         assert_eq!(describe_age(100, 100 + 7 * 60), "7m old");
         assert_eq!(describe_age(100, 100 + 5 * 3600), "5h old");
         assert_eq!(describe_age(100, 100 + 3 * 86_400), "3d old");
+    }
+
+    /// t-71998: under the Google login a Gemini row says, in the picker's
+    /// words, what the login's registry says of it — a release it serves
+    /// under another name, or nothing it serves. From a synthetic registry.
+    #[test]
+    fn a_gemini_row_says_what_the_logins_registry_says_of_it() {
+        use runtime::model_catalog::ModelCatalog;
+        use runtime::model_discovery::{
+            antigravity_rows, refresh_with, Answered, Overlay, UpdatePolicy, ANTIGRAVITY_SOURCE, ORIGIN_LIVE, SOURCES,
+        };
+        let home = tempfile::tempdir().expect("an overlay home");
+        let user = ModelCatalog::load_from_home(home.path()).expect("an empty overlay");
+        let rows = user.rows(&super::ALL_PROVIDERS, false);
+        let document = serde_json::json!({"models": {
+            "gemini-3.1-pro-low": {"displayName": "Gemini 3.1 Pro (Low)", "modelProvider": "MODEL_PROVIDER_GOOGLE"},
+            "gemini-pro-agent": {"displayName": "Gemini 3.1 Pro (High)", "modelProvider": "MODEL_PROVIDER_GOOGLE"}
+        }});
+        let now = 1_792_700_000;
+        let every: Vec<&'static str> = SOURCES.iter().map(|source| source.key).collect();
+        let catalog = refresh_with(None, &every, now, &[], |source| {
+            if source == ANTIGRAVITY_SOURCE {
+                Ok(Answered {
+                    source: source.to_string(),
+                    models: antigravity_rows(&document, source),
+                    origin: ORIGIN_LIVE.to_string(),
+                    fetched_at: now,
+                    note: None,
+                })
+            } else {
+                Err((source.to_string(), "skipped: not asked in this test".to_string()))
+            }
+        });
+        let overlay = Overlay::default();
+        let report = super::Report {
+            policy: UpdatePolicy::Auto,
+            catalog: &catalog,
+            user: &user,
+            rows: &rows,
+            overlay: &overlay,
+            merged: None,
+            tiers: &[],
+            now: now + 60,
+        };
+        let text = report.text();
+        let line = |id: &str| {
+            text.lines()
+                .find(|line| line.starts_with("google") && line.contains(&format!(" {id} ")))
+                .unwrap_or_else(|| panic!("no {id} row in:\n{text}"))
+                .to_string()
+        };
+        let renamed = line("gemini-3.1-pro-preview");
+        assert!(renamed.ends_with(&crate::tui::strings::antigravity_renamed("gemini-3.1-pro")), "{renamed}");
+        let unserved = line("gemini-3-flash");
+        assert!(unserved.ends_with(crate::tui::strings::ANTIGRAVITY_UNLISTED), "{unserved}");
     }
 }

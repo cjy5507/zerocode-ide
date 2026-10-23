@@ -63,7 +63,7 @@ fn explicit_structured_decisions_use_loopback_chat_completions() {
 }
 
 #[test]
-fn structured_decisions_do_not_enable_a_remote_or_generic_chat_provider() {
+fn structured_decisions_do_not_turn_a_local_connection_into_a_remote_one() {
     for address in [
         "http://192.0.2.1:1234",
         "https://example.com",
@@ -71,11 +71,9 @@ fn structured_decisions_do_not_enable_a_remote_or_generic_chat_provider() {
     ] {
         assert!(Provider::from_root(&config(address)).is_err());
     }
-    for kind in ["remote", "jev"] {
-        let mut root = config("http://127.0.0.1:1234");
-        root["smart"]["judgmentProvider"]["kind"] = json!(kind);
-        assert!(Provider::from_root(&root).is_err());
-    }
+    let mut root = config("http://127.0.0.1:1234");
+    root["smart"]["judgmentProvider"]["kind"] = json!("jev");
+    assert!(Provider::from_root(&root).is_err());
     let mut root = config("http://127.0.0.1:1234");
     root["smart"]["judgmentProvider"]["protocol"] = json!("open_ai");
     assert!(Provider::from_root(&root).is_err());

@@ -5,6 +5,11 @@
 //! OAuth client and the refresh, and this module is the quota reader on top
 //! of it. A refreshed access token lives only for this scan — the login on
 //! disk is written by the settings card and by zo, never by a gauge.
+//!
+//! The quota is asked for the project Google's answer names, and when it
+//! names none, for the one zo resolved for the same login and keeps on file
+//! (t-72144). The gauge never makes a project: a login with none to read gets
+//! a sentence saying why and what makes one, never 「read failed — retry」.
 
 use std::path::Path;
 
@@ -123,51 +128,178 @@ fn refused_answer(now: i64) -> ProviderUsage {
     )
 }
 
-/// The Code Assist project this login's quota is billed to. The client metadata
+/// What Google says about this login's Code Assist project. The client metadata
 /// names no IDE and no platform: every field is optional in Google's public
 /// schema, and the unspecified values are the ones its own CLI sends outside an
 /// IDE. `pluginType` is left out, because it names the Gemini plugin and this
 /// client is not that plugin.
-fn load_project_id(
+fn load_code_assist(
     wire: &mut impl Wire,
     access_token: &str,
     headers: &AntigravityHeaders,
     now: i64,
-) -> Result<String, Stop> {
-    let body = wire
-        .post_json(
-            LOAD_CODE_ASSIST_URL,
-            access_token,
-            headers,
-            &serde_json::json!({
-                "metadata": {
-                    "ideType": "IDE_UNSPECIFIED",
-                    "platform": "PLATFORM_UNSPECIFIED"
-                }
-            }),
+) -> Result<serde_json::Value, Stop> {
+    wire.post_json(
+        LOAD_CODE_ASSIST_URL,
+        access_token,
+        headers,
+        &serde_json::json!({
+            "metadata": {
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED"
+            }
+        }),
+        now,
+    )
+    .map_err(|failure| match refusal_of(&failure, LOAD_CODE_ASSIST) {
+        Some(refusal) => Stop::Refused(refusal),
+        None => Stop::Failed(Box::new(answer(
+            "error",
+            Some(format!(
+                "Antigravity 프로젝트 ID를 읽지 못했습니다 ({})",
+                failure.message
+            )),
             now,
-        )
-        .map_err(|failure| match refusal_of(&failure, LOAD_CODE_ASSIST) {
-            Some(refusal) => Stop::Refused(refusal),
-            None => Stop::Failed(Box::new(answer(
-                "error",
-                Some(format!(
-                    "Antigravity 프로젝트 ID를 읽지 못했습니다 ({})",
-                    failure.message
-                )),
-                now,
-            ))),
-        })?;
-    body.get("cloudaicompanionProject")
-        .and_then(serde_json::Value::as_str)
+        ))),
+    })
+}
+
+/// The tier Google gives a personal login at no charge — the one zo takes for
+/// a login with no tier yet without a project of its own.
+const FREE_TIER: &str = "free-tier";
+
+/// The project Google's answer names: the id itself, or an object carrying it
+/// (`{"id": …}`). An empty id names none.
+fn answered_project(load: &serde_json::Value) -> Option<String> {
+    let named = load.get("cloudaicompanionProject")?;
+    named
+        .as_str()
+        .or_else(|| named.get("id").and_then(serde_json::Value::as_str))
+        .filter(|project| !project.is_empty())
         .map(str::to_string)
-        .ok_or_else(|| {
-            Stop::Failed(Box::new(answer(
-                "error",
-                Some("Antigravity 프로젝트 ID가 응답에 없습니다".to_string()),
-                now,
-            )))
+}
+
+/// Whether Google's answer gives this login a tier now.
+fn has_current_tier(load: &serde_json::Value) -> bool {
+    load.get("currentTier").is_some_and(|tier| !tier.is_null())
+}
+
+/// The Code Assist project this login's quota is billed to, read and never
+/// made: the project Google's answer names; else the one zo resolved for this
+/// login under this configuration and keeps on file; else, for a login Google
+/// gives a tier, the project the configuration names — zo's own answer for
+/// such a login (`setup_user_from_load_response`). A login with no tier yet
+/// takes one through `onboardUser`, a write that zo and Antigravity send and
+/// this gauge never does.
+fn project_of(
+    load: &serde_json::Value,
+    remembered: impl FnOnce() -> Option<String>,
+    configured: Option<&str>,
+) -> Result<String, NoProject> {
+    answered_project(load)
+        .or_else(remembered)
+        .or_else(|| {
+            configured
+                .filter(|_| has_current_tier(load))
+                .map(str::to_string)
         })
+        .ok_or_else(|| NoProject::of(load, configured))
+}
+
+/// Why no project could be read, in the words of Google's own answer.
+#[derive(Debug)]
+enum NoProject {
+    /// Google names no project — for a login it gives a tier, or with nothing
+    /// to say at all — and zo has recorded none for this login either.
+    Unnamed,
+    /// No tier yet, and one on offer that zo would take for this login.
+    NotOnboarded,
+    /// No tier on offer, and Google's reasons against the ones it lists.
+    NotEligible(String),
+}
+
+impl NoProject {
+    /// Read off the answer the way zo decides what a login with no project
+    /// needs (`setup_user_from_load_response`): a login with a tier lacks only
+    /// its project; one without takes the default tier on offer when that is
+    /// the free tier or a project is configured; otherwise Google's reasons,
+    /// when it gives any, say why not.
+    fn of(load: &serde_json::Value, configured: Option<&str>) -> Self {
+        if has_current_tier(load) {
+            return Self::Unnamed;
+        }
+        let takes_a_tier = default_allowed_tier(load).is_some_and(|tier| {
+            configured.is_some()
+                || tier.get("id").and_then(serde_json::Value::as_str) == Some(FREE_TIER)
+        });
+        if takes_a_tier {
+            return Self::NotOnboarded;
+        }
+        ineligible_reasons(load).map_or(Self::Unnamed, Self::NotEligible)
+    }
+
+    /// What the bar's hover and the usage panel say: what is missing, and
+    /// what makes it. zo records a login's project the first time it sends a
+    /// Gemini request with that login, and the next read finds it.
+    fn sentence(&self) -> String {
+        match self {
+            Self::Unnamed => "Google이 이 로그인의 Antigravity 프로젝트를 알려 주지 않았고 zo에도 기록이 없습니다 — zo에서 Gemini 모델을 한 번 쓰면 zo가 프로젝트를 기록합니다".to_string(),
+            Self::NotOnboarded => "이 Google 로그인은 아직 Antigravity 프로젝트가 없습니다 — zo에서 Gemini 모델을 한 번 쓰면 만들어집니다".to_string(),
+            Self::NotEligible(reasons) => {
+                format!("Google이 이 계정에 Antigravity 프로젝트를 주지 않습니다 — {reasons}")
+            }
+        }
+    }
+}
+
+/// The tier Google offers by default: the one marked default, else the first
+/// (zo's `default_allowed_tier`).
+fn default_allowed_tier(load: &serde_json::Value) -> Option<&serde_json::Value> {
+    let tiers = load.get("allowedTiers")?.as_array()?;
+    tiers
+        .iter()
+        .find(|tier| {
+            tier.get("isDefault")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .or_else(|| tiers.first())
+}
+
+/// Google's reasons against the tiers this login may not take, worded as zo
+/// words them (`ineligible_or_project_required`): `tier: reason`, joined by
+/// `; `. `None` when it lists none.
+fn ineligible_reasons(load: &serde_json::Value) -> Option<String> {
+    let said: Vec<String> = load
+        .get("ineligibleTiers")?
+        .as_array()?
+        .iter()
+        .map(|tier| {
+            let name = tier
+                .get("tierName")
+                .or_else(|| tier.get("tierId"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tier");
+            let reason = tier
+                .get("reasonMessage")
+                .or_else(|| tier.get("validationErrorMessage"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("ineligible");
+            format!("{name}: {reason}")
+        })
+        .collect();
+    (!said.is_empty()).then(|| said.join("; "))
+}
+
+/// The status of a reading with no project to read. Its own word: the bar says
+/// it as neither a failure nor a refusal.
+const NO_PROJECT: &str = "no_project";
+
+/// Google named no project and none can be read. Not a failure — the read went
+/// through, and this is its answer — so it names no failure kind and asks for
+/// no retry: the bar says the project is not set, and the sentence says why.
+fn no_project(missing: &NoProject, now: i64) -> ProviderUsage {
+    answer(NO_PROJECT, Some(missing.sentence()), now)
 }
 
 /// One quota bucket as the API speaks it, shape-checked the way Orca
@@ -409,8 +541,11 @@ fn access_token(
 
 /// One read: the reading, and the refusal behind it when Google refused a call.
 /// A refused login is not renewed and the refused call is not sent again.
+/// `configured` is the project the configuration names, which also picks the
+/// record of zo's that answers for it.
 fn scan_with(
     path: Option<&Path>,
+    configured: Option<&str>,
     now: i64,
     wire: &mut impl Wire,
 ) -> (ProviderUsage, Option<Refusal>) {
@@ -433,9 +568,14 @@ fn scan_with(
         );
     };
     let headers = AntigravityHeaders::new();
-    let project = match load_project_id(wire, &access_token, &headers, now) {
-        Ok(project) => project,
+    let load = match load_code_assist(wire, &access_token, &headers, now) {
+        Ok(load) => load,
         Err(stop) => return stop.into_read(now),
+    };
+    let remembered = || google_login::remembered_project(path, &credentials, configured);
+    let project = match project_of(&load, remembered, configured) {
+        Ok(project) => project,
+        Err(missing) => return (no_project(&missing, now), None),
     };
     match fetch_quota(wire, &access_token, &project, &headers, now) {
         Ok(usage) => (usage, None),
@@ -448,7 +588,8 @@ fn scan_with(
 /// with, for the window's log and nothing else.
 pub(crate) fn scan(now: i64) -> (ProviderUsage, Option<Refusal>) {
     let path = google_login::credentials_path();
-    scan_with(path.as_deref(), now, &mut LiveWire)
+    let configured = google_login::configured_project();
+    scan_with(path.as_deref(), configured.as_deref(), now, &mut LiveWire)
 }
 
 #[cfg(test)]
@@ -551,6 +692,8 @@ mod tests {
         posts: Vec<PostedCall>,
         /// The call the server refuses, and the status it refuses with.
         refusal: Option<(&'static str, u16)>,
+        /// What `loadCodeAssist` answers — a synthetic shape of Google's.
+        load: serde_json::Value,
     }
 
     impl Wire for FakeWire {
@@ -587,7 +730,7 @@ mod tests {
                 });
             }
             if url == LOAD_CODE_ASSIST_URL {
-                Ok(serde_json::json!({ "cloudaicompanionProject": "project-a" }))
+                Ok(self.load.clone())
             } else {
                 Ok(serde_json::json!({ "buckets": [{
                     "remainingFraction": 0.5,
@@ -603,14 +746,245 @@ mod tests {
             refreshes: 0,
             posts: Vec::new(),
             refusal: None,
+            load: serde_json::json!({ "cloudaicompanionProject": "project-a" }),
         }
+    }
+
+    /// A live login on file whose refresh token the tests can fingerprint,
+    /// and the project record zo keeps beside it, when there is one.
+    fn login_on_file(dir: &Path, record: Option<serde_json::Value>) -> std::path::PathBuf {
+        let path = dir.join("credentials.json");
+        let mut root = serde_json::json!({
+            "google_code_assist_oauth": {
+                "accessToken": "live-access",
+                "refreshToken": "refresh-me",
+                "expiresAt": 9_999_999_999_u64
+            }
+        });
+        if let Some(record) = record {
+            root["google_code_assist_project"] = record;
+        }
+        std::fs::write(&path, root.to_string()).expect("credentials");
+        path
+    }
+
+    const NOW: i64 = 1_800_000_000_000;
+
+    /// The quota call's project, when one went out.
+    fn asked_project(wire: &FakeWire) -> Option<serde_json::Value> {
+        wire.posts
+            .iter()
+            .find(|posted| posted.url == RETRIEVE_QUOTA_URL)
+            .map(|posted| posted.body["project"].clone())
+    }
+
+    /// Google spells the project two ways — the id itself, or an object
+    /// carrying it — and the quota is asked for that project either way
+    /// (t-72144). An empty id, or an object with none, is no project.
+    #[test]
+    fn the_project_is_read_off_either_spelling_google_answers_with() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = login_on_file(dir.path(), None);
+        let tier = serde_json::json!({ "id": "free-tier" });
+        for (load, project) in [
+            (
+                serde_json::json!({ "currentTier": tier, "cloudaicompanionProject": "project-a" }),
+                Some("project-a"),
+            ),
+            (
+                serde_json::json!({
+                    "currentTier": tier,
+                    "cloudaicompanionProject": { "id": "project-b", "name": "synthetic" }
+                }),
+                Some("project-b"),
+            ),
+            (
+                serde_json::json!({ "currentTier": tier, "cloudaicompanionProject": "" }),
+                None,
+            ),
+            (
+                serde_json::json!({
+                    "currentTier": tier,
+                    "cloudaicompanionProject": { "name": "synthetic" }
+                }),
+                None,
+            ),
+        ] {
+            let mut wire = FakeWire {
+                load: load.clone(),
+                ..fake_wire()
+            };
+            let (held, refusal) = scan_with(Some(&path), None, NOW, &mut wire);
+            assert_eq!(refusal, None);
+            match project {
+                Some(project) => {
+                    assert_eq!(held.status, "ok", "{load} read as {:?}", held.error);
+                    assert_eq!(asked_project(&wire), Some(serde_json::json!(project)));
+                }
+                None => {
+                    assert_eq!(held.status, "no_project", "{load} read as {:?}", held.error);
+                    assert_eq!(asked_project(&wire), None, "{load} asked a quota");
+                }
+            }
+        }
+    }
+
+    /// When Google's answer names no project, the gauge reads the one zo
+    /// resolved for this same login under this same configuration — zo's
+    /// project record, matched by grant and configured project the way zo
+    /// matches it (t-72144). Another login's record is not this login's, and
+    /// neither is one made under another configuration: there, the configured
+    /// project stands in, as it does in zo for a login with a tier.
+    #[test]
+    fn a_login_google_names_no_project_for_reads_the_one_zo_recorded_for_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let grant = google_login::grant_fingerprint("refresh-me");
+        let unnamed = serde_json::json!({
+            "currentTier": { "id": "free-tier" },
+            "allowedTiers": [{ "id": "free-tier", "isDefault": true }]
+        });
+        for (record, configured, project) in [
+            (
+                serde_json::json!({ "grant": grant, "configured_project": null, "project": "zo-project" }),
+                None,
+                Some("zo-project"),
+            ),
+            (
+                serde_json::json!({ "grant": grant, "configured_project": "configured-project", "project": "zo-project" }),
+                Some("configured-project"),
+                Some("zo-project"),
+            ),
+            (
+                serde_json::json!({ "grant": grant, "configured_project": null, "project": "zo-project" }),
+                Some("configured-project"),
+                Some("configured-project"),
+            ),
+            (
+                serde_json::json!({ "grant": "0123456789abcdef", "configured_project": null, "project": "theirs" }),
+                None,
+                None,
+            ),
+        ] {
+            let path = login_on_file(dir.path(), Some(record.clone()));
+            let mut wire = FakeWire {
+                load: unnamed.clone(),
+                ..fake_wire()
+            };
+            let (held, _) = scan_with(Some(&path), configured, NOW, &mut wire);
+            match project {
+                Some(project) => {
+                    assert_eq!(held.status, "ok", "{record} read as {:?}", held.error);
+                    assert_eq!(asked_project(&wire), Some(serde_json::json!(project)));
+                }
+                None => {
+                    assert_eq!(
+                        held.status, "no_project",
+                        "{record} read as {:?}",
+                        held.error
+                    );
+                    assert_eq!(asked_project(&wire), None, "{record} asked a quota");
+                }
+            }
+        }
+    }
+
+    /// A project the configuration names stands in only where zo's own order
+    /// takes it: for a login Google gives a tier and names no project for. A
+    /// login with no tier yet is not given one by naming a project — that is
+    /// onboarding, a write this gauge never makes.
+    #[test]
+    fn a_configured_project_stands_in_only_for_a_login_with_a_tier() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = login_on_file(dir.path(), None);
+        let mut tiered = FakeWire {
+            load: serde_json::json!({ "currentTier": { "id": "standard-tier" } }),
+            ..fake_wire()
+        };
+        let (held, _) = scan_with(Some(&path), Some("configured-project"), NOW, &mut tiered);
+        assert_eq!(held.status, "ok", "{:?}", held.error);
+        assert_eq!(
+            asked_project(&tiered),
+            Some(serde_json::json!("configured-project"))
+        );
+
+        let mut untiered = FakeWire {
+            load: serde_json::json!({ "allowedTiers": [{ "id": "standard-tier", "isDefault": true }] }),
+            ..fake_wire()
+        };
+        let (held, _) = scan_with(Some(&path), Some("configured-project"), NOW, &mut untiered);
+        assert_eq!(held.status, "no_project", "{:?}", held.error);
+        assert_eq!(asked_project(&untiered), None);
+    }
+
+    /// With no project to read anywhere, the gauge says why in the words of
+    /// Google's own answer, and asks nothing more: no quota call, no renewed
+    /// login, no failure kind, and never 「read failed — retry」 (t-72144). A
+    /// login with no tier yet, one Google gives a tier but no project, and one
+    /// Google lists reasons against are three different sentences.
+    #[test]
+    fn with_no_project_to_read_the_gauge_says_why_and_asks_nothing_more() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = login_on_file(dir.path(), None);
+        let reason = "synthetic: not offered to this account";
+        let mut said = Vec::new();
+        for load in [
+            serde_json::json!({ "currentTier": { "id": "standard-tier" } }),
+            serde_json::json!({}),
+            serde_json::json!({ "allowedTiers": [{ "id": "free-tier", "isDefault": true }] }),
+            serde_json::json!({
+                "allowedTiers": [{ "id": "standard-tier", "isDefault": true }],
+                "ineligibleTiers": [{ "tierName": "Synthetic Tier", "reasonMessage": reason }]
+            }),
+        ] {
+            let mut wire = FakeWire {
+                load: load.clone(),
+                ..fake_wire()
+            };
+            let (held, refusal) = scan_with(Some(&path), None, NOW, &mut wire);
+            assert_eq!(refusal, None);
+            assert_eq!(held.status, "no_project", "{load} read as {:?}", held.error);
+            assert_eq!(held.failure_kind, None, "{load} named a failure kind");
+            assert_eq!(wire.posts.len(), 1, "{load} asked more than loadCodeAssist");
+            assert_eq!(wire.refreshes, 0);
+            let sentence = held.error.clone().expect("a no-project read says why");
+            for secret in ["live-access", "refresh-me"] {
+                assert!(
+                    !sentence.contains(secret),
+                    "the sentence carries `{secret}`"
+                );
+            }
+            let line = crate::usage_runtime::usage_read_line(
+                "antigravity",
+                crate::usage_runtime::UsageRoad::Api,
+                12,
+                Some(&held),
+                false,
+            );
+            assert_eq!(line, "usage antigravity road=api ms=12 status=no_project");
+            said.push(sentence);
+        }
+        assert_eq!(said[0], said[1], "two answers naming no project read apart");
+        assert_ne!(
+            said[0], said[2],
+            "a login with no tier yet read as one with a tier"
+        );
+        assert!(
+            said[3].contains(&format!("Synthetic Tier: {reason}")),
+            "Google's reason is not in the sentence: {}",
+            said[3]
+        );
     }
 
     #[test]
     fn missing_zo_google_login_is_signed_out() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut wire = fake_wire();
-        let (held, _) = scan_with(Some(&dir.path().join("credentials.json")), 7, &mut wire);
+        let (held, _) = scan_with(
+            Some(&dir.path().join("credentials.json")),
+            None,
+            7,
+            &mut wire,
+        );
         assert_eq!(held.provider, "antigravity");
         assert_eq!(held.status, "signed_out");
         // And the sentence points at the surface that fixes it, because this
@@ -638,7 +1012,7 @@ mod tests {
         std::fs::write(&path, original).expect("credentials");
         let mut wire = fake_wire();
 
-        let (held, _) = scan_with(Some(&path), 1_800_000_000_000, &mut wire);
+        let (held, _) = scan_with(Some(&path), None, 1_800_000_000_000, &mut wire);
 
         assert_eq!(held.status, "ok", "{:?}", held.error);
         assert_eq!(wire.refreshes, 1, "the 60-second refresh margin moved");
@@ -707,7 +1081,7 @@ mod tests {
                 refusal: Some((refused, status)),
                 ..fake_wire()
             };
-            let (held, refusal) = scan_with(Some(&path), now, &mut wire);
+            let (held, refusal) = scan_with(Some(&path), None, now, &mut wire);
             assert_eq!(
                 refusal,
                 Some(Refusal { status, call }),
@@ -756,7 +1130,7 @@ mod tests {
             refusal: Some((LOAD_CODE_ASSIST_URL, 401)),
             ..fake_wire()
         };
-        let (held, refusal) = scan_with(Some(&path), 1_800_000_000_000, &mut wire);
+        let (held, refusal) = scan_with(Some(&path), None, 1_800_000_000_000, &mut wire);
         let refusal = refusal.expect("the refusal was not named");
         let line = crate::usage_runtime::usage_read_line(
             "antigravity",

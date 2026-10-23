@@ -139,29 +139,32 @@ pub const SKILL_YES: &str = "The condition is supported by the request and skill
 pub const SKILL_NO: &str = "The condition is not supported, or there is not enough information.";
 
 #[must_use]
-pub fn skill_suggestion_rubric_fingerprint() -> String {
-    super::rubric_fingerprint(|| {
+pub fn skill_suggestion_rubric_words() -> String {
+    [
+        SKILL_STATE_KEYS.join(","),
+        SKILL_ENTRY_KEYS.join(","),
+        [SKILL_SHORTLIST_KEY, SKILL_EXCERPT_KEY].join(","),
         [
-            SKILL_STATE_KEYS.join(","),
-            SKILL_ENTRY_KEYS.join(","),
-            [SKILL_SHORTLIST_KEY, SKILL_EXCERPT_KEY].join(","),
-            [
-                SKILL_WIDE_QUESTION,
-                SKILL_NARROW_QUESTION,
-                SKILL_OPTION,
-                SKILL_NO_MATCH,
-                SKILL_NO_MATCH_CRITERION,
-                SKILL_ACTS_ON_SYSTEM,
-                SKILL_FOLLOWS_PROCEDURE,
-                SKILL_PROSE_SUFFICES,
-                SKILL_FITS,
-                SKILL_YES,
-                SKILL_NO,
-            ]
-            .join("\n"),
+            SKILL_WIDE_QUESTION,
+            SKILL_NARROW_QUESTION,
+            SKILL_OPTION,
+            SKILL_NO_MATCH,
+            SKILL_NO_MATCH_CRITERION,
+            SKILL_ACTS_ON_SYSTEM,
+            SKILL_FOLLOWS_PROCEDURE,
+            SKILL_PROSE_SUFFICES,
+            SKILL_FITS,
+            SKILL_YES,
+            SKILL_NO,
         ]
-        .join("\n")
-    })
+        .join("\n"),
+    ]
+    .join("\n")
+}
+
+#[must_use]
+pub fn skill_suggestion_rubric_fingerprint() -> String {
+    super::rubric_fingerprint(skill_suggestion_rubric_words)
 }
 pub const VAULT_PAIR_LINK_LEVELS: [&str; 3] = [
     "The pages are about different ideas.",
@@ -179,21 +182,24 @@ pub const VAULT_PAIR_REPLACES: &str = "Does either page say it replaces or corre
 
 /// One fingerprint across all four atomic questions and every criterion.
 #[must_use]
+pub fn vault_pair_rubric_words() -> String {
+    [
+        VAULT_PAIR_LINK_QUESTION,
+        VAULT_PAIR_LINK_LEVELS[0],
+        VAULT_PAIR_LINK_LEVELS[1],
+        VAULT_PAIR_LINK_LEVELS[2],
+        VAULT_PAIR_SAME_CLAIM,
+        VAULT_PAIR_OPPOSITE_CLAIM,
+        VAULT_PAIR_REPLACES,
+        VAULT_PAIR_YES,
+        VAULT_PAIR_NO,
+    ]
+    .join("\n")
+}
+
+#[must_use]
 pub fn vault_pair_rubric_fingerprint() -> String {
-    super::rubric_fingerprint(|| {
-        [
-            VAULT_PAIR_LINK_QUESTION,
-            VAULT_PAIR_LINK_LEVELS[0],
-            VAULT_PAIR_LINK_LEVELS[1],
-            VAULT_PAIR_LINK_LEVELS[2],
-            VAULT_PAIR_SAME_CLAIM,
-            VAULT_PAIR_OPPOSITE_CLAIM,
-            VAULT_PAIR_REPLACES,
-            VAULT_PAIR_YES,
-            VAULT_PAIR_NO,
-        ]
-        .join("\n")
-    })
+    super::rubric_fingerprint(vault_pair_rubric_words)
 }
 
 // ---- zo's routing seat (t-6346, routing 2판) --------------------------------
@@ -554,46 +560,49 @@ pub const ROUTING_FACTS: [Fact; 6] = [
 /// the levels, every option's contrast and examples, and every fact with its
 /// yes line — the line is part of what a row's answer means.
 #[must_use]
+pub fn routing_rubric_words() -> String {
+    let mut words: Vec<String> = vec![
+        ROUTING_STATE_TASK.into(),
+        ROUTING_STATE_FACTS.into(),
+        ROUTING_FACT_RETRY.into(),
+    ];
+    words.push(ROUTING_COMPLEXITY_QUESTION.into());
+    words.extend(
+        ROUTING_COMPLEXITY_LEVELS
+            .iter()
+            .map(|level| (*level).to_string()),
+    );
+    words.push(ROUTING_RISK_QUESTION.into());
+    words.extend(ROUTING_RISK_LEVELS.iter().map(|level| (*level).to_string()));
+    let contrast = |option: &Contrast| {
+        format!(
+            "{}|{}|{}|{}",
+            option.word,
+            option.what,
+            option.not_for,
+            option.examples.join("|")
+        )
+    };
+    words.push(ROUTING_INTENT_QUESTION.into());
+    words.extend(
+        ROUTING_INTENTS
+            .iter()
+            .map(|intent| format!("{}>{}", contrast(&intent.option), intent.folds_to)),
+    );
+    words.push(ROUTING_REASONING_QUESTION.into());
+    words.extend(ROUTING_REASONING.iter().map(contrast));
+    words.extend(ROUTING_FACTS.iter().map(|fact| {
+        format!(
+            "{}|{}|{}|{}|{}",
+            fact.id, fact.instructions, fact.yes, fact.no, fact.yes_from_permille
+        )
+    }));
+    words.join("\n")
+}
+
+#[must_use]
 pub fn routing_rubric_fingerprint() -> String {
-    super::rubric_fingerprint(|| {
-        let mut words: Vec<String> = vec![
-            ROUTING_STATE_TASK.into(),
-            ROUTING_STATE_FACTS.into(),
-            ROUTING_FACT_RETRY.into(),
-        ];
-        words.push(ROUTING_COMPLEXITY_QUESTION.into());
-        words.extend(
-            ROUTING_COMPLEXITY_LEVELS
-                .iter()
-                .map(|level| (*level).to_string()),
-        );
-        words.push(ROUTING_RISK_QUESTION.into());
-        words.extend(ROUTING_RISK_LEVELS.iter().map(|level| (*level).to_string()));
-        let contrast = |option: &Contrast| {
-            format!(
-                "{}|{}|{}|{}",
-                option.word,
-                option.what,
-                option.not_for,
-                option.examples.join("|")
-            )
-        };
-        words.push(ROUTING_INTENT_QUESTION.into());
-        words.extend(
-            ROUTING_INTENTS
-                .iter()
-                .map(|intent| format!("{}>{}", contrast(&intent.option), intent.folds_to)),
-        );
-        words.push(ROUTING_REASONING_QUESTION.into());
-        words.extend(ROUTING_REASONING.iter().map(contrast));
-        words.extend(ROUTING_FACTS.iter().map(|fact| {
-            format!(
-                "{}|{}|{}|{}|{}",
-                fact.id, fact.instructions, fact.yes, fact.no, fact.yes_from_permille
-            )
-        }));
-        words.join("\n")
-    })
+    super::rubric_fingerprint(routing_rubric_words)
 }
 
 /* ---- what an order to an agent is: the screen's guard and the tool text guard ---- */
@@ -684,17 +693,20 @@ pub const TOOL_TEXT_INSTRUCTED_NO: &str = concat!(
 /// One fingerprint over the tool text guard's question, its criteria and the
 /// state keys it reads.
 #[must_use]
+pub fn tool_text_guard_rubric_words() -> String {
+    [
+        INSTRUCTED,
+        TOOL_TEXT_INSTRUCTED_ASKS,
+        TOOL_TEXT_INSTRUCTED_YES,
+        TOOL_TEXT_INSTRUCTED_NO,
+        &TOOL_TEXT_GUARD_STATE_KEYS.join(","),
+    ]
+    .join("\n")
+}
+
+#[must_use]
 pub fn tool_text_guard_rubric_fingerprint() -> String {
-    super::rubric_fingerprint(|| {
-        [
-            INSTRUCTED,
-            TOOL_TEXT_INSTRUCTED_ASKS,
-            TOOL_TEXT_INSTRUCTED_YES,
-            TOOL_TEXT_INSTRUCTED_NO,
-            &TOOL_TEXT_GUARD_STATE_KEYS.join(","),
-        ]
-        .join("\n")
-    })
+    super::rubric_fingerprint(tool_text_guard_rubric_words)
 }
 
 /* ---- the command guard (t-6348) --------------------------------------------- */
@@ -761,15 +773,18 @@ pub const COMMAND_GUARD_QUESTIONS: [[&str; 4]; 2] = [
 
 /// One fingerprint over both Nouls, their criteria and the state keys.
 #[must_use]
+pub fn command_guard_rubric_words() -> String {
+    let mut words: Vec<String> = COMMAND_GUARD_QUESTIONS
+        .iter()
+        .flat_map(|question| question.iter().map(|word| (*word).to_string()))
+        .collect();
+    words.push(COMMAND_GUARD_STATE_KEYS.join(","));
+    words.join("\n")
+}
+
+#[must_use]
 pub fn command_guard_rubric_fingerprint() -> String {
-    super::rubric_fingerprint(|| {
-        let mut words: Vec<String> = COMMAND_GUARD_QUESTIONS
-            .iter()
-            .flat_map(|question| question.iter().map(|word| (*word).to_string()))
-            .collect();
-        words.push(COMMAND_GUARD_STATE_KEYS.join(","));
-        words.join("\n")
-    })
+    super::rubric_fingerprint(command_guard_rubric_words)
 }
 
 /* ---- the reflex decision (t-9205) ------------------------------------------- */
@@ -856,31 +871,34 @@ pub fn reflex_ahead_instructions(supposes: &str) -> String {
 /// One fingerprint over the question, its options, the state it reads and
 /// the branches it is asked ahead of.
 #[must_use]
+pub fn reflex_decide_rubric_words() -> String {
+    let mut words = vec![
+        REFLEX_DECIDE_QUESTION.to_string(),
+        REFLEX_DECIDE_ASKS.to_string(),
+    ];
+    for (word, covers) in REFLEX_DECIDE_OPTIONS {
+        words.push(word.to_string());
+        words.push(covers.to_string());
+    }
+    words.push(REFLEX_DECIDE_STATE_KEYS.join(","));
+    words.extend(
+        [
+            REFLEX_DECIDE_ASKS_WHAT,
+            REFLEX_AHEAD_SUPPOSE,
+            REFLEX_AHEAD_ASKS_WHAT,
+        ]
+        .map(str::to_string),
+    );
+    for (word, supposes) in REFLEX_DECIDE_BRANCHES {
+        words.push(word.to_string());
+        words.push(supposes.to_string());
+    }
+    words.join("\n")
+}
+
+#[must_use]
 pub fn reflex_decide_rubric_fingerprint() -> String {
-    super::rubric_fingerprint(|| {
-        let mut words = vec![
-            REFLEX_DECIDE_QUESTION.to_string(),
-            REFLEX_DECIDE_ASKS.to_string(),
-        ];
-        for (word, covers) in REFLEX_DECIDE_OPTIONS {
-            words.push(word.to_string());
-            words.push(covers.to_string());
-        }
-        words.push(REFLEX_DECIDE_STATE_KEYS.join(","));
-        words.extend(
-            [
-                REFLEX_DECIDE_ASKS_WHAT,
-                REFLEX_AHEAD_SUPPOSE,
-                REFLEX_AHEAD_ASKS_WHAT,
-            ]
-            .map(str::to_string),
-        );
-        for (word, supposes) in REFLEX_DECIDE_BRANCHES {
-            words.push(word.to_string());
-            words.push(supposes.to_string());
-        }
-        words.join("\n")
-    })
+    super::rubric_fingerprint(reflex_decide_rubric_words)
 }
 
 /* ---- a press whose place another window hides (t-12979) --------------------- */
@@ -985,31 +1003,34 @@ pub const COVER_REVERSIBLE_NO: &str = "No: what is in front blocks the target's 
 /// One fingerprint over the four questions, their options and the state
 /// they read.
 #[must_use]
+pub fn cover_rubric_words() -> String {
+    let mut words: Vec<String> = [
+        COVER_COVERED,
+        COVER_COVERED_ASKS,
+        COVER_COVERED_YES,
+        COVER_COVERED_NO,
+        COVER_KIND,
+        COVER_KIND_ASKS,
+        COVER_MOVE,
+        COVER_MOVE_ASKS,
+        COVER_REVERSIBLE,
+        COVER_REVERSIBLE_ASKS,
+        COVER_REVERSIBLE_YES,
+        COVER_REVERSIBLE_NO,
+    ]
+    .map(str::to_string)
+    .to_vec();
+    for (word, covers) in COVER_KINDS.iter().chain(&COVER_MOVES) {
+        words.push((*word).to_string());
+        words.push((*covers).to_string());
+    }
+    words.push(COVER_STATE_KEYS.join(","));
+    words.join("\n")
+}
+
+#[must_use]
 pub fn cover_rubric_fingerprint() -> String {
-    super::rubric_fingerprint(|| {
-        let mut words: Vec<String> = [
-            COVER_COVERED,
-            COVER_COVERED_ASKS,
-            COVER_COVERED_YES,
-            COVER_COVERED_NO,
-            COVER_KIND,
-            COVER_KIND_ASKS,
-            COVER_MOVE,
-            COVER_MOVE_ASKS,
-            COVER_REVERSIBLE,
-            COVER_REVERSIBLE_ASKS,
-            COVER_REVERSIBLE_YES,
-            COVER_REVERSIBLE_NO,
-        ]
-        .map(str::to_string)
-        .to_vec();
-        for (word, covers) in COVER_KINDS.iter().chain(&COVER_MOVES) {
-            words.push((*word).to_string());
-            words.push((*covers).to_string());
-        }
-        words.push(COVER_STATE_KEYS.join(","));
-        words.join("\n")
-    })
+    super::rubric_fingerprint(cover_rubric_words)
 }
 
 #[cfg(test)]

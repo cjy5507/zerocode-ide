@@ -497,6 +497,8 @@ pub(crate) fn base_url() -> String {
 /// it answered over — what every Jev ledger row the window writes carries.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Spent {
+    /// The edited question rubric carried by this request.
+    pub decision_rubric: Option<u32>,
     pub requests: u32,
     pub redacted_lines: usize,
     pub input_tokens: Option<u64>,
@@ -529,9 +531,11 @@ impl Spent {
     /// seat writes its own words and hands its row here — so a seat cannot
     /// forget the version, and a row nothing answered carries none.
     pub fn stamp(&self, row: &mut Value) {
+        stamp_decision_rubric(row, self.decision_rubric);
         let Some(fields) = row.as_object_mut() else {
             return;
         };
+
         fields.insert(REQUESTS_KEY.to_string(), json!(self.requests));
         fields.insert(REDACTED_LINES_KEY.to_string(), json!(self.redacted_lines));
         fields.insert(
@@ -574,6 +578,7 @@ impl Spent {
     #[must_use]
     pub fn rider(&self) -> Self {
         Self {
+            decision_rubric: self.decision_rubric,
             requests: 0,
             redacted_lines: 0,
             input_tokens: Some(0),
@@ -598,8 +603,17 @@ impl Spent {
             output_tokens: Some(0),
             ..Self::default()
         };
+        let mut rubric: Option<Option<u32>> = None;
         let mut route: Option<Option<&str>> = None;
         let mut all = asks.into_iter().fold(empty, |mut all, one| {
+            let current = one.decision_rubric;
+            rubric = Some(rubric.map_or(current, |prior| {
+                if prior == current {
+                    prior
+                } else {
+                    Some(u32::MAX)
+                }
+            }));
             if one.requests > 0 {
                 all.input_tokens = all
                     .input_tokens
@@ -622,8 +636,19 @@ impl Spent {
             }
             all
         });
+        all.decision_rubric = rubric.flatten();
         all.route = route.flatten().map(str::to_string);
         all
+    }
+}
+
+/// Preserve the evaluation wording identity on every ledger writer.
+pub fn stamp_decision_rubric(row: &mut Value, rubric: Option<u32>) {
+    if let (Some(fields), Some(rubric)) = (row.as_object_mut(), rubric) {
+        fields.insert(
+            zerocode_core::jev::builtin::RUBRIC_KEY.to_string(),
+            json!(rubric),
+        );
     }
 }
 
@@ -751,14 +776,30 @@ impl Wire {
 
     /// This machine's wire, reading nothing yet: the keychain when a question
     /// is asked, the settings file when the door or a switch is read.
+    /// Unit tests have an empty implicit machine. Cases that ask a server
+    /// supply their own keys, settings and socket through `reading` or `at`;
+    /// a developer's keyless local provider must never answer a test's turn.
     #[must_use]
     pub fn of_this_machine() -> Self {
-        Self {
-            keys: KeySource::Keychain,
-            base: base_url(),
-            settings: crate::api_routers::zo_settings_path(),
-            socket: &SOCKET,
-            review_origin: None,
+        if cfg!(test) {
+            Self {
+                keys: KeySource::Read {
+                    name: String::new(),
+                    key: None,
+                },
+                base: base_url(),
+                settings: None,
+                socket: &SOCKET,
+                review_origin: None,
+            }
+        } else {
+            Self {
+                keys: KeySource::Keychain,
+                base: base_url(),
+                settings: crate::api_routers::zo_settings_path(),
+                socket: &SOCKET,
+                review_origin: None,
+            }
         }
     }
 
@@ -874,6 +915,7 @@ impl Wire {
         let settings = JevSettings::from_root(&root).resolved();
         settings.enabled
             && settings.model == allowed.model
+            && settings.decisions == allowed.decisions
             && row.mode_in(&root) == mode
             && workspace.is_some_and(|path| settings.consents(&door::resolved_path(path)))
     }
@@ -1117,6 +1159,7 @@ impl Wire {
         if allowed.model != provider.identity() {
             return refused(Refused::SettingsChanged);
         }
+        let decision_rubric = cleared.decision_rubric();
         let request_bytes = cleared.bytes().len();
         let redacted_lines = cleared.withheld_lines();
         if let Some(remembered) = memo
@@ -1131,6 +1174,7 @@ impl Wire {
                     Err(Refused::SettingsChanged.token().to_string())
                 },
                 spent: Spent {
+                    decision_rubric,
                     requests: 0,
                     redacted_lines,
                     input_tokens: Some(0),
@@ -1157,6 +1201,7 @@ impl Wire {
                 return Asked {
                     answer: Err(reason.token().to_string()),
                     spent: Spent {
+                        decision_rubric,
                         redacted_lines,
                         ..Spent::default()
                     },
@@ -1191,6 +1236,7 @@ impl Wire {
             .and_then(|body| serde_json::from_str::<Value>(body).ok())
             .and_then(|body| body.get("usage").cloned());
         let spent = Spent {
+            decision_rubric,
             requests: u32::from(attempted),
             redacted_lines,
             input_tokens: usage

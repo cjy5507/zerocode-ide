@@ -19155,7 +19155,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "inbox",
-        "[--limit <n>] [--address <a>] · every run's mail, newest first — an audit, never a delivery",
+        "[--limit <n>] [--address <a>] · this project's mail, newest first — an audit, never a delivery",
         Doing::FreshRead,
     ),
     (
@@ -21082,6 +21082,8 @@ fn plan_inner(
     };
     within_bounds(&words)?;
 
+    project_scope::require_project(ledger, argv, &team.id, pane, actor, project)?;
+
     // A retry is answered with the first answer, not by doing the thing again.
     // Every mutation carries this: an agent whose connection dropped mid-verb
     // does not know whether the worker started, and the only safe way to ask
@@ -21680,7 +21682,12 @@ fn plan_inner(
                 Some(raw) => Some(page_limit(raw)?),
                 None => None,
             };
-            let newest: Vec<&Run> = ledger.runs().iter().rev().collect();
+            let newest: Vec<&Run> = ledger
+                .runs()
+                .iter()
+                .rev()
+                .filter(|run| project_scope::visible_to(run, project, &team.id, pane))
+                .collect();
             let from = match words.value("--cursor") {
                 Some(after) => {
                     newest
@@ -22618,7 +22625,10 @@ fn plan_inner(
             let model = model.or_else(|| profile.as_ref().map(|p| p.model.clone()));
             let effort = effort.or_else(|| profile.as_ref().map(|p| p.effort.clone()));
             let laddered = chosen
-                .filter(|_| effort.is_none())
+                // An inferred effort needs a selected model to apply to.
+                // With neither a model nor a profile, leave the CLI's dials
+                // open instead of manufacturing an invalid explicit request.
+                .filter(|_| effort.is_none() && model.is_some())
                 .and_then(|d| difficulty_effort(&agent, d));
             let effort = effort.or_else(|| laddered.map(str::to_string));
             // The dials say what set the effort even beside a model the
@@ -22907,7 +22917,14 @@ fn plan_inner(
                     look: difficulty_look,
                     teacher_effort,
                     baseline_high,
-                    receipt: difficulty_receipt,
+                    receipt: difficulty_receipt.map(|mut receipt| {
+                        if model.is_none() {
+                            // The answer set no launch dial when the CLI kept
+                            // its own model and effort defaults.
+                            receipt["applied"] = serde_json::json!(false);
+                        }
+                        receipt
+                    }),
                 });
             prepared_worker_start.summon_shadow = said.map(|words| {
                 let (brief, brief_chars) = crate::summon_choice::brief_shape(words);
@@ -23999,7 +24016,11 @@ fn plan_inner(
             };
             let address = words.value("--address");
             let mut held: Vec<(&Run, &Message)> = Vec::new();
-            for run in ledger.runs() {
+            for run in ledger
+                .runs()
+                .iter()
+                .filter(|run| project_scope::visible_to(run, project, &team.id, pane))
+            {
                 for message in run.messages() {
                     if address.is_some_and(|named| message.to != named && message.from != named) {
                         continue;
