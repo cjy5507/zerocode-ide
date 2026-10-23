@@ -551,5 +551,12 @@ pub async fn judge_plan(
     (plan, Judged { asked, dropped })
 }
 
+/// The editor reads the same instructions and option meanings as the request.
+#[must_use]
+pub fn question_definitions() -> Vec<zerocode_core::jev::builtin::QuestionDefinition> {
+    use zerocode_core::jev::builtin::QuestionDefinition as D;
+    vec![D::choice(&format!("{QUESTION_ID_PREFIX}*"), &format!("{INSTRUCTIONS_HEAD} `blocks[{{at}}]`?"), &[(COMPACTION_KEEP, KEEP_MEANS), (COMPACTION_DROP, DROP_MEANS)]).contextual()]
+}
+
 #[cfg(test)]
 mod tests;

@@ -1638,5 +1638,40 @@ impl ActionAsk {
     }
 }
 
+/// Structured editor fields, using the same words and answer keys as requests.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    use crate::jev::builtin::QuestionDefinition as D;
+    let mut options = vec![
+        (GIVE_UP, GOAL_GIVE_UP_MEANS),
+        (DONE, DONE_MEANS),
+        (MORE_CONTROLS, MORE_CONTROLS_MEANS),
+        (TYPE_TEXT, TYPE_TEXT_MEANS),
+    ];
+    options.extend(Navigation::ALL.map(|action| (action.word(), action.means())));
+    let mut definitions = vec![
+        D::choice(QUESTION, GOAL_INSTRUCTIONS, &options)
+            .contextual()
+            .dynamic_options(),
+        D::noul(
+            INSTRUCTED,
+            INSTRUCTED_INSTRUCTIONS,
+            INSTRUCTED_YES,
+            INSTRUCTED_NO,
+        ),
+        D::noul(WALLED, WALLED_INSTRUCTIONS, WALLED_YES, WALLED_NO),
+        D::choice(TYPE_TARGET, TYPE_TARGET_INSTRUCTIONS, &[]).dynamic_options(),
+    ];
+    definitions.extend(Observe::ALL.map(|head| {
+        D::choice(
+            head.head(),
+            head.instructions(),
+            &[(NONE, head.none_means())],
+        )
+        .dynamic_options()
+    }));
+    definitions
+}
+
 #[cfg(test)]
 mod tests;

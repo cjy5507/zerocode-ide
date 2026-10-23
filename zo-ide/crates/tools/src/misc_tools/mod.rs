@@ -12,6 +12,7 @@ mod skill_tools;
 mod smart_router;
 pub use smart_router::jev_summary;
 pub use smart_router::mention_rerank_rubric_words;
+pub use smart_router::mention_rerank_question_definitions;
 pub use smart_router::{custom_decide, CustomVerdict};
 mod specs;
 

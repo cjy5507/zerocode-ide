@@ -9298,12 +9298,17 @@
           <label class="jev-custom-field" for="jev-builtin-name"><span data-i18n="jev.custom.nameLegend">이름</span>
             <input class="jev-custom-input" id="jev-builtin-name" type="text" />
           </label>
+          <div class="jev-builtin-questions" id="jev-builtin-questions"></div>
+          <details class="jev-builtin-legacy" id="jev-builtin-legacy" hidden>
+            <summary data-i18n="jev.question.common">공통 판단 지침</summary>
+            <p class="jev-custom-about-line" data-i18n="jev.question.legacyAbout">이전에 저장한 공통 질문·기준을 유지합니다. 개별 문항을 수정하면 해당 문항의 설정을 우선합니다.</p>
           <label class="jev-custom-field" for="jev-builtin-question"><span data-i18n="jev.custom.questionLegend">질문</span>
             <textarea class="jev-custom-area" id="jev-builtin-question" rows="4"></textarea>
           </label>
           <label class="jev-custom-field" for="jev-builtin-criteria"><span data-i18n="jev.builtin.criteria">판단 기준</span>
             <textarea class="jev-custom-area" id="jev-builtin-criteria" rows="8"></textarea>
           </label>
+          </details>
           <fieldset class="jev-custom-field"><legend data-i18n="jev.builtin.mode">사용 방식</legend>
             <div class="jev-custom-mode" id="jev-builtin-mode" role="radiogroup" aria-label="사용 방식" data-i18n-aria="jev.builtin.mode"></div>
           </fieldset>

@@ -45490,6 +45490,32 @@ h4.knowledge-inspector-head::after {
   font-weight: var(--jev-weight-strong);
 }
 
+.jev-builtin-questions, .jev-builtin-legacy[open] {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.jev-builtin-question {
+  padding: var(--space-3);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+}
+
+.jev-builtin-question legend {
+  padding-inline: var(--space-2);
+}
+
+.jev-builtin-question code {
+  overflow-wrap: anywhere;
+}
+
+.jev-question-value select {
+  width: auto;
+  justify-self: end;
+  font-size: var(--jev-meta-size);
+}
+
 .jev-custom-field[data-refused] legend {
   color: var(--signal-halt);
 }

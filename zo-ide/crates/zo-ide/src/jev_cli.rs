@@ -313,6 +313,24 @@ fn builtin_definition_words(id: &str) -> Option<String> {
     definitions.iter().find(|(seat, _)| *seat == id).map(|(_, words)| words())
 }
 
+fn builtin_definition_questions(id: &str) -> Option<Vec<zerocode_core::jev::builtin::QuestionDefinition>> {
+    use zerocode_core::jev::{self, builtin::QuestionDefinition as D};
+    if let Some(questions) = jev::builtin::default_questions(id) { return Some(questions); }
+    let questions = match id {
+        id if id == jev::RECALL.id => runtime::memory::rerank::question_definitions(),
+        id if id == jev::SKILLS.id => runtime::skill_rank::search_question_definitions(),
+        id if id == jev::SKILL_SUGGESTION.id => runtime::skill_rank::suggestion_question_definitions(),
+        id if id == jev::COMPACTION.id => runtime::compaction_relevance::question_definitions(),
+        id if id == jev::MODEL_TIERS.id => vec![D::score("place_*", runtime::model_router::TIER_INSTRUCTIONS, &runtime::model_router::tier_levels()).contextual()],
+        id if id == jev::MENTION_RERANK.id => tools::mention_rerank_question_definitions(),
+        id if id == jev::PATCH_REVIEW.id => D::from_questions(serde_json::to_value(runtime::patch_review::questions()).ok()?).ok()?,
+        id if id == jev::ZO_STEP_EFFORT.id => D::from_questions(serde_json::to_value(runtime::step_questions()).ok()?).ok()?,
+        id if id == jev::ROUTING.id => D::from_questions(serde_json::to_value(runtime::routing_questions()).ok()?).ok()?,
+        _ => return None,
+    };
+    Some(questions)
+}
+
 /// What the command printed, and the exit code that says the answer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
@@ -328,7 +346,8 @@ pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Re
     match parse(args)? {
         Request::Definition { id, json } => {
             let words = builtin_definition_words(&id).ok_or_else(|| Refused { message: "builtin_decision_definition_unavailable".to_string(), exit: SUMMARY_REFUSED_EXIT })?;
-            Ok(Report { text: if json { serde_json::json!({"id": id, "words": words}).to_string() } else { words }, exit: 0 })
+            let questions = builtin_definition_questions(&id).ok_or_else(|| Refused { message: "builtin_decision_definition_unavailable".to_string(), exit: SUMMARY_REFUSED_EXIT })?;
+            Ok(Report { text: if json { serde_json::json!({"id": id, "words": words, "questions": questions}).to_string() } else { words }, exit: 0 })
         }
         Request::Learning(request) => learning::run(&request, &runtime::default_config_home(), now_ms),
         Request::Rules(request) => rules::run(&request, cwd, &runtime::default_config_home()),

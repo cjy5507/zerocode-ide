@@ -147,6 +147,20 @@ impl Move {
     }
 }
 
+/// The editor reads the same question and option meanings as the wire.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    let options = Move::ALL
+        .into_iter()
+        .map(|one| (one.word(), one.means()))
+        .collect::<Vec<_>>();
+    vec![crate::jev::builtin::QuestionDefinition::choice(
+        QUESTION,
+        INSTRUCTIONS,
+        &options,
+    )]
+}
+
 /// The words of the question, joined for [`crate::jev::rubric_fingerprint`].
 #[must_use]
 pub fn rubric_words() -> String {

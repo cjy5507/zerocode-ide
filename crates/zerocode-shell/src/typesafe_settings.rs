@@ -691,14 +691,13 @@ fn update_smart(
     })
 }
 
-/// The built-in editor reads the shipped words and the saved override apart.
+/// The editor keeps question structure and saved overrides separate.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BuiltinDecisionEditor {
     pub id: String,
     pub saved: zerocode_core::jev::builtin::Decision,
-    pub question: String,
-    pub criteria: String,
+    pub questions: Vec<zerocode_core::jev::builtin::QuestionDefinition>,
     pub can_edit_prompt: bool,
     pub dynamic: bool,
     pub mode: String,
@@ -706,13 +705,14 @@ pub struct BuiltinDecisionEditor {
     pub modes: Vec<ModeChoice>,
     pub name_max: usize,
     pub question_max: usize,
+    pub legacy_question_max: usize,
     pub criteria_max: usize,
 }
 
 pub fn builtin_decision_editor(
     path: &Path,
     id: &str,
-    words: &str,
+    questions: Vec<zerocode_core::jev::builtin::QuestionDefinition>,
 ) -> Result<BuiltinDecisionEditor, String> {
     use zerocode_core::jev::builtin;
     let row = builtin::seat(id).ok_or("builtin_decision_missing")?;
@@ -731,19 +731,19 @@ pub fn builtin_decision_editor(
     {
         smart.remove(row.setting);
     }
-    let (question, criteria) = words.split_once('\n').unwrap_or((words, ""));
+    let dynamic = questions.is_empty();
     Ok(BuiltinDecisionEditor {
         id: id.to_string(),
         saved: builtin::in_root(&document, id).unwrap_or_default(),
-        question: question.to_string(),
-        criteria: criteria.to_string(),
+        questions,
         can_edit_prompt: id != zerocode_core::jev::JUDGMENT_CACHE.id,
-        dynamic: words.is_empty(),
+        dynamic,
         mode: row.mode_in(&document).key().to_string(),
         default_mode: row.mode_in(&defaults).key().to_string(),
         modes: choices(row),
         name_max: builtin::NAME_MAX,
         question_max: builtin::QUESTION_MAX,
+        legacy_question_max: builtin::LEGACY_QUESTION_MAX,
         criteria_max: builtin::CRITERIA_MAX,
     })
 }
@@ -794,7 +794,9 @@ pub fn update_builtin_decision(
             }
             // A changed question starts recording. Its previous automatic
             // promotion says nothing about these new evaluation criteria.
-            if (next.question != current.question || next.criteria != current.criteria)
+            if (next.question != current.question
+                || next.criteria != current.criteria
+                || next.questions != current.questions)
                 && next.edited()
             {
                 next.mode = Some(
@@ -820,7 +822,7 @@ pub fn update_builtin_decision(
         } else {
             decisions.insert(
                 id.to_string(),
-                serde_json::to_value(next).map_err(|error| error.to_string())?,
+                builtin::storage_value(&next).map_err(|error| error.to_string())?,
             );
         }
         if action == "reset" || legacy.is_none() {

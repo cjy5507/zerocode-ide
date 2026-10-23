@@ -159,6 +159,15 @@ pub(crate) fn update_builtin_decision(
     expected: zerocode_core::jev::builtin::Decision,
     draft: Option<zerocode_core::jev::builtin::Decision>,
 ) -> Result<TypeSafeSettings, RouterRefusal> {
+    if action == "save"
+        && let Some(draft) = draft.as_ref().filter(|draft| !draft.questions.is_empty())
+    {
+        zerocode_core::jev::builtin::validate_against(
+            &draft.questions,
+            &load_builtin_questions(&id)?,
+        )
+        .map_err(|error| RouterRefusal::from(error.to_string()))?;
+    }
     typesafe_settings::update_builtin_decision(&settings_path()?, &id, &action, &expected, draft)?;
     settings_now()
 }
@@ -167,37 +176,33 @@ pub(crate) fn update_builtin_decision(
 pub(crate) fn builtin_decision_definition(
     id: String,
 ) -> Result<typesafe_settings::BuiltinDecisionEditor, RouterRefusal> {
-    use zerocode_core::jev::builtin;
-    builtin::seat(&id)
-        .ok_or_else(|| RouterRefusal::from("builtin_decision_missing".to_string()))?;
-    let words = match builtin::default_words(&id) {
-        Some(words) => words,
-        None => {
-            let home = dirs::home_dir().ok_or_else(|| {
-                RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
-            })?;
-            let bin = crate::zo_companion::zo_path_under(&home);
-            let output = crate::proc::quiet_command(&bin)
-                .args(["jev", "definition", &id, "--json"])
-                .output()
-                .map_err(|_| {
-                    RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
-                })?;
-            let words = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .ok()
-                .filter(|_| output.status.success())
-                .and_then(|body| {
-                    body.get("words")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                });
-            words.ok_or_else(|| {
-                RouterRefusal::from("builtin_decision_definition_unavailable".to_string())
-            })?
-        }
-    };
-    typesafe_settings::builtin_decision_editor(&settings_path()?, &id, &words)
+    typesafe_settings::builtin_decision_editor(&settings_path()?, &id, load_builtin_questions(&id)?)
         .map_err(RouterRefusal::from)
+}
+
+fn load_builtin_questions(
+    id: &str,
+) -> Result<Vec<zerocode_core::jev::builtin::QuestionDefinition>, RouterRefusal> {
+    use zerocode_core::jev::builtin;
+    builtin::seat(id).ok_or_else(|| RouterRefusal::from("builtin_decision_missing".to_string()))?;
+    if let Some(questions) = builtin::default_questions(id) {
+        return Ok(questions);
+    }
+    let unavailable = || RouterRefusal::from("builtin_decision_definition_unavailable".to_string());
+    let home = dirs::home_dir().ok_or_else(unavailable)?;
+    let bin = crate::zo_companion::zo_path_under(&home);
+    let output = crate::proc::quiet_command(&bin)
+        .args(["jev", "definition", id, "--json"])
+        .output()
+        .map_err(|_| unavailable())?;
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| unavailable())?;
+    if !output.status.success() || body.get("id").and_then(serde_json::Value::as_str) != Some(id) {
+        return Err(unavailable());
+    }
+    // An older companion's fingerprint is not a question definition.
+    serde_json::from_value(body.get("questions").cloned().ok_or_else(unavailable)?)
+        .map_err(|_| unavailable())
 }
 
 /// Move the routing classifier — the gate in front of the routing seat. Its

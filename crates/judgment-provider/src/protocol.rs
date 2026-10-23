@@ -125,7 +125,10 @@ fn validate_request(request: &Value) -> Result<(), Refusal> {
         return Err(Refusal::Request);
     }
     for question in questions.values() {
-        if question.get("instructions").is_none_or(Value::is_null) {
+        if !matches!(
+            question.get("instructions"),
+            Some(Value::Null | Value::String(_) | Value::Array(_) | Value::Object(_))
+        ) {
             return Err(Refusal::Request);
         }
         match question.get("type").and_then(Value::as_str) {

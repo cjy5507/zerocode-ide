@@ -1138,5 +1138,22 @@ pub fn label_over<'a>(
     (now_ms.saturating_sub(created_ms) > LABEL_HORIZON_MS).then_some(Err(NotCompared::Unhandled))
 }
 
+/// Structured editor fields, using the same words and answer keys as requests.
+#[must_use]
+pub fn question_definitions() -> Vec<crate::jev::builtin::QuestionDefinition> {
+    use crate::jev::builtin::QuestionDefinition as D;
+    let choice_id = crate::jev::batch::question_name(0, TRIAGE_SUFFIX).replacen('0', "*", 1);
+    let urgent_id = crate::jev::batch::question_name(0, URGENT_SUFFIX).replacen('0', "*", 1);
+    vec![
+        D::choice(
+            &choice_id,
+            &format!("{INSTRUCTIONS} {ITEM_INSTRUCTIONS}"),
+            &Triage::ALL.map(|value| (value.word(), value.means())),
+        )
+        .contextual(),
+        D::noul(&urgent_id, URGENT_INSTRUCTIONS, URGENT_YES, URGENT_NO).contextual(),
+    ]
+}
+
 #[cfg(test)]
 mod tests;
