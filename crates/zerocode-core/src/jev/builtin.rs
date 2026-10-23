@@ -17,6 +17,7 @@ pub const CRITERIA_MAX: usize = 8_000;
 pub const RUBRIC_KEY: &str = "decisionRubric";
 pub const EDITED_RUBRIC_FLAG: u32 = 1 << 31;
 const DECISION_STATE_KEY: &str = "__builtinDecision";
+const QUESTION_SCHEMA: u64 = 2;
 
 mod definitions;
 mod schema;
@@ -125,12 +126,31 @@ pub fn in_root(root: &Value, id: &str) -> Option<Decision> {
     };
     let value = decisions.get(id)?;
     // A malformed saved override must not silently resurrect its decision.
-    Some(
+    let mut decision: Decision =
         serde_json::from_value(value.clone()).unwrap_or_else(|_| Decision {
             deleted: true,
             ..Decision::default()
-        }),
-    )
+        });
+    if let Some(schema) = value.get("questionSchema") {
+        // A still-running older zo sees the legacy tombstone and asks nothing.
+        // Only a client understanding the typed definition reads its real state.
+        decision.deleted = schema.as_u64() != Some(QUESTION_SCHEMA)
+            || decision.questions.is_empty()
+            || value.get("questionDeleted").and_then(Value::as_bool) != Some(false);
+    }
+    Some(decision)
+}
+
+/// Persist typed edits with an off marker older clients already understand.
+/// The editor and current runtime still exchange the logical `Decision`.
+pub fn storage_value(decision: &Decision) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(decision)?;
+    if !decision.questions.is_empty() {
+        value["deleted"] = Value::Bool(true);
+        value["questionSchema"] = Value::from(QUESTION_SCHEMA);
+        value["questionDeleted"] = Value::Bool(decision.deleted);
+    }
+    Ok(value)
 }
 
 #[must_use]

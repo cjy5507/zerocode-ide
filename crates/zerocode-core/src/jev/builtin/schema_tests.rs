@@ -163,3 +163,33 @@ fn every_shipped_core_definition_fits_the_editing_contract() {
             .unwrap_or_else(|error| panic!("{}: {error}", seat.id));
     }
 }
+
+#[test]
+fn a_client_that_cannot_read_typed_edits_stays_off_even_for_an_explicit_on() {
+    let seat = &crate::jev::COMMAND_GUARD;
+    let mut draft = edit(
+        json!({"irreversible": {"type": "noul", "instructions": "Recoverable?", "criteria": {}}}),
+    );
+    draft.mode = Some(JevMode::On.key().into());
+    let stored = storage_value(&draft).unwrap();
+    // The previous client ignores the new fields, and already honors deleted.
+    let mut older: Decision = serde_json::from_value(stored.clone()).unwrap();
+    older.questions.clear();
+    assert_eq!(older.mode(seat), Some(JevMode::Off));
+    let root = json!({"smart": {(SETTING): {(seat.id): stored}}});
+    assert_eq!(in_root(&root, seat.id), Some(draft.clone()));
+    assert_eq!(
+        in_root(&root, seat.id).unwrap().mode(seat),
+        Some(JevMode::On)
+    );
+    assert_eq!(serde_json::to_value(&draft).unwrap()["deleted"], false);
+
+    for bad in [json!(null), json!(3), json!("2")] {
+        let mut changed = root.clone();
+        changed["smart"][SETTING][seat.id]["questionSchema"] = bad;
+        assert_eq!(
+            in_root(&changed, seat.id).unwrap().mode(seat),
+            Some(JevMode::Off)
+        );
+    }
+}

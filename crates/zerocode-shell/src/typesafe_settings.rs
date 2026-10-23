@@ -820,7 +820,7 @@ pub fn update_builtin_decision(
         } else {
             decisions.insert(
                 id.to_string(),
-                serde_json::to_value(next).map_err(|error| error.to_string())?,
+                builtin::storage_value(&next).map_err(|error| error.to_string())?,
             );
         }
         if action == "reset" || legacy.is_none() {
