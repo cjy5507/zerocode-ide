@@ -1842,3 +1842,24 @@ fn a_recall_label_naming_no_time_does_not_overwrite_the_one_naming_its_asking() 
         "the label naming 20 stands, and the one naming no time grades neither asking"
     );
 }
+
+
+#[test]
+fn the_dashboard_counts_the_current_edited_question_without_borrowing_default_evidence() {
+    use zerocode_core::jev::{PLACEMENT, builtin};
+    let home = tempfile::tempdir().unwrap();
+    let edit = builtin::Decision { question: Some("A saved question".into()), mode: Some("shadow".into()), ..builtin::Decision::default() };
+    let settings = json!({"smart":{(builtin::SETTING):{(PLACEMENT.id):edit}}});
+    let rubric = builtin::in_root(&settings, PLACEMENT.id).unwrap().rubric(PLACEMENT.rubric_version).unwrap();
+    let rows = [
+        json!({"at":10,"outcome":"answered","requests":1,"model":"fixture-model","rubricVersion":PLACEMENT.rubric_version}),
+        json!({"at":20,"outcome":"answered","requests":1,"model":"fixture-model","rubricVersion":PLACEMENT.rubric_version,(builtin::RUBRIC_KEY):rubric}),
+    ];
+    write(home.path(), PLACEMENT.ledger, &rows);
+    let report = one(&PLACEMENT, &[home.path().to_path_buf()], None, Some(&settings), 30, 0);
+    assert_eq!(report.week.rows, 1);
+    assert_eq!(report.mode, JevMode::Shadow);
+    assert!(report.judged.is_none());
+    let restored = one(&PLACEMENT, &[home.path().to_path_buf()], None, None, 30, 0);
+    assert_eq!(restored.week.rows, 0);
+}

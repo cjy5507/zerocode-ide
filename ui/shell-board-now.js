@@ -1019,11 +1019,26 @@ function boardDoneHead(view) {
   return head;
 }
 
-/* 오늘 끝난 일의 수 — 원장이 착지를 적은 때(`times.landed_ms`)가 오늘인 과업. */
-function boardLandedToday(ledger, now) {
+/* 과업이 끝난 때 — 착지한 과업은 원장이 착지를 적은 때(`times.landed_ms`), 착지할 것 없이 끝난
+ * 과업(조사·시안·검토, t-34501)은 코디가 검증을 적은 때(`times.verified_ms`). 그 밖은 모른다(`null`). */
+function boardFinishedAt(task) {
+  const times = task.times ?? {};
+  if (Number.isFinite(times.landed_ms)) return times.landed_ms;
+  return task.stage === "nothing_to_land" && Number.isFinite(times.verified_ms) ? times.verified_ms : null;
+}
+
+/* 오늘 끝난 일 — 끝난 때가 오늘인 과업, 늦게 끝난 것이 먼저. 이 표의 발이 그 수를 말하고 기록 탭의
+ * 「오늘 끝난 일」 표(`paintDeskToday`, t-70264)가 그 행을 그린다 — 한 규칙이라 두 곳의 수가 갈리지
+ * 않는다. */
+function boardFinishedTodayTasks(ledger, now) {
   const midnight = new Date(now);
   midnight.setHours(0, 0, 0, 0);
-  return (ledger.tasks ?? []).filter((task) => Number(task.times?.landed_ms) >= midnight.getTime()).length;
+  return (ledger.tasks ?? []).filter((task) => (boardFinishedAt(task) ?? -Infinity) >= midnight.getTime())
+    .sort((a, b) => boardFinishedAt(b) - boardFinishedAt(a));
+}
+
+function boardFinishedToday(ledger, now) {
+  return boardFinishedTodayTasks(ledger, now).length;
 }
 
 function paintDeskRunning(block, now, view) {
@@ -1125,7 +1140,7 @@ function paintDeskRunning(block, now, view) {
   reconcileElementOrder(table, wanted);
   // The draft's foot: how many finished today, and the door to the record of them.
   const foot = body.querySelector(":scope > .board-runs-foot");
-  const today = boardLandedToday(ledger, now);
+  const today = boardFinishedToday(ledger, now);
   writeTextContent(foot.firstElementChild, today > 0
     ? t("board.now.runsToday", "오늘 끝난 일 {{count}}개", { count: today })
     : t("board.now.runsTodayNone", "오늘 끝난 일은 아직 없습니다"));

@@ -11,16 +11,12 @@
 //!
 //! By the run's project:
 //!
-//! - **Made here, or confirmed** — no pointer is typed into a pane of another
-//!   project, no chair is sat from one, and no worker's checkout is opened in
-//!   one. A verb from one is written down as a verb the window would refuse,
-//!   and refused once the person turns the boundary on ([`SWITCH_FILE`]): the
-//!   first release only writes it down, so a wrong project costs a log line
-//!   and never the letter that would have put it right.
-//! - **Inferred** — every crossing is written down and nothing is held, until
-//!   the run's live coordinator confirms the project with a verb typed in its
-//!   own pane, in that project.
-//! - **None yet** — as before, with one line saying none could be read.
+//! - **Made here, confirmed, or inferred** — another project's panes cannot
+//!   read, write, receive mail, take the chair, or open a worker's checkout.
+//!   This is the default; no settings file enables or disables the boundary.
+//! - **None yet** — only the run's existing participants can use it. Its
+//!   coordinator can establish the project from its own placed pane. A pane
+//!   with no known project cannot enter a run whose project is known.
 //!
 //! The window's own reads — the sidebar, the board, the mail triage seat —
 //! are not a pane's verb and are not held here.
@@ -35,29 +31,6 @@ use zerocode_core::orchestration::{Ledger, ProjectSource, Run, RunProject, Scope
 use crate::agent_teams::Host;
 
 use super::{BLACKBOX, LiveRuntime, rang, runtime};
-
-/// The file a person turns the verb boundary on with, under the window's data
-/// root: a JSON string, [`ENFORCE`]. Absent — the first release's default — or
-/// holding anything else, a verb into another project's run is carried out
-/// and written down as one the window would refuse, so the boundary is turned
-/// on only after its lines show it refuses nothing a project should be given.
-pub(crate) const SWITCH_FILE: &str = "orchestration-project-scope.json";
-
-/// The word in [`SWITCH_FILE`] that turns the verb boundary on.
-pub(crate) const ENFORCE: &str = "enforce";
-
-/// Whether a verb into a run of another project is refused rather than only
-/// written down. Read at each verb, so the person's switch reaches the next
-/// verb without a restart; a verb is not the beat.
-fn verbs_refused() -> bool {
-    let Some(root) = BLACKBOX.get() else {
-        return false;
-    };
-    std::fs::read_to_string(root.join(SWITCH_FILE))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<String>(&raw).ok())
-        .is_some_and(|word| word == ENFORCE)
-}
 
 /// How many folders' projects the window keeps read. A window holds a few
 /// dozen panes; past this the whole map is forgotten and read again.
@@ -159,18 +132,14 @@ pub(super) struct Gate {
     /// The project the caller's pane works in, which a `run-create` writes on
     /// the run it makes.
     pub(super) root: Option<String>,
-    /// The runs of another project the verb reaches — for `run-list` and
-    /// `inbox`, whose answers are held to the caller's project afterwards.
-    elsewhere: Vec<(String, RunProject)>,
+    /// Runs the caller must not see, including unscoped runs it does not own.
+    hidden: Vec<String>,
 }
 
 /// The window's half of a verb from the pane `team/pane`, asked before the
-/// ledger plans it: the project the pane works in, or the refusal a verb into
-/// a run of another project gets once the boundary is on.
+/// ledger plans it: the pane's project, or a refusal to cross into another.
 ///
-/// Every crossing is written down whatever is decided — the run, the pane,
-/// both projects and the verb — so the person can read what turning the
-/// boundary on would refuse before it refuses anything. A verb the run's live
+/// Refusals name the run, pane, projects and verb in the window log. A verb the run's live
 /// coordinator types from a pane of the project the run was inferred to be in
 /// confirms that project. One question to the actor that holds the ledger
 /// ([`zerocode_core::orchestration::project_scope::reach`]); nothing is
@@ -186,40 +155,177 @@ pub(super) fn verb_gate(
     let term = crate::agent_teams::teams()
         .get(team)
         .and_then(|held| held.term_of(pane));
-    let Some(caller) = term.and_then(|term| pane_root(host, term)) else {
-        return Ok(Gate::default());
-    };
+    let caller = term.and_then(|term| pane_root(host, term));
     let Some(held) = runtime() else {
         return Ok(Gate {
-            root: Some(caller),
+            root: caller,
             ..Gate::default()
         });
     };
     let reach = held
         .actor
-        .project_reach(argv, team, pane, actor, &caller)
-        .unwrap_or_default();
+        .project_reach(
+            argv,
+            team,
+            pane,
+            actor,
+            caller.as_deref().unwrap_or_default(),
+        )
+        .map_err(|_| "the ledger's project scope could not be checked; try again".to_string())?;
     let verb = argv.first().map_or("", String::as_str);
     let seat = format!("{team}/{pane}");
     if verb == "reset" {
-        reset_gate(&reach.elsewhere, &caller, &seat, term)?;
+        reset_gate(&reach.hidden, caller.as_deref(), &seat, term)?;
     }
     if let Some((run_id, Some(project))) = &reach.run {
+        let caller = caller
+            .as_deref()
+            .ok_or_else(|| unidentified(verb, run_id))?;
         if project.inferred() && project.root == caller && reach.coordinator {
-            confirm(&held, run_id, project, &caller, &seat, term, now_ms);
+            confirm(&held, run_id, project, caller, &seat, term, now_ms);
         } else if project.root != caller {
-            verb_crossing(verb, run_id, project, &caller, &seat, term)?;
+            verb_crossing(verb, run_id, project, caller, &seat, term)?;
+        }
+    } else if let Some((run_id, None)) = &reach.run {
+        if !reach.participant {
+            return Err(unidentified(verb, run_id));
+        }
+        if let Some(caller) = caller.as_deref() {
+            if !reach.coordinator {
+                return Err(unidentified(verb, run_id));
+            }
+            let (moved, _) = held
+                .actor
+                .note_run_project(
+                    run_id,
+                    caller,
+                    ProjectSource::Seat,
+                    Some(seat.clone()),
+                    now_ms,
+                )
+                .map_err(|_| unidentified(verb, run_id))?;
+            rang(moved);
         }
     }
+    if let Some((run_id, project)) = &reach.reply_run {
+        match (caller.as_deref(), project.as_ref()) {
+            (Some(caller), Some(project)) if caller != project.root => {
+                verb_crossing(verb, run_id, project, caller, &seat, term)?
+            }
+            (None, Some(_)) | (Some(_), None) => return Err(unidentified(verb, run_id)),
+            _ => {}
+        }
+    }
+    for recipient in &reach.recipient_seats {
+        recipient_gate(host, verb, caller.as_deref(), recipient)?;
+    }
     Ok(Gate {
-        root: Some(caller),
-        elsewhere: reach.elsewhere,
+        root: caller,
+        hidden: reach.hidden,
     })
 }
 
-/// A verb from a pane of another project into `run`: written down, and
-/// refused once the boundary is on and the run's project was not merely
-/// inferred.
+fn unidentified(verb: &str, run: &str) -> String {
+    format!(
+        "the project of this pane or {run} is not identified — `{verb}` is not answered across an unknown project. Ask from the run's own project pane."
+    )
+}
+
+/// A federation run has no coordinator. Its explicit host team supplies the
+/// initial project; an older run must first agree with its recorded workers.
+/// The actor only fills an absent project, so a later host cannot move it.
+pub(super) fn place_federation_run(
+    host: &dyn Host,
+    held: &LiveRuntime,
+    run: &str,
+    team: &str,
+    pane: &str,
+    now_ms: i64,
+) -> Result<(), String> {
+    let image = held.actor.view().map_err(|_| unidentified("attach", run))?;
+    let rows = image.projection();
+    let current = rows
+        .runs
+        .iter()
+        .find(|row| row.id == run)
+        .ok_or_else(|| unidentified("attach", run))?;
+    if current.project.is_some() {
+        return Ok(());
+    }
+    let workers: Vec<_> = rows
+        .workers
+        .iter()
+        .filter(|worker| worker.run == run)
+        .collect();
+    let (root, source, seat) = if workers.is_empty() {
+        let term = crate::agent_teams::teams()
+            .get(team)
+            .and_then(|held| held.term_of(pane));
+        let root = term
+            .and_then(|term| pane_root(host, term))
+            .ok_or_else(|| unidentified("attach", run))?;
+        (root, ProjectSource::Seat, Some(format!("{team}/{pane}")))
+    } else {
+        let mut roots = workers.iter().map(|worker| {
+            worker
+                .checkout
+                .as_deref()
+                .and_then(|path| root_of(Path::new(path)))
+        });
+        let root = roots
+            .next()
+            .flatten()
+            .ok_or_else(|| unidentified("attach", run))?;
+        if roots.any(|other| other.as_deref() != Some(root.as_str())) {
+            return Err(unidentified("attach", run));
+        }
+        (root, ProjectSource::Workers, None)
+    };
+    let (moved, _) = held
+        .actor
+        .note_run_project(run, root, source, seat, now_ms)
+        .map_err(|_| unidentified("attach", run))?;
+    rang(moved);
+    Ok(())
+}
+
+/// The run is not the whole destination: an explicit pane or a reply can
+/// name a participant whose pane has since moved to another project.
+fn recipient_gate(
+    host: &dyn Host,
+    verb: &str,
+    caller: Option<&str>,
+    recipient: &str,
+) -> Result<(), String> {
+    let term = recipient.rsplit_once('/').and_then(|(team, pane)| {
+        crate::agent_teams::teams()
+            .get(team)
+            .and_then(|held| held.term_of(pane))
+    });
+    let target = term.and_then(|term| pane_root(host, term));
+    match (caller, target.as_deref()) {
+        (Some(caller), Some(target)) if caller == target => Ok(()),
+        // Legacy, unplaced participants are already restricted to their own
+        // unscoped run above. They never enter a known project's run.
+        (None, None) => Ok(()),
+        _ => {
+            let reason = format!(
+                "the recipient {recipient} works in {}, and this pane works in {} — `{verb}` was not sent across different or unidentified projects. Use a recipient in this project.",
+                target
+                    .as_deref()
+                    .map(label)
+                    .unwrap_or_else(|| "an unidentified project".into()),
+                caller
+                    .map(label)
+                    .unwrap_or_else(|| "an unidentified project".into())
+            );
+            note(&reason);
+            Err(reason)
+        }
+    }
+}
+
+/// A verb into another project's run is refused and recorded.
 fn verb_crossing(
     verb: &str,
     run: &str,
@@ -228,20 +334,9 @@ fn verb_crossing(
     seat: &str,
     term: Option<u32>,
 ) -> Result<(), String> {
-    let refused = !project.inferred() && verbs_refused();
     if let Some(count) = worth_a_line(format!("verb\u{1f}{verb}\u{1f}{run}\u{1f}{seat}")) {
-        let what = match (refused, project.inferred()) {
-            (true, _) => "refused".to_string(),
-            (false, true) => format!(
-                "carried out and only written down — the run's project is {}, not stated",
-                learned(project)
-            ),
-            (false, false) => {
-                format!("carried out; it would be refused once {SWITCH_FILE} holds \"{ENFORCE}\"")
-            }
-        };
         note(&format!(
-            "`{verb}` from {}, working in {}, into {run} of the project at {} ({}): {what} \
+            "`{verb}` from {}, working in {}, into {run} of the project at {} ({}): refused \
              (met {count} time(s))",
             pane_named(seat, term),
             label(caller),
@@ -249,10 +344,7 @@ fn verb_crossing(
             learned(project),
         ));
     }
-    match refused {
-        true => Err(refusal(verb, run, project, caller)),
-        false => Ok(()),
-    }
+    Err(refusal(verb, run, project, caller))
 }
 
 /// The run's live coordinator typed a verb from a pane of the project the run
@@ -288,55 +380,33 @@ fn confirm(
 }
 
 /// `reset` clears every run in the window, so it crosses into every run of
-/// another project at once. Written down like any crossing, and refused once
-/// the boundary is on and one of those runs' projects was not merely inferred.
+/// another project at once. It is refused while any row lies outside the
+/// caller's scope, including unidentified runs it does not own.
 fn reset_gate(
-    crossed: &[(String, RunProject)],
-    caller: &str,
+    hidden: &[String],
+    caller: Option<&str>,
     seat: &str,
     term: Option<u32>,
 ) -> Result<(), String> {
-    if crossed.is_empty() {
+    if hidden.is_empty() {
         return Ok(());
     }
-    let held: Vec<&str> = crossed
-        .iter()
-        .filter(|(_, project)| !project.inferred())
-        .map(|(run, _)| run.as_str())
-        .collect();
-    let refused = !held.is_empty() && verbs_refused();
-    let runs: Vec<&str> = crossed.iter().map(|(run, _)| run.as_str()).collect();
     if let Some(count) = worth_a_line(format!("reset\u{1f}{seat}")) {
         note(&format!(
-            "`reset` from {}, working in {}, reaches {} run(s) of other projects ({}): {} \
+            "`reset` from {}, working in {}, reaches {} run(s) outside its project: refused \
              (met {count} time(s))",
             pane_named(seat, term),
-            label(caller),
-            runs.len(),
-            runs.join(", "),
-            if refused {
-                "refused"
-            } else {
-                "carried out and only written down"
-            },
+            caller
+                .map(label)
+                .unwrap_or_else(|| "an unidentified project".into()),
+            hidden.len(),
         ));
     }
-    if refused {
-        return Err(format!(
-            "`reset` clears every run in this window, and {} of them belong to other \
-             projects ({}) — it is not answered across projects. Reset from a pane of each, \
-             or leave theirs to them.",
-            held.len(),
-            held.join(", "),
-        ));
-    }
-    Ok(())
+    Err("`reset` clears every run in this window, including other or unidentified projects — it is not answered across projects. Use this project's run-specific commands.".into())
 }
 
-/// `run-list` and `inbox` read every run in the window. Once the boundary is
-/// on, a pane is shown its own project's runs and mail and nothing of a run
-/// whose project was stated elsewhere; until then the answer is whole and the
-/// window writes down how much of it belongs to other projects.
+/// A final guard over list answers. The core already scopes before paging;
+/// this also holds a row that was outside the scope read before planning.
 pub(super) fn listing(
     team: &str,
     pane: &str,
@@ -350,15 +420,7 @@ pub(super) fn listing(
         "inbox" => "messages",
         _ => return,
     };
-    let Some(caller) = gate.root.as_deref() else {
-        return;
-    };
-    let stated: std::collections::HashSet<&str> = gate
-        .elsewhere
-        .iter()
-        .filter(|(_, project)| !project.inferred())
-        .map(|(run, _)| run.as_str())
-        .collect();
+    let stated: std::collections::HashSet<&str> = gate.hidden.iter().map(String::as_str).collect();
     if stated.is_empty() || answered.exit_code != 0 {
         return;
     }
@@ -377,22 +439,16 @@ pub(super) fn listing(
     if hidden == 0 {
         return;
     }
-    let refused = verbs_refused();
     let seat = format!("{team}/{pane}");
     if let Some(count) = worth_a_line(format!("listing\u{1f}{verb}\u{1f}{seat}")) {
         note(&format!(
             "`{verb}` from {seat}, working in {}, showed {hidden} row(s) of runs of other \
-             projects: {} (met {count} time(s))",
-            label(caller),
-            if refused {
-                "left out"
-            } else {
-                "shown, and left out once the boundary is on"
-            },
+            projects: left out (met {count} time(s))",
+            gate.root
+                .as_deref()
+                .map(label)
+                .unwrap_or_else(|| "an unidentified project".into()),
         ));
-    }
-    if !refused {
-        return;
     }
     if let Some(held) = said[rows].as_array_mut() {
         held.retain(|row| !elsewhere(row));
@@ -410,9 +466,11 @@ pub(super) fn listing(
 pub(super) enum PaneScope<'a> {
     /// The pane is the run's project's, or there is nothing to compare.
     Pass,
-    /// The pane is another project's and the run's project was only inferred:
-    /// written down once, pointed at as before.
+    /// Both sides are legacy, unplaced participants. They remain in their
+    /// own unscoped run, never a known project's run.
     Noted,
+    /// A placed pane must not receive a run whose project is still unknown.
+    Unknown,
     /// The pane is another project's and the run's project was stated: not
     /// pointed at, not sat from.
     Held(&'a RunProject, String),
@@ -432,29 +490,30 @@ pub(super) fn pane_scope<'a>(
         .or_insert_with(|| pane_root(host, term))
         .clone();
     let Some(root) = root else {
-        return PaneScope::Pass;
+        return match run.project.as_ref() {
+            Some(project) => PaneScope::Held(project, "an unidentified project".into()),
+            None => PaneScope::Noted,
+        };
     };
-    let Scope::Crossed(project) = run.scope(Some(root.as_str())) else {
-        return PaneScope::Pass;
-    };
-    if project.inferred() {
-        if met(format!(
-            "pointer-noted\u{1f}{}\u{1f}{address}\u{1f}{term}",
-            run.id
-        )) == 1
-        {
-            note(&format!(
-                "mail for {address} in {} would not be pointed at terminal {term}, which works \
-                 in {}: the run's project at {} is {}, so it is pointed as before",
-                run.id,
-                label(&root),
-                project.label(),
-                learned(project),
-            ));
+    match run.scope(Some(root.as_str())) {
+        Scope::Same => PaneScope::Pass,
+        Scope::Unknown => {
+            note_unknown(&run.id, address, term);
+            PaneScope::Unknown
         }
-        return PaneScope::Noted;
+        Scope::Crossed(project) => PaneScope::Held(project, root),
     }
-    PaneScope::Held(project, root)
+}
+
+fn note_unknown(run: &str, address: &str, term: u32) {
+    if met(format!(
+        "pointer-unknown\u{1f}{run}\u{1f}{address}\u{1f}{term}"
+    )) == 1
+    {
+        note(&format!(
+            "mail for {address} in {run} is not pointed at terminal {term}: the run's project is not identified"
+        ));
+    }
 }
 
 /// Mail for `address` was not pointed at the pane at `term`: it works in
@@ -498,34 +557,28 @@ pub(super) fn note_chair_held(run: &str, term: u32, project: &RunProject, root: 
 /* ---- the checkout a summoned worker opens in ------------------------------ */
 
 /// Whether the worker `worker` of `run` may open its pane in `checkout`: a
-/// worker works in its run's project, as the reservation found it. Refused
-/// when that project was not merely inferred and the checkout is another
-/// project's; written down and let through when it was only inferred; let
-/// through as before when there is nothing to compare.
+/// worker works in its run's project, as the reservation found it. Inferred
+/// projects hold the same boundary; only an entirely unplaced legacy run
+/// and checkout retain their existing participant-only road.
 pub(super) fn worker_checkout(
     project: Option<&RunProject>,
     run: &str,
     worker: &str,
     checkout: Option<&Path>,
 ) -> Result<(), String> {
-    let (Some(project), Some(root)) = (project, checkout.and_then(root_of)) else {
-        return Ok(());
+    let (project, root) = match (project, checkout.and_then(root_of)) {
+        (Some(project), Some(root)) => (project, root),
+        (None, None) => return Ok(()),
+        _ => {
+            return Err(format!(
+                "the project of {run} or worker {worker}'s checkout is not identified; the worker was not opened"
+            ));
+        }
     };
     if project.root == root {
         return Ok(());
     }
     let where_ = label(&root);
-    if project.inferred() {
-        if met(format!("checkout-noted\u{1f}{run}\u{1f}{worker}")) == 1 {
-            note(&format!(
-                "worker {worker} of {run} opens in {where_}, outside the run's project at {} ({}) \
-                 — let through, the project is not stated",
-                project.label(),
-                learned(project),
-            ));
-        }
-        return Ok(());
-    }
     note(&format!(
         "worker {worker} of {run} was not opened in {where_}: the run belongs to the project at \
          {} ({})",
@@ -598,7 +651,7 @@ pub(super) fn infer_projects(host: &dyn Host, held: &LiveRuntime, rows: &Ledger,
                 note(&format!(
                     "{} holds no project, and none could be read off it yet — none of its \
                      workers' checkouts is a folder here and no pane of this window holds its \
-                     seat; its mail and verbs are not bounded until one can be",
+                     seat; only its existing unplaced participants may use it until its project is identified",
                     run.id
                 ));
             }
@@ -613,8 +666,8 @@ pub(super) fn infer_projects(host: &dyn Host, held: &LiveRuntime, rows: &Ledger,
         rang(moved);
         if moved {
             note(&format!(
-                "{}'s project was read off {} as {}; it is written down as inferred, and \
-                 nothing is held for it until its coordinator confirms it",
+                "{}'s project was read off {} as {}; the project boundary holds while \
+                 its coordinator's confirmation is pending",
                 run.id,
                 match source {
                     ProjectSource::Workers => "its workers' checkouts",

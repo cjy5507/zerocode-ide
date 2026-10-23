@@ -43,6 +43,7 @@ import { testArtifactCards } from "./artifact-cards.mjs";
 import { testArtifactTasks } from "./artifact-tasks.mjs";
 import { testArtifactReopen } from "./artifact-reopen.mjs";
 import { testArtifactDiagrams } from "./artifact-diagrams.mjs";
+import { testMarkdownDiagrams } from "./markdown-diagrams.mjs";
 import { testArtifactStage2 } from "./artifact-stage2.mjs";
 import { testArtifactFlow } from "./artifact-flow.mjs";
 import { testAgentSupport } from "./agent-support.mjs";
@@ -52,6 +53,7 @@ import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
 import { testBoardNow } from "./board-now.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testAgentGraphTeams } from "./agent-graph-teams.mjs";
+import { testAgentGraphRail } from "./agent-graph-rail.mjs";
 import { testBoardLive } from "./board-live.mjs";
 import { testBoardOrbit } from "./board-orbit.mjs";
 import { testBoardSchedule } from "./board-schedule.mjs";
@@ -75,7 +77,7 @@ import { testEmulatorSeat } from "./emulator-seat.mjs";
 import { testSshSeat } from "./ssh-seat.mjs";
 import { testEmulatorLoans } from "./emulator-loans.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
-import { testJevCustomDecisions, testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
+import { testJevBuiltinDecisions, testJevCustomDecisions, testJevDashboard, testJevDashboardEvidence, testJevDashboardPictures, testJevDashboardResting, testJevDashboardScope } from "./jev-dashboard.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
 import { testTerminalSelection } from "./terminal-selection.mjs";
@@ -131,6 +133,7 @@ import { testConversationAgents, testConversationFolds, testConversationFont, te
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { testConversationRedesign } from "./conversation-redesign.mjs";
 import { testConversationSwitch } from "./conversation-switch.mjs";
+import { testConversationDiagrams } from "./conversation-diagrams.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -284,6 +287,9 @@ suite("artifact-cards", ({ browser, origin, ok }) => testArtifactCards(browser, 
 suite("artifact-tasks", ({ browser, origin, ok }) => testArtifactTasks(browser, origin, ok));
 suite("artifact-reopen", ({ browser, origin, ok }) => testArtifactReopen(browser, origin, ok));
 suite("artifact-diagrams", ({ browser, origin, ok }) => testArtifactDiagrams(browser, origin, ok));
+// The seven other Markdown views draw their ```mermaid fences too (t-58437): layouts asked two at a
+// time, once a source, the fences on screen first, and a layout already made drawn as the words are.
+suite("markdown-diagrams", ({ browser, origin, ok }) => testMarkdownDiagrams(browser, origin, ok));
 suite("artifact-stage2", ({ browser, origin, ok }) => testArtifactStage2(browser, origin, ok));
 // The tab's first view: the flow of the project in view (t-68458, draft p-4958d4720ba9e103 v3).
 suite("artifact-flow", ({ browser, origin, ok }) => testArtifactFlow(browser, origin, ok));
@@ -300,6 +306,10 @@ suite("agent-relations", async ({ browser, origin, ok }) => {
 // The relations tab's card picture, direction E2 (t-68475): one column per
 // coordinator, its workers and helpers hung on the stem by urgency.
 suite("agent-graph-teams", ({ browser, origin, ok }) => testAgentGraphTeams(browser, origin, ok));
+// The same picture in a 1440 window with the left list open (t-69978): the scope
+// rail folds so two coordinators' columns stand side by side, and the person's
+// own choice to open or fold it wins.
+suite("agent-graph-rail", ({ browser, origin, ok }) => testAgentGraphRail(browser, origin, ok));
 // The live coordination map layered over that same graph (t-7288).
 suite("board-live", ({ browser, origin, ok }) => testBoardLive(browser, origin, ok));
 // The orbit view of the same relations picture (t-9444): stars, planets, moons and mail.
@@ -342,6 +352,7 @@ suite("jev-dashboard", async ({ browser, origin, ok }) => {
   await testJevDashboardResting(browser, origin, ok);
   await testJevDashboardEvidence(browser, origin, ok);
 });
+suite("jev-builtin-decisions", ({ browser, origin, ok }) => testJevBuiltinDecisions(browser, origin, ok));
 suite("jev-custom-decisions", ({ browser, origin, ok }) => testJevCustomDecisions(browser, origin, ok));
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));
@@ -437,6 +448,9 @@ suite("conversation-redesign", ({ browser, origin, ok }) => testConversationRede
 /* 대화를 바꿨다가 돌아오면 그 화면 그대로, 판의 「대화」는 전사부터(인계 중 보낸 글은 한 번만),
  * 늦은 첫 읽기는 늦게 한 줄 (t-54304 — Claude·Codex·Dots 역분석에서 가져온 1단계). */
 suite("conversation-switch", ({ browser, origin, ok }) => testConversationSwitch(browser, origin, ok));
+/* 대화의 mermaid 울타리 — 닫힌 뒤에 한 번만 그림으로 서고(스트림 30프레임에 요청 1번), 답의 턴은
+ * 이미 받은 레이아웃으로 바로 그리고, 늦게 온 그림 앞에서 끝 따라가기와 읽던 자리가 그대로다 (t-58437). */
+suite("conversation-diagrams", ({ browser, origin, ok }) => testConversationDiagrams(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
@@ -46830,9 +46844,10 @@ const boardFitRamp = await page.evaluate(async () => {
       titleWhole: titles.length > 0 && titles.every((one) => one.scrollWidth <= one.clientWidth + 1),
     };
   };
-  /* 하네스의 기본 보드 — 1440 창에서 왼쪽 목록 · 작업 레일 · 곁의 인스펙터를 뺀 그림의 판(약 640px).
-   * 사람이 1440 창에서 보는 폭이고, 시안의 격자(열 340px 둘)가 들지 않아 열이 하나로 선다. 가로로
-   * 넘치지 않고, 칩과 제목은 잘리지 않는다. */
+  /* 하네스의 기본 보드 — 1440 창에서 왼쪽 목록과 곁의 인스펙터를 뺀 그림의 판. 사람이 1440 창에서
+   * 보는 폭이다. 작업 레일까지 서면 그림 안쪽이 두 열의 문턱(760px) 밑이라 열이 하나로 섰다 — 그래서
+   * 이 폭에서는 레일이 저절로 접히고(t-69978) 열 둘이 선다. 가로로 넘치지 않고, 칩과 제목은 잘리지
+   * 않는다. */
   const seen = { base: await paint(4) };
 
   // 열 둘이 설 보드(1440px — 그림의 판 약 920px). 시안의 격자는 판의 폭으로 열의 수를 정한다.
@@ -46895,7 +46910,7 @@ const boardFitRamp = await page.evaluate(async () => {
 });
 ok(
   "the columns fit the width they have, the stem grows downward, and one type ramp carries every title",
-  boardFitRamp.base.columns === 1 && boardFitRamp.base.overWide <= 1 &&
+  boardFitRamp.base.columns === 2 && boardFitRamp.base.overWide <= 1 &&
     boardFitRamp.base.chipWhole && boardFitRamp.base.titleWhole &&
     boardFitRamp.short.overWide <= 1 && boardFitRamp.tall.overWide <= 1 &&
     boardFitRamp.narrow.overWide <= 1 && boardFitRamp.tall.overTall > 0 &&

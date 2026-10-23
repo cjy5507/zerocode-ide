@@ -126,7 +126,6 @@ pub fn mention_rerank_path(cwd: &Path) -> PathBuf {
 /// Every word the judgment is shown, in one string, so a fingerprint of it
 /// pins them ([`MENTION_RUBRIC_VERSION`]): the question, what an option
 /// means, and the keys of the state and of each row.
-#[cfg(test)]
 #[must_use]
 pub fn rubric_words() -> String {
     [

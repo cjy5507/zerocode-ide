@@ -442,6 +442,8 @@ fn the_three_unsummoned_resumes_are_none_and_the_sleepers_reseat_stays_one() {
     const DOORS: u32 = 577_180;
     let (_window, _store) = PrivateWindow::boot();
     let root = tempfile::tempdir().expect("the checkouts");
+    let shared = root.path().join("repository").join(".git");
+    std::fs::create_dir_all(&shared).expect("the shared repository");
     let scenes = [
         ("t-54563", "57717c01-0000-4000-8000-000000000001", 577_161),
         (
@@ -458,6 +460,13 @@ fn the_three_unsummoned_resumes_are_none_and_the_sleepers_reseat_stays_one() {
     let checkout = |name: &str| {
         let folder = root.path().join(name);
         std::fs::create_dir_all(&folder).expect("a checkout");
+        // These scenes visit three worktrees of one project. Their shared
+        // Git identity must be present just as it is for the real checkouts.
+        let own = shared.join("worktrees").join(name);
+        std::fs::create_dir_all(&own).expect("the linked worktree metadata");
+        std::fs::write(own.join("commondir"), "../..\n").expect("the shared directory");
+        std::fs::write(folder.join(".git"), format!("gitdir: {}\n", own.display()))
+            .expect("the worktree pointer");
         folder
     };
     let at = |name: &str| root.path().join(name).to_string_lossy().into_owned();

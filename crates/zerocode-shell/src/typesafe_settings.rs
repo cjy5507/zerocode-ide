@@ -108,6 +108,8 @@ impl ModeChoice {
 #[serde(rename_all = "camelCase")]
 pub struct SwitchRow {
     pub id: &'static str,
+    #[serde(skip_serializing_if = "zerocode_core::jev::builtin::Decision::is_empty")]
+    pub decision: zerocode_core::jev::builtin::Decision,
     pub setting: &'static str,
     pub mode: &'static str,
     pub modes: Vec<ModeChoice>,
@@ -339,6 +341,8 @@ pub fn read_settings(
             .iter()
             .map(|row| SwitchRow {
                 id: row.id,
+                decision: zerocode_core::jev::builtin::in_root(&document, row.id)
+                    .unwrap_or_default(),
                 setting: row.setting,
                 mode: row.mode_in(&document).key(),
                 modes: choices(row),
@@ -471,12 +475,39 @@ pub fn save_selected_key(
     key: &str,
     keys: &dyn RouterKeys,
 ) -> Result<(), RouterRefusal> {
-    let service = selected_key_service(path, expected)?;
-    if service == typesafe_keychain_service() {
-        save_key(key, keys)
-    } else {
-        save_key_at(&service, key, "API 키가 비어 있습니다", keys)
-    }
+    with_provider_locked(path, || {
+        Ok(selected_key_service(path, expected).and_then(|service| {
+            if service == typesafe_keychain_service() {
+                save_key(key, keys)
+            } else {
+                save_key_at(&service, key, "API 키가 비어 있습니다", keys)
+            }
+        }))
+    })
+    .map_err(RouterRefusal::from)?
+}
+
+pub(crate) fn save_candidate_key(
+    path: &Path,
+    provider: &judgment_provider::Provider,
+    expected: Option<&str>,
+    key: &str,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
+    with_provider_locked(path, || {
+        Ok(selected_provider(path).and_then(|current| {
+            if let Some(expected) = expected {
+                require_provider(&current, Some(expected))?;
+            }
+            save_key_at(
+                &provider_keychain_service(provider),
+                key,
+                "API 키가 비어 있습니다",
+                keys,
+            )
+        }))
+    })
+    .map_err(RouterRefusal::from)?
 }
 
 pub fn remove_selected_key(
@@ -484,12 +515,16 @@ pub fn remove_selected_key(
     expected: Option<&str>,
     keys: &dyn RouterKeys,
 ) -> Result<(), RouterRefusal> {
-    let service = selected_key_service(path, expected)?;
-    if service == typesafe_keychain_service() {
-        remove_key(keys)
-    } else {
-        remove_key_at(&service, keys)
-    }
+    with_provider_locked(path, || {
+        Ok(selected_key_service(path, expected).and_then(|service| {
+            if service == typesafe_keychain_service() {
+                remove_key(keys)
+            } else {
+                remove_key_at(&service, keys)
+            }
+        }))
+    })
+    .map_err(RouterRefusal::from)?
 }
 
 pub fn set_provider(path: &Path, provider: judgment_provider::Provider) -> Result<(), String> {
@@ -503,6 +538,38 @@ pub(crate) fn set_provider_if_identity(
     binding: Option<&local_judgment::Binding>,
 ) -> Result<(), String> {
     set_provider_checked(path, provider, Some(expected), binding)
+}
+
+/// Commit an explicitly applied connection and its tested key together.
+/// The active-provider check runs before the key is touched, under the same
+/// settings lock the router uses, and a failed file write restores the key.
+pub(crate) fn set_provider_with_key_if_identity(
+    path: &Path,
+    provider: judgment_provider::Provider,
+    expected: &str,
+    key: &str,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
+    let provider = applicable(provider)?;
+    let key = key.trim();
+    if !provider.requires_auth || key.is_empty() {
+        return Err("provider_auth_not_required".to_string().into());
+    }
+    crate::api_routers::update_zo_settings_root_with_key(
+        path,
+        &provider_keychain_service(&provider),
+        key,
+        keys,
+        |root| {
+            let smart = root
+                .entry(SMART_SETTINGS_KEY)
+                .or_insert_with(|| Value::Object(Map::new()));
+            let smart = smart
+                .as_object_mut()
+                .ok_or_else(|| "provider_settings".to_string())?;
+            write_provider_to_smart(smart, &provider, Some(expected), None)
+        },
+    )
 }
 
 pub(crate) fn with_provider_locked<R>(
@@ -538,38 +605,46 @@ fn set_provider_checked(
         return Err("managed_model_binding".to_string());
     }
     update_smart(path, |smart| {
-        if let Some(expected) = expected {
-            let current =
-                judgment_provider::Provider::from_root(&serde_json::json!({"smart":smart}))
-                    .map_err(|reason| reason.to_string())?;
-            if current.identity() != expected {
-                return Err("settings_changed".to_string());
-            }
-        }
-        if provider.kind == judgment_provider::ProviderKind::Jev {
-            if provider.model == DEFAULT_MODEL {
-                smart.remove(MODEL_SETTING);
-            } else {
-                smart.insert(
-                    MODEL_SETTING.to_string(),
-                    Value::String(provider.model.clone()),
-                );
-            }
-        }
-        smart.insert(
-            judgment_provider::SETTINGS_KEY.to_string(),
-            serde_json::to_value(&provider).map_err(|error| error.to_string())?,
-        );
-        if let Some(binding) = binding {
-            smart.insert(
-                local_judgment::MANAGED_MODEL_KEY.to_string(),
-                serde_json::to_value(binding).map_err(|error| error.to_string())?,
-            );
-        } else {
-            smart.remove(local_judgment::MANAGED_MODEL_KEY);
-        }
-        Ok(())
+        write_provider_to_smart(smart, &provider, expected, binding)
     })
+}
+
+fn write_provider_to_smart(
+    smart: &mut Map<String, Value>,
+    provider: &judgment_provider::Provider,
+    expected: Option<&str>,
+    binding: Option<&local_judgment::Binding>,
+) -> Result<(), String> {
+    if let Some(expected) = expected {
+        let current = judgment_provider::Provider::from_root(&serde_json::json!({"smart":smart}))
+            .map_err(|reason| reason.to_string())?;
+        if current.identity() != expected {
+            return Err("settings_changed".to_string());
+        }
+    }
+    if provider.kind == judgment_provider::ProviderKind::Jev {
+        if provider.model == DEFAULT_MODEL {
+            smart.remove(MODEL_SETTING);
+        } else {
+            smart.insert(
+                MODEL_SETTING.to_string(),
+                Value::String(provider.model.clone()),
+            );
+        }
+    }
+    smart.insert(
+        judgment_provider::SETTINGS_KEY.to_string(),
+        serde_json::to_value(provider).map_err(|error| error.to_string())?,
+    );
+    if let Some(binding) = binding {
+        smart.insert(
+            local_judgment::MANAGED_MODEL_KEY.to_string(),
+            serde_json::to_value(binding).map_err(|error| error.to_string())?,
+        );
+    } else {
+        smart.remove(local_judgment::MANAGED_MODEL_KEY);
+    }
+    Ok(())
 }
 
 /// Turn Jev on or off (§6.1) in zo's settings file, under the window's
@@ -613,6 +688,150 @@ fn update_smart(
             ));
         };
         change(smart)
+    })
+}
+
+/// The built-in editor reads the shipped words and the saved override apart.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinDecisionEditor {
+    pub id: String,
+    pub saved: zerocode_core::jev::builtin::Decision,
+    pub question: String,
+    pub criteria: String,
+    pub can_edit_prompt: bool,
+    pub dynamic: bool,
+    pub mode: String,
+    pub default_mode: String,
+    pub modes: Vec<ModeChoice>,
+    pub name_max: usize,
+    pub question_max: usize,
+    pub criteria_max: usize,
+}
+
+pub fn builtin_decision_editor(
+    path: &Path,
+    id: &str,
+    words: &str,
+) -> Result<BuiltinDecisionEditor, String> {
+    use zerocode_core::jev::builtin;
+    let row = builtin::seat(id).ok_or("builtin_decision_missing")?;
+    let document = Value::Object(crate::api_routers::read_zo_settings_root(path)?);
+    let mut defaults = document.clone();
+    if let Some(choices) = defaults
+        .get_mut(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get_mut(builtin::SETTING))
+        .and_then(Value::as_object_mut)
+    {
+        choices.remove(id);
+    }
+    if let Some(smart) = defaults
+        .get_mut(SMART_SETTINGS_KEY)
+        .and_then(Value::as_object_mut)
+    {
+        smart.remove(row.setting);
+    }
+    let (question, criteria) = words.split_once('\n').unwrap_or((words, ""));
+    Ok(BuiltinDecisionEditor {
+        id: id.to_string(),
+        saved: builtin::in_root(&document, id).unwrap_or_default(),
+        question: question.to_string(),
+        criteria: criteria.to_string(),
+        can_edit_prompt: id != zerocode_core::jev::JUDGMENT_CACHE.id,
+        dynamic: words.is_empty(),
+        mode: row.mode_in(&document).key().to_string(),
+        default_mode: row.mode_in(&defaults).key().to_string(),
+        modes: choices(row),
+        name_max: builtin::NAME_MAX,
+        question_max: builtin::QUESTION_MAX,
+        criteria_max: builtin::CRITERIA_MAX,
+    })
+}
+
+/// One settings lock covers the stale-editor check and the whole edit.
+/// Deletion is a persistent tombstone; reset alone forgets the override.
+pub fn update_builtin_decision(
+    path: &Path,
+    id: &str,
+    action: &str,
+    expected: &zerocode_core::jev::builtin::Decision,
+    draft: Option<zerocode_core::jev::builtin::Decision>,
+) -> Result<(), String> {
+    use zerocode_core::jev::builtin;
+    let row = builtin::seat(id).ok_or("builtin_decision_missing")?;
+    update_smart(path, |smart| {
+        let root = serde_json::json!({(SMART_SETTINGS_KEY): &*smart});
+        let current = builtin::in_root(&root, id).unwrap_or_default();
+        if &current != expected {
+            return Err("builtin_decision_changed".to_string());
+        }
+        let mut next = match action {
+            "save" => draft.ok_or("builtin_decision_draft")?,
+            "delete" => builtin::Decision {
+                deleted: true,
+                ..current.clone()
+            },
+            "restore" => builtin::Decision {
+                deleted: false,
+                ..current.clone()
+            },
+            "reset" => builtin::Decision::default(),
+            _ => return Err("builtin_decision_action".to_string()),
+        };
+        if action == "delete" && next.mode.is_none() {
+            next.mode = row
+                .word_in(&root)
+                .map(|word| row.mode_of(Some(word)).key().to_string());
+        }
+        if action == "save" {
+            next.deleted = false;
+            for text in [&mut next.name, &mut next.question, &mut next.criteria] {
+                *text = text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_string);
+            }
+            // A changed question starts recording. Its previous automatic
+            // promotion says nothing about these new evaluation criteria.
+            if (next.question != current.question || next.criteria != current.criteria)
+                && next.edited()
+            {
+                next.mode = Some(
+                    if row.modes.contains(&JevMode::Shadow) {
+                        JevMode::Shadow
+                    } else {
+                        JevMode::Off
+                    }
+                    .key()
+                    .to_string(),
+                );
+            }
+        }
+        builtin::validate(id, &next).map_err(str::to_string)?;
+        let legacy = next.legacy_mode(row);
+        let decisions = smart
+            .entry(builtin::SETTING)
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("builtin_decision_settings")?;
+        if next.is_empty() {
+            decisions.remove(id);
+        } else {
+            decisions.insert(
+                id.to_string(),
+                serde_json::to_value(next).map_err(|error| error.to_string())?,
+            );
+        }
+        if action == "reset" || legacy.is_none() {
+            smart.remove(row.setting);
+        } else if let Some(mode) = legacy {
+            smart.insert(
+                row.setting.to_string(),
+                Value::String(mode.key().to_string()),
+            );
+        }
+        Ok(())
     })
 }
 
@@ -849,6 +1068,19 @@ pub fn preflight_provider(
     keys: &dyn RouterKeys,
     wire: &crate::systemone::Wire,
 ) -> Result<ProviderPreflight, String> {
+    preflight_provider_with_key(path, candidate, expected, keys, wire, None)
+}
+
+/// An entered key is temporary evidence for this check. It is never written
+/// to the credential store; applying a successful connection owns that write.
+pub fn preflight_provider_with_key(
+    path: &Path,
+    candidate: judgment_provider::Provider,
+    expected: &str,
+    keys: &dyn RouterKeys,
+    wire: &crate::systemone::Wire,
+    entered_key: Option<&str>,
+) -> Result<ProviderPreflight, String> {
     let candidate = applicable(candidate)?;
     let still_selected = || {
         require_provider(
@@ -858,10 +1090,14 @@ pub fn preflight_provider(
     };
     still_selected()?;
     let key = if candidate.requires_auth {
-        keys.read(&provider_keychain_service(&candidate))
-            .map_err(|refusal| refusal.message)?
-            .map(|key| key.trim().to_string())
-            .filter(|key| !key.is_empty())
+        if let Some(key) = entered_key.map(str::trim).filter(|key| !key.is_empty()) {
+            Some(key.to_string())
+        } else {
+            keys.read(&provider_keychain_service(&candidate))
+                .map_err(|refusal| refusal.message)?
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty())
+        }
     } else {
         None
     };
@@ -1400,6 +1636,9 @@ pub fn set_custom_decision_mode_at(
 
 #[cfg(test)]
 mod provider_tests;
+
+#[cfg(test)]
+mod builtin_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1960,6 +2199,7 @@ mod tests {
             [
                 "managed-judgment-filter",
                 "judgment-provider-kind",
+                "judgment-protocol",
                 "judgment-listed-model",
                 "route-classifier-select",
             ],
@@ -1979,8 +2219,8 @@ mod tests {
             "the advanced fold starts closed"
         );
         assert!(
-            !page.contains("data-jev-seat"),
-            "a feature's mode is chosen on the page"
+            page.contains("id=\"jev-builtin-form\""),
+            "built-in decisions have their own editor"
         );
 
         let main = include_str!("main.rs");
@@ -2005,6 +2245,8 @@ mod tests {
             "save_typesafe_key",
             "remove_typesafe_key",
             "set_jev_enabled",
+            "builtin_decision_definition",
+            "update_builtin_decision",
             "set_route_classifier",
             "set_judgment_provider",
             "judgment_models",

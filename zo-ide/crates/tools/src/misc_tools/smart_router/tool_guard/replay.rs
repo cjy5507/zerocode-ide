@@ -500,6 +500,7 @@ pub(super) fn cases(seed: &Value, repo: &Path, scratch: &Path) -> Vec<Case> {
 /// but its line rule decides.
 fn withheld(case: &Case) -> usize {
     let settings = JevSettings {
+        decisions: std::collections::BTreeMap::default(),
         enabled: true,
         workspaces: vec![door::EVERY_WORKSPACE.to_string()],
         daily_requests: None,

@@ -13,10 +13,10 @@
 //! ([`crate::git_dir::project_root`]), so every worktree of one repository is
 //! one project and two runs of one project still write to each other. A run
 //! made from now on is told its project by the pane that made it. A run made
-//! before is INFERRED one from its own rows, which the window records against
-//! and does not act on until the run's live coordinator confirms it with a
-//! verb typed in its own pane, in that project: a wrong inference must cost a
-//! line in a log, never a letter that cannot be sent. Each project carries
+//! before is INFERRED one from its own rows. That boundary already holds;
+//! its live coordinator can confirm it from a pane of the same project.
+//! An unscoped legacy run is visible only to its own seated participants.
+//! Each project carries
 //! how it was learned, when, and from which seat, so "why is this run that
 //! project's" has an answer in the ledger itself.
 
@@ -55,8 +55,7 @@ pub enum ProjectSource {
 }
 
 impl ProjectSource {
-    /// Whether the project was only read off the run's rows: recorded
-    /// against, never acted on.
+    /// Whether the project was read off the run's rows rather than confirmed.
     #[must_use]
     pub const fn inferred(self) -> bool {
         matches!(self, Self::Workers | Self::Seat)
@@ -158,12 +157,11 @@ pub enum Scope<'a> {
 }
 
 impl Scope<'_> {
-    /// Whether the window holds the boundary here rather than only writing
-    /// down that it was crossed: a crossing of a project that was not merely
-    /// inferred.
+    /// A different project is a boundary even before its coordinator confirms
+    /// an inferred project. Missing confirmation is not permission to cross.
     #[must_use]
     pub fn holds(&self) -> bool {
-        matches!(self, Self::Crossed(project) if !project.inferred())
+        matches!(self, Self::Crossed(_))
     }
 }
 
@@ -316,10 +314,73 @@ pub struct Reach {
     pub run: Option<(String, Option<RunProject>)>,
     /// Whether the caller sits in that run's live coordinator seat.
     pub coordinator: bool,
+    /// The caller is a live coordinator or worker of this run. This is the
+    /// visibility boundary for legacy rows whose project is not known yet.
+    pub participant: bool,
     /// The runs of another project than the caller's that a window verb
     /// reaches — every run `reset` clears, `run-list` lists and `inbox`
     /// reads — each with its project.
     pub elsewhere: Vec<(String, RunProject)>,
+    /// Rows a window-wide answer must omit, including unscoped legacy runs
+    /// in which the caller has no seat.
+    pub hidden: Vec<String>,
+    /// Actual recipients of send/ask/reply, resolved by the ledger's own
+    /// address rules. The window checks each pane's present project.
+    pub recipient_seats: Vec<String>,
+    /// A reply may also be copied into the asker's coordinator run.
+    pub reply_run: Option<(String, Option<RunProject>)>,
+}
+
+fn participant(run: &Run, team: &str, pane: &str) -> bool {
+    run.seat_is_coordinator(&format!("{team}/{pane}")) == Some(true)
+        || run.worker_in_pane(team, pane).is_some()
+}
+
+/// Scope a list before its limit or cursor is applied. A page of another
+/// project's rows must not hide this project's older messages or runs.
+#[must_use]
+pub fn visible_to(run: &Run, root: Option<&str>, team: &str, pane: &str) -> bool {
+    match (run.project.as_ref(), root) {
+        // Window-owned/internal reads have no pane context. Pane commands
+        // always carry Some(root), or Some("") for an unidentified project.
+        (_, None) => true,
+        (Some(project), Some(root)) => !root.is_empty() && project.root == root,
+        (None, _) => participant(run, team, pane),
+    }
+}
+
+/// Recheck the run inside the atomic ledger command. A legacy run can acquire
+/// its project between the window's preflight and the command being applied.
+pub fn require_project(
+    ledger: &Ledger,
+    argv: &[String],
+    team: &str,
+    pane: &str,
+    actor: Option<&str>,
+    root: Option<&str>,
+) -> Result<(), String> {
+    // Internal ledger operations have no pane scope. The window explicitly
+    // marks an unidentified pane with an empty scope, never None.
+    if root.is_none() {
+        return Ok(());
+    }
+    let Some(run) = acting_run(ledger, argv, team, pane, actor).and_then(|id| ledger.run(&id))
+    else {
+        return Ok(());
+    };
+    let Some(project) = run.project.as_ref() else {
+        return Ok(());
+    };
+    if root.filter(|root| !root.is_empty()) == Some(project.root.as_str()) {
+        return Ok(());
+    }
+    Err(refusal(
+        argv.first().map_or("", String::as_str),
+        &run.id,
+        project,
+        root.filter(|root| !root.is_empty())
+            .unwrap_or("an unidentified project"),
+    ))
 }
 
 /// What a verb from the pane `team/pane`, working in the project `root`,
@@ -333,28 +394,97 @@ pub fn reach(
     actor: Option<&str>,
     root: &str,
 ) -> Reach {
-    let elsewhere = match argv.first().map(String::as_str) {
-        Some("reset" | "run-list" | "inbox") => ledger
+    let lists = matches!(
+        argv.first().map(String::as_str),
+        Some("reset" | "run-list" | "inbox")
+    );
+    let elsewhere = if lists {
+        ledger
             .runs()
             .iter()
             .filter_map(|run| match run.scope(Some(root)) {
                 Scope::Crossed(project) => Some((run.id.clone(), project.clone())),
                 Scope::Same | Scope::Unknown => None,
             })
-            .collect(),
-        _ => Vec::new(),
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let hidden = if lists {
+        ledger
+            .runs()
+            .iter()
+            .filter(|run| !visible_to(run, Some(root), team, pane))
+            .map(|run| run.id.clone())
+            .collect()
+    } else {
+        Vec::new()
     };
     let Some(run) = acting_run(ledger, argv, team, pane, actor).and_then(|id| ledger.run(&id))
     else {
         return Reach {
             elsewhere,
+            hidden,
             ..Reach::default()
         };
     };
+    let words = split_words(&argv[1..], BOOL_FLAGS);
+    let target = match argv.first().map(String::as_str) {
+        Some("reply") => words
+            .value("--to-message")
+            .and_then(|id| run.message(id))
+            .map(|message| message.from.clone()),
+        Some("send") => words.value("--to").map(str::to_string),
+        Some("ask") if words.value("--resume").is_none() => Some(
+            words
+                .value("--to")
+                .map_or_else(|| run.address(), str::to_string),
+        ),
+        _ => None,
+    };
+    let reply_run = if argv.first().is_some_and(|verb| verb == "reply") {
+        target
+            .as_deref()
+            .and_then(|target| ledger.asker_run(target, &run.id))
+            .and_then(|id| ledger.run(&id))
+            .map(|run| (run.id.clone(), run.project.clone()))
+    } else {
+        None
+    };
+    let from = super::sender(
+        ledger,
+        crate::agent_teams::LEADER_PANE,
+        &run.id,
+        (team, pane),
+    );
+    let recipient_seats = target
+        .as_deref()
+        .and_then(|target| ledger.resolve_address(&run.id, target, &from).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|address| {
+            if let Some(seat) = address.strip_prefix(super::PANE_ADDRESS_PREFIX) {
+                return Some(seat.to_string());
+            }
+            if let Some(id) = address.strip_prefix(super::WORKER_ADDRESS_PREFIX) {
+                return run
+                    .worker(id)
+                    .map(|worker| format!("{}/{}", worker.team, worker.pane));
+            }
+            if address == &run.address() {
+                return run.coordinator_live().map(|chair| chair.seat.clone());
+            }
+            None
+        })
+        .collect();
     Reach {
         run: Some((run.id.clone(), run.project.clone())),
         coordinator: run.seat_is_coordinator(&format!("{team}/{pane}")) == Some(true),
+        participant: participant(run, team, pane),
         elsewhere,
+        hidden,
+        recipient_seats,
+        reply_run,
     }
 }
 

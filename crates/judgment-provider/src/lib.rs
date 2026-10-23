@@ -170,9 +170,6 @@ impl Provider {
     }
 
     pub fn endpoint_validated(mut self) -> Result<Self, Refusal> {
-        if self.protocol == Protocol::OpenaiJson && self.kind != ProviderKind::Local {
-            return Err(Refusal::Settings);
-        }
         if self.kind == ProviderKind::Jev
             && (self.protocol != Protocol::SystemOne
                 || self.base_url != JEV_BASE_URL
@@ -198,7 +195,7 @@ impl Provider {
         }
         match self.kind {
             ProviderKind::Local if !loopback(&address) => return Err(Refusal::LocalAddress),
-            ProviderKind::Remote if address.scheme() != "https" => {
+            ProviderKind::Remote if address.scheme() != "https" && !private_network(&address) => {
                 return Err(Refusal::RemoteAddress);
             }
             _ => {}
@@ -294,6 +291,20 @@ fn loopback(address: &Url) -> bool {
 
 fn valid_model(model: &str) -> bool {
     !model.is_empty() && model.len() <= 256 && !model.chars().any(char::is_control)
+}
+
+/// Explicit LAN endpoints can use HTTP, as local model servers do. Domain
+/// names still require TLS: validation never guesses where DNS will send a
+/// later request. Link-local and public addresses are not LAN exceptions.
+fn private_network(address: &Url) -> bool {
+    if loopback(address) {
+        return true;
+    }
+    match address.host() {
+        Some(Host::Ipv4(address)) => address.is_private(),
+        Some(Host::Ipv6(address)) => address.is_unique_local(),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

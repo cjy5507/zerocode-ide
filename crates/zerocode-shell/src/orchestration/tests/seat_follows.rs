@@ -58,6 +58,9 @@ impl Moving {
 }
 
 impl Host for Moving {
+    fn worktree_of(&self, _term: u32) -> Option<std::path::PathBuf> {
+        Some(crate::test_host::existing_directory().into())
+    }
     fn split(
         &self,
         _team: &str,

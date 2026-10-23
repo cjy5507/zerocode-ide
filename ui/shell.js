@@ -658,6 +658,10 @@ let agentGraphLayoutRuns = 0;
 let agentGraphNodeCreations = 0;
 let agentGraphEdgeMeasureRuns = 0;
 const agentGraphEdgeFrames = new WeakMap();
+/* 범위 목록 접기 (t-69978): 크기 관찰자가 판의 폭에서 낸 「저절로 접는가」의 답을 판마다 들고, 그 답이
+ * 바뀌면 다음 프레임에 판에 입힌다(`syncAgentGraphRail`). */
+const agentGraphRailAuto = new WeakMap();
+const agentGraphRailFrames = new WeakMap();
 const AGENT_RELATIVE_TIME_TICK_MS = 30_000;
 /* 카드가 그리는 활동의 양 (t-2374).
  *
@@ -2022,9 +2026,11 @@ document.addEventListener("keydown", (event) => {
       event.target.closest("input, textarea, [contenteditable='true']"))) {
     // The hand tool is the Space of the graph's own view. A line, a button or
     // a keyboard owner on another surface — a step's line on a conversation
-    // page in the next leaf — keeps the Space that is its own.
-    if (event.target instanceof Element && !view.contains(event.target) &&
-        event.target.closest("summary, button, [role='button'], [data-keyboard-owner]")) return;
+    // page in the next leaf — keeps the Space that is its own, and so does a
+    // keyboard owner inside this view: the scope rail's button in the
+    // relations toolbar is pressed with Space like any button (t-69978).
+    if (event.target instanceof Element && (event.target.closest("[data-keyboard-owner]") ||
+        (!view.contains(event.target) && event.target.closest("summary, button, [role='button']")))) return;
     agentGraphSpaceHeld = true;
     event.preventDefault();
     return;
@@ -4239,6 +4245,18 @@ function paintAgentRelationsControls(view, full, model) {
     }));
     scope.value = agentGraphScopeKey;
     scope.onchange = () => setAgentGraphScope(view, scope.value);
+  }
+  /* 범위 목록의 여닫이 (t-69978) — 누르면 지금 선 쪽의 반대가 사람의 선택이 된다. 편 단추가 제 폭에서
+   * 물러나면(이미 두 열이 서는 폭) 초점은 곁의 범위 선택으로 간다: 같은 일을 하는 손이고, 초점이
+   * 몸으로 떨어지면 키보드를 쓰는 사람은 제 자리를 잃는다. 단추가 초점을 쥐었는지는 바꾸기 전에 읽는다 —
+   * 숨는 그 자리에서 브라우저가 초점을 몸으로 내려놓아, 바꾼 뒤에는 쥔 적이 없는 것처럼 보인다. */
+  const railToggle = view.querySelector(".agent-relations-rail-toggle");
+  if (railToggle) {
+    railToggle.onclick = () => {
+      const held = document.activeElement === railToggle;
+      setAgentGraphRailChoice(view, view.classList.contains("is-rail-folded") ? "open" : "folded");
+      if (held && railToggle.hidden) scope?.focus();
+    };
   }
   /* 레일은 내용이 같으면 손대지 않는다 — 훅 하나마다 지나는 길이고, 항목마다
    * 낱말 둘과 손 하나를 다시 맞추는 값은 아무것도 움직이지 않은 판에서는 낭비다.
@@ -6684,6 +6702,10 @@ function agentGraphTierWidths(view) {
     side: read("--agent-graph-tier-side", 1100),
     list: read("--agent-graph-tier-list", 700),
     tight: read("--agent-graph-tier-tight", 400),
+    /* 범위 목록을 접는 셈의 둘 (t-69978): 열이 나란히 서는 그림 안쪽의 문턱과 곁판 티어의 레일 폭.
+     * 대비값이 없다 — 읽지 못하면 NaN이고, 그 판은 레일을 저절로 접지 않는다. */
+    stack: read("--agent-graph-team-stack", Number.NaN),
+    rail: read("--agent-relations-rail-width", Number.NaN),
   };
   agentGraphTiers.set(view, widths);
   return widths;
@@ -6713,6 +6735,80 @@ function setAgentGraphInspectorOpen(view, open) {
   if (toggle) writeAttribute(toggle, "aria-expanded", String(open));
 }
 
+/* ---- 범위 목록 접기 (t-69978, 사람 10-22) -----------------------------------
+ *
+ * 카드 보기의 코디 열(방향 E2)은 그림 안쪽이 두 열의 문턱(`--agent-graph-team-stack`)을 넘어야
+ * 나란히 선다. 인스펙터가 곁에 서는 넓은 판(곁판 티어)에 작업 레일까지 서면 그 몫이 모자란 폭이
+ * 있다 — 1440 창에서 왼쪽 목록을 펴면 그림 안쪽이 655px라 열이 하나로 쌓였다. 레일이 하는 일(범위
+ * 고르기)은 툴바의 범위 선택이 어느 폭에서나 그대로 하므로, 그 폭에서는 레일이 물러나 그림에 제
+ * 폭을 내준다. 인스펙터를 접지 않는 것은 카드를 누를 때마다 서랍이 오른쪽 열을 덮거나 열이 다시
+ * 하나로 접히기 때문이다.
+ *
+ * 사람이 툴바 맨 앞 단추로 펴거나 접은 것은 저절로 접는 것보다 이기고, 입체/카드 선택처럼 로컬
+ * 설정 한 키에 남는다 — 다시 그려도, 창을 다시 열어도. 키가 없으면 저절로다. */
+const AGENT_GRAPH_RAIL_STORE = "zerocode.board-relations-rail.v1";
+let agentGraphRailHeld = null;
+
+function agentGraphRailChoice() {
+  if (agentGraphRailHeld !== null) return agentGraphRailHeld;
+  let kept = null;
+  try {
+    kept = localStorage.getItem(AGENT_GRAPH_RAIL_STORE);
+  } catch {
+    // 저장소를 못 읽는 판은 고른 적 없는 판이다.
+  }
+  agentGraphRailHeld = kept === "open" || kept === "folded" ? kept : "auto";
+  return agentGraphRailHeld;
+}
+
+function setAgentGraphRailChoice(view, choice) {
+  agentGraphRailHeld = choice;
+  try {
+    localStorage.setItem(AGENT_GRAPH_RAIL_STORE, choice);
+  } catch {
+    // 저장하지 못해도 이 창은 고른 대로 선다 — 다음 시작만 저절로 돌아간다.
+  }
+  syncAgentGraphRail(view);
+}
+
+/* 레일을 저절로 접는가 — 크기 관찰자가 판의 폭을 재는 그 자리에서만 묻는다. 레일이 서 있다고 친
+ * 그림 안쪽이 문턱 밑이고, 레일의 몫을 더하면 문턱에 닿을 때다. 곁판 티어에서만 묻는다: 서랍
+ * 티어의 레일은 시안의 좁은 레일이고, 인스펙터가 이미 그림 위로 비켜서 있다. 폭은 스크롤바를 뺀
+ * 판의 폭이다 — 고전 스크롤바가 열이 바뀔 때 생기고 사라져도 답이 오가지 않게. 숨은 판과 토큰을
+ * 읽지 못한 판은 답하지 않는다. */
+function agentGraphRailFolds(view, scroll) {
+  const box = scroll.offsetWidth;
+  if (box === 0) return null;
+  const widths = agentGraphTierWidths(view);
+  if (!Number.isFinite(widths.stack) || !Number.isFinite(widths.rail)) return null;
+  if (view.clientWidth < widths.side) return false;
+  const dress = getComputedStyle(scroll);
+  const room = box - Number.parseFloat(dress.borderLeftWidth) - Number.parseFloat(dress.borderRightWidth)
+    - Number.parseFloat(dress.paddingLeft) - Number.parseFloat(dress.paddingRight);
+  const standing = view.classList.contains("is-rail-folded") ? room - widths.rail : room;
+  return standing < widths.stack && standing + widths.rail >= widths.stack;
+}
+
+/* 접힘을 판에 입힌다 — 판마다 그리는 길과, 크기 관찰자의 답이 바뀐 다음 프레임이 부른다. 레이아웃을
+ * 읽지 않는다: 저절로 접는 답은 크기 관찰자가 잰 것을 들고 있고, 사람의 선택은 한 키다. 단추는 카드
+ * 보기에서 레일이 접혀 있거나 저절로 접는 폭일 때만 선다 — 이미 두 열이 서는 폭과 입체는 그대로다
+ * (레일이 서지 않는 목록 티어에서는 CSS가 단추를 거둔다). 접힘이 바뀌면 그림의 폭이 바뀌므로
+ * 오버레이 선을 다시 잰다. */
+function syncAgentGraphRail(view) {
+  const cards = !view.classList.contains("is-task-board") && !agentOrbitShowing(view);
+  const auto = agentGraphRailAuto.get(view) === true;
+  const choice = agentGraphRailChoice();
+  const folded = cards && (choice === "auto" ? auto : choice === "folded");
+  const moved = view.classList.contains("is-rail-folded") !== folded;
+  view.classList.toggle("is-rail-folded", folded);
+  const toggle = view.querySelector(".agent-relations-rail-toggle");
+  if (toggle) {
+    writeHidden(toggle, !(cards && (folded || auto)));
+    writeAttribute(toggle, "aria-expanded", String(!folded));
+  }
+  if (moved && cards) scheduleAgentGraphEdges(view);
+}
+
 function watchAgentGraphSize(view) {
   /* 재는 것은 판이지 캔버스가 아니다 (round three). 그림이 판을 넘치면
    * 캔버스는 그림만큼 넓고, 판이 좁아져도 캔버스는 그대로라 알림이 오지
@@ -6724,6 +6820,14 @@ function watchAgentGraphSize(view) {
     agentGraphLiveSettle();
     const owner = scroll.closest(".file-view");
     if (!owner || !agentGraphModels.has(owner)) return;
+    /* 범위 목록을 저절로 접는가 (t-69978). 판의 폭을 읽는 것은 티어를 적기 전이다 — 적은 뒤에 읽으면
+     * 그 읽기가 레이아웃을 다시 돌린다. 답이 바뀌면 다음 프레임에 입힌다: 이 콜백 안에서 판의 폭을
+     * 바꾸면 같은 프레임에 같은 판을 다시 재야 하고, 그것이 ResizeObserver의 고리 오류다. */
+    const fold = agentGraphRailFolds(owner, scroll);
+    if (fold !== null && fold !== agentGraphRailAuto.get(owner)) {
+      agentGraphRailAuto.set(owner, fold);
+      scheduleGraphFrame(agentGraphRailFrames, owner, () => syncAgentGraphRail(owner));
+    }
     /* 폭을 이미 재고 있는 자리가 여기다 — 티어를 묻기에 가장 싼 자리이기도
      * 하다. 이 콜백은 뷰가 관찰에 들어갈 때 한 번 저절로 오므로, 처음 열린
      * 판도 제 티어를 안다. */
@@ -7632,6 +7736,8 @@ function paintAgentGraph(view, model) {
   writeHidden(view.querySelector(".agent-graph-surface"), taskMode);
   /* 관계 그림의 두 보기 (t-9444): 고른 것이 행성계면 카드의 판이 접히고 무대가 선다. */
   dressAgentOrbitMode(view, model, taskMode);
+  /* 범위 목록의 접힘 (t-69978) — 카드 보기에서만 접히므로 보기가 정해진 바로 뒤다. */
+  syncAgentGraphRail(view);
   /* 작업 목록으로 돌아간 판에는 지도가 없다 — 다른 판도 지도를 보이지 않으면
    * 맥박의 시계를 지금 거둔다 (t-7288). */
   agentGraphLiveSettle();
@@ -13843,14 +13949,19 @@ function updateHelperStatus(line, run) {
  * it names there; an image stays its caption; and a renderer that trips on a
  * line leaves the words standing as text rather than a blank turn. Bare paths
  * and addresses become the same doors a markdown link is (t-2973). Its code
- * takes its colours (`colourCodeIn`, t-22095) — unless `colour` is false: the
- * block still being written, which the next frame draws again. */
+ * takes its colours (`colourCodeIn`, t-22095) and its ```mermaid fences their
+ * diagrams (`paintMarkdownDiagrams`, t-58437) — unless `colour` is false: the
+ * block still being written, which the next frame draws again. So a fence
+ * draws once it has settled, and is laid out once: the settled part is drawn
+ * once (`settledCut`). The diagrams come after the doors, which walk the words
+ * and would walk a drawing's labels too. */
 function paintHelperProse(host, text, base, { colour = true } = {}) {
   const previous = mdWhere;
   mdWhere = { base, page: null };
   try {
     paintMarkdown(host, text);
     linkifyHelperProse(host);
+    if (colour) paintMarkdownDiagrams(host);
     // Each code block wears the extension's copy over its corner (A9).
     dressCodeCopies(host);
   } catch {

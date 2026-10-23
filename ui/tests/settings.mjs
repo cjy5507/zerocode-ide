@@ -3150,7 +3150,7 @@ class StatefulBackend {
         if (args.expectedProviderIdentity && args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (this.typesafeSetFailure) throw { kind: "failed", message: "fixture refused the model" };
         const provider = clone(args.provider);
-        if (!provider.model?.trim() || provider.protocol !== "system_one") {
+        if (!provider.model?.trim() || !["system_one", "openai_json"].includes(provider.protocol)) {
           throw { kind: "failed", message: "invalid decision provider" };
         }
         const endpoint = new URL(provider.baseUrl);
@@ -3167,12 +3167,20 @@ class StatefulBackend {
           if (pin === JEV_MODEL_ALIAS) delete smart[JEV_MODEL_SETTING];
           else smart[JEV_MODEL_SETTING] = pin;
         }
+        if (args.key?.trim()) {
+          if (!provider.requiresAuth) throw { kind: "failed", message: "provider_auth_not_required" };
+          this.keychain.set(this.judgmentService(provider), args.key.trim());
+        }
         smart.judgmentProvider = provider;
         this.zoSettings.smart = smart;
         return this.typesafeSettings();
       }
-      case "judgment_models": return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
+      case "judgment_models": {
+        if (this.judgmentModelsError) throw this.judgmentModelsError;
+        return clone(await (this.judgmentModelsWait ?? this.judgmentModels ?? [{ id: "fixture-decision-a" }, { id: "fixture-decision-b" }]));
+      }
       case "preflight_judgment_provider": {
+        if (this.judgmentPreflightError) throw this.judgmentPreflightError;
         if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
         if (args.provider.kind === "jev" && !jevModelPin(args.provider.model)) throw "provider_model";
         const check = await (this.judgmentPreflightWait ?? this.judgmentPreflight ?? {
@@ -6106,9 +6114,9 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     visible: all.filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0).map((select) => select.id),
   }));
   assertEqual(selects, {
-    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-listed-model", "route-classifier-select"],
-    visible: ["judgment-provider-kind"],
-  }, "the provider is visible, the library filter stands only over library rows, and classifier and inactive server choices stay folded");
+    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model", "route-classifier-select"],
+    visible: ["managed-judgment-filter", "judgment-provider-kind"],
+  }, "the provider and candidate filter are visible; protocol and inactive choices stay folded");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
@@ -7277,6 +7285,7 @@ await test("판단 모델 목록은 실제 지원 경로로 검색하고 서버 
     assert(await server.locator('[data-model-action="activate"]').isHidden(), "an unsupported local adapter offers to run here");
     assert(await server.locator('[data-model-action="connect"]').isVisible(), "a compatible server model has no connection path");
     assertEqual(await pageA.locator('[data-model-id="fixture-server-only"].managed-judgment-model').count(), 0, "a model not received here stands as a library row");
+    await pageA.fill("#managed-judgment-search", "");
     await pageA.locator("#managed-judgment-candidates > summary").click();
     const serverOnly = pageA.locator('#managed-judgment-candidate-list > [data-model-id="fixture-server-only"]');
     for (const action of ["install", "inspect-source", "import"]) {
@@ -7452,6 +7461,12 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
       { id: "fixture-local-candidate", name: "Fixture Local Candidate", size: words.sizes[0], actions: [["install", words.download], ["import", words.register]], folds: 0 },
       { id: "fixture-d3", name: "Fixture D3 lite", size: words.sizes[1], actions: [["inspect-source", words.inspect], ["connect", words.connect]], folds: 0 },
     ], "an unfolded candidate is not one line of its name, its size and the ways to have it");
+    assert(await page.locator('[data-model-id="fixture-d3"] .managed-judgment-candidate-reason').isVisible(), "a download-only candidate does not explain its limitation");
+    await page.fill("#managed-judgment-search", "fixture-d3");
+    assert(await page.locator('#managed-judgment-candidate-list > li[data-model-id="fixture-d3"]').isVisible(), "search cannot find a model not downloaded yet");
+    assert(await page.locator('#managed-judgment-candidate-list > li[data-model-id="fixture-local-candidate"]').isHidden(), "candidate search ignored the query");
+    assert(await page.locator("#managed-judgment-no-matches").isHidden(), "a matching candidate is reported as no matches");
+    await page.fill("#managed-judgment-search", "");
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
       await setQualityTheme(page, theme);
       await renderSettled(page);
@@ -7488,6 +7503,7 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
       candidates: [...document.querySelectorAll("#managed-judgment-candidate-list > li")].map((item) => item.dataset.modelId),
     }), words.connected);
     assertEqual(await answering(), { rows: ["fixture-d3"], candidates: ["fixture-d3-checked"] }, "two catalog entries of one server model stand as two connected rows");
+    assert(await page.locator('#managed-judgment-candidate-list [data-model-id="fixture-d3-checked"] [data-model-action="connect"]').isDisabled(), "the same connected server is offered as a new connection");
     assertEqual(await library(), ["fixture-laya", "fixture-local-candidate", "fixture-d3"], "the model a connected server answers with is not in the library");
     const served = await page.evaluate(() => {
       const row = managedJudgmentController.rows.get("fixture-d3");
@@ -7496,6 +7512,12 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
     assertEqual(served, { summary: words.source, identity: "acme/d3 · transformers_system_one", state: words.connected },
       "the connected server's model claims a pinned revision it cannot know, or hides that it is connected");
     assertEqual(await said(), { count: words.counted[2], fold: words.offered[1] }, "the connected server model is not counted as one row beside one candidate");
+    held.configuredModelId = checked.id;
+    held.revision += 1;
+    await page.evaluate(() => refreshTypeSafe());
+    await page.waitForFunction(() => managedJudgmentController.snapshot?.configuredModelId === "fixture-d3-checked");
+    assertEqual(await answering(), { rows: ["fixture-d3-checked"], candidates: ["fixture-d3"] }, "a connection bound to the second entry still selected the first");
+    held.configuredModelId = null;
     // Files received for the checked address make it the connection's row,
     // and the bundled entry goes back to the candidates.
     checked.installed = true;
@@ -7537,8 +7559,8 @@ await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 
         pinned: document.getElementById("managed-judgment-panel").textContent.includes("fixture-revision"),
       };
     });
-    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-none", "managed-judgment-candidates"], notice: false, open: false, pinned: false },
-      "a computer holding no model shows more than one line and the folded candidates");
+    assertEqual(await seen(), { rows: 0, lines: ["managed-judgment-library-tools", "managed-judgment-none", "managed-judgment-candidates"], notice: false, open: false, pinned: false },
+      "a computer holding no model cannot search the available candidates");
     assertEqual(await page.locator("#managed-judgment-none").textContent(),
       await page.evaluate(() => t("settings.managed.noneReceived", "받은 판단 모델이 없습니다 — 아래에서 불러오세요")), "the empty library does not point at the candidates below");
     // With nothing in the catalog either, the line left is the server one.
@@ -7771,6 +7793,118 @@ await test("로컬 모델 관리는 키보드와 다섯 언어·두 테마·좁�
     backend.managedModelState = previousManaged;
   }
   return "real Enter · 5 locales × 2 themes · supported 720×480 minimum and wider viewports · model actions grouped";
+});
+
+await test("판단 연결 시험은 입력 키를 임시로 쓰고 실패해도 기존 키를 바꾸지 않는다", async () => {
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const provider = { kind: "remote", protocol: "openai_json", baseUrl: "https://decision-key.example.com/v1", model: "acme/decision", requiresAuth: true };
+  const service = backend.judgmentService(provider);
+  const previousKey = backend.keychain.get(service);
+  backend.zoSettings.smart = { ...(previous ?? {}), judgmentProvider: provider };
+  backend.keychain.set(service, "kept-fixture-key");
+  const identity = backend.typesafeSettings().providerIdentity;
+  try {
+    await openJudgmentSettings(pageA);
+    backend.judgmentModelsError = "unauthorized";
+    backend.judgmentPreflight = { candidateIdentity: "fixture-candidate", activeProviderIdentity: identity, answered: false, failure: "unauthorized" };
+    for (const [button, command] of [["judgment-refresh-models", "judgment_models"], ["typesafe-check-btn", "preflight_judgment_provider"]]) {
+      await pageA.fill("#typesafe-key-input", "rejected-fixture-key");
+      const began = backend.calls.length;
+      await pageA.click(`#${button}`);
+      const call = await backend.waitForCall("A", command, began);
+      await pageA.waitForFunction(() => !typesafeBusy && !judgmentProviderController.loading);
+      assertEqual(backend.keychain.get(service), "kept-fixture-key", "a failed connection test replaced the active credential");
+      assertEqual(call.args.key, "rejected-fixture-key", "the test did not use the entered candidate credential");
+      assert(!backend.calls.slice(began).some((one) => ["save_typesafe_key", "set_judgment_provider"].includes(one.command)), "a read-only connection test wrote settings or a key");
+      assertEqual(backend.typesafeSettings().providerIdentity, identity);
+    }
+  } finally {
+    delete backend.judgmentModelsError;
+    delete backend.judgmentPreflight;
+    if (previousKey === undefined) backend.keychain.delete(service);
+    else backend.keychain.set(service, previousKey);
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "discovery and preflight are read-only · the current credential survives failure";
+});
+
+await test("판단 서버도 주소와 키로 연결하고 모델을 고른 뒤 검증해 적용한다", async () => {
+  await openJudgmentSettings(pageA);
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "remote");
+    assertEqual(await pageA.locator("#judgment-protocol").count(), 1, "a custom server has no protocol choice");
+    await pageA.selectOption("#judgment-protocol", "openai_json");
+    await pageA.fill("#judgment-endpoint", "https://decisions.example.com/v1");
+    await pageA.fill("#typesafe-model-input", "");
+    await pageA.fill("#typesafe-key-input", "decision-fixture-key");
+    assertEqual(await pageA.locator("#typesafe-status").textContent(), "", "the new connection still claims a previous model was checked or applied");
+    const candidate = await pageA.evaluate(() => judgmentProviderController.current());
+    const service = backend.judgmentService(candidate);
+    const storedBefore = backend.keychain.get(service);
+    const began = backend.calls.length;
+    await pageA.click("#judgment-refresh-models");
+    await backend.waitForCall("A", "judgment_models", began);
+    await pageA.waitForFunction(() => !judgmentProviderController.loading);
+    const calls = backend.calls.slice(began).filter((call) => ["save_typesafe_key", "judgment_models"].includes(call.command));
+    assertEqual(calls.map((call) => call.command), ["judgment_models"], "discovery wrote a credential before the connection was applied");
+    assertEqual(calls[0].args.provider.protocol, "openai_json");
+    assertEqual(calls[0].args.key, "decision-fixture-key", "discovery did not use the entered credential");
+    assertEqual(backend.keychain.get(service), storedBefore, "discovery replaced the stored credential");
+    assertEqual(backend.typesafeSettings().provider.kind, "jev", "discovery applied the candidate before its answer was checked");
+    await pageA.selectOption("#judgment-listed-model", "fixture-decision-b");
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      await renderSettled(pageA);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#judgment-connection-settings"), [], `${theme} custom connection accessibility`);
+      if (process.env.JUDGMENT_CONNECTION_SHOTS) {
+        await mkdir(process.env.JUDGMENT_CONNECTION_SHOTS, { recursive: true });
+        await pageA.locator("#judgment-connection-settings").screenshot({ path: resolve(process.env.JUDGMENT_CONNECTION_SHOTS, `connection-${theme}.png`), animations: "disabled" });
+      }
+    }
+    const applyAt = backend.calls.length;
+    await pageA.click("#judgment-save-provider");
+    await backend.waitForCall("A", "set_judgment_provider", applyAt);
+    assertEqual(backend.typesafeSettings().provider.model, "fixture-decision-b");
+    assertEqual(backend.typesafeSettings().provider.protocol, "openai_json");
+    await pageA.waitForFunction(() => !typesafeBusy && !typesafeRefreshing);
+    assertEqual(backend.keychain.get(service), "decision-fixture-key", "applying the checked connection did not keep its credential");
+    assertEqual(await pageA.inputValue("#typesafe-key-input"), "", "the applied key remained in the form");
+  } finally {
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "temporary key → model discovery → selected model → checked settings and key commit";
+});
+
+await test("판단 서버 주소 오류는 고칠 방법을 말하고 현재 모델은 유지한다", async () => {
+  await openJudgmentSettings(pageA);
+  const previous = backend.zoSettings.smart === undefined ? undefined : clone(backend.zoSettings.smart);
+  const identity = backend.typesafeSettings().providerIdentity;
+  try {
+    await pageA.selectOption("#judgment-provider-kind", "remote");
+    await pageA.fill("#judgment-endpoint", "http://gateway.example.com/v1");
+    backend.judgmentModelsError = "provider_https_required";
+    await pageA.click("#judgment-refresh-models");
+    await pageA.waitForFunction(() => !judgmentProviderController.loading);
+    const status = await pageA.locator("#judgment-model-status").textContent();
+    assert(status.includes("HTTPS") && !status.includes("provider_https_required"), "the address refusal is still an unexplained token", status);
+    assertEqual(backend.typesafeSettings().providerIdentity, identity, "failed discovery changed the current provider");
+    backend.judgmentPreflightError = "provider_https_required";
+    await pageA.fill("#typesafe-model-input", "fixture-decision");
+    await pageA.click("#judgment-save-provider");
+    await pageA.waitForFunction(() => !typesafeBusy);
+    const said = await pageA.locator("#typesafe-status .settings-status-said").textContent();
+    assert(said.includes("HTTPS") && !said.includes("provider_https_required"), "apply displayed the raw address token", said);
+    assertEqual(backend.typesafeSettings().providerIdentity, identity, "failed apply changed the current provider");
+  } finally {
+    delete backend.judgmentModelsError;
+    delete backend.judgmentPreflightError;
+    backend.zoSettings.smart = previous;
+    await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
+  }
+  return "actionable address failure · current selection unchanged";
 });
 
 await test("다른 서버의 키를 모델 선택 전에 저장하고 늦은 목록은 새 선택을 덮지 않는다", async () => {
@@ -14041,7 +14175,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
           // A notice's own action (the switch's 「모든 폴더에서 사용」) is the
           // notice's, not a button loose above the card's footer.
           buttonsOutside: [...box.querySelectorAll(".btn")]
-            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice") && !one.closest("#judgment-local-mode, #managed-judgment-panel, .judgment-model-source"))
+            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice") && !one.closest("#judgment-local-mode, #managed-judgment-panel, .judgment-model-source, .judgment-connect-actions"))
             .map((one) => one.id),
           filled,
         };

@@ -769,6 +769,57 @@ fn an_empty_landing_time_is_read_off_git() {
     assert_eq!(flow.sources.ship.get(&Told::Git), Some(&3));
 }
 
+/// The board's schedule ends a finished task's bar where git says it landed
+/// (t-71840), found the way the flow finds a line's landing: the merge that
+/// names the task, else the merge its `mergeHead` names, with the release that
+/// merge falls under; with no merge, the release the coordinator wrote it
+/// shipped in, when the walk holds it. A task git says nothing of is left out.
+#[test]
+fn the_schedule_reads_each_tasks_landing_and_release_off_git() {
+    let fixture = fixture();
+    let (landed, by_head, shipped) = (
+        fixture.ids["landed"].as_str(),
+        fixture.ids["named-by-head"].as_str(),
+        fixture.ids["shipped"].as_str(),
+    );
+    let head = sha(2);
+    let ask = |task, merge_head, release| LandingAsk {
+        task,
+        merge_head,
+        release,
+    };
+    let found = landings(
+        &fixture.git,
+        &[
+            ask(landed, None, None),
+            ask(by_head, Some(head.as_str()), None),
+            ask(shipped, None, Some("v2.4.0")),
+            ask("t-7001", None, Some("v2.3.0")),
+            ask("t-7002", None, Some("v9.9.9")),
+            ask("t-7003", None, None),
+        ],
+    );
+    let told = |landed_ms, released_ms| Landed {
+        landed_ms,
+        released_ms,
+    };
+    let expected: BTreeMap<String, Landed> = [
+        (landed, told(Some(at(120)), None)),
+        (by_head, told(Some(at(110)), None)),
+        (shipped, told(Some(at(90)), Some(at(100)))),
+        ("t-7001", told(None, Some(at(50)))),
+    ]
+    .into_iter()
+    .map(|(task, landing)| (task.to_string(), landing))
+    .collect();
+    assert_eq!(found, expected);
+    assert_eq!(
+        serde_json::to_value(found[shipped]).expect("a landing serializes"),
+        serde_json::json!({"landed_ms": at(90), "released_ms": at(100)}),
+        "the window reads these keys"
+    );
+}
+
 /// Each step's moment comes after the one before it: the task, its attempt,
 /// the hand-in, the review, the landing and the release.
 #[test]

@@ -2116,6 +2116,10 @@ pub(super) struct DeskCheckout {
     /// Changed files, the cleanup screen's own count (`cleanup_git_evidence`).
     /// `None`: git did not answer.
     pub(super) dirty_files: Option<usize>,
+    /// The lines its tree added and took away since it forked from the base
+    /// (`Orchestrator::lines_beyond`, t-70264) — the worker table's 바뀐 줄.
+    /// `None`: nobody recorded the base, or git could not compare.
+    pub(super) lines: Option<zerocode_orchestrator::LinesBeyond>,
 }
 
 /// The most checkouts one ask reads. A roster is a handful of workers; the
@@ -2164,6 +2168,12 @@ pub(super) fn desk_checkout_facts(
                     .flatten(),
                 _ => None,
             };
+            let lines = base.as_deref().and_then(|base| {
+                orchestrator
+                    .lines_beyond(&worktree.path, base)
+                    .ok()
+                    .flatten()
+            });
             let git = cleanup_git_evidence(&Host::for_workspace(&worktree.path), &worktree.path);
             facts.push(DeskCheckout {
                 path: worktree.path.to_string_lossy().into_owned(),
@@ -2171,6 +2181,7 @@ pub(super) fn desk_checkout_facts(
                 base,
                 beyond_base,
                 dirty_files: (!git.errored).then_some(git.dirty_files),
+                lines,
             });
         }
     }

@@ -573,6 +573,7 @@ mod tests {
     async fn a_keyless_question_is_refused_at_the_door_and_leaves_no_answer() {
         let home = tempfile::tempdir().expect("tmp");
         let settings = zerocode_core::jev::door::JevSettings {
+            decisions: std::collections::BTreeMap::default(),
             enabled: true,
             workspaces: vec![home.path().display().to_string()],
             daily_requests: None,
@@ -630,6 +631,7 @@ mod tests {
         let mock = super::super::jev_mock::Mock::serving(200, judged_large());
         let home = tempfile::tempdir().expect("tmp");
         let settings = zerocode_core::jev::door::JevSettings {
+            decisions: std::collections::BTreeMap::default(),
             enabled: true,
             workspaces: vec![WORKSPACE.to_string()],
             daily_requests: None,

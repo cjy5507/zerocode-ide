@@ -971,11 +971,15 @@
    * 시안 p-2259b7961aa24a46 v1 ③ E2의 수 그대로다. 열은 340px에서 판의 몫까지 자라되 한 열이
    * 720px를 넘지 않고(질문 한 줄이 눕지 않는 폭), 열 사이는 24px다. 줄기의 홈은 마디(16px)가
    * 서는 왼쪽 자리라 32 + 12, 헬퍼 줄기의 홈은 그보다 한 단 좁다. 타일은 카드 20px · 머리 24px,
-   * 상태 표식은 10px. 열이 한 열로 쌓이는 그림의 폭(760)은 컨테이너 쿼리의 조건이라 토큰이 될 수
-   * 없어 shell.css의 `@container graph` 한 곳에만 선다. */
+   * 상태 표식은 10px. */
   --agent-graph-team-width: 340px;
   --agent-graph-team-max: 720px;
   --agent-graph-team-gap: var(--space-5);
+  /* 열이 나란히 서는 그림 안쪽의 문턱 — 그 밑에서는 한 열로 쌓인다. 컨테이너 쿼리의 조건에는 `var()`가
+   * 들어가지 못하므로 이 수는 shell.css의 `@container graph (max-width: 759px)`에 한 번 더 서고, 이
+   * 주석이 그 사본을 짊어진다(티어의 문턱과 같은 예외). JS는 여기서 읽는다 — 이 문턱을 넘기려고 범위
+   * 목록을 접는 셈(t-69978, `agentGraphRailFolds`). */
+  --agent-graph-team-stack: 760px;
   --agent-graph-spine-gutter: calc(var(--space-6) + var(--space-3));
   --agent-graph-sub-gutter: 28px;
   --agent-graph-joint: 16px;

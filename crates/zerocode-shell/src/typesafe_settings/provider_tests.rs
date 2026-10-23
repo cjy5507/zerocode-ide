@@ -188,6 +188,92 @@ fn settings_wire(path: &Path) -> crate::systemone::Wire {
 }
 
 #[test]
+fn an_entered_preflight_key_is_used_without_replacing_the_saved_key() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut provider = candidate(endpoint.base());
+    provider.requires_auth = true;
+    set_provider(&path, provider.clone()).expect("active provider");
+    let before = std::fs::read(&path).expect("settings");
+    let keys = HeldKeys::default();
+    let service = provider_keychain_service(&provider);
+    keys.write(&service, "kept-fixture").expect("saved key");
+    let checked = preflight_provider_with_key(
+        &path,
+        provider.clone(),
+        &provider.identity(),
+        &keys,
+        &settings_wire(&path),
+        Some("entered-fixture"),
+    )
+    .expect("preflight");
+    assert!(checked.answered, "{checked:?}");
+    assert!(
+        endpoint.asked()[0]
+            .to_ascii_lowercase()
+            .contains("authorization: bearer entered-fixture")
+    );
+    assert_eq!(keys.held(&service).as_deref(), Some("kept-fixture"));
+    assert_eq!(std::fs::read(&path).expect("settings"), before);
+}
+
+#[test]
+fn a_stale_connection_apply_leaves_its_saved_key_and_settings_untouched() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (active, before) = selected_with_managed_model(&path);
+    let mut provider = local();
+    provider.requires_auth = true;
+    let keys = HeldKeys::default();
+    let service = provider_keychain_service(&provider);
+    keys.write(&service, "kept-fixture").expect("saved key");
+    let result = set_provider_with_key_if_identity(
+        &path,
+        provider,
+        "stale-identity",
+        "entered-fixture",
+        &keys,
+    );
+    assert_eq!(result.expect_err("stale apply").message, "settings_changed");
+    assert_eq!(keys.held(&service).as_deref(), Some("kept-fixture"));
+    assert_eq!(std::fs::read_to_string(&path).expect("settings"), before);
+    assert_eq!(selected_provider(&path).expect("provider"), active);
+}
+
+#[test]
+fn applying_a_checked_connection_commits_its_key_without_putting_it_in_settings() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (active, _) = selected_with_managed_model(&path);
+    let mut provider = local();
+    provider.requires_auth = true;
+    let keys = HeldKeys::default();
+    set_provider_with_key_if_identity(
+        &path,
+        provider.clone(),
+        &active.identity(),
+        "entered-fixture",
+        &keys,
+    )
+    .expect("checked apply");
+    assert_eq!(selected_provider(&path).expect("provider"), provider);
+    assert_eq!(
+        keys.held(&provider_keychain_service(&provider)).as_deref(),
+        Some("entered-fixture")
+    );
+    let saved = std::fs::read_to_string(&path).expect("settings");
+    assert!(!saved.contains("entered-fixture"));
+    let root: Value = serde_json::from_str(&saved).expect("JSON");
+    assert_eq!(root["theme"], "dark");
+    assert!(
+        root["smart"]
+            .get(local_judgment::MANAGED_MODEL_KEY)
+            .is_none()
+    );
+}
+
+#[test]
 fn a_preflight_answer_leaves_the_selected_provider_and_its_managed_model_unchanged() {
     let home = tempfile::tempdir().expect("home");
     let path = home.path().join("settings.json");
@@ -448,6 +534,7 @@ fn a_candidate_an_apply_would_refuse_is_refused_before_anything_is_sent() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
     let mut remote = candidate(endpoint.base());
     remote.kind = ProviderKind::Remote;
+    remote.base_url = "http://gateway.example.com/v1".to_string();
     let mut unpinned = Provider::jev(DEFAULT_MODEL);
     unpinned.model = "two words".to_string();
     for (refused, token) in [
@@ -467,6 +554,29 @@ fn a_candidate_an_apply_would_refuse_is_refused_before_anything_is_sent() {
     }
     assert!(endpoint.asked().is_empty());
     assert_eq!(std::fs::read_to_string(&path).expect("settings"), before);
+}
+
+#[test]
+fn a_remote_loopback_candidate_can_be_checked_then_applied() {
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (selected, before) = selected_with_managed_model(&path);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut remote = candidate(endpoint.base());
+    remote.kind = ProviderKind::Remote;
+    let check = preflight_provider(
+        &path,
+        remote.clone(),
+        &selected.identity(),
+        &HeldKeys::default(),
+        &settings_wire(&path),
+    )
+    .expect("an explicit loopback HTTP connection");
+    assert!(check.answered, "{check:?}");
+    assert_eq!(endpoint.count(), 1);
+    assert_eq!(std::fs::read_to_string(&path).expect("settings"), before);
+    set_provider_if_identity(&path, remote.clone(), &selected.identity(), None).expect("apply");
+    assert_eq!(selected_provider(&path).expect("provider"), remote);
 }
 
 /// A preflight of the very provider the settings select sends a real request

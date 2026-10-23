@@ -282,6 +282,15 @@ fn quote_for_display(path: &str) -> String {
     quoted
 }
 
+/// The lines a checkout's tree added and took away since it forked from its
+/// base ([`Orchestrator::lines_beyond`]) — the task board's worker table says
+/// them as `+added −removed` (t-70264).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct LinesBeyond {
+    pub added: u64,
+    pub removed: u64,
+}
+
 /// Everything that would be lost if a worktree were deleted right now.
 ///
 /// The two lists are separate because git treats them completely differently
@@ -874,6 +883,55 @@ impl Orchestrator {
         // same "no answer" the unresolved ref gives, and a caller weighing a
         // removal has to keep the checkout on it.
         Ok(output.stdout.trim().parse::<usize>().ok())
+    }
+
+    /// The lines a checkout's tree has added and taken away since it forked
+    /// from `base` (t-70264) — what a coordinator typed `git diff --shortstat`
+    /// for, and the task board's worker table says beside each worker.
+    ///
+    /// The tree is read as it stands, its commits and its edits not yet
+    /// committed alike, against the commit the branch forked from: work the
+    /// base took in after the cut is the base's, not this checkout's. A file
+    /// git does not track has no lines yet, and a binary file has none.
+    ///
+    /// `Ok(None)` when the base does not resolve here or the two share no
+    /// history — doubt, as [`Self::commits_beyond`] reads it, never zero.
+    ///
+    /// Asked on the board's slow beat while the worker may be running its own
+    /// git, so it takes no optional lock and does not refresh the index
+    /// (`NO_OPTIONAL_LOCKS`, `NO_DIFF_REFRESH`).
+    ///
+    /// # Errors
+    ///
+    /// [`OrchestratorError::GitUnavailable`] if git cannot be run, or
+    /// [`OrchestratorError::Git`] if the diff itself refuses.
+    pub fn lines_beyond(
+        &self,
+        worktree: impl AsRef<Path>,
+        base: &str,
+    ) -> Result<Option<LinesBeyond>, OrchestratorError> {
+        let worktree = worktree.as_ref();
+        let Some(base) = self.commit_of(worktree, base)? else {
+            return Ok(None);
+        };
+        let forked = run(&self.git, worktree, ["merge-base", base.as_str(), "HEAD"])?;
+        let fork = forked.stdout.trim();
+        if !forked.ok || fork.is_empty() {
+            return Ok(None);
+        }
+        let mut args = vec![NO_OPTIONAL_LOCKS];
+        args.extend(NO_DIFF_REFRESH);
+        args.extend(["diff", "--numstat", "--find-renames", "-z", fork, "--"]);
+        let output = run(&self.git, worktree, args)?;
+        if !output.ok {
+            return Err(self.failure("diff --numstat (since the fork)", &output));
+        }
+        let (added, removed) = parse_numstat(&output.stdout)
+            .into_values()
+            .fold((0, 0), |(added, removed), (more, fewer)| {
+                (added + more, removed + fewer)
+            });
+        Ok(Some(LinesBeyond { added, removed }))
     }
 
     /// The commit one name stands for, or `None` when this repository has no
@@ -3487,6 +3545,85 @@ prunable gitdir file points to non-existent location
                 .expect("count"),
             None
         );
+    }
+
+    /// The worker table's 바뀐 줄 (t-70264): the tree as it stands against the
+    /// commit its branch forked from. Committed work and edits not yet
+    /// committed both count; the base moving on after the cut does not, and a
+    /// file git does not track has no lines yet. A base that is not here is
+    /// doubt, never zero.
+    #[test]
+    fn lines_beyond_counts_the_tree_since_it_forked_from_its_base() {
+        let repo = empty_repository();
+        configure_identity(repo.path());
+        let git = |args: &[&str]| {
+            let output = Command::new(GIT_EXECUTABLE)
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        let lines = |added, removed| Some(LinesBeyond { added, removed });
+        std::fs::write(repo.path().join("a.txt"), "one\ntwo\nthree\n").expect("write");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["branch", "-M", "main"]);
+        let orchestrator = Orchestrator::open(repo.path()).expect("open");
+
+        // A branch just cut carries no lines of its own.
+        git(&["checkout", "-qb", "wt/work"]);
+        assert_eq!(
+            orchestrator
+                .lines_beyond(repo.path(), "main")
+                .expect("count"),
+            lines(0, 0)
+        );
+
+        // One commit: a line rewritten and a line added.
+        std::fs::write(repo.path().join("a.txt"), "one\nTWO\nthree\nfour\n").expect("write");
+        git(&["commit", "-qam", "work"]);
+        assert_eq!(
+            orchestrator
+                .lines_beyond(repo.path(), "main")
+                .expect("count"),
+            lines(2, 1)
+        );
+
+        // The base taking in other work after the cut is the base's.
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("c.txt"), "c1\nc2\nc3\n").expect("write");
+        git(&["add", "c.txt"]);
+        git(&["commit", "-qm", "base moves on"]);
+        git(&["checkout", "-q", "wt/work"]);
+        assert_eq!(
+            orchestrator
+                .lines_beyond(repo.path(), "main")
+                .expect("count"),
+            lines(2, 1)
+        );
+
+        // An edit not yet committed is the checkout's work too; a file git
+        // does not track is not lines yet.
+        std::fs::write(repo.path().join("a.txt"), "one\nTWO\nthree\nfour\nfive\n").expect("write");
+        std::fs::write(repo.path().join("loose.txt"), "loose\n").expect("write");
+        assert_eq!(
+            orchestrator
+                .lines_beyond(repo.path(), "main")
+                .expect("count"),
+            lines(3, 1)
+        );
+
+        // A base nobody can resolve is not zero, and neither is a name that
+        // would otherwise reach git's option parser.
+        for base in ["no-such-base", "--all"] {
+            assert_eq!(
+                orchestrator.lines_beyond(repo.path(), base).expect("count"),
+                None,
+                "{base}"
+            );
+        }
     }
 
     /// The two destructive verbs behind the panel's confirmation dialog, on a

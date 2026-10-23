@@ -146,6 +146,9 @@ impl<'a> Beat<'a> {
 }
 
 impl Host for Beat<'_> {
+    fn worktree_of(&self, term: u32) -> Option<std::path::PathBuf> {
+        self.inner.worktree_of(term)
+    }
     fn split(
         &self,
         team: &str,
@@ -925,6 +928,9 @@ impl Reseating<'_> {
 }
 
 impl Host for Reseating<'_> {
+    fn worktree_of(&self, term: u32) -> Option<std::path::PathBuf> {
+        self.beat.inner.worktree_of(term)
+    }
     fn split(
         &self,
         team: &str,

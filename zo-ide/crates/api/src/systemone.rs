@@ -494,6 +494,8 @@ impl SystemOneResponse {
 /// re-sent, how long it took end to end, and what it really cost.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemOneCall {
+    /// Local decision wording identity; never sent as a provider parameter.
+    pub decision_rubric: Option<u32>,
     /// The winning attempt's outcome, and the winner's own re-sends.
     pub outcome: Result<SystemOneResponse, SystemOneFailure>,
     pub retries: u32,
@@ -794,6 +796,7 @@ impl SystemOneClient {
     ) -> SystemOneCall {
         let opened = Instant::now();
         let refused = |failure| SystemOneCall {
+            decision_rubric: None,
             outcome: Err(failure),
             retries: 0,
             server_error_code: None,
@@ -823,6 +826,7 @@ impl SystemOneClient {
         // left has to say so.
         let requests = AtomicU32::new(0);
         let done = |run: Attempted, ran: Option<HedgeRan>| SystemOneCall {
+            decision_rubric: None,
             outcome: run.outcome,
             retries: run.retries,
             server_error_code: run.server_error_code,

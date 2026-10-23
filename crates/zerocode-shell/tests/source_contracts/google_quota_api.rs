@@ -123,6 +123,58 @@ fn the_gauge_makes_exactly_two_reads_on_the_one_bearer_road() {
     );
 }
 
+/// When Google's answer names no project, the gauge reads the one zo resolved
+/// for the same login (t-72144) — out of zo's credentials file, by zo's own
+/// spelling: the record's key and fields, the grant's sixteen hex digits of
+/// the refresh token's SHA-256, and the two variables the configured project
+/// is read from, in zo's order. A rename on either side is a record nobody
+/// reads, so both sides are pinned here.
+#[test]
+fn the_gauge_reads_zos_project_record_by_zos_own_spelling() {
+    let zo_store = include_str!("../../../../zo-ide/crates/api/src/oauth_store.rs");
+    for spelled in [
+        "const GOOGLE_CODE_ASSIST_PROJECT_KEY: &str = \"google_code_assist_project\";",
+        "const CONFIGURED_PROJECT_FIELD: &str = \"configured_project\";",
+        "const GRANT_FINGERPRINT_LEN: usize = 16;",
+        "format!(\"{:x}\", Sha256::digest(refresh_token.as_bytes()))",
+        "\"grant\": grant,",
+        "\"project\": project,",
+    ] {
+        assert!(
+            zo_store.contains(spelled),
+            "zo's project record no longer reads `{spelled}`"
+        );
+    }
+    let zo_client =
+        include_str!("../../../../zo-ide/crates/api/src/providers/gemini_code_assist.rs");
+    let configured = between(zo_client, "fn google_cloud_project(", "Ok(project)");
+    let first = configured
+        .find("std::env::var(\"GOOGLE_CLOUD_PROJECT\")")
+        .expect("zo reads GOOGLE_CLOUD_PROJECT");
+    let second = configured
+        .find("std::env::var(\"GOOGLE_CLOUD_PROJECT_ID\")")
+        .expect("zo reads GOOGLE_CLOUD_PROJECT_ID");
+    assert!(
+        first < second,
+        "zo reads its two variables in another order"
+    );
+
+    let window = include_str!("../../src/google_login.rs");
+    for spelled in [
+        "const PROJECT_KEY: &str = \"google_code_assist_project\";",
+        "const CONFIGURED_PROJECT_FIELD: &str = \"configured_project\";",
+        "const GRANT_FINGERPRINT_LEN: usize = 16;",
+        "[\"GOOGLE_CLOUD_PROJECT\", \"GOOGLE_CLOUD_PROJECT_ID\"]",
+        ".get(\"grant\")",
+        ".get(\"project\")",
+    ] {
+        assert!(
+            window.contains(spelled),
+            "the window does not read zo's project record as `{spelled}`"
+        );
+    }
+}
+
 /// The gauge is on the bar and in the settings again: the backend registers its
 /// command, the window draws its segment and lists its row, and the markup
 /// carries both.

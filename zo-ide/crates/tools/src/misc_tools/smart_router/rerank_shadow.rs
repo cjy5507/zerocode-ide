@@ -1644,6 +1644,7 @@ mod tests {
 
     fn door(consented: &[&str], home: &Path) -> JevDoor {
         let settings = zerocode_core::jev::door::JevSettings {
+            decisions: std::collections::BTreeMap::default(),
             enabled: true,
             workspaces: consented.iter().map(|root| (*root).to_string()).collect(),
             daily_requests: None,
@@ -1867,6 +1868,7 @@ mod tests {
     /// count file's home and the ledger the hedge's sample is read from.
     fn door_with(budget: Option<u64>, home: &Path) -> JevDoor {
         let settings = zerocode_core::jev::door::JevSettings {
+            decisions: std::collections::BTreeMap::default(),
             enabled: true,
             workspaces: vec![WORKSPACE.to_string()],
             daily_requests: budget,
