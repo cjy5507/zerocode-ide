@@ -1265,6 +1265,85 @@ mod tests {
     }
 
     #[test]
+    fn connection_without_a_public_key_remains_auth_required() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+
+        let rows = save_router(&path, router_save("gateway", None, None), &keys)
+            .expect("a connection may be registered before its key is supplied");
+
+        assert!(
+            rows.first().expect("saved connection").requires_auth,
+            "an absent key must not turn a public router into a keyless service"
+        );
+    }
+
+    #[test]
+    fn connection_on_loopback_can_remain_keyless() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        let mut local = router_save("local", None, None);
+        local.base_url = "http://127.0.0.1/v1".to_string();
+
+        let rows = save_router(&path, local, &keys).expect("keyless local connection");
+
+        assert!(
+            !rows.first().expect("saved connection").requires_auth,
+            "a local service without authentication must remain usable"
+        );
+    }
+
+    #[test]
+    fn connection_rejects_header_control_characters_before_saving() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        let invalid = "fixture\nmarker";
+
+        let refusal = save_router(&path, router_save("gateway", None, Some(invalid)), &keys)
+            .expect_err("a key containing a line break cannot be an HTTP credential");
+
+        assert!(!path.exists(), "invalid input changed the settings");
+        assert!(
+            keys.0.borrow().is_empty(),
+            "invalid input reached the key store"
+        );
+        assert!(
+            !refusal.message.contains(invalid),
+            "the refusal must not repeat a credential value"
+        );
+    }
+
+    #[test]
+    fn connection_store_read_failure_is_not_a_missing_key() {
+        struct RefusesRead;
+
+        impl RouterKeys for RefusesRead {
+            fn read(&self, _service: &str) -> Result<Option<String>, RouterRefusal> {
+                Err("fixture store refused the read".to_string().into())
+            }
+
+            fn write(&self, _service: &str, _secret: &str) -> Result<(), RouterRefusal> {
+                panic!("a failed read must not be followed by a key write")
+            }
+
+            fn delete(&self, _service: &str) -> Result<(), RouterRefusal> {
+                panic!("a failed read must not be followed by a key deletion")
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let refusal = save_router(&path, router_save("gateway", None, None), &RefusesRead)
+            .expect_err("an unreadable key store cannot establish a keyless connection");
+
+        assert_eq!(refusal.message, "fixture store refused the read");
+        assert!(!path.exists(), "a failed key read changed the settings");
+    }
+
+    #[test]
     fn invalid_settings_refuse_before_changing_router_keys() {
         for original in ["[]", "null", r#"{"providers": {"unexpected":"data"}}"#] {
             let dir = tempfile::tempdir().expect("tempdir");
