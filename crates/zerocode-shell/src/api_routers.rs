@@ -1344,6 +1344,24 @@ mod tests {
     }
 
     #[test]
+    fn connection_writer_respects_the_cli_settings_lock() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let lock = path.with_extension("json.lock");
+        let owner = format!("{}\n", std::process::id());
+        std::fs::write(&lock, &owner).expect("another live writer's lock");
+        let keys = HeldKeys::default();
+
+        let refusal = save_router(&path, router_save("gateway", None, None), &keys)
+            .expect_err("the window must not write while the CLI owns the settings lock");
+
+        assert!(refusal.message.contains("settings.json.lock"));
+        assert!(!path.exists(), "the locked settings were overwritten");
+        assert_eq!(std::fs::read_to_string(&lock).expect("live lock"), owner);
+        assert!(keys.0.borrow().is_empty(), "the blocked write changed keys");
+    }
+
+    #[test]
     fn invalid_settings_refuse_before_changing_router_keys() {
         for original in ["[]", "null", r#"{"providers": {"unexpected":"data"}}"#] {
             let dir = tempfile::tempdir().expect("tempdir");
