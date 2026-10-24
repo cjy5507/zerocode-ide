@@ -3,10 +3,6 @@ use std::sync::OnceLock;
 /// All of the backend shipped by this window, even after it is split into files.
 pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     (
-        "model_connections.rs",
-        include_str!("../../src/model_connections.rs"),
-    ),
-    (
         "cmd/model_connections.rs",
         include_str!("../../src/cmd/model_connections.rs"),
     ),
