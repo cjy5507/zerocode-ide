@@ -767,8 +767,14 @@ fn waits_for_a_claude_login(
         }
 }
 
-/// The one row a held request shows: why, and the ways back this build has.
+/// The one row a held request shows: why, and the ways back this build has,
+/// said once — a why that already names them is not followed by them again.
 fn claude_login_needed_row(why: &str) -> String {
+    if why.contains(api::CLAUDE_SIGN_IN_AGAIN) {
+        return format!(
+            "Claude login needed — {why}. This turn waits and goes on by itself once a login is back."
+        );
+    }
     format!(
         "Claude login needed — {why}. This turn waits and goes on by itself once a login is back ({}).",
         api::CLAUDE_SIGN_IN_AGAIN
