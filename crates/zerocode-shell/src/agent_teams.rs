@@ -2285,6 +2285,27 @@ mod tests {
     }
 
     #[test]
+    fn a_close_intent_does_not_confuse_another_threads_guard_with_its_own() {
+        let held = teams();
+        let prepared = std::thread::spawn(|| Recorder::new(0).prepare_close(0)).join();
+        drop(held);
+        assert!(prepared.expect("another thread's table guard does not enclose this close intent"));
+    }
+
+    #[test]
+    fn a_close_intent_still_refuses_its_callers_table_guard() {
+        let held = teams();
+        let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Recorder::new(0).prepare_close(0)
+        }));
+        drop(held);
+        assert!(
+            prepared.is_err(),
+            "the caller must drop its own table guard"
+        );
+    }
+
+    #[test]
     fn a_close_leaves_the_table_before_it_ends_a_shell() {
         // The window's own close reaches back into `forget_term` — that is
         // production, not a test contrivance, and calling it under the table
