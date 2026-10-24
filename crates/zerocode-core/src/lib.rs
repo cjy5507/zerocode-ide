@@ -110,6 +110,7 @@ pub mod second_brain_relate;
 pub mod second_brain_related;
 pub mod secret_prompt;
 pub mod session;
+pub mod settings_file_lock;
 pub mod shell_history;
 pub mod shell_rule;
 pub mod skill;

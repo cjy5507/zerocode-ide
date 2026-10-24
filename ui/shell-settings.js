@@ -7453,6 +7453,9 @@ async function saveApiRouterEntry() {
  * keyless, which is what the words say to do. */
 function routerSaveRefusal(error) {
   const failure = failureOf(error);
+  if (failure.kind === "invalid-key") {
+    return t("settings.apiRouters.invalidKey", "API 키의 형식을 확인하세요. 공백과 줄바꿈은 사용할 수 없습니다.");
+  }
   return failure.kind === "keychain-unavailable"
     ? t(
       "settings.apiRouters.keychainUnavailable",

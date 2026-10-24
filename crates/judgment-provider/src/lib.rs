@@ -9,6 +9,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::{Host, Url};
 
+pub mod connections;
 mod openai;
 mod protocol;
 pub use protocol::Prepared;

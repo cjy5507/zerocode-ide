@@ -4981,6 +4981,7 @@ version = "1.1.93"
 dependencies = [
  "judgment-provider",
  "model-prices",
+ "nix 0.29.0",
  "regex",
  "serde",
  "serde_json",

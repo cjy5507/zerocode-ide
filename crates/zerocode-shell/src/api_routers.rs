@@ -11,6 +11,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use zerocode_core::settings_file_lock::SettingsFileLock;
+
 pub static API_ROUTERS_PRESETS_JSON: &str = include_str!("api-routers.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -290,6 +292,8 @@ fn assign_auth_env(
 pub enum RouterRefusalKind {
     /// This machine has no keychain to keep a router key in.
     KeychainUnavailable,
+    /// The entered key cannot form an HTTP authentication value.
+    InvalidKey,
     /// Anything else; the message says what.
     Failed,
 }
@@ -420,18 +424,11 @@ fn settings_root(text: &str) -> Result<serde_json::Map<String, serde_json::Value
     Ok(root)
 }
 
-/// One window writer of zo's settings file at a time — router rows and the
-/// TypeSafe switch alike. Each reads the whole file, changes its part and
-/// replaces the file, so two at once would lose one change.
-static ZO_SETTINGS_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub(crate) fn with_zo_settings_root<R>(
     path: &Path,
     read: impl FnOnce(&serde_json::Map<String, serde_json::Value>) -> Result<R, String>,
 ) -> Result<R, String> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     read(&read_zo_settings_root(path)?)
 }
 
@@ -453,15 +450,13 @@ fn render_settings_root(
     Ok(rendered)
 }
 
-/// Change zo's settings file under [`ZO_SETTINGS_WRITES`], keeping every key the
+/// Change zo's settings file under [`SettingsFileLock`], keeping every key the
 /// change does not touch as it stood. A change that refuses writes nothing.
 pub(crate) fn update_zo_settings_root(
     path: &Path,
     change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
 ) -> Result<(), String> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let mut root = read_zo_settings_root(path)?;
     change(&mut root)?;
     crate::durable_file::replace_bytes(path, render_settings_root(&root)?.as_bytes())
@@ -479,9 +474,7 @@ pub(crate) fn update_zo_settings_root_with_key(
     keys: &dyn RouterKeys,
     change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
 ) -> Result<(), RouterRefusal> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let mut root = read_zo_settings_root(path)?;
     change(&mut root)?;
     let updated = render_settings_root(&root)?;
@@ -549,9 +542,7 @@ pub fn save_router(
     save: RouterSave,
     keys: &dyn RouterKeys,
 ) -> Result<Vec<ProviderEntry>, RouterRefusal> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     save_router_with_writer(path, save, keys, |path, updated| {
         crate::durable_file::replace_bytes(path, updated)
             .map(|_| ())
@@ -576,16 +567,22 @@ fn save_router_with_writer(
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty());
+    if secret.is_some_and(|key| key.chars().any(|ch| ch.is_whitespace() || ch.is_control())) {
+        return Err(RouterRefusal {
+            kind: RouterRefusalKind::InvalidKey,
+            message: "API 키의 형식을 확인하세요. 공백과 줄바꿈은 사용할 수 없습니다.".to_string(),
+        });
+    }
     let auth_env = assign_auth_env(&rows, &name, save.preset_id.as_deref(), secret.is_some());
     let service = router_keychain_service_for_env(&auth_env);
     let first_save = !rows
         .iter()
         .any(|row| row.name == name && row.auth_env.as_deref() == Some(auth_env.as_str()));
-    // Whether the row has a key — given now, or stored for its variable — is
-    // what `requires_auth` says: a keyless row (Ollama, OpenRouter saved
-    // without one) written as needing a key is a row zo refuses to build.
+    // A missing key is not permission to send a public router a keyless request.
+    // Use the same locality policy as the CLI; key-store errors stay errors.
     let previous_key = keys.read(&service)?;
-    let requires_auth = secret.is_some()
+    let requires_auth = !judgment_provider::connections::router_base_is_local(&save.base_url)
+        || secret.is_some()
         || (!first_save
             && previous_key
                 .as_ref()
@@ -634,9 +631,7 @@ pub fn remove_router(
     name: &str,
     keys: &dyn RouterKeys,
 ) -> Result<Vec<ProviderEntry>, String> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let existing = read_settings_text(path)?;
     let rows = row_identities(&settings_root(&existing)?);
     let own_env = rows
@@ -644,7 +639,9 @@ pub fn remove_router(
         .find(|row| row.name == name)
         .and_then(|row| row.auth_env.clone())
         .filter(|auth_env| is_router_env(auth_env));
-    remove_provider_file(path, name)?;
+    let updated = remove_provider_json_str(&existing, name)?;
+    crate::durable_file::replace_bytes(path, updated.as_bytes())
+        .map_err(|error| error.to_string())?;
     if let Some(auth_env) = own_env
         && !rows
             .iter()
@@ -799,6 +796,7 @@ pub fn remove_provider_json_str(
 
 /// Remove one provider entry from ~/.zo/settings.json file atomically.
 pub fn remove_provider_file(path: &Path, provider_name: &str) -> Result<(), String> {
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let existing = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1561,12 +1559,10 @@ mod tests {
         );
     }
 
-    /// `requires_auth` says whether the row has a key: one given now, or one
-    /// its variable already holds. A keyless Ollama (or an OpenRouter saved
-    /// without a key) is written keyless, so zo builds it instead of refusing
-    /// it for a key nobody was ever going to give.
+    /// Public routers keep their authentication requirement without a key;
+    /// an explicitly local service can still be keyless.
     #[test]
-    fn a_row_requires_a_key_only_when_it_has_one() {
+    fn a_row_keeps_authentication_required_apart_from_key_presence() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
         let keys = HeldKeys::default();
@@ -1578,7 +1574,9 @@ mod tests {
                 .map(|row| row.requires_auth)
         };
 
-        save_router(&path, router_save("Ollama", Some("ollama"), None), &keys).expect("save");
+        let mut local = router_save("Ollama", Some("ollama"), None);
+        local.base_url = "http://127.0.0.1/v1".to_string();
+        save_router(&path, local, &keys).expect("save");
         assert_eq!(
             requires("Ollama"),
             Some(false),
@@ -1607,7 +1605,7 @@ mod tests {
 
         // A new row whose variable still holds an item no row reads (a row
         // removed before removals found their own key) is not handed that
-        // stranger's key: it is keyless, and the stale item is gone.
+        // stranger's key: authentication is still required and the stale item is gone.
         let stale = router_keychain_service_for_env("ZEROCODE_ROUTER_AGENTROUTER_KEY");
         keys.write(&stale, "sk-stale").expect("seed");
         save_router(
@@ -1616,7 +1614,7 @@ mod tests {
             &keys,
         )
         .expect("save");
-        assert_eq!(requires("AgentRouter"), Some(false));
+        assert_eq!(requires("AgentRouter"), Some(true));
         assert_eq!(keys.held(&stale), None, "a new row inherited a stale key");
     }
 
@@ -1641,8 +1639,9 @@ mod tests {
             "a refused save wrote its row"
         );
 
-        let rows = save_router(&path, router_save("Ollama", Some("ollama"), None), &nowhere)
-            .expect("a keyless save needs no keychain");
+        let mut local = router_save("Ollama", Some("ollama"), None);
+        local.base_url = "http://127.0.0.1/v1".to_string();
+        let rows = save_router(&path, local, &nowhere).expect("a keyless save needs no keychain");
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].requires_auth);
         // The pane is told the same thing the save acts on, before anyone

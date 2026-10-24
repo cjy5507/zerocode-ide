@@ -16,10 +16,14 @@ pub(crate) fn api_router_keys_kept() -> bool {
     api_routers::Keychain::of_this_machine().keeps_keys()
 }
 
-#[tauri::command(async)]
-pub(crate) fn api_router_providers() -> Result<Vec<ProviderEntry>, String> {
-    let path = api_routers::zo_settings_path().ok_or("설정 경로를 찾을 수 없습니다")?;
-    api_routers::read_providers_file(&path)
+#[tauri::command]
+pub(crate) async fn api_router_providers() -> Result<Vec<ProviderEntry>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let path = api_routers::zo_settings_path().ok_or("설정 경로를 찾을 수 없습니다")?;
+        api_routers::read_providers_file(&path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command(async)]
@@ -47,9 +51,9 @@ pub(crate) async fn test_router_connection(
     .await
 }
 
-#[tauri::command(async)]
+#[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
-pub(crate) fn save_api_router(
+pub(crate) async fn save_api_router(
     preset_id: Option<String>,
     name: String,
     base_url: String,
@@ -58,26 +62,34 @@ pub(crate) fn save_api_router(
     client_fingerprint: Option<String>,
     headers: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<Vec<ProviderEntry>, RouterRefusal> {
-    let path = api_routers::zo_settings_path()
-        .ok_or_else(|| RouterRefusal::from("설정 경로를 찾을 수 없습니다".to_string()))?;
-    api_routers::save_router(
-        &path,
-        api_routers::RouterSave {
-            preset_id,
-            name,
-            base_url,
-            key,
-            models,
-            client_fingerprint,
-            headers,
-        },
-        &api_routers::Keychain::of_this_machine(),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = api_routers::zo_settings_path()
+            .ok_or_else(|| RouterRefusal::from("설정 경로를 찾을 수 없습니다".to_string()))?;
+        api_routers::save_router(
+            &path,
+            api_routers::RouterSave {
+                preset_id,
+                name,
+                base_url,
+                key,
+                models,
+                client_fingerprint,
+                headers,
+            },
+            &api_routers::Keychain::of_this_machine(),
+        )
+    })
+    .await
+    .map_err(|error| RouterRefusal::from(error.to_string()))?
 }
 
 /// A row is removed by its name; the key it read is found on the row itself.
-#[tauri::command(async)]
-pub(crate) fn remove_api_router(name: String) -> Result<Vec<ProviderEntry>, String> {
-    let path = api_routers::zo_settings_path().ok_or("설정 경로를 찾을 수 없습니다")?;
-    api_routers::remove_router(&path, &name, &api_routers::Keychain::of_this_machine())
+#[tauri::command]
+pub(crate) async fn remove_api_router(name: String) -> Result<Vec<ProviderEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = api_routers::zo_settings_path().ok_or("설정 경로를 찾을 수 없습니다")?;
+        api_routers::remove_router(&path, &name, &api_routers::Keychain::of_this_machine())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
