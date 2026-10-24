@@ -1604,6 +1604,21 @@ pub(in crate::session) mod tests {
         assert_eq!(rows[1], CLAUDE_LOGIN_BACK);
     }
 
+    /// A reason that already says how to sign in again — the keychain's
+    /// reasons for an unusable sign-in do — is not followed by the same road
+    /// a second time; a reason that does not is followed by it once.
+    #[test]
+    fn a_login_row_names_the_way_back_once() {
+        let named = format!(
+            "the Claude Code sign-in expired and its own CLI could not renew it — {}",
+            api::CLAUDE_SIGN_IN_AGAIN
+        );
+        for why in [named.as_str(), "the sign-in expired"] {
+            let row = claude_login_needed_row(why);
+            assert_eq!(row.matches(api::CLAUDE_SIGN_IN_AGAIN).count(), 1, "{row}");
+        }
+    }
+
     /// An endpoint that answers only the login it was told to expect: a
     /// request without it gets the 401 a revoked or expired login gets, one
     /// with it a short streamed answer. Every authorization it saw is kept.
