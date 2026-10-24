@@ -39119,11 +39119,12 @@ fn a_prompt_names_its_pane_only_once_its_record_says_a_person_typed_it() {
 /// The foot line of a conversation names what an agent is doing; zo says what
 /// its working row says in `session_status.activity`, and a zo helper's card
 /// says it in the `subagents` frame. A verb that is no tool — waiting,
-/// reconnecting, reasoning silently, quiet — is zo's protocol, not the
-/// core's, so the window keeps one table of them (`ZO_STATUS_WORDS`) and this
-/// test holds it to zo's constants: a word zo changes breaks here instead of
-/// leaving the line quietly naming nothing, and a word the table gains that zo
-/// never sends breaks here too.
+/// reconnecting, reasoning silently, quiet, compacting — is zo's protocol, not
+/// the core's, so the window keeps one table of them (`ZO_STATUS_WORDS`) and
+/// this test holds it to zo's constants, read from `StatusActivity::verb`
+/// itself: a word zo changes or adds breaks here instead of leaving the line
+/// quietly naming nothing, and a word the table gains that zo never sends
+/// breaks here too.
 #[test]
 fn the_windows_table_of_zo_status_verbs_is_zos_own_words() {
     let strings = include_str!("../../../../zo-ide/crates/zo-ide/src/tui/strings.rs");
@@ -39131,19 +39132,28 @@ fn the_windows_table_of_zo_status_verbs_is_zos_own_words() {
     let progress =
         include_str!("../../../../zo-ide/crates/zo-ide/src/session/subagent_progress.rs");
 
-    // The four verbs `StatusActivity::verb` sends, by the constants it names.
-    let constants = [
-        "ACTIVITY_WAITING",
-        "ACTIVITY_RECONNECTING",
-        "ACTIVITY_REASONING_SILENTLY",
-        "ACTIVITY_QUIET",
-    ];
+    // Every verb `StatusActivity::verb` sends, by the constants it names.
     let verbs = support::block_after(view, "pub fn verb(&self) -> String {");
+    let mut constants: Vec<&str> = verbs
+        .match_indices("strings::ACTIVITY_")
+        .map(|(at, _)| {
+            let name = &verbs[at + "strings::".len()..];
+            &name[..name
+                .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+                .unwrap_or(name.len())]
+        })
+        .collect();
+    constants.sort_unstable();
+    constants.dedup();
+    assert!(
+        !constants.is_empty(),
+        "zo's `StatusActivity::verb` names no `strings::ACTIVITY_*` constant:\n{verbs}"
+    );
     let mut sent: Vec<String> = Vec::new();
     for constant in constants {
         assert!(
             verbs.contains(&format!("strings::{constant}.to_string()")),
-            "zo's `StatusActivity::verb` no longer sends {constant}:\n{verbs}"
+            "zo's `StatusActivity::verb` names {constant} but does not send it:\n{verbs}"
         );
         let head = format!("pub const {constant}: &str = \"");
         let at = strings
