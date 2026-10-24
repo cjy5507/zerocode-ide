@@ -3441,6 +3441,7 @@ async function stepsNowWithoutARow(browser, origin, ok) {
         wantWaiting: t("worker.nowWaiting", "답을 기다리는 중"),
         wantReconnecting: t("worker.nowReconnecting", "다시 연결하는 중"),
         wantThinking: t("worker.nowThinking", "생각하는 중"),
+        wantCompacting: t("worker.nowCompacting", "대화를 줄이는 중"),
       };
       await settle();
       seen.nothing = state();
@@ -3471,6 +3472,7 @@ async function stepsNowWithoutARow(browser, origin, ok) {
       seen.waiting = await say({ verb: "waiting", target: "model", phase: "started" });
       seen.reconnecting = await say({ verb: "reconnecting", target: "attempt 2 in 5s", phase: "started" });
       seen.thinking = await say({ verb: "reasoning silently", phase: "started" });
+      seen.compacting = await say({ verb: "compacting", target: "1200 chars of summary so far", phase: "started" });
       seen.quiet = await say({ verb: "quiet", target: "last: read a.rs", phase: "started" });
       seen.finished = await say({ verb: "read", target: "a.rs", phase: "finished" });
       // A call still out is named again, and the turn's end takes the line away.
@@ -3493,14 +3495,15 @@ async function stepsNowWithoutARow(browser, origin, ok) {
       JSON.stringify(seen.same),
     );
     ok(
-      "D4: waiting, reconnecting and thinking are the page's words, one line each — and a card that says quiet, or a call that is already finished, says nothing the page can name, so the line is the window's 「작업 중…」 again",
+      "D4: waiting, reconnecting, thinking and compacting are the page's words, one line each — and a card that says quiet, or a call that is already finished, says nothing the page can name, so the line is the window's 「작업 중…」 again",
       seen.waiting.now === seen.wantWaiting && seen.reconnecting.now === seen.wantReconnecting &&
-        seen.thinking.now === seen.wantThinking && nothingKnown(seen.quiet) && nothingKnown(seen.finished),
-      JSON.stringify({ w: seen.waiting.now, r: seen.reconnecting.now, t: seen.thinking.now, q: seen.quiet.now, f: seen.finished.now }),
+        seen.thinking.now === seen.wantThinking && seen.compacting.now === seen.wantCompacting &&
+        nothingKnown(seen.quiet) && nothingKnown(seen.finished),
+      JSON.stringify({ w: seen.waiting.now, r: seen.reconnecting.now, t: seen.thinking.now, c: seen.compacting.now, q: seen.quiet.now, f: seen.finished.now }),
     );
     ok(
       "D4: none of them says the agent's English word aloud, and every one leads with 「지금」",
-      [seen.waiting, seen.reconnecting, seen.thinking, seen.again].every((one) => one.lead === seen.lead && !one.seeing.includes(seen.busy)) &&
+      [seen.waiting, seen.reconnecting, seen.thinking, seen.compacting, seen.again].every((one) => one.lead === seen.lead && !one.seeing.includes(seen.busy)) &&
         seen.again.now.includes("SCREEN_WIDTH"),
       JSON.stringify(seen.again),
     );

@@ -2886,15 +2886,16 @@ function activityKindOf(verb, run) {
 
 /* The verbs a status card carries that name no tool of the core's, with the page's own words for them
  * (an empty word: a fact the page has none for, so the line falls back). They are zo's protocol, spelled
- * once, here: `session_status.activity.verb` says waiting, reconnecting, reasoning silently and quiet
- * (`tui/strings.rs` ACTIVITY_*, `StatusActivity::verb` in `tui/view.rs`), and a zo helper's card says a
- * bare working before its first call (`session/subagent_progress.rs`). A source contract holds this
- * table to those spellings, so a word zo changes breaks that test instead of the line quietly naming
- * nothing. */
+ * once, here: `session_status.activity.verb` says waiting, reconnecting, reasoning silently, quiet and
+ * compacting (`tui/strings.rs` ACTIVITY_*, `StatusActivity::verb` in `tui/view.rs`), and a zo helper's
+ * card says a bare working before its first call (`session/subagent_progress.rs`). A source contract
+ * holds this table to those spellings, so a word zo changes breaks that test instead of the line quietly
+ * naming nothing. */
 const ZO_STATUS_WORDS = {
   waiting: () => t("worker.nowWaiting", "답을 기다리는 중"),
   reconnecting: () => t("worker.nowReconnecting", "다시 연결하는 중"),
   "reasoning silently": () => t("worker.nowThinking", "생각하는 중"),
+  compacting: () => t("worker.nowCompacting", "대화를 줄이는 중"),
   quiet: () => "",
   working: () => "",
 };
