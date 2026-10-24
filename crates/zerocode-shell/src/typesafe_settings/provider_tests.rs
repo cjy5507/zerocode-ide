@@ -705,7 +705,7 @@ fn a_shared_connection_preflight_uses_its_own_key_headers_and_exact_route() {
         "legacy-must-not-be-sent",
     )
     .expect("old key");
-    let result = crate::model_connections::check(
+    let result = crate::model_connection_store::check(
         &path,
         &reference,
         &selected.identity(),
@@ -745,7 +745,7 @@ fn returning_from_a_connection_restores_the_previous_managed_selection() {
         model: "fixture-model".to_string(),
         protocol: Protocol::SystemOne,
     };
-    crate::model_connections::apply_judgment(
+    crate::model_connection_store::apply_judgment(
         &path,
         &reference,
         &selected.identity(),
@@ -768,7 +768,7 @@ fn returning_from_a_connection_restores_the_previous_managed_selection() {
             .len(),
         5
     );
-    crate::model_connections::clear(&path, crate::model_connections::Role::Judgment)
+    crate::model_connection_store::clear(&path, crate::model_connection_store::Role::Judgment)
         .expect("restore");
     let restored: Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");

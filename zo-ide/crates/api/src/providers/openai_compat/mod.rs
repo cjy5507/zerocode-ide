@@ -92,6 +92,10 @@ pub struct OpenAiCompatConfig {
     /// Extra request headers applied verbatim, for gateways that gate on a
     /// client fingerprint beyond the `User-Agent`. Empty for built-in providers.
     pub client_headers: &'static [(&'static str, &'static str)],
+    pub auth_header: &'static str,
+    pub auth_scheme: Option<&'static str>,
+    pub connection_id: Option<&'static str>,
+    pub connection_stamp: Option<&'static str>,
     /// Whether this endpoint's models take OpenAI's `reasoning_effort` field.
     ///
     /// Built-in providers leave this `false` and rely on `is_reasoning_model`,
@@ -126,6 +130,10 @@ impl OpenAiCompatConfig {
             supports_vision: true,
             user_agent: None,
             client_headers: &[],
+            auth_header: "Authorization",
+            auth_scheme: Some("Bearer"),
+            connection_id: None,
+            connection_stamp: None,
             supports_reasoning_effort: false,
         }
     }
@@ -144,6 +152,10 @@ impl OpenAiCompatConfig {
             supports_vision: true,
             user_agent: None,
             client_headers: &[],
+            auth_header: "Authorization",
+            auth_scheme: Some("Bearer"),
+            connection_id: None,
+            connection_stamp: None,
             supports_reasoning_effort: false,
         }
     }
@@ -161,6 +173,10 @@ impl OpenAiCompatConfig {
             supports_vision: true,
             user_agent: None,
             client_headers: &[],
+            auth_header: "Authorization",
+            auth_scheme: Some("Bearer"),
+            connection_id: None,
+            connection_stamp: None,
             supports_reasoning_effort: false,
         }
     }
@@ -179,6 +195,10 @@ impl OpenAiCompatConfig {
             supports_vision: false,
             user_agent: None,
             client_headers: &[],
+            auth_header: "Authorization",
+            auth_scheme: Some("Bearer"),
+            connection_id: None,
+            connection_stamp: None,
             supports_reasoning_effort: false,
         }
     }
@@ -212,6 +232,10 @@ impl OpenAiCompatConfig {
             supports_vision: false,
             user_agent: None,
             client_headers: &[],
+            auth_header: "Authorization",
+            auth_scheme: Some("Bearer"),
+            connection_id: None,
+            connection_stamp: None,
             supports_reasoning_effort: false,
         }
     }
@@ -251,6 +275,8 @@ impl OpenAiCompatConfig {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomProviderConfig {
+    #[serde(default)]
+    pub connection: Option<judgment_provider::connections::Metadata>,
     /// Display name; also the provider tag in error messages.
     pub name: String,
     /// OpenAI-compatible endpoint base URL (e.g. `https://host/v1`).
@@ -437,6 +463,14 @@ impl CustomProviderConfig {
         config.supports_reasoning_effort = self.supports_reasoning_effort;
         config.user_agent = self.resolve_user_agent();
         config.client_headers = self.resolve_client_headers();
+        if let Some(connection) = &self.connection {
+            config.auth_header = leak(&connection.auth.header);
+            config.auth_scheme = connection.auth.scheme.as_deref().map(leak);
+            config.connection_id = Some(leak(&connection.id));
+            let row = serde_json::json!({"base_url":self.base_url,"auth_env":self.auth_env,"requires_auth":self.requires_auth,
+                "headers":self.headers,"client_fingerprint":self.client_fingerprint,"user_agent":self.user_agent,"connection":connection});
+            config.connection_stamp = judgment_provider::connections::route_stamp(&row).ok().map(|stamp| leak(&stamp));
+        }
         config
     }
 
@@ -526,6 +560,17 @@ impl std::fmt::Debug for OpenAiCompatAuth {
     }
 }
 
+fn read_bound_connection_key(config: OpenAiCompatConfig) -> Result<Option<String>, ApiError> {
+    let path = core_types::paths::default_config_home().join("settings.json");
+    let _guard = zerocode_core::settings_file_lock::SettingsFileLock::acquire(&path)?;
+    let root: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let row = judgment_provider::connections::row(&root, config.connection_id.ok_or(ApiError::ConnectionChanged)?)
+        .map_err(|_| ApiError::ConnectionChanged)?;
+    let stamp = judgment_provider::connections::route_stamp(row).map_err(|_| ApiError::ConnectionChanged)?;
+    if config.connection_stamp != Some(stamp.as_str()) { return Err(ApiError::ConnectionChanged); }
+    super::fresh_connection_key(config.api_key_env)
+}
+
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatClient {
     http: reqwest::Client,
@@ -564,16 +609,20 @@ impl OpenAiCompatClient {
     }
 
     pub fn from_env(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
-        let Some(api_key) = read_api_key(config.api_key_env)? else {
+        let Some(api_key) = (if config.connection_id.is_some() { read_bound_connection_key(config)? } else { read_api_key(config.api_key_env)? }) else {
             return Err(ApiError::missing_credentials(
                 config.provider_name,
                 config.credential_env_vars(),
             ));
         };
-        Ok(Self::new(api_key, config))
+        Self::new(api_key, config).with_connection_transport()
     }
 
     pub fn from_env_optional_auth(config: OpenAiCompatConfig) -> Result<Self, ApiError> {
+        if config.connection_id.is_some() {
+            let auth = read_bound_connection_key(config)?.map_or(OpenAiCompatAuth::None, OpenAiCompatAuth::StaticBearer);
+            return Self::new_with_auth(auth, config).with_connection_transport();
+        }
         let auth = read_env_non_empty(config.api_key_env)?
             .or_else(|| read_saved_api_key_non_empty(config.api_key_env))
             .map_or_else(
@@ -587,6 +636,13 @@ impl OpenAiCompatClient {
                 OpenAiCompatAuth::StaticBearer,
             );
         Ok(Self::new_with_auth(auth, config))
+    }
+
+    fn with_connection_transport(mut self) -> Result<Self, ApiError> {
+        if self.config.connection_id.is_some() {
+            self.http = super::tuned_http_builder().redirect(reqwest::redirect::Policy::none()).build()?;
+        }
+        Ok(self)
     }
 
     #[must_use]
@@ -733,6 +789,11 @@ impl OpenAiCompatClient {
         builder
     }
 
+    fn authenticate(&self, builder: reqwest::RequestBuilder, key: &str) -> reqwest::RequestBuilder {
+        let value = self.config.auth_scheme.map_or_else(|| key.to_string(), |scheme| format!("{scheme} {key}"));
+        builder.header(self.config.auth_header, value)
+    }
+
     async fn apply_auth(
         &self,
         builder: reqwest::RequestBuilder,
@@ -740,9 +801,9 @@ impl OpenAiCompatClient {
         match &self.auth {
             OpenAiCompatAuth::None => Ok((builder, false)),
             OpenAiCompatAuth::StaticBearer(token) if token.is_empty() => Ok((builder, false)),
-            OpenAiCompatAuth::StaticBearer(token) => Ok((builder.bearer_auth(token), true)),
+            OpenAiCompatAuth::StaticBearer(token) => Ok((self.authenticate(builder, token), true)),
             OpenAiCompatAuth::WindowKey(env) => Ok(match read_env_non_empty(env)? {
-                Some(key) => (builder.bearer_auth(key), true),
+                Some(key) => (self.authenticate(builder, &key), true),
                 None => (builder, false),
             }),
             OpenAiCompatAuth::GoogleGeminiOAuth => {

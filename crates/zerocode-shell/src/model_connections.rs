@@ -8,7 +8,6 @@ use serde_json::{Map, Value, json};
 
 use crate::api_routers::{self, ProviderEntry, RouterKeys};
 
-const PREVIOUS_CODING: &str = "previousCodingSelection";
 const JUDGMENT_KEYS: [&str; 3] = [
     judgment_provider::SETTINGS_KEY,
     "jevModel",
@@ -41,6 +40,7 @@ pub struct Catalog {
     pub judgment: Option<Reference>,
     pub coding_model: Option<String>,
     pub active_provider_identity: String,
+    pub legacy_key_present: bool,
 }
 
 fn root(path: &Path) -> Result<Value, String> {
@@ -62,6 +62,17 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
     let judgment = reference(&root, connections::JUDGMENT_CONNECTION_KEY)?;
     let active =
         judgment_provider::Provider::from_root(&root).map_err(|error| error.to_string())?;
+    let legacy_key_present = if active.connection.is_some() && active.requires_auth {
+        let mut legacy = active.clone();
+        legacy.connection = None;
+        keys.read(&crate::typesafe_settings::provider_keychain_service(
+            &legacy,
+        ))
+        .map_err(|error| error.message)?
+        .is_some_and(|key| !key.trim().is_empty())
+    } else {
+        false
+    };
     let mut connections = Vec::new();
     for row in root
         .get("providers")
@@ -69,14 +80,12 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
         .into_iter()
         .flatten()
     {
-        let provider: ProviderEntry =
+        let mut provider: ProviderEntry =
             serde_json::from_value(row.clone()).map_err(|error| error.to_string())?;
+        provider.requires_auth = connections::requires_auth(row);
         let metadata = connections::metadata(row).map_err(|error| error.to_string())?;
         let key_available = !provider.requires_auth
-            || keys
-                .read(&api_routers::router_keychain_service_for_env(
-                    &provider.auth_env,
-                ))
+            || api_routers::read_connection_key(&provider.auth_env, keys)
                 .map_err(|error| error.message)?
                 .is_some_and(|key| !key.trim().is_empty());
         let uses = [
@@ -108,6 +117,7 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
             .and_then(Value::as_str)
             .map(str::to_string),
         active_provider_identity: active.identity(),
+        legacy_key_present,
     })
 }
 
@@ -227,12 +237,24 @@ pub fn apply_coding(path: &Path, reference: &Reference) -> Result<(), String> {
             .get("name")
             .and_then(Value::as_str)
             .ok_or("provider_settings")?;
-        let model = format!("{name}/{}", reference.model);
+        let declared = row
+            .get("models")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|model| {
+                model
+                    .as_str()
+                    .or_else(|| model.get("id").and_then(Value::as_str))
+            })
+            .find(|model| model.eq_ignore_ascii_case(&reference.model))
+            .ok_or("provider_model")?;
+        let model = format!("{name}/{declared}");
         persist_identity(document, &reference.id)?;
         let previous = document.get("model").cloned().unwrap_or(Value::Null);
         let smart = smart(document)?;
         if !smart.contains_key(connections::CODING_CONNECTION_KEY) {
-            smart.insert(PREVIOUS_CODING.to_string(), previous);
+            smart.insert(connections::PREVIOUS_CODING_KEY.to_string(), previous);
         }
         smart.insert(
             connections::CODING_CONNECTION_KEY.to_string(),
@@ -291,7 +313,9 @@ pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<
         }
         Role::Coding => {
             if smart.remove(connections::CODING_CONNECTION_KEY).is_some() {
-                let previous = smart.remove(PREVIOUS_CODING).unwrap_or(Value::Null);
+                let previous = smart
+                    .remove(connections::PREVIOUS_CODING_KEY)
+                    .unwrap_or(Value::Null);
                 if previous.is_null() {
                     document.remove("model");
                 } else {

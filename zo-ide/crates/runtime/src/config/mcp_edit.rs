@@ -58,6 +58,7 @@ pub fn write_mcp_server(
     name: &str,
     config: &McpServerConfig,
 ) -> Result<McpEdit, ConfigError> {
+    let _guard = crate::file_ops::SettingsFileLock::acquire(path).map_err(ConfigError::Io)?;
     let mut root = read_document(path)?;
     let written = mcp_server_to_json(config);
     let servers = servers_section(&mut root, path)?;
@@ -80,6 +81,7 @@ pub fn write_mcp_server(
 ///
 /// As [`write_mcp_server`].
 pub fn remove_mcp_server(path: &Path, name: &str) -> Result<McpEdit, ConfigError> {
+    let _guard = crate::file_ops::SettingsFileLock::acquire(path).map_err(ConfigError::Io)?;
     let mut root = read_document(path)?;
     let servers = servers_section(&mut root, path)?;
     if servers.remove(name).is_none() {

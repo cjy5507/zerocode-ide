@@ -29,6 +29,8 @@ pub(crate) async fn api_router_providers() -> Result<Vec<ProviderEntry>, String>
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
 pub(crate) async fn test_router_connection(
+    connection_id: Option<String>,
+    expected_generation: Option<u64>,
     base_url: String,
     auth: RouterAuth,
     key: Option<String>,
@@ -38,6 +40,40 @@ pub(crate) async fn test_router_connection(
     client_fingerprint: Option<String>,
     headers: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<Vec<DiscoveredModel>, String> {
+    let key = if key.as_deref().is_none_or(|key| key.trim().is_empty()) {
+        if let (Some(id), Some(generation)) = (connection_id, expected_generation) {
+            let base = base_url.clone();
+            let auth = auth.clone();
+            let fingerprint = client_fingerprint.clone();
+            let headers = headers.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let path = api_routers::zo_settings_path().ok_or("provider_settings")?;
+                api_routers::saved_probe_key(
+                    &path,
+                    &id,
+                    generation,
+                    &api_routers::RouterProbe {
+                        base_url: &base,
+                        auth: &auth,
+                        key: None,
+                        models_path: None,
+                        id_field: None,
+                        context_field: None,
+                        client_fingerprint: fingerprint.as_deref(),
+                        headers: headers.as_ref(),
+                    },
+                    &api_routers::Keychain::of_this_machine(),
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())??
+        } else {
+            key
+        }
+    } else {
+        key
+    };
+
     api_routers::test_router_endpoint(&api_routers::RouterProbe {
         base_url: &base_url,
         auth: &auth,

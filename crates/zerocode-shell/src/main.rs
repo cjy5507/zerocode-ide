@@ -139,7 +139,8 @@ mod land_check;
 mod landing_watch_sweep;
 mod last_status;
 mod launch_budget_door;
-mod model_connections;
+#[path = "model_connections.rs"]
+mod model_connection_store;
 mod native_tray;
 mod notify_call;
 mod opencode_home;
@@ -384,21 +385,21 @@ use cmd::{
     ssh_remove_target, ssh_save_target, ssh_submit_credential, ssh_targets, stage_layouts,
     stage_path, stage_paths, standing_pane_worktrees, stats_summary, stop_pane_helper,
     stop_workspace_port, subagent_log, submodule_status, superseded_models, supply_chain_graph,
-    supply_chain_report, suppress_external_worktree_inbox, term_focus, term_fold,
-    term_has_running_process, term_key, term_lines, term_mouse, term_paste, term_pull, term_resize,
-    term_scroll, term_search, term_snapshot, term_text, term_view_to_line, terminal_command,
-    terminal_command_argv, terminal_prefs, terminal_sessions, terminal_windows_status,
-    test_local_network_permission, test_remote_server, test_remote_workspace,
-    test_router_connection, test_ssh_host, text_input, tip_verdict, tour_decision, tree_selection,
-    type_value_keys, typesafe_settings, unstage_path, unstage_paths, update_builtin_decision,
-    update_check, update_download, update_history, update_install, upstream_status,
-    use_system_claude_login, validate_branch_name, vault_sessions, verify_claude_accounts,
-    verify_codex_accounts, waiting_on_me, watch_files, wire_answer, wire_image, wire_interrupt,
-    wire_log, wire_models, wire_send, wire_set_mode, wire_set_model, wire_start, wire_stop,
-    work_item_seed, worker_screen, workspace_cleanup_scan, workspace_space_cancel,
-    workspace_space_git, workspace_space_scan, worktree_committed_diff, worktree_evidence,
-    worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs, worktree_stamp,
-    write_primary_selection, write_text_file,
+    supply_chain_report, suppress_external_worktree_inbox, sync_model_connections, term_focus,
+    term_fold, term_has_running_process, term_key, term_lines, term_mouse, term_paste, term_pull,
+    term_resize, term_scroll, term_search, term_snapshot, term_text, term_view_to_line,
+    terminal_command, terminal_command_argv, terminal_prefs, terminal_sessions,
+    terminal_windows_status, test_local_network_permission, test_remote_server,
+    test_remote_workspace, test_router_connection, test_ssh_host, text_input, tip_verdict,
+    tour_decision, tree_selection, type_value_keys, typesafe_settings, unstage_path, unstage_paths,
+    update_builtin_decision, update_check, update_download, update_history, update_install,
+    upstream_status, use_system_claude_login, validate_branch_name, vault_sessions,
+    verify_claude_accounts, verify_codex_accounts, waiting_on_me, watch_files, wire_answer,
+    wire_image, wire_interrupt, wire_log, wire_models, wire_send, wire_set_mode, wire_set_model,
+    wire_start, wire_stop, work_item_seed, worker_screen, workspace_cleanup_scan,
+    workspace_space_cancel, workspace_space_git, workspace_space_scan, worktree_committed_diff,
+    worktree_evidence, worktree_landing_stamp, worktree_last_agent, worktree_loss, worktree_prefs,
+    worktree_stamp, write_primary_selection, write_text_file,
 };
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
@@ -2619,7 +2620,7 @@ fn main() -> ExitCode {
             api_router_keys_kept,
             api_router_presets,
             api_router_providers,
-            model_connections, check_model_connection, select_model_connection, clear_model_connection,
+            model_connections, sync_model_connections, check_model_connection, select_model_connection, clear_model_connection,
             test_router_connection,
             save_api_router,
             remove_api_router,

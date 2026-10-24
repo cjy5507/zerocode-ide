@@ -133,6 +133,12 @@ pub fn save_to_path(path: &Path, model: &str, effort: Effort) -> io::Result<()> 
     let _guard = runtime::file_ops::SettingsFileLock::acquire(path)?;
     let mut object = read_object(path);
     let model = pinned_model_id(&persistable_model_id(model));
+    if object.get(MODEL_KEY).and_then(Value::as_str) != Some(&model) {
+        if let Some(smart) = object.get_mut("smart").and_then(Value::as_object_mut) {
+            smart.remove(judgment_provider::connections::CODING_CONNECTION_KEY);
+            smart.remove(judgment_provider::connections::PREVIOUS_CODING_KEY);
+        }
+    }
     object.insert(MODEL_KEY.to_string(), Value::String(model));
     object.insert(
         EFFORT_KEY.to_string(),

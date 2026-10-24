@@ -318,8 +318,8 @@ pub fn read_settings(
     let document = Value::Object(root.clone());
     let provider = judgment_provider::Provider::from_root(&document)
         .map_err(|reason| RouterRefusal::from(reason.token().to_string()))?;
-    let key_saved =
-        provider.requires_auth && key_saved_at(&provider_keychain_service(&provider), keys)?;
+    let key_saved = provider.requires_auth
+        && provider_key(&provider, keys)?.is_some_and(|key| !key.trim().is_empty());
     let lineup = crate::summon_lineup::snapshot();
     let now_ms = crate::usage_runtime::epoch_ms_now();
     Ok(TypeSafeSettings {
@@ -450,6 +450,17 @@ pub fn provider_keychain_service(provider: &judgment_provider::Provider) -> Stri
     format!("{prefix}{}", provider.key_env())
 }
 
+/// A linked connection reads its existing reference. No legacy hash-key fallback.
+pub(crate) fn provider_key(
+    provider: &judgment_provider::Provider,
+    keys: &dyn RouterKeys,
+) -> Result<Option<String>, RouterRefusal> {
+    if let Some(connection) = &provider.connection {
+        return crate::api_routers::read_connection_key(&connection.auth_env, keys);
+    }
+    keys.read(&provider_keychain_service(provider))
+}
+
 pub fn selected_provider(path: &Path) -> Result<judgment_provider::Provider, RouterRefusal> {
     let root = crate::api_routers::read_zo_settings_root(path)?;
     judgment_provider::Provider::from_root(&Value::Object(root))
@@ -459,6 +470,9 @@ pub fn selected_provider(path: &Path) -> Result<judgment_provider::Provider, Rou
 fn selected_key_service(path: &Path, expected: Option<&str>) -> Result<String, RouterRefusal> {
     let provider = selected_provider(path)?;
     require_provider(&provider, expected)?;
+    if provider.connection.is_some() {
+        return Err("connection_in_use".to_string().into());
+    }
     Ok(provider_keychain_service(&provider))
 }
 
@@ -1099,7 +1113,7 @@ pub fn preflight_provider_with_key(
         if let Some(key) = entered_key.map(str::trim).filter(|key| !key.is_empty()) {
             Some(key.to_string())
         } else {
-            keys.read(&provider_keychain_service(&candidate))
+            provider_key(&candidate, keys)
                 .map_err(|refusal| refusal.message)?
                 .map(|key| key.trim().to_string())
                 .filter(|key| !key.is_empty())

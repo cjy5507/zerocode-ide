@@ -10,8 +10,13 @@ use sha2::{Digest, Sha256};
 
 use crate::{Protocol, Provider, ProviderKind, Refusal};
 
+pub const ROUTER_KEY_ENV_PREFIX: &str = "ZEROCODE_ROUTER_";
+pub const RELOAD_METHOD: &str = "providers.reload";
+pub const RELOAD_VERSION: u64 = 1;
+
 pub const JUDGMENT_CONNECTION_KEY: &str = "judgmentConnection";
 pub const CODING_CONNECTION_KEY: &str = "codingConnection";
+pub const PREVIOUS_CODING_KEY: &str = "previousCodingSelection";
 pub const PREVIOUS_JUDGMENT_KEY: &str = "previousJudgmentSelection";
 
 /// A role names a saved connection, never an address paired with an arbitrary key reference.
@@ -41,6 +46,8 @@ impl Default for Authentication {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Metadata {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     pub id: String,
     pub generation: u64,
     #[serde(default)]
@@ -93,6 +100,7 @@ pub fn metadata(row: &Value) -> Result<Metadata, Refusal> {
         hash.update([0]);
     }
     Ok(Metadata {
+        aliases: Vec::new(),
         id: format!("connection-{:x}", hash.finalize()),
         generation: 0,
         auth: Authentication::default(),
@@ -113,6 +121,58 @@ pub fn row<'a>(root: &'a Value, id: &str) -> Result<&'a Value, Refusal> {
     Ok(row)
 }
 
+#[must_use]
+pub fn requires_auth(row: &Value) -> bool {
+    row.get("requires_auth")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        || (row
+            .get("auth_env")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name.starts_with(ROUTER_KEY_ENV_PREFIX))
+            && !router_base_is_local(
+                row.get("base_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ))
+}
+
+/// Non-secret route stamp; display names and model-list refreshes do not alter it.
+pub fn route_stamp(row: &Value) -> Result<String, Refusal> {
+    let metadata = metadata(row)?;
+    let mut hash = Sha256::new();
+    for key in [
+        "base_url",
+        "auth_env",
+        "client_fingerprint",
+        "headers",
+        "user_agent",
+    ] {
+        hash.update(
+            row.get(key)
+                .filter(|value| !value.is_null())
+                .map(Value::to_string)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        hash.update([0]);
+    }
+    hash.update(requires_auth(row).to_string().as_bytes());
+    hash.update(metadata.id.as_bytes());
+    hash.update(metadata.generation.to_be_bytes());
+    hash.update(metadata.auth.header.as_bytes());
+    hash.update([0]);
+    hash.update(
+        metadata
+            .auth
+            .scheme
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    Ok(format!("connection-route-{:x}", hash.finalize()))
+}
+
 pub fn candidate(root: &Value, reference: &Reference) -> Result<Provider, Refusal> {
     let row = row(root, &reference.id)?;
     let metadata = metadata(row)?;
@@ -128,10 +188,7 @@ pub fn candidate(root: &Value, reference: &Reference) -> Result<Provider, Refusa
         .get("auth_env")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let requires_auth = row
-        .get("requires_auth")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let requires_auth = requires_auth(row);
     if requires_auth
         && (auth_env.is_empty()
             || !auth_env

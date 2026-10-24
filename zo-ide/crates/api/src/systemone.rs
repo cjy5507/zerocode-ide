@@ -954,11 +954,11 @@ impl SystemOneClient {
             .body(prepared.body.clone());
         let request = if let Some(connection) = &self.provider.connection {
             let mut request = request;
-            if !connection.headers.keys().any(|name| name.eq_ignore_ascii_case("User-Agent"))
-                && let Some(agent) = connection.client_fingerprint.as_deref()
-                    .and_then(crate::providers::openai_compat::client_fingerprint_user_agent)
-            {
-                request = request.header("User-Agent", agent);
+            if !connection.headers.keys().any(|name| name.eq_ignore_ascii_case("User-Agent")) {
+                if let Some(agent) = connection.client_fingerprint.as_deref()
+                    .and_then(crate::providers::openai_compat::client_fingerprint_user_agent) {
+                    request = request.header("User-Agent", agent);
+                }
             }
             for (name, value) in &connection.headers {
                 request = request.header(name, value);

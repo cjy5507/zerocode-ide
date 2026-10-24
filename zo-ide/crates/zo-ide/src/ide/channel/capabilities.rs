@@ -142,6 +142,7 @@ impl Snapshot {
                     "pane":"session.steer | --resume-transcript","inline":"thread"},
                 // Implemented ability, whatever this launch asked for: the
                 // window reads it to know the guard exists on this binary.
+                "providers_reload":{"supported":true,"method":judgment_provider::connections::RELOAD_METHOD,"version":judgment_provider::connections::RELOAD_VERSION},
                 "exact_launch":{"supported":true,"version":crate::launch_contract::VERSION}
             }),
             mode: Mode { frontend:None, requested:None, effective:None, available:None, reason:None },

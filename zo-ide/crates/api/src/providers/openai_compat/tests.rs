@@ -2269,3 +2269,18 @@ fn thinking_blocks_are_dropped_from_openai_request() {
     assert!(serialized.contains("the answer"), "{serialized}");
     assert!(serialized.contains("weather"), "{serialized}");
 }
+
+#[tokio::test]
+async fn a_shared_connections_authentication_header_is_used_for_coding_too() {
+    let config: super::CustomProviderConfig = serde_json::from_value(json!({
+        "name":"Fixture", "base_url":"https://gateway.example.com/v1", "auth_env":"FIXTURE_KEY", "models":["fixture-model"],
+        "connection":{"id":"fixture", "generation":1, "auth":{"header":"X-Fixture-Key", "scheme":null}}
+    })).unwrap();
+    let client = OpenAiCompatClient::new("fixture-only-value", config.to_static_config());
+    let request = client.http.post("https://gateway.example.com/v1/chat/completions");
+    let (request, sent) = client.apply_auth(request).await.unwrap();
+    let request = request.build().unwrap();
+    assert!(sent);
+    assert_eq!(request.headers().get("x-fixture-key").unwrap(), "fixture-only-value");
+    assert!(!request.headers().contains_key("authorization"));
+}

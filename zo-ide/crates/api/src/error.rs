@@ -12,6 +12,8 @@ use core_types::retry_signal::{
 
 #[derive(Debug)]
 pub enum ApiError {
+    /// A saved connection changed while this client was being constructed.
+    ConnectionChanged,
     MissingCredentials {
         provider: &'static str,
         env_vars: &'static [&'static str],
@@ -491,7 +493,8 @@ impl ApiError {
             | Self::ExpiredOAuthToken
             | Self::Auth(_)
             | Self::InvalidApiKeyEnv(_) => ProviderErrorClass::AuthExpired,
-            Self::Http(_)
+            Self::ConnectionChanged
+            | Self::Http(_)
             | Self::Io(_)
             | Self::Json(_)
             | Self::InvalidSseFrame(_)
@@ -549,7 +552,8 @@ impl ApiError {
                     )
             }
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
-            Self::MissingCredentials { .. }
+            Self::ConnectionChanged
+            | Self::MissingCredentials { .. }
             | Self::RouterKeyRefused { .. }
             | Self::UnsupportedProvider { .. }
             | Self::MissingAuthRouteCredentials { .. }
@@ -911,6 +915,7 @@ impl Display for ApiError {
                     "saved OAuth token is expired and no refresh token is available"
                 )
             }
+            Self::ConnectionChanged => write!(f, "The model connection changed. Retry the turn to use the saved connection."),
             Self::Auth(message) => write!(f, "auth error: {message}"),
             Self::InvalidApiKeyEnv(error) => {
                 write!(f, "failed to read credential environment variable: {error}")

@@ -8128,6 +8128,7 @@ dependencies = [
 name = "zerocode-harness"
 version = "1.1.93"
 dependencies = [
+ "judgment-provider",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

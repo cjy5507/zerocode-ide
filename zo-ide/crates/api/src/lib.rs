@@ -291,3 +291,6 @@ pub(crate) mod test_env {
         }
     }
 }
+
+// Connection reloads invalidate only the window-owned router credentials.
+pub use providers::{note_provider_reload, provider_reload_generation};

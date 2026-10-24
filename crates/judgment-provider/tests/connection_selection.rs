@@ -18,22 +18,33 @@ fn selected(id: &str, key_ref: &str) -> Value {
 
 #[test]
 fn a_linked_judgment_reads_only_its_connections_key_reference() {
-    let provider = Provider::from_root(&selected("connection-a", "ZEROCODE_ROUTER_FIXTURE_A_KEY")).expect("selected");
+    let provider = Provider::from_root(&selected("connection-a", "ZEROCODE_ROUTER_FIXTURE_A_KEY"))
+        .expect("selected");
     assert_eq!(provider.key_env(), "ZEROCODE_ROUTER_FIXTURE_A_KEY");
 }
 
 #[test]
 fn two_accounts_at_one_endpoint_have_distinct_judgment_evidence() {
-    let a = Provider::from_root(&selected("connection-a", "ZEROCODE_ROUTER_FIXTURE_A_KEY")).expect("a");
-    let b = Provider::from_root(&selected("connection-b", "ZEROCODE_ROUTER_FIXTURE_B_KEY")).expect("b");
-    assert_ne!(a.identity(), b.identity(), "account changes must invalidate answers and late checks");
+    let a =
+        Provider::from_root(&selected("connection-a", "ZEROCODE_ROUTER_FIXTURE_A_KEY")).expect("a");
+    let b =
+        Provider::from_root(&selected("connection-b", "ZEROCODE_ROUTER_FIXTURE_B_KEY")).expect("b");
+    assert_ne!(
+        a.identity(),
+        b.identity(),
+        "account changes must invalidate answers and late checks"
+    );
     assert_ne!(a.route_fingerprint(), b.route_fingerprint());
 }
 
 #[test]
 fn a_linked_judgment_uses_the_connections_exact_api_base() {
-    let provider = Provider::from_root(&selected("connection-a", "ZEROCODE_ROUTER_FIXTURE_A_KEY")).expect("selected");
-    assert_eq!(provider.request_url(), "https://gateway.example.com/api/chat/completions");
+    let provider = Provider::from_root(&selected("connection-a", "ZEROCODE_ROUTER_FIXTURE_A_KEY"))
+        .expect("selected");
+    assert_eq!(
+        provider.request_url(),
+        "https://gateway.example.com/api/chat/completions"
+    );
 }
 
 #[test]
@@ -56,5 +67,8 @@ fn a_connection_reference_cannot_redirect_the_selected_credentials() {
 fn a_linked_provider_keeps_the_five_field_legacy_projection() {
     let root = selected("connection-a", "ZEROCODE_ROUTER_FIXTURE_A_KEY");
     let provider = Provider::from_root(&root).expect("selected");
-    assert_eq!(serde_json::to_value(provider).expect("serialized"), root["smart"]["judgmentProvider"]);
+    assert_eq!(
+        serde_json::to_value(provider).expect("serialized"),
+        root["smart"]["judgmentProvider"]
+    );
 }

@@ -48,7 +48,7 @@ pub const TOKEN_ENV: &str = "ZO_SERVE_TOKEN";
 /// adopts them out of its environment at startup, so nothing zo spawns — an
 /// MCP server, a tool's shell, a hook — inherits them. One spelling for both
 /// sides of that handoff.
-pub const ROUTER_KEY_ENV_PREFIX: &str = "ZEROCODE_ROUTER_";
+pub use judgment_provider::connections::ROUTER_KEY_ENV_PREFIX;
 
 /// Where the window keeps each of those keys: one keychain item per variable,
 /// named this prefix and the variable's name. A zo the window did not launch —

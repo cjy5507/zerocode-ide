@@ -3436,3 +3436,47 @@ pub(super) fn stored_supervisor_token(state_dir: &Path, root: &Path) -> Result<S
         )
     })
 }
+
+/// Snapshot channels while the pane maps are locked, then release all maps before I/O.
+pub(super) fn model_connection_targets(state: &AppState) -> Vec<(String, ZoChannel)> {
+    let channels = state.channels();
+    let sessions = state.pane_sessions();
+    let agents = state.agent_terms();
+    zo_channel_targets(&channels, &sessions, &agents, state.supervisor())
+}
+
+/// A protocol receipt says queued, not applied. Older binaries are distinguished
+/// from unreachable channels by their actual capabilities response.
+pub(super) async fn reload_model_connection(channel: ZoChannel) -> Result<bool, String> {
+    // A stalled pane cannot indefinitely hold a settings operation's receipt.
+    let exchange = async move {
+        let mut client = Client::connect(&channel.addr, channel.token)
+            .await
+            .map_err(|error| error.to_string())?;
+        let capabilities = client
+            .call("session.capabilities", json!({}))
+            .await
+            .map_err(|error| error.to_string())?;
+        let support = &capabilities["support"]["providers_reload"];
+        if capabilities["protocol"]["name"] != "zo-events"
+            || capabilities["protocol"]["major"] != 1
+            || support["supported"] != true
+            || support["method"] != judgment_provider::connections::RELOAD_METHOD
+            || support["version"].as_u64() != Some(judgment_provider::connections::RELOAD_VERSION)
+        {
+            return Ok(false);
+        }
+        let receipt = client
+            .call(
+                judgment_provider::connections::RELOAD_METHOD,
+                json!({"version":judgment_provider::connections::RELOAD_VERSION}),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(receipt["queued"] == true
+            && receipt["version"].as_u64() == Some(judgment_provider::connections::RELOAD_VERSION))
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
+        .await
+        .map_err(|_| "connection_reload_timeout".to_string())?
+}

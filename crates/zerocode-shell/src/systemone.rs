@@ -867,10 +867,7 @@ impl Wire {
                 (name == wanted.as_ref()).then(|| key.clone()).flatten()
             }
             KeySource::Keychain => trimmed(
-                Keychain::of_this_machine()
-                    .read(&crate::typesafe_settings::provider_keychain_service(
-                        provider,
-                    ))
+                crate::typesafe_settings::provider_key(provider, &Keychain::of_this_machine())
                     .ok()
                     .flatten(),
             ),

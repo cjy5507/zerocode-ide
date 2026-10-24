@@ -628,6 +628,8 @@ impl runtime::HookProgressReporter for CliHookProgressReporter {
 
 pub(crate) struct AnthropicRuntimeClient {
     client: ProviderClient,
+    connections_generation: u64,
+    connection_name: Option<String>,
     session_id: String,
     model: String,
     auth_route: AuthRoute,
@@ -2026,6 +2028,27 @@ async fn reconnect_claude_login(
 }
 
 impl AnthropicRuntimeClient {
+    /// Reload at the request boundary. A refused rebuild blocks that request,
+    /// rather than continuing with a deleted endpoint or an old credential.
+    pub(crate) async fn refresh_connections(&mut self, cwd: &Path) -> Result<(), String> {
+        let was_custom = self.connection_name.is_some();
+        let cwd = cwd.to_path_buf();
+        let generation = tokio::task::spawn_blocking(move || crate::custom_provider_env::refresh_for_turn(&cwd))
+            .await.map_err(|error| error.to_string())??;
+        if self.connections_generation == generation { return Ok(()); }
+        if was_custom {
+            if api::custom_provider_for_model(&self.model).is_none() {
+                return Err("The selected model connection was removed. Choose a registered model with /model.".to_string());
+            }
+            let session = self.session_id.clone(); let model = self.model.clone(); let route = self.auth_route;
+            let rebuilt = tokio::task::spawn_blocking(move || build_provider_client(&session, &model, route, None).map_err(|error| error.to_string()))
+                .await.map_err(|error| error.to_string())??;
+            self.client = rebuilt;
+        }
+        self.connections_generation = generation;
+        Ok(())
+    }
+
     pub(crate) fn client(&self) -> ProviderClient {
         self.client.clone()
     }
@@ -2131,6 +2154,8 @@ impl AnthropicRuntimeClient {
 
         Ok(Self {
             client,
+            connections_generation: api::provider_reload_generation(),
+            connection_name: api::custom_provider_for_model(&model).map(|provider| provider.config.provider_name.to_string()),
             session_id: session_id.to_string(),
             model,
             auth_route,
@@ -2925,6 +2950,8 @@ mod oauth_refresh_tests {
         let startup = super::resolve_startup_auth(resolve_and_cache_claude_auth);
         assert!(matches!(startup, api::AuthSource::None));
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
             client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(startup)),
             session_id: "missing-login-test".to_string(),
             model: "claude-opus-5".to_string(),
@@ -3003,6 +3030,8 @@ mod oauth_refresh_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
             client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(
                 api::AuthSource::BearerToken("refused-bearer".to_string()),
             )),
@@ -3104,6 +3133,8 @@ mod oauth_refresh_tests {
         .expect("save google oauth");
 
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
             client: ProviderClient::GeminiCodeAssist(api::GeminiCodeAssistClient::new(
                 "live-google-token",
             )),
@@ -3163,6 +3194,8 @@ mod oauth_refresh_tests {
         .expect("save expired google oauth");
 
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
             client: ProviderClient::GeminiCodeAssist(api::GeminiCodeAssistClient::new(
                 "live-google-token",
             )),
