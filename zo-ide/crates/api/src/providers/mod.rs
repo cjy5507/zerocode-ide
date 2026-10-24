@@ -7375,6 +7375,26 @@ mod tests {
     }
 
     #[test]
+    fn review_a_launch_key_keeps_its_declared_route_when_the_settings_lock_is_busy_at_launch() {
+        let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _catalog = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _routes = EnvVarGuard::set(judgment_provider::connections::LAUNCH_ROUTES_ENV, None);
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
+        let name = "ZEROCODE_ROUTER_T73675_BUSY_LOCK_FIXTURE_KEY";
+        let _key = EnvVarGuard::set(name, Some("busy-lock-launch-fixture"));
+        let _state = RouterTestState; super::forget_adopted_launch_keys_for_test();
+        let path = home.path().join("settings.json");
+        std::fs::write(&path, review_linked_settings("https://first.example.com/v1", name, 1).to_string()).unwrap();
+        // Another writer holds the lock past the launch's poll budget.
+        let busy = zerocode_core::settings_file_lock::SettingsFileLock::acquire(&path).unwrap();
+        assert_eq!(super::adopt_launch_keys(name), 1);
+        drop(busy);
+        let config = crate::SystemOneConfig::from_env().expect("a busy settings lock at launch erased the route the launch key was exported for");
+        assert!(config.test_key_matches("busy-lock-launch-fixture"));
+    }
+
+    #[test]
     fn review_linked_judgment_reads_the_new_key_without_waiting_for_reload() {
         let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
         let _catalog = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
