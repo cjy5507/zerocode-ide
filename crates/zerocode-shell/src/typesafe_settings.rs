@@ -4106,8 +4106,15 @@ mod tests {
     fn a_decision_goes_through_the_editors_doors_and_back() {
         let dir = tempfile::tempdir().expect("tempdir");
         let home = dir.path();
+        // Core keeps a decision's folders only as absolute paths, and an
+        // absolute path on Windows starts at a drive.
+        let acme = if cfg!(windows) {
+            "C:\\work\\acme"
+        } else {
+            "/work/acme"
+        };
         let settings = serde_json::json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: {
-            door::WORKSPACES_SETTING: ["/work/acme"],
+            door::WORKSPACES_SETTING: [acme],
         } } });
         let option = |name: &str, means: &str| ChoiceOption {
             name: name.to_string(),
@@ -4125,7 +4132,7 @@ mod tests {
             },
             at: custom::Point::TurnEnd,
             reads: BTreeSet::from([custom::Input::Task, custom::Input::EditedPaths]),
-            folders: Some(BTreeSet::from(["/work/acme".to_string()])),
+            folders: Some(BTreeSet::from([acme.to_string()])),
             act_from: custom::ACT_FROM_DEFAULT,
             max_per_hour: custom::HOURLY_DEFAULT,
         };
@@ -4149,7 +4156,7 @@ mod tests {
         );
         assert_eq!(
             (listed.folders, listed.everywhere),
-            (vec!["/work/acme".to_string()], false)
+            (vec![acme.to_string()], false)
         );
         let checked = check_custom_decision(kept.draft.clone());
         assert_eq!(
