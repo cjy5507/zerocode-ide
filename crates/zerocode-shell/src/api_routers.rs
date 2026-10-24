@@ -201,7 +201,7 @@ pub(crate) fn router_launch_snapshot(
     path: &Path,
     keys: &dyn RouterKeys,
 ) -> Result<Vec<(String, String)>, String> {
-    with_zo_settings_root(path, |document| {
+    with_zo_settings_root_for_launch(path, |document| {
         let mut secrets = std::collections::BTreeMap::new();
         let mut providers = Vec::new();
         let mut routes: std::collections::BTreeMap<String, Vec<String>> =
@@ -261,9 +261,13 @@ pub(crate) fn router_launch_snapshot(
 
 /// The launch captures its key provenance; it never writes a second credential store.
 pub fn router_launch_env_from_disk() -> Vec<(String, String)> {
-    zo_settings_path()
-        .and_then(|path| router_launch_snapshot(&path, &Keychain::of_this_machine()).ok())
-        .unwrap_or_default()
+    let Some(path) = zo_settings_path() else {
+        return Vec::new();
+    };
+    router_launch_snapshot(&path, &Keychain::of_this_machine()).unwrap_or_else(|error| {
+        eprintln!("[zerocode] zo launches without its router keys: {error}");
+        Vec::new()
+    })
 }
 
 /// The word a router variable is spelled from: ASCII letters and digits,
@@ -509,6 +513,29 @@ pub(crate) fn with_zo_settings_root<R>(
     read: impl FnOnce(&serde_json::Map<String, serde_json::Value>) -> Result<R, String>,
 ) -> Result<R, String> {
     let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
+    read(&read_zo_settings_root(path)?)
+}
+
+/// How long a launch waits for zo's settings lock. A writer can retry after the
+/// lock's own poll; a zo launched without its router keys gets them only by
+/// restarting.
+const LAUNCH_SETTINGS_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`with_zo_settings_root`] for a launch, which keeps polling for the lock
+/// until [`LAUNCH_SETTINGS_LOCK_WAIT`] has passed.
+fn with_zo_settings_root_for_launch<R>(
+    path: &Path,
+    read: impl FnOnce(&serde_json::Map<String, serde_json::Value>) -> Result<R, String>,
+) -> Result<R, String> {
+    let deadline = std::time::Instant::now() + LAUNCH_SETTINGS_LOCK_WAIT;
+    let _guard = loop {
+        match SettingsFileLock::acquire(path) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline => {}
+            taken => break taken.map_err(|error| error.to_string())?,
+        }
+    };
     read(&read_zo_settings_root(path)?)
 }
 
