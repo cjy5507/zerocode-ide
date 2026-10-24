@@ -868,9 +868,8 @@ impl Wire {
             }
             KeySource::Keychain => trimmed(
                 Keychain::of_this_machine()
-                    .read(&format!(
-                        "{}{wanted}",
-                        zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX
+                    .read(&crate::typesafe_settings::provider_keychain_service(
+                        provider,
                     ))
                     .ok()
                     .flatten(),
@@ -1357,7 +1356,27 @@ impl Wire {
         } else {
             request
         };
-        let request = if let Some(key) = key {
+        let request = if let Some(connection) = &provider.connection {
+            let mut request = request;
+            if let Some(user_agent) = crate::api_routers::presented_user_agent(
+                connection.client_fingerprint.as_deref(),
+                Some(&connection.headers),
+            ) {
+                request = request.header("User-Agent", user_agent);
+            }
+            for (name, value) in &connection.headers {
+                request = request.header(name, value);
+            }
+            if let Some(key) = key {
+                let value = connection
+                    .auth
+                    .scheme
+                    .as_ref()
+                    .map_or_else(|| key.to_string(), |scheme| format!("{scheme} {key}"));
+                request = request.header(&connection.auth.header, value);
+            }
+            request
+        } else if let Some(key) = key {
             request.bearer_auth(key)
         } else {
             request

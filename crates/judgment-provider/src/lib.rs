@@ -50,6 +50,8 @@ pub struct Provider {
     pub base_url: String,
     pub model: String,
     pub requires_auth: bool,
+    #[serde(skip)]
+    pub connection: Option<connections::Binding>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +136,7 @@ impl Provider {
             base_url: JEV_BASE_URL.to_string(),
             model: model.to_string(),
             requires_auth: true,
+            connection: None,
         }
     }
 
@@ -155,10 +158,11 @@ impl Provider {
         };
         let provider: Self =
             serde_json::from_value(config.clone()).map_err(|_| Refusal::Settings)?;
-        let provider = provider.validated()?;
+        let mut provider = provider.validated()?;
         if provider.kind == ProviderKind::Jev {
             return Ok(Self::jev(legacy_model));
         }
+        connections::bind_selected(root, &mut provider)?;
         Ok(provider)
     }
 
@@ -207,6 +211,9 @@ impl Provider {
 
     #[must_use]
     pub fn key_env(&self) -> Cow<'static, str> {
+        if let Some(connection) = &self.connection {
+            return Cow::Owned(connection.auth_env.clone());
+        }
         match self.kind {
             ProviderKind::Jev => Cow::Borrowed(JEV_KEY_ENV),
             ProviderKind::Local | ProviderKind::Remote => {
@@ -227,7 +234,11 @@ impl Provider {
     #[must_use]
     pub fn api_url(&self, resource: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
-        let version = if base.ends_with("/v1") { "" } else { "/v1" };
+        let version = if self.connection.is_some() || base.ends_with("/v1") {
+            ""
+        } else {
+            "/v1"
+        };
         format!("{base}{version}/{resource}")
     }
 
@@ -255,6 +266,9 @@ impl Provider {
             hash.update(part.as_bytes());
             hash.update([0]);
         }
+        if let Some(connection) = &self.connection {
+            hash.update(serde_json::to_vec(connection).unwrap_or_default());
+        }
         format!("judgment-{:x}", hash.finalize())
     }
 
@@ -271,6 +285,9 @@ impl Provider {
         ] {
             hash.update(part.as_bytes());
             hash.update([0]);
+        }
+        if let Some(connection) = &self.connection {
+            hash.update(serde_json::to_vec(connection).unwrap_or_default());
         }
         let digest = hash.finalize();
         let mut route = String::from("route-");

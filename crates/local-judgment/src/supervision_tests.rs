@@ -919,6 +919,7 @@ async fn only_the_persons_press_brings_an_ended_server_back_on_its_own_port_with
         base_url: "http://127.0.0.1:9".to_owned(),
         model: model.id.clone(),
         requires_auth: false,
+        connection: None,
     };
     select(
         &fixture.settings,

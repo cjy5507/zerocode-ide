@@ -7,6 +7,7 @@ fn remote(base_url: String, protocol: Protocol) -> Provider {
         base_url,
         model: "acme/decision".into(),
         requires_auth: true,
+        connection: None,
     }
 }
 

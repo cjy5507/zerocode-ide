@@ -54,6 +54,9 @@ pub(crate) async fn test_router_connection(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
 pub(crate) async fn save_api_router(
+    connection_id: Option<String>,
+    expected_generation: Option<u64>,
+    auth: Option<judgment_provider::connections::Authentication>,
     preset_id: Option<String>,
     name: String,
     base_url: String,
@@ -68,6 +71,9 @@ pub(crate) async fn save_api_router(
         api_routers::save_router(
             &path,
             api_routers::RouterSave {
+                connection_id,
+                expected_generation,
+                auth,
                 preset_id,
                 name,
                 base_url,

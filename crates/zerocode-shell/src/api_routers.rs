@@ -399,6 +399,9 @@ pub struct RouterSave {
     pub models: Vec<ProviderModel>,
     pub client_fingerprint: Option<String>,
     pub headers: Option<std::collections::BTreeMap<String, String>>,
+    pub connection_id: Option<String>,
+    pub expected_generation: Option<u64>,
+    pub auth: Option<judgment_provider::connections::Authentication>,
 }
 
 fn read_settings_text(path: &Path) -> Result<String, String> {
@@ -561,7 +564,57 @@ fn save_router_with_writer(
         return Err("라우터 이름이 비어 있습니다".to_string().into());
     }
     let existing = read_settings_text(path)?;
-    let rows = row_identities(&settings_root(&existing)?);
+    let mut root = serde_json::Value::Object(settings_root(&existing)?);
+    let source = if let Some(id) = save.connection_id.as_deref() {
+        Some(
+            judgment_provider::connections::row(&root, id)
+                .map_err(|error| error.to_string())?
+                .clone(),
+        )
+    } else {
+        root.get("providers")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+            .cloned()
+    };
+    let original_name = source
+        .as_ref()
+        .and_then(|row| row.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&name)
+        .to_string();
+    let rows = row_identities(root.as_object().ok_or("provider_settings")?);
+    if rows.iter().any(|row| {
+        row.name != original_name && judgment_provider::connections::names_match(&row.name, &name)
+    }) || (name.contains('/') && original_name != name)
+    {
+        return Err("connection_name_conflict".to_string().into());
+    }
+    let mut metadata = source
+        .as_ref()
+        .map(judgment_provider::connections::metadata)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| judgment_provider::connections::Metadata {
+            id: format!("connection-{}", uuid::Uuid::new_v4()),
+            generation: 0,
+            auth: judgment_provider::connections::Authentication::default(),
+        });
+    if save.connection_id.is_some() && save.expected_generation != Some(metadata.generation) {
+        return Err("settings_changed".to_string().into());
+    }
+    let previous_auth = metadata.auth.clone();
+    if let Some(auth) = save.auth {
+        metadata.auth = auth;
+    }
+    reqwest::header::HeaderName::from_bytes(metadata.auth.header.as_bytes())
+        .map_err(|_| "provider_settings".to_string())?;
+    if let Some(scheme) = &metadata.auth.scheme {
+        reqwest::header::HeaderValue::from_str(&format!("{scheme} fixture"))
+            .map_err(|_| "provider_settings".to_string())?;
+    }
     let secret = save
         .key
         .as_deref()
@@ -573,11 +626,16 @@ fn save_router_with_writer(
             message: "API 키의 형식을 확인하세요. 공백과 줄바꿈은 사용할 수 없습니다.".to_string(),
         });
     }
-    let auth_env = assign_auth_env(&rows, &name, save.preset_id.as_deref(), secret.is_some());
+    let auth_env = assign_auth_env(
+        &rows,
+        &original_name,
+        save.preset_id.as_deref(),
+        secret.is_some(),
+    );
     let service = router_keychain_service_for_env(&auth_env);
     let first_save = !rows
         .iter()
-        .any(|row| row.name == name && row.auth_env.as_deref() == Some(auth_env.as_str()));
+        .any(|row| row.name == original_name && row.auth_env.as_deref() == Some(auth_env.as_str()));
     // A missing key is not permission to send a public router a keyless request.
     // Use the same locality policy as the CLI; key-store errors stay errors.
     let previous_key = keys.read(&service)?;
@@ -588,7 +646,7 @@ fn save_router_with_writer(
                 .as_ref()
                 .is_some_and(|key| !key.trim().is_empty()));
     let entry = ProviderEntry {
-        name,
+        name: name.clone(),
         base_url: save.base_url,
         // Each model states its own window; none speaks for all of them.
         models: save
@@ -608,7 +666,66 @@ fn save_router_with_writer(
             .filter(|name| !name.is_empty()),
         headers: save.headers,
     };
-    let updated = upsert_provider_json_str(&existing, &entry)?;
+    let written = serde_json::to_value(&entry).map_err(|error| error.to_string())?;
+    let semantic_change = source.as_ref().is_some_and(|source| {
+        [
+            "base_url",
+            "requires_auth",
+            "auth_env",
+            "client_fingerprint",
+            "headers",
+        ]
+        .iter()
+        .any(|key| {
+            source.get(*key).filter(|value| !value.is_null())
+                != written.get(*key).filter(|value| !value.is_null())
+        })
+    }) || source.is_some()
+        && (secret.is_some() || previous_auth != metadata.auth);
+    if semantic_change && crate::model_connections::uses_connection(&root, &metadata.id) {
+        return Err("connection_in_use".to_string().into());
+    }
+    if semantic_change {
+        metadata.generation = metadata
+            .generation
+            .checked_add(1)
+            .ok_or("provider_settings")?;
+    }
+    if let Some(source) = &source {
+        if let Some(rows) = root
+            .get_mut("providers")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            if let Some(row) = rows.iter_mut().find(|row| *row == source) {
+                row["name"] = serde_json::json!(name);
+            }
+        }
+    }
+    let updated = upsert_provider_json_str(&root.to_string(), &entry)?;
+    let mut updated: serde_json::Value =
+        serde_json::from_str(&updated).map_err(|error| error.to_string())?;
+    if let Some(rows) = updated
+        .get_mut("providers")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        if let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+        {
+            row["connection"] = serde_json::json!(metadata);
+        }
+    }
+    if original_name != name {
+        if let Some(model) = updated
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|model| model.strip_prefix(&format!("{original_name}/")))
+            .map(str::to_string)
+        {
+            updated["model"] = serde_json::json!(format!("{name}/{model}"));
+        }
+    }
+    let updated = render_settings_root(updated.as_object().ok_or("provider_settings")?)?;
     let changing_key = secret.is_some() || (first_save && previous_key.is_some());
     commit_settings_and_key(
         path,
@@ -633,7 +750,21 @@ pub fn remove_router(
 ) -> Result<Vec<ProviderEntry>, String> {
     let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let existing = read_settings_text(path)?;
-    let rows = row_identities(&settings_root(&existing)?);
+    let root = serde_json::Value::Object(settings_root(&existing)?);
+    if let Some(row) = root
+        .get("providers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(name))
+    {
+        let metadata =
+            judgment_provider::connections::metadata(row).map_err(|error| error.to_string())?;
+        if crate::model_connections::uses_connection(&root, &metadata.id) {
+            return Err("connection_in_use".to_string());
+        }
+    }
+    let rows = row_identities(root.as_object().ok_or("provider_settings")?);
     let own_env = rows
         .iter()
         .find(|row| row.name == name)
@@ -856,7 +987,7 @@ fn installed_client_user_agent() -> String {
 /// client's identity when the row's `client_fingerprint` names that client,
 /// nothing otherwise — a row that names no client is probed as the generic
 /// client it is, and a row that brings its own `User-Agent` header keeps it.
-fn presented_user_agent(
+pub(crate) fn presented_user_agent(
     client_fingerprint: Option<&str>,
     headers: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Option<String> {
@@ -1250,6 +1381,9 @@ mod tests {
     fn router_save(name: &str, preset_id: Option<&str>, key: Option<&str>) -> RouterSave {
         RouterSave {
             preset_id: preset_id.map(str::to_string),
+            connection_id: None,
+            expected_generation: None,
+            auth: None,
             name: name.to_string(),
             base_url: format!(
                 "https://{}.invalid/v1",

@@ -442,7 +442,12 @@ pub fn remove_key(keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
 
 #[must_use]
 pub fn provider_keychain_service(provider: &judgment_provider::Provider) -> String {
-    format!("{SERVICE_KEYCHAIN_SERVICE_PREFIX}{}", provider.key_env())
+    let prefix = if provider.connection.is_some() {
+        zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX
+    } else {
+        SERVICE_KEYCHAIN_SERVICE_PREFIX
+    };
+    format!("{prefix}{}", provider.key_env())
 }
 
 pub fn selected_provider(path: &Path) -> Result<judgment_provider::Provider, RouterRefusal> {
@@ -560,15 +565,7 @@ pub(crate) fn set_provider_with_key_if_identity(
         &provider_keychain_service(&provider),
         key,
         keys,
-        |root| {
-            let smart = root
-                .entry(SMART_SETTINGS_KEY)
-                .or_insert_with(|| Value::Object(Map::new()));
-            let smart = smart
-                .as_object_mut()
-                .ok_or_else(|| "provider_settings".to_string())?;
-            write_provider_to_smart(smart, &provider, Some(expected), None)
-        },
+        |root| write_provider_to_root(root, &provider, Some(expected), None),
     )
 }
 
@@ -604,24 +601,31 @@ fn set_provider_checked(
     if binding.is_some_and(|binding| !binding.matches(&provider)) {
         return Err("managed_model_binding".to_string());
     }
-    update_smart(path, |smart| {
-        write_provider_to_smart(smart, &provider, expected, binding)
+    crate::api_routers::update_zo_settings_root(path, |root| {
+        write_provider_to_root(root, &provider, expected, binding)
     })
 }
 
-fn write_provider_to_smart(
-    smart: &mut Map<String, Value>,
+fn write_provider_to_root(
+    root: &mut Map<String, Value>,
     provider: &judgment_provider::Provider,
     expected: Option<&str>,
     binding: Option<&local_judgment::Binding>,
 ) -> Result<(), String> {
     if let Some(expected) = expected {
-        let current = judgment_provider::Provider::from_root(&serde_json::json!({"smart":smart}))
+        let current = judgment_provider::Provider::from_root(&Value::Object(root.clone()))
             .map_err(|reason| reason.to_string())?;
         if current.identity() != expected {
             return Err("settings_changed".to_string());
         }
     }
+    let smart = root
+        .entry(SMART_SETTINGS_KEY)
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or("provider_settings")?;
+    smart.remove(judgment_provider::connections::JUDGMENT_CONNECTION_KEY);
+    smart.remove(judgment_provider::connections::PREVIOUS_JUDGMENT_KEY);
     if provider.kind == judgment_provider::ProviderKind::Jev {
         if provider.model == DEFAULT_MODEL {
             smart.remove(MODEL_SETTING);
@@ -1659,6 +1663,7 @@ mod tests {
             base_url: "http://127.0.0.1:43210".to_string(),
             model: "fixture-native".to_string(),
             requires_auth: false,
+            connection: None,
         };
         assert_eq!(
             set_provider_if_identity(&path, provider.clone(), "old-provider", None),
@@ -1697,6 +1702,7 @@ mod tests {
             base_url: "http://127.0.0.1:43210".to_string(),
             model: "fixture-native".to_string(),
             requires_auth: false,
+            connection: None,
         };
         let binding = local_judgment::Binding {
             model_id: provider.model.clone(),

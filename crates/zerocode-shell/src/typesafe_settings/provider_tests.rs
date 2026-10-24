@@ -11,6 +11,7 @@ fn local() -> Provider {
         base_url: "http://127.0.0.1:1234".to_string(),
         model: "acme/decision-model".to_string(),
         requires_auth: false,
+        connection: None,
     }
 }
 
@@ -149,6 +150,7 @@ fn candidate(base: String) -> Provider {
         base_url: base,
         model: "acme/decision-model:q4".to_string(),
         requires_auth: false,
+        connection: None,
     }
 }
 
@@ -664,4 +666,117 @@ fn a_moved_selection_refuses_the_preflight_and_its_stale_apply() {
     set_provider_if_identity(&path, probed.clone(), &moved.identity(), None)
         .expect("an apply that names the current selection");
     assert_eq!(selected_provider(&path).expect("applied"), probed);
+}
+
+#[test]
+fn a_shared_connection_preflight_uses_its_own_key_headers_and_exact_route() {
+    use judgment_provider::connections::{self, Reference};
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (selected, _) = selected_with_managed_model(&path);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut root: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    root["providers"] = json!([{
+        "name":"Fixture", "base_url":format!("{}/custom", endpoint.base()),
+        "auth_env":"ZEROCODE_ROUTER_LINKED_FIXTURE_KEY", "requires_auth":true, "models":["fixture-model"],
+        "headers":{"X-Fixture-Route":"shared"},
+        "connection":{"id":"fixture-connection", "generation":3,"auth":{"header":"X-Fixture-Key", "scheme":null}}
+    }]);
+    std::fs::write(&path, root.to_string()).expect("write");
+    let before = std::fs::read(&path).expect("before");
+    let reference = Reference {
+        id: "fixture-connection".to_string(),
+        generation: 3,
+        model: "fixture-model".to_string(),
+        protocol: Protocol::SystemOne,
+    };
+    let candidate = connections::candidate(&root, &reference).expect("candidate");
+    let keys = HeldKeys::default();
+    keys.write(
+        &provider_keychain_service(&candidate),
+        "linked-fixture-value",
+    )
+    .expect("key");
+    let mut legacy = candidate.clone();
+    legacy.connection = None;
+    keys.write(
+        &provider_keychain_service(&legacy),
+        "legacy-must-not-be-sent",
+    )
+    .expect("old key");
+    let result = crate::model_connections::check(
+        &path,
+        &reference,
+        &selected.identity(),
+        &keys,
+        &settings_wire(&path),
+    )
+    .expect("check");
+    assert!(result.preflight.answered, "{:?}", result.preflight);
+    assert!(result.legacy_key_present);
+    let request = endpoint.asked()[0].to_ascii_lowercase();
+    assert!(
+        request.contains("/custom/systemone "),
+        "exact router API base"
+    );
+    assert!(request.contains("x-fixture-key: linked-fixture-value"));
+    assert!(request.contains("x-fixture-route: shared"));
+    assert!(!request.contains("legacy-must-not-be-sent"));
+    assert!(!request.contains("authorization:"));
+    assert_eq!(std::fs::read(&path).expect("unchanged"), before);
+}
+
+#[test]
+fn returning_from_a_connection_restores_the_previous_managed_selection() {
+    use judgment_provider::connections::{self, Reference};
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (selected, _) = selected_with_managed_model(&path);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut root: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    let before_smart = root["smart"].clone();
+    root["providers"] = json!([{"name":"Fixture", "base_url":endpoint.base(),"auth_env":"ZEROCODE_ROUTER_RESTORE_FIXTURE_KEY","requires_auth":false,"models":["fixture-model"],"connection":{"id":"restore-fixture","generation":0}}]);
+    std::fs::write(&path, root.to_string()).expect("write");
+    let reference = Reference {
+        id: "restore-fixture".to_string(),
+        generation: 0,
+        model: "fixture-model".to_string(),
+        protocol: Protocol::SystemOne,
+    };
+    crate::model_connections::apply_judgment(
+        &path,
+        &reference,
+        &selected.identity(),
+        &HeldKeys::default(),
+        &settings_wire(&path),
+    )
+    .expect("apply");
+    let applied = selected_provider(&path).expect("linked");
+    assert!(applied.connection.is_some());
+    let after: Value = serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    // The old parser sees only its original five-field projection.
+    let old: Provider =
+        serde_json::from_value(after["smart"][judgment_provider::SETTINGS_KEY].clone())
+            .expect("legacy parser");
+    assert!(old.connection.is_none());
+    assert_eq!(
+        after["smart"][judgment_provider::SETTINGS_KEY]
+            .as_object()
+            .expect("projection")
+            .len(),
+        5
+    );
+    crate::model_connections::clear(&path, crate::model_connections::Role::Judgment)
+        .expect("restore");
+    let restored: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    assert_eq!(restored["smart"], before_smart);
+    assert_eq!(selected_provider(&path).expect("managed again"), selected);
+    assert!(
+        restored["smart"]
+            .get(connections::JUDGMENT_CONNECTION_KEY)
+            .is_none()
+    );
 }

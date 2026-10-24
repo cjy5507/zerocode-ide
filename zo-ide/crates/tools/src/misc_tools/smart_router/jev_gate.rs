@@ -1505,6 +1505,7 @@ mod tests {
                 base_url: endpoint.base_url.clone(),
                 model: "acme/decision-model".to_string(),
                 requires_auth: false,
+                connection: None,
             };
             let mut root: Value = serde_json::from_str(&first).expect("json");
             root["smart"][judgment_provider::SETTINGS_KEY] =

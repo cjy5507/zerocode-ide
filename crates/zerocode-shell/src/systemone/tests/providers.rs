@@ -10,6 +10,7 @@ fn provider(base: String) -> Provider {
         base_url: base,
         model: "fixture-decision".to_string(),
         requires_auth: false,
+        connection: None,
     }
 }
 

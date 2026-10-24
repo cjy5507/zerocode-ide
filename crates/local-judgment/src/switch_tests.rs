@@ -407,6 +407,7 @@ async fn another_windows_new_provider_choice_is_never_replaced_by_rollback() {
         base_url: "https://example.invalid".to_owned(),
         model: "other-native".to_owned(),
         requires_auth: false,
+        connection: None,
     };
     let expected = chosen.identity();
     begin(&fixture, move |_, _, _| {

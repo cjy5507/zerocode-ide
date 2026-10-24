@@ -1278,6 +1278,7 @@ fn a_manual_provider_change_emits_the_new_identity_without_starting_a_server() {
         base_url: "https://example.invalid".to_owned(),
         model: "fixture-native".to_owned(),
         requires_auth: false,
+        connection: None,
     };
     fs::write(
         &settings,
@@ -1307,6 +1308,7 @@ fn concurrent_snapshots_cannot_give_an_old_provider_a_newer_revision() {
             base_url: "https://example.invalid".to_owned(),
             model: format!("fixture-{index}"),
             requires_auth: false,
+            connection: None,
         };
         identities.insert(provider.identity(), index);
         documents.push(
@@ -1425,6 +1427,7 @@ async fn failed_apply_does_not_erase_the_previously_configured_model() {
         base_url: "http://127.0.0.1:43127".to_owned(),
         model: model.id.clone(),
         requires_auth: false,
+        connection: None,
     };
     let identity = original.identity();
     let binding = json!({"modelId":model.id,"revision":model.revision,"providerIdentity":identity});

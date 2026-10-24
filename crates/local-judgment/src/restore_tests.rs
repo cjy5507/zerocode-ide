@@ -239,6 +239,7 @@ impl Restoring {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
             model: self.models[0].id.clone(),
             requires_auth: false,
+            connection: None,
         };
         select(
             &self.settings,

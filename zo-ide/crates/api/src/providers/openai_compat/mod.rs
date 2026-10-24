@@ -43,7 +43,7 @@ fn claude_code_client_user_agent() -> &'static str {
 /// Resolve a named client-fingerprint preset to the `User-Agent` that client
 /// presents. Unknown names yield `None` so a typo degrades to no override
 /// rather than a silently wrong fingerprint.
-fn client_fingerprint_user_agent(name: &str) -> Option<&'static str> {
+pub(crate) fn client_fingerprint_user_agent(name: &str) -> Option<&'static str> {
     match name.trim().to_ascii_lowercase().as_str() {
         "codex" | "codex-cli" | "codex_cli_rs" => Some(CODEX_CLIENT_USER_AGENT),
         "claude-code" | "claude" | "claude-cli" => Some(claude_code_client_user_agent()),

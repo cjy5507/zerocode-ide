@@ -952,7 +952,24 @@ impl SystemOneClient {
             .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(prepared.body.clone());
-        let request = if self.provider.requires_auth {
+        let request = if let Some(connection) = &self.provider.connection {
+            let mut request = request;
+            if !connection.headers.keys().any(|name| name.eq_ignore_ascii_case("User-Agent"))
+                && let Some(agent) = connection.client_fingerprint.as_deref()
+                    .and_then(crate::providers::openai_compat::client_fingerprint_user_agent)
+            {
+                request = request.header("User-Agent", agent);
+            }
+            for (name, value) in &connection.headers {
+                request = request.header(name, value);
+            }
+            if self.provider.requires_auth {
+                let value = connection.auth.scheme.as_ref()
+                    .map_or_else(|| self.api_key.clone(), |scheme| format!("{scheme} {}", self.api_key));
+                request = request.header(&connection.auth.header, value);
+            }
+            request
+        } else if self.provider.requires_auth {
             request.bearer_auth(&self.api_key)
         } else {
             request
@@ -1103,6 +1120,7 @@ mod tests {
             base_url: mock.base_url.clone(),
             model: "fixture-decider".to_string(),
             requires_auth: false,
+            connection: None,
         };
         let body = serde_json::json!({
             "model":provider.identity(),"state":"The page is ready.",
