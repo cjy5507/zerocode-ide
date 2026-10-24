@@ -1730,6 +1730,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_canonical_reclaim_root_can_create_a_git_worktree() {
+        let bench = Bench::open();
+        let path = bench.cut("canonical-root");
+        assert!(
+            path.join(".git").is_file(),
+            "git did not create a linked worktree under {}",
+            bench.worktrees.display()
+        );
+    }
+
     /// A checkout is resolved through its OWNING repository, never by opening
     /// git at the checkout itself.
     ///
