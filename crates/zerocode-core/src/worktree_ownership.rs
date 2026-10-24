@@ -205,11 +205,14 @@ fn under(path: &str, root: &str) -> bool {
     if root.is_empty() {
         return false;
     }
-    let root = root.trim_end_matches('/');
-    let Some(rest) = path.strip_prefix(root) else {
-        return false;
-    };
-    rest.starts_with('/') && rest.len() > 1
+    std::path::Path::new(path)
+        .strip_prefix(root)
+        .is_ok_and(|rest| {
+            !rest.as_os_str().is_empty()
+                && rest
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+        })
 }
 
 /// 이 워크트리가 우리 오케스트레이터가 만든 것인가.
@@ -522,6 +525,7 @@ mod tests {
         for path in [
             "C:/work/managed",
             "C:/work/managed-neighbour/task",
+            "C:/work/managed/../another-owner/task",
             "D:/work/managed/task",
         ] {
             assert!(
@@ -597,6 +601,14 @@ mod tests {
         // 이름이 겹치는 이웃 디렉터리도 아니다.
         assert!(!is_zerocode_managed(
             at("/home/dev/.zerocode/worktrees/api-abcd1234-old/side"),
+            ours()
+        ));
+    }
+
+    #[test]
+    fn a_parent_component_does_not_grant_managed_ownership() {
+        assert!(!is_zerocode_managed(
+            at(&format!("{ROOT}/../another-owner/task")),
             ours()
         ));
     }

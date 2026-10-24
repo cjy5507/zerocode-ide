@@ -1586,9 +1586,10 @@ mod tests {
             let temp = tempfile::tempdir().expect("a reclaim repository");
             // Git writes down a checkout's real path (macOS's temporary folder
             // is a link into /private) and the ownership rule reads the root as
-            // text, so the bench's root is the real one, as a window's is —
-            // or only a checkout on a prefixed branch would count as its own.
-            let real = temp.path().canonicalize().expect("the real temporary path");
+            // text, so the bench's root is the real one, as a window's is.
+            // Use a compatible spelling too: git cannot create a worktree
+            // from the verbatim disk path std returns on Windows.
+            let real = dunce::canonicalize(temp.path()).expect("the real temporary path");
             let repo = real.join("repo");
             std::fs::create_dir_all(&repo).expect("repo");
             git(&repo, &["init", "-q", "-b", "main"]);

@@ -78,6 +78,7 @@ sys-locale = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
+dunce = { workspace = true }
 # The native file panel, for the `zerocode-pick` helper binary ONLY (t-2982).
 # The window itself opens no panel: `NSOpenPanel` is a remote view that holds
 # the thread which opens it while `openAndSavePanelService` comes up, and on
