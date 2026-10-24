@@ -107,10 +107,10 @@ fn parse_array(label: &str, raw: &str) -> Result<Vec<Value>, String> {
 
 /// Observe settings at a request boundary, including zo launched from an ordinary terminal.
 /// A file change never changes the session's chosen model.
-pub(crate) fn refresh_for_turn(cwd: &std::path::Path) -> Result<u64, String> {
-    let config = runtime::ConfigLoader::default_for(cwd).load().map_err(|error| error.to_string())?;
+pub(crate) fn refresh_for_turn(cwd: &std::path::Path) -> Result<u64, &'static str> {
+    let config = runtime::ConfigLoader::default_for(cwd).load().map_err(|_| "settings could not be read")?;
     let raw = config.custom_providers_json().unwrap_or_else(|| "[]".to_string());
-    publish(&raw)?;
+    publish(&raw).map_err(|_| "the provider catalog could not be refreshed")?;
     Ok(api::provider_reload_generation())
 }
 

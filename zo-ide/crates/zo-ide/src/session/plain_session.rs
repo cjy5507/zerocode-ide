@@ -910,20 +910,16 @@ impl PlainSession {
         let Some(inner) = self.runtime.try_runtime_mut() else {
             return Ok(());
         };
-        inner.api_client_mut().refresh_connections(&self.cwd).await?;
+        let connection_note = inner.api_client_mut().refresh_connections(&self.cwd).await?;
         let persons_turn = !inner.is_autonomous_surface() && !crate::autonomy::wakeup::scope_active();
-        let Some(said) =
-            crate::runtime_support::refresh_oauth_if_near_expiry(inner.api_client_mut(), persons_turn).await
-        else {
-            return Ok(());
-        };
-        let _ = block_tx
-            .send(RenderBlock::System {
+        let account_note = crate::runtime_support::refresh_oauth_if_near_expiry(inner.api_client_mut(), persons_turn).await;
+        for said in [connection_note, account_note].into_iter().flatten() {
+            let _ = block_tx.send(RenderBlock::System {
                 id: runtime::message_stream::BlockIdGen::default().next(),
                 level: runtime::message_stream::SystemLevel::Housekeeping,
                 text: said,
-            })
-            .await;
+            }).await;
+        }
         Ok(())
     }
 

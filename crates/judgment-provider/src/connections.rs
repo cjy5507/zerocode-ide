@@ -10,6 +10,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{Protocol, Provider, ProviderKind, Refusal};
 
+pub const LAUNCH_ROUTES_ENV: &str = "ZEROCODE_CONNECTION_ROUTES";
+pub const LAUNCH_ROUTES_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchRoutes {
+    pub version: u32,
+    pub routes: BTreeMap<String, Vec<String>>,
+}
+
 pub const ROUTER_KEY_ENV_PREFIX: &str = "ZEROCODE_ROUTER_";
 pub const RELOAD_METHOD: &str = "providers.reload";
 pub const RELOAD_VERSION: u64 = 1;
@@ -149,13 +159,20 @@ pub fn route_stamp(row: &Value) -> Result<String, Refusal> {
         "headers",
         "user_agent",
     ] {
-        hash.update(
-            row.get(key)
-                .filter(|value| !value.is_null())
-                .map(Value::to_string)
+        let value = row.get(key).filter(|value| !value.is_null());
+        let rendered = if key == "headers" {
+            value
+                .map(|value| {
+                    let headers: BTreeMap<String, String> =
+                        serde_json::from_value(value.clone()).map_err(|_| Refusal::Settings)?;
+                    serde_json::to_string(&headers).map_err(|_| Refusal::Settings)
+                })
+                .transpose()?
                 .unwrap_or_default()
-                .as_bytes(),
-        );
+        } else {
+            value.map(Value::to_string).unwrap_or_default()
+        };
+        hash.update(rendered.as_bytes());
         hash.update([0]);
     }
     hash.update(requires_auth(row).to_string().as_bytes());

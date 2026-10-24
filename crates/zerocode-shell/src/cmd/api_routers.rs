@@ -29,7 +29,7 @@ pub(crate) async fn api_router_providers() -> Result<Vec<ProviderEntry>, String>
 #[tauri::command(async)]
 #[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
 pub(crate) async fn test_router_connection(
-    connection_id: Option<String>,
+    source_id: Option<String>,
     expected_generation: Option<u64>,
     base_url: String,
     auth: RouterAuth,
@@ -41,7 +41,7 @@ pub(crate) async fn test_router_connection(
     headers: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<Vec<DiscoveredModel>, String> {
     let key = if key.as_deref().is_none_or(|key| key.trim().is_empty()) {
-        if let (Some(id), Some(generation)) = (connection_id, expected_generation) {
+        if let (Some(id), Some(generation)) = (source_id, expected_generation) {
             let base = base_url.clone();
             let auth = auth.clone();
             let fingerprint = client_fingerprint.clone();
@@ -90,7 +90,7 @@ pub(crate) async fn test_router_connection(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // Tauri command arguments are the public IPC wire.
 pub(crate) async fn save_api_router(
-    connection_id: Option<String>,
+    source_id: Option<String>,
     expected_generation: Option<u64>,
     auth: Option<judgment_provider::connections::Authentication>,
     preset_id: Option<String>,
@@ -107,7 +107,7 @@ pub(crate) async fn save_api_router(
         api_routers::save_router(
             &path,
             api_routers::RouterSave {
-                connection_id,
+                source_id,
                 expected_generation,
                 auth,
                 preset_id,
@@ -129,12 +129,12 @@ pub(crate) async fn save_api_router(
 #[tauri::command]
 pub(crate) async fn remove_api_router(
     name: String,
-    connection_id: Option<String>,
+    source_id: Option<String>,
     expected_generation: Option<u64>,
 ) -> Result<Vec<ProviderEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = api_routers::zo_settings_path().ok_or("설정 경로를 찾을 수 없습니다")?;
-        match (connection_id.as_deref(), expected_generation) {
+        match (source_id.as_deref(), expected_generation) {
             (Some(id), Some(generation)) => api_routers::remove_router_if_current(
                 &path,
                 &name,

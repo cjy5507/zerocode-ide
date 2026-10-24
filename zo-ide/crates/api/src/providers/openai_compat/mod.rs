@@ -466,9 +466,14 @@ impl CustomProviderConfig {
         if let Some(connection) = &self.connection {
             config.auth_header = leak(&connection.auth.header);
             config.auth_scheme = connection.auth.scheme.as_deref().map(leak);
-            config.connection_id = Some(leak(&connection.id));
-            let row = serde_json::json!({"base_url":self.base_url,"auth_env":self.auth_env,"requires_auth":self.requires_auth,
-                "headers":self.headers,"client_fingerprint":self.client_fingerprint,"user_agent":self.user_agent,"connection":connection});
+        }
+        if self.connection.is_some() || self.auth_env.as_deref().is_some_and(|name| name.starts_with(judgment_provider::connections::ROUTER_KEY_ENV_PREFIX)) {
+            let row = serde_json::json!({"name":self.name,"base_url":self.base_url,"auth_env":self.auth_env,"requires_auth":self.requires_auth,
+                "headers":self.headers,"client_fingerprint":self.client_fingerprint,"user_agent":self.user_agent});
+            let mut row = row;
+            if let Some(connection) = &self.connection { row["connection"] = serde_json::json!(connection); }
+            // A malformed binding remains bound and refuses; it must not fall back to a legacy key.
+            config.connection_id = Some(leak(&judgment_provider::connections::metadata(&row).map(|meta| meta.id).unwrap_or_default()));
             config.connection_stamp = judgment_provider::connections::route_stamp(&row).ok().map(|stamp| leak(&stamp));
         }
         config
@@ -561,18 +566,14 @@ impl std::fmt::Debug for OpenAiCompatAuth {
 }
 
 fn read_bound_connection_key(config: OpenAiCompatConfig) -> Result<Option<String>, ApiError> {
-    use std::io::Read as _;
     let path = core_types::paths::default_config_home().join("settings.json");
     let _guard = zerocode_core::settings_file_lock::SettingsFileLock::acquire(&path)?;
-    let mut bytes = Vec::new();
-    std::fs::File::open(&path)?.take(judgment_provider::MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > judgment_provider::MAX_RESPONSE_BYTES { return Err(ApiError::ConnectionChanged); }
-    let root: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let root = crate::connection_keys::read_settings(&path)?;
     let row = judgment_provider::connections::row(&root, config.connection_id.ok_or(ApiError::ConnectionChanged)?)
         .map_err(|_| ApiError::ConnectionChanged)?;
     let stamp = judgment_provider::connections::route_stamp(row).map_err(|_| ApiError::ConnectionChanged)?;
     if config.connection_stamp != Some(stamp.as_str()) { return Err(ApiError::ConnectionChanged); }
-    super::fresh_connection_key(config.api_key_env)
+    super::fresh_connection_key(config.api_key_env, &stamp)
 }
 
 #[derive(Debug, Clone)]

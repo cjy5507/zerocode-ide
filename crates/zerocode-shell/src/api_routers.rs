@@ -196,17 +196,74 @@ pub fn router_launch_env(
     env
 }
 
-/// [`router_launch_env`] over zo's real settings file and this user's keychain.
-pub fn router_launch_env_from_disk() -> Vec<(String, String)> {
-    let Some(path) = zo_settings_path() else {
-        return Vec::new();
-    };
-    let Ok(providers) = read_providers_file(&path) else {
-        return Vec::new();
-    };
-    router_launch_env(&providers, |service| {
-        crate::accounts::read_keychain_service(service).ok()
+/// Capture each handed-off key and the routes it belongs to in the same settings transaction.
+pub(crate) fn router_launch_snapshot(
+    path: &Path,
+    keys: &dyn RouterKeys,
+) -> Result<Vec<(String, String)>, String> {
+    with_zo_settings_root(path, |document| {
+        let mut secrets = std::collections::BTreeMap::new();
+        let mut providers = Vec::new();
+        let mut routes: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for row in document
+            .get("providers")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Ok(entry) = serde_json::from_value::<ProviderEntry>(row.clone()) else {
+                continue;
+            };
+            providers.push(entry);
+            let Some(name) = row
+                .get("auth_env")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| is_router_env(name))
+            else {
+                continue;
+            };
+            let Ok(stamp) = judgment_provider::connections::route_stamp(row) else {
+                continue;
+            };
+            if !secrets.contains_key(name) {
+                // A key this launch cannot read is left for zo's normal credential diagnostics.
+                let Some(key) = keys
+                    .read(&router_keychain_service_for_env(name))
+                    .ok()
+                    .flatten()
+                    .filter(|key| !key.trim().is_empty())
+                else {
+                    continue;
+                };
+                secrets.insert(name.to_string(), key);
+            }
+            routes.entry(name.to_string()).or_default().push(stamp);
+        }
+        let mut env = router_launch_env(&providers, |service| {
+            service
+                .strip_prefix(zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX)
+                .and_then(|name| secrets.get(name).cloned())
+        });
+        if !env.is_empty() {
+            env.push((
+                judgment_provider::connections::LAUNCH_ROUTES_ENV.to_string(),
+                serde_json::to_string(&judgment_provider::connections::LaunchRoutes {
+                    version: judgment_provider::connections::LAUNCH_ROUTES_VERSION,
+                    routes,
+                })
+                .map_err(|error| error.to_string())?,
+            ));
+        }
+        Ok(env)
     })
+}
+
+/// The launch captures its key provenance; it never writes a second credential store.
+pub fn router_launch_env_from_disk() -> Vec<(String, String)> {
+    zo_settings_path()
+        .and_then(|path| router_launch_snapshot(&path, &Keychain::of_this_machine()).ok())
+        .unwrap_or_default()
 }
 
 /// The word a router variable is spelled from: ASCII letters and digits,
@@ -419,7 +476,7 @@ pub struct RouterSave {
     pub models: Vec<ProviderModel>,
     pub client_fingerprint: Option<String>,
     pub headers: Option<std::collections::BTreeMap<String, String>>,
-    pub connection_id: Option<String>,
+    pub source_id: Option<String>,
     pub expected_generation: Option<u64>,
     pub auth: Option<judgment_provider::connections::Authentication>,
 }
@@ -596,7 +653,7 @@ fn save_router_with_writer(
     }
     let existing = read_settings_text(path)?;
     let mut root = serde_json::Value::Object(settings_root(&existing)?);
-    let source = if let Some(id) = save.connection_id.as_deref() {
+    let source = if let Some(id) = save.source_id.as_deref() {
         Some(
             judgment_provider::connections::row(&root, id)
                 .map_err(|error| error.to_string())?
@@ -637,7 +694,7 @@ fn save_router_with_writer(
             generation: 0,
             auth: judgment_provider::connections::Authentication::default(),
         });
-    if save.connection_id.is_some() && save.expected_generation != Some(metadata.generation) {
+    if save.source_id.is_some() && save.expected_generation != Some(metadata.generation) {
         return Err("settings_changed".to_string().into());
     }
     if original_name != name && !metadata.aliases.contains(&original_name) {
@@ -1530,7 +1587,7 @@ mod tests {
     fn router_save(name: &str, preset_id: Option<&str>, key: Option<&str>) -> RouterSave {
         RouterSave {
             preset_id: preset_id.map(str::to_string),
-            connection_id: None,
+            source_id: None,
             expected_generation: None,
             auth: None,
             name: name.to_string(),
@@ -1559,7 +1616,7 @@ mod tests {
         std::fs::write(&path, root.to_string()).unwrap();
         let mut save = router_save("Renamed", None, None);
         save.base_url = rows[0].base_url.clone();
-        save.connection_id = Some(before.id.clone());
+        save.source_id = Some(before.id.clone());
         save.expected_generation = Some(before.generation);
         let after = save_router(&path, save, &keys).unwrap();
         let root: serde_json::Value =
@@ -1616,7 +1673,7 @@ mod tests {
         let metadata = judgment_provider::connections::metadata(&root["providers"][0]).unwrap();
         let mut save = router_save("Renamed", None, None);
         save.base_url = "https://gateway.example.com/v1".to_string();
-        save.connection_id = Some(metadata.id);
+        save.source_id = Some(metadata.id);
         save.expected_generation = Some(metadata.generation);
         let keys = HeldKeys::default();
         let after = save_router(&path, save, &keys).unwrap();
@@ -1929,7 +1986,7 @@ mod tests {
             ("사내 게이트웨이", None, "sk-corp"),
             ("개인 게이트웨이", None, "sk-mine"),
             ("OpenRouter", Some("openrouter"), "sk-or-1"),
-            ("OpenRouter 회사", Some("openrouter"), "sk-or-2"),
+            ("OpenRouter Work", Some("openrouter"), "sk-or-2"),
         ];
         for (name, preset, key) in saved {
             save_router(&path, router_save(name, preset, Some(key)), &keys).expect("save");

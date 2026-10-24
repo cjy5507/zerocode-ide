@@ -84,7 +84,7 @@ fn coding_matches(root: &Value, reference: &Reference) -> bool {
 }
 
 fn coding_reference(root: &Value) -> Result<Option<Reference>, String> {
-    if let Some(mut reference) = reference(root, connections::CODING_CONNECTION_KEY)?
+    if let Ok(Some(mut reference)) = reference(root, connections::CODING_CONNECTION_KEY)
         && coding_matches(root, &reference)
     {
         let row = connections::row(root, &reference.id).map_err(|error| error.to_string())?;
@@ -106,7 +106,9 @@ fn coding_reference(root: &Value) -> Result<Option<Reference>, String> {
         .into_iter()
         .flatten()
     {
-        let metadata = connections::metadata(row).map_err(|error| error.to_string())?;
+        let Ok(metadata) = connections::metadata(row) else {
+            continue;
+        };
         let reference = Reference {
             id: metadata.id,
             generation: metadata.generation,

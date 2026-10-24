@@ -3,6 +3,7 @@
 pub mod sign_in;
 mod client;
 mod credential;
+mod connection_keys;
 mod error;
 pub mod managed_account;
 mod model_price;

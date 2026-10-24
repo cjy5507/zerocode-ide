@@ -4373,7 +4373,7 @@ pub fn note_provider_reload() -> u64 {
     let mut adopted = adopted_launch_keys().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     asked.retain(|key| !is_router(key));
     adopted.retain(|key, (_, source)| !is_router(key)
-        || (*source == KeySource::Adopted && !cfg!(target_os = "macos")));
+        || *source == KeySource::Adopted);
     PROVIDER_RELOAD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
 }
 
@@ -4384,24 +4384,29 @@ pub fn provider_reload_generation() -> u64 {
 
 /// A connection constructor reads a fresh window key while its caller holds
 /// the common settings lock, so a new endpoint cannot receive an old cached key.
-pub(crate) fn fresh_connection_key(key: &str) -> Result<Option<String>, crate::error::ApiError> {
+pub(crate) fn fresh_connection_key(key: &str, stamp: &str) -> Result<Option<String>, crate::error::ApiError> {
+    Ok(connection_credential(key, stamp)?.map(|(value, _)| value))
+}
+
+pub(crate) fn connection_credential(key: &str, stamp: &str) -> Result<Option<(String, KeySource)>, crate::error::ApiError> {
     match std::env::var(key) {
-        Ok(value) if !value.trim().is_empty() => return Ok(Some(value)),
+        Ok(value) if !value.trim().is_empty() => return Ok(Some((value, KeySource::Environment))),
         Ok(_) | Err(std::env::VarError::NotPresent) => {},
         Err(error) => return Err(error.into()),
     }
     let keychains = window_keychains().read().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(keychain) = keychains.iter().find(|keychain| keychain.names.answers(key)) {
         match (keychain.read)(&format!("{}{key}", keychain.service_prefix)) {
-            KeychainAnswer::Found(value) => return Ok(Some(value)),
-            KeychainAnswer::Absent => return Ok(if anthropic::keychain::router_keychain_available() { None }
-                else { adopted_table_key(key).filter(|(_, source)| *source == KeySource::Adopted).map(|(value, _)| value) }),
-            KeychainAnswer::Unanswered if cfg!(target_os = "macos") => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "The saved model connection key could not be read.").into()),
-            KeychainAnswer::Unanswered => {},
+            KeychainAnswer::Found(value) => return Ok(Some((value, KeySource::WindowKeychain))),
+            KeychainAnswer::Absent if anthropic::keychain::router_keychain_available() => return Ok(None),
+            KeychainAnswer::Unanswered if anthropic::keychain::router_keychain_available() => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "The saved model connection key could not be read.").into()),
+            KeychainAnswer::Absent | KeychainAnswer::Unanswered => {},
         }
     }
     drop(keychains);
-    read_env_non_empty(key)
+    let Some((value, KeySource::Adopted)) = adopted_table_key(key) else { return Ok(None); };
+    if !crate::connection_keys::permits(key, stamp) { return Err(crate::error::ApiError::ConnectionRestartRequired); }
+    Ok(Some((value, KeySource::Adopted)))
 }
 
 /// Keys this process holds outside its environment, by variable name, each
@@ -4480,6 +4485,7 @@ pub fn adopt_launch_keys(prefix: &str) -> usize {
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, value)| name.starts_with(prefix) && !value.trim().is_empty())
         .collect();
+    crate::connection_keys::capture(&found.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(), prefix);
     let mut table = adopted_launch_keys()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4595,6 +4601,7 @@ fn install_window_keychain(names: WindowKeyNames, service_prefix: &str, read: fn
 
 #[cfg(test)]
 pub(crate) fn forget_adopted_launch_keys_for_test() {
+    crate::connection_keys::clear();
     adopted_launch_keys()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7352,6 +7359,8 @@ mod tests {
     #[test]
     fn review_a_launch_key_is_not_adopted_by_a_route_changed_before_its_first_use() {
         let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _catalog = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _routes = EnvVarGuard::set(judgment_provider::connections::LAUNCH_ROUTES_ENV, None);
         let home = tempfile::tempdir().unwrap();
         let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
         let name = "ZEROCODE_ROUTER_T73675_ROUTE_FIXTURE_KEY";
@@ -7368,6 +7377,8 @@ mod tests {
     #[test]
     fn review_linked_judgment_reads_the_new_key_without_waiting_for_reload() {
         let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _catalog = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _routes = EnvVarGuard::set(judgment_provider::connections::LAUNCH_ROUTES_ENV, None);
         let home = tempfile::tempdir().unwrap();
         let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
         let name = "ZEROCODE_ROUTER_T73675_CURRENT_FIXTURE_KEY"; let _key = EnvVarGuard::set(name,None);

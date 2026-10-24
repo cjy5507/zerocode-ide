@@ -98,6 +98,7 @@ pub enum SystemOneFailure {
     Schema,
     /// No key is configured; nothing was sent.
     NoKey,
+    RestartRequired,
     Configuration,
     ResponseTooLarge,
     ContextTruncated,
@@ -119,6 +120,7 @@ impl SystemOneFailure {
             Self::Timeout => "timeout",
             Self::Schema => "schema",
             Self::NoKey => "no_key",
+            Self::RestartRequired => "provider_restart_required",
             Self::Configuration => "provider_settings",
             Self::ResponseTooLarge => "provider_response_too_large",
             Self::ContextTruncated => "provider_context_truncated",
@@ -661,24 +663,27 @@ impl SystemOneConfig {
     pub fn from_env_for(expected: Option<&str>) -> Result<Self, SystemOneFailure> {
         let settings_path = core_types::paths::default_config_home().join("settings.json");
         let provider = Provider::read(&settings_path).map_err(|_| SystemOneFailure::Configuration)?;
-        Self::from_provider(provider, expected)
+        Self::from_provider(provider, expected, Some(&settings_path))
     }
 
     #[cfg(test)]
     fn from_root(root: &serde_json::Value) -> Result<Self, SystemOneFailure> {
         let provider = Provider::from_root(root).map_err(|_| SystemOneFailure::Configuration)?;
-        Self::from_provider(provider, None)
+        Self::from_provider(provider, None, None)
     }
 
-    fn from_provider(mut provider: Provider, expected: Option<&str>) -> Result<Self, SystemOneFailure> {
+    fn from_provider(mut provider: Provider, expected: Option<&str>, settings_path: Option<&std::path::Path>) -> Result<Self, SystemOneFailure> {
         if expected.is_some_and(|identity| identity != provider.identity()) {
             return Err(SystemOneFailure::Configuration);
         }
         let credential = if provider.requires_auth {
-            Some(crate::providers::read_env_key(&provider.key_env())
-                .ok()
-                .flatten()
-                .ok_or(SystemOneFailure::NoKey)?)
+            let credential = if provider.connection.is_some() {
+                crate::connection_keys::judgment_credential(settings_path.ok_or(SystemOneFailure::Configuration)?, &provider)
+                    .map_err(|error| match error { crate::ApiError::ConnectionRestartRequired => SystemOneFailure::RestartRequired, _ => SystemOneFailure::Configuration })?
+            } else {
+                crate::providers::read_env_key(&provider.key_env()).ok().flatten()
+            };
+            Some(credential.ok_or(SystemOneFailure::NoKey)?)
         } else {
             None
         };

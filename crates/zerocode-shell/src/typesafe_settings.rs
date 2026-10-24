@@ -320,7 +320,11 @@ pub fn read_settings(
     let provider = judgment_provider::Provider::from_root(&document)
         .map_err(|reason| RouterRefusal::from(reason.token().to_string()))?;
     let key_saved = provider.requires_auth
-        && provider_key(&provider, keys)?.is_some_and(|key| !key.trim().is_empty());
+        && if provider.connection.is_some() {
+            provider_key(&provider, keys)?.is_some_and(|key| !key.trim().is_empty())
+        } else {
+            key_saved_at(&provider_keychain_service(&provider), keys)?
+        };
     let lineup = crate::summon_lineup::snapshot();
     let now_ms = crate::usage_runtime::epoch_ms_now();
     Ok(TypeSafeSettings {

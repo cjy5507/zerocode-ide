@@ -14,6 +14,7 @@ use core_types::retry_signal::{
 pub enum ApiError {
     /// A saved connection changed while this client was being constructed.
     ConnectionChanged,
+    ConnectionRestartRequired,
     MissingCredentials {
         provider: &'static str,
         env_vars: &'static [&'static str],
@@ -494,6 +495,7 @@ impl ApiError {
             | Self::Auth(_)
             | Self::InvalidApiKeyEnv(_) => ProviderErrorClass::AuthExpired,
             Self::ConnectionChanged
+            | Self::ConnectionRestartRequired
             | Self::Http(_)
             | Self::Io(_)
             | Self::Json(_)
@@ -553,6 +555,7 @@ impl ApiError {
             }
             Self::RetriesExhausted { last_error, .. } => last_error.is_retryable(),
             Self::ConnectionChanged
+            | Self::ConnectionRestartRequired
             | Self::MissingCredentials { .. }
             | Self::RouterKeyRefused { .. }
             | Self::UnsupportedProvider { .. }
@@ -916,6 +919,7 @@ impl Display for ApiError {
                 )
             }
             Self::ConnectionChanged => write!(f, "The model connection changed. Retry the turn to use the saved connection."),
+            Self::ConnectionRestartRequired => write!(f, "The key supplied at launch belongs to an older model connection. Restart zo with credentials for the saved connection."),
             Self::Auth(message) => write!(f, "auth error: {message}"),
             Self::InvalidApiKeyEnv(error) => {
                 write!(f, "failed to read credential environment variable: {error}")

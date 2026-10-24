@@ -6610,7 +6610,7 @@ function setEveryRouterModel(on) {
 /* One function for OpenAI-compatible GET /models fetch */
 async function fetchRouterModels({ base_url, auth, key, models_path, id_field, context_field, client_fingerprint, headers }) {
   return await invoke("test_router_connection", {
-    connectionId: modelConnectionsController.editing?.id ?? null,
+    sourceId: modelConnectionsController.editing?.id ?? null,
     expectedGeneration: modelConnectionsController.editing?.generation ?? null,
     baseUrl: base_url,
     auth,
@@ -7445,7 +7445,7 @@ async function saveApiRouterEntry() {
     // under — is the backend's, decided at the row's first save and kept. The
     // pane says only which preset the row came from, if any, and its name.
     configuredRouters = (await invoke("save_api_router", {
-      connectionId: modelConnectionsController.editing?.id ?? null,
+      sourceId: modelConnectionsController.editing?.id ?? null,
       expectedGeneration: modelConnectionsController.editing?.generation ?? null,
       auth: currentRouterAuth(),
       presetId: preset?.id ?? null,
