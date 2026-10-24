@@ -571,6 +571,7 @@ const JEV_TOKENS = Object.freeze({
   not_consented: { key: "jev.token.notConsented", word: "동의 안 된 폴더", fix: "consent" },
   settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
   provider_settings: { key: "jev.token.providerSettings", word: "판단 제공자 설정 오류", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
+  provider_restart_required: { key: "jev.token.providerRestartRequired", word: "zo 재시작 필요", saidKey: "settings.judgment.restartRequired", said: "zo를 시작할 때 받은 키가 이전 모델 연결의 것입니다. 저장된 연결의 키로 zo를 다시 시작하세요." },
   provider_address: { key: "jev.token.providerAddress", word: "판단 제공자 주소 오류", saidKey: "settings.judgment.invalidAddress", said: "http:// 또는 https://로 시작하는 기본 URL을 입력하세요. 키는 주소 대신 API 키 칸에 입력하세요." },
   provider_not_loopback: { key: "jev.token.providerNotLoopback", word: "이 컴퓨터의 주소가 아님", saidKey: "settings.judgment.notLocal", said: "다른 컴퓨터의 서버는 ‘다른 판단 서버’를 선택하세요. 로컬 연결은 localhost 또는 루프백 IP를 사용합니다." },
   provider_https_required: { key: "jev.token.providerHttpsRequired", word: "HTTPS 주소 필요", saidKey: "settings.judgment.httpsRequired", said: "이 주소는 HTTPS가 필요합니다. 사설망의 HTTP 서버라면 호스트 이름 대신 사설 IP 주소를 입력하세요." },
