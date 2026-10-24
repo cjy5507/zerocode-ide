@@ -1745,6 +1745,33 @@ mod tests {
     }
 
     #[test]
+    fn review_a_launch_waits_out_a_writer_holding_the_settings_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        save_router(
+            &path,
+            router_save("Selected", None, Some("launch-fixture-key")),
+            &keys,
+        )
+        .unwrap();
+        // Another writer keeps the lock past the lock's own two-second poll.
+        let writer = SettingsFileLock::acquire(&path).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(writer);
+        });
+        let launch = router_launch_snapshot(&path, &keys);
+        release.join().unwrap();
+        let env = launch
+            .expect("a writer holding the settings lock made this launch hand zo no router keys");
+        assert!(
+            env.iter().any(|(_, value)| value == "launch-fixture-key"),
+            "the launch did not hand over the saved router key"
+        );
+    }
+
+    #[test]
     fn connection_without_a_public_key_remains_auth_required() {
         let dir = tempfile::tempdir().expect("temporary settings");
         let path = dir.path().join("settings.json");
