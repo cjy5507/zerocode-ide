@@ -18912,7 +18912,7 @@ fn worker_readiness_runs_without_the_team_lock_and_reports_its_screen() {
             _term: u32,
         ) -> Result<(), crate::agent_teams::HostStartFailure> {
             self.saw_locked_table.store(
-                crate::agent_teams::team_table_is_locked(),
+                crate::agent_teams::table_is_held_by_current_thread(),
                 std::sync::atomic::Ordering::SeqCst,
             );
             Err(crate::agent_teams::HostStartFailure::new(
@@ -18998,7 +18998,7 @@ fn the_seat_resolution_holds_the_table_it_reads() {
     let mut witnessed = None;
     ShellPaneTable.with_seat_of_term(LEADER_TERM, &mut |seat| {
         witnessed = Some((
-            crate::agent_teams::table_is_held_for_tests(),
+            crate::agent_teams::table_is_held_by_current_thread(),
             seat.map(|(team, pane)| (team.to_string(), pane.to_string())),
         ));
     });
@@ -19954,7 +19954,7 @@ fn a_release_in_one_team_leaves_another_teams_pane_of_the_same_name_alone() {
  *   resolves to no seat and settles nothing, by construction.
  *
  * · `a_settlement_does_not_let_go_of_the_seat_it_read` — the lock-hold
- *   probe (`team_table_is_locked` from inside the gap) has no gap left
+ *   probe (`table_is_held_by_current_thread` from inside the gap) has no gap left
  *   to probe; the same property is the actor's `with_seat_of_term`
  *   contract, exercised by its `seat_gone`/`turn_ended` battery.
  */
