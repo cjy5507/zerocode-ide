@@ -839,30 +839,17 @@ fn git_within(host: &Host, dir: &Path, args: &[&str], budget: Duration) -> Resul
     }
 }
 
-/// A canonical path as git reads it. On Windows `canonicalize` answers a verbatim path
-/// (`\\?\C:\…`), which git refuses as a worktree's folder ("could not create leading
-/// directories … Invalid argument"). A plain disk path loses the prefix when the plain form
-/// fits in a classic path; a UNC path and a path longer than that keep it, as the prefix is
-/// what makes them reachable (part of the rule of `dunce::simplified`). Any other path, and
-/// one that is not Unicode, is answered as it came.
+/// Prefer this host's compatible spelling without changing the named path.
+/// The shared adapter retains namespaces when a plain spelling would change
+/// their meaning, and leaves other platforms' literal filenames untouched.
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
-    let Some(rest) = path.to_str().and_then(|text| text.strip_prefix(r"\\?\")) else {
-        return path;
-    };
-    let mut letters = rest.chars();
-    let is_disk = letters.next().is_some_and(|c| c.is_ascii_alphabetic())
-        && letters.next() == Some(':')
-        && letters.next() == Some('\\');
-    if is_disk && rest.len() < CLASSIC_PATH_MAX {
-        PathBuf::from(rest)
-    } else {
+    let plain = dunce::simplified(&path);
+    if plain.as_os_str() == path.as_os_str() {
         path
+    } else {
+        plain.to_path_buf()
     }
 }
-
-/// The length a Windows path may have without the verbatim prefix (MAX_PATH, the terminating
-/// NUL included).
-const CLASSIC_PATH_MAX: usize = 260;
 
 /// The commit a word names in the repository, if git knows it as one.
 fn commit_of(host: &Host, repo: &Path, word: &str) -> Option<String> {

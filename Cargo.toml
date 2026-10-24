@@ -119,6 +119,9 @@ sys-locale = "=0.3.2"
 # headless CLI uses the same crate so both binaries agree without duplicating
 # platform environment-variable rules.
 dirs = "=6.0.0"
+# Already used by Tauri. Keep canonical paths compatible without reinterpreting
+# Windows device names, trailing dots or namespaces.
+dunce = "=1.0.5"
 tempfile = "3"
 # The performance witnesses. "Rust must outperform" is this product's charter
 # line, and a charter without a measuring stick regresses one refactor at a

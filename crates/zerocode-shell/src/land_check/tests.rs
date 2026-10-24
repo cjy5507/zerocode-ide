@@ -760,6 +760,7 @@ fn a_record_whose_log_is_not_its_own_log_path_is_refused() {
 /// The store's root is a path git can take: a Windows verbatim prefix comes off a plain disk
 /// path, while a UNC path, a path too long for a classic one and a plain path are kept as they
 /// are.
+#[cfg(windows)]
 #[test]
 fn a_verbatim_windows_prefix_comes_off_a_plain_disk_root_only() {
     assert_eq!(
@@ -768,12 +769,31 @@ fn a_verbatim_windows_prefix_comes_off_a_plain_disk_root_only() {
     );
     let unc = PathBuf::from(r"\\?\UNC\server\share\app");
     assert_eq!(without_verbatim_prefix(unc.clone()), unc);
-    let long = PathBuf::from(format!(r"\\?\C:\{}", "x".repeat(CLASSIC_PATH_MAX)));
+    let long = PathBuf::from(format!(r"\\?\C:\{}checkout", "segment\\".repeat(40)));
     assert_eq!(without_verbatim_prefix(long.clone()), long);
     assert_eq!(
         without_verbatim_prefix(PathBuf::from("/Users/dev/app")),
         PathBuf::from("/Users/dev/app")
     );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_windows_spelling_remains_literal_on_another_host() {
+    let path = PathBuf::from(r"\\?\C:\work\checkout");
+    assert_eq!(without_verbatim_prefix(path.clone()), path);
+}
+
+#[test]
+fn a_reserved_verbatim_component_is_not_reinterpreted() {
+    let path = PathBuf::from(r"\\?\C:\work\CON");
+    assert_eq!(without_verbatim_prefix(path.clone()), path);
+}
+
+#[test]
+fn a_trailing_dot_in_a_verbatim_path_keeps_its_identity() {
+    let path = PathBuf::from(r"\\?\C:\work\checkout.");
+    assert_eq!(without_verbatim_prefix(path.clone()), path);
 }
 
 /// The stored words of a project become one policy: a blank command is none, a missing or zero
