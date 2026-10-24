@@ -28,6 +28,7 @@ pub struct ConnectionRow {
     pub generation: u64,
     pub provider: ProviderEntry,
     pub auth: connections::Authentication,
+    pub probe_headers: Option<std::collections::BTreeMap<String, String>>,
     pub key_available: bool,
     pub uses: Vec<Role>,
 }
@@ -83,15 +84,14 @@ fn coding_matches(root: &Value, reference: &Reference) -> bool {
 }
 
 fn coding_reference(root: &Value) -> Result<Option<Reference>, String> {
-    if let Some(mut reference) = reference(root, connections::CODING_CONNECTION_KEY)? {
-        if coding_matches(root, &reference) {
-            if let Ok(row) = connections::row(root, &reference.id) {
-                reference.generation = connections::metadata(row)
-                    .map_err(|error| error.to_string())?
-                    .generation;
-            }
-            return Ok(Some(reference));
-        }
+    if let Some(mut reference) = reference(root, connections::CODING_CONNECTION_KEY)?
+        && coding_matches(root, &reference)
+    {
+        let row = connections::row(root, &reference.id).map_err(|error| error.to_string())?;
+        reference.generation = connections::metadata(row)
+            .map_err(|error| error.to_string())?
+            .generation;
+        return Ok(Some(reference));
     }
     let Some((name, model)) = root
         .get("model")
@@ -168,6 +168,7 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
             generation: metadata.generation,
             provider,
             auth: metadata.auth,
+            probe_headers: api_routers::probe_headers(row)?,
             key_available,
             uses,
         });

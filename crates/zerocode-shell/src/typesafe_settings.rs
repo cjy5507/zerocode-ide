@@ -466,6 +466,30 @@ pub(crate) fn provider_key(
     keys.read(&provider_keychain_service(provider))
 }
 
+/// Capture a linked row and its key under the same lock used by saves.
+/// An edited row cannot supply its new credential to an older request endpoint.
+pub(crate) fn provider_key_at(
+    path: &Path,
+    provider: &judgment_provider::Provider,
+    keys: &dyn RouterKeys,
+) -> Result<Option<String>, RouterRefusal> {
+    let Some(connection) = &provider.connection else {
+        return provider_key(provider, keys);
+    };
+    crate::api_routers::with_zo_settings_root(path, |root| {
+        let current = judgment_provider::connections::candidate(
+            &Value::Object(root.clone()),
+            &connection.reference,
+        )
+        .map_err(|error| error.to_string())?;
+        if current.identity() != provider.identity() {
+            return Err("settings_changed".to_string());
+        }
+        provider_key(provider, keys).map_err(|error| error.message)
+    })
+    .map_err(RouterRefusal::from)
+}
+
 pub fn selected_provider(path: &Path) -> Result<judgment_provider::Provider, RouterRefusal> {
     let root = crate::api_routers::read_zo_settings_root(path)?;
     judgment_provider::Provider::from_root(&Value::Object(root))
@@ -1123,7 +1147,7 @@ pub fn preflight_provider_with_key(
         if let Some(key) = entered_key.map(str::trim).filter(|key| !key.is_empty()) {
             Some(key.to_string())
         } else {
-            provider_key(&candidate, keys)
+            provider_key_at(path, &candidate, keys)
                 .map_err(|refusal| refusal.message)?
                 .map(|key| key.trim().to_string())
                 .filter(|key| !key.is_empty())

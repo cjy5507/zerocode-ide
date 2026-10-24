@@ -776,15 +776,13 @@ fn save_router_with_writer(
             .checked_add(1)
             .ok_or_else(|| "provider_settings".to_string())?;
     }
-    if let Some(source) = &source {
-        if let Some(rows) = root
+    if let Some(source) = &source
+        && let Some(rows) = root
             .get_mut("providers")
             .and_then(serde_json::Value::as_array_mut)
-        {
-            if let Some(row) = rows.iter_mut().find(|row| *row == source) {
-                row["name"] = serde_json::json!(name);
-            }
-        }
+        && let Some(row) = rows.iter_mut().find(|row| *row == source)
+    {
+        row["name"] = serde_json::json!(name);
     }
     let updated = upsert_provider_json_str(&root.to_string(), &entry)?;
     let mut updated: serde_json::Value =
@@ -792,23 +790,20 @@ fn save_router_with_writer(
     if let Some(rows) = updated
         .get_mut("providers")
         .and_then(serde_json::Value::as_array_mut)
-    {
-        if let Some(row) = rows
+        && let Some(row) = rows
             .iter_mut()
             .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
-        {
-            row["connection"] = serde_json::json!(metadata);
-        }
+    {
+        row["connection"] = serde_json::json!(metadata);
     }
-    if original_name != name {
-        if let Some(model) = updated
+    if original_name != name
+        && let Some(model) = updated
             .get("model")
             .and_then(serde_json::Value::as_str)
             .and_then(|model| model.strip_prefix(&format!("{original_name}/")))
             .map(str::to_string)
-        {
-            updated["model"] = serde_json::json!(format!("{name}/{model}"));
-        }
+    {
+        updated["model"] = serde_json::json!(format!("{name}/{model}"));
     }
     let updated = render_settings_root(
         updated
@@ -1138,6 +1133,32 @@ pub struct RouterProbe<'a> {
 /// Reuse a saved credential only for the exact saved destination and headers.
 /// Editing the address requires an explicitly entered key; an ID is not a
 /// credential-forwarding capability to an arbitrary endpoint.
+/// An existing raw user-agent is a request header, without rewriting its stored form.
+pub(crate) fn probe_headers(
+    row: &serde_json::Value,
+) -> Result<Option<std::collections::BTreeMap<String, String>>, String> {
+    let mut headers: Option<std::collections::BTreeMap<String, String>> = row
+        .get("headers")
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value(value.clone()).map_err(|error| error.to_string()))
+        .transpose()?;
+    if let Some(agent) = row
+        .get("user_agent")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+    {
+        let headers = headers.get_or_insert_with(Default::default);
+        if !headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("User-Agent"))
+        {
+            headers.insert("User-Agent".to_string(), agent.to_string());
+        }
+    }
+    Ok(headers)
+}
+
 pub(crate) fn saved_probe_key(
     path: &Path,
     id: &str,
@@ -1145,22 +1166,25 @@ pub(crate) fn saved_probe_key(
     probe: &RouterProbe<'_>,
     keys: &dyn RouterKeys,
 ) -> Result<Option<String>, String> {
-    let root = serde_json::Value::Object(read_zo_settings_root(path)?);
-    let row = judgment_provider::connections::row(&root, id).map_err(|error| error.to_string())?;
-    let metadata =
-        judgment_provider::connections::metadata(row).map_err(|error| error.to_string())?;
-    let entry: ProviderEntry =
-        serde_json::from_value(row.clone()).map_err(|error| error.to_string())?;
-    if metadata.generation != generation
-        || entry.base_url.trim_end_matches('/') != probe.base_url.trim_end_matches('/')
-        || metadata.auth.header != probe.auth.header
-        || metadata.auth.scheme != probe.auth.scheme
-        || entry.headers.as_ref() != probe.headers
-        || entry.client_fingerprint.as_deref() != probe.client_fingerprint
-    {
-        return Err("settings_changed".to_string());
-    }
-    read_connection_key(&entry.auth_env, keys).map_err(|error| error.message)
+    with_zo_settings_root(path, |document| {
+        let root = serde_json::Value::Object(document.clone());
+        let row =
+            judgment_provider::connections::row(&root, id).map_err(|error| error.to_string())?;
+        let metadata =
+            judgment_provider::connections::metadata(row).map_err(|error| error.to_string())?;
+        let entry: ProviderEntry =
+            serde_json::from_value(row.clone()).map_err(|error| error.to_string())?;
+        if metadata.generation != generation
+            || entry.base_url.trim_end_matches('/') != probe.base_url.trim_end_matches('/')
+            || metadata.auth.header != probe.auth.header
+            || metadata.auth.scheme != probe.auth.scheme
+            || probe_headers(row)?.as_ref() != probe.headers
+            || entry.client_fingerprint.as_deref() != probe.client_fingerprint
+        {
+            return Err("settings_changed".to_string());
+        }
+        read_connection_key(&entry.auth_env, keys).map_err(|error| error.message)
+    })
 }
 
 pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<DiscoveredModel>, String> {

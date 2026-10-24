@@ -3475,10 +3475,14 @@ pub(super) fn reload_model_connection(channel: ZoChannel) -> Result<bool, String
         |error| error.to_string(),
         Some(std::time::Duration::from_secs(5)),
         async move |client| {
-            let capabilities = client
-                .call("session.capabilities", json!({}))
-                .await
-                .map_err(|error| error.to_string())?;
+            let capabilities = match client.call("session.capabilities", json!({})).await {
+                Ok(value) => value,
+                Err(zerocode_harness::HarnessError::Rpc {
+                    kind: zerocode_harness::ServeErrorKind::MethodNotFound,
+                    ..
+                }) => return Ok(false),
+                Err(error) => return Err(error.to_string()),
+            };
             let support = &capabilities["support"]["providers_reload"];
             if capabilities["protocol"]["name"] != "zo-events"
                 || capabilities["protocol"]["major"] != 1
@@ -3489,13 +3493,20 @@ pub(super) fn reload_model_connection(channel: ZoChannel) -> Result<bool, String
             {
                 return Ok(false);
             }
-            let receipt = client
+            let receipt = match client
                 .call(
                     judgment_provider::connections::RELOAD_METHOD,
                     json!({"version":judgment_provider::connections::RELOAD_VERSION}),
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+            {
+                Ok(value) => value,
+                Err(zerocode_harness::HarnessError::Rpc {
+                    kind: zerocode_harness::ServeErrorKind::MethodNotFound,
+                    ..
+                }) => return Ok(false),
+                Err(error) => return Err(error.to_string()),
+            };
             Ok(receipt["queued"] == true
                 && receipt["version"].as_u64()
                     == Some(judgment_provider::connections::RELOAD_VERSION))

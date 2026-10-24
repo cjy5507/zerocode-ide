@@ -98,6 +98,7 @@ pub use providers::openai_oauth::{
     openai_authorize_url, openai_oauth_config, refresh_openai_tokens,
 };
 pub use providers::{
+    note_provider_reload, provider_reload_generation,
     ANTHROPIC_FABLE_MODEL_ALIAS, ANTHROPIC_LATEST_MODEL_ALIAS,
     ANTHROPIC_OPUS_MODEL_ALIAS, DEEPSEEK_PRESET_MODELS, GOOGLE_LATEST_MODEL_ALIAS,
     KIMI_PRESET_MODELS, NVIDIA_PRESET_MODELS, OPENAI_FAST_MODEL_ALIAS,
@@ -291,6 +292,3 @@ pub(crate) mod test_env {
         }
     }
 }
-
-// Connection reloads invalidate only the window-owned router credentials.
-pub use providers::{note_provider_reload, provider_reload_generation};

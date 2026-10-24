@@ -955,8 +955,8 @@ impl SystemOneClient {
         let request = if let Some(connection) = &self.provider.connection {
             let mut request = request;
             if !connection.headers.keys().any(|name| name.eq_ignore_ascii_case("User-Agent")) {
-                if let Some(agent) = connection.client_fingerprint.as_deref()
-                    .and_then(crate::providers::openai_compat::client_fingerprint_user_agent) {
+                if let Some(agent) = connection.user_agent.as_deref().or_else(|| connection.client_fingerprint.as_deref()
+                    .and_then(crate::providers::openai_compat::client_fingerprint_user_agent)) {
                     request = request.header("User-Agent", agent);
                 }
             }

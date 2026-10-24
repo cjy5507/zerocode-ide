@@ -7363,7 +7363,7 @@ async function runRouterTestConnection() {
       id_field: modelsConfig.id_field,
       context_field: modelsConfig.context_field,
       client_fingerprint: modelConnectionsController.editing?.provider.client_fingerprint ?? preset?.client_fingerprint,
-      headers: modelConnectionsController.editing?.provider.headers ?? preset?.headers,
+      headers: modelConnectionsController.editing?.probeHeaders ?? modelConnectionsController.editing?.provider.headers ?? preset?.headers,
     });
     if (generation !== routerProbeGeneration) return;
     testedModels = models ?? [];

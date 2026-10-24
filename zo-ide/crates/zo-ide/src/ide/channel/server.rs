@@ -261,11 +261,11 @@ fn dispatch(
         // `session_matches` 를 거치지 않는다.
         method::AUTH_RELOAD => auth_reload(state, params, id),
         judgment_provider::connections::RELOAD_METHOD => {
-            if params.get("version").and_then(Value::as_u64) != Some(judgment_provider::connections::RELOAD_VERSION) {
-                RpcResponse::err(id, CODE_INVALID_PARAMS, "unsupported provider reload protocol".to_string())
-            } else {
+            if params.get("version").and_then(Value::as_u64) == Some(judgment_provider::connections::RELOAD_VERSION) {
                 let generation = api::note_provider_reload();
                 RpcResponse::ok(id, json!({"version":judgment_provider::connections::RELOAD_VERSION,"queued":true,"generation":generation}))
+            } else {
+                RpcResponse::err(id, CODE_INVALID_PARAMS, "unsupported provider reload protocol".to_string())
             }
         },
         method::TEAMMATE_CLOSE => teammate_close(state, params, id),

@@ -62,6 +62,7 @@ pub struct Binding {
     pub auth: Authentication,
     pub headers: BTreeMap<String, String>,
     pub client_fingerprint: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 impl std::fmt::Debug for Binding {
@@ -218,6 +219,10 @@ pub fn candidate(root: &Value, reference: &Reference) -> Result<Provider, Refusa
             auth_env: auth_env.to_string(),
             auth: metadata.auth,
             headers,
+            user_agent: row
+                .get("user_agent")
+                .and_then(Value::as_str)
+                .map(str::to_string),
             client_fingerprint: row
                 .get("client_fingerprint")
                 .and_then(Value::as_str)

@@ -7798,7 +7798,7 @@ mod tests {
             let shown = refused.to_string();
             assert!(
                 shown.contains(&format!(
-                    "No {router} key — put it in the window's Settings › API Routers › {router}, then reopen zo."
+                    "No {router} key — put it in the window's Settings › Model Connections › {router}, then retry the turn."
                 )),
                 "the error says where the key goes: {shown}"
             );
@@ -7909,7 +7909,7 @@ mod tests {
         );
         assert!(
             shown.contains(
-                "OpenRouter refused the key zo sent — put the right key in the window's Settings › API Routers › OpenRouter, then reopen zo."
+                "OpenRouter refused the key zo sent — put the right key in the window's Settings › Model Connections › OpenRouter, then retry the turn."
             ),
             "{shown}"
         );
@@ -7927,7 +7927,7 @@ mod tests {
         let shown = keyless.to_string();
         assert!(
             shown.contains(
-                "No LocalRouter key — put it in the window's Settings › API Routers › LocalRouter, then reopen zo."
+                "No LocalRouter key — put it in the window's Settings › Model Connections › LocalRouter, then retry the turn."
             ),
             "{shown}"
         );

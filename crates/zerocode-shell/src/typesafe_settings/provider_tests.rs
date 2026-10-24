@@ -680,7 +680,7 @@ fn a_shared_connection_preflight_uses_its_own_key_headers_and_exact_route() {
     root["providers"] = json!([{
         "name":"Fixture", "base_url":format!("{}/custom", endpoint.base()),
         "auth_env":"ZEROCODE_ROUTER_LINKED_FIXTURE_KEY", "requires_auth":true, "models":["fixture-model"],
-        "headers":{"X-Fixture-Route":"shared"},
+        "headers":{"X-Fixture-Route":"shared"}, "user_agent":"fixture-client/1",
         "connection":{"id":"fixture-connection", "generation":3,"auth":{"header":"X-Fixture-Key", "scheme":null}}
     }]);
     std::fs::write(&path, root.to_string()).expect("write");
@@ -722,6 +722,7 @@ fn a_shared_connection_preflight_uses_its_own_key_headers_and_exact_route() {
     );
     assert!(request.contains("x-fixture-key: linked-fixture-value"));
     assert!(request.contains("x-fixture-route: shared"));
+    assert!(request.contains("user-agent: fixture-client/1"));
     assert!(!request.contains("legacy-must-not-be-sent"));
     assert!(!request.contains("authorization:"));
     assert_eq!(std::fs::read(&path).expect("unchanged"), before);
@@ -782,5 +783,94 @@ fn returning_from_a_connection_restores_the_previous_managed_selection() {
         restored["smart"]
             .get(connections::JUDGMENT_CONNECTION_KEY)
             .is_none()
+    );
+}
+
+#[test]
+fn a_linked_key_is_captured_under_the_settings_lock_and_never_for_a_stale_route() {
+    use judgment_provider::connections::{self, Reference};
+    struct LockedKeys<'a> {
+        path: &'a std::path::Path,
+        reads: std::cell::Cell<usize>,
+    }
+    impl RouterKeys for LockedKeys<'_> {
+        fn read(&self, _service: &str) -> Result<Option<String>, RouterRefusal> {
+            assert!(
+                self.path.with_extension("json.lock").exists(),
+                "the endpoint and credential must be one locked snapshot"
+            );
+            self.reads.set(self.reads.get() + 1);
+            Ok(Some("fixture-bound-key".to_string()))
+        }
+        fn write(&self, _service: &str, _value: &str) -> Result<(), RouterRefusal> {
+            panic!("read-only capture");
+        }
+        fn delete(&self, _service: &str) -> Result<(), RouterRefusal> {
+            panic!("read-only capture");
+        }
+    }
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("settings.json");
+    let mut root = json!({"providers":[{"name":"Fixture","base_url":"https://gateway.example.com/v1","auth_env":"ZEROCODE_ROUTER_CAPTURE_KEY","requires_auth":true,"models":["fixture-model"],"connection":{"id":"capture","generation":1}}]});
+    std::fs::write(&path, root.to_string()).unwrap();
+    let reference = Reference {
+        id: "capture".to_string(),
+        generation: 1,
+        model: "fixture-model".to_string(),
+        protocol: Protocol::SystemOne,
+    };
+    let provider = connections::candidate(&root, &reference).unwrap();
+    let keys = LockedKeys {
+        path: &path,
+        reads: std::cell::Cell::new(0),
+    };
+    assert_eq!(
+        provider_key_at(&path, &provider, &keys).unwrap().as_deref(),
+        Some("fixture-bound-key")
+    );
+    root["providers"][0]["base_url"] = json!("https://different.example.com/v1");
+    std::fs::write(&path, root.to_string()).unwrap();
+    assert_eq!(
+        provider_key_at(&path, &provider, &keys)
+            .unwrap_err()
+            .message,
+        "settings_changed"
+    );
+    assert_eq!(
+        keys.reads.get(),
+        1,
+        "a stale destination reached the credential store"
+    );
+}
+
+#[test]
+fn a_captured_window_key_cannot_follow_a_reused_reference_to_another_endpoint() {
+    use judgment_provider::connections::{self, Reference};
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("settings.json");
+    let mut root = json!({"providers":[{"name":"Fixture","base_url":"https://gateway.example.com/v1","auth_env":"ZEROCODE_ROUTER_PINNED_KEY","requires_auth":true,"models":["fixture-model"],"connection":{"id":"pinned","generation":1}}]});
+    let reference = Reference {
+        id: "pinned".to_string(),
+        generation: 1,
+        model: "fixture-model".to_string(),
+        protocol: Protocol::SystemOne,
+    };
+    let provider = connections::candidate(&root, &reference).unwrap();
+    root["smart"] = json!({"judgmentProvider":provider,"judgmentConnection":reference});
+    std::fs::write(&path, root.to_string()).unwrap();
+    let keys = HeldKeys::default();
+    keys.write(
+        &provider_keychain_service(&provider),
+        "captured-fixture-key",
+    )
+    .unwrap();
+    let wire = crate::systemone::Wire::reading(&keys, Some(path.clone()));
+    assert!(wire.armed());
+    root["providers"][0]["base_url"] = json!("https://different.example.com/v1");
+    root["smart"]["judgmentProvider"]["baseUrl"] = json!("https://different.example.com/v1");
+    std::fs::write(&path, root.to_string()).unwrap();
+    assert!(
+        !wire.armed(),
+        "a captured key was reused for the changed endpoint"
     );
 }
