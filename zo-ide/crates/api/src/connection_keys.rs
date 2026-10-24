@@ -45,13 +45,14 @@ fn add_rows(routes: &mut BTreeMap<String, BTreeSet<String>>, rows: Option<&Vec<V
 fn settings_routes() -> BTreeMap<String, BTreeSet<String>> {
     let mut routes = BTreeMap::new();
     let path = core_types::paths::default_config_home().join("settings.json");
-    if let Ok(_guard) = zerocode_core::settings_file_lock::SettingsFileLock::acquire(&path) {
-        if let Ok(file) = std::fs::File::open(&path) {
-            let mut bytes = Vec::new();
-            if file.take(judgment_provider::MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut bytes).is_ok()
-                && bytes.len() <= judgment_provider::MAX_RESPONSE_BYTES {
-                if let Ok(root) = serde_json::from_slice::<Value>(&bytes) { add_rows(&mut routes, root.get("providers").and_then(Value::as_array)); }
-            }
+    // A writer holding the lock past the poll must not empty the routes a launch key is held to.
+    // Writers replace or truncate the whole file, so the unlocked read sees a committed document or fails to parse.
+    let _guard = zerocode_core::settings_file_lock::SettingsFileLock::acquire(&path).ok();
+    if let Ok(file) = std::fs::File::open(&path) {
+        let mut bytes = Vec::new();
+        if file.take(judgment_provider::MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut bytes).is_ok()
+            && bytes.len() <= judgment_provider::MAX_RESPONSE_BYTES {
+            if let Ok(root) = serde_json::from_slice::<Value>(&bytes) { add_rows(&mut routes, root.get("providers").and_then(Value::as_array)); }
         }
     }
     // An operator-exported catalog is also part of the launch's declared routes.
