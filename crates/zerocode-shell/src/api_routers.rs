@@ -1652,6 +1652,42 @@ mod tests {
     }
 
     #[test]
+    fn review_header_insertion_order_does_not_change_a_connection_route_stamp() {
+        let first:serde_json::Value=serde_json::from_str(r#"{"name":"Fixture","base_url":"https://gateway.example.com/v1","auth_env":"FIXTURE_KEY","requires_auth":true,"headers":{"X-Title":"fixture","HTTP-Referer":"https://example.com"}}"#).unwrap();
+        let second:serde_json::Value=serde_json::from_str(r#"{"name":"Fixture","base_url":"https://gateway.example.com/v1","auth_env":"FIXTURE_KEY","requires_auth":true,"headers":{"HTTP-Referer":"https://example.com","X-Title":"fixture"}}"#).unwrap();
+        assert_eq!(
+            judgment_provider::connections::route_stamp(&first).unwrap(),
+            judgment_provider::connections::route_stamp(&second).unwrap(),
+            "header insertion order changed the credential route"
+        );
+    }
+
+    #[test]
+    fn review_an_unrelated_malformed_row_does_not_remove_coding_use_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        save_router(
+            &path,
+            router_save("Selected", None, Some("selected-fixture-key")),
+            &keys,
+        )
+        .unwrap();
+        let mut root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        root["providers"].as_array_mut().unwrap().insert(0,serde_json::json!({"name":"Unrelated","base_url":"https://unused.example.com/v1","models":[],"requires_auth":false,"connection":{"id":"bad-row","generation":"bad"}}));
+        root["model"] = serde_json::json!("Selected/vendor/model");
+        std::fs::write(&path, root.to_string()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let result = remove_router(&path, "Selected", &keys);
+        assert!(
+            result.is_err(),
+            "an unrelated malformed row disabled the selected connection's deletion guard"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
     fn connection_without_a_public_key_remains_auth_required() {
         let dir = tempfile::tempdir().expect("temporary settings");
         let path = dir.path().join("settings.json");

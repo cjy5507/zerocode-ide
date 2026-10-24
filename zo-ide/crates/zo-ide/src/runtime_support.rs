@@ -2670,6 +2670,30 @@ mod oauth_refresh_tests {
     use tools::GlobalToolRegistry;
 
     #[test]
+    fn review_invalid_project_settings_do_not_stop_an_existing_first_party_session() {
+        let _lock = crate::test_env_lock(); let home = tempfile::tempdir().unwrap(); let project = tempfile::tempdir().unwrap();
+        let home_text = home.path().to_str().unwrap();
+        let _home = crate::support::EnvVarGuard::set("HOME", Some(home_text));
+        let _profile = crate::support::EnvVarGuard::set("USERPROFILE", Some(home_text));
+        let _zo = crate::support::EnvVarGuard::set("ZO_HOME", Some(home_text));
+        let _config = crate::support::EnvVarGuard::set("ZO_CONFIG_HOME", Some(home_text));
+        std::fs::create_dir_all(project.path().join(".zo")).unwrap();
+        std::fs::write(project.path().join(".zo/settings.json"), "{ invalid json").unwrap();
+        let mut client = AnthropicRuntimeClient {
+            client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(api::AuthSource::None)),
+            connection_name: None, connections_generation: api::provider_reload_generation(),
+            session_id:"review-existing-session".to_string(), model: "fixture-existing-model".to_string(),
+            auth_route:AuthRoute::Auto,enable_tools:false,emit_output:false,allowed_tools:None,
+            tool_registry:GlobalToolRegistry::builtin(),thinking:None,named_effort:None,effort_band_ceiling:None,session_tracer:None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result = runtime.block_on(client.refresh_connections(project.path()));
+        assert!(result.is_ok(), "a malformed project file stopped an existing unrelated session: {result:?}");
+        assert_eq!(client.model, "fixture-existing-model");
+        assert!(matches!(client.client, ProviderClient::Anthropic(_)));
+    }
+
+    #[test]
     fn managed_claude_credentials_are_reloaded_after_the_file_changes() {
         let _env_lock = crate::test_env_lock();
         let config_home = crate::support::temp_dir("managed-claude-reload");

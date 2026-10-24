@@ -693,6 +693,9 @@ impl SystemOneConfig {
         Ok(Self { base_url: provider.base_url.clone(), api_key, key_source, provider })
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_key_matches(&self, expected: &str) -> bool { self.api_key == expected }
+
     /// Which rung of that ladder this configuration's key came from.
     #[must_use]
     pub const fn key_source(&self) -> Option<crate::providers::KeySource> {

@@ -7343,6 +7343,47 @@ mod tests {
         super::refresh_custom_providers_from_json("[]").expect("clear");
     }
 
+    fn review_linked_settings(base: &str, key: &str, generation: u64) -> serde_json::Value {
+        serde_json::json!({"providers":[{"name":"Review fixture","base_url":base,"models":["fixture-model"],"auth_env":key,"requires_auth":true,"connection":{"id":"review-route","generation":generation}}],
+          "smart":{"judgmentProvider":{"kind":"remote","protocol":"system_one","baseUrl":base,"model":"fixture-model","requiresAuth":true},
+          "judgmentConnection":{"id":"review-route","generation":generation,"model":"fixture-model","protocol":"system_one"}}})
+    }
+
+    #[test]
+    fn review_a_launch_key_is_not_adopted_by_a_route_changed_before_its_first_use() {
+        let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
+        let name = "ZEROCODE_ROUTER_T73675_ROUTE_FIXTURE_KEY";
+        let _key = EnvVarGuard::set(name, Some("old-launch-fixture"));
+        let _state = RouterTestState; super::forget_adopted_launch_keys_for_test();
+        let path = home.path().join("settings.json");
+        std::fs::write(&path, review_linked_settings("https://first.example.com/v1", name, 1).to_string()).unwrap();
+        assert_eq!(super::adopt_launch_keys(name), 1);
+        std::fs::write(&path, review_linked_settings("https://second.example.com/v1", name, 2).to_string()).unwrap();
+        let error = crate::SystemOneConfig::from_env().expect_err("the launch key was accepted for a different route before its first use");
+        assert_eq!(error.token(), "provider_restart_required");
+    }
+
+    #[test]
+    fn review_linked_judgment_reads_the_new_key_without_waiting_for_reload() {
+        let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
+        let name = "ZEROCODE_ROUTER_T73675_CURRENT_FIXTURE_KEY"; let _key = EnvVarGuard::set(name,None);
+        let _state = RouterTestState; super::forget_adopted_launch_keys_for_test();
+        super::install_window_keychain(super::WindowKeyNames::Prefix(name.to_string()), "fixture.review.", reloaded_fixture);
+        let path = home.path().join("settings.json");
+        std::fs::write(&path, review_linked_settings("https://first.example.com/v1", name, 1).to_string()).unwrap();
+        *RELOADED_FIXTURE.lock().unwrap() = Some("old-cache-fixture");
+        assert!(crate::SystemOneConfig::from_env().unwrap().test_key_matches("old-cache-fixture"));
+        std::fs::write(&path, review_linked_settings("https://second.example.com/v1", name, 2).to_string()).unwrap();
+        *RELOADED_FIXTURE.lock().unwrap() = Some("current-store-fixture");
+        let current = crate::SystemOneConfig::from_env().unwrap();
+        assert!(current.test_key_matches("current-store-fixture"), "linked judgment reused a key cached for a different route before reload");
+        *RELOADED_FIXTURE.lock().unwrap() = None;
+    }
+
     static RELOADED_FIXTURE: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
 
     fn reloaded_fixture(_service: &str) -> super::KeychainAnswer {
