@@ -664,7 +664,7 @@ mod tests {
     use super::lane_fixtures::{snapshot, test_digest};
     use super::*;
     use crate::agent_teams::{
-        forget_term, remember_pane_token, restore_pane_token, team_table_is_locked,
+        forget_term, remember_pane_token, restore_pane_token, table_is_held_by_current_thread,
     };
     use zerocode_orchestrator::effect_journal::{
         AuthorityLease, BeginEffect, EffectJournal, EffectRequest,
@@ -944,7 +944,7 @@ mod tests {
         let term = lease
             .apply_fenced(&test_digest(0xe1), |team, binding, token, _command| {
                 assert!(
-                    team_table_is_locked(),
+                    table_is_held_by_current_thread(),
                     "source check and backend effect were separated by an unlocked window"
                 );
                 team.record_split(

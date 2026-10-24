@@ -56,6 +56,11 @@ pub(crate) const ORC_SHIM_NAME: &str = zerocode_core::agent_shims::ORCHESTRATION
 /// Where it lives — its own directory, for the reason above.
 pub(crate) const ORC_DIR_NAME: &str = zerocode_core::agent_shims::ORCHESTRATION_DIR_NAME;
 
+#[cfg(not(test))]
+pub(crate) type TeamTableGuard = MutexGuard<'static, HashMap<String, Team>>;
+#[cfg(test)]
+pub(crate) use tests::{TeamTableGuard, table_is_held_by_current_thread};
+
 /// Every team this window has open, by id.
 ///
 /// A `static` rather than a field of the app state: a team outlives no window
@@ -66,8 +71,8 @@ pub(crate) const ORC_DIR_NAME: &str = zerocode_core::agent_shims::ORCHESTRATION_
 /// `split-window` written in another dialect, and it has to be planned against
 /// the same pane table for the same reason [`run`] holds it across a whole
 /// call: a plan and its write-down must not be separated by another request.
-pub(crate) fn teams() -> MutexGuard<'static, HashMap<String, Team>> {
-    team_table().lock().unwrap_or_else(|held| held.into_inner())
+pub(crate) fn teams() -> TeamTableGuard {
+    track_table_guard(team_table().lock().unwrap_or_else(|held| held.into_inner()))
 }
 
 /// The team table for a reader that must not wait on it — the way out
@@ -77,19 +82,30 @@ pub(crate) fn teams() -> MutexGuard<'static, HashMap<String, Team>> {
 /// held it while it waited for a file lock nobody was going to release, and
 /// the window was killed for it. A reader with somewhere else to be takes the
 /// table only while it is there to take.
-pub(crate) fn teams_within(
-    patience: std::time::Duration,
-) -> Option<MutexGuard<'static, HashMap<String, Team>>> {
+pub(crate) fn teams_within(patience: std::time::Duration) -> Option<TeamTableGuard> {
     let asked = std::time::Instant::now();
     loop {
         match team_table().try_lock() {
-            Ok(held) => return Some(held),
-            Err(std::sync::TryLockError::Poisoned(held)) => return Some(held.into_inner()),
+            Ok(held) => return Some(track_table_guard(held)),
+            Err(std::sync::TryLockError::Poisoned(held)) => {
+                return Some(track_table_guard(held.into_inner()));
+            }
             Err(std::sync::TryLockError::WouldBlock) if asked.elapsed() < patience => {
                 std::thread::sleep(TABLE_POLL);
             }
             Err(std::sync::TryLockError::WouldBlock) => return None,
         }
+    }
+}
+
+fn track_table_guard(held: MutexGuard<'static, HashMap<String, Team>>) -> TeamTableGuard {
+    #[cfg(test)]
+    {
+        TeamTableGuard::new(held)
+    }
+    #[cfg(not(test))]
+    {
+        held
     }
 }
 
@@ -129,40 +145,10 @@ pub(crate) fn launching_under_team_table() -> bool {
     UNDER_TEAM_TABLE.with(std::cell::Cell::get)
 }
 
-/// The one static behind [`teams`].
-///
-/// Split out so the lock itself can be asked a question, not just held. There
-/// is exactly one caller of that: a test proving that a road which reads a seat
-/// has not let go of the table before it acts on what it read.
-#[cfg(test)]
-pub(crate) fn table_is_held_for_tests() -> bool {
-    match team_table().try_lock() {
-        /* A poisoned-but-free lock still ACQUIRES — only WouldBlock means
-         * somebody is holding it right now. */
-        Ok(_) => false,
-        Err(std::sync::TryLockError::WouldBlock) => true,
-        Err(std::sync::TryLockError::Poisoned(_)) => false,
-    }
-}
+/// The one mutex behind both team-table acquisition paths.
 fn team_table() -> &'static Mutex<HashMap<String, Team>> {
     static TEAMS: OnceLock<Mutex<HashMap<String, Team>>> = OnceLock::new();
     TEAMS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Whether the team table is held by somebody right now.
-///
-/// `try_lock` and not a second thread with a deadline: a competing thread that
-/// has not been scheduled yet looks exactly like a lock that was free, so a
-/// deadline can only ever say "nobody got it in time", which is true of the bug
-/// as well. This answers about the lock rather than about the scheduler, and it
-/// answers the same way from the owning thread — `try_lock` does not block, so
-/// a road calling this while holding the table reads `WouldBlock` about itself.
-#[cfg(test)]
-pub(crate) fn team_table_is_locked() -> bool {
-    matches!(
-        team_table().try_lock(),
-        Err(std::sync::TryLockError::WouldBlock)
-    )
 }
 
 /// One opaque inherited capability per pane.
@@ -1782,6 +1768,53 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    thread_local! {
+        static TABLE_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Track the calling thread, not a competing test's lock acquisition.
+    pub(crate) fn table_is_held_by_current_thread() -> bool {
+        TABLE_HELD.with(std::cell::Cell::get)
+    }
+
+    #[must_use = "dropping the guard releases the team table"]
+    pub(crate) struct TeamTableGuard {
+        // Field order releases the mutex before restoring this thread's marker.
+        held: MutexGuard<'static, HashMap<String, Team>>,
+        _ownership: TableOwnership,
+    }
+
+    struct TableOwnership(bool);
+
+    impl Drop for TableOwnership {
+        fn drop(&mut self) {
+            TABLE_HELD.with(|held| held.set(self.0));
+        }
+    }
+
+    impl TeamTableGuard {
+        pub(super) fn new(held: MutexGuard<'static, HashMap<String, Team>>) -> Self {
+            Self {
+                held,
+                _ownership: TableOwnership(TABLE_HELD.with(|held| held.replace(true))),
+            }
+        }
+    }
+
+    impl std::ops::Deref for TeamTableGuard {
+        type Target = HashMap<String, Team>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.held
+        }
+    }
+
+    impl std::ops::DerefMut for TeamTableGuard {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.held
+        }
+    }
+
     /// A window that records instead of drawing.
     ///
     /// `base` is what keeps these tests apart. The team table is a process-wide
@@ -1920,7 +1953,7 @@ mod tests {
         /// one a seated agent walks.
         fn prepare_close(&self, _term: u32) -> bool {
             assert!(
-                !team_table_is_locked(),
+                !table_is_held_by_current_thread(),
                 "journal I/O must be outside the team table"
             );
             if let Some((team, pane, term)) = self.move_during_close_intent.borrow_mut().take() {
@@ -2282,6 +2315,37 @@ mod tests {
         assert_eq!(teams().get(&id).unwrap().term_of("%2"), Some(74_002));
         assert!(host.closed.borrow().is_empty());
         forget_term(74_000);
+    }
+
+    #[test]
+    fn a_close_intent_does_not_confuse_another_threads_guard_with_its_own() {
+        let held = teams();
+        let prepared = std::thread::spawn(|| Recorder::new(0).prepare_close(0)).join();
+        drop(held);
+        assert!(prepared.expect("another thread's table guard does not enclose this close intent"));
+    }
+
+    #[test]
+    fn a_close_intent_still_refuses_its_callers_table_guard() {
+        let held = teams();
+        let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Recorder::new(0).prepare_close(0)
+        }));
+        drop(held);
+        assert!(
+            prepared.is_err(),
+            "the caller must drop its own table guard"
+        );
+        assert!(!table_is_held_by_current_thread());
+    }
+
+    #[test]
+    fn a_timed_table_guard_tracks_ownership_until_release() {
+        assert!(!table_is_held_by_current_thread());
+        let held = teams_within(std::time::Duration::MAX).expect("the table becomes available");
+        assert!(table_is_held_by_current_thread());
+        drop(held);
+        assert!(!table_is_held_by_current_thread());
     }
 
     #[test]
