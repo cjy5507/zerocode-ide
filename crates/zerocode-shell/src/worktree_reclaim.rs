@@ -2619,7 +2619,9 @@ mod tests {
             }
             args.extend([spelled.as_str(), at]);
             git(&bench.repo, &args);
-            path
+            // The hand-in discovers these paths through Git. Its listed
+            // spelling is also what the log records (forward slashes on Windows).
+            bench.listed(&path).path
         };
         let taken = [
             cut_beside("t-26584-before", None, "main"),
