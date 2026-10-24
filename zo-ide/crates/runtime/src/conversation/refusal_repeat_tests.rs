@@ -68,12 +68,15 @@ impl Declining {
     }
 
     /// From now on every request is answered.
+    // These two are called only from the unix-only `hook_contract` module.
+    #[cfg(unix)]
     fn answer_from_now_on(&self) {
         self.answer(None, "here is the list");
     }
 
     /// From now on a request whose last user words are `words` — every
     /// request, for `None` — is answered with `text`.
+    #[cfg(unix)]
     fn answer(&self, words: Option<&'static str>, text: &'static str) {
         self.answers.lock().expect("answers").push((words, text));
     }
