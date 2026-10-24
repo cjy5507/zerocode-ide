@@ -7471,7 +7471,7 @@ async function saveApiRouterEntry() {
   } catch (error) {
     // Said beside the button that was pressed, not only in a toast: a key
     // this machine cannot keep is a thing to act on here.
-    const reason = routerSaveRefusal(error);
+    const reason = modelConnectionsController.failure(error);
     if (generation === routerDraftGeneration) {
       paintSettingsStatus(statusEl, reason, { standing: "failed" });
       paintSettingsStanding(el("router-card-state"), "failed");
