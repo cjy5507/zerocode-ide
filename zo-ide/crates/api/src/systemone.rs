@@ -1151,7 +1151,7 @@ mod tests {
 
     #[test]
     fn a_provider_mismatch_is_refused_before_any_credentials_are_read() {
-        assert_eq!(SystemOneConfig::from_provider(Provider::jev(SYSTEMONE_MODEL), Some("another-provider")),
+        assert_eq!(SystemOneConfig::from_provider(Provider::jev(SYSTEMONE_MODEL), Some("another-provider"), None),
             Err(SystemOneFailure::Configuration));
     }
 

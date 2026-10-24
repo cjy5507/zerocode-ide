@@ -80,7 +80,7 @@ pub(crate) fn capture(names: &[String], prefix: &str) {
     let mut held = bindings().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     for name in names {
         let allowed = match &handed {
-            Some(Some(handed)) => handed.routes.get(name).map(|routes| routes.iter().cloned().collect()).unwrap_or_else(|| declared.get(name).cloned().unwrap_or_default()),
+            Some(Some(handed)) => handed.routes.get(name).map_or_else(|| declared.get(name).cloned().unwrap_or_default(), |routes| routes.iter().cloned().collect()),
             Some(None) => BTreeSet::new(),
             None => declared.get(name).cloned().unwrap_or_default(),
         };
