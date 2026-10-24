@@ -16476,6 +16476,9 @@ listen("worker:done", (event) => {
  * it never touches the layout. */
 const MIRROR_SETTLE_MS = 1200;
 const pendingMirrors = new Map();
+// Timers above have not requested a process yet. This map owns admitted
+// native starts until their replies have been placed or safely closed.
+const openingMirrors = new Map();
 /* One seat per (parent, agent): the next run replaces the last run's tail
  * instead of stacking a new pane beside a dead one. */
 const mirrorPanes = new Map();
@@ -16497,7 +16500,23 @@ listen("worker:mirror_end", (event) => {
   pendingMirrors.delete(path);
 });
 
-async function openMirrorPane(term, agent, path) {
+function openMirrorPane(term, agent, path) {
+  const pending = openingMirrors.get(path);
+  if (pending) return pending.promise;
+  const tab = tabOfTerm(term);
+  if (!tab || tab.kind !== "term") return Promise.resolve();
+  const project = projectOfWorktree(tab.worktree);
+  if (project && removingProjectPaths.has(project.path)) return Promise.resolve();
+  const opening = { worktree: tab.worktree, promise: null };
+  const request = Promise.resolve().then(() => openMirrorPaneNow(term, agent, path)).finally(() => {
+    if (openingMirrors.get(path) === opening) openingMirrors.delete(path);
+  });
+  opening.promise = request;
+  openingMirrors.set(path, opening);
+  return request;
+}
+
+async function openMirrorPaneNow(term, agent, path) {
   const tab = tabOfTerm(term);
   if (!tab || tab.kind !== "term") return;
   // The page yields to the real screen — same run, better window. Closing it
@@ -16516,6 +16535,12 @@ async function openMirrorPane(term, agent, path) {
   // 안그려지고"). The parent's own grid says what half of this tab actually
   // holds; `renderPanes` still resizes to the real cell box after the split.
   const grid = viewOfTerm(term)?.gridSize() ?? DEFAULT_TERMINAL_GRID;
+  const seat = `${term}:${agent}`;
+  const held = mirrorPanes.get(seat);
+  if (held !== undefined && paneLeaves(tab.layout).includes(held)) {
+    if (!(await closeTermAndView(held, "mirror-replaced"))) return;
+    if (!tabs.includes(tab) || !paneLeaves(tab.layout).includes(term)) return;
+  }
   let mirror;
   try {
     mirror = await invoke("open_mirror_term", {
@@ -16528,16 +16553,17 @@ async function openMirrorPane(term, agent, path) {
     // break the run it was only watching.
     return;
   }
-  const seat = `${term}:${agent}`;
-  const held = mirrorPanes.get(seat);
-  if (held !== undefined && paneLeaves(tab.layout).includes(held)) {
-    invoke("close_term", { term: held }).catch(() => {});
-    tab.layout = prunePanes(
-      tab.layout,
-      new Set(paneLeaves(tab.layout).filter((leaf) => leaf !== held)),
-    );
-    dropTermView(held);
-    noteLeafLeft(held, tab, "mirror-replaced", "closed");
+  if (!tabs.includes(tab) || !paneLeaves(tab.layout).includes(term)) {
+    // The parent left while the mirror was opening. A close refusal still
+    // needs a visible retry door, so mount before requesting its retirement.
+    mountTermTab(mirror, { worktree: tab.worktree }, { focus: false, placement: "tab" });
+    const project = projectOfWorktree(tab.worktree);
+    // Project removal is already waiting for this start and owns its close.
+    // Otherwise the vanished parent's mirror has no reason to keep running.
+    if (!project || !removingProjectPaths.has(project.path)) {
+      await closeTermAndView(mirror, "mirror-parent-left");
+    }
+    return;
   }
   mirrorPanes.set(seat, mirror);
   const source = activePaneOf(tab) ?? paneLeaves(tab.layout)[0];
@@ -16581,6 +16607,8 @@ listen("term:exited", (event) => {
   zoIntegrationRecords.delete(`term-${event.payload.term}`);
   if (event.payload.term === skillsInstallTerm) { skillsNeedsRescan = true; void refreshSkills(true); }
   const { term } = event.payload;
+  const closing = terminalCloseRequests.get(term);
+  if (closing) closing.exited = true;
   forgetManagedTerminalSession(term);
   forgetCodexPtyFallback(term);
   forgetMailWaiting(term);
@@ -16616,30 +16644,13 @@ listen("term:exited", (event) => {
   // tab showing nothing. The tab is found by looking for the shell rather
   // than by deriving an id from it, because only the first pane's id names
   // the tab and any pane can be the one that exits.
-  const holder = tabs.find(
-    (tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(term),
-  );
-  dropTermView(term);
   // No tab holds this shell YET: a restore assigns its layout only after
   // every leaf has spawned, and a resume that dies inside that window would
   // otherwise slip this prune and mount as a pane nothing ever clears. The
   // id is parked and `mountStoredLayout` prunes it before the layout stands.
-  if (!holder) {
+  if (!dropClosedTermLeaf(term, "exit") && waking.size > 0) {
     exitedUnheld.add(term);
-    return;
   }
-  const staying = paneLeaves(holder.layout).filter((held) => held !== term);
-  noteLeafLeft(term, holder, "exit", "exited");
-  if (staying.length === 0) {
-    dropTab(holder.id);
-    return;
-  }
-  holder.layout = prunePanes(holder.layout, new Set(staying));
-  schedulePaneAlignment(holder);
-  if (holder.activePane === term) holder.activePane = staying[0];
-  renderPanes(holder);
-  updateStage();
-  paintRunningCount();
 });
 
 /* An orchestration worker owns a terminal in its resolved worktree.
@@ -17623,11 +17634,10 @@ function paintStagePlaceholder() {
     }
     placeholder.dataset.i18nHtml = "stage.empty";
     applyLocale(placeholder);
-    // The sentence invites you to press a key, so it has to name the key that
-    // is in force. `applyLocale` writes the catalog text with its `{{chord}}`
-    // still in it — the source is this file's own catalog either way, which is
-    // the same reason assigning `innerHTML` here is not a way in.
-    placeholder.innerHTML = placeholder.innerHTML.replace("{{chord}}", hint);
+    // Only the catalog owns markup. A shortcut may come from an edited
+    // settings file; even an invalid stored value must remain literal text.
+    const key = placeholder.querySelector("kbd");
+    if (key) key.textContent = hint;
     seatStageDoor();
     return;
   }

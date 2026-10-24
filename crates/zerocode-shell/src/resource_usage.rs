@@ -786,6 +786,42 @@ pub(crate) fn process_start_identity(pid: u32) -> Result<String, String> {
         .ok_or_else(|| "프로세스 시작 식별자를 읽을 수 없습니다".to_string())
 }
 
+/// A native exit observation. Access denied and API failures are unknown,
+/// not proof that a process died. The handle pins this process while read.
+#[cfg(windows)]
+pub(crate) fn process_exited(pid: u32) -> Option<bool> {
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: querying an OS-owned process; no borrowed pointer crosses the call.
+    let process = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+        Ok(process) => process,
+        Err(error)
+            if error.code() == windows::core::HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) =>
+        {
+            return Some(true);
+        }
+        Err(_) => return None,
+    };
+    // A signalled process handle proves exit even when its exit code happens
+    // to equal STILL_ACTIVE. This is a nonblocking observation.
+    // SAFETY: the process handle remains owned here throughout the call.
+    let read = unsafe { WaitForSingleObject(process, 0) };
+    // SAFETY: the handle was opened above and is closed exactly once.
+    let _ = unsafe { CloseHandle(process) };
+    match read {
+        WAIT_OBJECT_0 => Some(true),
+        WAIT_TIMEOUT => Some(false),
+        _ => None,
+    }
+}
+
 /// Check native-authored launch arguments on one known pid without exposing a
 /// general process query to the renderer.
 pub(crate) fn process_has_args(pid: u32, required: &[&str]) -> Result<bool, String> {
@@ -1132,6 +1168,26 @@ fn unix_millis() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn a_live_windows_process_is_not_reported_as_exited() {
+        assert_eq!(process_exited(std::process::id()), Some(false));
+        assert_eq!(process_exited(0), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_exit_code_cannot_masquerade_as_a_running_process() {
+        let mut child = crate::proc::quiet_command("cmd.exe")
+            .args(["/C", "exit", "/B", "259"])
+            .spawn()
+            .expect("synthetic child");
+        assert_eq!(child.wait().unwrap().code(), Some(259));
+        // The Child still owns its process handle, so the PID cannot be
+        // reused. 259 is STILL_ACTIVE's value, but this process has exited.
+        assert_eq!(process_exited(child.id()), Some(true));
+    }
+
     use super::*;
 
     fn sample(rows: Vec<ProcessRow>) -> ProcessSample {

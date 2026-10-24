@@ -411,7 +411,9 @@ pub(crate) fn signal_process_group(process_group: u32, signal: libc::c_int) -> s
 pub(crate) fn process_group_exists(process_group: u32) -> bool {
     match signal_process_group(process_group, 0) {
         Ok(()) => true,
-        Err(error) => error.raw_os_error() == Some(libc::EPERM),
+        // Only ESRCH proves absence. Permission and observation errors must
+        // not become an exit receipt for a still-running process group.
+        Err(error) => error.raw_os_error() != Some(libc::ESRCH),
     }
 }
 
@@ -1493,6 +1495,81 @@ pub(crate) fn reap_stale() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_queue_keeps_the_requested_launch_for_pty_fallback() {
+        let original = vec![
+            "--model",
+            "test-model",
+            "--config",
+            "model_reasoning_effort=high",
+            "resume",
+            "test-session",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let mut args = original.clone();
+        let result = prepare(Path::new("codex.exe"), &mut args, Path::new("."), &[]);
+        assert!(matches!(result, Err(CodexQueueError::UnsupportedPlatform)));
+        assert_eq!(args, original);
+        assert!(CodexQueueError::UnsupportedPlatform.degrades());
+    }
+
+    /// Exercise ConPTY itself without a user's CLI installation or login.
+    /// The companion test above holds the agent's model/effort argv fixed;
+    /// this one proves that a refused native route still has a working PTY.
+    #[cfg(windows)]
+    #[test]
+    fn an_unsupported_queue_still_allows_pty_input_output_and_termination() {
+        let directory = tempfile::tempdir().expect("synthetic checkout");
+        let requested = vec!["/Q".to_string(), "/D".to_string()];
+        let mut args = requested.clone();
+        assert!(matches!(
+            prepare(Path::new("cmd.exe"), &mut args, directory.path(), &[]),
+            Err(CodexQueueError::UnsupportedPlatform)
+        ));
+        assert_eq!(args, requested);
+        let mut pty =
+            zerocode_pty::PtyLane::spawn("cmd.exe", &args, Some(directory.path()), &[], 24, 80)
+                .expect("fallback ConPTY");
+        // The answer is absent from the typed bytes, so echoing our input
+        // cannot masquerade as a program that read and answered it.
+        pty.write_input(b"set /a 17*19\r")
+            .expect("input through fallback PTY");
+        let deadline = std::time::Instant::now() + crate::cmd::HAND_OVER_EXIT_WAIT;
+        let mut answered = false;
+        while std::time::Instant::now() < deadline {
+            pty.pump();
+            answered = pty
+                .terminal()
+                .grid()
+                .visible_text()
+                .lines()
+                .any(|line| line.trim() == "323");
+            if answered {
+                break;
+            }
+            std::thread::sleep(crate::cmd::HAND_OVER_EXIT_POLL);
+        }
+        assert!(
+            answered,
+            "the fallback shell never answered input over its PTY"
+        );
+        pty.kill().expect("request fallback child termination");
+        let deadline = std::time::Instant::now() + crate::cmd::HAND_OVER_EXIT_WAIT;
+        loop {
+            if pty.try_wait().expect("read the child's exit").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fallback child remained alive after termination"
+            );
+            std::thread::sleep(crate::cmd::HAND_OVER_EXIT_POLL);
+        }
+    }
 
     /// The production table, under the names the assertions below read with.
     #[cfg(unix)]

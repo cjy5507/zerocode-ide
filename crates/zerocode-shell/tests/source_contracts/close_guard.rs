@@ -33,7 +33,7 @@ fn a_tab_holding_a_seat_asks_first_and_refuses_a_close_no_hand_made() {
         "const held = tabHoldings(tab);",
         "if (road.synthetic) {\n          refuseSyntheticClose(tab, road, held);\n          return;\n        }",
         "askAboutSeats(held).then((proceed) => passCloseCheck(tab, road, held, true, proceed))",
-        "noteCloseRoad(tab, road, held, \"closed\");",
+        "noteCloseRoad(tab, road, held, \"close requested\");",
     ] {
         assert!(
             closing.contains(needle),

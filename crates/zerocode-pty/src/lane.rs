@@ -637,11 +637,11 @@ impl PtyLane {
     ///
     /// # Errors
     ///
-    /// [`PtyError::Io`] if the signal could not be delivered — which includes
-    /// the ordinary case of a child that already exited, so check
-    /// [`Self::try_wait`] first when the two need telling apart.
+    /// [`PtyError::Io`] if the child's status could not be read or a signal
+    /// could not be delivered. An already-reaped child is a no-op: its PID
+    /// may have been reused and no longer grants permission to send a signal.
     pub fn kill(&mut self) -> Result<(), PtyError> {
-        self.child.kill().map_err(PtyError::Io)
+        kill_known_child(self.child.as_mut()).map_err(PtyError::Io)
     }
 
     /// When the child last wrote, if it ever has.
@@ -1255,11 +1255,21 @@ fn argv_in(buffer: &[u8]) -> Vec<String> {
 /// lane to something that then refused it leaked that one, because the caller
 /// had already moved it and had no handle left to clean up with.
 ///
-/// The result is ignored on purpose: a child that already exited is the common
-/// case, and in a destructor there is nobody left to tell.
+/// A destructor cannot return an error. Explicit close records the outcome
+/// before forgetting a lane; this last best effort uses the same child guard.
 impl Drop for PtyLane {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let _ = kill_known_child(self.child.as_mut());
+    }
+}
+
+fn kill_known_child(child: &mut (impl portable_pty::Child + ?Sized)) -> std::io::Result<()> {
+    // portable-pty's Unix ChildKiller sends SIGHUP to Child::id() before
+    // looking at its cached exit status. Never pass it a reaped child: that
+    // number can name another process, even though we still own this handle.
+    match child.try_wait()? {
+        Some(_) => Ok(()),
+        None => child.kill(),
     }
 }
 
@@ -1895,4 +1905,101 @@ fn epoch_ms_now() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod child_termination_tests {
+    use super::kill_known_child;
+    use portable_pty::{Child, ChildKiller, ExitStatus};
+    use std::io;
+
+    #[derive(Debug, Clone, Copy)]
+    enum Observation {
+        Running,
+        Reaped,
+        Unknown,
+    }
+
+    #[derive(Debug, Clone)]
+    struct Probe {
+        observation: Observation,
+        signals: usize,
+        refuse: bool,
+    }
+
+    impl ChildKiller for Probe {
+        fn kill(&mut self) -> io::Result<()> {
+            self.signals += 1;
+            if self.refuse {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            self.observation = Observation::Reaped;
+            Ok(())
+        }
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(self.clone())
+        }
+    }
+    impl Child for Probe {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            match self.observation {
+                Observation::Running => Ok(None),
+                Observation::Reaped => Ok(Some(ExitStatus::with_exit_code(0))),
+                Observation::Unknown => Err(io::Error::from(io::ErrorKind::Other)),
+            }
+        }
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+        fn process_id(&self) -> Option<u32> {
+            Some(4242)
+        }
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+    fn probe(observation: Observation) -> Probe {
+        Probe {
+            observation,
+            signals: 0,
+            refuse: false,
+        }
+    }
+
+    #[test]
+    fn a_reaped_child_is_never_signalled_again() {
+        let mut child = probe(Observation::Reaped);
+        kill_known_child(&mut child).unwrap();
+        assert_eq!(
+            child.signals, 0,
+            "a reaped child's PID may belong to another process"
+        );
+    }
+
+    #[test]
+    fn an_unknown_child_status_cannot_authorize_a_pid_signal() {
+        let mut child = probe(Observation::Unknown);
+        assert!(kill_known_child(&mut child).is_err());
+        assert_eq!(child.signals, 0);
+    }
+
+    #[test]
+    fn a_live_childs_signal_refusal_reaches_the_caller() {
+        let mut child = probe(Observation::Running);
+        child.refuse = true;
+        assert_eq!(
+            kill_known_child(&mut child).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(child.signals, 1);
+    }
+
+    #[test]
+    fn repeated_termination_after_exit_sends_only_one_signal() {
+        let mut child = probe(Observation::Running);
+        kill_known_child(&mut child).unwrap();
+        kill_known_child(&mut child).unwrap();
+        assert_eq!(child.signals, 1);
+    }
 }

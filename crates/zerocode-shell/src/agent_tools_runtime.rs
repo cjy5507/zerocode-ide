@@ -585,9 +585,15 @@ pub(super) fn schedule_completed_worker_cleanup(
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let retired = retire_terminal(&state, term);
+        let was_present = state.terminals().contains_key(&term);
+        let retired = retire_terminal(&state, term).unwrap_or(false);
         if retired {
             announce_retired_terminal(&app, term);
+        }
+        if was_present && !retired {
+            // The close could not prove exit. Its checkout may still have a
+            // writer, so completion does not authorize reclaiming it.
+            return;
         }
         let Some(isolated) = cleanup.isolated else {
             return;
@@ -2057,8 +2063,34 @@ impl agent_teams::Host for TeamWindow {
         crate::cmd::program_left(witness)
     }
 
-    fn close(&self, term: TermId) {
+    fn prepare_close(&self, term: TermId) -> bool {
         let state = self.app.state::<AppState>();
+        let Some(held) = state.terminals().handle(term) else {
+            return true;
+        };
+        match (
+            orchestration::terminal_exit_journal(),
+            orchestration::host_epoch(),
+        ) {
+            (Some(journal), Some(epoch)) => {
+                match crate::durable_lifecycle::terminal::prepare(journal, epoch, term, &held) {
+                    Ok(_) => true,
+                    Err(why) => {
+                        note_window_event(
+                            state.local_data_root(),
+                            &format!("term {term} exit intent: {why}"),
+                        );
+                        false
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
+    fn close_confirmed(&self, term: TermId) -> bool {
+        let state = self.app.state::<AppState>();
+        let already_absent = !state.terminals().contains_key(&term);
         // Through the same door the tab close uses, whole: the process is
         // stopped, every map that names the shell forgets it, and the window
         // is TOLD. This road used to name four maps by hand and so kept the
@@ -2076,13 +2108,21 @@ impl agent_teams::Host for TeamWindow {
         // (reported 2026-08-30: "이건 계속 멈춰있어"). Announced only when a
         // shell was actually here: a term the reaper already announced is not
         // told twice.
-        if retire_terminal(&state, term) {
+        if retire_terminal(&state, term).unwrap_or(false) {
             state.cadence().wake();
             announce_retired_terminal(&self.app, term);
-        } else {
+            true
+        } else if already_absent {
             forget_term_state(&state, term, TermLedgerSettlement::Recorded(None));
             state.cadence().wake();
+            true
+        } else {
+            false
         }
+    }
+
+    fn close(&self, term: TermId) {
+        self.close_confirmed(term);
     }
 }
 
@@ -2222,6 +2262,14 @@ pub(super) fn beat_standing_orders(app: &AppHandle) {
         // asks this window who is in the seat — under its own guard, where the
         // answer cannot go stale between the asking and the acting.
         let now_ms = now_epoch_ms();
+        if let Some(journal) = orchestration::terminal_exit_journal()
+            && let Err(why) = crate::durable_lifecycle::terminal::recheck(journal, now_ms)
+        {
+            note_window_event(
+                beating.state::<AppState>().local_data_root(),
+                &format!("terminal exit recheck: {why}"),
+            );
+        }
         orchestration::tick(&window, &overrides, now_ms);
         // The way out, on the same beat (t-6428): a 「끝나면」 armed goes at
         // the first gap the census finds, and a question nobody answers

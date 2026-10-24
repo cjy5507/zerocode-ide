@@ -8173,8 +8173,8 @@ async function mountStoredLayout(record, worktree, tab, road) {
  * dies inside that window (a dead conversation's `--resume` exits about a
  * second in) has no holder to prune from. Its id parks here and the mount
  * consumes it. Ids are never reused (`next_term`'s own rule), so an entry
- * is a fact about one shell forever, and `delete`-on-read keeps the set at
- * the handful a single restore can strand. */
+ * is a fact about one shell forever. Only in-flight wakes collect these ids;
+ * the last wake clears any unrelated exits that arrived beside its own. */
 const exitedUnheld = new Set();
 
 /* The wake in flight for a tab, by tab id.
@@ -8225,6 +8225,7 @@ async function wakeStoredTab(tab) {
     await going;
   } finally {
     waking.delete(tab.id);
+    if (waking.size === 0) exitedUnheld.clear();
   }
 }
 
@@ -9026,14 +9027,6 @@ function noteAgentDetachment(term, detached) {
   void invoke("note_term_detached", { term, detached }).catch(() => {});
 }
 
-/* 탭째 끝나는 길(탭 닫기, 워크트리·프로젝트 제거): 그 탭의 판마다 한 줄. */
-function noteTabsLeaving(held, road) {
-  for (const tab of held) {
-    if (tab.kind !== "term") continue;
-    for (const term of paneLeaves(tab.layout)) noteLeafLeft(term, tab, road, "closed");
-  }
-}
-
 /* 탭을 잃은 셸이 돌아갈 체크아웃: 그 프로세스가 서 있는 곳(파일 트리가 들고
  * 있는 마지막 `term:cwd`), 아니면 그 판을 연 판이 서 있는 곳, 아니면 지금 앞의
  * 체크아웃 — 엉뚱한 카드의 행도 문이지만, 행이 없으면 문이 없다. */
@@ -9108,13 +9101,83 @@ function paneProgramLeft(term) {
   return hookStates.get(term) === "idle";
 }
 
-function closePaneLeaf(tab, going) {
+function terminalCloseFailure(error) {
+  switch (error?.kind) {
+    case "journal_unavailable": return t("terminal.closeJournalUnavailable", "종료 기록을 열 수 없어 터미널을 닫지 못했습니다. 화면을 유지했습니다.");
+    case "journal_failed": return t("terminal.closeJournalFailed", "종료 기록을 저장하지 못했습니다. 화면을 유지했습니다. 다시 시도해 주세요.");
+    case "signal_failed": return t("terminal.closeSignalFailed", "프로그램에 종료 요청을 보내지 못했습니다. 화면을 유지했습니다.");
+    case "unconfirmed": return t("terminal.closeUnconfirmed", "프로그램 종료가 아직 확인되지 않았습니다. 잠시 후 다시 닫아 주세요.");
+    case "replaced": return t("terminal.closeReplaced", "터미널의 프로그램이 바뀌어 닫기를 중단했습니다.");
+    default: return t("terminal.closeReplyMissing", "터미널 종료 결과를 받지 못했습니다. 화면을 유지했습니다. 다시 시도해 주세요.");
+  }
+}
+
+// One in-flight request per terminal, shared by tab, pane and removal doors.
+// Keeping the view while this waits leaves both the screen and a retry door.
+const terminalCloseRequests = new Map();
+
+function closeTermAndView(term, road) {
+  const waiting = terminalCloseRequests.get(term);
+  if (waiting) return waiting.promise;
+  const receipt = { promise: null, exited: false };
+  const request = Promise.resolve().then(() => invoke("close_term", { term })).then(() => {
+    dropClosedTermLeaf(term, road);
+    return true;
+  }, (error) => {
+    // The native exit event can arrive before a late IPC refusal. That is
+    // already an exit receipt; no live screen remains to preserve or retry.
+    if (receipt.exited) return true;
+    showError(terminalCloseFailure(error));
+    return false;
+  }).finally(() => {
+    if (terminalCloseRequests.get(term) === receipt) terminalCloseRequests.delete(term);
+  });
+  receipt.promise = request;
+  terminalCloseRequests.set(term, receipt);
+  return request;
+}
+
+// Both a native exit event and an accepted close remove exactly this leaf.
+// A tab with other living leaves keeps its identity and screen host.
+function dropClosedTermLeaf(term, road) {
+  const holder = tabs.find((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(term));
+  dropTermView(term);
+  if (!holder) return false;
+  const staying = paneLeaves(holder.layout).filter((held) => held !== term);
+  noteLeafLeft(term, holder, road, road === "exit" ? "exited" : "closed");
+  if (staying.length === 0) {
+    dropTab(holder.id);
+    return true;
+  }
+  holder.layout = prunePanes(holder.layout, new Set(staying));
+  schedulePaneAlignment(holder);
+  if (holder.activePane === term) holder.activePane = staying[0];
+  renderPanes(holder);
+  updateStage();
+  paintRunningCount();
+  return true;
+}
+
+async function closeTerminalTab(tab, road) {
+  const wake = waking.get(tab.id);
+  if (wake) await wake;
+  const terms = paneLeaves(tab.layout);
+  if (terms.length === 0 && tab.asleep) {
+    dropTab(tab.id);
+    return true;
+  }
+  for (const term of terms) await closeTermAndView(term, road);
+  // A newly opened leaf is not part of this close's snapshot either.
+  return !tabs.includes(tab);
+}
+
+async function closePaneLeaf(tab, going) {
   const staying = paneLeaves(tab.layout).filter((term) => term !== going);
   if (staying.length === 0) return;
-  tab.layout = prunePanes(tab.layout, new Set(staying));
-  schedulePaneAlignment(tab);
-  tab.activePane = staying[0];
   if (termHoldsAgent(going)) {
+    tab.layout = prunePanes(tab.layout, new Set(staying));
+    schedulePaneAlignment(tab);
+    tab.activePane = staying[0];
     detachedAgents.set(going, tab.worktree);
     noteAgentDetachment(going, true);
     dropTermScreen(going);
@@ -9122,9 +9185,9 @@ function closePaneLeaf(tab, going) {
     noteWorkerRoomChange(going, "background");
     noteLeafLeft(going, tab, "close-pane", `detached ${tab.worktree}`);
   } else {
-    invoke("close_term", { term: going }).catch(() => {});
-    dropTermView(going);
-    noteLeafLeft(going, tab, "close-pane", "closed");
+    if (!(await closeTermAndView(going, "close-pane"))) return;
+    if (document.activeElement === document.body) keySink.focus();
+    return;
   }
   renderPanes(tab);
   updateStage();

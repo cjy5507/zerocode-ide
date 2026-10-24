@@ -3378,7 +3378,7 @@ fn install_runtime(actor: RuntimeActor, overrides: LiveOverrides, usage: UsageSo
 /// guessing what that backend reached.
 static HOST_EPOCH: OnceLock<String> = OnceLock::new();
 
-fn host_epoch() -> Option<&'static str> {
+pub(crate) fn host_epoch() -> Option<&'static str> {
     HOST_EPOCH.get().map(String::as_str)
 }
 
@@ -3407,6 +3407,13 @@ static GOODBYE_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 /// the vault moved the two would disagree. `None` is a window whose runtime
 /// never started, which every reader answers as "there is no store here".
 static AUTHORITY_STORE: OnceLock<std::path::PathBuf> = OnceLock::new();
+static TERMINAL_EXITS: OnceLock<zerocode_orchestrator::terminal_exit::TerminalExitJournal> =
+    OnceLock::new();
+
+pub(crate) fn terminal_exit_journal()
+-> Option<&'static zerocode_orchestrator::terminal_exit::TerminalExitJournal> {
+    TERMINAL_EXITS.get()
+}
 
 /// Where this window's authority store is, when it has one.
 pub(crate) fn authority_store_path() -> Option<std::path::PathBuf> {
@@ -4712,6 +4719,8 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
             return Restarted::default();
         }
     };
+    let _ = TERMINAL_EXITS
+        .set(zerocode_orchestrator::terminal_exit::TerminalExitJournal::new(store.clone()));
     /* An effect the last window died inside of is reconciled FIRST — the
      * actor fences every mutation until it is, the restart sweep below
      * included. What this window can prove about that operation is exactly

@@ -102,6 +102,8 @@ import { testRestartSamePanes } from "./restart-same-panes.mjs";
 import { testFinishedWorkerResume, testFinishedWorkerInspection } from "./finished-worker-resume.mjs";
 import { testSidebarReclaimReason } from "./sidebar-reclaim-reason.mjs";
 import { testSidebarStage } from "./sidebar-stage.mjs";
+import { testKeybindingText } from "./keybinding-text.mjs";
+import { testTerminalCloseResult } from "./terminal-close-result.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
 import { testExplain } from "./explain.mjs";
@@ -367,6 +369,8 @@ suite("finished-worker-resume", ({ browser, origin, ok }) => testFinishedWorkerR
 suite("finished-worker-inspection", ({ browser, origin, ok }) => testFinishedWorkerInspection(browser, origin, ok));
 suite("sidebar-reclaim-reason", ({ browser, origin, ok }) => testSidebarReclaimReason(browser, origin, ok));
 suite("sidebar-stage", ({ browser, origin, ok }) => testSidebarStage(browser, origin, ok));
+suite("keybinding-text", ({ browser, origin, ok }) => testKeybindingText(browser, origin, ok));
+suite("terminal-close-result", ({ browser, origin, ok }) => testTerminalCloseResult(browser, origin, ok));
 suite("permission-card", ({ browser, origin, ok }) => testPermissionCard(browser, origin, ok));
 // Every question the window puts to the person, in the one popup (t-17514).
 suite("ask-popup", ({ browser, origin, ok }) => testAskPopup(browser, origin, ok));
@@ -6398,7 +6402,7 @@ const selecting = await page.evaluate(async () => {
     cancelable: true,
   }));
   const mouseAfterPress = window.__COUNTS__.term_mouse ?? 0;
-  closePaneLeaf(tabOfTerm(other), other);
+  await closePaneLeaf(tabOfTerm(other), other);
   window.dispatchEvent(new MouseEvent("mouseup", {
     button: 0, bubbles: true, cancelable: true,
   }));
@@ -24456,7 +24460,7 @@ const splitPlain = await page.evaluate(async () => {
   else delete window.__ANSWER__.open_term_tab;
   seen.panes = paneLeaves(tab.layout).length;
   const extra = paneLeaves(tab.layout).find((one) => one !== tab.term);
-  if (extra !== undefined) closePaneLeaf(tab, extra);
+  if (extra !== undefined) await closePaneLeaf(tab, extra);
   return seen;
 });
 ok(
@@ -31521,7 +31525,7 @@ const setupScriptLocation = await page.evaluate(async () => {
     title: paneTitleOf(host, 9302),
     focusKept: host.activePane === leaderTerm && activeTabId === host.id,
   };
-  closePaneLeaf(host, 9302);
+  await closePaneLeaf(host, 9302);
 
   mountSetupTerminal({
     path: activeWorktreePath,
@@ -31535,7 +31539,7 @@ const setupScriptLocation = await page.evaluate(async () => {
     title: paneTitleOf(host, 9303),
     focusKept: host.activePane === leaderTerm && activeTabId === host.id,
   };
-  closePaneLeaf(host, 9303);
+  await closePaneLeaf(host, 9303);
   dropTab(host.id);
   return seen;
 });

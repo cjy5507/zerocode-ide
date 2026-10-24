@@ -468,16 +468,39 @@ pub(super) const KEYBINDING_ACTIONS: &[(&str, &[&str])] = &[
 /// The identity emitted by the renderer's `chordOf`: `mod`, optional `alt`,
 /// optional `shift`, then one lower-case physical key id.
 pub(super) fn normalize_keybinding_chord(raw: &str) -> Result<String, String> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    let parts: Vec<&str> = normalized.split('+').collect();
-    let valid = matches!(parts.as_slice(), ["mod", key] if !key.is_empty())
-        || matches!(parts.as_slice(), ["mod", "alt", key] if !key.is_empty())
-        || matches!(parts.as_slice(), ["mod", "shift", key] if !key.is_empty())
-        || matches!(parts.as_slice(), ["mod", "alt", "shift", key] if !key.is_empty());
+    // `keyId` emits a literal space for Space. Preserve it while still
+    // accepting whitespace around named keys in an edited settings file.
+    let raw = raw.trim_start();
+    let raw = if raw.ends_with("+ ") {
+        raw
+    } else {
+        raw.trim_end()
+    };
+    let normalized = raw.to_ascii_lowercase();
+    let valid = normalized.strip_prefix("mod+").is_some_and(|key| {
+        let key = key.strip_prefix("alt+").unwrap_or(key);
+        let key = key.strip_prefix("shift+").unwrap_or(key);
+        keybinding_key_id(key)
+    });
     if !valid {
         return Err(format!("{raw}는 이 창이 인식하는 단축키가 아닙니다"));
     }
     Ok(normalized)
+}
+
+/// `KeyboardEvent.key` is either one printable character or a named key
+/// (Enter, ArrowLeft, F24, MediaPlayPause, ...). Validate that grammar rather
+/// than maintaining another platform's list of key names. Both settings
+/// writes and effective-binding reads pass through this one validator.
+fn keybinding_key_id(key: &str) -> bool {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if chars.next().is_none() {
+        return !first.is_control();
+    }
+    first.is_ascii_alphabetic() && key.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 pub(super) fn effective_keybinding_chords(

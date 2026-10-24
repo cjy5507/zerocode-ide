@@ -627,6 +627,9 @@ impl WorkflowStore {
             require_authority_schema(&transaction)?;
         }
         transaction
+            .execute_batch(crate::terminal_exit::SCHEMA)
+            .map_err(|_| WorkflowStoreError::Database)?;
+        transaction
             .commit()
             .map_err(|_| WorkflowStoreError::Database)?;
         tighten_store_files(&store.path)?;

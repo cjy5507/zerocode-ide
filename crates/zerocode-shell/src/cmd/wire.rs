@@ -193,10 +193,23 @@ pub(crate) fn wait_process_group_gone(
         }
         true
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let began = std::time::Instant::now();
+        loop {
+            if crate::resource_usage::process_exited(root) == Some(true) {
+                return true;
+            }
+            if began.elapsed() >= wait {
+                return false;
+            }
+            std::thread::sleep(poll);
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (root, wait, poll);
-        true
+        false
     }
 }
 
@@ -208,7 +221,8 @@ pub(crate) fn wait_process_group_gone(
 /// the program's; and whatever the process table cannot say answers "not
 /// yet", so the next look asks again rather than a restore guessing.
 ///
-/// Windows has no process groups to ask; the close there is the kill.
+/// Windows reads the native child exit status; requesting a kill is not an
+/// exit receipt. Unknown observations remain unconfirmed on every platform.
 pub(crate) fn program_left(witness: &crate::agent_teams::ExitWitness) -> bool {
     #[cfg(unix)]
     {
@@ -223,10 +237,24 @@ pub(crate) fn program_left(witness: &crate::agent_teams::ExitWitness) -> bool {
             _ => false,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match crate::resource_usage::process_exited(witness.group) {
+            Some(true) => true,
+            Some(false) => match (
+                witness.started.as_deref(),
+                crate::resource_usage::process_start_identity(witness.group),
+            ) {
+                (Some(started), Ok(now)) => now != started,
+                _ => false,
+            },
+            None => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = witness;
-        true
+        false
     }
 }
 

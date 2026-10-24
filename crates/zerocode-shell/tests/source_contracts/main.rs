@@ -9306,6 +9306,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_terminal_close_reply_preserves_native_refusals_before_any_screen_is_dropped() {
+        let backend = shipped_backend();
+        let command = block_after(backend, "fn close_term(");
+        assert!(command.contains("retire_terminal(&state, term).map(|_| ())"));
+        assert!(!command.contains("unwrap_or") && !command.contains("let _ ="));
+
+        let window = window_source();
+        let request = block_after(window, "function closeTermAndView(");
+        assert!(request.contains("invoke(\"close_term\", { term })).then(() => {"));
+        assert!(
+            request.contains("dropClosedTermLeaf(term, road);")
+                && request.contains("showError(terminalCloseFailure(error))")
+        );
+        assert!(
+            request.contains("terminalCloseRequests.get(term)")
+                && request.contains("terminalCloseRequests.delete(term)")
+        );
+        assert_eq!(
+            window.matches("invoke(\"close_term\"").count(),
+            1,
+            "another close door bypasses the receipt"
+        );
+
+        let closing = block_after(window, "function closeTab(id) {");
+        let terminals = block_after(closing, "if (tab.kind === \"term\") {");
+        assert!(terminals.contains("closeTerminalTab(tab, \"close-tab\")"));
+        assert!(!terminals.contains("dropTermView(") && !terminals.contains("dropTab("));
+        let pane = block_after(window, "async function closePaneLeaf(");
+        assert!(pane.contains("if (!(await closeTermAndView(going, \"close-pane\"))) return;"));
+        let project = block_after(window, "async function removeProjectFromList(");
+        let fence = project
+            .find("removingProjectPaths.add(path)")
+            .expect("no project start fence");
+        let waiting = project
+            .find("await Promise.all(starting)")
+            .expect("unobserved mirror starts");
+        let remove = project
+            .find("invoke(\"remove_project\"")
+            .expect("no catalog removal");
+        assert!(fence < waiting && waiting < remove);
+        assert!(
+            project.contains("gone.has(opening.worktree)")
+                && project.contains("removingProjectPaths.delete(path)")
+        );
+        let mirror = block_after(window, "function openMirrorPane(");
+        assert!(
+            mirror.contains("removingProjectPaths.has(project.path)")
+                && mirror.contains("openingMirrors.set(path, opening)")
+        );
+        assert!(mirror.contains("openingMirrors.delete(path)"));
+    }
+
     /// The embedded Chromium never asks the login keychain for its cookie
     /// key. Without a Team ID (local signing), macOS partitions the generic
     /// "Chromium Safe Storage" item by the caller's cdhash — a new partition
@@ -14395,18 +14448,16 @@ mod tests {
         );
         let finishing = block_after(window, "async function finishWorktreeRemoval(worktree) {");
         assert!(
-            finishing.contains("dropWorktreeSurfaces(path);"),
+            finishing.contains("if (!(await dropWorktreeSurfaces(path))) return;"),
             "a removed worktree leaves its tabs behind again:\n{finishing}"
         );
-        let sweeping = block_after(window, "function dropWorktreeSurfaces(path) {");
+        let sweeping = block_after(window, "async function dropWorktreeSurfaces(path) {");
         assert!(
             sweeping.contains(concat!(
                 "  for (const held of tabs.filter((one) => one.worktree === path)) {\n",
                 "    if (held.kind === \"term\") {\n",
-                "      for (const term of paneLeaves(held.layout)) {\n",
-                "        invoke(\"close_term\", { term }).catch(() => {});\n",
-                "        dropTermView(term);\n",
-                "      }\n",
+                "      await closeTerminalTab(held, \"worktree-removed\");\n",
+                "      continue;\n",
                 "    }\n",
                 "    dropTab(held.id);\n",
                 "  }\n",
@@ -20841,20 +20892,15 @@ mod tests {
         // Road one: the tab was closed on purpose. `retire_terminal` owns the
         // terminal/delivery locks before walking through the shared forget
         // door so every explicit management action uses the same ordering.
-        let closing = block_after(
-            shipped,
-            "fn close_term(state: State<'_, AppState>, term: TermId) {",
-        );
+        let closing = block_after(shipped, "fn close_term(");
         assert!(
-            closing.contains("retire_terminal(&state, term);"),
+            closing.contains("retire_terminal(&state, term).map(|_| ())"),
             "a closed tab leaves its shell's state behind:\n{closing}"
         );
-        let retirement = block_after(
-            shipped,
-            "fn retire_terminal(state: &AppState, term: TermId) -> bool {",
-        );
+        let retirement = block_after(shipped, "fn retire_terminal(");
         assert!(
-            retirement.contains("state.terminals().remove(&term)")
+            retirement.contains("state.terminals().remove_exact(term, &pty)")
+                && retirement.contains("ExitState::Gone")
                 && retirement.contains("state.deliveries().remove(&term);")
                 && retirement.contains(
                     "forget_term_state(state, term, TermLedgerSettlement::Recorded(Some(screen)));"
@@ -20893,13 +20939,18 @@ mod tests {
         // worker's tab on its last frame and its row in the sidebar
         // (reported 2026-08-30: "이건 계속 멈춰있어").
         let shim = shipped
-            .split_once("fn close(&self, term: TermId) {")
+            .split_once("fn close_confirmed(&self, term: TermId) -> bool {")
             .map_or("", |(_, rest)| rest);
         let shim = &shim[..shim.find("\n    }").unwrap_or(shim.len())];
         assert!(
-            shim.contains("if retire_terminal(&state, term) {")
+            shim.contains("if retire_terminal(&state, term).unwrap_or(false) {")
                 && shim.contains("announce_retired_terminal(&self.app, term);"),
             "the team shim's close forgets most of a pane, or forgets to say so:\n{shim}"
+        );
+        let close = block_after(shipped, "fn close(&self, term: TermId) {");
+        assert!(
+            close.contains("self.close_confirmed(term)"),
+            "unchecked close bypasses the observed retirement door"
         );
 
         // And the project switch is deliberately NOT a road out of a shell.
@@ -20998,12 +21049,14 @@ mod tests {
         // as well. Three roads used to sweep the tabs themselves in the same
         // shape — the removal dialog, the cleanup table, the space page — and
         // none of them forgot the stage layout keyed by the path.
-        let sweeping = block_after(window, "function dropWorktreeSurfaces(path) {");
+        let sweeping = block_after(window, "async function dropWorktreeSurfaces(path) {");
         assert!(
-            sweeping.contains("dropTermView(term);")
+            sweeping.contains("await closeTerminalTab(held, \"worktree-removed\");")
                 && sweeping.contains("dropTab(held.id);")
+                && sweeping
+                    .contains("if (tabs.some((one) => one.worktree === path)) return false;")
                 && sweeping.contains("stageTrees.delete(path);"),
-            "a removed checkout leaves a surface standing:\n{sweeping}"
+            "a removed checkout either leaks a confirmed surface or hides an unconfirmed shell:\n{sweeping}"
         );
         assert_eq!(
             window.matches("dropWorktreeSurfaces(").count(),
@@ -22723,10 +22776,7 @@ mod tests {
             "the readiness window is spent napping — the wait is measured in \
              output, so the pump has to be at display rate to see it:\n{sending}"
         );
-        let retirement = block_after(
-            backend,
-            "fn retire_terminal(state: &AppState, term: TermId) -> bool",
-        );
+        let retirement = block_after(backend, "fn retire_terminal(");
         assert!(
             retirement.contains("deliveries().remove(&term)"),
             "closing a shell leaves a delivery addressed to it:\n{retirement}"
@@ -32799,7 +32849,7 @@ mod tests {
             2,
             "a drop no longer reports the placed worker's move:\n{dragged}"
         );
-        let closed = block_after(window, "function closePaneLeaf(tab, going) {");
+        let closed = block_after(window, "async function closePaneLeaf(tab, going) {");
         assert!(
             closed.contains("noteWorkerRoomChange(going, \"background\")"),
             "closing a tiled worker no longer reports the move:\n{closed}"
@@ -34372,7 +34422,7 @@ mod tests {
 
         let retiring = block_after(backend, "fn retire_terminal(");
         let kill_at = retiring
-            .find("let _ = lock_pty(&pty).kill();")
+            .find("durable_lifecycle::terminal::close(")
             .expect("a deliberately closed Codex process is not stopped before auth sync");
         let cleanup_at = retiring
             .find("forget_term_state(state, term")
@@ -34381,6 +34431,13 @@ mod tests {
             kill_at < cleanup_at,
             "the exit sync runs before the deliberately closed process is stopped"
         );
+        let confirmed_at = retiring
+            .find("ExitState::Gone")
+            .expect("retirement does not require an exit receipt");
+        let exact_at = retiring
+            .find("remove_exact(term, &pty)")
+            .expect("retirement can remove a replacement shell");
+        assert!(kill_at < confirmed_at && confirmed_at < exact_at && exact_at < cleanup_at);
     }
 
     /// Every TOML header read is guarded by the multi-line-string scanner.
@@ -36884,7 +36941,7 @@ mod tests {
     fn closing_a_split_lets_the_agent_in_it_keep_running() {
         let window = window_source();
 
-        let closing = block_after(window, "function closePaneLeaf(tab, going) {");
+        let closing = block_after(window, "async function closePaneLeaf(tab, going) {");
         assert!(
             closing.contains("if (termHoldsAgent(going)) {")
                 && closing.contains("detachedAgents.set(going, tab.worktree);")

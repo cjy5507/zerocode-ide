@@ -606,7 +606,10 @@ function removableProject(path) {
  * the same way. The step rides the same in-flight guard as every other
  * switch (`switchingProject`): a remove landing in the middle of a move
  * would interleave the repaint with somebody else's. */
+const removingProjectPaths = new Set();
+
 async function removeProjectFromList(path) {
+  if (!removableProject(path) || removingProjectPaths.has(path)) return;
   // Orca asks before it removes (`confirm-remove-folder` →
   // RemoveFolderDialog.tsx: title "Remove Project", "This only removes
   // {{name}} from Orca. It is still on your disk.", Cancel · Remove). The
@@ -626,13 +629,31 @@ async function removeProjectFromList(path) {
     cancel: false,
   });
   if (removing !== true) return;
+  if (!removableProject(path) || removingProjectPaths.has(path)) return;
+  const gone = new Set(
+    (projects.find((held) => held.path === path)?.worktrees ?? []).map((held) => held.path),
+  );
+  removingProjectPaths.add(path);
   try {
+    // Native mirror creation can outlive its parent. Fence new starts, then
+    // let already-admitted starts place their screens before closing them.
+    const starting = [];
+    for (const opening of openingMirrors.values()) {
+      if (gone.has(opening.worktree)) starting.push(opening.promise);
+    }
+    await Promise.all(starting);
+    // Keep the project and its retry doors until every selected shell has
+    // confirmed exit. Removing the catalog first would strand a refusal.
+    for (const held of tabs.filter((one) => one.kind === "term" && gone.has(one.worktree))) {
+      if (!(await closeTerminalTab(held, "project-removed"))) return;
+    }
+    if (tabs.some((one) => one.kind === "term" && gone.has(one.worktree))) return;
     if (path === activeProjectPath) {
       const elsewhere = projects.find((project) => project.path !== path);
       if (!elsewhere) return;
       if (switchingProject) await switchingProject;
       // Past `mayLeaveLiveAgents`: the removal was already confirmed, and its
-      // shells are about to be ended below — asking whether to leave them
+      // shells have confirmed their exits — asking whether to leave them
       // running would be a lie. The flag is read before the switch's first
       // await, so it is lowered as soon as the call returns.
       switchingAwayForRemoval = true;
@@ -642,32 +663,19 @@ async function removeProjectFromList(path) {
       switchingAwayForRemoval = false;
       await switchingProject;
     }
+    if (tabs.some((one) => one.kind === "term" && gone.has(one.worktree))) return;
     await invoke("remove_project", { path });
+    // Shells have already confirmed exit. Other surfaces can now leave the
+    // list, and the start fence stays up until the refreshed catalog arrives.
+    for (const held of tabs.filter((held) => gone.has(held.worktree))) {
+      if (held.kind !== "term") dropTab(held.id);
+    }
+    await refreshWorktrees();
   } catch (error) {
     showError(String(error));
-    return;
+  } finally {
+    removingProjectPaths.delete(path);
   }
-  // The removed project's tabs go with it — every worktree it held. Left
-  // behind they are rows for places the sidebar no longer names, and their
-  // mere existence keeps the empty-stage placeholder suppressed
-  // (`placeholder.hidden = tabs.length > 0`), which is how a removal used to
-  // end on a blank stage that claimed it was showing something.
-  // Read from the list that still remembers the project — the refresh below
-  // is what forgets it.
-  const gone = new Set(
-    (projects.find((held) => held.path === path)?.worktrees ?? []).map((held) => held.path),
-  );
-  noteTabsLeaving(tabs.filter((held) => gone.has(held.worktree)), "project-removed");
-  for (const held of tabs.filter((held) => gone.has(held.worktree))) {
-    if (held.kind === "term") {
-      for (const term of paneLeaves(held.layout)) {
-        invoke("close_term", { term }).catch(() => {});
-        dropTermView(term);
-      }
-    }
-    dropTab(held.id);
-  }
-  await refreshWorktrees();
 }
 
 /* ---- 이 창이 만들지 않은 워크트리 ----
@@ -11750,20 +11758,19 @@ async function askToRemoveWorktree(worktree) {
  * and a window that creates and deletes workspaces all day accumulated a split
  * tree per checkout it had ever stood in — each holding group numbers that can
  * never be drawn again. */
-function dropWorktreeSurfaces(path) {
-  noteTabsLeaving(tabs.filter((one) => one.worktree === path), "worktree-removed");
+async function dropWorktreeSurfaces(path) {
   for (const held of tabs.filter((one) => one.worktree === path)) {
     if (held.kind === "term") {
-      for (const term of paneLeaves(held.layout)) {
-        invoke("close_term", { term }).catch(() => {});
-        dropTermView(term);
-      }
+      await closeTerminalTab(held, "worktree-removed");
+      continue;
     }
     dropTab(held.id);
   }
   // 탭이 다 나간 뒤에 지운다. `dropTab`은 마지막 탭과 함께 그룹을 접으면서
   // 이 트리를 다시 쓰므로, 먼저 지우면 그 자리에서 빈 트리가 새로 생긴다.
+  if (tabs.some((one) => one.worktree === path)) return false;
   stageTrees.delete(path);
+  return true;
 }
 
 async function finishWorktreeRemoval(worktree) {
@@ -11776,7 +11783,7 @@ async function finishWorktreeRemoval(worktree) {
   // below, because a ghost left as the active tab is exactly what the
   // same-workspace early return mistakes for "already fine" — the blank-stage
   // bug this sweep exists to end.
-  dropWorktreeSurfaces(path);
+  if (!(await dropWorktreeSurfaces(path))) return;
   const worktrees = await refreshWorktrees();
   // The backend has already moved off a removed worktree; this catches the
   // titlebar and the tree up with it.
@@ -12360,7 +12367,7 @@ async function removeCleanupRows(rows) {
   // 사라진 체크아웃의 표면은 함께 간다 — `removeWorktree`가 한 행에 대해 하는
   // 일과 같은 문이고, 그것을 건너뛰면 없는 디렉터리를 가리키는 탭이 남는다.
   for (const row of ordered) {
-    if (removed.includes(row.name)) dropWorktreeSurfaces(row.path);
+    if (removed.includes(row.name)) await dropWorktreeSurfaces(row.path);
   }
   await refreshWorktrees();
 }
@@ -13152,7 +13159,7 @@ async function removeSpaceRows(rows, forced = false) {
   space.summary = { removed, kept };
   // 사라진 체크아웃의 표면은 함께 간다 — `removeCleanupRows`와 같은 문이다.
   for (const row of ordered) {
-    if (removed.includes(row.name)) dropWorktreeSurfaces(row.path);
+    if (removed.includes(row.name)) await dropWorktreeSurfaces(row.path);
   }
   await refreshWorktrees();
   await scanSpace();
