@@ -3402,6 +3402,7 @@ class StatefulBackend {
       keySaved: provider.requiresAuth && Boolean(this.keychain.get(this.judgmentService(provider))?.trim()),
       provider,
       providerIdentity: `fixture-provider:${JSON.stringify(provider)}`,
+      providerConnection: smart.judgmentConnection ?? null,
       jevProvider,
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
       // The rows a person wrote, and what each difficulty runs (t-14437):

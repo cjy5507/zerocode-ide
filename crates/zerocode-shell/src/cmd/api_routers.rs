@@ -127,10 +127,25 @@ pub(crate) async fn save_api_router(
 
 /// A row is removed by its name; the key it read is found on the row itself.
 #[tauri::command]
-pub(crate) async fn remove_api_router(name: String) -> Result<Vec<ProviderEntry>, String> {
+pub(crate) async fn remove_api_router(
+    name: String,
+    connection_id: Option<String>,
+    expected_generation: Option<u64>,
+) -> Result<Vec<ProviderEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = api_routers::zo_settings_path().ok_or("설정 경로를 찾을 수 없습니다")?;
-        api_routers::remove_router(&path, &name, &api_routers::Keychain::of_this_machine())
+        match (connection_id.as_deref(), expected_generation) {
+            (Some(id), Some(generation)) => api_routers::remove_router_if_current(
+                &path,
+                &name,
+                Some((id, generation)),
+                &api_routers::Keychain::of_this_machine(),
+            ),
+            (None, None) => {
+                api_routers::remove_router(&path, &name, &api_routers::Keychain::of_this_machine())
+            }
+            _ => Err("settings_changed".to_string()),
+        }
     })
     .await
     .map_err(|error| error.to_string())?

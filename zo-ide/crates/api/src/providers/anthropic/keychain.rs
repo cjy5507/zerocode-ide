@@ -873,11 +873,15 @@ fn read_keychain_service_secret(service: &str, account: Option<&str>) -> Keychai
 /// A router key the window's router pane keeps under `service` — read only
 /// on macOS, the one platform where the window keeps router keys, and never
 /// under the keychain kill switch (`ZO_DISABLE_KEYCHAIN`).
+pub(crate) fn router_keychain_available() -> bool {
+    cfg!(target_os = "macos") && std::env::var_os(DISABLE_KEYCHAIN_ENV).is_none()
+}
+
 pub(crate) fn read_router_key(service: &str) -> KeychainAnswer {
     // Neither is a read that failed: this platform keeps no router keys, and
     // the kill switch means this process may not look. Both are settled, so a
     // caller is right to remember them and stop asking.
-    if !cfg!(target_os = "macos") || std::env::var_os(DISABLE_KEYCHAIN_ENV).is_some() {
+    if !router_keychain_available() {
         return KeychainAnswer::Absent;
     }
     read_keychain_service_secret(service, None)

@@ -768,8 +768,12 @@ fn returning_from_a_connection_restores_the_previous_managed_selection() {
             .len(),
         5
     );
-    crate::model_connection_store::clear(&path, crate::model_connection_store::Role::Judgment)
-        .expect("restore");
+    crate::model_connection_store::clear(
+        &path,
+        crate::model_connection_store::Role::Judgment,
+        Some(&reference),
+    )
+    .expect("restore");
     let restored: Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
     assert_eq!(restored["smart"], before_smart);

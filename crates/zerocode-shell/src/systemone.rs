@@ -760,12 +760,12 @@ impl Wire {
         };
         if let Ok(provider) = wire.provider() {
             let name = provider.key_env().into_owned();
-            let service = format!(
-                "{}{name}",
-                zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX
-            );
             let key = if provider.requires_auth {
-                trimmed(keys.read(&service).ok().flatten())
+                trimmed(
+                    crate::typesafe_settings::provider_key(&provider, keys)
+                        .ok()
+                        .flatten(),
+                )
             } else {
                 None
             };

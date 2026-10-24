@@ -497,6 +497,16 @@ fn with_client_or<T: Send + 'static>(
     unconnected: fn(zerocode_harness::HarnessError) -> String,
     exchange: impl AsyncFnOnce(&mut Client) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
+    with_client_deadline(addr, token, unconnected, None, exchange)
+}
+
+fn with_client_deadline<T: Send + 'static>(
+    addr: String,
+    token: Option<String>,
+    unconnected: fn(zerocode_harness::HarnessError) -> String,
+    deadline: Option<std::time::Duration>,
+    exchange: impl AsyncFnOnce(&mut Client) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     // A dedicated OS thread, unconditionally. Callers reach here from sync
     // contexts AND from tauri's async runtime (the ZO tab launch resolves
     // there), and building a runtime on a runtime worker is the "Cannot
@@ -511,8 +521,17 @@ fn with_client_or<T: Send + 'static>(
                 .build()
                 .map_err(|error| error.to_string())?;
             runtime.block_on(async {
-                let mut client = Client::connect(&addr, token).await.map_err(unconnected)?;
-                exchange(&mut client).await
+                let request = async {
+                    let mut client = Client::connect(&addr, token).await.map_err(unconnected)?;
+                    exchange(&mut client).await
+                };
+                if let Some(deadline) = deadline {
+                    tokio::time::timeout(deadline, request)
+                        .await
+                        .map_err(|_| "connection_reload_timeout".to_string())?
+                } else {
+                    request.await
+                }
             })
         })
         .map_err(|error| error.to_string())?
@@ -3447,36 +3466,39 @@ pub(super) fn model_connection_targets(state: &AppState) -> Vec<(String, ZoChann
 
 /// A protocol receipt says queued, not applied. Older binaries are distinguished
 /// from unreachable channels by their actual capabilities response.
-pub(super) async fn reload_model_connection(channel: ZoChannel) -> Result<bool, String> {
-    // A stalled pane cannot indefinitely hold a settings operation's receipt.
-    let exchange = async move {
-        let mut client = Client::connect(&channel.addr, channel.token)
-            .await
-            .map_err(|error| error.to_string())?;
-        let capabilities = client
-            .call("session.capabilities", json!({}))
-            .await
-            .map_err(|error| error.to_string())?;
-        let support = &capabilities["support"]["providers_reload"];
-        if capabilities["protocol"]["name"] != "zo-events"
-            || capabilities["protocol"]["major"] != 1
-            || support["supported"] != true
-            || support["method"] != judgment_provider::connections::RELOAD_METHOD
-            || support["version"].as_u64() != Some(judgment_provider::connections::RELOAD_VERSION)
-        {
-            return Ok(false);
-        }
-        let receipt = client
-            .call(
-                judgment_provider::connections::RELOAD_METHOD,
-                json!({"version":judgment_provider::connections::RELOAD_VERSION}),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(receipt["queued"] == true
-            && receipt["version"].as_u64() == Some(judgment_provider::connections::RELOAD_VERSION))
-    };
-    tokio::time::timeout(std::time::Duration::from_secs(5), exchange)
-        .await
-        .map_err(|_| "connection_reload_timeout".to_string())?
+pub(super) fn reload_model_connection(channel: ZoChannel) -> Result<bool, String> {
+    // The same local-runtime transport accepts the harness's non-Send reader.
+    // The complete connect/exchange is bounded so a stale pane cannot hold settings.
+    with_client_deadline(
+        channel.addr,
+        channel.token,
+        |error| error.to_string(),
+        Some(std::time::Duration::from_secs(5)),
+        async move |client| {
+            let capabilities = client
+                .call("session.capabilities", json!({}))
+                .await
+                .map_err(|error| error.to_string())?;
+            let support = &capabilities["support"]["providers_reload"];
+            if capabilities["protocol"]["name"] != "zo-events"
+                || capabilities["protocol"]["major"] != 1
+                || support["supported"] != true
+                || support["method"] != judgment_provider::connections::RELOAD_METHOD
+                || support["version"].as_u64()
+                    != Some(judgment_provider::connections::RELOAD_VERSION)
+            {
+                return Ok(false);
+            }
+            let receipt = client
+                .call(
+                    judgment_provider::connections::RELOAD_METHOD,
+                    json!({"version":judgment_provider::connections::RELOAD_VERSION}),
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(receipt["queued"] == true
+                && receipt["version"].as_u64()
+                    == Some(judgment_provider::connections::RELOAD_VERSION))
+        },
+    )
 }

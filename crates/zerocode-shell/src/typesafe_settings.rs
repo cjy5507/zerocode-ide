@@ -251,6 +251,7 @@ pub struct TypeSafeSettings {
     pub key_saved: bool,
     pub provider: judgment_provider::Provider,
     pub provider_identity: String,
+    pub provider_connection: Option<judgment_provider::connections::Reference>,
     pub jev_provider: judgment_provider::Provider,
     /// The one switch: whether Jev is in use here.
     pub jev: JevSwitch,
@@ -326,6 +327,10 @@ pub fn read_settings(
         keys_kept_here,
         key_saved,
         provider_identity: provider.identity(),
+        provider_connection: provider
+            .connection
+            .as_ref()
+            .map(|connection| connection.reference.clone()),
         provider,
         jev_provider: judgment_provider::Provider::jev(model_in(&document)),
         jev: JevSwitch::of(&document),
@@ -515,6 +520,11 @@ pub(crate) fn save_candidate_key(
 ) -> Result<(), RouterRefusal> {
     with_provider_locked(path, || {
         Ok(selected_provider(path).and_then(|current| {
+            if current.connection.is_some()
+                && serde_json::to_value(&current).ok() == serde_json::to_value(provider).ok()
+            {
+                return Err("connection_in_use".to_string().into());
+            }
             if let Some(expected) = expected {
                 require_provider(&current, Some(expected))?;
             }

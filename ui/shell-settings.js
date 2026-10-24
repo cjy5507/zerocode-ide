@@ -7156,6 +7156,7 @@ function typesafeCheckFailure(token) {
 /* This card says a refusal as every key card does (`keyStoreRefusal`). */
 function typesafeRefusal(error) {
   const token = typeof error === "string" ? error : error?.message;
+  if (token === "connection_in_use") return t("settings.connections.editLinked", "이 모델의 주소와 인증은 공통 연결에서 수정합니다.");
   return judgmentProviderController.failure(token) ?? keyStoreRefusal(error);
 }
 

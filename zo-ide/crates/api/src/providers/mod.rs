@@ -4394,7 +4394,8 @@ pub(crate) fn fresh_connection_key(key: &str) -> Result<Option<String>, crate::e
     if let Some(keychain) = keychains.iter().find(|keychain| keychain.names.answers(key)) {
         match (keychain.read)(&format!("{}{key}", keychain.service_prefix)) {
             KeychainAnswer::Found(value) => return Ok(Some(value)),
-            KeychainAnswer::Absent => return Ok(None),
+            KeychainAnswer::Absent => return Ok(if anthropic::keychain::router_keychain_available() { None }
+                else { adopted_table_key(key).filter(|(_, source)| *source == KeySource::Adopted).map(|(value, _)| value) }),
             KeychainAnswer::Unanswered if cfg!(target_os = "macos") => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "The saved model connection key could not be read.").into()),
             KeychainAnswer::Unanswered => {},
         }

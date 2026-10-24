@@ -54,7 +54,7 @@ const modelConnectionsController = {
       if (node) node.textContent = t("settings.connections.sync", "다음 요청에서 갱신 {{queued}}개 · 이전 버전 재시작 필요 {{restart}}개 · 상태 확인 불가 {{unknown}}개", { queued: status.queued, restart: status.restartRequired, unknown: status.unknown });
     } catch (error) { const node = el("connections-sync-status"); if (node) node.textContent = this.failure(error); }
   },
-  selected(role) { return this.drafts.get(role) ?? this.state?.[role] ?? null; },
+  selected(role) { return this.drafts.has(role) ? this.drafts.get(role) : this.state?.[role] ?? null; },
   key(reference) { return reference ? JSON.stringify([reference.id, reference.model]) : ""; },
   change(role, reference) {
     this.drafts.set(role, reference);
@@ -182,7 +182,7 @@ const modelConnectionsController = {
           message: result.preflight.answered ? t("settings.connections.checked", "선택 · 점수 · 참/거짓 응답 형식 확인됨") : this.failure(result.preflight.failure) });
       } else {
         this.state = await invoke(action === "clear" ? "clear_model_connection" : "select_model_connection", {
-          role, reference, expectedProviderIdentity: this.state.activeProviderIdentity,
+          role, reference, expectedReference: this.state?.[role] ?? null, expectedProviderIdentity: this.state.activeProviderIdentity,
         });
         this.drafts.delete(role);
         this.results.set(role, { message: t("settings.connections.applied", "저장된 설정을 적용했습니다.") });
@@ -215,7 +215,7 @@ const modelConnectionsController = {
       showError(t("settings.connections.inUse", "이 연결을 쓰는 용도를 먼저 해제하세요. 이름과 모델 목록은 그대로 수정할 수 있습니다."));
       document.querySelector('[data-connection-roles="all"]')?.scrollIntoView({ block: "nearest" }); return;
     }
-    try { await invoke("remove_api_router", { name: row.provider.name }); await this.refresh(); }
+    try { await invoke("remove_api_router", { name: row.provider.name, connectionId: row.id, expectedGeneration: row.generation }); await this.refresh(); }
     catch (error) { showError(this.failure(error)); }
   },
 };

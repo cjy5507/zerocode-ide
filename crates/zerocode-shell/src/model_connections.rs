@@ -56,9 +56,73 @@ fn reference(root: &Value, key: &str) -> Result<Option<Reference>, String> {
         .transpose()
 }
 
+fn coding_matches(root: &Value, reference: &Reference) -> bool {
+    let Some((name, model)) = root
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(|model| model.split_once('/'))
+    else {
+        return false;
+    };
+    let Ok(row) = connections::row(root, &reference.id) else {
+        return false;
+    };
+    let Ok(metadata) = connections::metadata(row) else {
+        return false;
+    };
+    model == reference.model
+        && (row
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|current| connections::names_match(current, name))
+            || metadata.id == name
+            || metadata
+                .aliases
+                .iter()
+                .any(|alias| connections::names_match(alias, name)))
+}
+
+fn coding_reference(root: &Value) -> Result<Option<Reference>, String> {
+    if let Some(mut reference) = reference(root, connections::CODING_CONNECTION_KEY)? {
+        if coding_matches(root, &reference) {
+            if let Ok(row) = connections::row(root, &reference.id) {
+                reference.generation = connections::metadata(row)
+                    .map_err(|error| error.to_string())?
+                    .generation;
+            }
+            return Ok(Some(reference));
+        }
+    }
+    let Some((name, model)) = root
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(|model| model.split_once('/'))
+    else {
+        return Ok(None);
+    };
+    for row in root
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let metadata = connections::metadata(row).map_err(|error| error.to_string())?;
+        let reference = Reference {
+            id: metadata.id,
+            generation: metadata.generation,
+            model: model.to_string(),
+            protocol: judgment_provider::Protocol::OpenaiJson,
+        };
+        if !name.is_empty() && coding_matches(root, &reference) {
+            return Ok(Some(reference));
+        }
+    }
+    Ok(None)
+}
+
 pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
     let root = root(path)?;
-    let coding = reference(&root, connections::CODING_CONNECTION_KEY)?;
+    let coding = coding_reference(&root)?;
     let judgment = reference(&root, connections::JUDGMENT_CONNECTION_KEY)?;
     let active =
         judgment_provider::Provider::from_root(&root).map_err(|error| error.to_string())?;
@@ -252,8 +316,10 @@ pub fn apply_coding(path: &Path, reference: &Reference) -> Result<(), String> {
         let model = format!("{name}/{declared}");
         persist_identity(document, &reference.id)?;
         let previous = document.get("model").cloned().unwrap_or(Value::Null);
+        let owned = self::reference(&root, connections::CODING_CONNECTION_KEY)?
+            .is_some_and(|held| coding_matches(&root, &held));
         let smart = smart(document)?;
-        if !smart.contains_key(connections::CODING_CONNECTION_KEY) {
+        if !owned {
             smart.insert(connections::PREVIOUS_CODING_KEY.to_string(), previous);
         }
         smart.insert(
@@ -291,6 +357,9 @@ pub(crate) fn smart(document: &mut Map<String, Value>) -> Result<&mut Map<String
 }
 
 pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<(), String> {
+    let root = Value::Object(document.clone());
+    let restore_coding = reference(&root, connections::CODING_CONNECTION_KEY)?
+        .is_some_and(|held| coding_matches(&root, &held));
     let smart = smart(document)?;
     match role {
         Role::Judgment => {
@@ -312,36 +381,49 @@ pub(crate) fn clear_in(document: &mut Map<String, Value>, role: Role) -> Result<
             }
         }
         Role::Coding => {
-            if smart.remove(connections::CODING_CONNECTION_KEY).is_some() {
-                let previous = smart
-                    .remove(connections::PREVIOUS_CODING_KEY)
-                    .unwrap_or(Value::Null);
-                if previous.is_null() {
-                    document.remove("model");
-                } else {
-                    document.insert("model".to_string(), previous);
-                }
+            smart.remove(connections::CODING_CONNECTION_KEY);
+            let previous = smart
+                .remove(connections::PREVIOUS_CODING_KEY)
+                .filter(|_| restore_coding)
+                .unwrap_or(Value::Null);
+            if previous.is_null() {
+                document.remove("model");
+            } else {
+                document.insert("model".to_string(), previous);
             }
         }
     }
     Ok(())
 }
 
-pub fn clear(path: &Path, role: Role) -> Result<(), String> {
-    api_routers::update_zo_settings_root(path, |root| clear_in(root, role))
+pub fn clear(path: &Path, role: Role, expected: Option<&Reference>) -> Result<(), String> {
+    api_routers::update_zo_settings_root(path, |document| {
+        let root = Value::Object(document.clone());
+        let current = match role {
+            Role::Coding => coding_reference(&root)?,
+            Role::Judgment => reference(&root, connections::JUDGMENT_CONNECTION_KEY)?,
+        };
+        let recovery = role == Role::Judgment
+            && expected.is_none()
+            && judgment_provider::Provider::from_root(&root).is_err();
+        if current.as_ref() != expected && !recovery {
+            return Err("settings_changed".to_string());
+        }
+        if current.is_none() {
+            return Ok(());
+        }
+        clear_in(document, role)
+    })
 }
 
 pub(crate) fn uses_connection(root: &Value, id: &str) -> bool {
-    [
-        connections::CODING_CONNECTION_KEY,
-        connections::JUDGMENT_CONNECTION_KEY,
-    ]
-    .iter()
-    .any(|key| {
-        root.get("smart")
-            .and_then(|smart| smart.get(*key))
-            .and_then(|reference| reference.get("id"))
-            .and_then(Value::as_str)
-            == Some(id)
-    })
+    root.get("smart")
+        .and_then(|smart| smart.get(connections::JUDGMENT_CONNECTION_KEY))
+        .and_then(|reference| reference.get("id"))
+        .and_then(Value::as_str)
+        == Some(id)
+        || coding_reference(root)
+            .ok()
+            .flatten()
+            .is_some_and(|reference| reference.id == id)
 }

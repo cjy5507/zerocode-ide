@@ -5105,6 +5105,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "image",
+ "judgment-provider",
  "mock-anthropic-service",
  "nix 0.29.0",
  "plugins",

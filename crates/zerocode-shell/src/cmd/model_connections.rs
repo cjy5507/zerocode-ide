@@ -59,10 +59,13 @@ pub(crate) async fn select_model_connection(
 }
 
 #[tauri::command]
-pub(crate) async fn clear_model_connection(role: Role) -> Result<Catalog, String> {
+pub(crate) async fn clear_model_connection(
+    role: Role,
+    expected_reference: Option<Reference>,
+) -> Result<Catalog, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = path()?;
-        store::clear(&path, role)?;
+        store::clear(&path, role, expected_reference.as_ref())?;
         super::managed_judgment::settings_changed();
         store::catalog(&path, &Keychain::of_this_machine())
     })
@@ -81,12 +84,12 @@ pub(crate) struct ReloadStatus {
 #[tauri::command]
 pub(crate) async fn sync_model_connections(
     state: tauri::State<'_, crate::AppState>,
-) -> ReloadStatus {
+) -> Result<ReloadStatus, String> {
     let tasks: Vec<_> = crate::shell_runtime::model_connection_targets(&state)
         .into_iter()
         .map(|(_, channel)| {
-            tauri::async_runtime::spawn(async move {
-                crate::shell_runtime::reload_model_connection(channel).await
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::shell_runtime::reload_model_connection(channel)
             })
         })
         .collect();
@@ -98,5 +101,5 @@ pub(crate) async fn sync_model_connections(
             Ok(Err(_)) | Err(_) => status.unknown += 1,
         }
     }
-    status
+    Ok(status)
 }

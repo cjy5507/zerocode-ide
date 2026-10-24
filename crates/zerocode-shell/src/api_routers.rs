@@ -111,7 +111,9 @@ pub struct ProviderEntry {
     pub base_url: String,
     #[serde(default)]
     pub models: Vec<ProviderModel>,
+    #[serde(default = "default_requires_auth")]
     pub requires_auth: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_env: String,
     /// A window for every model of the row that states none of its own. The
     /// window never writes one — it states each model's own — but a row may
@@ -122,6 +124,10 @@ pub struct ProviderEntry {
     pub client_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::BTreeMap<String, String>>,
+}
+
+const fn default_requires_auth() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -698,12 +704,17 @@ fn save_router_with_writer(
     } else {
         keys.read(&service)?
     };
-    let requires_auth = source
+    let declared_auth = source
         .as_ref()
-        .and_then(|row| row.get("requires_auth"))
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        || !judgment_provider::connections::router_base_is_local(&save.base_url)
+        .map(|row| {
+            row.get("requires_auth")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false);
+    let requires_auth = declared_auth
+        || (foreign_env.is_none()
+            && !judgment_provider::connections::router_base_is_local(&save.base_url))
         || secret.is_some()
         || (!first_save
             && previous_key
@@ -741,19 +752,19 @@ fn save_router_with_writer(
         return Err("provider_model".to_string().into());
     }
     let written = serde_json::to_value(&entry).map_err(|error| error.to_string())?;
+    let mut prospective = source.clone().unwrap_or_else(|| serde_json::json!({}));
+    resave_row(
+        prospective
+            .as_object_mut()
+            .ok_or_else(|| "provider_settings".to_string())?,
+        written
+            .as_object()
+            .ok_or_else(|| "provider_settings".to_string())?,
+    );
+    prospective["connection"] = serde_json::json!(metadata);
     let semantic_change = source.as_ref().is_some_and(|source| {
-        [
-            "base_url",
-            "requires_auth",
-            "auth_env",
-            "client_fingerprint",
-            "headers",
-        ]
-        .iter()
-        .any(|key| {
-            source.get(*key).filter(|value| !value.is_null())
-                != written.get(*key).filter(|value| !value.is_null())
-        })
+        judgment_provider::connections::route_stamp(source).ok()
+            != judgment_provider::connections::route_stamp(&prospective).ok()
     }) || source.is_some()
         && (secret.is_some() || previous_auth != metadata.auth);
     if semantic_change && crate::model_connection_store::uses_connection(&root, &metadata.id) {
@@ -826,9 +837,30 @@ pub fn remove_router(
     name: &str,
     keys: &dyn RouterKeys,
 ) -> Result<Vec<ProviderEntry>, String> {
+    remove_router_if_current(path, name, None, keys)
+}
+
+pub(crate) fn remove_router_if_current(
+    path: &Path,
+    name: &str,
+    expected: Option<(&str, u64)>,
+    keys: &dyn RouterKeys,
+) -> Result<Vec<ProviderEntry>, String> {
     let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let existing = read_settings_text(path)?;
     let root = serde_json::Value::Object(settings_root(&existing)?);
+    if let Some((id, generation)) = expected {
+        let held =
+            judgment_provider::connections::row(&root, id).map_err(|error| error.to_string())?;
+        if judgment_provider::connections::metadata(held)
+            .map_err(|error| error.to_string())?
+            .generation
+            != generation
+            || held.get("name").and_then(serde_json::Value::as_str) != Some(name)
+        {
+            return Err("settings_changed".to_string());
+        }
+    }
     if let Some(row) = root
         .get("providers")
         .and_then(serde_json::Value::as_array)
@@ -1487,6 +1519,112 @@ mod tests {
             client_fingerprint: None,
             headers: None,
         }
+    }
+
+    #[test]
+    fn a_connection_rename_preserves_its_key_identity_and_legacy_coding_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        let rows =
+            save_router(&path, router_save("Old", None, Some("fixture-key")), &keys).unwrap();
+        let mut root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let before = judgment_provider::connections::metadata(&root["providers"][0]).unwrap();
+        root["model"] = serde_json::json!("Old/vendor/model");
+        std::fs::write(&path, root.to_string()).unwrap();
+        let mut save = router_save("Renamed", None, None);
+        save.base_url = rows[0].base_url.clone();
+        save.connection_id = Some(before.id.clone());
+        save.expected_generation = Some(before.generation);
+        let after = save_router(&path, save, &keys).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let metadata = judgment_provider::connections::metadata(&root["providers"][0]).unwrap();
+        assert_eq!(metadata.id, before.id);
+        assert_eq!(metadata.generation, before.generation);
+        assert_eq!(after[0].auth_env, rows[0].auth_env);
+        assert_eq!(metadata.aliases, ["Old"]);
+        assert_eq!(root["model"], "Renamed/vendor/model");
+        assert_eq!(
+            keys.held(&router_keychain_service_for_env(&after[0].auth_env))
+                .as_deref(),
+            Some("fixture-key")
+        );
+        assert_eq!(
+            remove_router_if_current(
+                &path,
+                "Renamed",
+                Some((&metadata.id, metadata.generation)),
+                &keys
+            )
+            .unwrap_err(),
+            "connection_in_use"
+        );
+        let reference = crate::model_connection_store::catalog(&path, &keys)
+            .unwrap()
+            .coding
+            .unwrap();
+        crate::model_connection_store::clear(
+            &path,
+            crate::model_connection_store::Role::Coding,
+            Some(&reference),
+        )
+        .unwrap();
+        assert!(
+            remove_router_if_current(
+                &path,
+                "Renamed",
+                Some((&metadata.id, metadata.generation)),
+                &keys
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_foreign_cli_connection_keeps_its_key_reference_and_declared_keyless_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let root = serde_json::json!({"providers":[{"name":"Legacy","base_url":"https://gateway.example.com/v1","models":["vendor/model"],"auth_env":"SHELL_FIXTURE_KEY","requires_auth":false,"custom":true}]});
+        std::fs::write(&path, root.to_string()).unwrap();
+        let metadata = judgment_provider::connections::metadata(&root["providers"][0]).unwrap();
+        let mut save = router_save("Renamed", None, None);
+        save.base_url = "https://gateway.example.com/v1".to_string();
+        save.connection_id = Some(metadata.id);
+        save.expected_generation = Some(metadata.generation);
+        let keys = HeldKeys::default();
+        let after = save_router(&path, save, &keys).unwrap();
+        assert_eq!(after[0].auth_env, "SHELL_FIXTURE_KEY");
+        assert!(!after[0].requires_auth);
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["providers"][0]["custom"], true);
+        assert_eq!(
+            keys.held(&router_keychain_service_for_env("SHELL_FIXTURE_KEY")),
+            None
+        );
+    }
+
+    #[test]
+    fn deleting_a_stale_row_does_not_remove_the_new_connection_with_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        save_router(
+            &path,
+            router_save("Fixture", None, Some("fixture-key")),
+            &keys,
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            remove_router_if_current(&path, "Fixture", Some(("old-connection", 0)), &keys)
+                .unwrap_err(),
+            "settings_changed"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]

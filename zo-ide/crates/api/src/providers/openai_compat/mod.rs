@@ -563,7 +563,11 @@ impl std::fmt::Debug for OpenAiCompatAuth {
 fn read_bound_connection_key(config: OpenAiCompatConfig) -> Result<Option<String>, ApiError> {
     let path = core_types::paths::default_config_home().join("settings.json");
     let _guard = zerocode_core::settings_file_lock::SettingsFileLock::acquire(&path)?;
-    let root: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)?.take(judgment_provider::MAX_RESPONSE_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > judgment_provider::MAX_RESPONSE_BYTES { return Err(ApiError::ConnectionChanged); }
+    let root: serde_json::Value = serde_json::from_slice(&bytes)?;
     let row = judgment_provider::connections::row(&root, config.connection_id.ok_or(ApiError::ConnectionChanged)?)
         .map_err(|_| ApiError::ConnectionChanged)?;
     let stamp = judgment_provider::connections::route_stamp(row).map_err(|_| ApiError::ConnectionChanged)?;
