@@ -502,6 +502,58 @@ mod tests {
         Facts { path, branch: None }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn git_slashes_and_a_native_root_name_the_same_managed_child() {
+        let configured = Ours {
+            worktree_root: r"C:\work\managed",
+            ..ours()
+        };
+        assert!(is_zerocode_managed(at("C:/work/managed/task"), configured));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_managed_root_keeps_its_component_boundary() {
+        let configured = Ours {
+            worktree_root: r"C:\work\managed",
+            ..ours()
+        };
+        for path in [
+            "C:/work/managed",
+            "C:/work/managed-neighbour/task",
+            "D:/work/managed/task",
+        ] {
+            assert!(
+                !is_zerocode_managed(at(path), configured),
+                "{path} is not a child of the managed root"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_slashes_and_a_native_unc_root_name_the_same_managed_child() {
+        let configured = Ours {
+            worktree_root: r"\\example.invalid\share\managed",
+            ..ours()
+        };
+        assert!(is_zerocode_managed(
+            at("//example.invalid/share/managed/task"),
+            configured
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_literal_backslash_does_not_create_a_unix_child_component() {
+        let configured = Ours {
+            worktree_root: "/work/managed",
+            ..ours()
+        };
+        assert!(!is_zerocode_managed(at(r"/work/managed\task"), configured));
+    }
+
     /// 우리가 만든 것이 무엇보다 먼저 판정된다.
     ///
     /// 우리 워크트리 디렉터리 안에 `.claude/worktrees/`가 있을 수 있다(에이전트가

@@ -776,6 +776,18 @@ fn a_verbatim_windows_prefix_comes_off_a_plain_disk_root_only() {
     );
 }
 
+#[test]
+fn a_reserved_verbatim_component_is_not_reinterpreted() {
+    let path = PathBuf::from(r"\\?\C:\work\CON");
+    assert_eq!(without_verbatim_prefix(path.clone()), path);
+}
+
+#[test]
+fn a_trailing_dot_in_a_verbatim_path_keeps_its_identity() {
+    let path = PathBuf::from(r"\\?\C:\work\checkout.");
+    assert_eq!(without_verbatim_prefix(path.clone()), path);
+}
+
 /// The stored words of a project become one policy: a blank command is none, a missing or zero
 /// limit is the default, and a blank pin is none.
 #[test]
