@@ -10505,6 +10505,20 @@ await test("non-default writes become canonical state before the second window b
     ],
     "color override gestures emitted a stale or duplicate patch",
   );
+  // t-73869: the pane's grid answers `OSC 10/11/12 ; ?` with what the window
+  // paints, so the renderer reports the resolved palette — theme plus the
+  // person's overrides — whenever it changes.
+  const paintedReport = backend.last("A", "report_terminal_colors")?.args?.report;
+  assertEqual(
+    {
+      foreground: paintedReport?.foreground,
+      background: paintedReport?.background,
+      brightBlue: paintedReport?.ansi?.[12],
+      named: paintedReport?.ansi?.length,
+    },
+    { foreground: "#f8f8f2", background: "#102030", brightBlue: "#abcdef", named: 16 },
+    "the renderer painted a terminal palette it never reported to the shell",
+  );
 
   assertEqual(backend.settings.default_agent, { kind: "blank" }, "Blank was not stored canonically");
   assert(backend.settings.terminal_prefs.font_size === 16, "terminal prefs did not persist");

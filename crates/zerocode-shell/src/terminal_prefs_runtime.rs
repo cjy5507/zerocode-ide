@@ -370,6 +370,27 @@ pub(super) struct TerminalThemeColors {
     pub(super) bright_white: String,
 }
 
+/// The colours the window painted its terminals with, as the renderer
+/// resolved them (theme, light or dark variant, the person's overrides).
+///
+/// The renderer is the only place that knows what is on screen, so the grid
+/// is told this rather than working it out a second time and drifting from
+/// it. `ansi` is the sixteen named colours, black through bright white.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TerminalColorsReport {
+    pub(crate) foreground: String,
+    pub(crate) background: String,
+    pub(crate) cursor: String,
+    pub(crate) ansi: Vec<String>,
+}
+
+impl TerminalColorsReport {
+    pub(crate) fn into_colors(&self) -> Result<zerocode_pty::TerminalColors, String> {
+        Err("not wired yet".to_string())
+    }
+}
+
 pub(super) fn terminal_theme_catalog() -> &'static BTreeMap<String, TerminalThemeColors> {
     static CATALOG: OnceLock<BTreeMap<String, TerminalThemeColors>> = OnceLock::new();
     CATALOG.get_or_init(|| {
