@@ -59,6 +59,7 @@ tools-test:
     t -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v; \
     t tools/release/tests/test_lane.py; \
     t tools/release/tests/test_coord_receipt.py; \
+    t tools/release/tests/test_prebatch.py; \
     t tools/release/tests/test_workspace_units.py; \
     macos "win-check cross-compiles from a Mac (cargo-xwin, Homebrew llvm)" tools/release/tests/test_win_check.py; \
     t tools/release/tests/test_bump.py; \
@@ -103,6 +104,7 @@ tools-test:
     t tools/tests/test_question_discovery.py; \
     t tools/tests/test_jev_review_study.py; \
     t tools/tests/test_challenger_replay_seed.py; \
+    t tools/tests/test_delegation_eval.py; \
     t tools/tests/test_claude_code_panel_rules.py; \
     t tools/tests/test_codegraph_bench.py; \
     t tools/login-renewal-probe/test_probe.py; \
