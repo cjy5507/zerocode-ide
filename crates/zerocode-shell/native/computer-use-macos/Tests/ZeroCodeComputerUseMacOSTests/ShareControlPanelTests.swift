@@ -4,6 +4,12 @@ import XCTest
 
 /// Synthetic events and window rows only; no panel is ordered and no input is posted.
 final class ShareControlPanelTests: XCTestCase {
+    func testMissingOrBlankControlLabelKeepsTheHumanControlVisible() {
+        XCTAssertEqual(ShareControlPanel.controlLabel(""), "Take control")
+        XCTAssertEqual(ShareControlPanel.controlLabel(" \n"), "Take control")
+        XCTAssertEqual(ShareControlPanel.controlLabel("제어권 가져오기"), "제어권 가져오기")
+    }
+
     func testPanelNeverTakesKeyboardOrMainWindow() {
         MainActor.assumeIsolated {
             let panel = ShareTakePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -32,6 +38,23 @@ final class ShareControlPanelTests: XCTestCase {
         state.update(target: nil, generation: 2, revision: 3)
         XCTAssertNil(state.target)
         XCTAssertFalse(state.takeControl(displayedRevision: 1))
+    }
+
+    func testPendingPressSurvivesANewerShareRenoticeUntilHandBack() throws {
+        var state = ShareControlState()
+        state.update(target: "Sample", generation: 0, revision: 1)
+        XCTAssertTrue(state.takeControl(displayedRevision: 1))
+        state.update(target: "Sample", generation: 0, revision: 2)
+        XCTAssertTrue(state.takenBack)
+        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack)) {
+            XCTAssertEqual(($0 as? ProviderError)?.code, "person_took_control")
+        }
+        // The window acknowledges the press, then the person hands back.
+        state.update(target: "Sample", generation: 1, revision: 3, takenBack: true)
+        XCTAssertTrue(state.takenBack)
+        state.update(target: "Sample", generation: 2, revision: 4)
+        XCTAssertFalse(state.takenBack)
+        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack))
     }
 
     func testHelperIsExcludedAndPanelCoordinatesAreBlockedEvenWithAllowSelf() throws {
