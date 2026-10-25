@@ -982,8 +982,8 @@ function chordOf(event) {
   return parts.join("+");
 }
 
-function closeLane(id) {
-  invoke("close_lane", { id }).catch(showError).finally(refreshWorktrees);
+function closeLane(id, hand = handNow()) {
+  invoke("close_lane", { id }, { hand }).catch(showError).finally(refreshWorktrees);
 }
 
 /* Keybindings as data, not as branches.

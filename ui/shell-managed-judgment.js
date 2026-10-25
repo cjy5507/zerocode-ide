@@ -50,7 +50,7 @@ const managedJudgmentController = {
       if (action === "activate") void this.activate(model);
       else if (action === "prepare") void this.perform("managed_judgment_prepare_model_runtime", this.modelArgs(model));
       else if (action === "install") void this.perform("managed_judgment_install", this.modelArgs(model));
-      else if (action === "remove") void this.perform("managed_judgment_remove", this.modelArgs(model));
+      else if (action === "remove") void this.perform("managed_judgment_remove", this.modelArgs(model), { hand: handNow() });
       else if (action === "stop") void this.perform("managed_judgment_stop", { serverId: this.snapshot.server.id });
       else if (action === "connect") judgmentProviderController.connectModel(model);
       else if (action === "inspect-source") judgmentModelSourceController.inspectAddress(model.source);
@@ -320,7 +320,8 @@ const managedJudgmentController = {
     await refreshTypeSafe();
   },
 
-  async perform(command, args = {}) {
+  // `hand` is a person-only command's (shell-boot.js `handNow`, t-75209).
+  async perform(command, args = {}, { hand } = {}) {
     if (this.busy || this.operating() || typesafeBusy || judgmentModelSourceController.busy) return;
     this.busy = true;
     const importing = typeof args.sourceDirectory === "string";
@@ -331,7 +332,7 @@ const managedJudgmentController = {
     this.render();
     this.say("");
     try {
-      if (!this.accept(await invoke(command, args))) throw new Error("invalid_snapshot");
+      if (!this.accept(await invoke(command, args, { hand }))) throw new Error("invalid_snapshot");
     } catch (error) {
       if (importing) {
         if (this.importAttempt.key === this.importKey()) this.sayImport(this.failure(error));

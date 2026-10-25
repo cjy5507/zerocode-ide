@@ -9120,11 +9120,14 @@ function terminalCloseFailure(error) {
 // Keeping the view while this waits leaves both the screen and a retry door.
 const terminalCloseRequests = new Map();
 
-function closeTermAndView(term, road) {
+// `hand` is the hand of the flow that asked (shell-boot.js `flowHand`,
+// t-75209): ending a terminal is the person's (t-74975), and the close goes
+// out a microtask later, where the event that asked is already over.
+function closeTermAndView(term, road, hand = handNow()) {
   const waiting = terminalCloseRequests.get(term);
   if (waiting) return waiting.promise;
   const receipt = { promise: null, exited: false };
-  const request = Promise.resolve().then(() => invoke("close_term", { term })).then(() => {
+  const request = Promise.resolve().then(() => invoke("close_term", { term }, { hand })).then(() => {
     dropClosedTermLeaf(term, road);
     return true;
   }, (error) => {
@@ -9162,7 +9165,7 @@ function dropClosedTermLeaf(term, road) {
   return true;
 }
 
-async function closeTerminalTab(tab, road) {
+async function closeTerminalTab(tab, road, hand = handNow()) {
   const wake = waking.get(tab.id);
   if (wake) await wake;
   const terms = paneLeaves(tab.layout);
@@ -9170,12 +9173,12 @@ async function closeTerminalTab(tab, road) {
     dropTab(tab.id);
     return true;
   }
-  for (const term of terms) await closeTermAndView(term, road);
+  for (const term of terms) await closeTermAndView(term, road, hand);
   // A newly opened leaf is not part of this close's snapshot either.
   return !tabs.includes(tab);
 }
 
-async function closePaneLeaf(tab, going) {
+async function closePaneLeaf(tab, going, hand = handNow()) {
   const staying = paneLeaves(tab.layout).filter((term) => term !== going);
   if (staying.length === 0) return;
   if (termHoldsAgent(going)) {
@@ -9189,7 +9192,7 @@ async function closePaneLeaf(tab, going) {
     noteWorkerRoomChange(going, "background");
     noteLeafLeft(going, tab, "close-pane", `detached ${tab.worktree}`);
   } else {
-    if (!(await closeTermAndView(going, "close-pane"))) return;
+    if (!(await closeTermAndView(going, "close-pane", hand))) return;
     if (document.activeElement === document.body) keySink.focus();
     return;
   }
@@ -9200,6 +9203,7 @@ async function closePaneLeaf(tab, going) {
 }
 
 function closeActivePane() {
+  const started = handNow();
   const tab = currentTab();
   if (tab?.kind !== "term") return false;
   const leaves = paneLeaves(tab.layout);
@@ -9214,8 +9218,8 @@ function closeActivePane() {
     void terminalCloseNeedsConfirmation([going]).then(async (needsConfirmation) => {
       closeChecks.delete(key);
       if (!paneLeaves(tab.layout).includes(going)) return;
-      if (needsConfirmation && !(await askAboutRunning(tab, [going]))) return;
-      if (paneLeaves(tab.layout).includes(going)) closePaneLeaf(tab, going);
+      if (needsConfirmation && !(await askAboutRunning(tab, [going], started))) return;
+      if (paneLeaves(tab.layout).includes(going)) closePaneLeaf(tab, going, flowHand(started));
     });
     return true;
   }

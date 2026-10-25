@@ -84,7 +84,7 @@ const modelConnectionsController = {
         holder.replaceChildren(this.node("p", "settings-hint", this.failure(error)), this.button(t("settings.managed.refresh", "상태 새로고침"), () => void this.refresh()));
         if ((typeof error === "string" ? error : error?.message) === "settings_changed") {
           holder.append(this.button(t("settings.connections.clear", "용도 해제 · 이전 선택 복원"), async () => {
-            try { await invoke("clear_model_connection", { role: "judgment" }); await refreshTypeSafe(); await this.refresh(); }
+            try { await invoke("clear_model_connection", { role: "judgment" }, { hand: handNow() }); await refreshTypeSafe(); await this.refresh(); }
             catch (failure) { showError(this.failure(failure)); }
           }));
         }
@@ -322,7 +322,7 @@ const modelConnectionsController = {
       } else {
         this.state = await invoke(action === "clear" ? "clear_model_connection" : "select_model_connection", {
           role, reference, expectedReference: this.state?.[role] ?? null, expectedProviderIdentity: this.state.activeProviderIdentity,
-        });
+        }, { hand: handNow() });
         this.drafts.delete(role);
         this.results.set(role, { message: t("settings.connections.applied", "저장된 설정을 적용했습니다.") });
         await refreshTypeSafe();

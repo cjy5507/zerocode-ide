@@ -662,20 +662,22 @@ function paintScmPrimary() {
  * remote-tracking ref, so the fetch IS what the lease will be measured against.
  * Fetch and fast-forward are the menu's: `gitFetch` and `gitFastForward`
  * (`pull --ff-only`) in Orca's own argv. */
-async function runScmAction(action) {
-  if (action === "publish" || action === "push") return invoke("scm_push", { forceWithLease: false });
-  if (action === "force_push") return invoke("scm_push", { forceWithLease: true });
+async function runScmAction(action, started) {
+  // A push is the person's (t-74975): it carries the hand the press started
+  // with, after Sync's fetch and pull too (shell-boot.js `flowHand`, t-75209).
+  if (action === "publish" || action === "push") return invoke("scm_push", { forceWithLease: false }, { hand: flowHand(started) });
+  if (action === "force_push") return invoke("scm_push", { forceWithLease: true }, { hand: flowHand(started) });
   if (action === "pull") return invoke("scm_pull");
   if (action === "fetch") return invoke("scm_fetch");
   if (action === "fast_forward") return invoke("scm_pull", { ffOnly: true });
   await invoke("scm_fetch");
   upstreamState = await invoke("upstream_status");
   paintScmPrimary();
-  if (shouldForcePushWithLease(upstreamState)) return invoke("scm_push", { forceWithLease: true });
+  if (shouldForcePushWithLease(upstreamState)) return invoke("scm_push", { forceWithLease: true }, { hand: flowHand(started) });
   await invoke("scm_pull");
   upstreamState = await invoke("upstream_status");
   paintScmPrimary();
-  if (upstreamState?.ahead > 0) return invoke("scm_push", { forceWithLease: false });
+  if (upstreamState?.ahead > 0) return invoke("scm_push", { forceWithLease: false }, { hand: flowHand(started) });
   return null;
 }
 
@@ -686,13 +688,13 @@ async function runScmAction(action) {
  * the button promotes itself to Force Push (the remote only ever held old
  * copies) or demotes itself to Sync (somebody else's work is there now) on
  * the fresh answer. Nothing else re-arms the lease. */
-async function runScmRemote(action) {
+async function runScmRemote(action, started = handNow()) {
   if (syncRunning) return;
   syncRunning = true;
   syncFailure = null;
   paintScmPrimary();
   try {
-    await runScmAction(action);
+    await runScmAction(action, started);
   } catch (failure) {
     // The backend answers a refused push as `{ kind, text }`; everything else
     // (a pull, a fetch) still answers as a sentence, so both shapes land here.
@@ -903,17 +905,18 @@ function closeScmMenu() {
 }
 
 async function runScmMenuAction(kind) {
+  const started = handNow();
   if (kind === "commit") return commitStaged();
   if (kind === "commit_push" || kind === "commit_sync") {
     // 실측 순서(`runCompoundCommitAction`): 커밋이 서야 원격이 걷는다 — 그리고
     // push 쪽은 리스 승격감이면 강제 푸시로 승격해 걷는다.
     if (!(await commitStaged())) return;
-    if (kind === "commit_sync") return runScmRemote("sync");
-    return runScmRemote(shouldForcePushWithLease(upstreamState) ? "force_push" : "push");
+    if (kind === "commit_sync") return runScmRemote("sync", started);
+    return runScmRemote(shouldForcePushWithLease(upstreamState) ? "force_push" : "push", started);
   }
   if (kind === "create_pr") return runScmPrIntent();
   if (kind === "abort") return abortConflictOperation();
-  return runScmRemote(kind);
+  return runScmRemote(kind, started);
 }
 
 el("scm-primary-more").addEventListener("click", () => {
@@ -1824,7 +1827,7 @@ async function abortConflictOperation() {
   if (button.disabled) return;
   button.disabled = true;
   try {
-    await invoke("abort_conflict_operation", { operation: conflictCard.operation });
+    await invoke("abort_conflict_operation", { operation: conflictCard.operation }, { hand: handNow() });
     await refreshScm();
     await reloadBadges();
   } catch (error) {
@@ -2880,16 +2883,19 @@ el("scm-discard-scrim").addEventListener("mousedown", (event) => {
   if (event.target === el("scm-discard-scrim")) closeScmDiscard();
 });
 el("scm-discard-go").addEventListener("click", () => {
+  // The press's hand, carried past the unstage and the status read below
+  // (shell-boot.js `flowHand`, t-75209): both drops are the person's (t-74975).
+  const started = handNow();
   const ask = scmDiscardAsk;
   closeScmDiscard();
   if (!ask) return;
   void runScmBulk(async () => {
     if (ask.kind === "entry") {
       if (ask.group === "untracked")
-        return invoke("delete_untracked", { paths: [ask.entry.path] });
-      return invoke("discard_paths", { paths: [ask.entry.path] });
+        return invoke("delete_untracked", { paths: [ask.entry.path] }, { hand: flowHand(started) });
+      return invoke("discard_paths", { paths: [ask.entry.path] }, { hand: flowHand(started) });
     }
-    if (ask.area === "untracked") return invoke("delete_untracked", { paths: ask.paths });
+    if (ask.area === "untracked") return invoke("delete_untracked", { paths: ask.paths }, { hand: flowHand(started) });
     if (ask.area === "staged") {
       // Unstage first, then split by what git NOW says: a staged NEW file
       // has no HEAD version to restore — after the unstage it is untracked,
@@ -2907,10 +2913,10 @@ el("scm-discard-go").addEventListener("click", () => {
       );
       const doomed = ask.paths.filter((path) => loose.has(path));
       const tracked = ask.paths.filter((path) => !loose.has(path));
-      if (doomed.length > 0) await invoke("delete_untracked", { paths: doomed });
-      return invoke("discard_paths", { paths: tracked });
+      if (doomed.length > 0) await invoke("delete_untracked", { paths: doomed }, { hand: flowHand(started) });
+      return invoke("discard_paths", { paths: tracked }, { hand: flowHand(started) });
     }
-    return invoke("discard_paths", { paths: ask.paths });
+    return invoke("discard_paths", { paths: ask.paths }, { hand: flowHand(started) });
   });
 });
 
@@ -5097,6 +5103,8 @@ function scmPrNote(tone, words) {
 }
 
 async function runScmPrIntent() {
+  // The door's hand, carried to the push past the ladder's awaits (t-75209).
+  const started = handNow();
   if (scmPrBusy) return;
   if (scmEntries.some((one) => one.conflict)) {
     scmPrNote("halt", t("pr.ladder.conflicts", "{{pr}}을(를) 만들기 전에 충돌을 해결하세요.", { pr: "PR" }));
@@ -5188,7 +5196,7 @@ async function runScmPrIntent() {
             : t("pr.ladder.pushing", "commits을 푸시하는 중…"),
       );
       try {
-        await invoke("scm_push", { forceWithLease: force });
+        await invoke("scm_push", { forceWithLease: force }, { hand: flowHand(started) });
       } catch {
         scmPrNote("halt", t("pr.ladder.remoteFailed", "원격 브랜치를 업데이트할 수 없습니다. Create PR을 다시 시도하세요."));
         return;
@@ -7667,7 +7675,7 @@ function notesShelfRow(note) {
   drop.setAttribute("aria-label", t("review.delete", "노트 삭제"));
   drop.addEventListener("click", async () => {
     try {
-      await invoke("delete_diff_note", { id: note.id });
+      await invoke("delete_diff_note", { id: note.id }, { hand: handNow() });
     } catch (error) {
       showError(error);
       return;
@@ -7697,6 +7705,7 @@ async function openNoteAt(note) {
 /* 지우기는 물어보고 한다 — 한 파일의 것이든 전부든(원본
  * PendingDiffCommentsClear의 두 종류가 한 문을 쓰는 그 모양). */
 async function askClearNotes(filePath = null) {
+  const started = handNow();
   const count = filePath
     ? diffNotes.filter((note) => note.file_path === filePath).length
     : diffNotes.length;
@@ -7715,7 +7724,7 @@ async function askClearNotes(filePath = null) {
   });
   if (!yes) return;
   try {
-    await invoke("clear_diff_notes", { workspace: activeWorktreePath, filePath });
+    await invoke("clear_diff_notes", { workspace: activeWorktreePath, filePath }, { hand: flowHand(started) });
   } catch (error) {
     showError(error);
     return;
@@ -7839,7 +7848,7 @@ function noteCard(host, note) {
   });
   act("trash", t("review.delete", "노트 삭제"), async () => {
     try {
-      await invoke("delete_diff_note", { id: note.id });
+      await invoke("delete_diff_note", { id: note.id }, { hand: handNow() });
     } catch (error) {
       showError(error);
       return;

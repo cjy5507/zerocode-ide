@@ -610,7 +610,7 @@ async function ackInboxBatch(item, pressed) {
   }
   paintInboxViews();
   try {
-    await invoke("desk_ack", { run: item.run, delivery: item.letter.delivery_id, retryRequest: held.retry.id });
+    await invoke("desk_ack", { run: item.run, delivery: item.letter.delivery_id, retryRequest: held.retry.id }, { hand: handNow() });
     held.done = true;
     held.retry = null;
     void refreshInbox();

@@ -9365,6 +9365,9 @@ async function jumpFromArtifact(jump, id) {
 const artifactOpening = new Set();
 
 async function artifactAction(view, action, id) {
+  // The press's hand, carried past the delete question (shell-boot.js
+  // `flowHand`, t-75209): a delete is the person's (t-74975).
+  const started = handNow();
   const row = artifactRows.get(id);
   if (!row) return;
   try {
@@ -9395,7 +9398,7 @@ async function artifactAction(view, action, id) {
         cancel: false,
       });
       if (answer !== true) return;
-      const gone = await invoke("artifact_delete", { id, confirmed: true });
+      const gone = await invoke("artifact_delete", { id, confirmed: true }, { hand: flowHand(started) });
       if (gone) {
         artifactRows.delete(id);
         indexArtifactTasks();
