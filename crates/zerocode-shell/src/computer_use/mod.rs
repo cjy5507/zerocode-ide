@@ -54,6 +54,7 @@ pub mod recipes;
 pub mod reflex;
 pub mod report;
 pub(crate) mod screenshot_png;
+pub(crate) mod self_surface;
 pub mod sequence;
 pub mod state;
 pub(crate) mod surface_execution;
@@ -127,6 +128,11 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// later request gets one clean restart; provider refusals keep its snapshots.
 pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     input_policy::ensure_current()?;
+    // ZeroCode's own app is the page's to answer, before any helper road
+    // (t-73906): no OS event is made in the window the person works in.
+    if let Some(answer) = self_surface::route(method, &params) {
+        return answer;
+    }
     browser_route::provider(method, &params)?;
     let params = input_policy::current().prepare_provider(method, params)?;
     if let Some(params) = params.as_object() {

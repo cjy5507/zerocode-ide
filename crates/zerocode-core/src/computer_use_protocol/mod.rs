@@ -30,6 +30,7 @@ pub mod marks;
 pub mod pointer;
 pub mod reflex;
 pub mod render;
+pub mod self_surface;
 pub mod text_field;
 pub mod validate;
 pub mod words;
@@ -103,6 +104,19 @@ pub mod error_code {
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
     pub const APP_NOT_FOUND: &str = "app_not_found";
     pub const APP_BLOCKED: &str = "app_blocked";
+    /// A control of ZeroCode's own window the window never presses for an
+    /// agent: a question to the person, a secret field or its pane, a
+    /// terminal, a person-only control or a setting (t-73906). Nothing was
+    /// pressed; the message says which mark refused.
+    pub const SELF_SENSITIVE: &str = "self_sensitive";
+    /// The person's focus is in that field of ZeroCode's own window, or they
+    /// typed in it a moment ago: nothing was pressed. Look again later.
+    pub const PERSON_TYPING: &str = "person_typing";
+    /// The act names an app or a window outside the one the person shared.
+    pub const SHARE_SCOPE: &str = "share_scope";
+    /// The person took control of the shared window back; this request and
+    /// every later one under that share is refused. Ask to share again.
+    pub const PERSON_TOOK_CONTROL: &str = "person_took_control";
     /// Desktop browser page input must use the window's work browser.
     pub const BROWSER_REQUIRES_WORK_BROWSER: &str = "browser_requires_work_browser";
     pub const WINDOW_NOT_FOUND: &str = "window_not_found";
