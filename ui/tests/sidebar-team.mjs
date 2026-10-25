@@ -881,6 +881,32 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
       JSON.stringify(opened),
     );
 
+    /* ②b — the keyboard: the head is a row the arrows walk, and a press on it opens or folds the family with the focus
+     * staying on the head. */
+    const keys = await page.evaluate(async () => {
+      const key = (target, init) => target.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+      const headNode = () => document.querySelector('#sidebar-team [data-team-key="g:run-fam/t-9100"]');
+      headNode().focus();
+      key(document.activeElement, { key: "ArrowDown" });
+      const down = document.activeElement?.dataset.teamKey ?? null;
+      key(document.activeElement, { key: "ArrowUp" });
+      const up = document.activeElement?.dataset.teamKey ?? null;
+      headNode().click();
+      await window.__TEAM_SETTLED__();
+      const folded = { expanded: headNode().getAttribute("aria-expanded"), focus: document.activeElement === headNode(),
+        rows: window.__TEAM_KEYS__().length };
+      headNode().click();
+      await window.__TEAM_SETTLED__();
+      return { down, up, folded, reopened: headNode().getAttribute("aria-expanded"), rows: window.__TEAM_KEYS__().length,
+        stops: [...document.querySelectorAll("#sidebar-team > .team-row")].filter((node) => node.tabIndex === 0).length };
+    });
+    ok(
+      "↓ from the head walks into the family's first row and ↑ comes back; a press folds the family and opens it again with the focus left on the head, and one row holds the tab stop throughout",
+      keys.down === "w:run-fam/w-f1" && keys.up === "g:run-fam/t-9100" && keys.folded.expanded === "false" && keys.folded.focus &&
+        keys.folded.rows === 5 && keys.reopened === "true" && keys.rows === 9 && keys.stops === 1,
+      JSON.stringify(keys),
+    );
+
     /* ③ — the line under a worker. */
     const line = await page.evaluate(async () => {
       const node = document.querySelector('#sidebar-team [data-team-key="w:run-fam/w-h1"]');
@@ -908,7 +934,10 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
       const from = { dressed: dressed(), words: words() };
       let changed = 0;
       const watch = new MutationObserver((records) => { changed += records.length; });
-      watch.observe(document.getElementById("sidebar-team"), { subtree: true, childList: true, characterData: true, attributes: true });
+      // What a person reads: words, tips, labels and what is shown. A working dot's ring turns on its own beat
+      // (`spinWorktreeDots`) and is not a word the clock wrote.
+      watch.observe(document.getElementById("sidebar-team"), { subtree: true, childList: true, characterData: true, attributes: true,
+        attributeFilter: ["data-tip", "aria-label", "aria-expanded", "hidden", "data-said-ms"] });
       for (let minute = 0; minute < 8; minute += 1) {
         window.__SKEW__ += 60_000;
         paintSidebarTeam();
