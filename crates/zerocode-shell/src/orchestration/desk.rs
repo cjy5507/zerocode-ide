@@ -4139,6 +4139,10 @@ mod tests {
         let start = crate::now_epoch_ms() - HOUR_MS;
         let mut ledger = Ledger::new();
         let (first, _) = a_worker_carrying_a_task(&mut ledger, start);
+        // A hand-in somebody is coming back to has a live seat to come back to.
+        ledger
+            .seat_coordinator(&first, "team-news/%1", None, start + 49)
+            .expect("a seat");
         let second = ledger.create_run("desk-second", start + 50);
         ledger
             .start_worker(&second, "codex", ("team-second", "%3"), None, start + 51)
@@ -4210,8 +4214,8 @@ mod tests {
             })
             .collect();
 
-        let desk = desk_snapshot(&ledger, |_| None, no_cost);
-        let inbox = super::inbox::inbox_of(&desk, &panes);
+        let desk = desk_snapshot(&ledger, |seat| (seat == "team-news/%1").then_some(7), no_cost);
+        let inbox = crate::orchestration::inbox::inbox_of(&desk, &panes);
         let cards: usize = desk.runs.iter().map(|run| run.mail).sum();
         assert_eq!(desk.counts.mail, 3, "{:?}", desk.counts);
         assert_eq!(
@@ -4255,7 +4259,7 @@ mod tests {
         assert_eq!(inbox.counts.all, inbox.items.len(), "{:?}", inbox.counts);
         let order: Vec<&str> = inbox.items.iter().map(|item| item.tab).collect();
         let mut sorted = order.clone();
-        sorted.sort_by_key(|tab| super::inbox::TABS.iter().position(|one| one == tab));
+        sorted.sort_by_key(|tab| crate::orchestration::inbox::TABS.iter().position(|one| one == tab));
         assert_eq!(order, sorted, "the tabs stand in the page's order");
     }
 }
