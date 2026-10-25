@@ -385,6 +385,10 @@ struct Book {
     /// The `# task:` line of each ended job's file in `done/`, read once per
     /// version of it; no stamp while the file is not there yet.
     ended_tasks: BTreeMap<String, (Option<FileStamp>, Vec<String>)>,
+    /// Runs between tying the ended jobs and signing what was tied, so a test
+    /// can put a file into that gap (the review R5).
+    #[cfg(test)]
+    after_tie: Option<fn(&Roots)>,
 }
 
 impl Book {
@@ -462,6 +466,10 @@ impl Book {
         let paused = queue.as_ref().is_some_and(|look| look.paused);
         let mut jobs = self.jobs(queue.as_ref(), from_ms);
         self.tie_ended(&mut jobs);
+        #[cfg(test)]
+        if let Some(act) = self.after_tie {
+            act(&self.roots);
+        }
         // What this answer tied is no change the next time.
         self.signature = with_ties(read_so_far, self.ties_now());
         Timeline {

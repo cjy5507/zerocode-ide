@@ -1000,6 +1000,61 @@ fn a_done_file_that_arrives_late_or_is_rewritten_moves_the_revision() {
     );
 }
 
+/// A done file that arrives between the look tying the ended jobs and the
+/// look signing what it tied is a change the next look must report: the
+/// signature holds the stamps the tie was made from, not the disk's a moment
+/// later (the review R5, P2-4).
+#[test]
+fn a_done_file_arriving_in_the_gap_after_the_tie_is_a_change_the_next_look_reports() {
+    const GAP: &str = "1792540200-w2-t2-red";
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let roots = line_of(
+        scratch.path(),
+        &[(GAP, "# who: w2-t2\n# task: t-2\n", 0, 50)],
+        &[],
+    );
+    let file = roots
+        .line
+        .as_ref()
+        .expect("the line")
+        .join(QUEUE_DONE)
+        .join(format!("{GAP}{JOB_SUFFIX}"));
+    std::fs::remove_file(&file).expect("the file is not there yet");
+    let ask = |known: Option<u64>| Ask {
+        known,
+        from_ms: Some(NOW_MS - 5 * 24 * HOUR_MS),
+        log: None,
+    };
+    let mut book = Book::default();
+    // Reads once so the roots are the book's own and the hook survives.
+    book.read(&roots, &ask(None), NOW_MS, KST);
+    book.after_tie = Some(|roots| {
+        let done = roots.line.as_ref().expect("the line").join(QUEUE_DONE);
+        std::fs::write(
+            done.join(format!("{GAP}{JOB_SUFFIX}")),
+            "# who: w2-t2\n# task: t-2\n",
+        )
+        .expect("arrives in the gap");
+    });
+    let tied = book.read(&roots, &ask(None), NOW_MS, KST);
+    assert!(
+        job(&tied, GAP).tasks.is_empty(),
+        "the tie was made before the file came"
+    );
+    book.after_tie = None;
+    let next = book.read(&roots, &ask(Some(tied.revision)), NOW_MS, KST);
+    assert!(
+        !next.unchanged,
+        "the file that came in the gap is a change the view was never told of"
+    );
+    assert_eq!(job(&next, GAP).tasks, ["t-2"]);
+    assert!(
+        book.read(&roots, &ask(Some(next.revision)), NOW_MS, KST)
+            .unchanged,
+        "and once told, it is no change again"
+    );
+}
+
 /// A job naming no task ties itself to none, and the answer says nothing of
 /// tasks rather than a zero.
 #[test]
