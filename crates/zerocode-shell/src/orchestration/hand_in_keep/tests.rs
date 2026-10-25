@@ -119,6 +119,7 @@ fn desk_row(message: &str) -> DeskTask {
         hand_in: Default::default(),
         progress: None,
         next_step: crate::orchestration::desk::next_step("reported", None),
+        on_remote: None,
         times: None,
         left: None,
         touched_ms: 1,

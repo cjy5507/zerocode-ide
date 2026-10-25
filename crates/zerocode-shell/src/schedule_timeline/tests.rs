@@ -949,6 +949,58 @@ fn a_jobs_task_line_ties_its_run_to_each_task_it_names_and_shares_it() {
     );
 }
 
+/// A done file that comes after its runner line, or whose `# task:` line is
+/// rewritten, moves the answer: a view that knows the last revision is not
+/// told "unchanged" over a tie it never saw (the review R2, P2-4). A tie the
+/// look read is no change the next time.
+#[test]
+fn a_done_file_that_arrives_late_or_is_rewritten_moves_the_revision() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let (first, late) = ("1792540100-w1-t1-red", "1792540200-w2-t2-red");
+    let roots = line_of(
+        scratch.path(),
+        &[
+            (first, "# who: w1-t1\n# task: t-1\n", 0, 100),
+            (late, "# who: w2-t2\n# task: t-2\n", 0, 50),
+        ],
+        &[],
+    );
+    let done = roots.line.as_ref().expect("the line").join(QUEUE_DONE);
+    let file = |name: &str| done.join(format!("{name}{JOB_SUFFIX}"));
+    std::fs::remove_file(file(late)).expect("the late job's file is not there yet");
+    let ask = |known: Option<u64>| Ask {
+        known,
+        from_ms: Some(NOW_MS - 5 * 24 * HOUR_MS),
+        log: None,
+    };
+    let mut book = Book::default();
+    let read = book.read(&roots, &ask(None), NOW_MS, KST);
+    assert_eq!(job(&read, first).tasks, ["t-1"]);
+    assert!(job(&read, late).tasks.is_empty());
+    assert!(
+        book.read(&roots, &ask(Some(read.revision)), NOW_MS, KST)
+            .unchanged,
+        "a look where nothing moved"
+    );
+
+    std::fs::write(file(first), "# who: w1-t1\n# task: t-5\n").expect("rewritten");
+    stamp_at(&file(first), kst(21, 9, 40, 0));
+    std::fs::write(file(late), "# who: w2-t2\n# task: t-2\n").expect("arrived");
+    let moved = book.read(&roots, &ask(Some(read.revision)), NOW_MS, KST);
+    assert!(
+        !moved.unchanged,
+        "the ties moved and the view was told nothing"
+    );
+    assert!(moved.revision > read.revision);
+    assert_eq!(job(&moved, first).tasks, ["t-5"]);
+    assert_eq!(job(&moved, late).tasks, ["t-2"]);
+    assert!(
+        book.read(&roots, &ask(Some(moved.revision)), NOW_MS, KST)
+            .unchanged,
+        "a tie the look read is no change the next time"
+    );
+}
+
 /// A job naming no task ties itself to none, and the answer says nothing of
 /// tasks rather than a zero.
 #[test]

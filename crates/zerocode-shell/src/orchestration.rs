@@ -2527,11 +2527,15 @@ fn transient_failed_turn(
     })
 }
 
-/// A failed turn as a ledger row carries it (t-69010).
+/// A failed turn as a ledger row carries it (t-69010), with the attempt and
+/// the failure's letter: a press names the failure the person was shown (the
+/// review R2, P2-10).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub(crate) struct TurnFailed {
     pub(crate) error: String,
     pub(crate) at_ms: i64,
+    pub(crate) dispatch: String,
+    pub(crate) letter: String,
 }
 
 /// The board's THIRD source. Its first two — the panes this window opened and
@@ -3054,6 +3058,9 @@ pub(crate) fn refresh_board_ledger() {
     // Whether each batch's repository has the integration queue on is the project's setting,
     // laid over the desk the same way, outside the ledger's view (t-45315).
     crate::land_batch::dress_desk(Arc::make_mut(&mut next.desk));
+    // Whether each landed task's commit is on the remote, from the answers the beat's
+    // look kept (t-73910 W4-2) — no git here.
+    crate::remote_landing::dress_desk(Arc::make_mut(&mut next.desk));
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
@@ -3243,6 +3250,8 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 Some(TurnFailed {
                     error: said["error"].as_str().unwrap_or_default().to_string(),
                     at_ms: said["turnEndedMs"].as_i64().unwrap_or(newest.created_ms),
+                    dispatch: attempt.id.clone(),
+                    letter: newest.id.clone(),
                 })
             });
             let wall =
