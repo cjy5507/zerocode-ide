@@ -11,10 +11,13 @@ struct ShareControlState {
 
     mutating func update(target: String?, generation: Int, revision: Int, takenBack: Bool = false) {
         guard revision > self.revision else { return }
+        // A newer presentation is not a hand-back. Keep a physical press until
+        // the window acknowledges it or replaces this share's ownership.
+        let pendingPress = self.takenBack && self.target == target && self.generation == generation
         self.target = target
         self.generation = generation
         self.revision = revision
-        self.takenBack = takenBack
+        self.takenBack = takenBack || pendingPress
         event += 1
     }
 

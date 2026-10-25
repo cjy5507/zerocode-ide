@@ -51,6 +51,8 @@ struct Held {
     share: Share,
     labels: BTreeMap<String, String>,
     panel_revision: u64,
+    panel_first_revision: u64,
+    panel_share: (Option<String>, u64),
     panel_label: String,
     panel_window: Value,
 }
@@ -113,9 +115,25 @@ thread_local! {
 }
 
 fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
+    let tracked = |held: &mut Held| {
+        let result = touch(held);
+        if held.panel_share.0.as_deref() != held.share.target()
+            || held.panel_share.1 != held.share.generation()
+        {
+            // Keep a lower bound for presses from this ownership only, even
+            // when the target changes away and back before its next notice.
+            held.panel_revision += 1;
+            held.panel_first_revision = held.panel_revision;
+            held.panel_share = (
+                held.share.target().map(str::to_string),
+                held.share.generation(),
+            );
+        }
+        result
+    };
     #[cfg(not(test))]
     {
-        touch(
+        tracked(
             HELD.lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get_or_insert_with(Held::default),
@@ -123,7 +141,7 @@ fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
     }
     #[cfg(test)]
     {
-        HELD.with(|held| touch(&mut held.borrow_mut()))
+        HELD.with(|held| tracked(&mut held.borrow_mut()))
     }
 }
 
@@ -328,8 +346,8 @@ pub(crate) fn panel_label(label: Option<String>) {
     }
 }
 
-/// A physical panel press belongs to the exact share it displayed. Replies
-/// from a previous target or from before a hand-back cannot take a new share.
+/// A physical panel press survives presentation notices for the same share.
+/// A previous target or a press from before a hand-back cannot take a new share.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn hear_panel(answer: &Value) {
     let Some(panel) = answer.get("shareControl") else {
@@ -338,11 +356,16 @@ pub(super) fn hear_panel(answer: &Value) {
     if panel.get("takenBack").and_then(Value::as_bool) != Some(true) {
         return;
     }
+    let Some(revision) = panel.get("revision").and_then(Value::as_u64) else {
+        return;
+    };
     let took = with_held(|held| {
         if held.share.taken_back()
+            || held.share.target().is_none()
             || panel.get("target").and_then(Value::as_str) != held.share.target()
             || panel.get("generation").and_then(Value::as_u64) != Some(held.share.generation())
-            || panel.get("revision").and_then(Value::as_u64) != Some(held.panel_revision)
+            || revision < held.panel_first_revision
+            || revision > held.panel_revision
         {
             return false;
         }
