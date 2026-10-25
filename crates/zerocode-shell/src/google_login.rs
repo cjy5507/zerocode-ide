@@ -1202,27 +1202,6 @@ mod tests {
         assert_ne!(attempt.expected_state, other.expected_state);
     }
 
-    /// A loopback seat below every range the kernel hands out on its own.
-    ///
-    /// `bind(0)` and every outgoing connection in this test binary draw from
-    /// the ephemeral range (macOS and Windows 49152.., Linux 32768..), so a
-    /// port released there can be taken by another test's listener in the gap
-    /// before it is bound again — and that listener may be gone again by the
-    /// time anyone asks who held it. Starting from the process id keeps two
-    /// test processes on one machine from probing the same port first.
-    fn quiet_seat() -> (TcpListener, u16) {
-        const FIRST: u16 = 20_000;
-        const SPAN: u16 = 10_000;
-        let start = (std::process::id() % u32::from(SPAN)) as u16;
-        for step in 0..256 {
-            let port = FIRST + (start + step) % SPAN;
-            if let Ok(seat) = bind_seat(port) {
-                return (seat, port);
-            }
-        }
-        panic!("no free loopback port in {FIRST}..{}", FIRST + SPAN);
-    }
-
     /// The seat can be retaken while the LAST sign-in's connection is still
     /// lingering.
     ///
@@ -1232,12 +1211,15 @@ mod tests {
     /// nowhere else to go. Measured on macOS 26 — without the option, a rebind
     /// two hundred milliseconds after the connection closed answers
     /// `EADDRINUSE`. On a port of its own, so no test ever contends for the
-    /// real callback seat or for a zo sign-in in flight — and not an ephemeral
-    /// one (t-74682): the port is released before it is bound again, and on an
-    /// ephemeral port another test's `bind(0)` can take it in that gap.
+    /// real callback seat or for a zo sign-in in flight — and not one the
+    /// kernel hands out on its own (t-74682): the port is released before it is
+    /// bound again, and another test's `bind(0)` can take it in that gap. The
+    /// port is a quiet one, under the dynamic range, and its lease is kept to
+    /// the end of the test so no other test is given it meanwhile (t-74864).
     #[test]
     fn the_callback_seat_can_be_retaken_while_the_last_one_lingers() {
-        let (first, port) = quiet_seat();
+        let (lease, first) = crate::test_host::quiet_ports::QuietPort::claim(bind_seat);
+        let port = lease.port();
         let client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("a browser");
         let (accepted, _) = first.accept().expect("the redirect");
         // Closed from THIS side first, so it is our end of that connection

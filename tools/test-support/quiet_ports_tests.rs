@@ -51,7 +51,8 @@ fn the_os_answers_are_read_by_their_numbers_not_their_words() {
     assert_eq!(lowest_port("49152\n49152\n"), Some(49_152));
     assert_eq!(lowest_port("not a number\n"), None);
     let english = "Protocol tcp Dynamic Port Range\n---------------------------------\nStart Port      : 49152\nNumber of Ports : 16384\n";
-    let localised = "TCP 동적 포트 범위\n---------------\n시작 포트        : 49152\n포트 수          : 16384\n";
+    let localised =
+        "TCP 동적 포트 범위\n---------------\n시작 포트        : 49152\n포트 수          : 16384\n";
     assert_eq!(netsh_start(english), Some(49_152));
     assert_eq!(netsh_start(localised), Some(49_152));
     assert_eq!(netsh_start("nothing here\n"), None);
@@ -59,9 +60,7 @@ fn the_os_answers_are_read_by_their_numbers_not_their_words() {
 
 #[test]
 fn a_port_stays_taken_until_its_holder_lets_go() {
-    let held: Vec<_> = (0..16)
-        .map(|_| QuietPort::claim(bind_loopback))
-        .collect();
+    let held: Vec<_> = (0..16).map(|_| QuietPort::claim(bind_loopback)).collect();
     let ports: HashSet<u16> = held.iter().map(|(lease, _)| lease.port()).collect();
     assert_eq!(ports.len(), held.len(), "two holders were given one port");
     for port in &ports {

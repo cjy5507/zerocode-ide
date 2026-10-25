@@ -24510,7 +24510,8 @@ mod update_command_edges {
 
     #[test]
     fn a_dead_port_is_a_network_word_and_a_non_json_body_is_malformed() {
-        let dead = format!("http://{}", crate::test_host::silent_addr());
+        let silent = crate::test_host::quiet_ports::QuietPort::silent();
+        let dead = format!("http://{}", silent.addr());
         assert_eq!(
             tauri::async_runtime::block_on(fetch_releases(&dead)).unwrap_err(),
             FailureWord::Network

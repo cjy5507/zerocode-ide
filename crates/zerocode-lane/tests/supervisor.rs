@@ -27,6 +27,12 @@ use zerocode_pty::{ZO_EVENTS_ADDR_FILE_ENV, ZO_EXECUTABLE, ZoBinary};
 
 const TOKEN: &str = "supervisor-test-secret";
 
+/// The one way a test here takes a port nobody listens on or is given
+/// (t-74864).
+#[path = "../../../tools/test-support/quiet_ports.rs"]
+mod quiet_ports;
+use quiet_ports::QuietPort;
+
 /// A hand-started interactive Zo publishes the private channel that belongs to
 /// its process under the app's runtime directory. The process id is discovery;
 /// the two complete lines are the address and the credential needed to use it.
@@ -180,29 +186,6 @@ fn foreign_listener() -> (String, Arc<Mutex<Vec<String>>>) {
         }
     });
     (addr, received)
-}
-
-/// An address nothing is listening on, and no other test here can come to
-/// listen on: it lies below the ephemeral range, where every `bind(0)` in this
-/// binary and every outgoing connection draws from. A port released from that
-/// range can be taken by another test's listener before the probe asks about
-/// it (t-74716), and "not listening" would turn into "already running". Each
-/// call moves on from the last, and the process id keeps two test processes
-/// apart.
-fn free_addr() -> String {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    const FIRST: u32 = 20_000;
-    const SPAN: u32 = 10_000;
-    static STEP: AtomicU32 = AtomicU32::new(0);
-    for _ in 0..256 {
-        let step = STEP.fetch_add(1, Ordering::Relaxed);
-        let port = FIRST + (std::process::id() + step) % SPAN;
-        let addr = format!("127.0.0.1:{port}");
-        if TcpListener::bind(&addr).is_ok() {
-            return addr;
-        }
-    }
-    panic!("no free loopback port in {FIRST}..{}", FIRST + SPAN);
 }
 
 fn pump_until(lane: &mut PtyHandle, predicate: impl Fn(&PtyHandle) -> bool) -> bool {
@@ -391,7 +374,9 @@ fn an_absent_server_is_spawned_with_the_serve_arguments_and_the_token() {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("calls.log");
     let zo = fake_zo(dir.path(), &marker);
-    let addr = free_addr();
+    // Kept to the end of the test, so nobody is given the port meanwhile.
+    let silent = QuietPort::silent();
+    let addr = silent.addr().to_string();
 
     let supervisor = supervisor_for(zo, &addr);
     assert_eq!(supervisor.probe(), ServeProbe::NotListening);
@@ -498,7 +483,8 @@ fn opening_a_pane_uses_its_private_events_channel() {
     let addr_file = dir.path().join("pane.addr");
     let worktree = dir.path().join("wt-events");
     fs::create_dir_all(&worktree).expect("worktree");
-    let supervisor = supervisor_for(fake_zo(dir.path(), &marker), &free_addr());
+    let silent = QuietPort::silent();
+    let supervisor = supervisor_for(fake_zo(dir.path(), &marker), &silent.addr().to_string());
 
     let opened = supervisor
         .open_pane(
@@ -549,7 +535,8 @@ fn a_pane_that_exits_before_publishing_is_refused_at_once_with_its_last_words() 
     let addr_file = dir.path().join("pane.addr");
     let worktree = dir.path().join("wt-refused");
     fs::create_dir_all(&worktree).expect("worktree");
-    let supervisor = supervisor_for(refusing_zo(dir.path()), &free_addr());
+    let silent = QuietPort::silent();
+    let supervisor = supervisor_for(refusing_zo(dir.path()), &silent.addr().to_string());
 
     let started = Instant::now();
     let error = supervisor
@@ -608,7 +595,8 @@ fn refusing_zo(dir: &Path) -> ZoBinary {
 fn spawn_attach_hands_the_exact_remote_request_to_the_selected_backend() {
     let dir = tempfile::tempdir().expect("tempdir");
     let marker = dir.path().join("calls.log");
-    let supervisor = supervisor_for(fake_zo(dir.path(), &marker), &free_addr());
+    let silent = QuietPort::silent();
+    let supervisor = supervisor_for(fake_zo(dir.path(), &marker), &silent.addr().to_string());
     let cwd = RemotePath::parse("/srv/work/zerocode").expect("validated remote cwd");
     let seen = Arc::new(Mutex::new(Vec::new()));
 

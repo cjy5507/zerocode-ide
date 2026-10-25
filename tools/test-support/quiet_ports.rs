@@ -145,10 +145,7 @@ impl QuietPort {
     }
 
     /// [`claim`](Self::claim) in a band of the caller's choosing.
-    pub fn claim_in<T>(
-        band: &Range<u16>,
-        mut bind: impl FnMut(u16) -> io::Result<T>,
-    ) -> (Self, T) {
+    pub fn claim_in<T>(band: &Range<u16>, mut bind: impl FnMut(u16) -> io::Result<T>) -> (Self, T) {
         let span = u64::from(band.end - band.start);
         // Only spreads the processes over the band; the lock is what keeps
         // two of them apart.

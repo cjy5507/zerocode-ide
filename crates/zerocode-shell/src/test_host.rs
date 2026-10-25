@@ -205,70 +205,9 @@ pub(crate) fn echo_program(dir: &Path) -> String {
     }
 }
 
-/// First port of the loopback range tests take their own ports from.
-const QUIET_FIRST: u16 = 20_000;
-/// How many ports that range holds.
-const QUIET_SPAN: u16 = 10_000;
-/// Where this process starts in the range: the process id keeps it apart from
-/// the next test process's start, and half a span on keeps it apart from the
-/// callback-seat test in `google_login`, which starts at the process id itself
-/// and so can never meet a port released here.
-static QUIET_START: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-/// How many ports this process has already handed out.
-static QUIET_STEP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Takes a loopback port that no test's `bind(0)` and no outgoing connection
-/// can have, by running `bind` on candidates until one is taken (t-74682).
-///
-/// `bind(0)` and every outgoing connection in this test binary draw from the
-/// ephemeral range (macOS and Windows 49152.., Linux 32768..). A port released
-/// there can be taken by another test's listener before it is used again, and
-/// that listener may be gone by the time anyone asks who held it. This range
-/// lies below all of them. Each call also moves on from the last, so two callers
-/// in one process never hold or release the same port in turn.
-pub(crate) fn quiet_port<T>(mut bind: impl FnMut(u16) -> std::io::Result<T>) -> (T, u16) {
-    let start = *QUIET_START
-        .get_or_init(|| (std::process::id() + u32::from(QUIET_SPAN / 2)) % u32::from(QUIET_SPAN));
-    for _ in 0..256 {
-        let step = QUIET_STEP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let offset = (start + step) % u32::from(QUIET_SPAN);
-        let port = QUIET_FIRST + u16::try_from(offset).expect("the offset is below the span");
-        if let Ok(held) = bind(port) {
-            return (held, port);
-        }
-    }
-    panic!(
-        "no free loopback port in {QUIET_FIRST}..{}",
-        QUIET_FIRST + QUIET_SPAN
-    );
-}
-
-/// A loopback address nobody listens on, and no test can come to listen on:
-/// a connection to it is refused. Released at once, since the point is the
-/// port's silence — which [`quiet_port`] keeps from every other test here.
-pub(crate) fn silent_addr() -> std::net::SocketAddr {
-    let (seat, port) =
-        quiet_port(|port| std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)));
-    drop(seat);
-    std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_silent_address_is_below_the_ephemeral_ranges_and_never_handed_out_twice() {
-        let first = silent_addr();
-        let second = silent_addr();
-        assert_ne!(first.port(), second.port());
-        for addr in [first, second] {
-            assert!(addr.ip().is_loopback());
-            assert!((QUIET_FIRST..QUIET_FIRST + QUIET_SPAN).contains(&addr.port()));
-            assert!(
-                std::net::TcpStream::connect(addr).is_err(),
-                "nobody may answer on {addr}"
-            );
-        }
-    }
-}
+/// The one way a test takes a loopback port nobody else can come to (t-74864):
+/// a silent port for a connection that must be refused, or a claimed one it
+/// will bind, free and bind again. The source is shared with the other crates'
+/// test binaries.
+#[path = "../../../tools/test-support/quiet_ports.rs"]
+pub(crate) mod quiet_ports;

@@ -15,6 +15,11 @@ use url::Url;
 use zerocode_core::localhost_label::{LabelInput, RouteSpec};
 use zerocode_devproxy::{AllowedPorts, ProxyState, RouteError, TargetGate, serve};
 
+/// The one way a test here takes a port nobody listens on (t-74864).
+#[path = "../../../tools/test-support/quiet_ports.rs"]
+mod quiet_ports;
+use quiet_ports::QuietPort;
+
 /// A gate that says yes, for the tests that are about something else.
 struct OpenGate;
 impl TargetGate for OpenGate {
@@ -71,28 +76,6 @@ async fn capturing_upstream(answer: &'static str) -> Upstream {
         }
     });
     Upstream { port, seen, task }
-}
-
-/// A port nobody is listening on, and no other test here can come to: it
-/// lies below the ephemeral range, where every `bind(0)` in this binary and
-/// every outgoing connection draws from. A port released from that range can
-/// be taken by another test's upstream before the proxy dials it (t-74716),
-/// and the 502 under test would turn into a relayed answer. Each call moves on
-/// from the last, and the process id keeps two test processes apart.
-fn dead_port() -> u16 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    const FIRST: u32 = 20_000;
-    const SPAN: u32 = 10_000;
-    static STEP: AtomicU32 = AtomicU32::new(0);
-    for _ in 0..256 {
-        let step = STEP.fetch_add(1, Ordering::Relaxed);
-        let port = FIRST + (std::process::id() + step) % SPAN;
-        let port = u16::try_from(port).expect("the range lies below 65536");
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-    panic!("no free loopback port in {FIRST}..{}", FIRST + SPAN);
 }
 
 /// An upstream answer carrying one hop-by-hop field of its own, so a leak of
@@ -357,7 +340,9 @@ async fn a_loopback_target_the_gate_does_not_know_is_refused_at_registration() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_upstream_that_is_not_there_is_a_plain_text_502_that_names_nothing() {
     let (state, port, _task) = proxy(Arc::new(OpenGate)).await;
-    let target = format!("http://127.0.0.1:{}/", dead_port());
+    // Kept to the end of the test, so nobody is given the port meanwhile.
+    let silent = QuietPort::silent();
+    let target = format!("http://127.0.0.1:{}/", silent.port());
     state.register(&spec("/w/a", &target)).unwrap();
     let answered = ask(port, &get("ui-auth", port, "/")).await;
     assert!(answered.starts_with("HTTP/1.1 502"), "{answered}");
