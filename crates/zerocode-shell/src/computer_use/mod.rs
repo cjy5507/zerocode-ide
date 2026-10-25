@@ -227,6 +227,17 @@ pub fn session_stands_now() -> bool {
     }
 }
 
+/// Whether a request holds the session's lock right now — not whether a
+/// session stands: one left standing by an earlier test, as a Windows
+/// process keeps its in-process provider, is idle and holds nothing.
+#[cfg(test)]
+pub(crate) fn session_lock_held_now() -> bool {
+    matches!(
+        held_client().try_lock(),
+        Err(std::sync::TryLockError::WouldBlock)
+    )
+}
+
 /// Hold the session's lock for as long as `hold` runs, as [`call`] holds it
 /// across a request in flight — a test's request that reaches no helper.
 #[cfg(test)]

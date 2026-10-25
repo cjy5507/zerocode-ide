@@ -30,13 +30,18 @@ use windows::Win32::UI::Accessibility::{
     ScrollAmount_LargeIncrement, ScrollAmount_NoAmount, TextPatternRangeEndpoint_End,
     TextPatternRangeEndpoint_Start, TextUnit_Character, ToggleState_On, TreeScope_Children,
     TreeScope_Element, UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId,
-    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId, UIA_ExpandCollapsePatternId,
+    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId,
+    UIA_ExpandCollapseExpandCollapseStatePropertyId, UIA_ExpandCollapsePatternId,
     UIA_HasKeyboardFocusPropertyId, UIA_HelpTextPropertyId, UIA_InvokePatternId,
     UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
     UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId, UIA_LocalizedControlTypePropertyId,
     UIA_NamePropertyId, UIA_NativeWindowHandlePropertyId, UIA_ProcessIdPropertyId,
-    UIA_RangeValuePatternId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_SelectionItemPatternId, UIA_TextPatternId, UIA_TogglePatternId, UIA_ValuePatternId,
+    UIA_RangeValueIsReadOnlyPropertyId, UIA_RangeValuePatternId, UIA_RangeValueValuePropertyId,
+    UIA_ScrollHorizontallyScrollablePropertyId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
+    UIA_ScrollVerticallyScrollablePropertyId, UIA_SelectionItemIsSelectedPropertyId,
+    UIA_SelectionItemPatternId, UIA_TextPatternId, UIA_TogglePatternId,
+    UIA_ToggleToggleStatePropertyId, UIA_ValueIsReadOnlyPropertyId, UIA_ValuePatternId,
+    UIA_ValueValuePropertyId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor};
 use windows::core::{BSTR, IUnknown, Interface};
@@ -84,6 +89,19 @@ const CACHED_PROPERTIES: &[windows::Win32::UI::Accessibility::UIA_PROPERTY_ID] =
     UIA_IsControlElementPropertyId,
     UIA_NativeWindowHandlePropertyId,
     UIA_ProcessIdPropertyId,
+    // A cached pattern holds the pattern object and not its values: each
+    // value the renderer reads off a `Cached*` getter below is asked for by
+    // its own property, or the getter has nothing to answer with and the
+    // element renders without its value, state or scroll actions.
+    UIA_ToggleToggleStatePropertyId,
+    UIA_ValueValuePropertyId,
+    UIA_ValueIsReadOnlyPropertyId,
+    UIA_RangeValueValuePropertyId,
+    UIA_RangeValueIsReadOnlyPropertyId,
+    UIA_SelectionItemIsSelectedPropertyId,
+    UIA_ExpandCollapseExpandCollapseStatePropertyId,
+    UIA_ScrollHorizontallyScrollablePropertyId,
+    UIA_ScrollVerticallyScrollablePropertyId,
 ];
 
 const CACHED_PATTERNS: &[windows::Win32::UI::Accessibility::UIA_PATTERN_ID] = &[

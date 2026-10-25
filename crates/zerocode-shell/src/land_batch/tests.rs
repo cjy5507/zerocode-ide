@@ -72,7 +72,9 @@ struct Fixture {
 impl Fixture {
     fn new(size: usize, clashing: &[usize]) -> Self {
         let temp = tempfile::tempdir().expect("a temporary folder");
-        let root = fs::canonicalize(temp.path()).expect("a canonical folder");
+        // The plain spelling of the real folder: git cannot create a worktree
+        // at the verbatim `\\?\` path `fs::canonicalize` gives on Windows.
+        let root = dunce::canonicalize(temp.path()).expect("a canonical folder");
         let repo = root.join("repo");
         fs::create_dir_all(&repo).expect("the repository folder");
         git(&repo, &["init", "-q", "-b", "main"]);
@@ -572,7 +574,9 @@ fn stacking_builds_one_merge_per_member_on_main() {
     );
     assert_eq!(base_branch, "refs/heads/main");
     assert_eq!(base, &fixture.main);
-    assert_eq!(repository, &fixture.repo.display().to_string());
+    // Git spells the repository's folder with forward slashes on Windows; the
+    // same folder compares equal as a path.
+    assert_eq!(Path::new(repository), fixture.repo.as_path());
     assert_eq!(records[0].by, coordinator());
     assert_eq!(records[0].generation, 1);
     assert!(is_batch_id(&state.batch), "{}", state.batch);

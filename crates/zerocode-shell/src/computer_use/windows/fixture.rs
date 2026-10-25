@@ -10,7 +10,10 @@
 //! does: the Tab KEY moves focus between the controls and the Enter KEY
 //! presses the default button (the OK button, which counts). That is what
 //! makes the literal-text tests mean something — typed text that moved the
-//! focus or pressed OK would show here.
+//! focus or pressed OK would show here. The frame answers `DM_GETDEFID`
+//! itself, because only a real dialog procedure does: without an answer the
+//! dialog manager presses a control with the id `IDOK`, which no control here
+//! has.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
@@ -23,14 +26,15 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BM_GETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CreatePopupMenu,
-    CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL,
-    ES_AUTOVSCROLL, ES_MULTILINE, ES_PASSWORD, ES_WANTRETURN, EndMenu, GUITHREADINFO, GetDlgCtrlID,
-    GetDlgItem, GetGUIThreadInfo, GetMessageW, GetWindowTextW, HMENU, IsDialogMessageW, KillTimer,
-    LB_ADDSTRING, LB_INITSTORAGE, LBS_NOINTEGRALHEIGHT, MF_STRING, MSG, PostMessageW,
-    PostQuitMessage, RegisterClassW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowTextW,
-    TPM_LEFTALIGN, TPM_RETURNCMD, TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD,
-    WS_OVERLAPPEDWINDOW, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW, DestroyMenu, DestroyWindow,
+    DispatchMessageW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_PASSWORD, ES_WANTRETURN,
+    EndMenu, GUITHREADINFO, GetDlgCtrlID, GetDlgItem, GetGUIThreadInfo, GetMessageW,
+    GetWindowTextW, HMENU, IsDialogMessageW, KillTimer, LB_ADDSTRING, LB_INITSTORAGE,
+    LBS_NOINTEGRALHEIGHT, MF_STRING, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
+    SendMessageW, SetForegroundWindow, SetTimer, SetWindowTextW, TPM_LEFTALIGN, TPM_RETURNCMD,
+    TrackPopupMenu, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLOSE, WM_COMMAND,
+    WM_CONTEXTMENU, WM_DESTROY, WM_TIMER, WNDCLASSW, WS_BORDER, WS_CHILD, WS_OVERLAPPEDWINDOW,
+    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
@@ -97,6 +101,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = EndMenu();
                 LRESULT(0)
             }
+            // A dialog procedure's answer to the dialog manager: the OK
+            // button is the default button, so Enter presses it.
+            DM_GETDEFID => LRESULT(((DC_HASDEFID << 16) | BUTTON_ID as u32) as isize),
             WM_CLOSE => {
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
@@ -283,8 +290,14 @@ impl Fixture {
                     while GetMessageW(&mut message, None, 0, 0).as_bool() {
                         // A dialog's loop: Tab navigates, Enter presses the
                         // default button, and only what is left reaches
-                        // the controls as characters.
-                        if IsDialogMessageW(frame, &message).as_bool() {
+                        // the controls as characters. A tab CHARACTER typed
+                        // into the multi-line edit is text and not a way
+                        // on, so the dialog manager, which drops it, does
+                        // not see it.
+                        let tab_text = message.message == WM_CHAR
+                            && message.wParam.0 == usize::from(b'\t')
+                            && GetDlgCtrlID(message.hwnd) == MULTILINE_ID;
+                        if !tab_text && IsDialogMessageW(frame, &message).as_bool() {
                             continue;
                         }
                         let _ = TranslateMessage(&message);
