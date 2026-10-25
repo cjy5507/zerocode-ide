@@ -1474,6 +1474,26 @@ pub(crate) fn set_computer_confirm(
     Ok(snapshot)
 }
 
+/// Only the person may require or relax app sharing (t-74582).
+#[tauri::command(async)]
+pub(crate) fn set_computer_share_required(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    on: bool,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::COMPUTER_SHARE_REQUIRED],
+        |settings| {
+            settings.computer_share_required = on;
+            Ok(())
+        },
+    )
+}
+
 #[tauri::command(async)]
 pub(crate) fn set_computer_input_policy(
     app: AppHandle,

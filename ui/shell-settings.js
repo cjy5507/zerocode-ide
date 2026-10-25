@@ -33,6 +33,7 @@ const PANE_OF = {
   "type-value-key-input": "computer-use",
   "computer-live-reflex": "computer-use",
   "computer-shared-desktop": "computer-use",
+  "computer-share-required": "computer-use",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -547,6 +548,11 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
   if (hasSetting(snapshot, "computer_live_reflex")) {
     computerLiveReflex = snapshot.computer_live_reflex === true;
     paintComputerLiveReflex();
+  }
+  if (first || hasSetting(snapshot, "computer_share_required")) {
+    const control = el("computer-share-required");
+    control.checked = snapshot.computer_share_required === true;
+    control.disabled = typeof snapshot.computer_share_required !== "boolean";
   }
   if (first || hasSetting(snapshot, "computer_input_policy")) {
     computerInputPolicyKnown = ["background", "shared-desktop"].includes(snapshot.computer_input_policy);
@@ -3156,6 +3162,12 @@ function paintComputerInputPolicy() {
       computerInputPolicy === "background" ? "배경 입력만 허용됨" : "공유 데스크톱 입력이 허용됨")
     : t("computerUse.inputPolicyUnknown", "현재 입력 정책을 확인하지 못했습니다."));
 }
+
+el("computer-share-required").addEventListener("change", () => {
+  void commitSetting("computer_share_required", "set_computer_share_required", {
+    on: el("computer-share-required").checked,
+  });
+});
 
 el("computer-shared-desktop").addEventListener("change", () => {
   if (!computerInputPolicyKnown) return;

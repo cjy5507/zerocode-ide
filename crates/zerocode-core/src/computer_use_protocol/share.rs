@@ -7,7 +7,9 @@
 //! once a session per app: the same app is not asked again, and another app
 //! is asked when the agent turns to it. A no refuses that app. Silence (the
 //! person away) leaves the agent working as before, unshared, so an
-//! unattended run does not stop at a card; it never widens a share that
+//! unattended run does not stop at a card by default. When the person requires
+//! sharing, silence and unnamed acts are refused; looks keep the same rules.
+//! Silence never widens a share that
 //! stands. While a share stands, an act or a look outside it — another app,
 //! no app, the whole screen — is refused. "Take control" refuses every act
 //! until the person hands the window back; the card is not raised again.
@@ -101,6 +103,7 @@ impl Share {
                 return Gate::Go;
             }
             return match reach.app {
+                None if self.required => Gate::Refuse(required()),
                 None => Gate::Go,
                 Some(app) => self.first_act(app),
             };
@@ -124,6 +127,7 @@ impl Share {
                     self.target = Some(app.to_string());
                     Gate::Go
                 }
+                Some(Answer::Silent) if self.required => Gate::Refuse(required()),
                 Some(Answer::Declined | Answer::Silent) => Gate::Refuse(scope(&format!(
                     "the person shared {target} only, not {app}"
                 ))),
@@ -141,6 +145,7 @@ impl Share {
             Some(Answer::Declined) => {
                 Gate::Refuse(scope(&format!("the person did not hand {app} over")))
             }
+            Some(Answer::Silent) if self.required => Gate::Refuse(required()),
             Some(Answer::Silent) => Gate::Go,
             None => Gate::Ask(app.to_string()),
         }
@@ -170,6 +175,15 @@ impl Share {
             self.generation += 1;
         }
     }
+}
+
+/// An act needs the person to explicitly share its app.
+#[must_use]
+pub fn required() -> ProviderError {
+    ProviderError::new(
+        error_code::SHARE_REQUIRED,
+        "sharing is required for actions; the person must explicitly hand this app over in the window before it can act (silence does not grant a share)",
+    )
 }
 
 fn scope(message: &str) -> ProviderError {
