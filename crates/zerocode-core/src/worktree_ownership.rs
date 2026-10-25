@@ -286,14 +286,15 @@ pub fn classify(facts: Facts<'_>, ours: Ours<'_>) -> Ownership {
 /// 체크아웃은 우리가 판 것이 거의 확실하지만 지금 배치로는 이 저장소 것이라고
 /// 말할 수 없다 — Orca의 `isUnderFlatOrUntrustedOrcaRoot`가 같은 자리를 본다.
 fn under_flat_worktree_area(facts: Facts<'_>, ours: Ours<'_>) -> bool {
-    let root = ours.worktree_root.trim_end_matches('/');
-    let Some(cut) = root.rfind('/') else {
+    let Some(parent) = std::path::Path::new(ours.worktree_root)
+        .parent()
+        .filter(|parent| parent.file_name().is_some())
+    else {
         return false;
     };
-    if cut == 0 {
-        return false;
-    }
-    under(facts.path, &root[..cut])
+    // The parent's separator and prefix rules are the same ones `under`
+    // uses. A filesystem/drive/share root is not a flat worktree area.
+    parent.to_str().is_some_and(|root| under(facts.path, root))
 }
 
 /// external이라고 부를 근거가 있는가.
@@ -558,6 +559,40 @@ mod tests {
         assert!(!is_zerocode_managed(at(r"/work/managed\task"), configured));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_link_target_can_change_without_changing_lexical_ownership() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().expect("fixture");
+        let base = temp.path().canonicalize().unwrap();
+        let root = base.join("managed");
+        let targets = [base.join("outside-a"), base.join("outside-b")];
+        std::fs::create_dir(&root).unwrap();
+        let link = root.join("door");
+        let configured = Ours {
+            worktree_root: root.to_str().unwrap(),
+            branch_prefix: "",
+            ..ours()
+        };
+        for target in &targets {
+            std::fs::create_dir(target).unwrap();
+            symlink(target, &link).unwrap();
+            assert_eq!(link.canonicalize().unwrap(), *target);
+            assert!(!link.canonicalize().unwrap().starts_with(&root));
+            assert_eq!(
+                classify(at(link.to_str().unwrap()), configured),
+                Ownership::ZerocodeManaged
+            );
+            std::fs::remove_file(&link).unwrap();
+        }
+        // This is a deterministic witness of the classifier's lexical scope,
+        // not a test of deletion-time race resistance.
+        assert_ne!(
+            targets[0].canonicalize().unwrap(),
+            targets[1].canonicalize().unwrap()
+        );
+    }
+
     /// 우리가 만든 것이 무엇보다 먼저 판정된다.
     ///
     /// 우리 워크트리 디렉터리 안에 `.claude/worktrees/`가 있을 수 있다(에이전트가
@@ -638,6 +673,126 @@ mod tests {
             classify(at("/home/dev/scratch/by-hand"), ours()),
             Ownership::External
         );
+    }
+
+    #[test]
+    fn a_flat_root_with_a_final_dot_keeps_the_sibling_legacy() {
+        let configured = Ours {
+            worktree_root: "/work/worktrees/repo/./",
+            ..ours()
+        };
+        let sibling = at("/work/worktrees/other/task");
+        assert_eq!(classify(sibling, configured), Ownership::UnknownLegacy);
+        assert!(!is_zerocode_managed(sibling, configured));
+    }
+
+    #[test]
+    fn a_filesystem_root_is_not_a_flat_worktree_area() {
+        for root in ["", "/", "/repo", "/repo/"] {
+            let configured = Ours {
+                worktree_root: root,
+                ..ours()
+            };
+            assert!(!under_flat_worktree_area(at("/other/task"), configured));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_literal_backslash_does_not_split_a_unix_flat_root() {
+        let configured = Ours {
+            worktree_root: r"/work/worktrees\repo",
+            ..ours()
+        };
+        assert_eq!(
+            classify(at("/work/other/task"), configured),
+            Ownership::UnknownLegacy
+        );
+        assert_eq!(
+            classify(at("/outside/task"), configured),
+            Ownership::External
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_backslash_flat_root_keeps_git_slash_siblings_legacy() {
+        for root in [r"C:\work\worktrees\repo", r"C:\work\worktrees\repo\"] {
+            let configured = Ours {
+                worktree_root: root,
+                ..ours()
+            };
+            let sibling = at("C:/work/worktrees/other/task");
+            assert_eq!(classify(sibling, configured), Ownership::UnknownLegacy);
+            assert!(!is_zerocode_managed(sibling, configured));
+            for outside in [
+                "C:/work/worktrees",
+                "C:/work/worktrees-neighbour/other/task",
+                "C:/work/worktrees/../outside/task",
+                "D:/work/worktrees/other/task",
+            ] {
+                assert_eq!(classify(at(outside), configured), Ownership::External);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_backslash_unc_flat_root_keeps_git_slash_siblings_legacy() {
+        let configured = Ours {
+            worktree_root: r"\\example.invalid\share\worktrees\repo\",
+            ..ours()
+        };
+        let sibling = at("//example.invalid/share/worktrees/other/task");
+        assert_eq!(classify(sibling, configured), Ownership::UnknownLegacy);
+        assert!(!is_zerocode_managed(sibling, configured));
+        for outside in [
+            "//example.invalid/share/worktrees",
+            "//example.invalid/other/worktrees/other/task",
+            "//other.invalid/share/worktrees/other/task",
+        ] {
+            assert_eq!(classify(at(outside), configured), Ownership::External);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_drive_or_share_root_is_not_a_flat_worktree_area() {
+        for root in [r"C:\repo", r"C:\repo\", r"\\example.invalid\share\repo"] {
+            let configured = Ours {
+                worktree_root: root,
+                ..ours()
+            };
+            assert!(!under_flat_worktree_area(at("C:/other/task"), configured));
+            assert!(!under_flat_worktree_area(
+                at("//example.invalid/share/other/task"),
+                configured
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mixed_extended_namespaces_do_not_grant_managed_ownership() {
+        for (root, child) in [
+            (r"C:\work\managed", r"\\?\C:\work\managed\task"),
+            (r"\\?\C:\work\managed", "C:/work/managed/task"),
+            (
+                r"\\example.invalid\share\managed",
+                r"\\?\UNC\example.invalid\share\managed\task",
+            ),
+            (r"C:\work\managed", r"\\.\C:\work\managed\task"),
+        ] {
+            let configured = Ours {
+                worktree_root: root,
+                branch_prefix: "",
+                ..ours()
+            };
+            assert!(
+                !is_zerocode_managed(at(child), configured),
+                "{root:?}: {child:?}"
+            );
+        }
     }
 
     /// 윈도우에서 git이 돌려주는 `C:/…` 경로도 절대 경로다 — 그 밖의 체크아웃은

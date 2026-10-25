@@ -946,3 +946,6 @@ fn read_row(store: &Store, check: &str) -> Option<serde_json::Value> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_path_observations;
