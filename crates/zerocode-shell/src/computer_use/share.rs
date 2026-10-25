@@ -120,10 +120,12 @@ fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
         if held.panel_share.0.as_deref() != held.share.target()
             || held.panel_share.1 != held.share.generation()
         {
-            // Keep a lower bound for presses from this ownership only, even
-            // when the target changes away and back before its next notice.
+            // A target change is a presentation change, not a hand-back. A
+            // pending physical press takes control of every app in this generation.
             held.panel_revision += 1;
-            held.panel_first_revision = held.panel_revision;
+            if held.panel_share.1 != held.share.generation() || held.panel_first_revision == 0 {
+                held.panel_first_revision = held.panel_revision;
+            }
             held.panel_share = (
                 held.share.target().map(str::to_string),
                 held.share.generation(),
@@ -346,8 +348,8 @@ pub(crate) fn panel_label(label: Option<String>) {
     }
 }
 
-/// A physical panel press survives presentation notices for the same share.
-/// A previous target or a press from before a hand-back cannot take a new share.
+/// A physical panel press survives target changes within the same generation.
+/// A press from before a hand-back cannot take a new generation.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(super) fn hear_panel(answer: &Value) {
     let Some(panel) = answer.get("shareControl") else {
@@ -362,7 +364,7 @@ pub(super) fn hear_panel(answer: &Value) {
     let took = with_held(|held| {
         if held.share.taken_back()
             || held.share.target().is_none()
-            || panel.get("target").and_then(Value::as_str) != held.share.target()
+            || panel.get("target").and_then(Value::as_str).is_none()
             || panel.get("generation").and_then(Value::as_u64) != Some(held.share.generation())
             || revision < held.panel_first_revision
             || revision > held.panel_revision

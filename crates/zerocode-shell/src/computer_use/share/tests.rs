@@ -341,6 +341,32 @@ fn a_future_or_missing_panel_revision_cannot_take_control() {
 }
 
 #[test]
+fn a_panel_press_without_a_displayed_target_cannot_take_control() {
+    let (_person, _) = person(Decision::Allowed);
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut pressed = state();
+    pressed["takenBack"] = true.into();
+    pressed["target"] = Value::Null;
+    super::hear_panel(&json!({"shareControl": pressed.clone()}));
+    assert_eq!(state()["takenBack"], false);
+    pressed.as_object_mut().unwrap().remove("target");
+    super::hear_panel(&json!({"shareControl": pressed}));
+    assert_eq!(state()["takenBack"], false);
+}
+
+#[test]
+fn a_panel_revision_from_before_the_first_share_cannot_take_control() {
+    let (_person, _) = person(Decision::Allowed);
+    let before = state()["revision"].clone();
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut pressed = state();
+    pressed["takenBack"] = true.into();
+    pressed["revision"] = before;
+    super::hear_panel(&json!({"shareControl": pressed}));
+    assert_eq!(state()["takenBack"], false);
+}
+
+#[test]
 fn the_panel_carries_the_requests_explicit_window_selector() {
     let (_person, _) = person(Decision::Allowed);
     let _ = admit(
