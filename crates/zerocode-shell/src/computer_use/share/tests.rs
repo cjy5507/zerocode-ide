@@ -244,18 +244,53 @@ fn a_panel_press_survives_a_share_renotice_before_the_window_hears_it() {
 }
 
 #[test]
-fn a_late_panel_press_cannot_take_a_replaced_or_handed_back_share() {
-    let (_person, _) = person(Decision::Allowed);
+fn a_panel_press_survives_a_switch_to_an_already_shared_target() {
+    let (_person, asked) = person(Decision::Allowed);
+    let _ = admit(ComputerMethod::Click, &click("Another")).unwrap();
     let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
     let mut panel = state();
     panel["takenBack"] = true.into();
-    let _ = admit(ComputerMethod::Click, &click("Another")).unwrap();
+    let request = admit(ComputerMethod::Click, &click("Another")).unwrap();
+    assert_eq!(asked.get(), 2, "returning to an approved app needs no card");
+    assert_eq!(state()["generation"], panel["generation"]);
+    assert_eq!(state()["target"], "another");
     super::hear_panel(&json!({"shareControl": panel}));
-    assert_eq!(state()["takenBack"], false);
+    assert_eq!(state()["takenBack"], true);
+    assert_eq!(
+        ensure_current().unwrap_err().code,
+        error_code::PERSON_TOOK_CONTROL
+    );
+    drop(request);
+    for app in ["Sample", "Another"] {
+        for method in ComputerMethod::ALL
+            .iter()
+            .copied()
+            .filter(|method| method.acts())
+        {
+            assert_eq!(
+                refused(method, &click(app)).as_deref(),
+                Some(error_code::PERSON_TOOK_CONTROL),
+                "{app}: {method:?}"
+            );
+        }
+    }
+    give_back();
+    for app in ["Sample", "Another"] {
+        assert!(admit(ComputerMethod::Click, &click(app)).is_ok());
+    }
+    assert_eq!(asked.get(), 2);
+}
+
+#[test]
+fn a_late_panel_press_cannot_take_a_handed_back_share_even_after_target_changes() {
+    let (_person, _) = person(Decision::Allowed);
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
     let mut current = state();
     current["takenBack"] = true.into();
     super::hear_panel(&json!({"shareControl": current.clone()}));
     give_back();
+    let _ = admit(ComputerMethod::Click, &click("Another")).unwrap();
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
     super::hear_panel(&json!({"shareControl": current}));
     assert_eq!(state()["takenBack"], false);
 }
@@ -280,7 +315,7 @@ fn a_panel_press_survives_a_window_selector_renotice() {
 }
 
 #[test]
-fn a_previous_panel_press_cannot_take_the_same_target_after_it_was_replaced() {
+fn a_pending_panel_press_survives_target_changes_away_and_back() {
     let (_person, _) = person(Decision::Allowed);
     let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
     let mut pressed = state();
@@ -288,7 +323,7 @@ fn a_previous_panel_press_cannot_take_the_same_target_after_it_was_replaced() {
     let _ = admit(ComputerMethod::Click, &click("Another")).unwrap();
     let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
     super::hear_panel(&json!({"shareControl": pressed}));
-    assert_eq!(state()["takenBack"], false);
+    assert_eq!(state()["takenBack"], true);
 }
 
 #[test]
