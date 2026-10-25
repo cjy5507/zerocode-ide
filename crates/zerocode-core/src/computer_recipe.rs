@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
+pub mod privacy;
 
 use crate::agent_browser::{self, BROWSER_CLI};
 use crate::agent_emulator::{self, EMULATOR_CLI};
@@ -316,6 +317,9 @@ pub fn recipe_params(raw: &str) -> Result<Map<String, Value>, String> {
 /// Every `{{name}}` in one word, in order; `{{a b}}` is not one.
 #[must_use]
 pub fn recipe_placeholders(word: &str) -> Vec<String> {
+    if privacy::is_secret_parameter(word) {
+        return vec![word[1..].to_string()];
+    }
     let mut found = Vec::new();
     let mut rest = word;
     while let Some(open) = rest.find(RECIPE_PARAM_OPEN) {
@@ -374,11 +378,12 @@ pub fn recipe_fill(argv: &[String], values: &Map<String, Value>) -> Result<Vec<S
         for name in names {
             match values.get(&name).and_then(Value::as_str) {
                 Some(value) => {
-                    out = out.replacen(
-                        &format!("{RECIPE_PARAM_OPEN}{name}{RECIPE_PARAM_CLOSE}"),
-                        value,
-                        1,
-                    );
+                    let marker = if privacy::is_secret_parameter(word) {
+                        format!("${name}")
+                    } else {
+                        format!("{RECIPE_PARAM_OPEN}{name}{RECIPE_PARAM_CLOSE}")
+                    };
+                    out = out.replacen(&marker, value, 1);
                     let program_words = at
                         .checked_sub(1)
                         .and_then(|before| argv[before].strip_prefix("--"))
@@ -1027,7 +1032,12 @@ impl TabBindings {
                 ));
             }
         }
-        if tab.is_some() && !required.contains(RECIPE_TAB_ALIAS) {
+        let stopped_alias = planned.iter().any(|(line, plan)| {
+            matches!(plan, Plan::Stop(_))
+                && line.tool == RecipeTool::Browser
+                && browser_tab_target(&line.argv) == Some(RECIPE_TAB_ALIAS)
+        });
+        if tab.is_some() && !required.contains(RECIPE_TAB_ALIAS) && !stopped_alias {
             return Err(TabBindingError::new(
                 "recipe_tab_unused",
                 "--tab is only for a recipe's external $tab; this stretch opens its own tab or uses no alias",
@@ -1138,7 +1148,19 @@ pub fn preflight(
             }
             Ok(())
         };
-        let plan = if let Some(kind) = desktop.then(|| recipe_step_stop(&line.argv)).flatten() {
+        let missing_secret = line
+            .argv
+            .iter()
+            .filter(|word| privacy::is_secret_parameter(word))
+            .any(|word| {
+                values
+                    .get(&word[1..])
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            });
+        let plan = if missing_secret {
+            Plan::Stop(RecipeStop::PersonsTurn)
+        } else if let Some(kind) = desktop.then(|| recipe_step_stop(&line.argv)).flatten() {
             Plan::Stop(kind)
         } else if line.failed_then {
             Plan::Skip("failed then")
@@ -1236,6 +1258,14 @@ mod tests {
         walk_budget_ms,
     };
     use serde_json::json;
+
+    #[test]
+    fn a_secret_recipe_parameter_stops_for_the_person_without_guessing_a_value() {
+        let lines = recipe_lines("## Steps\n1. `zerocode-browser type browser-1 #code $secret_code`\n2. `zerocode-browser click browser-1 #continue`\n").unwrap();
+        let planned = preflight(&lines, 1, &Map::new()).unwrap();
+        assert_eq!(planned.planned[0].1, Plan::Stop(RecipeStop::PersonsTurn));
+        assert_eq!(planned.planned.len(), 1);
+    }
 
     #[test]
     fn browser_replay_budgets_its_in_process_observation() {

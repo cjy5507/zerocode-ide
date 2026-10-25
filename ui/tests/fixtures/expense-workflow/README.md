@@ -60,3 +60,10 @@ Additional external tabs use `--params` keys such as `tab-2`.
 The runner never chooses another tab when one is missing or closed.
 A resumed call after an open needs an explicit tab again.
 The stopped report's `browserTabs` lists the labels to supply.
+
+Secret inputs use whole references such as `$secret_text_3`.
+An absent secret stops the procedure at the person's turn.
+The saver checks remaining values with the core credential classifier.
+It refuses a risky value using only line and step numbers.
+Passwords, codes and card values stay out of saved input literals.
+Secret entry is left to the person in the browser.

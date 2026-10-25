@@ -24,6 +24,7 @@ use zerocode_core::computer_use_protocol::error_code;
 
 use super::ComputerUseError;
 use crate::run_evidence::{Step, captures};
+use zerocode_core::computer_recipe::privacy;
 
 /// Under the window's local data root.
 pub const RECIPES_DIR: &str = "computer-use/recipes";
@@ -70,7 +71,13 @@ fn saved_steps(steps: &[Step]) -> Vec<Saved<'_>> {
         // kept as they were, one line long.
         let (words, handed_back) = match tool {
             RecipeTool::Computer => recipe_saved_step(&step.argv, refusal.as_ref()),
-            RecipeTool::Browser | RecipeTool::Emulator => (recipe_saved_words(&step.argv), false),
+            RecipeTool::Browser | RecipeTool::Emulator => (
+                recipe_saved_words(
+                    &privacy::normalized(tool.as_str(), &step.argv)
+                        .unwrap_or_else(|_| step.argv.iter().take(2).cloned().collect()),
+                ),
+                false,
+            ),
         };
         let looks = |saved: &Saved<'_>| {
             saved.tool == RecipeTool::Computer
@@ -116,6 +123,81 @@ fn free_param(n: usize, taken: &mut std::collections::BTreeSet<String>) -> Strin
     name
 }
 
+fn recorded_input(step: &Step) -> privacy::InputPolicy {
+    let mut policy = privacy::input_policy(&step.tool, &step.argv, &[]);
+    if let Some(recorded) = step
+        .observation
+        .as_ref()
+        .and_then(|value| value.get(privacy::INPUT_KEY))
+        .and_then(|value| serde_json::from_value::<privacy::InputPolicy>(value.clone()).ok())
+    {
+        policy.secret |= recorded.secret;
+        policy.credential |= recorded.credential;
+    }
+    policy
+}
+
+fn free_secret(n: usize, taken: &mut std::collections::BTreeSet<String>) -> String {
+    let base = format!("secret_text_{n}");
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while taken.contains(&name) {
+        name = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    taken.insert(name.clone());
+    name
+}
+
+/// Refuse before creating or replacing a file. The diagnostic contains only
+/// source positions; no field, argument, URL or rejected value is echoed.
+fn validate_saved_values(
+    name: &str,
+    note: Option<&str>,
+    steps: &[Step],
+) -> Result<(), ComputerUseError> {
+    let refused = |line: usize, step: usize| {
+        ComputerUseError::new(
+            error_code::INVALID_ARGUMENT,
+            format!("recipe_credentials: line {line}, step {step}"),
+        )
+    };
+    if !privacy::is_reference_value(name) && zerocode_core::credential::may_carry_a_credential(name)
+        || note.is_some_and(|value| {
+            !privacy::is_reference_value(value)
+                && zerocode_core::credential::may_carry_a_credential(value)
+        })
+    {
+        return Err(refused(0, 0));
+    }
+    for (line, step) in steps.iter().enumerate() {
+        let policy = recorded_input(step);
+        if policy.credential {
+            return Err(refused(line + 1, step.n));
+        }
+        let argv =
+            privacy::normalized(&step.tool, &step.argv).map_err(|_| refused(line + 1, step.n))?;
+        let inputs = privacy::value_positions(&step.tool, &argv);
+        if argv.iter().enumerate().any(|(index, word)| {
+            index > 0
+                && !word.starts_with("--")
+                && !inputs.contains(&index)
+                && privacy::unsafe_stored_argument(&step.tool, &argv, index)
+        }) {
+            return Err(refused(line + 1, step.n));
+        }
+        if inputs.is_empty()
+            && step
+                .error
+                .as_deref()
+                .is_some_and(zerocode_core::credential::may_carry_a_credential)
+        {
+            return Err(refused(line + 1, step.n));
+        }
+    }
+    Ok(())
+}
+
 /// The document: a title, the note, one command line per step — its words
 /// in the command-line grammar `recipe-run` splits back, typed text a named
 /// `{{parameter}}` — with the person's points called out, and the parameters
@@ -147,11 +229,33 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
     for (at, saved) in kept.iter().enumerate() {
         let n = at + 1;
         let went = saved.step.ok || saved.handed_back;
+        let input = recorded_input(saved.step);
+        let value_positions = privacy::value_positions(saved.tool.as_str(), &saved.words);
         let mut words: Vec<String> = saved
             .words
             .iter()
-            .map(
-                |word| match (went, crate::run_evidence::redacted_chars(word)) {
+            .enumerate()
+            .map(|(index, word)| {
+                match (
+                    value_positions.contains(&index),
+                    crate::run_evidence::redacted_chars(word),
+                ) {
+                    (true, _) if input.secret => {
+                        let param = free_secret(n, &mut taken);
+                        params.push((
+                            param.clone(),
+                            format!("person's input at step {n}; no value was stored"),
+                        ));
+                        format!("${param}")
+                    }
+                    (true, None) if !privacy::is_parameter_word(word) => {
+                        let param = free_param(n, &mut taken);
+                        params.push((
+                            param.clone(),
+                            format!("typed at step {n}; no value was stored"),
+                        ));
+                        format!("{RECIPE_PARAM_OPEN}{param}{RECIPE_PARAM_CLOSE}")
+                    }
                     // What was typed, kept only as its length, becomes the value
                     // the next run is given — named for the step it was typed at.
                     (true, Some(chars)) => {
@@ -172,8 +276,8 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
                         }
                         word.clone()
                     }
-                },
-            )
+                }
+            })
             .collect();
         let mut marks: Vec<String> = Vec::new();
         if saved.tool == RecipeTool::Browser {
@@ -220,7 +324,11 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
         if !went {
             marks.push(format!(
                 "{RECIPE_MARK_FAILED} {}",
-                saved.step.error.as_deref().unwrap_or("?")
+                if value_positions.is_empty() {
+                    saved.step.error.as_deref().unwrap_or("?")
+                } else {
+                    "input failed; values omitted"
+                }
             ));
         }
         out.push_str(&format!(
@@ -261,6 +369,7 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
     }
     let example: String = params
         .iter()
+        .filter(|(param, _)| !param.starts_with("secret_"))
         .map(|(param, ..)| format!("\"{param}\":\"…\""))
         .collect::<Vec<_>>()
         .join(",");
@@ -317,6 +426,7 @@ pub fn save(
     }
     let keep = last.unwrap_or(RECIPE_STEPS);
     let start = steps.len().saturating_sub(keep);
+    validate_saved_values(name, note, &steps[start..])?;
     let dir = recipes_dir(root);
     std::fs::create_dir_all(&dir).map_err(|error| {
         ComputerUseError::new(error_code::ACCESSIBILITY_ERROR, error.to_string())
@@ -731,6 +841,107 @@ mod tests {
     use super::*;
 
     #[test]
+    fn saving_a_whole_secret_reference_succeeds_while_a_literal_credential_refuses() {
+        for (value, allowed) in [
+            ("$secret_password", true),
+            ("{{password}}", true),
+            ("password=$secret_password", true),
+            ("password=SYNTHETIC_INPUT_ONLY", false),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let evidence = root.path().join("evidence");
+            std::fs::create_dir_all(&evidence).unwrap();
+            let recorded = Step {
+                tool: "browser".into(),
+                ..step(1, &["type", "browser-1", "#reference", value], true)
+            };
+            std::fs::write(
+                evidence.join("steps.jsonl"),
+                format!("{}\n", serde_json::to_string(&recorded).unwrap()),
+            )
+            .unwrap();
+            let result = save(root.path(), "References", None, &evidence, None, 1);
+            assert_eq!(
+                result.is_ok(),
+                allowed,
+                "references and literal values must be distinguished"
+            );
+            if let Ok(file) = result {
+                assert!(
+                    !std::fs::read_to_string(file)
+                        .unwrap()
+                        .contains("SYNTHETIC_INPUT_ONLY")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_secret_recipe_value_is_a_parameter_and_never_a_saved_literal() {
+        let root = tempfile::tempdir().unwrap();
+        let evidence = root.path().join("evidence");
+        std::fs::create_dir_all(&evidence).unwrap();
+        let payload = serde_json::json!({"#password":"SYNTHETIC_INPUT_ONLY"}).to_string();
+        let recorded = Step {
+            tool: "browser".into(),
+            observation: Some(
+                serde_json::json!({"recipeInput":{"secret":true,"credential":false}}),
+            ),
+            ..step(1, &["fill", "browser-1", &payload], true)
+        };
+        std::fs::write(
+            evidence.join("steps.jsonl"),
+            format!("{}\n", serde_json::to_string(&recorded).unwrap()),
+        )
+        .unwrap();
+        let path = save(root.path(), "Login", None, &evidence, None, 1).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(
+            !text.contains("SYNTHETIC_INPUT_ONLY"),
+            "a value escaped its parameter"
+        );
+        assert!(
+            text.contains("$secret_"),
+            "the missing value must be a person's step"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_recipe_field_cannot_save_a_card_shaped_value_or_a_credential_url() {
+        for argv in [
+            vec![
+                "fill".to_string(),
+                "browser-1".into(),
+                serde_json::json!({"#reference": "4242".repeat(4)}).to_string(),
+            ],
+            vec![
+                "goto".into(),
+                "browser-1".into(),
+                "https://example.test/?token=SYNTHETIC_INPUT_ONLY".into(),
+            ],
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let evidence = root.path().join("evidence");
+            std::fs::create_dir_all(&evidence).unwrap();
+            let refs: Vec<_> = argv.iter().map(String::as_str).collect();
+            let recorded = Step {
+                tool: "browser".into(),
+                ..step(1, &refs, true)
+            };
+            std::fs::write(
+                evidence.join("steps.jsonl"),
+                format!("{}\n", serde_json::to_string(&recorded).unwrap()),
+            )
+            .unwrap();
+            let refused = save(root.path(), "Entry", None, &evidence, None, 1)
+                .expect_err("unsafe values must refuse the save");
+            assert!(!refused.message.contains("SYNTHETIC_INPUT_ONLY"));
+            assert!(!refused.message.contains(&"4242".repeat(4)));
+            assert!(!root.path().join(RECIPES_DIR).join("entry.md").exists());
+        }
+    }
+
+    #[test]
     fn browser_tab_alias_survives_save_without_the_recorded_label() {
         let opened = Step {
             tool: "browser".into(),
@@ -1037,9 +1248,9 @@ mod tests {
         assert!(text.contains("3. `zerocode-computer handoff --reason 2FA` — the person's turn"));
         assert!(
             text.contains(
-                "4. `zerocode-computer type --text \"[6 chars]\"` — failed then: stopped"
+                "4. `zerocode-computer type --text {{text-4}}` — failed then: input failed; values omitted"
             ),
-            "a failed step keeps its literal words, whole: {text}"
+            "a failed input still keeps its value out of the document: {text}"
         );
     }
 

@@ -217,28 +217,28 @@ pub(crate) fn browser_open_observation(
 /// frames already hold, and a recipe replays it.
 #[must_use]
 pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
-    // A browser `type` and a `fill` carry what was typed last, as one word
-    // or after `--value`.
-    let typing = tool == "browser"
-        && argv
-            .first()
-            .is_some_and(|verb| verb == "type" || verb == "fill");
-    let needle = tool == "computer"
-        && argv
-            .first()
-            .and_then(|verb| zerocode_core::computer_use::verb_method(verb))
-            .is_some_and(|method| COMPUTER_NEEDLE_VERBS.contains(&method));
-    let mut hide_next = false;
+    let Ok(plain) = zerocode_core::computer_recipe::privacy::normalized(tool, argv) else {
+        return argv
+            .iter()
+            .enumerate()
+            .map(|(index, word)| {
+                if index < 2 {
+                    word.clone()
+                } else {
+                    redaction(word.chars().count())
+                }
+            })
+            .collect();
+    };
+    let argv = &plain;
+    let positions = zerocode_core::computer_recipe::privacy::value_positions(tool, argv);
+    let policy = observed_input_policy(tool, argv);
     argv.iter()
         .enumerate()
         .map(|(index, word)| {
-            // A recipe's own words — a word holding its placeholder — are the
-            // document's, not what was typed. A browser `type` carries its text
-            // last, as one word or after `--value` (the stdin road's shape).
-            let hidden =
-                (hide_next || (typing && index + 1 == argv.len())) && !names_a_placeholder(word);
-            hide_next = !needle && matches!(word.as_str(), "--text" | "--value");
-            if hidden {
+            if positions.contains(&index)
+                && (policy.secret || policy.credential || !names_a_placeholder(word))
+            {
                 redaction(word.chars().count())
             } else {
                 word.clone()
@@ -250,17 +250,9 @@ pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
 /// Whether a word holds a recipe's placeholder (`{{name}}`): a line a recipe
 /// walk logs in its own words — the document's text, with its names.
 fn names_a_placeholder(word: &str) -> bool {
-    !zerocode_core::computer_recipe::recipe_placeholders(word).is_empty()
+    zerocode_core::computer_recipe::privacy::is_parameter_word(word)
 }
 
-/// The verbs whose `--text` is what the screen should show, not what the
-/// hand types: a check's needle, and a click's target — the control named
-/// by what it reads, kept so a saved walk replays the press (t-4227).
-const COMPUTER_NEEDLE_VERBS: &[zerocode_core::computer_use::ComputerMethod] = &[
-    zerocode_core::computer_use::ComputerMethod::Click,
-    zerocode_core::computer_use::ComputerMethod::Find,
-    zerocode_core::computer_use::ComputerMethod::WaitFor,
-];
 /// How a redacted word reads in the log — written and read back here only.
 const REDACTED_OPEN: &str = "[";
 const REDACTED_CLOSE: &str = " chars]";
@@ -411,6 +403,47 @@ pub fn observing<T>(value: serde_json::Value, run: impl FnOnce() -> T) -> T {
     run()
 }
 
+fn observed_input_policy(
+    tool: &str,
+    argv: &[String],
+) -> zerocode_core::computer_recipe::privacy::InputPolicy {
+    let plain = zerocode_core::computer_recipe::privacy::normalized(tool, argv).unwrap_or_default();
+    let masked = if tool == "browser" {
+        plain
+            .get(1)
+            .map(|label| crate::cmd::browser::form::known_masked(label))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    zerocode_core::computer_recipe::privacy::input_policy(tool, argv, &masked)
+}
+
+fn with_input_policy(
+    mut observation: Option<serde_json::Value>,
+    tool: &str,
+    argv: &[String],
+) -> Option<serde_json::Value> {
+    use zerocode_core::computer_recipe::privacy::{INPUT_KEY, InputPolicy};
+    let mut policy = observed_input_policy(tool, argv);
+    if observation.is_none() && !policy.secret && !policy.credential {
+        return None;
+    }
+    let value = observation.get_or_insert_with(|| serde_json::json!({}));
+    if !value.is_object() {
+        *value = serde_json::json!({ "context": value.clone() });
+    }
+    if let Some(prior) = value
+        .get(INPUT_KEY)
+        .and_then(|value| serde_json::from_value::<InputPolicy>(value.clone()).ok())
+    {
+        policy.secret |= prior.secret;
+        policy.credential |= prior.credential;
+    }
+    value[INPUT_KEY] = serde_json::json!(policy);
+    observation
+}
+
 /// Add the time measured around the actual door call. Verb classification
 /// stays with the existing core tables; a read is never labelled a press.
 pub fn measured(
@@ -419,6 +452,7 @@ pub fn measured(
     argv: &[String],
     elapsed: std::time::Duration,
 ) -> Option<serde_json::Value> {
+    observed = with_input_policy(observed, tool, argv);
     let verb = argv.first().map_or("", String::as_str);
     let acts = match tool {
         "browser" => zerocode_core::agent_browser::acts(verb),
@@ -471,6 +505,11 @@ fn record_with(
     emitted: impl FnOnce(&Path, &Step),
 ) -> Option<String> {
     let verb = argv.first().map_or("?", String::as_str);
+    let observation = with_input_policy(observation, tool, argv);
+    let typed = zerocode_core::computer_recipe::privacy::normalized(tool, argv)
+        .map_or(true, |plain| {
+            !zerocode_core::computer_recipe::privacy::value_positions(tool, &plain).is_empty()
+        });
     let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
     let steps = dir.join(STEPS_FILE);
     let (n, separated) = match std::fs::read(&steps) {
@@ -518,9 +557,13 @@ fn record_with(
         argv: redacted(tool, argv),
         ok: outcome.is_ok(),
         observation,
-        error: outcome
-            .err()
-            .map(|error| error.trim().chars().take(ERROR_CHARS).collect()),
+        error: outcome.err().map(|error| {
+            if typed {
+                "input failed; values omitted".into()
+            } else {
+                error.trim().chars().take(ERROR_CHARS).collect()
+            }
+        }),
         code: outcome
             .err()
             .and_then(zerocode_core::computer_use_protocol::refusal_code),
@@ -657,6 +700,47 @@ fn walk_files(dir: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_input_facts_and_credential_rejections_survive_value_redaction() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = "SYNTHETIC_INPUT_ONLY";
+        let argv = [
+            "type",
+            "browser-91009",
+            "#opaque",
+            "--value",
+            marker,
+            "--workspace-revision",
+            "7",
+        ]
+        .map(str::to_string);
+        let _ = record(root.path(), 1, "browser", &argv, Err(marker), Framing::None);
+        let text = std::fs::read_to_string(root.path().join(STEPS_FILE)).unwrap();
+        assert!(
+            !text.contains(marker),
+            "neither argv nor the error may keep the value"
+        );
+        let steps = steps_in(root.path());
+        assert_eq!(
+            steps[0].observation.as_ref().unwrap()
+                [zerocode_core::computer_recipe::privacy::INPUT_KEY]["secret"],
+            true
+        );
+        let payload = serde_json::json!({"#reference":"4242".repeat(4)}).to_string();
+        let argv = ["fill", "browser-91009", &payload].map(str::to_string);
+        let _ = record(root.path(), 2, "browser", &argv, Ok(()), Framing::None);
+        let steps = steps_in(root.path());
+        assert_eq!(
+            steps[1].observation.as_ref().unwrap()
+                [zerocode_core::computer_recipe::privacy::INPUT_KEY]["credential"],
+            true
+        );
+        assert!(
+            !std::fs::read_to_string(root.path().join(STEPS_FILE))
+                .unwrap()
+                .contains(&"4242".repeat(4))
+        );
+    }
     use super::*;
 
     #[test]
@@ -733,7 +817,7 @@ mod tests {
                             ),
                         ),
                         "computer",
-                        &words(&["type", "--text", "secret"]),
+                        &words(&["type", "--text", "SYNTHETIC_INPUT_ONLY"]),
                         Ok(()),
                         Framing::None,
                         |folder, step| {
@@ -760,7 +844,11 @@ mod tests {
                 .unwrap()
                 .clone()
         );
-        assert!(!serde_json::to_string(&emitted).unwrap().contains("secret"));
+        assert!(
+            !serde_json::to_string(&emitted)
+                .unwrap()
+                .contains("SYNTHETIC_INPUT_ONLY")
+        );
         assert_eq!(emitted[0]["observation"]["act_ms"], 7);
         crate::computer_use::report::write(dir.path()).unwrap();
         assert!(crate::computer_use::report::verify(dir.path()).reproduced);
@@ -1094,8 +1182,8 @@ mod tests {
         );
         assert_eq!(
             redacted("computer", &words(&["type", "--text", "Dear {{name}}"]))[2],
-            "Dear {{name}}",
-            "a recipe's own words keep the names a re-save needs"
+            "[13 chars]",
+            "a partial reference does not exempt adjacent literal input"
         );
         assert_eq!(
             redacted("computer", &words(&["type", "--text", "Dear Kim"]))[2],
@@ -1215,7 +1303,10 @@ mod tests {
             vec![1, 2, 3]
         );
         assert_eq!(steps[1].argv, words(&["text", "--text", "[6 chars]"]));
-        assert_eq!(steps[1].error.as_deref(), Some("no focused field"));
+        assert_eq!(
+            steps[1].error.as_deref(),
+            Some("input failed; values omitted")
+        );
         assert!(!steps[1].ok && steps[1].shot.is_none());
         assert_eq!(
             steps[1].frame_skipped,

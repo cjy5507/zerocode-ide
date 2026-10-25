@@ -386,7 +386,7 @@ await test("a_secret_field_is_judged_once_for_typing_and_looking", async () => {
       <input id="Upper" type="PASSWORD"><input id="text"><input id="email" type="email" autocomplete="username">
       <input id="fresh" type="text" autocomplete="new-password"><textarea id="area"></textarea>
       <div id="editable" contenteditable="true">x</div></form>`);
-    const expected = { password: true, current: true, Upper: true, text: false, email: false, fresh: false, area: false, editable: false };
+    const expected = { password: true, current: true, Upper: true, text: false, email: false, fresh: true, area: false, editable: false };
     const typed = {};
     for (const id of Object.keys(expected)) {
       const answer = await evalJson(judged, script({ selector: "#" + id, text: "x", road: "keys", blockRoots: BLOCK_ROOTS.join(",") }, TYPE_BODY));
@@ -3468,6 +3468,19 @@ await test("a_key_that_writes_is_held_at_a_password_field_before_its_first_event
     const enter = await evalJson(secret, keyScript("enter"));
     assert(enter.ok && enter.value.method === "synthetic-keys", "Enter writes nothing, and goes", enter);
     return "held, then Enter";
+  } finally { await secret.close(); }
+});
+
+await test("marked password code and card values stay out of fields and numbered looks", async () => {
+  const secret = await browser.newPage();
+  try {
+    for (const mark of ['new-password', 'current-password', 'one-time-code', 'cc-number', 'cc-csc', 'cc-exp', 'cc-exp-month', 'cc-exp-year']) {
+      await secret.setContent(`<label>New value<input autocomplete="${mark}" value="SYNTHETIC_INPUT_ONLY"></label>`);
+      const read = JSON.parse(await secret.evaluate(fieldsScript())).value;
+      assert(read.fields[0].masked && read.fields[0].value === '', 'a marked value escaped the form read');
+      const look = await secret.evaluate(lookScript());
+      assert(!look.includes('SYNTHETIC_INPUT_ONLY'), 'a marked value escaped a numbered look');
+    }
   } finally { await secret.close(); }
 });
 

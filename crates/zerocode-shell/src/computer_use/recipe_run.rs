@@ -1888,6 +1888,45 @@ pub(crate) mod bench {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_secret_recipe_stops_for_the_person_and_keeps_its_opened_tab_for_resume() {
+        use super::bench::{Bench, browser_said, command, walk_of};
+        let text = "## Steps\n1. `zerocode-browser open https://example.test/login` — opens $tab\n2. `zerocode-browser type $tab #code --value $secret_code`\n3. `zerocode-browser click $tab #continue`\n";
+        let bench = Bench::new();
+        let mut calls = Vec::new();
+        let report = super::run(
+            &walk_of(&command(&[]), text),
+            |_, argv, _| {
+                calls.push(argv[0].clone());
+                bench.show(&[("browser-901", "https://example.test/login")]);
+                browser_said(&crate::cmd::browser::open_answer("browser-901", true))
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(calls, ["open"]);
+        assert_eq!(report["stop"]["kind"], "persons_turn");
+        assert_eq!(report["browserTabs"]["$tab"], "browser-901");
+        let missing = "## Steps\n1. `zerocode-browser type $tab #code --value $secret_code`\n";
+        calls.clear();
+        let report = super::run(
+            &walk_of(&command(&["--tab", "browser-901"]), missing),
+            |_, argv, _| {
+                calls.push(argv[0].clone());
+                browser_said("unexpected")
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert!(calls.is_empty());
+        assert_eq!(report["stop"]["kind"], "persons_turn");
+    }
+    #[test]
     fn a_recipe_refreshes_a_form_after_a_press_and_refuses_input_when_that_read_fails() {
         use super::bench::{browser_refused, browser_said, words};
         let calls = std::cell::RefCell::new(Vec::new());
