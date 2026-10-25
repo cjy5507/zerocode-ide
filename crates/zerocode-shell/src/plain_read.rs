@@ -88,6 +88,37 @@ mod tests {
         );
     }
 
+    /// Exercise the open after the caller's metadata check, with the name
+    /// deterministically replaced by a link in between. Windows CI runs this
+    /// with the same symlink permission its other filesystem tests require.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_replaced_by_a_link_after_the_look_is_not_followed() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let path = scratch.path().join("status.json");
+        let elsewhere = scratch.path().join("elsewhere.json");
+        std::fs::write(&path, b"original").expect("a plain file");
+        std::fs::write(&elsewhere, b"replacement").expect("a link target");
+        assert!(open_plain(&path).is_some(), "a plain disk file must open");
+        assert!(
+            std::fs::symlink_metadata(&path)
+                .expect("the look")
+                .is_file()
+        );
+        std::fs::remove_file(&path).expect("replace after the look");
+        std::os::windows::fs::symlink_file(&elsewhere, &path).expect("a replacement symlink");
+        assert!(
+            open_reading(&path).is_none(),
+            "the open followed the replacement link"
+        );
+        assert_eq!(read_plain(&path, 100), None);
+        assert_eq!(read_plain_tail(&path, 100), None);
+        assert!(
+            open_plain(scratch.path()).is_none(),
+            "a directory must not open"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_link_is_not_followed_and_a_pipe_is_not_waited_on() {
