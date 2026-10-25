@@ -36,6 +36,22 @@ use crate::computer_use_protocol::render::Rect;
 /// The shim's name on every pane's PATH — the word a recipe line starts with
 /// when its step goes through the browser door.
 pub const BROWSER_CLI: &str = "zerocode-browser";
+/// Backend-owned `open` completion, also read by recipe tab bindings.
+pub const BROWSER_OPENED_PREFIX: &str = "열림 ";
+pub const BROWSER_OPENED_TAB_KEY: &str = "browserOpenedTab";
+
+#[must_use]
+pub fn opened_browser_label(stdout: &str) -> Option<&str> {
+    let label = stdout.trim_end().strip_prefix(BROWSER_OPENED_PREFIX)?;
+    valid_browser_label(label).then_some(label)
+}
+
+#[must_use]
+pub fn valid_browser_label(label: &str) -> bool {
+    label.strip_prefix("browser-").is_some_and(|number| {
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
 
 /// The control revision from the agent observation that selected an action.
 /// It is neither a document epoch nor an authorization capability.
@@ -144,6 +160,13 @@ pub fn observation_revision(stdout: &str) -> Option<u64> {
 #[must_use]
 pub fn observes(verb: &str) -> bool {
     matches!(verb, "read" | "marks" | "fields" | "screenshot")
+}
+
+/// Form writes in a saved procedure need a current form observation after
+/// a preceding press, even when the recording kept no `fields` line.
+#[must_use]
+pub fn replay_needs_fields(verb: &str) -> bool {
+    matches!(verb, "fill" | "upload")
 }
 
 #[must_use]
@@ -326,7 +349,7 @@ pub fn arity_ok_in(table: &[BrowserVerb], cli: &str, argv: &[String]) -> Result<
 /// `diagnose`) count their flags and values as words and are typed by their
 /// own parsers. `type` takes its text as one word, or as `--value <text>`
 /// — the shape the shim sends for `--value-stdin`; so does `fill` its bundle.
-pub const BROWSER_VERBS: [BrowserVerb; 21] = [
+pub const BROWSER_VERBS: [BrowserVerb; 22] = [
     verb("list", 0, 0, 0),
     changes_page(verb("open", 1, 1, BROWSER_DOOR_BUDGET_MS)),
     act_verb("goto", 2, 2, BROWSER_DOOR_BUDGET_MS),
@@ -369,6 +392,7 @@ pub const BROWSER_VERBS: [BrowserVerb; 21] = [
     // again inside the door's budget for the fields an earlier value brings.
     verb("fields", 1, 2, BROWSER_CALLBACK_DEADLINE_MS),
     act_verb("fill", 2, 3, BROWSER_DOOR_BUDGET_MS),
+    act_verb("upload", 3, 19, BROWSER_DOOR_BUDGET_MS),
 ];
 
 /// The words the authenticated browser dispatcher accepts — the table's
@@ -519,6 +543,41 @@ pub fn parse_fill(argv: &[String]) -> Result<FillCommand, String> {
     };
     let entries = crate::browser_form::fill_entries(bundle)?;
     Ok(FillCommand { label, entries })
+}
+
+/// A file input or a visible drop target, plus explicitly selected local files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UploadCommand {
+    pub label: String,
+    pub selector: String,
+    pub drop: bool,
+    pub paths: Vec<String>,
+}
+
+/// `upload <label> <css> [--drop] <path>...`. No directory expansion.
+pub fn parse_upload(argv: &[String]) -> Result<UploadCommand, String> {
+    arity_ok(argv)?;
+    let label = labelled(argv, "upload")?;
+    let selector = argv[2].clone();
+    if selector.trim().is_empty() || selector.starts_with("--") {
+        return Err("upload needs a selector".into());
+    }
+    let drop = argv.get(3).is_some_and(|word| word == "--drop");
+    let paths = &argv[if drop { 4 } else { 3 }..];
+    if paths.is_empty()
+        || paths.len() > 16
+        || paths
+            .iter()
+            .any(|path| path.is_empty() || path.starts_with("--"))
+    {
+        return Err("upload needs 1~16 explicit file paths".into());
+    }
+    Ok(UploadCommand {
+        label,
+        selector,
+        drop,
+        paths: paths.to_vec(),
+    })
 }
 
 /// What `click` names its control by: a CSS selector, or a number on the
@@ -1734,6 +1793,8 @@ pub fn usage() -> String {
         "                                             양식의 모든 칸을 한 번에: 손잡이·종류·라벨·값·선택지·필수, 그리고 버튼 (화면 밖·같은 출처 틀 안의 칸도)",
         "  zerocode-browser fill <label> --value-stdin",
         "                                             stdin의 {\"손잡이\": 값, …}을 한 번에 채우고 칸마다 다시 읽어 확인 — 글·고르기·체크·날짜·직접 그린 목록·눌림 단추 묶음(칩: 옵션 글의 목록, 상태가 다른 단추만 누름); 늦게 뜨는 칸은 다시 시도; 비밀·파일 칸은 거절",
+        "  zerocode-browser upload <label> <css> [--drop] <path>...",
+        "                                             파일 입력(숨었으면 연결된 라벨) 또는 --drop 영역에 절대 경로의 로컬 파일 1~16개, 합계 16 MiB까지 전달; 업로드 완료는 wait/read로 확인",
         "  zerocode-browser console <label> [--since N] [--level error|warn|all]",
         "                                             페이지 콘솔: seq·레벨·시각·문장 (--since 로 이어 읽기)",
         "  zerocode-browser network <label> [--since N] [--failed]",
@@ -1981,6 +2042,44 @@ pub fn pack_argv(argv: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn upload_grammar_carries_only_explicit_paths_and_a_drop_target() {
+        let argv = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        let input = super::parse_upload(&argv(&[
+            "upload",
+            "browser-1",
+            "#receipt",
+            "/tmp/receipt.txt",
+        ]))
+        .unwrap();
+        assert!(!input.drop);
+        assert_eq!(input.paths, ["/tmp/receipt.txt"]);
+        let drop = super::parse_upload(&argv(&[
+            "upload",
+            "browser-1",
+            "#drop",
+            "--drop",
+            "/tmp/receipt.txt",
+        ]))
+        .unwrap();
+        assert!(drop.drop);
+        for words in [
+            vec!["upload", "browser-1", "#file"],
+            vec!["upload", "browser-1", "#file", "--drop"],
+            vec!["upload", "browser-1", "#file", "--unknown", "/tmp/file"],
+            vec!["upload", "browser-1", "", "/tmp/file"],
+        ] {
+            assert!(super::parse_upload(&argv(&words)).is_err(), "{words:?}");
+        }
+        let row = super::browser_verb("upload").unwrap();
+        assert!(row.acts && row.changes_page && !row.check);
+    }
+
     use super::*;
     use crate::agent_teams::unpack_argv;
 

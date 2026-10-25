@@ -315,10 +315,6 @@ await test("a press names the block it landed in by the same chain the cutter wr
  * moves no focus, no selection and no scroll. Every constant below is read
  * from the Rust the pane runs, never restated. */
 const CORE = await readFile(resolve(UI, "../crates/zerocode-core/src/agent_browser.rs"), "utf8");
-const SCREEN = await readFile(resolve(UI, "../crates/zerocode-core/src/screen_action.rs"), "utf8");
-const VALUE_QUESTION = JSON.parse(await readFile(resolve(UI, "../crates/zerocode-core/fixtures/type-value/question.json"), "utf8"));
-const snapshotKey = (name) => rustText(SCREEN, name);
-const observeKey = (head) => SCREEN.match(new RegExp(`pub const fn key\\(self\\)[\\s\\S]*?Self::${head} => "(\\w+)"`))[1];
 const MARK_HELPERS = rustText(DOOR, "BROWSER_MARK_HELPERS");
 const MARKS_BODY = rustText(DOOR, "BROWSER_MARKS_BODY");
 const REMEASURE_BODY = rustText(DOOR, "BROWSER_REMEASURE_BODY");
@@ -327,29 +323,8 @@ const SETTLE_BODY = rustText(DOOR, "BROWSER_SETTLE_BODY");
 const SETTLE_QUIET_MS = rustNumber(CORE, "BROWSER_SETTLE_QUIET_MS");
 const SETTLE_MS = rustNumber(CORE, "BROWSER_SETTLE_MS");
 const CANDIDATE_CAP = rustNumber(JEV, "SCREEN_CANDIDATE_CAP");
-const KEYS = {
-  epoch: snapshotKey("EPOCH_KEY"), kind: snapshotKey("FIELD_KIND_KEY"), secret: snapshotKey("FIELD_SECRET_KEY"),
-  label: snapshotKey("LABEL_KEY"), placeholder: snapshotKey("FIELD_PLACEHOLDER_KEY"), near: snapshotKey("FIELD_NEAR_KEY"),
-  value: snapshotKey("FIELD_VALUE_KEY"), role: snapshotKey("ROLE_KEY"), count: snapshotKey("COUNT_KEY"),
-  alt: snapshotKey("ALT_KEY"), width: snapshotKey("WIDTH_KEY"), height: snapshotKey("HEIGHT_KEY"),
-  text: snapshotKey("TEXT_KEY"), selector: snapshotKey("SELECTOR_KEY"),
-  containers: observeKey("Container"), images: observeKey("Image"), rows: observeKey("Row"),
-};
-/* The request `automate_marks` hands the page (cmd/browser.rs
- * `marks_request`), from the same tables. */
-const MARKS_REQUEST = {
-  selectors: rustList(CORE, "BROWSER_MARKABLE"),
-  answerCap: rustNumber(DOOR, "BROWSER_CALLBACK_CAP"),
-  keys: KEYS,
-  observed: {
-    containers: rustList(CORE, "BROWSER_OBSERVED_CONTAINERS"), rows: rustList(CORE, "BROWSER_OBSERVED_ROWS"),
-    images: rustList(CORE, "BROWSER_OBSERVED_IMAGES"), chrome: rustList(CORE, "BROWSER_OBSERVED_CHROME"),
-    cap: CANDIDATE_CAP, imageMinPx: rustNumber(CORE, "BROWSER_OBSERVED_IMAGE_MIN_PX"),
-  },
-  field: { regions: rustList(CORE, "BROWSER_FIELD_REGIONS"), headings: rustList(CORE, "BROWSER_FIELD_HEADINGS") },
-  wordCap: Math.floor(rustNumber(SCREEN, "SHOWS_CHAR_CAP") / CANDIDATE_CAP),
-  valueCap: VALUE_QUESTION.valueCharCap,
-};
+const MARKS_REQUEST = twin.MARKS_REQUEST;
+const KEYS = MARKS_REQUEST.keys;
 /* The settle's watch is kept under the guest's own slot name
  * (`settle_watch`, cmd/browser.rs), read from the one file both sides read. */
 const WATCH = (await readFile(resolve(UI, "browser-guest-key.txt"), "utf8")).trim();

@@ -123,14 +123,14 @@ pub fn fenced_dir(local_data_root: &Path, presented: Option<&str>) -> Option<Pat
 #[must_use]
 pub fn captures(tool: &str, verb: &str) -> Option<bool> {
     match (tool, verb) {
+        ("browser", verb) if zerocode_core::agent_browser::acts(verb) => Some(true),
         ("emulator", verb) if zerocode_core::agent_emulator::acts(verb) => Some(true),
         // Deterministic AX checks leave a line; their verdict needs no picture.
         ("emulator", verb) if zerocode_core::agent_emulator::is_check(verb) => Some(false),
         ("emulator", "screenshot")
         | (
             "browser",
-            "goto" | "click" | "type" | "press" | "fill" | "eval" | "wait" | "screenshot"
-            | "viewport" | "scroll" | "find",
+            "wait" | "screenshot" | "viewport" | "find",
         )
         | (
             "computer",
@@ -183,6 +183,30 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
         ) => Some(false),
         _ => None,
     }
+}
+
+/// Keep only the backend's completed `open` label, so a saved recipe binds a
+/// new tab instead of replaying a label from another day. No page text enters.
+pub(crate) fn browser_open_observation(
+    argv: &[String],
+    answer: &zerocode_hookd::TeamAnswer,
+    observation: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if argv.first().map(String::as_str) != Some("open") || answer.exit_code != 0 {
+        return observation;
+    }
+    let Some(label) = zerocode_core::agent_browser::opened_browser_label(&answer.stdout) else {
+        return observation;
+    };
+    let mut observation = observation.unwrap_or_else(|| serde_json::json!({}));
+    if !observation.is_object() {
+        observation = serde_json::json!({ "context": observation });
+    }
+    observation.as_object_mut()?.insert(
+        zerocode_core::agent_browser::BROWSER_OPENED_TAB_KEY.into(),
+        serde_json::json!(label),
+    );
+    Some(observation)
 }
 
 /// The argv as the log keeps it: what was typed is replaced by its length.
@@ -1303,6 +1327,7 @@ mod tests {
         assert_eq!(captures("browser", "close"), Some(false));
         assert_eq!(captures("browser", "marks"), Some(false));
         assert_eq!(captures("browser", "find"), Some(true));
+        assert_eq!(captures("browser", "upload"), Some(true));
         assert_eq!(captures("browser", "read"), None);
         assert_eq!(captures("browser", "tabs"), None);
         assert_eq!(captures("computer", "get-app-state"), None);

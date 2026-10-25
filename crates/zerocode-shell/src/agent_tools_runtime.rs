@@ -8339,6 +8339,19 @@ async fn dispatch_browser_command(
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
+        ("upload", _) => {
+            let command = match zerocode_core::agent_browser::parse_upload(argv) {
+                Ok(command) => command,
+                Err(why) => {
+                    return refused_unsent(dispatched, format!("zerocode-browser: {why}\n"));
+                }
+            };
+            let label = command.label.clone();
+            match cmd::browser::upload::automate_upload(app, &state, command).await {
+                Ok(report) => page_said(&label, report.to_string()),
+                Err(refusal) => executor_refused(dispatched, refusal),
+            }
+        }
         ("fill", _) => {
             let command = match zerocode_core::agent_browser::parse_fill(argv) {
                 Ok(command) => command,

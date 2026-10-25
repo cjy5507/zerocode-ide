@@ -145,6 +145,7 @@ browser-observation-test:
 # a person could see. Reads the strings the Rust hands the pane.
 browser-door-test:
     node ui/tests/browser-door.mjs
+    node ui/tests/expense-workflow.mjs
 
 # The knowledge graph's 14 browser tests (first paint, frame gap, DOM budget,
 # determinism, hex-literal ban, slicer, path). Outside the gate this file sat

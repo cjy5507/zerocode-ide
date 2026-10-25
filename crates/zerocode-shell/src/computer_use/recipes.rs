@@ -14,9 +14,10 @@ use zerocode_core::computer_flow::{
 };
 use zerocode_core::computer_recipe::{
     RECIPE_HEADING_PARAMS, RECIPE_HEADING_STEPS, RECIPE_HOUSEKEEPING, RECIPE_MARK_FAILED,
-    RECIPE_MARK_PERSONS_LAST_STEP, RECIPE_MARK_PERSONS_TURN, RECIPE_PARAM_CLOSE, RECIPE_PARAM_OPEN,
-    RECIPE_SKIPPED, RECIPE_TEXT_PARAM, RecipeStop, RecipeTool, recipe_line_text,
-    recipe_placeholders, recipe_same_step, recipe_saved_step, recipe_saved_words, recipe_step_stop,
+    RECIPE_MARK_OPENS, RECIPE_MARK_PERSONS_LAST_STEP, RECIPE_MARK_PERSONS_TURN, RECIPE_PARAM_CLOSE,
+    RECIPE_PARAM_OPEN, RECIPE_SKIPPED, RECIPE_TAB_ALIAS, RECIPE_TEXT_PARAM, RecipeStop, RecipeTool,
+    recipe_line_text, recipe_placeholders, recipe_same_step, recipe_saved_step, recipe_saved_words,
+    recipe_step_stop,
 };
 use zerocode_core::computer_use::{COMPUTER_CLI, RECIPE_STEPS, recipe_slug, verb_method};
 use zerocode_core::computer_use_protocol::error_code;
@@ -131,6 +132,8 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
     }
     out.push_str(&format!("\n{RECIPE_HEADING_STEPS}\n\n"));
     let mut params: Vec<(String, String)> = Vec::new();
+    let mut browser_tabs: BTreeMap<String, String> = BTreeMap::new();
+    let mut opened_aliases = std::collections::BTreeSet::new();
     // Names a walked line already carries: typed text takes none of them.
     let mut taken: std::collections::BTreeSet<String> = kept
         .iter()
@@ -144,7 +147,7 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
     for (at, saved) in kept.iter().enumerate() {
         let n = at + 1;
         let went = saved.step.ok || saved.handed_back;
-        let words: Vec<String> = saved
+        let mut words: Vec<String> = saved
             .words
             .iter()
             .map(
@@ -173,6 +176,41 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
             )
             .collect();
         let mut marks: Vec<String> = Vec::new();
+        if saved.tool == RecipeTool::Browser {
+            let label = if words.first().is_some_and(|verb| verb == "open") && went {
+                saved
+                    .step
+                    .observation
+                    .as_ref()
+                    .and_then(|value| {
+                        value.get(zerocode_core::agent_browser::BROWSER_OPENED_TAB_KEY)
+                    })
+                    .and_then(Value::as_str)
+            } else {
+                zerocode_core::computer_recipe::browser_tab_target(&words)
+            };
+            if let Some(alias) =
+                label.filter(|label| zerocode_core::computer_recipe::is_tab_alias(label))
+                && !browser_tabs.values().any(|known| known == alias)
+            {
+                browser_tabs.insert(alias.to_string(), alias.to_string());
+            }
+            if let Some(label) =
+                label.filter(|label| zerocode_core::agent_browser::valid_browser_label(label))
+            {
+                let next = zerocode_core::computer_recipe::tab_alias(browser_tabs.len() + 1);
+                let alias = browser_tabs
+                    .entry(label.to_string())
+                    .or_insert(next)
+                    .clone();
+                if words[0] == "open" {
+                    marks.push(format!("{RECIPE_MARK_OPENS}{alias}"));
+                    opened_aliases.insert(alias);
+                } else {
+                    words[1] = alias;
+                }
+            }
+        }
         if recipe_step_stop(&words) == Some(RecipeStop::PersonsLastStep) {
             marks.push(RECIPE_MARK_PERSONS_LAST_STEP.to_string());
         }
@@ -190,6 +228,29 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
             recipe_line_text(saved.tool, &words, &marks)
         ));
     }
+    let external: Vec<_> = browser_tabs
+        .values()
+        .filter(|alias| !opened_aliases.contains(*alias))
+        .collect();
+    if !browser_tabs.is_empty() {
+        out.push_str("\n## Browser tabs\n\n");
+        for alias in browser_tabs.values() {
+            if opened_aliases.contains(alias) {
+                out.push_str(&format!("- `{alias}` — the tab this run opens.\n"));
+            } else if alias == RECIPE_TAB_ALIAS {
+                out.push_str(&format!(
+                    "- `{alias}` — supply `--tab <browser-label>` for a tab you own.\n"
+                ));
+            } else {
+                let name = alias.trim_start_matches('$');
+                params.push((
+                    name.into(),
+                    format!("the browser label for {alias}, supplied explicitly"),
+                ));
+                out.push_str(&format!("- `{alias}` — supply `{name}` in `--params`.\n"));
+            }
+        }
+    }
     if !params.is_empty() {
         out.push_str(&format!("\n{RECIPE_HEADING_PARAMS}\n\n"));
         for (param, said) in &params {
@@ -203,10 +264,22 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
         .map(|(param, ..)| format!("\"{param}\":\"…\""))
         .collect::<Vec<_>>()
         .join(",");
+    let tab_arg = if external
+        .iter()
+        .any(|alias| alias.as_str() == RECIPE_TAB_ALIAS)
+    {
+        " --tab <browser-label>"
+    } else {
+        ""
+    };
+    let params_arg = if example.is_empty() {
+        String::new()
+    } else {
+        format!(" --params '{{{example}}}'")
+    };
     out.push_str(&format!(
-        "\n## How to walk it\n\n`{COMPUTER_CLI} recipe-run --name {slug}{given}` walks every step in one call and answers where it stopped: the person's turn or last step, a step naming the saved screen's element, window or process, a check the screen fails, a step whose work did not happen, a press that changed nothing where it landed, a person's hand on the pointer, or a step that would outlast the call. Do that step with a lone command, then run again with `--start <next>`. Edit a line to change a step; delete it to drop one; keep each step on its own numbered line.\n",
+        "\n## How to walk it\n\n`{COMPUTER_CLI} recipe-run --name {slug}{tab_arg}{params_arg}` walks every step in one call and answers where it stopped: the person's turn or last step, a step naming the saved screen's element, window or process, a check the screen fails, a step whose work did not happen, a press that changed nothing where it landed, a person's hand on the pointer, or a step that would outlast the call. Do that step with a lone command, then run again with `--start <next>`. Edit a line to change a step; delete it to drop one; keep each step on its own numbered line.\n",
         slug = recipe_slug(name),
-        given = if example.is_empty() { String::new() } else { format!(" --params '{{{example}}}'") },
     ));
     out
 }
@@ -657,6 +730,253 @@ fn splice_flow_sections(text: &str, spec: &FlowSpec) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn browser_tab_alias_survives_save_without_the_recorded_label() {
+        let opened = Step {
+            tool: "browser".into(),
+            observation: Some(serde_json::json!({ "browserOpenedTab": "browser-4" })),
+            ..step(1, &["open", "https://example.test/work"], true)
+        };
+        let pressed = Step {
+            tool: "browser".into(),
+            ..step(2, &["click", "browser-4", "#continue"], true)
+        };
+        let text = recipe_markdown("Tabs", None, &[opened, pressed], 1);
+        assert!(text.contains("opens $tab"), "{text}");
+        assert!(text.contains("click $tab #continue"), "{text}");
+        assert!(!text.contains("browser-4"), "{text}");
+    }
+
+    #[test]
+    fn browser_tab_alias_resaving_a_tail_keeps_the_explicit_tab_instruction() {
+        let pressed = Step {
+            tool: "browser".into(),
+            ..step(1, &["click", "$tab", "#continue"], true)
+        };
+        let text = recipe_markdown("Tail", None, &[pressed], 1);
+        assert!(text.contains("--tab <browser-label>"), "{text}");
+        assert!(text.contains("click $tab #continue"), "{text}");
+    }
+
+    /// The real recipe loop and saver, with its browser-script boundary in
+    /// Chromium. Opt-in because the Rust gate need not install Node/Chromium.
+    #[test]
+    #[ignore = "offline benchmark: requires Node and Playwright Chromium"]
+    fn expense_workflow_runs_and_replays_its_saved_recipe_in_one_call() {
+        use super::super::recipe_run::{
+            self,
+            bench::{Bench, command, walk_of},
+        };
+        use std::io::{BufRead, BufReader, Write};
+        use std::process::{Command, Stdio};
+
+        struct Driver {
+            child: std::process::Child,
+            input: std::process::ChildStdin,
+            output: BufReader<std::process::ChildStdout>,
+        }
+        impl Driver {
+            fn read(&mut self) -> Value {
+                let mut line = String::new();
+                assert!(
+                    self.output.read_line(&mut line).unwrap() > 0,
+                    "browser driver ended"
+                );
+                serde_json::from_str(&line).expect("browser driver JSON")
+            }
+            fn ask(&mut self, argv: &[String]) -> zerocode_hookd::TeamAnswer {
+                writeln!(self.input, "{}", serde_json::to_string(argv).unwrap()).unwrap();
+                self.input.flush().unwrap();
+                let reply = self.read();
+                zerocode_hookd::TeamAnswer {
+                    exit_code: i32::try_from(reply["exit_code"].as_i64().expect("exit code"))
+                        .unwrap(),
+                    stdout: reply["stdout"].as_str().expect("stdout").into(),
+                    stderr: reply["stderr"].as_str().expect("stderr").into(),
+                }
+            }
+        }
+        impl Drop for Driver {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut child = Command::new("node")
+            .arg(root.join("ui/tests/expense-workflow-driver.mjs"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("Node with Chromium");
+        let input = child.stdin.take().unwrap();
+        let output = BufReader::new(child.stdout.take().unwrap());
+        let mut driver = Driver {
+            child,
+            input,
+            output,
+        };
+        let ready = driver.read();
+        assert_eq!(ready["ready"], true);
+        let period = r##"{"#period":"지난달"}"##;
+        let details = r##"{"#date":"2027-02-03","#amount":"18500","#template":"지출결의 · 환급신청서","#approver":"팀 검토 → 재무 검토"}"##;
+        let params = serde_json::json!({ "url": ready["url"], "receipt": ready["receipt"], "period": period, "details": details });
+        let text = "# Synthetic expense\n\n## Steps\n\n\
+1. `zerocode-browser open {{url}}`\n\
+2. `zerocode-browser marks browser-801`\n\
+3. `zerocode-browser click browser-801 #approval-menu`\n\
+4. `zerocode-browser click browser-801 'a[href=\"#documents\"]'`\n\
+5. `zerocode-browser wait browser-801 #period`\n\
+6. `zerocode-browser fields browser-801`\n\
+7. `zerocode-browser fill browser-801 {{period}}`\n\
+8. `zerocode-browser click browser-801 #open-document`\n\
+9. `zerocode-browser wait browser-801 #copy`\n\
+10. `zerocode-browser click browser-801 #copy`\n\
+11. `zerocode-browser wait browser-801 #expense`\n\
+12. `zerocode-browser fields browser-801`\n\
+13. `zerocode-browser fill browser-801 {{details}}`\n\
+14. `zerocode-browser click browser-801 #attach`\n\
+15. `zerocode-browser wait browser-801 '#uploader[open]'`\n\
+16. `zerocode-browser fields browser-801`\n\
+17. `zerocode-browser upload browser-801 #receipt {{receipt}}`\n\
+18. `zerocode-browser click browser-801 #upload-done`\n\
+19. `zerocode-browser click browser-801 #review`\n\
+20. `zerocode-browser wait browser-801 #confirm`\n\
+21. `zerocode-browser click browser-801 #confirm`\n\
+22. `zerocode-browser wait browser-801 #complete`\n";
+        let temp = tempfile::tempdir().unwrap();
+        let evidence = temp.path().join("evidence");
+        std::fs::create_dir_all(&evidence).unwrap();
+        let mut records = Vec::new();
+        let mut measurements = Vec::new();
+        let mut opened_labels = Vec::new();
+        for round in 0..2 {
+            if round == 0 {
+                assert_eq!(driver.ask(&["reset".into()]).exit_code, 0);
+            } else {
+                assert_eq!(
+                    driver
+                        .ask(&["close".into(), "browser-801".into()])
+                        .exit_code,
+                    0
+                );
+            }
+            let (document, given) = if round == 0 {
+                (text.to_string(), params.clone())
+            } else {
+                let (_, saved) = show(temp.path(), "Synthetic expense").unwrap();
+                assert!(
+                    saved.contains("zerocode-browser upload"),
+                    "the attachment must survive save: {saved}"
+                );
+                let lines = zerocode_core::computer_recipe::recipe_lines(&saved).unwrap();
+                let mut values = serde_json::Map::new();
+                let mut fills = 0;
+                for line in &lines {
+                    if line.argv[0] == "fill" {
+                        let name = zerocode_core::computer_recipe::recipe_placeholders(
+                            line.argv.last().unwrap(),
+                        );
+                        values.insert(
+                            name[0].clone(),
+                            Value::String(if fills == 0 { period } else { details }.into()),
+                        );
+                        fills += 1;
+                    }
+                }
+                (saved, Value::Object(values))
+            };
+            let given = given.to_string();
+            let command = command(&["--params", &given]);
+            let bench = Bench::new();
+            let began = std::time::Instant::now();
+            let mut count = 0;
+            let report = recipe_run::run(
+                &walk_of(&command, &document),
+                |tool, argv, _| {
+                    assert_eq!(tool, RecipeTool::Browser);
+                    count += 1;
+                    let answer = driver.ask(argv);
+                    if argv[0] == "open" && answer.exit_code == 0 {
+                        let label =
+                            zerocode_core::agent_browser::opened_browser_label(&answer.stdout)
+                                .unwrap();
+                        opened_labels.push(label.to_string());
+                        bench.show(&[(label, ready["url"].as_str().unwrap())]);
+                    }
+                    bench
+                        .clock
+                        .set(u64::try_from(began.elapsed().as_millis()).unwrap());
+                    if round == 0 {
+                        let words = crate::run_evidence::redacted("browser", argv);
+                        let refs: Vec<_> = words.iter().map(String::as_str).collect();
+                        records.push(Step {
+                            tool: "browser".into(),
+                            observation: crate::run_evidence::browser_open_observation(
+                                argv, &answer, None,
+                            ),
+                            ..step(count, &refs, answer.exit_code == 0)
+                        });
+                    }
+                    answer
+                },
+                |_, _, _| {},
+                |_| {},
+                bench.desk(false, None),
+                || true,
+            )
+            .expect("recipe runner");
+            assert_eq!(report["done"], true, "round {round}: {report}");
+            let elapsed_ms = began.elapsed().as_secs_f64() * 1000.0;
+            assert!(
+                elapsed_ms < 30_000.0,
+                "recipe exceeded 30 seconds: {elapsed_ms} ms"
+            );
+            let completed = driver.ask(&["verify".into()]);
+            assert_eq!(completed.exit_code, 0);
+            let state: Value = serde_json::from_str(&completed.stdout).unwrap();
+            assert_eq!(state["submitted"], true);
+            assert_eq!(state["amount"], "18500");
+            assert_eq!(state["files"][0]["name"], "receipt.txt");
+            measurements.push(serde_json::json!({ "round": round + 1, "recipeCalls": 1, "recipeLines": report["steps"], "browserSteps": count, "elapsedMs": elapsed_ms, "modelCalls": 0 }));
+            if round == 0 {
+                let jsonl = records
+                    .iter()
+                    .map(|step| serde_json::to_string(step).unwrap())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                std::fs::write(evidence.join("steps.jsonl"), format!("{jsonl}\n")).unwrap();
+                save(temp.path(), "Synthetic expense", None, &evidence, None, 1).unwrap();
+            }
+        }
+        assert_eq!(
+            opened_labels,
+            ["browser-801", "browser-802"],
+            "the replay must open a different tab"
+        );
+        println!("expense recipe bench: {}", serde_json::json!(measurements));
+        if let Some(out) = std::env::var_os("ZC_EXPENSE_EVIDENCE") {
+            let out = PathBuf::from(out);
+            std::fs::create_dir_all(&out).unwrap();
+            std::fs::write(
+                out.join("recipe-measurements.json"),
+                serde_json::to_string_pretty(&measurements).unwrap(),
+            )
+            .unwrap();
+            let (_, saved) = show(temp.path(), "Synthetic expense").unwrap();
+            std::fs::write(out.join("saved-recipe.md"), saved).unwrap();
+            assert_eq!(
+                driver
+                    .ask(&["snapshot".into(), out.to_string_lossy().into_owned()])
+                    .exit_code,
+                0
+            );
+        }
+        assert_eq!(driver.ask(&["finish".into()]).exit_code, 0);
+        assert!(driver.child.wait().unwrap().success());
+    }
+
     fn step(n: usize, argv: &[&str], ok: bool) -> Step {
         Step {
             n,
@@ -1060,15 +1380,15 @@ mod tests {
             "a listing leaves no evidence and is no step: {text}"
         );
         assert!(
-            text.contains("1. `zerocode-browser goto browser-1 https://stg.example/login`\n"),
+            text.contains("1. `zerocode-browser goto $tab https://stg.example/login`\n"),
             "{text}"
         );
         assert!(
-            text.contains("2. `zerocode-browser click browser-1 #login`\n"),
+            text.contains("2. `zerocode-browser click $tab #login`\n"),
             "{text}"
         );
         assert!(
-            text.contains("3. `zerocode-browser type browser-1 #pw {{text-3}}`\n"),
+            text.contains("3. `zerocode-browser type $tab #pw {{text-3}}`\n"),
             "what was typed is the next run's to give: {text}"
         );
         assert!(
@@ -1085,8 +1405,8 @@ mod tests {
                 RecipeTool::Computer
             ]
         );
-        let bench = Bench::new();
-        let command = command(&["--params", r#"{"text-3":"hunter2"}"#]);
+        let bench = Bench::new().showing(&[("browser-1", "https://stg.example/login")]);
+        let command = command(&["--tab", "browser-1", "--params", r#"{"text-3":"hunter2"}"#]);
         let mut roads: Vec<(RecipeTool, Vec<String>, Vec<String>)> = Vec::new();
         let report = super::super::recipe_run::run(
             &walk_of(&command, &text),
@@ -1105,14 +1425,19 @@ mod tests {
         )
         .expect("walked");
         assert_eq!(report["done"], true, "{report}");
-        assert_eq!(roads.len(), 4);
         assert_eq!(
-            roads[0].1,
+            roads.len(),
+            5,
+            "a newly supplied tab is read before its first change"
+        );
+        assert_eq!(roads[0].1, words(&["read", "browser-1"]));
+        assert_eq!(
+            roads[1].1,
             words(&["goto", "browser-1", "https://stg.example/login"]),
             "a browser line carries no walk flags"
         );
         assert_eq!(
-            (roads[2].0, roads[2].1.clone(), roads[2].2[3].as_str()),
+            (roads[3].0, roads[3].1.clone(), roads[3].2[3].as_str()),
             (
                 RecipeTool::Browser,
                 words(&["type", "browser-1", "#pw", "hunter2"]),
@@ -1120,7 +1445,7 @@ mod tests {
             ),
             "the value goes down the road; the log keeps the recipe's word"
         );
-        assert_eq!(roads[3].0, RecipeTool::Computer);
+        assert_eq!(roads[4].0, RecipeTool::Computer);
         assert_eq!(report["ran"][0]["tool"], "browser");
         assert_eq!(report["ran"][3]["tool"], "computer");
 

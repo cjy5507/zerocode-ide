@@ -4,6 +4,7 @@ use crate::*;
 
 /// The form pair (`fields`, `fill`, and the same inside an `eval`).
 pub(crate) mod form;
+pub(crate) mod upload;
 pub(crate) use form::{automate_fields, automate_fill, eval_script};
 
 /// The callback channel is shared by find/grab/menu and the automation
@@ -3059,7 +3060,10 @@ pub(crate) async fn wait_until(
 /// `open`'s answer: the label, opened — or the label, still opening.
 pub(crate) fn open_answer(label: &str, opened: bool) -> String {
     if opened {
-        format!("열림 {label}\n")
+        format!(
+            "{}{label}\n",
+            zerocode_core::agent_browser::BROWSER_OPENED_PREFIX
+        )
     } else {
         format!("아직 여는 중 {label} — `zerocode-browser tabs`가 말해 줍니다\n")
     }

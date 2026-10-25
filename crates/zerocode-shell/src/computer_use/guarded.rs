@@ -583,6 +583,7 @@ mod tests {
             argv: vec!["click".into(), "browser-1".into(), "#send".into()],
             failed_then: false,
             money: true,
+            opens_tab: None,
         };
         let mut asked: Vec<Vec<String>> = Vec::new();
         let answer = |found: &[&str]| {

@@ -47,7 +47,9 @@ mod original_observation_regressions {
                 error.starts_with(code) && error.contains("zerocode-browser marks browser-1")
             })
         };
-        for verb in ["click", "type", "fill", "goto", "close", "scroll", "find"] {
+        for verb in [
+            "click", "type", "fill", "upload", "goto", "close", "scroll", "find",
+        ] {
             assert!(
                 says(
                     workspaces.begin_at("browser-1", Some("pane-a"), verb, None),
@@ -62,7 +64,7 @@ mod original_observation_regressions {
             .unwrap()
             .finish_observation()
             .unwrap();
-        for verb in ["click", "type", "fill", "goto", "scroll", "find"] {
+        for verb in ["click", "type", "fill", "upload", "goto", "scroll", "find"] {
             let operation = workspaces
                 .begin_at("browser-1", Some("pane-a"), verb, None)
                 .unwrap_or_else(|error| panic!("{verb} after the look: {error}"))
