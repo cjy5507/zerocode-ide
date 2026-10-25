@@ -63,19 +63,25 @@ export async function testPaletteRecent(browser, origin, standBackend, ok) {
   ok("the Go group names the doors the sidebar already has", go.join("|") === "작업 상황판|받은 편지함|아티팩트|자동화|보관함|스킬|설정" || go.join("|") === "작업 상황판|받은 편지함|아티팩트|보관함|스킬|설정", JSON.stringify(go));
 
   // 「받은 편지함」 줄은 받은 편지함 화면을 연다(t-67483의 화면, 사이드바 문과 같은 길).
-  const inbox = await page.evaluate(async () => {
-    closePalette();
-    togglePalette("worktree");
-    await new Promise((done) => setTimeout(done, 400));
+  // Each step waits for the page's own state, not for a guessed time: the palette is open on its
+  // first list, a typed query has replaced the rows it started from (a fresh `paletteRows`), and
+  // Enter has closed the palette and made the inbox tab.
+  await page.evaluate(() => { closePalette(); togglePalette("worktree"); });
+  await page.waitForFunction(() => paletteMode === "worktree" && document.querySelector("#qo-results .qo-row") !== null);
+  await page.evaluate(() => {
+    window.__PALETTE_ROWS_BEFORE__ = paletteRows;
     const input = document.getElementById("qo-input");
     input.value = "받은 편지함";
     input.dispatchEvent(new Event("input", { bubbles: true }));
-    await new Promise((done) => setTimeout(done, 400));
-    const shown = [...document.querySelectorAll("#qo-results .qo-row .qo-label")].map((node) => node.textContent);
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
-    await new Promise((done) => setTimeout(done, 200));
-    return { shown, closed: paletteMode === null, opened: tabs.some((tab) => tab.kind === "inbox") };
   });
+  await page.waitForFunction(() => paletteRows !== window.__PALETTE_ROWS_BEFORE__ && document.querySelectorAll("#qo-results .qo-row").length === paletteRows.length);
+  const shown = await page.evaluate(() => [...document.querySelectorAll("#qo-results .qo-row .qo-label")].map((node) => node.textContent));
+  await page.evaluate(() => {
+    document.getElementById("qo-input").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  });
+  await page.waitForFunction(() => paletteMode === null && tabs.some((tab) => tab.kind === "inbox")).catch(() => null);
+  const inbox = await page.evaluate(() => ({ shown: null, closed: paletteMode === null, opened: tabs.some((tab) => tab.kind === "inbox") }));
+  inbox.shown = shown;
   ok("the Go group's 받은 편지함 opens the inbox page and closes the palette",
     inbox.shown.join("|") === "받은 편지함" && inbox.closed === true && inbox.opened === true, JSON.stringify(inbox));
 
