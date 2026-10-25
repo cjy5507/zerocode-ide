@@ -214,6 +214,36 @@ fn a_panel_press_takes_the_same_share_and_invalidates_the_inflight_request() {
 }
 
 #[test]
+fn a_panel_press_survives_a_share_renotice_before_the_window_hears_it() {
+    let (_person, asked) = person(Decision::Allowed);
+    let request = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut pressed = state();
+    pressed["takenBack"] = true.into();
+    super::tell();
+    super::hear_panel(&json!({"shareControl": pressed}));
+    assert_eq!(state()["takenBack"], true);
+    assert_eq!(
+        ensure_current().unwrap_err().code,
+        error_code::PERSON_TOOK_CONTROL
+    );
+    drop(request);
+    for method in ComputerMethod::ALL
+        .iter()
+        .copied()
+        .filter(|method| method.acts())
+    {
+        assert_eq!(
+            refused(method, &click("Sample")).as_deref(),
+            Some(error_code::PERSON_TOOK_CONTROL),
+            "{method:?}"
+        );
+    }
+    assert_eq!(asked.get(), 1);
+    give_back();
+    assert!(admit(ComputerMethod::Click, &click("Sample")).is_ok());
+}
+
+#[test]
 fn a_late_panel_press_cannot_take_a_replaced_or_handed_back_share() {
     let (_person, _) = person(Decision::Allowed);
     let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();

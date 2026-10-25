@@ -34,6 +34,23 @@ final class ShareControlPanelTests: XCTestCase {
         XCTAssertFalse(state.takeControl(displayedRevision: 1))
     }
 
+    func testPendingPressSurvivesANewerShareRenoticeUntilHandBack() throws {
+        var state = ShareControlState()
+        state.update(target: "Sample", generation: 0, revision: 1)
+        XCTAssertTrue(state.takeControl(displayedRevision: 1))
+        state.update(target: "Sample", generation: 0, revision: 2)
+        XCTAssertTrue(state.takenBack)
+        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack)) {
+            XCTAssertEqual(($0 as? ProviderError)?.code, "person_took_control")
+        }
+        // The window acknowledges the press, then the person hands back.
+        state.update(target: "Sample", generation: 1, revision: 3, takenBack: true)
+        XCTAssertTrue(state.takenBack)
+        state.update(target: "Sample", generation: 2, revision: 4)
+        XCTAssertFalse(state.takenBack)
+        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack))
+    }
+
     func testHelperIsExcludedAndPanelCoordinatesAreBlockedEvenWithAllowSelf() throws {
         XCTAssertTrue(ShareControlPanel.isHelperPID(getpid()))
         XCTAssertThrowsError(try ShareControlPanel.refuseHelper(pid: getpid()))
