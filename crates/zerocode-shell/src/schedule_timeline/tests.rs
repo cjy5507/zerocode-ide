@@ -1427,3 +1427,65 @@ fn a_lane_run_carries_the_result_the_window_reads() {
         assert_eq!(lane["result"], serde_json::json!(want), "{lane}");
     }
 }
+
+/// lane.sh's judge_sha can reject an unknown sha before archive. sweep_sha
+/// still logs a successful sweep, then the explicit `== red (reason)` result.
+/// That cleanup must never teach the reader that red means passed.
+fn verdict_fixture() -> Vec<ParsedRun> {
+    let text = std::fs::read_to_string(fixture().join("verdicts/lane-aaaaaaaa.log"))
+        .expect("the scrubbed lane verdict log");
+    lane_runs(&text, kst(21, 8, 4, 46), KST)
+}
+
+#[test]
+fn lane_verdicts_do_not_learn_success_from_cleanup_only_failures() {
+    let parsed = verdict_fixture();
+    let read = |runs: &[&ParsedRun]| {
+        lane_view(runs, None)
+            .into_iter()
+            .map(|run| (run.verdict, run.result))
+            .collect::<Vec<_>>()
+    };
+    let alone = read(&[&parsed[1], &parsed[4]]);
+    let mixed = read(&parsed.iter().collect::<Vec<_>>());
+    eprintln!(
+        "gate failure alone: {}; with cleanup-only failures: {}",
+        alone[0].1, mixed[1].1
+    );
+    assert_eq!(
+        alone,
+        [(Some("red".into()), FAILED), (Some("green".into()), PASSED)]
+    );
+    assert_eq!(
+        mixed[1], alone[0],
+        "a cleanup-only red changed another red's result"
+    );
+    assert_eq!(mixed[4], alone[1], "the true green changed its result");
+    assert_eq!(mixed[0].1, FAILED, "unknown sha ended red");
+    assert_eq!(mixed[2].1, ENDED, "a refusal did not pass");
+    assert_eq!(mixed[3].1, ENDED, "a superseded run did not pass");
+}
+
+#[test]
+fn lane_verdicts_do_not_need_a_successful_neighbor_to_read_red() {
+    let parsed = verdict_fixture();
+    let runs = lane_view(&[&parsed[1]], None);
+    assert_eq!(runs[0].result, FAILED);
+}
+
+#[test]
+fn lane_verdicts_cleanup_only_failures_do_not_plan_a_running_lane() {
+    let parsed = verdict_fixture();
+    let runs = lane_view(&[&parsed[0], &parsed[2], &parsed[3]], None);
+    assert!(
+        lane_plan(&runs).is_empty(),
+        "failed cleanup became a successful lane plan"
+    );
+}
+
+#[test]
+fn lane_verdicts_failed_gate_durations_do_not_enter_successful_history() {
+    let parsed = verdict_fixture();
+    let runs = lane_view(&parsed.iter().collect::<Vec<_>>(), None);
+    assert_eq!(stage_past(&runs).get("gate-root"), Some(&vec![10]));
+}
