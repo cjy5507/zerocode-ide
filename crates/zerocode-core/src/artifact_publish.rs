@@ -832,7 +832,9 @@ mod tests {
         let root = dir.path().join("artifacts");
         let held = lock_store(&root).unwrap();
         let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(40));
+            std::thread::sleep(std::time::Duration::from_millis(
+                STORE_LOCK_PATIENCE_MS * 2,
+            ));
             drop(held);
         });
         let started = std::time::Instant::now();
