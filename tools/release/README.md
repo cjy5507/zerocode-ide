@@ -171,6 +171,28 @@ ends red or refused keeps it for its next turn. `tests/test_coord_receipt.py`
 pins the reading; `tests/test_lane.py Receipt` pins the lane with stubs and
 `ReceiptOnGit` the same on a real repository.
 
+## The quick check before a batch (2026-10-25, t-73910)
+
+10-25's batch gate went round four times on reds a read of the text finds, each
+seen only when the gate reached it: a bundled skill's text with no release line
+(l78d, about 7 min in), a tools seed behind the Rust kinds it copies (l78d, about
+21 min), a launch road past the shell's literal count (l78g, about 13 min), a
+call at load the settings test's fake backend has no case for (l78h, about 90
+min). Before a batch head is gated — and a worker before it hands over —
+
+    python3 tools/release/prebatch.py --base main --head <batch head>
+
+reads the paths the two trees differ in and runs only the checks that read one
+of them: `skill-release`, `backend-count` (a count assert over a crate's
+`shipped_backend()`, with the test's own number), `settings-ipc`, and each
+`tools-test` line of the justfile whose test names a changed file, run in a
+checkout of the head made for it and removed after (over 30 s it is said
+unchecked: the gate's to run). It prints `RC <check>=<rc> (<s>s)` with reasons,
+`unchecked <path>` for a path no check reads, and `RC prebatch=<rc>`; it exits 1
+on a red and 2 when a revision cannot be read. It runs no cargo and stands in for
+no gate: a green says only that these checks found nothing, and every recipe the
+gate owes still runs. `tests/test_prebatch.py` pins each rule.
+
 ## The warm targets
 
 Each gate and build keeps its own cargo target under
