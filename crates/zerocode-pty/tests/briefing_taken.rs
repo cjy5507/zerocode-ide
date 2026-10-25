@@ -4,14 +4,20 @@
 //!
 //! Each fake CLI is a shell script in a real pty that wears one agent's shape:
 //! it shakes hands, draws its composer glyph at once, and then — like Claude
-//! Code 2.1.281 on its way up — reads and discards everything for a while
-//! before its real composer stands, which echoes what it is given. The launch
+//! Code 2.1.281 on its way up — reads and discards everything until the test
+//! says its boot is over, before its real composer stands, which echoes what
+//! it is given. No clock decides when: a CLI whose boot ended on a timer was
+//! a CLI that kept a briefing on a slow machine, and one whose composer came
+//! back on a timer made a retype end inside or outside the watch window as
+//! the machine pleased (t-75231). The window's own clock is checked on a fake
+//! clock in `briefing.rs`; here the order is fixed. The launch
 //! road is the window's in small and in the window's order: deliveries run on
 //! a pump thread of their own while [`confirm`] — the function the window's
 //! launch road calls — reads the screen and types again on this one.
 
 #![cfg(unix)]
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -53,34 +59,91 @@ const LAUNCH: u64 = 1;
 /// How long a delivery waits for its pane's readiness here.
 const DELIVERY_DEADLINE: Duration = Duration::from_secs(10);
 
-/// The script of a CLI that draws its glyph right after the handshake and
-/// then, for `boot` seconds, reads and throws away what it is typed — or for
-/// ever when `boot` is `forever` — then takes its handshake down for `gap`
-/// seconds before a composer that echoes and keeps what it is given. (A
-/// background job in a script has no terminal on its input, so the
-/// discarding `dd` is handed the pty by name.)
-fn fake_cli(shape: &Shape, boot: &str, gap: &str) -> String {
+/// How far the fake CLI's boot has come when the pane is launched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Boot {
+    /// Up already: its first glyph is its composer's, which echoes from the
+    /// start.
+    Up,
+    /// Reading and throwing away what it is typed until the test ends the
+    /// boot, which it does once the first briefing is in the pane.
+    Discarding,
+    /// Throwing away what it is typed for ever.
+    Forever,
+}
+
+/// When the composer stands again after the boot, and the handshake with it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Composer {
+    /// As the boot ends.
+    Back,
+    /// Once the briefing typed again has stood this long: the retype is out
+    /// longer than that, whatever the machine does.
+    After(Duration),
+}
+
+/// The words the test says to the fake CLI: a file that exists, or not yet.
+/// (The CLI's input is what the briefing is typed into and is thrown away or
+/// echoed, so the test cannot speak through it.)
+struct Gates {
+    dir: tempfile::TempDir,
+}
+
+impl Gates {
+    /// The pump has read the CLI's handshake: the readiness wait counts a
+    /// glyph only from a round after the one that carried the handshake, so
+    /// the CLI draws its glyph once it has been told it was seen.
+    const HANDSHAKE_SEEN: &'static str = "handshake-seen";
+    const BOOT_ENDED: &'static str = "boot-ended";
+    const COMPOSER_BACK: &'static str = "composer-back";
+
+    fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().expect("a folder for the gates"),
+        }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+
+    fn say(&self, name: &str) {
+        std::fs::write(self.path(name), b"").expect("a gate opens");
+    }
+}
+
+/// How the script waits for a file: a look every 50 ms, which decides nothing
+/// but how soon the CLI goes on.
+fn until_said(path: &Path) -> String {
+    format!("while [ ! -e '{}' ]; do sleep 0.05; done", path.display())
+}
+
+/// The script of a CLI that draws its glyph once the handshake is seen and
+/// then, until the test says its boot ended, reads and throws away what it is
+/// typed — and, once it has, everything that was already waiting — then takes
+/// its handshake down until the test says its composer is back, a composer
+/// that echoes and keeps what it is given. The reads time out after 100 ms
+/// (`min 0 time 1`), so the CLI sees the test's word without a byte arriving,
+/// and an empty read after the word means nothing is left to throw away.
+fn fake_cli(shape: &Shape, boot: Boot, gates: &Gates) -> String {
     let glyph = shape.glyph_octal;
     let working = shape.working;
     let reads = format!("while IFS= read -r line; do printf '{working}\\r\\n'; done");
-    if boot == "0" {
-        // A CLI that is up already throws nothing away: its first glyph is
-        // its composer's, which echoes from the start.
+    let handshake_seen = until_said(&gates.path(Gates::HANDSHAKE_SEEN));
+    if boot == Boot::Up {
         return format!(
-            "stty cooked echo; printf '\\033[?2004h'; sleep 0.2; printf '{glyph} '; {reads}"
+            "stty cooked echo; printf '\\033[?2004h'; {handshake_seen}; printf '{glyph} '; {reads}"
         );
     }
-    let discard = if boot == "forever" {
-        "dd of=/dev/null bs=1 2>/dev/null".to_string()
-    } else {
-        format!(
-            "dd of=/dev/null bs=1 </dev/tty 2>/dev/null & D=$!; sleep {boot}; kill $D 2>/dev/null; wait $D 2>/dev/null"
-        )
-    };
+    let boot_ended = gates.path(Gates::BOOT_ENDED);
+    let composer_back = until_said(&gates.path(Gates::COMPOSER_BACK));
     format!(
-        "stty raw -echo; printf '\\033[?2004h'; sleep 0.2; printf '{glyph} '; {discard}; \
-         printf '\\033[?2004l'; sleep {gap}; printf '\\033[?2004h\\r\\n{glyph} '; \\
-         stty cooked echo; {reads}"
+        "stty raw -echo min 0 time 1; printf '\\033[?2004h'; {handshake_seen}; printf '{glyph} '; \
+         left=1; while [ ! -e '{}' ] || [ \"$left\" != 0 ]; do \
+         left=$(dd bs=4096 count=1 2>/dev/null | wc -c | tr -d ' '); done; \
+         printf '\\033[?2004l'; {composer_back}; \
+         printf '\\033[?2004h\\r\\n{glyph} '; stty cooked echo; {reads}",
+        boot_ended.display()
     )
 }
 
@@ -111,10 +174,17 @@ struct Pane {
     /// When the briefing was typed again, and when that delivery ended how.
     retyped_at: Option<Instant>,
     retype_ended: Option<(Instant, DeliveryOutcome)>,
+    /// The composer's word, still to be said: how long after the briefing
+    /// was typed again, and where.
+    composer_after: Option<(Duration, PathBuf)>,
+    /// Where the CLI is told the pump read its handshake, until it has been.
+    handshake_gate: Option<PathBuf>,
     stop: bool,
 }
 
-/// The pump: one round every 10 ms, the delivery fed the line as it stands.
+/// The pump: one round every 10 ms, the delivery fed the line as it stands —
+/// and the composer's word said when the briefing typed again has stood as
+/// long as the test wants.
 fn pump(shared: Arc<Mutex<Pane>>, starts_after: Duration) -> JoinHandle<()> {
     std::thread::spawn(move || {
         std::thread::sleep(starts_after);
@@ -125,6 +195,12 @@ fn pump(shared: Arc<Mutex<Pane>>, starts_after: Duration) -> JoinHandle<()> {
                     return;
                 }
                 let pumped = pane.lane.pump();
+                if let (Some((after, gate)), Some(typed)) = (&pane.composer_after, pane.retyped_at)
+                    && typed.elapsed() >= *after
+                {
+                    std::fs::write(gate, b"").expect("the composer's gate opens");
+                    pane.composer_after = None;
+                }
                 if let Some((mut delivery, notify)) = pane.delivery.take() {
                     let seen = {
                         let grid = pane.lane.terminal_mut().grid_mut();
@@ -164,6 +240,14 @@ fn pump(shared: Arc<Mutex<Pane>>, starts_after: Duration) -> JoinHandle<()> {
                             let _ = notify.send(outcome);
                         }
                     }
+                }
+                // After the round the delivery has just looked at: the glyph
+                // then comes in a later one.
+                if pane.handshake_gate.is_some()
+                    && pane.lane.terminal_mut().grid_mut().bracketed_paste()
+                {
+                    let gate = pane.handshake_gate.take().expect("a gate to open");
+                    std::fs::write(gate, b"").expect("the handshake's gate opens");
                 }
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -240,21 +324,28 @@ struct Journey {
 
 /// The launch road in small: the first delivery to the glyph, awaited, then
 /// the watch over what it delivered while the pump keeps running.
-fn launch(shape: &Shape, boot: &str, gap: &str, window: Duration, relaunch: bool) -> Journey {
-    launch_under(shape, boot, gap, window, relaunch, Load::NONE)
+fn launch(
+    shape: &Shape,
+    boot: Boot,
+    composer: Composer,
+    window: Duration,
+    relaunch: bool,
+) -> Journey {
+    launch_under(shape, boot, composer, window, relaunch, Load::NONE)
 }
 
 fn launch_under(
     shape: &Shape,
-    boot: &str,
-    gap: &str,
+    boot: Boot,
+    composer: Composer,
     window: Duration,
     relaunch: bool,
     load: Load,
 ) -> Journey {
+    let gates = Gates::new();
     let lane = PtyLane::spawn(
         "/bin/sh",
-        &["-c".to_string(), fake_cli(shape, boot, gap)],
+        &["-c".to_string(), fake_cli(shape, boot, &gates)],
         None,
         &[],
         24,
@@ -270,6 +361,13 @@ fn launch_under(
         pasted: 0,
         retyped_at: None,
         retype_ended: None,
+        handshake_gate: Some(gates.path(Gates::HANDSHAKE_SEEN)),
+        composer_after: match composer {
+            Composer::After(after) if boot == Boot::Discarding => {
+                Some((after, gates.path(Gates::COMPOSER_BACK)))
+            }
+            _ => None,
+        },
         stop: false,
     }));
     let pumping = pump(Arc::clone(&shared), load.pump_starts_after);
@@ -277,6 +375,15 @@ fn launch_under(
         .recv_timeout(DELIVERY_DEADLINE * 2)
         .expect("the first delivery ended");
     assert_eq!(outcome, DeliveryOutcome::Delivered, "{}", shape.name);
+    // The first briefing is in the pane, written whole, and a booting CLI has
+    // thrown it away or is about to: its boot ends now, and its composer
+    // with it unless the test holds that back.
+    if boot == Boot::Discarding {
+        gates.say(Gates::BOOT_ENDED);
+        if composer == Composer::Back {
+            gates.say(Gates::COMPOSER_BACK);
+        }
+    }
     let mut watched = Watched {
         shared: Arc::clone(&shared),
         glyph: shape.glyph,
@@ -306,7 +413,13 @@ fn launch_under(
 #[test]
 fn a_briefing_the_booting_cli_threw_away_is_typed_again_and_then_taken() {
     for shape in [&CLAUDE, &CODEX] {
-        let journey = launch(shape, "1.5", "0.1", Duration::from_millis(3_500), false);
+        let journey = launch(
+            shape,
+            Boot::Discarding,
+            Composer::Back,
+            Duration::from_millis(3_500),
+            false,
+        );
         assert_eq!(
             journey.verdict,
             Verdict::Taken,
@@ -334,7 +447,13 @@ fn a_briefing_the_booting_cli_threw_away_is_typed_again_and_then_taken() {
 #[test]
 fn a_cli_that_never_takes_its_briefing_is_reported_undelivered_after_one_retype() {
     for shape in [&CLAUDE, &CODEX] {
-        let journey = launch(shape, "forever", "0.1", Duration::from_millis(3_500), false);
+        let journey = launch(
+            shape,
+            Boot::Forever,
+            Composer::Back,
+            Duration::from_millis(3_500),
+            false,
+        );
         assert_eq!(
             journey.verdict,
             Verdict::Undelivered(Unheard::NeverShown),
@@ -355,7 +474,13 @@ fn a_cli_that_never_takes_its_briefing_is_reported_undelivered_after_one_retype(
 #[test]
 fn a_briefing_that_was_taken_the_first_time_is_not_typed_again() {
     for shape in [&CLAUDE, &CODEX] {
-        let journey = launch(shape, "0", "0.1", Duration::from_millis(3_500), false);
+        let journey = launch(
+            shape,
+            Boot::Up,
+            Composer::Back,
+            Duration::from_millis(3_500),
+            false,
+        );
         assert_eq!(
             journey.verdict,
             Verdict::Taken,
@@ -379,7 +504,13 @@ fn a_briefing_that_was_taken_the_first_time_is_not_typed_again() {
 #[test]
 fn a_retyped_briefing_whose_enter_was_withheld_is_no_start_though_the_screen_shows_it() {
     for shape in [&CLAUDE, &CODEX] {
-        let journey = launch(shape, "1.5", "0.1", Duration::from_millis(3_500), true);
+        let journey = launch(
+            shape,
+            Boot::Discarding,
+            Composer::Back,
+            Duration::from_millis(3_500),
+            true,
+        );
         assert_eq!(
             journey.verdict,
             Verdict::Undelivered(Unheard::RetypeEnded(DeliveryOutcome::Unsubmitted(
@@ -407,7 +538,13 @@ fn a_retyped_briefing_whose_enter_was_withheld_is_no_start_though_the_screen_sho
 fn a_retype_that_outlasts_the_watch_window_but_not_its_deadline_is_waited_for() {
     let window = Duration::from_secs(2);
     for shape in [&CLAUDE, &CODEX] {
-        let journey = launch(shape, "1.5", "5", window, false);
+        let journey = launch(
+            shape,
+            Boot::Discarding,
+            Composer::After(window),
+            window,
+            false,
+        );
         assert_eq!(
             journey.verdict,
             Verdict::Taken,
@@ -428,9 +565,10 @@ fn a_retype_that_outlasts_the_watch_window_but_not_its_deadline_is_waited_for() 
 }
 
 /// R3 (t-75231): the machine is slow to start pumping the pane — three
-/// seconds, past the 1.5 s the fake CLI boots for — and the first briefing
-/// is still thrown away, because the CLI's boot ends when the test says so
-/// and not when a clock does. The assertions are the loss test's own.
+/// seconds, longer than the 1.5 s the fake CLI once booted for on a timer —
+/// and the first briefing is still thrown away, because the CLI's boot ends
+/// when the test says so and not when a clock does. The assertions are the
+/// loss test's own.
 #[test]
 fn a_pump_that_starts_late_still_loses_the_first_briefing_and_takes_the_second() {
     let load = Load {
@@ -440,8 +578,8 @@ fn a_pump_that_starts_late_still_loses_the_first_briefing_and_takes_the_second()
     for shape in [&CLAUDE, &CODEX] {
         let journey = launch_under(
             shape,
-            "1.5",
-            "0.1",
+            Boot::Discarding,
+            Composer::Back,
             Duration::from_millis(3_500),
             false,
             load,
@@ -469,9 +607,9 @@ fn a_pump_that_starts_late_still_loses_the_first_briefing_and_takes_the_second()
 }
 
 /// R3 (t-75231): the retype is registered four seconds after the watch asks
-/// for it — most of the old five-second gap gone — and the composer still
-/// comes back after one watch window of the retype's own life, because the
-/// test lets it come back only then.
+/// for it — most of the five seconds the composer once took on a timer — and
+/// the composer still comes back after one watch window of the retype's own
+/// life, because the test lets it come back only then.
 #[test]
 fn a_retype_registered_late_still_outlasts_the_watch_window() {
     let window = Duration::from_secs(2);
@@ -480,7 +618,14 @@ fn a_retype_registered_late_still_outlasts_the_watch_window() {
         ..Load::NONE
     };
     for shape in [&CLAUDE, &CODEX] {
-        let journey = launch_under(shape, "1.5", "5", window, false, load);
+        let journey = launch_under(
+            shape,
+            Boot::Discarding,
+            Composer::After(window),
+            window,
+            false,
+            load,
+        );
         assert_eq!(
             journey.verdict,
             Verdict::Taken,
