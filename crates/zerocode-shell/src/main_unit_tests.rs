@@ -10212,9 +10212,9 @@ fn team_work_has_sixteen_total_credits_and_only_eight_wait_credits() {
         receivers.push(receiver);
         permits.push(budget.try_admit(&request).expect("wait credit"));
     }
-    assert_eq!(budget.waiting.available_permits(), 0);
+    assert_eq!(budget.waiting.available(), 0);
     assert_eq!(
-        budget.active.available_permits(),
+        budget.active.available(),
         zerocode_hookd::TEAM_ACTIVE_LIMIT - zerocode_hookd::TEAM_WAIT_LIMIT
     );
 
@@ -10226,7 +10226,23 @@ fn team_work_has_sixteen_total_credits_and_only_eight_wait_credits() {
     let busy = ninth_answer
         .try_recv()
         .expect("the rejected wait gets an immediate answer");
-    assert_eq!(busy.stderr, zerocode_hookd::TEAM_BUSY_MESSAGE);
+    // The refusal keeps the busy kind's two ends and names the credit that
+    // was full: the wait credit, not the total, with its eight holders
+    // (t-47458).
+    assert!(
+        busy.stderr
+            .starts_with(zerocode_hookd::busy::TEAM_BUSY_LEAD)
+    );
+    assert!(busy.stderr.ends_with(zerocode_hookd::busy::TEAM_BUSY_TAIL));
+    assert!(
+        busy.stderr.contains(&format!(
+            "refused at the window wait credit: {limit} of {limit} held, oldest held ",
+            limit = zerocode_hookd::TEAM_WAIT_LIMIT
+        )),
+        "{:?}",
+        busy.stderr
+    );
+    assert_eq!(busy.exit_code, 1);
 
     // A send still has one of the eight reserved non-wait roads and answers
     // while every wait seat remains occupied.
@@ -10250,18 +10266,22 @@ fn team_work_has_sixteen_total_credits_and_only_eight_wait_credits() {
         receivers.push(receiver);
         permits.push(budget.try_admit(&request).expect("active credit"));
     }
-    assert_eq!(budget.active.available_permits(), 0);
+    assert_eq!(budget.active.available(), 0);
     let (overflow, _receiver) = team_request(&["split-window"]);
-    assert!(budget.try_admit(&overflow).is_none());
+    let refused = budget
+        .try_admit(&overflow)
+        .err()
+        .expect("the total is full, so one more request is refused");
+    // The total is full and the wait credit is not even asked: the name is the
+    // total's, so a reader does not go looking in the wait quota (t-47458).
+    assert_eq!(
+        refused.entry(),
+        zerocode_hookd::busy::BusyEntry::WindowCredit
+    );
+    assert_eq!(refused.held(), zerocode_hookd::TEAM_ACTIVE_LIMIT);
     drop(permits);
-    assert_eq!(
-        budget.active.available_permits(),
-        zerocode_hookd::TEAM_ACTIVE_LIMIT
-    );
-    assert_eq!(
-        budget.waiting.available_permits(),
-        zerocode_hookd::TEAM_WAIT_LIMIT
-    );
+    assert_eq!(budget.active.available(), zerocode_hookd::TEAM_ACTIVE_LIMIT);
+    assert_eq!(budget.waiting.available(), zerocode_hookd::TEAM_WAIT_LIMIT);
     drop(receivers);
 }
 
@@ -10281,14 +10301,8 @@ fn team_work_credits_return_after_refusal_and_panic() {
         });
     }));
     assert!(unwound.is_err());
-    assert_eq!(
-        budget.active.available_permits(),
-        zerocode_hookd::TEAM_ACTIVE_LIMIT
-    );
-    assert_eq!(
-        budget.waiting.available_permits(),
-        zerocode_hookd::TEAM_WAIT_LIMIT
-    );
+    assert_eq!(budget.active.available(), zerocode_hookd::TEAM_ACTIVE_LIMIT);
+    assert_eq!(budget.waiting.available(), zerocode_hookd::TEAM_WAIT_LIMIT);
 
     let (refused, mut answer) = team_request(&["check", "--wait"]);
     schedule_team_request(&budget, refused, |permit, request| {
@@ -10300,14 +10314,8 @@ fn team_work_credits_return_after_refusal_and_panic() {
         });
     });
     assert_eq!(answer.try_recv().expect("refusal answer").exit_code, 1);
-    assert_eq!(
-        budget.active.available_permits(),
-        zerocode_hookd::TEAM_ACTIVE_LIMIT
-    );
-    assert_eq!(
-        budget.waiting.available_permits(),
-        zerocode_hookd::TEAM_WAIT_LIMIT
-    );
+    assert_eq!(budget.active.available(), zerocode_hookd::TEAM_ACTIVE_LIMIT);
+    assert_eq!(budget.waiting.available(), zerocode_hookd::TEAM_WAIT_LIMIT);
 }
 
 /// A leader's tree is read off the leader's own environment.

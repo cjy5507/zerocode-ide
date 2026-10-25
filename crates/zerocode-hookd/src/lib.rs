@@ -37,6 +37,7 @@ use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use busy::{Busy, BusyEntry, Seat, Seats};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -196,6 +197,7 @@ pub mod env_var {
 }
 
 mod brief_receipts;
+pub mod busy;
 pub mod codex_grant;
 pub mod codex_install;
 pub mod codex_mirror;
@@ -258,7 +260,7 @@ pub struct TeamRequest {
     /// A long-poll credit minted by the bridge. It travels through the bounded
     /// queue and the window's blocking closure, so queued plus active waits can
     /// never consume the control half of the ingress road.
-    _wait_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    _wait_permit: Option<Seat>,
 }
 
 impl TeamRequest {
@@ -284,7 +286,7 @@ impl TeamRequest {
         self.gate_open.as_deref()
     }
 
-    fn with_wait_permit(mut self, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+    fn with_wait_permit(mut self, permit: Seat) -> Self {
         self._wait_permit = Some(permit);
         self
     }
@@ -381,11 +383,12 @@ pub struct TeamAnswer {
 }
 
 impl TeamAnswer {
+    /// A busy refusal that names the door that said no (t-47458).
     #[must_use]
-    pub fn busy() -> Self {
+    pub fn busy(busy: &Busy) -> Self {
         Self {
             stdout: String::new(),
-            stderr: TEAM_BUSY_MESSAGE.to_string(),
+            stderr: busy.message(),
             exit_code: 1,
         }
     }
@@ -532,7 +535,6 @@ pub const TEAM_BODY_READ_LIMIT: usize = TEAM_QUEUE_CAPACITY;
 /// `send` or control request that can end those waits.
 pub const TEAM_WAIT_LIMIT: usize = TEAM_ACTIVE_LIMIT / 2;
 
-pub const TEAM_BUSY_MESSAGE: &str = "tmux: this window is busy; retry the request\n";
 pub const TEAM_CLOSED_MESSAGE: &str = "tmux: this window is no longer listening\n";
 
 #[derive(Clone)]
@@ -543,8 +545,8 @@ pub struct BridgeState {
     computer_token: Arc<String>,
     events: mpsc::UnboundedSender<HookEnvelope>,
     teams: mpsc::Sender<TeamRequest>,
-    team_bodies: Arc<tokio::sync::Semaphore>,
-    team_waits: Arc<tokio::sync::Semaphore>,
+    team_bodies: Seats,
+    team_waits: Seats,
     browser: mpsc::UnboundedSender<BrowserRequest>,
     computer: mpsc::UnboundedSender<ComputerRequest>,
     federation: mpsc::UnboundedSender<FederationRequest>,
@@ -774,8 +776,8 @@ impl BridgeState {
                 computer_token: Arc::new(computer_token.into()),
                 events,
                 teams,
-                team_bodies: Arc::new(tokio::sync::Semaphore::new(TEAM_BODY_READ_LIMIT)),
-                team_waits: Arc::new(tokio::sync::Semaphore::new(TEAM_WAIT_LIMIT)),
+                team_bodies: Seats::new(BusyEntry::BodyPermit, TEAM_BODY_READ_LIMIT),
+                team_waits: Seats::new(BusyEntry::WaitPermit, TEAM_WAIT_LIMIT),
                 browser,
                 computer,
                 federation,
@@ -1028,8 +1030,9 @@ async fn receive_team_command(State(state): State<BridgeState>, request: Request
     // Admission starts BEFORE buffering. The body has a byte ceiling too, but
     // a ceiling per handler is not a process bound if arbitrarily many slow
     // authenticated bodies can all sit below it at once.
-    let Ok(body_permit) = Arc::clone(&state.team_bodies).try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, TEAM_BUSY_MESSAGE).into_response();
+    let body_permit = match state.team_bodies.try_acquire() {
+        Ok(permit) => permit,
+        Err(busy) => return busy_response(&busy),
     };
     let body = match axum::body::to_bytes(request.into_body(), MAX_HOOK_BODY_BYTES).await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
@@ -1048,15 +1051,16 @@ async fn receive_team_command(State(state): State<BridgeState>, request: Request
     // handler's wait.
     let patience = team_request.deadline();
     if team_request.reserves_wait_slot() {
-        let Ok(permit) = Arc::clone(&state.team_waits).try_acquire_owned() else {
-            return (StatusCode::TOO_MANY_REQUESTS, TEAM_BUSY_MESSAGE).into_response();
+        let permit = match state.team_waits.try_acquire() {
+            Ok(permit) => permit,
+            Err(busy) => return busy_response(&busy),
         };
         team_request = team_request.with_wait_permit(permit);
     }
     match state.teams.try_send(team_request) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(_)) => {
-            return (StatusCode::TOO_MANY_REQUESTS, TEAM_BUSY_MESSAGE).into_response();
+            return busy_response(&Busy::full_queue(TEAM_QUEUE_CAPACITY));
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
             return (StatusCode::SERVICE_UNAVAILABLE, TEAM_CLOSED_MESSAGE).into_response();
@@ -1106,8 +1110,9 @@ async fn receive_gate_open(State(state): State<BridgeState>, request: Request) -
     if team.is_empty() || pane.is_empty() || capability.is_empty() {
         return refused("authority_unavailable: native gate owner");
     }
-    let Ok(permit) = Arc::clone(&state.team_bodies).try_acquire_owned() else {
-        return (StatusCode::TOO_MANY_REQUESTS, TEAM_BUSY_MESSAGE).into_response();
+    let permit = match state.team_bodies.try_acquire() {
+        Ok(permit) => permit,
+        Err(busy) => return busy_response(&busy),
     };
     let body = match axum::body::to_bytes(request.into_body(), MAX_HOOK_BODY_BYTES).await {
         Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
@@ -1134,6 +1139,11 @@ async fn receive_gate_open(State(state): State<BridgeState>, request: Request) -
         Ok(Ok(answer)) => refused(answer.stderr),
         _ => refused("authority_unavailable: native gate owner unavailable"),
     }
+}
+
+/// The busy kind — 429 — with the door that refused in its words (t-47458).
+fn busy_response(busy: &Busy) -> Response {
+    (StatusCode::TOO_MANY_REQUESTS, busy.message()).into_response()
 }
 
 fn refused(why: impl Into<String>) -> Response {
