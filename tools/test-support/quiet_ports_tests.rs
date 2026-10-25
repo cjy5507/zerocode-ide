@@ -3,20 +3,22 @@
 
 use std::collections::HashSet;
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::time::Duration;
 
 use super::quiet_ports::{
-    QuietPort, band_for, lock_path, lowest_port, netsh_start, os_dynamic_start,
+    QuietPort, apart_band, band_for, lock_dir, lock_path_in, lowest_port, netsh_start,
+    os_dynamic_start,
 };
 
 fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
     TcpListener::bind(("127.0.0.1", port))
 }
 
-/// Whether some other holder of the lock file (another process, here another
-/// handle) could take the lock now.
-fn lock_is_free(port: u16) -> bool {
-    let path = lock_path(port);
+/// Whether some other holder of the lock file in `dir` (another process, here
+/// another handle) could take the lock now.
+fn lock_is_free(dir: &Path, port: u16) -> bool {
+    let path = lock_path_in(dir, port);
     std::fs::create_dir_all(path.parent().expect("a folder")).expect("the lock folder");
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -62,19 +64,32 @@ fn the_os_answers_are_read_by_their_numbers_not_their_words() {
 
 /// Sixteen claims, held, then let go; `parallel` runs between the letting go
 /// and the check, standing for another test that asks for ports in that
-/// moment and holds what it was given until the check is over. The lease's
-/// release is the one thing judged.
+/// moment and holds what it was given until the check is over.
+///
+/// The claims are made in a lock folder of this call's own and in the band
+/// under the shared one: no other test can be given these ports, so the lease's
+/// release is the one thing judged, whoever else is claiming (t-75231).
 fn release_is_seen<R>(parallel: impl FnOnce(&HashSet<u16>) -> R) {
-    let held: Vec<_> = (0..16).map(|_| QuietPort::claim(bind_loopback)).collect();
+    let apart = tempfile::tempdir().expect("a lock folder of its own");
+    let band = apart_band(os_dynamic_start());
+    let held: Vec<_> = (0..16)
+        .map(|_| QuietPort::claim_apart(apart.path(), &band, bind_loopback))
+        .collect();
     let ports: HashSet<u16> = held.iter().map(|(lease, _)| lease.port()).collect();
     assert_eq!(ports.len(), held.len(), "two holders were given one port");
     for port in &ports {
-        assert!(!lock_is_free(*port), "{port} is held by nothing");
+        assert!(
+            !lock_is_free(apart.path(), *port),
+            "{port} is held by nothing"
+        );
     }
     drop(held);
     let _other_test = parallel(&ports);
     for port in &ports {
-        assert!(lock_is_free(*port), "{port} stayed locked after its holder");
+        assert!(
+            lock_is_free(apart.path(), *port),
+            "{port} stayed locked after its holder"
+        );
     }
 }
 
@@ -130,7 +145,7 @@ fn a_silent_port_refuses_and_is_not_given_to_anyone_else_meanwhile() {
         "something answered on {}",
         silent.addr()
     );
-    assert!(!lock_is_free(silent.port()));
+    assert!(!lock_is_free(&lock_dir(), silent.port()));
     for _ in 0..64 {
         let (other, _held) = QuietPort::claim(bind_loopback);
         assert_ne!(other.port(), silent.port());
