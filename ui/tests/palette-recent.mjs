@@ -59,8 +59,25 @@ export async function testPaletteRecent(browser, origin, standBackend, ok) {
   ok("the five recent places come first, the newest on top, with keys 1 to 5",
     recent.map((row) => row.text).join("|") === PLACES.map((place) => place.label).join("|")
       && recent.map((row) => row.key).join("") === "12345", JSON.stringify(recent));
-  const go = opened.slice(opened.findIndex((row) => row.group && row.text === "이동") + 1).filter((row) => !row.group).slice(0, 6).map((row) => row.text);
-  ok("the Go group names the doors the sidebar already has", go.join("|") === "작업 상황판|아티팩트|자동화|보관함|스킬|설정" || go.join("|") === "작업 상황판|아티팩트|보관함|스킬|설정", JSON.stringify(go));
+  const go = opened.slice(opened.findIndex((row) => row.group && row.text === "이동") + 1).filter((row) => !row.group).slice(0, 7).map((row) => row.text);
+  ok("the Go group names the doors the sidebar already has", go.join("|") === "작업 상황판|받은 편지함|아티팩트|자동화|보관함|스킬|설정" || go.join("|") === "작업 상황판|받은 편지함|아티팩트|보관함|스킬|설정", JSON.stringify(go));
+
+  // 「받은 편지함」 줄은 받은 편지함 화면을 연다(t-67483의 화면, 사이드바 문과 같은 길).
+  const inbox = await page.evaluate(async () => {
+    closePalette();
+    togglePalette("worktree");
+    await new Promise((done) => setTimeout(done, 400));
+    const input = document.getElementById("qo-input");
+    input.value = "받은 편지함";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((done) => setTimeout(done, 400));
+    const shown = [...document.querySelectorAll("#qo-results .qo-row .qo-label")].map((node) => node.textContent);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await new Promise((done) => setTimeout(done, 200));
+    return { shown, closed: paletteMode === null, opened: tabs.some((tab) => tab.kind === "inbox") };
+  });
+  ok("the Go group's 받은 편지함 opens the inbox page and closes the palette",
+    inbox.shown.join("|") === "받은 편지함" && inbox.closed === true && inbox.opened === true, JSON.stringify(inbox));
 
   // 키 이벤트 두 개: ⌘J, 숫자 하나. 첫째 최근(과업)을 상황판에서 다시 고른다.
   const keys = await page.evaluate(async (primary) => {

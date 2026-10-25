@@ -3409,7 +3409,7 @@ async function reopenRecentPlace(place) {
  * when its screen lands. */
 const GO_PLACES = Object.freeze([
   { id: "board", icon: "#i-tasks", label: () => t("board.tasks.heading", "작업 상황판"), open: () => { setWorkspaceBoardOpen(false); showAgentBoard(); } },
-  { id: "inbox", icon: "#i-bell", label: () => t("palette.goInbox", "받은 편지함"), open: null },
+  { id: "inbox", icon: "#i-bell", label: () => t("palette.goInbox", "받은 편지함"), open: () => openInboxView() },
   { id: "artifacts", icon: "#i-ft-file-box", label: () => t("sidebar.artifacts", "아티팩트"), open: () => el("nav-artifacts").click() },
   { id: "automations", icon: "#i-calendar-clock", label: () => t("sidebar.automations", "자동화"), shown: () => !el("nav-automations").hidden, open: () => el("nav-automations").click() },
   { id: "vault", icon: "#i-archive", label: () => t("sidebar.vault", "보관함"), open: () => el("nav-vault").click() },
