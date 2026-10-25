@@ -5301,10 +5301,9 @@ enum Standing {
     /// The advice is registered with the pump as one guarded delivery — the
     /// paste and its Enter — and its receipt is in [`pointer_receipts`]. The
     /// next beats read the receipt; nothing is retyped while it stands.
-    /// `noted` carries whether an earlier beat already wrote down that this
-    /// mail could not be delivered, so a pane that stays shut costs one line
-    /// and not one line per second.
-    Advised { noted: bool },
+    /// The history keeps the prior log and notice separately while the pump
+    /// carries the line. A successful line ends only a notice actually shown.
+    Advised { history: AdviceHistory },
     /// Advice and Enter both landed — nothing more is owed for this mail.
     Delivered,
     /// Advice was pasted but its Enter was withheld. Keep this transient
@@ -5386,10 +5385,13 @@ impl Standing {
     /// that line still stands: the window said it once for the whole condition
     /// (t-45801), so the condition ends when this mark goes.
     fn told_not_typed(self) -> bool {
-        matches!(
-            self,
-            Standing::Withheld | Standing::HeldByADraft | Standing::PaneTaken
-        )
+        match self {
+            Standing::Advised { history } => history.notified,
+            _ => matches!(
+                self,
+                Standing::Withheld | Standing::HeldByADraft | Standing::PaneTaken
+            ),
+        }
     }
 }
 
@@ -5446,6 +5448,13 @@ fn read_pointer_receipt(key: &(String, String)) -> Receipt {
     }
 }
 
+/// The log and the person's waiting notice are independent facts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct AdviceHistory {
+    noted: bool,
+    notified: bool,
+}
+
 /// What the pump's answer about an advice line makes of its standing.
 ///
 /// `None` while the pump has not answered; the caller leaves the mark as it
@@ -5462,7 +5471,7 @@ fn advice_standing(
     address: &str,
     term: u32,
     newest: &str,
-    noted: bool,
+    history: AdviceHistory,
 ) -> Option<Option<Standing>> {
     let stood = match read_pointer_receipt(&(run.to_string(), address.to_string())) {
         Receipt::Pending => return None,
@@ -5472,16 +5481,20 @@ fn advice_standing(
     Some(Some(match stood {
         zerocode_pty::DeliveryOutcome::Delivered => {
             note_delivered(run, address, newest);
-            host.mail_waiting_cleared(term);
+            if history.notified {
+                host.mail_waiting_cleared(term);
+            }
             Standing::Delivered
         }
         zerocode_pty::DeliveryOutcome::Unsubmitted(_) => {
             note_pointer_withheld(run, address, term, stood);
-            host.mail_waiting_cleared(term);
+            if history.notified {
+                host.mail_waiting_cleared(term);
+            }
             Standing::Unsubmitted
         }
         zerocode_pty::DeliveryOutcome::Refused(why) => {
-            if !noted {
+            if !history.noted {
                 note_pointer_withheld(run, address, term, stood);
                 tell_unpointed(
                     host,
@@ -5499,7 +5512,7 @@ fn advice_standing(
             }
         }
         zerocode_pty::DeliveryOutcome::TimedOut => {
-            if !noted {
+            if !history.noted {
                 note_pointer_silent(run, address, term, NO_ROAD_CARRIED_IT);
             }
             Standing::Unreachable
@@ -8664,7 +8677,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         /// Whether an earlier beat already wrote down that this pane cannot
         /// be reached, so a pane that stays shut costs one line and not one
         /// line per second.
-        unreachable_noted: bool,
+        history: AdviceHistory,
     }
     let mut pointing: Vec<Pointing> = Vec::new();
     /// A pointer this pass could not type and has not told anyone about:
@@ -9354,8 +9367,8 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                      * person's screen, which is as far as advice goes — the
                      * Enter is theirs now, and retyping the line would only
                      * stack a second copy under it. */
-                    Some(Standing::Advised { noted }) => {
-                        match advice_standing(host, &run.id, &address, term, &newest, noted) {
+                    Some(Standing::Advised { history }) => {
+                        match advice_standing(host, &run.id, &address, term, &newest, history) {
                             None => continue,
                             Some(None) => {
                                 marks.remove(&key);
@@ -9479,14 +9492,20 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                             newest,
                             text,
                             notice,
-                            unreachable_noted: matches!(
-                                standing,
-                                Some(
-                                    Standing::Unreachable
-                                        | Standing::Withheld
-                                        | Standing::HeldByADraft
-                                )
-                            ),
+                            history: AdviceHistory {
+                                notified: marks
+                                    .get(&key)
+                                    .filter(|stood| stood.term == Some(term))
+                                    .is_some_and(|stood| stood.standing.told_not_typed()),
+                                noted: matches!(
+                                    standing,
+                                    Some(
+                                        Standing::Unreachable
+                                            | Standing::Withheld
+                                            | Standing::HeldByADraft
+                                    )
+                                ),
+                            },
                         });
                     }
                 }
@@ -9558,7 +9577,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
              * pane has mail nothing told it about. Remembered as unreachable
              * — the next beat tries the same line again, and the black box
              * hears about it once. */
-            if !one.unreachable_noted {
+            if !one.history.noted {
                 note_pointer_silent(&key.0, &key.1, one.term, NO_ROAD_CARRIED_IT);
             }
             pointed()
@@ -9583,20 +9602,14 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
          * but a host that answers on the spot (a `send-keys` dialect, a
          * test's fake) is settled on this very beat, exactly as the raw
          * road used to be. */
-        let standing = match advice_standing(
-            host,
-            &key.0,
-            &key.1,
-            one.term,
-            &one.newest,
-            one.unreachable_noted,
-        ) {
-            None => Standing::Advised {
-                noted: one.unreachable_noted,
-            },
-            Some(None) => continue,
-            Some(Some(standing)) => standing,
-        };
+        let standing =
+            match advice_standing(host, &key.0, &key.1, one.term, &one.newest, one.history) {
+                None => Standing::Advised {
+                    history: one.history,
+                },
+                Some(None) => continue,
+                Some(Some(standing)) => standing,
+            };
         pointed()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
