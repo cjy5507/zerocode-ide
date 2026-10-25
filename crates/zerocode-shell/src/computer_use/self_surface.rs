@@ -78,6 +78,19 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "relaunch_window",
 ];
 
+/// Commands whose names touch a key, a secret, a token, a password, a
+/// credential, an account or a login that an agent pressing in the window may
+/// still run: each reads, or is not a credential at all (the source contract
+/// `a_command_named_for_a_credential_or_an_account_is_decided_for` asks every
+/// such command to stand here or on [`PERSON_ONLY_COMMANDS`]).
+pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[];
+
+/// The refusal the window's invoke handler answers a command with: `None`
+/// for a command not on [`PERSON_ONLY_COMMANDS`] or while no agent presses.
+pub(crate) fn person_only_refusal(_command: &str) -> Option<String> {
+    None
+}
+
 /// Whether person-only `command` may run now: refused while an agent's press
 /// in ZeroCode's own window is in flight, and for PERSON_ONLY_GRACE_MS after.
 pub(crate) fn person_only(command: &str) -> Result<(), String> {

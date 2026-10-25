@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use super::quiet_children::{code_only, shell_sources};
+use super::quiet_children::code_only;
 use super::support::block_after;
 
 const ROAD: &str = include_str!("../../src/computer_use/self_surface.rs");
@@ -36,29 +36,92 @@ fn person_only_commands() -> Vec<String> {
     names
 }
 
-/// Every person-only command is a window command, defined once, and asks the
-/// second wall before it does anything.
+/// A list of the road's, read off its source: the quoted names up to `];`.
+fn road_list(opens: &str) -> Vec<String> {
+    let start = ROAD
+        .find(opens)
+        .unwrap_or_else(|| panic!("the road has {opens}"))
+        + opens.len();
+    let list = &ROAD[start..start + ROAD[start..].find("];").expect("the list closes")];
+    list.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_string)
+        .collect()
+}
+
+/// The commands the window registers, by the name the page invokes them by.
+fn registered_commands() -> Vec<String> {
+    let main = code_only(include_str!("../../src/main.rs"));
+    let opens = "tauri::generate_handler![";
+    let start = main.find(opens).expect("the window registers its commands") + opens.len();
+    let list = &main[start..start + main[start..].find(']').expect("the list closes")];
+    list.split(',')
+        .map(|entry| {
+            entry
+                .trim()
+                .rsplit("::")
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Every command passes the second wall in one place: the window's invoke
+/// handler is wrapped, so a command on the person-only list refuses while an
+/// agent presses in the window whichever crate defines it.
 #[test]
-fn every_person_only_command_asks_the_second_wall_first() {
-    let sources = shell_sources();
+fn the_invoke_handler_asks_the_second_wall_for_every_command() {
+    let main = code_only(include_str!("../../src/main.rs"));
+    assert!(
+        main.contains(".invoke_handler(person_only_gate(tauri::generate_handler!["),
+        "the window's commands are registered through person_only_gate"
+    );
+    let registered = registered_commands();
     for name in person_only_commands() {
-        let opens = format!("fn {name}(");
-        let defined: Vec<&(String, String)> = sources
-            .iter()
-            .filter(|(file, source)| !file.contains("test") && code_only(source).contains(&opens))
-            .collect();
-        assert_eq!(
-            defined.len(),
-            1,
-            "{name} is defined once: {:?}",
-            defined.iter().map(|(file, _)| file).collect::<Vec<_>>()
-        );
-        let (file, source) = defined[0];
-        let body = block_after(source, &opens);
         assert!(
-            body.contains(&format!("self_surface::person_only(\"{name}\")")),
-            "{file}: {name} does not ask `self_surface::person_only(\"{name}\")`"
+            registered.contains(&name),
+            "{name} is on the person-only list but not registered"
         );
+    }
+}
+
+/// The rule, not a hand list: a registered command whose name touches a key,
+/// a secret, a token, a password, a credential, an account or a login is on
+/// the person-only list, or on the list of such names an agent may run (a
+/// read, not a write), each with its reason in the road's source. A new
+/// command of that kind fails here until someone decides which it is.
+#[test]
+fn a_command_named_for_a_credential_or_an_account_is_decided_for() {
+    const WORDS: [&str; 7] = [
+        "key",
+        "secret",
+        "token",
+        "password",
+        "credential",
+        "account",
+        "login",
+    ];
+    let person = person_only_commands();
+    let allowed = road_list("pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[");
+    let registered = registered_commands();
+    let undecided: Vec<&String> = registered
+        .iter()
+        .filter(|name| WORDS.iter().any(|word| name.contains(word)))
+        .filter(|name| !person.contains(name) && !allowed.contains(name))
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "undecided credential or account commands: {undecided:?}"
+    );
+    for name in &allowed {
+        assert!(
+            registered.contains(name),
+            "{name} is allowed but not registered"
+        );
+        assert!(!person.contains(name), "{name} is on both lists");
     }
 }
 

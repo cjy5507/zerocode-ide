@@ -390,3 +390,44 @@ fn an_agents_press_holds_every_person_only_command() {
         assert_eq!(person_only_at(command, later), Ok(()), "{command} later");
     }
 }
+
+/// The invoke handler's question: a command on the person-only list is
+/// refused during an agent's press, any other command never is.
+#[test]
+fn the_invoke_gate_refuses_only_the_persons_commands_under_a_press() {
+    use super::person_only_refusal;
+
+    let _hand = one_hand();
+    let (_helper, _) = stand_helper();
+    let during = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&during);
+    let page = Arc::new(Mutex::new(Page {
+        controls: ordinary_page(),
+        pressed: Vec::new(),
+    }));
+    let answering = Arc::clone(&page);
+    let _page = stand_in::stand(
+        own(),
+        Arc::new(move |request: &Value| {
+            if request["kind"] == "do" {
+                for command in ["set_computer_input_policy", "jira_connect", "board_columns"] {
+                    seen.lock()
+                        .unwrap()
+                        .push((command, person_only_refusal(command).is_some()));
+                }
+            }
+            page_answer(&answering, request)
+        }),
+    );
+    assert_eq!(person_only_refusal("set_computer_input_policy"), None);
+    call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
+    call("click", json!({ "app": "ZeroCode", "elementIndex": 1 })).unwrap();
+    assert_eq!(
+        *during.lock().unwrap(),
+        vec![
+            ("set_computer_input_policy", true),
+            ("jira_connect", true),
+            ("board_columns", false),
+        ]
+    );
+}
