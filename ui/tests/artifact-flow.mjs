@@ -699,11 +699,11 @@ export async function testArtifactFlow(browser, origin, ok) {
 
     /* ---- git did not answer: the flow stays, and says it is being read again (t-69107 ③) ------------- */
     await standFlow(page, { stale: true });
-    const stale = await page.evaluate(async (settled) => {
+    const stale = await page.evaluate(async () => {
       const view = artifactsView();
       await refreshArtifactFlow(view);
-      await new Promise((done) => setTimeout(done, settled));
       const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+      await window.__UNTIL__(() => shown(view?.querySelector(".artifact-flow-stale")), "the stale git notice");
       const line = view?.querySelector(".artifact-flow-stale");
       return {
         shown: shown(line), word: line?.textContent ?? "",
@@ -711,17 +711,18 @@ export async function testArtifactFlow(browser, origin, ok) {
         lines: view?.querySelectorAll(".artifact-flow-item").length ?? 0,
         quietOutside: !shown(view?.querySelector(".artifact-flow-outside")),
       };
-    }, SETTLED_MS);
+    });
     ok("a flow read over git's last answer keeps its lines and says 「다시 읽는 중」 in one line",
       stale.shown && stale.word === "다시 읽는 중" && stale.size >= TEXT_MIN_PX && stale.lines > 0 && stale.quietOutside,
       JSON.stringify(stale));
     await standFlow(page);
-    const staleGone = await page.evaluate(async (settled) => {
+    const staleGone = await page.evaluate(async () => {
       const view = artifactsView();
       await refreshArtifactFlow(view);
-      await new Promise((done) => setTimeout(done, settled));
-      return Boolean(view?.querySelector(".artifact-flow-stale")?.closest("[hidden]") ?? view?.querySelector(".artifact-flow-stale")?.hidden);
-    }, SETTLED_MS);
+      const hidden = () => Boolean(view?.querySelector(".artifact-flow-stale")?.closest("[hidden]") ?? view?.querySelector(".artifact-flow-stale")?.hidden);
+      await window.__UNTIL__(hidden, "the stale git notice to clear");
+      return hidden();
+    });
     ok("and the line is gone once git answers", staleGone, "the line still stands");
 
     /* ---- thirty tasks over twelve releases: 400 elements, 3 ms a paint with the CPU slowed ----------- */
