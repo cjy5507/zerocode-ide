@@ -16292,15 +16292,22 @@ mod tests {
             "    fn hold_terminal(\n        &self,\n        settings: &settings::SettingsRepository,",
         );
         assert!(
-            holding.contains("set_colors(") && holding.contains("self.terminal_colors()"),
+            holding.contains("self.terminal_palette") && holding.contains(".hold("),
             "a newly spawned shell is not told the colours the window paints:\n{holding}"
+        );
+        assert!(
+            !holding.contains("terminals().insert("),
+            "hold_terminal lists a shell outside the palette's lock (t-74931):\n{holding}"
         );
         let reporting = block_after(shipped, "fn report_terminal_colors(");
         assert!(
             reporting.contains("to_colors()")
-                && reporting.contains("state.terminals().handles()")
-                && reporting.contains("set_colors("),
+                && reporting.contains("state.terminal_palette().tell(state.terminals()"),
             "a reported palette does not reach the shells already open:\n{reporting}"
+        );
+        assert!(
+            !reporting.contains("handles()") && !reporting.contains("set_colors("),
+            "a report dresses the pool outside the palette's lock (t-74931):\n{reporting}"
         );
         let painting = block_after(window, "function applyTerminalPalette() {");
         assert!(
