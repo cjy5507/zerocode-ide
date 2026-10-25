@@ -611,13 +611,17 @@ public final class OperatorHand: @unchecked Sendable {
         return release
     }
 
-    /// A person resumed: presses may go again, and a release the hand could
-    /// not confirm is theirs to have checked.
-    public func resume() {
+    /// Resume for `lifter` (t-68324 ②): presses may go again. A release the
+    /// hand could not confirm is a person's to have checked, as the stop
+    /// they made is theirs to lift (t-66753 A) — an agent's resume over it is
+    /// refused (`releaseUnconfirmed`) and lifts nothing, not even a stop
+    /// standing beside it; only a person's clears it.
+    public func resume(by lifter: StopLifter) throws {
         lock.lock()
+        defer { lock.unlock() }
+        if lifter != .person, unconfirmedReleases > 0 { throw Refusal.releaseUnconfirmed }
         stoppedReason = nil
         unconfirmedReleases = 0
-        lock.unlock()
     }
 
     /// One hold is taken back — a reflex run pauses on someone else's input,

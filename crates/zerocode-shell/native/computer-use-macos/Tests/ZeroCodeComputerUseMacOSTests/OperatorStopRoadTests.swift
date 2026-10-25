@@ -127,4 +127,32 @@ final class OperatorStopRoadTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(waited, 0.05, "it waited its 50 ms")
         XCTAssertLessThan(waited, 2, "and no longer")
     }
+
+    /// The host's resume for an agent while the hand holds a release the
+    /// platform refused (t-68324 ②): refused as the person's turn, whether
+    /// or not the ledger has a stop — nothing of either is lifted — and the
+    /// band's resume lifts both. Counted: how often an agent's resume cleared
+    /// the unconfirmed release.
+    func test_an_agents_resume_over_an_unconfirmed_release_is_refused_and_lifts_nothing() throws {
+        defer { Self.personLifts() }
+        Self.personLifts()
+        let hand = try OperatorGuardTests.handWithARefusedRelease()
+        var clearedByAgent = 0
+        for stopFirst in [false, true] {
+            if stopFirst { OperatorGuardHost.stop(reason: StopReason.request) }
+            let revision = OperatorGuardHost.status()["stopRevision"] as? Int
+            XCTAssertThrowsError(try OperatorGuardHost.resume(resetBudget: false, by: .agent, hand: hand)) { error in
+                let coded = error as? ProviderError
+                XCTAssertEqual(coded?.code, "stopped", "\(error)")
+                XCTAssertTrue(coded?.message.contains("only they lift it") == true, "the answer says it is the person's turn: \(error)")
+            }
+            if hand.snapshot.unconfirmedReleases == 0 { clearedByAgent += 1 }
+            XCTAssertEqual(OperatorGuardHost.status()["stopRevision"] as? Int, revision, "the refused resume moved no stop")
+        }
+        XCTAssertEqual(clearedByAgent, 0, "times an agent's resume cleared the unconfirmed release")
+        XCTAssertTrue(OperatorGuardHost.isStopped(), "the stop an agent's refused resume came over stands")
+        try OperatorGuardHost.resume(resetBudget: false, by: .person, hand: hand)
+        XCTAssertFalse(OperatorGuardHost.isStopped())
+        XCTAssertEqual(hand.snapshot.unconfirmedReleases, 0, "the band's resume clears it")
+    }
 }
