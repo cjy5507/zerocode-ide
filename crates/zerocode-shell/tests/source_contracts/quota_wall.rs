@@ -1188,7 +1188,7 @@ fn the_failed_turn_press_asks_first_and_walks_the_retrys_guarded_road() {
             .unwrap_or_else(|| panic!("the failed-turn press lost `{needle}`:\n{road}"))
     };
     let licensed = at("composer_at_rest(host, term, heard)");
-    let marked = at("person_turn_marker(failed, worker_id)");
+    let marked = at("person_turn_marker_at(dispatch, letter)");
     let planned = at("resume_plan(failed, worker_id, &marker, now_ms)");
     let lined = at("crate::account_switch::unless_switching(");
     let reserved = at(".resume_begin(plan.clone(), now_ms)");
@@ -1219,6 +1219,11 @@ fn the_failed_turn_press_asks_first_and_walks_the_retrys_guarded_road() {
     let invoked = pressing
         .find("invoke(\"turn_failed_retry\"")
         .expect("the command");
+    // The press names the failure the confirm showed (the review R2, P2-10).
+    assert!(
+        pressing.contains("dispatch: failed.dispatch, letter: failed.letter"),
+        "the press does not name the failure the person was shown:\n{pressing}"
+    );
     assert!(
         asked < answered && answered < invoked,
         "the renderer presses before the person said yes:\n{pressing}"

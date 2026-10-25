@@ -16621,7 +16621,7 @@ pub const PERSON_MARKER_SOURCE: &str = "person";
 /// press at a worker whose turn failed. It waives the declared order and
 /// nothing else of [`resume_plan`] — a turn that failed is no wall, so the
 /// wall's refusal stands — and the press is about the failure the attempt
-/// stands at now. Built by [`person_turn_marker`] and by nothing else.
+/// stands at now. Built by [`person_turn_marker_at`] and by nothing else.
 pub const PERSON_TURN_MARKER_SOURCE: &str = "person-turn";
 
 /// The attempt's failed turn while it stands (t-69010): its newest letter,
@@ -16647,13 +16647,23 @@ pub fn standing_turn_failure<'run>(run: &'run Run, dispatch_id: &str) -> Option<
 pub fn person_turn_marker(run: &Run, worker_id: &str) -> Option<TransientErrorMarker> {
     let dispatch = run.worker(worker_id)?.dispatch.as_deref()?;
     let failed = standing_turn_failure(run, dispatch)?;
-    Some(TransientErrorMarker {
+    Some(person_turn_marker_at(dispatch, &failed.id))
+}
+
+/// The marker of a press at the failure a person was SHOWN: the attempt and
+/// the failure's letter the window drew (the review R2, P2-10). [`resume_plan`]
+/// holds it against the failure that stands when the press arrives, so a
+/// confirm left open while another failure came is refused, never typed at
+/// the new one.
+#[must_use]
+pub fn person_turn_marker_at(dispatch_id: &str, letter_id: &str) -> TransientErrorMarker {
+    TransientErrorMarker {
         source: PERSON_TURN_MARKER_SOURCE.to_string(),
         line: "a person asked this worker to go on after its turn failed"
             .to_string()
             .into(),
-        key: person_turn_key(dispatch, &failed.id),
-    })
+        key: person_turn_key(dispatch_id, letter_id),
+    }
 }
 
 /// The key one failed turn of one attempt gives a person's press.

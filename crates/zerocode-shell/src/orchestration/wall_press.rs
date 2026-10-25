@@ -40,7 +40,7 @@
 use super::*;
 use zerocode_core::orchestration::{
     HandoverPlan, NotResumed, QuotaWallChip, RESUME_LINE, ResumePlan, WALL_RETRY_LINE, WallRefusal,
-    handover_paragraph, handover_recap, newest_wall, parse_on_quota_wall, person_turn_marker,
+    handover_paragraph, handover_recap, newest_wall, parse_on_quota_wall, person_turn_marker_at,
     person_wall_marker, resume_plan, wall_cause, wall_chip_for,
 };
 
@@ -344,14 +344,16 @@ pub(crate) fn retry(
 /// 「다시 띄우기」 (t-69010): type one continuation at a worker whose turn
 /// failed, on the road 「지금 다시 시도」 takes — the composer at rest by the
 /// pointer's own reading, [`resume_plan`] on the press's marker
-/// ([`person_turn_marker`]: the failure the attempt stands at now), the
-/// receipt reserved before a word is typed, the words through the pointer's
-/// one guarded door. Answers the receipt and the line; `Err` is the reason,
-/// by its code.
+/// ([`person_turn_marker_at`]: the attempt and the failure's letter the person
+/// was shown, which the plan holds against the failure that stands now — the
+/// review R2, P2-10), the receipt reserved before a word is typed, the words
+/// through the pointer's one guarded door. Answers the receipt and the line;
+/// `Err` is the reason, by its code.
 pub(crate) fn retry_failed_turn(
     host: &dyn Host,
     run_id: &str,
     worker_id: &str,
+    (dispatch, letter): (&str, &str),
     now_ms: i64,
 ) -> Result<serde_json::Value, PressRefusal> {
     let term = with_ledger_seats(|ledger, seats| -> Result<u32, PressRefusal> {
@@ -384,12 +386,7 @@ pub(crate) fn retry_failed_turn(
         let failed = rows.run(run_id).ok_or_else(|| WallRefusal::UnknownRun {
             run: run_id.to_string(),
         })?;
-        let dispatch = failed
-            .worker(worker_id)
-            .and_then(|worker| worker.dispatch.clone())
-            .unwrap_or_default();
-        let marker =
-            person_turn_marker(failed, worker_id).ok_or(WallRefusal::TurnNotNow { dispatch })?;
+        let marker = person_turn_marker_at(dispatch, letter);
         resume_plan(failed, worker_id, &marker, now_ms).map_err(not_resumed)?
     };
     crate::account_switch::unless_switching(|| -> Result<serde_json::Value, PressRefusal> {
