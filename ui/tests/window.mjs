@@ -10065,6 +10065,8 @@ const mirrored = await page.evaluate(async () => {
   };
   const closed = [];
   window.__ANSWER__.close_term = (args) => (closed.push(args.term), null);
+  // A mirror pane closes by its own door (t-75153, R7b).
+  window.__ANSWER__.close_mirror_term = (args) => (closed.push(args.term), null);
   // A running page for the same run stands first — the mirror must replace it.
   tell("worker:opened", { id: "m1", term, agent: "codex", name: "Codex", command: "codex exec" });
   await pageStands("m1");
@@ -10119,6 +10121,7 @@ const mirrored = await page.evaluate(async () => {
   seen.fallbackQuiet = window.__MIRROR_ASKED__ === null;
   delete window.__ANSWER__.open_mirror_term;
   delete window.__ANSWER__.close_term;
+  delete window.__ANSWER__.close_mirror_term;
   // Tidy: drop the mirror pane and the term tab.
   tab.layout = prunePanes(tab.layout, new Set([term]));
   tab.activePane = term;

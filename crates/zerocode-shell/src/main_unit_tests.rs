@@ -356,7 +356,7 @@ fn assert_canonical_setting_round_trip(
     );
     let transport = block_after(window, "async function commitSetting(");
     assert!(
-        transport.contains("const snapshot = await invoke(command, args);")
+        transport.contains("const snapshot = await invoke(command, args, { hand });")
             && transport.contains("const snapshot = await fetchSettingsSnapshot();")
             && transport.contains("const mutationEpoch = ++settingsMutationEpoch;")
             && transport.contains("settingsMutationsInFlight += 1;")
@@ -4723,7 +4723,7 @@ fn a_running_terminal_is_measured_and_its_answer_survives_restart() {
     );
     let retiring = block_after(window, "async function runTerminalSessionMutation(");
     assert!(
-        retiring.contains("await invoke(command, args);")
+        retiring.contains("await invoke(command, args, { hand });")
             && window.contains(r#"runTerminalSessionMutation("end_terminal_session""#)
             && window.contains(r#"runTerminalSessionMutation("end_all_terminal_sessions""#),
         "Manage Sessions has no single native mutation door:\n{retiring}"
@@ -4754,21 +4754,21 @@ fn a_running_terminal_is_measured_and_its_answer_survives_restart() {
             && measuring.contains(r#"hookStates.get(term) === "working""#),
         "terminal close no longer measures every PTY and fails back to the known agent state:\n{measuring}"
     );
-    let tab = block_after(window, "function closeTab(id) {");
+    let tab = block_after(window, "function closeTab(id, started = handNow()) {");
     assert!(
         tab.contains("const terms = paneLeaves(tab.layout);")
             && tab.contains("terminalCloseNeedsConfirmation(terms)")
-            && tab.contains("askAboutRunning(tab, terms)"),
+            && tab.contains("askAboutRunning(tab, terms, started)"),
         "the tab close no longer measures all of its terminal panes:\n{tab}"
     );
     let pane = block_after(window, "function closeActivePane() {");
     assert!(
         pane.contains("const going = activePaneOf(tab);")
             && pane.contains("terminalCloseNeedsConfirmation([going])")
-            && pane.contains("askAboutRunning(tab, [going])"),
+            && pane.contains("askAboutRunning(tab, [going], started)"),
         "the pane close no longer measures the pane selected at click time:\n{pane}"
     );
-    let asking = block_after(window, "async function askAboutRunning(tab, terms) {");
+    let asking = block_after(window, "async function askAboutRunning(tab, terms, started) {");
     assert!(
         asking.contains("terminal.stopProcessTitle")
             && asking.contains("terminal.stopAgentTitle")
@@ -4788,7 +4788,7 @@ fn a_running_terminal_is_measured_and_its_answer_survives_restart() {
         "set_skip_close_terminal_with_running_process_confirm",
         "setting_key::SKIP_CLOSE_TERMINAL_WITH_RUNNING_PROCESS_CONFIRM",
         "settings.skip_close_terminal_with_running_process_confirm = skip;",
-        "async function askAboutRunning(tab, terms) {",
+        "async function askAboutRunning(tab, terms, started) {",
         "skip_close_terminal_with_running_process_confirm",
         "setConfirmCloseRunning(!skip);",
     );
@@ -11933,7 +11933,13 @@ fn launches_do_not_clear_and_sends_follow_the_agent_catalog() {
             && !pumping.contains("pty.write_input(&bytes)"),
         "the pump writes a delivery past the transaction seam:\n{pumping}"
     );
-    let promotion = block_after(backend, "fn settle(");
+    // The promotion lives in `take_next` since t-74974; settle hands it over.
+    let settling = block_after(backend, "fn settle(");
+    assert!(
+        settling.contains("take_next(term, deliveries, waiters, queue, now);"),
+        "a settled send no longer promotes the next queued one:\n{settling}"
+    );
+    let promotion = block_after(backend, "fn take_next(");
     assert!(
         promotion.contains(".clearing(next.clearing)")
             && promotion.contains(".guarded(next.guard)"),
@@ -29742,6 +29748,18 @@ fn required_computer_sharing_defaults_off_and_survives_the_settings_repository()
 /// not start, and one it closed already.
 #[test]
 fn only_a_mirror_the_window_opened_closes_without_a_hand() {
+    // Every road that ends a terminal forgets it as a mirror, and a mirror
+    // is one before the exit watch can see it (R8).
+    let backend = shipped_backend();
+    let closing = block_after(backend, "fn forget_term_state(");
+    assert!(
+        closing.contains("crate::cmd::terminal::forget_mirror_term(term);"),
+        "a mirror ended by another road stays among the mirrors:\n{closing}"
+    );
+    let opening = block_after(backend, "fn open_mirror_term(");
+    let noted = opening.find("note_mirror_term(id);").expect("a mirror is noted");
+    let held = opening.find("state.hold_terminal(id, pty);").expect("a mirror is held");
+    assert!(noted < held, "a mirror is held before it is noted:\n{opening}");
     use crate::cmd::terminal::{forget_mirror_term, mirror_close_allowed, note_mirror_term};
     let mirror: TermId = 4_100_001;
     let shell: TermId = 4_100_002;

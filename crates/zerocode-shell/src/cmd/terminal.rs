@@ -776,8 +776,10 @@ pub(crate) fn open_mirror_term(
         state.local_data_root(),
         &format!("term {id} spawned tail (mirror)"),
     );
-    state.hold_terminal(id, pty);
+    // A mirror before it is a terminal: the exit watch may see it end the
+    // moment it is held (R8).
     note_mirror_term(id);
+    state.hold_terminal(id, pty);
     state.cadence().wake();
     Ok(id)
 }

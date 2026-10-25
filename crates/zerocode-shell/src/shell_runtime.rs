@@ -2989,6 +2989,9 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     // The calls its agent left waiting on the tool guards' hindsight never
     // get it (t-10916); the next occupant of the id starts a book of its own.
     crate::pane_guard::forget_term(term);
+    // A mirror pane leaves the mirrors close_mirror_term may end, whichever
+    // road ended it — close_term, the session manager, its own exit (R8).
+    crate::cmd::terminal::forget_mirror_term(term);
     state.zo_worker_deliveries().remove(&term);
     state.agent_terms().remove(&term);
     state.pane_accounts().remove(&term);
