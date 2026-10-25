@@ -22,6 +22,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from posix_shell import BASH, WINDOWS_ENV, posix
+
 REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
 BUMP = RELEASE / "bump.sh"
@@ -87,6 +89,7 @@ class Fixture:
         (self.repo / "crates" / "zerocode-shell").mkdir(parents=True)
         (self.repo / "zo-ide").mkdir(parents=True)
         git_env = {
+            **WINDOWS_ENV,
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
             "GIT_COMMITTER_EMAIL": "t@x",
             # The system dirs only: git, awk and sed live there, gh (homebrew)
@@ -142,7 +145,7 @@ class Fixture:
     # -- the script --------------------------------------------------------
     def bump(self, *args):
         return subprocess.run(
-            ["bash", str(BUMP), *args, "--repo", str(self.repo)],
+            [BASH, posix(BUMP), *args, "--repo", str(self.repo)],
             capture_output=True, text=True, env=self.env, timeout=30,
         )
 
@@ -170,9 +173,9 @@ class Table(BumpCase):
     def test_script_exists_parses_and_has_a_table(self):
         self.assertTrue(BUMP.exists(), "tools/release/bump.sh missing")
         self.assertTrue(os.access(BUMP, os.X_OK), "bump.sh not executable")
-        rc = subprocess.run(["bash", "-n", str(BUMP)], capture_output=True, text=True)
+        rc = subprocess.run([BASH, "-n", posix(BUMP)], capture_output=True, text=True)
         self.assertEqual(rc.returncode, 0, rc.stderr)
-        out = subprocess.run(["bash", str(BUMP), "--table"], capture_output=True, text=True)
+        out = subprocess.run([BASH, posix(BUMP), "--table"], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
         table = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
         table = {k: v.strip("'") for k, v in table.items()}
@@ -399,7 +402,7 @@ class Changelog(BumpCase):
         self.assertIn("- fix: late", body)
 
     def test_a_long_prefix_is_capped_by_the_table(self):
-        out = subprocess.run(["bash", str(BUMP), "--table"], capture_output=True, text=True)
+        out = subprocess.run([BASH, posix(BUMP), "--table"], capture_output=True, text=True)
         cap = int(dict(l.split("=", 1) for l in out.stdout.splitlines())["MAX_PER_PREFIX"].strip("'"))
         for i in range(cap + 5):
             self.fx.commit(f"fix(many): number {i}")
