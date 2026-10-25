@@ -865,6 +865,11 @@ fn number_as_usize(number: &serde_json::Number) -> Option<usize> {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolSearchOutput {
+    /// Read before the matches: where web pages go, when the answer names
+    /// `Computer` and the window's work browser is installed (t-74223).
+    /// Absent otherwise, so every other answer reads as it always has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub matches: Vec<String>,
     /// Full definitions (description + input schema) of the matched tools —
     /// the payload a deferred-tool lookup exists for. Empty when no match
