@@ -433,16 +433,13 @@ impl Book {
         let status_stamp = status_file.as_deref().and_then(stamp_plain);
         self.lanes.look(lanes_folder.as_deref(), now_ms);
         let signature = signature_of(queue.as_ref(), &self.lanes, status_stamp, self.landed);
-        if signature != self.signature || self.revision == 0 {
+        let files_changed = signature != self.signature || self.revision == 0;
+        if files_changed {
             self.signature = signature;
-            self.revision += 1;
             if let (Some(folder), Some(queue)) = (roots.line.as_deref(), queue.as_ref()) {
                 self.runner.caps = queue.caps;
                 self.runner
                     .follow(&folder.join(RUNNER_LOG), queue.runner_log, offset_secs);
-                let running: HashSet<&str> =
-                    queue.running.iter().map(|job| job.name.as_str()).collect();
-                self.runner.expire(now_ms, &running);
                 self.floor = queue.floor.map(|held| {
                     let value = match self.floor {
                         Some((before, value)) if before == held => value,
@@ -453,6 +450,16 @@ impl Book {
             }
             let status = status_file.as_deref().and_then(lane_status);
             self.lanes.read(offset_secs, status.as_ref());
+        }
+        // A missing run can cross its cap and grace while every file stays
+        // quiet. Expire before the unchanged answer, and move the revision
+        // only when a job actually changed (or a file did).
+        let expired = queue.as_ref().is_some_and(|queue| {
+            let running = queue.running.iter().map(|job| job.name.as_str()).collect();
+            self.runner.expire(now_ms, &running)
+        });
+        if files_changed || expired {
+            self.revision += 1;
         }
         let log = ask
             .log
@@ -1454,7 +1461,7 @@ impl RunnerTail {
     /// Let go of the runs that have no end line coming: started, never ended,
     /// not in `run/` (the runner's own to end), and [`LOST_AFTER_CAP_MS`] past
     /// their cap. They stay on the board, lost, among the finished.
-    fn expire(&mut self, now_ms: i64, running: &HashSet<&str>) {
+    fn expire(&mut self, now_ms: i64, running: &HashSet<&str>) -> bool {
         let stale: Vec<String> = self
             .open
             .iter()
@@ -1465,6 +1472,7 @@ impl RunnerTail {
             })
             .map(|(name, _)| name.clone())
             .collect();
+        let changed = !stale.is_empty();
         for name in stale {
             let Some(started) = self.open.remove(&name) else {
                 continue;
@@ -1479,6 +1487,7 @@ impl RunnerTail {
                 ..named
             });
         }
+        changed
     }
 
     /// One of the runner's own lines, written at `at_ms`.
