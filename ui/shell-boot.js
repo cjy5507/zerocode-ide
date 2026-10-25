@@ -19,9 +19,14 @@ const { listen: listenToBackend } = window.__TAURI__.event;
  * the flow's, never the page's last input: the person moving elsewhere while
  * an agent's flow awaits gives that flow nothing.
  *
- *  - `person` inside the person's own event — a pointer, a touch or a key the
- *    browser marks `isTrusted`, what the page answers it with, and the
- *    microtasks it settles (a question's answer) — made outside a press;
+ *  - `person` inside the person's own event — a pointer, a touch, a key or
+ *    the text they type, which the browser marks `isTrusted`, what the page
+ *    answers it with, and the microtasks it settles (a question's answer) —
+ *    made outside a press. A focus, a blur, a change or a submit is trusted
+ *    too when the page's own focus() or click() sets it off, so it is the
+ *    person's only inside their event, or as a checkbox's change the hand of
+ *    the click that flipped it (t-75431); a handler that saves on blur
+ *    carries the hand that wrote what it saves;
  *  - `agent` inside an agent's press in this window (shell-self-act.js), and
  *    for the rest of the flow it started, when the flow carries its hand;
  *  - `none` anywhere else: after an await that left the event behind, a
@@ -41,11 +46,24 @@ let agentPressing = false;
 // The person's own event the browser is dispatching, if one is: a page's
 // `click()` inside it (Enter pressing a button) is still the person's.
 let personEvent = null;
+// The last click the page saw, whoever made it, with its hand: a checkbox's
+// change is fired after that click's dispatch, and answers it.
+let lastClick = null;
 
 for (const kind of PERSON_MOVES) {
   window.addEventListener(kind, (event) => {
     if (event.isTrusted && !agentPressing) personEvent = event;
   }, true);
+}
+window.addEventListener("click", (event) => {
+  lastClick = { target: event.target, hand: handNow() };
+}, true);
+
+/* Whether a trusted event is the person's own move: a pointer, a touch, a
+ * key, or text typed, pasted or dropped (an InputEvent — the input a
+ * checkbox's click() fires is a plain Event). */
+function personMove(event) {
+  return PERSON_MOVES.includes(event.type) || event instanceof InputEvent;
 }
 
 /* The hand of the event the page is answering right now. */
@@ -53,7 +71,13 @@ function handNow() {
   if (agentPressing) return "agent";
   const event = window.event;
   if (!event) return "none";
-  if (event.isTrusted) return "person";
+  if (event.isTrusted && personMove(event)) return "person";
+  const flipped = event.target;
+  if (event.isTrusted && (event.type === "change" || event.type === "input")
+    && flipped instanceof HTMLInputElement && (flipped.type === "checkbox" || flipped.type === "radio")
+    && lastClick?.target === flipped) {
+    return lastClick.hand;
+  }
   return personEvent !== null && personEvent.eventPhase !== Event.NONE ? "person" : "none";
 }
 

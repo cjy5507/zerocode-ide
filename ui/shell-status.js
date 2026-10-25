@@ -344,6 +344,15 @@ function flashPane(term) {
  * Both commit on blur and on Enter rather than per keystroke — a keychain
  * write per typed character is a keychain prompt per typed character. */
 let opencodeCookieConfigured = false;
+// Whose hand wrote the cookie box's text (t-75431): a blur is no one's move —
+// the page's own focus() sets it off as well as the person leaving the box —
+// so the save carries the hand that wrote what it saves. An agent's fill keeps
+// the text the agent's until the box is emptied.
+let opencodeCookieHand = "none";
+
+el("opencode-cookie").addEventListener("input", (event) => {
+  opencodeCookieHand = event.currentTarget.value === "" ? "none" : flowHand(opencodeCookieHand);
+});
 
 function commitOpencodeCookie() {
   const field = el("opencode-cookie");
@@ -351,13 +360,16 @@ function commitOpencodeCookie() {
   // An empty box is not "clear it": the box is empty whenever a cookie is
   // already held, because a stored secret is never read back into the window.
   if (pasted === "") return;
+  const hand = flowHand(opencodeCookieHand);
   field.value = "";
-  void commitSetting("opencode_cookie_configured", "set_opencode_cookie", { cookie: pasted }, { hand: handNow() })
+  opencodeCookieHand = "none";
+  void commitSetting("opencode_cookie_configured", "set_opencode_cookie", { cookie: pasted }, { hand })
     .then(() => refreshProviderUsage(usageProvider("opencode-go"), true));
 }
 
 function clearOpencodeCookie() {
   el("opencode-cookie").value = "";
+  opencodeCookieHand = "none";
   void commitSetting("opencode_cookie_configured", "set_opencode_cookie", { cookie: "" }, { hand: handNow() });
 }
 
