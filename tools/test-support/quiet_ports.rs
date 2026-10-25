@@ -23,8 +23,9 @@
 //! A test that judges the release of a lease cannot do it in that shared
 //! folder: another test may be given the freed port the next moment, and its
 //! hold is not the lease's. [`QuietPort::claim_apart`] takes a folder of the
-//! caller's own, which no other test names, and [`apart_band`] a band under
-//! the shared one, which no other test draws from (t-75231).
+//! caller's own, which no other test names, and [`apart_slot`] a slice of a
+//! band under the shared one, which no other test draws from and no other
+//! such test overlaps (t-75231, t-75388).
 //!
 //! What stays open is a program outside the tests that binds that exact port
 //! inside the gap. A port taken that way fails the bind the claim tries first,
@@ -69,9 +70,14 @@ pub fn band_for(reported: Option<u16>) -> Range<u16> {
     start..end
 }
 
-/// How many ports lie in the band under the shared one that a test judging a
-/// release draws from.
+/// How many ports lie in the band under the shared one that the tests judging a
+/// release share out among them.
 const APART_SPAN: u16 = 512;
+/// How many ports one test judging a release has to itself: sixteen claims
+/// and room for the ones another program has taken.
+const APART_SLOT_SPAN: u16 = 64;
+/// The folder under the temp dir that holds the locks of the apart slots.
+const SLOT_DIR: &str = "zerocode-test-port-slots";
 
 /// The folder the locks of the ports that every test draws from live in.
 pub fn lock_dir() -> PathBuf {
@@ -88,9 +94,9 @@ pub fn lock_path(port: u16) -> PathBuf {
     lock_path_in(&lock_dir(), port)
 }
 
-/// A band just under [`band_for`]'s that no ordinary claim draws from, for a
-/// test that lets a lease go and asks whether it did.
-pub fn apart_band(reported: Option<u16>) -> Range<u16> {
+/// The ports under [`band_for`]'s that no ordinary claim draws from, which
+/// [`apart_slot`] shares out among the tests that judge a release.
+fn apart_region(reported: Option<u16>) -> Range<u16> {
     let shared = band_for(reported);
     let start = shared.start.saturating_sub(APART_SPAN).max(LOWEST_PORT);
     assert!(
@@ -98,6 +104,41 @@ pub fn apart_band(reported: Option<u16>) -> Range<u16> {
         "no room under the shared band {shared:?} for a band of its own"
     );
     start..shared.start
+}
+
+/// A band of ports that one test, in this process or another, has to itself
+/// for as long as the value lives.
+pub struct ApartSlot {
+    band: Range<u16>,
+    _lock: File,
+}
+
+impl ApartSlot {
+    pub fn band(&self) -> &Range<u16> {
+        &self.band
+    }
+}
+
+/// A slice of the band just under [`band_for`]'s that no ordinary claim draws
+/// from and no other live slot overlaps, for a test that lets a lease go and
+/// asks whether it did. Two such tests share no lock folder, so the lock
+/// folder cannot keep them from being given each other's freed port; what
+/// does is that their bands never meet. A slot is held by a lock on a file in
+/// a folder every test names, and the OS lets go of it if the process dies.
+pub fn apart_slot(reported: Option<u16>) -> ApartSlot {
+    let region = apart_region(reported);
+    let slots = (region.end - region.start) / APART_SLOT_SPAN;
+    let dir = std::env::temp_dir().join(SLOT_DIR);
+    for slot in 0..slots {
+        if let Some(lock) = lock_port(&dir, slot) {
+            let start = region.start + slot * APART_SLOT_SPAN;
+            return ApartSlot {
+                band: start..start + APART_SLOT_SPAN,
+                _lock: lock,
+            };
+        }
+    }
+    panic!("all {slots} bands of {region:?} are held by tests judging a release");
 }
 
 /// Where the OS says its dynamic range starts, when it says.

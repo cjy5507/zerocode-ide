@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::quiet_ports::{
-    QuietPort, apart_band, band_for, lock_dir, lock_path_in, lowest_port, netsh_start,
+    QuietPort, apart_slot, band_for, lock_dir, lock_path_in, lowest_port, netsh_start,
     os_dynamic_start,
 };
 
@@ -66,14 +66,15 @@ fn the_os_answers_are_read_by_their_numbers_not_their_words() {
 /// and the check, standing for another test that asks for ports in that
 /// moment and holds what it was given until the check is over.
 ///
-/// The claims are made in a lock folder of this call's own and in the band
-/// under the shared one: no other test can be given these ports, so the lease's
-/// release is the one thing judged, whoever else is claiming (t-75231).
+/// The claims are made in a lock folder of this call's own and in a slice of
+/// the band under the shared one that no other call has at the same time: no
+/// other test can be given these ports, so the lease's release is the one thing
+/// judged, whoever else is claiming (t-75231, t-75388).
 fn release_is_seen<R>(parallel: impl FnOnce(&HashSet<u16>) -> R) {
     let apart = tempfile::tempdir().expect("a lock folder of its own");
-    let band = apart_band(os_dynamic_start());
+    let slot = apart_slot(os_dynamic_start());
     let held: Vec<_> = (0..16)
-        .map(|_| QuietPort::claim_apart(apart.path(), &band, bind_loopback))
+        .map(|_| QuietPort::claim_apart(apart.path(), slot.band(), bind_loopback))
         .collect();
     let ports: HashSet<u16> = held.iter().map(|(lease, _)| lease.port()).collect();
     assert_eq!(ports.len(), held.len(), "two holders were given one port");
@@ -91,6 +92,26 @@ fn release_is_seen<R>(parallel: impl FnOnce(&HashSet<u16>) -> R) {
             "{port} stayed locked after its holder"
         );
     }
+}
+
+/// Two tests judging a release in the same moment must not draw from one
+/// band: the one lets go of a port and asks for it again, and the other, in a
+/// lock folder of its own, may be given it in between (t-75388).
+#[test]
+fn tests_judging_a_release_at_once_draw_from_bands_that_do_not_meet() {
+    let (first, second) = (
+        apart_slot(os_dynamic_start()),
+        apart_slot(os_dynamic_start()),
+    );
+    let (first, second) = (first.band(), second.band());
+    assert!(
+        first.end <= second.start || second.end <= first.start,
+        "{first:?} and {second:?} are one band for two tests"
+    );
+    assert!(
+        first.end <= band_for(os_dynamic_start()).start,
+        "{first:?} reaches the band every ordinary claim draws from"
+    );
 }
 
 #[test]
