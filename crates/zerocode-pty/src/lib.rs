@@ -18,6 +18,8 @@ pub mod grid;
 pub mod input;
 pub mod lane;
 mod packed_row;
+#[cfg(target_os = "macos")]
+mod posix_launch;
 pub mod readers;
 pub mod ready;
 pub mod recording;
