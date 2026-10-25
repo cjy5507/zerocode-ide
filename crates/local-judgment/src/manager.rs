@@ -3478,6 +3478,8 @@ pub(crate) mod test_support {
     use super::*;
 
     /// Adds one record to the store's file of exits, as the manager does.
+    /// Only the unix supervision tests write exits this way.
+    #[cfg(unix)]
     pub fn keep_exit(path: &Path, record: &Value) -> Result<()> {
         super::keep_exit(path, record)
     }
