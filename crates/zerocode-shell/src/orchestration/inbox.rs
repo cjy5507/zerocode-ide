@@ -93,7 +93,9 @@ pub(crate) struct Inbox {
 }
 
 fn rank(tab: &str) -> usize {
-    TABS.iter().position(|one| *one == tab).unwrap_or(TABS.len())
+    TABS.iter()
+        .position(|one| *one == tab)
+        .unwrap_or(TABS.len())
 }
 
 /// The word a stopped or finished pane keeps for what it is.
@@ -150,7 +152,11 @@ pub(crate) fn inbox_of(desk: &DeskSnapshot, panes: &[WaitingRow]) -> Inbox {
             what: "handoff",
             run: Some(task.run.clone()),
             project: project.to_string(),
-            at_ms: task.times.as_ref().and_then(|times| times.handed_ms).unwrap_or(task.created_ms),
+            at_ms: task
+                .times
+                .as_ref()
+                .and_then(|times| times.handed_ms)
+                .unwrap_or(task.created_ms),
             seat,
             letter: None,
             task: Some(task.clone()),

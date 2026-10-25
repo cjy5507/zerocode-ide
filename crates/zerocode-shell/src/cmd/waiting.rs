@@ -57,7 +57,10 @@ const fn word(waiting: Waiting) -> &'static str {
 pub(crate) fn board_inbox(state: State<'_, AppState>) -> crate::orchestration::inbox::Inbox {
     let _crumb = crate::crumbs::Command::enter("board_inbox");
     let panes = pane_waits(&state);
-    crate::orchestration::inbox::inbox_of(&crate::orchestration::board_ledger_snapshot().desk, &panes)
+    crate::orchestration::inbox::inbox_of(
+        &crate::orchestration::board_ledger_snapshot().desk,
+        &panes,
+    )
 }
 
 /// Every pane that waits on the person now. Blocks and questions come first,

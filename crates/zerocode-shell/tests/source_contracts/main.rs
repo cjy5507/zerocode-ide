@@ -22279,7 +22279,8 @@ mod tests {
         let shell = include_str!("../../../../ui/shell.js");
         let inbox = include_str!("../../../../ui/shell-inbox.js");
         assert!(
-            inbox.contains("invoke(\"board_inbox\")") && inbox.contains("invoke(\"clear_finish_mark\""),
+            inbox.contains("invoke(\"board_inbox\")")
+                && inbox.contains("invoke(\"clear_finish_mark\""),
             "the page no longer asks Rust for its letters, or no longer releases a finish by its pane"
         );
         assert!(
@@ -22295,7 +22296,9 @@ mod tests {
 
         let main = include_str!("../../src/main.rs");
         assert!(
-            main.contains("board_inbox,") && main.contains("clear_finish_mark,") && !main.contains("waiting_on_me"),
+            main.contains("board_inbox,")
+                && main.contains("clear_finish_mark,")
+                && !main.contains("waiting_on_me"),
             "the inbox commands are not registered with the window"
         );
 
@@ -22405,7 +22408,9 @@ mod tests {
         );
         let view = block_after(&code, "function paintInboxView(");
         assert!(
-            view.contains("counts[tab]") && view.contains("counts.waiting") && view.contains("counts.notice"),
+            view.contains("counts[tab]")
+                && view.contains("counts.waiting")
+                && view.contains("counts.notice"),
             "the tabs and the summary are no longer drawn from `counts`:\n{view}"
         );
         assert!(

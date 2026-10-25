@@ -4170,7 +4170,10 @@ mod tests {
         ask(&mut ledger, &first, "team-news", 60);
         ask(&mut ledger, &first, "team-news", 61);
         ask(&mut ledger, &second, "team-second", 62);
-        for (at, kind) in [(63, MessageKind::QuotaWalled), (64, MessageKind::WorkerDied)] {
+        for (at, kind) in [
+            (63, MessageKind::QuotaWalled),
+            (64, MessageKind::WorkerDied),
+        ] {
             ledger
                 .post(
                     &first,
@@ -4180,10 +4183,23 @@ mod tests {
                 .expect("a notice");
         }
         let task = ledger
-            .create_task(&first, "hand".into(), "hand".into(), vec![], None, start + 65)
+            .create_task(
+                &first,
+                "hand".into(),
+                "hand".into(),
+                vec![],
+                None,
+                start + 65,
+            )
             .expect("a task");
         let carrier = ledger
-            .start_worker(&first, "claude", ("team-news", "%4"), Some(&task), start + 66)
+            .start_worker(
+                &first,
+                "claude",
+                ("team-news", "%4"),
+                Some(&task),
+                start + 66,
+            )
             .expect("a worker carries it");
         ledger
             .post(
@@ -4214,7 +4230,11 @@ mod tests {
             })
             .collect();
 
-        let desk = desk_snapshot(&ledger, |seat| (seat == "team-news/%1").then_some(7), no_cost);
+        let desk = desk_snapshot(
+            &ledger,
+            |seat| (seat == "team-news/%1").then_some(7),
+            no_cost,
+        );
         let inbox = crate::orchestration::inbox::inbox_of(&desk, &panes);
         let cards: usize = desk.runs.iter().map(|run| run.mail).sum();
         assert_eq!(desk.counts.mail, 3, "{:?}", desk.counts);
@@ -4259,7 +4279,11 @@ mod tests {
         assert_eq!(inbox.counts.all, inbox.items.len(), "{:?}", inbox.counts);
         let order: Vec<&str> = inbox.items.iter().map(|item| item.tab).collect();
         let mut sorted = order.clone();
-        sorted.sort_by_key(|tab| crate::orchestration::inbox::TABS.iter().position(|one| one == tab));
+        sorted.sort_by_key(|tab| {
+            crate::orchestration::inbox::TABS
+                .iter()
+                .position(|one| one == tab)
+        });
         assert_eq!(order, sorted, "the tabs stand in the page's order");
     }
 }
