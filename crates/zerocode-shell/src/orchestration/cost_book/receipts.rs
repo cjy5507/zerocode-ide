@@ -181,7 +181,7 @@ mod tests {
     fn a_copy_of_the_lock_left_behind_does_not_hold_the_next_lock() {
         let directory = tempfile::tempdir().unwrap();
         let held = take_lock(directory.path()).expect("a free lock");
-        let copy = held.0.try_clone().unwrap();
+        let copy = held.try_clone().unwrap();
         drop(held);
         assert!(
             take_lock(directory.path()).is_some(),
