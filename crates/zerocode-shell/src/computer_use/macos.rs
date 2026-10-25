@@ -235,6 +235,7 @@ pub(super) fn sync_share_panel(state: &Value) {
 struct StopWatch {
     stream: std::os::unix::net::UnixStream,
     thread: std::thread::JoinHandle<()>,
+    ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StopWatch {
@@ -249,6 +250,9 @@ impl StopWatch {
         let kept = stream.try_clone().ok()?;
         let mut wire = Wire::new(stream, token.to_string()).ok()?;
         let wait = u64::try_from(STOP_WATCH_WAIT.as_millis()).unwrap_or(u64::MAX);
+        let socket = socket.to_path_buf();
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_ended = std::sync::Arc::clone(&ended);
         let thread = std::thread::Builder::new()
             .name("computer-use-stop-watch".into())
             .spawn(move || {
@@ -264,22 +268,27 @@ impl StopWatch {
                         asked.insert("afterShare".into(), event.into());
                     }
                     let Ok(heard) = wire.request(STOP_WATCH_METHOD, Value::Object(asked)) else {
-                        return;
+                        break;
                     };
                     super::guard::hear_watched(&heard);
                     super::share::hear_panel(&heard);
                     after_share = heard.pointer("/shareControl/event").and_then(Value::as_i64);
                     // An answer with no count to ask after is not this road's.
                     let Some(revision) = heard.get("stopRevision").and_then(Value::as_u64) else {
-                        return;
+                        break;
                     };
                     after = Some(revision);
                 }
+                // Publish liveness before forgetting the endpoint: that
+                // presentation can wake the panel worker before we return.
+                worker_ended.store(true, std::sync::atomic::Ordering::Release);
+                forget_panel(&socket);
             })
             .ok()?;
         Some(Self {
             stream: kept,
             thread,
+            ended,
         })
     }
 
@@ -386,6 +395,13 @@ fn launch() -> Result<Launched, ComputerUseError> {
 }
 
 impl Session {
+    #[cfg(not(test))]
+    pub(super) fn panel_watch_ended(&self) -> bool {
+        self.watching
+            .as_ref()
+            .is_some_and(|watch| watch.ended.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     /// Connect to a launched helper and shake hands — the second half of
     /// [`Session::start`]: the pid read off the socket, the token on every
     /// request, the protocol and the guard table held to this window's.

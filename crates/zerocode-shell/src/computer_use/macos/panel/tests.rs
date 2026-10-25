@@ -18,6 +18,7 @@ fn update(revision: u64, endpoint: Option<PanelEndpoint>) -> Update {
     Update {
         state: json!({"revision": revision, "target": "sample", "generation": 0}),
         endpoint,
+        helper_lost: false,
     }
 }
 
@@ -296,6 +297,7 @@ fn an_ended_watch_forgets_its_endpoint_and_preserves_a_new_helpers_endpoint() {
         close.send(()).unwrap();
         server.join().unwrap();
         watch.thread.join().unwrap();
+        assert!(watch.ended.load(std::sync::atomic::Ordering::Acquire));
         let mut held = PANEL_ENDPOINT.lock().unwrap();
         let remaining = held.take();
         assert_eq!(
