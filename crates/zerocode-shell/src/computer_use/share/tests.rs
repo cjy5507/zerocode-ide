@@ -569,3 +569,34 @@ fn a_step_in_flight_never_moves_the_share_back() {
     assert_eq!(stand_in::notices().len(), told, "the band heard no move");
     drop(in_flight);
 }
+
+/// R3 (t-74826 again): a request in flight outside the share the person
+/// makes since — an unanswered app, the whole screen — is refused at its
+/// next step, as a new request would be, and the share stays where the
+/// person put it.
+#[test]
+fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
+    let answers = Rc::new(Cell::new(Decision::TimedOut));
+    let answering = Rc::clone(&answers);
+    let _person = stand_in::stand(move |_| answering.get());
+    let unshared = admit(ComputerMethod::Click, &click("Calculator")).expect("silence goes on");
+    let screen = admit(ComputerMethod::Screenshot, &json!({})).expect("nothing shared yet");
+    answers.set(Decision::Allowed);
+    drop(admit(ComputerMethod::Click, &click("Notes")).expect("admitted"));
+    assert_eq!(state()["target"], "notes");
+    let told = stand_in::notices().len();
+    assert_eq!(
+        ensure_current().err().map(|error| error.code).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "the whole-screen look in flight"
+    );
+    drop(screen);
+    assert_eq!(
+        ensure_current().err().map(|error| error.code).as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "the unshared click in flight"
+    );
+    drop(unshared);
+    assert_eq!(state()["target"], "notes");
+    assert_eq!(stand_in::notices().len(), told, "the band heard no move");
+}

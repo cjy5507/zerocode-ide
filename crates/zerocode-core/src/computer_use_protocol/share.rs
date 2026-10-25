@@ -51,6 +51,17 @@ pub enum Gate {
     Refuse(ProviderError),
 }
 
+/// The rule's verdict before anything moves: [`Share::gate`] carries it out,
+/// [`Share::still_holds`] only reads it.
+#[derive(Debug)]
+enum Judged {
+    Go,
+    /// Go, and an app the person said yes to before is the shared one again.
+    ShareAgain(String),
+    Ask(String),
+    Refuse(ProviderError),
+}
+
 /// What a request is, for the share's sake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reach<'a> {
@@ -123,94 +134,97 @@ impl Share {
     /// What `reach` may do now, at `now_ms` on the window's clock. A yes the
     /// person gave an app before makes it the shared one again without asking.
     pub fn gate(&mut self, reach: Reach<'_>, now_ms: u64) -> Gate {
-        if reach.acts && self.taken_back {
-            return Gate::Refuse(took_control());
+        match self.judge(reach, now_ms) {
+            Judged::Go => Gate::Go,
+            Judged::ShareAgain(app) => {
+                self.target = Some(app);
+                Gate::Go
+            }
+            Judged::Ask(app) => Gate::Ask(app),
+            Judged::Refuse(error) => Gate::Refuse(error),
         }
-        let Some(target) = self.target.clone() else {
+    }
+
+    /// Whether a request admitted before may take its next step, at `now_ms`:
+    /// judged as [`Self::gate`] judges a new request — the same refusals,
+    /// word for word — without moving anything (t-74826). An app said yes to
+    /// before goes on without the share coming back to it from the app the
+    /// person handed over since; what the gate would ask about is refused,
+    /// since no card is raised mid-step.
+    pub fn still_holds(&self, reach: Reach<'_>, now_ms: u64) -> Result<(), ProviderError> {
+        match self.judge(reach, now_ms) {
+            Judged::Go | Judged::ShareAgain(_) => Ok(()),
+            Judged::Ask(_) if self.required => Err(required()),
+            Judged::Ask(app) => Err(scope(&format!(
+                "the person has not answered for {app} yet; a new request in {app} asks them"
+            ))),
+            Judged::Refuse(error) => Err(error),
+        }
+    }
+
+    /// The share's rule for `reach` at `now_ms`, read without moving anything.
+    fn judge(&self, reach: Reach<'_>, now_ms: u64) -> Judged {
+        if reach.acts && self.taken_back {
+            return Judged::Refuse(took_control());
+        }
+        let Some(target) = self.target.as_deref() else {
             if !reach.acts {
-                return Gate::Go;
+                return Judged::Go;
             }
             return match reach.app {
-                None if self.required => Gate::Refuse(required()),
-                None => Gate::Go,
+                None if self.required => Judged::Refuse(required()),
+                None => Judged::Go,
                 Some(app) => self.first_act(app, now_ms),
             };
         };
         if reach.whole_screen {
-            return Gate::Refuse(scope(&format!(
+            return Judged::Refuse(scope(&format!(
                 "the person shared {target} only; look at that app's window, not the whole screen"
             )));
         }
         match reach.app {
-            Some(app) if app == target => Gate::Go,
-            None if !reach.acts => Gate::Go,
-            None => Gate::Refuse(scope(&format!(
+            Some(app) if app == target => Judged::Go,
+            None if !reach.acts => Judged::Go,
+            None => Judged::Refuse(scope(&format!(
                 "the person shared {target} only; name it as --app"
             ))),
-            Some(app) if !reach.acts => Gate::Refuse(scope(&format!(
+            Some(app) if !reach.acts => Judged::Refuse(scope(&format!(
                 "the person shared {target} only, not {app}"
             ))),
             Some(app) => match self.answers.get(app) {
-                Some(Answer::Shared) => {
-                    self.target = Some(app.to_string());
-                    Gate::Go
-                }
+                Some(Answer::Shared) => Judged::ShareAgain(app.to_string()),
                 Some(Answer::Silent) if self.required => self.silent_required(app, now_ms),
-                Some(Answer::Declined | Answer::Silent) => Gate::Refuse(scope(&format!(
+                Some(Answer::Declined | Answer::Silent) => Judged::Refuse(scope(&format!(
                     "the person shared {target} only, not {app}"
                 ))),
-                None => Gate::Ask(app.to_string()),
+                None => Judged::Ask(app.to_string()),
             },
         }
     }
 
-    /// Whether a request admitted before may take its next step, judged
-    /// without moving anything (t-74826): the share stays where the person
-    /// put it while a request in flight in another app finishes. Only what
-    /// the person can change mid-request is judged again — their hand on the
-    /// window, and whether an act needs an app they handed over.
-    pub fn still_holds(&self, reach: Reach<'_>) -> Result<(), ProviderError> {
-        if !reach.acts {
-            return Ok(());
-        }
-        if self.taken_back {
-            return Err(took_control());
-        }
-        let handed = reach
-            .app
-            .is_some_and(|app| self.answers.get(app) == Some(&Answer::Shared));
-        if self.required && !handed {
-            return Err(required());
-        }
-        Ok(())
-    }
-
-    fn first_act(&mut self, app: &str, now_ms: u64) -> Gate {
+    fn first_act(&self, app: &str, now_ms: u64) -> Judged {
         match self.answers.get(app) {
-            Some(Answer::Shared) => {
-                self.target = Some(app.to_string());
-                Gate::Go
-            }
+            Some(Answer::Shared) => Judged::ShareAgain(app.to_string()),
             Some(Answer::Declined) => {
-                Gate::Refuse(scope(&format!("the person did not hand {app} over")))
+                Judged::Refuse(scope(&format!("the person did not hand {app} over")))
             }
             Some(Answer::Silent) if self.required => self.silent_required(app, now_ms),
-            Some(Answer::Silent) => Gate::Go,
-            None => Gate::Ask(app.to_string()),
+            Some(Answer::Silent) => Judged::Go,
+            None => Judged::Ask(app.to_string()),
         }
     }
 
     /// An unanswered app under required sharing: refused while the quiet
     /// after its silence lasts, asked again after it.
-    fn silent_required(&self, app: &str, now_ms: u64) -> Gate {
+    fn silent_required(&self, app: &str, now_ms: u64) -> Judged {
         let again = self
             .silent_at
             .get(app)
             .map_or(now_ms, |at| at.saturating_add(SHARE_ASK_AGAIN_MS));
         if now_ms >= again {
-            return Gate::Ask(app.to_string());
+            return Judged::Ask(app.to_string());
         }
-        Gate::Refuse(waiting_for(app, again - now_ms))
+        Judged::Refuse(waiting_for(app, again - now_ms))
     }
 
     /// The person's answer about `app`, at `now_ms`. A yes shares it; silence
