@@ -1,0 +1,343 @@
+// 받은 편지함 (t-67483) — what waits on the person, from every project, on one page.
+//
+// Rust reads it (`board_inbox`: the ledger's desk and the panes, counted once). This
+// suite stands in for that answer and checks the window: the sidebar's one door and its
+// number, the page's tabs and their numbers, the list beside the preview, the answer given
+// where the letter is read (the ledger's own `desk_reply`), a read that costs no frame, and
+// the 100-letter paint. The numbers come from Rust's `counts`; this screen never recounts.
+//
+//   WINDOW_SUITES=inbox node ui/tests/window.mjs
+//   INBOX_REPORT=1 prints the measured numbers (screens crossed, read delay, 100-letter paint).
+const MINUTE = 60_000;
+const PAINT_ROWS = 100;
+const PAINT_RUNS = 9;
+/* Q5 of the draft: three milliseconds for a hundred letters, a fifth of a frame. */
+const PAINT_BUDGET_MS = 3;
+
+/* A synthetic ledger letter (acme, example.com, /Users/dev). */
+function letter(now, over = {}) {
+  return {
+    run: "run-a", id: "m-q1", kind: "question", from: "pane:team-a/%7", worker: "w-2043", task_id: "t-2041",
+    task: "결제 화면 문구", body: "이 변경을 main에 바로 올려도 될까요?", reason: null, resets_at_ms: null,
+    since_ms: null, category: null, routed: null, rung: null, switched_to: null, scope: null,
+    created_ms: now - 4 * MINUTE, delivery: "delivered", delivery_id: "d-q", batch: 1, notices: 1, ...over,
+  };
+}
+
+function item(tab, what, over = {}) {
+  return { id: `${over.run ?? "run-a"}/${over.letter?.id ?? what}`, tab, what, run: "run-a", project: "acme-web", at_ms: 0, seat: true, ...over };
+}
+
+/* The page's example: three questions over two runs (one run this window holds no seat of),
+ * two hand-ins, a stopped pane and a quota wall, three notices (two letters in one batch, and
+ * a landing line). `counts` is what Rust says; it is deliberately not derived here. */
+export function inboxFixture(now = Date.now()) {
+  const q = (id, run, seat, ago, body, extra = {}) => item("question", "question", {
+    id: `${run}/${id}`, run, seat, at_ms: now - ago * MINUTE, project: run === "run-a" ? "acme-web" : "acme-api",
+    letter: letter(now, { run, id, created_ms: now - ago * MINUTE, body, ...extra }),
+  });
+  const hand = (id, title, ago, attempt) => item("handoff", "handoff", {
+    id: `handoff:run-a/${id}`, at_ms: now - ago * MINUTE,
+    task: {
+      run: "run-a", id, title, stage: "reported", parent: null, parent_title: null, gate: null, blocked_by: [], closed: null,
+      created_ms: now - ago * MINUTE, cost: null, writing: null, left: null,
+      progress: { stage: "report_only", attempt, source: "a1b2c3d" },
+      times: { started_ms: now - 60 * MINUTE, handed_ms: now - ago * MINUTE },
+      hand_in: { conditions: [{ number: 1, text: "시험 12개가 통과함", state: "checked" }], decisions: "오류 문구를 한 줄로", blocked: "", next: "" },
+    },
+  });
+  const news = (tab, what, id, ago, extra = {}) => item(tab, what, {
+    id: `run-a/${id}`, at_ms: now - ago * MINUTE,
+    letter: letter(now, { id, kind: what, body: "", created_ms: now - ago * MINUTE, delivery_id: "d-n", batch: 2, worker: "w-2024", ...extra }),
+  });
+  const items = [
+    q("m-q1", "run-a", true, 4, "이 변경을 main에 바로 올려도 될까요?"),
+    q("m-q2", "run-a", true, 11, "느린 쿼리 두 개 중 어느 쪽을 먼저 고칠까요?", { delivery_id: "d-q2" }),
+    q("m-q3", "run-b", false, 38, "알림 끄기 버튼을 설정 맨 위로 옮겨도 되나요?"),
+    hand("t-2033", "로그인 오류 문구", 7, "dp-2033"),
+    hand("t-2025", "홈 화면 빈 상태", 26, "dp-2025"),
+    item("blocked", "pane_blocked", {
+      id: "pane:term:5@1", run: null, project: "wt-c", at_ms: now - 2 * MINUTE, seat: false,
+      pane: { pane: "term:5", agent: "claude", worktree: "/Users/dev/acme-api/wt-c", waiting: "blocked", since_ms: now - 2 * MINUTE },
+    }),
+    news("blocked", "quota_walled", "m-wall", 19, { delivery: "pending", delivery_id: null, batch: null, resets_at_ms: now + 40 * MINUTE }),
+    news("notice", "went_quiet", "m-n1", 5, { reason: "stalled" }),
+    news("notice", "model_deviated", "m-n3", 15, { switched_to: "claude-sonnet-5-5", scope: "session", category: "cyber" }),
+    item("notice", "landing", { id: "landing:run-a:2", at_ms: 0, landing: 2 }),
+  ];
+  const counts = { all: 10, question: 3, handoff: 2, blocked: 2, notice: 3, waiting: 7 };
+  return { items, counts };
+}
+
+export async function testInbox(browser, origin, standBackend, ok) {
+  const page = await browser.newPage();
+  await standBackend(page);
+  await page.addInitScript(() => {
+    const base = window.__TAURI__.core.invoke;
+    window.__INBOX__ = { snapshot: { items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 } }, calls: [], fail: new Set(), asks: 0 };
+    window.__TAURI__.core.invoke = (name, args) => {
+      const state = window.__INBOX__;
+      if (name === "board_inbox") {
+        state.asks += 1;
+        return Promise.resolve(JSON.parse(JSON.stringify(state.snapshot)));
+      }
+      if (["desk_reply", "desk_ack", "desk_review_pass", "clear_finish_mark"].includes(name)) {
+        state.calls.push({ name, args: JSON.parse(JSON.stringify(args ?? {})) });
+        const key = `${name}:${args?.message ?? args?.delivery ?? args?.task ?? ""}`;
+        if (state.fail.has(key)) {
+          state.fail.delete(key);
+          return Promise.reject("the ledger refused");
+        }
+        return Promise.resolve(name === "clear_finish_mark" ? false : { receipt: "r-1" });
+      }
+      return base(name, args);
+    };
+  });
+  await page.goto(`${origin}/index.html`);
+  await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
+
+  const fixture = inboxFixture();
+  const setSnapshot = (snapshot) =>
+    page.evaluate(async (snapshot) => {
+      window.__INBOX__.snapshot = snapshot;
+      await refreshInbox();
+    }, snapshot);
+  await setSnapshot(fixture);
+
+  // The sidebar keeps one line for it, and the two lists it absorbs are gone.
+  const door = await page.evaluate(() => {
+    const row = document.getElementById("nav-inbox");
+    return {
+      row: Boolean(row),
+      inNav: row?.parentElement?.classList.contains("nav-rows") === true,
+      badge: row?.querySelector(".nav-badge")?.textContent ?? null,
+      badgeShown: row ? !row.querySelector(".nav-badge").hidden : false,
+      oldList: Boolean(document.getElementById("waiting-list")),
+      oldRow: Boolean(document.getElementById("nav-attention")),
+    };
+  });
+  ok("the sidebar has one 받은 편지함 row in the shortcut rows", door.row && door.inNav, JSON.stringify(door));
+  ok("its number is what Rust counts as waiting (7), not a recount", door.badge === "7" && door.badgeShown, JSON.stringify(door));
+  ok("「나를 기다림」 and 「주의 필요」 left the sidebar", !door.oldList && !door.oldRow, JSON.stringify(door));
+
+  // One screen from the start to the answer sent (the old road crossed three: sidebar card,
+  // task board, the answer box). A screen is the active tab; its changes are counted.
+  const screens = await page.evaluate(() => {
+    const seen = [];
+    const note = () => {
+      if (seen.at(-1) !== activeTabId) seen.push(activeTabId);
+    };
+    note();
+    document.getElementById("nav-inbox").click();
+    note();
+    return seen;
+  });
+  const opened = await page.waitForSelector(".inbox-view:not([hidden]) .inbox-list .inbox-row", { timeout: 5000 }).then(() => true, () => false);
+  ok("the door opens the page with the list in it", opened);
+  const sendOne = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    const seen = [activeTabId];
+    const note = () => {
+      if (seen.at(-1) !== activeTabId) seen.push(activeTabId);
+    };
+    view.querySelector('.inbox-tab[data-inbox-tab="question"]').click();
+    note();
+    view.querySelector('.inbox-row[data-id="run-a/m-q1"]').click();
+    note();
+    const field = view.querySelector(".inbox-reply-field");
+    field.value = "검토 뒤에 올려 주세요.";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    view.querySelector('[data-inbox-act="reply"]').click();
+    note();
+    return seen;
+  });
+  const crossed = screens.length - 1 + (sendOne.length - 1);
+  ok("a question is answered on one screen (3 before)", crossed === 1, `screens=${JSON.stringify([...screens, ...sendOne])}`);
+  const replied = await page.evaluate(() => window.__INBOX__.calls.filter((call) => call.name === "desk_reply"));
+  ok(
+    "the answer goes by the ledger's own reply, with a retry name",
+    replied.length === 1 && replied[0].args.run === "run-a" && replied[0].args.message === "m-q1"
+      && replied[0].args.body === "검토 뒤에 올려 주세요." && /^ui-inbox-reply-/.test(replied[0].args.retryRequest ?? ""),
+    JSON.stringify(replied),
+  );
+
+  // The tabs say Rust's numbers, even where the rows in hand are fewer (the desk sends a window).
+  await setSnapshot({ ...inboxFixture(), counts: { all: 40, question: 7, handoff: 2, blocked: 2, notice: 3, waiting: 11 } });
+  const said = await page.evaluate(() => ({
+    tabs: Object.fromEntries([...document.querySelectorAll(".inbox-view:not([hidden]) .inbox-tab")].map((tab) => [tab.dataset.inboxTab, tab.querySelector(".inbox-tab-count").textContent])),
+    badge: document.querySelector("#nav-inbox .nav-badge").textContent,
+  }));
+  ok(
+    "the tabs and the sidebar draw Rust's counts and never count the rows themselves",
+    said.tabs.all === "40" && said.tabs.question === "7" && said.tabs.notice === "3" && said.badge === "11",
+    JSON.stringify(said),
+  );
+  await setSnapshot(inboxFixture());
+
+  // Tabs narrow the list; blocked rows are marked by a shape and a word, not colour alone.
+  const byTab = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    const out = {};
+    for (const tab of ["all", "question", "handoff", "blocked", "notice"]) {
+      view.querySelector(`.inbox-tab[data-inbox-tab="${tab}"]`).click();
+      out[tab] = [...view.querySelectorAll(".inbox-row")].map((row) => row.dataset.kind);
+    }
+    return out;
+  });
+  ok(
+    "the tabs narrow the list to their own kind, and 전체 keeps the page's order",
+    byTab.all.length === 10 && byTab.question.every((kind) => kind === "question") && byTab.question.length === 3
+      && byTab.handoff.length === 2 && byTab.blocked.length === 2 && byTab.notice.length === 3
+      && byTab.all.slice(0, 3).every((kind) => kind === "question"),
+    JSON.stringify(byTab),
+  );
+  const blockedMark = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-tab[data-inbox-tab="blocked"]').click();
+    return [...view.querySelectorAll(".inbox-row")].map((row) => ({
+      word: row.querySelector(".inbox-kind").textContent,
+      shape: Boolean(row.querySelector(".inbox-kind svg, .inbox-kind[data-shape]")),
+    }));
+  });
+  ok("a blocked row says 막힘 in words and in a shape", blockedMark.every((mark) => mark.word === "막힘" && mark.shape), JSON.stringify(blockedMark));
+
+  // A blocked pane gets one door: open the pane. Allow and deny are never pressed from here.
+  const blockedPane = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-row[data-id="pane:term:5@1"]').click();
+    const shown = [...view.querySelectorAll(".inbox-preview [data-inbox-act]")].filter((button) => button.checkVisibility());
+    const acts = shown.map((button) => button.dataset.inboxAct);
+    return { acts, allowDeny: /허용|거절|allow|deny/i.test(shown.map((button) => button.textContent).join(" ")) };
+  });
+  ok(
+    "a stopped pane has only 판 열기 — no allow or deny from the page",
+    JSON.stringify(blockedPane.acts) === JSON.stringify(["open-pane"]) && !blockedPane.allowDeny,
+    JSON.stringify(blockedPane),
+  );
+
+  // A hand-in is passed by the ledger's own pass, naming the attempt and the source the page read.
+  const passed = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-tab[data-inbox-tab="handoff"]').click();
+    view.querySelector('.inbox-row[data-id="handoff:run-a/t-2033"]').click();
+    view.querySelector('[data-inbox-act="pass"]').click();
+    return window.__INBOX__.calls.filter((call) => call.name === "desk_review_pass");
+  });
+  ok(
+    "확인 on a hand-in passes it with its attempt and source",
+    passed.length === 1 && passed[0].args.run === "run-a" && passed[0].args.task === "t-2033"
+      && passed[0].args.attempt === "dp-2033" && passed[0].args.source === "a1b2c3d",
+    JSON.stringify(passed),
+  );
+
+  // A question of a run this window holds no seat of cannot be answered here, and says so.
+  const noSeat = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-tab[data-inbox-tab="question"]').click();
+    view.querySelector('.inbox-row[data-id="run-b/m-q3"]').click();
+    return {
+      field: view.querySelector(".inbox-reply-field").checkVisibility(),
+      reply: view.querySelector('[data-inbox-act="reply"]').checkVisibility(),
+      note: view.querySelector(".inbox-preview .inbox-note")?.textContent ?? "",
+    };
+  });
+  ok("without the run's seat there is no answer box, only the reason", !noSeat.field && !noSeat.reply && noSeat.note.length > 0, JSON.stringify(noSeat));
+
+  // A failed answer keeps its retry name, so pressing again replays one receipt.
+  const retried = await page.evaluate(async () => {
+    window.__INBOX__.fail.add("desk_reply:m-q2");
+    window.__INBOX__.calls.length = 0;
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-row[data-id="run-a/m-q2"]').click();
+    const field = view.querySelector(".inbox-reply-field");
+    field.value = "색인부터 고치세요.";
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    view.querySelector('[data-inbox-act="reply"]').click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    view.querySelector('[data-inbox-act="reply"]').click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return window.__INBOX__.calls.filter((call) => call.name === "desk_reply").map((call) => call.args.retryRequest);
+  });
+  ok("a refused answer is retried under the same name", retried.length === 2 && retried[0] === retried[1], JSON.stringify(retried));
+
+  // Reading is immediate: the dot is off in the frame the letter opens, and the ack leaves in
+  // the same task — but only when every letter of its batch is read (the ledger acks a batch).
+  await setSnapshot(inboxFixture());
+  const reading = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-tab[data-inbox-tab="notice"]').click();
+    window.__INBOX__.calls.length = 0;
+    const row = (id) => view.querySelector(`.inbox-row[data-id="${id}"]`);
+    const before = row("run-a/m-n1").dataset.unread;
+    row("run-a/m-n1").click();
+    const afterFirst = { unread: row("run-a/m-n1").dataset.unread, acks: window.__INBOX__.calls.filter((call) => call.name === "desk_ack").length };
+    row("run-a/m-n3").click();
+    const acks = window.__INBOX__.calls.filter((call) => call.name === "desk_ack");
+    return { before, afterFirst, secondUnread: row("run-a/m-n3").dataset.unread, acks: acks.map((call) => call.args) };
+  });
+  ok("opening a letter turns its unread dot off in the same frame", reading.before === "true" && reading.afterFirst.unread === "false" && reading.secondUnread === "false", JSON.stringify(reading));
+  ok(
+    "the ack leaves with the last read letter of its batch, once, by the ledger's batch id",
+    reading.afterFirst.acks === 0 && reading.acks.length === 1 && reading.acks[0].delivery === "d-n" && reading.acks[0].run === "run-a",
+    JSON.stringify(reading),
+  );
+
+  // 안 읽음만 hides what was read.
+  const unreadOnly = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-tab[data-inbox-tab="notice"]').click();
+    const all = view.querySelectorAll(".inbox-row").length;
+    view.querySelector(".inbox-unread-switch").click();
+    const shown = [...view.querySelectorAll(".inbox-row")].map((row) => row.dataset.unread);
+    const on = view.querySelector(".inbox-unread-switch").getAttribute("aria-checked");
+    view.querySelector(".inbox-unread-switch").click();
+    return { all, shown, on };
+  });
+  ok("「안 읽음만」 keeps only the unread letters", unreadOnly.on === "true" && unreadOnly.shown.every((one) => one === "true") && unreadOnly.shown.length < unreadOnly.all, JSON.stringify(unreadOnly));
+
+  // The 「주의 필요」 chord opens the page on its 막힘 tab (draft Q2: absorbed, not kept beside it).
+  const chord = await page.evaluate(() => {
+    document.querySelector('.inbox-view:not([hidden]) .inbox-tab[data-inbox-tab="all"]').click();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "A", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    const pressed = document.querySelector('.inbox-view:not([hidden]) .inbox-tab[aria-pressed="true"]');
+    return { tab: pressed?.dataset.inboxTab ?? null, modal: !document.getElementById("action-hub-scrim")?.hidden };
+  });
+  ok("the 주의 필요 chord opens the inbox on 막힘, not the old modal", chord.tab === "blocked" && chord.modal === false, JSON.stringify(chord));
+
+  // 100 letters, median of nine. Gated: the worst case, where every letter's words changed
+  // (a minute turned, or the ledger moved them all). Reported: the steady repaint, where the
+  // keyed rows are reused as they stand.
+  const timings = await page.evaluate(({ rows, runs }) => {
+    const base = inboxSnapshot.items;
+    const bulk = Array.from({ length: rows }, (_, index) => {
+      const source = base[index % base.length];
+      return { ...source, id: `${source.id}#${index}` };
+    });
+    inboxSnapshot = { items: bulk, counts: { all: rows, question: rows, handoff: 0, blocked: 0, notice: 0, waiting: rows } };
+    document.querySelector('.inbox-view:not([hidden]) .inbox-tab[data-inbox-tab="all"]').click();
+    const measure = (before) => {
+      const samples = [];
+      for (let run = 0; run < runs; run += 1) {
+        before(run);
+        const started = performance.now();
+        paintInboxViews();
+        samples.push(performance.now() - started);
+      }
+      return samples.sort((left, right) => left - right);
+    };
+    const changed = measure((run) => {
+      for (const item of bulk) item.at_ms += 1 + run;
+    });
+    const steady = measure(() => {});
+    return { changed, steady };
+  }, { rows: PAINT_ROWS, runs: PAINT_RUNS });
+  const middle = (samples) => samples[Math.floor(samples.length / 2)];
+  const median = middle(timings.changed);
+  ok(`${PAINT_ROWS} letters, every word rewritten, paint in ${PAINT_BUDGET_MS} ms or less (median of ${PAINT_RUNS})`, median <= PAINT_BUDGET_MS, `median=${median.toFixed(2)}ms`);
+  if (process.env.INBOX_REPORT === "1") {
+    console.log(
+      `INBOX_REPORT screens=${crossed} paint_rows=${PAINT_ROWS} rewritten_ms_median=${median.toFixed(2)} rewritten_ms_max=${timings.changed.at(-1).toFixed(2)} steady_ms_median=${middle(timings.steady).toFixed(2)}`,
+    );
+  }
+  await page.close();
+}

@@ -2154,8 +2154,8 @@ class StatefulBackend {
       // 없는 창에 답하는 그대로(`zerocode_core::board::snapshot`).
       case "board_snapshot": return { columns: [], attention_count: 0, total_count: 0 };
       case "pane_subagents": return [];
-      // 나를 기다림 — 기다리는 판이 없는 창이 실제 백엔드에서 받는 답(t-26595).
-      case "waiting_on_me": return [];
+      // 받은 편지함 — 기다리는 것이 없는 창이 실제 백엔드에서 받는 답(t-26595, t-67483).
+      case "board_inbox": return { items: [], counts: { all: 0, question: 0, handoff: 0, blocked: 0, notice: 0, waiting: 0 } };
       case "clear_finish_mark": return false;
       case "pane_activities": return [];
       case "process_memory": return 0;

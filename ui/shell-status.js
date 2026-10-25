@@ -4556,6 +4556,13 @@ function renderTabs() {
   const jevDoor = el("nav-jev");
   const jevPressed = String(activeTabId === JEV_TAB.id);
   if (jevDoor.getAttribute("aria-pressed") !== jevPressed) jevDoor.setAttribute("aria-pressed", jevPressed);
+  // The inbox's row in the sidebar says the same of its page: it is the screen on stage.
+  const inboxDoor = el("nav-inbox");
+  const onInbox = activeTabId === INBOX_TAB.id;
+  if (inboxDoor.hasAttribute("aria-current") !== onInbox) {
+    if (onInbox) inboxDoor.setAttribute("aria-current", "page");
+    else inboxDoor.removeAttribute("aria-current");
+  }
   // The machine figures ride along, bounded — a render is a fine moment to
   // notice they are stale, and a terrible one to spawn `lsof`.
   paintMachineFigures();
