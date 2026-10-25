@@ -1315,6 +1315,29 @@ mod tests {
     use crate::credential_store::{MemorySecretStore, SecretOperation, UnavailableSecretStore};
     use std::sync::{Arc, Barrier};
 
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of every descriptor until the exec, and a flock belongs to the
+    /// open file description, so a lock its holder only closed stays held by
+    /// that copy (t-73907: a child that never reached its exec kept three new
+    /// windows waiting on the settings lock). The duplicate here is that copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_lock() {
+        use std::os::fd::AsRawFd as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = JiraStore::new(directory.path());
+        let held = store.lock().unwrap();
+        let inherited = held._file.try_clone().unwrap();
+        drop(held);
+        let next =
+            crate::durable_file::private_lock_file(&directory.path().join(LOCK_FILE_NAME))
+                .unwrap();
+        let taken = unsafe { libc::flock(next.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        drop(inherited);
+        assert_eq!(taken, 0, "a lock its holder let go is still held by a copy");
+    }
+
     fn site(id: &str) -> JiraSite {
         JiraSite {
             id: id.to_string(),
