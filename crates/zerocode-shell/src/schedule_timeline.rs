@@ -56,9 +56,16 @@ const JOB_SUFFIX: &str = ".job";
 const HELD_SUFFIX: &str = ".job.hold";
 const LOG_SUFFIX: &str = ".log";
 const RC_SUFFIX: &str = ".rc";
-/// The cap the runner gives a job that names none, and the most it grants.
-const DEFAULT_CAP_SECS: u32 = 900;
-const MOST_CAP_SECS: u32 = 1800;
+/// The runner's script, `runner<n>.sh`, in the queue folder: the one place its
+/// caps are decided, and so the one place this reads them from.
+const RUNNER_SCRIPT_HEAD: &str = "runner";
+const RUNNER_SCRIPT_TAIL: &str = ".sh";
+/// How much of that script is read: a script of a few hundred lines.
+const SCRIPT_BYTES: u64 = 64 * 1024;
+/// How long past its cap a `RUN` with no `DONE` waits before the window lets
+/// it go as lost: the runner kills at the cap and writes its line a few
+/// seconds later, so a job this far over has no end line coming.
+const LOST_AFTER_CAP_MS: i64 = 10 * 60_000;
 /// A re-run keeps the kind of the job it repeats (`…-g5-window-실측-rerun`).
 const RERUN_MARK: &str = "rerun";
 
@@ -71,12 +78,26 @@ const SAMPLES: usize = 5;
 /// The lane logs read, newest first by their last write: eight hold more than
 /// five runs of every stage even when one sha was launched three times.
 const LANE_FILES: usize = 8;
+/// The lane logs stamped: when the newest [`LANE_FILES`] hold no lane that
+/// passed every stage, the older of these are read too, until one does —
+/// the stages ahead of a running lane are that lane's.
+const LANE_FILES_FAR: usize = 32;
 /// How often the lane folder is listed again although it did not change: an
 /// old sha launched again appends to a file the newest eight may not hold.
 const LANE_RELIST_MS: i64 = 60_000;
-/// The most of a long runner log a first look reads: its last stretch holds
-/// the past of every kind and the week the board can show.
-const FIRST_LOOK_BYTES: u64 = 4 * 1024 * 1024;
+/// The most of the runner's log one look reads — a first look at a long log,
+/// or a look at one that grew far since the last: its last stretch holds the
+/// past of every kind and the week the board can show.
+const LOOK_BYTES: u64 = 4 * 1024 * 1024;
+/// How many bytes before the offset a look remembers, to know the file it
+/// reads on is still the one it read: a log cut and grown past the offset is
+/// told by them.
+const SEAM_BYTES: usize = 32;
+/// A lane log's last stretch, read in full by a look: a lane's log is a few
+/// hundred KiB to a few MiB, and its newest runs are at its end.
+const LANE_LOG_BYTES: u64 = 4 * 1024 * 1024;
+/// `DISK_FLOOR` holds one number of GiB.
+const FLOOR_BYTES: u64 = 64;
 /// Finished jobs kept between looks, the newest last.
 const KEPT_JOBS: usize = 3_000;
 /// The most finished jobs one answer carries: the newest.
@@ -240,6 +261,11 @@ pub(crate) struct Expected {
     pub(crate) samples: u8,
 }
 
+/// A lane run's result when it neither passed nor failed to the window's
+/// reading: no verdict, or one nobody can tell the word of (the other words
+/// are the job states [`PASSED`], [`FAILED`] and [`RUNNING`]).
+const ENDED: &str = "ended";
+
 /// One run of the release lane over one sha.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct LaneRun {
@@ -252,10 +278,19 @@ pub(crate) struct LaneRun {
     pub(crate) verdict: Option<String>,
     pub(crate) reason: Option<String>,
     pub(crate) running: bool,
+    /// How it ended, in the board's words: `running`, `passed` (its verdict is
+    /// the word the lanes that passed every stage end with), `failed` (any
+    /// other verdict of a lane that ran stages) or `ended`. The window compares
+    /// none of the lane's own words.
+    pub(crate) result: &'static str,
     pub(crate) stages: Vec<LaneStage>,
     /// While it runs: the stage it is in, then the stages the last full green
     /// lane ran after it, each with what it is expected to take.
     pub(crate) ahead: Vec<StageAhead>,
+    /// The stages after the one it is in came from such a lane. Without one
+    /// `ahead` holds the stage it is in alone, and what is left of the lane is
+    /// not known.
+    pub(crate) ahead_planned: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -354,6 +389,7 @@ struct Book {
     roots: Roots,
     runner: RunnerTail,
     headers: HashMap<String, (FileStamp, Header)>,
+    script: ScriptCaps,
     floor: Option<(FileStamp, Option<u32>)>,
     lanes: LaneBook,
     /// What git said of the board's tasks at the last look, and its hash: a
@@ -386,7 +422,7 @@ impl Book {
         let queue = roots
             .line
             .as_deref()
-            .map(|folder| look_at_queue(folder, &mut self.headers));
+            .map(|folder| look_at_queue(folder, &mut self.headers, &mut self.script));
         let lanes_folder = roots
             .release
             .as_ref()
@@ -395,15 +431,19 @@ impl Book {
             .release
             .as_ref()
             .map(|release| release.join(crate::update_runtime::STATUS_FILE));
-        let status_stamp = status_file.as_deref().and_then(stamp);
+        let status_stamp = status_file.as_deref().and_then(stamp_plain);
         self.lanes.look(lanes_folder.as_deref(), now_ms);
         let signature = signature_of(queue.as_ref(), &self.lanes, status_stamp, self.landed);
         if signature != self.signature || self.revision == 0 {
             self.signature = signature;
             self.revision += 1;
             if let (Some(folder), Some(queue)) = (roots.line.as_deref(), queue.as_ref()) {
+                self.runner.caps = queue.caps;
                 self.runner
                     .follow(&folder.join(RUNNER_LOG), queue.runner_log, offset_secs);
+                let running: HashSet<&str> =
+                    queue.running.iter().map(|job| job.name.as_str()).collect();
+                self.runner.expire(now_ms, &running);
                 self.floor = queue.floor.map(|held| {
                     let value = match self.floor {
                         Some((before, value)) if before == held => value,
@@ -511,8 +551,8 @@ impl Book {
                 // In `run/` with no `RUN` line read: it started when the
                 // runner moved it there.
                 None => {
-                    let cap_secs = cap_secs(queued.header.cap.as_deref());
-                    let named = Job::named(&queued.name);
+                    let cap_secs = queue.caps.cap_secs(queued.header.cap.as_deref());
+                    let named = Job::named(&queued.name, queue.caps);
                     Job {
                         who: queued.header.who.clone().unwrap_or_default(),
                         state: RUNNING,
@@ -526,8 +566,8 @@ impl Book {
             });
         }
         for queued in &queue.waiting {
-            let cap_secs = cap_secs(queued.header.cap.as_deref());
-            let named = Job::named(&queued.name);
+            let cap_secs = queue.caps.cap_secs(queued.header.cap.as_deref());
+            let named = Job::named(&queued.name, queue.caps);
             jobs.push(Job {
                 who: queued.header.who.clone().unwrap_or_default(),
                 state: if queued.held { HELD } else { WAITING },
@@ -543,7 +583,7 @@ impl Book {
 
     /// A job the runner's log says started, still without an end.
     fn started_job(&self, name: &str, started: &Started) -> Job {
-        let named = Job::named(name);
+        let named = Job::named(name, self.runner.caps);
         Job {
             who: started.who.clone(),
             state: RUNNING,
@@ -601,7 +641,7 @@ fn tail_of(path: Option<&Path>) -> LogTail {
         missing: true,
         ..LogTail::default()
     };
-    let Some(mut file) = path.and_then(|path| File::open(path).ok()) else {
+    let Some(mut file) = path.and_then(crate::plain_read::open_plain) else {
         return missing;
     };
     let len = file.metadata().map_or(0, |meta| meta.len());
@@ -644,6 +684,15 @@ struct FileStamp {
 
 fn stamp(path: &Path) -> Option<FileStamp> {
     std::fs::metadata(path).ok().map(|meta| stamp_of(&meta))
+}
+
+/// The stamp of a plain file at `path` — none for a link, a pipe or a folder:
+/// a file another process owns is not followed to wherever it points.
+fn stamp_plain(path: &Path) -> Option<FileStamp> {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .filter(Metadata::is_file)
+        .map(|meta| stamp_of(&meta))
 }
 
 fn stamp_of(meta: &Metadata) -> FileStamp {
@@ -699,9 +748,132 @@ struct QueueLook {
     floor: Option<FileStamp>,
     quiet_wanted: bool,
     runner_log: Option<FileStamp>,
+    /// What the runner caps a job at, as its script says.
+    caps: Caps,
 }
 
-fn look_at_queue(folder: &Path, headers: &mut HashMap<String, (FileStamp, Header)>) -> QueueLook {
+/// What the runner caps a job at: the number it gives a job that names none,
+/// and the most it grants. The runner's script decides them, so they are read
+/// off its text — not copied here to drift from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Caps {
+    default_secs: u32,
+    most_secs: u32,
+}
+
+impl Default for Caps {
+    fn default() -> Self {
+        Self::LAST_KNOWN
+    }
+}
+
+impl Caps {
+    /// The runner's numbers as they stood when this was written, for a queue
+    /// folder with no script of its own to read them off.
+    const LAST_KNOWN: Caps = Caps {
+        default_secs: 900,
+        most_secs: 1800,
+    };
+
+    /// The two numbers in a runner script's text, the way its `cap` lines say
+    /// them: `case "$cap" in ''|*[!0-9]*) cap=<default>;; esac; [ $cap -gt
+    /// <most> ] && cap=<most>`. None where either is not there.
+    fn of_script(text: &str) -> Option<Self> {
+        let number = |rest: &str| -> Option<u32> {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            rest[..digits].parse().ok()
+        };
+        let default_secs = text.lines().find_map(|line| {
+            let (_, rest) = line.split_once("*[!0-9]*) cap=")?;
+            number(rest)
+        })?;
+        let most_secs = text.lines().find_map(|line| {
+            let (_, rest) = line.split_once("[ $cap -gt ")?;
+            let (_, rest) = rest.split_once("&& cap=")?;
+            number(rest)
+        })?;
+        Some(Self {
+            default_secs,
+            most_secs,
+        })
+    }
+
+    /// The cap as the runner reads it: digits, or its default — never above its most.
+    fn cap_secs(self, said: Option<&str>) -> u32 {
+        said.filter(|word| !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|word| word.parse::<u64>().ok())
+            .map_or(self.default_secs, |secs| {
+                secs.min(u64::from(self.most_secs)) as u32
+            })
+    }
+}
+
+/// The caps last read off the runner's script, and what that read stood on:
+/// the queue folder's and the script's stamps. A look where neither moved
+/// reads nothing; the folder is listed again only when it changed.
+#[derive(Debug, Default)]
+struct ScriptCaps {
+    folder: Option<FileStamp>,
+    script: Option<(PathBuf, Option<FileStamp>)>,
+    caps: Caps,
+    looked: bool,
+}
+
+impl ScriptCaps {
+    fn look(&mut self, folder: &Path) -> Caps {
+        let folder_stamp = stamp(folder);
+        let script_stamp = self.script.as_ref().map(|(path, _)| stamp_plain(path));
+        let held = self.script.as_ref().map(|(_, held)| *held);
+        if self.looked && self.folder == folder_stamp && script_stamp == held {
+            return self.caps;
+        }
+        self.looked = true;
+        self.folder = folder_stamp;
+        let path = runner_script(folder);
+        let text = path
+            .as_deref()
+            .and_then(|path| crate::plain_read::read_plain(path, SCRIPT_BYTES))
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+        self.caps = text
+            .as_deref()
+            .and_then(Caps::of_script)
+            .unwrap_or(Caps::LAST_KNOWN);
+        self.script = path.map(|path| {
+            let held = stamp_plain(&path);
+            (path, held)
+        });
+        self.caps
+    }
+}
+
+/// The runner's script in the queue folder: `runner<n>.sh` — the highest
+/// number, a copy or a backup beside it (`runner10.sh.bak-…`) not counted.
+fn runner_script(folder: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(folder)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let number: u32 = name
+                .strip_prefix(RUNNER_SCRIPT_HEAD)?
+                .strip_suffix(RUNNER_SCRIPT_TAIL)?
+                .parse()
+                .ok()?;
+            entry
+                .metadata()
+                .ok()
+                .filter(Metadata::is_file)
+                .map(|_| (number, entry.path()))
+        })
+        .max_by_key(|(number, _)| *number)
+        .map(|(_, path)| path)
+}
+
+fn look_at_queue(
+    folder: &Path,
+    headers: &mut HashMap<String, (FileStamp, Header)>,
+    script: &mut ScriptCaps,
+) -> QueueLook {
     let waiting_dir = folder.join(QUEUE_IN);
     if !waiting_dir.is_dir() {
         headers.clear();
@@ -719,9 +891,10 @@ fn look_at_queue(folder: &Path, headers: &mut HashMap<String, (FileStamp, Header
         waiting,
         running,
         paused: folder.join(PAUSE_FLAG).exists(),
-        floor: stamp(&folder.join(DISK_FLOOR_FLAG)),
+        floor: stamp_plain(&folder.join(DISK_FLOOR_FLAG)),
         quiet_wanted: folder.join(QUIET_FLAG).exists(),
-        runner_log: stamp(&folder.join(RUNNER_LOG)),
+        runner_log: stamp_plain(&folder.join(RUNNER_LOG)),
+        caps: script.look(folder),
     }
 }
 
@@ -779,8 +952,9 @@ fn queued_files(
 /// A job's header, as the runner reads it: the first `# <key>:` line of each.
 fn read_header(path: &Path) -> Header {
     let mut bytes = Vec::new();
-    let read = File::open(path).and_then(|file| file.take(HEADER_BYTES).read_to_end(&mut bytes));
-    if read.is_err() {
+    let read = crate::plain_read::open_plain(path)
+        .map(|file| file.take(HEADER_BYTES).read_to_end(&mut bytes));
+    if !matches!(read, Some(Ok(_))) {
         return Header::default();
     }
     let text = String::from_utf8_lossy(&bytes);
@@ -799,18 +973,10 @@ fn read_header(path: &Path) -> Header {
     }
 }
 
-/// The cap as the runner reads it: digits, or its default — never above its most.
-fn cap_secs(said: Option<&str>) -> u32 {
-    said.filter(|word| !word.is_empty() && word.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|word| word.parse::<u64>().ok())
-        .map_or(DEFAULT_CAP_SECS, |secs| {
-            secs.min(u64::from(MOST_CAP_SECS)) as u32
-        })
-}
-
 /// The disk floor the runner reads (`DISK_FLOOR`, whole GiB).
 fn read_floor(path: &Path) -> Option<u32> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    let bytes = crate::plain_read::read_plain(path, FLOOR_BYTES)?;
+    std::str::from_utf8(&bytes).ok()?.trim().parse().ok()
 }
 
 /// What a look compares with the last: every stamp, listing and flag it read.
@@ -836,6 +1002,7 @@ fn signature_of(
         queue.paused.hash(&mut hasher);
         queue.floor.hash(&mut hasher);
         queue.quiet_wanted.hash(&mut hasher);
+        queue.caps.hash(&mut hasher);
     }
     lanes.folder_stamp.hash(&mut hasher);
     for (path, held) in &lanes.files {
@@ -857,7 +1024,9 @@ enum Said {
         name: String,
         who: String,
         lane: Option<u8>,
-        cap_secs: u32,
+        /// The `cap=` the line names: none on a line that names none, which
+        /// the runner's default caps.
+        cap_secs: Option<u32>,
         clock: u32,
     },
     Done {
@@ -937,7 +1106,7 @@ fn run_line(text: &str) -> Option<Said> {
         name,
         who,
         lane,
-        cap_secs: cap.unwrap_or(DEFAULT_CAP_SECS),
+        cap_secs: cap,
         clock: clock?,
     })
 }
@@ -1134,7 +1303,7 @@ fn landing(token: &str) -> Option<(String, String)> {
 
 impl Job {
     /// A job as its name alone tells it.
-    fn named(name: &str) -> Self {
+    fn named(name: &str, caps: Caps) -> Self {
         let parts = name_parts(name);
         Self {
             name: name.to_string(),
@@ -1142,7 +1311,7 @@ impl Job {
             state: WAITING,
             class: parts.class,
             lane: None,
-            cap_secs: DEFAULT_CAP_SECS,
+            cap_secs: caps.default_secs,
             queued_ms: parts.queued_ms,
             start_ms: None,
             end_ms: None,
@@ -1172,14 +1341,24 @@ struct RunnerTail {
     /// The file read: a runner log replaced by another (a new runner, a
     /// rotation) is read again from its first byte.
     file: Option<(u64, u64)>,
+    /// What the file stood as at the last look: a look at the same stamp reads
+    /// nothing.
+    seen: Option<FileStamp>,
     offset: u64,
-    /// A first look that starts mid-file drops the line it cut.
+    /// The bytes just before the offset, as read: the file at the offset must
+    /// still have them before it, or it is not the file that was read.
+    seam: Vec<u8>,
+    /// A look that starts mid-file drops the line it cut.
     cut_first: bool,
+    /// What the runner caps a job at (the queue's script says).
+    caps: Caps,
     /// Started and not ended, by name.
     open: HashMap<String, Started>,
     finished: VecDeque<Job>,
-    /// A kind's last passing runs, in seconds, oldest first.
-    past: HashMap<String, VecDeque<u32>>,
+    /// A kind's last passing runs, oldest first: the job (a log read again
+    /// counts a run once) and its seconds. A runner log that is replaced or
+    /// rotated starts over; what its kinds took does not.
+    past: HashMap<String, VecDeque<(String, u32)>>,
     pause_note: Option<String>,
     disk_low: bool,
     /// Every lane a `RUN` or a `DONE` line named.
@@ -1189,27 +1368,34 @@ struct RunnerTail {
 impl RunnerTail {
     /// Read what the log gained since the last look, its lines dated back from
     /// the file's last write ([`dated_back`]). A line still being written is
-    /// read whole on the next look.
+    /// read whole on the next look. A gain past [`LOOK_BYTES`] is read by its
+    /// last stretch; a file that is another one (replaced, cut shorter, or
+    /// written over where the offset was) is read again from its first byte.
     fn follow(&mut self, path: &Path, stamp: Option<FileStamp>, offset_secs: i64) {
         let Some(stamp) = stamp else {
-            *self = Self::default();
+            self.start_over(None);
             return;
         };
-        if self.file != Some(stamp.file) || stamp.len < self.offset {
-            *self = Self {
-                file: Some(stamp.file),
-                ..Self::default()
-            };
+        if self.seen == Some(stamp) {
+            return;
         }
+        if self.file != Some(stamp.file) || stamp.len < self.offset {
+            self.start_over(Some(stamp.file));
+        }
+        let Some(mut log) = crate::plain_read::open_plain(path) else {
+            return;
+        };
+        if self.offset > 0 && !self.seam_holds(&mut log) {
+            self.start_over(Some(stamp.file));
+        }
+        self.seen = Some(stamp);
         if stamp.len <= self.offset {
             return;
         }
-        let Ok(mut log) = File::open(path) else {
-            return;
-        };
-        if self.offset == 0 && stamp.len > FIRST_LOOK_BYTES {
-            self.offset = stamp.len - FIRST_LOOK_BYTES;
+        if stamp.len - self.offset > LOOK_BYTES {
+            self.offset = stamp.len - LOOK_BYTES;
             self.cut_first = true;
+            self.seam.clear();
         }
         let mut bytes = Vec::new();
         if log.seek(SeekFrom::Start(self.offset)).is_err()
@@ -1218,12 +1404,14 @@ impl RunnerTail {
                 .read_to_end(&mut bytes)
                 .is_err()
         {
+            self.seen = None;
             return;
         }
         let Some(last) = bytes.iter().rposition(|byte| *byte == b'\n') else {
             return;
         };
         self.offset += last as u64 + 1;
+        self.seam = bytes[..=last][last + 1 - (last + 1).min(SEAM_BYTES)..].to_vec();
         let mut lines = bytes[..last].split(|byte| *byte == b'\n');
         if std::mem::take(&mut self.cut_first) {
             lines.next();
@@ -1238,6 +1426,59 @@ impl RunnerTail {
         let times = dated_back(&clocks, stamp.modified_ms, LINE_SLACK_MS, offset_secs);
         for (said, at_ms) in said.into_iter().zip(times) {
             self.heard(said, at_ms);
+        }
+    }
+
+    /// The bytes just before the offset are the ones read there.
+    fn seam_holds(&self, log: &mut File) -> bool {
+        let Some(from) = self.offset.checked_sub(self.seam.len() as u64) else {
+            return false;
+        };
+        let mut found = vec![0_u8; self.seam.len()];
+        log.seek(SeekFrom::Start(from)).is_ok()
+            && log.read_exact(&mut found).is_ok()
+            && found == self.seam
+    }
+
+    /// Read the log again from its first byte: what it told is dropped, except
+    /// what the kinds took — a rotation does not send every estimate back to
+    /// its cap — and the caps in force.
+    fn start_over(&mut self, file: Option<(u64, u64)>) {
+        *self = Self {
+            file,
+            caps: self.caps,
+            past: std::mem::take(&mut self.past),
+            ..Self::default()
+        };
+    }
+
+    /// Let go of the runs that have no end line coming: started, never ended,
+    /// not in `run/` (the runner's own to end), and [`LOST_AFTER_CAP_MS`] past
+    /// their cap. They stay on the board, lost, among the finished.
+    fn expire(&mut self, now_ms: i64, running: &HashSet<&str>) {
+        let stale: Vec<String> = self
+            .open
+            .iter()
+            .filter(|(name, started)| {
+                !running.contains(name.as_str())
+                    && now_ms - started.start_ms
+                        > i64::from(started.cap_secs) * 1000 + LOST_AFTER_CAP_MS
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in stale {
+            let Some(started) = self.open.remove(&name) else {
+                continue;
+            };
+            let named = Job::named(&name, self.caps);
+            self.keep(Job {
+                who: started.who,
+                state: LOST,
+                lane: started.lane,
+                cap_secs: started.cap_secs,
+                start_ms: Some(started.start_ms),
+                ..named
+            });
         }
     }
 
@@ -1257,7 +1498,7 @@ impl RunnerTail {
                     Started {
                         who,
                         lane,
-                        cap_secs,
+                        cap_secs: cap_secs.unwrap_or(self.caps.default_secs),
                         start_ms: at_ms,
                     },
                 );
@@ -1271,6 +1512,11 @@ impl RunnerTail {
             } => {
                 self.lanes.extend(lane);
                 let started = self.open.remove(&name);
+                if started.is_none() {
+                    // An end line that comes after the run was let go as lost.
+                    self.finished
+                        .retain(|job| !(job.name == name && job.state == LOST));
+                }
                 // Its start and its count date the end to the second; a job
                 // that started before what this look read ends at its own line.
                 let end_ms = started
@@ -1282,12 +1528,14 @@ impl RunnerTail {
                     Ending::Capped => (CAPPED, None),
                     Ending::Other => (FAILED, None),
                 };
-                let named = Job::named(&name);
+                let named = Job::named(&name, self.caps);
                 if state == PASSED
                     && let Some(kind) = &named.kind
                 {
                     let past = self.past.entry(kind.clone()).or_default();
-                    past.push_back(secs);
+                    if !past.iter().any(|(job, _)| *job == name) {
+                        past.push_back((name.clone(), secs));
+                    }
                     if past.len() > SAMPLES {
                         past.pop_front();
                     }
@@ -1318,7 +1566,7 @@ impl RunnerTail {
                 state: REFUSED,
                 start_ms: Some(at_ms),
                 end_ms: Some(at_ms),
-                ..Job::named(&name)
+                ..Job::named(&name, self.caps)
             }),
             Said::Pause { set, note, .. } => self.pause_note = set.then_some(note),
             Said::Disk { low, .. } => self.disk_low = low,
@@ -1338,7 +1586,7 @@ impl RunnerTail {
     fn expected(&self, kind: Option<&str>, cap_secs: u32) -> Expected {
         let past: Vec<u32> = kind
             .and_then(|kind| self.past.get(kind))
-            .map(|held| held.iter().copied().collect())
+            .map(|held| held.iter().map(|(_, secs)| *secs).collect())
             .unwrap_or_default();
         median(&past).map_or(
             Expected {
@@ -1542,11 +1790,30 @@ impl LaneBook {
         }
     }
 
-    /// Read the files that changed, and fold every run they hold.
+    /// Read the files that changed, and fold every run they hold. The newest
+    /// [`LANE_FILES`] are read; while a running lane has no stages ahead of it
+    /// to plan by (no lane in them passed every stage), the older ones too.
     fn read(&mut self, offset_secs: i64, status: Option<&LaneStatus>) {
         let listed: HashSet<&PathBuf> = self.files.iter().map(|(path, _)| path).collect();
         self.parsed.retain(|path, _| listed.contains(path));
-        for (path, held) in &self.files {
+        let mut take = LANE_FILES.min(self.files.len());
+        loop {
+            self.fold(take, offset_secs, status);
+            let unplanned = self
+                .runs
+                .iter()
+                .any(|run| run.running && !run.ahead_planned);
+            if !unplanned || take >= self.files.len() {
+                break;
+            }
+            take = (take * 2).min(self.files.len());
+        }
+    }
+
+    /// The runs of the newest `take` lane logs, as the window is told them.
+    fn fold(&mut self, take: usize, offset_secs: i64, status: Option<&LaneStatus>) {
+        let files = &self.files[..take];
+        for (path, held) in files {
             if self
                 .parsed
                 .get(path)
@@ -1554,13 +1821,15 @@ impl LaneBook {
             {
                 continue;
             }
-            let runs = std::fs::read(path)
-                .map(|bytes| {
-                    lane_runs(
-                        &String::from_utf8_lossy(&bytes),
-                        held.modified_ms,
-                        offset_secs,
-                    )
+            let runs = crate::plain_read::read_plain_tail(path, LANE_LOG_BYTES)
+                .map(|(bytes, cut)| {
+                    let text = String::from_utf8_lossy(&bytes);
+                    // The line a long log's tail cuts through is not a line.
+                    let body: &str = match text.split_once('\n') {
+                        Some((_, rest)) if cut => rest,
+                        _ => &text,
+                    };
+                    lane_runs(body, held.modified_ms, offset_secs)
                 })
                 .unwrap_or_default();
             self.parsed.insert(path.clone(), (*held, runs));
@@ -1568,7 +1837,7 @@ impl LaneBook {
         // A log copied under a second name holds the same runs: each once.
         let mut seen = HashSet::new();
         let mut parsed: Vec<(&PathBuf, &ParsedRun)> = Vec::new();
-        for (path, _) in &self.files {
+        for (path, _) in files {
             for run in self
                 .parsed
                 .get(path)
@@ -1589,7 +1858,7 @@ impl LaneBook {
     }
 }
 
-/// The lane logs under `folder`, newest first, at most [`LANE_FILES`].
+/// The lane logs under `folder`, newest first, at most [`LANE_FILES_FAR`].
 fn newest_lane_logs(folder: &Path) -> Vec<(PathBuf, FileStamp)> {
     let Ok(listing) = std::fs::read_dir(folder) else {
         return Vec::new();
@@ -1608,7 +1877,7 @@ fn newest_lane_logs(folder: &Path) -> Vec<(PathBuf, FileStamp)> {
         })
         .collect();
     logs.sort_by_key(|(_, held)| std::cmp::Reverse(held.modified_ms));
-    logs.truncate(LANE_FILES);
+    logs.truncate(LANE_FILES_FAR);
     logs
 }
 
@@ -1676,6 +1945,11 @@ fn lane_view(parsed: &[&ParsedRun], status: Option<&LaneStatus>) -> Vec<LaneRun>
     }
     let past = stage_past(&runs);
     let plan = lane_plan(&runs);
+    let done = done_words(&runs);
+    let results: Vec<&'static str> = runs.iter().map(|run| result_of(run, &done)).collect();
+    for (run, result) in runs.iter_mut().zip(results) {
+        run.result = result;
+    }
     for run in runs.iter_mut().filter(|run| run.running) {
         let Some(current) = run.stages.last().filter(|stage| stage.end_ms.is_none()) else {
             continue;
@@ -1683,6 +1957,7 @@ fn lane_view(parsed: &[&ParsedRun], status: Option<&LaneStatus>) -> Vec<LaneRun>
         let mut ahead = vec![current.name.clone()];
         if let Some(at) = plan.iter().position(|name| *name == current.name) {
             ahead.extend(plan[at + 1..].iter().cloned());
+            run.ahead_planned = true;
         }
         run.ahead = ahead
             .into_iter()
@@ -1710,8 +1985,10 @@ fn folded_run(run: &ParsedRun, stage_names: &HashSet<&str>, running: bool) -> La
         verdict: None,
         reason: None,
         running,
+        result: ENDED,
         stages: Vec::new(),
         ahead: Vec::new(),
+        ahead_planned: false,
     };
     let mut last_ms = run.start_ms;
     for (index, mark) in run.marks.iter().enumerate() {
@@ -1772,15 +2049,7 @@ fn folded_run(run: &ParsedRun, stage_names: &HashSet<&str>, running: bool) -> La
 /// run that ended red may have hung or been cut. A run ended done when its
 /// verdict is the word the runs that passed every stage end with.
 fn stage_past(runs: &[LaneRun]) -> HashMap<String, Vec<u32>> {
-    let done_words: HashSet<&str> = runs
-        .iter()
-        .filter(|run| {
-            !run.running
-                && !run.stages.is_empty()
-                && run.stages.iter().all(|stage| stage.rc == Some(0))
-        })
-        .filter_map(|run| run.verdict.as_deref())
-        .collect();
+    let done_words = done_words(runs);
     let mut past: HashMap<String, Vec<u32>> = HashMap::new();
     for run in runs.iter().filter(|run| !run.running) {
         let done = run
@@ -1797,6 +2066,33 @@ fn stage_past(runs: &[LaneRun]) -> HashMap<String, Vec<u32>> {
         }
     }
     past
+}
+
+/// The verdict word the runs that passed every stage end with: what the lane
+/// says when it is done, whatever its spelling.
+fn done_words(runs: &[LaneRun]) -> HashSet<&str> {
+    runs.iter()
+        .filter(|run| {
+            !run.running
+                && !run.stages.is_empty()
+                && run.stages.iter().all(|stage| stage.rc == Some(0))
+        })
+        .filter_map(|run| run.verdict.as_deref())
+        .collect()
+}
+
+/// How a run ended, in the board's words: `passed` where its verdict is a
+/// done word, `failed` where it is any other word of a run that ran stages
+/// (and a done word is known to tell it from), `ended` where nobody can say.
+fn result_of(run: &LaneRun, done: &HashSet<&str>) -> &'static str {
+    if run.running {
+        return RUNNING;
+    }
+    match run.verdict.as_deref() {
+        Some(word) if done.contains(word) => PASSED,
+        Some(_) if !done.is_empty() && !run.stages.is_empty() => FAILED,
+        _ => ENDED,
+    }
 }
 
 /// A stage's expected seconds: the median of its last passing runs.

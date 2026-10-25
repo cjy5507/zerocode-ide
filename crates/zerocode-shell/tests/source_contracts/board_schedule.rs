@@ -78,6 +78,82 @@ fn the_schedule_reads_two_folders_off_the_main_thread_and_writes_nothing() {
     }
 }
 
+/// The schedule reads other processes' files, and every such read goes through
+/// the one reader that opens a plain file and nothing else, never past a cap
+/// (`plain_read`, the review t-69069 P3 ④): no `std::fs::read`, no
+/// `File::open`, no `read_to_string` in the module that could follow a link
+/// or wait on a pipe with the book's lock held. The reader itself only opens
+/// for reading. And the runner's caps are numbers the module reads off the
+/// runner's script, spelled once as the fallback (⑥) — a second copy is a
+/// number that drifts.
+#[test]
+fn the_schedule_reads_another_processs_files_only_through_the_plain_reader() {
+    let module = strip_rust_comments(&shell_source("schedule_timeline.rs"));
+    for open in [
+        "std::fs::read(",
+        "fs::read_to_string(",
+        "File::open(",
+        "fs::File::open(",
+    ] {
+        assert!(
+            !module.contains(open),
+            "the schedule opens a file of another process some other way (`{open}`)"
+        );
+    }
+    assert!(
+        module.matches("crate::plain_read::").count() >= 5,
+        "the schedule lost the plain reader"
+    );
+    for number in ["900", "1800"] {
+        assert_eq!(
+            module.matches(number).count(),
+            1,
+            "the runner's cap {number} is spelled more than once (or not at all): read it off the script"
+        );
+    }
+    let reader = strip_rust_comments(&shell_source("plain_read.rs"));
+    let code = reader
+        .split_once("#[cfg(test)]")
+        .map_or(reader.as_str(), |(code, _)| code);
+    assert!(
+        code.contains(".read(true)") && code.contains("O_NOFOLLOW") && code.contains("O_NONBLOCK"),
+        "the plain reader lost how it opens"
+    );
+    for write in WRITES
+        .iter()
+        .filter(|word| !["File::options", "OpenOptions"].contains(word))
+        .chain(&[".write(", ".append(", ".create(", ".truncate("])
+    {
+        assert!(
+            !code.contains(write),
+            "the plain reader writes or creates (`{write}`)"
+        );
+    }
+}
+
+/// The window compares none of the lane's own words (the review t-69069 P3
+/// ⑦): the answer says how a lane ended in the board's words, and the part
+/// reads that.
+#[test]
+fn the_schedule_view_compares_no_word_of_the_lanes_own() {
+    let part = WINDOW_PARTS
+        .iter()
+        .find(|(name, _)| *name == "shell-board-schedule.js")
+        .map(|(_, source)| *source)
+        .expect("ui/shell-board-schedule.js is a window part");
+    let code = strip_comments(part);
+    for word in ["\"green\"", "\"red\"", "'green'", "'red'"] {
+        assert!(
+            !code.contains(word),
+            "the schedule view spells the lane's word {word}: the answer's `result` says it"
+        );
+    }
+    assert!(
+        code.contains("run.result"),
+        "the schedule view does not read the lane's result"
+    );
+}
+
 /// The command finds the build line by the window's workspace setting, and
 /// reads that setting from memory (`remembered_settings`, t-67102). Through
 /// the settings repository a look took its process lock and its

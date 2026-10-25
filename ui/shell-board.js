@@ -2479,6 +2479,10 @@ const DESK_RELEASE_VERDICTS = Object.freeze({
   red: { dot: "halt", key: "board.desk.releaseRed", word: "빨강" },
 });
 
+/* 일정의 답이 레인 한 번을 어떻게 끝냈다고 말하는가(`result`) → 이 표의 낱말. 일정은 레인의 낱말을
+ * 직접 비교하지 않고 이 표만 읽는다(검토 t-69069 P3 ⑦). */
+const DESK_RELEASE_OF_RESULT = Object.freeze({ passed: "green", failed: "red" });
+
 function deskReleaseVerdict(status) {
   if (status.outcome === "green") return "green";
   if (status.outcome === "red") return "red";
