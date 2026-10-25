@@ -76,7 +76,13 @@ fn a_port_stays_taken_until_its_holder_lets_go() {
 fn threads_claiming_together_never_meet() {
     let claimed: Vec<Vec<(QuietPort, TcpListener)>> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..8)
-            .map(|_| scope.spawn(|| (0..8).map(|_| QuietPort::claim(bind_loopback)).collect()))
+            .map(|_| {
+                scope.spawn(|| {
+                    (0..8)
+                        .map(|_| QuietPort::claim(bind_loopback))
+                        .collect::<Vec<_>>()
+                })
+            })
             .collect();
         workers
             .into_iter()
