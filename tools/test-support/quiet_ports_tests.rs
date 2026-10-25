@@ -93,6 +93,19 @@ fn release_is_seen<R>(parallel: impl FnOnce(&HashSet<u16>) -> R) {
     }
 }
 
+/// Two tests judging a release in the same moment must not draw from one
+/// band: the one lets go of a port and asks for it again, and the other, in a
+/// lock folder of its own, may be given it in between (t-75388).
+#[test]
+fn tests_judging_a_release_at_once_draw_from_bands_that_do_not_meet() {
+    let first = apart_band(os_dynamic_start());
+    let second = apart_band(os_dynamic_start());
+    assert!(
+        first.end <= second.start || second.end <= first.start,
+        "{first:?} and {second:?} are one band for two tests"
+    );
+}
+
 #[test]
 fn a_port_stays_taken_until_its_holder_lets_go() {
     release_is_seen(|_| {});
