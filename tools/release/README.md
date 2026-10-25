@@ -195,6 +195,23 @@ on a red and 2 when a revision cannot be read. It runs no cargo and stands in fo
 no gate: a green says only that these checks found nothing, and every recipe the
 gate owes still runs. `tests/test_prebatch.py` pins each rule.
 
+## A job names its tasks: `# task:` (2026-10-25, t-73910)
+
+A build-line job's head may carry one line naming the ledger tasks it gates or
+checks, comma-separated:
+
+    # task: t-73910, t-74181
+
+The board's schedule (`crates/zerocode-shell/src/schedule_timeline.rs`) reads it
+off the job's file in `in/`, `run/` or `done/` and sums, per task, the jobs that
+named it and ran to an end, how many were red and their run time — each job's
+whole, never shared out; a batch's job says how many tasks it shared. Only `t-`
+and digits are read; any other piece is dropped. `# what:` stays the person's
+words and is never read for a task, so a job with no `# task:` line ties to no
+task, and that task's line time is unknown, not zero. The runner reads the line
+as the comment it is. The coordinator's gate script and a worker's own job each
+write it.
+
 ## Re-gating the same head from a receipt (`gate_receipt.py`, 2026-10-25, t-73910)
 
 The core's gate reuse (`orchestration::gate_reuse`) answers hit only for the same

@@ -908,3 +908,85 @@ fn the_reason_said_is_the_most_fundamental() {
     let serialized = serde_json::to_value(&cost).expect("json");
     assert_eq!(serialized["generation"]["usdReason"], "unsupported_agent");
 }
+
+/// A task no worker attempted and the coordinator completed was done in the
+/// coordinator's own conversation (t-73910): its shape says so, and its
+/// dollars are unknown with that reason — the desk drew `$0.0000` for it.
+#[test]
+fn a_task_the_coordinator_finished_itself_is_direct_and_its_dollars_say_why() {
+    let held = run(json!([]), json!([]), json!([]));
+    let cost = task_cost(&held, "t-1", &SessionBook::default(), JevTally::default());
+    assert_eq!(cost.shape, TaskShape::Direct, "{cost:?}");
+    assert_eq!(cost.generation.usd, None, "{cost:?}");
+    assert_eq!(
+        cost.generation.usd_reason,
+        Some(UsdReason::CoordinatorConversation),
+        "{cost:?}"
+    );
+    let serialized = serde_json::to_value(&cost).expect("json");
+    assert_eq!(serialized["shape"], json!({"kind": "direct"}));
+    assert_eq!(
+        serialized["generation"]["usdReason"],
+        "coordinator_conversation"
+    );
+}
+
+/// Attempts by two workers that were open at once are delegated work, with
+/// the overlap the task's time already reads; one open attempt leaves the
+/// overlap unknown, not zero.
+#[test]
+fn two_attempts_that_overlapped_are_delegated_with_their_overlap() {
+    let held = run(
+        json!([
+            attempt("dp-1", "t-1", "w-1", 0, Some(30 * MINUTE)),
+            attempt("dp-2", "t-1", "w-2", 20 * MINUTE, Some(50 * MINUTE)),
+            attempt("dp-9", "t-2", "w-9", 0, Some(5 * MINUTE)),
+        ]),
+        json!([
+            worker("w-1", "claude", None),
+            worker("w-2", "claude", None),
+            worker("w-9", "claude", None),
+        ]),
+        json!([]),
+    );
+    let cost = task_cost(&held, "t-1", &SessionBook::default(), JevTally::default());
+    assert_eq!(
+        cost.shape,
+        TaskShape::Delegated {
+            workers: 2,
+            overlap_ms: Some(10 * MINUTE)
+        },
+        "{cost:?}"
+    );
+    let serialized = serde_json::to_value(&cost).expect("json");
+    assert_eq!(
+        serialized["shape"],
+        json!({"kind": "delegated", "workers": 2, "overlapMs": 10 * MINUTE})
+    );
+    let open = run(
+        json!([attempt("dp-1", "t-1", "w-1", 0, None)]),
+        json!([worker("w-1", "claude", None)]),
+        json!([]),
+    );
+    assert_eq!(
+        task_shape(&open, "t-1"),
+        TaskShape::Delegated {
+            workers: 1,
+            overlap_ms: None
+        }
+    );
+}
+
+/// A task with no attempt that is not completed says nothing of how it is
+/// carried: unknown, and its dollars are not a number either.
+#[test]
+fn a_task_nobody_carried_or_completed_has_an_unknown_shape() {
+    let mut held = run(json!([]), json!([]), json!([]));
+    for task in &mut held.tasks {
+        task.status = TaskStatus::Ready;
+    }
+    let cost = task_cost(&held, "t-1", &SessionBook::default(), JevTally::default());
+    assert_eq!(cost.shape, TaskShape::Unknown, "{cost:?}");
+    assert_eq!(cost.generation.usd, None, "{cost:?}");
+    assert_eq!(task_shape(&held, "t-404"), TaskShape::Unknown);
+}
