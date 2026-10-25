@@ -104,3 +104,69 @@ fn a_failed_turn_is_one_notice_to_the_coordinator_and_its_silence_is_not_told() 
         Some(MessageKind::TurnFailed)
     );
 }
+
+/// t-69010: 「다시 띄우기」 — a person's press at a worker whose turn failed.
+/// It needs no declared order, is about the failure the attempt stands at
+/// now, and types one line per failure: once it was typed the same failure is
+/// refused, and once the worker spoke again the press is about a failure that
+/// no longer stands.
+#[test]
+fn a_press_at_a_failed_turn_is_one_continuation_for_the_failure_that_stands() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name pressed");
+    let (worker, pane) = a_worker(&mut bench);
+    assert_eq!(person_turn_marker(&bench.ledger.runs()[0], &worker), None);
+    let letter = bench
+        .ledger
+        .worker_turn_failed(
+            ("team-1", &pane),
+            9_000,
+            "api failed after 3 attempts",
+            9_100,
+        )
+        .expect("the failure");
+    let marker = person_turn_marker(&bench.ledger.runs()[0], &worker).expect("a press");
+    assert_eq!(marker.source, PERSON_TURN_MARKER_SOURCE);
+    assert!(marker.key.ends_with(&letter), "{}", marker.key);
+
+    // No `--on-transient-error resume` was declared: the press is the order.
+    let plan = resume_plan(&bench.ledger.runs()[0], &worker, &marker, 9_200).expect("a plan");
+    let run_id = plan.run.clone();
+    let typed = bench.ledger.resume_begin(&plan, 9_200).expect("reserved");
+    bench
+        .ledger
+        .resume_settled(
+            &run_id,
+            &typed,
+            &ResumeOutcome {
+                submitted: true,
+                typed: true,
+                detail: Text::from("typed and entered"),
+            },
+            9_201,
+        )
+        .expect("settled");
+    // The receipt is the press's own answer, not the attempt going on: the
+    // failure still stands, and the same failure is not typed at twice.
+    let again = person_turn_marker(&bench.ledger.runs()[0], &worker).expect("still standing");
+    assert_eq!(again.key, marker.key);
+    assert!(
+        matches!(
+            resume_plan(&bench.ledger.runs()[0], &worker, &again, 99_000),
+            Err(NotResumed::Refused(WallRefusal::AlreadyTyped { .. }))
+        ),
+        "one failure was typed at twice"
+    );
+
+    // The worker spoke: the failure is history, and a press made on it is
+    // about a failure that no longer stands.
+    bench.json_at(&pane, "send --type status --body going-on");
+    assert_eq!(person_turn_marker(&bench.ledger.runs()[0], &worker), None);
+    assert!(
+        matches!(
+            resume_plan(&bench.ledger.runs()[0], &worker, &marker, 99_000),
+            Err(NotResumed::Refused(WallRefusal::TurnNotNow { .. }))
+        ),
+        "a press on a failure that no longer stands was taken"
+    );
+}

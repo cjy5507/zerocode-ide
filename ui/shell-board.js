@@ -1075,7 +1075,8 @@ function deskWorkerRow(view) {
       open);
     return detail;
   };
-  group.append(row, deskWallStrip(view, group), deskTableMore("board-desk-worker-more", DESK_WORKER_COLUMNS));
+  group.append(row, deskWallStrip(view, group), deskTurnStrip(view, group),
+    deskTableMore("board-desk-worker-more", DESK_WORKER_COLUMNS));
   return group;
 }
 
@@ -1137,6 +1138,7 @@ function paintDeskWorkers(block, now, view) {
     const lines = deskCheckouts.get(row.checkout)?.lines;
     writeTextContent(node.querySelector(".board-desk-worker-lines"), lines ? deskLinesWords(lines) : "—");
     paintDeskWall(node, row, now);
+    paintDeskTurn(node, row);
     // The details, while the row is open: the facts the row has no cell for, the last word heard, the gate's
     // line with its basis, the keeping, the door to the task.
     if (open) {
@@ -1260,6 +1262,77 @@ function deskWallStrip(view, row) {
   return strip;
 }
 
+/* 턴이 실패한 워커의 띠(t-69010): 실패와 그 오류의 첫 말, 다시 띄우기, 누른 결과. 원장이 그 실패를
+ * 지금도 세워 두는 동안만 선다(`turn_failed`, 시도의 가장 새 편지) — 워커가 다시 말하면 띠는 내려간다.
+ * 한도 벽의 「지금 다시 시도」와 같은 길이다: 사람이 확인해야 창의 명령을 부르고, 그 명령은 누른 때의
+ * 원장을 다시 읽어 거절할 것은 거절한다. */
+const deskTurnSaid = new Map();
+
+function deskTurnStrip(view, row) {
+  const strip = deskElement("tr", "board-desk-worker-turn");
+  strip.hidden = true;
+  const cell = deskElement("td", "board-desk-worker-turn-cell");
+  cell.colSpan = DESK_WORKER_COLUMNS.length;
+  strip.append(cell);
+  const retry = deskElement("button", "board-btn board-desk-worker-turn-retry");
+  retry.type = "button";
+  retry.onclick = () => void pressTurnFailed(view, row.__turnRow);
+  cell.append(deskElement("strong", "board-desk-worker-turn-chip"), retry,
+    deskElement("span", "board-desk-worker-turn-said"));
+  return strip;
+}
+
+function paintDeskTurn(node, row) {
+  const strip = node.querySelector(".board-desk-worker-turn");
+  const failed = row.turn_failed && typeof row.turn_failed === "object" ? row.turn_failed : null;
+  writeHidden(strip, !failed);
+  if (!failed) return;
+  node.__turnRow = row;
+  const error = String(failed.error ?? "").trim();
+  writeTextContent(strip.querySelector(".board-desk-worker-turn-chip"), error === ""
+    ? t("sidebar.team.turnFailed", "턴 실패")
+    : t("sidebar.team.turnFailedLine", "턴 실패 — {{error}}", { error }));
+  const held = deskTurnSaid.get(`${row.run}/${row.worker}`);
+  const mine = held?.at === failed.at_ms ? held : null;
+  const retry = strip.querySelector(".board-desk-worker-turn-retry");
+  writeTextContent(retry, t("turnFailed.retry", "다시 띄우기"));
+  writeDisabled(retry, mine?.sending === true || mine?.ok === true);
+  writeAttribute(retry, "data-tip", t("turnFailed.retryTip", "입력 칸에 이어서 하라는 한 줄을 넣습니다 — 이 실패에는 한 번만"));
+  const saidLine = strip.querySelector(".board-desk-worker-turn-said");
+  writeTextContent(saidLine, mine?.text ?? "");
+  writeHidden(saidLine, !mine);
+}
+
+async function pressTurnFailed(view, row) {
+  const failed = row?.turn_failed;
+  if (!failed) return;
+  const key = `${row.run}/${row.worker}`;
+  if (deskTurnSaid.get(key)?.sending) return;
+  const worker = row.worker;
+  const said = await askConfirm({
+    title: t("turnFailed.retryTitle", "이 워커를 다시 띄울까요?"),
+    body: t("turnFailed.retryBody", "이 워커({{worker}})의 지난 차례가 실패했습니다. 입력 칸에 이어서 하라는 한 줄을 넣습니다 — 이 실패에는 한 번만 넣습니다.", { worker }),
+    confirm: t("turnFailed.retry", "다시 띄우기"),
+    deny: t("app.cancel", "취소"),
+    cancel: false,
+  });
+  if (said !== true) return;
+  const held = { at: failed.at_ms, sending: true, ok: false, text: t("quotaWall.sending", "보내는 중…") };
+  deskTurnSaid.set(key, held);
+  paintCoordinatorDesk(view);
+  try {
+    await invoke("turn_failed_retry", { run: row.run, worker });
+    held.ok = true;
+    held.text = t("quotaWall.retried", "이어서 하라는 한 줄을 넣었습니다");
+    refreshDeskLedger();
+  } catch (error) {
+    held.text = t("quotaWall.refused", "안 됨 — {{why}}", { why: quotaWallRefusalWords(error) });
+  } finally {
+    held.sending = false;
+    paintCoordinatorDesk(view);
+  }
+}
+
 /* 원장과 창은 거절을 문장이 아니라 코드와 그 문장이 이름하는 사실로 보낸다(t-47935). 이 표가 그
  * 코드를 사람의 언어로 말하는 한 곳이다 — 원장의 `WallRefusal`과 창의 `WindowRefusal`이 가진
  * 코드마다 한 줄이고, 소스 계약이 두 열거형에서 코드를 읽어 빠진 줄을 잡는다. */
@@ -1284,6 +1357,7 @@ const QUOTA_WALL_REFUSALS = {
   awaiting_answer: (said) => t("quotaWall.why.awaitingAnswer", "워커 {{worker}}가 자기가 물은 질문의 답을 기다리고 있습니다", { worker: said.worker }),
   at_wall: (said) => t("quotaWall.why.atWall", "시도 {{dispatch}}는 한도 벽에 서 있습니다 — 넘기기가 그 답입니다", { dispatch: said.dispatch }),
   wall_not_now: (said) => t("quotaWall.why.wallNotNow", "이 누름은 시도 {{dispatch}}가 지금 서 있지 않은 지난 벽에 대한 것입니다", { dispatch: said.dispatch }),
+  turn_not_now: (said) => t("quotaWall.why.turnNotNow", "이 누름은 시도 {{dispatch}}가 지금 서 있지 않은 지난 실패에 대한 것입니다 — 워커가 그 뒤에 다시 말했습니다", { dispatch: said.dispatch }),
   resume_in_flight: (said) => t("quotaWall.why.resumeInFlight", "이어서 하라는 한 줄을 지금 넣는 중입니다"),
   resume_ceiling: (said) => t("quotaWall.why.resumeCeiling", "시도 {{dispatch}}에 이미 {{count}}번 이어 쓰기를 넣어 상한에 닿았습니다", { dispatch: said.dispatch, count: said.count }),
   already_typed: (said) => t("quotaWall.why.alreadyTyped", "이 벽에 대해 시도 {{dispatch}}에 이미 한 줄을 넣었습니다 — 그 글이 입력 칸에 남아 있을 수 있습니다", { dispatch: said.dispatch }),

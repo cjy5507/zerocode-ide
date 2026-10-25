@@ -16208,6 +16208,11 @@ pub enum WallRefusal {
     WallNotNow {
         dispatch: String,
     },
+    /// A press for a failed turn the attempt does not stand at now
+    /// (t-69010): the worker spoke since, or another turn ended.
+    TurnNotNow {
+        dispatch: String,
+    },
     /// A continuation is being typed for the attempt ([`RESUME_IN_FLIGHT`]).
     ResumeInFlight,
     /// [`RESUME_POLICY`]`.attempts_max` continuations already.
@@ -16304,6 +16309,10 @@ impl std::fmt::Display for WallRefusal {
             Self::WallNotNow { dispatch } => write!(
                 f,
                 "the press names a wall dispatch {dispatch} does not stand at now"
+            ),
+            Self::TurnNotNow { dispatch } => write!(
+                f,
+                "the press names a failed turn dispatch {dispatch} does not stand at now"
             ),
             Self::ResumeInFlight => f.write_str(RESUME_IN_FLIGHT),
             Self::ResumeCeiling { dispatch, count } => write!(
@@ -16608,6 +16617,50 @@ pub const JEV_MARKER_SOURCE: &str = "jev";
 /// (a source contract pins who may mention it).
 pub const PERSON_MARKER_SOURCE: &str = "person";
 
+/// The source of the marker a person's 「다시 띄우기」 stands on (t-69010): a
+/// press at a worker whose turn failed. It waives the declared order and
+/// nothing else of [`resume_plan`] — a turn that failed is no wall, so the
+/// wall's refusal stands — and the press is about the failure the attempt
+/// stands at now. Built by [`person_turn_marker`] and by nothing else.
+pub const PERSON_TURN_MARKER_SOURCE: &str = "person-turn";
+
+/// The attempt's failed turn while it stands (t-69010): its newest letter,
+/// read past the continuation receipts (`resumed`) written to answer it, is
+/// a [`MessageKind::TurnFailed`]. A worker's word, a silence or another turn
+/// end after it is the attempt going on, and the failure is history. The one
+/// reading the board's row, the beat's marker and a person's press share.
+#[must_use]
+pub fn standing_turn_failure<'run>(run: &'run Run, dispatch_id: &str) -> Option<&'run Message> {
+    run.messages
+        .iter()
+        .rev()
+        .find(|one| {
+            one.dispatch.as_deref() == Some(dispatch_id) && one.kind != MessageKind::Resumed
+        })
+        .filter(|one| one.kind == MessageKind::TurnFailed)
+}
+
+/// The marker a person's press at a worker whose turn failed stands on —
+/// keyed by the attempt and the failure's letter, so one failure is typed at
+/// once. `None` for a worker with no open attempt or no standing failure.
+#[must_use]
+pub fn person_turn_marker(run: &Run, worker_id: &str) -> Option<TransientErrorMarker> {
+    let dispatch = run.worker(worker_id)?.dispatch.as_deref()?;
+    let failed = standing_turn_failure(run, dispatch)?;
+    Some(TransientErrorMarker {
+        source: PERSON_TURN_MARKER_SOURCE.to_string(),
+        line: "a person asked this worker to go on after its turn failed"
+            .to_string()
+            .into(),
+        key: person_turn_key(dispatch, &failed.id),
+    })
+}
+
+/// The key one failed turn of one attempt gives a person's press.
+fn person_turn_key(dispatch_id: &str, letter_id: &str) -> String {
+    format!("person-turn:{dispatch_id}:{letter_id}")
+}
+
 /// What a person's press types at a wall (t-39771). The beat's
 /// [`RESUME_LINE`] says the last turn died on a transient API error, which is
 /// not what a wall is, so the press has a sentence of its own — one English
@@ -16741,8 +16794,11 @@ pub fn resume_plan(
     // A person's press stands in for the declared order AND is asked at a wall
     // (t-39771): the two refusals it waives, and nothing else of the plan.
     let by_person = marker.source == PERSON_MARKER_SOURCE;
+    // A press at a failed turn (t-69010) stands in for the order alone.
+    let by_person_turn = marker.source == PERSON_TURN_MARKER_SOURCE;
     if marker.source != JEV_MARKER_SOURCE
         && !by_person
+        && !by_person_turn
         && run
             .handover
             .as_ref()
@@ -16803,6 +16859,15 @@ pub fn resume_plan(
             .is_none_or(|wall| person_wall_key(&dispatch.id, &wall.wall) != marker.key)
     {
         return refused(WallRefusal::WallNotNow {
+            dispatch: dispatch.id.clone(),
+        });
+    }
+    // A press is about ONE failure: the one the attempt stands at now.
+    if by_person_turn
+        && standing_turn_failure(run, &dispatch.id)
+            .is_none_or(|failed| person_turn_key(&dispatch.id, &failed.id) != marker.key)
+    {
+        return refused(WallRefusal::TurnNotNow {
             dispatch: dispatch.id.clone(),
         });
     }

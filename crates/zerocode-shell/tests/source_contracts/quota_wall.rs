@@ -1160,3 +1160,72 @@ fn the_zo_transient_turn_errors_are_words_zo_still_writes() {
         "zo no longer ends its retries with `api failed after N attempts: …`"
     );
 }
+
+/// t-69010: 「다시 띄우기」 is a person's press like the wall's two — one
+/// window command, main window only, off the main thread; the road reads the
+/// pane and the ledger again, plans on the press's own marker, reserves the
+/// receipt and only then types through the pointer's guarded door; and the
+/// renderer asks the person before it calls the command, from one place.
+#[test]
+fn the_failed_turn_press_asks_first_and_walks_the_retrys_guarded_road() {
+    let board = shell_source("cmd/board.rs");
+    let door = super::support::block_after(&board, "pub(crate) async fn turn_failed_retry(");
+    let main_only = door
+        .find("crate::from_the_main_webview(&webview)?")
+        .expect("the press proves the main window");
+    let pressed = door
+        .find("wall_press::retry_failed_turn(")
+        .expect("the press");
+    assert!(
+        main_only < pressed && door.contains("spawn_blocking"),
+        "the failed-turn press is open beyond the main window or runs on its thread:\n{door}"
+    );
+
+    let press = shell_source("orchestration/wall_press.rs");
+    let road = super::support::block_after(&press, "pub(crate) fn retry_failed_turn(");
+    let at = |needle: &str| {
+        road.find(needle)
+            .unwrap_or_else(|| panic!("the failed-turn press lost `{needle}`:\n{road}"))
+    };
+    let licensed = at("composer_at_rest(host, term, heard)");
+    let marked = at("person_turn_marker(failed, worker_id)");
+    let planned = at("resume_plan(failed, worker_id, &marker, now_ms)");
+    let lined = at("crate::account_switch::unless_switching(");
+    let reserved = at(".resume_begin(plan.clone(), now_ms)");
+    let typed = at("host.point(term, RESUME_LINE, true)");
+    assert!(
+        licensed < marked
+            && marked < planned
+            && planned < lined
+            && lined < reserved
+            && reserved < typed,
+        "the failed-turn press types before it is licensed, planned or reserved:\n{road}"
+    );
+    for forbidden in [".send(", ".paste(", "type_prompt_at_term("] {
+        assert!(
+            !road.contains(forbidden),
+            "the failed-turn press types around the pointer's guarded door: `{forbidden}`"
+        );
+    }
+
+    let window = super::support::window_source();
+    let pressing = super::support::block_after(window, "async function pressTurnFailed(");
+    let asked = pressing
+        .find("await askConfirm(")
+        .expect("the press asks first");
+    let answered = pressing
+        .find("if (said !== true) return;")
+        .expect("a press without a yes does nothing");
+    let invoked = pressing
+        .find("invoke(\"turn_failed_retry\"")
+        .expect("the command");
+    assert!(
+        asked < answered && answered < invoked,
+        "the renderer presses before the person said yes:\n{pressing}"
+    );
+    assert_eq!(
+        window.matches("\"turn_failed_retry\"").count(),
+        1,
+        "turn_failed_retry is invoked from more than the one press"
+    );
+}

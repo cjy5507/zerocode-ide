@@ -2512,16 +2512,9 @@ fn transient_failed_turn(
     agent: &str,
     dispatch: &str,
 ) -> Option<zerocode_core::orchestration::TransientErrorMarker> {
-    // The continuation's own receipt (`resumed`) is the beat answering this
-    // failure, not the attempt going on: read past it, so the marker stands
-    // with its key and the failure is typed at once and is no silence after.
-    let newest = run.messages().iter().rev().find(|one| {
-        one.dispatch.as_deref() == Some(dispatch)
-            && one.kind != zerocode_core::orchestration::MessageKind::Resumed
-    })?;
-    if newest.kind != zerocode_core::orchestration::MessageKind::TurnFailed {
-        return None;
-    }
+    // Read past the continuation's own receipt, so the marker stands with its
+    // key and the failure is typed at once and is no silence after.
+    let newest = zerocode_core::orchestration::standing_turn_failure(run, dispatch)?;
     let said: serde_json::Value = serde_json::from_str(newest.body.as_str()).ok()?;
     let error = said["error"].as_str()?;
     crate::quota_wall::transient_turn_failure(agent, error).then(|| {
@@ -3229,18 +3222,9 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 }
                 _ => Vec::new(),
             };
-            // The attempt's newest letter, when it is a failed turn's (t-69010):
-            // anything after it — a status, a silence, a report — is the
-            // attempt going on, and the failure is history.
+            // The attempt's failed turn while it stands (t-69010).
             let turn_failed = dispatch.filter(|one| one.is_open()).and_then(|attempt| {
-                let newest = run
-                    .messages()
-                    .iter()
-                    .rev()
-                    .find(|one| one.dispatch.as_deref() == Some(attempt.id.as_str()))?;
-                if newest.kind != zerocode_core::orchestration::MessageKind::TurnFailed {
-                    return None;
-                }
+                let newest = zerocode_core::orchestration::standing_turn_failure(run, &attempt.id)?;
                 let said: serde_json::Value =
                     serde_json::from_str(newest.body.as_str()).unwrap_or_default();
                 Some(TurnFailed {

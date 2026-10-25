@@ -142,7 +142,7 @@ pub(crate) use board::{
     quota_wall_retry, release_untitled_markdown, resume_line, resume_session, reveal_board_agent,
     save_clipboard_image, schedule_timeline, set_coordinator_handover, set_dock_badge,
     set_hooks_enabled, set_previewed_terms, set_watched_terms, term_pull, term_snapshot,
-    worker_screen,
+    turn_failed_retry, worker_screen,
 };
 pub(crate) use board::{
     land_batch_bisect, land_batch_cancel, land_batch_promote, land_batch_restack,
