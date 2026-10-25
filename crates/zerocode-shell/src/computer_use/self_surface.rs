@@ -73,6 +73,8 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "land_batch_bisect",
     "land_batch_cancel",
     "land_batch_restack",
+    // A letter acknowledged on the person's behalf; the desk and the inbox's marks are the first wall (t-74825).
+    "desk_ack",
     "merge_and_remove_worktree",
     "github_merge_pr",
     "gitlab_merge_mr",
