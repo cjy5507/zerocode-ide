@@ -489,4 +489,152 @@ export async function testSelfAct(browser, origin, ok) {
     ok("the person's Enter that presses a button by click() says person", hand(entered, "computer_give_back").join() === "person", JSON.stringify(entered));
     ok("the same button the agent pressed says agent", hand(agentPressed, "computer_give_back").join() === "agent", JSON.stringify(agentPressed));
   });
+
+  /* The roads t-74975 made the person's — a push, a discard, a checkout's
+   * removal — await before their person-only command: Sync fetches and pulls
+   * first, the staged discard unstages and reads git's status, the cleanup
+   * asks, then re-measures the row. Each carries the hand its press started
+   * with (t-75153, the hand rule of t-75209): the person's press reaches the
+   * window as `person`, and the same road an agent's press started says
+   * `agent`, which the second wall refuses. */
+  await scenario(browser, origin, "person-only roads that await", ok, async (page) => {
+    await page.evaluate(() => {
+      const T = window.__SELF_T__;
+      T.hands = [];
+      const row = {
+        id: "probe-row", path: "/work/probe-checkout", name: "probe-checkout", force: false,
+        git: { dirty_files: 0 }, blockers: [], reasons: [],
+      };
+      const said = (command, answer = null) => (args, options) => {
+        T.hands.push([command, options?.headers?.["zerocode-hand"] ?? null]);
+        return answer;
+      };
+      Object.assign(window.__ANSWER__, {
+        scm_fetch: () => null,
+        scm_pull: () => null,
+        upstream_status: () => ({ upstream: "origin/probe", ahead: 1, behind: 0 }),
+        unstage_paths: () => null,
+        scm_status: () => ({ changed: [{ path: "loose.txt", code: "??" }, { path: "kept.txt", code: " M" }] }),
+        workspace_cleanup_scan: ({ only }) => ({ rows: only ? [row] : [] }),
+        scm_push: said("scm_push"),
+        delete_untracked: said("delete_untracked"),
+        discard_paths: said("discard_paths"),
+        remove_worktree: said("remove_worktree"),
+      });
+      const fixture = document.getElementById("self-act-fixture");
+      fixture.insertAdjacentHTML("beforeend", `
+        <button id="road-sync" type="button">Road sync</button>
+        <button id="road-discard" type="button">Road discard</button>
+        <button id="road-cleanup" type="button">Road cleanup</button>`);
+      document.getElementById("road-sync").addEventListener("click", () => void runScmRemote("sync"));
+      // The discard dialog's own Delete button, pressed in the same event.
+      document.getElementById("road-discard").addEventListener("click", () => {
+        openScmDiscard({ kind: "area", area: "staged", paths: ["loose.txt", "kept.txt"] });
+        el("scm-discard-go").click();
+      });
+      document.getElementById("road-cleanup").addEventListener("click", () => void removeCleanupRows([row]));
+    });
+    const press = (name) => page.evaluate(async (name) => {
+      const T = window.__SELF_T__;
+      const look = await T.ask({ kind: "look" });
+      const control = T.named(look, name);
+      const facts = await T.ask({ kind: "facts", lookId: look.ok.lookId, id: control.id });
+      return (await T.ask({ kind: "do", lookId: look.ok.lookId, id: control.id, act: "click", facts: facts.ok.facts }))?.ok?.done ?? null;
+    }, name);
+    // Every road ends in its person-only command; the cleanup's question is
+    // answered by the page (a yes no hand made), so only the press decides.
+    const reached = (command) => page.waitForFunction(
+      (command) => window.__SELF_T__.hands.some(([name]) => name === command), command, { timeout: 5000 });
+    const answerCleanup = async () => {
+      await page.waitForFunction(() => wsclean.confirming !== null, null, { timeout: 5000 });
+      await page.evaluate(() => closeCleanupConfirm(true));
+    };
+    const take = () => page.evaluate(() => window.__SELF_T__.hands.splice(0));
+    const hand = (hands, command) => hands.filter(([name]) => name === command).map(([, by]) => by);
+
+    await page.click("#road-sync");
+    await reached("scm_push");
+    const personSync = await take();
+    await page.click("#road-discard");
+    await reached("discard_paths");
+    const personDiscard = await take();
+    await page.click("#road-cleanup");
+    await answerCleanup();
+    await reached("remove_worktree");
+    const personCleanup = await take();
+
+    const pressedSync = await press("Road sync");
+    await reached("scm_push");
+    const agentSync = await take();
+    const pressedDiscard = await press("Road discard");
+    await reached("discard_paths");
+    const agentDiscard = await take();
+    const pressedCleanup = await press("Road cleanup");
+    await answerCleanup();
+    await reached("remove_worktree");
+    const agentCleanup = await take();
+
+    ok("the agent's presses on the three roads were made", pressedSync === true && pressedDiscard === true && pressedCleanup === true,
+      JSON.stringify({ pressedSync, pressedDiscard, pressedCleanup }));
+    ok("the person's Sync pushes as the person after its fetch and pull", hand(personSync, "scm_push").join() === "person", JSON.stringify(personSync));
+    ok("the person's staged discard deletes and restores as the person after the unstage",
+      hand(personDiscard, "delete_untracked").join() === "person" && hand(personDiscard, "discard_paths").join() === "person",
+      JSON.stringify(personDiscard));
+    ok("the person's cleanup removes as the person after its question and re-measure",
+      hand(personCleanup, "remove_worktree").join() === "person", JSON.stringify(personCleanup));
+    ok("a Sync an agent pressed pushes as the agent", hand(agentSync, "scm_push").join() === "agent", JSON.stringify(agentSync));
+    ok("a discard an agent pressed deletes and restores as the agent",
+      hand(agentDiscard, "delete_untracked").join() === "agent" && hand(agentDiscard, "discard_paths").join() === "agent",
+      JSON.stringify(agentDiscard));
+    ok("a cleanup an agent pressed removes as the agent", hand(agentCleanup, "remove_worktree").join() === "agent", JSON.stringify(agentCleanup));
+  });
+
+  /* A pre-canonical build kept the person's "don't ask again" for a running
+   * terminal in this webview only. A boot carries no hand, so it writes
+   * nothing of it — no person-only call, no error — and the window still asks
+   * (t-75153). The person's own "don't ask again" saves it as the person and
+   * takes the old key away. */
+  const LEGACY_KEY = "zerocode.confirm-close-running.v1";
+  const SKIP = "set_skip_close_terminal_with_running_process_confirm";
+  const { page: legacy } = await openWindowTestPage(browser, origin, {
+    before: (page) => page.addInitScript(({ key, skip }) => {
+      localStorage.setItem(key, "off");
+      window.__LEGACY_HANDS__ = [];
+      window.__ANSWER__[skip] = (args, options) => {
+        window.__LEGACY_HANDS__.push(options?.headers?.["zerocode-hand"] ?? null);
+        return { skip_close_terminal_with_running_process_confirm: args?.skip === true };
+      };
+    }, { key: LEGACY_KEY, skip: SKIP }),
+  });
+  try {
+    const boot = await legacy.evaluate((key) => ({
+      calls: [...window.__LEGACY_HANDS__],
+      asks: confirmCloseRunning,
+      kept: localStorage.getItem(key),
+      error: stageError ?? null,
+    }), LEGACY_KEY);
+    ok("a boot with the old key makes no person-only call and says no error", boot.calls.length === 0 && !boot.error, JSON.stringify(boot));
+    ok("a boot with the old key still asks before closing a running terminal", boot.asks === true, JSON.stringify(boot));
+    await legacy.evaluate(() => {
+      const button = document.createElement("button");
+      button.id = "legacy-ask";
+      button.type = "button";
+      button.textContent = "Legacy ask";
+      button.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:1";
+      document.body.append(button);
+      button.addEventListener("click", () => void askAboutRunning({ agent: null }, [], handNow()));
+    });
+    await legacy.click("#legacy-ask");
+    await legacy.waitForSelector(".ask-remember input", { state: "visible" });
+    await legacy.click(".ask-remember input");
+    await legacy.click("#ask-yes");
+    await legacy.waitForFunction((key) => localStorage.getItem(key) === null, LEGACY_KEY, { timeout: 5000 });
+    const remembered = await legacy.evaluate(() => ({ calls: [...window.__LEGACY_HANDS__], asks: confirmCloseRunning }));
+    ok("the person's \"don't ask again\" saves it once, as the person, and the old key goes",
+      remembered.calls.join() === "person" && remembered.asks === false, JSON.stringify(remembered));
+  } catch (error) {
+    ok("the old-key scenario ran to its end", false, String(error?.stack ?? error).split("\n").slice(0, 3).join(" | "));
+  } finally {
+    await legacy.close();
+  }
 }
