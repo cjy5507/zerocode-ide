@@ -178,9 +178,9 @@ impl Ledger {
     /// Where the transaction stands, or None when the ledger never saw it.
     pub fn seen(&self, txn: &str) -> io::Result<Option<State>> {
         match File::open(&self.path) {
-            Ok(mut file) => {
-                file.lock_shared()?;
-                Ok(Self::latest(&Self::lines(&mut file)?, txn))
+            Ok(file) => {
+                let mut held = LedgerLock::shared(file)?;
+                Ok(Self::latest(&Self::lines(&mut held.0)?, txn))
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error),
@@ -195,17 +195,17 @@ impl Ledger {
     /// exclusive lock, so no two writers can both be first — and then
     /// nothing of the call is written.
     pub fn record(&self, lines: &[Line]) -> Result<(), Refusal> {
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .read(true)
             .append(true)
             .open(&self.path)
             .map_err(Refusal::Io)?;
-        file.lock().map_err(Refusal::Io)?;
+        let mut held = LedgerLock::exclusive(file).map_err(Refusal::Io)?;
+        let file = &mut held.0;
         if let Some(acting) = lines.iter().find(|line| line.state == State::Acting)
-            && let Some(state) =
-                Self::latest(&Self::lines(&mut file).map_err(Refusal::Io)?, &acting.txn)
-                    .filter(|state| state.spent())
+            && let Some(state) = Self::latest(&Self::lines(file).map_err(Refusal::Io)?, &acting.txn)
+                .filter(|state| state.spent())
         {
             return Err(Refusal::Seen(state));
         }
@@ -376,6 +376,30 @@ pub fn page_agrees(
     }
 }
 
+/// The ledger file under its lock, for one read or one append.
+struct LedgerLock(File);
+
+impl Drop for LedgerLock {
+    /// Ends the flock itself rather than leaving it to the close: a launch
+    /// that forks before it execs holds a copy of the descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone (t-73907).
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+impl LedgerLock {
+    fn shared(file: File) -> io::Result<Self> {
+        file.lock_shared()?;
+        Ok(Self(file))
+    }
+
+    fn exclusive(file: File) -> io::Result<Self> {
+        file.lock()?;
+        Ok(Self(file))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +408,29 @@ mod tests {
     use zerocode_core::computer_flow::{Check, CheckKind, Confirm, Money, Observed, Presence};
     use zerocode_core::computer_recipe::{RecipeLine, RecipeTool};
     use zerocode_core::computer_use_protocol::error_code;
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of every descriptor until the exec, and a flock belongs to the
+    /// open file description, so a lock its holder only closed stays held by
+    /// that copy (t-73907: a child that never reached its exec kept three new
+    /// windows waiting on the settings lock). The duplicate here is that copy:
+    /// the next `record` must not wait on it forever.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recipe.ledger.jsonl");
+        for take in [LedgerLock::exclusive, LedgerLock::shared] {
+            let held = take(File::create(&path).unwrap()).unwrap();
+            let inherited = held.0.try_clone().unwrap();
+            drop(held);
+            let taken = File::open(&path).unwrap().try_lock();
+            drop(inherited);
+            assert!(
+                taken.is_ok(),
+                "a lock its holder let go is still held by a copy: {taken:?}"
+            );
+        }
+    }
 
     fn line(state: State, txn: &str, by: By) -> Line {
         Line {

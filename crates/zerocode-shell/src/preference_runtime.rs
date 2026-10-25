@@ -65,12 +65,7 @@ impl PreferenceStore {
         &self,
         apply: impl FnOnce(&mut PreferenceBook) -> Result<T, String>,
     ) -> Result<T, String> {
-        durable_file::ensure_private_directory_durable(&self.root)
-            .map_err(|_| "the private preference directory is unavailable")?;
-        let lock = durable_file::private_lock_file(&self.root.join(".user-preferences.lock"))
-            .map_err(|_| "the preference store could not be locked safely")?;
-        lock.lock()
-            .map_err(|_| "the preference store could not be locked")?;
+        let _lock = self.lock()?;
         let mut book = self.read()?;
         let result = apply(&mut book)?;
         let bytes = book.encode().map_err(|error| error.message().to_owned())?;
@@ -83,6 +78,16 @@ impl PreferenceStore {
             );
         }
         Ok(result)
+    }
+
+    fn lock(&self) -> Result<StoreLock, String> {
+        durable_file::ensure_private_directory_durable(&self.root)
+            .map_err(|_| "the private preference directory is unavailable")?;
+        let lock = durable_file::private_lock_file(&self.root.join(".user-preferences.lock"))
+            .map_err(|_| "the preference store could not be locked safely")?;
+        lock.lock()
+            .map_err(|_| "the preference store could not be locked")?;
+        Ok(StoreLock(lock))
     }
 
     pub(crate) fn save(
@@ -103,9 +108,43 @@ impl PreferenceStore {
     }
 }
 
+/// The store's lock file, held for one modification.
+struct StoreLock(std::fs::File);
+
+impl Drop for StoreLock {
+    /// Ends the flock itself rather than leaving it to the close: a launch
+    /// that forks before it execs holds a copy of the descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone (t-73907).
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of every descriptor until the exec, and a flock belongs to the
+    /// open file description, so a lock its holder only closed stays held by
+    /// that copy (t-73907: a child that never reached its exec kept three new
+    /// windows waiting on the settings lock). The duplicate here is that copy.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PreferenceStore::at(directory.path());
+        let held = store.lock().unwrap();
+        let inherited = held.0.try_clone().unwrap();
+        drop(held);
+        let next =
+            durable_file::private_lock_file(&store.root.join(".user-preferences.lock")).unwrap();
+        let taken = next.try_lock();
+        drop(inherited);
+        assert!(
+            taken.is_ok(),
+            "a lock its holder let go is still held by a copy: {taken:?}"
+        );
+    }
 
     fn origin() -> FeedbackOrigin {
         FeedbackOrigin {
