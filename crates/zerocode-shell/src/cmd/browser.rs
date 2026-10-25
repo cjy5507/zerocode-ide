@@ -4,6 +4,7 @@ use crate::*;
 
 /// The form pair (`fields`, `fill`, and the same inside an `eval`).
 pub(crate) mod form;
+pub(crate) mod upload;
 pub(crate) use form::{automate_fields, automate_fill, eval_script};
 
 /// The callback channel is shared by find/grab/menu and the automation
@@ -1131,9 +1132,10 @@ const zcFail = (code) => zcEncode({ ok: false, code });
 // the typing holds its keys by, a look and a form read call a field secret
 // by. Read by the element's tag, not its realm's class, so a field inside a
 // frame is judged as one on the page.
-const zcSecretField = (element) => String((element && element.tagName) || "").toLowerCase() === "input"
-  && (String(element.type).toLowerCase() === "password"
-    || String(element.autocomplete || "").toLowerCase() === "current-password");
+const zcSecretAutocomplete = ["current-password", "new-password", "one-time-code", "cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year"];
+const zcSecretField = (element) => !!element && (
+  String(element.tagName || "").toLowerCase() === "input" && String(element.type).toLowerCase() === "password"
+  || String(element.getAttribute && element.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).some((mark) => zcSecretAutocomplete.includes(mark)));
 // The element a selector names is the first one a person could SEE, not the
 // first in the document: a page that keeps a hidden twin of its form (a
 // responsive layout, a template) puts the twin first, and a door that took it
@@ -3059,7 +3061,10 @@ pub(crate) async fn wait_until(
 /// `open`'s answer: the label, opened — or the label, still opening.
 pub(crate) fn open_answer(label: &str, opened: bool) -> String {
     if opened {
-        format!("열림 {label}\n")
+        format!(
+            "{}{label}\n",
+            zerocode_core::agent_browser::BROWSER_OPENED_PREFIX
+        )
     } else {
         format!("아직 여는 중 {label} — `zerocode-browser tabs`가 말해 줍니다\n")
     }
@@ -4172,11 +4177,11 @@ const zcMarkRole = (el) => {
   return "";
 };
 const zcMarkName = (el) => {
+  const secret = zcSecretField(el);
   const aria = el.getAttribute && el.getAttribute("aria-label");
   if (aria && aria.trim()) return aria.trim();
-  const text = String(el.innerText || el.textContent || "").trim();
+  const text = secret ? "" : String(el.innerText || el.textContent || "").trim();
   if (text) return text;
-  const secret = el.matches && el.matches('input[type="password"]');
   if (!secret && "value" in el && el.value) return String(el.value);
   const title = el.getAttribute && el.getAttribute("title");
   if (title && title.trim()) return title.trim();
@@ -5300,7 +5305,15 @@ pub(crate) async fn automate_type(
             }
             let script = form::form_script(&held, TYPE_BODY);
             let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
-            typed_report(input_value(reply)?, road)
+            let value = input_value(reply)?;
+            if value
+                .get("secureField")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                form::remember_masked(label, selector);
+            }
+            typed_report(value, road)
         },
     )
     .await

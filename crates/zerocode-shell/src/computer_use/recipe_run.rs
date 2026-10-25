@@ -35,8 +35,9 @@ use zerocode_core::computer_flow::{
     Presence, Target, judge, page_host, parse_flow,
 };
 use zerocode_core::computer_recipe::{
-    Plan, RECIPE_CHECKS, RECIPE_CURSOR_SLOP_POINTS, RecipeLine, RecipeStop, RecipeTool, preflight,
-    recipe_landing_box, recipe_line_argv, recipe_line_holds_ms, recipe_lines, recipe_step_argv,
+    Plan, RECIPE_CHECKS, RECIPE_CURSOR_SLOP_POINTS, RecipeLine, RecipeStop, RecipeTool,
+    TabBindingError, TabBindings, preflight, recipe_landing_box, recipe_line_argv,
+    recipe_line_holds_ms, recipe_lines, recipe_step_argv,
 };
 use zerocode_core::computer_use::{
     COMPUTER_CLI, ComputerCommand, ComputerMethod, FLOW_BASELINE_PROBE_MS, FLOW_VERIFY_MS, Next,
@@ -178,6 +179,34 @@ impl Refused {
     }
 }
 
+impl From<TabBindingError> for Refused {
+    fn from(error: TabBindingError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}
+
+fn resolve_tabs(
+    tabs: &RefCell<TabBindings>,
+    tool: RecipeTool,
+    argv: &[String],
+    desk: &RefCell<impl Desk>,
+) -> Result<Vec<String>, Refused> {
+    let aliased = tool == RecipeTool::Browser
+        && zerocode_core::computer_recipe::browser_tab_target(argv)
+            .is_some_and(zerocode_core::computer_recipe::is_tab_alias);
+    let pages = if aliased {
+        desk.borrow_mut().pages()
+    } else {
+        Vec::new()
+    };
+    tabs.borrow()
+        .resolve(tool, argv, &pages)
+        .map_err(Into::into)
+}
+
 /// One walk as the caller asks for it: the command with its values and
 /// start, the recipe (the file it was read from, and its text), the bridge's
 /// deadline, and the workspace the request came from. Evidence identity is
@@ -292,6 +321,7 @@ pub fn first_act(command: &ComputerCommand, text: &str) -> Option<(Vec<String>, 
 /// flags its app acts are sent with (`recipe_line_argv`).
 #[derive(Clone, Copy)]
 struct Terms<'f> {
+    tabs: &'f RefCell<TabBindings>,
     bound: Option<&'f Fingerprint>,
     framed: bool,
     /// The gate before the Flow's money step, when it has one (design §2–§4).
@@ -519,6 +549,7 @@ fn observed_browser_steps(
     mut step: impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
 ) -> impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer {
     let mut revisions = BTreeMap::<String, u64>::new();
+    let mut fresh_forms = std::collections::BTreeSet::<String>::new();
     move |tool, argv, logged| {
         if tool != RecipeTool::Browser {
             return step(tool, argv, logged);
@@ -536,6 +567,21 @@ fn observed_browser_steps(
         let mut argv = command.argv;
         let verb = argv.first().cloned().unwrap_or_default();
         let label = argv.get(1).cloned();
+        if agent_browser::replay_needs_fields(&verb)
+            && let Some(label) = &label
+            && !fresh_forms.contains(label)
+        {
+            let look = vec!["fields".to_string(), label.clone()];
+            let answer = step(RecipeTool::Browser, &look, &look);
+            revisions.remove(label);
+            if answer.exit_code != 0 {
+                return answer;
+            }
+            if let Some(revision) = agent_browser::observation_revision(&answer.stdout) {
+                revisions.insert(label.clone(), revision);
+            }
+            fresh_forms.insert(label.clone());
+        }
         if agent_browser::browser_verb(&verb).is_some_and(|row| row.changes_page) && verb != "open"
         {
             let revision = label
@@ -546,6 +592,13 @@ fn observed_browser_steps(
         }
         let answer = step(tool, &argv, logged);
         if let Some(label) = label {
+            if agent_browser::browser_verb(&verb).is_some_and(|row| row.changes_page)
+                || answer.exit_code != 0
+            {
+                fresh_forms.remove(&label);
+            } else if verb == "fields" {
+                fresh_forms.insert(label.clone());
+            }
             if agent_browser::observes(&verb) {
                 revisions.remove(&label);
                 if answer.exit_code == 0
@@ -617,7 +670,62 @@ pub fn run(
         command.params["start"] = json!(step);
         command
     });
-    let (lines, start, decided) = decide(resumed.as_ref().unwrap_or(run.command), run.text)?;
+    let (lines, start, mut decided) = decide(resumed.as_ref().unwrap_or(run.command), run.text)?;
+    let tabs = RefCell::new(
+        TabBindings::prepare(
+            &decided.planned,
+            run.command.params.get("tab").and_then(Value::as_str),
+            &values_of(run.command),
+        )
+        .map_err(Refused::from)?,
+    );
+    decided
+        .unused
+        .retain(|name| !tabs.borrow().uses_parameter(name));
+    let mut prepared_tabs = std::collections::BTreeSet::new();
+    // Checks and money witnesses take the same explicit bindings as recipe
+    // lines. The lines resolve before their host gate too, below.
+    let mut step =
+        |tool, argv: &[String], logged: &[String]| match resolve_tabs(&tabs, tool, argv, &desk) {
+            Ok(resolved) => {
+                let verb = resolved.first().map_or("", String::as_str);
+                let label = resolved.get(1).filter(|label| {
+                    tool == RecipeTool::Browser && tabs.borrow().contains_label(label)
+                });
+                if let Some(label) = label
+                    && agent_browser::browser_verb(verb).is_some_and(|row| row.changes_page)
+                    && !prepared_tabs.contains(label)
+                {
+                    // A new bound tab has no observation from this run. Read
+                    // through the caller's own browser door before any input;
+                    // a missing/paused/other-owner tab stops here, unchanged.
+                    let look = if agent_browser::replay_needs_fields(verb) {
+                        "fields"
+                    } else {
+                        "read"
+                    };
+                    let read = vec![look.to_string(), label.clone()];
+                    let answer = step(RecipeTool::Browser, &read, &read);
+                    if answer.exit_code != 0 {
+                        return answer;
+                    }
+                    prepared_tabs.insert(label.clone());
+                }
+                let answer = step(tool, &resolved, logged);
+                if answer.exit_code == 0
+                    && agent_browser::observes(verb)
+                    && let Some(label) = label
+                {
+                    prepared_tabs.insert(label.clone());
+                }
+                answer
+            }
+            Err(error) => TeamAnswer {
+                exit_code: 1,
+                stdout: String::new(),
+                stderr: format!("{}: {}", error.code, error.message),
+            },
+        };
     if let Some(spec) = &flow {
         spec.fingerprint
             .matches(&live_fingerprint(&mut *desk.borrow_mut()))
@@ -660,6 +768,7 @@ pub fn run(
         &desk,
         &caller_waits,
         Terms {
+            tabs: &tabs,
             bound: flow.as_ref().map(|spec| &spec.fingerprint),
             framed: level.frames(),
             money: gate.as_ref(),
@@ -735,6 +844,7 @@ pub fn run(
     report["evidence_ids"] = json!(true);
     report["at_epoch_ms"] = json!(at_epoch_ms);
     report["handWatched"] = Value::Bool(watched);
+    report["browserTabs"] = json!(tabs.borrow().labels());
     // The run's whole time, its verification included: speed is verified
     // completion time.
     report["elapsedMs"] = json!(elapsed());
@@ -1185,6 +1295,7 @@ fn walk_lines(
     terms: Terms<'_>,
 ) -> (Walked<RecipeStop>, bool) {
     let Terms {
+        tabs,
         bound,
         framed,
         money: gate,
@@ -1220,6 +1331,16 @@ fn walk_lines(
         },
         |n, (line, _), argv| {
             let tool = line.tool;
+            let resolved = match resolve_tabs(tabs, tool, argv, desk) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return (
+                        refused_report(n, argv, error.code, error.message),
+                        Some(RecipeStop::StepFailed),
+                    );
+                }
+            };
+            let argv = &resolved;
             let verb = argv.first().map_or("", String::as_str);
             // A browser verb is never a desktop method, whatever it is called.
             let command = (tool == RecipeTool::Computer)
@@ -1335,6 +1456,13 @@ fn walk_lines(
                     .unwrap_or_default();
                 let kind = stop_for(tool, code, check);
                 return (finish(report, phases), Some(kind));
+            }
+            if let Some(alias) = &line.opens_tab
+                && let Err(error) = tabs.borrow_mut().opened(alias, &answer.stdout)
+            {
+                report["ok"] = Value::Bool(false);
+                report["error"] = json!({ "code": error.code, "message": error.message });
+                return (finish(report, phases), Some(RecipeStop::StepFailed));
             }
             // A desktop or emulator act that answered from an app outside the
             // recording stops the walk after it — bound act by act, the app
@@ -1759,6 +1887,162 @@ pub(crate) mod bench {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_secret_recipe_stops_for_the_person_and_keeps_its_opened_tab_for_resume() {
+        use super::bench::{Bench, browser_said, command, walk_of};
+        let text = "## Steps\n1. `zerocode-browser open https://example.test/login` — opens $tab\n2. `zerocode-browser type $tab #code --value $secret_code`\n3. `zerocode-browser click $tab #continue`\n";
+        let bench = Bench::new();
+        let mut calls = Vec::new();
+        let report = super::run(
+            &walk_of(&command(&[]), text),
+            |_, argv, _| {
+                calls.push(argv[0].clone());
+                bench.show(&[("browser-901", "https://example.test/login")]);
+                browser_said(&crate::cmd::browser::open_answer("browser-901", true))
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(calls, ["open"]);
+        assert_eq!(report["stop"]["kind"], "persons_turn");
+        assert_eq!(report["browserTabs"]["$tab"], "browser-901");
+        let missing = "## Steps\n1. `zerocode-browser type $tab #code --value $secret_code`\n";
+        calls.clear();
+        let report = super::run(
+            &walk_of(&command(&["--tab", "browser-901"]), missing),
+            |_, argv, _| {
+                calls.push(argv[0].clone());
+                browser_said("unexpected")
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert!(calls.is_empty());
+        assert_eq!(report["stop"]["kind"], "persons_turn");
+    }
+    #[test]
+    fn a_recipe_refreshes_a_form_after_a_press_and_refuses_input_when_that_read_fails() {
+        use super::bench::{browser_refused, browser_said, words};
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut wrapped = super::observed_browser_steps(|_, argv, _| {
+            calls.borrow_mut().push(argv.to_vec());
+            browser_said(r#"{"workspaceRevision":7}"#)
+        });
+        for argv in [
+            words(&["fields", "browser-1"]),
+            words(&["fill", "browser-1", "{}"]),
+            words(&["click", "browser-1", "#next"]),
+            words(&["upload", "browser-1", "#file", "/tmp/receipt.txt"]),
+        ] {
+            assert_eq!(wrapped(RecipeTool::Browser, &argv, &argv).exit_code, 0);
+        }
+        let verbs: Vec<_> = calls.borrow().iter().map(|argv| argv[0].clone()).collect();
+        assert_eq!(verbs, ["fields", "fill", "click", "fields", "upload"]);
+        assert!(
+            calls.borrow()[4]
+                .windows(2)
+                .any(|pair| pair == ["--workspace-revision", "7"])
+        );
+        let denied = std::cell::RefCell::new(Vec::new());
+        let mut wrapped = super::observed_browser_steps(|_, argv, _| {
+            denied.borrow_mut().push(argv[0].clone());
+            browser_refused("workspace_person_controlled")
+        });
+        let fill = words(&["fill", "browser-2", "{}"]);
+        assert_eq!(wrapped(RecipeTool::Browser, &fill, &fill).exit_code, 1);
+        assert_eq!(*denied.borrow(), ["fields"]);
+    }
+    #[test]
+    fn browser_tab_alias_external_requires_a_fresh_owned_read_and_never_guesses() {
+        use super::bench::{Bench, browser_refused, command, walk_of};
+        let text = "## Steps\n1. `zerocode-browser click $tab #continue`\n";
+        let mut calls = Vec::new();
+        let bench = Bench::new().showing(&[("browser-9", "https://example.test")]);
+        let missing = super::run(
+            &walk_of(&command(&[]), text),
+            |_, argv, _| {
+                calls.push(argv.to_vec());
+                browser_refused("unexpected")
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap_err();
+        assert_eq!(missing.code, "recipe_tab_required");
+        assert!(calls.is_empty());
+        let report = super::run(
+            &walk_of(&command(&["--tab", "browser-9"]), text),
+            |_, argv, _| {
+                calls.push(argv.to_vec());
+                browser_refused("workspace_person_controlled")
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![vec!["read".to_string(), "browser-9".to_string()]],
+            "no click after a refused look"
+        );
+        assert_eq!(report["done"], false);
+        calls.clear();
+        let report = super::run(
+            &walk_of(&command(&["--tab", "browser-8"]), text),
+            |_, argv, _| {
+                calls.push(argv.to_vec());
+                browser_refused("unexpected")
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(report["stop"]["code"], "recipe_tab_closed");
+        assert!(calls.is_empty(), "a different tab was never tried");
+    }
+    #[test]
+    fn browser_tab_alias_uses_this_runs_opened_tab() {
+        use super::bench::{Bench, browser_refused, browser_said, command, walk_of};
+        let text = "# Tabs\n\n## Steps\n\n1. `zerocode-browser open https://example.test/work` — opens $tab\n2. `zerocode-browser wait $tab #ready`\n";
+        let bench = Bench::new().showing(&[("browser-42", "https://example.test/work")]);
+        let mut targets = Vec::new();
+        let report = super::run(
+            &walk_of(&command(&[]), text),
+            |_, argv, _| {
+                if argv[0] == "open" {
+                    browser_said(&crate::cmd::browser::open_answer("browser-42", true))
+                } else {
+                    targets.push(argv[1].clone());
+                    if argv[1] == "browser-42" {
+                        browser_said("ready")
+                    } else {
+                        browser_refused("closed tab")
+                    }
+                }
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(report["done"], true, "{report}");
+        assert_eq!(targets, ["browser-42"]);
+        assert_eq!(report["browserTabs"]["$tab"], "browser-42");
+    }
+
     use super::bench::*;
     use super::*;
     use crate::computer_use::guarded::{By, LEDGER_EXTENSION, Line, State};

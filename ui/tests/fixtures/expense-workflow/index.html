@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'none'; form-action 'none'">
+<title>acme · 문서 업무 시험</title>
+<style>
+  body { font: 16px system-ui; margin: 24px; max-width: 900px; }
+  header, nav, main, section { margin-bottom: 16px; }
+  button, input, select { font: inherit; padding: 8px; margin: 4px; }
+  label { display: block; margin: 12px 0; }
+  dialog { width: 480px; padding: 24px; }
+  dialog::backdrop { background: #0006; }
+  #drop-zone { border: 2px dashed; padding: 24px; margin: 12px 0; }
+  [role=alert] { color: #a00; }
+</style>
+<header>acme · 시험 세션 연결됨 · 가상 작성자</header>
+<nav aria-label="업무 메뉴"><button id="approval-menu" aria-expanded="false">전자결재</button><span id="menu-items" hidden><a href="#documents">내 문서함</a> · <a href="#templates">새 문서</a></span></nav>
+<main id="view"></main>
+<dialog id="uploader" aria-labelledby="upload-heading">
+  <h2 id="upload-heading">증빙 첨부</h2>
+  <div id="drop-zone" role="button" tabindex="0" aria-label="영수증 끌어 놓기">영수증을 여기에 끌어 놓으세요</div>
+  <label>영수증 파일<input id="receipt" type="file" accept="image/*,.pdf,.txt" multiple></label>
+  <p id="upload-status" role="status">첨부 없음</p>
+  <button id="upload-done">첨부 완료</button>
+</dialog>
+<script src="app.js"></script>
+</html>

@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::{BTreeMap, BTreeSet};
+pub mod privacy;
 
 use crate::agent_browser::{self, BROWSER_CLI};
 use crate::agent_emulator::{self, EMULATOR_CLI};
@@ -27,6 +29,39 @@ pub const RECIPE_MARK_SEPARATOR: &str = " — ";
 pub const RECIPE_MARK_PERSONS_LAST_STEP: &str = "the person's last step: the window asks";
 pub const RECIPE_MARK_PERSONS_TURN: &str = "the person's turn";
 pub const RECIPE_MARK_FAILED: &str = "failed then:";
+/// A browser open binds this run's returned label, never the recording's.
+pub const RECIPE_MARK_OPENS: &str = "opens ";
+pub const RECIPE_TAB_ALIAS: &str = "$tab";
+
+#[must_use]
+pub fn tab_alias(index: usize) -> String {
+    if index == 1 {
+        RECIPE_TAB_ALIAS.into()
+    } else {
+        format!("{RECIPE_TAB_ALIAS}-{index}")
+    }
+}
+
+#[must_use]
+pub fn is_tab_alias(word: &str) -> bool {
+    word == RECIPE_TAB_ALIAS
+        || word.strip_prefix("$tab-").is_some_and(|number| {
+            number
+                .parse::<usize>()
+                .is_ok_and(|n| n >= 2 && n.to_string() == number)
+        })
+}
+
+/// Only a browser command's target position is a binding. Text and selectors
+/// that happen to contain `$tab` remain data.
+#[must_use]
+pub fn browser_tab_target(argv: &[String]) -> Option<&str> {
+    let verb = argv.first()?.as_str();
+    (!matches!(verb, "open" | "list" | "tabs"))
+        .then(|| argv.get(1))
+        .flatten()
+        .map(String::as_str)
+}
 /// The step that moves money (docs/design/flow-engine-guarded-money-path.md
 /// §2) — written by the person in the document, never by `recipe-save`: a
 /// `dry` Flow stops before it, a `guarded` one presses it past its gate.
@@ -282,6 +317,9 @@ pub fn recipe_params(raw: &str) -> Result<Map<String, Value>, String> {
 /// Every `{{name}}` in one word, in order; `{{a b}}` is not one.
 #[must_use]
 pub fn recipe_placeholders(word: &str) -> Vec<String> {
+    if privacy::is_secret_parameter(word) {
+        return vec![word[1..].to_string()];
+    }
     let mut found = Vec::new();
     let mut rest = word;
     while let Some(open) = rest.find(RECIPE_PARAM_OPEN) {
@@ -340,11 +378,12 @@ pub fn recipe_fill(argv: &[String], values: &Map<String, Value>) -> Result<Vec<S
         for name in names {
             match values.get(&name).and_then(Value::as_str) {
                 Some(value) => {
-                    out = out.replacen(
-                        &format!("{RECIPE_PARAM_OPEN}{name}{RECIPE_PARAM_CLOSE}"),
-                        value,
-                        1,
-                    );
+                    let marker = if privacy::is_secret_parameter(word) {
+                        format!("${name}")
+                    } else {
+                        format!("{RECIPE_PARAM_OPEN}{name}{RECIPE_PARAM_CLOSE}")
+                    };
+                    out = out.replacen(&marker, value, 1);
                     let program_words = at
                         .checked_sub(1)
                         .and_then(|before| argv[before].strip_prefix("--"))
@@ -553,16 +592,26 @@ pub fn recipe_step_holds_ms(step: &[String]) -> u64 {
 
 /// How long one recipe line may hold a walk, by its door: a desktop line
 /// by its verb's table and its landing's settle (`recipe_step_holds_ms`), a
-/// browser line by the browser table's row — the one answer the preflight
-/// fits and the walk budgets.
+/// browser line by its table's row plus the read or form observation it may
+/// need in this run. Cached observations may save work, never this budget.
 #[must_use]
 pub fn recipe_line_holds_ms(tool: RecipeTool, step: &[String]) -> u64 {
     match tool {
         RecipeTool::Computer => recipe_step_holds_ms(step),
-        RecipeTool::Browser => step
-            .first()
-            .and_then(|verb| agent_browser::holds_ms(verb))
-            .unwrap_or_default(),
+        RecipeTool::Browser => {
+            let Some(verb) = step.first() else { return 0 };
+            let Some(row) = agent_browser::browser_verb(verb) else {
+                return 0;
+            };
+            let look = agent_browser::replay_needs_fields(verb)
+                || row.changes_page && browser_tab_target(step).is_some_and(is_tab_alias);
+            row.hold_ms
+                + if look {
+                    agent_browser::BROWSER_CALLBACK_DEADLINE_MS
+                } else {
+                    0
+                }
+        }
         RecipeTool::Emulator => step
             .first()
             .and_then(|verb| agent_emulator::holds_ms(verb))
@@ -782,6 +831,8 @@ pub struct RecipeLine {
     pub failed_then: bool,
     /// The person marked it the money step (`RECIPE_MARK_MONEY`).
     pub money: bool,
+    /// `open … — opens $tab`: bind the backend's successful open answer.
+    pub opens_tab: Option<String>,
 }
 
 /// A line's marks after its code span, each without the separator.
@@ -828,6 +879,23 @@ pub fn recipe_lines(text: &str) -> Result<Vec<RecipeLine>, String> {
         let at = |why: &str| format!("step {step} ({shown}.): {why}");
         let (command, marks) = span.map_err(at)?;
         let (tool, argv) = recipe_command_words(command).map_err(|why| at(&why))?;
+        let declarations: Vec<_> = marks_of(marks)
+            .filter(|mark| *mark == "opens" || mark.starts_with(RECIPE_MARK_OPENS))
+            .collect();
+        let opens_tab = match declarations.as_slice() {
+            [] => None,
+            [mark]
+                if tool == RecipeTool::Browser
+                    && argv.first().is_some_and(|verb| verb == "open") =>
+            {
+                let alias = mark
+                    .strip_prefix(RECIPE_MARK_OPENS)
+                    .filter(|alias| is_tab_alias(alias))
+                    .ok_or_else(|| at("opens needs $tab or $tab-N (N starts at 2)"))?;
+                Some(alias.to_string())
+            }
+            _ => return Err(at("only one browser open may declare a tab on a line")),
+        };
         lines.push(RecipeLine {
             step,
             shown,
@@ -835,6 +903,7 @@ pub fn recipe_lines(text: &str) -> Result<Vec<RecipeLine>, String> {
             argv,
             failed_then: marks_of(marks).any(|mark| mark.starts_with(RECIPE_MARK_FAILED)),
             money: marks_of(marks).any(|mark| mark == RECIPE_MARK_MONEY),
+            opens_tab,
         });
     }
     Ok(lines)
@@ -878,6 +947,169 @@ pub struct Preflight {
     pub later: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabBindingError {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl TabBindingError {
+    fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// Per-run browser names. Only an explicit input or a successful backend
+/// open may populate this map; no current/first/other tab is ever guessed.
+#[derive(Debug, Default)]
+pub struct TabBindings {
+    labels: BTreeMap<String, String>,
+}
+
+impl TabBindings {
+    /// The labels this run actually used, for an explicit resumed call.
+    #[must_use]
+    pub fn labels(&self) -> &BTreeMap<String, String> {
+        &self.labels
+    }
+
+    #[must_use]
+    pub fn contains_label(&self, label: &str) -> bool {
+        self.labels.values().any(|held| held == label)
+    }
+
+    #[must_use]
+    pub fn uses_parameter(&self, name: &str) -> bool {
+        self.labels.contains_key(&format!("${name}"))
+    }
+
+    pub fn prepare(
+        planned: &[(RecipeLine, Plan)],
+        tab: Option<&str>,
+        values: &Map<String, Value>,
+    ) -> Result<Self, TabBindingError> {
+        let declarations: BTreeSet<_> = planned
+            .iter()
+            .filter_map(|(line, plan)| {
+                matches!(plan, Plan::Run(_))
+                    .then_some(line.opens_tab.as_deref())
+                    .flatten()
+            })
+            .collect();
+        let mut available = BTreeSet::new();
+        let mut required = BTreeSet::new();
+        for (line, plan) in planned {
+            let Plan::Run(argv) = plan else { continue };
+            if line.tool != RecipeTool::Browser {
+                continue;
+            }
+            if let Some(alias) = browser_tab_target(argv).filter(|word| word.starts_with('$')) {
+                if !is_tab_alias(alias) {
+                    return Err(TabBindingError::new(
+                        "recipe_tab_invalid",
+                        format!("invalid browser alias {alias}"),
+                    ));
+                }
+                if !available.contains(alias) {
+                    if declarations.contains(alias) {
+                        return Err(TabBindingError::new(
+                            "recipe_tab_forward",
+                            format!("{alias} is used before its open step"),
+                        ));
+                    }
+                    required.insert(alias.to_string());
+                }
+            }
+            if let Some(alias) = &line.opens_tab
+                && !available.insert(alias.clone())
+            {
+                return Err(TabBindingError::new(
+                    "recipe_tab_duplicate",
+                    format!("more than one open binds {alias}"),
+                ));
+            }
+        }
+        let stopped_alias = planned.iter().any(|(line, plan)| {
+            matches!(plan, Plan::Stop(_))
+                && line.tool == RecipeTool::Browser
+                && browser_tab_target(&line.argv) == Some(RECIPE_TAB_ALIAS)
+        });
+        if tab.is_some() && !required.contains(RECIPE_TAB_ALIAS) && !stopped_alias {
+            return Err(TabBindingError::new(
+                "recipe_tab_unused",
+                "--tab is only for a recipe's external $tab; this stretch opens its own tab or uses no alias",
+            ));
+        }
+        let mut labels = BTreeMap::new();
+        for alias in required {
+            let named = values
+                .get(alias.trim_start_matches('$'))
+                .and_then(Value::as_str);
+            let explicit = (alias == RECIPE_TAB_ALIAS).then_some(tab).flatten();
+            if explicit.is_some() && named.is_some() {
+                return Err(TabBindingError::new(
+                    "recipe_tab_duplicate",
+                    "give $tab once, with --tab or params.tab",
+                ));
+            }
+            let label = explicit.or(named).ok_or_else(|| TabBindingError::new("recipe_tab_required", format!("{alias} needs an explicit browser label; use --tab <label> for $tab, or --params for tab-N")))?;
+            if !agent_browser::valid_browser_label(label) {
+                return Err(TabBindingError::new(
+                    "recipe_tab_invalid",
+                    format!("{alias} is not a browser label"),
+                ));
+            }
+            labels.insert(alias, label.to_string());
+        }
+        Ok(Self { labels })
+    }
+
+    pub fn resolve(
+        &self,
+        tool: RecipeTool,
+        argv: &[String],
+        pages: &[(String, String)],
+    ) -> Result<Vec<String>, TabBindingError> {
+        let mut resolved = argv.to_vec();
+        if tool != RecipeTool::Browser {
+            return Ok(resolved);
+        }
+        if let Some(alias) = browser_tab_target(argv).filter(|word| is_tab_alias(word)) {
+            let label = self.labels.get(alias).ok_or_else(|| {
+                TabBindingError::new(
+                    "recipe_tab_required",
+                    format!("{alias} has no tab in this run; open it or supply --tab"),
+                )
+            })?;
+            if !pages.iter().any(|(page, _)| page == label) {
+                return Err(TabBindingError::new(
+                    "recipe_tab_closed",
+                    format!(
+                        "{alias} ({label}) is missing or closed; open a new tab and supply its label"
+                    ),
+                ));
+            }
+            resolved[1].clone_from(label);
+        }
+        Ok(resolved)
+    }
+
+    pub fn opened(&mut self, alias: &str, stdout: &str) -> Result<(), TabBindingError> {
+        let label = agent_browser::opened_browser_label(stdout).ok_or_else(|| TabBindingError::new("recipe_tab_unanswered", format!("open for {alias} did not return a completed backend label; inspect tabs before resuming")))?;
+        if self.labels.contains_key(alias) {
+            return Err(TabBindingError::new(
+                "recipe_tab_duplicate",
+                format!("{alias} is already bound in this run"),
+            ));
+        }
+        self.labels.insert(alias.into(), label.into());
+        Ok(())
+    }
+}
+
 /// Decide the walk from `start` (counted from 1): each line's stop or skip,
 /// and every line before the first stop filled and parsed — all missing
 /// names in one refusal, so nothing moves on a recipe that cannot finish
@@ -916,7 +1148,19 @@ pub fn preflight(
             }
             Ok(())
         };
-        let plan = if let Some(kind) = desktop.then(|| recipe_step_stop(&line.argv)).flatten() {
+        let missing_secret = line
+            .argv
+            .iter()
+            .filter(|word| privacy::is_secret_parameter(word))
+            .any(|word| {
+                values
+                    .get(&word[1..])
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            });
+        let plan = if missing_secret {
+            Plan::Stop(RecipeStop::PersonsTurn)
+        } else if let Some(kind) = desktop.then(|| recipe_step_stop(&line.argv)).flatten() {
             Plan::Stop(kind)
         } else if line.failed_then {
             Plan::Skip("failed then")
@@ -1015,6 +1259,106 @@ mod tests {
     };
     use serde_json::json;
 
+    #[test]
+    fn a_secret_recipe_parameter_stops_for_the_person_without_guessing_a_value() {
+        let lines = recipe_lines("## Steps\n1. `zerocode-browser type browser-1 #code $secret_code`\n2. `zerocode-browser click browser-1 #continue`\n").unwrap();
+        let planned = preflight(&lines, 1, &Map::new()).unwrap();
+        assert_eq!(planned.planned[0].1, Plan::Stop(RecipeStop::PersonsTurn));
+        assert_eq!(planned.planned.len(), 1);
+    }
+
+    #[test]
+    fn browser_replay_budgets_its_in_process_observation() {
+        let fill = words(&["fill", "$tab", "{}"]);
+        assert_eq!(
+            recipe_line_holds_ms(RecipeTool::Browser, &fill),
+            agent_browser::holds_ms("fill").unwrap() + agent_browser::BROWSER_CALLBACK_DEADLINE_MS
+        );
+        let press = words(&["click", "$tab", "#next"]);
+        assert_eq!(
+            recipe_line_holds_ms(RecipeTool::Browser, &press),
+            agent_browser::holds_ms("click").unwrap() + agent_browser::BROWSER_CALLBACK_DEADLINE_MS
+        );
+    }
+
+    #[test]
+    fn browser_tab_aliases_are_bound_explicitly_and_never_replace_page_data() {
+        let lines =
+            recipe_lines("## Steps\n1. `zerocode-browser type $tab '#field' '$tab'`\n").unwrap();
+        let plan = preflight(&lines, 1, &Map::new()).unwrap();
+        assert_eq!(
+            TabBindings::prepare(&plan.planned, None, &Map::new())
+                .unwrap_err()
+                .code,
+            "recipe_tab_required"
+        );
+        let bindings = TabBindings::prepare(&plan.planned, Some("browser-8"), &Map::new()).unwrap();
+        let pages = vec![("browser-8".into(), "https://example.test".into())];
+        let resolved = bindings
+            .resolve(RecipeTool::Browser, &lines[0].argv, &pages)
+            .unwrap();
+        assert_eq!(resolved, words(&["type", "browser-8", "#field", "$tab"]));
+        assert_eq!(
+            bindings
+                .resolve(RecipeTool::Browser, &lines[0].argv, &[])
+                .unwrap_err()
+                .code,
+            "recipe_tab_closed"
+        );
+    }
+
+    #[test]
+    fn browser_tab_declarations_reject_forward_duplicate_and_invalid_bindings() {
+        for (text, code) in [
+            (
+                "## Steps\n1. `zerocode-browser read $tab`\n2. `zerocode-browser open https://example.test` — opens $tab\n",
+                "recipe_tab_forward",
+            ),
+            (
+                "## Steps\n1. `zerocode-browser open https://example.test` — opens $tab\n2. `zerocode-browser open https://example.test` — opens $tab\n",
+                "recipe_tab_duplicate",
+            ),
+        ] {
+            let lines = recipe_lines(text).unwrap();
+            let plan = preflight(&lines, 1, &Map::new()).unwrap();
+            assert_eq!(
+                TabBindings::prepare(&plan.planned, None, &Map::new())
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+        for text in [
+            "## Steps\n1. `zerocode-browser read browser-1` — opens $tab\n",
+            "## Steps\n1. `zerocode-browser open https://example.test` — opens $other\n",
+        ] {
+            assert!(recipe_lines(text).is_err());
+        }
+    }
+
+    #[test]
+    fn a_browser_open_binds_only_its_completed_backend_label_for_this_run() {
+        let lines = recipe_lines("## Steps\n1. `zerocode-browser open https://example.test` — opens $tab\n2. `zerocode-browser read $tab`\n").unwrap();
+        let plan = preflight(&lines, 1, &Map::new()).unwrap();
+        for label in ["browser-8", "browser-9"] {
+            let mut bindings = TabBindings::prepare(&plan.planned, None, &Map::new()).unwrap();
+            assert!(bindings.opened("$tab", "아직 여는 중 browser-7").is_err());
+            bindings
+                .opened(
+                    "$tab",
+                    &format!("{}{label}\n", agent_browser::BROWSER_OPENED_PREFIX),
+                )
+                .unwrap();
+            let pages = vec![(label.into(), "https://example.test".into())];
+            assert_eq!(
+                bindings
+                    .resolve(RecipeTool::Browser, &lines[1].argv, &pages)
+                    .unwrap()[1],
+                label
+            );
+        }
+    }
+
     fn words(list: &[&str]) -> Vec<String> {
         list.iter().map(|word| (*word).to_string()).collect()
     }
@@ -1034,6 +1378,7 @@ mod tests {
             argv: words(argv),
             failed_then: false,
             money: false,
+            opens_tab: None,
         }
     }
 

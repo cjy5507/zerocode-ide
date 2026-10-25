@@ -1434,6 +1434,7 @@ fn line(step: usize, tool: RecipeTool, argv: &[&str]) -> RecipeLine {
         argv: argv.iter().map(|word| (*word).to_string()).collect(),
         failed_then: false,
         money: false,
+        opens_tab: None,
     }
 }
 
