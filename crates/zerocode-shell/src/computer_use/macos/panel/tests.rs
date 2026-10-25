@@ -269,6 +269,9 @@ fn an_ended_watch_forgets_its_endpoint_and_preserves_a_new_helpers_endpoint() {
     use crate::computer_use::macos::{PANEL_ENDPOINT, StopWatch, remember_panel};
     use std::os::unix::net::UnixListener;
 
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for replacement in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("watch.sock");
@@ -297,6 +300,7 @@ fn an_ended_watch_forgets_its_endpoint_and_preserves_a_new_helpers_endpoint() {
         close.send(()).unwrap();
         server.join().unwrap();
         watch.thread.join().unwrap();
+        crate::computer_use::guard::watch_left();
         assert!(watch.ended.load(std::sync::atomic::Ordering::Acquire));
         let mut held = PANEL_ENDPOINT.lock().unwrap();
         let remaining = held.take();
@@ -306,6 +310,120 @@ fn an_ended_watch_forgets_its_endpoint_and_preserves_a_new_helpers_endpoint() {
             "watch termination forgets only the matching helper"
         );
     }
+}
+
+/// The handshake succeeds, but no listener remains for the watch's connection.
+/// Channels and socket closure fix the ordering without a real helper or input.
+fn connect_without_a_watch() -> (
+    crate::computer_use::macos::Session,
+    std::thread::JoinHandle<()>,
+    tempfile::TempDir,
+) {
+    use crate::computer_use::macos::{Launched, Session};
+    use std::os::unix::net::UnixListener;
+    use zerocode_core::computer_use::{COMPUTER_USE_PROTOCOL_VERSION, guard_table};
+
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
+    let socket = directory.path().join("provider.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let closed_socket = socket.clone();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "handshake");
+        assert_eq!(request["token"], "fixture");
+        drop(listener);
+        std::fs::remove_file(closed_socket).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({
+                "id": request["id"], "ok": true,
+                "result": {
+                    "protocolVersion": COMPUTER_USE_PROTOCOL_VERSION,
+                    "supports": {
+                        "desktop": {"guard": {"budget": guard_table()}},
+                        "windows": {"shareControlPanel": true}
+                    }
+                }
+            })
+        )
+        .unwrap();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let request: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(request["method"], "terminate");
+    });
+    let session = Session::connect(Launched {
+        directory: directory.path().to_path_buf(),
+        socket,
+        token_file: directory.path().join("provider.token"),
+        token: "fixture".into(),
+    })
+    .unwrap();
+    (session, server, directory)
+}
+
+#[test]
+fn a_watch_start_failure_forgets_the_panel_and_marks_the_session_ended() {
+    use crate::computer_use::macos::PANEL_ENDPOINT;
+
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (session, server, _directory) = connect_without_a_watch();
+    let ended = session.panel_watch_ended();
+    let forgotten = PANEL_ENDPOINT.lock().unwrap().take().is_none();
+    let report = crate::computer_use::guard::watch_report();
+    drop(session);
+    server.join().unwrap();
+    assert_eq!(
+        (forgotten, ended),
+        (true, true),
+        "a published panel whose watch never started must allow session replacement"
+    );
+    assert_eq!(report["state"], "ended");
+    assert!(report["reason"].as_str().unwrap().contains("connect:"));
+    assert_eq!(crate::computer_use::guard::watch_report()["state"], "away");
+}
+
+#[test]
+fn a_watch_start_failure_allows_only_one_panel_recovery() {
+    use crate::computer_use::macos::PANEL_ENDPOINT;
+
+    let _hand = crate::tests::computer_desktop_wait::ONE_HAND
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut delivery = Delivery::default();
+    delivery.send(update(1, None), |_| None, || true);
+    let (session, server, directory) = connect_without_a_watch();
+    let mailbox = Mailbox::default();
+    // The worker can miss the endpoint announcement while starting the helper.
+    let advertised = PanelEndpoint {
+        socket: directory.path().join("provider.sock"),
+        token: "fixture".into(),
+    };
+    mailbox.publish(&update(2, None).state, Some(advertised));
+    let remaining = PANEL_ENDPOINT.lock().unwrap().take();
+    let recoveries = Cell::new(0);
+    for revision in 3..=5 {
+        mailbox.publish(&update(revision, None).state, remaining.clone());
+        delivery.send(
+            mailbox.next(),
+            |_| None,
+            || {
+                recoveries.set(recoveries.get() + 1);
+                true // The recovery fails too: repeated notices must not loop.
+            },
+        );
+    }
+    drop(session);
+    server.join().unwrap();
+    assert_eq!(recoveries.get(), 1, "one recovery after the initial start");
+    assert_eq!(crate::computer_use::guard::watch_report()["state"], "away");
 }
 
 #[test]

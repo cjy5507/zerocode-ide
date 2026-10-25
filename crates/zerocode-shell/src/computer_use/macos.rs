@@ -437,7 +437,6 @@ fn launch() -> Result<Launched, ComputerUseError> {
 }
 
 impl Session {
-    #[cfg(not(test))]
     pub(super) fn panel_watch_ended(&self) -> bool {
         self.watching
             .as_ref()
