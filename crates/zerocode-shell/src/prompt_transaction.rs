@@ -539,6 +539,82 @@ mod tests {
         }
     }
 
+    /// A switch's commit — the ledger's write, which waits on the disk —
+    /// leaves the pump's lock free (t-74974). The pump turns every pane under
+    /// deliveries at the display rate, so one pane's move must not stop every
+    /// other pane's output for as long as the disk takes.
+    #[test]
+    fn followup_a_switch_commit_leaves_every_other_pane_pumping() {
+        let deliveries = Mutex::new(HashMap::new());
+        let queue = Mutex::new(HashMap::new());
+        let mut pump_free = None;
+        with_no_prompt_in_flight(&deliveries, &queue, 74974, &mut || {
+            pump_free = Some(std::thread::scope(|scope| {
+                scope
+                    .spawn(|| deliveries.try_lock().is_ok())
+                    .join()
+                    .unwrap()
+            }));
+        });
+        assert_eq!(
+            pump_free,
+            Some(true),
+            "the pump waits out the switch's ledger write"
+        );
+    }
+
+    /// How long the pump waits for its lock while a switch commits
+    /// (t-74974): each switch's pump asks for deliveries the moment the
+    /// commit begins, and the wait runs until it gets it. The commit stands
+    /// in for the ledger's: one row written to a SQLite file in WAL with
+    /// `synchronous = FULL`, on this machine's disk. A measurement, run by
+    /// hand with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: prints the pump's wait beside the commit's time"]
+    fn measure_the_pump_wait_during_switch_commits() {
+        const SWITCHES: usize = 40;
+        let root = tempfile::tempdir().expect("a scratch folder");
+        let ledger = rusqlite::Connection::open(root.path().join("ledger.sqlite")).unwrap();
+        ledger
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; \
+                 CREATE TABLE rests (worker INTEGER NOT NULL);",
+            )
+            .unwrap();
+        let deliveries = Mutex::new(HashMap::new());
+        let queue = Mutex::new(HashMap::new());
+        let mut commits = Vec::with_capacity(SWITCHES);
+        let mut waits = Vec::with_capacity(SWITCHES);
+        let held_by_the_pump = &deliveries;
+        for switch in 0..SWITCHES {
+            std::thread::scope(|scope| {
+                let mut pump = None;
+                with_no_prompt_in_flight(&deliveries, &queue, 74974, &mut || {
+                    let asked = Instant::now();
+                    pump = Some(scope.spawn(move || {
+                        drop(held_by_the_pump.lock().unwrap());
+                        asked.elapsed()
+                    }));
+                    ledger
+                        .execute("INSERT INTO rests (worker) VALUES (?1)", [switch])
+                        .unwrap();
+                    commits.push(asked.elapsed());
+                });
+                waits.push(pump.expect("the commit ran").join().unwrap());
+            });
+        }
+        commits.sort();
+        waits.sort();
+        eprintln!(
+            "switches={SWITCHES} commit: median {:?}, longest {:?}; \
+             pump's wait for its lock: median {:?}, longest {:?}",
+            commits[SWITCHES / 2],
+            commits[SWITCHES - 1],
+            waits[SWITCHES / 2],
+            waits[SWITCHES - 1],
+        );
+    }
+
     use zerocode_pty::ready::{Guard, PATIENCE, QUIET, Refusal, SUBMIT_GAP, TIMEOUT};
 
     #[test]

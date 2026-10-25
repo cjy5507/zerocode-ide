@@ -28529,6 +28529,65 @@ fn a_handover_whose_replacement_cannot_start_says_so_by_code_and_leaves_the_task
     assert_eq!(task.status, zerocode_core::orchestration::TaskStatus::Ready);
 }
 
+/// A line no road carried is written down and nobody is told; a refusal on
+/// a later beat for the same mail must raise the pane's notice then, because
+/// its standing says the person was told (t-74974). The beats are driven in
+/// order, each one's history read off the standing the last one left, as
+/// the pointer's own pass reads it.
+#[test]
+fn followup_a_refusal_after_an_unreached_line_raises_the_notice_its_standing_claims() {
+    use zerocode_pty::{DeliveryOutcome, ready::Refusal};
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let host = BesideADraft {
+        term: 74974,
+        offered: Mutex::new(Vec::new()),
+        told: Mutex::new(Vec::new()),
+        cleared: Mutex::new(Vec::new()),
+    };
+    let key = ("fixture-run".to_string(), "fixture-address".to_string());
+    let mut standing: Option<super::Standing> = None;
+    let mut notices = Vec::new();
+    for outcome in [
+        DeliveryOutcome::TimedOut,
+        DeliveryOutcome::Refused(Refusal::Parked),
+        DeliveryOutcome::Refused(Refusal::Parked),
+        DeliveryOutcome::Delivered,
+    ] {
+        let history = super::AdviceHistory {
+            noted: matches!(
+                standing,
+                Some(
+                    super::Standing::Unreachable
+                        | super::Standing::Withheld
+                        | super::Standing::HeldByADraft
+                )
+            ),
+            notified: standing.is_some_and(super::Standing::told_not_typed),
+        };
+        let (send, receipt) = std::sync::mpsc::sync_channel(1);
+        send.send(outcome).unwrap();
+        super::pointer_receipts()
+            .lock()
+            .unwrap()
+            .insert(key.clone(), receipt);
+        standing =
+            super::advice_standing(&host, &key.0, &key.1, host.term, "fixture-mail", history)
+                .flatten();
+        let told = host.told.lock().unwrap().len();
+        notices.push((told, host.cleared().len()));
+        assert!(
+            !standing.is_some_and(super::Standing::told_not_typed) || told > 0,
+            "after {outcome:?} the standing says the pane was told, and it never was"
+        );
+    }
+    assert_eq!(
+        notices,
+        [(0, 0), (1, 0), (1, 0), (1, 1)],
+        "(notices raised, notices cleared) after each beat"
+    );
+}
+
 /// Successful advice does not clear a notice that was never raised.
 #[test]
 fn followup_successful_advice_clears_only_a_previously_notified_condition() {
