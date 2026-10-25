@@ -990,6 +990,7 @@ fn runner_log(roots: &Roots) -> PathBuf {
 
 /// `f` on its own thread, given `secs` to answer: a reader that waits on a
 /// pipe never does, and the test says so instead of hanging.
+#[cfg(unix)]
 fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
     let (tell, hear) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

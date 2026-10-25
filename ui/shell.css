@@ -49061,10 +49061,14 @@ button.jev-token:hover {
   padding-bottom: var(--space-6);
 }
 
-.artifact-flow-list:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+.artifact-flow-list:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+}
 
-/* 등록된 저장소 밖 폴더 — 런타임이 git을 묻지 않았다는 한 줄(t-69070 P2). 목록과 빈 안내 위에 선다. */
-.artifact-flow-outside {
+/* 등록된 저장소 밖 폴더 — 런타임이 git을 묻지 않았다는 한 줄(t-69070 P2). 목록과 빈 안내 위에 선다.
+ * git이 때맞춰 답하지 못해 지난 답을 보이는 중이라는 한 줄(t-69107 ③)도 같은 자리에 같은 모양으로 선다. */
+:is(.artifact-flow-outside, .artifact-flow-stale) {
   flex: none;
   margin: 0;
   padding: var(--space-2) var(--space-4);
@@ -49132,7 +49136,10 @@ button.jev-token:hover {
 }
 
 .artifact-flow-item:hover { background: var(--row-hover); }
-.artifact-flow-item:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+.artifact-flow-item:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+}
 
 .artifact-flow-item[aria-expanded="true"] {
   background: var(--surface-deck);
@@ -49278,7 +49285,10 @@ button.jev-token:hover {
 }
 
 .artifact-flow-chip:hover { box-shadow: inset 0 0 0 var(--rule-width) var(--ink-mist); }
-.artifact-flow-chip:focus-visible { outline: none; box-shadow: 0 0 0 var(--ring-width) var(--ring); }
+.artifact-flow-chip:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
 
 .artifact-flow-chip[aria-pressed="true"] {
   background: var(--row-selected);
@@ -49325,7 +49335,10 @@ button.jev-token:hover {
 }
 
 .artifact-flow-more:hover { background: var(--row-hover); color: var(--ink-chalk); }
-.artifact-flow-more:focus-visible { outline: none; box-shadow: 0 0 0 var(--ring-width) var(--ring); }
+.artifact-flow-more:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
 .artifact-flow-more[aria-expanded="true"] .icon--twist { transform: rotate(90deg); }
 
 /* 펼친 줄: 무엇 · 왜 · 대가 세 줄, 그리고 걸음마다 한 줄 */
@@ -49452,7 +49465,10 @@ button.jev-token:hover {
 }
 
 .artifact-flow-release-head:hover { background: var(--row-hover); }
-.artifact-flow-release-head:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+.artifact-flow-release-head:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+}
 .artifact-flow-release-head .artifact-flow-node { grid-row: auto; margin-top: 0; }
 .artifact-flow-release-name { font: var(--type-label-13-mono); font-weight: 600; }
 .artifact-flow-release-when { color: var(--ink-mist); white-space: nowrap; }
@@ -49519,7 +49535,10 @@ button.jev-token:hover {
 }
 
 .artifact-flow-pile-fold:hover { background: var(--row-hover); }
-.artifact-flow-pile-fold:focus-visible { outline: none; box-shadow: inset 0 0 0 var(--accent-rule) var(--ring); }
+.artifact-flow-pile-fold:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: calc(var(--focus-ring-offset) * -1);
+}
 .artifact-flow-pile-fold .artifact-flow-node { grid-row: auto; margin-top: 0; }
 /* 무더기의 이름은 판 이름이 아니라 말이다 — 고정폭이 아니다. */
 .artifact-flow-pile-fold .artifact-flow-release-name { font: var(--type-label-13); font-weight: 600; }

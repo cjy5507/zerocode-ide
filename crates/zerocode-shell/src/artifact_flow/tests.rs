@@ -38,7 +38,7 @@ fn sha(byte: u8) -> String {
 /// One line of the walk, as git prints it in [`LOG_FORMAT`].
 fn walked(commit: &str, parents: &[&str], hours: i64, subject: &str, refs: &str) -> String {
     format!(
-        "{commit}\u{1f}{}\u{1f}{}\u{1f}{subject}\u{1f}{refs}",
+        "{commit}\u{1f}{}\u{1f}{}\u{1f}{refs}\u{1f}{subject}",
         parents.join(" "),
         at(hours) / 1000
     )
@@ -318,6 +318,7 @@ fn fixture() -> Fixture {
             unreleased,
             releases,
             notes,
+            stale: false,
         },
         ids,
         other_run,
@@ -886,7 +887,8 @@ fn a_line_says_what_was_done_and_where_it_read_it() {
         (carried_in.said.as_str(), carried_in.said_from),
         ("the docs build waits less", Said::Merge)
     );
-    assert_eq!(carried_in.run.as_deref(), Some(fixture.other_run.as_str()));
+    // Another project's run holds it, and that run is not this project's to show (t-69107 ①).
+    assert_eq!(carried_in.run, None);
     let noted = line(&flow, "t-9001");
     assert_eq!(
         (noted.said.as_str(), noted.said_from),
@@ -1508,4 +1510,246 @@ fn the_persons_ledger_counts_now_before_and_after_the_piles() {
         desk.left.settle.len(),
         desk.left.unreviewed.len(),
     );
+}
+
+/* ---- the review t-69070's P3 (t-69107) ------------------------------------- */
+
+/// ① A merge on this project's base that names a task another project's run
+/// holds is drawn from git alone — its attempts, model and hand-in summary are
+/// that other project's — while a run that states no project lends its tasks.
+#[test]
+fn a_task_another_projects_run_holds_is_drawn_from_git_alone() {
+    let fixture = fixture();
+    let flow = flow_of(&fixture, &table());
+    let carried_in = line(&flow, &fixture.ids["carried-in"]);
+    assert_ne!(
+        carried_in.run.as_deref(),
+        Some(fixture.other_run.as_str()),
+        "the line names another project's run"
+    );
+    assert!(
+        carried_in.run.is_none()
+            && carried_in.attempts.is_empty()
+            && carried_in.summary.is_none()
+            && carried_in.hand_in.is_none()
+            && carried_in.ledger_stage.is_none(),
+        "{carried_in:#?}"
+    );
+    // A run with no project of its own is nobody else's: its task is shown.
+    let mut ledger = Ledger::new();
+    let loose = ledger.create_run("loose", at(0));
+    let id = ledger
+        .create_task(
+            &loose,
+            "do it".into(),
+            "the loose work".into(),
+            vec![],
+            None,
+            at(1),
+        )
+        .expect("a task");
+    let (unreleased, releases) = parse_log(&merge_line(
+        1,
+        10,
+        &format!("Merge wt/{id} at 1111111 ({id}) — the loose work lands"),
+    ));
+    let flow = assemble(&Reading {
+        root: "/acme/app",
+        project: Some(PROJECT),
+        ledger: Some(&ledger),
+        git: &GitFacts {
+            base: Some("main".to_string()),
+            unreleased,
+            releases,
+            ..GitFacts::default()
+        },
+        table: &table(),
+        now_ms: at(READ_AT),
+    });
+    assert_eq!(line(&flow, &id).run.as_deref(), Some(loose.as_str()));
+}
+
+fn commit_in(repo: &Path, message: &str) {
+    let file = repo
+        .parent()
+        .expect("the folder holding it")
+        .join("message.txt");
+    std::fs::write(&file, message).expect("a message");
+    git_in(
+        repo,
+        &[
+            "-c",
+            "user.name=ZeroCode Test",
+            "-c",
+            "user.email=test@zerocode",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-F",
+            &file.to_string_lossy(),
+        ],
+    );
+}
+
+fn no_held() -> Mutex<Vec<GitHeld>> {
+    Mutex::new(Vec::new())
+}
+
+/// ② What git answers is read to a bound: a changelog past it gives no notes
+/// and does not stop the rest, and a log past it is no answer at all — a repository
+/// somebody else wrote is not read whole into this window's memory.
+#[test]
+fn what_git_answers_is_read_to_a_bound() {
+    const BIG: usize = 5 * 1024 * 1024;
+    let (_held, repo) = repository();
+    std::fs::write(
+        repo.join(FLOW.notes_file),
+        format!(
+            "# Changelog\n\n## [1.0.0] — 2026-10-25\n\n- the note (t-1)\n\n{}",
+            "- padding\n".repeat(BIG / 10)
+        ),
+    )
+    .expect("a heavy changelog");
+    git_in(&repo, &["add", FLOW.notes_file]);
+    commit_in(&repo, "release: v1.0.0\n");
+    git_in(&repo, &["tag", "v1.0.0"]);
+    let facts = git_facts_in(&no_held(), 8, &repo, at(0));
+    assert_eq!(
+        facts.base.as_deref(),
+        Some("main"),
+        "the rest of the answer stands"
+    );
+    assert_eq!(facts.releases.len(), 1);
+    assert!(
+        facts.notes.is_empty(),
+        "a changelog of {} MiB was read whole",
+        BIG / (1024 * 1024)
+    );
+    // A subject past any bound: the walk is not answered.
+    commit_in(&repo, &format!("{}\n", "x".repeat(BIG)));
+    let facts = git_facts_in(&no_held(), 8, &repo, at(0));
+    assert!(
+        facts.base.is_none() && facts.releases.is_empty(),
+        "a log of {} MiB was read whole",
+        BIG / (1024 * 1024)
+    );
+}
+
+/// The ref the base stands on, made unreadable and given back.
+fn break_main(repo: &Path) -> impl FnOnce() {
+    let path = repo.join(".git/refs/heads/main");
+    let was = std::fs::read_to_string(&path).expect("main is a loose ref");
+    std::fs::write(&path, "not a commit\n").expect("a broken ref");
+    move || std::fs::write(&path, was).expect("the ref back")
+}
+
+/// ③ git failing once does not blank a flow the window already draws: the last
+/// answer stands, says it is being read again, and git is not asked again for
+/// as long as a failure is remembered.
+#[test]
+fn a_git_that_fails_leaves_the_last_answer_standing_and_is_not_asked_again_at_once() {
+    let (_held, repo) = repository();
+    let held = no_held();
+    let good = git_facts_in(&held, 8, &repo, at(0));
+    assert_eq!((good.base.as_deref(), good.stale), (Some("main"), false));
+    let restore = break_main(&repo);
+    let failed_at = at(0) + FLOW.git_fresh_ms + 1;
+    let stale = git_facts_in(&held, 8, &repo, failed_at);
+    assert_eq!(
+        (stale.base.as_deref(), stale.stale),
+        (Some("main"), true),
+        "one failed read emptied the flow"
+    );
+    restore();
+    // git would answer now, but a failure is remembered for a while.
+    let within = git_facts_in(&held, 8, &repo, failed_at + FLOW.git_fresh_ms + 1);
+    assert!(within.stale, "git was asked again at once after a failure");
+    let later = git_facts_in(&held, 8, &repo, failed_at + FLOW.git_retry_ms + 1);
+    assert_eq!((later.base.as_deref(), later.stale), (Some("main"), false));
+}
+
+/// ③ The read says so: a flow whose git answer is the last one says `stale`.
+#[test]
+fn a_flow_read_over_a_stale_answer_says_so() {
+    let (_held, repo) = repository();
+    let ask = ask_for(&repo, &[&repo]);
+    let projects = [repo.clone()];
+    let fresh_at = at(1_000);
+    let first = read(&ask, &projects, fresh_at);
+    assert_eq!(first.git, GitAsked::Kept);
+    let restore = break_main(&repo);
+    let flow = read(&ask, &projects, fresh_at + FLOW.git_fresh_ms + 1);
+    restore();
+    assert_eq!(
+        serde_json::to_value(&flow).expect("the flow serializes")["git"],
+        "stale"
+    );
+    assert_eq!(flow.base.as_deref(), Some("main"));
+}
+
+/// ④ A subject that holds the walk's own field mark does not move the tags
+/// into the subject's place: no release a subject names is a release.
+#[test]
+fn a_subject_with_the_field_mark_makes_no_release() {
+    let (_held, repo) = repository();
+    commit_in(&repo, "evil\u{1f}tag: v9.9.9\u{1f}x\n");
+    let facts = git_facts_in(&no_held(), 8, &repo, at(0));
+    let versions: Vec<&str> = facts
+        .releases
+        .iter()
+        .map(|release| release.version.as_str())
+        .collect();
+    assert!(
+        versions.is_empty(),
+        "a subject made a release: {versions:?}"
+    );
+}
+
+/// ⑤ The walk names its revision and then ends the revisions with `--`: a file
+/// in the work tree called `main` does not make `main` ambiguous.
+#[test]
+fn a_file_named_like_the_branch_does_not_make_the_walk_ambiguous() {
+    let (_held, repo) = repository();
+    std::fs::write(repo.join("main"), "a file\n").expect("a file named main");
+    let walked = format!("{:?}", walk_at(&repo, "main"));
+    assert!(walked.contains("first"), "the walk was refused: {walked}");
+}
+
+/// ⑥ The eight repositories kept are the last used, not the last read whole:
+/// a repository asked again keeps its place, and the one not asked for longest
+/// goes.
+#[test]
+fn the_repositories_kept_are_the_last_used() {
+    let held = no_held();
+    let made: Vec<_> = (0..3).map(|_| repository()).collect();
+    let [(_a, one), (_b, two), (_c, three)] = [&made[0], &made[1], &made[2]];
+    let now = at(0);
+    git_facts_in(&held, 2, one, now);
+    git_facts_in(&held, 2, two, now);
+    // `one` is asked again within the time its answer stands, so it is the last used.
+    git_facts_in(&held, 2, one, now + 1);
+    git_facts_in(&held, 2, three, now + 2);
+    let roots: Vec<PathBuf> = held
+        .lock()
+        .expect("held")
+        .iter()
+        .map(|kept| kept.root.clone())
+        .collect();
+    assert!(
+        roots.contains(one) && roots.contains(three) && !roots.contains(two),
+        "the one asked longest ago was kept: {roots:?}"
+    );
+}
+
+/// ⑥ A trailing slash is the same repository.
+#[test]
+fn a_path_with_a_trailing_slash_is_the_same_repository() {
+    let (_held, repo) = repository();
+    let held = no_held();
+    git_facts_in(&held, 8, &repo, at(0));
+    let slashed = PathBuf::from(format!("{}/", repo.display()));
+    git_facts_in(&held, 8, &slashed, at(0) + 1);
+    assert_eq!(held.lock().expect("held").len(), 1);
 }
