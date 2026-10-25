@@ -220,6 +220,18 @@ fn shown_project(host: &Placed, team: &str, run_id: &str) -> serde_json::Value {
     json_from_leader(host, team, &format!("run-show --run {run_id}"))["project"].clone()
 }
 
+/// The window log's lines that carry every one of `needles` and were written
+/// about a verb from terminal `term` — the pane this test made, whose number no
+/// other test uses. The log is one file for the whole bench window, and run ids
+/// repeat from one test's ledger to the next, so a run id alone names another
+/// test's line as readily as its own (t-74271).
+fn logged_from(term: u32, needles: &[&str]) -> Vec<String> {
+    let from = format!("from terminal {term} (");
+    let mut all = vec![from.as_str()];
+    all.extend_from_slice(needles);
+    logged(&all)
+}
+
 /// The window log's lines that carry every one of `needles`.
 fn logged(needles: &[&str]) -> Vec<String> {
     let blackbox = super::super::BLACKBOX
@@ -924,7 +936,8 @@ fn one_project_in_two_folders(a: u32, a_beside: u32, port: u32, foreign_line_in_
     let read = from_leader(&host, &team_beside, &format!("check --run {run_id}"));
     assert_eq!(read.exit_code, 0, "{}", read.stderr);
     assert!(
-        logged(&[&format!("into {run_id} of")]).is_empty(),
+        logged_from(a_beside, &[&format!("into {run_id} of")]).is_empty()
+            && logged_from(a, &[&format!("into {run_id} of")]).is_empty(),
         "a verb within one project was written down as a crossing"
     );
 
@@ -987,8 +1000,10 @@ fn two_runs_of_one_project_still_send_and_reply_with_the_boundary_on() {
         "the answer from {two} did not come back to {one}'s coordinator"
     );
     assert!(
-        logged(&[&format!("into {one} of")]).is_empty()
-            && logged(&[&format!("into {two} of")]).is_empty(),
+        [A, A_TASK].into_iter().all(|term| {
+            logged_from(term, &[&format!("into {one} of")]).is_empty()
+                && logged_from(term, &[&format!("into {two} of")]).is_empty()
+        }),
         "a verb between two runs of one project was written down as a crossing"
     );
 
