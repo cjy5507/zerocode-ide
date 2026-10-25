@@ -6,7 +6,9 @@ use zerocode_core::computer_use::ComputerMethod;
 use zerocode_core::computer_use_protocol::error_code;
 
 use super::stand_in;
-use super::{Decision, admit, ensure_current, give_back, state, take_control};
+use super::{
+    Decision, SHARE_ASK_AGAIN_MS, admit, ensure_current, give_back, hand_over, state, take_control,
+};
 
 fn person(answer: Decision) -> (stand_in::Standing, Rc<Cell<u32>>) {
     let asked = Rc::new(Cell::new(0));
@@ -258,4 +260,111 @@ fn the_panel_reuses_the_renderers_words_without_changing_the_share_stamp() {
     assert_eq!(state()["buttonLabel"], "Take control");
     super::panel_label(Some(String::new()));
     assert_eq!(state()["buttonLabel"], "Take control");
+}
+
+/// R1 (t-74826): with sharing required, an unanswered card is no lasting no.
+/// The agent's acts in that app are refused at once, with no new card, for
+/// the quiet; the first act after it raises the card again.
+#[test]
+fn required_silence_asks_again_after_the_quiet_and_never_in_it() {
+    super::with_held(|held| held.share.set_required(true));
+    let (_person, asked) = person(Decision::TimedOut);
+    for _ in 0..3 {
+        assert_eq!(
+            refused(ComputerMethod::Click, &click("Notes")).as_deref(),
+            Some(error_code::SHARE_REQUIRED)
+        );
+    }
+    assert_eq!(asked.get(), 1, "no card within the quiet");
+    stand_in::advance(SHARE_ASK_AGAIN_MS - 1);
+    assert_eq!(
+        refused(ComputerMethod::Click, &click("Notes")).as_deref(),
+        Some(error_code::SHARE_REQUIRED)
+    );
+    assert_eq!(asked.get(), 1);
+    stand_in::advance(1);
+    assert_eq!(
+        refused(ComputerMethod::Click, &click("Notes")).as_deref(),
+        Some(error_code::SHARE_REQUIRED)
+    );
+    assert_eq!(asked.get(), 2, "the first act after the quiet asks again");
+}
+
+/// A yes on the card raised again shares the app as the first one would.
+#[test]
+fn a_yes_on_the_card_raised_again_shares_the_waiting_app() {
+    super::with_held(|held| held.share.set_required(true));
+    let answers = Rc::new(Cell::new(Decision::TimedOut));
+    let answering = Rc::clone(&answers);
+    let _person = stand_in::stand(move |_| answering.get());
+    assert!(admit(ComputerMethod::Click, &click("Notes")).is_err());
+    answers.set(Decision::Allowed);
+    stand_in::advance(SHARE_ASK_AGAIN_MS);
+    assert!(admit(ComputerMethod::Click, &click("Notes")).is_ok());
+    assert_eq!(state()["target"], "notes");
+    assert!(state()["waiting"].is_null());
+}
+
+/// The card says whether silence lets the run go on unshared or keeps the
+/// agent waiting, so its clock can say which.
+#[test]
+fn the_card_says_whether_sharing_is_required() {
+    let cards = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = Rc::clone(&cards);
+    let _person = stand_in::stand(move |card| {
+        seen.borrow_mut().push(serde_json::to_value(card).expect("a card"));
+        Decision::TimedOut
+    });
+    let _ = admit(ComputerMethod::Click, &click("Calculator"));
+    super::with_held(|held| held.share.set_required(true));
+    let _ = admit(ComputerMethod::Click, &click("Notes"));
+    let cards = cards.borrow();
+    assert_eq!(cards.len(), 2, "{cards:?}");
+    assert_eq!(cards[0]["required"], false);
+    assert_eq!(cards[1]["required"], true);
+}
+
+/// The person can hand the waiting app over later from the band: no card,
+/// that app only, and the band hears what waits and what is shared.
+#[test]
+fn the_person_hands_the_waiting_app_over_later_from_the_band() {
+    super::with_held(|held| held.share.set_required(true));
+    let (_person, asked) = person(Decision::TimedOut);
+    assert!(admit(ComputerMethod::Click, &click("Notes")).is_err());
+    assert_eq!(state()["waiting"], "notes");
+    assert_eq!(state()["waitingLabel"], "Notes");
+    assert!(
+        stand_in::notices()
+            .iter()
+            .any(|notice| notice["waiting"] == "notes"),
+        "the band hears the wait: {:?}",
+        stand_in::notices()
+    );
+    assert!(!hand_over("Safari"), "only the app that waits");
+    assert!(state()["target"].is_null());
+    assert!(hand_over("notes"));
+    assert_eq!(state()["target"], "notes");
+    assert_eq!(state()["label"], "Notes");
+    assert!(state()["waiting"].is_null());
+    assert!(admit(ComputerMethod::Click, &click("Notes")).is_ok());
+    assert_eq!(asked.get(), 1, "handing over raises no card");
+    assert!(
+        stand_in::notices()
+            .last()
+            .is_some_and(|notice| notice["target"] == "notes" && notice["waiting"].is_null()),
+        "{:?}",
+        stand_in::notices()
+    );
+}
+
+/// Without required sharing nothing waits and the band offers nothing new.
+#[test]
+fn without_required_sharing_nothing_waits() {
+    let (_person, asked) = person(Decision::TimedOut);
+    assert!(admit(ComputerMethod::Click, &click("Calculator")).is_ok());
+    stand_in::advance(SHARE_ASK_AGAIN_MS * 10);
+    assert!(admit(ComputerMethod::Click, &click("Calculator")).is_ok());
+    assert_eq!(asked.get(), 1);
+    assert!(state()["waiting"].is_null());
+    assert!(!hand_over("calculator"));
 }

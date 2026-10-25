@@ -220,7 +220,11 @@ fn every_step_asks_the_share_and_the_band_is_the_persons() {
         "a command is admitted to the share before it acts"
     );
     let person = person_only_commands();
-    for name in ["computer_take_control", "computer_give_back"] {
+    for name in [
+        "computer_take_control",
+        "computer_give_back",
+        "computer_share_hand_over",
+    ] {
         assert!(person.contains(&name.to_string()), "{name} is the person's");
     }
 }
