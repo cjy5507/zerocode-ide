@@ -246,6 +246,13 @@ pub(crate) fn echo_program(dir: &Path) -> String {
     }
 }
 
+/// The one way a test takes a loopback port nobody else can come to (t-74864):
+/// a silent port for a connection that must be refused, or a claimed one it
+/// will bind, free and bind again. The source is shared with the other crates'
+/// test binaries.
+#[path = "../../../tools/test-support/quiet_ports.rs"]
+pub(crate) mod quiet_ports;
+
 #[cfg(test)]
 mod tests {
     use super::*;

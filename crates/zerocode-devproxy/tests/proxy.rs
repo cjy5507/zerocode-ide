@@ -15,6 +15,11 @@ use url::Url;
 use zerocode_core::localhost_label::{LabelInput, RouteSpec};
 use zerocode_devproxy::{AllowedPorts, ProxyState, RouteError, TargetGate, serve};
 
+/// The one way a test here takes a port nobody listens on (t-74864).
+#[path = "../../../tools/test-support/quiet_ports.rs"]
+mod quiet_ports;
+use quiet_ports::QuietPort;
+
 /// A gate that says yes, for the tests that are about something else.
 struct OpenGate;
 impl TargetGate for OpenGate {
@@ -71,12 +76,6 @@ async fn capturing_upstream(answer: &'static str) -> Upstream {
         }
     });
     Upstream { port, seen, task }
-}
-
-/// A port nobody is listening on: bound, read, dropped.
-async fn dead_port() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    listener.local_addr().unwrap().port()
 }
 
 /// An upstream answer carrying one hop-by-hop field of its own, so a leak of
@@ -341,7 +340,9 @@ async fn a_loopback_target_the_gate_does_not_know_is_refused_at_registration() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_upstream_that_is_not_there_is_a_plain_text_502_that_names_nothing() {
     let (state, port, _task) = proxy(Arc::new(OpenGate)).await;
-    let target = format!("http://127.0.0.1:{}/", dead_port().await);
+    // Kept to the end of the test, so nobody is given the port meanwhile.
+    let silent = QuietPort::silent();
+    let target = format!("http://127.0.0.1:{}/", silent.port());
     state.register(&spec("/w/a", &target)).unwrap();
     let answered = ask(port, &get("ui-auth", port, "/")).await;
     assert!(answered.starts_with("HTTP/1.1 502"), "{answered}");

@@ -3,7 +3,6 @@
 //! door before any socket. Every case here crosses a real socket or none at
 //! all.
 
-use std::net::TcpListener;
 use std::time::Duration;
 
 use serde_json::json;
@@ -269,10 +268,8 @@ fn a_socket_that_answers_nothing_is_transport() {
     // A seat nobody is sitting in: the connection is refused at once — on
     // Windows after the stack's own SYN retries (about two seconds, measured
     // on the public runner), which the call's deadline answers first.
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
-    let addr = listener.local_addr().expect("its address");
-    drop(listener);
-    let (_home, mut judge) = consented_judge(&format!("http://{addr}"));
+    let silent = crate::test_host::quiet_ports::QuietPort::silent();
+    let (_home, mut judge) = consented_judge(&format!("http://{}", silent.addr()));
 
     let refused = if cfg!(windows) { TIMEOUT } else { TRANSPORT };
     assert_eq!(judge.choose(&asked()), Judged::Refused(refused.to_string()));
