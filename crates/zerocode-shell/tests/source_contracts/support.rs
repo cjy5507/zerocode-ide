@@ -722,6 +722,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
     ),
     ("shell-jev.js", include_str!("../../../../ui/shell-jev.js")),
     (
+        "shell-inbox.js",
+        include_str!("../../../../ui/shell-inbox.js"),
+    ),
+    (
         "shell-flow.js",
         include_str!("../../../../ui/shell-flow.js"),
     ),
