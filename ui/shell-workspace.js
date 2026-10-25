@@ -1048,6 +1048,9 @@ function worktreeMenuAt(worktree, x, y) {
  * that one tab and carrying on: "no" answered about a file is also an answer
  * about the sweep it was asked inside. */
 async function closeTabRun(list) {
+  // The press's hand, carried past each document's let-go (an await): the
+  // terminals in the run end as the person's (t-75153, R7b).
+  const started = handNow();
   for (const tab of list) {
     // Every bulk close walks around the pins — Orca's own filters
     // (`closeOtherTabs`/`closeTabsToRight`, I18nProvider:58085): "close the
@@ -1055,7 +1058,7 @@ async function closeTabRun(list) {
     if (tab.pinned) continue;
 
     if (!isDocument(tab)) {
-      closeTab(tab.id);
+      closeTab(tab.id, flowHand(started));
       continue;
     }
     // The same two steps `closeTab` takes for a document, in the order it
@@ -13883,7 +13886,7 @@ async function killResourceSession(session) {
   paintResourcePop();
   try {
     if (session.kind === "lane") await invoke("close_lane", { id: session.lane }, { hand: flowHand(started) });
-    else await invoke("end_terminal_session", { term: session.term });
+    else await invoke("end_terminal_session", { term: session.term }, { hand: flowHand(started) });
   } catch (error) {
     resourceManager.operationError = t("resource.endFailed", "세션을 종료하지 못했습니다.");
     resourceManager.error = resourceManager.operationError;
@@ -13951,7 +13954,7 @@ async function killAllResourceSessions() {
     sessions.filter((session) => session.kind === "lane").map((session) => session.lane),
   )];
   const results = await Promise.allSettled([
-    invoke("end_all_terminal_sessions"),
+    invoke("end_all_terminal_sessions", undefined, { hand: flowHand(started) }),
     ...laneIds.map((id) => invoke("close_lane", { id }, { hand: flowHand(started) })),
   ]);
   resourceManager.killing.clear();

@@ -3195,6 +3195,9 @@ pub(super) enum TerminalCloseError {
     SignalFailed,
     Unconfirmed,
     Replaced,
+    /// `close_mirror_term` was asked to close a term no mirror pane holds:
+    /// only `close_term`, on the person's hand, ends that (t-75153, R7b).
+    NotMirror,
 }
 
 /// Retire one observed shell after its exit is confirmed.

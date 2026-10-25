@@ -777,8 +777,56 @@ pub(crate) fn open_mirror_term(
         &format!("term {id} spawned tail (mirror)"),
     );
     state.hold_terminal(id, pty);
+    note_mirror_term(id);
     state.cadence().wake();
     Ok(id)
+}
+
+/// The terms [`open_mirror_term`] started: a `tail -F` over a run's mirror
+/// file, nothing typed into them and nothing lost when one closes. The window
+/// replaces a run's mirror and takes down one whose parent left on no
+/// person's hand — a backend notice, a timer — so they close through
+/// [`close_mirror_term`], which ends these and nothing else; `close_term`
+/// stays the person's (t-75153, R7b).
+static MIRROR_TERMS: std::sync::Mutex<std::collections::BTreeSet<TermId>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn mirror_terms() -> std::sync::MutexGuard<'static, std::collections::BTreeSet<TermId>> {
+    MIRROR_TERMS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(crate) fn note_mirror_term(term: TermId) {
+    mirror_terms().insert(term);
+}
+
+pub(crate) fn forget_mirror_term(term: TermId) {
+    mirror_terms().remove(&term);
+}
+
+/// Whether `term` is a mirror pane [`close_mirror_term`] may end.
+pub(crate) fn mirror_close_allowed(term: TermId) -> Result<(), TerminalCloseError> {
+    if mirror_terms().contains(&term) {
+        Ok(())
+    } else {
+        Err(TerminalCloseError::NotMirror)
+    }
+}
+
+/// Close one mirror pane the window opened — the same retirement as
+/// [`close_term`], refused for any other term.
+#[tauri::command(async)]
+pub(crate) fn close_mirror_term(
+    state: State<'_, AppState>,
+    term: TermId,
+) -> Result<(), TerminalCloseError> {
+    mirror_close_allowed(term)?;
+    let retired = retire_terminal(&state, term);
+    if retired.is_ok() {
+        forget_mirror_term(term);
+    }
+    retired.map(|_| ())
 }
 
 #[tauri::command(async)]

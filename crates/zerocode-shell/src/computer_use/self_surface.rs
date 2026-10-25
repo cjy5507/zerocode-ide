@@ -159,6 +159,11 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "set_skip_delete_automation_confirm",
     "set_skip_close_terminal_with_running_process_confirm",
     "set_confirm_close_pinned",
+    // What the session manager ends, a terminal and the program in it, and
+    // Computer Use's own confirmations turned off (t-75153, R7b).
+    "end_terminal_session",
+    "end_all_terminal_sessions",
+    "set_computer_confirm",
 ];
 
 /// Commands whose names touch a key, a secret, a token, a password, a
@@ -229,6 +234,12 @@ pub(crate) const AGENT_ALLOWED_DESTRUCTIVE_NAMED: &[&str] = &[
     // Presets, not a reset.
     "api_router_presets",
     "github_preset_query",
+    // A mirror pane the window opened over a run's log: a `tail -F` the run
+    // goes on without (t-75153, R7b).
+    "close_mirror_term",
+    // The person's session regrant on a work browser turned off: the agent
+    // loses a grant; the person keeps everything (t-66200).
+    "end_browser_workspace_regrant",
 ];
 
 /// The header in which the page's one `invoke` says whose hand made a call

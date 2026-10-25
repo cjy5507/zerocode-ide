@@ -4444,15 +4444,7 @@ const askFrame = askScrim.querySelector(".permission");
  * answering a question its person has not read. So a repeating Enter or Space
  * answers nothing here; a repeating Escape is left out by the modal manager
  * (`ignoresRepeat`, shell-input.js). */
-askScrim.addEventListener(
-  "keydown",
-  (event) => {
-    if (!event.repeat || (event.key !== "Enter" && event.key !== " ")) return;
-    event.preventDefault();
-    event.stopPropagation();
-  },
-  true,
-);
+askScrim.addEventListener("keydown", stopRepeatedPress, true);
 
 function registerAskKind(name, kind) {
   askKinds.set(name, kind);
@@ -9127,7 +9119,12 @@ function closeTermAndView(term, road, hand = handNow()) {
   const waiting = terminalCloseRequests.get(term);
   if (waiting) return waiting.promise;
   const receipt = { promise: null, exited: false };
-  const request = Promise.resolve().then(() => invoke("close_term", { term }, { hand })).then(() => {
+  // A mirror pane — a `tail -F` the window opened over a run's log — closes
+  // on no person's hand, by its own door (t-75153, R7b).
+  const closing = road.startsWith("mirror-")
+    ? () => invoke("close_mirror_term", { term })
+    : () => invoke("close_term", { term }, { hand });
+  const request = Promise.resolve().then(closing).then(() => {
     dropClosedTermLeaf(term, road);
     return true;
   }, (error) => {

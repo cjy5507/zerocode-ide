@@ -9532,7 +9532,19 @@ mod tests {
 
         let window = window_source();
         let request = block_after(window, "function closeTermAndView(");
-        assert!(request.contains("invoke(\"close_term\", { term }, { hand })).then(() => {"));
+        assert!(request.contains("Promise.resolve().then(closing).then(() => {"));
+        // A mirror pane closes by its own door, which ends mirrors only
+        // (t-75153, R7b); every other close is `close_term` on the hand.
+        assert!(request.contains(concat!(
+            "  const closing = road.startsWith(\"mirror-\")\n",
+            "    ? () => invoke(\"close_mirror_term\", { term })\n",
+            "    : () => invoke(\"close_term\", { term }, { hand });\n",
+        )));
+        assert_eq!(
+            window.matches("invoke(\"close_mirror_term\"").count(),
+            1,
+            "another door closes a mirror pane"
+        );
         assert!(
             request.contains("dropClosedTermLeaf(term, road);")
                 && request.contains("showError(terminalCloseFailure(error))")

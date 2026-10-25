@@ -1007,6 +1007,9 @@ const ACTIONS = [
     // What ⌘W means everywhere: close the tab in front of you. On the lane's
     // tab that is the lane, because the tab is the lane's only surface.
     id: "tab.close", group: "tabs", allowInTerminal: true,
+    // A held ⌘W repeats; only its first keydown closes (t-75153, R7b): each
+    // repeat would end the next terminal as the person's own press.
+    repeats: false,
     // Orca's own, copied: `searchKeywords` on the definition
     // this mirrors (`plugin-manifest-Dq3wpxrr.js`).
     keywords: ["shortcut", "close", "tab", "pane"],
@@ -1562,6 +1565,7 @@ window.addEventListener("keydown", (event) => {
     // ⌘R on a file tab is not this window's to eat.
     if (shortcut?.action) {
       event.preventDefault();
+      if (event.repeat && shortcut.action.repeats === false) return;
       shortcut.action.run();
       return;
     }

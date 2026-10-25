@@ -3197,7 +3197,7 @@ for (const kind of COMPUTER_CONFIRM_KINDS) {
   el(`computer-confirm-${kind}`).addEventListener("change", () => {
     const on = el(`computer-confirm-${kind}`).checked;
     computerConfirmPolicy[kind] = on;
-    void commitSetting(`computer_confirm_${kind}`, "set_computer_confirm", { kind, on });
+    void commitSetting(`computer_confirm_${kind}`, "set_computer_confirm", { kind, on }, { hand: handNow() });
   });
 }
 
@@ -7997,14 +7997,16 @@ async function refreshTerminalSessions() {
   }
 }
 
-async function runTerminalSessionMutation(command, args) {
+// `hand` is the hand of the flow that asks (shell-boot.js `flowHand`):
+// ending a session is the person's (t-75153, R7b).
+async function runTerminalSessionMutation(command, args, { hand } = {}) {
   if (terminalSessionsLoading) return;
   ++terminalSessionsGeneration;
   terminalSessionsLoading = true;
   terminalSessionsProblem = "";
   paintTerminalSessions();
   try {
-    await invoke(command, args);
+    await invoke(command, args, { hand });
     terminalSessionsLoading = false;
     await refreshTerminalSessions();
   } catch (error) {
@@ -8019,6 +8021,7 @@ async function runTerminalSessionMutation(command, args) {
 }
 
 async function requestEndTerminalSession(session) {
+  const started = handNow();
   const label = managedTerminalSessionLabel(session);
   const accepted = await askConfirm({
     title: t("settings.terminal.sessionsEndOneTitle", "터미널 세션을 종료할까요?"),
@@ -8032,11 +8035,12 @@ async function requestEndTerminalSession(session) {
     danger: true,
   });
   if (accepted === true) {
-    await runTerminalSessionMutation("end_terminal_session", { term: session.term });
+    await runTerminalSessionMutation("end_terminal_session", { term: session.term }, { hand: flowHand(started) });
   }
 }
 
 async function requestEndAllTerminalSessions() {
+  const started = handNow();
   const count = managedTerminalSessions.length;
   if (count === 0) return;
   const accepted = await askConfirm({
@@ -8051,7 +8055,7 @@ async function requestEndAllTerminalSessions() {
     danger: true,
   });
   if (accepted === true) {
-    await runTerminalSessionMutation("end_all_terminal_sessions", {});
+    await runTerminalSessionMutation("end_all_terminal_sessions", {}, { hand: flowHand(started) });
   }
 }
 

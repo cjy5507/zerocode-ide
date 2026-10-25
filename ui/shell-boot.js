@@ -66,6 +66,27 @@ function personMove(event) {
   return PERSON_MOVES.includes(event.type) || event instanceof InputEvent;
 }
 
+/* One key, one press (t-75153, R7b). A held Enter or Space repeats, and each
+ * repeat on a focused button, link or box presses it again — as the person's
+ * own key. The ask popup has said so since it stood (shell-term.js); every
+ * control the keyboard can press says it here. Typing keeps its repeats: a
+ * field, an editor and the terminal are not pressed. */
+function stopRepeatedPress(event) {
+  if (!event.repeat || (event.key !== "Enter" && event.key !== " ")) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+const PRESSED_BY_KEY = 'button, a[href], summary, [role="button"], [role="menuitem"], [role="link"], '
+  + 'input[type="button"], input[type="submit"], input[type="reset"], input[type="checkbox"], input[type="radio"]';
+
+function stopRepeatedControlPress(event) {
+  if (event.target instanceof Element && event.target.matches(PRESSED_BY_KEY)) stopRepeatedPress(event);
+}
+
+window.addEventListener("keydown", stopRepeatedControlPress, true);
+
 /* The hand of the event the page is answering right now. */
 function handNow() {
   if (agentPressing) return "agent";
