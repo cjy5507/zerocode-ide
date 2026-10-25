@@ -137,6 +137,20 @@ fn recorded_input(step: &Step) -> privacy::InputPolicy {
     policy
 }
 
+/// A parameter name for an upload's file at step `n`: `file_<n>`, and
+/// `file_<n>_<k>` for the step's later files.
+fn free_file(n: usize, taken: &mut std::collections::BTreeSet<String>) -> String {
+    let base = format!("file_{n}");
+    let mut name = base.clone();
+    let mut suffix = 2;
+    while taken.contains(&name) {
+        name = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    taken.insert(name.clone());
+    name
+}
+
 fn free_secret(n: usize, taken: &mut std::collections::BTreeSet<String>) -> String {
     let base = format!("secret_text_{n}");
     let mut name = base.clone();
@@ -231,11 +245,22 @@ pub fn recipe_markdown(name: &str, note: Option<&str>, steps: &[Step], at_epoch_
         let went = saved.step.ok || saved.handed_back;
         let input = recorded_input(saved.step);
         let value_positions = privacy::value_positions(saved.tool.as_str(), &saved.words);
+        let file_positions = privacy::file_positions(saved.tool.as_str(), &saved.words);
         let mut words: Vec<String> = saved
             .words
             .iter()
             .enumerate()
             .map(|(index, word)| {
+                if file_positions.contains(&index) && !privacy::is_parameter_word(word) {
+                    // A path is where a file sat on one machine: the next run
+                    // is given the file, and the document names no folder.
+                    let param = free_file(n, &mut taken);
+                    params.push((
+                        param.clone(),
+                        format!("the file chosen at step {n}; its path was not stored"),
+                    ));
+                    return format!("${param}");
+                }
                 match (
                     value_positions.contains(&index),
                     crate::run_evidence::redacted_chars(word),
@@ -906,6 +931,74 @@ mod tests {
         );
     }
 
+    fn save_browser_steps(name: &str, rows: &[&[&str]]) -> String {
+        let root = tempfile::tempdir().unwrap();
+        let evidence = root.path().join("evidence");
+        std::fs::create_dir_all(&evidence).unwrap();
+        let lines: Vec<String> = rows
+            .iter()
+            .enumerate()
+            .map(|(at, argv)| {
+                let recorded = Step {
+                    tool: "browser".into(),
+                    ..step(at + 1, argv, true)
+                };
+                serde_json::to_string(&recorded).unwrap()
+            })
+            .collect();
+        std::fs::write(
+            evidence.join("steps.jsonl"),
+            format!("{}\n", lines.join("\n")),
+        )
+        .unwrap();
+        let path = save(root.path(), name, None, &evidence, None, 1).unwrap();
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    #[test]
+    fn a_saved_upload_names_its_files_by_parameter_and_never_by_path() {
+        // An older log kept the whole path; a new one keeps the name only.
+        for logged in ["/Users/dev/Documents/receipt.pdf", "receipt.pdf"] {
+            let text = save_browser_steps(
+                "Upload",
+                &[
+                    &["upload", "browser-1", "#receipt", logged],
+                    &[
+                        "upload",
+                        "browser-1",
+                        "#more",
+                        "--drop",
+                        logged,
+                        "/Users/dev/Pictures/scan.png",
+                    ],
+                ],
+            );
+            assert!(!text.contains("/Users/dev"), "a folder was saved: {text}");
+            assert!(!text.contains("receipt.pdf"), "a file was saved: {text}");
+            assert!(
+                text.contains("zerocode-browser upload $tab #receipt $file_1"),
+                "{text}"
+            );
+            assert!(text.contains("#more --drop $file_2 $file_2_2"), "{text}");
+            assert!(text.contains("- `{{file_1}}` — "), "{text}");
+            let lines = zerocode_core::computer_recipe::recipe_lines(&text).unwrap();
+            assert_eq!(
+                zerocode_core::computer_recipe::params_of(&lines),
+                ["file_1", "file_2", "file_2_2"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_saved_upload_keeps_a_parameter_it_was_walked_with() {
+        let text = save_browser_steps(
+            "Upload",
+            &[&["upload", "browser-1", "#receipt", "$file_receipt"]],
+        );
+        assert!(text.contains("#receipt $file_receipt`"), "{text}");
+        assert!(!text.contains("$file_1"), "{text}");
+    }
+
     #[test]
     fn an_ordinary_recipe_field_cannot_save_a_card_shaped_value_or_a_credential_url() {
         for argv in [
@@ -1081,10 +1174,24 @@ mod tests {
                     saved.contains("zerocode-browser upload"),
                     "the attachment must survive save: {saved}"
                 );
+                let receipt = ready["receipt"].as_str().unwrap();
+                assert!(
+                    !saved.contains(receipt) && !saved.contains("receipt.txt"),
+                    "the attachment's path must not survive save: {saved}"
+                );
                 let lines = zerocode_core::computer_recipe::recipe_lines(&saved).unwrap();
                 let mut values = serde_json::Map::new();
                 let mut fills = 0;
                 for line in &lines {
+                    if line.argv[0] == "upload" {
+                        // The attachment is the replay's to be given.
+                        let file = line.argv.last().unwrap();
+                        assert!(
+                            zerocode_core::computer_recipe::privacy::is_file_parameter(file),
+                            "{file}"
+                        );
+                        values.insert(file[1..].to_string(), Value::String(receipt.into()));
+                    }
                     if line.argv[0] == "fill" {
                         let name = zerocode_core::computer_recipe::recipe_placeholders(
                             line.argv.last().unwrap(),

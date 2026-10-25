@@ -232,11 +232,16 @@ pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
     };
     let argv = &plain;
     let positions = zerocode_core::computer_recipe::privacy::value_positions(tool, argv);
+    let files = zerocode_core::computer_recipe::privacy::file_positions(tool, argv);
     let policy = observed_input_policy(tool, argv);
     argv.iter()
         .enumerate()
         .map(|(index, word)| {
-            if positions.contains(&index)
+            if files.contains(&index) && !names_a_placeholder(word) {
+                // Where a file sat names a person (a home folder): the log
+                // keeps the file's name.
+                zerocode_core::computer_recipe::privacy::file_name(word).to_string()
+            } else if positions.contains(&index)
                 && (policy.secret || policy.credential || !names_a_placeholder(word))
             {
                 redaction(word.chars().count())
@@ -444,6 +449,43 @@ fn with_input_policy(
     observation
 }
 
+/// What an upload step leaves of its files: how many, and each one's name and
+/// size in bytes (a file gone or unreadable has its name only). The folders
+/// above them are never kept.
+fn with_file_facts(
+    mut observation: Option<serde_json::Value>,
+    tool: &str,
+    argv: &[String],
+) -> Option<serde_json::Value> {
+    use zerocode_core::computer_recipe::privacy::{file_name, file_positions};
+    let Ok(plain) = zerocode_core::computer_recipe::privacy::normalized(tool, argv) else {
+        return observation;
+    };
+    let files: Vec<serde_json::Value> = file_positions(tool, &plain)
+        .into_iter()
+        .map(|index| {
+            let word = &plain[index];
+            let mut fact = serde_json::json!({ "name": file_name(word) });
+            if !names_a_placeholder(word)
+                && let Ok(meta) = std::fs::metadata(word)
+                && meta.is_file()
+            {
+                fact["bytes"] = serde_json::json!(meta.len());
+            }
+            fact
+        })
+        .collect();
+    if files.is_empty() {
+        return observation;
+    }
+    let value = observation.get_or_insert_with(|| serde_json::json!({}));
+    if !value.is_object() {
+        *value = serde_json::json!({ "context": value.clone() });
+    }
+    value["upload"] = serde_json::json!({ "count": files.len(), "files": files });
+    observation
+}
+
 /// Add the time measured around the actual door call. Verb classification
 /// stays with the existing core tables; a read is never labelled a press.
 pub fn measured(
@@ -505,7 +547,7 @@ fn record_with(
     emitted: impl FnOnce(&Path, &Step),
 ) -> Option<String> {
     let verb = argv.first().map_or("?", String::as_str);
-    let observation = with_input_policy(observation, tool, argv);
+    let observation = with_file_facts(with_input_policy(observation, tool, argv), tool, argv);
     let typed = zerocode_core::computer_recipe::privacy::normalized(tool, argv)
         .map_or(true, |plain| {
             !zerocode_core::computer_recipe::privacy::value_positions(tool, &plain).is_empty()
@@ -1378,6 +1420,83 @@ mod tests {
                 &words(&["type-text", "--app", "Wallet", "--text", "1234"])
             ),
             words(&["type-text", "--app", "Wallet", "--text", "[4 chars]"])
+        );
+    }
+
+    /// An upload names local files; the log keeps each one's name, size and
+    /// the count — never the folders above it, where a person's name sits.
+    #[test]
+    fn an_upload_is_logged_by_file_name_never_by_folder() {
+        assert_eq!(
+            redacted(
+                "browser",
+                &words(&[
+                    "upload",
+                    "b1",
+                    "#receipt",
+                    "/Users/dev/Documents/receipt 1.pdf",
+                    "C:\\Users\\dev\\scan.png"
+                ])
+            ),
+            words(&["upload", "b1", "#receipt", "receipt 1.pdf", "scan.png"])
+        );
+        assert_eq!(
+            redacted(
+                "browser",
+                &words(&["upload", "b1", "#drop", "--drop", "/Users/dev/a.pdf"])
+            ),
+            words(&["upload", "b1", "#drop", "--drop", "a.pdf"])
+        );
+        // A parameter stands for its file: the document's own word.
+        assert_eq!(
+            redacted("browser", &words(&["upload", "b1", "#f", "$file_3"])),
+            words(&["upload", "b1", "#f", "$file_3"])
+        );
+        assert_eq!(
+            redacted("browser", &words(&["upload", "b1", "#f", "{{receipt}}"])),
+            words(&["upload", "b1", "#f", "{{receipt}}"])
+        );
+    }
+
+    #[test]
+    fn an_upload_step_records_file_names_sizes_and_count_and_no_folder() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = tempfile::tempdir().expect("home");
+        let kept = home.path().join("receipt.txt");
+        std::fs::write(&kept, b"12345").expect("file");
+        let kept = kept.display().to_string();
+        record(
+            dir.path(),
+            1,
+            "browser",
+            &words(&["upload", "b1", "#r", &kept, "/Users/dev/Documents/gone.pdf"]),
+            Err("upload_file_unreadable: 파일을 열 수 없습니다"),
+            Framing::None,
+        );
+        let raw = std::fs::read_to_string(dir.path().join(STEPS_FILE)).expect("log");
+        assert!(
+            !raw.contains("/Users/dev"),
+            "a folder reached the log: {raw}"
+        );
+        assert!(
+            !raw.contains(&home.path().display().to_string()),
+            "a folder reached the log: {raw}"
+        );
+        let step = &steps_in(dir.path())[0];
+        assert_eq!(step.argv[3], "receipt.txt");
+        assert_eq!(step.argv[4], "gone.pdf");
+        let files = &step.observation.as_ref().expect("facts")["upload"];
+        assert_eq!(files["count"], 2);
+        assert_eq!(files["files"][0]["name"], "receipt.txt");
+        assert_eq!(files["files"][0]["bytes"], 5);
+        assert_eq!(files["files"][1]["name"], "gone.pdf");
+        assert!(files["files"][1].get("bytes").is_none());
+        assert!(
+            step.error
+                .as_deref()
+                .is_some_and(|error| !error.contains('/')),
+            "{:?}",
+            step.error
         );
     }
 

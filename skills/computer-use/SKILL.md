@@ -1104,6 +1104,12 @@ Recording permission the screenshots use — no new prompt.
     with spaces); delete a line to drop a step. `--start` counts lines from
     1, not the numbers written in front of them. A `{{name}}` fills a
     flag's value, never a flag; a saved line never carries `--allow-self`.
+  - A saved `zerocode-browser upload` names its files `$file_N` (`$file_N_2`
+    for a step's second file), never their folder: give each with
+    `--params '{"file_3":"/abs/path"}'`, and a walk that reaches one with no
+    value stops as `persons_turn` — never guess a path. A recipe saved before
+    this keeps its path and still runs; saving again turns it into `$file_N`.
+    The evidence log keeps an upload's file names, sizes and count only.
 - **Memory across a cut context**: `status --json` carries `state` — the
   last verb, whether it worked, failures in a row, recent actions — and the
   session's evidence folder holds `state.json` and `steps.jsonl`. Read them
