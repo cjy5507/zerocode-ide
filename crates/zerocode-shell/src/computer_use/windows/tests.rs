@@ -102,6 +102,42 @@ fn foreground_or_skip(fixture: &Fixture, test: &str) -> bool {
     false
 }
 
+/// The number of context menus the fixture has shown once it reaches `want`,
+/// or when `within` is up.
+fn wait_for_menus(want: u32, within: Duration) -> u32 {
+    let limit = Instant::now() + within;
+    while Fixture::menus() < want && Instant::now() < limit {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Fixture::menus()
+}
+
+/// What a failing desktop test needs to tell the CI session apart from the
+/// code: who is in front, who holds the keyboard focus, and whether a popup
+/// menu stands.
+fn desktop_probe(fixture: &Fixture) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetClassNameW, GetForegroundWindow, GetWindowTextW,
+    };
+    use windows::core::w;
+    // SAFETY: plain queries; the buffers outlive the calls that fill them.
+    let (class, title, popup) = unsafe {
+        let front = GetForegroundWindow();
+        let (mut class, mut title) = ([0u16; 128], [0u16; 128]);
+        let class_len = GetClassNameW(front, &mut class).max(0) as usize;
+        let title_len = GetWindowTextW(front, &mut title).max(0) as usize;
+        (
+            String::from_utf16_lossy(&class[..class_len]),
+            String::from_utf16_lossy(&title[..title_len]),
+            FindWindowW(w!("#32768"), None).is_ok(),
+        )
+    };
+    format!(
+        "foreground {class:?} {title:?}, fixture focused control {}, popup menu window {popup}",
+        fixture.focused_control_id()
+    )
+}
+
 #[test]
 fn the_fixture_is_listed_and_its_window_resolves() {
     with_fixture(|provider, fixture| {
@@ -405,11 +441,16 @@ fn a_right_click_on_an_element_opens_its_context_menu_without_a_false_failure() 
                 json!({ "app": fixture.app_query(), "elementIndex": button, "mouseButton": "right" }),
             )
             .expect("right-click");
-        std::thread::sleep(Duration::from_millis(600));
+        // The menu of a context-menu request can open after the call has
+        // returned; wait for it, and say what the desktop looked like when
+        // none did.
+        let opened = wait_for_menus(before + 1, Duration::from_secs(3));
         assert_eq!(
-            Fixture::menus(),
+            opened,
             before + 1,
-            "no context menu was shown ({answer})"
+            "no context menu was shown ({}; {})",
+            desktop_probe(fixture),
+            answer["action"]
         );
         match answer["action"]["path"].as_str() {
             Some("accessibility") => {

@@ -24004,7 +24004,7 @@ pub(crate) mod computer_desktop_wait {
             let mut status_took = Duration::ZERO;
             while !done.load(Ordering::SeqCst) {
                 samples += 1;
-                if crate::computer_use::session_stands_now() {
+                if crate::computer_use::session_lock_held_now() {
                     held += 1;
                 }
                 if samples == 300 {
