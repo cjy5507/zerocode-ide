@@ -353,7 +353,11 @@ impl PtyLane {
             }
         }
         for (key, value) in env {
-            edits.push((key, (!value.is_empty()).then_some(value.as_str())));
+            if value.is_empty() {
+                edits.push((key, None));
+            } else {
+                edits.push((key, Some(value)));
+            }
         }
 
         let child = start_child(&pair, program, args, cwd, &edits)?;

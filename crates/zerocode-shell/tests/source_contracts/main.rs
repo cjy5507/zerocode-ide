@@ -24811,13 +24811,23 @@ mod tests {
         // The empty-means-remove half of the contract, in the crate that keeps
         // it. Named as the two calls rather than counted, because what matters
         // is which branch each value takes.
+        // The value becomes an edit, and each start applies a `None` edit as
+        // a removal: portable_pty's builder, and the fork-free start on macOS
+        // (t-73907).
         let spawning = block_after(pty, "for (key, value) in env {");
+        let applying = block_after(pty, "for (key, value) in edits {");
+        let posix = include_str!("../../../zerocode-pty/src/posix_launch.rs");
+        let editing = block_after(posix, "for (key, value) in edits {");
         assert!(
             spawning.contains("if value.is_empty()")
-                && spawning.contains("command.env_remove(key)")
-                && spawning.contains("command.env(key, value)"),
+                && spawning.contains("edits.push((key, None))")
+                && spawning.contains("edits.push((key, Some(value)))")
+                && applying.contains("None => command.env_remove(key)")
+                && applying.contains("Some(value) => command.env(key, value)")
+                && editing.contains("env.retain(|(named, _)| named != key)")
+                && editing.contains("if let Some(value) = value"),
             "an empty environment value no longer REMOVES the variable, so a \
-             cleared credential would reach the child as an empty one:\n{spawning}"
+             cleared credential would reach the child as an empty one:\n{spawning}\n{applying}\n{editing}"
         );
 
         // And the half that relies on it, at both the places a config directory
