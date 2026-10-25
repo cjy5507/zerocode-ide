@@ -292,7 +292,7 @@ fn board_ledger_reads_do_not_wait_for_the_authority_on_the_main_thread() {
 
 /// t-67102: a plain sync command runs on the main thread, and a settings read
 /// there waits on the repository's one lock, which every settings commit holds
-/// through its fsync — `waiting_on_me` stood 20 255 ms behind one on
+/// through its fsync — `board_inbox` (then `waiting_on_me`) stood 20 255 ms behind one on
 /// 2026-10-21 while a build saturated the disk. Such a command reads the
 /// snapshot every load and every commit leave in memory.
 #[test]

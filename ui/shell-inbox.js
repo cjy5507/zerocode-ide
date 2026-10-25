@@ -81,7 +81,8 @@ function saveInboxRead() {
   }
 }
 
-function openInboxView() {
+function openInboxView({ tab = null } = {}) {
+  if (tab !== null) inboxChoice.tab = tab;
   leavePagesForStage();
   openTab({ ...INBOX_TAB });
 }
@@ -449,7 +450,7 @@ function paintInboxView(view) {
   });
   if (nodes.length === 0) {
     const none = inboxNode("li", "inbox-empty");
-    none.textContent = inboxSnapshot.items.length === 0
+    none.textContent = counts.all === 0
       ? t("inbox.empty", "받은 편지함이 비었습니다 — 지금 당신을 기다리는 것이 없습니다.")
       : t("inbox.emptyUnread", "안 읽은 편지가 없습니다.");
     nodes.push(none);
@@ -479,9 +480,13 @@ function paintInboxPreview(view, item, now) {
   writeTextContent(chip.querySelector(".inbox-kind-word"), t(kind.key, kind.word));
   writeTextContent(detail.querySelector(".inbox-pv-kind .inbox-age"), item.at_ms > 0 ? inboxAge(item.at_ms, now) : "");
   writeTextContent(detail.querySelector(".inbox-pv-title"), inboxTitle(item));
-  writeTextContent(detail.querySelector(".inbox-fact-project"), item.project);
-  writeTextContent(detail.querySelector(".inbox-fact-task"), inboxTaskName(item));
-  writeTextContent(detail.querySelector(".inbox-fact-from"), inboxFrom(item));
+  // A fact the letter does not carry (a pane has no task) takes no line.
+  for (const [name, value] of [["project", item.project], ["task", inboxTaskName(item)], ["from", inboxFrom(item)]]) {
+    const fact = detail.querySelector(`.inbox-fact-${name}`);
+    writeTextContent(fact, value);
+    writeHidden(fact, value === "");
+    writeHidden(fact.previousElementSibling, value === "");
+  }
   const body = inboxBody(item, now);
   const bodyNode = detail.querySelector(".inbox-pv-body");
   writeTextContent(bodyNode, body);
@@ -656,4 +661,4 @@ function openInboxPane(item) {
   openBoardCard({ pane: item.pane.pane, agent: item.pane.agent, worktree: item.pane.worktree }, bucket);
 }
 
-el("nav-inbox")?.addEventListener("click", openInboxView);
+el("nav-inbox")?.addEventListener("click", () => openInboxView());

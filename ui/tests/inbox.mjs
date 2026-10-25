@@ -295,6 +295,15 @@ export async function testInbox(browser, origin, standBackend, ok) {
   });
   ok("「안 읽음만」 keeps only the unread letters", unreadOnly.on === "true" && unreadOnly.shown.every((one) => one === "true") && unreadOnly.shown.length < unreadOnly.all, JSON.stringify(unreadOnly));
 
+  // The 「주의 필요」 chord opens the page on its 막힘 tab (draft Q2: absorbed, not kept beside it).
+  const chord = await page.evaluate(() => {
+    document.querySelector('.inbox-view:not([hidden]) .inbox-tab[data-inbox-tab="all"]').click();
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "A", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
+    const pressed = document.querySelector('.inbox-view:not([hidden]) .inbox-tab[aria-pressed="true"]');
+    return { tab: pressed?.dataset.inboxTab ?? null, modal: !document.getElementById("action-hub-scrim")?.hidden };
+  });
+  ok("the 주의 필요 chord opens the inbox on 막힘, not the old modal", chord.tab === "blocked" && chord.modal === false, JSON.stringify(chord));
+
   // 100 letters, median of nine. Gated: the worst case, where every letter's words changed
   // (a minute turned, or the ledger moved them all). Reported: the steady repaint, where the
   // keyed rows are reused as they stand.

@@ -1839,7 +1839,8 @@ el("action-hub-dismiss")?.addEventListener("click", closeActionHub);
 window.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && (event.key === "a" || event.key === "A")) {
     event.preventDefault();
-    openActionHub();
+    // 「주의 필요」 is absorbed by the inbox (t-67483, draft Q2): the chord opens its 막힘 tab.
+    openInboxView({ tab: "blocked" });
   }
 });
 

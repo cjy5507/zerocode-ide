@@ -22248,13 +22248,13 @@ mod tests {
         );
     }
 
-    /// 나를 기다림 (t-26595): the sidebar's top list and the finish setting are
-    /// pinned — the list sits in the column above the shortcut rows, the window
-    /// asks Rust for its rows and releases a finish by its pane, the setting
-    /// writes its word through its own command, and every word the two show is
-    /// in the four languages that are not the source.
+    /// 받은 편지함 (t-67483, absorbing 나를 기다림 of t-26595 and the 주의 필요
+    /// row): the sidebar keeps one row for it in the shortcut rows, the two lists
+    /// it absorbed are gone, the finish setting still writes its word through its
+    /// own command, and every word the page and the setting show is in the four
+    /// languages that are not the source.
     #[test]
-    fn the_waiting_list_sits_on_top_and_its_words_reach_every_language() {
+    fn the_inbox_replaces_the_waiting_list_and_its_words_reach_every_language() {
         let markup = include_str!("../../../../ui/index.html");
         let column = markup_between(
             markup,
@@ -22262,8 +22262,13 @@ mod tests {
             "<nav class=\"nav-rows\"",
         );
         assert!(
-            column.contains("<section class=\"waiting-list\" id=\"waiting-list\""),
-            "the waiting list left the top of the column:\n{column}"
+            !column.contains("id=\"waiting-list\"") && !markup.contains("id=\"nav-attention\""),
+            "the lists the inbox absorbed are back in the sidebar"
+        );
+        let nav = markup_between(markup, "<nav class=\"nav-rows\"", "</nav>");
+        assert!(
+            nav.contains("id=\"nav-inbox\"") && nav.contains("id=\"inbox-badge\""),
+            "the shortcut rows lost the inbox's row and its number"
         );
         assert!(
             markup.contains("id=\"notify-finish-mode\"")
@@ -22272,11 +22277,14 @@ mod tests {
         );
 
         let shell = include_str!("../../../../ui/shell.js");
+        let inbox = include_str!("../../../../ui/shell-inbox.js");
         assert!(
-            shell.contains("invoke(\"waiting_on_me\")")
-                && shell.contains("invoke(\"clear_finish_mark\""),
-            "the list no longer asks Rust for its rows, or no longer releases a \
-             finish by its pane"
+            inbox.contains("invoke(\"board_inbox\")") && inbox.contains("invoke(\"clear_finish_mark\""),
+            "the page no longer asks Rust for its letters, or no longer releases a finish by its pane"
+        );
+        assert!(
+            !shell.contains("waiting_on_me") && !shell.contains("refreshWaitingList"),
+            "the sidebar's waiting list is still asked for"
         );
 
         let settings = include_str!("../../../../ui/shell-settings.js");
@@ -22287,17 +22295,24 @@ mod tests {
 
         let main = include_str!("../../src/main.rs");
         assert!(
-            main.contains("waiting_on_me,") && main.contains("clear_finish_mark,"),
-            "the list commands are not registered with the window"
+            main.contains("board_inbox,") && main.contains("clear_finish_mark,") && !main.contains("waiting_on_me"),
+            "the inbox commands are not registered with the window"
         );
 
         let i18n = include_str!("../../../../ui/shell-i18n.js");
+        for key in INBOX_KEYS {
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\"")).count(),
+                4,
+                "{key} must be in en/ja/zh/es"
+            );
+        }
+        assert_eq!(
+            i18n.matches("\"waiting.").count(),
+            0,
+            "a word of the absorbed list is still in the catalogs"
+        );
         for key in [
-            "waiting.label",
-            "waiting.title",
-            "waiting.blocked",
-            "waiting.question",
-            "waiting.finished",
             "settings.notifications.finishOff",
             "settings.notifications.finishLong",
             "settings.notifications.finishAlways",
@@ -22309,6 +22324,110 @@ mod tests {
                 "{key} must be in en/ja/zh/es"
             );
         }
+    }
+
+    /// The words the inbox page asks the catalog for.
+    const INBOX_KEYS: [&str; 30] = [
+        "inbox.title",
+        "inbox.tabs.label",
+        "inbox.tab.all",
+        "inbox.tab.question",
+        "inbox.tab.handoff",
+        "inbox.tab.blocked",
+        "inbox.tab.notice",
+        "inbox.unreadOnly",
+        "inbox.list.label",
+        "inbox.fact.project",
+        "inbox.fact.task",
+        "inbox.fact.from",
+        "inbox.reply.label",
+        "inbox.reply.placeholder",
+        "inbox.pick",
+        "inbox.sum",
+        "inbox.landing",
+        "inbox.pane.blocked",
+        "inbox.pane.question",
+        "inbox.pane.finished",
+        "inbox.unread",
+        "inbox.read",
+        "inbox.empty",
+        "inbox.emptyUnread",
+        "inbox.confirm",
+        "inbox.openPane",
+        "inbox.openBoard",
+        "inbox.note.question",
+        "inbox.note.handoff",
+        "inbox.note.blocked",
+    ];
+
+    /// The inbox reads one snapshot (t-67483): its letters and its numbers are
+    /// Rust's single reading (`board_inbox` → `orchestration::inbox::inbox_of`),
+    /// and the page draws the numbers it is given. It does not ask the desk or
+    /// the panes a second time, and it does not count its own rows into a tab,
+    /// the sidebar or the summary line. Answers, passes and acks leave by the
+    /// ledger's own doors, and a stopped pane is only ever opened — the page
+    /// holds no door to allow or deny.
+    #[test]
+    fn the_inbox_reads_one_snapshot() {
+        let inbox = include_str!("../../../../ui/shell-inbox.js");
+        let code = strip_comments(inbox);
+        for second_source in [
+            "board_desk",
+            "waiting_on_me",
+            "coordinator_seats",
+            "pane_agents",
+            "ledger_agents",
+            "deskLedger",
+        ] {
+            assert!(
+                !code.contains(second_source),
+                "the inbox page reads `{second_source}` beside its one snapshot"
+            );
+        }
+        for door in [
+            "invoke(\"desk_reply\"",
+            "invoke(\"desk_ack\"",
+            "invoke(\"desk_review_pass\"",
+        ] {
+            assert!(code.contains(door), "the page lost its door {door}");
+        }
+        for forbidden in ["answer_approval", "answer_ask", "approve", "deny"] {
+            assert!(
+                !code.contains(forbidden),
+                "the page presses `{forbidden}` — permissions are answered in the pane (draft Q3)"
+            );
+        }
+
+        let badge = block_after(&code, "function paintInboxBadge(");
+        assert!(
+            badge.contains("inboxSnapshot.counts?.waiting") && !badge.contains(".items"),
+            "the sidebar's number is no longer Rust's `counts.waiting`:\n{badge}"
+        );
+        let view = block_after(&code, "function paintInboxView(");
+        assert!(
+            view.contains("counts[tab]") && view.contains("counts.waiting") && view.contains("counts.notice"),
+            "the tabs and the summary are no longer drawn from `counts`:\n{view}"
+        );
+        assert!(
+            !view.contains("items.length") && !view.contains(".items.filter("),
+            "the page counts its own rows for a number it draws:\n{view}"
+        );
+
+        let backend = include_str!("../../src/cmd/waiting.rs");
+        let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
+        let command = block_after(shipped, "pub(crate) fn board_inbox(");
+        assert!(
+            command.contains("pane_waits(&state)")
+                && command.contains("inbox_of(")
+                && command.contains("board_ledger_snapshot().desk"),
+            "`board_inbox` is no longer the desk snapshot and the panes, made once:\n{command}"
+        );
+        let reading = include_str!("../../src/orchestration/inbox.rs");
+        assert_eq!(
+            reading.matches("InboxCounts {").count(),
+            2,
+            "the counts are made in more than one place (the type, `inbox_of`)"
+        );
     }
 
     /// A lane rings through the same bell as a pane.
