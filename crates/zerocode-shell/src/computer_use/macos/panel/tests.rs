@@ -28,7 +28,10 @@ fn only_the_latest_pending_presentation_is_delivered() {
     for revision in 1..=3 {
         mailbox.publish(&update(revision, None).state, None);
     }
-    assert_eq!(mailbox.next().state["revision"], 3);
+    assert_eq!(
+        mailbox.next(None, super::BUSY_RETRY_INTERVAL).state["revision"],
+        3
+    );
     assert!(mailbox.pending.lock().unwrap().latest.is_none());
     // Even after delivery, a late caller cannot replace a newer presentation.
     mailbox.publish(&update(2, None).state, None);
@@ -64,7 +67,7 @@ fn queued_presentations_coalesce_while_one_authenticated_connection_is_busy() {
     mailbox.publish(&update(1, None).state, Some(endpoint("panel-fixture")));
     for _ in 0..2 {
         delivery.send(
-            mailbox.next(),
+            mailbox.next(None, super::BUSY_RETRY_INTERVAL),
             |_| {
                 connections.set(connections.get() + 1);
                 // New notices arrive while the first delivery is connecting.
@@ -254,7 +257,7 @@ fn coalescing_presentations_keeps_a_helper_loss_until_delivery() {
     }
     let launches = Cell::new(0);
     delivery.send(
-        mailbox.next(),
+        mailbox.next(None, super::BUSY_RETRY_INTERVAL),
         |_| None,
         || {
             launches.set(launches.get() + 1);
@@ -412,7 +415,7 @@ fn a_watch_start_failure_allows_only_one_panel_recovery() {
     for revision in 3..=5 {
         mailbox.publish(&update(revision, None).state, remaining.clone());
         delivery.send(
-            mailbox.next(),
+            mailbox.next(None, super::BUSY_RETRY_INTERVAL),
             |_| None,
             || {
                 recoveries.set(recoveries.get() + 1);
@@ -443,4 +446,72 @@ fn a_busy_provider_is_not_counted_as_a_failed_launch() {
         );
     }
     assert_eq!(launches.get(), 1);
+}
+
+#[test]
+fn a_busy_recovery_retries_without_a_new_presentation_and_stops_after_one_attempt() {
+    let mailbox = Mailbox::default();
+    let mut delivery = Delivery::default();
+    delivery.send(update(1, None), |_| None, || true);
+    delivery.send(update(2, Some(endpoint("first"))), |_| None, || true);
+    let client = std::sync::Mutex::new(());
+    let held = client.lock().unwrap();
+    let attempts = Cell::new(0);
+    let ensure = || {
+        let Ok(_client) = client.try_lock() else {
+            return false;
+        };
+        attempts.set(attempts.get() + 1);
+        true
+    };
+    mailbox.publish(&update(3, None).state, None);
+    delivery.send(
+        mailbox.next(None, super::BUSY_RETRY_INTERVAL),
+        |_| None,
+        ensure,
+    );
+    for _ in 0..2 {
+        assert!(
+            delivery.retry.is_some(),
+            "a busy recovery must arrange its next wake"
+        );
+        assert!(mailbox.pending.lock().unwrap().latest.is_none());
+        let retry = mailbox.next(delivery.retry.as_ref(), std::time::Duration::ZERO);
+        delivery.send(retry, |_| None, ensure);
+        assert_eq!(attempts.get(), 0, "a busy lock spends no launch attempt");
+    }
+    drop(held);
+    // No publication follows the unlock. The worker's own deadline wakes it.
+    let retry = mailbox.next(delivery.retry.as_ref(), std::time::Duration::ZERO);
+    delivery.send(retry, |_| None, ensure);
+    assert_eq!(attempts.get(), 1);
+    assert!(
+        delivery.retry.is_none(),
+        "a real attempt must stop the deadline"
+    );
+    assert!(mailbox.pending.lock().unwrap().latest.is_none());
+}
+
+#[test]
+fn ending_the_share_cancels_a_busy_recovery_before_its_deadline() {
+    let mailbox = Mailbox::default();
+    let mut delivery = Delivery::default();
+    delivery.send(update(1, None), |_| None, || false);
+    assert!(
+        delivery.retry.is_some(),
+        "a busy startup must arrange its next wake"
+    );
+    let mut ended = update(2, None);
+    ended.state["target"] = Value::Null;
+    mailbox.publish(&ended.state, None);
+    let latest = mailbox.next(delivery.retry.as_ref(), std::time::Duration::ZERO);
+    delivery.send(
+        latest,
+        |_| None,
+        || panic!("an ended share needs no helper"),
+    );
+    assert!(
+        delivery.retry.is_none(),
+        "the ended share must stop the deadline"
+    );
 }
