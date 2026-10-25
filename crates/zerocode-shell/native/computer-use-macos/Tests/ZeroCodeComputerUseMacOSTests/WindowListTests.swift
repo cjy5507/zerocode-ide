@@ -80,4 +80,64 @@ final class WindowListTests: XCTestCase {
         XCTAssertEqual(read, listed)
         XCTAssertEqual(asked, 0)
     }
+
+    /// An accessibility window is on the screen only as something said so
+    /// (t-68324 ③): the app is hidden → off the screen; the window server
+    /// said this window's number is on / off the screen → that; nothing said
+    /// → unknown, never "on the screen". A window of another Space is the
+    /// server's `off`, a window of a hidden app is the app's.
+    func test_an_accessibility_window_is_on_the_screen_only_as_something_said_so() {
+        let read = WindowList.forReading(listed: [], pid: Self.app) {
+            [
+                AccessibilityWindow(pid: Self.app, number: 1, frame: notes, title: "front", minimized: false, serverOnScreen: true),
+                AccessibilityWindow(pid: Self.app, number: 2, frame: notes, title: "other Space", minimized: false, serverOnScreen: false),
+                AccessibilityWindow(pid: Self.app, number: 3, frame: notes, title: "no word", minimized: false),
+                AccessibilityWindow(pid: Self.app, number: 4, frame: notes, title: "app hidden", minimized: false, appHidden: true, serverOnScreen: true),
+            ]
+        }
+        let presence = Dictionary(uniqueKeysWithValues: read.map { ($0.windowId, $0.presence) })
+        XCTAssertEqual(presence[1], .onScreen, "the server said it is on the screen")
+        XCTAssertEqual(presence[2], .offScreen, "the server said it is not: another Space")
+        XCTAssertEqual(presence[3], .unknown, "nothing said where it is")
+        XCTAssertEqual(presence[4], .offScreen, "a hidden app shows no window, whatever else was said")
+        XCTAssertEqual(read.filter(\.isOnScreen).map(\.windowId), [1], "only the window known to be on the screen counts as on it")
+    }
+
+    /// A window known to be on the screen is read before one that is not, and
+    /// before one nobody knows about, of the same size and title (t-68324 ③).
+    func test_a_window_known_on_the_screen_ranks_before_an_unknown_one() {
+        let read = WindowList.forReading(listed: [], pid: Self.app) {
+            [
+                AccessibilityWindow(pid: Self.app, number: 3, frame: notes, title: "Notes", minimized: false),
+                AccessibilityWindow(pid: Self.app, number: 2, frame: notes, title: "Notes", minimized: false, serverOnScreen: false),
+                AccessibilityWindow(pid: Self.app, number: 1, frame: notes, title: "Notes", minimized: false, serverOnScreen: true),
+            ]
+        }
+        XCTAssertEqual(read.first?.windowId, 1, "the window known to be on the screen is read first")
+    }
+
+    /// The words an answer through the tree adds about where its window is
+    /// (t-68324 ③): each state says its own fact, and an unknown one says it
+    /// is not known rather than that the window is shown.
+    func test_the_answer_says_where_the_window_is_in_words_that_tell_the_three_apart() {
+        let said = [WindowPresence.onScreen, .offScreen, .unknown].map { WindowPresence.sentence(for: $0) }
+        XCTAssertEqual(Set(said).count, 3, "three states, three sentences: \(said)")
+        XCTAssertTrue(said[1].contains("not on the screen"), said[1])
+        XCTAssertTrue(said[2].contains("not known"), said[2])
+        XCTAssertFalse(said[2].contains("is on the screen"), "an unknown window is not called shown: \(said[2])")
+    }
+
+    /// What the window server says of an app's windows by number (t-68324
+    /// ③): on its on-screen list → on the screen; only in its full list →
+    /// not on it; in neither → nothing said. Another app's windows are not
+    /// read at all.
+    func test_the_window_servers_two_lists_say_which_of_an_apps_windows_are_on_the_screen() {
+        let front = serverWindow(number: 1, bounds: notes)
+        let otherSpace = serverWindow(number: 2, bounds: notes)
+        let another = serverWindow(pid: Self.other, number: 3, bounds: notes)
+        let view = WindowList.serverView(onScreen: [front, another], all: [front, otherSpace, another], pid: Self.app)
+        XCTAssertEqual(view, [1: true, 2: false])
+        XCTAssertNil(view[3], "another app's window is not read")
+        XCTAssertNil(view[4], "a number it lists nowhere has no word")
+    }
 }

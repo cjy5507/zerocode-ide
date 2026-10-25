@@ -233,7 +233,7 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertThrowsError(try hand.acquire(.request)) { error in
             XCTAssertEqual(error as? OperatorHand.Refusal, .stopped(StopReason.hotkey))
         }
-        hand.resume()
+        try hand.resume(by: .person)
         // Taken back without a stop, the same unconfirmed release still keeps
         // the next hold off.
         let run = try hand.acquire(.reflex("r"))
@@ -243,7 +243,7 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertThrowsError(try hand.acquire(.request)) { error in
             XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed)
         }
-        hand.resume()
+        try hand.resume(by: .person)
         XCTAssertNoThrow(try hand.acquire(.request), "a person's resume")
     }
 
@@ -321,7 +321,67 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertThrowsError(try hand.acquire(.request)) { error in
             XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed)
         }
-        hand.resume()
+        try hand.resume(by: .person)
         XCTAssertNoThrow(try hand.acquire(.request), "a person's resume")
+    }
+
+    /// A hand whose hold pressed a button the platform then refused to let go
+    /// of: the release is counted as unconfirmed and the hold taken back.
+    static func handWithARefusedRelease() throws -> OperatorHand {
+        let clock = FakeClock()
+        let poster = RecordingPoster()
+        poster.refuse = { event in
+            if case .buttonUp = event.kind { return true }
+            return false
+        }
+        let hand = OperatorHand(poster: poster, clock: clock, sleeper: ScriptedSleeper(clock: clock), tag: 0xbad)
+        let run = try hand.acquire(.reflex("r"))
+        try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: 5, y: 5), by: run)
+        XCTAssertThrowsError(try hand.post(HandEvent(.buttonUp(.left, clickState: 1), x: 5, y: 5), by: run))
+        hand.relinquish(run)
+        XCTAssertEqual(hand.snapshot.unconfirmedReleases, 1, "the refused release is counted")
+        return hand
+    }
+
+    /// A release the platform refused is a person's to have checked (t-68324
+    /// ②): an agent's resume lifts nothing of it — the count stays and nobody
+    /// takes the hand — and the person's resume clears it, as the stop the
+    /// person made is theirs alone to lift.
+    func test_an_agents_resume_cannot_clear_a_release_the_platform_refused() throws {
+        let hand = try Self.handWithARefusedRelease()
+        XCTAssertThrowsError(try hand.resume(by: .agent)) { error in
+            XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed, "the agent is told it is the person's turn")
+        }
+        XCTAssertEqual(hand.snapshot.unconfirmedReleases, 1, "an agent's resume left the unconfirmed release standing")
+        XCTAssertThrowsError(try hand.acquire(.request)) { error in
+            XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed, "nobody takes the hand after an agent's resume")
+        }
+        XCTAssertNoThrow(try hand.resume(by: .person))
+        XCTAssertEqual(hand.snapshot.unconfirmedReleases, 0, "the person's resume clears it")
+        XCTAssertNoThrow(try hand.acquire(.request), "a person's resume")
+    }
+
+    /// An agent's resume that is refused for the unconfirmed release lifts
+    /// the stop standing with it no more than the release (t-68324 ②): the
+    /// hand would still refuse its presses, and the refusal is one answer.
+    func test_an_agents_refused_resume_leaves_a_standing_stop_standing_too() throws {
+        let hand = try Self.handWithARefusedRelease()
+        hand.stop(reason: StopReason.request)
+        XCTAssertThrowsError(try hand.resume(by: .agent))
+        XCTAssertEqual(hand.snapshot.stopped, StopReason.request, "the stop stands")
+        XCTAssertEqual(hand.snapshot.unconfirmedReleases, 1)
+        try hand.resume(by: .person)
+        XCTAssertNil(hand.snapshot.stopped)
+        XCTAssertEqual(hand.snapshot.unconfirmedReleases, 0)
+    }
+
+    /// With nothing unconfirmed an agent's resume lifts the hand's stop as
+    /// before (t-68324 ②): the rule takes away only the person's check.
+    func test_an_agents_resume_still_lifts_a_stop_when_no_release_is_unconfirmed() throws {
+        let clock = FakeClock()
+        let hand = OperatorHand(poster: RecordingPoster(), clock: clock, sleeper: ScriptedSleeper(clock: clock), tag: 0xbad)
+        hand.stop(reason: StopReason.request)
+        XCTAssertNoThrow(try hand.resume(by: .agent))
+        XCTAssertNil(hand.snapshot.stopped)
     }
 }

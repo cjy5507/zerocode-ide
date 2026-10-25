@@ -417,7 +417,7 @@ final class ReflexRuntimeTests: XCTestCase {
         XCTAssertEqual(ended.wait(timeout: .now() + 5), .success, "the hold ends at the stop")
         XCTAssertEqual(refusal.value, .stopped(StopReason.hotkey))
         XCTAssertThrowsError(try hand.acquire(.request), "nothing is pressed until a person resumes")
-        hand.resume()
+        try hand.resume(by: .person)
 
         // A reflex click in its fence, the frame source silent: the button is
         // let go of by the stop, and nothing more is pressed.
@@ -438,7 +438,7 @@ final class ReflexRuntimeTests: XCTestCase {
         XCTAssertEqual(poster.releases.last?.kind, .buttonUp(.left, clickState: 1))
         XCTAssertEqual(hand.snapshot.held, [])
         hand.relinquish(run)
-        hand.resume()
+        try hand.resume(by: .person)
     }
 
     /// One writer: while a reflex run holds the hand no request takes it and
@@ -1394,7 +1394,7 @@ final class ReflexRunBoundaryTests: XCTestCase {
         XCTAssertThrowsError(try rig.hand.acquire(.request)) { error in
             XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed, "until a person resumes")
         }
-        rig.hand.resume()
+        try rig.hand.resume(by: .person)
         XCTAssertNoThrow(try rig.hand.acquire(.request))
     }
 
