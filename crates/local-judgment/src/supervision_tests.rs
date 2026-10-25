@@ -9,7 +9,7 @@ use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,7 +24,9 @@ use crate::{Binding, Manager};
 /// for the file `end` and ends the way that file says: `code N` exits with N,
 /// `signal N` sends itself signal N, `mute` closes its output and runs on,
 /// `orphan N` leaves a process holding its output open for N seconds and
-/// exits with 7. What the file `stderr` holds is the last it writes there.
+/// exits with 7, `hold` leaves one holding it open until the file `release`
+/// appears and exits with 7. What the file `stderr` holds is the last it
+/// writes there.
 const RUNTIME: &str = r#"import os,sys,time
 root=sys.argv[1]
 sys.stderr.write('x'*(1<<20)+'\n')
@@ -40,6 +42,10 @@ if how=='mute': os.close(1)
 if how=='orphan':
  import subprocess
  subprocess.Popen(['sleep',value])
+ os._exit(7)
+if how=='hold':
+ import subprocess
+ subprocess.Popen([sys.executable,'-I','-c','import os,sys,time\nwhile not os.path.exists(sys.argv[1]): time.sleep(0.005)',os.path.join(root,'release')])
  os._exit(7)
 time.sleep(60)
 "#;
@@ -94,6 +100,9 @@ struct Supervised {
     model: crate::Model,
     server: String,
     told: Told,
+    /// The runtime the manager started, held weakly so its end stays the
+    /// manager's to make.
+    engine: std::sync::Weak<Engine>,
 }
 
 impl Drop for Supervised {
@@ -111,12 +120,16 @@ async fn supervised() -> Supervised {
     let data = home.path().join("data");
     let model = crate::tests::fixture_model();
     let root = control.path().to_owned();
+    let started_engine = Arc::new(Mutex::new(std::sync::Weak::new()));
+    let keeps = started_engine.clone();
     let factory: EngineFactory = Arc::new(move |_| {
-        Ok(Engine::from_command(
+        let engine = Engine::from_command(
             Command::new("python3")
                 .args(["-I", "-u", "-c", RUNTIME])
                 .arg(&root),
-        ))
+        );
+        *keeps.lock().unwrap() = Arc::downgrade(&engine);
+        Ok(engine)
     });
     let (told, sink) = telling();
     let manager =
@@ -136,6 +149,7 @@ async fn supervised() -> Supervised {
         model,
         server,
         told,
+        engine: started_engine.lock().unwrap().clone(),
     }
 }
 
@@ -267,6 +281,65 @@ async fn a_runtime_whose_output_another_process_holds_open_is_still_told_when_it
     let exit = &failed["server"]["exit"];
     assert_eq!(exit["cause"], "runtime_exited", "{failed}");
     assert_eq!(exit["code"], 7);
+}
+
+/// A status read made on an async worker just as a runtime ends waits for
+/// the last of its stderr, up to `STDERR_SETTLE`, and keeps the end on disk.
+/// The runtime here leaves its stderr open until another task on the same
+/// worker lets it go, and the runtime has that one worker (the test's own
+/// body runs beside it): while the read waits, the worker's other tasks run
+/// on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_status_read_that_waits_for_an_ended_runtimes_stderr_leaves_the_async_worker_to_other_tasks()
+ {
+    let fixture = supervised().await;
+    let engine = fixture.engine.upgrade().expect("the started runtime runs");
+    let manager = fixture.manager.clone();
+    let release = fixture.control.path().join("release");
+    fixture.end("hold", "");
+    let began = Instant::now();
+    let reader = tokio::spawn(async move {
+        // Blocking on purpose: nothing else may run on the one worker before
+        // the read below, or the release could come first.
+        while engine.alive() {
+            assert!(began.elapsed() < SETTLE, "the runtime did not end");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(engine);
+        let ran = Arc::new(AtomicBool::new(false));
+        let other = tokio::spawn({
+            let ran = ran.clone();
+            async move {
+                ran.store(true, Ordering::Release);
+                fs::write(release, b"").unwrap();
+            }
+        });
+        let read = manager.snapshot();
+        (ran.load(Ordering::Acquire), read, other)
+    });
+    let (ran, read, other) = reader.await.unwrap();
+    other.await.unwrap();
+    assert!(
+        ran,
+        "the status read held its async worker while the ended runtime's stderr settled"
+    );
+    assert_eq!(read.server.state, "failed");
+    assert_eq!(
+        read.server
+            .exit
+            .as_ref()
+            .map(|exit| (exit.cause, exit.code)),
+        Some(("runtime_exited", Some(7)))
+    );
+    // The watch may have taken the end first and still be writing it down.
+    while !fixture.kept().contains("\"runtime_exited\"") {
+        assert!(
+            began.elapsed() < SETTLE,
+            "the end was not kept: {}",
+            fixture.kept()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
