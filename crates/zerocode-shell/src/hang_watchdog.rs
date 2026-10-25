@@ -189,6 +189,37 @@ impl Watch {
     }
 }
 
+/// What the sample taken after a hang was seen can speak for (t-72138).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sampled {
+    /// Still unanswered when the sample ended: every frame is the hang's.
+    Open,
+    /// Answered this many ms after the ping, before the sample began.
+    Before(u64),
+    /// Answered this many ms after the ping, while the sample ran.
+    During(u64),
+}
+
+fn sampled(_sent: u64, _sample_from: u64, _answered: Option<u64>) -> Sampled {
+    Sampled::Open
+}
+
+impl Sampled {
+    /// The frames the hang's record may carry.
+    fn frames(
+        self,
+        sample: Result<Vec<String>, &'static str>,
+    ) -> Result<Vec<String>, &'static str> {
+        sample
+    }
+}
+
+impl fmt::Display for Sampled {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
 struct Answer {
     outstanding: AtomicBool,
     at_ms: AtomicU64,
@@ -697,5 +728,38 @@ mod tests {
         assert!(quick.step(beat(sent), None, limits).ping);
         let tick = quick.step(beat(sent + 2_300), Some(sent + 2_266), limits);
         assert_eq!((tick.hang, tick.ended), (Some(2_266), None));
+    }
+
+    /// 2026-10-23 05:19 (t-72138): the ping went unanswered 2,031 ms while
+    /// the main thread ran Chromium's message pump, and the one-second
+    /// sample that followed found it idle in `mach_msg` in 72 of its 78
+    /// samples — the hang had ended, and its task carried the idle loop as
+    /// its stack. A sample that began after the answer holds none of the
+    /// hang; one the answer arrived in holds its end. Either way the record
+    /// says when the answer came, so the frames are read for what they are.
+    #[test]
+    fn a_sample_taken_after_the_answer_is_not_filed_as_the_hangs_stack() {
+        let limits = Limits::DEFAULT;
+        let sent = limits.warmup_ms;
+        let seen = sent + 2_031;
+        let sample_from = seen + 4;
+        let idle = || Ok(vec!["native::self_72::mach_msg2_trap".to_string()]);
+
+        let before = sampled(sent, sample_from, Some(seen + 1));
+        assert_eq!(before, Sampled::Before(2_032));
+        assert_eq!(before.frames(idle()), Err("answered_before_sample"));
+        assert_eq!(before.to_string(), " lasted_ms=2032 answered_before_sample");
+
+        let during = sampled(sent, sample_from, Some(sample_from + 300));
+        assert_eq!(during, Sampled::During(2_335));
+        assert_eq!(during.frames(idle()), idle());
+        assert_eq!(during.to_string(), " lasted_ms=2335 answered_during_sample");
+
+        let open = sampled(sent, sample_from, None);
+        assert_eq!(open, Sampled::Open);
+        assert_eq!(open.frames(idle()), idle());
+        assert_eq!(open.to_string(), "");
+        // A sampler that failed says its own reason, whatever the answer.
+        assert_eq!(during.frames(Err("sample_timeout")), Err("sample_timeout"));
     }
 }

@@ -645,6 +645,23 @@ fn put_away(returned: Vec<Loan>, end: LoanEnd) {
     announce_loans();
 }
 
+/// Where the window's exit stands with its devices (t-62468).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitPutAway {
+    Idle,
+    Pending,
+    Done,
+}
+
+fn defer_put_away(
+    _phase: &'static std::sync::Mutex<ExitPutAway>,
+    _devices: bool,
+    _put_away: impl FnOnce() + Send + 'static,
+    _then: impl FnOnce() + Send + 'static,
+) -> bool {
+    false
+}
+
 /// [`put_away`]'s order, with the three hands passed in so the order is a
 /// test rather than a hope.
 fn put_away_with(
@@ -712,6 +729,55 @@ mod tests {
                 "tell lent_avd 1 the emulator process would not stop",
             ]
         );
+    }
+
+    /// 2026-10-17 (t-62468): the window's exit put a lent AVD away on the
+    /// main thread, and its saved exit — up to thirty seconds a device —
+    /// held the main thread in `nanosleep` in every one of 83 samples. The
+    /// exit now waits for its devices on a thread of their own and goes on
+    /// when they are down; an exit asked for again meanwhile keeps waiting
+    /// and starts nothing twice, and a window with no device exits at once.
+    #[test]
+    fn the_exit_puts_its_devices_away_off_the_exiting_thread() {
+        let phase: &'static _ = Box::leak(Box::new(std::sync::Mutex::new(ExitPutAway::Idle)));
+        assert!(!defer_put_away(
+            phase,
+            false,
+            || unreachable!(),
+            || unreachable!()
+        ));
+        assert_eq!(*session::held(phase), ExitPutAway::Idle);
+
+        let caller = std::thread::current().id();
+        let (gate, opened) = std::sync::mpsc::channel::<()>();
+        let (down, went_down) = std::sync::mpsc::channel();
+        let (exit, exited) = std::sync::mpsc::channel();
+        assert!(defer_put_away(
+            phase,
+            true,
+            move || {
+                opened.recv().expect("the test opens the gate");
+                down.send(std::thread::current().id()).expect("put away");
+            },
+            move || exit.send(()).expect("exit"),
+        ));
+        assert_eq!(*session::held(phase), ExitPutAway::Pending);
+        assert!(defer_put_away(
+            phase,
+            true,
+            || unreachable!(),
+            || unreachable!()
+        ));
+        gate.send(()).expect("open the gate");
+        assert_ne!(went_down.recv().expect("the devices went down"), caller);
+        exited.recv().expect("the exit was asked for again");
+        assert_eq!(*session::held(phase), ExitPutAway::Done);
+        assert!(!defer_put_away(
+            phase,
+            true,
+            || unreachable!(),
+            || unreachable!()
+        ));
     }
 
     #[test]
