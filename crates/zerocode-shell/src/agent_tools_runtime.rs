@@ -877,8 +877,13 @@ impl TeamWindow {
     /// or the placeholder a long paste folds to — for [`BRIEFING_WINDOW`];
     /// when it never shows, the briefing is typed once more to the composer
     /// that stands by then, and when it still does not, the launch says so.
-    /// Only an agent whose row names a composer glyph is checked: the others
-    /// have no measured screen to read it off.
+    /// That retype is a success only once its own delivery says it was
+    /// submitted, and the screen is read after that (t-74919): its words
+    /// stand in the composer before their Enter, and stay there under an
+    /// Enter the delivery withholds. Its outcome is waited for on the
+    /// agent's own deadline and the submission receipt's patience, never the
+    /// watch's window. Only an agent whose row names a composer glyph is
+    /// checked: the others have no measured screen to read it off.
     fn confirm_briefing(&self, term: TermId, pending: &PendingWorkerReadiness) -> Option<String> {
         use zerocode_pty::briefing::{BRIEFING_WINDOW, Unheard, Verdict, confirm};
         let glyph = pending.composer?;
@@ -887,18 +892,20 @@ impl TeamWindow {
         }
         let state = self.app.state::<AppState>();
         let agent = state.agent_terms().get(&term).copied();
+        let deadline = ready_timeout_for(agent);
         let mut pane = LaunchPane {
             state: &state,
             term,
             briefing: &pending.briefing,
             glyph,
             agent,
+            deadline,
         };
         let why = match confirm(
             &mut pane,
             &pending.briefing,
             BRIEFING_WINDOW,
-            zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+            deadline + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
         ) {
             Verdict::Taken => return None,
             Verdict::Gone => {
@@ -908,9 +915,7 @@ impl TeamWindow {
                 "typed twice, and the worker's screen never showed it".to_string()
             }
             Verdict::Undelivered(Unheard::RetypeEnded(outcome)) => {
-                format!(
-                    "typed again, and that delivery ended {outcome:?} before its Enter was taken"
-                )
+                format!("typed again, and that delivery ended {outcome:?}, not submitted")
             }
             Verdict::Undelivered(Unheard::RetypeUnanswered) => {
                 "typed again, and that delivery never answered".to_string()
@@ -924,13 +929,16 @@ impl TeamWindow {
     }
 }
 
-/// A worker's pane as the briefing watch reads and types at it (t-74381).
+/// A worker's pane as the briefing watch reads and types at it (t-74381,
+/// t-74919).
 struct LaunchPane<'a> {
     state: &'a AppState,
     term: TermId,
     briefing: &'a str,
     glyph: char,
     agent: Option<&'static str>,
+    /// The agent's own readiness deadline, which the retype pays.
+    deadline: Duration,
 }
 
 impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
@@ -961,7 +969,7 @@ impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
                 zerocode_pty::ReadySignal::Rest(Some(self.glyph)),
                 Instant::now(),
                 ready_quiet_for(self.agent),
-                ready_timeout_for(self.agent),
+                self.deadline,
             )
             .clearing(false)
             .guarded(zerocode_pty::ready::Guard::for_its_own_line(
