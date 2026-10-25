@@ -109,7 +109,11 @@ fn a_git_listed_flat_sibling_stays_legacy_without_becoming_managed() {
         &["worktree", "add", "--detach", sibling.to_str().unwrap()],
     );
     let listed = listed(&orchestrator, &sibling).expect("git lists the sibling");
-    let configured = keep.path().join("worktrees/repo");
+    // Git resolves the macOS temporary-directory alias. Use that same base
+    // while retaining this host's separator spelling for the configured root.
+    let configured = orchestrator.repo_root().parent().unwrap().join("worktrees/repo");
+    #[cfg(windows)]
+    let configured = PathBuf::from(configured.to_str().unwrap().replace('/', "\\"));
     // Include the native spelling (backslashes on Windows) and a redundant
     // final dot. Git, rather than the fixture, supplies the candidate spelling.
     for configured in [configured.clone(), configured.join(".")] {
