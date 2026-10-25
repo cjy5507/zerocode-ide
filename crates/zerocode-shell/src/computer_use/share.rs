@@ -281,24 +281,29 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
 }
 
 /// Whether the request this thread runs is still under the share it was
-/// admitted to: refused once the person took control since, or required
-/// sharing for an app they did not hand over. Judged without moving the
-/// share (t-74826): a step in flight never takes it back from the app the
-/// person handed over since.
+/// admitted to: refused once the person took control since, and otherwise
+/// judged as admitting it now would be — outside the share the person made
+/// since, or required sharing for an app they did not hand over. Judged
+/// without moving the share (t-74826): a step in flight never takes it back
+/// from the app the person handed over since.
 pub(crate) fn ensure_current() -> Result<(), ComputerUseError> {
     let Some(admitted) = ADMITTED.with(|held| held.borrow().clone()) else {
         return Ok(());
     };
     refresh_required();
+    let now = now_ms();
     with_held(|held| {
         if held.share.generation() != admitted.generation {
             return Err(took_control());
         }
-        held.share.still_holds(Reach {
-            app: admitted.app.as_deref(),
-            acts: admitted.acts,
-            whole_screen: admitted.whole_screen,
-        })
+        held.share.still_holds(
+            Reach {
+                app: admitted.app.as_deref(),
+                acts: admitted.acts,
+                whole_screen: admitted.whole_screen,
+            },
+            now,
+        )
     })
 }
 

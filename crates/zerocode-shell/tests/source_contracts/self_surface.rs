@@ -257,7 +257,10 @@ fn required_sharing_reads_the_saved_policy_and_rechecks_each_provider_step() {
     let road = code_only(include_str!("../../src/computer_use/share.rs"));
     let current = block_after(&road, "pub(crate) fn ensure_current()");
     assert!(current.contains("refresh_required()"));
-    // A step in flight is judged without moving the share (t-74826).
-    assert!(current.contains("held.share.still_holds(Reach"));
+    // A step in flight is judged without moving the share (t-74826), on the
+    // reach it was admitted with and the window's clock (t-75217).
+    assert!(current.contains("held.share.still_holds("));
+    assert!(current.contains("whole_screen: admitted.whole_screen"));
+    assert!(current.contains("now_ms()"));
     assert!(!current.contains(".gate("));
 }

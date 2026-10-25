@@ -333,15 +333,15 @@ fn a_no_under_required_sharing_is_not_asked_again_and_does_not_wait() {
 
 /// R1 (t-74826): a request in flight is judged again at each step without
 /// moving the share. With A in flight and B handed over since, A's next
-/// step neither takes the share back to A nor is refused for it; only the
-/// person's requirement and their hand on the window are judged again.
+/// step neither takes the share back to A nor is refused for it, since A was
+/// handed over; everything else is judged again as the gate judges it.
 #[test]
 fn a_request_in_flight_is_judged_again_without_moving_the_share() {
     let mut share = Share::default();
     share.answered("safari", Answer::Shared, NOW);
     share.answered("notes", Answer::Shared, NOW);
     assert_eq!(share.target(), Some("notes"));
-    assert_eq!(share.still_holds(act(Some("safari"))), Ok(()));
+    assert_eq!(share.still_holds(act(Some("safari")), NOW), Ok(()));
     assert_eq!(
         share.target(),
         Some("notes"),
@@ -349,24 +349,27 @@ fn a_request_in_flight_is_judged_again_without_moving_the_share() {
     );
     share.set_required(true);
     assert_eq!(
-        share.still_holds(act(Some("safari"))),
+        share.still_holds(act(Some("safari")), NOW),
         Ok(()),
         "safari was handed over"
     );
-    for reach in [act(Some("calculator")), act(None)] {
+    for (reach, wanted) in [
+        (act(Some("calculator")), error_code::SHARE_REQUIRED),
+        (act(None), error_code::SHARE_SCOPE),
+    ] {
         assert_eq!(
             share
-                .still_holds(reach)
+                .still_holds(reach, NOW)
                 .map_err(|error| error.code)
                 .err()
                 .as_deref(),
-            Some(error_code::SHARE_REQUIRED),
-            "{reach:?}"
+            Some(wanted),
+            "{reach:?}: as the gate refuses it while notes is shared"
         );
     }
     assert_eq!(
         share
-            .still_holds(look(Some("calculator")))
+            .still_holds(look(Some("calculator")), NOW)
             .map_err(|error| error.code)
             .err()
             .as_deref(),
@@ -376,7 +379,7 @@ fn a_request_in_flight_is_judged_again_without_moving_the_share() {
     share.take_back();
     assert_eq!(
         share
-            .still_holds(act(Some("notes")))
+            .still_holds(act(Some("notes")), NOW)
             .map_err(|error| error.code)
             .err()
             .as_deref(),
@@ -403,7 +406,7 @@ fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
     for reach in in_flight {
         assert_eq!(
             share
-                .still_holds(reach)
+                .still_holds(reach, NOW)
                 .map_err(|error| error.code)
                 .err()
                 .as_deref(),
@@ -412,7 +415,7 @@ fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
         );
     }
     assert_eq!(share, before, "judging a step in flight moves nothing");
-    assert_eq!(share.still_holds(act(Some("notes"))), Ok(()));
+    assert_eq!(share.still_holds(act(Some("notes")), NOW), Ok(()));
 }
 
 /// A step in flight is judged as the gate judges a new request, without
@@ -469,7 +472,7 @@ fn a_step_in_flight_is_judged_as_the_gate_judges_without_moving_anything() {
                     };
                     let gated = share.clone().gate(reach, now);
                     let held = share.clone();
-                    let step = held.still_holds(reach);
+                    let step = held.still_holds(reach, now);
                     assert_eq!(
                         &held, share,
                         "the step moved the share: {reach:?} {share:?}"
