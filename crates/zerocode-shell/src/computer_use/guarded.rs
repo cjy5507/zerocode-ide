@@ -204,9 +204,8 @@ impl Ledger {
         let mut held = LedgerLock::exclusive(file).map_err(Refusal::Io)?;
         let file = &mut held.0;
         if let Some(acting) = lines.iter().find(|line| line.state == State::Acting)
-            && let Some(state) =
-                Self::latest(&Self::lines(file).map_err(Refusal::Io)?, &acting.txn)
-                    .filter(|state| state.spent())
+            && let Some(state) = Self::latest(&Self::lines(file).map_err(Refusal::Io)?, &acting.txn)
+                .filter(|state| state.spent())
         {
             return Err(Refusal::Seen(state));
         }

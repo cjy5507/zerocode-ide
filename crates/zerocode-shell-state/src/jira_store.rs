@@ -276,11 +276,8 @@ impl Drop for JiraStoreLock<'_> {
     /// Ends the flock itself rather than leaving it to the close: a launch
     /// that forks before it execs holds a copy of the descriptor until the
     /// exec, and a close ends the lock only when every copy is gone (t-73907).
-    /// Unix only: Windows forks nothing, and its one-byte `LockFile` is not
-    /// the range `File::unlock` names.
     fn drop(&mut self) {
-        #[cfg(unix)]
-        let _ = self.file.unlock();
+        unlock_file(&self.file);
     }
 }
 
@@ -1220,6 +1217,25 @@ fn lock_file_exclusively(file: &File) -> StoreResult<()> {
     }
 }
 
+#[cfg(unix)]
+fn unlock_file(file: &File) {
+    let _ = file.unlock();
+}
+
+/// The one byte [`lock_file_exclusively`] locked: `UnlockFile` must name the
+/// same range, which `File::unlock` does not.
+#[cfg(windows)]
+fn unlock_file(file: &File) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFile;
+
+    // SAFETY: the raw handle remains owned by `file` for this call.
+    unsafe { UnlockFile(file.as_raw_handle() as _, 0, 0, 1, 0) };
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unlock_file(_file: &File) {}
+
 #[cfg(not(any(unix, windows)))]
 fn lock_file_exclusively(_file: &File) -> StoreResult<()> {
     Err(invalid_metadata(
@@ -1343,8 +1359,7 @@ mod tests {
         let inherited = held.file.try_clone().unwrap();
         drop(held);
         let next =
-            crate::durable_file::private_lock_file(&directory.path().join(LOCK_FILE_NAME))
-                .unwrap();
+            crate::durable_file::private_lock_file(&directory.path().join(LOCK_FILE_NAME)).unwrap();
         let taken = unsafe { libc::flock(next.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         drop(inherited);
         assert_eq!(taken, 0, "a lock its holder let go is still held by a copy");

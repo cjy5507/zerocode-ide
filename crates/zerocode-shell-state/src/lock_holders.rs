@@ -230,6 +230,7 @@ pub fn settle(
 }
 
 /// How long [`end`] waits for an ended process to be gone.
+#[cfg(unix)]
 const END_WAIT: Duration = Duration::from_secs(1);
 
 #[cfg(unix)]
