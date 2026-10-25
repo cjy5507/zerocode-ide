@@ -2318,6 +2318,10 @@ pub(super) fn beat_standing_orders(app: &AppHandle) {
         // And the ledger's record held against git's, once a minute, from the landing cache the
         // sidebar already keeps (t-34501): what is late is told, nothing is merged or deleted.
         crate::landing_watch_sweep::sweep(&beating, now_ms);
+        // And whether each landed task's commit is on the remote (t-73910 W4-2),
+        // once a minute: the reclaimer's git question, put to the remote's
+        // default branch; the desk is dressed from the answers on the next beat.
+        crate::remote_landing::sweep(&beating, now_ms);
     });
 }
 

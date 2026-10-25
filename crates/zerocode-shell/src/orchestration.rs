@@ -3046,6 +3046,9 @@ pub(crate) fn refresh_board_ledger() {
     // Whether each batch's repository has the integration queue on is the project's setting,
     // laid over the desk the same way, outside the ledger's view (t-45315).
     crate::land_batch::dress_desk(Arc::make_mut(&mut next.desk));
+    // Whether each landed task's commit is on the remote, from the answers the beat's
+    // look kept (t-73910 W4-2) — no git here.
+    crate::remote_landing::dress_desk(Arc::make_mut(&mut next.desk));
     // Build, allocate and drop old rows outside the publication lock. The
     // main-thread reader holds it only long enough to clone an Arc.
     let next = Arc::new(next);
