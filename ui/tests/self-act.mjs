@@ -637,4 +637,107 @@ export async function testSelfAct(browser, origin, ok) {
   } finally {
     await legacy.close();
   }
+
+  /* Whose hand a trusted event is (t-75431, R5 of t-75209). The browser marks
+   * trusted what the page's own focus() or click() sets off as well — a blur,
+   * a checkbox's change — so only the person's own moves (a pointer, a touch,
+   * a key, the text they type) are the person's by themselves. A checkbox's
+   * change is the hand of the click that flipped it; the OpenCode cookie box
+   * saves on blur as the hand that wrote its text. An agent's flow that moves
+   * the focus after an await saves nothing as the person's, nor does the
+   * person leaving a box an agent filled, nor a page's click() on a checkbox
+   * after an await; the person leaving the box they typed in, pressing Enter
+   * in it, and clicking a checkbox or its label still say person. */
+  await scenario(browser, origin, "hand by event kind", ok, async (page) => {
+    await page.evaluate(() => {
+      const T = window.__SELF_T__;
+      T.hands = [];
+      const said = (command) => (args, options) => {
+        T.hands.push([command, options?.headers?.["zerocode-hand"] ?? null]);
+        return command === "set_opencode_cookie" ? { opencode_cookie_configured: true } : true;
+      };
+      for (const command of ["jira_connect", "set_opencode_cookie", "board_columns_probe"]) {
+        window.__ANSWER__[command] = said(command);
+      }
+      T.gates = [];
+      T.gate = () => new Promise((done) => T.gates.push(done));
+      const fixture = document.getElementById("self-act-fixture");
+      fixture.insertAdjacentHTML("beforeend", `
+        <label><input id="kind-check" type="checkbox" aria-label="Kind check"><span id="kind-check-words">Kind check words</span></label>
+        <button id="kind-flip" type="button">Kind flip</button>
+        <button id="kind-move" type="button">Kind move</button>`);
+      document.getElementById("kind-check").addEventListener("change", () => void invoke("jira_connect"));
+      // An agent's flow that, after an await, clicks a checkbox by the page's
+      // own click() — and one that moves the focus.
+      document.getElementById("kind-flip").addEventListener("click", async () => {
+        await T.gate();
+        document.getElementById("kind-check").click();
+      });
+      document.getElementById("kind-move").addEventListener("click", async () => {
+        await T.gate();
+        document.getElementById("opencode-workspace").focus();
+      });
+    });
+    const press = (name) => page.evaluate(async (name) => {
+      const T = window.__SELF_T__;
+      const look = await T.ask({ kind: "look" });
+      const control = T.named(look, name);
+      const facts = await T.ask({ kind: "facts", lookId: look.ok.lookId, id: control.id });
+      return (await T.ask({ kind: "do", lookId: look.ok.lookId, id: control.id, act: "click", facts: facts.ok.facts }))?.ok?.done ?? null;
+    }, name);
+    const release = () => page.evaluate(() => new Promise((done) => {
+      for (const open of window.__SELF_T__.gates.splice(0)) open();
+      setTimeout(done, 0);
+    }));
+    const take = () => page.evaluate(() => window.__SELF_T__.hands.splice(0));
+    const hand = (hands, command) => hands.filter(([name]) => name === command).map(([, by]) => by);
+
+    // The checkbox: an agent's flow clicks it by click() after an await; the
+    // person clicks it, and its label.
+    const flipped = await press("Kind flip");
+    await release();
+    const pageFlip = await take();
+    await page.click("#kind-check");
+    const personFlip = await take();
+    await page.click("#kind-check-words");
+    const labelFlip = await take();
+
+    // The cookie box, in its settings pane.
+    await page.evaluate(() => {
+      setSettingsOpen(true);
+      showSettingsPane("appearance");
+    });
+    const cookie = "#opencode-cookie";
+    // The person types and leaves the box by clicking the next one.
+    await page.click(cookie);
+    await page.keyboard.type("auth=typed-by-person-1");
+    await page.click("#opencode-workspace");
+    const left = await take();
+    // The person types and presses Enter.
+    await page.click(cookie);
+    await page.keyboard.type("auth=typed-by-person-2");
+    await page.keyboard.press("Enter");
+    const entered = await take();
+    // The box holds text no hand typed; an agent's flow moves the focus after
+    // an await.
+    await page.click(cookie);
+    await page.evaluate(() => { document.getElementById("opencode-cookie").value = "auth=written-by-page"; });
+    const moved = await press("Kind move");
+    await release();
+    const agentMoved = await take();
+    // An agent fills the box the person stands in; the person leaves it.
+    await page.click(cookie);
+    await page.evaluate(() => asAgentPress(() => selfActFill(document.getElementById("opencode-cookie"), "auth=filled-by-agent")));
+    await page.click("#opencode-workspace");
+    const agentFilled = await take();
+
+    ok("the agent's flow presses were made", flipped === true && moved === true, JSON.stringify({ flipped, moved }));
+    ok("a page's click() on a checkbox after an await names no person", hand(pageFlip, "jira_connect").join() === "none", JSON.stringify(pageFlip));
+    ok("the person's click on a checkbox says person", hand(personFlip, "jira_connect").join() === "person", JSON.stringify(personFlip));
+    ok("the person's click on a checkbox's label says person", hand(labelFlip, "jira_connect").join() === "person", JSON.stringify(labelFlip));
+    ok("the person leaving the cookie box they typed in saves as person", hand(left, "set_opencode_cookie").join() === "person", JSON.stringify(left));
+    ok("the person's Enter in the cookie box saves as person", hand(entered, "set_opencode_cookie").join() === "person", JSON.stringify(entered));
+    ok("an agent's flow moving the focus saves no person's cookie", hand(agentMoved, "set_opencode_cookie").join() === "none", JSON.stringify(agentMoved));
+    ok("the person leaving a box an agent filled saves as the agent's", hand(agentFilled, "set_opencode_cookie").join() === "agent", JSON.stringify(agentFilled));
+  });
 }
