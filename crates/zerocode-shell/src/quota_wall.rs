@@ -86,19 +86,6 @@ impl StallCause {
         )
     }
 
-    /// Until when the pointer holds back from a pane whose record of this
-    /// cause was written at `at_ms`. A wall stands for its reset window
-    /// ([`zerocode_core::orchestration::wall_stands_until`]). A decline has no
-    /// reset: it stands until the pane answers otherwise or a person types,
-    /// both of which take the record off the last word, and at most
-    /// [`DECLINE_POINTER_HOLD_MS`], after which one pointer goes in.
-    fn pointer_held_until(self, at_ms: i64, resets_at_ms: Option<i64>) -> i64 {
-        match self {
-            Self::ClassifierDecline => at_ms.saturating_add(DECLINE_POINTER_HOLD_MS),
-            _ => zerocode_core::orchestration::wall_stands_until(at_ms, resets_at_ms),
-        }
-    }
-
     /// The cause as the window's own log names it.
     pub(crate) const fn word(self) -> &'static str {
         match self {
@@ -318,6 +305,14 @@ const ZO_DECLINE_NOTICES: &[&str] = &[
     "The model's safety classifier declined this request",
     "The safety classifier declined this again.",
 ];
+
+/// The key zo's `message` record names a recorded decline by, and the values
+/// it takes (t-57445): read first, so a reworded notice changes nothing. The
+/// names are this window's placeholder until ZO fixes them in zo's session
+/// record; a record without the key — every one zo wrote before it — is read
+/// by how its text begins ([`ZO_DECLINE_NOTICES`]).
+const ZO_DECLINE_KEY: &str = "decline";
+const ZO_DECLINE_KINDS: &[&str] = &["surfaced", "standing"];
 
 /// The longest the mail pointer holds back from a pane whose last answer is
 /// a decline (t-57445). The window has no other re-notification bound, and
@@ -1136,7 +1131,15 @@ pub(crate) fn pane_wall_in(agent: &str, lines: &[String]) -> Option<PaneWall> {
             Some(PaneWall {
                 cause: rule.cause,
                 line: found.line,
-                stands_until_ms: rule.cause.pointer_held_until(at_ms, found.resets_at_ms),
+                // A wall stands for its reset window, from the one wall table. A
+                // decline has no reset: it stands until the pane answers otherwise
+                // or a person types — both take the record off the last word —
+                // and at most `DECLINE_POINTER_HOLD_MS`, after which one pointer
+                // goes in.
+                stands_until_ms: match rule.cause {
+                    StallCause::ClassifierDecline => at_ms.saturating_add(DECLINE_POINTER_HOLD_MS),
+                    _ => zerocode_core::orchestration::wall_stands_until(at_ms, found.resets_at_ms),
+                },
             })
         })
 }
@@ -1214,7 +1217,14 @@ fn zo_session_marker(lines: &[String], starts: &[&str]) -> Option<Found> {
             })
             .unwrap_or("")
             .trim_start();
-        if !starts.iter().any(|start| text.starts_with(start)) {
+        // The record's own word first; its text only where it has none.
+        let declined = match value.get(ZO_DECLINE_KEY) {
+            Some(kind) => kind
+                .as_str()
+                .is_some_and(|kind| ZO_DECLINE_KINDS.contains(&kind)),
+            None => starts.iter().any(|start| text.starts_with(start)),
+        };
+        if !declined {
             return None;
         }
         let at_ms = value
@@ -2093,6 +2103,18 @@ pub(crate) mod tests {
         assert!(
             zo(&[ZO_ASKED, ZO_DECLINED, ZO_SYSTEM]).is_some(),
             "a system record is neither an answer nor a prompt"
+        );
+        // A record that names its decline is read by the name, whatever its
+        // text says; a record naming something else is no decline.
+        let keyed = r#"{"type":"message","turn_index":7,"updated_at_ms":1792905009000,"decline":"standing","message":{"role":"assistant","blocks":[{"type":"text","text":"Reworded: still declined."}]}}"#;
+        let other = r#"{"type":"message","turn_index":7,"updated_at_ms":1792905009000,"decline":"none","message":{"role":"assistant","blocks":[{"type":"text","text":"The safety classifier declined this again."}]}}"#;
+        assert_eq!(
+            zo(&[ZO_ASKED, keyed]).map(|wall| wall.stands_until_ms),
+            Some(1_792_905_009_000 + DECLINE_POINTER_HOLD_MS)
+        );
+        assert!(
+            zo(&[ZO_ASKED, other]).is_none(),
+            "a record naming no decline held the pointer"
         );
         for (why, held) in [
             ("a prompt after the notice", vec![ZO_DECLINED, ZO_POINTER]),

@@ -1066,3 +1066,73 @@ fn every_reason_a_press_at_a_wall_can_meet_has_words_in_all_five_languages() {
         "a refused press shows what came back as it came:\n{pressing}"
     );
 }
+
+/// zo's source, from the workspace beside this one — read, never changed.
+fn zo_source(path: &str) -> String {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zo-ide/crates");
+    std::fs::read_to_string(src.join(path)).unwrap_or_else(|why| panic!("{path}: {why}"))
+}
+
+/// The text of the Rust string literal that follows `declared` in `source`,
+/// as the compiler reads it: a `\` before a line break drops the break and
+/// the leading space after it, and `\"` is a quote.
+fn literal_after(source: &str, declared: &str) -> String {
+    let start = source
+        .find(declared)
+        .unwrap_or_else(|| panic!("`{declared}` is gone"));
+    let rest = &source[start + declared.len()..];
+    let open = rest.find('"').expect("the literal opens") + 1;
+    let mut text = String::new();
+    let mut chars = rest[open..].chars().peekable();
+    while let Some(one) = chars.next() {
+        match one {
+            '"' => return text,
+            '\\' => match chars.next() {
+                Some('\n') => {
+                    while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                        chars.next();
+                    }
+                }
+                Some(escaped) => text.push(escaped),
+                None => break,
+            },
+            other => text.push(other),
+        }
+    }
+    panic!("`{declared}`'s literal never closes")
+}
+
+/// t-57445: the window's zo decline row holds the mail pointer on how zo's two
+/// recorded decline notices BEGIN, copied into `ZO_DECLINE_NOTICES` because the
+/// window links no zo crate. A notice zo rewords would leave the row reading
+/// nothing and the pointer retyping into a declined pane again — so the two
+/// beginnings are held against zo's own constants, read from its source.
+#[test]
+fn the_zo_decline_row_starts_where_zos_own_recorded_notices_start() {
+    let table = shell_source("quota_wall.rs");
+    let opens = "const ZO_DECLINE_NOTICES: &[&str] = &[";
+    let notices = &table[table.find(opens).expect("the zo decline row's notices")..];
+    let notices = &notices[..notices.find("\n];").expect("the notices close")];
+    let starts: Vec<&str> = notices
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+        .collect();
+    let surfaced = literal_after(
+        &zo_source("runtime/src/conversation/fallback.rs"),
+        "const REFUSAL_SURFACED_NOTICE: &str =",
+    );
+    let standing = literal_after(
+        &zo_source("core-types/src/retry_signal.rs"),
+        "pub const REFUSAL_STANDING_NOTICE: &str =",
+    );
+    assert_eq!(starts.len(), 2, "the row lost a notice:\n{notices}");
+    for (start, notice, name) in [
+        (starts[0], &surfaced, "REFUSAL_SURFACED_NOTICE"),
+        (starts[1], &standing, "REFUSAL_STANDING_NOTICE"),
+    ] {
+        assert!(
+            !start.is_empty() && notice.starts_with(start),
+            "zo's {name} no longer begins with the row's words `{start}`:\n{notice}"
+        );
+    }
+}
