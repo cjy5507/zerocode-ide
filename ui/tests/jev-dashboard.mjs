@@ -14,13 +14,11 @@
  * The backend is the window harness's stub with its answers swapped in
  * (`window.__ANSWER__`): the settings' state, zo's summary, the day's
  * count and the switch's door. */
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
+import { realSummary } from "./jev-real-summary.mjs";
 import { createRequire } from "node:module";
 import { SETTINGS_QUALITY_SPEC, contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
 
@@ -497,32 +495,6 @@ export function jevDashboardFixture(real = null) {
   };
 }
 
-/* This machine's own ledgers, counted by the zo the window would run
- * (`~/.local/bin/zo`, or JEV_ZO_BIN) over the project JEV_PROJECT_DIR names
- * (else this checkout), with the recent list when that zo knows the flag.
- * `null` when no zo answers — the fixture then stands in, and the evidence
- * says so. */
-function realSummary() {
-  const zo = process.env.JEV_ZO_BIN || join(homedir(), ".local", "bin", "zo");
-  if (!existsSync(zo)) return null;
-  const project = process.env.JEV_PROJECT_DIR || ROOT;
-  const sessions = process.env.JEV_SESSIONS_DIR
-    || join(homedir(), "Library", "Application Support", "dev.zerocode.app", "computer-use", "sessions");
-  const base = ["jev", "summary", "--json", "--cwd", project];
-  if (existsSync(sessions)) base.push("--computer-use", sessions);
-  for (const args of [[...base, "--recent", "12"], base]) {
-    const ran = spawnSync(zo, args, { encoding: "utf8", timeout: 20_000 });
-    if (ran.status !== 0) continue;
-    try {
-      const seats = JSON.parse(ran.stdout).seats;
-      if (Array.isArray(seats) && seats.length > 0) return { seats, zo, recent: args.includes("--recent") };
-    } catch {
-      // An answer this reader does not understand: try the next shape.
-    }
-  }
-  return null;
-}
-
 /* The evidence a person looks at (t-5807): the dashboard with this
  * machine's numbers in the light and the dark treatment, everything on one
  * screen, no text cut, clipped or overlapping; and the settings card the
@@ -574,7 +546,7 @@ async function testJevLongModelIds(browser, origin, ok) {
 export async function testJevDashboardEvidence(browser, origin, ok) {
   await mkdir(EVIDENCE_DIR, { recursive: true });
   await testJevLongModelIds(browser, origin, ok);
-  const real = realSummary();
+  const real = realSummary({ root: ROOT });
   // The table carries every seat of the card; the numbers, trends and card
   // lines are drawn for the seats the answering zo could count. An installed
   // zo can predate a seat the table just gained (it reads the same table,
