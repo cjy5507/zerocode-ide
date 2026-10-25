@@ -1203,10 +1203,10 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       return { words, out, unmapped: deskNextStepWords({ next_step: "from_a_newer_window" }) };
     });
     const hangul = /[\u3131-\u318e\uac00-\ud7a3]/u;
-    ok("all thirteen next steps are worded in the five languages: none empty, none the raw word, each language its own (no Korean in en or es), and a word from a newer window says nothing instead of guessing",
+    ok("all thirteen next steps are worded in the five languages: none empty, none a bare catalog key, each language its own (no Korean in en or es), and a word from a newer window says nothing instead of guessing",
       stepWords.words.every((word, at) => ["ko", "en", "ja", "zh", "es"].every((locale) => {
         const said = stepWords.out[locale][at];
-        return said !== "" && !said.includes(word) && !said.includes("_") && (stepWords.out.ko[at] !== said || locale === "ko");
+        return said !== "" && !said.includes("board.desk") && !said.includes("{{") && !said.includes("_") && (stepWords.out.ko[at] !== said || locale === "ko");
       })) && stepWords.out.en.every((said) => !hangul.test(said)) && stepWords.out.es.every((said) => !hangul.test(said)) &&
       stepWords.unmapped === "",
       JSON.stringify(stepWords));
@@ -1280,7 +1280,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await readStage("stale");
     const viewport = page.viewportSize();
     const fit = {};
-    for (const width of [360, 560]) {
+    for (const width of [320, 360, 560]) {
       await page.setViewportSize({ width, height: 900 });
       for (const theme of ["dark", "light"]) {
         for (const locale of ["ko", "en", "ja", "zh", "es"]) {
@@ -1295,7 +1295,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
             const strip = view.querySelector(".board-desk-stages");
             const task = [...view.querySelectorAll(".board-desk-task")].find((one) => one.querySelector(".board-desk-task-id").textContent === "t-963");
             const box = task?.getBoundingClientRect();
-            const outside = [".board-desk-task-work", ".board-desk-task-next-command", ".board-desk-task-next-copy"].filter((name) => {
+            const outside = [".board-desk-task-work", ".board-desk-task-step", ".board-desk-task-next-command", ".board-desk-task-next-copy"].filter((name) => {
               const part = task?.querySelector(name)?.getBoundingClientRect();
               return !part || part.right > box.right + 0.5 || part.left < box.left - 0.5;
             });
@@ -1313,7 +1313,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     });
     if (viewport) await page.setViewportSize(viewport);
     const staleWords = new Set(Object.entries(fit).filter(([key]) => key.startsWith("360-dark-")).map(([, one]) => one.stale));
-    ok("at 360 and 560 px, in both treatments and the five languages, the new stages and the row's commits, command and copy stay inside the desk — nothing overflows and no chip is cut — and each language says the stage in its own word",
+    ok("at 320, 360 and 560 px, in both treatments and the five languages, the new stages and the row's commits, next step, command and copy stay inside the desk — nothing overflows and no chip is cut — and each language says the stage in its own word",
       Object.values(fit).every((one) => one.desk <= 1 && one.strip <= 1 && one.outside.length === 0 && one.chips === 0) &&
       staleWords.size === 5, JSON.stringify(fit));
 

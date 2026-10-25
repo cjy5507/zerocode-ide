@@ -444,6 +444,7 @@ function paintBoardHold(row, ask, now, view) {
   writeTextContent(row.querySelector(".board-ask-title"), deskHoldWords(gate));
   paintBoardMeta(row.querySelector(".board-ask-meta"), boardMetaPieces([
     [task.parent_title], [task.title, { id: task.id }], [gate.checkout ? basename(gate.checkout) : ""],
+    [deskNextStepWords(task)],
   ]));
   const acts = row.querySelector(".board-ask-acts");
   const press = boardPressNote(row, ask.key);
@@ -562,6 +563,7 @@ function paintBoardReview(row, ask, now, view) {
   paintBoardMeta(row.querySelector(".board-ask-meta"), boardMetaPieces([
     [task.parent_title], [task.title, { id: task.id }], [boardModelName(carrier)],
     [handed > 0 ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(handed, now) }) : ""],
+    [deskNextStepWords(task)],
   ], t("board.now.reviewNext", "통과시키면 다음 발행에 같이 실립니다")));
   const acts = row.querySelector(".board-ask-acts");
   const press = boardPressNote(row, ask.key);

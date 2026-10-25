@@ -34145,6 +34145,7 @@ details.task-board-section > summary {
 .board-desk-task-note,
 .board-desk-task-work,
 .board-desk-task-owner,
+.board-desk-task-step,
 .board-desk-task-cost,
 .board-desk-task-writing {
   grid-column: 2;
@@ -34295,6 +34296,7 @@ details.task-board-section > summary {
 .board-desk-task-note[hidden],
 .board-desk-task-work[hidden],
 .board-desk-task-owner[hidden],
+.board-desk-task-step[hidden],
 .board-desk-task-next[hidden],
 .board-desk-task-next-command[hidden],
 .board-desk-task-next-copy[hidden],
