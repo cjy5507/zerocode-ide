@@ -195,6 +195,46 @@ on a red and 2 when a revision cannot be read. It runs no cargo and stands in fo
 no gate: a green says only that these checks found nothing, and every recipe the
 gate owes still runs. `tests/test_prebatch.py` pins each rule.
 
+## Re-gating the same head from a receipt (`gate_receipt.py`, 2026-10-25, t-73910)
+
+The core's gate reuse (`orchestration::gate_reuse`) answers hit only for the same
+head, tree and declared inputs gated before under the same live coordinator: a
+batch rebuilt with any other member is always a miss
+(`a_different_head_with_the_same_tree_misses`). It pays where the same head goes
+up again — a batch whose only red was a measurement job, or a job withdrawn and
+put back. On 10-25 none of the last 300 build-line jobs used it, and the four
+l78 heads (c, f, g, h) were all different, so it would have saved 0 minutes that
+day.
+
+A build-line job reaches it only through the window's pinned launcher: called
+directly, `gate_receipt.py` answers `miss` ("use the independently pinned
+external launcher"). The shape of a job entry (not yet run on the line — every
+`<…>` is the coordinator's):
+
+    zerocode gate-bootstrap \
+      --launcher <pinned gate_launcher.py> --launcher-sha256 <sha256> \
+      --python <python> --python-sha256 <sha256> --stdlib <stdlib> --stdlib-sha256 <sha256> \
+      --gate-job '<JobIntent JSON, core gate_reuse::JobIntent>' \
+      -- --policy <manifest> --policy-sha256 <sha256> --repo <gate checkout> \
+      -- verify --repo <gate checkout> --gate gate-root --task <t-…> --attempt <dispatch|none> \
+         --scope deterministic --metadata <the first run's metadata.json> --log <its gate.log> \
+         -- just test
+
+`run` in place of `verify` (with `--output <folder>` for the metadata and log)
+executes and records the first time. A `measurement` or `nondeterministic` scope
+never hits: window measurements and benches always run. A hit still leaves the
+four mandatory checks (`native`, `windows`, `flake-judgment`, `publish`) owed.
+
+The policy is not pinned (`gate-policy-pin`), by the coordinator's decision
+(m-74459). Pinning would let a deterministic job on a head gated before skip as
+a hit, with "reused — original record r" kept in the ledger. Against it: every
+record misses after a coordinator generation change
+(`a_completed_receipt_misses_after_a_coordinator_generation_change`) or a change
+of the pinned policy bytes; without the pinned launcher and manifest every job
+misses (fail closed — an unrun check is never called passed); and each job pays
+the fingerprint (`timings.fingerprintMs` in the answer). The gain stays unknown
+until heads are gated again.
+
 ## The warm targets
 
 Each gate and build keeps its own cargo target under
