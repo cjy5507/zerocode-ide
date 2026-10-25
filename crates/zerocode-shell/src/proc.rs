@@ -301,6 +301,7 @@ mod tests {
         assert_eq!(inherited.get_envs().count(), 0);
     }
 
+    #[cfg(unix)]
     fn envs_of(command: &std::process::Command) -> Vec<(String, Option<String>)> {
         command
             .get_envs()

@@ -37,13 +37,12 @@ impl Drop for HeldFileLock {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
     /// The copy a forked launch would keep: the lock ends with the guard all
     /// the same, and a bare close of the same kind does not end it.
-    #[cfg(unix)]
     #[test]
     fn the_lock_ends_with_the_guard_while_a_copy_of_its_descriptor_lives() {
         let dir = tempfile::tempdir().unwrap();
