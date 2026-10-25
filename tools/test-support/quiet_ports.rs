@@ -20,6 +20,12 @@
 //!   one whose lock is held. The OS lets go of the lock if the process dies, so
 //!   nothing is left to clean up.
 //!
+//! A test that judges the release of a lease cannot do it in that shared
+//! folder: another test may be given the freed port the next moment, and its
+//! hold is not the lease's. [`QuietPort::claim_apart`] takes a folder of the
+//! caller's own, which no other test names, and [`apart_band`] a band under
+//! the shared one, which no other test draws from (t-75231).
+//!
 //! What stays open is a program outside the tests that binds that exact port
 //! inside the gap. A port taken that way fails the bind the claim tries first,
 //! and the claim moves on.
@@ -32,7 +38,7 @@ use std::hash::BuildHasher;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Where the dynamic range is taken to start when the OS does not say: the
@@ -63,9 +69,35 @@ pub fn band_for(reported: Option<u16>) -> Range<u16> {
     start..end
 }
 
+/// How many ports lie in the band under the shared one that a test judging a
+/// release draws from.
+const APART_SPAN: u16 = 512;
+
+/// The folder the locks of the ports that every test draws from live in.
+pub fn lock_dir() -> PathBuf {
+    std::env::temp_dir().join(LOCK_DIR)
+}
+
+/// Where the lock that holds `port` lives in `dir`.
+pub fn lock_path_in(dir: &Path, port: u16) -> PathBuf {
+    dir.join(port.to_string())
+}
+
 /// Where the lock that holds `port` lives.
 pub fn lock_path(port: u16) -> PathBuf {
-    std::env::temp_dir().join(LOCK_DIR).join(port.to_string())
+    lock_path_in(&lock_dir(), port)
+}
+
+/// A band just under [`band_for`]'s that no ordinary claim draws from, for a
+/// test that lets a lease go and asks whether it did.
+pub fn apart_band(reported: Option<u16>) -> Range<u16> {
+    let shared = band_for(reported);
+    let start = shared.start.saturating_sub(APART_SPAN).max(LOWEST_PORT);
+    assert!(
+        shared.start - start >= APART_SPAN / 2,
+        "no room under the shared band {shared:?} for a band of its own"
+    );
+    start..shared.start
 }
 
 /// Where the OS says its dynamic range starts, when it says.
@@ -122,9 +154,10 @@ pub fn netsh_start(text: &str) -> Option<u16> {
         .find_map(|(_, number)| number.trim().parse::<u16>().ok())
 }
 
-/// Takes the lock on `port`'s file, or `None` when another holder has it.
-fn lock_port(port: u16) -> Option<File> {
-    let path = lock_path(port);
+/// Takes the lock on `port`'s file in `dir`, or `None` when another holder has
+/// it.
+fn lock_port(dir: &Path, port: u16) -> Option<File> {
+    let path = lock_path_in(dir, port);
     std::fs::create_dir_all(path.parent()?).ok()?;
     let file = OpenOptions::new()
         .read(true)
@@ -145,7 +178,18 @@ impl QuietPort {
     }
 
     /// [`claim`](Self::claim) in a band of the caller's choosing.
-    pub fn claim_in<T>(band: &Range<u16>, mut bind: impl FnMut(u16) -> io::Result<T>) -> (Self, T) {
+    pub fn claim_in<T>(band: &Range<u16>, bind: impl FnMut(u16) -> io::Result<T>) -> (Self, T) {
+        Self::claim_apart(&lock_dir(), band, bind)
+    }
+
+    /// [`claim_in`](Self::claim_in) with the locks kept in `dir` instead of the
+    /// folder every test shares, so that only the callers who name `dir` can
+    /// meet over a port.
+    pub fn claim_apart<T>(
+        dir: &Path,
+        band: &Range<u16>,
+        mut bind: impl FnMut(u16) -> io::Result<T>,
+    ) -> (Self, T) {
         let span = u64::from(band.end - band.start);
         // Only spreads the processes over the band; the lock is what keeps
         // two of them apart.
@@ -153,7 +197,7 @@ impl QuietPort {
         for step in 0..span {
             let offset = (first + step) % span;
             let port = band.start + u16::try_from(offset).expect("the offset is below the span");
-            let Some(lock) = lock_port(port) else {
+            let Some(lock) = lock_port(dir, port) else {
                 continue;
             };
             if let Ok(held) = bind(port) {
