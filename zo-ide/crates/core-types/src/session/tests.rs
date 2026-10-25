@@ -1,7 +1,8 @@
 use super::{
     cleanup_rotated_logs, reconcile_tool_history, rotate_session_file_if_needed,
     seal_orphan_tool_uses, vault_path_for, AnchorSummary, ContentBlock, ConversationMessage,
-    MessageRole, Session, SessionError, SessionFork, MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX,
+    DeclineKind, MessageRole, Session, SessionError, SessionFork, MODEL_HANDOFF_PREFIX,
+    PROCESS_EVENT_PREFIX,
 };
 use crate::json::JsonValue;
 use crate::usage::TokenUsage;
@@ -1048,6 +1049,7 @@ fn record_compaction_rewrites_persisted_snapshot_to_compacted_state() {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     }];
     session.messages = std::sync::Arc::new(compacted.clone());
     session.record_compaction("summarized earlier work", 3);
@@ -1919,6 +1921,7 @@ fn make_tool_result_message(tool_use_id: &str) -> ConversationMessage {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     }
 }
 
@@ -2023,6 +2026,7 @@ fn rewind_treats_a_cleared_reminder_as_the_annotation_it_replaced() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
     assert!(
         cleared.is_reminder_annotation(),
@@ -2909,6 +2913,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
     let summary = ConversationMessage {
         role: MessageRole::System,
@@ -2920,6 +2925,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
 
     let mut session = Session::new();
@@ -4240,4 +4246,37 @@ fn a_record_naming_no_known_decline_loads_and_its_rewrite_names_none() {
         );
         cleanup_session_file(&path);
     }
+}
+
+#[test]
+fn a_pushed_decline_is_named_on_its_line_and_read_back_by_that_name() {
+    let path = temp_session_path("decline-push");
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
+    session.push_user_text("list it").unwrap();
+    session
+        .push_message(
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Reworded: still declined.".to_string(),
+            }])
+            .with_decline(DeclineKind::Standing),
+        )
+        .unwrap();
+
+    let written = fs::read_to_string(&*path).expect("read the session file");
+    assert_eq!(
+        message_declines_in(&written),
+        vec![None, Some("standing".to_string())],
+        "the appended line names the decline the message was recorded as"
+    );
+    assert!(
+        !a_message_in_names_a_decline(&written),
+        "the name is the record's key and never part of the message a model is sent"
+    );
+    let loaded = Session::load_from_path(&path).expect("load the file");
+    assert_eq!(
+        loaded.messages.iter().map(|message| message.decline).collect::<Vec<_>>(),
+        vec![None, Some(DeclineKind::Standing)],
+        "a load reads the decline back by its name"
+    );
+    cleanup_session_file(&path);
 }

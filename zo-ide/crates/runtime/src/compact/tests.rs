@@ -29,6 +29,7 @@ fn tool_result_message(id: usize, output: &str, image_count: usize) -> Conversat
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     }
 }
 
@@ -58,6 +59,7 @@ fn edit_result_message(id: usize, path: &str) -> ConversationMessage {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     }
 }
 
@@ -80,6 +82,7 @@ fn state_distill_summarizes_working_state_without_mutating_transcript() {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         })
         .expect("assistant message");
     let before = session.messages.clone();
@@ -243,6 +246,7 @@ fn microcompact_clears_old_standalone_images_but_keeps_recent() {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     };
     let mut session = Session::new();
     session.messages = ::std::sync::Arc::new((0..7).map(image_message).collect());
@@ -296,6 +300,7 @@ fn edited_file_paths_skips_cleared_and_unparseable_envelopes() {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     };
     let garbage = ConversationMessage {
         role: MessageRole::User,
@@ -311,6 +316,7 @@ fn edited_file_paths_skips_cleared_and_unparseable_envelopes() {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     };
     assert!(edited_file_paths(&[cleared, garbage]).is_empty());
 }
@@ -479,6 +485,7 @@ fn compacts_older_messages_into_a_system_summary() {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         },
     ]);
 
@@ -580,6 +587,7 @@ fn ignores_existing_compacted_summary_when_deciding_to_recompact() {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         },
         ConversationMessage::user_text("tiny"),
         ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -1246,6 +1254,7 @@ fn an_images_only_pass_still_sets_the_reminder_frontier() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
     let mut messages = vec![reminder_message(&reminder)];
     messages.extend((0..7).map(image_message));
@@ -1288,6 +1297,7 @@ fn reminder_message(text: &str) -> ConversationMessage {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     }
 }
 
@@ -1514,6 +1524,7 @@ fn continuation_vault_affordance_is_emitted_and_excluded_from_legacy_reparse() {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     };
     let extracted = super::extract_existing_compacted_summary(&system_message)
         .expect("continuation is recognized as a compacted summary");
@@ -1585,6 +1596,7 @@ fn microcompact_cleared_body_is_restored_to_vault_on_compaction() {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         })
         .expect("push tool result");
     session
@@ -1837,6 +1849,7 @@ fn a_second_clear_in_the_same_message_reseals_both_originals() {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         })
         .expect("push paired results");
     session
@@ -2085,6 +2098,7 @@ fn pasted_image_message(caption: &str, data: &str) -> ConversationMessage {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     }
 }
 
@@ -2194,6 +2208,7 @@ fn a_second_image_cleared_in_the_same_message_does_not_bury_the_first() {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         })
         .expect("push a message with two pasted images");
     session.push_user_text("some work happened").expect("push");
@@ -2253,6 +2268,7 @@ fn an_image_seal_belonging_to_a_different_turn_is_refused() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     }];
     super::restore_microcompacted_bodies(&mut messages, &session, &[0]);
 
@@ -2300,6 +2316,7 @@ fn an_image_seal_that_two_turns_could_own_heals_neither_of_them() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
     let session = Session::new().with_persistence_path(path.clone());
     assert!(
@@ -2320,6 +2337,7 @@ fn an_image_seal_that_two_turns_could_own_heals_neither_of_them() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
     let mut messages = vec![blanked(), blanked(), blanked()];
     super::restore_microcompacted_bodies(&mut messages, &session, &[0, 1, 2]);
@@ -2654,6 +2672,7 @@ fn estimate_message_tokens_image_uses_fixed_estimate() {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     };
     let tokens = super::estimate_message_tokens(&msg);
     // 1600 (fixed image estimate) + 4 (message overhead) = 1604
@@ -2681,6 +2700,7 @@ fn compact_summary_mentions_images_without_copying_base64() {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         },
         ConversationMessage::assistant(vec![ContentBlock::Text {
             text: "I inspected it.".to_string(),
@@ -3116,6 +3136,7 @@ fn the_quote_prices_a_head_rewrite_far_above_an_identical_tail_rewrite() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
 
     // History BEHIND the rewrite: everything after message 0 is re-billed.
