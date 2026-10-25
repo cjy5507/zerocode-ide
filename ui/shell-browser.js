@@ -7183,7 +7183,7 @@ async function openQuickCommands(anchor, term) {
       // The row runs the command; the trash must not run it on the way out.
       event.stopPropagation();
       try {
-        await invoke("delete_quick_command", { id: command.id });
+        await invoke("delete_quick_command", { id: command.id }, { hand: handNow() });
       } catch (error) {
         showError(error);
         return;

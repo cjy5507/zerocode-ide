@@ -183,7 +183,7 @@ function paintSettingsQuickCommands() {
     drop.addEventListener("click", async () => {
       drop.disabled = true;
       try {
-        await invoke("delete_quick_command", { id: command.id });
+        await invoke("delete_quick_command", { id: command.id }, { hand: handNow() });
         await refreshSettingsQuickCommands();
       } catch (error) {
         drop.disabled = false;
@@ -609,6 +609,9 @@ function removableProject(path) {
 const removingProjectPaths = new Set();
 
 async function removeProjectFromList(path) {
+  // The press's hand, carried past the awaits below (shell-boot.js `flowHand`,
+  // t-75209): the removal and the ends it brings are the person's (t-74975).
+  const started = handNow();
   if (!removableProject(path) || removingProjectPaths.has(path)) return;
   // Orca asks before it removes (`confirm-remove-folder` →
   // RemoveFolderDialog.tsx: title "Remove Project", "This only removes
@@ -645,7 +648,7 @@ async function removeProjectFromList(path) {
     // Keep the project and its retry doors until every selected shell has
     // confirmed exit. Removing the catalog first would strand a refusal.
     for (const held of tabs.filter((one) => one.kind === "term" && gone.has(one.worktree))) {
-      if (!(await closeTerminalTab(held, "project-removed"))) return;
+      if (!(await closeTerminalTab(held, "project-removed", flowHand(started)))) return;
     }
     if (tabs.some((one) => one.kind === "term" && gone.has(one.worktree))) return;
     if (path === activeProjectPath) {
@@ -664,7 +667,7 @@ async function removeProjectFromList(path) {
       await switchingProject;
     }
     if (tabs.some((one) => one.kind === "term" && gone.has(one.worktree))) return;
-    await invoke("remove_project", { path });
+    await invoke("remove_project", { path }, { hand: flowHand(started) });
     // Shells have already confirmed exit. Other surfaces can now leave the
     // list, and the start fence stays up until the refreshed catalog arrives.
     for (const held of tabs.filter((held) => gone.has(held.worktree))) {
@@ -1251,7 +1254,7 @@ el("ctrl-tab-order-mode").addEventListener("change", (event) => {
 function setConfirmClosePinned(on) {
   confirmClosePinnedTab = on;
   paintPinnedConfirm();
-  void commitSetting("confirm_close_pinned", "set_confirm_close_pinned", { on });
+  void commitSetting("confirm_close_pinned", "set_confirm_close_pinned", { on }, { hand: handNow() });
 }
 
 function paintPinnedConfirm() {
@@ -1540,13 +1543,14 @@ el("open-in-add-custom").addEventListener("click", () => {
   )?.focus();
 });
 
-function setAskBeforeDeletingWorktrees(on) {
+function setAskBeforeDeletingWorktrees(on, hand = handNow()) {
   skipDeleteWorktreeConfirm = !on;
   paintDeleteWorktreeConfirm();
   void commitSetting(
     "skip_delete_worktree_confirm",
     "set_skip_delete_worktree_confirm",
     { skip: skipDeleteWorktreeConfirm },
+    { hand },
   );
 }
 
@@ -1558,13 +1562,14 @@ el("ask-before-delete-worktree").addEventListener("change", (event) => {
   setAskBeforeDeletingWorktrees(event.target.checked);
 });
 
-function setAskBeforeDeletingAutomations(on) {
+function setAskBeforeDeletingAutomations(on, hand = handNow()) {
   skipDeleteAutomationConfirm = !on;
   paintDeleteAutomationConfirm();
   void commitSetting(
     "skip_delete_automation_confirm",
     "set_skip_delete_automation_confirm",
     { skip: skipDeleteAutomationConfirm },
+    { hand },
   );
 }
 
@@ -11918,6 +11923,9 @@ function describeLoss(loss) {
  * checkout its explicit Force Delete fallback without ever turning a stored
  * preference into `discardChanges: true`. */
 async function requestWorktreeRemoval(worktree) {
+  // The press's hand, carried past the awaits below (shell-boot.js `flowHand`,
+  // t-75209): the removal and the ends it brings are the person's (t-74975).
+  const started = handNow();
   if (!skipDeleteWorktreeConfirm) {
     await askToRemoveWorktree(worktree);
     return;
@@ -11937,14 +11945,14 @@ async function requestWorktreeRemoval(worktree) {
   }
   setWorktreeDeleting(worktree.path, true);
   try {
-    await invoke("remove_worktree", { path: worktree.path, discardChanges: false });
+    await invoke("remove_worktree", { path: worktree.path, discardChanges: false }, { hand: flowHand(started) });
   } catch {
     await askToRemoveWorktree(worktree);
     return;
   } finally {
     setWorktreeDeleting(worktree.path, false);
   }
-  await finishWorktreeRemoval(worktree);
+  await finishWorktreeRemoval(worktree, flowHand(started));
 }
 
 async function askToRemoveWorktree(worktree) {
@@ -12014,10 +12022,10 @@ async function askToRemoveWorktree(worktree) {
  * and a window that creates and deletes workspaces all day accumulated a split
  * tree per checkout it had ever stood in — each holding group numbers that can
  * never be drawn again. */
-async function dropWorktreeSurfaces(path) {
+async function dropWorktreeSurfaces(path, hand) {
   for (const held of tabs.filter((one) => one.worktree === path)) {
     if (held.kind === "term") {
-      await closeTerminalTab(held, "worktree-removed");
+      await closeTerminalTab(held, "worktree-removed", hand);
       continue;
     }
     dropTab(held.id);
@@ -12029,7 +12037,9 @@ async function dropWorktreeSurfaces(path) {
   return true;
 }
 
-async function finishWorktreeRemoval(worktree) {
+/* `hand` is the removal's (`flowHand`): the shells standing in the checkout
+ * end with it. */
+async function finishWorktreeRemoval(worktree, hand) {
   const { path, active } = worktree;
   // Which project the removed checkout belonged to, asked while the list
   // still remembers it — after the refresh below the row is gone and the
@@ -12039,7 +12049,7 @@ async function finishWorktreeRemoval(worktree) {
   // below, because a ghost left as the active tab is exactly what the
   // same-workspace early return mistakes for "already fine" — the blank-stage
   // bug this sweep exists to end.
-  if (!(await dropWorktreeSurfaces(path))) return;
+  if (!(await dropWorktreeSurfaces(path, hand))) return;
   const worktrees = await refreshWorktrees();
   // The backend has already moved off a removed worktree; this catches the
   // titlebar and the tree up with it.
@@ -12056,6 +12066,9 @@ async function finishWorktreeRemoval(worktree) {
 }
 
 async function removeWorktree(discardChanges) {
+  // The press's hand, carried past the awaits below (shell-boot.js `flowHand`,
+  // t-75209): the removal and the ends it brings are the person's (t-74975).
+  const started = handNow();
   const asked = removal;
   if (!asked) return;
   // Nothing has been shown yet, so there is nothing anyone could have agreed
@@ -12090,7 +12103,7 @@ async function removeWorktree(discardChanges) {
   closeRemovalPrompt();
   setWorktreeDeleting(path, true);
   try {
-    await invoke("remove_worktree", { path, discardChanges });
+    await invoke("remove_worktree", { path, discardChanges }, { hand: flowHand(started) });
   } catch (error) {
     // The dialog is gone, so the refusal lands where errors already land.
     showError(error);
@@ -12098,7 +12111,7 @@ async function removeWorktree(discardChanges) {
   } finally {
     setWorktreeDeleting(path, false);
   }
-  await finishWorktreeRemoval(worktree);
+  await finishWorktreeRemoval(worktree, flowHand(started));
 }
 
 /* Re-reads the loss and compares it with the one the dialog is showing. On a
@@ -12585,6 +12598,9 @@ function closeCleanupConfirm(said) {
  * 수 있다. 상태가 나빠진 행은 거부한다 — 좋아진 것은 거부하지 않는다: 사람이
  * 승인한 것보다 안전해진 것을 막을 이유가 없다. */
 async function removeCleanupRows(rows) {
+  // The press's hand, carried past the awaits below (shell-boot.js `flowHand`,
+  // t-75209): the removal and the ends it brings are the person's (t-74975).
+  const started = handNow();
   if (wsclean.busy || rows.length === 0) return;
   if (!(await askCleanupConfirm(rows.length))) return;
   wsclean.busy = true;
@@ -12609,7 +12625,7 @@ async function removeCleanupRows(rows) {
         path: row.path,
         discardChanges: now.force,
         landedBranches: (now.reasons ?? []).includes("landed"),
-      });
+      }, { hand: flowHand(started) });
       removed.push(row.name);
       wsclean.picked.delete(row.id);
     } catch (error) {
@@ -12623,7 +12639,7 @@ async function removeCleanupRows(rows) {
   // 사라진 체크아웃의 표면은 함께 간다 — `removeWorktree`가 한 행에 대해 하는
   // 일과 같은 문이고, 그것을 건너뛰면 없는 디렉터리를 가리키는 탭이 남는다.
   for (const row of ordered) {
-    if (removed.includes(row.name)) await dropWorktreeSurfaces(row.path);
+    if (removed.includes(row.name)) await dropWorktreeSurfaces(row.path, flowHand(started));
   }
   await refreshWorktrees();
 }
@@ -13389,6 +13405,9 @@ async function prefetchSpaceGit() {
  * 들고 있는 `force`를 쓴다 — Rust가 증거를 보고 답한 값이지 이 화면이 정한
  * 값이 아니다. */
 async function removeSpaceRows(rows, forced = false) {
+  // The press's hand, carried past the awaits below (shell-boot.js `flowHand`,
+  // t-75209): the removal and the ends it brings are the person's (t-74975).
+  const started = handNow();
   if (space.busy || space.scanning || rows.length === 0) return;
   if (!(await askCleanupConfirm(rows.length))) return;
   space.busy = true;
@@ -13402,7 +13421,7 @@ async function removeSpaceRows(rows, forced = false) {
       await invoke("remove_worktree", {
         path: row.path,
         discardChanges: forced || row.force,
-      });
+      }, { hand: flowHand(started) });
       removed.push(row.name);
       space.picked.delete(row.id);
       delete space.errors[row.id];
@@ -13415,7 +13434,7 @@ async function removeSpaceRows(rows, forced = false) {
   space.summary = { removed, kept };
   // 사라진 체크아웃의 표면은 함께 간다 — `removeCleanupRows`와 같은 문이다.
   for (const row of ordered) {
-    if (removed.includes(row.name)) await dropWorktreeSurfaces(row.path);
+    if (removed.includes(row.name)) await dropWorktreeSurfaces(row.path, flowHand(started));
   }
   await refreshWorktrees();
   await scanSpace();
@@ -13846,6 +13865,7 @@ async function openStrandedSession(term, worktreeKey) {
 }
 
 async function killResourceSession(session) {
+  const started = handNow();
   const accepted = await askConfirm({
     title: t("resource.killTitle", "{{name}}을(를) 종료할까요?", { name: session.label }),
     body: t(
@@ -13862,7 +13882,7 @@ async function killResourceSession(session) {
   resourceManager.killing.add(session.key);
   paintResourcePop();
   try {
-    if (session.kind === "lane") await invoke("close_lane", { id: session.lane });
+    if (session.kind === "lane") await invoke("close_lane", { id: session.lane }, { hand: flowHand(started) });
     else await invoke("end_terminal_session", { term: session.term });
   } catch (error) {
     resourceManager.operationError = t("resource.endFailed", "세션을 종료하지 못했습니다.");
@@ -13906,6 +13926,7 @@ async function killResourceNativeProcess(process) {
 }
 
 async function killAllResourceSessions() {
+  const started = handNow();
   const { projects } = resourceTree();
   const sessions = projects.flatMap((project) =>
     project.worktrees.flatMap((worktree) => worktree.sessions));
@@ -13931,7 +13952,7 @@ async function killAllResourceSessions() {
   )];
   const results = await Promise.allSettled([
     invoke("end_all_terminal_sessions"),
-    ...laneIds.map((id) => invoke("close_lane", { id })),
+    ...laneIds.map((id) => invoke("close_lane", { id }, { hand: flowHand(started) })),
   ]);
   resourceManager.killing.clear();
   if (results.some((result) => result.status === "rejected")) {

@@ -566,25 +566,12 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
   if (hasSetting(snapshot, "skip_close_terminal_with_running_process_confirm")) {
     const skip = snapshot.skip_close_terminal_with_running_process_confirm === true;
     setConfirmCloseRunning(!skip);
-    if (skip) {
-      closeRunningLegacyMigrationStarted = true;
-      forgetLegacyCloseRunningPreference();
-    } else if (first && legacySkipCloseRunningConfirm && !closeRunningLegacyMigrationStarted) {
-      // Pre-canonical builds stored the inverse in this webview only. Carry it
-      // once into the repository; a failed write leaves the old key for the
-      // next boot and the canonical recovery snapshot turns prompting back on.
-      closeRunningLegacyMigrationStarted = true;
-      setConfirmCloseRunning(false);
-      void commitSetting(
-        "skip_close_terminal_with_running_process_confirm",
-        "set_skip_close_terminal_with_running_process_confirm",
-        { skip: true },
-      ).then((saved) => {
-        if (saved?.skip_close_terminal_with_running_process_confirm === true) {
-          forgetLegacyCloseRunningPreference();
-        }
-      });
-    }
+    // Pre-canonical builds kept the person's "don't ask again" in this
+    // webview only. Writing it to the repository is the person's to do
+    // (t-74975), and a boot has no hand: the old key carries nothing until
+    // the person answers the question again, and goes once the setting says
+    // skip (t-75153).
+    if (skip) forgetLegacyCloseRunningPreference();
   }
   if (hasSetting(snapshot, "workspace_creation_prefs")) {
     workspaceCreationPrefs = {
@@ -2827,10 +2814,10 @@ function launchLineEl(row, badge) {
  * identical from this webview, so the plans are re-read either way — if the
  * backend committed, its value wins; if it refused, the field rolls back to
  * the last durable value. */
-async function commitAgentLaunch(command, args) {
+async function commitAgentLaunch(command, args, hand) {
   let failure = null;
   try {
-    await invoke(command, args);
+    await invoke(command, args, { hand });
   } catch (error) {
     failure = error;
   }
@@ -2852,7 +2839,7 @@ async function saveAgentLaunchEnv(agent, env) {
 }
 
 async function resetAgentLaunch(agent) {
-  await commitAgentLaunch("reset_agent_launch", { agent });
+  await commitAgentLaunch("reset_agent_launch", { agent }, handNow());
 }
 
 function paintAgents() {
@@ -3176,7 +3163,7 @@ function paintComputerInputPolicy() {
 el("computer-share-required").addEventListener("change", () => {
   void commitSetting("computer_share_required", "set_computer_share_required", {
     on: el("computer-share-required").checked,
-  });
+  }, { hand: handNow() });
 });
 
 el("computer-shared-desktop").addEventListener("change", () => {
@@ -3528,7 +3515,7 @@ for (const id of COMPUTER_PERMISSION_IDS) {
   document.querySelector(`[data-permission-check="${id}"]`).addEventListener("click", () => void refreshComputerUse());
 }
 el("computer-use-reset").addEventListener("click", () => void computerUseCall(
-  () => invoke("reset_computer_use_permissions"),
+  () => invoke("reset_computer_use_permissions", undefined, { hand: handNow() }),
   (report) => report,
 ));
 async function computerUseInstall() {
@@ -11712,8 +11699,8 @@ for (const button of document.querySelectorAll("[data-auto-sort]")) {
   });
 }
 
-async function deleteAutomationAndHistory(automation) {
-  automations = await invoke("delete_automation", { id: automation.id });
+async function deleteAutomationAndHistory(automation, hand) {
+  automations = await invoke("delete_automation", { id: automation.id }, { hand });
   if (autoSelectedId === automation.id) autoSelectedId = null;
   closeAutoForm();
   autoRuns = [];
@@ -11722,6 +11709,9 @@ async function deleteAutomationAndHistory(automation) {
 }
 
 async function requestAutomationDeletion(automation) {
+  // The press's hand, carried past the question (shell-boot.js `flowHand`,
+  // t-75209): the delete and "don't ask again" are the person's (t-74975).
+  const started = handNow();
   if (!skipDeleteAutomationConfirm) {
     const confirmed = await askConfirm({
       title: t("auto.deleteTitle", "자동화 삭제"),
@@ -11737,9 +11727,9 @@ async function requestAutomationDeletion(automation) {
       cancel: false,
     });
     if (confirmed !== true) return;
-    if (askRemembered()) setAskBeforeDeletingAutomations(false);
+    if (askRemembered()) setAskBeforeDeletingAutomations(false, flowHand(started));
   }
-  await deleteAutomationAndHistory(automation);
+  await deleteAutomationAndHistory(automation, flowHand(started));
 }
 
 el("auto-delete").addEventListener("click", () => {
@@ -12077,6 +12067,7 @@ async function toggleDefaultBrowserProfile(id) {
 /* 프로필 하나를 잊는다 — 확인을 묻고(되돌릴 수 없다), 목록·쿠키 단지·기본
  * 표시를 시스템 손이 함께 거둔다(delete_browser_profile). */
 async function deleteBrowserProfile(profile) {
+  const started = handNow();
   const yes = await askConfirm({
     title: t("settings.browser.profileDelete", "프로필 삭제"),
     body: t(
@@ -12091,7 +12082,7 @@ async function deleteBrowserProfile(profile) {
   });
   if (yes !== true) return;
   try {
-    await invoke("delete_browser_profile", { id: profile.id });
+    await invoke("delete_browser_profile", { id: profile.id }, { hand: flowHand(started) });
   } catch (error) {
     showError(String(error));
     return;
