@@ -115,8 +115,9 @@ struct Pane {
 }
 
 /// The pump: one round every 10 ms, the delivery fed the line as it stands.
-fn pump(shared: Arc<Mutex<Pane>>) -> JoinHandle<()> {
+fn pump(shared: Arc<Mutex<Pane>>, starts_after: Duration) -> JoinHandle<()> {
     std::thread::spawn(move || {
+        std::thread::sleep(starts_after);
         loop {
             {
                 let mut pane = shared.lock().expect("pane");
@@ -189,6 +190,7 @@ fn delivery(signal: ReadySignal) -> PromptDelivery {
 struct Watched {
     shared: Arc<Mutex<Pane>>,
     glyph: char,
+    retype_registers_after: Duration,
 }
 
 impl BriefingPane for Watched {
@@ -197,6 +199,7 @@ impl BriefingPane for Watched {
     }
 
     fn retype(&mut self) -> Receiver<DeliveryOutcome> {
+        std::thread::sleep(self.retype_registers_after);
         let (notify, waiting) = sync_channel(1);
         let mut pane = self.shared.lock().expect("pane");
         pane.retyped_at = Some(Instant::now());
@@ -208,6 +211,22 @@ impl BriefingPane for Watched {
     fn withdraw(&mut self) {
         self.shared.lock().expect("pane").delivery = None;
     }
+}
+
+/// A machine under load, made on purpose: how late the pump thread starts and
+/// how late the watch's retype is registered. A test that holds on a loaded
+/// machine holds on these.
+#[derive(Clone, Copy)]
+struct Load {
+    pump_starts_after: Duration,
+    retype_registers_after: Duration,
+}
+
+impl Load {
+    const NONE: Load = Load {
+        pump_starts_after: Duration::ZERO,
+        retype_registers_after: Duration::ZERO,
+    };
 }
 
 /// What the launch found out.
@@ -222,6 +241,17 @@ struct Journey {
 /// The launch road in small: the first delivery to the glyph, awaited, then
 /// the watch over what it delivered while the pump keeps running.
 fn launch(shape: &Shape, boot: &str, gap: &str, window: Duration, relaunch: bool) -> Journey {
+    launch_under(shape, boot, gap, window, relaunch, Load::NONE)
+}
+
+fn launch_under(
+    shape: &Shape,
+    boot: &str,
+    gap: &str,
+    window: Duration,
+    relaunch: bool,
+    load: Load,
+) -> Journey {
     let lane = PtyLane::spawn(
         "/bin/sh",
         &["-c".to_string(), fake_cli(shape, boot, gap)],
@@ -242,7 +272,7 @@ fn launch(shape: &Shape, boot: &str, gap: &str, window: Duration, relaunch: bool
         retype_ended: None,
         stop: false,
     }));
-    let pumping = pump(Arc::clone(&shared));
+    let pumping = pump(Arc::clone(&shared), load.pump_starts_after);
     let outcome = first
         .recv_timeout(DELIVERY_DEADLINE * 2)
         .expect("the first delivery ended");
@@ -250,6 +280,7 @@ fn launch(shape: &Shape, boot: &str, gap: &str, window: Duration, relaunch: bool
     let mut watched = Watched {
         shared: Arc::clone(&shared),
         glyph: shape.glyph,
+        retype_registers_after: load.retype_registers_after,
     };
     let verdict = confirm(&mut watched, BRIEFING, window, DELIVERY_DEADLINE * 2);
     let mut pane = shared.lock().expect("pane");
@@ -377,6 +408,79 @@ fn a_retype_that_outlasts_the_watch_window_but_not_its_deadline_is_waited_for() 
     let window = Duration::from_secs(2);
     for shape in [&CLAUDE, &CODEX] {
         let journey = launch(shape, "1.5", "5", window, false);
+        assert_eq!(
+            journey.verdict,
+            Verdict::Taken,
+            "{}: retype {:?}, screen {:?}",
+            shape.name,
+            journey.retype,
+            journey.screen
+        );
+        let (took, how) = journey.retype.expect("the briefing was typed again");
+        assert_eq!(how, DeliveryOutcome::Delivered, "{}", shape.name);
+        assert!(
+            took > window,
+            "{}: the retype ended in {took:?}, inside one window — not the case under test",
+            shape.name
+        );
+        assert_eq!(journey.pasted, 2, "{}", shape.name);
+    }
+}
+
+/// R3 (t-75231): the machine is slow to start pumping the pane — three
+/// seconds, past the 1.5 s the fake CLI boots for — and the first briefing
+/// is still thrown away, because the CLI's boot ends when the test says so
+/// and not when a clock does. The assertions are the loss test's own.
+#[test]
+fn a_pump_that_starts_late_still_loses_the_first_briefing_and_takes_the_second() {
+    let load = Load {
+        pump_starts_after: Duration::from_secs(3),
+        ..Load::NONE
+    };
+    for shape in [&CLAUDE, &CODEX] {
+        let journey = launch_under(
+            shape,
+            "1.5",
+            "0.1",
+            Duration::from_millis(3_500),
+            false,
+            load,
+        );
+        assert_eq!(
+            journey.verdict,
+            Verdict::Taken,
+            "{}: {:?}",
+            shape.name,
+            journey.screen
+        );
+        assert_eq!(
+            journey.pasted, 2,
+            "{}: the briefing was typed {} time(s)",
+            shape.name, journey.pasted
+        );
+        assert_eq!(
+            journey.screen.matches("T-STAMP-7").count(),
+            1,
+            "{}: the briefing stands once on the screen: {:?}",
+            shape.name,
+            journey.screen
+        );
+    }
+}
+
+/// R3 (t-75231): the retype is registered four seconds after the watch asks
+/// for it — most of the old five-second gap gone — and the composer still
+/// comes back after one watch window of the retype's own life, because the
+/// test lets it come back only then.
+#[test]
+fn a_retype_registered_late_still_outlasts_the_watch_window() {
+    let window = Duration::from_secs(2);
+    let load = Load {
+        retype_registers_after: Duration::from_secs(4),
+        ..Load::NONE
+    };
+    for shape in [&CLAUDE, &CODEX] {
+        let journey = launch_under(shape, "1.5", "5", window, false, load);
         assert_eq!(
             journey.verdict,
             Verdict::Taken,
