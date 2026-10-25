@@ -15,9 +15,10 @@ use std::path::Path;
 /// The file at `path` opened for reading, when it is a plain file: not a link
 /// to one (a link is another process's choice of where we read), not a pipe, a
 /// device or a folder. The open itself does not follow a link or wait on a
-/// pipe that nobody writes (`O_NOFOLLOW`, `O_NONBLOCK`), so a name swapped for
-/// either between the look and the open still comes back `None`, and the kind
-/// is asked of the open file, not of the name.
+/// pipe that nobody writes (`O_NOFOLLOW`, `O_NONBLOCK` on Unix; open the
+/// reparse point itself and require a disk file on Windows). A name swapped
+/// between the look and the open still comes back `None`, and the kind is
+/// asked of the open file, not of the name.
 pub(crate) fn open_plain(path: &Path) -> Option<File> {
     if !std::fs::symlink_metadata(path).ok()?.is_file() {
         return None;
@@ -36,7 +37,29 @@ fn open_reading(path: &Path) -> Option<File> {
         .ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_reading(path: &Path) -> Option<File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_TYPE_DISK, GetFileType,
+    };
+
+    let file = File::options()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    // Ask the opened handle: the earlier path lookup cannot rule out a swap.
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return None;
+    }
+    // SAFETY: file owns this live handle for the duration of the query.
+    (unsafe { GetFileType(file.as_raw_handle()) } == FILE_TYPE_DISK).then_some(file)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_reading(path: &Path) -> Option<File> {
     File::open(path).ok()
 }
