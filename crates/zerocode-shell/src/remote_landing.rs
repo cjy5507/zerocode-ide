@@ -236,6 +236,36 @@ mod tests {
         );
     }
 
+    /// More unconfirmed merges than the looks of one asking-again span can
+    /// reach must not leave the last of them for ever unasked: each look takes
+    /// the longest unasked first (the review R5, W4-2).
+    #[test]
+    fn unconfirmed_merges_beyond_the_looks_of_a_span_are_still_asked_in_turn() {
+        let mut book = Book::default();
+        let repo = Path::new("/repo");
+        let heads: BTreeSet<String> = (0..12).map(|n| format!("{n:02}")).collect();
+        let mut asked: HashMap<String, Vec<i64>> = HashMap::new();
+        for beat in 0..60 {
+            let now_ms = beat * LOOK_EVERY_MS;
+            for head in book.due(repo, &heads, now_ms) {
+                asked.entry(head.clone()).or_default().push(now_ms);
+                book.answers.insert(head, (OnRemote::NotYet, now_ms));
+            }
+        }
+        let never: Vec<&String> = heads.iter().filter(|head| !asked.contains_key(*head)).collect();
+        assert!(never.is_empty(), "never asked in an hour: {never:?}");
+        let longest_gap = asked
+            .values()
+            .flat_map(|times| times.windows(2).map(|pair| pair[1] - pair[0]))
+            .max()
+            .expect("every merge was asked more than once in an hour");
+        assert!(
+            longest_gap
+                <= ASK_AGAIN_AFTER_MS.max(heads.len().div_ceil(ASKS_PER_LOOK) as i64 * LOOK_EVERY_MS),
+            "a merge waited {longest_gap} ms between two asks"
+        );
+    }
+
     #[test]
     fn a_look_asks_two_merges_at_most_and_never_again_one_confirmed() {
         let mut book = Book::default();
