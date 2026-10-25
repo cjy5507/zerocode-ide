@@ -307,12 +307,14 @@ export async function testSelfAct(browser, origin, ok) {
         <button id="hand-agent" type="button">Hand agent</button>
         <input id="hand-check" type="checkbox" aria-label="Hand check">
         <button id="hand-person" type="button">Hand person</button>`);
+      // A road that awaits carries the hand it started with (t-75209).
       document.getElementById("hand-agent").addEventListener("click", async () => {
+        const started = handNow();
         void invoke("computer_take_control");
         await invoke("board_columns_probe");
-        void invoke("answer_ask");
+        void invoke("answer_ask", undefined, { hand: flowHand(started) });
         await T.later;
-        void invoke("computer_give_back");
+        void invoke("computer_give_back", undefined, { hand: flowHand(started) });
       });
       document.getElementById("hand-check").addEventListener("change", () => void invoke("jira_connect"));
       document.getElementById("hand-person").addEventListener("click", () => void invoke("answer_approval"));
@@ -347,5 +349,144 @@ export async function testSelfAct(browser, origin, ok) {
     ok("a command a change the press fired makes says agent", hand(agent.hands, "jira_connect").join() === "agent", JSON.stringify(agent.hands));
     ok("the person's own click right after says person", hand(person, "answer_approval").join() === "person", JSON.stringify(person));
     ok("the update clock's quiet download says program", hand(person, "update_download").join() === "program", JSON.stringify(person));
+  });
+
+  /* Whose hand made a command is the flow's, not the page's last input
+   * (t-75209, R3 of t-74927). An agent's press starts a flow; while that flow
+   * awaits, the person clicks something else and presses a key; the flow's
+   * person-only command still does not say `person` — whether it carries the
+   * hand its press started with (a real road: the restart door's census and
+   * its `leave_now`) or carries none (a handler that awaits and then calls).
+   * A question the agent's flow opened stays the agent's when the person
+   * answers it. The person's own roads keep their hand: the band's
+   * 「제어권 가져오기」 right after an agent's press, the restart door they
+   * press themselves through its census, and the window close's question
+   * they answer. */
+  await scenario(browser, origin, "hand per flow", ok, async (page) => {
+    await page.evaluate(() => {
+      const T = window.__SELF_T__;
+      T.hands = [];
+      const census = [];
+      T.census = census;
+      const said = (command) => (args, options) => {
+        T.hands.push([command, options?.headers?.["zerocode-hand"] ?? null]);
+        if (command === "busy_census") return new Promise((done) => census.push(done));
+        return command === "leave_now" || command === "leave_when_idle" ? null : true;
+      };
+      for (const command of ["computer_take_control", "computer_give_back", "board_columns_probe",
+        "busy_census", "leave_now", "leave_when_idle", "desk_ack"]) {
+        window.__ANSWER__[command] = said(command);
+      }
+      let release;
+      T.later = new Promise((done) => { release = done; });
+      T.release = release;
+      const fixture = document.getElementById("self-act-fixture");
+      fixture.insertAdjacentHTML("beforeend", `
+        <button id="flow-agent" type="button">Flow agent</button>
+        <button id="flow-restart" type="button">Flow restart</button>
+        <button id="flow-elsewhere" type="button">Flow elsewhere</button>
+        <input id="flow-enter" type="text" aria-label="Flow enter">
+        <button id="flow-enter-press" type="button">Flow enter press</button>`);
+      // Enter in a field presses its button by the page's own click(), the way
+      // the hand-over code's field does: still the person's key.
+      document.getElementById("flow-enter").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") document.getElementById("flow-enter-press").click();
+      });
+      document.getElementById("flow-enter-press").addEventListener("click", () => {
+        void invoke("computer_give_back", undefined, { hand: handNow() });
+      });
+      document.getElementById("flow-agent").addEventListener("click", async () => {
+        await invoke("board_columns_probe");
+        await T.later;
+        void invoke("computer_give_back");
+      });
+      document.getElementById("flow-restart").addEventListener("click", () => void askBeforeRestart("probe-door"));
+      // The band, standing: a window shared with an agent.
+      T.fire("computer:share-state", { target: "probe", label: "Probe", takenBack: false });
+    });
+    const press = (name) => page.evaluate(async (name) => {
+      const T = window.__SELF_T__;
+      const look = await T.ask({ kind: "look" });
+      const control = T.named(look, name);
+      const facts = await T.ask({ kind: "facts", lookId: look.ok.lookId, id: control.id });
+      return (await T.ask({ kind: "do", lookId: look.ok.lookId, id: control.id, act: "click", facts: facts.ok.facts }))?.ok?.done ?? null;
+    }, name);
+    const census = (busy) => page.evaluate((busy) => {
+      const T = window.__SELF_T__;
+      const done = T.census.shift();
+      done?.({ road: "restart", door: "probe-door", busy: { busy }, waitMin: null });
+      return done !== undefined;
+    }, busy);
+    const settle = () => page.evaluate(() => new Promise((done) => setTimeout(done, 0)));
+    const take = () => page.evaluate(() => window.__SELF_T__.hands.splice(0));
+    const elsewhere = async () => {
+      await page.click("#flow-elsewhere");
+      await page.keyboard.press("Shift");
+    };
+    const hand = (hands, command) => hands.filter(([name]) => name === command).map(([, by]) => by);
+
+    // The agent's handler awaits; the person moves elsewhere before it ends.
+    const pressedFlow = await press("Flow agent");
+    await elsewhere();
+    await page.evaluate(() => window.__SELF_T__.release());
+    await settle();
+    const flow = await take();
+
+    // The agent presses the restart door; its census is out when the person
+    // moves elsewhere; the census comes back with nothing busy.
+    const pressedRestart = await press("Flow restart");
+    await elsewhere();
+    const agentCensus = await census(false);
+    await settle();
+    const restart = await take();
+
+    // The agent presses the restart door again; the census says busy and the
+    // question opens; the person answers it 「지금 다시 시작」.
+    await press("Flow restart");
+    await census(true);
+    await page.waitForSelector("#ask-no", { state: "visible" });
+    await page.click("#ask-no");
+    await settle();
+    const answered = await take();
+
+    // The person's own hand: 「제어권 가져오기」 right after an agent's press,
+    // and the restart door through its census.
+    await press("Flow agent");
+    await page.click("#computer-band-take");
+    const band = await take();
+    await page.click("#flow-restart");
+    await census(false);
+    await settle();
+    const own = await take();
+    // The window's close asks (a backend event, no page hand), the person
+    // answers 「지금 종료」.
+    await page.evaluate(() => {
+      for (const handler of window.__LISTENERS__["exit:ask"] ?? []) {
+        handler({ payload: { road: "close", door: null, busy: { busy: true }, waitMin: null } });
+      }
+    });
+    await page.waitForSelector("#ask-no", { state: "visible" });
+    await page.click("#ask-no");
+    await settle();
+    const closed = await take();
+    // The person's Enter right after an agent's press, through the page's own
+    // click(); and the same button pressed by the agent.
+    await press("Flow elsewhere");
+    await page.focus("#flow-enter");
+    await page.keyboard.press("Enter");
+    const entered = await take();
+    await press("Flow enter press");
+    const agentPressed = await take();
+
+    ok("the agent's flow presses were made", pressedFlow === true && pressedRestart === true && agentCensus === true,
+      JSON.stringify({ pressedFlow, pressedRestart, agentCensus }));
+    ok("a flow's command after the person moved elsewhere names no hand", hand(flow, "computer_give_back").join() === "none", JSON.stringify(flow));
+    ok("the restart door the agent pressed stays the agent's though the person moved", hand(restart, "leave_now").join() === "agent", JSON.stringify(restart));
+    ok("a question the agent's flow opened stays the agent's when the person answers", hand(answered, "leave_now").join() === "agent", JSON.stringify(answered));
+    ok("the person's 「제어권 가져오기」 right after an agent's press says person", hand(band, "computer_take_control").join() === "person", JSON.stringify(band));
+    ok("the person's own restart door says person through its census", hand(own, "leave_now").join() === "person", JSON.stringify(own));
+    ok("the person's answer to the window's close says person", hand(closed, "leave_now").join() === "person", JSON.stringify(closed));
+    ok("the person's Enter that presses a button by click() says person", hand(entered, "computer_give_back").join() === "person", JSON.stringify(entered));
+    ok("the same button the agent pressed says agent", hand(agentPressed, "computer_give_back").join() === "agent", JSON.stringify(agentPressed));
   });
 }
