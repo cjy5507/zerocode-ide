@@ -727,6 +727,54 @@ fn skill_distill_writes_proposed_skill_without_auto_loading_it() {
     cleanup_temp_cwd(&cwd, "cleanup temp cwd");
 }
 
+/// A skill is a procedure kept to be walked again, so it must not carry a
+/// credential VALUE (t-74223): the line is refused by number, the value is
+/// never echoed, and no draft is written. A step that only names the
+/// credential is the procedure, and saves.
+#[test]
+fn skill_distill_refuses_a_line_that_carries_a_credential_value() {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cwd = temp_path("skill-distill-credential");
+    fs::create_dir_all(&cwd).expect("cwd should exist");
+    let original_cwd = std::env::current_dir().expect("cwd");
+    std::env::set_current_dir(&cwd).expect("enter temp cwd");
+    let skill_path = cwd.join(".zo").join("skills").join("portal-login").join("SKILL.md");
+
+    for (body, line, value) in [
+        ("1. Open the portal.\n2. Sign in.\n3. password=fixture-pass-7731", "3", "fixture-pass-7731"),
+        ("1. Call the API with\n   Authorization: Bearer fixture-bearer-4410", "2", "fixture-bearer-4410"),
+    ] {
+        let refused = run_tool_isolated(
+            "SkillDistill",
+            &json!({ "slug": "portal-login", "description": "Sign in to the portal", "body": body }),
+        )
+        .expect_err("a credential value is not kept for reuse");
+        let ToolError::Declined(verdict) = &refused else {
+            panic!("a refusal, not a failure: {refused:?}");
+        };
+        assert!(verdict.contains(&format!("line {line}")), "{verdict}");
+        assert!(!verdict.contains(value), "the verdict never echoes the value: {verdict}");
+        assert!(verdict.contains("keychain") && verdict.contains("{{"), "{verdict}");
+        assert!(!skill_path.exists(), "no draft was written");
+    }
+
+    run_tool_isolated(
+        "SkillDistill",
+        &json!({
+            "slug": "portal-login",
+            "description": "Sign in to the portal",
+            "body": "1. Open the portal.\n2. Type the keychain password into the password field.\n3. Press Sign in."
+        }),
+    )
+    .expect("a step that names a credential saves");
+    assert!(skill_path.exists());
+
+    std::env::set_current_dir(original_cwd).expect("restore cwd");
+    cleanup_temp_cwd(&cwd, "cleanup temp cwd");
+}
+
 #[test]
 fn skill_distill_rejects_existing_skill_path() {
     let _guard = env_lock()
