@@ -721,9 +721,11 @@ async fn the_team_queue_is_bounded_and_a_rejected_request_never_arrives_late() {
     let rejected_body = axum::body::to_bytes(rejected.into_body(), 4096)
         .await
         .expect("busy body");
-    assert_eq!(
-        &rejected_body[..],
-        zerocode_hookd::TEAM_BUSY_MESSAGE.as_bytes()
+    // Which door refused is the three named-entrance tests' business below;
+    // this one only pins that the busy kind keeps its lead.
+    assert!(
+        rejected_body.starts_with(zerocode_hookd::busy::TEAM_BUSY_LEAD.as_bytes()),
+        "the busy kind lost its lead: {rejected_body:?}"
     );
 
     let mut seen = Vec::new();
@@ -2223,7 +2225,10 @@ async fn a_refusal_at_the_wait_permit_names_the_wait_permit_and_how_long_it_has_
         });
     }
     for handler in waiting_handlers {
-        assert_eq!(handler.await.expect("wait handler").status(), StatusCode::OK);
+        assert_eq!(
+            handler.await.expect("wait handler").status(),
+            StatusCode::OK
+        );
     }
 }
 
