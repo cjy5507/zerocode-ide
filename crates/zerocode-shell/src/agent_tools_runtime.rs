@@ -865,6 +865,87 @@ fn split_launch_agent(command: &str) -> Option<&'static str> {
     spoken.as_deref().and_then(agent_for_program)
 }
 
+impl TeamWindow {
+    /// Whether the briefing a worker was launched with stands on its screen
+    /// (t-74381); `None` when it does, else the sentence the launch fails with.
+    ///
+    /// The delivery that wrote it reports the words written and the Enter
+    /// pressed, never that the program kept them: Claude Code takes its first
+    /// input handler down while it boots and drops what the handler held,
+    /// which left a pane at an empty composer under a ledger line that said
+    /// the worker started. So the screen is read — the head of the briefing,
+    /// or the placeholder a long paste folds to — for [`BRIEFING_WINDOW`];
+    /// when it never shows, the briefing is typed once more to the composer
+    /// that stands by then, and when it still does not, the launch says so.
+    /// Only an agent whose row names a composer glyph is checked: the others
+    /// have no measured screen to read it off.
+    fn confirm_briefing(&self, term: TermId, pending: &PendingWorkerReadiness) -> Option<String> {
+        use zerocode_pty::briefing::{BRIEFING_WINDOW, BriefingWatch, WatchStep, briefing_shows};
+        let glyph = pending.composer?;
+        if pending.briefing.trim().is_empty() {
+            return None;
+        }
+        let state = self.app.state::<AppState>();
+        let mut watch = BriefingWatch::new(Instant::now(), BRIEFING_WINDOW);
+        loop {
+            let Some(held) = state.terminals().handle(term) else {
+                return Some("the worker exited before its briefing was seen on its screen".into());
+            };
+            let screen = {
+                let pty = lock_pty(&held);
+                let grid = pty.terminal().grid();
+                let mut text = String::new();
+                for index in 0..grid.scrollback_len() {
+                    text.push_str(&grid.scrollback_line(index));
+                    text.push('\n');
+                }
+                text.push_str(&grid.visible_text());
+                text
+            };
+            match watch.poll(briefing_shows(&screen, &pending.briefing), Instant::now()) {
+                WatchStep::Taken => return None,
+                WatchStep::Waiting => std::thread::sleep(Duration::from_millis(100)),
+                WatchStep::Retype => {
+                    let agent = state.agent_terms().get(&term).copied();
+                    let (notify, _waiting) = std::sync::mpsc::sync_channel(1);
+                    state.delivery_waiters().insert(term, notify);
+                    state.deliveries().insert(
+                        term,
+                        PromptDelivery::with_deadlines(
+                            pending.briefing.clone(),
+                            true,
+                            zerocode_pty::ReadySignal::Rest(Some(glyph)),
+                            Instant::now(),
+                            ready_quiet_for(agent),
+                            ready_timeout_for(agent),
+                        )
+                        .clearing(false)
+                        .guarded(zerocode_pty::ready::Guard::for_its_own_line(
+                            crate::cmd::terminal::launch_of(&state, term),
+                        ))
+                        .words(composer_words_for(agent)),
+                    );
+                }
+                WatchStep::Undelivered => {
+                    state.deliveries().remove(&term);
+                    state.delivery_waiters().remove(&term);
+                    note_window_event(
+                        state.local_data_root(),
+                        &format!(
+                            "term {term} briefing not delivered: typed twice, never on its screen"
+                        ),
+                    );
+                    return Some(
+                        "briefing not delivered (브리핑 미전달): typed twice, and the worker's screen \
+                         never showed it"
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+}
+
 impl agent_teams::Host for TeamWindow {
     /// The Codex lease a split of `command` will need, taken now — before its
     /// caller takes the team table (t-51380).
@@ -1453,6 +1534,12 @@ impl agent_teams::Host for TeamWindow {
                  * can report completion while its row is still Sleeping. */
                 let restoring = prompt.resumed.is_some();
                 let submitted_prompt = (!restoring).then(|| prompt.prompt.clone());
+                let briefing = submitted_prompt.clone().unwrap_or_default();
+                let composer = match ready_signal_for(named) {
+                    zerocode_pty::ReadySignal::Prompt(glyph)
+                    | zerocode_pty::ReadySignal::AltScreenPrompt(glyph) => Some(glyph),
+                    _ => None,
+                };
                 let timeout = Duration::from_millis(u64::from(prompt.timeout_ms));
                 let started = Instant::now();
                 let (notify, waiting) = std::sync::mpsc::sync_channel(1);
@@ -1499,6 +1586,8 @@ impl agent_teams::Host for TeamWindow {
                     submitted,
                     started + timeout + zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
                     restoring,
+                    briefing,
+                    composer,
                 )
             });
         // Who started it — the same edge the board's subagent tree is drawn
@@ -1555,7 +1644,7 @@ impl agent_teams::Host for TeamWindow {
             );
         }
         state.cadence().wake();
-        if let Some((waiting, submitted, deadline, restoring)) = readiness {
+        if let Some((waiting, submitted, deadline, restoring, briefing, composer)) = readiness {
             state.worker_readiness().insert(
                 term,
                 WorkerReadinessSlot {
@@ -1568,6 +1657,8 @@ impl agent_teams::Host for TeamWindow {
                         previous_pane_token,
                         isolated,
                         restoring,
+                        briefing,
+                        composer,
                     }),
                     exited_screen: None,
                 },
@@ -1665,7 +1756,15 @@ impl agent_teams::Host for TeamWindow {
         let accepted = entered
             && terminal_is_live
             && await_prompt_submission(pending.submitted.as_ref(), pending.deadline);
-        if accepted && state.terminals().contains_key(&term) {
+        // Done is the words having been written, and a program still booting
+        // throws away what it is written (t-74381): the screen says whether
+        // the briefing stayed, and a pane that holds none is no success.
+        let undelivered = if accepted && !pending.restoring {
+            self.confirm_briefing(term, &pending)
+        } else {
+            None
+        };
+        if accepted && undelivered.is_none() && state.terminals().contains_key(&term) {
             state.worker_readiness().remove(&term);
             return Ok(());
         }
@@ -1699,7 +1798,9 @@ impl agent_teams::Host for TeamWindow {
             }
         }
 
-        let reason = if entered && terminal_is_live {
+        let reason = if let Some(why) = undelivered {
+            why
+        } else if entered && terminal_is_live {
             "the worker TUI never acknowledged the submitted briefing".to_string()
         } else if entered {
             "the worker exited while accepting its briefing".to_string()

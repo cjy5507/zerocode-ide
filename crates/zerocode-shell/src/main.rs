@@ -770,6 +770,13 @@ struct PendingWorkerReadiness {
     /// wait carries no briefing — see `await_worker_ready`, which will not
     /// tear down a restored worker that is alive and at work.
     restoring: bool,
+    /// The briefing the delivery was given to type, and the composer glyph
+    /// the agent's row names (`None` for a row that names none): what
+    /// `await_worker_ready` looks for on the screen once the delivery says it
+    /// is done (t-74381). A delivery is done when its words were written; a
+    /// booting program may have thrown them away.
+    briefing: String,
+    composer: Option<char>,
 }
 
 struct WorkerReadinessSlot {
