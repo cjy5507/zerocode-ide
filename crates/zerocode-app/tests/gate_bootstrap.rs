@@ -1,7 +1,11 @@
+#[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(any(target_os = "macos", not(unix)))]
 use std::path::Path;
+#[cfg(any(target_os = "macos", not(unix)))]
 use std::process::Command;
 
+#[cfg(any(target_os = "macos", not(unix)))]
 fn invoke(options: &[String], root: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_zerocode"))
         .arg("gate-bootstrap")
@@ -25,6 +29,9 @@ fn invoke(options: &[String], root: &Path) -> std::process::Output {
 }
 
 #[test]
+// The retained runtime verifier walks Mach-O load commands with otool.
+// Other platforms deliberately refuse this runtime before launching Python.
+#[cfg(target_os = "macos")]
 fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -185,4 +192,26 @@ fn real_python_uses_retained_launcher_bytes_and_declared_standard_library() {
         "{}",
         String::from_utf8_lossy(&output.stdout)
     );
+}
+
+#[cfg(not(unix))]
+#[test]
+fn an_authorized_gate_job_on_an_unsupported_platform_executes_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = Vec::new();
+    for flag in ["--launcher", "--python", "--stdlib"] {
+        options.extend([
+            flag.to_string(),
+            root.path().join("absent").display().to_string(),
+        ]);
+        options.extend([format!("{flag}-sha256"), "0".repeat(64)]);
+    }
+    options.extend(["--gate-job".to_string(), "fixture-job".to_string()]);
+    let output = invoke(&options, root.path());
+    assert_eq!(output.status.code(), Some(1));
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["decision"], "miss");
+    assert_eq!(answer["code"], "unsupported_platform");
+    assert_eq!(answer["executed"], false);
+    assert_eq!(answer["newExecutions"], 0);
 }

@@ -154,22 +154,18 @@ impl Provider {
                     ));
                 }
             }
-            if modifiers.is_empty() && count <= 1 {
-                // `performClickAction`: the element's own press for the
-                // left button, its own context menu for the right one.
-                let performed = match button {
-                    MouseButton::Left => uia::primary_click_action(&record.actions)
-                        .filter(|action| uia::perform_action(element, action).is_ok())
-                        .map(str::to_string),
-                    MouseButton::Right => uia::show_context_menu(element)
-                        .ok()
-                        .map(|()| "ShowContextMenu".to_string()),
-                    MouseButton::Middle => None,
-                };
+            if modifiers.is_empty() && count <= 1 && button == MouseButton::Left {
+                let performed = uia::primary_click_action(&record.actions)
+                    .filter(|action| uia::perform_action(element, action).is_ok())
+                    .map(str::to_string);
                 if let Some(action) = performed {
                     return Ok(ActionMetadata::new(ActionPath::Accessibility).named(action));
                 }
             }
+            // Classic UIA proxies can acknowledge ShowContextMenu without
+            // delivering WM_CONTEXTMENU. Send one guarded pointer click,
+            // rather than reporting that acknowledgement as a right-click
+            // or retrying a request that may have already opened a menu.
             let Some((x, y)) = snapshot.center_of(record) else {
                 return Err(ProviderError::new(
                     error_code::ELEMENT_NOT_CLICKABLE,
