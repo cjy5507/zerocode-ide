@@ -620,6 +620,11 @@ public final class OperatorHand: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// `resume`, for `lifter` (t-68324 ②).
+    public func resume(by lifter: StopLifter) throws {
+        resume()
+    }
+
     /// One hold is taken back — a reflex run pauses on someone else's input,
     /// a frame source gone quiet: the holder keeps the hand but presses
     /// nothing more, and what it held is let go of now.

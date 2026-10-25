@@ -6648,7 +6648,7 @@ enum OperatorGuardHost {
     /// Lift the stop for `lifter` (t-66753 A): the person's stop for the
     /// person — the window's band — alone; anyone else's resume of it is
     /// refused and lifts nothing.
-    static func resume(resetBudget: Bool, by lifter: StopLifter) throws {
+    static func resume(resetBudget: Bool, by lifter: StopLifter, hand: OperatorHand = OperatorHandHost.hand) throws {
         let refused: String? = changing { ledger in
             guard ledger.liftable(by: lifter) else { return ledger.stoppedReason ?? "" }
             ledger.resume(resetBudget: resetBudget)
@@ -6657,7 +6657,7 @@ enum OperatorGuardHost {
         if let refused {
             throw ProviderError.coded("stopped", "the operator is stopped (\(refused)); the person stopped it — only they lift it, from the window's band")
         }
-        OperatorHandHost.hand.resume()
+        hand.resume()
     }
 
     /// The window's waiting request (t-66753 B): answered once the stop is

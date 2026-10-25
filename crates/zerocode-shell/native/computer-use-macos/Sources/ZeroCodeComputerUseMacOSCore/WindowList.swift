@@ -1,6 +1,17 @@
 import CoreGraphics
 import Foundation
 
+/// Whether a window is on the screen the person sees, as a fact something
+/// reported — never a guess: `unknown` when nothing did (t-68324 ③).
+public enum WindowPresence: String, Equatable, Sendable {
+    case onScreen = "on_screen"
+    case offScreen = "off_screen"
+    case unknown = "unknown"
+
+    /// What an answer through the tree says of where its window is.
+    public static func sentence(for presence: WindowPresence) -> String { "" }
+}
+
 /// One window a look or an action may be aimed at, as the window server lists
 /// it (`CGWindowListCopyWindowInfo`).
 public struct WindowCandidate: Equatable, Sendable {
@@ -9,8 +20,11 @@ public struct WindowCandidate: Equatable, Sendable {
     public let bounds: CGRect
     public let title: String?
     public let alpha: CGFloat
-    public let isOnScreen: Bool
+    public let presence: WindowPresence
     public let sharingState: Int?
+
+    /// Known to be on the screen — `unknown` is not.
+    public var isOnScreen: Bool { presence == .onScreen }
 
     public init(
         windowId: CGWindowID,
@@ -21,12 +35,27 @@ public struct WindowCandidate: Equatable, Sendable {
         isOnScreen: Bool,
         sharingState: Int?
     ) {
+        self.init(
+            windowId: windowId, layer: layer, bounds: bounds, title: title, alpha: alpha,
+            presence: isOnScreen ? .onScreen : .offScreen, sharingState: sharingState
+        )
+    }
+
+    public init(
+        windowId: CGWindowID,
+        layer: Int,
+        bounds: CGRect,
+        title: String?,
+        alpha: CGFloat,
+        presence: WindowPresence,
+        sharingState: Int?
+    ) {
         self.windowId = windowId
         self.layer = layer
         self.bounds = bounds
         self.title = title
         self.alpha = alpha
-        self.isOnScreen = isOnScreen
+        self.presence = presence
         self.sharingState = sharingState
     }
 
@@ -50,13 +79,20 @@ public struct AccessibilityWindow: Equatable, Sendable {
     public let frame: CGRect?
     public let title: String?
     public let minimized: Bool
+    public let appHidden: Bool
+    public let serverOnScreen: Bool?
 
-    public init(pid: pid_t, number: CGWindowID?, frame: CGRect?, title: String?, minimized: Bool) {
+    public init(
+        pid: pid_t, number: CGWindowID?, frame: CGRect?, title: String?, minimized: Bool,
+        appHidden: Bool = false, serverOnScreen: Bool? = nil
+    ) {
         self.pid = pid
         self.number = number
         self.frame = frame
         self.title = title
         self.minimized = minimized
+        self.appHidden = appHidden
+        self.serverOnScreen = serverOnScreen
     }
 }
 
