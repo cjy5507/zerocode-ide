@@ -1,0 +1,12 @@
+{
+  "scenarios": [
+    {
+      "id": "s01-small-fix",
+      "kind": "small-fix",
+      "seed": "seed/s01-small-fix",
+      "brief": "tally.py fails its tests: words are split only on single spaces, case makes two words, and top() puts the rarest first. Fix tally.py so `python3 -m unittest -q` passes. Change no test.",
+      "accept": ["python3", "-m", "unittest", "-q"],
+      "files": ["tally.py"]
+    }
+  ]
+}

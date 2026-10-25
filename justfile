@@ -94,6 +94,7 @@ tools-test:
     python3 tools/tests/test_question_discovery.py
     python3 tools/tests/test_jev_review_study.py
     python3 tools/tests/test_challenger_replay_seed.py
+    python3 tools/tests/test_delegation_eval.py
     python3 tools/tests/test_claude_code_panel_rules.py
     python3 tools/tests/test_codegraph_bench.py
     python3 tools/login-renewal-probe/test_probe.py
