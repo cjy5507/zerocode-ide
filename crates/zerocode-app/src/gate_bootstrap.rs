@@ -10,6 +10,7 @@ use zerocode_core::orchestration::gate_reuse::{
 };
 use zerocode_core::user_preferences::content_key;
 
+mod gate_channel;
 mod runtime_libraries;
 mod startup_layout;
 
@@ -276,7 +277,7 @@ fn execute(args: &[String]) -> Result<ExitCode, ()> {
                 .arg("--bound-policy-sha256")
                 .arg(arguments.policy_sha)
                 .args(forwarded);
-            zerocode_pty::gate_channel::spawn(command, channel).map_err(|_| ())?
+            gate_channel::spawn(command, channel).map_err(|_| ())?
         }
         #[cfg(not(unix))]
         {

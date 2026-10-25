@@ -123,9 +123,14 @@ pub fn judge(holder: &Holder, asker: &Asker) -> Verdict {
         Some(parent) => return Verdict::Leave(LeaveReason::HasParent(parent)),
     }
     match holder.threads {
-        None => Verdict::Leave(LeaveReason::Unreadable("threads")),
-        Some(1) => Verdict::EndStuckLaunch,
-        Some(threads) => Verdict::Leave(LeaveReason::Threads(threads)),
+        None => return Verdict::Leave(LeaveReason::Unreadable("threads")),
+        Some(1) => {}
+        Some(threads) => return Verdict::Leave(LeaveReason::Threads(threads)),
+    }
+    // Without its start, the pid cannot be checked again before the kill.
+    match holder.started {
+        None => Verdict::Leave(LeaveReason::Unreadable("start")),
+        Some(_) => Verdict::EndStuckLaunch,
     }
 }
 
@@ -234,12 +239,30 @@ pub fn settle(
 }
 
 /// How long [`end`] waits for an ended process to be gone.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 const END_WAIT: Duration = Duration::from_secs(1);
 
-#[cfg(unix)]
+/// End the process [`judge`] judged, if `holder.pid` still names it.
+///
+/// Between the reading and the kill that process can end and its pid go to
+/// another, so the pid's start is read again just before the signal and must
+/// be the one the holder was judged with. What is left between that read and
+/// the kill is one system call: macOS has no descriptor that names a process
+/// rather than a pid.
+#[cfg(target_os = "macos")]
 fn end(holder: &Holder) -> std::io::Result<()> {
-    let pid = holder.pid;
+    let now = macos::bsd_info(holder.pid).map(|bsd| macos::started_of(&bsd));
+    if holder.started.is_none() || now != holder.started {
+        return Err(std::io::Error::other(format!(
+            "pid {} is no longer the process that was judged",
+            holder.pid
+        )));
+    }
+    kill_and_wait(holder.pid)
+}
+
+#[cfg(target_os = "macos")]
+fn kill_and_wait(pid: i32) -> std::io::Result<()> {
     // SIGKILL: a process standing in a mutex inside a fork handler runs no
     // signal handler that a gentler signal would be asking.
     if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
@@ -258,7 +281,9 @@ fn end(holder: &Holder) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Only macOS lists a lock's holders ([`holders_of`]), so only there is one
+/// ever judged and ended.
+#[cfg(not(target_os = "macos"))]
 fn end(_holder: &Holder) -> std::io::Result<()> {
     Err(std::io::Error::other("ending a holder is macOS-only"))
 }
@@ -521,6 +546,13 @@ mod tests {
                     ..stuck_launch()
                 },
                 LeaveReason::Unreadable("threads"),
+            ),
+            (
+                Holder {
+                    started: None,
+                    ..stuck_launch()
+                },
+                LeaveReason::Unreadable("start"),
             ),
         ];
         for (holder, reason) in cases {
