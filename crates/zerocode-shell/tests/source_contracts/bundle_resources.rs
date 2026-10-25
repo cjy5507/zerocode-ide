@@ -92,3 +92,31 @@ fn every_overlay_names_resources_as_a_map() {
         );
     }
 }
+
+/// `tauri_build` announces the helper bundle's own files, and `build.rs`
+/// writes them: a script that announces its output folder or rewrites the
+/// bundle on every run is newer than its own start the next time, so every
+/// cargo call re-ran it and recompiled the crate (about 50 s each, t-68218).
+/// Pinned: the helper package folder is never announced as a whole, its
+/// output folders are skipped, and an unchanged input leaves the bundle alone.
+#[test]
+fn the_build_script_does_not_watch_or_rewrite_its_own_helper_output() {
+    let build = include_str!("../../build.rs");
+    let (_, inputs) = build
+        .split_once("fn helper_inputs(")
+        .expect("build.rs lists the helper's inputs in `helper_inputs`");
+    let inputs = inputs.split_once("\n}\n").map_or(inputs, |(body, _)| body);
+    assert!(
+        build.contains("const HELPER_OUTPUT_DIRS: &[&str] = &[\".build\", \".swiftpm\"];")
+            && inputs.contains("HELPER_OUTPUT_DIRS"),
+        "the helper package's output folders must stay out of the inputs"
+    );
+    assert!(
+        !inputs.contains("rerun-if-changed"),
+        "`helper_inputs` only lists; the root folder must not be announced as a whole"
+    );
+    assert!(
+        build.contains("computer-use-inputs.hash") && build.contains("if destination.is_dir()"),
+        "an unchanged helper must be left as it is, or the next cargo call runs the script again"
+    );
+}
