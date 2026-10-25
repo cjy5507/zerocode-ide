@@ -50,6 +50,9 @@ const NEVER_HELD: [ComputerMethod; 4] = [
 struct Held {
     share: Share,
     labels: BTreeMap<String, String>,
+    panel_revision: u64,
+    panel_label: String,
+    panel_window: Value,
 }
 
 #[cfg(not(test))]
@@ -196,6 +199,28 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
         }
         match gate {
             Gate::Go => {
+                if named.as_ref().is_some_and(|(key, _)| {
+                    with_held(|held| held.share.target() == Some(key.as_str()))
+                }) {
+                    let pinned = params
+                        .get("mark")
+                        .and_then(|_| super::marks::pinned_click(params).ok());
+                    let selected = pinned
+                        .as_ref()
+                        .map(|pinned| &pinned.params)
+                        .or_else(|| params.as_object());
+                    let window = json!({"windowId": selected.and_then(|p| p.get("windowId")), "windowIndex": selected.and_then(|p| p.get("windowIndex"))});
+                    let changed = with_held(|held| {
+                        if held.panel_window == window {
+                            return false;
+                        }
+                        held.panel_window = window;
+                        true
+                    });
+                    if changed {
+                        tell();
+                    }
+                }
                 return Ok(scope(Some(Admitted {
                     generation,
                     app: named.as_ref().map(|(key, _)| key.clone()),
@@ -276,8 +301,57 @@ pub(crate) fn state() -> Value {
             "target": target,
             "label": target.and_then(|key| held.labels.get(key)),
             "takenBack": held.share.taken_back(),
+            "generation": held.share.generation(),
+            "revision": held.panel_revision,
+            "buttonLabel": held.panel_label,
+            "windowId": held.panel_window.get("windowId"),
+            "windowIndex": held.panel_window.get("windowIndex"),
         })
     })
+}
+
+/// Reuse the renderer's existing translated words on the native panel.
+pub(crate) fn panel_label(label: Option<String>) {
+    // This read command can carry only the existing catalog's control name.
+    // A caller cannot rename the human control to an arbitrary instruction.
+    const LABELS: [&str; 5] = [
+        "제어권 가져오기",
+        "Take control",
+        "操作を取り戻す",
+        "收回控制权",
+        "Tomar el control",
+    ];
+    if let Some(label) = label.filter(|label| LABELS.contains(&label.as_str())) {
+        with_held(|held| held.panel_label = label);
+        #[cfg(all(target_os = "macos", not(test)))]
+        super::macos::sync_share_panel(&state());
+    }
+}
+
+/// A physical panel press belongs to the exact share it displayed. Replies
+/// from a previous target or from before a hand-back cannot take a new share.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn hear_panel(answer: &Value) {
+    let Some(panel) = answer.get("shareControl") else {
+        return;
+    };
+    if panel.get("takenBack").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    let took = with_held(|held| {
+        if held.share.taken_back()
+            || panel.get("target").and_then(Value::as_str) != held.share.target()
+            || panel.get("generation").and_then(Value::as_u64) != Some(held.share.generation())
+            || panel.get("revision").and_then(Value::as_u64) != Some(held.panel_revision)
+        {
+            return false;
+        }
+        held.share.take_back();
+        true
+    });
+    if took {
+        tell();
+    }
 }
 
 /// Hand the window's card and band to the share — at boot.
@@ -316,7 +390,18 @@ fn ask(card: &ShareAsk) -> Decision {
 
 /// Tell the band what is shared now.
 fn tell() {
+    with_held(|held| held.panel_revision += 1);
     let said = state();
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        super::macos::sync_share_panel(&said);
+        if said.get("target").is_some_and(|target| !target.is_null()) {
+            // Sharing ZeroCode's own page may never otherwise start a helper.
+            let _ = std::thread::Builder::new()
+                .name("computer-share-panel".into())
+                .spawn(super::ensure_share_panel);
+        }
+    }
     #[cfg(not(test))]
     {
         let road = ROAD

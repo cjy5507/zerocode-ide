@@ -187,6 +187,7 @@ struct DesktopRunBoundary: ReflexInputBoundary {
         let at = CGPoint(x: point.x, y: point.y)
         let pid = owner(at)
         do {
+            try ShareControlPanel.refusePoint(at)
             try DesktopSelf.refuseOwn(pid, at: at, isOwn: isOwn)
         } catch let error as ProviderError {
             return error.message

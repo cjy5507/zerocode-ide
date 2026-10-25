@@ -329,6 +329,9 @@ final class Provider {
     static let keyedMethods: Set<String> = ["key", "holdKey", "type"]
 
     func handle(method: String, params: [String: JSONValue]) throws -> Any {
+        if let id = params["windowId"]?.number.flatMap(UInt32.init(exactly:)), let owner = DesktopWindows.ownerPid(windowId: id) {
+            try ShareControlPanel.refuseHelper(pid: owner)
+        }
         if params["background"] != nil && params["background"]?.bool == nil {
             throw ProviderError.coded("invalid_argument", "background must be a boolean")
         }
@@ -340,6 +343,7 @@ final class Provider {
             throw ProviderError.coded(refusal.rawValue, "background input requires an app-scoped action; no foreground fallback was attempted")
         }
         guard Self.actingMethods.contains(method) else { return try dispatch(method: method, params: params) }
+        try ShareControlPanel.refuseInput(method: method, params: params)
         // One hand (realtime v1 §5.4): an acting request holds it from its
         // count to its last event — never beside a reflex run — and a stop
         // lets go of whatever it pressed.
@@ -370,6 +374,7 @@ final class Provider {
            let kind = confirmKind(of: target, words: words) {
             throw ProviderError.coded("confirmation_required", "\(kind): \(target)")
         }
+        try ShareControlPanel.refuseInput(method: method, params: params)
         if params["allowSelf"]?.bool != true {
             for (xKey, yKey) in Self.pointedMethods[method] ?? [] {
                 try DesktopSelf.refuseOwnWindow(at: try desktopPoint(params, xKey, yKey))
@@ -821,7 +826,7 @@ final class Provider {
             .compactMap { app in
                 guard let name = app.localizedName, !name.isEmpty else { return nil }
                 let pid = app.processIdentifier
-                guard pid > 0, pidIsLive(pid) else { return nil }
+                guard pid > 0, !ShareControlPanel.isHelperPID(pid), pidIsLive(pid) else { return nil }
                 let key = (app.bundleIdentifier ?? "pid:\(pid)").lowercased()
                 guard seen.insert(key).inserted else { return nil }
                 return AppDescriptor(name: name, bundleId: app.bundleIdentifier, pid: pid, app: app)
@@ -861,6 +866,7 @@ final class Provider {
                     "list": true,
                     "targetById": true,
                     "targetByIndex": true,
+                    "shareControlPanel": true,
                     "focus": false,
                     "moveResize": false,
                 ],
@@ -919,6 +925,7 @@ final class Provider {
             throw ProviderError.coded("invalid_argument", "app query must not be empty")
         }
         if let pid = parsePid(trimmed) {
+            try ShareControlPanel.refuseHelper(pid: pid)
             if let app = appByPid(pid) {
                 try rejectBlockedApp(app)
                 return app
@@ -939,7 +946,9 @@ final class Provider {
         if let query = params["app"]?.string, let app = try? resolveApp(query) {
             try refuseOwn(app, named: query)
         }
-        if let id = params["windowId"]?.number, let owner = DesktopWindows.ownerPid(windowId: CGWindowID(id)), isTrustedZeroCodeApplication(owner) {
+        if let id = params["windowId"]?.number.flatMap(UInt32.init(exactly:)), let owner = DesktopWindows.ownerPid(windowId: id) {
+            try ShareControlPanel.refuseHelper(pid: owner)
+            if !isTrustedZeroCodeApplication(owner) { return }
             throw ProviderError.coded("app_blocked", "window \(Int(id)) is ZeroCode's own; the operator does not drive the app it lives in")
         }
     }
@@ -962,6 +971,7 @@ final class Provider {
     }
 
     private func rejectBlockedApp(_ app: AppDescriptor) throws {
+        try ShareControlPanel.refuseHelper(pid: app.pid)
         if let bundle = app.bundleId, BlockedApps.bundleIds.contains(bundle) {
             throw ProviderError.coded("app_blocked", "app '\(bundle)' is blocked for safety")
         }
@@ -1057,6 +1067,7 @@ final class Provider {
         ) else {
             throw ProviderError.coded("window_not_found", "app '\(app.name)' has no on-screen window")
         }
+        ShareControlPanel.observedWindow(pid: app.pid, windowID: capture.windowId)
         guard let window = matchingWindow(appElement: appElement, capture: capture, focused: focused, explicitTarget: windowId != nil || windowIndex != nil) else {
             throw ProviderError.coded("window_not_found", "could not match accessibility window to requested window; run get-app-state again or retry without a window selector")
         }
@@ -1944,7 +1955,7 @@ private func requiredNumber(_ params: [String: JSONValue], _ key: String) throws
     return value
 }
 
-private func requiredInteger(_ params: [String: JSONValue], _ key: String) throws -> Int {
+func requiredInteger(_ params: [String: JSONValue], _ key: String) throws -> Int {
     guard let value = boundedInteger(try requiredNumber(params, key), as: Int.self) else {
         throw ProviderError.coded("invalid_argument", "\(key) is out of range")
     }
@@ -3653,7 +3664,8 @@ private struct WindowCapture {
         guard let infos = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
-        return WindowList.candidates(infos: infos, pid: pid)
+        guard !ShareControlPanel.isHelperPID(pid) else { return [] }
+        return WindowList.candidates(infos: ShareControlPanel.agentWindows(infos), pid: pid)
     }
 
     func screenshotPayload() -> ScreenshotPayload? {
@@ -5576,6 +5588,9 @@ func handleRequest(
 /// and answers it under its own lock (`ReflexRuntimeHost`).
 func unlockedRoad(_ method: String, params: [String: JSONValue]) throws -> [String: Any]? {
     switch method {
+    case "sharePanel":
+        try ShareControlPanel.update(params)
+        return ShareControlPanel.status()
     case "stop":
         OperatorGuardHost.stop(reason: StopReason.request)
         return OperatorGuardHost.status()
@@ -5587,7 +5602,7 @@ func unlockedRoad(_ method: String, params: [String: JSONValue]) throws -> [Stri
         guard waitMs > 0, (after ?? 0) >= 0 else {
             throw ProviderError.coded("invalid_argument", "stopWatch waits ms above 0, after a stopRevision from 0")
         }
-        return OperatorGuardHost.watch(after: after.map { UInt64($0) }, waitMs: waitMs)
+        return OperatorGuardHost.watch(after: after.map { UInt64($0) }, waitMs: waitMs, afterShare: try optionalInteger(params, "afterShare"))
     case "reflexStatus":
         return ReflexRuntimeHost.status(run: try reflexRunId(params, "run"))
     case "reflexStop":
@@ -5716,7 +5731,7 @@ if arguments.first == "--agent" {
 /// A point on the desktop, in Quartz global coordinates (origin at the main
 /// display's top-left, y downward) — the space CGEvent posts in and the space
 /// a desktop screenshot's `origin` reports.
-private func desktopPoint(_ params: [String: JSONValue], _ xKey: String, _ yKey: String) throws -> CGPoint {
+func desktopPoint(_ params: [String: JSONValue], _ xKey: String, _ yKey: String) throws -> CGPoint {
     CGPoint(x: try requiredNumber(params, xKey), y: try requiredNumber(params, yKey))
 }
 
@@ -6432,10 +6447,11 @@ private enum DesktopWindows {
             return []
         }
         let displays = DesktopScreen.displays().map(\.bounds)
-        return infos.flatMap { info -> [[String: Any]] in
+        return ShareControlPanel.agentWindows(infos).flatMap { info -> [[String: Any]] in
             guard let layer = info[kCGWindowLayer as String] as? Int, everyLayer || layer == 0,
                   let number = info[kCGWindowNumber as String] as? NSNumber,
                   let ownerPid = info[kCGWindowOwnerPID as String] as? pid_t,
+                  !ShareControlPanel.isHelperPID(ownerPid),
                   let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
                   everyLayer || (bounds.width >= smallestWindowSide && bounds.height >= smallestWindowSide)
@@ -6694,10 +6710,18 @@ enum OperatorGuardHost {
     /// else after `waitMs` with the stop as it stands — at once without
     /// `after`. It waits on its connection's own thread, outside the provider
     /// lock: no request waits behind it, and it waits behind none.
-    static func watch(after: UInt64?, waitMs: Int) -> [String: Any] {
+    static func shareChanged() {
+        lock.lock()
+        lock.broadcast()
+        lock.unlock()
+    }
+
+    static func watch(after: UInt64?, waitMs: Int, afterShare: Int? = nil) -> [String: Any] {
         let deadline = Date(timeIntervalSinceNow: Double(waitMs) / 1_000)
         lock.lock()
-        while let after, ledger.stopRevision == after, lock.wait(until: deadline) {}
+        while let after, ledger.stopRevision == after,
+              afterShare == nil || ShareControlPanel.status()["event"] as? Int == afterShare,
+              lock.wait(until: deadline) {}
         lock.unlock()
         return status()
     }
@@ -6774,6 +6798,7 @@ enum OperatorGuardHost {
         return [
             "stopped": snapshot.isStopped,
             "backgroundPointer": BackgroundPointerOverlay.status(),
+            "shareControl": ShareControlPanel.status(),
             "reason": jsonNullable(snapshot.stoppedReason),
             // What the window's waiting request asks after (t-66753 B).
             "stopRevision": Int(clamping: snapshot.stopRevision),
@@ -6827,6 +6852,13 @@ enum OperatorHandHost {
             hand.relinquish(token)
         }
         return try body()
+    }
+
+    static func revokeForShare() {
+        lock.lock()
+        let held = request
+        lock.unlock()
+        if let held { hand.revoke(held, reason: "person_took_control") }
     }
 
     /// Post one event for the request holding the hand.
@@ -6921,12 +6953,14 @@ enum DesktopSelf {
     }
 
     static func refuseOwnWindow(at point: CGPoint) throws {
+        try ShareControlPanel.refusePoint(point)
         try refuseOwn(ownerPid(at: point), at: point)
     }
 
     /// The policy itself, for whoever already knows whose window is under the
     /// point (a reflex run's press asks it too, `DesktopRunBoundary`).
     static func refuseOwn(_ pid: pid_t?, at point: CGPoint, isOwn: (pid_t) -> Bool = DesktopSelf.isOwn) throws {
+        if let pid { try ShareControlPanel.refuseHelper(pid: pid) }
         guard let pid, isOwn(pid) else { return }
         throw ProviderError.coded("app_blocked", "(\(Int(point.x)), \(Int(point.y))) lands on ZeroCode's own window; the operator does not drive the app it lives in")
     }
