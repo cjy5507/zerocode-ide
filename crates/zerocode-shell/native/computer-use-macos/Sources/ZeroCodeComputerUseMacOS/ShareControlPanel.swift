@@ -45,7 +45,7 @@ final class ShareControlPanel {
     private var panel: ShareTakePanel?
     private var timer: DispatchSourceTimer?
     private var pinned: (pid_t, UInt32)?
-    private var label = ""
+    private var label = ShareControlPanel.controlLabel("")
     private var windowID: UInt32?
     private var windowIndex: Int?
     private var presentedTarget: String?
@@ -103,7 +103,9 @@ final class ShareControlPanel {
                 "revision": state.revision, "event": state.event, "takenBack": state.takenBack]
     }
 
-    nonisolated static func controlLabel(_ label: String) -> String { label }
+    nonisolated static func controlLabel(_ label: String) -> String {
+        label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Take control" : label
+    }
 
     nonisolated static func update(_ params: [String: JSONValue]) throws {
         let revision = try requiredInteger(params, "revision")
@@ -233,7 +235,6 @@ final class ShareControlPanel {
         }) { hide(); return }
         let frame = CGRect(x: bounds.minX, y: CGDisplayBounds(CGMainDisplayID()).height - bounds.maxY,
                            width: bounds.width, height: bounds.height)
-        guard !label.isEmpty else { hide(); return }
         let shown: ShareTakePanel
         if let panel { shown = panel } else {
             shown = ShareTakePanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)

@@ -418,12 +418,6 @@ fn tell() {
     #[cfg(all(target_os = "macos", not(test)))]
     {
         super::macos::sync_share_panel(&said);
-        if said.get("target").is_some_and(|target| !target.is_null()) {
-            // Sharing ZeroCode's own page may never otherwise start a helper.
-            let _ = std::thread::Builder::new()
-                .name("computer-share-panel".into())
-                .spawn(super::ensure_share_panel);
-        }
     }
     #[cfg(not(test))]
     {

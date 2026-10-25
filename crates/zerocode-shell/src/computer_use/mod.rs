@@ -128,9 +128,10 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// A shared page needs its native person-only panel even when the page route
 /// handles all actions. Starting the helper posts no input and takes no focus.
 #[cfg(all(target_os = "macos", not(test)))]
-fn ensure_share_panel() {
+fn ensure_share_panel() -> bool {
     let Ok(mut held) = held_client().try_lock() else {
-        return;
+        // A provider may already be starting; this is not a failed launch.
+        return false;
     };
     if held.is_none()
         && let Ok(session) = platform::Session::start()
@@ -139,6 +140,8 @@ fn ensure_share_panel() {
         SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
         *held = Some(session);
     }
+    // The panel worker remembers an attempted launch, including a failure.
+    true
 }
 
 /// Call the persistent provider. Transport failures discard the session so a
