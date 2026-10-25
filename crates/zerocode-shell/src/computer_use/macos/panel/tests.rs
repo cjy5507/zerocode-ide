@@ -184,9 +184,105 @@ fn a_new_generation_allows_one_helper_start_after_an_endpoint_is_forgotten() {
     }
     assert_eq!(
         launches.get(),
-        3,
-        "one start per generation, including after helper loss"
+        4,
+        "initial start, one recovery, then one start per new generation"
     );
+}
+
+#[test]
+fn a_lost_helper_gets_one_restart_in_the_same_share_but_not_a_restart_loop() {
+    let mut delivery = Delivery::default();
+    let launches = Cell::new(0);
+    // The helper first starts, dies, restarts, and dies again. Neither the
+    // target nor the ownership generation changes during these notices.
+    for (index, name) in [
+        None,
+        Some("first"),
+        None,
+        None,
+        Some("restarted"),
+        None,
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        delivery.send(
+            update(index as u64 + 1, name.map(endpoint)),
+            |_| None,
+            || {
+                launches.set(launches.get() + 1);
+                true
+            },
+        );
+        assert_eq!(
+            launches.get(),
+            if index < 2 { 1 } else { 2 },
+            "the next notice recovers once; repeated loss stays remembered"
+        );
+    }
+}
+
+#[test]
+fn a_lost_helpers_restart_waits_for_a_busy_provider_without_spending_the_attempt() {
+    let mut delivery = Delivery::default();
+    delivery.send(update(1, None), |_| None, || true);
+    delivery.send(update(2, Some(endpoint("first"))), |_| None, || true);
+    let attempts = Cell::new(0);
+    for revision in 3..=5 {
+        delivery.send(
+            update(revision, None),
+            |_| None,
+            || {
+                attempts.set(attempts.get() + 1);
+                revision != 3
+            },
+        );
+    }
+    assert_eq!(attempts.get(), 2, "busy once, then one actual launch");
+}
+
+#[test]
+fn an_ended_watch_forgets_its_endpoint_and_preserves_a_new_helpers_endpoint() {
+    use crate::computer_use::macos::{PANEL_ENDPOINT, StopWatch, remember_panel};
+    use std::os::unix::net::UnixListener;
+
+    for replacement in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("watch.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (asked, heard) = std::sync::mpsc::channel();
+        let (close, closing) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "stopWatch");
+            asked.send(()).unwrap();
+            closing.recv().unwrap();
+            // EOF is the helper's death, with no command on the main session.
+        });
+        remember_panel(&socket, "fixture");
+        let watch = StopWatch::start(&socket, "fixture").unwrap();
+        heard.recv().unwrap();
+        let next_socket = directory.path().join("new.sock");
+        if replacement {
+            remember_panel(&next_socket, "new-fixture");
+        }
+        close.send(()).unwrap();
+        server.join().unwrap();
+        watch.thread.join().unwrap();
+        let mut held = PANEL_ENDPOINT.lock().unwrap();
+        let remaining = held.take();
+        assert_eq!(
+            remaining.as_ref().map(|endpoint| endpoint.socket.as_path()),
+            replacement.then_some(next_socket.as_path()),
+            "watch termination forgets only the matching helper"
+        );
+    }
 }
 
 #[test]
