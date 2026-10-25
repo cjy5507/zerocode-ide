@@ -232,6 +232,7 @@ const UI_FILES: &[&str] = &[
     "shell-judgment.js",
     "shell-connections.js",
     "shell-jev.js",
+    "shell-inbox.js",
     "shell-status.js",
     "shell-term.js",
     "shell-term-selection.js",

@@ -175,11 +175,23 @@ function inboxNode(tag, className, ...children) {
   return node;
 }
 
-/* An element whose words are a catalog key's, re-read by `applyLocale` when the language moves. */
-function inboxWord(key, fallback, tag = "span", className = "") {
+/* The page's fixed words, as catalog rows (`INBOX_KINDS` carries the kinds'). */
+const INBOX_LABELS = Object.freeze({
+  all: { key: "inbox.tab.all", word: "전체" },
+  unreadOnly: { key: "inbox.unreadOnly", word: "안 읽음만" },
+  title: { key: "inbox.title", word: "받은 편지함" },
+  project: { key: "inbox.fact.project", word: "프로젝트" },
+  task: { key: "inbox.fact.task", word: "과업" },
+  from: { key: "inbox.fact.from", word: "보낸 이" },
+  pick: { key: "inbox.pick", word: "왼쪽에서 편지를 고르면 여기에서 읽고 바로 답합니다." },
+});
+
+/* An element whose words are a catalog row's, in the window's language now and re-read by `applyLocale` when
+ * the language moves. */
+function inboxWord({ key, word }, tag = "span", className = "") {
   const node = inboxNode(tag, className);
   node.dataset.i18n = key;
-  node.textContent = fallback;
+  node.textContent = t(key, word);
   return node;
 }
 
@@ -217,7 +229,7 @@ function buildInboxView() {
   for (const tab of INBOX_TABS) {
     const kind = INBOX_KINDS[tab];
     const button = inboxNode("button", "inbox-tab",
-      kind ? inboxWord(kind.key, kind.word, "span", "inbox-tab-word") : inboxWord("inbox.tab.all", "전체", "span", "inbox-tab-word"),
+      inboxWord(kind ?? INBOX_LABELS.all, "span", "inbox-tab-word"),
       inboxNode("span", "inbox-tab-count"));
     button.type = "button";
     button.dataset.inboxTab = tab;
@@ -229,10 +241,10 @@ function buildInboxView() {
   unreadSwitch.setAttribute("role", "switch");
   unreadSwitch.setAttribute("aria-label", t("inbox.unreadOnly", "안 읽음만"));
   unreadSwitch.dataset.i18nAria = "inbox.unreadOnly";
-  unread.append(unreadSwitch, inboxWord("inbox.unreadOnly", "안 읽음만"));
+  unread.append(unreadSwitch, inboxWord(INBOX_LABELS.unreadOnly));
 
   const head = inboxNode("header", "inbox-head",
-    inboxNode("div", "inbox-heading", inboxWord("inbox.title", "받은 편지함", "h1", "inbox-title"), inboxNode("p", "inbox-sum")),
+    inboxNode("div", "inbox-heading", inboxWord(INBOX_LABELS.title, "h1", "inbox-title"), inboxNode("p", "inbox-sum")),
     inboxNode("div", "inbox-tools", tabsGroup, unread));
 
   const list = inboxNode("ol", "inbox-list");
@@ -242,9 +254,9 @@ function buildInboxView() {
 
   const kind = inboxNode("div", "inbox-pv-kind", inboxNode("span", "inbox-kind"), inboxNode("span", "inbox-age"));
   const facts = inboxNode("dl", "inbox-facts",
-    inboxWord("inbox.fact.project", "프로젝트", "dt"), inboxNode("dd", "inbox-fact-project"),
-    inboxWord("inbox.fact.task", "과업", "dt"), inboxNode("dd", "inbox-fact-task"),
-    inboxWord("inbox.fact.from", "보낸 이", "dt"), inboxNode("dd", "inbox-fact-from"));
+    inboxWord(INBOX_LABELS.project, "dt"), inboxNode("dd", "inbox-fact-project"),
+    inboxWord(INBOX_LABELS.task, "dt"), inboxNode("dd", "inbox-fact-task"),
+    inboxWord(INBOX_LABELS.from, "dt"), inboxNode("dd", "inbox-fact-from"));
   const field = inboxNode("textarea", "settings-input inbox-reply-field");
   field.rows = 4;
   field.setAttribute("aria-label", t("inbox.reply.label", "답장"));
@@ -261,7 +273,7 @@ function buildInboxView() {
   actions.dataset.personOnly = "";
   const detail = inboxNode("div", "inbox-detail", kind, inboxNode("h2", "inbox-pv-title"), facts,
     inboxNode("p", "inbox-pv-body"), reply, actions, inboxNode("p", "inbox-note"));
-  const preview = inboxNode("article", "inbox-preview", inboxWord("inbox.pick", "왼쪽에서 편지를 고르면 여기에서 읽고 바로 답합니다.", "p", "inbox-empty"), detail);
+  const preview = inboxNode("article", "inbox-preview", inboxWord(INBOX_LABELS.pick, "p", "inbox-empty"), detail);
   preview.setAttribute("aria-live", "polite");
 
   root.append(head, inboxNode("div", "inbox-body", list, preview));
