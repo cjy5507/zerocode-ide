@@ -942,6 +942,28 @@ mod tests {
         save(&path, &credentials()).expect("save once the lock is free");
     }
 
+    /// A launch on another thread that forks before it execs holds a copy of
+    /// every descriptor until the exec, and a flock belongs to the open file
+    /// description, so a lock its holder only closed stays held by that copy
+    /// (t-73907, t-74976). The duplicate here is that copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_the_credential_lock_left_in_a_launch_does_not_hold_the_next_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        let held = hold_lock(&path).expect("first hold");
+        let inherited = held.try_clone().expect("a copy of the descriptor");
+        drop(held);
+        let next = crate::durable_file::private_lock_file(&path.with_extension("json.lock"))
+            .expect("the lock file");
+        let taken = next.try_lock();
+        drop(inherited);
+        assert!(
+            taken.is_ok(),
+            "a lock its holder let go is still held by a copy"
+        );
+    }
+
     /// The store's word turned into the two judgements a person acts on.
     #[test]
     fn a_standing_names_what_is_wrong_with_the_login() {

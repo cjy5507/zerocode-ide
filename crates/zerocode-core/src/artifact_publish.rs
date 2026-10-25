@@ -845,6 +845,27 @@ mod tests {
         assert!(lock_store(&root).is_ok());
     }
 
+    /// A launch on another thread that forks before it execs holds a copy of
+    /// every descriptor until the exec, and a flock belongs to the open file
+    /// description, so a lock its holder only closed stays held by that copy
+    /// (t-73907, t-74976). The duplicate here is that copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_the_store_lock_left_in_a_launch_does_not_hold_the_next_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("artifacts");
+        let held = lock_store(&root).unwrap();
+        let inherited = held.try_clone().unwrap();
+        drop(held);
+        let next = std::fs::File::open(root.join(".publish.lock")).unwrap();
+        let taken = next.try_lock();
+        drop(inherited);
+        assert!(
+            taken.is_ok(),
+            "a lock its holder let go is still held by a copy"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn artifact_export_shim_carries_the_callers_directory_and_quoted_path() {

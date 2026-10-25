@@ -28,6 +28,10 @@ pub struct Holder {
     pub threads: Option<u32>,
     /// `None` when its executable could not be read.
     pub executable: Option<PathBuf>,
+    /// When it began, since the epoch; `None` when it could not be read. A
+    /// pid names one process only while that process lives, so this is what
+    /// the pid is checked against again just before it is ended.
+    pub started: Option<Duration>,
 }
 
 /// The process asking: whoever runs [`settle`].
@@ -215,7 +219,7 @@ pub fn settle(
     };
     for holder in &holders {
         match judge(holder, asker) {
-            Verdict::EndStuckLaunch => match end(holder.pid) {
+            Verdict::EndStuckLaunch => match end(holder) {
                 Ok(()) => settled.ended.push(holder.pid),
                 Err(error) => settled
                     .failures
@@ -234,7 +238,8 @@ pub fn settle(
 const END_WAIT: Duration = Duration::from_secs(1);
 
 #[cfg(unix)]
-fn end(pid: i32) -> std::io::Result<()> {
+fn end(holder: &Holder) -> std::io::Result<()> {
+    let pid = holder.pid;
     // SIGKILL: a process standing in a mutex inside a fork handler runs no
     // signal handler that a gentler signal would be asking.
     if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
@@ -254,7 +259,7 @@ fn end(pid: i32) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn end(_pid: i32) -> std::io::Result<()> {
+fn end(_holder: &Holder) -> std::io::Result<()> {
     Err(std::io::Error::other("ending a holder is macOS-only"))
 }
 
@@ -283,6 +288,7 @@ pub fn holders_of(path: &Path) -> std::io::Result<Vec<Holder>> {
             parent: i32::try_from(bsd.pbi_ppid).ok(),
             threads: macos::threads(pid),
             executable: macos::executable(pid),
+            started: Some(macos::started_of(&bsd)),
         });
     }
     Ok(holders)
@@ -341,6 +347,12 @@ mod macos {
 
     pub(super) fn bsd_info(pid: i32) -> Option<libc::proc_bsdinfo> {
         info::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO)
+    }
+
+    /// When the process `bsd` describes began, since the epoch.
+    pub(super) fn started_of(bsd: &libc::proc_bsdinfo) -> std::time::Duration {
+        std::time::Duration::from_secs(bsd.pbi_start_tvsec)
+            + std::time::Duration::from_micros(bsd.pbi_start_tvusec)
     }
 
     pub(super) fn threads(pid: i32) -> Option<u32> {
@@ -442,6 +454,7 @@ mod tests {
             parent: Some(LAUNCHD),
             threads: Some(1),
             executable: Some(asker().executable),
+            started: Some(Duration::from_secs(1_792_900_000)),
         }
     }
 
@@ -564,6 +577,64 @@ mod tests {
         fn drop(&mut self) {
             unsafe { libc::kill(self.0, libc::SIGKILL) };
         }
+    }
+
+    /// A child of this test, ended and reaped by its guard however the test
+    /// ends — through `Child`, which signals nothing once it has reaped.
+    #[cfg(target_os = "macos")]
+    struct Sleeper(std::process::Child);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// The pid [`settle`] judged can end and be handed to another process
+    /// before the kill: the start read with the holder must still be that
+    /// pid's, or the process now behind it is left alone (t-74976).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_pid_that_now_names_another_process_is_not_ended() {
+        use std::os::unix::process::ExitStatusExt as _;
+
+        let mut sleeper = Sleeper(
+            std::process::Command::new("/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("a child to judge"),
+        );
+        let pid = i32::try_from(sleeper.0.id()).unwrap();
+        let started = macos::started_of(&macos::bsd_info(pid).expect("the child's record"));
+
+        let another = Holder {
+            pid,
+            started: Some(started + Duration::from_micros(1)),
+            ..stuck_launch()
+        };
+        assert!(
+            end(&another).is_err(),
+            "a pid judged with another process's start was ended"
+        );
+        assert!(
+            sleeper.0.try_wait().unwrap().is_none(),
+            "the process now behind the pid was killed"
+        );
+        let unread = Holder {
+            started: None,
+            ..another.clone()
+        };
+        assert!(end(&unread).is_err(), "a pid with no start read was ended");
+        assert!(sleeper.0.try_wait().unwrap().is_none());
+
+        end(&Holder {
+            started: Some(started),
+            ..another
+        })
+        .expect("the judged process itself is ended");
+        assert_eq!(sleeper.0.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 
     /// The measured case with a real process: a launch forked while the lock

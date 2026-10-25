@@ -1813,6 +1813,40 @@ mod tests {
         );
     }
 
+    /// The same under a launch env that names no `PATH`: `env_clear` alone is
+    /// a `PATH` change to std, so the bare name is found where `execvp` would
+    /// have looked with no `PATH` at all, and the child still gets none
+    /// (t-74976).
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_program_under_an_env_without_a_path_starts_by_its_path() {
+        let env = vec![("ZEROCODE_QUEUE_PROBE".to_string(), "1".to_string())];
+        let command = command_under(Path::new("sh"), Some(&env));
+        let program = Path::new(command.get_program());
+        assert!(
+            program.is_absolute() && program.ends_with("sh"),
+            "a bare name under env_clear makes std fork the window: {program:?}"
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
+                .collect::<Vec<_>>(),
+            vec![("ZEROCODE_QUEUE_PROBE".into(), Some("1".into()))],
+            "the env is the launch's own and nothing else"
+        );
+        assert_eq!(
+            run_bounded_command(
+                Path::new("sh"),
+                &["-c".to_string(), "exit 0".to_string()],
+                None,
+                Some(&env),
+                Duration::from_secs(5),
+            ),
+            CommandResult::Succeeded
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn bounded_process_runner_distinguishes_success_failure_and_timeout() {
