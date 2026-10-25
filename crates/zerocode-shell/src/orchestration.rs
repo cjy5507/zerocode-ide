@@ -5496,6 +5496,11 @@ fn advice_standing(
         zerocode_pty::DeliveryOutcome::Refused(why) => {
             if !history.noted {
                 note_pointer_withheld(run, address, term, stood);
+            }
+            // The standing below says the pane was told, so a refusal after a
+            // line no road carried — written down, nobody told — tells it
+            // now (t-74974).
+            if !history.notified {
                 tell_unpointed(
                     host,
                     run,
