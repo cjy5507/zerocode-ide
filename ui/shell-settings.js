@@ -7768,6 +7768,7 @@ function repaintDocumentsForLocale() {
 function setLocale(code) {
   const { refresh = true, persist = true } = arguments[1] ?? {};
   locale = code;
+  syncComputerSharePanelWords();
   document.documentElement.lang = code === "system" ? systemLocale : code;
   applyLocale();
   paintLocalePicker();

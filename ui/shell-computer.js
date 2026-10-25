@@ -38,6 +38,7 @@ let computerBandTimer = null;
  * control. The band stands while a window is shared, whatever the agent last
  * did, so 「제어권 가져오기」 is always one press away. */
 let computerShareState = { target: null, label: null, takenBack: false };
+let computerShareRevision = null;
 /* The pane and assignment of the newest look the backend announced: what the
  * band's view opens. */
 let computerBandLook = null;
@@ -158,6 +159,9 @@ function paintComputerShare() {
 }
 
 function takeComputerShare(said) {
+  const revision = Number.isSafeInteger(said?.revision) ? said.revision : null;
+  if (revision != null && computerShareRevision != null && revision < computerShareRevision) return;
+  if (revision != null) computerShareRevision = revision;
   computerShareState = {
     target: said?.target ?? null,
     label: said?.label ?? null,
@@ -167,7 +171,12 @@ function takeComputerShare(said) {
 }
 
 listen("computer:share-state", (event) => takeComputerShare(event.payload));
-void invoke("computer_share_state").then(takeComputerShare).catch(() => {});
+function syncComputerSharePanelWords() {
+  void invoke("computer_share_state", {
+    panelLabel: t("computer.band.take", "제어권 가져오기"),
+  }).then(takeComputerShare).catch(() => {});
+}
+syncComputerSharePanelWords();
 
 el("computer-band-take").addEventListener("click", () => {
   void invoke("computer_take_control").catch(() => {});
