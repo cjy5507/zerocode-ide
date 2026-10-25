@@ -5838,7 +5838,7 @@ async function runCookieImport(family, profile, target, box) {
   paintBrowserProfiles();
   let summary;
   try {
-    summary = await invoke("import_browser_cookies", { family, profile, target });
+    summary = await invoke("import_browser_cookies", { family, profile, target }, { hand: handNow() });
   } catch (error) {
     browserImportingId = null;
     paintBrowserProfiles();
@@ -5861,7 +5861,7 @@ async function runCookieFileImport(target, box) {
   paintBrowserProfiles();
   let summary;
   try {
-    summary = await invoke("import_cookie_file", { target });
+    summary = await invoke("import_cookie_file", { target }, { hand: handNow() });
   } catch (error) {
     browserImportingId = null;
     paintBrowserProfiles();

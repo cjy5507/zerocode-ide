@@ -387,6 +387,9 @@ fn an_agents_call_runs_no_person_only_command() {
             person_only(command, None).is_err(),
             "{command} with no hand"
         );
+        // A call outside any event that carries no flow's hand (t-75209).
+        let none = person_only(command, Some("none")).expect_err(command);
+        assert!(none.contains("carries no hand"), "{command}: {none}");
         assert!(
             person_only(command, Some("someone")).is_err(),
             "{command} with a hand the page never says"

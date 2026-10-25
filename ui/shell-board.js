@@ -587,7 +587,7 @@ async function ackDeskBatch(view, letter) {
   deskAcks.set(key, held);
   paintCoordinatorDesk(view);
   try {
-    await invoke("desk_ack", { run: letter.run, delivery: key, retryRequest: held.retry.id });
+    await invoke("desk_ack", { run: letter.run, delivery: key, retryRequest: held.retry.id }, { hand: handNow() });
     held.sent = true;
     held.retry = null;
     refreshDeskLedger();
@@ -1363,6 +1363,7 @@ function paintDeskWall(node, row, now) {
  * 창에서만 받고, 눌린 때의 원장을 다시 읽어 거절할 것은 거절한다. 답은 그 벽에 대한 말로 띠에
  * 남고(안 됐으면 그 까닭의 코드를 사람의 말로), 원장을 다시 읽는다. */
 async function pressQuotaWall(view, row, act, to) {
+  const started = handNow();
   const chip = row?.quota_wall;
   if (!chip) return;
   const key = `${row.run}/${row.worker}`;
@@ -1386,13 +1387,15 @@ async function pressQuotaWall(view, row, act, to) {
       cancel: false,
     });
   if (said !== true) return;
+  // The press's hand, joined by the answer's (shell-boot.js `flowHand`).
+  const hand = flowHand(started);
   const held = { wall: chip.wall, sending: true, ok: false, text: t("quotaWall.sending", "보내는 중…") };
   deskWallSaid.set(key, held);
   paintCoordinatorDesk(view);
   try {
     const answer = act === "retry"
       ? await invoke("quota_wall_retry", { run: row.run, worker })
-      : await invoke("quota_wall_handover", { run: row.run, worker, to });
+      : await invoke("quota_wall_handover", { run: row.run, worker, to }, { hand });
     held.ok = true;
     held.text = act === "retry"
       ? t("quotaWall.retried", "이어서 하라는 한 줄을 넣었습니다")
@@ -1854,6 +1857,7 @@ function paintDeskBatchCard(card, entry, now) {
  * 눌린 때의 원장을 다시 읽어 코디의 동사와 같은 규칙으로 거절할 것은 거절한다. 보내는 동안 그 카드의
  * 단추는 다 잠긴다 — 두 번 눌러도 한 번이다. 답과 거절은 그 카드에 남고, 원장을 다시 읽는다. */
 async function pressLandBatch(view, entry, act) {
+  const started = handNow();
   const batch = entry?.batch;
   if (!batch) return;
   const key = `${entry.run}/${batch.batch}`;
@@ -1862,6 +1866,8 @@ async function pressLandBatch(view, entry, act) {
   const drop = act === "restack-drop" ? [batchDropTask(batch)] : [];
   const said = await askConfirm(batchAsk(batch, act, drop));
   if (said !== true) return;
+  // The press's hand, joined by the answer's (shell-boot.js `flowHand`).
+  const hand = flowHand(started);
   const held = {
     sending: true, tone: "sending", generation: batch.generation, standings: [batch.standing],
     say: () => t("board.batch.saidSending", "보내는 중…"),
@@ -1870,10 +1876,10 @@ async function pressLandBatch(view, entry, act) {
   paintCoordinatorDesk(view);
   try {
     const run = entry.run;
-    const answer = act === "promote" ? await invoke("land_batch_promote", { run, batch: batch.batch })
-      : act === "bisect" ? await invoke("land_batch_bisect", { run, batch: batch.batch })
-        : act === "cancel" ? await invoke("land_batch_cancel", { run, batch: batch.batch })
-          : await invoke("land_batch_restack", { run, batch: batch.batch, drop });
+    const answer = act === "promote" ? await invoke("land_batch_promote", { run, batch: batch.batch }, { hand })
+      : act === "bisect" ? await invoke("land_batch_bisect", { run, batch: batch.batch }, { hand })
+        : act === "cancel" ? await invoke("land_batch_cancel", { run, batch: batch.batch }, { hand })
+          : await invoke("land_batch_restack", { run, batch: batch.batch, drop }, { hand });
     const words = batchAnswerWords(answer, batch);
     const generation = Number(answer?.generation ?? batch.generation);
     held.tone = words.tone;

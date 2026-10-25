@@ -228,12 +228,14 @@ export async function testSelfAct(browser, origin, ok) {
         <button id="hand-agent" type="button">Hand agent</button>
         <input id="hand-check" type="checkbox" aria-label="Hand check">
         <button id="hand-person" type="button">Hand person</button>`);
+      // A road that awaits carries the hand it started with (t-75209).
       document.getElementById("hand-agent").addEventListener("click", async () => {
+        const started = handNow();
         void invoke("computer_take_control");
         await invoke("board_columns_probe");
-        void invoke("answer_ask");
+        void invoke("answer_ask", undefined, { hand: flowHand(started) });
         await T.later;
-        void invoke("computer_give_back");
+        void invoke("computer_give_back", undefined, { hand: flowHand(started) });
       });
       document.getElementById("hand-check").addEventListener("change", () => void invoke("jira_connect"));
       document.getElementById("hand-person").addEventListener("click", () => void invoke("answer_approval"));
@@ -303,7 +305,17 @@ export async function testSelfAct(browser, origin, ok) {
       fixture.insertAdjacentHTML("beforeend", `
         <button id="flow-agent" type="button">Flow agent</button>
         <button id="flow-restart" type="button">Flow restart</button>
-        <button id="flow-elsewhere" type="button">Flow elsewhere</button>`);
+        <button id="flow-elsewhere" type="button">Flow elsewhere</button>
+        <input id="flow-enter" type="text" aria-label="Flow enter">
+        <button id="flow-enter-press" type="button">Flow enter press</button>`);
+      // Enter in a field presses its button by the page's own click(), the way
+      // the hand-over code's field does: still the person's key.
+      document.getElementById("flow-enter").addEventListener("keydown", (event) => {
+        if (event.key === "Enter") document.getElementById("flow-enter-press").click();
+      });
+      document.getElementById("flow-enter-press").addEventListener("click", () => {
+        void invoke("computer_give_back", undefined, { hand: handNow() });
+      });
       document.getElementById("flow-agent").addEventListener("click", async () => {
         await invoke("board_columns_probe");
         await T.later;
@@ -378,6 +390,14 @@ export async function testSelfAct(browser, origin, ok) {
     await page.click("#ask-no");
     await settle();
     const closed = await take();
+    // The person's Enter right after an agent's press, through the page's own
+    // click(); and the same button pressed by the agent.
+    await press("Flow elsewhere");
+    await page.focus("#flow-enter");
+    await page.keyboard.press("Enter");
+    const entered = await take();
+    await press("Flow enter press");
+    const agentPressed = await take();
 
     ok("the agent's flow presses were made", pressedFlow === true && pressedRestart === true && agentCensus === true,
       JSON.stringify({ pressedFlow, pressedRestart, agentCensus }));
@@ -387,5 +407,7 @@ export async function testSelfAct(browser, origin, ok) {
     ok("the person's 「제어권 가져오기」 right after an agent's press says person", hand(band, "computer_take_control").join() === "person", JSON.stringify(band));
     ok("the person's own restart door says person through its census", hand(own, "leave_now").join() === "person", JSON.stringify(own));
     ok("the person's answer to the window's close says person", hand(closed, "leave_now").join() === "person", JSON.stringify(closed));
+    ok("the person's Enter that presses a button by click() says person", hand(entered, "computer_give_back").join() === "person", JSON.stringify(entered));
+    ok("the same button the agent pressed says agent", hand(agentPressed, "computer_give_back").join() === "agent", JSON.stringify(agentPressed));
   });
 }

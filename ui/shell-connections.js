@@ -216,7 +216,7 @@ const modelConnectionsController = {
       showError(t("settings.connections.inUse", "이 연결을 쓰는 용도를 먼저 해제하세요. 이름과 모델 목록은 그대로 수정할 수 있습니다."));
       document.querySelector('[data-connection-roles="all"]')?.scrollIntoView({ block: "nearest" }); return;
     }
-    try { await invoke("remove_api_router", { name: row.provider.name, sourceId: row.id, expectedGeneration: row.generation }); await this.refresh(); }
+    try { await invoke("remove_api_router", { name: row.provider.name, sourceId: row.id, expectedGeneration: row.generation }, { hand: handNow() }); await this.refresh(); }
     catch (error) { showError(this.failure(error)); }
   },
 };

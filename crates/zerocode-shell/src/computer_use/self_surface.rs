@@ -168,10 +168,13 @@ pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[
 ];
 
 /// The header in which the page's one `invoke` says whose hand made a call
-/// (ui/shell-boot.js `HAND_HEADER`, t-74927): `person` once the person's own
-/// pointer, touch or key moved; `agent` from an agent's press in this window
-/// on, its click and whatever runs after it, until the person moves again;
-/// `program` for the one road no hand starts ([`PROGRAM_COMMANDS`]).
+/// (ui/shell-boot.js `HAND_HEADER`, t-74927): the hand of the flow that made
+/// it, never the page's last input (t-75209) — `person` inside the person's
+/// own pointer, touch or key and for the flow it started; `agent` inside an
+/// agent's press in this window and for the flow it started, whatever the
+/// person pressed meanwhile; `none` for a call outside any event that carries
+/// no flow's hand; `program` for the one road no hand starts
+/// ([`PROGRAM_COMMANDS`]).
 pub(crate) const HAND_HEADER: &str = "zerocode-hand";
 
 /// The person-only commands a road no hand starts still runs: the update
@@ -225,6 +228,9 @@ pub(crate) fn person_only(command: &str, hand: Option<&str>) -> Result<(), Strin
         Some("program") if PROGRAM_COMMANDS.contains(&command) => Ok(()),
         Some("agent") => Err(format!(
             "{command} is the person's to run, and an agent's press in ZeroCode's window made this call; the person runs it with their own hand"
+        )),
+        Some("none") => Err(format!(
+            "{command} is the person's to run, and this call came from no event of the person's and carries no hand its flow started with"
         )),
         _ => Err(format!(
             "{command} is the person's to run, and this call does not say the person made it"

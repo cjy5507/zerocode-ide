@@ -875,7 +875,7 @@ function submitAsk(card, draft) {
   const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
   const road = draft.answer
     ? draft.answer(selections)
-    : invoke("answer_ask", { term, agent: card.agent, prompt: card.ask_prompt, selections });
+    : invoke("answer_ask", { term, agent: card.agent, prompt: card.ask_prompt, selections }, { hand: handNow() });
   road.catch((error) => {
     draft.sending = false;
     showError(answerRefusalWords(error));
@@ -1090,7 +1090,7 @@ function approvalPanelNode(card, draft) {
   const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
   // The board's card answers the TUI by keystroke; a wire's card answers the
   // request itself (`draft.answer`, the option's id).
-  const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }));
+  const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }, { hand: handNow() }));
   const act = (label, choice, kind, { then = null, says = null } = {}) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -7179,8 +7179,8 @@ async function changeCoordinator(action) {
   el("coordinator-result").textContent = "";
   paintCoordinatorPanel();
   try {
-    if (action === "claim") await invoke("claim_coordinator_seat", { runId, targetTerm, expectedGeneration, retryRequest });
-    else await invoke("set_coordinator_handover", { runId, targetTerm, expectedGeneration, retryRequest });
+    if (action === "claim") await invoke("claim_coordinator_seat", { runId, targetTerm, expectedGeneration, retryRequest }, { hand: handNow() });
+    else await invoke("set_coordinator_handover", { runId, targetTerm, expectedGeneration, retryRequest }, { hand: handNow() });
     if (coordinatorPanel !== panel) return;
     panel.retry = null;
     el("coordinator-result").textContent = action === "claim"
@@ -12997,7 +12997,7 @@ function paintWireAsk(host, run, force = false) {
           // The words only ride a refusal that has some; a plain answer is
           // the same request it always was.
           : { option: choice, ...(message ? { message } : {}) }),
-      }),
+      }, { hand: handNow() }),
     });
     force = true;
   }

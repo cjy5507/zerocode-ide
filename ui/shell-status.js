@@ -352,13 +352,13 @@ function commitOpencodeCookie() {
   // already held, because a stored secret is never read back into the window.
   if (pasted === "") return;
   field.value = "";
-  void commitSetting("opencode_cookie_configured", "set_opencode_cookie", { cookie: pasted })
+  void commitSetting("opencode_cookie_configured", "set_opencode_cookie", { cookie: pasted }, { hand: handNow() })
     .then(() => refreshProviderUsage(usageProvider("opencode-go"), true));
 }
 
 function clearOpencodeCookie() {
   el("opencode-cookie").value = "";
-  void commitSetting("opencode_cookie_configured", "set_opencode_cookie", { cookie: "" });
+  void commitSetting("opencode_cookie_configured", "set_opencode_cookie", { cookie: "" }, { hand: handNow() });
 }
 
 for (const [id, run] of [

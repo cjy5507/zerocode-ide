@@ -90,14 +90,18 @@ function absorbUpdateReport(report) {
  * pressed the button. */
 async function askUpdateCheck(knock) {
   if (updateKnockInFlight !== null) return updateReport;
+  const started = handNow();
   updateKnockInFlight = knock;
   paintUpdatePane();
   try {
     const report = await invoke("update_check", { knock });
     absorbUpdateReport(report);
-    // The clock's knock is no hand's: its quiet download is the program road
-    // (shell-boot.js `invoke`), the window's only one.
-    if (report?.next === "download") await runUpdateDownload(knock === UPDATE_KNOCK.clock ? "program" : undefined);
+    // The clock's knock and the pane's opening are no hand's: their quiet
+    // download is the program road (shell-boot.js `invoke`), the window's
+    // only one. The button's is the hand that pressed it.
+    if (report?.next === "download") {
+      await runUpdateDownload(knock === UPDATE_KNOCK.button ? flowHand(started) : "program");
+    }
     else if (report?.next === "announce") raiseUpdateAvailableToast();
     return report;
   } catch (error) {
@@ -111,12 +115,17 @@ async function askUpdateCheck(knock) {
 
 /* 「내려받기」 — download and verify, then stage beside the bundle: two
  * commands, one road, whichever policy asked for it. Progress arrives on
- * `update:progress` while the first one runs. `hand` is `program` for the
- * clock's quiet download; a press leaves it to the page (t-74927). */
-async function runUpdateDownload(hand) {
+ * `update:progress` while the first one runs. `started` is the hand that
+ * asked — the press's, or `program` for a quiet download (t-74927) — and
+ * both commands carry it (t-75209). */
+async function runUpdateDownload(started = handNow()) {
   try {
-    if (updatePhase().phase === "available") absorbUpdateReport(await invoke("update_download", undefined, { hand }));
-    if (updatePhase().phase === "downloaded") absorbUpdateReport(await invoke("update_install", undefined, { hand }));
+    if (updatePhase().phase === "available") {
+      absorbUpdateReport(await invoke("update_download", undefined, { hand: flowHand(started) }));
+    }
+    if (updatePhase().phase === "downloaded") {
+      absorbUpdateReport(await invoke("update_install", undefined, { hand: flowHand(started) }));
+    }
   } catch (error) {
     showError(error);
   }
@@ -145,12 +154,14 @@ function restartToInstall() {
  * way out's `leave_now`, whose restart stands its notice first — the line
  * below — and the beat takes the one restart road when the notice ends. Each
  * says whose hand pressed it (`handSaid`), read before the census's await
- * takes the event away. */
+ * takes the event away, and carries that hand to the way out (`flowHand`,
+ * t-75209). */
 const EXIT_WAIT_MARK = "exit-wait";
 let exitWaitToast = null;
 
 async function askBeforeRestart(door) {
   const by = handSaid();
+  const started = handNow();
   let census = null;
   try {
     census = await invoke("busy_census", { road: "restart", door });
@@ -159,13 +170,13 @@ async function askBeforeRestart(door) {
   }
   if (census && !census.busy?.busy) {
     try {
-      standExitNotice(await invoke("leave_now", { road: "restart", door, by, unasked: true }));
+      standExitNotice(await invoke("leave_now", { road: "restart", door, by, unasked: true }, { hand: flowHand(started) }));
     } catch (error) {
       showError(error);
     }
     return;
   }
-  await askLeaving(census ?? { road: "restart", door, busy: null, waitMin: null }, "");
+  await askLeaving(census ?? { road: "restart", door, busy: null, waitMin: null }, "", started);
 }
 
 /* How each road asks: a restart and the window's close say the same
@@ -203,8 +214,9 @@ function leavingWords(census) {
 /* The question itself — asked by a restart door, by the window's close
  * (`exit:ask`), and again when a wait ran out: the census's words (or that
  * nobody could read it), the road's patience, and the two ways on. `lead`
- * is what is said first. */
-async function askLeaving(census, lead) {
+ * is what is said first; `started` is the hand of the door that asked, none
+ * for the backend's own question, and the answer's hand joins it. */
+async function askLeaving(census, lead, started = "none") {
   const road = census.road;
   const door = census.door ?? null;
   const said = busyWords(census.busy) || t("exit.unread", "도는 일을 읽지 못했습니다");
@@ -220,13 +232,13 @@ async function askLeaving(census, lead) {
   const by = handSaid();
   if (answer === true) {
     try {
-      standExitWait(await invoke("leave_when_idle", { road, door, by }));
+      standExitWait(await invoke("leave_when_idle", { road, door, by }, { hand: flowHand(started) }));
     } catch (error) {
       showError(error);
     }
   } else if (answer === false) {
     try {
-      standExitNotice(await invoke("leave_now", { road, door, by }));
+      standExitNotice(await invoke("leave_now", { road, door, by }, { hand: flowHand(started) }));
     } catch (error) {
       showError(error);
     }

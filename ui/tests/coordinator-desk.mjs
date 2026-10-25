@@ -235,7 +235,11 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, fol
   });
   window.__DESK_SENT__ = [];
   window.__ANSWER__.desk_reply = (args) => (window.__DESK_SENT__.push({ verb: "reply", ...args }), { messageId: "m-reply" });
-  window.__ANSWER__.desk_ack = (args) => (window.__DESK_SENT__.push({ verb: "ack", ...args }), { count: 0 });
+  // The hand the page says made the call (t-75209): the person's press on a
+  // batch's 「확인」 is the person's.
+  window.__ANSWER__.desk_ack = (args, options) => (window.__DESK_SENT__.push({
+    verb: "ack", ...args, hand: options?.headers?.["zerocode-hand"] ?? null,
+  }), { count: 0 });
   window.__RELEASE__ = {
     sha: "ccb6e1bda074f7fc8099f1d057aae2308d175564", phase: "build-app",
     started_at: new Date(now - 6 * minute).toISOString(), updated_at: new Date(now - minute).toISOString(),
@@ -612,6 +616,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       acked.length === 1 && acked[0].run === "run-desk" && acked[0].delivery === "d-990" &&
       held && held.note === "묶음을 확인함 · 원장에 적히면 목록에서 빠져요" && afterAck.head === "소식 · 14",
       JSON.stringify({ acked, held }));
+    ok("the person's 「확인」 on a batch says person", acked.length === 1 && acked[0].hand === "person", JSON.stringify(acked));
     const landed = await page.evaluate(async () => {
       const kept = (one) => one.id !== "m-901" && one.delivery_id !== "d-990";
       const mail = window.__DESK__.mail.filter(kept);

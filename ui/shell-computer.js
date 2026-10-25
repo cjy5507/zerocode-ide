@@ -170,11 +170,11 @@ listen("computer:share-state", (event) => takeComputerShare(event.payload));
 void invoke("computer_share_state").then(takeComputerShare).catch(() => {});
 
 el("computer-band-take").addEventListener("click", () => {
-  void invoke("computer_take_control").catch(() => {});
+  void invoke("computer_take_control", undefined, { hand: handNow() }).catch(() => {});
 });
 
 el("computer-band-give").addEventListener("click", () => {
-  void invoke("computer_give_back").catch(() => {});
+  void invoke("computer_give_back", undefined, { hand: handNow() }).catch(() => {});
 });
 
 browserWorkspaceChromeReaders.add(paintComputerWorkBrowsers);
@@ -268,7 +268,7 @@ el("computer-band-resume").addEventListener("click", () => {
   if (state.stopped == null || state.revision == null || state.resuming || state.stopping) return;
   computerBandState = { ...state, resuming: true, resumeFailed: false };
   paintComputerBand();
-  invoke("computer_resume", { reset: false, revision: state.revision })
+  invoke("computer_resume", { reset: false, revision: state.revision }, { hand: handNow() })
     .then((answer) => {
       if (typeof answer?.revision === "number") {
         takeComputerBandStop(answer.revision, answer.stopped ?? null, answer.personsStop);
@@ -613,7 +613,7 @@ function computerAskSeconds(ask) {
 /* Both answer the same road, by the id they were asked under: `allow` is the
  * press for the confirm and 「다 했어요」 for the hand-over. */
 const computerAnswerRoad = {
-  deliver: (ask, choice) => invoke("computer_confirm_answer", { id: ask.id, allow: choice.allow }),
+  deliver: (ask, choice, hand) => invoke("computer_confirm_answer", { id: ask.id, allow: choice.allow }, { hand }),
 };
 
 /* The last step (§1.5): the person answers before a press lands on a payment,
@@ -712,13 +712,13 @@ function holdComputerCode(ask) {
 /* Send what is typed. Nothing typed is no round trip; the window's verdict is
  * the only judge of the rest: `invalid` holds the card, `delivered` and `gone`
  * both end it (a code the window no longer waits for is not one to retry). */
-async function sendComputerCode(ask) {
+async function sendComputerCode(ask, hand) {
   const typed = computerCodeInput.value;
   if (typed.trim() === "") return holdComputerCode(ask);
   computerCodeInput.readOnly = true;
   let verdict;
   try {
-    verdict = await invoke("computer_handoff_code", { id: ask.id, code: typed });
+    verdict = await invoke("computer_handoff_code", { id: ask.id, code: typed }, { hand });
   } finally {
     computerCodeInput.readOnly = false;
   }
@@ -747,8 +747,8 @@ computerCodeInput.addEventListener("keydown", (event) => {
 
 registerAskKind("computer-handoff", {
   ...computerAnswerRoad,
-  deliver: (ask, choice) =>
-    choice.allow && ask.payload.codeAsk ? sendComputerCode(ask) : computerAnswerRoad.deliver(ask, choice),
+  deliver: (ask, choice, hand) =>
+    choice.allow && ask.payload.codeAsk ? sendComputerCode(ask, hand) : computerAnswerRoad.deliver(ask, choice, hand),
   tone: "computer-handoff",
   view: (ask) => {
     const line = ask.payload.codeAsk;

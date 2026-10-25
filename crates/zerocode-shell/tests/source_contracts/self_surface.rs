@@ -227,8 +227,10 @@ fn every_step_asks_the_share_and_the_band_is_the_persons() {
 
 /// The second wall reads whose hand made a call, never a clock (t-74927): the
 /// gate reads the header the page's one `invoke` writes, under the same name
-/// on both sides; the page presses as the agent's hand; and the road that
-/// names its own hand is the update clock's alone.
+/// on both sides; the page presses as the agent's hand; the hand is the
+/// flow's, never the page's last input, and every person-only call in the
+/// page carries the hand its flow has (t-75209); and the road that names the
+/// program's hand is the update policy's alone.
 #[test]
 fn the_second_wall_reads_the_hand_the_page_says_and_no_clock() {
     let road = code_only(ROAD);
@@ -252,14 +254,29 @@ fn the_second_wall_reads_the_hand_the_page_says_and_no_clock() {
     );
     let invoke = block_after(&boot, "const invoke = (command, args, options) => {");
     assert!(
-        invoke.contains("[HAND_HEADER]: hand") && invoke.contains("invokeBackend("),
-        "the page's one invoke says the hand on every call"
+        invoke.contains("hand = handNow()")
+            && invoke.contains("[HAND_HEADER]: hand")
+            && invoke.contains("invokeBackend("),
+        "the page's one invoke says the hand on every call, the event's when the caller carries none"
     );
     assert!(
         boot.contains(
             "const { invoke: invokeBackend, Channel: TauriChannel } = window.__TAURI__.core;"
         ),
         "Tauri's own invoke is reached only through the page's"
+    );
+    assert!(
+        !boot.contains("pageHand"),
+        "the page keeps one hand for every flow"
+    );
+    let now = block_after(&boot, "function handNow() {");
+    assert!(
+        now.contains("agentPressing") && now.contains("window.event"),
+        "the hand of a call is the event the page is answering"
+    );
+    assert!(
+        block_after(&boot, "function flowHand(started) {").contains("started === \"agent\""),
+        "a flow an agent's press started stays the agent's"
     );
     let page = ui_file("shell-self-act.js");
     assert!(
@@ -271,6 +288,7 @@ fn the_second_wall_reads_the_hand_the_page_says_and_no_clock() {
         !block_after(&page, "function selfActDo(request) {").contains("node.click()"),
         "selfActDo presses only inside asAgentPress"
     );
+    let person_only = person_only_commands();
     let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
     for entry in std::fs::read_dir(&ui).expect("ui reads") {
         let path = entry.expect("ui entry").path();
@@ -289,18 +307,51 @@ fn the_second_wall_reads_the_hand_the_page_says_and_no_clock() {
                 "{name} reaches Tauri's invoke without saying the hand"
             );
         }
-        for line in text.lines().filter(|line| line.contains("invoke(")) {
-            let names_hand = line.contains("{ hand") || line.contains("hand:");
-            assert!(
-                !names_hand || name == "shell-update.js",
-                "{name} names its own hand: {line}"
-            );
+        for word in ["hand: \"person\"", "hand: \"agent\"", "hand: \"program\""] {
+            assert!(!text.contains(word), "{name} names a hand itself: {word}");
+        }
+        assert!(
+            name == "shell-update.js" || !text.contains(": \"program\")"),
+            "{name} takes the program road"
+        );
+        for command in &person_only {
+            let quoted = format!("\"{command}\"");
+            for (at, _) in text.match_indices(&quoted) {
+                let call = enclosing_call(&text, at);
+                assert!(
+                    call.contains("hand"),
+                    "{name}: {command} is called without the hand its flow carries: {call}"
+                );
+            }
         }
     }
     let update = ui_file("shell-update.js");
     assert!(
-        update
-            .contains("runUpdateDownload(knock === UPDATE_KNOCK.clock ? \"program\" : undefined)"),
-        "only the update clock's knock takes the program road"
+        update.contains(
+            "runUpdateDownload(knock === UPDATE_KNOCK.button ? flowHand(started) : \"program\")"
+        ),
+        "only the update policy's quiet download takes the program road"
     );
+}
+
+/// The call around `at`: from the last `(` before it to the `)` that closes
+/// that one.
+fn enclosing_call(text: &str, at: usize) -> &str {
+    let open = text[..at]
+        .rfind('(')
+        .expect("a command name sits inside a call");
+    let mut depth = 0usize;
+    for (offset, letter) in text[open..].char_indices() {
+        match letter {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &text[open..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    &text[open..]
 }
