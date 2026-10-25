@@ -1114,16 +1114,16 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       const w4 = window.__LEDGER__.find((one) => one.worker === "w-4");
       w4.wall = { ...w4.wall, stands_until_ms: Date.now() + 47 * 60_000 };
       const rows = [
-        { id: "t-961", stage: "verified", progress: { stage: "verified", attempt: "dp-961", source: heads.reviewed,
+        { id: "t-961", stage: "verified", next_step: "land", progress: { stage: "verified", attempt: "dp-961", source: heads.reviewed,
           next: `zerocode-orc land-check --task t-961 --head ${heads.reviewed} --retry-request land-check-t-961-abcdef123456` } },
-        { id: "t-962", stage: "deployed", progress: { stage: "deployed", attempt: "dp-962", source: heads.reviewed, merge_head: heads.landed } },
-        { id: "t-963", stage: "stale", progress: { stage: "stale", attempt: "dp-963", source: heads.now, reviewed: heads.reviewed,
+        { id: "t-962", stage: "deployed", next_step: "over", progress: { stage: "deployed", attempt: "dp-962", source: heads.reviewed, merge_head: heads.landed } },
+        { id: "t-963", stage: "stale", next_step: "review_new_head", progress: { stage: "stale", attempt: "dp-963", source: heads.now, reviewed: heads.reviewed,
           next: "zerocode-orc worktree-evidence --worker w-963" } },
-        { id: "t-964", stage: "unknown", progress: { stage: "unknown" } },
-        { id: "t-4", stage: "dispatched", progress: { stage: "working", attempt: "dp-4" } },
-        { id: "t-3", stage: "dispatched", progress: { stage: "working", attempt: "dp-3" } },
-        { id: "t-2", stage: "failed", progress: { stage: "failed", attempt: "dp-2", next: "zerocode-orc worker-transcript --worker w-2" } },
-        { id: "t-970", stage: "failed", progress: { stage: "failed", attempt: "dp-970" } },
+        { id: "t-964", stage: "unknown", next_step: "unknown", progress: { stage: "unknown" } },
+        { id: "t-4", stage: "dispatched", next_step: "wait", progress: { stage: "working", attempt: "dp-4" } },
+        { id: "t-3", stage: "dispatched", next_step: "wait", progress: { stage: "working", attempt: "dp-3" } },
+        { id: "t-2", stage: "failed", next_step: "retry_or_close", progress: { stage: "failed", attempt: "dp-2", next: "zerocode-orc worker-transcript --worker w-2" } },
+        { id: "t-970", stage: "failed", next_step: "retry_or_close", progress: { stage: "failed", attempt: "dp-970" } },
       ].map((one) => ({ run, title: `단계 ${one.id}`, gate: null, blocked_by: [], closed: null, created_ms: 1, cost: null, ...one }));
       const added = (stage) => rows.filter((one) => one.stage === stage).length;
       const known = new Set(window.__DESK__.stages.map((one) => one.stage));
@@ -1149,6 +1149,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
           const copy = row.querySelector(".board-desk-task-next-copy");
           return { id: line(".board-desk-task-id"), work: line(".board-desk-task-work"), owner: line(".board-desk-task-owner"),
             next: line(".board-desk-task-next-command"), label: line(".board-desk-task-next-label"),
+            step: line(".board-desk-task-step"),
             copy: copy && !copy.hidden ? copy.textContent : "" };
         }));
     };
@@ -1184,6 +1185,75 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       row(failedRows, "t-2").next === "zerocode-orc worker-transcript --worker w-2" &&
       row(failedRows, "t-970").owner === "막힘: 원인 확인 필요" && row(failedRows, "t-970").next === "",
       JSON.stringify({ carriedRows, failedRows }));
+    ok("every task row says its next step in one line of words, from the word the backend laid on it — a stage's step is never a colour and never a table kept in the window",
+      row(verifiedRows, "t-961").step === "다음 조치: 착지" && row(deployedRows, "t-962").step === "다음 조치: 할 일 없음" &&
+      row(staleRows, "t-963").step === "다음 조치: 새 커밋 검증" && row(unknownRows, "t-964").step === "다음 조치: 확인 불가" &&
+      row(carriedRows, "t-4").step === "다음 조치: 워커 작업 기다리기" &&
+      row(failedRows, "t-2").step === "다음 조치: 다시 맡기기 또는 닫기",
+      JSON.stringify({ verifiedRows, deployedRows, staleRows, unknownRows, carriedRows, failedRows }));
+    const stepWords = await page.evaluate(() => {
+      const words = ["await_dependencies", "summon", "wait", "decide", "mend_dependency", "review", "retry_or_close",
+        "restart_or_close", "review_new_head", "land", "ship", "over", "unknown"];
+      const out = {};
+      for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+        setLocale(locale, { persist: false });
+        out[locale] = words.map((word) => deskNextStepWords({ next_step: word }));
+      }
+      setLocale("ko", { persist: false });
+      return { words, out, unmapped: deskNextStepWords({ next_step: "from_a_newer_window" }) };
+    });
+    const hangul = /[\u3131-\u318e\uac00-\ud7a3]/u;
+    ok("all thirteen next steps are worded in the five languages: none empty, none a bare catalog key, each language its own (no Korean in en or es), and a word from a newer window says nothing instead of guessing",
+      stepWords.words.every((word, at) => ["ko", "en", "ja", "zh", "es"].every((locale) => {
+        const said = stepWords.out[locale][at];
+        return said !== "" && !said.includes("board.desk") && !said.includes("{{") && !said.includes("_") && (stepWords.out.ko[at] !== said || locale === "ko");
+      })) && stepWords.out.en.every((said) => !hangul.test(said)) && stepWords.out.es.every((said) => !hangul.test(said)) &&
+      stepWords.unmapped === "",
+      JSON.stringify(stepWords));
+    const costShapes = await page.evaluate(() => {
+      const out = {};
+      const shapes = {
+        direct: { attempts: 0, shape: { kind: "direct" }, generation: { usd: null, usdReason: "coordinator_conversation", sessionsLinked: 0, sessionsKnown: 0 }, jev: { requests: 2 } },
+        delegated: { attempts: 3, wallMs: 60_000, shape: { kind: "delegated", workers: 2, overlapMs: 120_000 }, generation: { usd: 1.5, sessionsLinked: 2, sessionsKnown: 2, inputTokens: 10 }, jev: { requests: 0 } },
+        unknown: { attempts: 0, shape: { kind: "unknown" }, jev: { requests: 0 } },
+      };
+      for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+        setLocale(locale, { persist: false });
+        out[locale] = Object.fromEntries(Object.entries(shapes).map(([name, cost]) => [name, taskCostWords(cost)]));
+      }
+      setLocale("ko", { persist: false });
+      return out;
+    });
+    ok("a task the coordinator did itself says 직접(코디) — 비용 미확인 and never a zero; a delegated one says 위임 N명 and the overlap; an unreadable one says 미확인 — in the five languages",
+      costShapes.ko.direct.text.startsWith("직접(코디) — 비용 미확인") && !/\$\s?0|0원|\$—/u.test(costShapes.ko.direct.text) &&
+      costShapes.ko.direct.tip.includes("코디 대화는 여러 과업에 걸쳐") &&
+      costShapes.ko.delegated.text.startsWith("위임 2명 · ") && costShapes.ko.delegated.tip.includes("겹친 시간 2분") &&
+      costShapes.ko.unknown.text.startsWith("미확인") &&
+      ["en", "ja", "zh", "es"].every((locale) => ["direct", "delegated", "unknown"].every((name) => {
+        const said = costShapes[locale][name].text;
+        return said !== costShapes.ko[name].text && !said.includes("board.desk") && !said.includes("{{");
+      })) && !hangul.test(costShapes.en.direct.text + costShapes.en.delegated.text + costShapes.en.unknown.text +
+        costShapes.es.direct.text + costShapes.es.delegated.text + costShapes.es.unknown.text),
+      JSON.stringify(costShapes));
+    await readStage("verified");
+    const stays = await page.evaluate(async () => {
+      const find = () => [...document.querySelectorAll('#board-view [data-desk-block="pipeline"] .board-desk-task')]
+        .find((one) => one.querySelector(".board-desk-task-id")?.textContent === "t-961");
+      const before = find();
+      const copy = before.querySelector(".board-desk-task-next-copy");
+      copy.focus();
+      const first = before.querySelector(".board-desk-task-step").textContent;
+      window.__DESK__ = { ...window.__DESK__, revision: window.__DESK__.revision + 1,
+        tasks: window.__DESK__.tasks.map((one) => (one.id === "t-961" ? { ...one, next_step: "ship" } : one)) };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const after = find();
+      return { sameNode: before === after, focused: document.activeElement === copy, first,
+        then: after?.querySelector(".board-desk-task-step").textContent };
+    });
+    ok("when a task's step changes the row keeps its node and the keyboard focus on its copy button — only the words are written",
+      stays.sameNode && stays.focused && stays.first === "다음 조치: 착지" && stays.then === "다음 조치: 발행", JSON.stringify(stays));
     await readStage("verified");
     const copied = await page.evaluate(async () => {
       window.__CLIPBOARD_WRITES__ = [];
@@ -1210,7 +1280,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     await readStage("stale");
     const viewport = page.viewportSize();
     const fit = {};
-    for (const width of [360, 560]) {
+    for (const width of [320, 360, 560]) {
       await page.setViewportSize({ width, height: 900 });
       for (const theme of ["dark", "light"]) {
         for (const locale of ["ko", "en", "ja", "zh", "es"]) {
@@ -1225,7 +1295,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
             const strip = view.querySelector(".board-desk-stages");
             const task = [...view.querySelectorAll(".board-desk-task")].find((one) => one.querySelector(".board-desk-task-id").textContent === "t-963");
             const box = task?.getBoundingClientRect();
-            const outside = [".board-desk-task-work", ".board-desk-task-next-command", ".board-desk-task-next-copy"].filter((name) => {
+            const outside = [".board-desk-task-work", ".board-desk-task-step", ".board-desk-task-next-command", ".board-desk-task-next-copy"].filter((name) => {
               const part = task?.querySelector(name)?.getBoundingClientRect();
               return !part || part.right > box.right + 0.5 || part.left < box.left - 0.5;
             });
@@ -1243,7 +1313,7 @@ export async function testCoordinatorDesk(browser, origin, ok) {
     });
     if (viewport) await page.setViewportSize(viewport);
     const staleWords = new Set(Object.entries(fit).filter(([key]) => key.startsWith("360-dark-")).map(([, one]) => one.stale));
-    ok("at 360 and 560 px, in both treatments and the five languages, the new stages and the row's commits, command and copy stay inside the desk — nothing overflows and no chip is cut — and each language says the stage in its own word",
+    ok("at 320, 360 and 560 px, in both treatments and the five languages, the new stages and the row's commits, next step, command and copy stay inside the desk — nothing overflows and no chip is cut — and each language says the stage in its own word",
       Object.values(fit).every((one) => one.desk <= 1 && one.strip <= 1 && one.outside.length === 0 && one.chips === 0) &&
       staleWords.size === 5, JSON.stringify(fit));
 

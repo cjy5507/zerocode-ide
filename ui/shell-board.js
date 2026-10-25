@@ -1986,7 +1986,43 @@ const TASK_COST_REASONS = Object.freeze({
   outside_attempt: { key: "board.desk.cost.reasonOutsideAttempt", word: "세션 사용량이 과업 시도 시간 안에만 속하는지 확인할 수 없음" },
   mixed_models: { key: "board.desk.cost.reasonMixed", word: "세션 중 모델이 바뀜" },
   unpriced_model: { key: "board.desk.cost.reasonUnpriced", word: "가격표에 없는 모델" },
+  coordinator_conversation: { key: "board.desk.cost.reasonCoordinator", word: "코디 대화는 여러 과업에 걸쳐 있어 과업마다 나눌 수 없음" },
 });
+
+/* 과업을 누가 어떻게 이끌었는가(백엔드 `TaskShape`, t-73910 W3-1) — 비용 줄의 맨 앞 말. 직접 한 일은 비용을
+ * 0으로 쓰지 않고 모른다고 쓴다. 기록에 없는 낱말·모양(옛 창이 보낸 답)은 말하지 않는다. */
+function taskShapeWords(shape) {
+  switch (shape?.kind) {
+    case "direct": return t("board.desk.cost.shapeDirect", "직접(코디) — 비용 미확인");
+    case "delegated": return t("board.desk.cost.shapeDelegated", "위임 {{count}}명", { count: Number(shape.workers) || 0 });
+    case "unknown": return t("board.desk.cost.shapeUnknown", "미확인");
+    default: return "";
+  }
+}
+
+/* 다음 조치의 낱말(백엔드 `NextStep`, t-73910 W4-1) — 단계마다 무엇을 할지는 백엔드가 한 곳에서 정하고,
+ * 여기는 그 낱말을 번역할 뿐이다. 표를 따로 두지 않는다: 모르는 낱말은 말하지 않는다. */
+const DESK_NEXT_STEPS = Object.freeze({
+  await_dependencies: { key: "board.desk.step.awaitDependencies", word: "선행 과업이 끝나길 기다리기" },
+  summon: { key: "board.desk.step.summon", word: "워커를 부르거나 직접 하기" },
+  wait: { key: "board.desk.step.wait", word: "워커 작업 기다리기" },
+  decide: { key: "board.desk.step.decide", word: "결정에 답하기" },
+  mend_dependency: { key: "board.desk.step.mendDependency", word: "선행 과업을 고치거나 이 과업 닫기" },
+  review: { key: "board.desk.step.review", word: "코디 검증" },
+  retry_or_close: { key: "board.desk.step.retryOrClose", word: "다시 맡기기 또는 닫기" },
+  restart_or_close: { key: "board.desk.step.restartOrClose", word: "다시 띄우기 또는 닫기" },
+  review_new_head: { key: "board.desk.step.reviewNewHead", word: "새 커밋 검증" },
+  land: { key: "board.desk.step.land", word: "착지" },
+  ship: { key: "board.desk.step.ship", word: "발행" },
+  over: { key: "board.desk.step.over", word: "할 일 없음" },
+  unknown: { key: "board.desk.step.unknown", word: "확인 불가" },
+});
+
+/* 과업 행·코디 카드의 다음 조치 한 줄. 색이 아니라 글이다. */
+function deskNextStepWords(task) {
+  const step = DESK_NEXT_STEPS[task?.next_step];
+  return step ? t("board.desk.step.line", "다음 조치: {{step}}", { step: t(step.key, step.word) }) : "";
+}
 
 /* 비용 한 줄과 그 팁 — 백엔드가 끝난 과업에 실어 보낸 비용 하나에서. */
 function taskCostWords(cost) {
@@ -1998,7 +2034,13 @@ function taskCostWords(cost) {
   const tokens = (Number(generation.inputTokens) || 0) + (Number(generation.outputTokens) || 0) +
     (Number(generation.cacheReadTokens) || 0) + (Number(generation.cacheWriteTokens) || 0);
   const reason = TASK_COST_REASONS[generation.usdReason];
-  const text = [
+  const shape = taskShapeWords(cost.shape);
+  const jevWords = t("board.desk.cost.jev", "Jev 요청 {{count}}", { count: Number(jev.requests) || 0 });
+  // A task nobody attempted has no attempts, wall clock or tokens to count, and no dollar to divide out of the
+  // coordinator's conversation: its line says so rather than a row of dashes.
+  const ownLine = cost.shape?.kind === "direct" || cost.shape?.kind === "unknown";
+  const text = ownLine ? [shape, jevWords].join(" · ") : [
+    ...(shape ? [shape] : []),
     t("board.desk.cost.attempts", "시도 {{count}}", { count: Number(cost.attempts) || 0 }),
     wall ? t("board.desk.cost.wall", "{{time}}(대기 포함)", { time: wall }) : t("board.desk.cost.wallOpen", "벽시계 —"),
     Number(generation.sessionsLinked) > 0
@@ -2006,17 +2048,22 @@ function taskCostWords(cost) {
       : t("board.desk.cost.tokensNone", "생성 —"),
     Number.isFinite(generation.usd) ? formatCost(generation.usd)
       : t("board.desk.cost.usdUnknown", "$— {{reason}}", { reason: reason ? t(reason.key, reason.word) : "" }).trim(),
-    t("board.desk.cost.jev", "Jev 요청 {{count}}", { count: Number(jev.requests) || 0 }),
+    jevWords,
   ].join(" · ");
   const seats = { stamped: Number(jev.stampedSeats) || 0, unstamped: Number(jev.unstampedSeats) || 0 };
   const tip = [
     completed
       ? t("board.desk.cost.tipCompletion", "첫 시도부터 검증·반영 확인까지 {{time}}", { time: completed })
       : t("board.desk.cost.tipCompletionUnknown", "검증·반영 완료 시간 미기록 — 시도 종료 시간과 다름"),
-    t("board.desk.cost.tipSessions", "생성은 시도별 기록된 세션의 합 · 이은 세션 {{linked}}/{{known}}",
-      { linked: Number(generation.sessionsLinked) || 0, known: Number(generation.sessionsKnown) || 0 }),
-    ...(generation.historyComplete === false ? [t("board.desk.cost.reasonIncompleteHistory", "과거 세션 이력이 완전하지 않음")] : []),
-    t("board.desk.cost.tipUsd", "API 환산가(구독 사용자는 청구액 아님)"),
+    ...(cost.shape?.kind === "direct" ? [t(TASK_COST_REASONS.coordinator_conversation.key, TASK_COST_REASONS.coordinator_conversation.word)] : []),
+    ...(cost.shape?.kind === "delegated" && Number(cost.shape.overlapMs) > 0
+      ? [t("board.desk.cost.tipOverlap", "시도 둘 이상이 함께 열려 있던 겹친 시간 {{time}}", { time: usageDuration(cost.shape.overlapMs) })] : []),
+    ...(ownLine ? [] : [
+      t("board.desk.cost.tipSessions", "생성은 시도별 기록된 세션의 합 · 이은 세션 {{linked}}/{{known}}",
+        { linked: Number(generation.sessionsLinked) || 0, known: Number(generation.sessionsKnown) || 0 }),
+      ...(generation.historyComplete === false ? [t("board.desk.cost.reasonIncompleteHistory", "과거 세션 이력이 완전하지 않음")] : []),
+      t("board.desk.cost.tipUsd", "API 환산가(구독 사용자는 청구액 아님)"),
+    ]),
     Number.isFinite(jev.inputTokens)
       ? t("board.desk.cost.tipJevTokens", "Jev 요청은 스탬프 좌석 {{stamped}}개만 셈 — 나머지 {{unstamped}}좌석과 zo 원장은 과업 id가 없음 · 입력 {{tokens}} 토큰",
         { ...seats, tokens: formatTokens(jev.inputTokens) })
@@ -2312,7 +2359,8 @@ function paintDeskTaskNext(line, task, health) {
 function deskTaskLines(host) {
   const lines = {
     note: deskElement("span", "board-desk-task-note"), work: deskElement("span", "board-desk-task-work"),
-    owner: deskElement("span", "board-desk-task-owner"), next: deskTaskNextLine(),
+    owner: deskElement("span", "board-desk-task-owner"), step: deskElement("span", "board-desk-task-step"),
+    next: deskTaskNextLine(),
     cost: deskElement("span", "board-desk-task-cost"), writing: deskElement("span", "board-desk-task-writing"),
     conditions: deskElement("ol", "board-desk-task-conditions"), handIn: deskElement("p", "board-desk-task-handin"),
     kept: deskKeptLine("board-desk-task-kept", true),
@@ -2333,7 +2381,7 @@ function deskTaskRow(held, task, runs, now) {
 }
 
 function paintDeskTaskLines(host, task, now) {
-  const { note: noteLine, work: workLine, owner: ownerLine, next: nextLine, cost: costLine, writing: writingLine,
+  const { note: noteLine, work: workLine, owner: ownerLine, step: stepLine, next: nextLine, cost: costLine, writing: writingLine,
     conditions: conditionsLine, handIn: handInLine, kept: keptLine } = host.__lines;
   const note = task.gate
     ? t("board.desk.taskGate", "{{gate}} · {{question}}", { gate: task.gate.id, question: task.gate.question })
@@ -2352,6 +2400,10 @@ function paintDeskTaskLines(host, task, now) {
   const owner = deskTaskOwnerWords(task, carrier, health);
   writeTextContent(ownerLine, owner);
   writeHidden(ownerLine, owner === "");
+  const step = deskNextStepWords(task);
+  writeTextContent(stepLine, step);
+  writeAttribute(stepLine, "data-step", task.next_step ?? "");
+  writeHidden(stepLine, step === "");
   paintDeskTaskNext(nextLine, task, health);
   // A finished row carries what its task cost (t-9470); a moving one carries none.
   const cost = task.cost && typeof task.cost === "object" ? taskCostWords(task.cost) : null;
