@@ -5064,21 +5064,23 @@
         <button class="settings-version" id="general-version" type="button">ZeroCode</button>
         </section>
 
-        <section class="settings-pane ds-page" data-pane="design-system" hidden data-keywords="design system token tokens component 디자인 토큰 컴포넌트">
+        <section class="settings-pane" data-pane="design-system" hidden data-keywords="design system token tokens component 디자인 토큰 컴포넌트">
         <header class="settings-section-head">
           <h2 class="settings-section-title" data-i18n="design.title">디자인 시스템</h2>
           <p class="settings-section-desc" data-i18n="design.about">
             설정의 숨은 페이지입니다. 디자인 게이트가 읽는 파일(tokens.css·shell.css)만 읽고 값을 다시 적지 않습니다.
           </p>
         </header>
-        <div class="ds-bar">
-          <div class="board-mode" role="group" data-i18n-aria="design.theme" aria-label="테마">
-            <button type="button" data-ds-theme="dark" data-i18n="design.themeDark">다크</button>
-            <button type="button" data-ds-theme="light" data-i18n="design.themeLight">라이트</button>
+        <div class="settings-card">
+          <div class="ds-bar">
+            <div class="board-mode" role="group" data-i18n-aria="design.theme" aria-label="테마">
+              <button type="button" data-ds-theme="dark" data-i18n="design.themeDark">다크</button>
+              <button type="button" data-ds-theme="light" data-i18n="design.themeLight">라이트</button>
+            </div>
           </div>
+          <div class="ds-stats" role="status"></div>
+          <div class="ds-body"></div>
         </div>
-        <div class="ds-stats" role="status"></div>
-        <div class="ds-body"></div>
         </section>
         <!-- 「업데이트」 (t-3191, docs/design/versioned-auto-update.md §2.5): the
              running build, the channel, the policy (three radios), 「지금 확인」,

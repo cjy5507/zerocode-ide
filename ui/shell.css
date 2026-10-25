@@ -51577,7 +51577,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   outline-offset: 2px;
 }
 
-.ds-page {
+.settings-pane[data-pane="design-system"] {
   container-type: inline-size;
   container-name: ds-page;
   color: var(--ink-chalk);
