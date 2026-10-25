@@ -5292,6 +5292,8 @@ function setActiveTab(id) {
     // And looking at it moves it up the group's recency order — the order
     // that decides where the eye lands when a tab closes.
     if (owner.pane !== undefined) pushRecentTab(owner.pane, owner.id);
+    // A terminal the person brought forward is a place ⌘J can go back to.
+    if (owner.kind === "term") rememberRecentPlace({ kind: "pane", id: owner.id, label: tabLabel(owner) });
   }
   // The document surfaces are painted by `updateStage`, per leaf, rather than
   // here for the one tab that was clicked \u2014 see the note there.

@@ -3012,14 +3012,19 @@ function leavePagesForStage() {
 el("nav-board").addEventListener("click", () => {
   setWorkspaceBoardOpen(!workspaceBoardOpen);
 });
+/* The board's tab, brought forward from wherever the person is. The door
+ * toggles it; ⌘J's 「이동」 only goes there. */
+function showAgentBoard() {
+  leavePagesForStage();
+  openBoard();
+}
 el("nav-agents").addEventListener("click", () => {
   setWorkspaceBoardOpen(false);
   if (activeTabId === "board") {
     dropTab("board");
     return;
   }
-  leavePagesForStage();
-  openBoard();
+  showAgentBoard();
 });
 /* The Jev door: the seats' numbers, decisions and trend on one tab
  * (docs/design/jev-dashboard-and-perfection-20260921.md §2). A neighbour of

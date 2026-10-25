@@ -18341,6 +18341,30 @@ button.helper-sib:hover {
   color: var(--ink-mist);
 }
 
+/* A group's title in ⌘J's list (최근 · 이동 · 워크트리), and the digit that opens
+ * a recent place. Both read the finder's own tokens: the rows beside them are
+ * the rows the finder always had. */
+.qo-group {
+  padding: var(--space-2) var(--space-3) var(--space-1);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+.qo-group:not(:first-child) {
+  margin-top: var(--space-2);
+}
+
+.qo-key {
+  flex: none;
+  min-width: var(--space-4);
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-border);
+  color: var(--ink-mist);
+  font: var(--type-label-12-mono);
+  text-align: center;
+}
+
 .qo-row:hover {
   color: var(--ink-chalk);
   background: var(--row-hover);

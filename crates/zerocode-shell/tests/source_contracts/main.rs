@@ -1828,6 +1828,54 @@ mod tests {
         );
     }
 
+    /// ⌘J asks where to go, and the window asks only two questions (t-67485).
+    ///
+    /// 「한 화면, 두 질문」: ⌘P asks which file and ⌘J asks where to go — not a
+    /// command bar that grew a third mode. What ⌘J added is three groups in one
+    /// answer (the five places the person opened last, the doors the sidebar
+    /// already has, the worktrees), a digit that opens a recent place only while
+    /// the field is empty, and a list that holds five and no more.
+    #[test]
+    fn the_palette_asks_two_questions_and_remembers_five_places() {
+        let window = strip_comments(window_source());
+        let finders = block_after(&window, "const FINDERS = {");
+        let asks: Vec<&str> = finders
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+            .filter_map(|line| line.trim().strip_suffix(": {"))
+            .collect();
+        assert_eq!(
+            asks,
+            ["file", "worktree"],
+            "the finder grew a question beyond \"which file\" and \"where to\":\n{finders}"
+        );
+        assert!(
+            finders
+                .split("\n  worktree: {")
+                .next()
+                .is_some_and(|file| file.contains("listsEmpty: false")),
+            "the file finder lists before a word is typed"
+        );
+        assert!(
+            window.contains("const RECENT_PLACES_LIMIT = 5;"),
+            "the recent list is no longer five places"
+        );
+        // Each road the person opens a place by leaves a mark on it.
+        for kind in ["task", "pane", "artifact"] {
+            assert!(
+                window.contains(&format!("rememberRecentPlace({{ kind: \"{kind}\",")),
+                "opening a {kind} no longer lands in the recent list"
+            );
+        }
+        // The digit is a key only while the field is empty, or it eats the
+        // first letters of a word being typed.
+        let keys = block_after(&window, "qoInput.addEventListener(\"keydown\"");
+        assert!(
+            keys.contains("/^[1-5]$/.test(event.key)") && keys.contains("qoInput.value === \"\""),
+            "a digit opens a recent place while a word is being typed:\n{keys}"
+        );
+    }
+
     /// The palette is the Geist language the person passed (2026-10-21).
     ///
     /// Draft B of the task board — Vercel's Geist, artifact

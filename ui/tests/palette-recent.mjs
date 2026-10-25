@@ -77,7 +77,7 @@ export async function testPaletteRecent(browser, origin, standBackend, ok) {
     await new Promise((done) => setTimeout(done, 100));
     window.removeEventListener("keydown", count, true);
     window.revealTaskBoardMember = original;
-    return { seen, revealed, closed: document.getElementById("qo-scrim").hidden };
+    return { seen, revealed, closed: paletteMode === null };
   }, PRIMARY_EVENT);
   ok("reopening a recent place takes two key events and closes the palette",
     keys.seen.length === 2 && keys.closed === true && keys.revealed.join() === "agent:term:2041", JSON.stringify(keys));
@@ -120,18 +120,27 @@ export async function testPaletteRecent(browser, origin, standBackend, ok) {
   ok("the file finder stays as it was: no groups, no rows before a word", file.groups === 0 && file.rows === 0, JSON.stringify(file));
 
   if (process.env.PALETTE_RECENT_REPORT) {
-    const times = await page.evaluate(async (runs) => {
+    // What the groups cost on top of the worktree list: the finder's whole answer and drawing
+    // (`runPaletteQuery`), nine times with five recent places and nine times with none.
+    const paint = (places) => page.evaluate(async ({ places, runs }) => {
+      localStorage.removeItem(RECENT_PLACES_KEY);
+      for (const place of [...places].reverse()) rememberRecentPlace(place);
+      closePalette();
+      togglePalette("worktree");
+      await new Promise((done) => setTimeout(done, 400));
       const out = [];
       for (let n = 0; n < runs; n += 1) {
-        closePalette();
         const started = performance.now();
-        togglePalette("worktree");
-        while (!document.querySelector("#qo-results .qo-row")) await new Promise((done) => requestAnimationFrame(done));
+        await runPaletteQuery();
         out.push(performance.now() - started);
       }
-      return out.sort((a, b) => a - b);
-    }, REPORT_RUNS);
-    console.log(`MEASURE palette_recent_paint_median_ms=${times[Math.floor(times.length / 2)].toFixed(1)} max_ms=${times.at(-1).toFixed(1)}`);
+      return out.sort((a, b) => a - b)[Math.floor(runs / 2)];
+    }, { places, runs: REPORT_RUNS });
+    const bare = await paint([]);
+    const grouped = await paint(PLACES);
+    const delta = grouped - bare;
+    console.log(`MEASURE palette_recent_paint_ms bare=${bare.toFixed(2)} grouped=${grouped.toFixed(2)} added=${delta.toFixed(2)}`);
+    ok("the groups add at most 2.1 ms to the worktree list's paint", delta <= 2.1, `added=${delta.toFixed(2)} ms`);
   }
   await page.close();
 }
