@@ -100,6 +100,49 @@ fn listed(orchestrator: &Orchestrator, path: &Path) -> Option<Worktree> {
 
 // -------------------------------------------------------------------- create
 
+#[test]
+fn a_git_listed_flat_sibling_stays_legacy_without_becoming_managed() {
+    let (keep, root, orchestrator) = fixture();
+    let sibling = keep.path().join("worktrees/other/task");
+    git(
+        &root,
+        &["worktree", "add", "--detach", sibling.to_str().unwrap()],
+    );
+    let listed = listed(&orchestrator, &sibling).expect("git lists the sibling");
+    // Git resolves the macOS temporary-directory alias. Use that same base
+    // while retaining this host's separator spelling for the configured root.
+    let configured = orchestrator
+        .repo_root()
+        .parent()
+        .unwrap()
+        .join("worktrees/repo");
+    #[cfg(windows)]
+    let configured = PathBuf::from(configured.to_str().unwrap().replace('/', "\\"));
+    // Include the native spelling (backslashes on Windows) and a redundant
+    // final dot. Git, rather than the fixture, supplies the candidate spelling.
+    for configured in [configured.clone(), configured.join(".")] {
+        let configured = configured.to_str().unwrap();
+        let candidate = listed.path.to_str().unwrap();
+        let facts = zerocode_core::WorktreeFacts {
+            path: candidate,
+            branch: listed.branch.as_deref(),
+        };
+        let ours = zerocode_core::WorktreeOurs {
+            worktree_root: configured,
+            past_roots: &[],
+            branch_prefix: "",
+        };
+        assert_eq!(
+            zerocode_core::classify(facts, ours),
+            zerocode_core::Ownership::UnknownLegacy,
+            "configured={configured:?}, git={candidate:?}"
+        );
+        assert!(!zerocode_core::worktree_ownership::is_zerocode_managed(
+            facts, ours
+        ));
+    }
+}
+
 /// An automation's nightly checkout is cut from the branch the job names, not
 /// from whatever HEAD happens to be — and a base that stopped existing since
 /// the job was written refuses out loud instead of running the job somewhere
