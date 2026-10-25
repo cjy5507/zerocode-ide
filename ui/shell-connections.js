@@ -18,8 +18,7 @@ const modelConnectionsController = {
     el("router-preset-select").value = "custom";
     el("connection-location").value = "remote";
     el("connection-auth").value = el("router-key-input").disabled ? "none" : "new";
-    el("connection-form-title").textContent = t("settings.connections.add", "연결 추가");
-    el("connection-form-title").dataset.i18n = "settings.connections.add";
+    say(el("connection-form-title"), () => t("settings.connections.add", "연결 추가"));
     this.addFields();
     this.show("add");
   },
@@ -349,8 +348,7 @@ const modelConnectionsController = {
     el("connection-location").value = this.location(row.provider.base_url);
     el("connection-auth").value = row.provider.requires_auth ? row.keyAvailable ? "saved" : "new" : "none";
     this.addFields();
-    el("connection-form-title").textContent = t("settings.connections.configure", "설정");
-    el("connection-form-title").dataset.i18n = "settings.connections.configure";
+    say(el("connection-form-title"), () => t("settings.connections.configure", "설정"));
     this.show("add");
     el("router-name-input").focus();
     el("router-card").scrollIntoView({ block: "nearest" });
