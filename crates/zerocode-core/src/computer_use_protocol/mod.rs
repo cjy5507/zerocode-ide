@@ -31,6 +31,7 @@ pub mod pointer;
 pub mod reflex;
 pub mod render;
 pub mod self_surface;
+pub mod share;
 pub mod text_field;
 pub mod validate;
 pub mod words;

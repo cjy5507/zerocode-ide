@@ -195,3 +195,32 @@ fn the_persons_controls_carry_the_person_only_mark() {
         "a terminal tab's close is marked person-only"
     );
 }
+
+/// The share holds every provider step: the one road to the helper and to
+/// the page asks it before anything else, and a command is admitted to it
+/// before it acts. Taking control and handing back are the person's.
+#[test]
+fn every_step_asks_the_share_and_the_band_is_the_persons() {
+    let call = code_only(include_str!("../../src/computer_use/mod.rs"));
+    let body = block_after(&call, "pub fn call(method: &str, params: Value)");
+    let share = body
+        .find("share::ensure_current()?")
+        .expect("call asks the share");
+    let route = body
+        .find("self_surface::route(")
+        .expect("call routes the page");
+    assert!(
+        share < route,
+        "the share is asked before the page or the helper"
+    );
+    let runtime = code_only(include_str!("../../src/agent_tools_runtime.rs"));
+    assert!(
+        block_after(&runtime, "fn answer_computer_command_with(")
+            .contains("computer_use::share::admit("),
+        "a command is admitted to the share before it acts"
+    );
+    let person = person_only_commands();
+    for name in ["computer_take_control", "computer_give_back"] {
+        assert!(person.contains(&name.to_string()), "{name} is the person's");
+    }
+}
