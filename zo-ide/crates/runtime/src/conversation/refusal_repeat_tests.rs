@@ -15,7 +15,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::fallback::TurnLoop;
+use super::fallback::{TurnLoop, REFUSAL_SURFACED_NOTICE};
 use super::{
     ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, ConversationRuntime, RuntimeError,
     StaticToolExecutor, StreamingTurnError, TurnSummary,
@@ -567,6 +567,115 @@ fn a_turn_that_repeats_a_standing_decline_adds_nothing_to_the_session_file() {
         stood.len(),
         after.len()
     );
+}
+
+/// What the window reads of each message line in the session file at `path`:
+/// the line's `decline` name and the first words of its message.
+fn message_lines(path: &Path) -> Vec<(Option<String>, Option<String>)> {
+    std::fs::read_to_string(path)
+        .expect("the session file")
+        .lines()
+        .filter_map(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .filter(|record| record["type"] == "message")
+        .map(|record| {
+            (
+                record["decline"].as_str().map(str::to_string),
+                record["message"]["blocks"][0]["text"].as_str().map(str::to_string),
+            )
+        })
+        .collect()
+}
+
+/// The `decline` name a message line is expected to carry, by its words: the
+/// decline a notice was recorded as, and `None` for words no notice has.
+fn decline_of_the_notice(words: Option<&str>) -> Option<String> {
+    match words {
+        Some(REFUSAL_SURFACED_NOTICE) => Some("surfaced".to_string()),
+        Some(REFUSAL_STANDING_NOTICE) => Some("standing".to_string()),
+        _ => None,
+    }
+}
+
+/// The window and a later zo know a recorded decline by the name its line
+/// carries (t-57445), not by its words: the line of the notice a decline was
+/// surfaced with names `surfaced`, the line of the one it stood with names
+/// `standing`, and no other line names a decline.
+#[test]
+fn a_recorded_decline_names_its_kind_on_its_line() {
+    let env = Hermetic::new("decline-names");
+    let provider = Declining::new(UNROUTED);
+    let _runtime = stood_runtime(&env, &provider);
+
+    let lines = message_lines(&env.session_file());
+    let expected: Vec<_> = lines
+        .iter()
+        .map(|(_, words)| decline_of_the_notice(words.as_deref()))
+        .collect();
+    assert!(
+        expected.iter().any(|decline| decline.as_deref() == Some("standing")),
+        "the file holds the notice the decline stood with: {lines:?}"
+    );
+    let written: Vec<_> = lines.into_iter().map(|(decline, _)| decline).collect();
+    assert_eq!(
+        written, expected,
+        "each notice's line names the decline it was recorded as, and no other line names one"
+    );
+}
+
+/// The refusal ladder finds the declined exchange it drops before its
+/// context-cleaning retry by the name the answer's record carries (t-57445):
+/// a decline told in other words is still one. In history from before the
+/// name, a notice's own words still mark one; other words under no name are an
+/// answer like any other.
+#[test]
+fn a_decline_is_known_by_the_name_its_record_carries_before_its_words() {
+    for (decline, words, known) in [
+        (Some("standing"), "Reworded: still declined.", true),
+        (Some("surfaced"), "Reworded: declined.", true),
+        (None, REFUSAL_STANDING_NOTICE, true),
+        (None, "Reworded: still declined.", false),
+    ] {
+        let env = Hermetic::new("decline-known");
+        let mut answer = serde_json::json!({
+            "type": "message",
+            "turn_index": 0,
+            "message": {"role": "assistant", "blocks": [{"type": "text", "text": words}]},
+        });
+        if let Some(decline) = decline {
+            answer["decline"] = serde_json::Value::from(decline);
+        }
+        let records = [
+            serde_json::json!({
+                "type": "session_meta",
+                "version": 1,
+                "session_id": "session-decline-known",
+                "created_at_ms": 1_790_000_000_000_u64,
+                "updated_at_ms": 1_790_000_001_000_u64,
+            }),
+            serde_json::json!({
+                "type": "message",
+                "turn_index": 0,
+                "message": {"role": "user", "blocks": [{"type": "text", "text": WORDS}]},
+            }),
+            answer,
+        ];
+        let contents = records.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+        std::fs::write(env.session_file(), format!("{contents}\n")).expect("write the session file");
+        let session = Session::load_from_path(env.session_file()).expect("load the session file");
+        let provider = Declining::new(UNROUTED);
+        let mut runtime = streaming_runtime(&provider, &env.cwd, session);
+
+        assert_eq!(
+            runtime.drop_last_declined_exchange(),
+            known,
+            "an answer told in {words:?} whose record names {decline:?}"
+        );
+        assert_eq!(
+            runtime.session.messages.len(),
+            if known { 0 } else { 2 },
+            "a declined exchange is dropped whole, and any other answer stays"
+        );
+    }
 }
 
 /// A repeat ends its turn as any turn ends: the screen is let go, nothing a

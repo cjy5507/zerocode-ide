@@ -1022,6 +1022,7 @@ mod tests {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         }
     }
 
@@ -1425,6 +1426,7 @@ mod tests {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         };
         (
             build(ContentBlock::Image {
@@ -1842,6 +1844,7 @@ mod tests {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         };
         let plain = message_plain(&m);
         assert!(plain.contains("running it"));
@@ -1868,6 +1871,7 @@ mod tests {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         }
     }
 

@@ -40,6 +40,7 @@ fn user_text(text: &str) -> ConversationMessage {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     }
 }
 
