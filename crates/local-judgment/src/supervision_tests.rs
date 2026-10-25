@@ -9,7 +9,7 @@ use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,8 @@ use crate::{Binding, Manager};
 /// for the file `end` and ends the way that file says: `code N` exits with N,
 /// `signal N` sends itself signal N, `mute` closes its output and runs on,
 /// `orphan N` leaves a process holding its output open for N seconds and
+/// exits with 7, `hold` leaves one holding it open until the file `release`
+/// appears, when that one writes `fixture: released` there and goes, and
 /// exits with 7. What the file `stderr` holds is the last it writes there.
 const RUNTIME: &str = r#"import os,sys,time
 root=sys.argv[1]
@@ -40,6 +42,10 @@ if how=='mute': os.close(1)
 if how=='orphan':
  import subprocess
  subprocess.Popen(['sleep',value])
+ os._exit(7)
+if how=='hold':
+ import subprocess
+ subprocess.Popen([sys.executable,'-I','-c','import os,sys,time\nwhile not os.path.exists(sys.argv[1]): time.sleep(0.005)\nprint("fixture: released",file=sys.stderr)',os.path.join(root,'release')])
  os._exit(7)
 time.sleep(60)
 "#;
@@ -94,6 +100,9 @@ struct Supervised {
     model: crate::Model,
     server: String,
     told: Told,
+    /// The runtime the manager started, held weakly so its end stays the
+    /// manager's to make.
+    engine: std::sync::Weak<Engine>,
 }
 
 impl Drop for Supervised {
@@ -111,12 +120,16 @@ async fn supervised() -> Supervised {
     let data = home.path().join("data");
     let model = crate::tests::fixture_model();
     let root = control.path().to_owned();
+    let started_engine = Arc::new(Mutex::new(std::sync::Weak::new()));
+    let keeps = started_engine.clone();
     let factory: EngineFactory = Arc::new(move |_| {
-        Ok(Engine::from_command(
+        let engine = Engine::from_command(
             Command::new("python3")
                 .args(["-I", "-u", "-c", RUNTIME])
                 .arg(&root),
-        ))
+        );
+        *keeps.lock().unwrap() = Arc::downgrade(&engine);
+        Ok(engine)
     });
     let (told, sink) = telling();
     let manager =
@@ -136,6 +149,7 @@ async fn supervised() -> Supervised {
         model,
         server,
         told,
+        engine: started_engine.lock().unwrap().clone(),
     }
 }
 
@@ -267,6 +281,134 @@ async fn a_runtime_whose_output_another_process_holds_open_is_still_told_when_it
     let exit = &failed["server"]["exit"];
     assert_eq!(exit["cause"], "runtime_exited", "{failed}");
     assert_eq!(exit["code"], 7);
+}
+
+/// A status read made on an async worker just as a runtime ends waits for
+/// the last of its stderr, up to `STDERR_SETTLE`, and keeps the end on disk.
+/// The runtime here leaves its stderr open until another task on the same
+/// worker lets it go, and the runtime has that one worker (the test's own
+/// body runs beside it): while the read waits, the worker's other tasks run
+/// on, so the release comes while the read still waits and the end it keeps
+/// holds the line the holder writes once released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_status_read_that_waits_for_an_ended_runtimes_stderr_leaves_the_async_worker_to_other_tasks()
+ {
+    let fixture = supervised().await;
+    let engine = fixture.engine.upgrade().expect("the started runtime runs");
+    let manager = fixture.manager.clone();
+    let release = fixture.control.path().join("release");
+    fixture.end("hold", "");
+    let began = Instant::now();
+    let reader = tokio::spawn(async move {
+        // Blocking on purpose: nothing else may run on the one worker before
+        // the read below, or the release could come first.
+        while engine.alive() {
+            assert!(began.elapsed() < SETTLE, "the runtime did not end");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(engine);
+        let ran = Arc::new(AtomicBool::new(false));
+        let other = tokio::spawn({
+            let ran = ran.clone();
+            async move {
+                ran.store(true, Ordering::Release);
+                fs::write(release, b"").unwrap();
+            }
+        });
+        let read = manager.snapshot();
+        (ran.load(Ordering::Acquire), read, other)
+    });
+    let (ran, read, other) = reader.await.unwrap();
+    other.await.unwrap();
+    assert!(
+        ran,
+        "the status read held its async worker while the ended runtime's stderr settled"
+    );
+    assert_eq!(read.server.state, "failed");
+    assert_eq!(
+        read.server
+            .exit
+            .as_ref()
+            .map(|exit| (exit.cause, exit.code)),
+        Some(("runtime_exited", Some(7)))
+    );
+    // The watch may have taken the end first and still be writing it down.
+    while !fixture.kept().contains("\"runtime_exited\"") {
+        assert!(
+            began.elapsed() < SETTLE,
+            "the end was not kept: {}",
+            fixture.kept()
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // A read that held its worker let `STDERR_SETTLE` run out before the
+    // release, and kept the end without the holder's last line; one that let
+    // the worker go waited for that line. Any later step that lets the worker
+    // go cannot bring it back into an end already kept.
+    let kept = fixture.kept();
+    let record = kept
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record["cause"] == "runtime_exited")
+        .expect("the end is kept");
+    assert!(
+        tail(&record).iter().any(|line| line == "fixture: released"),
+        "the status read held its async worker while the ended runtime's stderr settled: {:?}",
+        tail(&record)
+    );
+}
+
+/// Records kept at the same instant by writers on different threads (a
+/// reap, a restart's attempt, a stop) each keep their line, and no staging
+/// file is left behind.
+#[test]
+fn records_kept_at_the_same_instant_each_keep_their_line() {
+    const WRITERS: usize = 8;
+    const EACH: usize = 25;
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("server-exits.jsonl");
+    let start = Arc::new(std::sync::Barrier::new(WRITERS));
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|writer| {
+            let (path, start) = (path.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                (0..EACH)
+                    .filter(|&n| {
+                        test_support::keep_exit(&path, &json!({"writer": writer, "n": n})).is_err()
+                    })
+                    .count()
+            })
+        })
+        .collect();
+    let refused: usize = writers
+        .into_iter()
+        .map(|writer| writer.join().unwrap())
+        .sum();
+    assert_eq!(
+        refused, 0,
+        "a record kept at the same instant as another was refused"
+    );
+    let kept: Vec<Value> = fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let lost: Vec<(usize, usize)> = (0..WRITERS)
+        .flat_map(|writer| (0..EACH).map(move |n| (writer, n)))
+        .filter(|&(writer, n)| !kept.contains(&json!({"writer": writer, "n": n})))
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} records kept at the same instant lost their line: {lost:?}",
+        lost.len(),
+        WRITERS * EACH
+    );
+    assert_eq!(kept.len(), WRITERS * EACH, "a record was kept twice");
+    assert!(
+        !path.with_extension("jsonl.partial").exists(),
+        "a staging file was left behind"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
