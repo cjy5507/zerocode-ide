@@ -255,6 +255,10 @@ function buildInboxView() {
   const actions = inboxNode("div", "inbox-actions",
     inboxButton("reply", "btn btn--primary"), inboxButton("pass", "btn btn--primary"),
     inboxButton("ack", "btn btn--primary"), inboxButton("open-pane"), inboxButton("open-board"));
+  // The answer and its buttons are the person's, as on the desk they repeat (t-73906): an agent pressing in the
+  // window reads the letters but sends, passes and acknowledges nothing.
+  reply.dataset.personOnly = "";
+  actions.dataset.personOnly = "";
   const detail = inboxNode("div", "inbox-detail", kind, inboxNode("h2", "inbox-pv-title"), facts,
     inboxNode("p", "inbox-pv-body"), reply, actions, inboxNode("p", "inbox-note"));
   const preview = inboxNode("article", "inbox-preview", inboxWord("inbox.pick", "왼쪽에서 편지를 고르면 여기에서 읽고 바로 답합니다.", "p", "inbox-empty"), detail);

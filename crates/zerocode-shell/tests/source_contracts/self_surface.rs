@@ -154,7 +154,7 @@ fn the_page_presses_without_keys_focus_or_the_clipboard() {
 
 /// The controls the window keeps for the person carry the mark the page
 /// reads (`data-person-only`): the coordinator's seat card, the stop's
-/// resume, a board card's answers, a terminal tab's close.
+/// resume, a board card's answers, the inbox's answer, a terminal tab's close.
 #[test]
 fn the_persons_controls_carry_the_person_only_mark() {
     let index = ui_file("index.html");
@@ -182,6 +182,16 @@ fn the_persons_controls_carry_the_person_only_mark() {
         desk_tag.contains("data-person-only"),
         "the coordinator desk carries data-person-only"
     );
+    // The inbox answers through the desk's own roads (t-67483), so its answer
+    // and its buttons carry the desk's mark.
+    let inbox = ui_file("shell-inbox.js");
+    let inbox = block_after(&inbox, "function buildInboxView(");
+    for part in [
+        "reply.dataset.personOnly = \"\"",
+        "actions.dataset.personOnly = \"\"",
+    ] {
+        assert!(inbox.contains(part), "the inbox's answer lost `{part}`");
+    }
     let shell = ui_file("shell.js");
     for panel in ["function askPanelNode(", "function approvalPanelNode("] {
         assert!(
