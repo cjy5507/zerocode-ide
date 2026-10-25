@@ -884,7 +884,10 @@ pub fn windows_handle_is_current_user_owned<H: std::os::windows::io::AsRawHandle
 /// Open an existing owner-only Windows regular file without following any
 /// symlink or junction component. `append` selects append-only versus read-only
 /// data access; both paths validate the protected current-SID DACL and one-link
-/// identity on the retained handle.
+/// identity on the retained handle. An append-only handle cannot be locked:
+/// `LockFileEx` needs read or write data access and fails with
+/// `ERROR_ACCESS_DENIED`, so a lock file opens with
+/// [`open_windows_owner_only_regular_file_read_write`].
 #[cfg(windows)]
 pub fn open_windows_owner_only_regular_file(
     path: &Path,

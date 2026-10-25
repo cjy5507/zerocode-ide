@@ -1084,7 +1084,7 @@ fn open_credentials_lock(lock_path: &Path) -> io::Result<File> {
                 Err(error) => return Err(error),
             }
         }
-        core_types::paths::open_windows_owner_only_regular_file(lock_path, true)
+        core_types::paths::open_windows_owner_only_regular_file_read_write(lock_path)
     }
 
     #[cfg(not(windows))]
