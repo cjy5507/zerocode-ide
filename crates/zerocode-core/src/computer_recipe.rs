@@ -317,7 +317,7 @@ pub fn recipe_params(raw: &str) -> Result<Map<String, Value>, String> {
 /// Every `{{name}}` in one word, in order; `{{a b}}` is not one.
 #[must_use]
 pub fn recipe_placeholders(word: &str) -> Vec<String> {
-    if privacy::is_secret_parameter(word) {
+    if privacy::is_person_parameter(word) {
         return vec![word[1..].to_string()];
     }
     let mut found = Vec::new();
@@ -378,7 +378,7 @@ pub fn recipe_fill(argv: &[String], values: &Map<String, Value>) -> Result<Vec<S
         for name in names {
             match values.get(&name).and_then(Value::as_str) {
                 Some(value) => {
-                    let marker = if privacy::is_secret_parameter(word) {
+                    let marker = if privacy::is_person_parameter(word) {
                         format!("${name}")
                     } else {
                         format!("{RECIPE_PARAM_OPEN}{name}{RECIPE_PARAM_CLOSE}")
@@ -1151,7 +1151,7 @@ pub fn preflight(
         let missing_secret = line
             .argv
             .iter()
-            .filter(|word| privacy::is_secret_parameter(word))
+            .filter(|word| privacy::is_person_parameter(word))
             .any(|word| {
                 values
                     .get(&word[1..])
@@ -1265,6 +1265,30 @@ mod tests {
         let planned = preflight(&lines, 1, &Map::new()).unwrap();
         assert_eq!(planned.planned[0].1, Plan::Stop(RecipeStop::PersonsTurn));
         assert_eq!(planned.planned.len(), 1);
+    }
+
+    #[test]
+    fn a_file_recipe_parameter_is_given_by_params_or_stops_for_the_person() {
+        let lines = recipe_lines("## Steps\n1. `zerocode-browser upload browser-1 #receipt $file_3`\n2. `zerocode-browser click browser-1 #done`\n").unwrap();
+        assert_eq!(params_of(&lines), ["file_3"]);
+        let stopped = preflight(&lines, 1, &Map::new()).unwrap();
+        assert_eq!(stopped.planned[0].1, Plan::Stop(RecipeStop::PersonsTurn));
+        assert_eq!(stopped.planned.len(), 1);
+        let empty = values(&[("file_3", "")]);
+        let stopped = preflight(&lines, 1, &empty).unwrap();
+        assert_eq!(stopped.planned[0].1, Plan::Stop(RecipeStop::PersonsTurn));
+        let given = values(&[("file_3", "/Users/dev/Documents/receipt.pdf")]);
+        let walked = preflight(&lines, 1, &given).unwrap();
+        assert_eq!(
+            walked.planned[0].1,
+            Plan::Run(words(&[
+                "upload",
+                "browser-1",
+                "#receipt",
+                "/Users/dev/Documents/receipt.pdf"
+            ]))
+        );
+        assert!(walked.unused.is_empty());
     }
 
     #[test]
