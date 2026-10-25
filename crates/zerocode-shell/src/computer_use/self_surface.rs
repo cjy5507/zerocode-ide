@@ -81,6 +81,7 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     // The person's hand on a window shared with an agent.
     "computer_take_control",
     "computer_give_back",
+    "computer_share_hand_over",
     // The two ways out the page offers; both reach `relaunch_window`.
     "leave_now",
     "leave_when_idle",

@@ -6559,9 +6559,12 @@ fn install_share(app: AppHandle) {
 
     let policy = app.clone();
     share::install_required(Box::new(move || {
-        // A failed read must not turn an enabled requirement off.
-        load_settings(policy.state::<AppState>().settings())
-            .map_or(true, |snapshot| snapshot.document.computer_share_required)
+        // Asked at every provider step, so from memory (t-74826): never the
+        // disk, never the lock a commit holds through its fsync (t-67102).
+        // The person's toggle commits, and every commit is remembered; a
+        // root nothing read yet is read once, healed rather than failed.
+        let snapshot = remembered_settings(policy.state::<AppState>().settings());
+        snapshot.document.computer_share_required
     }));
     let asking = app.clone();
     share::install(

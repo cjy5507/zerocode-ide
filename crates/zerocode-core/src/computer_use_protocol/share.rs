@@ -8,8 +8,11 @@
 //! is asked when the agent turns to it. A no refuses that app. Silence (the
 //! person away) leaves the agent working as before, unshared, so an
 //! unattended run does not stop at a card by default. When the person requires
-//! sharing, silence and unnamed acts are refused; looks keep the same rules.
-//! Silence never widens a share that
+//! sharing, unnamed acts are refused and silence is no lasting no (t-74826):
+//! the app waits for the person. Its acts are refused at once, with no card,
+//! for [`SHARE_ASK_AGAIN_MS`]; the first act after that asks again; and the
+//! person can hand the waiting app over from the window at any time. Looks
+//! keep the same rules. Silence never widens a share that
 //! stands. While a share stands, an act or a look outside it — another app,
 //! no app, the whole screen — is refused. "Take control" refuses every act
 //! until the person hands the window back; the card is not raised again.
@@ -22,6 +25,14 @@ use super::{ProviderError, error_code};
 
 /// How long the window's card waits for the person before it is silence.
 pub const SHARE_ASK_MS: u64 = 30_000;
+
+/// With sharing required, how long after a silence the same app is refused
+/// without a card. Silence means the person is away; a card raised again at
+/// every retry would stand on their screen most of the time they are gone.
+/// After this quiet one card stands at most 30 s of every 150 s, and the
+/// band offers the hand-over the whole time, so a person who comes back
+/// never waits for a card.
+pub const SHARE_ASK_AGAIN_MS: u64 = 120_000;
 
 /// What the person said when asked about an app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +68,10 @@ pub struct Share {
     required: bool,
     target: Option<String>,
     answers: BTreeMap<String, Answer>,
+    /// When each app's card went unanswered, on the window's clock (ms).
+    silent_at: BTreeMap<String, u64>,
+    /// The app whose card went unanswered last, while no answer replaced it.
+    waiting: Option<String>,
     taken_back: bool,
     generation: u64,
 }
@@ -74,10 +89,23 @@ impl Share {
         self.required = required;
     }
 
+    /// Whether an act must wait for an explicit share.
+    #[must_use]
+    pub const fn required(&self) -> bool {
+        self.required
+    }
+
     /// The shared app's key, while one is shared.
     #[must_use]
     pub fn target(&self) -> Option<&str> {
         self.target.as_deref()
+    }
+
+    /// The app that waits for the person to hand it over: the last one whose
+    /// card went unanswered, while sharing is required.
+    #[must_use]
+    pub fn waiting(&self) -> Option<&str> {
+        self.waiting.as_deref().filter(|_| self.required)
     }
 
     #[must_use]
@@ -92,9 +120,9 @@ impl Share {
         self.generation
     }
 
-    /// What `reach` may do now. A yes the person gave an app before makes it
-    /// the shared one again without asking.
-    pub fn gate(&mut self, reach: Reach<'_>) -> Gate {
+    /// What `reach` may do now, at `now_ms` on the window's clock. A yes the
+    /// person gave an app before makes it the shared one again without asking.
+    pub fn gate(&mut self, reach: Reach<'_>, now_ms: u64) -> Gate {
         if reach.acts && self.taken_back {
             return Gate::Refuse(took_control());
         }
@@ -105,7 +133,7 @@ impl Share {
             return match reach.app {
                 None if self.required => Gate::Refuse(required()),
                 None => Gate::Go,
-                Some(app) => self.first_act(app),
+                Some(app) => self.first_act(app, now_ms),
             };
         };
         if reach.whole_screen {
@@ -127,7 +155,7 @@ impl Share {
                     self.target = Some(app.to_string());
                     Gate::Go
                 }
-                Some(Answer::Silent) if self.required => Gate::Refuse(required()),
+                Some(Answer::Silent) if self.required => self.silent_required(app, now_ms),
                 Some(Answer::Declined | Answer::Silent) => Gate::Refuse(scope(&format!(
                     "the person shared {target} only, not {app}"
                 ))),
@@ -136,7 +164,28 @@ impl Share {
         }
     }
 
-    fn first_act(&mut self, app: &str) -> Gate {
+    /// Whether a request admitted before may take its next step, judged
+    /// without moving anything (t-74826): the share stays where the person
+    /// put it while a request in flight in another app finishes. Only what
+    /// the person can change mid-request is judged again — their hand on the
+    /// window, and whether an act needs an app they handed over.
+    pub fn still_holds(&self, reach: Reach<'_>) -> Result<(), ProviderError> {
+        if !reach.acts {
+            return Ok(());
+        }
+        if self.taken_back {
+            return Err(took_control());
+        }
+        let handed = reach
+            .app
+            .is_some_and(|app| self.answers.get(app) == Some(&Answer::Shared));
+        if self.required && !handed {
+            return Err(required());
+        }
+        Ok(())
+    }
+
+    fn first_act(&mut self, app: &str, now_ms: u64) -> Gate {
         match self.answers.get(app) {
             Some(Answer::Shared) => {
                 self.target = Some(app.to_string());
@@ -145,15 +194,54 @@ impl Share {
             Some(Answer::Declined) => {
                 Gate::Refuse(scope(&format!("the person did not hand {app} over")))
             }
-            Some(Answer::Silent) if self.required => Gate::Refuse(required()),
+            Some(Answer::Silent) if self.required => self.silent_required(app, now_ms),
             Some(Answer::Silent) => Gate::Go,
             None => Gate::Ask(app.to_string()),
         }
     }
 
-    /// The person's answer about `app`. A yes shares it.
-    pub fn answered(&mut self, app: &str, answer: Answer) {
+    /// An unanswered app under required sharing: refused while the quiet
+    /// after its silence lasts, asked again after it.
+    fn silent_required(&self, app: &str, now_ms: u64) -> Gate {
+        let again = self
+            .silent_at
+            .get(app)
+            .map_or(now_ms, |at| at.saturating_add(SHARE_ASK_AGAIN_MS));
+        if now_ms >= again {
+            return Gate::Ask(app.to_string());
+        }
+        Gate::Refuse(waiting_for(app, again - now_ms))
+    }
+
+    /// The person's answer about `app`, at `now_ms`. A yes shares it; silence
+    /// leaves it waiting, should sharing be required.
+    pub fn answered(&mut self, app: &str, answer: Answer, now_ms: u64) {
+        if answer == Answer::Silent {
+            self.answers.insert(app.to_string(), answer);
+            self.silent_at.insert(app.to_string(), now_ms);
+            self.waiting = Some(app.to_string());
+            return;
+        }
+        self.settle(app, answer);
+    }
+
+    /// The person hands the waiting app over from the window, without a card:
+    /// that app only, and only while it waits. Whether it was handed over.
+    pub fn hand_over(&mut self, app: &str) -> bool {
+        if self.waiting() != Some(app) {
+            return false;
+        }
+        self.settle(app, Answer::Shared);
+        true
+    }
+
+    /// A yes or a no about `app`: it ends any wait for it.
+    fn settle(&mut self, app: &str, answer: Answer) {
         self.answers.insert(app.to_string(), answer);
+        self.silent_at.remove(app);
+        if self.waiting.as_deref() == Some(app) {
+            self.waiting = None;
+        }
         if answer == Answer::Shared {
             self.target = Some(app.to_string());
         }
@@ -183,6 +271,18 @@ pub fn required() -> ProviderError {
     ProviderError::new(
         error_code::SHARE_REQUIRED,
         "sharing is required for actions; the person must explicitly hand this app over in the window before it can act (silence does not grant a share)",
+    )
+}
+
+/// An act in an app that waits for the person under required sharing: when
+/// the window asks again, and where the person can hand it over meanwhile.
+fn waiting_for(app: &str, again_ms: u64) -> ProviderError {
+    ProviderError::new(
+        error_code::SHARE_REQUIRED,
+        format!(
+            "sharing is required for actions and the person did not answer the share card for {app}; nothing was done. The person can hand {app} over from the window's band at any time, and your first act in {app} after {} s asks them again. Tell the person you are waiting for {app}; do not retry sooner",
+            again_ms.div_ceil(1_000)
+        ),
     )
 }
 

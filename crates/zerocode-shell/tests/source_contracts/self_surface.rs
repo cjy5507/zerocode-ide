@@ -253,7 +253,7 @@ fn required_sharing_reads_the_saved_policy_and_rechecks_each_provider_step() {
         !install.contains("load_settings("),
         "a step must not wait on the settings lock"
     );
-    assert!(install.contains(".document.computer_share_required"));
+    assert!(install.contains("snapshot.document.computer_share_required"));
     let road = code_only(include_str!("../../src/computer_use/share.rs"));
     let current = block_after(&road, "pub(crate) fn ensure_current()");
     assert!(current.contains("refresh_required()"));

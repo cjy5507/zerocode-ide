@@ -312,7 +312,8 @@ fn the_card_says_whether_sharing_is_required() {
     let cards = Rc::new(std::cell::RefCell::new(Vec::new()));
     let seen = Rc::clone(&cards);
     let _person = stand_in::stand(move |card| {
-        seen.borrow_mut().push(serde_json::to_value(card).expect("a card"));
+        seen.borrow_mut()
+            .push(serde_json::to_value(card).expect("a card"));
         Decision::TimedOut
     });
     let _ = admit(ComputerMethod::Click, &click("Calculator"));

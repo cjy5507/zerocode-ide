@@ -6,7 +6,10 @@
 //! `computer_confirm_answer`), and the answer is held for the window's
 //! lifetime. The band paints the share (`computer:share-state`) and offers
 //! "take control" and "hand back"; a request admitted under one generation
-//! is refused at its next provider step once the person took control.
+//! is refused at its next provider step once the person took control. With
+//! sharing required, an app whose card went unanswered waits (t-74826): the
+//! band names it and offers the hand-over (`computer_share_hand_over`), and
+//! the card is raised again only after the quiet.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -16,21 +19,26 @@ use std::sync::{Arc, Mutex, RwLock};
 use serde::Serialize;
 use serde_json::{Value, json};
 use zerocode_core::computer_use::ComputerMethod;
+#[cfg(test)]
+pub(crate) use zerocode_core::computer_use_protocol::share::SHARE_ASK_AGAIN_MS;
 use zerocode_core::computer_use_protocol::share::{
-    Answer, Gate, Reach, SHARE_ASK_MS, Share, app_key, required, took_control,
+    Answer, Gate, Reach, SHARE_ASK_MS, Share, app_key, took_control,
 };
 
 use super::ComputerUseError;
 use super::confirm::Decision;
 
-/// The card the window raises: which app an agent asks for, and how long the
-/// window waits before the person's silence is the answer.
+/// The card the window raises: which app an agent asks for, how long the
+/// window waits before the person's silence is the answer, and whether
+/// sharing is required — then silence keeps the agent waiting rather than
+/// lets it go on unshared, and the card's clock says so.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ShareAsk {
     pub(crate) id: String,
     pub(crate) app: String,
     #[serde(rename = "timeoutMs")]
     pub(crate) timeout_ms: u64,
+    pub(crate) required: bool,
 }
 
 pub(crate) type Asker = dyn Fn(&ShareAsk) -> Decision + Send + Sync;
@@ -95,6 +103,20 @@ fn refresh_required() {
 }
 #[cfg(not(test))]
 static ROAD: RwLock<Option<(Arc<Asker>, Arc<Notice>)>> = RwLock::new(None);
+
+/// The window's clock for the share, in ms: monotonic, from its first read.
+fn now_ms() -> u64 {
+    #[cfg(not(test))]
+    {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let start = START.get_or_init(std::time::Instant::now);
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+    #[cfg(test)]
+    {
+        stand_in::NOW.with(std::cell::Cell::get)
+    }
+}
 #[cfg(test)]
 thread_local! {
     static HELD: std::cell::RefCell<Held> = std::cell::RefCell::new(Held::default());
@@ -182,12 +204,16 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
     loop {
         refresh_required();
         let before = with_held(|held| held.share.target().map(str::to_string));
+        let now = now_ms();
         let (gate, generation, after) = with_held(|held| {
-            let gate = held.share.gate(Reach {
-                app: named.as_ref().map(|(key, _)| key.as_str()),
-                acts,
-                whole_screen: screen,
-            });
+            let gate = held.share.gate(
+                Reach {
+                    app: named.as_ref().map(|(key, _)| key.as_str()),
+                    acts,
+                    whole_screen: screen,
+                },
+                now,
+            );
             (
                 gate,
                 held.share.generation(),
@@ -233,10 +259,12 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                 let label = named
                     .as_ref()
                     .map_or_else(|| key.clone(), |(_, label)| label.clone());
+                let required = with_held(|held| held.share.required());
                 let answer = match ask(&ShareAsk {
                     id: super::confirm::next_id(),
                     app: label.clone(),
                     timeout_ms: SHARE_ASK_MS,
+                    required,
                 }) {
                     Decision::Allowed => Answer::Shared,
                     Decision::Refused => Answer::Declined,
@@ -244,7 +272,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
                 };
                 with_held(|held| {
                     held.labels.insert(key.clone(), label);
-                    held.share.answered(&key, answer);
+                    held.share.answered(&key, answer, now_ms());
                 });
                 tell();
             }
@@ -253,31 +281,25 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
 }
 
 /// Whether the request this thread runs is still under the share it was
-/// admitted to: refused once the person took control since.
+/// admitted to: refused once the person took control since, or required
+/// sharing for an app they did not hand over. Judged without moving the
+/// share (t-74826): a step in flight never takes it back from the app the
+/// person handed over since.
 pub(crate) fn ensure_current() -> Result<(), ComputerUseError> {
     let Some(admitted) = ADMITTED.with(|held| held.borrow().clone()) else {
         return Ok(());
     };
     refresh_required();
-    let before = with_held(|held| held.share.target().map(str::to_string));
-    let result = with_held(|held| {
+    with_held(|held| {
         if held.share.generation() != admitted.generation {
             return Err(took_control());
         }
-        match held.share.gate(Reach {
+        held.share.still_holds(Reach {
             app: admitted.app.as_deref(),
             acts: admitted.acts,
             whole_screen: admitted.whole_screen,
-        }) {
-            Gate::Go => Ok(()),
-            Gate::Refuse(error) => Err(error),
-            Gate::Ask(_) => Err(required()),
-        }
-    });
-    if before != with_held(|held| held.share.target().map(str::to_string)) {
-        tell();
-    }
-    result
+        })
+    })
 }
 
 /// The person takes control of the shared window.
@@ -292,14 +314,29 @@ pub(crate) fn give_back() {
     tell();
 }
 
+/// The person hands over, from the band, the app that waits for them under
+/// required sharing — no card. `app` is the key the band was told it by
+/// (`waiting`), taken as it is. Whether it was the app that waits.
+pub(crate) fn hand_over(app: &str) -> bool {
+    let handed = with_held(|held| held.share.hand_over(app));
+    if handed {
+        tell();
+    }
+    handed
+}
+
 /// The share as the band paints it: the shared app's key and the words the
-/// person knows it by, and whether the person took control.
+/// person knows it by, whether the person took control, and the app that
+/// waits for them to hand it over.
 pub(crate) fn state() -> Value {
     with_held(|held| {
         let target = held.share.target();
+        let waiting = held.share.waiting();
         json!({
             "target": target,
             "label": target.and_then(|key| held.labels.get(key)),
+            "waiting": waiting,
+            "waitingLabel": waiting.and_then(|key| held.labels.get(key)),
             "takenBack": held.share.taken_back(),
             "generation": held.share.generation(),
             "revision": held.panel_revision,
@@ -434,6 +471,12 @@ pub(crate) mod stand_in {
         pub(super) static REQUIRED: RefCell<Option<Box<Required>>> = const { RefCell::new(None) };
         pub(super) static ASKED: RefCell<Option<Person>> = const { RefCell::new(None) };
         pub(super) static NOTICES: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+        pub(super) static NOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Move this thread's share clock on by `ms`.
+    pub(crate) fn advance(ms: u64) {
+        NOW.with(|now| now.set(now.get() + ms));
     }
 
     /// The person stood in on this thread: answers every card with `answer`

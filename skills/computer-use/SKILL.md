@@ -1149,7 +1149,14 @@ a failed step in the log and is filed as a task for a person; write
   `share_scope` — work in the shared app, or act in the other app to ask for
   it. The person can take control at any time; then every act answers
   `person_took_control` until they hand it back. Do not retry around either.
-- When the person enables required sharing, `share_required` refuses acts in an unshared app even after silence; wait for the person to share it, and never change this person-only setting. Looks keep the existing share rules.
+- When the person enables required sharing, `share_required` refuses acts in
+  an unshared app and acts naming no app. If the person does not answer the
+  card, that app waits for them: until the time the refusal names, its acts
+  answer `share_required` at once with no new card; the person can hand it
+  over from the window's band at any time; and your first act in it after
+  that time asks again. Do not retry inside that wait; tell the person you are waiting for
+  them to hand the app over. Never change this person-only setting. Looks
+  keep the existing share rules.
 - The person has one hand on you at all times: the desktop chord
   control+option+escape, `zerocode-computer stop`, and the window's stop
   button all stop the operator at its next event. A `stopped` answer means
@@ -1237,6 +1244,8 @@ a failed step in the log and is filed as a task for a person; write
   typed in it a moment ago; nothing was pressed. Look again later.
 - `share_scope`: the request reaches outside the window the person shared, or
   the person declined that app; nothing was done. Stay in the shared app.
+- `share_required`: sharing is required and the person has not handed that
+  app over; nothing was done. The message says when the window asks again.
 - `person_took_control`: the person took the shared window back; nothing was
   done. Report where you were and wait for them to hand it back.
 

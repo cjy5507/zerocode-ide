@@ -37,7 +37,10 @@ fn code(gate: Gate) -> Option<String> {
 #[test]
 fn the_first_act_in_an_app_asks_once_and_a_yes_shares_it() {
     let mut share = Share::default();
-    assert_eq!(share.gate(act(Some("safari")), NOW), Gate::Ask("safari".into()));
+    assert_eq!(
+        share.gate(act(Some("safari")), NOW),
+        Gate::Ask("safari".into())
+    );
     share.answered("safari", Answer::Shared, NOW);
     assert_eq!(share.target(), Some("safari"));
     for _ in 0..3 {
@@ -69,7 +72,10 @@ fn a_share_holds_the_agent_to_its_one_window() {
         "the app list is no picture"
     );
     assert_eq!(share.gate(look(Some("safari")), NOW), Gate::Go);
-    assert_eq!(share.gate(act(Some("notes")), NOW), Gate::Ask("notes".into()));
+    assert_eq!(
+        share.gate(act(Some("notes")), NOW),
+        Gate::Ask("notes".into())
+    );
     share.answered("notes", Answer::Shared, NOW);
     assert_eq!(share.target(), Some("notes"), "a yes moves the share");
     assert_eq!(
@@ -153,7 +159,10 @@ fn an_app_is_one_key_whatever_its_case() {
 fn required_sharing_refuses_silence_and_unnamed_acts_but_keeps_looks() {
     let mut share = Share::default();
     share.set_required(true);
-    assert_eq!(share.gate(act(Some("notes")), NOW), Gate::Ask("notes".into()));
+    assert_eq!(
+        share.gate(act(Some("notes")), NOW),
+        Gate::Ask("notes".into())
+    );
     share.answered("notes", Answer::Silent, NOW);
     for reach in [act(Some("notes")), act(None)] {
         let Gate::Refuse(error) = share.gate(reach, NOW) else {
@@ -173,7 +182,10 @@ fn required_sharing_allows_a_yes_and_keeps_refusal_scope_and_take_back() {
     let mut share = Share::default();
     share.set_required(true);
     share.answered("notes", Answer::Declined, NOW);
-    assert!(matches!(share.gate(act(Some("notes")), NOW), Gate::Refuse(_)));
+    assert!(matches!(
+        share.gate(act(Some("notes")), NOW),
+        Gate::Refuse(_)
+    ));
     share.answered("safari", Answer::Shared, NOW);
     assert_eq!(share.gate(act(Some("safari")), NOW), Gate::Go);
     assert_eq!(
@@ -199,7 +211,10 @@ fn required_silence_waits_then_the_next_act_after_the_quiet_asks_again() {
     let mut share = Share::default();
     share.set_required(true);
     let asked = 1_000;
-    assert_eq!(share.gate(act(Some("notes")), asked), Gate::Ask("notes".into()));
+    assert_eq!(
+        share.gate(act(Some("notes")), asked),
+        Gate::Ask("notes".into())
+    );
     share.answered("notes", Answer::Silent, asked);
     assert_eq!(share.waiting(), Some("notes"));
     for now in [asked, asked + SHARE_ASK_AGAIN_MS - 1] {
@@ -267,7 +282,11 @@ fn required_silence_beside_a_share_waits_and_never_widens_it() {
         code(share.gate(act(Some("notes")), 1)).as_deref(),
         Some(error_code::SHARE_REQUIRED)
     );
-    assert_eq!(share.target(), Some("safari"), "silence never widens a share");
+    assert_eq!(
+        share.target(),
+        Some("safari"),
+        "silence never widens a share"
+    );
     assert_eq!(
         share.gate(act(Some("notes")), SHARE_ASK_AGAIN_MS),
         Gate::Ask("notes".into())
@@ -289,7 +308,11 @@ fn without_required_sharing_silence_never_waits_and_is_never_asked_again() {
         Gate::Go
     );
     share.set_required(true);
-    assert_eq!(share.waiting(), Some("calculator"), "requiring it makes it wait");
+    assert_eq!(
+        share.waiting(),
+        Some("calculator"),
+        "requiring it makes it wait"
+    );
     share.set_required(false);
     assert_eq!(share.waiting(), None);
 }
@@ -319,20 +342,40 @@ fn a_request_in_flight_is_judged_again_without_moving_the_share() {
     share.answered("notes", Answer::Shared, NOW);
     assert_eq!(share.target(), Some("notes"));
     assert_eq!(share.still_holds(act(Some("safari"))), Ok(()));
-    assert_eq!(share.target(), Some("notes"), "a step in flight moves nothing");
+    assert_eq!(
+        share.target(),
+        Some("notes"),
+        "a step in flight moves nothing"
+    );
     share.set_required(true);
-    assert_eq!(share.still_holds(act(Some("safari"))), Ok(()), "safari was handed over");
+    assert_eq!(
+        share.still_holds(act(Some("safari"))),
+        Ok(()),
+        "safari was handed over"
+    );
     for reach in [act(Some("calculator")), act(None)] {
         assert_eq!(
-            share.still_holds(reach).map_err(|error| error.code).err().as_deref(),
+            share
+                .still_holds(reach)
+                .map_err(|error| error.code)
+                .err()
+                .as_deref(),
             Some(error_code::SHARE_REQUIRED),
             "{reach:?}"
         );
     }
-    assert_eq!(share.still_holds(look(Some("calculator"))), Ok(()), "a look is no act");
+    assert_eq!(
+        share.still_holds(look(Some("calculator"))),
+        Ok(()),
+        "a look is no act"
+    );
     share.take_back();
     assert_eq!(
-        share.still_holds(act(Some("notes"))).map_err(|error| error.code).err().as_deref(),
+        share
+            .still_holds(act(Some("notes")))
+            .map_err(|error| error.code)
+            .err()
+            .as_deref(),
         Some(error_code::PERSON_TOOK_CONTROL)
     );
     assert_eq!(share.target(), Some("notes"));
