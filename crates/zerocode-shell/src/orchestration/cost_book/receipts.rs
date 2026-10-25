@@ -3,6 +3,7 @@ use std::io::Read;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use zerocode_core::held_file_lock::HeldFileLock;
 use zerocode_core::orchestration::task_cost::{GenerationCost, UsdReason};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -97,24 +98,15 @@ pub(super) fn preserve(
     }
 }
 
-/// The receipts lock while one preserve holds it.
-///
-/// Ended by its guard, not by its last descriptor: a child another thread
+/// The receipts lock while one preserve holds it, ended by its guard
+/// ([`HeldFileLock`]), not by its last descriptor: a child another thread
 /// starts while this is held can keep a copy of the descriptor, and a close
 /// alone would shut the next preserve out (the lesson of t-73907 and
 /// t-73946).
-struct Held(std::fs::File);
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        let _ = self.0.unlock();
-    }
-}
-
-fn take_lock(root: &Path) -> Option<Held> {
+fn take_lock(root: &Path) -> Option<HeldFileLock> {
     let lock = crate::durable_file::private_lock_file(&root.join(".receipts.lock")).ok()?;
     lock.try_lock().ok()?;
-    Some(Held(lock))
+    Some(HeldFileLock::locked(lock))
 }
 
 fn read(file: &Path) -> Option<Receipt> {

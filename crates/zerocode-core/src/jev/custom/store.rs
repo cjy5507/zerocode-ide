@@ -28,8 +28,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{DECISIONS_MAX, Definition, MODES, Refusal, SCHEMA_VERSION, check, is_id, version_of};
 use crate::civil;
+use crate::held_file_lock::HeldFileLock;
 use crate::jev::JevMode;
-use crate::jev::store_lock::StoreLock;
 
 /// Where the store lives under zo's config home.
 pub const DIRECTORY: &str = "jev/decisions";
@@ -589,7 +589,7 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn lock(root: &Path) -> io::Result<StoreLock> {
+fn lock(root: &Path) -> io::Result<HeldFileLock> {
     private_directory(root)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -602,7 +602,7 @@ fn lock(root: &Path) -> io::Result<StoreLock> {
     let until = Instant::now() + LOCK_WAIT;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(StoreLock::held(file)),
+            Ok(()) => return Ok(HeldFileLock::locked(file)),
             Err(TryLockError::WouldBlock) if Instant::now() < until => thread::sleep(LOCK_POLL),
             Err(TryLockError::WouldBlock) => {
                 return Err(io::Error::new(

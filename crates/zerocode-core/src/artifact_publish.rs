@@ -480,8 +480,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
-/// OS lock is released on process exit, including an interrupted publication.
-pub fn lock_store(root: &Path) -> Result<std::fs::File, String> {
+/// OS lock is released when the guard drops, and on process exit, including
+/// an interrupted publication.
+pub fn lock_store(root: &Path) -> Result<crate::held_file_lock::HeldFileLock, String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -493,7 +494,7 @@ pub fn lock_store(root: &Path) -> Result<std::fs::File, String> {
     let started = std::time::Instant::now();
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(crate::held_file_lock::HeldFileLock::locked(file)),
             Err(std::fs::TryLockError::WouldBlock)
                 if started.elapsed() < std::time::Duration::from_millis(STORE_LOCK_PATIENCE_MS) =>
             {
@@ -843,6 +844,27 @@ mod tests {
         assert!(busy.starts_with("artifact store busy"), "{busy}");
         drop(second);
         assert!(lock_store(&root).is_ok());
+    }
+
+    /// A launch on another thread that forks before it execs holds a copy of
+    /// every descriptor until the exec, and a flock belongs to the open file
+    /// description, so a lock its holder only closed stays held by that copy
+    /// (t-73907, t-74976). The duplicate here is that copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_the_store_lock_left_in_a_launch_does_not_hold_the_next_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("artifacts");
+        let held = lock_store(&root).unwrap();
+        let inherited = held.try_clone().unwrap();
+        drop(held);
+        let next = std::fs::File::open(root.join(".publish.lock")).unwrap();
+        let taken = next.try_lock();
+        drop(inherited);
+        assert!(
+            taken.is_ok(),
+            "a lock its holder let go is still held by a copy"
+        );
     }
 
     #[cfg(unix)]

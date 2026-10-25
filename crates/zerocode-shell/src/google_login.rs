@@ -241,13 +241,14 @@ fn update_root(
 ///
 /// The lock file stays in place permanently and the OS lock rides the open
 /// descriptor: an unlink-and-recreate cycle would race, and a crash would
-/// leave an existence lock nobody can clear.
-fn hold_lock(path: &Path) -> Result<std::fs::File, String> {
+/// leave an existence lock nobody can clear. The guard ends the lock when it
+/// drops, so a copy of the descriptor in a forked launch cannot keep it.
+fn hold_lock(path: &Path) -> Result<zerocode_core::held_file_lock::HeldFileLock, String> {
     let lock_path = path.with_extension("json.lock");
     let file = durable_file::private_lock_file(&lock_path).map_err(|error| error.to_string())?;
     for attempt in 0..LOCK_TRIES {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(zerocode_core::held_file_lock::HeldFileLock::locked(file)),
             Err(error) => {
                 let error = std::io::Error::from(error);
                 if error.kind() != std::io::ErrorKind::WouldBlock {
@@ -940,6 +941,28 @@ mod tests {
         );
         drop(held);
         save(&path, &credentials()).expect("save once the lock is free");
+    }
+
+    /// A launch on another thread that forks before it execs holds a copy of
+    /// every descriptor until the exec, and a flock belongs to the open file
+    /// description, so a lock its holder only closed stays held by that copy
+    /// (t-73907, t-74976). The duplicate here is that copy.
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_of_the_credential_lock_left_in_a_launch_does_not_hold_the_next_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("credentials.json");
+        let held = hold_lock(&path).expect("first hold");
+        let inherited = held.try_clone().expect("a copy of the descriptor");
+        drop(held);
+        let next = crate::durable_file::private_lock_file(&path.with_extension("json.lock"))
+            .expect("the lock file");
+        let taken = next.try_lock();
+        drop(inherited);
+        assert!(
+            taken.is_ok(),
+            "a lock its holder let go is still held by a copy"
+        );
     }
 
     /// The store's word turned into the two judgements a person acts on.

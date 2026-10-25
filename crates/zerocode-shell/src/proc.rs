@@ -76,6 +76,50 @@ pub(crate) fn quiet_command_on_path(
     command
 }
 
+/// 자식에게 변수 몇 개를 더 얹는 문 — `env` 가 `PATH` 를 담으면 이름은 그
+/// `PATH` 위에서 먼저 풀린다(`quiet_command_on_path`). 담지 않으면 `PATH` 를
+/// 건드리지 않은 명령이라 맨 이름이어도 std 는 `posix_spawn` 을 탄다.
+pub(crate) fn quiet_command_with_env<K: AsRef<OsStr>, V: AsRef<OsStr>>(
+    program: impl AsRef<OsStr>,
+    env: &[(K, V)],
+) -> std::process::Command {
+    let mut command = quiet_command_on_path(program, path_named_in(env));
+    command.envs(env.iter().map(|(name, value)| (name, value)));
+    command
+}
+
+/// 자식의 환경이 `env` 하나뿐인 문. std 는 `env_clear` 를 `PATH` 바꿈으로
+/// 세므로(t-74976), 이름은 `env` 의 `PATH` 위에서 — `env` 에 `PATH` 가
+/// 없으면 `execvp` 가 `PATH` 없이 찾았을 자리([`EXECVP_DEFAULT_PATH`])에서 —
+/// 먼저 풀린다. 그 자리는 이름을 푸는 데만 쓰이고, 자식은 `env` 에 없는
+/// `PATH` 를 받지 않는다.
+pub(crate) fn quiet_command_in_env<K: AsRef<OsStr>, V: AsRef<OsStr>>(
+    program: impl AsRef<OsStr>,
+    env: &[(K, V)],
+) -> std::process::Command {
+    let path = path_named_in(env).unwrap_or(OsStr::new(EXECVP_DEFAULT_PATH));
+    let mut command = quiet_command_on_path(program, Some(path));
+    command
+        .env_clear()
+        .envs(env.iter().map(|(name, value)| (name, value)));
+    command
+}
+
+/// `PATH` 가 없는 환경에서 `execvp` 가 찾는 자리: macOS `<paths.h>` 의
+/// `_PATH_DEFPATH`, glibc 의 `confstr(_CS_PATH)`. windows 는 이 문에서 이름을
+/// 풀지 않으므로 값을 읽지 않는다.
+#[cfg(target_os = "macos")]
+const EXECVP_DEFAULT_PATH: &str = "/usr/bin:/bin";
+#[cfg(not(target_os = "macos"))]
+const EXECVP_DEFAULT_PATH: &str = "/bin:/usr/bin";
+
+/// `env` 가 자식에게 주는 `PATH`.
+fn path_named_in<K: AsRef<OsStr>, V: AsRef<OsStr>>(env: &[(K, V)]) -> Option<&OsStr> {
+    env.iter()
+        .find(|(name, _)| name.as_ref() == OsStr::new("PATH"))
+        .map(|(_, value)| value.as_ref())
+}
+
 /// `execvp` 의 걸음: 이름에 `/` 가 있으면 그대로, 없으면 `path` 의 디렉터리
 /// 차례로 실행 비트가 선 보통 파일. 없으면 첫 디렉터리(없으면 루트) 아래
 /// 그 이름 — 존재하지 않는 절대 경로라 spawn 이 `NotFound` 로 답한다.
@@ -255,5 +299,76 @@ mod tests {
         let inherited = quiet_command_on_path("zo-nowhere", None::<&str>);
         assert_eq!(inherited.get_program(), "zo-nowhere");
         assert_eq!(inherited.get_envs().count(), 0);
+    }
+
+    fn envs_of(command: &std::process::Command) -> Vec<(String, Option<String>)> {
+        command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    /// A whole env of its own: a bare name is found on that env's `PATH`, or
+    /// where `execvp` looks with none, and the child's env is that env and
+    /// nothing else — no `PATH` it did not name (t-74976).
+    #[cfg(unix)]
+    #[test]
+    fn a_child_given_a_whole_env_is_named_by_a_path_and_gets_only_that_env() {
+        let with_path = [("PATH", "/bin"), ("ZEROCODE_DOOR", "1")];
+        let command = quiet_command_in_env("sh", &with_path);
+        assert_eq!(command.get_program(), "/bin/sh");
+        assert_eq!(
+            envs_of(&command),
+            vec![
+                ("PATH".into(), Some("/bin".into())),
+                ("ZEROCODE_DOOR".into(), Some("1".into()))
+            ]
+        );
+
+        let without_path = [("ZEROCODE_DOOR", "1")];
+        let mut command = quiet_command_in_env("sh", &without_path);
+        let program = std::path::PathBuf::from(command.get_program());
+        assert!(
+            program.is_absolute() && program.ends_with("sh"),
+            "{program:?}"
+        );
+        assert_eq!(
+            envs_of(&command),
+            vec![("ZEROCODE_DOOR".into(), Some("1".into()))]
+        );
+        let status = command
+            .args(["-c", "exit 4"])
+            .status()
+            .expect("the child ran");
+        assert_eq!(status.code(), Some(4));
+    }
+
+    /// A few variables more: a `PATH` among them names the program the same
+    /// way; without one the command keeps its name and the window's `PATH`,
+    /// which std starts by `posix_spawn` either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_given_a_few_variables_is_named_by_the_path_among_them() {
+        let command = quiet_command_with_env("sh", &[("PATH", "/bin"), ("ZEROCODE_DOOR", "1")]);
+        assert_eq!(command.get_program(), "/bin/sh");
+        assert_eq!(
+            envs_of(&command),
+            vec![
+                ("PATH".into(), Some("/bin".into())),
+                ("ZEROCODE_DOOR".into(), Some("1".into()))
+            ]
+        );
+
+        let command = quiet_command_with_env("zo-nowhere", &[("ZEROCODE_DOOR", "1")]);
+        assert_eq!(command.get_program(), "zo-nowhere");
+        assert_eq!(
+            envs_of(&command),
+            vec![("ZEROCODE_DOOR".into(), Some("1".into()))]
+        );
     }
 }

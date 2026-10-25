@@ -974,24 +974,16 @@ fn capability_with(
 
 /// The command for `program`, under `env` alone when one is given.
 ///
-/// A bare name is found on that env's own `PATH` first. std counts
+/// A bare name is found first — on that env's own `PATH`, or where `execvp`
+/// looks when it names none (`proc::quiet_command_in_env`). std counts
 /// `env_clear` as a `PATH` change, and a bare name with a changed `PATH`
 /// makes std fork; a fork in the window can stand before its exec holding a
-/// copy of every descriptor the window has (t-73907; t-47141 for the doors
-/// `quiet_command_on_path` already serves).
+/// copy of every descriptor the window has (t-73907, t-74976).
 fn command_under(program: &Path, env: Option<&[(String, String)]>) -> std::process::Command {
-    let path = env.and_then(|env| {
-        env.iter()
-            .find(|(name, _)| name == "PATH")
-            .map(|(_, path)| path.as_str())
-    });
-    let mut command = crate::proc::quiet_command_on_path(program, path);
-    if let Some(env) = env {
-        command
-            .env_clear()
-            .envs(env.iter().map(|(name, value)| (name, value)));
+    match env {
+        Some(env) => crate::proc::quiet_command_in_env(program, env),
+        None => crate::proc::quiet_command(program),
     }
-    command
 }
 
 fn run_bounded_command(
@@ -1799,6 +1791,40 @@ mod tests {
                 .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
                 .collect::<Vec<_>>(),
             vec![("PATH".into(), Some("/bin:/usr/bin".into()))],
+            "the env is the launch's own and nothing else"
+        );
+        assert_eq!(
+            run_bounded_command(
+                Path::new("sh"),
+                &["-c".to_string(), "exit 0".to_string()],
+                None,
+                Some(&env),
+                Duration::from_secs(5),
+            ),
+            CommandResult::Succeeded
+        );
+    }
+
+    /// The same under a launch env that names no `PATH`: `env_clear` alone is
+    /// a `PATH` change to std, so the bare name is found where `execvp` would
+    /// have looked with no `PATH` at all, and the child still gets none
+    /// (t-74976).
+    #[cfg(unix)]
+    #[test]
+    fn a_bare_program_under_an_env_without_a_path_starts_by_its_path() {
+        let env = vec![("ZEROCODE_QUEUE_PROBE".to_string(), "1".to_string())];
+        let command = command_under(Path::new("sh"), Some(&env));
+        let program = Path::new(command.get_program());
+        assert!(
+            program.is_absolute() && program.ends_with("sh"),
+            "a bare name under env_clear makes std fork the window: {program:?}"
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .map(|(name, value)| (name.to_owned(), value.map(ToOwned::to_owned)))
+                .collect::<Vec<_>>(),
+            vec![("ZEROCODE_QUEUE_PROBE".into(), Some("1".into()))],
             "the env is the launch's own and nothing else"
         );
         assert_eq!(

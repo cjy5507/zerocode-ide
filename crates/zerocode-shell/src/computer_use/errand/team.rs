@@ -208,10 +208,9 @@ impl TeamJudge {
     fn run(&self, prompt: &str, deadline: Duration) -> Result<String, String> {
         let last_message = answer_file();
         let _ = std::fs::remove_file(&last_message);
-        let mut command = crate::proc::quiet_command(&self.program);
+        let mut command = crate::proc::quiet_command_with_env(&self.program, &self.env);
         command
             .args(self.argv(&last_message))
-            .envs(self.env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

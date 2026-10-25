@@ -14,7 +14,6 @@ pub mod answer;
 pub mod briefing;
 pub mod colors;
 pub mod echo_shapes;
-pub mod gate_channel;
 pub mod grid;
 pub mod input;
 pub mod lane;
