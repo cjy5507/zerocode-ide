@@ -640,6 +640,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_flat_root_with_a_final_dot_keeps_the_sibling_legacy() {
+        let configured = Ours {
+            worktree_root: "/work/worktrees/repo/./",
+            ..ours()
+        };
+        let sibling = at("/work/worktrees/other/task");
+        assert_eq!(classify(sibling, configured), Ownership::UnknownLegacy);
+        assert!(!is_zerocode_managed(sibling, configured));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_backslash_flat_root_keeps_git_slash_siblings_legacy() {
+        for root in [r"C:\work\worktrees\repo", r"C:\work\worktrees\repo\"] {
+            let configured = Ours {
+                worktree_root: root,
+                ..ours()
+            };
+            let sibling = at("C:/work/worktrees/other/task");
+            assert_eq!(classify(sibling, configured), Ownership::UnknownLegacy);
+            assert!(!is_zerocode_managed(sibling, configured));
+            for outside in [
+                "C:/work/worktrees",
+                "C:/work/worktrees-neighbour/other/task",
+                "C:/work/worktrees/../outside/task",
+                "D:/work/worktrees/other/task",
+            ] {
+                assert_eq!(classify(at(outside), configured), Ownership::External);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_backslash_unc_flat_root_keeps_git_slash_siblings_legacy() {
+        let configured = Ours {
+            worktree_root: r"\\example.invalid\share\worktrees\repo\",
+            ..ours()
+        };
+        let sibling = at("//example.invalid/share/worktrees/other/task");
+        assert_eq!(classify(sibling, configured), Ownership::UnknownLegacy);
+        assert!(!is_zerocode_managed(sibling, configured));
+        for outside in [
+            "//example.invalid/share/worktrees",
+            "//example.invalid/other/worktrees/other/task",
+            "//other.invalid/share/worktrees/other/task",
+        ] {
+            assert_eq!(classify(at(outside), configured), Ownership::External);
+        }
+    }
+
     /// 윈도우에서 git이 돌려주는 `C:/…` 경로도 절대 경로다 — 그 밖의 체크아웃은
     /// external이다(앞이 `/`인 경로만 절대라고 읽던 시절에는 영원히 legacy였다).
     #[test]
