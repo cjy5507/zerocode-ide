@@ -328,20 +328,27 @@ mod slot_tests {
         let mut held = fill_slots(&dir.0);
         let released_band = held.last().expect("eight slots").band().clone();
         let (waiting, exhausted) = sync_channel(1);
-        let (resume, released) = sync_channel(1);
         std::thread::scope(|scope| {
             let lock_dir = &dir.0;
             let borrower = scope.spawn(move || {
-                apart_slot_in(lock_dir, None, SLOT_WAIT_TIMEOUT, |_| {
-                    waiting.send(()).expect("report the exhausted scan");
-                    released.recv().expect("the holder released a slot");
+                // The pause never blocks on the test: it reports the first
+                // exhausted scan and then waits out its interval, so a rescan
+                // that misses the freed slot scans again, and only the claim's
+                // own deadline ends the wait (gate l78n3 g2 hung on a pause
+                // that waited for a second release nobody would send).
+                let mut reported = false;
+                apart_slot_in(lock_dir, None, SLOT_WAIT_TIMEOUT, |interval| {
+                    if !reported {
+                        reported = true;
+                        waiting.send(()).expect("report the exhausted scan");
+                    }
+                    std::thread::sleep(interval);
                 })
             });
             exhausted
                 .recv_timeout(SLOT_WAIT_TIMEOUT)
                 .expect("the borrower must wait with all eight slots still held");
             drop(held.pop());
-            resume.send(()).expect("retry the exhausted claim");
             let borrowed = borrower.join().expect("the waiting borrower gets a slot");
             assert_eq!(borrowed.band(), &released_band);
         });
