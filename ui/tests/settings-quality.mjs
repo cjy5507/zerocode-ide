@@ -186,13 +186,14 @@ export async function contrastTable(page, AxeBuilder, include) {
         for (const layer of layers.reverse()) ground = over(layer, ground);
         const ink = over(channels(getComputedStyle(node).color) ?? [0, 0, 0, 1], ground);
         const [hi, lo] = [luminance(ink), luminance(ground)].sort((a, b) => b - a);
-        return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
+        const colour = channels => `rgb(${channels.slice(0, 3).map(channel => Math.round(channel * 255)).join(", ")})`;
+        return { ratio: Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100, fg: colour(ink), bg: colour(ground) };
       });
     }, unknown.map((row) => row.target));
     unknown.forEach((row, at) => {
       if (measured[at] === null) return;
       row.verdict = "computed";
-      row.ratio = measured[at];
+      Object.assign(row, measured[at]);
     });
   }
   return rows;

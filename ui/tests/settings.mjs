@@ -3562,6 +3562,7 @@ const pass = (name, detail = "") => results.push({ name, pass: true, detail });
 const fail = (name, detail) => results.push({ name, pass: false, detail: String(detail) });
 
 async function test(name, run) {
+  if (process.env.SETTINGS_FILTER && !new RegExp(process.env.SETTINGS_FILTER).test(name)) return;
   if (process.env.SETTINGS_TRACE) process.stderr.write(`settings START ${name}\n`);
   try {
     const detail = await run();
@@ -3666,6 +3667,23 @@ async function openSettings(page, pane = null) {
     if (wanted) showSettingsPane(wanted);
   }, pane);
   await renderSettled(page);
+}
+
+async function connectionScenePictures(page, name) {
+  const folder = process.env.CONNECTION_SCENE_SHOTS;
+  if (!folder) return;
+  await mkdir(folder, { recursive: true });
+  for (const [theme, width] of [["dark", 320], ["dark", 768], ["dark", 1440], ["light", 768]]) {
+    await setQualityTheme(page, theme);
+    await page.setViewportSize({ width, height: 1069 });
+    await page.evaluate(() => { const pane = document.querySelector('.settings-pane:not([hidden])'); pane?.parentElement.scrollTo({ top: 0, behavior: "instant" }); });
+    await settlePaint(page);
+    const geometry = await page.locator('.settings-pane:not([hidden])').evaluate(pane => ({ width: pane.clientWidth, scroll: pane.scrollWidth }));
+    assert(geometry.scroll <= geometry.width + 1, `${name}/${theme}/${width} overflows`, geometry);
+    await page.screenshot({ path: resolve(folder, `${name}-${theme}-${width}.png`), animations: "disabled" });
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await setQualityTheme(page, "dark");
 }
 
 async function reopenSettings(page, id, pane) {
@@ -5655,6 +5673,7 @@ await test("a_timed_out_watch_still_rereads_the_gauge: 기다림이 시간을 �
 
 await test("라우터 추가→연결 시험→모델 셋 켬→settings.json providers 한 항목", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
 
   assert(
     await pageA.locator('.settings-pane[data-pane="api-routers"]').isVisible(),
@@ -5766,6 +5785,7 @@ await test("라우터 추가→연결 시험→모델 셋 켬→settings.json pr
 
 await test("라우터 모델 표의 머리칸 하나로 전체 선택·전체 해제", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "pick-all");
   await pageA.fill("#router-base-url-input", origin);
@@ -5808,6 +5828,7 @@ await test("라우터 모델 표의 머리칸 하나로 전체 선택·전체 �
 
 await test("라우터 연결 변경은 이전 모델 목록과 늦게 도착한 응답을 무효화한다", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "probe-generation");
   await pageA.fill("#router-base-url-input", origin);
@@ -5847,6 +5868,7 @@ await test("라우터 연결 변경은 이전 모델 목록과 늦게 도착한 
 
 await test("라우터 저장 중 이름이나 모델을 바꾸면 옛 저장 응답이 새 편집을 저장됐다고 하지 않는다", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "saved-draft");
   await pageA.fill("#router-base-url-input", origin);
@@ -5910,6 +5932,7 @@ async function addRouterRow(page, { preset, name, key }) {
 
 await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘이 서로의 키를 덮지 않고, 지우기는 제 키만", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   backend.zoSettings.providers = [];
   backend.keychain.clear();
   await pageA.evaluate(() => refreshApiRouters());
@@ -5943,7 +5966,9 @@ await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘
   const droppedAt = backend.calls.length;
   const rows = pageA.locator("#router-provider-list .account-row");
   const index = (await rows.locator(".agent-row-name").allTextContents()).indexOf("OpenRouter 회사");
+  await pageA.evaluate(() => modelConnectionsController.show("catalog"));
   await rows.nth(index).locator(".account-drop").click();
+  await rows.nth(index).locator(".connection-delete-note").getByRole("button", { name: "삭제", exact: true }).click();
   const removal = await backend.waitForCall("A", "remove_api_router", droppedAt);
   assertEqual(removal.args, { name: "OpenRouter 회사", sourceId: listed.id, expectedGeneration: listed.generation }, "the removal did not name the row the list showed");
   await pageA.waitForFunction(
@@ -5958,6 +5983,7 @@ await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘
 
 await test("키체인이 없는 컴퓨터: 판이 키체인을 약속하지 않고 키 칸을 내주지 않으며, 키 없는 저장은 된다", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   backend.zoSettings.providers = [];
   backend.keychain.clear();
   backend.routerKeychainUnavailable = true;
@@ -5986,6 +6012,7 @@ await test("키체인이 없는 컴퓨터: 판이 키체인을 약속하지 않�
   }
   // The same pane on a machine with a keychain offers the field again.
   await pageA.evaluate(() => refreshApiRouters());
+  await pageA.selectOption("#connection-auth", "new");
   assert(!(await pageA.locator("#router-key-input").isDisabled()), "a machine with a keychain was left without the key field");
   assert(await pageA.locator("#router-keychain-hint").isVisible(), "a machine with a keychain lost its hint");
   assert(!(await pageA.locator("#router-no-keychain-hint").isVisible()), "a machine with a keychain still said it had none");
@@ -9121,26 +9148,21 @@ await test("SSH Hosts verifies the server key and drives one native-backed remot
   await backend.waitForCall("A", "remote_workspaces", reopenedAt);
 
   await pageA.locator("#remote-workspace-add").click();
+  // Compare the same unfocused state; the initial input focus owns a different border.
+  await pageA.evaluate(() => document.activeElement?.blur());
+  await settlePaint(pageA);
   // 이 칸의 select는 형제 input과 같은 얼굴이어야 한다. 오래 `settings-select`를
   // 입고 있었는데 이 창의 어떤 스타일시트도 그 이름을 선언하지 않는다 — 밑줄도
   // 얼굴도 없는 네이티브 셀렉트로 서고, 그 옆에는 `.settings-field:has(select)`가
   // 그린 셰브런만 떠 있었다. 재는 것은 클래스 목록이 아니라 그려진 결과다.
-  assertEqual(
-    await pageA.evaluate(() => {
-      const face = (id) => {
-        const paint = getComputedStyle(document.getElementById(id));
-        return [
-          paint.borderBottomWidth,
-          paint.borderBottomColor,
-          paint.backgroundColor,
-          paint.fontFamily,
-        ].join(" | ");
-      };
-      return { same: face("remote-workspace-host") === face("remote-workspace-label") };
-    }),
-    { same: true },
-    "the host select is not wearing the field face its siblings wear",
-  );
+  const hostFaces = await pageA.evaluate(() => {
+    const face = id => {
+      const paint = getComputedStyle(document.getElementById(id));
+      return [paint.borderBottomWidth, paint.borderBottomColor, paint.backgroundColor, paint.fontFamily];
+    };
+    return { select: face("remote-workspace-host"), input: face("remote-workspace-label") };
+  });
+  assertEqual(hostFaces.select, hostFaces.input, "the host select is not wearing the field face its siblings wear");
   await pageA.locator("#remote-workspace-label").fill("Project checkout");
   await pageA.locator("#remote-workspace-root").fill("/srv/project-link");
   const rootProbeAt = backend.calls.length;
@@ -14052,6 +14074,193 @@ await test("a profile card imports cookies from a file", async () => {
   return "file import summary + source line";
 });
 
+await test("model connection scenes: catalog separates registration, models and use", async () => {
+  backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
+  const before = clone(backend.zoSettings);
+  const managedBefore = backend.managedModelState ? clone(backend.managedModelState) : null;
+  try {
+    backend.managedJudgmentSettings();
+    backend.managedModelState.models[0].installed = true;
+    backend.zoSettings.providers = [{ name: "긴 한글 연결 이름으로 표시하는 외부 서버", base_url: "https://gateway.example.com/v1", models: ["choice-model", "coding-model"], requires_auth: false, connection: { id: "scene-external", generation: 1 } },
+      { name: "Local fixture", base_url: "http://127.0.0.1:8080/v1", models: ["local-model"], requires_auth: false, connection: { id: "scene-local", generation: 1 } }];
+    await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => refreshApiRouters());
+    assert(await pageA.locator("#router-card").isHidden(), "the add form still occupies the catalog");
+    const remote = pageA.locator('[data-connection-id="scene-external"]');
+    assert((await remote.textContent()).includes("외부 서버"), "the connection has no location");
+    assert(!(await remote.textContent()).includes("연결됨"), "registration invented a live server status");
+    await remote.locator("[data-connection-models]").click();
+    assertEqual(await remote.locator(".connection-model").count(), 2, "the model list is not expandable");
+    assert(await pageA.locator('[data-connection-id="jev"]').isVisible(), "Jev is outside the catalog");
+    assertEqual(await pageA.locator('[data-connection-id^="managed:"]').count(), 1, "managed local models are outside the catalog");
+    assert((await pageA.locator('[data-connection-id="scene-local"]').textContent()).includes("실행 중인 로컬 서버"));
+    if (process.env.CONNECTION_SCENE_SHOTS) {
+      await mkdir(process.env.CONNECTION_SCENE_SHOTS, { recursive: true });
+      for (const theme of ["dark", "light"]) {
+        await setQualityTheme(pageA, theme);
+        for (const width of [320, 768, 1440]) {
+          await pageA.setViewportSize({ width, height: 960 });
+          await settlePaint(pageA);
+          await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, `catalog-${theme}-${width}.png`), animations: "disabled" });
+          const overflow = await pageA.evaluate(() => { const pane = document.querySelector('.settings-pane[data-pane="api-routers"]'); const right = pane.getBoundingClientRect().right; return [...pane.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > right + 1).map(node => [node.tagName, node.className, node.id, node.getBoundingClientRect().width]); });
+          assert(!overflow.length, "the catalog overflows its pane", overflow);
+        }
+      }
+      await setQualityTheme(pageA, "dark");
+      await pageA.setViewportSize({ width: 1440, height: 1069 });
+      await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => { pane.style.width = "320px"; });
+      await settlePaint(pageA);
+      const split = await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => ({ width: pane.clientWidth, scroll: pane.scrollWidth }));
+      assert(split.scroll <= split.width + 1, "the catalog overflows a narrow pane inside a wide window", split);
+      await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "catalog-split-320.png"), animations: "disabled" });
+      await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => { pane.style.width = ""; });
+      backend.zoSettings.providers = [];
+      await pageA.evaluate(() => refreshApiRouters());
+      assertEqual(await pageA.locator("#router-provider-list .account-row").count(), 0);
+      assert((await pageA.locator("#router-provider-note").textContent()).length > 0);
+      await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "catalog-empty.png"), animations: "disabled" });
+    }
+  } finally {
+    await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => { pane.style.width = ""; });
+    backend.zoSettings = before;
+    if (managedBefore) backend.managedModelState = managedBefore; else delete backend.managedModelState;
+    await pageA.setViewportSize({ width: 1280, height: 900 });
+    await pageA.evaluate(() => refreshApiRouters());
+  }
+});
+
+await test("model connection scenes: add chooses location and authentication before listing models", async () => {
+  backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
+  await openSettings(pageA, "api-routers");
+  await pageA.click("#connections-add");
+  assert(await pageA.locator("#router-card").isVisible());
+  assertEqual(await pageA.locator("#connection-location option").count(), 4, "location choices omit a source");
+  await pageA.selectOption("#connection-location", "local");
+  await pageA.fill("#router-base-url-input", "http://127.0.0.1:8080/v1");
+  await pageA.selectOption("#connection-auth", "none");
+  assert(await pageA.locator("#router-key-input").isHidden(), "keyless setup still requests a key");
+  assert((await pageA.locator("#connection-registration-note").textContent()).includes("현재 사용 모델은 바뀌지"));
+  await connectionScenePictures(pageA, "add-flow");
+  const calls = backend.calls.length;
+  await pageA.selectOption("#connection-location", "managed");
+  assert(await pageA.locator("#connection-service-action").isVisible());
+  assert(await pageA.locator("#connection-server-fields").isHidden());
+  assertEqual(backend.calls.slice(calls).filter(call => ["save_api_router", "select_model_connection", "test_router_connection"].includes(call.command)).length, 0, "choosing a source made a server request");
+  await pageA.selectOption("#connection-location", "remote");
+  await pageA.evaluate(() => modelConnectionsController.show("catalog"));
+});
+
+await test("model connection scenes: assignment compares drafts and requires a current format check", async () => {
+  backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
+  const before = clone(backend.zoSettings);
+  try {
+    backend.zoSettings.providers = [
+      { name: "Local fixture", base_url: "http://127.0.0.1:8080/v1", models: ["local-model"], requires_auth: false, connection: { id: "local-scene", generation: 1 } },
+      { name: "External fixture", base_url: "https://gateway.example.com/v1", models: ["external-model"], requires_auth: false, connection: { id: "external-scene", generation: 1 } },
+    ];
+    await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => refreshApiRouters());
+    await pageA.locator('[data-connection-nav="usage"]').click();
+    const calls = backend.calls.length;
+    await pageA.click('[data-connection-scenario="local"]');
+    const selected = await pageA.evaluate(() => [modelConnectionsController.selected("coding"), modelConnectionsController.selected("judgment")]);
+    assertEqual(selected.map(row => row.id), ["external-scene", "local-scene"]);
+    assertEqual(backend.calls.slice(calls).filter(call => call.command === "select_model_connection").length, 0);
+    const judgment = pageA.locator('[data-connection-roles="all"] [data-role="judgment"]');
+    assert(await judgment.locator('[data-connection-apply]').isDisabled(), "unchecked draft can be applied");
+    await judgment.locator('[data-connection-check]').click();
+    await pageA.waitForFunction(() => !modelConnectionsController.busy);
+    assert(await judgment.locator('[data-connection-apply]').isEnabled());
+    assertEqual(await judgment.locator('[data-format-state="ready"]').count(), 3);
+    await pageA.click('[data-connection-scenario="shared"]');
+    assert(await judgment.locator('[data-connection-apply]').isDisabled(), "changed assignment reused its check");
+    assertEqual(await pageA.evaluate(() => modelConnectionsController.selected("coding").id), "external-scene");
+    assert((await pageA.locator("#connection-comparison").textContent()).includes("External fixture"));
+    await connectionScenePictures(pageA, "assignment-draft");
+  } finally {
+    backend.zoSettings = before;
+    await pageA.evaluate(() => { modelConnectionsController.drafts.clear(); modelConnectionsController.results.clear(); modelConnectionsController.show("catalog"); return refreshApiRouters(); });
+  }
+});
+
+await test("model connection scenes: deletion explains used roles beside the connection", async () => {
+  backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
+  const before = clone(backend.zoSettings);
+  try {
+    backend.zoSettings.providers = [{ name: "Used fixture", base_url: "https://gateway.example.com/v1", models: ["fixture-model"], requires_auth: false, connection: { id: "used-scene", generation: 1 } }];
+    backend.zoSettings.smart = { ...backend.zoSettings.smart, codingConnection: { id: "used-scene", generation: 1, model: "fixture-model", protocol: "openai_json" } };
+    await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => { modelConnectionsController.show("catalog"); return refreshApiRouters(); });
+    const from = backend.calls.length;
+    await pageA.locator('[data-connection-id="used-scene"] .account-drop').click();
+    const note = pageA.locator('[data-connection-id="used-scene"] .connection-delete-note');
+    assert(await note.isVisible(), "deletion advice is outside the connection");
+    assert((await note.textContent()).includes("코딩"));
+    assert(await note.getByRole("button", { name: "모델 사용", exact: true }).isVisible(), "deletion offers no route to replace the role");
+    assertEqual(backend.calls.slice(from).filter(call => call.command === "remove_api_router").length, 0);
+    if (process.env.CONNECTION_SCENE_SHOTS) await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "delete-used.png"), animations: "disabled" });
+  } finally {
+    backend.zoSettings = before;
+    await pageA.evaluate(() => refreshApiRouters());
+  }
+});
+
+await test("model connection scenes: model use absorbs the old judgment picker", async () => {
+  backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
+  await openSettings(pageA, "judgment-models");
+  assertEqual(await pageA.locator('.settings-rail-item[data-pane="judgment-models"]').textContent().then(text => text.trim()), "모델 사용");
+  assertEqual(await pageA.locator('[data-connection-roles="judgment"]').count(), 0, "a second role picker remains");
+  assert(await pageA.locator('[data-connection-roles="all"]').isVisible(), "coding and judgment are not selected together");
+  assert(!(await pageA.locator('#judgment-connection-settings > summary').textContent()).includes("기존 서버"));
+  await pageA.evaluate(() => modelConnectionsController.show("catalog"));
+});
+
+await test("model connection scenes: failed and stale checks keep the active judgment", async () => {
+  backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
+  const before = clone(backend.zoSettings);
+  try {
+    backend.zoSettings.providers = [{ name: "Error fixture", base_url: "http://127.0.0.1:8080/v1", models: ["fixture-model"], requires_auth: false, connection: { id: "error-scene", generation: 1 } }];
+    await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => refreshApiRouters());
+    await pageA.evaluate(() => { modelConnectionsController.show("usage"); modelConnectionsController.change("judgment", { id: "error-scene", generation: 1, model: "fixture-model", protocol: "openai_json" }); });
+    const active = clone(backend.zoSettings.smart?.judgmentProvider ?? null);
+    for (const token of ["schema", "provider_request"]) {
+      backend.connectionCheck = { answered: false, failure: token };
+      await pageA.evaluate(() => modelConnectionsController.run("judgment", "check"));
+      const panel = pageA.locator('[data-connection-roles="all"] [data-role="judgment"]');
+      assert((await panel.locator(".connection-failure-help").textContent()).includes("현재 판단 모델"));
+      assert(await panel.locator("[data-connection-apply]").isDisabled());
+      assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null, active);
+      if (process.env.CONNECTION_SCENE_SHOTS) {
+        await panel.scrollIntoViewIfNeeded();
+        await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, `error-${token}.png`), animations: "disabled" });
+      }
+    }
+    let finish;
+    backend.connectionCheckWait = new Promise(resolve => { finish = resolve; });
+    const from = backend.calls.length;
+    const checking = pageA.evaluate(() => modelConnectionsController.run("judgment", "check"));
+    await backend.waitForCall("A", "check_model_connection", from);
+    backend.zoSettings.providers[0].connection.generation += 1;
+    await pageA.evaluate(() => modelConnectionsController.refresh());
+    finish({ answered: true, failure: null });
+    await checking;
+    assert(!await pageA.evaluate(() => modelConnectionsController.checked("judgment")), "an old-generation check became applicable");
+    assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null, active);
+  } finally {
+    delete backend.connectionCheck;
+    delete backend.connectionCheckWait;
+    backend.zoSettings = before;
+    await pageA.evaluate(() => { modelConnectionsController.drafts.clear(); modelConnectionsController.results.clear(); modelConnectionsController.show("catalog"); return refreshApiRouters(); });
+  }
+});
+
 await test("shared connection selection sends only its reference and preserves the active model on refusal", async () => {
   const before = clone(backend.zoSettings);
   try {
@@ -14105,6 +14314,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
   await pageA.setViewportSize({ width: 2000, height: 1200 });
   try {
     await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => modelConnectionsController.add());
     backend.keychain.delete(TYPESAFE_SERVICE);
     delete backend.zoSettings.smart;
     backend.zoSettings.providers = [];
@@ -14395,7 +14605,8 @@ await test("the Jev page is named for the decisions it shows — the tab, the ti
       if (locale === "ko") assert(words.navTip === want, "ko: the rail's tip is the page's name", words);
     }
   } finally {
-    await setQualityLocale(pageA, "ko");
+    backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
   }
   return JSON.stringify(seen);
 });
@@ -14424,7 +14635,8 @@ await test("the Google card names zo and the gauge as the sign-in's users — in
       assert(typeof words.hint === "string" && words.hint.includes("zo") && gauge.test(words.hint), `${locale}: the hint names zo and the gauge`, words);
     }
   } finally {
-    await setQualityLocale(pageA, "ko");
+    backend.settings.locale = "ko";
+  await setQualityLocale(pageA, "ko");
   }
   return JSON.stringify(seen);
 });
