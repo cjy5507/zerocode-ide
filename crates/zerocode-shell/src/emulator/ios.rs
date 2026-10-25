@@ -2099,6 +2099,11 @@ pub(super) fn start_idle_reclaimer(app: AppHandle) {
     keeping::start_idle_reclaimer(app);
 }
 
+/// Whether this window booted a simulator its exit would shut down.
+pub(super) fn holds_devices() -> bool {
+    !keeping::nothing_is_ours()
+}
+
 /// The window is closing. A booted simulator is left booted — that is the
 /// whole of D3 — unless the person has said otherwise, in which case the
 /// devices this window is answerable for go with it.

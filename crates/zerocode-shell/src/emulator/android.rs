@@ -725,6 +725,16 @@ fn managed_processes() -> Vec<Arc<ManagedEmulatorProcess>> {
     held(managed_devices()).values().cloned().collect()
 }
 
+/// Whether this window holds an emulator its exit would put away.
+pub(super) fn holds_devices() -> bool {
+    !held(managed_devices()).is_empty()
+}
+
+/// The window is on its way out: no launch starts from here on.
+pub(super) fn stop_launching() {
+    MANAGED_SHUTTING_DOWN.store(true, Ordering::Release);
+}
+
 /// Put away every emulator this window is holding.
 ///
 /// `keep_booted` is the person's `emulator.keepBooted` (D3): the devices stay
@@ -732,7 +742,7 @@ fn managed_processes() -> Vec<Arc<ManagedEmulatorProcess>> {
 /// road that already exists instead of paying a cold boot. Launches stop
 /// either way — a window on its way out has nobody to hand a new device to.
 pub(super) fn shutdown_all_devices(keep_booted: bool) {
-    MANAGED_SHUTTING_DOWN.store(true, Ordering::Release);
+    stop_launching();
     if keep_booted {
         return;
     }
