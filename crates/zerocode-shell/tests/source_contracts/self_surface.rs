@@ -245,14 +245,19 @@ fn required_sharing_reads_the_saved_policy_and_rechecks_each_provider_step() {
     let runtime = code_only(include_str!("../../src/agent_tools_runtime.rs"));
     let install = block_after(&runtime, "fn install_share(app: AppHandle)");
     assert!(install.contains("share::install_required("));
-    assert!(install.contains("load_settings("));
-    assert!(install.contains("snapshot.document.computer_share_required"));
+    // R1 (t-74826): read at every provider step, so from memory — never the
+    // disk and never the repository's lock a commit holds through its fsync
+    // (t-67102). The person's toggle commits, and a commit is remembered.
+    assert!(install.contains("remembered_settings("));
     assert!(
-        install.contains("map_or(true,"),
-        "a failed read cannot relax the requirement"
+        !install.contains("load_settings("),
+        "a step must not wait on the settings lock"
     );
+    assert!(install.contains(".document.computer_share_required"));
     let road = code_only(include_str!("../../src/computer_use/share.rs"));
     let current = block_after(&road, "pub(crate) fn ensure_current()");
     assert!(current.contains("refresh_required()"));
-    assert!(current.contains("held.share.gate(Reach"));
+    // A step in flight is judged without moving the share (t-74826).
+    assert!(current.contains("held.share.still_holds(Reach"));
+    assert!(!current.contains(".gate("));
 }

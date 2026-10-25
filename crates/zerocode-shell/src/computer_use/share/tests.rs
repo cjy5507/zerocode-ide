@@ -368,3 +368,19 @@ fn without_required_sharing_nothing_waits() {
     assert!(state()["waiting"].is_null());
     assert!(!hand_over("calculator"));
 }
+
+/// R1 (t-74826): a request in flight in one app, another app handed over
+/// since — the first request's next step leaves the share where the person
+/// put it and tells the band nothing.
+#[test]
+fn a_step_in_flight_never_moves_the_share_back() {
+    let (_person, _) = person(Decision::Allowed);
+    let in_flight = admit(ComputerMethod::Click, &click("Safari")).expect("admitted");
+    drop(admit(ComputerMethod::Click, &click("Notes")).expect("admitted"));
+    assert_eq!(state()["target"], "notes");
+    let told = stand_in::notices().len();
+    assert!(ensure_current().is_ok());
+    assert_eq!(state()["target"], "notes", "the step moved the share back");
+    assert_eq!(stand_in::notices().len(), told, "the band heard no move");
+    drop(in_flight);
+}

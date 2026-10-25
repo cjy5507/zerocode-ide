@@ -307,3 +307,33 @@ fn a_no_under_required_sharing_is_not_asked_again_and_does_not_wait() {
         Some(error_code::SHARE_SCOPE)
     );
 }
+
+/// R1 (t-74826): a request in flight is judged again at each step without
+/// moving the share. With A in flight and B handed over since, A's next
+/// step neither takes the share back to A nor is refused for it; only the
+/// person's requirement and their hand on the window are judged again.
+#[test]
+fn a_request_in_flight_is_judged_again_without_moving_the_share() {
+    let mut share = Share::default();
+    share.answered("safari", Answer::Shared, NOW);
+    share.answered("notes", Answer::Shared, NOW);
+    assert_eq!(share.target(), Some("notes"));
+    assert_eq!(share.still_holds(act(Some("safari"))), Ok(()));
+    assert_eq!(share.target(), Some("notes"), "a step in flight moves nothing");
+    share.set_required(true);
+    assert_eq!(share.still_holds(act(Some("safari"))), Ok(()), "safari was handed over");
+    for reach in [act(Some("calculator")), act(None)] {
+        assert_eq!(
+            share.still_holds(reach).map_err(|error| error.code).err().as_deref(),
+            Some(error_code::SHARE_REQUIRED),
+            "{reach:?}"
+        );
+    }
+    assert_eq!(share.still_holds(look(Some("calculator"))), Ok(()), "a look is no act");
+    share.take_back();
+    assert_eq!(
+        share.still_holds(act(Some("notes"))).map_err(|error| error.code).err().as_deref(),
+        Some(error_code::PERSON_TOOK_CONTROL)
+    );
+    assert_eq!(share.target(), Some("notes"));
+}
