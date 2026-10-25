@@ -35,6 +35,7 @@ import { testUsageGoogleLogin, testUsageRefresh, testUsageWords } from "./usage-
 import { testTerminalDoor } from "./terminal-door.mjs";
 import { testWaitingList } from "./waiting-list.mjs";
 import { testPaletteRecent } from "./palette-recent.mjs";
+import { testDesignSystem } from "./design-system.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testToastClearOfDrawer } from "./toast-clear-of-drawer.mjs";
 import { testTaskBoard } from "./task-board.mjs";
@@ -281,6 +282,7 @@ suite("terminal-door", ({ browser, origin, ok }) => testTerminalDoor(browser, or
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("waiting-list", ({ browser, origin, ok }) => testWaitingList(browser, origin, standBackend, ok));
 suite("palette-recent", ({ browser, origin, ok }) => testPaletteRecent(browser, origin, standBackend, ok));
+suite("design-system", ({ browser, origin, ok }) => testDesignSystem(browser, origin, standBackend, ok));
 suite("toast-clear-of-drawer", ({ browser, origin, ok }) => testToastClearOfDrawer(browser, origin, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
