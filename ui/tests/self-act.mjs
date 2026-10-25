@@ -151,6 +151,85 @@ export async function testSelfAct(browser, origin, ok) {
     ok("a secret field's value never leaves the page", said.leaked === false);
   });
 
+  await scenario(browser, origin, "values", ok, async (page) => {
+    // The person's words in the window (t-74975): a draft they typed, a field
+    // the window filled for them, a settings address, the name beside a
+    // secret, a draft in an editable block. A look carries their length only.
+    await page.evaluate(() => {
+      const more = document.createElement("div");
+      more.id = "self-act-values";
+      more.style.cssText = "position:fixed;left:8px;top:8px;z-index:1;background:#000;padding:4px";
+      more.innerHTML = `
+        <input id="kept-field" type="text" aria-label="Kept field" value="SENTINEL-kept-text-62">
+        <section class="settings-pane"><input id="setting-address" type="email" aria-label="Setting address" value="SENTINEL-address-63"></section>
+        <div role="dialog" aria-label="Login dialog">
+          <input id="login-name" type="text" aria-label="Login name" value="SENTINEL-user-64">
+          <input type="password" aria-label="Login secret" value="">
+        </div>
+        <div id="draft-block" contenteditable="true" aria-label="Draft block">SENTINEL-block-65</div>
+        <div role="textbox" contenteditable="true">SENTINEL-unnamed-67</div>`;
+      document.body.appendChild(more);
+    });
+    await page.focus("#person-field");
+    await page.keyboard.type("SENTINEL-draft-61");
+    await page.focus("#probe-button");
+    const said = await page.evaluate(async () => {
+      const T = window.__SELF_T__;
+      const first = await T.ask({ kind: "look" });
+      const field = T.named(first, "Probe field");
+      const read = await T.ask({ kind: "facts", lookId: first.ok.lookId, id: field.id });
+      const filled = await T.ask({ kind: "do", lookId: first.ok.lookId, id: field.id, act: "setValue", value: "main.rs", facts: read.ok.facts });
+      const look = await T.ask({ kind: "look" });
+      const shown = (name) => {
+        const control = T.named(look, name);
+        return control && { value: control.value, withheld: control.withheld ?? null, name: control.name };
+      };
+      return {
+        filled: filled?.ok?.done ?? null,
+        leaked: (JSON.stringify(first) + JSON.stringify(look)).match(/SENTINEL-[a-z-]+-\d+/g) ?? [],
+        draft: shown("Person field"),
+        kept: shown("Kept field"),
+        address: shown("Setting address"),
+        user: shown("Login name"),
+        block: shown("Draft block"),
+        agents: shown("Probe field"),
+      };
+    });
+    ok("a look carries none of the person's words", said.leaked.length === 0, JSON.stringify(said.leaked));
+    ok("the person's draft reads as its length", said.draft?.value === null && said.draft?.withheld === "SENTINEL-draft-61".length, JSON.stringify(said.draft));
+    ok("a field's text the window put there reads as its length", said.kept?.value === null && said.kept?.withheld === "SENTINEL-kept-text-62".length, JSON.stringify(said.kept));
+    ok("a settings address reads as its length", said.address?.value === null && said.address?.withheld === "SENTINEL-address-63".length, JSON.stringify(said.address));
+    ok("a name beside a secret field reads as its length", said.user?.value === null && said.user?.withheld === "SENTINEL-user-64".length, JSON.stringify(said.user));
+    ok("an editable block's draft is neither its name nor its value", said.block?.name === "Draft block" && said.block?.value === null
+      && said.block?.withheld === "SENTINEL-block-65".length, JSON.stringify(said.block));
+    ok("the text an agent's own fill put there still reads", said.filled === true && said.agents?.value === "main.rs" && said.agents?.withheld === null,
+      JSON.stringify(said.agents));
+  });
+
+  await scenario(browser, origin, "values-after-the-person", ok, async (page) => {
+    // An agent filled the field, and then the person typed in it: the text is
+    // theirs again.
+    const asked = await page.evaluate(async () => {
+      const T = window.__SELF_T__;
+      const look = await T.ask({ kind: "look" });
+      const field = T.named(look, "Probe field");
+      const read = await T.ask({ kind: "facts", lookId: look.ok.lookId, id: field.id });
+      const filled = await T.ask({ kind: "do", lookId: look.ok.lookId, id: field.id, act: "setValue", value: "main.rs", facts: read.ok.facts });
+      return filled?.ok?.done ?? null;
+    });
+    await page.focus("#probe-field");
+    await page.keyboard.type("-SENTINEL-66");
+    await page.focus("#probe-button");
+    const said = await page.evaluate(async () => {
+      const T = window.__SELF_T__;
+      const look = await T.ask({ kind: "look" });
+      const field = T.named(look, "Probe field");
+      return { value: field?.value ?? null, withheld: field?.withheld ?? null, text: document.getElementById("probe-field").value };
+    });
+    ok("a field the person typed in after an agent's fill reads as its length", asked === true && said.value === null
+      && said.withheld === said.text.length && said.text.endsWith("-SENTINEL-66"), JSON.stringify(said));
+  });
+
   await scenario(browser, origin, "asking", ok, async (page) => {
     const said = await page.evaluate(async () => {
       const T = window.__SELF_T__;

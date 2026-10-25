@@ -41,6 +41,13 @@ pub const PERSON_ONLY_GRACE_MS: u64 = 1_500;
 /// page did not answer in time is reported unknown, never as pressed.
 pub const PAGE_ANSWER_MS: u64 = 3_000;
 
+/// What a look says in place of text it does not carry: only how long it is,
+/// in characters.
+#[must_use]
+pub fn withheld_text(chars: u64) -> String {
+    format!("(withheld: {chars} characters)")
+}
+
 /// What the page acts with: a look reads, the others press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

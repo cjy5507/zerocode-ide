@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use zerocode_core::computer_use_protocol::error_code;
-use zerocode_core::computer_use_protocol::self_surface::{Facts, OwnApp};
+use zerocode_core::computer_use_protocol::self_surface::{Facts, OwnApp, withheld_text};
 
 use super::stand_in;
 use crate::computer_use::{ComputerUseError, call, test_helper};
@@ -27,6 +27,8 @@ struct Control {
     role: &'static str,
     name: &'static str,
     value: Option<&'static str>,
+    /// How long the text the page held back is, when it held it back.
+    withheld: Option<u64>,
     facts: Facts,
 }
 
@@ -35,6 +37,7 @@ fn control(role: &'static str, name: &'static str) -> Control {
         role,
         name,
         value: None,
+        withheld: None,
         facts: Facts::default(),
     }
 }
@@ -62,6 +65,7 @@ fn page_answer(page: &Mutex<Page>, request: &Value) -> Result<Value, ComputerUse
                 "role": control.role,
                 "name": control.name,
                 "value": control.value,
+                "withheld": control.withheld,
                 "facts": control.facts,
             })).collect::<Vec<_>>(),
         })),
@@ -251,6 +255,72 @@ fn the_field_the_person_types_in_is_left_to_them() {
     .expect_err("the person's field was filled");
     assert_eq!(refused.code, error_code::PERSON_TYPING);
     assert!(page.lock().unwrap().pressed.is_empty());
+}
+
+/// A look carries no words of the person's (t-74975): the text in a field
+/// the person is in or typed in, in a settings pane, or beside a secret
+/// field reaches the agent as its length only, and so does text the page
+/// held back; a field's text the person has nothing to do with, a checkbox's
+/// state in a setting and an option still read.
+#[test]
+fn a_look_carries_the_persons_text_as_its_length_only() {
+    let _hand = one_hand();
+    let (_helper, _) = stand_helper();
+    let persons = [
+        Facts {
+            person_focus: true,
+            ..Facts::default()
+        },
+        Facts {
+            typed_ms_ago: Some(60_000),
+            ..Facts::default()
+        },
+        Facts {
+            setting: true,
+            ..Facts::default()
+        },
+        Facts {
+            beside_secret: true,
+            ..Facts::default()
+        },
+    ];
+    let mut controls: Vec<Control> = persons
+        .iter()
+        .map(|facts| Control {
+            value: Some("SENTINEL-persons-words-19"),
+            facts: facts.clone(),
+            ..control("AXTextArea", "Draft")
+        })
+        .collect();
+    controls.push(Control {
+        withheld: Some(23),
+        ..control("AXTextField", "Held back")
+    });
+    controls.push(Control {
+        value: Some("main.rs"),
+        ..control("AXTextField", "Search files")
+    });
+    controls.push(Control {
+        value: Some("checked"),
+        facts: Facts {
+            setting: true,
+            ..Facts::default()
+        },
+        ..control("AXCheckBox", "Show hidden files")
+    });
+    let (_page, _) = stand_page(controls);
+    let look = call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
+    let tree = look["snapshot"]["treeText"].as_str().unwrap();
+    assert!(!tree.contains("SENTINEL"), "{tree}");
+    let rows: Vec<&str> = tree.lines().filter(|row| row.contains("Draft")).collect();
+    assert_eq!(rows.len(), persons.len(), "{tree}");
+    let length = "SENTINEL-persons-words-19".chars().count() as u64;
+    for row in rows {
+        assert!(row.contains(&withheld_text(length)), "{row}");
+    }
+    assert!(tree.contains(&withheld_text(23)), "{tree}");
+    assert!(tree.contains("main.rs"), "{tree}");
+    assert!(tree.contains("checked"), "{tree}");
 }
 
 /// Keys, typed text, a paste or a drag would be OS events in the window the

@@ -125,6 +125,58 @@ fn a_command_named_for_a_credential_or_an_account_is_decided_for() {
     }
 }
 
+/// The same rule for work that cannot be had back (t-74975): a registered
+/// command whose name discards, deletes, removes, pushes, resets, closes,
+/// clears or aborts is on the person-only list, or on the list of such names
+/// an agent may run — each with its reason in the road's source. An agent's
+/// press on the source control panel's "discard changes" runs none of these
+/// while the marks miss it; a new command of that kind fails here until
+/// someone decides which it is.
+#[test]
+fn a_command_that_cannot_be_taken_back_is_decided_for() {
+    const WORDS: [&str; 8] = [
+        "discard", "delete", "remove", "push", "reset", "close", "clear", "abort",
+    ];
+    let person = person_only_commands();
+    // The ones the review found outside the wall (R1, t-73906): the person's
+    // uncommitted work, their checkouts and projects, their browser's
+    // sign-ins, Computer Use's own permissions, a push.
+    for name in [
+        "discard_paths",
+        "delete_untracked",
+        "scm_push",
+        "remove_worktree",
+        "remove_project",
+        "close_lane",
+        "delete_browser_profile",
+        "reset_computer_use_permissions",
+    ] {
+        assert!(person.contains(&name.to_string()), "{name} is the person's");
+    }
+    let allowed = road_list("pub(crate) const AGENT_ALLOWED_DESTRUCTIVE_NAMED: &[&str] = &[");
+    let registered = registered_commands();
+    let undecided: Vec<&String> = registered
+        .iter()
+        .filter(|name| WORDS.iter().any(|word| name.contains(word)))
+        .filter(|name| !person.contains(name) && !allowed.contains(name))
+        .collect();
+    assert!(
+        undecided.is_empty(),
+        "undecided commands that cannot be taken back: {undecided:?}"
+    );
+    for name in &allowed {
+        assert!(
+            registered.contains(name),
+            "{name} is allowed but not registered"
+        );
+        assert!(
+            WORDS.iter().any(|word| name.contains(word)),
+            "{name} is allowed but its name says none of {WORDS:?}"
+        );
+        assert!(!person.contains(name), "{name} is on both lists");
+    }
+}
+
 /// The page presses with the document's own calls: no synthetic key or
 /// pointer event, no focus move, no clipboard.
 #[test]
