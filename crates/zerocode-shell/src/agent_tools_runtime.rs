@@ -6660,6 +6660,12 @@ fn install_self_surface(app: AppHandle) {
 fn install_share(app: AppHandle) {
     use computer_use::{confirm, share};
 
+    let policy = app.clone();
+    share::install_required(Box::new(move || {
+        // A failed read must not turn an enabled requirement off.
+        load_settings(policy.state::<AppState>().settings())
+            .map_or(true, |snapshot| snapshot.document.computer_share_required)
+    }));
     let asking = app.clone();
     share::install(
         Box::new(move |card| {

@@ -1157,6 +1157,7 @@ a failed step in the log and is filed as a task for a person; write
   `share_scope` — work in the shared app, or act in the other app to ask for
   it. The person can take control at any time; then every act answers
   `person_took_control` until they hand it back. Do not retry around either.
+- When the person enables required sharing, `share_required` refuses acts in an unshared app even after silence; wait for the person to share it, and never change this person-only setting. Looks keep the existing share rules.
 - The person has one hand on you at all times: the desktop chord
   control+option+escape, `zerocode-computer stop`, and the window's stop
   button all stop the operator at its next event. A `stopped` answer means

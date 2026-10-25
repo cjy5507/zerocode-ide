@@ -63,6 +63,7 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "computer_confirm_answer",
     "computer_handoff_code",
     "set_computer_input_policy",
+    "set_computer_share_required",
     "set_computer_live_reflex",
     "computer_resume",
     "claim_coordinator_seat",

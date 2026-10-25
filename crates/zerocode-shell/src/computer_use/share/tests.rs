@@ -128,3 +128,73 @@ fn the_windows_own_verbs_are_never_held_to_a_share() {
         assert!(admit(method, &json!({})).is_ok(), "{method:?}");
     }
 }
+
+#[test]
+fn required_sharing_refuses_an_unanswered_card_and_every_unnamed_act() {
+    super::with_held(|held| held.share.set_required(true));
+    let (_person, asked) = person(Decision::TimedOut);
+    for _ in 0..2 {
+        assert_eq!(
+            refused(ComputerMethod::Click, &click("Notes")).as_deref(),
+            Some("share_required")
+        );
+    }
+    assert_eq!(asked.get(), 1);
+    assert_eq!(
+        refused(ComputerMethod::PressKey, &json!({"key": "Escape"})).as_deref(),
+        Some("share_required")
+    );
+    assert!(admit(ComputerMethod::Screenshot, &json!({})).is_ok());
+}
+
+#[test]
+fn required_sharing_accepts_a_yes_and_keeps_window_verbs_available() {
+    super::with_held(|held| held.share.set_required(true));
+    let (_person, asked) = person(Decision::Allowed);
+    assert!(admit(ComputerMethod::Click, &click("Notes")).is_ok());
+    assert_eq!(asked.get(), 1);
+    for method in [
+        ComputerMethod::Stop,
+        ComputerMethod::Resume,
+        ComputerMethod::Status,
+        ComputerMethod::Handoff,
+    ] {
+        assert!(admit(method, &json!({})).is_ok());
+    }
+}
+
+#[test]
+fn required_sharing_blocks_every_unnamed_act_without_asking() {
+    super::with_held(|held| held.share.set_required(true));
+    let (_person, asked) = person(Decision::Allowed);
+    for method in ComputerMethod::ALL
+        .iter()
+        .copied()
+        .filter(|method| method.acts())
+    {
+        assert_eq!(
+            refused(method, &json!({})).as_deref(),
+            Some("share_required"),
+            "{method:?}"
+        );
+    }
+    assert_eq!(asked.get(), 0);
+}
+
+#[test]
+fn enabling_required_sharing_stops_an_unshared_act_at_its_next_step() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let (_person, _) = person(Decision::TimedOut);
+    let required = Arc::new(AtomicBool::new(false));
+    let read = Arc::clone(&required);
+    super::install_required(Box::new(move || read.load(Ordering::SeqCst)));
+    let _in_flight =
+        admit(ComputerMethod::Click, &click("Notes")).expect("default permits silence");
+    required.store(true, Ordering::SeqCst);
+    assert_eq!(ensure_current().unwrap_err().code, "share_required");
+    required.store(false, Ordering::SeqCst);
+    assert!(ensure_current().is_ok());
+}

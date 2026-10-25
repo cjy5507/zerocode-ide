@@ -122,6 +122,7 @@ pub(super) mod setting_key {
     pub const COMPUTER_CONFIRM_DELETE: &str = "computer_confirm_delete";
     pub const COMPUTER_LIVE_REFLEX: &str = "computer_live_reflex";
     pub const COMPUTER_INPUT_POLICY: &str = "computer_input_policy";
+    pub const COMPUTER_SHARE_REQUIRED: &str = "computer_share_required";
     pub const COMPUTER_GENERATOR_ROAD: &str = "computer_generator_road";
     pub const OPENCODE_COOKIE_CONFIGURED: &str = "opencode_cookie_configured";
     pub const OPENCODE_WORKSPACE: &str = "opencode_workspace";
@@ -2490,6 +2491,9 @@ pub(super) struct SettingsDocument {
     pub(super) computer_confirm_delete: bool,
     #[serde(default)]
     pub(super) computer_input_policy: zerocode_core::computer_use_protocol::execution::InputPolicy,
+    /// Require an explicit app share for acts. Off until the person chooses it.
+    #[serde(default)]
+    pub(super) computer_share_required: bool,
     /// Whether a live reflex run may start on this desktop (realtime v1,
     /// t-9205). Off for a person who never chose: a run holds the hand and
     /// presses at its own pace, so it is theirs to turn on.
@@ -2678,6 +2682,7 @@ impl Default for SettingsDocument {
             computer_confirm_delete: true,
             computer_input_policy:
                 zerocode_core::computer_use_protocol::execution::InputPolicy::default(),
+            computer_share_required: false,
             computer_live_reflex: false,
             computer_generator_road: zerocode_core::type_value::GeneratorRoad::default(),
             browser: BrowserPrefs::default(),
