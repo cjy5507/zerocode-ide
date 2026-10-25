@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use zerocode_core::computer_use::ComputerMethod;
 use zerocode_core::computer_use_protocol::render::{RenderNode, line, render_tree_text};
 use zerocode_core::computer_use_protocol::self_surface::{
-    Act, Facts, METHODS, OwnApp, judge, unsupported,
+    Act, Facts, METHODS, OwnApp, PAGE_ANSWER_MS, PERSON_ONLY_GRACE_MS, judge, unsupported,
 };
 use zerocode_core::computer_use_protocol::{AppIdentity, error_code};
 
@@ -70,7 +70,6 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "land_batch_bisect",
     "land_batch_cancel",
     "land_batch_restack",
-    "commit_landings",
     "merge_and_remove_worktree",
     "github_merge_pr",
     "gitlab_merge_mr",
@@ -86,8 +85,58 @@ pub(crate) fn person_only(command: &str) -> Result<(), String> {
 }
 
 /// [`person_only`] at `now`.
-pub(crate) fn person_only_at(_command: &str, _now: std::time::Instant) -> Result<(), String> {
-    Ok(())
+pub(crate) fn person_only_at(command: &str, now: std::time::Instant) -> Result<(), String> {
+    debug_assert!(
+        PERSON_ONLY_COMMANDS.contains(&command),
+        "{command} asks the second wall but is not on PERSON_ONLY_COMMANDS"
+    );
+    match held() {
+        Some(until) if now < until => Err(format!(
+            "{command} is the person's to run, and an agent is pressing in ZeroCode's window; run it again in a moment"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Until when the person-only commands are held: an agent's press in flight
+/// and PERSON_ONLY_GRACE_MS after it. A test's press holds its own thread
+/// only, so it never refuses a command another test runs beside it.
+#[cfg(not(test))]
+static HELD_UNTIL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+#[cfg(test)]
+thread_local! {
+    static HELD_UNTIL: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+fn held() -> Option<std::time::Instant> {
+    #[cfg(not(test))]
+    {
+        *HELD_UNTIL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    #[cfg(test)]
+    {
+        HELD_UNTIL.with(std::cell::Cell::get)
+    }
+}
+
+/// Hold the person-only commands until `until`, never shortening a hold
+/// another press set.
+fn hold_until(until: std::time::Instant) {
+    if held().is_some_and(|standing| standing >= until) {
+        return;
+    }
+    #[cfg(not(test))]
+    {
+        *HELD_UNTIL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(until);
+    }
+    #[cfg(test)]
+    {
+        HELD_UNTIL.with(|held| held.set(Some(until)));
+    }
 }
 
 /// Requests the page has not answered yet, by id.
@@ -365,7 +414,13 @@ fn press(
         }
         Act::Click | Act::Look => {}
     }
-    let done = page(&request)?;
+    // The person-only commands are held while the press is in flight and a
+    // moment after it, for a handler that awaits before it calls one.
+    let grace = Duration::from_millis(PERSON_ONLY_GRACE_MS);
+    hold_until(std::time::Instant::now() + Duration::from_millis(PAGE_ANSWER_MS) + grace);
+    let done = page(&request);
+    hold_until(std::time::Instant::now() + grace);
+    let done = done?;
     if done.get("done") != Some(&Value::Bool(true)) {
         return Err(not_found(
             "that element of ZeroCode's window changed before the press; nothing was pressed — look again",

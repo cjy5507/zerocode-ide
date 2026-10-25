@@ -673,6 +673,8 @@ pub(crate) async fn github_merge_pr(
     number: Option<u64>,
     method: Option<String>,
 ) -> Result<(), GhFailure> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("github_merge_pr").map_err(GhFailure::ours)?;
     let orchestrator =
         known_project_orchestrator(state.config_root(), &project.unwrap_or_default())
             .map_err(GhFailure::ours)?;
@@ -858,6 +860,8 @@ pub(crate) async fn gitlab_merge_mr(
     number: Option<u64>,
     method: Option<String>,
 ) -> Result<(), GlabFailure> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("gitlab_merge_mr").map_err(GlabFailure::ours)?;
     let orchestrator =
         known_project_orchestrator(state.config_root(), &project.unwrap_or_default())
             .map_err(GlabFailure::ours)?;
@@ -1752,6 +1756,8 @@ pub(crate) async fn merge_and_remove_worktree(
     target_branch: Option<String>,
     commit_message: Option<String>,
 ) -> Result<String, String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("merge_and_remove_worktree")?;
     let (orchestrator, chosen) = known_worktree_context(state.config_root(), &path)?;
     let branch = chosen
         .branch

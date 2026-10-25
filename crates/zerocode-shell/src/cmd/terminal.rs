@@ -2011,6 +2011,8 @@ pub(crate) fn answer_ask(
     prompt: zerocode_core::ask::AskPrompt,
     selections: Vec<zerocode_core::ask::AskSelection>,
 ) -> Result<(), String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("answer_ask")?;
     use zerocode_core::ask;
     if !ask::has_answer(&prompt, &selections) {
         return Err("고른 답이 없습니다".to_string());
@@ -2154,6 +2156,8 @@ pub(crate) fn answer_approval(
     term: TermId,
     allow: bool,
 ) -> Result<(), String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("answer_approval")?;
     let key = if allow {
         zerocode_core::ask::APPROVAL_ALLOW
     } else {
@@ -2199,6 +2203,8 @@ pub(crate) fn answer_secret(
     line: String,
     value: String,
 ) -> Result<(), String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("answer_secret")?;
     let held = state.terminals().handle(term);
     let agent_pane = state.agent_terms().contains_key(&term);
     answer_door::answer_secret_into(

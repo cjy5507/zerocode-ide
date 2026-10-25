@@ -479,6 +479,8 @@ pub(crate) async fn quota_wall_handover(
     to: Option<String>,
 ) -> Result<serde_json::Value, PressRefusal> {
     crate::from_the_main_webview(&webview)?;
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("quota_wall_handover")?;
     tauri::async_runtime::spawn_blocking(move || {
         let overrides: Vec<_> = {
             let state = app.state::<AppState>();
@@ -511,6 +513,8 @@ pub(crate) async fn land_batch_promote(
     run: String,
     batch: String,
 ) -> Result<serde_json::Value, String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("land_batch_promote")?;
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::orchestration::press_land_batch(
@@ -532,6 +536,8 @@ pub(crate) async fn land_batch_bisect(
     run: String,
     batch: String,
 ) -> Result<serde_json::Value, String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("land_batch_bisect")?;
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::orchestration::press_land_batch(
@@ -555,6 +561,8 @@ pub(crate) async fn land_batch_restack(
     batch: String,
     drop: Vec<String>,
 ) -> Result<serde_json::Value, String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("land_batch_restack")?;
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::orchestration::press_land_batch(
@@ -576,6 +584,8 @@ pub(crate) async fn land_batch_cancel(
     run: String,
     batch: String,
 ) -> Result<serde_json::Value, String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("land_batch_cancel")?;
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::orchestration::press_land_batch(
@@ -750,6 +760,8 @@ pub(crate) async fn claim_coordinator_seat(
     expected_generation: u32,
     retry_request: String,
 ) -> Result<serde_json::Value, String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("claim_coordinator_seat")?;
     tauri::async_runtime::spawn_blocking(move || {
         let host = crate::agent_tools_runtime::TeamWindow { app };
         crate::orchestration::coordinator_handover::claim_seat(
@@ -788,6 +800,8 @@ pub(crate) async fn set_coordinator_handover(
     target_term: Option<u32>,
     retry_request: String,
 ) -> Result<serde_json::Value, String> {
+    // An agent pressing in ZeroCode's own window never runs this (t-73906).
+    crate::computer_use::self_surface::person_only("set_coordinator_handover")?;
     tauri::async_runtime::spawn_blocking(move || {
         let host = crate::agent_tools_runtime::TeamWindow { app };
         crate::orchestration::coordinator_handover::set_policy(

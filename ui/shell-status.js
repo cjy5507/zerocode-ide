@@ -4602,6 +4602,10 @@ function buildTabNode(tab, group) {
       ? '<span class="tab-pin" aria-hidden="true"></span>'
       : '<button class="tab-close">×</button>');
   if (tab.pinned) node.querySelector(".tab-pin").innerHTML = icon("pin");
+  // A terminal tab's close ends whatever runs in it — another agent's work
+  // or the person's — so an agent pressing in the window never makes it (t-73906).
+  const close = node.querySelector(".tab-close");
+  if (tab.kind === "term" && close) close.dataset.personOnly = "";
   // What kind of thing this tab holds. Orca's tabs carry one (measured on
   // 1.4.164: its `Terminal 1` tab wears a terminal glyph), and a strip of
   // bare words is the thing that reads as a wireframe — the same finding

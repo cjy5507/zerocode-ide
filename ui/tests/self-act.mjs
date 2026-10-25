@@ -163,9 +163,12 @@ export async function testSelfAct(browser, origin, ok) {
       const first = inPopup[0];
       // Facts that do not match the control — a backend that judged other
       // facts than the page's — press nothing.
+      // The facts read first, as the backend reads them; then a press on
+      // other facts than those.
+      const read = first && await T.ask({ kind: "facts", lookId: look.ok.lookId, id: first.id });
       const forged = first && await T.ask({
         kind: "do", lookId: look.ok.lookId, id: first.id, act: "click",
-        facts: { ...first.facts, asking: false },
+        facts: { ...read.ok.facts, asking: false },
       });
       const scrim = document.getElementById("ask-scrim");
       return {

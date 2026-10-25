@@ -50290,6 +50290,21 @@ button.jev-token:hover {
   font-size: var(--text-xs);
 }
 
+/* Where an agent pressed in ZeroCode's own window (t-73906): a dashed ring for
+ * a moment — dashed so it never reads as the person's keyboard focus, which is
+ * a solid ring of the same ink. */
+.self-act-pressed {
+  outline: 2px dashed var(--ink-chalk);
+  outline-offset: 2px;
+  transition: outline-color var(--motion-fast) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .self-act-pressed {
+    transition: none;
+  }
+}
+
 /* The person's stop could not pause a work browser (t-62872): the words say
  * so, in the halt ink the stop itself wears, on the band and in the panel. */
 .computer-band-browsers.is-failed,
