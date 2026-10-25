@@ -20,6 +20,9 @@ function closeBrowser({ active = false, receiver = "other" } = {}) {
   const document = { body, activeElement: { other: field, body, chrome }[receiver] };
   const tab = { id: "browser:closing", kind: "browser", pane: 0 };
   const state = vm.createContext({
+    // closeTab's default hand (shell-boot.js handNow, t-75209): the person's
+    // own press closes the browser in every scene here.
+    handNow: () => "person",
     tabs: [tab],
     activeTabId: active ? tab.id : "term:kept",
     document,
