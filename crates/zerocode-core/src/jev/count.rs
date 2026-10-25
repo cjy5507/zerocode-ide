@@ -9,11 +9,13 @@
 //! request's own place in the day, so two programs counting at the same
 //! moment each learn which of them took the last place.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, OpenOptions, TryLockError};
 use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use super::store_lock::StoreLock;
 
 /// The directory under zo's config home the day files live in.
 pub const REQUESTS_DIR: &str = "jev";
@@ -102,7 +104,7 @@ pub fn hour_path(config_home: &Path, key: &str, hour: &str) -> PathBuf {
 
 /// Exclude every other hour writer until the returned file is dropped.
 /// A lock that stays busy past [`HOURS_LOCK_WAIT`] returns `WouldBlock`.
-pub(super) fn lock_hours(every: &Path) -> io::Result<File> {
+pub(super) fn lock_hours(every: &Path) -> io::Result<StoreLock> {
     let path = every.with_file_name(HOURS_LOCK_FILE);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -118,7 +120,7 @@ pub(super) fn lock_hours(every: &Path) -> io::Result<File> {
     let until = Instant::now() + HOURS_LOCK_WAIT;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(StoreLock::held(file)),
             Err(TryLockError::WouldBlock) if Instant::now() < until => {
                 thread::sleep(HOURS_LOCK_POLL);
             }
