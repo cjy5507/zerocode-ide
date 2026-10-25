@@ -30,6 +30,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const source = (path) => readFile(resolve(ROOT, path), "utf8").catch(() => "");
 const DOOR = await source("crates/zerocode-shell/src/cmd/browser.rs");
 const FORM = await source("crates/zerocode-shell/src/cmd/browser/form.rs");
+const UPLOAD = await source("crates/zerocode-shell/src/cmd/browser/upload.rs");
 const CORE = await source("crates/zerocode-core/src/agent_browser.rs");
 const FORM_CORE = await source("crates/zerocode-core/src/browser_form.rs");
 const SCREEN = await source("crates/zerocode-core/src/screen_action.rs");
@@ -47,6 +48,7 @@ export const need = (name, value) => {
 };
 
 export const HELPERS = rustText(DOOR, "BROWSER_AUTOMATION_HELPERS");
+export const OPENED_PREFIX = rustText(CORE, "BROWSER_OPENED_PREFIX");
 export const OBSERVE_HELPERS = rustText(DOOR, "BROWSER_OBSERVE_HELPERS");
 export const MARK_HELPERS = rustText(DOOR, "BROWSER_MARK_HELPERS");
 export const CLICK_BODY = rustText(DOOR, "CLICK_BODY");
@@ -88,6 +90,33 @@ export const FILL_POLL_MS = rustNumber(CORE, "BROWSER_WAIT_POLL_MS");
 export const TRIES_AGAIN = ["mismatch", "not_found", "no_option", "disabled"];
 
 const CANDIDATE_CAP = rustNumber(JEV, "SCREEN_CANDIDATE_CAP");
+const snapshotKey = (name) => rustText(SCREEN, name);
+const observeKey = (head) => SCREEN.match(new RegExp(`pub const fn key\\(self\\)[\\s\\S]*?Self::${head} => "(\\w+)"`))[1];
+const KEYS = {
+  epoch: snapshotKey("EPOCH_KEY"), kind: snapshotKey("FIELD_KIND_KEY"), secret: snapshotKey("FIELD_SECRET_KEY"),
+  label: snapshotKey("LABEL_KEY"), placeholder: snapshotKey("FIELD_PLACEHOLDER_KEY"), near: snapshotKey("FIELD_NEAR_KEY"),
+  value: snapshotKey("FIELD_VALUE_KEY"), role: snapshotKey("ROLE_KEY"), count: snapshotKey("COUNT_KEY"),
+  alt: snapshotKey("ALT_KEY"), width: snapshotKey("WIDTH_KEY"), height: snapshotKey("HEIGHT_KEY"),
+  text: snapshotKey("TEXT_KEY"), selector: snapshotKey("SELECTOR_KEY"),
+  containers: observeKey("Container"), images: observeKey("Image"), rows: observeKey("Row"),
+};
+/* The request `automate_marks` hands the page (cmd/browser.rs
+ * `marks_request`), from the same tables. */
+export const MARKS_REQUEST = {
+  selectors: rustList(CORE, "BROWSER_MARKABLE"),
+  answerCap: rustNumber(DOOR, "BROWSER_CALLBACK_CAP"),
+  keys: KEYS,
+  observed: {
+    containers: rustList(CORE, "BROWSER_OBSERVED_CONTAINERS"), rows: rustList(CORE, "BROWSER_OBSERVED_ROWS"),
+    images: rustList(CORE, "BROWSER_OBSERVED_IMAGES"), chrome: rustList(CORE, "BROWSER_OBSERVED_CHROME"),
+    cap: CANDIDATE_CAP, imageMinPx: rustNumber(CORE, "BROWSER_OBSERVED_IMAGE_MIN_PX"),
+  },
+  field: { regions: rustList(CORE, "BROWSER_FIELD_REGIONS"), headings: rustList(CORE, "BROWSER_FIELD_HEADINGS") },
+  wordCap: Math.floor(rustNumber(SCREEN, "SHOWS_CHAR_CAP") / CANDIDATE_CAP),
+  valueCap: VALUE_QUESTION.valueCharCap,
+};
+export const marksScript = () => doorScript(MARKS_REQUEST, `${OBSERVE_HELPERS}\n${MARK_HELPERS}\n${need("BROWSER_MARKS_BODY", rustText(DOOR, "BROWSER_MARKS_BODY"))}`);
+
 /* `guarded::HELD_ROWS`: the rows of the window's one table of presses that
  * cannot be taken back, whole and in the table's order — a row the source
  * lacks makes the whole list null, so `need` names it, not a shorter list. */
@@ -123,6 +152,8 @@ const formScript = (request, body) => {
     + `${need("BROWSER_FORM_HELPERS", FORM_HELPERS)}\n${body}`);
 };
 export const fieldsScript = () => formScript(FORM_REQUEST, need("BROWSER_FIELDS_BODY", FIELDS_BODY));
+export const uploadScript = (selector, files, drop = false, expect = null) =>
+  formScript({ ...FORM_REQUEST, selector, files, drop, expect }, need("BROWSER_UPLOAD_BODY", rustText(UPLOAD, "BROWSER_UPLOAD_BODY")));
 /* The two halves of one fill pass (t-41387): the write — held to `expect` — and,
  * once the page has settled, the read-back of what the write held, in the
  * document `epoch` it was made in. */

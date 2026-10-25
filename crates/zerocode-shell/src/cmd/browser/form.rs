@@ -1108,7 +1108,7 @@ const zcPartCaptions = (records, request) => {
 // or, on a page that marks nothing, by the short words the page gives the field itself (card number, CVC, CVV, security code — in two languages); and the parts of one value are all secret when
 // one of them is. A secret field's value is never read.
 const zcOneTimeWords = /one[\s-]?time|\botp\b|verification|security\s*code|\bsms\b|인증/i;
-const zcCardMarks = ["cc-number", "cc-csc", "cc-exp", "cc-exp-month", "cc-exp-year"];
+const zcCardMarks = zcSecretAutocomplete.filter((mark) => mark.startsWith("cc-"));
 const zcCardWords = /\bcard[\s_-]*(?:number|no\b)|\bcv[cv]2?\b|security[\s_-]*code|카드[\s_-]*번호|보안[\s_-]*코드/i;
 // A payment card's expiry date is secret as its number is (t-41720, 2026-10-06): by the platform's marks above, or by its own words — expiry, expiration,
 // valid thru, MM/YY, 유효기간, 만료 — when it stands in the form that holds the card's number or security code; a coupon's or a passport's expiry stands in
@@ -1134,7 +1134,7 @@ const zcSecretParts = (records) => {
     if (marked || shaped || carded) hide(record);
   }
   // The forms that hold a card's number or security code, by the marks and words above — and in them, the card's expiry: an input or a select whose own words say so.
-  const cardForms = new Set(records.filter((record) => record.masked && zcFormTag(record.el) === "input" && !zcSecretField(record.el)
+  const cardForms = new Set(records.filter((record) => record.masked && zcFormTag(record.el) === "input"
     && (String(record.el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).some((mark) => mark === "cc-number" || mark === "cc-csc") || zcCardWords.test(ownWords(record))))
     .map((record) => zcCardScope(record.el)));
   for (const record of records) {
@@ -2249,7 +2249,37 @@ fn form_buttons() -> &'static std::sync::Mutex<std::collections::HashMap<String,
     BUTTONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+fn masked_fields() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<String>>> {
+    static MASKED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    > = std::sync::OnceLock::new();
+    MASKED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn known_masked(label: &str) -> Vec<String> {
+    masked_fields()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(label)
+        .cloned()
+        .unwrap_or_default()
+}
+
+pub(crate) fn remember_masked(label: &str, handle: &str) {
+    let mut fields = masked_fields()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let fields = fields.entry(label.into()).or_default();
+    if !fields.iter().any(|known| known == handle) {
+        fields.push(handle.into());
+    }
+}
+
 pub(crate) fn forget_form(label: &str) {
+    masked_fields()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(label);
     form_prints()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2469,6 +2499,17 @@ pub(crate) async fn automate_fields(
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     let read: FormRead = serde_json::from_value(page_value(reply)?)
         .map_err(|_| "브라우저 판의 양식 읽기를 읽을 수 없습니다".to_string())?;
+    masked_fields()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            label.into(),
+            read.fields
+                .iter()
+                .filter(|field| field.masked)
+                .map(|field| field.handle.clone())
+                .collect(),
+        );
     remember_form(label, &read.fingerprint);
     remember_buttons(label, &read.actions);
     Ok(read)
@@ -2508,6 +2549,11 @@ pub(crate) async fn automate_fill(
                 return Err(BrowserRefusal::Unsent(words.trim_end().to_string()));
             }
             let report = report.against(known.as_deref(), &buttons);
+            for result in &report.results {
+                if result.status == zerocode_core::browser_form::FillStatus::Secret {
+                    remember_masked(label, &result.handle);
+                }
+            }
             remember_form(label, &report.fingerprint);
             remember_buttons(label, &report.actions);
             Ok::<_, BrowserRefusal>(report)

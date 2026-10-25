@@ -348,7 +348,15 @@ zerocode-browser find <pane-label> <text> --workspace-revision <revision>
 zerocode-browser diagnose <pane-label> [--json]
 zerocode-browser fields <pane-label> [--json]           # every field of the page's forms at once: handle, kind, words, value, choices, required; and the buttons
 zerocode-browser fill <pane-label> --workspace-revision <revision> --value-stdin # stdin: {"<handle>": value, …}
+zerocode-browser upload <pane-label> <css> [--drop] <absolute-path>... --workspace-revision <revision> # local files into a file input or, with --drop, a drop area
 ```
+
+`upload` hands 1 to 16 local files (16 MiB in all, absolute paths, no folders)
+to a page's file input — or its label when the input is hidden — or, with
+`--drop`, to a drop area; use it when a form asks for a file, since `fill`
+refuses file fields. Its answer says the files reached the page's list, not
+that the site took them: confirm the site's own acceptance with `wait` or
+`read`.
 
 Words a page wrote — `read`, `eval`, `fields`, `fill`, `console`,
 `network`, `tabs`, `list` and the `diagnose` paragraph — arrive between

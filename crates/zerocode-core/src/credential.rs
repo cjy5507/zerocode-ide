@@ -62,14 +62,60 @@ pub fn names_a_credential(word: &str) -> bool {
 /// digest (a commit sha, a content hash).
 #[must_use]
 pub fn looks_like_a_credential(word: &str) -> bool {
-    VALUE_MARKS
-        .iter()
-        .any(|mark| contains_ascii_case(word, mark))
+    looks_like_a_payment_card(word)
+        || VALUE_MARKS
+            .iter()
+            .any(|mark| contains_ascii_case(word, mark))
         || (word.len() >= OPAQUE_WORD_MIN_BYTES
             && !word.contains("::")
             && word.bytes().any(|byte| byte.is_ascii_digit())
             && word.bytes().any(|byte| byte.is_ascii_alphabetic())
             && !word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+}
+
+/// A complete payment-card-shaped value, including common display separators.
+/// Luhn avoids treating every long timestamp or document number as a card.
+#[must_use]
+pub fn looks_like_a_payment_card(value: &str) -> bool {
+    let mut digits = [0u8; 19];
+    let mut count = 0;
+    for byte in value.bytes() {
+        if matches!(byte, b' ' | b'-') {
+            continue;
+        }
+        if !byte.is_ascii_digit() || count == digits.len() {
+            return false;
+        }
+        digits[count] = byte - b'0';
+        count += 1;
+    }
+    if count < 13 {
+        return false;
+    }
+    let sum: u32 = digits[..count]
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(index, &digit)| {
+            let value = if index % 2 == 1 { digit * 2 } else { digit };
+            u32::from(if value > 9 { value - 9 } else { value })
+        })
+        .sum();
+    sum.is_multiple_of(10)
+}
+
+/// A structural location component is not an opaque value merely for being
+/// long and numbered. The same named assignments, vendor marks and card
+/// shapes apply without a second credential vocabulary.
+#[must_use]
+pub fn location_segment_may_carry_a_credential(value: &str) -> bool {
+    VALUE_MARKS.iter().any(|mark| {
+        value
+            .as_bytes()
+            .get(..mark.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(mark.as_bytes()))
+    }) || looks_like_a_payment_card(value)
+        || mask_named_values(value) != value
 }
 
 /// Whether `needle` occurs in `raw`, ASCII case ignored. No allocation.
@@ -168,7 +214,8 @@ fn names_a_header(word: &str) -> bool {
 /// userinfo check.
 #[must_use]
 pub fn may_carry_a_credential(line: &str) -> bool {
-    names_a_credential(line)
+    looks_like_a_payment_card(line)
+        || names_a_credential(line)
         || line.split_whitespace().any(looks_like_a_credential)
         || SCHEME_WORDS
             .iter()

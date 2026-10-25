@@ -430,6 +430,7 @@ pub(super) fn leave_browser_evidence(
     observation: Option<serde_json::Value>,
     control: Option<crate::browser_workspace::StepControl>,
 ) {
+    let observation = run_evidence::browser_open_observation(argv, answer, observation);
     let verb = argv.first().map_or("", String::as_str);
     let Some(framed) = run_evidence::captures("browser", verb) else {
         return;
