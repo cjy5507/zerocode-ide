@@ -128,3 +128,37 @@ fn the_windows_own_verbs_are_never_held_to_a_share() {
         assert!(admit(method, &json!({})).is_ok(), "{method:?}");
     }
 }
+
+#[test]
+fn required_sharing_refuses_an_unanswered_card_and_every_unnamed_act() {
+    super::with_held(|held| held.share.set_required(true));
+    let (_person, asked) = person(Decision::TimedOut);
+    for _ in 0..2 {
+        assert_eq!(
+            refused(ComputerMethod::Click, &click("Notes")).as_deref(),
+            Some("share_required")
+        );
+    }
+    assert_eq!(asked.get(), 1);
+    assert_eq!(
+        refused(ComputerMethod::PressKey, &json!({"key": "Escape"})).as_deref(),
+        Some("share_required")
+    );
+    assert!(admit(ComputerMethod::Screenshot, &json!({})).is_ok());
+}
+
+#[test]
+fn required_sharing_accepts_a_yes_and_keeps_window_verbs_available() {
+    super::with_held(|held| held.share.set_required(true));
+    let (_person, asked) = person(Decision::Allowed);
+    assert!(admit(ComputerMethod::Click, &click("Notes")).is_ok());
+    assert_eq!(asked.get(), 1);
+    for method in [
+        ComputerMethod::Stop,
+        ComputerMethod::Resume,
+        ComputerMethod::Status,
+        ComputerMethod::Handoff,
+    ] {
+        assert!(admit(method, &json!({})).is_ok());
+    }
+}

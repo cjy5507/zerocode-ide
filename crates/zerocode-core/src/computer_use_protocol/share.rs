@@ -52,6 +52,7 @@ pub struct Reach<'a> {
 /// The share, as the window holds it for its lifetime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Share {
+    required: bool,
     target: Option<String>,
     answers: BTreeMap<String, Answer>,
     taken_back: bool,
@@ -66,6 +67,11 @@ pub fn app_key(app: &str) -> String {
 }
 
 impl Share {
+    /// Whether an act must wait for an explicit share (off by default).
+    pub fn set_required(&mut self, required: bool) {
+        self.required = required;
+    }
+
     /// The shared app's key, while one is shared.
     #[must_use]
     pub fn target(&self) -> Option<&str> {

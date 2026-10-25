@@ -224,3 +224,14 @@ fn every_step_asks_the_share_and_the_band_is_the_persons() {
         assert!(person.contains(&name.to_string()), "{name} is the person's");
     }
 }
+
+#[test]
+fn requiring_a_share_is_a_persisted_person_only_setting() {
+    let person = person_only_commands();
+    assert!(person.contains(&"set_computer_share_required".to_string()));
+    let settings = code_only(include_str!("../../src/cmd/settings.rs"));
+    let body = block_after(&settings, "pub(crate) fn set_computer_share_required(");
+    assert!(body.contains("commit_setting("));
+    assert!(body.contains("setting_key::COMPUTER_SHARE_REQUIRED"));
+    assert!(body.contains("settings.computer_share_required = on"));
+}
