@@ -11,7 +11,8 @@
 //! `confirmed` is never ahead of it.
 //!
 //! It rides the beat once a minute and puts the question to git for two
-//! merges at most; a confirmed one is not asked again. The desk is dressed
+//! merges at most, those never asked first and then the longest unasked; a
+//! confirmed one is not asked again. The desk is dressed
 //! every beat from what was answered, with no git.
 
 use std::collections::{BTreeSet, HashMap};
@@ -66,8 +67,10 @@ struct Book {
 }
 
 impl Book {
-    /// The merges among `heads` to put to git now, in their order: never
-    /// asked, or not confirmed and asked long enough ago. Forgets every merge
+    /// The merges among `heads` to put to git now: never asked, or not
+    /// confirmed and asked long enough ago — those never asked first, then the
+    /// longest unasked, in `heads`' order between equals, so that however many
+    /// merges stand unconfirmed each is reached in turn. Forgets every merge
     /// no longer in `heads`, and all of them when the repository changed.
     fn due(&mut self, repo: &Path, heads: &BTreeSet<String>, now_ms: i64) -> Vec<String> {
         if self.repo.as_deref() != Some(repo) {
@@ -75,15 +78,20 @@ impl Book {
             self.repo = Some(repo.to_path_buf());
         }
         self.answers.retain(|head, _| heads.contains(head));
-        heads
+        let mut due: Vec<(&String, Option<i64>)> = heads
             .iter()
-            .filter(|head| match self.answers.get(*head) {
-                None => true,
-                Some((OnRemote::Confirmed, _)) => false,
-                Some((_, at_ms)) => now_ms.saturating_sub(*at_ms) >= ASK_AGAIN_AFTER_MS,
+            .filter_map(|head| match self.answers.get(head) {
+                None => Some((head, None)),
+                Some((OnRemote::Confirmed, _)) => None,
+                Some((_, at_ms)) => (now_ms.saturating_sub(*at_ms) >= ASK_AGAIN_AFTER_MS)
+                    .then_some((head, Some(*at_ms))),
             })
+            .collect();
+        // Stable: `None` sorts before any time, and equals keep their order.
+        due.sort_by_key(|(_, asked_at)| *asked_at);
+        due.into_iter()
             .take(ASKS_PER_LOOK)
-            .cloned()
+            .map(|(head, _)| head.clone())
             .collect()
     }
 
@@ -252,7 +260,10 @@ mod tests {
                 book.answers.insert(head, (OnRemote::NotYet, now_ms));
             }
         }
-        let never: Vec<&String> = heads.iter().filter(|head| !asked.contains_key(*head)).collect();
+        let never: Vec<&String> = heads
+            .iter()
+            .filter(|head| !asked.contains_key(*head))
+            .collect();
         assert!(never.is_empty(), "never asked in an hour: {never:?}");
         let longest_gap = asked
             .values()
@@ -261,7 +272,8 @@ mod tests {
             .expect("every merge was asked more than once in an hour");
         assert!(
             longest_gap
-                <= ASK_AGAIN_AFTER_MS.max(heads.len().div_ceil(ASKS_PER_LOOK) as i64 * LOOK_EVERY_MS),
+                <= ASK_AGAIN_AFTER_MS
+                    .max(heads.len().div_ceil(ASKS_PER_LOOK) as i64 * LOOK_EVERY_MS),
             "a merge waited {longest_gap} ms between two asks"
         );
     }
