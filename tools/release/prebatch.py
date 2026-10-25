@@ -342,6 +342,27 @@ def references(text, tops):
     return {path for path in found if path.split("/", 1)[0] in tops}
 
 
+def tools_test_words(line):
+    """The python3 command one tools-test line runs, or None. A line is a plain `python3 …`,
+    or a call of the recipe's helpers that t-74384 brought (every script runs after one
+    fails): `t …; \\` runs `python3 …`, and `macos "<why>" …; \\` runs it on a Mac only.
+    The helpers' own definitions and the recipe's tally lines run no script."""
+    line = line.removesuffix("\\").strip().removesuffix(";").strip()
+    try:
+        words = shlex.split(line)
+    except ValueError:
+        return None
+    if not words:
+        return None
+    if words[0] == "python3":
+        return words
+    if words[0] == "t" and len(words) > 1:
+        return ["python3", *words[1:]]
+    if words[0] == "macos" and len(words) > 2 and sys.platform == "darwin":
+        return ["python3", *words[2:]]
+    return None
+
+
 def tools_tests(head, base_paths, base_justfile):
     justfile = head.read("justfile")
     if justfile is None:
@@ -350,9 +371,9 @@ def tools_tests(head, base_paths, base_justfile):
     checks = []
     for line in recipe_lines(justfile, "tools-test"):
         fresh = line not in before
-        words = shlex.split(line)
-        test = next((w for w in words if w.endswith(".py")), None)
-        if test is None or words[0] != "python3":
+        words = tools_test_words(line)
+        test = next((w for w in words or () if w.endswith(".py")), None)
+        if test is None:
             continue
         name = f"tools-test:{test}"
         folder = posixpath.dirname(test)

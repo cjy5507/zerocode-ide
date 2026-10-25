@@ -198,6 +198,36 @@ class PrebatchTest(unittest.TestCase):
         said = self.fx.check()
         self.assertNotIn("tools-test:", said.stdout)
 
+    def test_the_recipe_that_runs_every_script_is_read_as_its_scripts(self):
+        # t-74384's tools-test: shell helpers `t` and `macos` called one line each, every
+        # line ending `; \`. Each call is the script it runs; the helpers' own lines are none.
+        self.fx.write("justfile", textwrap.dedent("""\
+            tools-test:
+                @rc=0; red=; skipped=; \\
+                t() { echo "python3 $*" >&2; python3 "$@" || { rc=1; red="$red $*"; }; }; \\
+                macos() { why=$1; shift; if [ "$(uname -s)" = Darwin ]; then t "$@"; else echo "SKIPPED python3 $* — macOS-only: $why"; fi; }; \\
+                t tools/tests/test_kinds_seed.py; \\
+                macos "drives a macOS-only tool" tools/tests/test_mac_only.py; \\
+                [ -z "$red" ] || { echo "tools-test: red scripts:$red" >&2; exit 1; }; exit $rc
+            """))
+        self.fx.write("tools/tests/test_mac_only.py", "raise SystemExit(0)\n")
+        self.fx.commit("the recipe runs every script")
+        self.fx.append("crates/zerocode-core/src/orchestration.rs", "Kind::Gamma\n")
+        self.fx.commit("a kind the seed does not copy")
+        said = self.fx.check()
+        self.assertRed(said, "tools-test:tools/tests/test_kinds_seed.py")
+        self.assertNotIn("Traceback", said.stderr)
+        self.fx.write("tools/kinds-seed/seed.py", 'KINDS = ["Alpha", "Beta", "Gamma"]\n')
+        self.fx.commit("the seed copies it")
+        self.assertGreen(self.fx.check(), "tools-test:tools/tests/test_kinds_seed.py")
+        self.fx.append("tools/tests/test_mac_only.py", "# touched\n")
+        self.fx.commit("the macOS-only script changed")
+        said = self.fx.check()
+        if sys.platform == "darwin":
+            self.assertGreen(said, "tools-test:tools/tests/test_mac_only.py")
+        else:
+            self.assertNotIn("RC tools-test:tools/tests/test_mac_only.py", said.stdout)
+
     def test_a_tools_test_line_whose_file_head_lacks_is_red(self):
         self.fx.write("justfile", self.fx.repo.joinpath("justfile").read_text().replace(
             "    # a comment line is no test\n",
