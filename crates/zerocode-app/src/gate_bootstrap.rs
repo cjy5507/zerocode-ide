@@ -518,6 +518,19 @@ fn open_authority(
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn an_unsupported_runtime_is_refused_before_any_image_is_loaded() {
+        assert_eq!(
+            runtime_libraries::verify_closure(
+                Path::new("absent-python"),
+                Path::new("absent-runtime"),
+                &[]
+            ),
+            Err("unsupported_runtime")
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn bootstrap_library_closure_rejects_missing_transitive_and_unresolved_loads() {
