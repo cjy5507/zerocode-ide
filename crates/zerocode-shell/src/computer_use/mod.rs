@@ -125,11 +125,37 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
     CLIENT.get_or_init(|| Mutex::new(None))
 }
 
+/// Only a request in flight defers panel startup. Poison still grants the
+/// lock, as it does for the other session callers; it must not keep retrying.
+#[cfg(any(target_os = "macos", test))]
+fn panel_lock_unless_busy<T>(result: std::sync::TryLockResult<T>) -> Option<T> {
+    match result {
+        Ok(held) => Some(held),
+        Err(std::sync::TryLockError::Poisoned(held)) => Some(held.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+#[test]
+fn panel_lock_recovers_poison_and_only_defers_a_busy_request() {
+    use std::sync::{PoisonError, TryLockError};
+
+    assert_eq!(panel_lock_unless_busy(Ok(1)), Some(1));
+    assert_eq!(
+        panel_lock_unless_busy::<u8>(Err(TryLockError::WouldBlock)),
+        None
+    );
+    assert_eq!(
+        panel_lock_unless_busy(Err(TryLockError::Poisoned(PoisonError::new(2)))),
+        Some(2)
+    );
+}
+
 /// A shared page needs its native person-only panel even when the page route
 /// handles all actions. Starting the helper posts no input and takes no focus.
 #[cfg(all(target_os = "macos", not(test)))]
 fn ensure_share_panel() -> bool {
-    let Ok(mut held) = held_client().try_lock() else {
+    let Some(mut held) = panel_lock_unless_busy(held_client().try_lock()) else {
         // A provider may already be starting; this is not a failed launch.
         return false;
     };

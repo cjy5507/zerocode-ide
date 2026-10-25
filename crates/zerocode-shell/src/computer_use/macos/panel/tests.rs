@@ -316,7 +316,7 @@ fn an_ended_watch_forgets_its_endpoint_and_preserves_a_new_helpers_endpoint() {
 }
 
 /// The handshake succeeds, but no listener remains for the watch's connection.
-/// Channels and socket closure fix the ordering without a real helper or input.
+/// Closing the socket before replying fixes the order without a real helper or input.
 fn connect_without_a_watch() -> (
     crate::computer_use::macos::Session,
     std::thread::JoinHandle<()>,
