@@ -28,27 +28,128 @@ use super::*;
 
 use zerocode_pty::ready::{Line, Refusal, Step};
 
-/// Observe an empty prompt queue before committing a between-turns move.
-/// Prompt registration and pump settlement both take deliveries first.
+/// The maps a prompt's way onto a pane's line is decided in, borrowed from
+/// the shell runtime so a between-turns move and a test can hold the same
+/// locks the registration door and the pump hold. `deliveries` is taken
+/// first by every one of them.
+pub(super) struct PromptLines<'a> {
+    pub(super) deliveries: &'a Mutex<HashMap<TermId, PromptDelivery>>,
+    pub(super) waiters: &'a Mutex<HashMap<TermId, std::sync::mpsc::SyncSender<DeliveryOutcome>>>,
+    pub(super) queue: &'a Mutex<HashMap<TermId, VecDeque<QueuedPrompt>>>,
+    pub(super) moving: &'a Mutex<std::collections::HashSet<TermId>>,
+}
+
+/// Observe an empty prompt line before committing a between-turns move, and
+/// hold the pane's later prompts in its queue until the move is written
+/// (t-74974).
+///
+/// The look and the hold are one step under deliveries, so a prompt either
+/// registered before it and defers the move, or meets the hold and queues.
+/// The commit itself — a ledger write that waits on the disk — runs with
+/// deliveries let go: the pump turns every pane under that lock at the
+/// display rate, and one pane's move must not stop the others' output. The
+/// hold ends under deliveries again, where a prompt queued during it takes
+/// the line on a fresh clock, as one queued behind a settled delivery does.
+///
+/// Answers whether a queued prompt took the line, for the caller to wake
+/// the pump.
 pub(super) fn with_no_prompt_in_flight(
-    deliveries: &Mutex<HashMap<TermId, PromptDelivery>>,
-    queue: &Mutex<HashMap<TermId, VecDeque<QueuedPrompt>>>,
+    lines: &PromptLines<'_>,
     term: TermId,
     commit: &mut dyn FnMut(),
-) {
-    let held = deliveries
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let busy = held.contains_key(&term)
-        || queue
+) -> bool {
+    {
+        let held = lines
+            .deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let busy = held.contains_key(&term)
+            || lines
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&term)
+                .is_some_and(|queued| !queued.is_empty());
+        if busy {
+            return false;
+        }
+        lines
+            .moving
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&term)
-            .is_some_and(|queued| !queued.is_empty());
-    if !busy {
-        commit();
+            .insert(term);
     }
-    drop(held);
+    let mut hold = MoveHold {
+        lines,
+        term,
+        ended: false,
+    };
+    commit();
+    hold.end()
+}
+
+/// The hold a between-turns move puts on its pane's line, ended when the
+/// commit returns — or unwinds, so a panic cannot leave the pane's prompts
+/// queued for good.
+struct MoveHold<'l, 'a> {
+    lines: &'l PromptLines<'a>,
+    term: TermId,
+    ended: bool,
+}
+
+impl MoveHold<'_, '_> {
+    fn end(&mut self) -> bool {
+        self.ended = true;
+        let mut deliveries = self
+            .lines
+            .deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.lines
+            .moving
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.term);
+        !deliveries.contains_key(&self.term)
+            && take_next(
+                self.term,
+                &mut deliveries,
+                &mut self
+                    .lines
+                    .waiters
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                &mut self
+                    .lines
+                    .queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                Instant::now(),
+            )
+    }
+}
+
+impl Drop for MoveHold<'_, '_> {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.end();
+        }
+    }
+}
+
+/// Whether a prompt for `term` waits in its queue: a delivery holds the
+/// line, or the pane's account move is being written (t-74974). Asked under
+/// `deliveries`, the lock both are set under.
+pub(super) fn line_is_taken(
+    deliveries: &HashMap<TermId, PromptDelivery>,
+    moving: &Mutex<std::collections::HashSet<TermId>>,
+    term: TermId,
+) -> bool {
+    deliveries.contains_key(&term)
+        || moving
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&term)
 }
 
 /// What the window knows about a pane's line, gathered for one round.
@@ -448,92 +549,159 @@ pub(super) fn settle(
     if let Some(waiting) = waiters.remove(&term) {
         let _ = waiting.send(outcome);
     }
-    if let Some(row) = queue.get_mut(&term) {
-        if let Some(next) = row.pop_front() {
-            waiters.insert(term, next.completion);
-            deliveries.insert(
-                term,
-                PromptDelivery::new(next.text, next.submit, next.signal, now)
-                    .clearing(next.clearing)
-                    .guarded(next.guard)
-                    .pressing(next.enter_again)
-                    .words(next.words)
-                    .parking(next.parks)
-                    .handing_back(next.hands_back),
-            );
-        }
-        if row.is_empty() {
-            queue.remove(&term);
-        }
+    take_next(term, deliveries, waiters, queue, now);
+}
+
+/// Put the next parked prompt for `term` on its free line, on a fresh
+/// clock, keeping the clear policy and the guard of the door that made it.
+/// Answers whether one took the line.
+fn take_next(
+    term: TermId,
+    deliveries: &mut HashMap<TermId, PromptDelivery>,
+    waiters: &mut HashMap<TermId, std::sync::mpsc::SyncSender<DeliveryOutcome>>,
+    queue: &mut HashMap<TermId, VecDeque<QueuedPrompt>>,
+    now: Instant,
+) -> bool {
+    let Some(row) = queue.get_mut(&term) else {
+        return false;
+    };
+    let next = row.pop_front();
+    if row.is_empty() {
+        queue.remove(&term);
     }
+    let Some(next) = next else {
+        return false;
+    };
+    waiters.insert(term, next.completion);
+    deliveries.insert(
+        term,
+        PromptDelivery::new(next.text, next.submit, next.signal, now)
+            .clearing(next.clearing)
+            .guarded(next.guard)
+            .pressing(next.enter_again)
+            .words(next.words)
+            .parking(next.parks)
+            .handing_back(next.hands_back),
+    );
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The maps a pane's prompt line is decided in, owned by a test.
+    #[derive(Default)]
+    struct Lines {
+        deliveries: Mutex<HashMap<TermId, PromptDelivery>>,
+        waiters: Mutex<HashMap<TermId, std::sync::mpsc::SyncSender<DeliveryOutcome>>>,
+        queue: Mutex<HashMap<TermId, VecDeque<QueuedPrompt>>>,
+        moving: Mutex<std::collections::HashSet<TermId>>,
+    }
+
+    impl Lines {
+        fn borrowed(&self) -> PromptLines<'_> {
+            PromptLines {
+                deliveries: &self.deliveries,
+                waiters: &self.waiters,
+                queue: &self.queue,
+                moving: &self.moving,
+            }
+        }
+
+        /// The registration door's decision (`type_prompt_at_term`), made
+        /// under deliveries: queue behind a taken line, or take it.
+        fn register(&self, term: TermId, text: &str) {
+            let mut deliveries = self.deliveries.lock().unwrap();
+            let (prompt, _receipt) = parked(text, Guard::for_its_own_line(None));
+            if line_is_taken(&deliveries, &self.moving, term) {
+                self.queue
+                    .lock()
+                    .unwrap()
+                    .entry(term)
+                    .or_default()
+                    .push_back(prompt);
+            } else {
+                self.waiters.lock().unwrap().insert(term, prompt.completion);
+                deliveries.insert(
+                    term,
+                    PromptDelivery::new(prompt.text, prompt.submit, prompt.signal, Instant::now()),
+                );
+            }
+        }
+
+        fn line(&self, term: TermId) -> Option<String> {
+            self.deliveries
+                .lock()
+                .unwrap()
+                .get(&term)
+                .map(|delivery| delivery.text().to_string())
+        }
+
+        fn queued(&self, term: TermId) -> usize {
+            self.queue
+                .lock()
+                .unwrap()
+                .get(&term)
+                .map_or(0, VecDeque::len)
+        }
+    }
+
+    /// A pointer that registers between the switch's empty look and its
+    /// commit queues behind the move instead of taking the line, and takes it
+    /// once the move is written; another pane's prompt is not held at all.
     #[test]
-    fn followup_a_switch_observation_holds_prompt_registration_through_commit() {
-        let deliveries = Mutex::new(HashMap::new());
-        let queue = Mutex::new(HashMap::new());
-        let mut commits = 0;
-        with_no_prompt_in_flight(&deliveries, &queue, 47223, &mut || {
-            commits += 1;
-            std::thread::scope(|scope| {
-                scope
-                    .spawn(|| {
-                        assert!(
-                            matches!(
-                                deliveries.try_lock(),
-                                Err(std::sync::TryLockError::WouldBlock)
-                            ),
-                            "a pointer can register after the empty observation and before commit"
-                        );
-                    })
-                    .join()
-                    .unwrap();
-            });
+    fn followup_a_switch_holds_its_panes_prompts_through_commit_and_then_hands_them_the_line() {
+        const OTHER: TermId = 74975;
+        let lines = Lines::default();
+        let mut during = None;
+        let took = with_no_prompt_in_flight(&lines.borrowed(), 47223, &mut || {
+            lines.register(47223, "mail");
+            lines.register(OTHER, "other");
+            during = Some((lines.line(47223), lines.queued(47223), lines.line(OTHER)));
         });
-        assert_eq!(commits, 1);
+        assert_eq!(
+            during,
+            Some((None, 1, Some("other".to_string()))),
+            "(the moving pane's line, its queue, another pane's line) while the move commits"
+        );
+        assert!(took, "the held prompt was not handed the line");
+        assert_eq!(lines.line(47223).as_deref(), Some("mail"));
+        assert!(lines.waiters.lock().unwrap().contains_key(&47223));
+        assert_eq!(lines.queued(47223), 0);
         assert!(
-            deliveries.try_lock().is_ok(),
-            "the commit left registration locked"
+            lines.moving.lock().unwrap().is_empty(),
+            "the move left its pane marked"
         );
     }
 
     #[test]
     fn followup_an_in_flight_prompt_defers_the_switch_until_it_settles() {
         for queued in [false, true] {
-            let deliveries = Mutex::new(HashMap::new());
-            let queue = Mutex::new(HashMap::new());
-            let (prompt, _receipt) =
-                parked("mail", zerocode_pty::ready::Guard::for_its_own_line(None));
+            let lines = Lines::default();
             if queued {
-                queue
+                let (prompt, _receipt) =
+                    parked("mail", zerocode_pty::ready::Guard::for_its_own_line(None));
+                lines
+                    .queue
                     .lock()
                     .unwrap()
                     .entry(47223)
-                    .or_insert_with(VecDeque::new)
+                    .or_default()
                     .push_back(prompt);
             } else {
-                deliveries.lock().unwrap().insert(
-                    47223,
-                    PromptDelivery::new(
-                        "mail".to_string(),
-                        true,
-                        zerocode_pty::ReadySignal::Quiet,
-                        Instant::now(),
-                    ),
-                );
+                lines.register(47223, "mail");
             }
             let mut commits = 0;
-            with_no_prompt_in_flight(&deliveries, &queue, 47223, &mut || commits += 1);
-            assert_eq!(commits, 0, "queued={queued}");
-            deliveries.lock().unwrap().clear();
-            queue.lock().unwrap().clear();
-            with_no_prompt_in_flight(&deliveries, &queue, 47223, &mut || commits += 1);
+            let took = with_no_prompt_in_flight(&lines.borrowed(), 47223, &mut || commits += 1);
+            assert_eq!((commits, took), (0, false), "queued={queued}");
+            assert!(lines.moving.lock().unwrap().is_empty(), "queued={queued}");
+            lines.deliveries.lock().unwrap().clear();
+            lines.queue.lock().unwrap().clear();
+            let took = with_no_prompt_in_flight(&lines.borrowed(), 47223, &mut || commits += 1);
             assert_eq!(
-                commits, 1,
+                (commits, took),
+                (1, false),
                 "the move was lost instead of deferred; queued={queued}"
             );
         }
@@ -545,13 +713,12 @@ mod tests {
     /// other pane's output for as long as the disk takes.
     #[test]
     fn followup_a_switch_commit_leaves_every_other_pane_pumping() {
-        let deliveries = Mutex::new(HashMap::new());
-        let queue = Mutex::new(HashMap::new());
+        let lines = Lines::default();
         let mut pump_free = None;
-        with_no_prompt_in_flight(&deliveries, &queue, 74974, &mut || {
+        with_no_prompt_in_flight(&lines.borrowed(), 74974, &mut || {
             pump_free = Some(std::thread::scope(|scope| {
                 scope
-                    .spawn(|| deliveries.try_lock().is_ok())
+                    .spawn(|| lines.deliveries.try_lock().is_ok())
                     .join()
                     .unwrap()
             }));
@@ -561,6 +728,22 @@ mod tests {
             Some(true),
             "the pump waits out the switch's ledger write"
         );
+    }
+
+    /// A commit that unwinds still ends the hold: the pane's prompts are not
+    /// queued for good behind a move that never finished.
+    #[test]
+    fn followup_a_switch_commit_that_unwinds_still_frees_its_pane() {
+        let lines = Lines::default();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_no_prompt_in_flight(&lines.borrowed(), 74974, &mut || {
+                lines.register(74974, "mail");
+                panic!("the ledger's write failed");
+            })
+        }));
+        assert!(unwound.is_err());
+        assert!(lines.moving.lock().unwrap().is_empty());
+        assert_eq!(lines.line(74974).as_deref(), Some("mail"));
     }
 
     /// How long the pump waits for its lock while a switch commits
@@ -581,15 +764,14 @@ mod tests {
                  CREATE TABLE rests (worker INTEGER NOT NULL);",
             )
             .unwrap();
-        let deliveries = Mutex::new(HashMap::new());
-        let queue = Mutex::new(HashMap::new());
+        let lines = Lines::default();
         let mut commits = Vec::with_capacity(SWITCHES);
         let mut waits = Vec::with_capacity(SWITCHES);
-        let held_by_the_pump = &deliveries;
+        let held_by_the_pump = &lines.deliveries;
         for switch in 0..SWITCHES {
             std::thread::scope(|scope| {
                 let mut pump = None;
-                with_no_prompt_in_flight(&deliveries, &queue, 74974, &mut || {
+                with_no_prompt_in_flight(&lines.borrowed(), 74974, &mut || {
                     let asked = Instant::now();
                     pump = Some(scope.spawn(move || {
                         drop(held_by_the_pump.lock().unwrap());

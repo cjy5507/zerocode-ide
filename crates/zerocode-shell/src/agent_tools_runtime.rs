@@ -989,26 +989,36 @@ impl agent_teams::Host for TeamWindow {
                 .is_some_and(|queued| !queued.is_empty())
     }
 
-    /// Hold prompt registration still from the empty observation through
-    /// commit. The pump takes deliveries before hook state too, so a pointer
-    /// either registers first and defers the move, or waits until it commits.
+    /// Hold this pane's prompts in its queue from the empty observation
+    /// through commit, under the registration door's own lock, so a pointer
+    /// either registers first and defers the move or queues behind it. The
+    /// ledger's write runs with that lock let go (t-74974): the pump turns
+    /// every pane under it, and one move must not stop the others' output.
+    /// The hook's word is held still while it is read and while `commit`
+    /// runs: a report that the pane took a tool waits on the same lock the
+    /// hook road writes `pane_states` under (t-46106).
     fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {
         let state = self.app.state::<AppState>();
-        crate::prompt_transaction::with_no_prompt_in_flight(
-            &state.shell_runtime().deliveries,
-            &state.shell_runtime().prompt_queue,
-            term,
-            &mut || {
-                let states = state.pane_states();
-                let done = states
-                    .get(&term)
-                    .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
-                if done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term) {
-                    commit();
-                }
-                drop(states);
-            },
-        );
+        let runtime = state.shell_runtime();
+        let lines = crate::prompt_transaction::PromptLines {
+            deliveries: &runtime.deliveries,
+            waiters: &runtime.delivery_waiters,
+            queue: &runtime.prompt_queue,
+            moving: &runtime.moving_terms,
+        };
+        let took = crate::prompt_transaction::with_no_prompt_in_flight(&lines, term, &mut || {
+            let states = state.pane_states();
+            let done = states
+                .get(&term)
+                .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
+            if done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term) {
+                commit();
+            }
+            drop(states);
+        });
+        if took {
+            state.cadence().wake();
+        }
     }
 
     fn follow_account_switch(&self, now_ms: i64) {
