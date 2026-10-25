@@ -6,6 +6,8 @@ use crate::credential;
 
 pub const INPUT_KEY: &str = "recipeInput";
 pub const SECRET_PREFIX: &str = "$secret_";
+/// A saved upload names its files by parameter, never by where they sat.
+pub const FILE_PREFIX: &str = "$file_";
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct InputPolicy {
@@ -52,8 +54,45 @@ pub fn is_secret_parameter(word: &str) -> bool {
     })
 }
 
+/// `$file_<name>`: the file an upload picks, given with `--params` or by the
+/// person when a walk reaches the step.
+pub fn is_file_parameter(word: &str) -> bool {
+    word.strip_prefix('$').is_some_and(|name| {
+        name.starts_with("file_") && name.len() > "file_".len() && recipe_param_name(name)
+    })
+}
+
+/// A `$`-word the person supplies, never a value the recipe keeps: a secret
+/// or a file. A walk stops for the person when one has no value.
+pub fn is_person_parameter(word: &str) -> bool {
+    is_secret_parameter(word) || is_file_parameter(word)
+}
+
+/// The words of an upload that name local files: after the selector and an
+/// optional `--drop`. Where a file sat is not kept, so these never reach a
+/// log or a saved procedure as given.
+pub fn file_positions(tool: &str, argv: &[String]) -> Vec<usize> {
+    if tool != "browser" || argv.first().is_none_or(|verb| verb != "upload") {
+        return Vec::new();
+    }
+    let first = if argv.get(3).is_some_and(|word| word == "--drop") {
+        4
+    } else {
+        3
+    };
+    (first..argv.len()).collect()
+}
+
+/// A file as a log keeps it: its name, never the folders above it (a home
+/// folder carries a person's name).
+pub fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+}
+
 pub fn is_parameter_word(word: &str) -> bool {
-    if is_secret_parameter(word) {
+    if is_person_parameter(word) {
         return true;
     }
     let names = recipe_placeholders(word);
@@ -198,6 +237,45 @@ mod tests {
             "https://example.test/?password=SYNTHETIC_INPUT_ONLY",
         ] {
             assert!(unsafe_location_or_value(value));
+        }
+    }
+
+    #[test]
+    fn an_upload_names_its_files_after_the_selector_and_a_log_keeps_only_their_names() {
+        let argv = |list: &[&str]| list.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            file_positions(
+                "browser",
+                &argv(&[
+                    "upload",
+                    "browser-1",
+                    "#file",
+                    "/Users/dev/a.pdf",
+                    "/Users/dev/b.png"
+                ])
+            ),
+            [3, 4]
+        );
+        assert_eq!(
+            file_positions(
+                "browser",
+                &argv(&["upload", "browser-1", "#drop", "--drop", "/Users/dev/a.pdf"])
+            ),
+            [4]
+        );
+        assert!(file_positions("browser", &argv(&["click", "browser-1", "#file"])).is_empty());
+        assert!(file_positions("computer", &argv(&["upload", "x", "y", "/a"])).is_empty());
+        assert_eq!(
+            file_name("/Users/dev/Documents/receipt 1.pdf"),
+            "receipt 1.pdf"
+        );
+        assert_eq!(file_name("C:\\Users\\dev\\receipt.pdf"), "receipt.pdf");
+        assert_eq!(file_name("receipt.pdf"), "receipt.pdf");
+        for word in ["$file_3", "$file_receipt"] {
+            assert!(is_file_parameter(word) && is_parameter_word(word), "{word}");
+        }
+        for word in ["$file_", "$file", "file_3", "$files_3", "$file_a b"] {
+            assert!(!is_file_parameter(word), "{word}");
         }
     }
 

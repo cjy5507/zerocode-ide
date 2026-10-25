@@ -1927,6 +1927,57 @@ mod tests {
         assert_eq!(report["stop"]["kind"], "persons_turn");
     }
     #[test]
+    fn a_saved_upload_file_is_given_by_params_or_the_walk_stops_for_the_person() {
+        use super::bench::{Bench, browser_said, command, walk_of};
+        let text = "## Steps\n1. `zerocode-browser upload browser-901 #receipt $file_1`\n2. `zerocode-browser click browser-901 #done`\n";
+        let bench = Bench::new();
+        bench.show(&[("browser-901", "https://example.test/form")]);
+        let calls = std::cell::RefCell::new(Vec::<Vec<String>>::new());
+        let run = |given: &[&str]| {
+            calls.borrow_mut().clear();
+            super::run(
+                &walk_of(&command(given), text),
+                |_, argv, _| {
+                    calls.borrow_mut().push(argv.to_vec());
+                    browser_said("{}")
+                },
+                |_, _, _| {},
+                |_| {},
+                bench.desk(false, None),
+                || true,
+            )
+            .unwrap()
+        };
+        // No value: the person's turn, and no path is guessed.
+        let report = run(&[]);
+        assert_eq!(report["stop"]["kind"], "persons_turn");
+        assert!(calls.borrow().is_empty());
+        let report = run(&["--params", r#"{"file_1":""}"#]);
+        assert_eq!(report["stop"]["kind"], "persons_turn");
+        assert!(calls.borrow().is_empty());
+        // Given: the walk uploads that file and goes on.
+        let report = run(&[
+            "--params",
+            r#"{"file_1":"/Users/dev/Documents/receipt.pdf"}"#,
+        ]);
+        assert_eq!(report["done"], true, "{report}");
+        let calls = calls.borrow();
+        let upload = calls
+            .iter()
+            .find(|argv| argv[0] == "upload")
+            .expect("the upload ran");
+        assert_eq!(
+            upload[..4],
+            [
+                "upload",
+                "browser-901",
+                "#receipt",
+                "/Users/dev/Documents/receipt.pdf"
+            ]
+        );
+    }
+
+    #[test]
     fn a_recipe_refreshes_a_form_after_a_press_and_refuses_input_when_that_read_fails() {
         use super::bench::{browser_refused, browser_said, words};
         let calls = std::cell::RefCell::new(Vec::new());
