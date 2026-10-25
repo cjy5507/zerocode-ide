@@ -105,7 +105,144 @@ fn pane_what(waiting: &str) -> (&'static str, &'static str) {
     }
 }
 
-/// Red stand-in (t-67483): the page's reading is not made yet.
-pub(crate) fn inbox_of(_desk: &DeskSnapshot, _panes: &[WaitingRow]) -> Inbox {
-    Inbox::default()
+/// `desk` and the `panes` that wait, as one list: each tab newest first, the
+/// tabs in [`TABS`] order.
+///
+/// The counts are made from the same rows the list carries, except a
+/// hand-in's: the desk sends at most a window of each stage's tasks and counts
+/// the rest ([`DeskSnapshot::stages`]), so the 넘김 number is the stage's own
+/// count, less the work nobody is coming back to.
+pub(crate) fn inbox_of(desk: &DeskSnapshot, panes: &[WaitingRow]) -> Inbox {
+    let runs: HashMap<&str, (&str, bool)> = desk
+        .runs
+        .iter()
+        .map(|run| (run.run.as_str(), (run.name.as_str(), run.seat)))
+        .collect();
+    let named = |run: &str| runs.get(run).copied().unwrap_or(("", false));
+    let mut items: Vec<InboxItem> = Vec::new();
+
+    for letter in &desk.mail {
+        let (project, seat) = named(&letter.run);
+        items.push(InboxItem {
+            id: format!("{}/{}", letter.run, letter.id),
+            tab: "question",
+            what: letter.kind,
+            run: Some(letter.run.clone()),
+            project: project.to_string(),
+            at_ms: letter.created_ms,
+            seat,
+            letter: Some(letter.clone()),
+            task: None,
+            pane: None,
+            landing: None,
+        });
+    }
+
+    for task in desk
+        .tasks
+        .iter()
+        .filter(|task| task.stage == HANDED_IN && task.left.is_none())
+    {
+        let (project, seat) = named(&task.run);
+        items.push(InboxItem {
+            id: format!("handoff:{}/{}", task.run, task.id),
+            tab: "handoff",
+            what: "handoff",
+            run: Some(task.run.clone()),
+            project: project.to_string(),
+            at_ms: task.times.as_ref().and_then(|times| times.handed_ms).unwrap_or(task.created_ms),
+            seat,
+            letter: None,
+            task: Some(task.clone()),
+            pane: None,
+            landing: None,
+        });
+    }
+
+    for pane in panes {
+        let (tab, what) = pane_what(pane.waiting);
+        items.push(InboxItem {
+            id: format!("pane:{}@{}", pane.pane, pane.since_ms),
+            tab,
+            what,
+            run: None,
+            project: pane
+                .worktree
+                .rsplit('/')
+                .find(|part| !part.is_empty())
+                .unwrap_or_default()
+                .to_string(),
+            at_ms: pane.since_ms,
+            seat: false,
+            letter: None,
+            task: None,
+            pane: Some(pane.clone()),
+            landing: None,
+        });
+    }
+
+    for line in &desk.news {
+        let (project, seat) = named(&line.run);
+        let tab = if BLOCKING_LETTERS.contains(&line.kind) {
+            "blocked"
+        } else {
+            "notice"
+        };
+        items.push(InboxItem {
+            id: format!("{}/{}", line.run, line.id),
+            tab,
+            what: line.kind,
+            run: Some(line.run.clone()),
+            project: project.to_string(),
+            at_ms: line.created_ms,
+            seat,
+            letter: Some(line.clone()),
+            task: None,
+            pane: None,
+            landing: None,
+        });
+    }
+
+    for run in desk.runs.iter().filter(|run| run.landing > 0) {
+        items.push(InboxItem {
+            id: format!("landing:{}:{}", run.run, run.landing),
+            tab: "notice",
+            what: "landing",
+            run: Some(run.run.clone()),
+            project: run.name.clone(),
+            // The ledger dates no waiting-to-land as one moment; the row has
+            // none of its own and sinks to the bottom of the notices.
+            at_ms: 0,
+            seat: run.seat,
+            letter: None,
+            task: None,
+            pane: None,
+            landing: Some(run.landing),
+        });
+    }
+
+    items.sort_by(|a, b| {
+        rank(a.tab)
+            .cmp(&rank(b.tab))
+            .then(b.at_ms.cmp(&a.at_ms))
+            .then(a.id.cmp(&b.id))
+    });
+
+    let in_tab = |tab: &str| items.iter().filter(|item| item.tab == tab).count();
+    let handed_in = desk
+        .stages
+        .iter()
+        .find(|stage| stage.stage == HANDED_IN)
+        .map_or(0, |stage| stage.count.saturating_sub(stage.left));
+    let (question, blocked, notice) = (in_tab("question"), in_tab("blocked"), in_tab("notice"));
+    let handoff = handed_in.max(in_tab("handoff"));
+    let counts = InboxCounts {
+        all: question + handoff + blocked + notice,
+        question,
+        handoff,
+        blocked,
+        notice,
+        waiting: question + handoff + blocked,
+    };
+    Inbox { items, counts }
 }

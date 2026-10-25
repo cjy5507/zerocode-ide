@@ -4320,7 +4320,7 @@ function noteTermFocus() {
   // The pane that now holds the keyboard is one the person is looking at, so a
   // finish the list shows for it is released (t-26595). A switch between panes
   // with nothing to release costs no round trip.
-  if (focusedTerm !== null && focusedTerm !== undefined && waitingFinishStands(focusedTerm)) {
+  if (focusedTerm !== null && focusedTerm !== undefined && inboxFinishStands(focusedTerm)) {
     void invoke("clear_finish_mark", { pane: `term:${focusedTerm}` }).catch(() => false);
   }
 }
@@ -7190,7 +7190,7 @@ function persistPaneLayouts(worktree) {
  * (`isTransientEditorContentType`, :50810); not sending them keeps the
  * file's churn down to what can actually return. */
 const STAGE_STORED_KINDS = new Set(
-  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev"],
+  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev", "inbox"],
 );
 
 /* A tab the record may hold: its kind is worth writing down, and it is not a
@@ -7510,6 +7510,7 @@ async function reopenStageTab(tab) {
   if (tab.kind === "skills") return openSkillsView();
   if (tab.kind === "artifacts") return openArtifacts({ fresh: true });
   if (tab.kind === "jev") return openJevView();
+  if (tab.kind === "inbox") return openInboxView();
 }
 
 /* The documents this worktree had when it was last looked at, back in their
@@ -9474,6 +9475,7 @@ function tabLabel(tab) {
   if (tab.kind === "skills") return skillText("title");
   if (tab.kind === "artifacts") return t("artifacts.tab", "아티팩트");
   if (tab.kind === "jev") return t("jev.tab", "의사결정 모델");
+  if (tab.kind === "inbox") return t("inbox.title", "받은 편지함");
   if (tab.kind === "tokens") return t("tokens.tab", "토큰 사용량");
   if (tab.kind === "emulator") {
     return tab.deviceName || t("emulator.tab", "모바일 에뮬레이터");

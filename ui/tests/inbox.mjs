@@ -205,9 +205,9 @@ export async function testInbox(browser, origin, standBackend, ok) {
   const blockedPane = await page.evaluate(() => {
     const view = document.querySelector(".inbox-view:not([hidden])");
     view.querySelector('.inbox-row[data-id="pane:term:5@1"]').click();
-    const acts = [...view.querySelectorAll(".inbox-preview [data-inbox-act]")].map((button) => button.dataset.inboxAct);
-    const words = view.querySelector(".inbox-preview").textContent;
-    return { acts, allowDeny: /허용|거절|allow|deny/i.test([...view.querySelectorAll(".inbox-preview button")].map((b) => b.textContent).join(" ")), words };
+    const shown = [...view.querySelectorAll(".inbox-preview [data-inbox-act]")].filter((button) => button.checkVisibility());
+    const acts = shown.map((button) => button.dataset.inboxAct);
+    return { acts, allowDeny: /허용|거절|allow|deny/i.test(shown.map((button) => button.textContent).join(" ")) };
   });
   ok(
     "a stopped pane has only 판 열기 — no allow or deny from the page",
@@ -236,8 +236,8 @@ export async function testInbox(browser, origin, standBackend, ok) {
     view.querySelector('.inbox-tab[data-inbox-tab="question"]').click();
     view.querySelector('.inbox-row[data-id="run-b/m-q3"]').click();
     return {
-      field: Boolean(view.querySelector(".inbox-reply-field:not([hidden])")),
-      reply: Boolean(view.querySelector('[data-inbox-act="reply"]:not([hidden])')),
+      field: view.querySelector(".inbox-reply-field").checkVisibility(),
+      reply: view.querySelector('[data-inbox-act="reply"]').checkVisibility(),
       note: view.querySelector(".inbox-preview .inbox-note")?.textContent ?? "",
     };
   });
@@ -295,7 +295,9 @@ export async function testInbox(browser, origin, standBackend, ok) {
   });
   ok("「안 읽음만」 keeps only the unread letters", unreadOnly.on === "true" && unreadOnly.shown.every((one) => one === "true") && unreadOnly.shown.length < unreadOnly.all, JSON.stringify(unreadOnly));
 
-  // 100 letters: the keyed paint, median of nine.
+  // 100 letters, median of nine. Gated: the worst case, where every letter's words changed
+  // (a minute turned, or the ledger moved them all). Reported: the steady repaint, where the
+  // keyed rows are reused as they stand.
   const timings = await page.evaluate(({ rows, runs }) => {
     const base = inboxSnapshot.items;
     const bulk = Array.from({ length: rows }, (_, index) => {
@@ -303,20 +305,29 @@ export async function testInbox(browser, origin, standBackend, ok) {
       return { ...source, id: `${source.id}#${index}` };
     });
     inboxSnapshot = { items: bulk, counts: { all: rows, question: rows, handoff: 0, blocked: 0, notice: 0, waiting: rows } };
-    document.querySelector(".inbox-view:not([hidden]) .inbox-tab[data-inbox-tab=\"all\"]").click();
-    const samples = [];
-    for (let run = 0; run < runs; run += 1) {
-      const started = performance.now();
-      paintInboxViews();
-      samples.push(performance.now() - started);
-    }
-    return samples.sort((left, right) => left - right);
+    document.querySelector('.inbox-view:not([hidden]) .inbox-tab[data-inbox-tab="all"]').click();
+    const measure = (before) => {
+      const samples = [];
+      for (let run = 0; run < runs; run += 1) {
+        before(run);
+        const started = performance.now();
+        paintInboxViews();
+        samples.push(performance.now() - started);
+      }
+      return samples.sort((left, right) => left - right);
+    };
+    const changed = measure((run) => {
+      for (const item of bulk) item.at_ms += 1 + run;
+    });
+    const steady = measure(() => {});
+    return { changed, steady };
   }, { rows: PAINT_ROWS, runs: PAINT_RUNS });
-  const median = timings[Math.floor(timings.length / 2)];
-  ok(`${PAINT_ROWS} letters paint in ${PAINT_BUDGET_MS} ms or less (median of ${PAINT_RUNS})`, median <= PAINT_BUDGET_MS, `median=${median.toFixed(2)}ms`);
+  const middle = (samples) => samples[Math.floor(samples.length / 2)];
+  const median = middle(timings.changed);
+  ok(`${PAINT_ROWS} letters, every word rewritten, paint in ${PAINT_BUDGET_MS} ms or less (median of ${PAINT_RUNS})`, median <= PAINT_BUDGET_MS, `median=${median.toFixed(2)}ms`);
   if (process.env.INBOX_REPORT === "1") {
     console.log(
-      `INBOX_REPORT screens=${crossed} paint_rows=${PAINT_ROWS} paint_ms_median=${median.toFixed(2)} paint_ms_min=${timings[0].toFixed(2)} paint_ms_max=${timings.at(-1).toFixed(2)}`,
+      `INBOX_REPORT screens=${crossed} paint_rows=${PAINT_ROWS} rewritten_ms_median=${median.toFixed(2)} rewritten_ms_max=${timings.changed.at(-1).toFixed(2)} steady_ms_median=${middle(timings.steady).toFixed(2)}`,
     );
   }
   await page.close();
