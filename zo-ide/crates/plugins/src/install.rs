@@ -214,8 +214,8 @@ pub(crate) fn update_settings_json(
     path: &Path,
     mut update: impl FnMut(&mut Map<String, Value>),
 ) -> Result<(), PluginError> {
-    // Parent creation is deferred to `write_atomic`; the read below already
-    // tolerates a missing file (NotFound → empty object).
+    let _guard = zerocode_core::settings_file_lock::SettingsFileLock::acquire(path)?;
+    // The shared guard prepares the parent; a missing document starts empty.
     let mut root = match fs::read_to_string(path) {
         Ok(contents) if !contents.trim().is_empty() => serde_json::from_str::<Value>(&contents)?,
         Ok(_) => Value::Object(Map::new()),

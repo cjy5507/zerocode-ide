@@ -12,6 +12,7 @@ path = "src/main.rs"
 # 코어만 문다 — 표면(TUI)·attach/serve 클라이언트는 의존하지 않는다.
 # 이 의존 목록이 곧 "가져온 것"의 전부다: 대화 런타임과 그 아래 잎들.
 [dependencies]
+judgment-provider = { path = "../../../crates/judgment-provider" }
 api = { path = "../api" }
 arboard = "3"
 base64.workspace = true

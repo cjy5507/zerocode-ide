@@ -64,6 +64,7 @@
     <script defer src="./shell-managed-judgment.js"></script>
     <script defer src="./shell-model-source.js"></script>
     <script defer src="./shell-judgment.js"></script>
+    <script defer src="./shell-connections.js"></script>
     <script defer src="./shell-jev.js"></script>
     <script defer src="./shell-flow.js"></script>
     <script defer src="./shell-remote.js"></script>
@@ -3733,7 +3734,7 @@
               </button>
               <button class="settings-rail-item" type="button" data-pane="api-routers">
                 <svg class="icon" aria-hidden="true"><use href="#i-waypoints"></use></svg>
-                <span data-i18n="settings.apiRouters.title">API 라우터</span>
+                <span data-i18n="settings.apiRouters.title">모델 연결</span>
               </button>
               <button class="settings-rail-item" type="button" data-pane="judgment-models">
                 <svg class="icon" aria-hidden="true"><use href="#i-bot"></use></svg>
@@ -4160,9 +4161,9 @@
              button on it. -->
         <section class="settings-pane" data-pane="api-routers" hidden>
         <header class="settings-section-head">
-          <h2 class="settings-section-title" data-i18n="settings.apiRouters.title">API 라우터</h2>
+          <h2 class="settings-section-title" data-i18n="settings.apiRouters.title">모델 연결</h2>
           <p class="settings-section-desc" data-i18n="settings.apiRouters.about">
-            OpenRouter·AgentRouter·커스텀 엔드포인트를 연결하고 터미널에서 쓸 모델을 고릅니다.
+            로컬·외부 서버를 한곳에서 연결하고 코딩과 판단에 사용할 모델을 각각 고릅니다.
           </p>
         </header>
 
@@ -4171,17 +4172,27 @@
           <div class="settings-subhead settings-subhead--acts">
             <div>
               <h3 class="settings-subhead-title">
-                <span data-i18n="settings.apiRouters.connectedTitle">연결된 라우터</span>
+                <span data-i18n="settings.apiRouters.connectedTitle">등록한 연결</span>
                 <span class="settings-badge" id="router-provider-count"></span>
               </h3>
               <p class="settings-subhead-desc" data-i18n="settings.apiRouters.connectedAbout">
-                ~/.zo/settings.json의 providers에 등록된 라우터 목록입니다.
+                주소와 인증은 연결에 한 번 등록합니다. 같은 연결을 코딩과 판단에서 함께 사용할 수 있습니다.
               </p>
             </div>
           </div>
           <div class="agent-list" id="router-provider-list"></div>
           <p class="settings-hint" id="router-provider-note"></p>
         </div>
+
+        <section class="connections-usage" aria-labelledby="connection-usage-title">
+          <h3 class="settings-subhead-title" id="connection-usage-title" data-i18n="settings.connections.usesTitle">용도별 모델</h3>
+          <div class="connection-roles" data-connection-roles="all"></div>
+          <p class="settings-hint" id="connections-sync-status" role="status" aria-live="polite"></p>
+          <div class="settings-action-row">
+            <button type="button" class="btn" id="connections-managed" data-i18n="settings.connections.managed">앱 관리 로컬 모델 · Jev</button>
+            <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
+          </div>
+        </section>
 
         <!-- Add or configure router -->
         <div class="settings-card" id="router-card">
@@ -4237,6 +4248,23 @@
                    autocomplete="off" spellcheck="false" placeholder="sk-or-..." />
           </label>
 
+          <details class="settings-fold">
+            <summary data-i18n="settings.connections.advanced">인증 방식 · 모델 ID 직접 입력</summary>
+            <label class="settings-field" data-field="md" for="router-auth-header">
+              <span class="settings-label" data-i18n="settings.connections.authHeader">인증 헤더</span>
+              <input class="settings-input" id="router-auth-header" value="Authorization" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="settings-field" data-field="md" for="router-auth-scheme">
+              <span class="settings-label" data-i18n="settings.connections.authScheme">인증 접두어 · 없으면 비움</span>
+              <input class="settings-input" id="router-auth-scheme" value="Bearer" autocomplete="off" spellcheck="false" />
+            </label>
+            <label class="settings-field" data-field="lg" for="router-manual-models">
+              <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.connections.manualModels">모델 ID · 한 줄에 하나</span>
+                <span class="settings-row-desc" data-i18n="settings.connections.manualHint">서버가 모델 목록을 제공하지 않을 때 직접 등록합니다. 응답 확인은 별도로 진행합니다.</span></span>
+              <textarea class="settings-input" id="router-manual-models" rows="3" spellcheck="false"></textarea>
+            </label>
+          </details>
+
           <div class="settings-status" id="router-test-status" role="status" aria-live="polite"></div>
 
           <!-- Models table returned from connection test -->
@@ -4285,11 +4313,12 @@
             <div>
               <h2 class="settings-section-title" data-i18n="settings.judgment.title">판단 모델</h2>
               <p class="settings-section-desc" data-i18n="settings.judgment.about">
-                선택·점수·참/거짓을 반환하는 판단 모델을 고릅니다. 컴퓨터 유즈와 라우팅을 포함한 모든 판단 기능이 같은 선택을 사용합니다. 일반 채팅 모델은 지원하지 않습니다.
+                선택·점수·참/거짓을 반환하는 모델을 고릅니다. 등록한 로컬·외부 연결을 재사용하며, 일반 모델도 판단 응답 형식이 확인되면 사용할 수 있습니다.
               </p>
             </div>
           </div>
         </header>
+        <div class="connection-roles" data-connection-roles="judgment"></div>
         <div class="settings-card" id="typesafe-card">
           <section class="judgment-current-status" id="judgment-current-status" aria-labelledby="judgment-current-title">
             <div class="judgment-current-heading">
@@ -4331,6 +4360,10 @@
           <div class="settings-notice settings-notice--row settings-jev-partial" data-jev-partial hidden>
             <span class="settings-jev-partial-said" data-jev-partial-said></span>
             <button class="btn" type="button" data-jev-everywhere data-i18n="settings.typesafe.everyFolder">모든 폴더에서 사용</button>
+          </div>
+          <div class="settings-notice settings-notice--row" id="judgment-linked-notice" hidden>
+            <span data-i18n="settings.connections.editLinked">이 모델의 주소와 인증은 공통 연결에서 수정합니다.</span>
+            <button class="btn" type="button" id="judgment-edit-linked" data-i18n="settings.apiRouters.title">모델 연결</button>
           </div>
           <section class="judgment-model-changes" id="judgment-model-changes" aria-labelledby="judgment-changes-title">
             <h3 id="judgment-changes-title" data-i18n="settings.judgment.changesTitle">모델 변경</h3>

@@ -2171,6 +2171,7 @@ pub struct CustomProviderUsability {
 
 #[derive(Clone)]
 pub struct ResolvedCustomProvider {
+    pub connection: Option<judgment_provider::connections::Metadata>,
     pub models: Vec<String>,
     pub requires_auth: bool,
     pub config: openai_compat::OpenAiCompatConfig,
@@ -2208,6 +2209,7 @@ impl From<openai_compat::CustomProviderConfig> for ResolvedCustomProvider {
             model_limits,
             fit_hint: custom.to_fit_hint(),
             config: custom.to_static_config(),
+            connection: custom.connection,
             models,
             requires_auth: custom.requires_auth,
         }
@@ -2215,6 +2217,11 @@ impl From<openai_compat::CustomProviderConfig> for ResolvedCustomProvider {
 }
 
 impl ResolvedCustomProvider {
+    fn named(&self, name: &str) -> bool {
+        provider_name_matches(self.config.provider_name, name) || self.connection.as_ref().is_some_and(|connection|
+            connection.id == name || connection.aliases.iter().any(|alias| provider_name_matches(alias, name)))
+    }
+
     /// Whether this provider serves `model` (case-insensitive id match).
     fn serves(&self, model: &str) -> bool {
         self.canonical_model(model).is_some()
@@ -2226,7 +2233,7 @@ impl ResolvedCustomProvider {
         let model = model.trim();
         model
             .split_once('/')
-            .filter(|(named, _)| provider_name_matches(self.config.provider_name, named))
+            .filter(|(named, _)| self.named(named))
             .and_then(|(_, half)| self.canonical_model(half))
             .or_else(|| self.canonical_model(model))
     }
@@ -2360,6 +2367,7 @@ fn builtin_seed_providers() -> Vec<ResolvedCustomProvider> {
     let mut seeds = Vec::new();
     if deepseek_credential_present() {
         seeds.push(ResolvedCustomProvider {
+            connection: None,
             models: vec![
                 "deepseek-v4-pro".to_string(),
                 "deepseek-v4-flash".to_string(),
@@ -2424,18 +2432,28 @@ fn custom_provider_snapshot() -> CustomProviders {
 /// the live companion to the startup env bridge: `/connect` writes settings,
 /// then calls this so model routing and the picker reflect the new provider in
 /// the already-running process.
+fn last_custom_providers_json() -> &'static std::sync::Mutex<Option<String>> {
+    static LAST: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
+    LAST.get_or_init(Default::default)
+}
+
 pub fn refresh_custom_providers_from_json(raw: &str) -> Result<(), serde_json::Error> {
+    let mut last = last_custom_providers_json().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.as_deref() == Some(raw) { return Ok(()); }
     let providers = shared_providers(with_builtin_seed(parse_resolved_custom_providers(raw)?));
     let mut guard = custom_provider_store()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = providers;
+    *last = Some(raw.to_string());
     Ok(())
 }
 
 /// Re-read the process-local custom-provider catalog from
 /// `ZO_CUSTOM_PROVIDERS`.
 pub fn refresh_custom_providers_from_env() {
+    let mut last = last_custom_providers_json().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *last = None;
     let mut guard = custom_provider_store()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2467,7 +2485,7 @@ pub fn split_provider_model_ref(model: &str) -> Option<(&str, &str)> {
             && !rest.is_empty()
             && custom_provider_snapshot()
                 .iter()
-                .any(|provider| provider_name_matches(provider.config.provider_name, first))
+                .any(|provider| provider.named(first))
         {
             return Some((first, rest));
         }
@@ -2482,20 +2500,7 @@ pub fn split_provider_model_ref(model: &str) -> Option<(&str, &str)> {
 }
 
 fn provider_name_matches(configured: &str, requested: &str) -> bool {
-    let configured = configured.trim();
-    let requested = requested.trim();
-    if configured.eq_ignore_ascii_case(requested) {
-        return true;
-    }
-    // Allow `agent-router` / `agent_router` to match display name `agent router`.
-    let normalize = |value: &str| {
-        value
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .flat_map(char::to_lowercase)
-            .collect::<String>()
-    };
-    !normalize(configured).is_empty() && normalize(configured) == normalize(requested)
+    judgment_provider::connections::names_match(configured, requested)
 }
 
 /// The custom provider that serves `model`, if any.
@@ -2534,7 +2539,7 @@ pub fn custom_provider_for_model(model: &str) -> Option<Arc<ResolvedCustomProvid
 fn named_provider_ref(model: &str) -> Option<(Arc<ResolvedCustomProvider>, String)> {
     let (provider_name, model_id) = split_provider_model_ref(model)?;
     custom_provider_snapshot().iter().find_map(|provider| {
-        if !provider_name_matches(provider.config.provider_name, provider_name) {
+        if !provider.named(provider_name) {
             return None;
         }
         let declared = provider.canonical_model(model_id)?.to_string();
@@ -4358,6 +4363,52 @@ impl KeySource {
     }
 }
 
+static PROVIDER_RELOAD_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Invalidation only: no filesystem, keychain or network work on the events handler.
+pub fn note_provider_reload() -> u64 {
+    let keychains = window_keychains().read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let is_router = |key: &str| keychains.iter().any(|keychain| matches!(&keychain.names, WindowKeyNames::Prefix(_)) && keychain.names.answers(key));
+    let mut asked = asked_window_keychain().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut adopted = adopted_launch_keys().write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    asked.retain(|key| !is_router(key));
+    adopted.retain(|key, (_, source)| !is_router(key)
+        || *source == KeySource::Adopted);
+    PROVIDER_RELOAD_GENERATION.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1
+}
+
+#[must_use]
+pub fn provider_reload_generation() -> u64 {
+    PROVIDER_RELOAD_GENERATION.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// A connection constructor reads a fresh window key while its caller holds
+/// the common settings lock, so a new endpoint cannot receive an old cached key.
+pub(crate) fn fresh_connection_key(key: &str, stamp: &str) -> Result<Option<String>, crate::error::ApiError> {
+    Ok(connection_credential(key, stamp)?.map(|(value, _)| value))
+}
+
+pub(crate) fn connection_credential(key: &str, stamp: &str) -> Result<Option<(String, KeySource)>, crate::error::ApiError> {
+    match std::env::var(key) {
+        Ok(value) if !value.trim().is_empty() => return Ok(Some((value, KeySource::Environment))),
+        Ok(_) | Err(std::env::VarError::NotPresent) => {},
+        Err(error) => return Err(error.into()),
+    }
+    let keychains = window_keychains().read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(keychain) = keychains.iter().find(|keychain| keychain.names.answers(key)) {
+        match (keychain.read)(&format!("{}{key}", keychain.service_prefix)) {
+            KeychainAnswer::Found(value) => return Ok(Some((value, KeySource::WindowKeychain))),
+            KeychainAnswer::Absent if anthropic::keychain::router_keychain_available() => return Ok(None),
+            KeychainAnswer::Unanswered if anthropic::keychain::router_keychain_available() => return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "The saved model connection key could not be read.").into()),
+            KeychainAnswer::Absent | KeychainAnswer::Unanswered => {},
+        }
+    }
+    drop(keychains);
+    let Some((value, KeySource::Adopted)) = adopted_table_key(key) else { return Ok(None); };
+    if !crate::connection_keys::permits(key, stamp) { return Err(crate::error::ApiError::ConnectionRestartRequired); }
+    Ok(Some((value, KeySource::Adopted)))
+}
+
 /// Keys this process holds outside its environment, by variable name, each
 /// with the rung it came from ([`adopt_launch_keys`], [`window_keychain_key`]).
 ///
@@ -4434,6 +4485,7 @@ pub fn adopt_launch_keys(prefix: &str) -> usize {
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, value)| name.starts_with(prefix) && !value.trim().is_empty())
         .collect();
+    crate::connection_keys::capture(&found.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(), prefix);
     let mut table = adopted_launch_keys()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4549,6 +4601,7 @@ fn install_window_keychain(names: WindowKeyNames, service_prefix: &str, read: fn
 
 #[cfg(test)]
 pub(crate) fn forget_adopted_launch_keys_for_test() {
+    crate::connection_keys::clear();
     adopted_launch_keys()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7297,6 +7350,112 @@ mod tests {
         super::refresh_custom_providers_from_json("[]").expect("clear");
     }
 
+    fn review_linked_settings(base: &str, key: &str, generation: u64) -> serde_json::Value {
+        serde_json::json!({"providers":[{"name":"Review fixture","base_url":base,"models":["fixture-model"],"auth_env":key,"requires_auth":true,"connection":{"id":"review-route","generation":generation}}],
+          "smart":{"judgmentProvider":{"kind":"remote","protocol":"system_one","baseUrl":base,"model":"fixture-model","requiresAuth":true},
+          "judgmentConnection":{"id":"review-route","generation":generation,"model":"fixture-model","protocol":"system_one"}}})
+    }
+
+    #[test]
+    fn review_a_launch_key_is_not_adopted_by_a_route_changed_before_its_first_use() {
+        let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _catalog = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _routes = EnvVarGuard::set(judgment_provider::connections::LAUNCH_ROUTES_ENV, None);
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
+        let name = "ZEROCODE_ROUTER_T73675_ROUTE_FIXTURE_KEY";
+        let _key = EnvVarGuard::set(name, Some("old-launch-fixture"));
+        let _state = RouterTestState; super::forget_adopted_launch_keys_for_test();
+        let path = home.path().join("settings.json");
+        std::fs::write(&path, review_linked_settings("https://first.example.com/v1", name, 1).to_string()).unwrap();
+        assert_eq!(super::adopt_launch_keys(name), 1);
+        std::fs::write(&path, review_linked_settings("https://second.example.com/v1", name, 2).to_string()).unwrap();
+        let error = crate::SystemOneConfig::from_env().expect_err("the launch key was accepted for a different route before its first use");
+        assert_eq!(error.token(), "provider_restart_required");
+    }
+
+    #[test]
+    fn review_a_launch_key_keeps_its_declared_route_when_the_settings_lock_is_busy_at_launch() {
+        let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _catalog = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _routes = EnvVarGuard::set(judgment_provider::connections::LAUNCH_ROUTES_ENV, None);
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
+        let name = "ZEROCODE_ROUTER_T73675_BUSY_LOCK_FIXTURE_KEY";
+        let _key = EnvVarGuard::set(name, Some("busy-lock-launch-fixture"));
+        let _state = RouterTestState; super::forget_adopted_launch_keys_for_test();
+        let path = home.path().join("settings.json");
+        std::fs::write(&path, review_linked_settings("https://first.example.com/v1", name, 1).to_string()).unwrap();
+        // Another writer holds the lock past the launch's poll budget.
+        let busy = zerocode_core::settings_file_lock::SettingsFileLock::acquire(&path).unwrap();
+        assert_eq!(super::adopt_launch_keys(name), 1);
+        drop(busy);
+        let config = crate::SystemOneConfig::from_env().expect("a busy settings lock at launch erased the route the launch key was exported for");
+        assert!(config.test_key_matches("busy-lock-launch-fixture"));
+    }
+
+    #[test]
+    fn review_linked_judgment_reads_the_new_key_without_waiting_for_reload() {
+        let _lock = crate::test_env_lock(); let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _catalog = EnvVarGuard::set(super::CUSTOM_PROVIDERS_ENV, None);
+        let _routes = EnvVarGuard::set(judgment_provider::connections::LAUNCH_ROUTES_ENV, None);
+        let home = tempfile::tempdir().unwrap();
+        let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
+        let name = "ZEROCODE_ROUTER_T73675_CURRENT_FIXTURE_KEY"; let _key = EnvVarGuard::set(name,None);
+        let _state = RouterTestState; super::forget_adopted_launch_keys_for_test();
+        super::install_window_keychain(super::WindowKeyNames::Prefix(name.to_string()), "fixture.review.", reloaded_fixture);
+        let path = home.path().join("settings.json");
+        std::fs::write(&path, review_linked_settings("https://first.example.com/v1", name, 1).to_string()).unwrap();
+        *RELOADED_FIXTURE.lock().unwrap() = Some("old-cache-fixture");
+        assert!(crate::SystemOneConfig::from_env().unwrap().test_key_matches("old-cache-fixture"));
+        std::fs::write(&path, review_linked_settings("https://second.example.com/v1", name, 2).to_string()).unwrap();
+        *RELOADED_FIXTURE.lock().unwrap() = Some("current-store-fixture");
+        let current = crate::SystemOneConfig::from_env().unwrap();
+        assert!(current.test_key_matches("current-store-fixture"), "linked judgment reused a key cached for a different route before reload");
+        *RELOADED_FIXTURE.lock().unwrap() = None;
+    }
+
+    static RELOADED_FIXTURE: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+    fn reloaded_fixture(_service: &str) -> super::KeychainAnswer {
+        RELOADED_FIXTURE.lock().unwrap().map_or(super::KeychainAnswer::Absent, |value| super::KeychainAnswer::Found(value.to_string()))
+    }
+
+    #[test]
+    fn provider_reload_forgets_missing_rotated_and_removed_router_keys() {
+        let _lock = crate::test_env_lock();
+        let name = "ZO_TEST_RELOAD_KEY";
+        let _env = EnvVarGuard::set(name, None);
+        super::forget_adopted_launch_keys_for_test();
+        super::install_window_keychain(super::WindowKeyNames::Prefix("ZO_TEST_RELOAD_".to_string()), "fixture.reload.", reloaded_fixture);
+        *RELOADED_FIXTURE.lock().unwrap() = None;
+        assert_eq!(super::read_env_non_empty(name).unwrap(), None);
+        *RELOADED_FIXTURE.lock().unwrap() = Some("first-fixture");
+        assert_eq!(super::read_env_non_empty(name).unwrap(), None, "negative cache before reload");
+        super::note_provider_reload();
+        assert_eq!(super::read_env_non_empty(name).unwrap().as_deref(), Some("first-fixture"));
+        *RELOADED_FIXTURE.lock().unwrap() = Some("rotated-fixture");
+        super::note_provider_reload();
+        assert_eq!(super::read_env_non_empty(name).unwrap().as_deref(), Some("rotated-fixture"));
+        *RELOADED_FIXTURE.lock().unwrap() = None;
+        super::note_provider_reload();
+        assert_eq!(super::read_env_non_empty(name).unwrap(), None, "a deleted key must not fall back to the adopted value");
+        assert!(std::env::var_os(name).is_none());
+        super::forget_adopted_launch_keys_for_test();
+    }
+
+    #[test]
+    fn a_renamed_connection_preserves_both_its_stable_id_and_old_model_reference() {
+        let _lock = crate::test_env_lock();
+        let _state = RouterTestState;
+        super::refresh_custom_providers_from_json(r#"[{"name":"New gateway","base_url":"https://gateway.example.com/v1","models":["vendor/model"],"requires_auth":false,"connection":{"id":"fixture-stable","generation":0,"aliases":["Old gateway"]}}]"#).unwrap();
+        for selected in ["Old gateway/vendor/model", "New gateway/vendor/model", "fixture-stable/vendor/model"] {
+            let provider = super::custom_provider_for_model(selected).expect("same connection");
+            assert_eq!(provider.config.provider_name, "New gateway");
+            assert_eq!(super::wire_model_id(selected), "vendor/model");
+        }
+    }
+
     /// What the fake keychain below was asked, in order.
     static KEYCHAIN_ASKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -7711,7 +7870,7 @@ mod tests {
             let shown = refused.to_string();
             assert!(
                 shown.contains(&format!(
-                    "No {router} key — put it in the window's Settings › API Routers › {router}, then reopen zo."
+                    "No {router} key — put it in the window's Settings › Model Connections › {router}, then retry the turn."
                 )),
                 "the error says where the key goes: {shown}"
             );
@@ -7822,7 +7981,7 @@ mod tests {
         );
         assert!(
             shown.contains(
-                "OpenRouter refused the key zo sent — put the right key in the window's Settings › API Routers › OpenRouter, then reopen zo."
+                "OpenRouter refused the key zo sent — put the right key in the window's Settings › Model Connections › OpenRouter, then retry the turn."
             ),
             "{shown}"
         );
@@ -7840,7 +7999,7 @@ mod tests {
         let shown = keyless.to_string();
         assert!(
             shown.contains(
-                "No LocalRouter key — put it in the window's Settings › API Routers › LocalRouter, then reopen zo."
+                "No LocalRouter key — put it in the window's Settings › Model Connections › LocalRouter, then retry the turn."
             ),
             "{shown}"
         );

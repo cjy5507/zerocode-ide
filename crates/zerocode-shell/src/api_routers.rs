@@ -11,6 +11,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use zerocode_core::settings_file_lock::SettingsFileLock;
+
 pub static API_ROUTERS_PRESETS_JSON: &str = include_str!("api-routers.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,7 +111,9 @@ pub struct ProviderEntry {
     pub base_url: String,
     #[serde(default)]
     pub models: Vec<ProviderModel>,
+    #[serde(default = "default_requires_auth")]
     pub requires_auth: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth_env: String,
     /// A window for every model of the row that states none of its own. The
     /// window never writes one — it states each model's own — but a row may
@@ -120,6 +124,10 @@ pub struct ProviderEntry {
     pub client_fingerprint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub headers: Option<std::collections::BTreeMap<String, String>>,
+}
+
+const fn default_requires_auth() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -142,6 +150,20 @@ pub fn router_keychain_service_for_env(auth_env: &str) -> String {
         "{}{auth_env}",
         zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX
     )
+}
+
+pub(crate) fn read_connection_key(
+    auth_env: &str,
+    keys: &dyn RouterKeys,
+) -> Result<Option<String>, RouterRefusal> {
+    if is_router_env(auth_env) {
+        return keys.read(&router_keychain_service_for_env(auth_env));
+    }
+    match std::env::var(auth_env) {
+        Ok(value) => Ok((!value.trim().is_empty()).then_some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err("provider_settings".to_string().into()),
+    }
 }
 
 /// Whether `auth_env` is one of the window's own router variables — the mark
@@ -174,16 +196,77 @@ pub fn router_launch_env(
     env
 }
 
-/// [`router_launch_env`] over zo's real settings file and this user's keychain.
+/// Capture each handed-off key and the routes it belongs to in the same settings transaction.
+pub(crate) fn router_launch_snapshot(
+    path: &Path,
+    keys: &dyn RouterKeys,
+) -> Result<Vec<(String, String)>, String> {
+    with_zo_settings_root_for_launch(path, |document| {
+        let mut secrets = std::collections::BTreeMap::new();
+        let mut providers = Vec::new();
+        let mut routes: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for row in document
+            .get("providers")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Ok(entry) = serde_json::from_value::<ProviderEntry>(row.clone()) else {
+                continue;
+            };
+            providers.push(entry);
+            let Some(name) = row
+                .get("auth_env")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| is_router_env(name))
+            else {
+                continue;
+            };
+            let Ok(stamp) = judgment_provider::connections::route_stamp(row) else {
+                continue;
+            };
+            if !secrets.contains_key(name) {
+                // A key this launch cannot read is left for zo's normal credential diagnostics.
+                let Some(key) = keys
+                    .read(&router_keychain_service_for_env(name))
+                    .ok()
+                    .flatten()
+                    .filter(|key| !key.trim().is_empty())
+                else {
+                    continue;
+                };
+                secrets.insert(name.to_string(), key);
+            }
+            routes.entry(name.to_string()).or_default().push(stamp);
+        }
+        let mut env = router_launch_env(&providers, |service| {
+            service
+                .strip_prefix(zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX)
+                .and_then(|name| secrets.get(name).cloned())
+        });
+        if !env.is_empty() {
+            env.push((
+                judgment_provider::connections::LAUNCH_ROUTES_ENV.to_string(),
+                serde_json::to_string(&judgment_provider::connections::LaunchRoutes {
+                    version: judgment_provider::connections::LAUNCH_ROUTES_VERSION,
+                    routes,
+                })
+                .map_err(|error| error.to_string())?,
+            ));
+        }
+        Ok(env)
+    })
+}
+
+/// The launch captures its key provenance; it never writes a second credential store.
 pub fn router_launch_env_from_disk() -> Vec<(String, String)> {
     let Some(path) = zo_settings_path() else {
         return Vec::new();
     };
-    let Ok(providers) = read_providers_file(&path) else {
-        return Vec::new();
-    };
-    router_launch_env(&providers, |service| {
-        crate::accounts::read_keychain_service(service).ok()
+    router_launch_snapshot(&path, &Keychain::of_this_machine()).unwrap_or_else(|error| {
+        eprintln!("[zerocode] zo launches without its router keys: {error}");
+        Vec::new()
     })
 }
 
@@ -290,6 +373,8 @@ fn assign_auth_env(
 pub enum RouterRefusalKind {
     /// This machine has no keychain to keep a router key in.
     KeychainUnavailable,
+    /// The entered key cannot form an HTTP authentication value.
+    InvalidKey,
     /// Anything else; the message says what.
     Failed,
 }
@@ -395,6 +480,9 @@ pub struct RouterSave {
     pub models: Vec<ProviderModel>,
     pub client_fingerprint: Option<String>,
     pub headers: Option<std::collections::BTreeMap<String, String>>,
+    pub source_id: Option<String>,
+    pub expected_generation: Option<u64>,
+    pub auth: Option<judgment_provider::connections::Authentication>,
 }
 
 fn read_settings_text(path: &Path) -> Result<String, String> {
@@ -420,18 +508,34 @@ fn settings_root(text: &str) -> Result<serde_json::Map<String, serde_json::Value
     Ok(root)
 }
 
-/// One window writer of zo's settings file at a time — router rows and the
-/// TypeSafe switch alike. Each reads the whole file, changes its part and
-/// replaces the file, so two at once would lose one change.
-static ZO_SETTINGS_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 pub(crate) fn with_zo_settings_root<R>(
     path: &Path,
     read: impl FnOnce(&serde_json::Map<String, serde_json::Value>) -> Result<R, String>,
 ) -> Result<R, String> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
+    read(&read_zo_settings_root(path)?)
+}
+
+/// How long a launch waits for zo's settings lock. A writer can retry after the
+/// lock's own poll; a zo launched without its router keys gets them only by
+/// restarting.
+const LAUNCH_SETTINGS_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// [`with_zo_settings_root`] for a launch, which keeps polling for the lock
+/// until [`LAUNCH_SETTINGS_LOCK_WAIT`] has passed.
+fn with_zo_settings_root_for_launch<R>(
+    path: &Path,
+    read: impl FnOnce(&serde_json::Map<String, serde_json::Value>) -> Result<R, String>,
+) -> Result<R, String> {
+    let deadline = std::time::Instant::now() + LAUNCH_SETTINGS_LOCK_WAIT;
+    let _guard = loop {
+        match SettingsFileLock::acquire(path) {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline => {}
+            taken => break taken.map_err(|error| error.to_string())?,
+        }
+    };
     read(&read_zo_settings_root(path)?)
 }
 
@@ -453,15 +557,13 @@ fn render_settings_root(
     Ok(rendered)
 }
 
-/// Change zo's settings file under [`ZO_SETTINGS_WRITES`], keeping every key the
+/// Change zo's settings file under [`SettingsFileLock`], keeping every key the
 /// change does not touch as it stood. A change that refuses writes nothing.
 pub(crate) fn update_zo_settings_root(
     path: &Path,
     change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
 ) -> Result<(), String> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let mut root = read_zo_settings_root(path)?;
     change(&mut root)?;
     crate::durable_file::replace_bytes(path, render_settings_root(&root)?.as_bytes())
@@ -479,9 +581,7 @@ pub(crate) fn update_zo_settings_root_with_key(
     keys: &dyn RouterKeys,
     change: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>,
 ) -> Result<(), RouterRefusal> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let mut root = read_zo_settings_root(path)?;
     change(&mut root)?;
     let updated = render_settings_root(&root)?;
@@ -549,9 +649,7 @@ pub fn save_router(
     save: RouterSave,
     keys: &dyn RouterKeys,
 ) -> Result<Vec<ProviderEntry>, RouterRefusal> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     save_router_with_writer(path, save, keys, |path, updated| {
         crate::durable_file::replace_bytes(path, updated)
             .map(|_| ())
@@ -566,32 +664,148 @@ fn save_router_with_writer(
     write: impl FnOnce(&Path, &[u8]) -> Result<(), String>,
 ) -> Result<Vec<ProviderEntry>, RouterRefusal> {
     let name = save.name.trim().to_string();
-    if name.is_empty() {
+    if name.is_empty() || name.len() > 256 || name.chars().any(char::is_control) {
         return Err("라우터 이름이 비어 있습니다".to_string().into());
     }
+    let address =
+        reqwest::Url::parse(save.base_url.trim()).map_err(|_| "provider_address".to_string())?;
+    if !matches!(address.scheme(), "http" | "https")
+        || address.host().is_none()
+        || !address.username().is_empty()
+        || address.password().is_some()
+        || address.query().is_some()
+        || address.fragment().is_some()
+    {
+        return Err("provider_address".to_string().into());
+    }
     let existing = read_settings_text(path)?;
-    let rows = row_identities(&settings_root(&existing)?);
+    let mut root = serde_json::Value::Object(settings_root(&existing)?);
+    let source = if let Some(id) = save.source_id.as_deref() {
+        Some(
+            judgment_provider::connections::row(&root, id)
+                .map_err(|error| error.to_string())?
+                .clone(),
+        )
+    } else {
+        root.get("providers")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+            .cloned()
+    };
+    let original_name = source
+        .as_ref()
+        .and_then(|row| row.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(&name)
+        .to_string();
+    let rows = row_identities(
+        root.as_object()
+            .ok_or_else(|| "provider_settings".to_string())?,
+    );
+    if rows.iter().any(|row| {
+        row.name != original_name && judgment_provider::connections::names_match(&row.name, &name)
+    }) || (name.contains('/') && (source.is_none() || original_name != name))
+    {
+        return Err("connection_name_conflict".to_string().into());
+    }
+    let mut metadata = source
+        .as_ref()
+        .map(judgment_provider::connections::metadata)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| judgment_provider::connections::Metadata {
+            aliases: Vec::new(),
+            id: format!("connection-{}", uuid::Uuid::new_v4()),
+            generation: 0,
+            auth: judgment_provider::connections::Authentication::default(),
+        });
+    if save.source_id.is_some() && save.expected_generation != Some(metadata.generation) {
+        return Err("settings_changed".to_string().into());
+    }
+    if original_name != name && !metadata.aliases.contains(&original_name) {
+        metadata.aliases.push(original_name.clone());
+    }
+    if root
+        .get("providers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|row| source.as_ref() != Some(*row))
+        .filter_map(|row| judgment_provider::connections::metadata(row).ok())
+        .any(|metadata| {
+            metadata
+                .aliases
+                .iter()
+                .any(|alias| judgment_provider::connections::names_match(alias, &name))
+        })
+    {
+        return Err("connection_name_conflict".to_string().into());
+    }
+    let previous_auth = metadata.auth.clone();
+    if let Some(auth) = save.auth {
+        metadata.auth = auth;
+    }
+    reqwest::header::HeaderName::from_bytes(metadata.auth.header.as_bytes())
+        .map_err(|_| "provider_settings".to_string())?;
+    if let Some(scheme) = &metadata.auth.scheme {
+        reqwest::header::HeaderValue::from_str(&format!("{scheme} fixture"))
+            .map_err(|_| "provider_settings".to_string())?;
+    }
     let secret = save
         .key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty());
-    let auth_env = assign_auth_env(&rows, &name, save.preset_id.as_deref(), secret.is_some());
+    if secret.is_some_and(|key| key.chars().any(|ch| ch.is_whitespace() || ch.is_control())) {
+        return Err(RouterRefusal {
+            kind: RouterRefusalKind::InvalidKey,
+            message: "API 키의 형식을 확인하세요. 공백과 줄바꿈은 사용할 수 없습니다.".to_string(),
+        });
+    }
+    let foreign_env = source
+        .as_ref()
+        .and_then(|row| row.get("auth_env"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|env| !is_router_env(env) && secret.is_none());
+    let auth_env = foreign_env.map(str::to_string).unwrap_or_else(|| {
+        assign_auth_env(
+            &rows,
+            &original_name,
+            save.preset_id.as_deref(),
+            secret.is_some(),
+        )
+    });
     let service = router_keychain_service_for_env(&auth_env);
     let first_save = !rows
         .iter()
-        .any(|row| row.name == name && row.auth_env.as_deref() == Some(auth_env.as_str()));
-    // Whether the row has a key — given now, or stored for its variable — is
-    // what `requires_auth` says: a keyless row (Ollama, OpenRouter saved
-    // without one) written as needing a key is a row zo refuses to build.
-    let previous_key = keys.read(&service)?;
-    let requires_auth = secret.is_some()
+        .any(|row| row.name == original_name && row.auth_env.as_deref() == Some(auth_env.as_str()));
+    // A missing key is not permission to send a public router a keyless request.
+    // Use the same locality policy as the CLI; key-store errors stay errors.
+    let previous_key = if foreign_env.is_some() {
+        None
+    } else {
+        keys.read(&service)?
+    };
+    let declared_auth = source
+        .as_ref()
+        .map(|row| {
+            row.get("requires_auth")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false);
+    let requires_auth = declared_auth
+        || (foreign_env.is_none()
+            && !judgment_provider::connections::router_base_is_local(&save.base_url))
+        || secret.is_some()
         || (!first_save
             && previous_key
                 .as_ref()
                 .is_some_and(|key| !key.trim().is_empty()));
     let entry = ProviderEntry {
-        name,
+        name: name.clone(),
         base_url: save.base_url,
         // Each model states its own window; none speaks for all of them.
         models: save
@@ -611,7 +825,75 @@ fn save_router_with_writer(
             .filter(|name| !name.is_empty()),
         headers: save.headers,
     };
-    let updated = upsert_provider_json_str(&existing, &entry)?;
+    if entry.models.len() > judgment_provider::MAX_MODELS
+        || entry.models.iter().any(|model| {
+            let id = match model {
+                ProviderModel::Id(id) | ProviderModel::Stated { id, .. } => id,
+            };
+            id.trim().is_empty() || id.len() > 256 || id.chars().any(char::is_control)
+        })
+    {
+        return Err("provider_model".to_string().into());
+    }
+    let written = serde_json::to_value(&entry).map_err(|error| error.to_string())?;
+    let mut prospective = source.clone().unwrap_or_else(|| serde_json::json!({}));
+    resave_row(
+        prospective
+            .as_object_mut()
+            .ok_or_else(|| "provider_settings".to_string())?,
+        written
+            .as_object()
+            .ok_or_else(|| "provider_settings".to_string())?,
+    );
+    prospective["connection"] = serde_json::json!(metadata);
+    let semantic_change = source.as_ref().is_some_and(|source| {
+        judgment_provider::connections::route_stamp(source).ok()
+            != judgment_provider::connections::route_stamp(&prospective).ok()
+    }) || source.is_some()
+        && (secret.is_some() || previous_auth != metadata.auth);
+    if semantic_change && crate::model_connection_store::uses_connection(&root, &metadata.id) {
+        return Err("connection_in_use".to_string().into());
+    }
+    if semantic_change {
+        metadata.generation = metadata
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| "provider_settings".to_string())?;
+    }
+    if let Some(source) = &source
+        && let Some(rows) = root
+            .get_mut("providers")
+            .and_then(serde_json::Value::as_array_mut)
+        && let Some(row) = rows.iter_mut().find(|row| *row == source)
+    {
+        row["name"] = serde_json::json!(name);
+    }
+    let updated = upsert_provider_json_str(&root.to_string(), &entry)?;
+    let mut updated: serde_json::Value =
+        serde_json::from_str(&updated).map_err(|error| error.to_string())?;
+    if let Some(rows) = updated
+        .get_mut("providers")
+        .and_then(serde_json::Value::as_array_mut)
+        && let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(name.as_str()))
+    {
+        row["connection"] = serde_json::json!(metadata);
+    }
+    if original_name != name
+        && let Some(model) = updated
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|model| model.strip_prefix(&format!("{original_name}/")))
+            .map(str::to_string)
+    {
+        updated["model"] = serde_json::json!(format!("{name}/{model}"));
+    }
+    let updated = render_settings_root(
+        updated
+            .as_object()
+            .ok_or_else(|| "provider_settings".to_string())?,
+    )?;
     let changing_key = secret.is_some() || (first_save && previous_key.is_some());
     commit_settings_and_key(
         path,
@@ -634,17 +916,52 @@ pub fn remove_router(
     name: &str,
     keys: &dyn RouterKeys,
 ) -> Result<Vec<ProviderEntry>, String> {
-    let _guard = ZO_SETTINGS_WRITES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    remove_router_if_current(path, name, None, keys)
+}
+
+pub(crate) fn remove_router_if_current(
+    path: &Path,
+    name: &str,
+    expected: Option<(&str, u64)>,
+    keys: &dyn RouterKeys,
+) -> Result<Vec<ProviderEntry>, String> {
+    let _guard = SettingsFileLock::acquire(path).map_err(|error| error.to_string())?;
     let existing = read_settings_text(path)?;
-    let rows = row_identities(&settings_root(&existing)?);
+    let root = serde_json::Value::Object(settings_root(&existing)?);
+    if let Some((id, generation)) = expected {
+        let held =
+            judgment_provider::connections::row(&root, id).map_err(|error| error.to_string())?;
+        if judgment_provider::connections::metadata(held)
+            .map_err(|error| error.to_string())?
+            .generation
+            != generation
+            || held.get("name").and_then(serde_json::Value::as_str) != Some(name)
+        {
+            return Err("settings_changed".to_string());
+        }
+    }
+    if let Some(row) = root
+        .get("providers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(name))
+    {
+        let metadata =
+            judgment_provider::connections::metadata(row).map_err(|error| error.to_string())?;
+        if crate::model_connection_store::uses_connection(&root, &metadata.id) {
+            return Err("connection_in_use".to_string());
+        }
+    }
+    let rows = row_identities(root.as_object().ok_or("provider_settings")?);
     let own_env = rows
         .iter()
         .find(|row| row.name == name)
         .and_then(|row| row.auth_env.clone())
         .filter(|auth_env| is_router_env(auth_env));
-    remove_provider_file(path, name)?;
+    let updated = remove_provider_json_str(&existing, name)?;
+    crate::durable_file::replace_bytes(path, updated.as_bytes())
+        .map_err(|error| error.to_string())?;
     if let Some(auth_env) = own_env
         && !rows
             .iter()
@@ -797,19 +1114,6 @@ pub fn remove_provider_json_str(
     render_settings_root(&root)
 }
 
-/// Remove one provider entry from ~/.zo/settings.json file atomically.
-pub fn remove_provider_file(path: &Path, provider_name: &str) -> Result<(), String> {
-    let existing = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(format!("파일 읽기 실패: {err}")),
-    };
-    let updated = remove_provider_json_str(&existing, provider_name)?;
-    crate::durable_file::replace_bytes(path, updated.as_bytes())
-        .map(|_| ())
-        .map_err(|err| format!("파일 쓰기 실패: {err}"))
-}
-
 /// The `client_fingerprint` names that mean the Claude Code client — the one
 /// identity the window can present, because it reads that client's own install.
 /// zo maps the same names to the same client (`client_fingerprint_user_agent`
@@ -858,7 +1162,7 @@ fn installed_client_user_agent() -> String {
 /// client's identity when the row's `client_fingerprint` names that client,
 /// nothing otherwise — a row that names no client is probed as the generic
 /// client it is, and a row that brings its own `User-Agent` header keeps it.
-fn presented_user_agent(
+pub(crate) fn presented_user_agent(
     client_fingerprint: Option<&str>,
     headers: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Option<String> {
@@ -910,6 +1214,63 @@ pub struct RouterProbe<'a> {
 }
 
 /// Test connection to an OpenAI-compatible endpoint and discover model IDs.
+/// Reuse a saved credential only for the exact saved destination and headers.
+/// Editing the address requires an explicitly entered key; an ID is not a
+/// credential-forwarding capability to an arbitrary endpoint.
+/// An existing raw user-agent is a request header, without rewriting its stored form.
+pub(crate) fn probe_headers(
+    row: &serde_json::Value,
+) -> Result<Option<std::collections::BTreeMap<String, String>>, String> {
+    let mut headers: Option<std::collections::BTreeMap<String, String>> = row
+        .get("headers")
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value(value.clone()).map_err(|error| error.to_string()))
+        .transpose()?;
+    if let Some(agent) = row
+        .get("user_agent")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|agent| !agent.is_empty())
+    {
+        let headers = headers.get_or_insert_with(Default::default);
+        if !headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("User-Agent"))
+        {
+            headers.insert("User-Agent".to_string(), agent.to_string());
+        }
+    }
+    Ok(headers)
+}
+
+pub(crate) fn saved_probe_key(
+    path: &Path,
+    id: &str,
+    generation: u64,
+    probe: &RouterProbe<'_>,
+    keys: &dyn RouterKeys,
+) -> Result<Option<String>, String> {
+    with_zo_settings_root(path, |document| {
+        let root = serde_json::Value::Object(document.clone());
+        let row =
+            judgment_provider::connections::row(&root, id).map_err(|error| error.to_string())?;
+        let metadata =
+            judgment_provider::connections::metadata(row).map_err(|error| error.to_string())?;
+        let entry: ProviderEntry =
+            serde_json::from_value(row.clone()).map_err(|error| error.to_string())?;
+        if metadata.generation != generation
+            || entry.base_url.trim_end_matches('/') != probe.base_url.trim_end_matches('/')
+            || metadata.auth.header != probe.auth.header
+            || metadata.auth.scheme != probe.auth.scheme
+            || probe_headers(row)?.as_ref() != probe.headers
+            || entry.client_fingerprint.as_deref() != probe.client_fingerprint
+        {
+            return Err("settings_changed".to_string());
+        }
+        read_connection_key(&entry.auth_env, keys).map_err(|error| error.message)
+    })
+}
+
 pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<DiscoveredModel>, String> {
     let RouterProbe {
         base_url,
@@ -931,6 +1292,7 @@ pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<Discove
     let url = format!("{trimmed_base}{clean_path}");
 
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|err| err.to_string())?;
@@ -1252,6 +1614,9 @@ mod tests {
     fn router_save(name: &str, preset_id: Option<&str>, key: Option<&str>) -> RouterSave {
         RouterSave {
             preset_id: preset_id.map(str::to_string),
+            source_id: None,
+            expected_generation: None,
+            auth: None,
             name: name.to_string(),
             base_url: format!(
                 "https://{}.invalid/v1",
@@ -1262,6 +1627,272 @@ mod tests {
             client_fingerprint: None,
             headers: None,
         }
+    }
+
+    #[test]
+    fn a_connection_rename_preserves_its_key_identity_and_legacy_coding_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        let rows =
+            save_router(&path, router_save("Old", None, Some("fixture-key")), &keys).unwrap();
+        let mut root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let before = judgment_provider::connections::metadata(&root["providers"][0]).unwrap();
+        root["model"] = serde_json::json!("Old/vendor/model");
+        std::fs::write(&path, root.to_string()).unwrap();
+        let mut save = router_save("Renamed", None, None);
+        save.base_url = rows[0].base_url.clone();
+        save.source_id = Some(before.id.clone());
+        save.expected_generation = Some(before.generation);
+        let after = save_router(&path, save, &keys).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let metadata = judgment_provider::connections::metadata(&root["providers"][0]).unwrap();
+        assert_eq!(metadata.id, before.id);
+        assert_eq!(metadata.generation, before.generation);
+        assert_eq!(after[0].auth_env, rows[0].auth_env);
+        assert_eq!(metadata.aliases, ["Old"]);
+        assert_eq!(root["model"], "Renamed/vendor/model");
+        assert_eq!(
+            keys.held(&router_keychain_service_for_env(&after[0].auth_env))
+                .as_deref(),
+            Some("fixture-key")
+        );
+        assert_eq!(
+            remove_router_if_current(
+                &path,
+                "Renamed",
+                Some((&metadata.id, metadata.generation)),
+                &keys
+            )
+            .unwrap_err(),
+            "connection_in_use"
+        );
+        let reference = crate::model_connection_store::catalog(&path, &keys)
+            .unwrap()
+            .coding
+            .unwrap();
+        crate::model_connection_store::clear(
+            &path,
+            crate::model_connection_store::Role::Coding,
+            Some(&reference),
+        )
+        .unwrap();
+        assert!(
+            remove_router_if_current(
+                &path,
+                "Renamed",
+                Some((&metadata.id, metadata.generation)),
+                &keys
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_foreign_cli_connection_keeps_its_key_reference_and_declared_keyless_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let root = serde_json::json!({"providers":[{"name":"Legacy","base_url":"https://gateway.example.com/v1","models":["vendor/model"],"auth_env":"SHELL_FIXTURE_KEY","requires_auth":false,"custom":true}]});
+        std::fs::write(&path, root.to_string()).unwrap();
+        let metadata = judgment_provider::connections::metadata(&root["providers"][0]).unwrap();
+        let mut save = router_save("Renamed", None, None);
+        save.base_url = "https://gateway.example.com/v1".to_string();
+        save.source_id = Some(metadata.id);
+        save.expected_generation = Some(metadata.generation);
+        let keys = HeldKeys::default();
+        let after = save_router(&path, save, &keys).unwrap();
+        assert_eq!(after[0].auth_env, "SHELL_FIXTURE_KEY");
+        assert!(!after[0].requires_auth);
+        let root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["providers"][0]["custom"], true);
+        assert_eq!(
+            keys.held(&router_keychain_service_for_env("SHELL_FIXTURE_KEY")),
+            None
+        );
+    }
+
+    #[test]
+    fn deleting_a_stale_row_does_not_remove_the_new_connection_with_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        save_router(
+            &path,
+            router_save("Fixture", None, Some("fixture-key")),
+            &keys,
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            remove_router_if_current(&path, "Fixture", Some(("old-connection", 0)), &keys)
+                .unwrap_err(),
+            "settings_changed"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn review_header_insertion_order_does_not_change_a_connection_route_stamp() {
+        let first:serde_json::Value=serde_json::from_str(r#"{"name":"Fixture","base_url":"https://gateway.example.com/v1","auth_env":"FIXTURE_KEY","requires_auth":true,"headers":{"X-Title":"fixture","HTTP-Referer":"https://example.com"}}"#).unwrap();
+        let second:serde_json::Value=serde_json::from_str(r#"{"name":"Fixture","base_url":"https://gateway.example.com/v1","auth_env":"FIXTURE_KEY","requires_auth":true,"headers":{"HTTP-Referer":"https://example.com","X-Title":"fixture"}}"#).unwrap();
+        assert_eq!(
+            judgment_provider::connections::route_stamp(&first).unwrap(),
+            judgment_provider::connections::route_stamp(&second).unwrap(),
+            "header insertion order changed the credential route"
+        );
+    }
+
+    #[test]
+    fn review_an_unrelated_malformed_row_does_not_remove_coding_use_protection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        save_router(
+            &path,
+            router_save("Selected", None, Some("selected-fixture-key")),
+            &keys,
+        )
+        .unwrap();
+        let mut root: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        root["providers"].as_array_mut().unwrap().insert(0,serde_json::json!({"name":"Unrelated","base_url":"https://unused.example.com/v1","models":[],"requires_auth":false,"connection":{"id":"bad-row","generation":"bad"}}));
+        root["model"] = serde_json::json!("Selected/vendor/model");
+        std::fs::write(&path, root.to_string()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let result = remove_router(&path, "Selected", &keys);
+        assert!(
+            result.is_err(),
+            "an unrelated malformed row disabled the selected connection's deletion guard"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn review_a_launch_waits_out_a_writer_holding_the_settings_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        save_router(
+            &path,
+            router_save("Selected", None, Some("launch-fixture-key")),
+            &keys,
+        )
+        .unwrap();
+        // Another writer keeps the lock past the lock's own two-second poll.
+        let writer = SettingsFileLock::acquire(&path).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            drop(writer);
+        });
+        let launch = router_launch_snapshot(&path, &keys);
+        release.join().unwrap();
+        let env = launch
+            .expect("a writer holding the settings lock made this launch hand zo no router keys");
+        assert!(
+            env.iter().any(|(_, value)| value == "launch-fixture-key"),
+            "the launch did not hand over the saved router key"
+        );
+    }
+
+    #[test]
+    fn connection_without_a_public_key_remains_auth_required() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+
+        let rows = save_router(&path, router_save("gateway", None, None), &keys)
+            .expect("a connection may be registered before its key is supplied");
+
+        assert!(
+            rows.first().expect("saved connection").requires_auth,
+            "an absent key must not turn a public router into a keyless service"
+        );
+    }
+
+    #[test]
+    fn connection_on_loopback_can_remain_keyless() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        let mut local = router_save("local", None, None);
+        local.base_url = "http://127.0.0.1/v1".to_string();
+
+        let rows = save_router(&path, local, &keys).expect("keyless local connection");
+
+        assert!(
+            !rows.first().expect("saved connection").requires_auth,
+            "a local service without authentication must remain usable"
+        );
+    }
+
+    #[test]
+    fn connection_rejects_header_control_characters_before_saving() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        let invalid = "fixture\nmarker";
+
+        let refusal = save_router(&path, router_save("gateway", None, Some(invalid)), &keys)
+            .expect_err("a key containing a line break cannot be an HTTP credential");
+
+        assert!(!path.exists(), "invalid input changed the settings");
+        assert!(
+            keys.0.borrow().is_empty(),
+            "invalid input reached the key store"
+        );
+        assert!(
+            !refusal.message.contains(invalid),
+            "the refusal must not repeat a credential value"
+        );
+    }
+
+    #[test]
+    fn connection_store_read_failure_is_not_a_missing_key() {
+        struct RefusesRead;
+
+        impl RouterKeys for RefusesRead {
+            fn read(&self, _service: &str) -> Result<Option<String>, RouterRefusal> {
+                Err("fixture store refused the read".to_string().into())
+            }
+
+            fn write(&self, _service: &str, _secret: &str) -> Result<(), RouterRefusal> {
+                panic!("a failed read must not be followed by a key write")
+            }
+
+            fn delete(&self, _service: &str) -> Result<(), RouterRefusal> {
+                panic!("a failed read must not be followed by a key deletion")
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let refusal = save_router(&path, router_save("gateway", None, None), &RefusesRead)
+            .expect_err("an unreadable key store cannot establish a keyless connection");
+
+        assert_eq!(refusal.message, "fixture store refused the read");
+        assert!(!path.exists(), "a failed key read changed the settings");
+    }
+
+    #[test]
+    fn connection_writer_respects_the_cli_settings_lock() {
+        let dir = tempfile::tempdir().expect("temporary settings");
+        let path = dir.path().join("settings.json");
+        let lock = path.with_extension("json.lock");
+        let owner = format!("{}\n", std::process::id());
+        std::fs::write(&lock, &owner).expect("another live writer's lock");
+        let keys = HeldKeys::default();
+
+        let refusal = save_router(&path, router_save("gateway", None, None), &keys)
+            .expect_err("the window must not write while the CLI owns the settings lock");
+
+        assert!(refusal.message.contains("settings.json.lock"));
+        assert!(!path.exists(), "the locked settings were overwritten");
+        assert_eq!(std::fs::read_to_string(&lock).expect("live lock"), owner);
+        assert!(keys.0.borrow().is_empty(), "the blocked write changed keys");
     }
 
     #[test]
@@ -1409,7 +2040,7 @@ mod tests {
             ("사내 게이트웨이", None, "sk-corp"),
             ("개인 게이트웨이", None, "sk-mine"),
             ("OpenRouter", Some("openrouter"), "sk-or-1"),
-            ("OpenRouter 회사", Some("openrouter"), "sk-or-2"),
+            ("OpenRouter Work", Some("openrouter"), "sk-or-2"),
         ];
         for (name, preset, key) in saved {
             save_router(&path, router_save(name, preset, Some(key)), &keys).expect("save");
@@ -1464,12 +2095,10 @@ mod tests {
         );
     }
 
-    /// `requires_auth` says whether the row has a key: one given now, or one
-    /// its variable already holds. A keyless Ollama (or an OpenRouter saved
-    /// without a key) is written keyless, so zo builds it instead of refusing
-    /// it for a key nobody was ever going to give.
+    /// Public routers keep their authentication requirement without a key;
+    /// an explicitly local service can still be keyless.
     #[test]
-    fn a_row_requires_a_key_only_when_it_has_one() {
+    fn a_row_keeps_authentication_required_apart_from_key_presence() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
         let keys = HeldKeys::default();
@@ -1481,7 +2110,9 @@ mod tests {
                 .map(|row| row.requires_auth)
         };
 
-        save_router(&path, router_save("Ollama", Some("ollama"), None), &keys).expect("save");
+        let mut local = router_save("Ollama", Some("ollama"), None);
+        local.base_url = "http://127.0.0.1/v1".to_string();
+        save_router(&path, local, &keys).expect("save");
         assert_eq!(
             requires("Ollama"),
             Some(false),
@@ -1510,7 +2141,7 @@ mod tests {
 
         // A new row whose variable still holds an item no row reads (a row
         // removed before removals found their own key) is not handed that
-        // stranger's key: it is keyless, and the stale item is gone.
+        // stranger's key: authentication is still required and the stale item is gone.
         let stale = router_keychain_service_for_env("ZEROCODE_ROUTER_AGENTROUTER_KEY");
         keys.write(&stale, "sk-stale").expect("seed");
         save_router(
@@ -1519,7 +2150,7 @@ mod tests {
             &keys,
         )
         .expect("save");
-        assert_eq!(requires("AgentRouter"), Some(false));
+        assert_eq!(requires("AgentRouter"), Some(true));
         assert_eq!(keys.held(&stale), None, "a new row inherited a stale key");
     }
 
@@ -1544,8 +2175,9 @@ mod tests {
             "a refused save wrote its row"
         );
 
-        let rows = save_router(&path, router_save("Ollama", Some("ollama"), None), &nowhere)
-            .expect("a keyless save needs no keychain");
+        let mut local = router_save("Ollama", Some("ollama"), None);
+        local.base_url = "http://127.0.0.1/v1".to_string();
+        let rows = save_router(&path, local, &nowhere).expect("a keyless save needs no keychain");
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].requires_auth);
         // The pane is told the same thing the save acts on, before anyone

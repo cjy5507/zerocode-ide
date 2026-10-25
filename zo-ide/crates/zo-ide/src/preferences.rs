@@ -130,8 +130,15 @@ pub fn save(model: &str, effort: Effort) -> io::Result<()> {
 /// alias follows the family when the provider ships the next release, while
 /// a release id would freeze the choice on the day it was made.
 pub fn save_to_path(path: &Path, model: &str, effort: Effort) -> io::Result<()> {
+    let _guard = runtime::file_ops::SettingsFileLock::acquire(path)?;
     let mut object = read_object(path);
     let model = pinned_model_id(&persistable_model_id(model));
+    if object.get(MODEL_KEY).and_then(Value::as_str) != Some(&model) {
+        if let Some(smart) = object.get_mut("smart").and_then(Value::as_object_mut) {
+            smart.remove(judgment_provider::connections::CODING_CONNECTION_KEY);
+            smart.remove(judgment_provider::connections::PREVIOUS_CODING_KEY);
+        }
+    }
     object.insert(MODEL_KEY.to_string(), Value::String(model));
     object.insert(
         EFFORT_KEY.to_string(),
@@ -194,6 +201,7 @@ pub fn pin_persisted_model_alias() -> io::Result<Option<ModelMigration>> {
 }
 
 pub fn pin_persisted_model_alias_at(path: &Path) -> io::Result<Option<ModelMigration>> {
+    let _guard = runtime::file_ops::SettingsFileLock::acquire(path)?;
     let mut object = read_object(path);
     let Some(current) = object
         .get(MODEL_KEY)
@@ -264,6 +272,23 @@ mod tests {
         fs::write(&missing, b"not json").expect("write corrupt settings");
         assert_eq!(load_from_path(&missing), Preferences::default());
         let _ = fs::remove_dir_all(missing.parent().expect("test parent"));
+    }
+
+    #[test]
+    fn preferences_writers_preserve_a_document_locked_by_another_writer() {
+        let settings = path("shared-lock");
+        let original = br#"{"model":"fixture/model","smart":{"retained":true}}"#;
+        fs::write(&settings, original).expect("seed");
+        let lock = settings.with_extension("json.lock");
+        let owner = format!("{}\n", std::process::id());
+        fs::write(&lock, &owner).expect("lock");
+        let save = save_to_path(&settings, "replacement/model", Effort::Smart);
+        assert_eq!(save.expect_err("must respect the other writer").kind(), std::io::ErrorKind::WouldBlock);
+        let pin = super::pin_persisted_model_alias_at(&settings);
+        assert_eq!(pin.expect_err("migration must also lock before reading").kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read(&settings).expect("read"), original);
+        assert_eq!(fs::read_to_string(&lock).expect("owner"), owner);
+        fs::remove_dir_all(settings.parent().expect("parent")).expect("cleanup");
     }
 
     #[test]

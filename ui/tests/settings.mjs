@@ -2799,6 +2799,43 @@ class StatefulBackend {
       case "api_router_keys_kept": return !this.routerKeychainUnavailable;
       case "api_router_presets": return clone(this.routerPresets);
       case "api_router_providers": return clone(this.zoSettings.providers);
+      case "model_connections": return this.modelConnections();
+      case "sync_model_connections": return clone(this.connectionReloadStatus ?? { queued: 1, restartRequired: 0, unknown: 0 });
+      case "check_model_connection": {
+        if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
+        const answer = await (this.connectionCheckWait ?? this.connectionCheck ?? { answered: true, failure: null });
+        return { preflight: { ...answer, candidateIdentity: JSON.stringify(args.reference), activeProviderIdentity: args.expectedProviderIdentity, model: args.reference.model, elapsedMs: 1 }, legacyKeyPresent: false };
+      }
+      case "select_model_connection": {
+        if (this.connectionApplyError) throw this.connectionApplyError;
+        const smart = this.zoSettings.smart ??= {};
+        const row = this.modelConnections().connections.find(row => row.id === args.reference.id);
+        if (!row || row.generation !== args.reference.generation) throw "settings_changed";
+        if (args.role === "judgment") {
+          if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
+          smart.previousJudgmentSelection ??= { judgmentProvider: smart.judgmentProvider ?? null };
+          smart.judgmentConnection = clone(args.reference);
+          smart.judgmentProvider = { kind: "remote", protocol: args.reference.protocol, baseUrl: row.provider.base_url, model: args.reference.model, requiresAuth: row.provider.requires_auth };
+        } else {
+          smart.previousCodingSelection ??= this.zoSettings.model ?? null;
+          smart.codingConnection = clone(args.reference);
+          this.zoSettings.model = `${row.provider.name}/${args.reference.model}`;
+        }
+        return this.modelConnections();
+      }
+      case "clear_model_connection": {
+        const smart = this.zoSettings.smart ??= {};
+        if (args.role === "judgment") {
+          if (smart.previousJudgmentSelection?.judgmentProvider) smart.judgmentProvider = smart.previousJudgmentSelection.judgmentProvider;
+          else delete smart.judgmentProvider;
+          delete smart.judgmentConnection; delete smart.previousJudgmentSelection;
+        } else {
+          if (smart.previousCodingSelection) this.zoSettings.model = smart.previousCodingSelection;
+          else delete this.zoSettings.model;
+          delete smart.codingConnection; delete smart.previousCodingSelection;
+        }
+        return this.modelConnections();
+      }
       case "test_router_connection": {
         /* `api_routers::test_router_endpoint` hands a refusal back as one
            string: its own prefix, the status, and whatever the server put in
@@ -2858,7 +2895,7 @@ class StatefulBackend {
           models: args.models.map((model) => (typeof model === "object" && model?.context_window > 0
             ? { id: model.id, context_window: model.context_window }
             : (typeof model === "object" ? model.id : model))),
-          requires_auth: this.keychain.has(service),
+          requires_auth: this.keychain.has(service) || !["localhost", "127.0.0.1", "[::1]"].includes(new URL(args.baseUrl).hostname),
           auth_env: authEnv,
         };
         // Mirrors `save_api_router`: a row that names a client (its preset's
@@ -2881,8 +2918,15 @@ class StatefulBackend {
         return clone(this.zoSettings.providers);
       }
       case "remove_api_router": {
-        // Mirrors `remove_router`: the key is found on the row itself and
-        // deleted only when no other row still reads it.
+        // Mirrors `remove_api_router`: a row named with the id and generation
+        // the list showed goes only while it is still that row, half of that
+        // pair is refused, and the key is found on the row itself and deleted
+        // only when no other row still reads it.
+        if ((args.sourceId == null) !== (args.expectedGeneration == null)) throw "settings_changed";
+        if (args.sourceId != null) {
+          const held = this.modelConnections().connections.find((row) => row.id === args.sourceId);
+          if (!held || held.generation !== args.expectedGeneration || held.provider.name !== args.name) throw "settings_changed";
+        }
         const own = this.zoSettings.providers.find((p) => p.name === args.name)?.auth_env;
         this.zoSettings.providers = this.zoSettings.providers.filter((p) => p.name !== args.name);
         if (own?.startsWith("ZEROCODE_ROUTER_")
@@ -3304,6 +3348,22 @@ class StatefulBackend {
     }
   }
 
+  modelConnections() {
+    const smart = this.zoSettings.smart ?? {};
+    const coding = smart.codingConnection ?? null, judgment = smart.judgmentConnection ?? null;
+    return clone({
+      connections: this.zoSettings.providers.map(provider => {
+        const id = provider.connection?.id ?? `fixture-${provider.name}`;
+        return { id, generation: provider.connection?.generation ?? 0, provider,
+          auth: provider.connection?.auth ?? { header: "Authorization", scheme: "Bearer" },
+          keyAvailable: !provider.requires_auth || this.keychain.has(`dev.zerocode.router.${provider.auth_env}`),
+          uses: [["coding",coding],["judgment",judgment]].filter(([, ref]) => ref?.id === id).map(([role]) => role),
+        };
+      }), coding, judgment, codingModel: this.zoSettings.model ?? null,
+      activeProviderIdentity: this.typesafeSettings().providerIdentity, legacyKeyPresent: false,
+    });
+  }
+
   typesafeSettings() {
     const smart = this.zoSettings.smart ?? {};
     const jev = smart[JEV_SETTINGS_KEY];
@@ -3349,6 +3409,7 @@ class StatefulBackend {
       keySaved: provider.requiresAuth && Boolean(this.keychain.get(this.judgmentService(provider))?.trim()),
       provider,
       providerIdentity: `fixture-provider:${JSON.stringify(provider)}`,
+      providerConnection: smart.judgmentConnection ?? null,
       jevProvider,
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
       // The rows a person wrote, and what each difficulty runs (t-14437):
@@ -5871,15 +5932,17 @@ await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘
   assertEqual(keyOf("OpenRouter 회사"), "sk-or-corp", "a second OpenRouter row overwrote the first one's key");
   assertEqual(keyOf("OpenRouter"), "sk-or-mine", "the second OpenRouter row's key is missing");
 
-  // 지우기 on the renamed preset row sends its name alone; the key it read is
-  // gone and every other row keeps its own.
+  // 지우기 on the renamed preset row names the row the list showed — its name,
+  // id and generation, never an id the pane derived; the key it read is gone
+  // and every other row keeps its own.
   const renamed = backend.zoSettings.providers.find((p) => p.name === "OpenRouter 회사");
+  const listed = backend.modelConnections().connections.find((row) => row.provider.name === "OpenRouter 회사");
   const droppedAt = backend.calls.length;
   const rows = pageA.locator("#router-provider-list .account-row");
   const index = (await rows.locator(".agent-row-name").allTextContents()).indexOf("OpenRouter 회사");
   await rows.nth(index).locator(".account-drop").click();
   const removal = await backend.waitForCall("A", "remove_api_router", droppedAt);
-  assertEqual(Object.keys(removal.args), ["name"], "the removal still guesses a row id");
+  assertEqual(removal.args, { name: "OpenRouter 회사", sourceId: listed.id, expectedGeneration: listed.generation }, "the removal did not name the row the list showed");
   await pageA.waitForFunction(
     () => document.querySelectorAll("#router-provider-list .account-row").length === 3,
     null,
@@ -13984,6 +14047,39 @@ await test("a profile card imports cookies from a file", async () => {
 
   backend.browserProfiles = [];
   return "file import summary + source line";
+});
+
+await test("shared connection selection sends only its reference and preserves the active model on refusal", async () => {
+  const before = clone(backend.zoSettings);
+  try {
+    backend.zoSettings.providers = [{name:"Shared fixture",base_url:"https://gateway.example.com/v1",models:["choice-model","coding-model"],requires_auth:true,auth_env:"ZEROCODE_ROUTER_SHARED_FIXTURE_KEY",connection:{id:"shared-fixture",generation:7}}];
+    backend.connectionReloadStatus = {queued:1,restartRequired:1,unknown:0};
+    await openSettings(pageA,"api-routers");
+    await pageA.evaluate(() => refreshApiRouters());
+    await pageA.evaluate(() => modelConnectionsController.change("judgment",{id:"shared-fixture",generation:7,model:"choice-model",protocol:"openai_json"}));
+    const active = clone(backend.zoSettings.smart?.judgmentProvider ?? null);
+    backend.connectionApplyError = "schema";
+    const from = backend.calls.length;
+    await pageA.evaluate(() => modelConnectionsController.run("judgment","apply"));
+    const sent = backend.calls.slice(from).find(call => call.command === "select_model_connection");
+    assertEqual(sent.args.reference,{id:"shared-fixture",generation:7,model:"choice-model",protocol:"openai_json"},"role request did not carry the saved identity");
+    assert(!("key" in sent.args) && !("baseUrl" in sent.args) && !("authEnv" in sent.args),"role selector forwarded credential material");
+    assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null,active,"a refused apply changed the active provider");
+    backend.connectionApplyError = null;
+    await pageA.evaluate(() => modelConnectionsController.run("judgment","check"));
+    assert(await pageA.locator('[data-connection-roles="all"] .connection-result').last().textContent(),"the response check was not displayed");
+    await pageA.evaluate(() => modelConnectionsController.change("judgment",{id:"shared-fixture",generation:7,model:"coding-model",protocol:"openai_json"}));
+    assertEqual(await pageA.evaluate(() => modelConnectionsController.results.has("judgment")),false,"old check survived a model change");
+    await pageA.evaluate(() => modelConnectionsController.run("judgment","apply"));
+    const removals = backend.count("A","remove_api_router");
+    await pageA.locator('#router-provider-list .account-drop').first().click();
+    assertEqual(backend.count("A","remove_api_router"),removals,"an in-use connection was silently deleted");
+    await pageA.evaluate(() => modelConnectionsController.run("judgment","clear"));
+    assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null,active,"clearing a role lost the previous provider");
+  } finally {
+    backend.zoSettings = before; backend.connectionApplyError = null; backend.connectionReloadStatus = null;
+    await pageA.evaluate(() => { modelConnectionsController.drafts.clear(); modelConnectionsController.results.clear(); return refreshApiRouters(); });
+  }
 });
 
 await test("Blank starts a deliberately plain terminal", async () => {

@@ -2,6 +2,10 @@ use std::sync::OnceLock;
 
 /// All of the backend shipped by this window, even after it is split into files.
 pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
+    (
+        "cmd/model_connections.rs",
+        include_str!("../../src/cmd/model_connections.rs"),
+    ),
     ("sftp_runtime.rs", include_str!("../../src/sftp_runtime.rs")),
     ("cmd/sftp.rs", include_str!("../../src/cmd/sftp.rs")),
     ("crash.rs", include_str!("../../src/crash.rs")),
@@ -711,6 +715,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
     (
         "shell-judgment.js",
         include_str!("../../../../ui/shell-judgment.js"),
+    ),
+    (
+        "shell-connections.js",
+        include_str!("../../../../ui/shell-connections.js"),
     ),
     ("shell-jev.js", include_str!("../../../../ui/shell-jev.js")),
     (

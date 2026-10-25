@@ -792,6 +792,7 @@ fn compiled_recorded_actions_run_on_the_manifest_pinned_model() {
         base_url: "http://127.0.0.1".to_string(),
         model: model.id,
         requires_auth: false,
+        connection: None,
     };
     let expected_refusal =
         std::env::var("LOCAL_JUDGMENT_EXPECT_REFUSAL").is_ok_and(|value| value == "1");

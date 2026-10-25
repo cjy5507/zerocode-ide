@@ -628,6 +628,9 @@ impl runtime::HookProgressReporter for CliHookProgressReporter {
 
 pub(crate) struct AnthropicRuntimeClient {
     client: ProviderClient,
+    connections_generation: u64,
+    connection_refresh_issue: Option<String>,
+    connection_name: Option<String>,
     session_id: String,
     model: String,
     auth_route: AuthRoute,
@@ -2026,6 +2029,35 @@ async fn reconnect_claude_login(
 }
 
 impl AnthropicRuntimeClient {
+    /// Reload at the request boundary. A refused rebuild blocks that request,
+    /// rather than continuing with a deleted endpoint or an old credential.
+    pub(crate) async fn refresh_connections(&mut self, cwd: &Path) -> Result<Option<String>, String> {
+        let was_custom = self.connection_name.is_some();
+        let cwd = cwd.to_path_buf();
+        let refreshed = tokio::task::spawn_blocking(move || crate::custom_provider_env::refresh_for_turn(&cwd)).await;
+        let generation = match refreshed {
+            Ok(Ok(generation)) => { self.connection_refresh_issue = None; generation }
+            failed => {
+                let reason = match failed { Ok(Err(reason)) => reason, _ => "the connection refresh worker did not finish" };
+                if self.connection_refresh_issue.as_deref() == Some(reason) { return Ok(None); }
+                self.connection_refresh_issue = Some(reason.to_string());
+                return Ok(Some(format!("Model connection refresh skipped: {reason}. The current session connection is unchanged.")));
+            }
+        };
+        if self.connections_generation == generation { return Ok(None); }
+        if was_custom {
+            if api::custom_provider_for_model(&self.model).is_none() {
+                return Err("The selected model connection was removed. Choose a registered model with /model.".to_string());
+            }
+            let session = self.session_id.clone(); let model = self.model.clone(); let route = self.auth_route;
+            let rebuilt = tokio::task::spawn_blocking(move || build_provider_client(&session, &model, route, None).map_err(|error| error.to_string()))
+                .await.map_err(|error| error.to_string())??;
+            self.client = rebuilt;
+        }
+        self.connections_generation = generation;
+        Ok(None)
+    }
+
     pub(crate) fn client(&self) -> ProviderClient {
         self.client.clone()
     }
@@ -2131,6 +2163,9 @@ impl AnthropicRuntimeClient {
 
         Ok(Self {
             client,
+            connections_generation: api::provider_reload_generation(),
+            connection_refresh_issue: None,
+            connection_name: api::custom_provider_for_model(&model).map(|provider| provider.config.provider_name.to_string()),
             session_id: session_id.to_string(),
             model,
             auth_route,
@@ -2645,6 +2680,30 @@ mod oauth_refresh_tests {
     use tools::GlobalToolRegistry;
 
     #[test]
+    fn review_invalid_project_settings_do_not_stop_an_existing_first_party_session() {
+        let _lock = crate::test_env_lock(); let home = tempfile::tempdir().unwrap(); let project = tempfile::tempdir().unwrap();
+        let home_text = home.path().to_str().unwrap();
+        let _home = crate::support::EnvVarGuard::set("HOME", Some(home_text));
+        let _profile = crate::support::EnvVarGuard::set("USERPROFILE", Some(home_text));
+        let _zo = crate::support::EnvVarGuard::set("ZO_HOME", Some(home_text));
+        let _config = crate::support::EnvVarGuard::set("ZO_CONFIG_HOME", Some(home_text));
+        std::fs::create_dir_all(project.path().join(".zo")).unwrap();
+        std::fs::write(project.path().join(".zo/settings.json"), "{ invalid json").unwrap();
+        let mut client = AnthropicRuntimeClient {
+            client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(api::AuthSource::None)),
+            connection_name: None, connections_generation: api::provider_reload_generation(), connection_refresh_issue: None,
+            session_id:"review-existing-session".to_string(), model: "fixture-existing-model".to_string(),
+            auth_route:AuthRoute::Auto,enable_tools:false,emit_output:false,allowed_tools:None,
+            tool_registry:GlobalToolRegistry::builtin(),thinking:None,named_effort:None,effort_band_ceiling:None,session_tracer:None,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let result = runtime.block_on(client.refresh_connections(project.path()));
+        assert!(result.is_ok(), "a malformed project file stopped an existing unrelated session: {result:?}");
+        assert_eq!(client.model, "fixture-existing-model");
+        assert!(matches!(client.client, ProviderClient::Anthropic(_)));
+    }
+
+    #[test]
     fn managed_claude_credentials_are_reloaded_after_the_file_changes() {
         let _env_lock = crate::test_env_lock();
         let config_home = crate::support::temp_dir("managed-claude-reload");
@@ -2925,6 +2984,9 @@ mod oauth_refresh_tests {
         let startup = super::resolve_startup_auth(resolve_and_cache_claude_auth);
         assert!(matches!(startup, api::AuthSource::None));
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
+            connection_refresh_issue: None,
             client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(startup)),
             session_id: "missing-login-test".to_string(),
             model: "claude-opus-5".to_string(),
@@ -3003,6 +3065,9 @@ mod oauth_refresh_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
+            connection_refresh_issue: None,
             client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(
                 api::AuthSource::BearerToken("refused-bearer".to_string()),
             )),
@@ -3104,6 +3169,9 @@ mod oauth_refresh_tests {
         .expect("save google oauth");
 
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
+            connection_refresh_issue: None,
             client: ProviderClient::GeminiCodeAssist(api::GeminiCodeAssistClient::new(
                 "live-google-token",
             )),
@@ -3163,6 +3231,9 @@ mod oauth_refresh_tests {
         .expect("save expired google oauth");
 
         let mut client = AnthropicRuntimeClient {
+            connection_name: None,
+            connections_generation: api::provider_reload_generation(),
+            connection_refresh_issue: None,
             client: ProviderClient::GeminiCodeAssist(api::GeminiCodeAssistClient::new(
                 "live-google-token",
             )),

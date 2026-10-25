@@ -25,6 +25,7 @@ use serde_json::Value;
 /// by a one-way "who got there first" flag: the comparison stays correct no
 /// matter how many times the variable is set, cleared, or re-exported.
 static ZO_PUBLISHED: Mutex<Option<String>> = Mutex::new(None);
+static CONNECTION_SOURCE: Mutex<Option<String>> = Mutex::new(None);
 
 fn env_value() -> Option<String> {
     std::env::var(api::CUSTOM_PROVIDERS_ENV)
@@ -62,13 +63,20 @@ pub(crate) fn operator_override_active() -> bool {
 /// re-seeded from settings, which is what makes a `/connect` merge or a
 /// `/providers` delete visible in the same session.
 pub(crate) fn publish(settings_json: &str) -> Result<(), String> {
+    let mut source = CONNECTION_SOURCE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(override_json) = env_value().filter(|_| operator_override_active()) {
         let merged = merge_operator_override(&override_json, settings_json)?;
-        return api::refresh_custom_providers_from_json(&merged).map_err(|error| error.to_string());
+        api::refresh_custom_providers_from_json(&merged).map_err(|error| error.to_string())?;
+    } else {
+        if env_value().as_deref() != Some(settings_json) {
+            std::env::set_var(api::CUSTOM_PROVIDERS_ENV, settings_json);
+        }
+        remember_published(settings_json);
+        api::refresh_custom_providers_from_json(settings_json).map_err(|error| error.to_string())?;
     }
-    std::env::set_var(api::CUSTOM_PROVIDERS_ENV, settings_json);
-    remember_published(settings_json);
-    api::refresh_custom_providers_from_json(settings_json).map_err(|error| error.to_string())
+    if source.as_deref().is_some_and(|previous| previous != settings_json) { api::note_provider_reload(); }
+    *source = Some(settings_json.to_string());
+    Ok(())
 }
 
 /// Layer settings entries under an operator override: the override wins every
@@ -95,6 +103,15 @@ fn parse_array(label: &str, raw: &str) -> Result<Vec<Value>, String> {
         Value::Array(entries) => Ok(entries),
         _ => Err(format!("{label} must be a JSON array")),
     }
+}
+
+/// Observe settings at a request boundary, including zo launched from an ordinary terminal.
+/// A file change never changes the session's chosen model.
+pub(crate) fn refresh_for_turn(cwd: &std::path::Path) -> Result<u64, &'static str> {
+    let config = runtime::ConfigLoader::default_for(cwd).load().map_err(|_| "settings could not be read")?;
+    let raw = config.custom_providers_json().unwrap_or_else(|| "[]".to_string());
+    publish(&raw).map_err(|_| "the provider catalog could not be refreshed")?;
+    Ok(api::provider_reload_generation())
 }
 
 #[cfg(test)]

@@ -419,6 +419,7 @@ mod tests {
             base_url: format!("http://{}", listener.local_addr().unwrap()),
             model: model.id.clone(),
             requires_auth: false,
+            connection: None,
         };
         let binding = local_judgment::Binding {
             model_id: model.id.clone(),

@@ -1,5 +1,5 @@
 use std::fs;
-use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -130,6 +130,28 @@ fn port(provider: &Provider) -> u16 {
     url::Url::parse(&provider.base_url).unwrap().port().unwrap()
 }
 
+/// The port a seed records, on which no socket has been: one bound and closed
+/// just before the restore binds it again is not reliably free at once. It is
+/// below the kernels' ephemeral ranges (Linux from 32768, macOS from 49152), so
+/// no other test's `:0` bind or outgoing connection is handed it; the count
+/// keeps this run's tests apart and the process id two runs, and a port
+/// something answers on is passed over.
+fn seed_port() -> u16 {
+    const FIRST: usize = 20_000;
+    const COUNT: usize = 12_000;
+    static TAKEN: AtomicUsize = AtomicUsize::new(0);
+    let offset = usize::try_from(std::process::id()).unwrap() * 7_919 % COUNT;
+    loop {
+        let taken = TAKEN.fetch_add(1, Ordering::Relaxed);
+        assert!(taken < COUNT, "every seed port answers");
+        let port = u16::try_from(FIRST + (offset + taken) % COUNT).unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+            return port;
+        }
+    }
+}
+
 /// A status read as JSON, without what the supervision says of it: the state
 /// a start that restores nothing leaves as it found it.
 fn state_of(snapshot: Snapshot) -> Value {
@@ -232,13 +254,13 @@ impl Restoring {
     }
 
     fn seed(&self) {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let provider = Provider {
             kind: ProviderKind::Local,
             protocol: Protocol::SystemOne,
-            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            base_url: format!("http://{}:{}", Ipv4Addr::LOCALHOST, seed_port()),
             model: self.models[0].id.clone(),
             requires_auth: false,
+            connection: None,
         };
         select(
             &self.settings,

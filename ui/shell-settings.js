@@ -1008,6 +1008,7 @@ function showSettingsPane(pane) {
     void refreshGoogleAccount();
     void refreshCliLogins();
   }
+  if (pane === "judgment-models" && arriving) void modelConnectionsController.refresh();
   if (pane === "api-routers" && arriving) {
     void refreshApiRouters();
   }
@@ -6609,6 +6610,8 @@ function setEveryRouterModel(on) {
 /* One function for OpenAI-compatible GET /models fetch */
 async function fetchRouterModels({ base_url, auth, key, models_path, id_field, context_field, client_fingerprint, headers }) {
   return await invoke("test_router_connection", {
+    sourceId: modelConnectionsController.editing?.id ?? null,
+    expectedGeneration: modelConnectionsController.editing?.generation ?? null,
     baseUrl: base_url,
     auth,
     key: key || null,
@@ -6659,6 +6662,17 @@ function initApiRoutersEvents() {
     el(id)?.addEventListener("input", invalidateRouterProbe);
   }
   el("router-name-input")?.addEventListener("input", routerDraftChanged);
+  for (const id of ["router-auth-header", "router-auth-scheme"]) el(id)?.addEventListener("input", invalidateRouterProbe);
+  // Typed model IDs become the row's models as the field is left: the card keeps
+  // its one footer, and leaving the field for 저장 lands them before the save.
+  el("router-manual-models")?.addEventListener("change", () => {
+    const ids = [...new Set((el("router-manual-models")?.value ?? "").split(/\r?\n/).map(value => value.trim()).filter(Boolean))];
+    if (!ids.length || ids.length > 2000 || ids.some(id => id.length > 256)) return;
+    testedModels = ids.map(id => ({ id }));
+    testedRouterGeneration = routerProbeGeneration;
+    paintRouterModels(testedModels);
+    routerDraftChanged();
+  });
 }
 
 async function refreshApiRouters() {
@@ -6685,6 +6699,7 @@ async function refreshApiRouters() {
   }
   paintConfiguredRouters();
   await refreshTypeSafe();
+  await modelConnectionsController.refresh();
 }
 
 /* Where a router's key would go, said before anyone types one: a machine
@@ -6982,6 +6997,8 @@ async function refreshTypeSafe() {
         const held = managedJudgmentController.snapshot;
         const superseded = held?.instanceId === snapshot?.instanceId && held?.revision > snapshot?.revision;
         managedJudgmentController.statusError = Boolean(managed.error || (!superseded && !managedJudgmentController.accept(snapshot, true)));
+        // The connections list shows the held managed models from this same read.
+        if (modelConnectionsController.state) modelConnectionsController.render();
       }
       if (settings.error || !settings.value || typeof settings.value !== "object" || Array.isArray(settings.value)) {
         typesafeRefreshFailed = true;
@@ -7143,6 +7160,7 @@ function typesafeCheckFailure(token) {
 /* This card says a refusal as every key card does (`keyStoreRefusal`). */
 function typesafeRefusal(error) {
   const token = typeof error === "string" ? error : error?.message;
+  if (token === "connection_in_use") return t("settings.connections.editLinked", "이 모델의 주소와 인증은 공통 연결에서 수정합니다.");
   return judgmentProviderController.failure(token) ?? keyStoreRefusal(error);
 }
 
@@ -7173,6 +7191,11 @@ function populateRouterPresets() {
 }
 
 function onRouterPresetChange(chosenId) {
+  modelConnectionsController.editing = null;
+  const auth = routerPresets.find(preset => preset.id === chosenId)?.auth;
+  if (el("router-auth-header")) el("router-auth-header").value = auth?.header ?? "Authorization";
+  if (el("router-auth-scheme")) el("router-auth-scheme").value = auth?.scheme ?? "Bearer";
+  if (el("router-manual-models")) el("router-manual-models").value = "";
   const nameInput = el("router-name-input");
   const urlInput = el("router-base-url-input");
   const keyInput = el("router-key-input");
@@ -7256,65 +7279,16 @@ async function dropConfiguredRouter(row) {
   paintConfiguredRouters();
 }
 
-async function runRouterTestConnection() {
-  const testBtn = el("router-test-btn");
-  const saveBtn = el("router-save-btn");
-  const statusEl = el("router-test-status");
-  const nameInput = el("router-name-input");
-  const urlInput = el("router-base-url-input");
-  const keyInput = el("router-key-input");
-  const select = el("router-preset-select");
-  const modelsSection = el("router-models-section");
+function currentRouterAuth() {
+  return { header: el("router-auth-header")?.value.trim() || "Authorization", scheme: el("router-auth-scheme")?.value.trim() || null };
+}
+
+function paintRouterModels(models) {
   const tbody = el("router-models-tbody");
-
-  const baseUrl = urlInput?.value.trim() ?? "";
-  const key = keyInput?.value.trim() ?? "";
-  if (!baseUrl) {
-    paintSettingsStatus(
-      statusEl,
-      t("settings.apiRouters.needBaseUrl", "기본 URL이 비어 있습니다 — 라우터의 주소를 적으세요."),
-      { standing: "failed" },
-    );
-    paintSettingsStanding(el("router-card-state"), "failed");
-    return;
-  }
-
-  const chosenId = select?.value ?? "custom";
-  const preset = routerPresets.find((p) => p.id === chosenId);
-
-  const auth = preset?.auth ?? { header: "Authorization", scheme: "Bearer" };
-  const modelsConfig = preset?.models ?? { path: "/models", id_field: "id", context_field: "context_length" };
-
-  invalidateRouterProbe();
-  const generation = routerProbeGeneration;
-  routerProbeInFlight = generation;
-
-  if (testBtn) {
-    testBtn.disabled = true;
-    testBtn.textContent = t("settings.apiRouters.testing", "연결 시험 중…");
-  }
-  // No badge while the question is still out: a standing is an answer, and
-  // the button already says the asking is under way.
-  paintSettingsStatus(statusEl, t("settings.apiRouters.testing", "연결 시험 중…"));
-
-  try {
-    const models = await fetchRouterModels({
-      base_url: baseUrl,
-      auth,
-      key,
-      models_path: modelsConfig.path,
-      id_field: modelsConfig.id_field,
-      context_field: modelsConfig.context_field,
-      client_fingerprint: preset?.client_fingerprint,
-      headers: preset?.headers,
-    });
-    if (generation !== routerProbeGeneration) return;
-    testedModels = models ?? [];
-    testedRouterGeneration = generation;
-
-    if (tbody) tbody.replaceChildren();
-    for (let i = 0; i < testedModels.length; i++) {
-      const m = testedModels[i];
+  const modelsSection = el("router-models-section");
+  if (tbody) tbody.replaceChildren();
+    for (let i = 0; i < models.length; i++) {
+      const m = models[i];
       const tr = document.createElement("tr");
       const tdCheck = document.createElement("td");
       const checkbox = document.createElement("input");
@@ -7341,6 +7315,65 @@ async function runRouterTestConnection() {
     syncRouterModelsAll();
 
     if (modelsSection) modelsSection.hidden = false;
+}
+
+async function runRouterTestConnection() {
+  const testBtn = el("router-test-btn");
+  const saveBtn = el("router-save-btn");
+  const statusEl = el("router-test-status");
+  const nameInput = el("router-name-input");
+  const urlInput = el("router-base-url-input");
+  const keyInput = el("router-key-input");
+  const select = el("router-preset-select");
+  const modelsSection = el("router-models-section");
+  const tbody = el("router-models-tbody");
+
+  const baseUrl = urlInput?.value.trim() ?? "";
+  const key = keyInput?.value.trim() ?? "";
+  if (!baseUrl) {
+    paintSettingsStatus(
+      statusEl,
+      t("settings.apiRouters.needBaseUrl", "기본 URL이 비어 있습니다 — 라우터의 주소를 적으세요."),
+      { standing: "failed" },
+    );
+    paintSettingsStanding(el("router-card-state"), "failed");
+    return;
+  }
+
+  const chosenId = select?.value ?? "custom";
+  const preset = routerPresets.find((p) => p.id === chosenId);
+
+  const auth = currentRouterAuth();
+  const modelsConfig = preset?.models ?? { path: "/models", id_field: "id", context_field: "context_length" };
+
+  invalidateRouterProbe();
+  const generation = routerProbeGeneration;
+  routerProbeInFlight = generation;
+
+  if (testBtn) {
+    testBtn.disabled = true;
+    testBtn.textContent = t("settings.apiRouters.testing", "연결 시험 중…");
+  }
+  // No badge while the question is still out: a standing is an answer, and
+  // the button already says the asking is under way.
+  paintSettingsStatus(statusEl, t("settings.apiRouters.testing", "연결 시험 중…"));
+
+  try {
+    const models = await fetchRouterModels({
+      base_url: baseUrl,
+      auth,
+      key,
+      models_path: modelsConfig.path,
+      id_field: modelsConfig.id_field,
+      context_field: modelsConfig.context_field,
+      client_fingerprint: modelConnectionsController.editing?.provider.client_fingerprint ?? preset?.client_fingerprint,
+      headers: modelConnectionsController.editing?.probeHeaders ?? modelConnectionsController.editing?.provider.headers ?? preset?.headers,
+    });
+    if (generation !== routerProbeGeneration) return;
+    testedModels = models ?? [];
+    testedRouterGeneration = generation;
+
+    paintRouterModels(testedModels);
     paintSettingsStatus(
       statusEl,
       t("settings.apiRouters.testSuccess", "연결 성공 — 사용할 모델을 선택하세요"),
@@ -7416,25 +7449,33 @@ async function saveApiRouterEntry() {
     // under — is the backend's, decided at the row's first save and kept. The
     // pane says only which preset the row came from, if any, and its name.
     configuredRouters = (await invoke("save_api_router", {
+      sourceId: modelConnectionsController.editing?.id ?? null,
+      expectedGeneration: modelConnectionsController.editing?.generation ?? null,
+      auth: currentRouterAuth(),
       presetId: preset?.id ?? null,
       name,
       baseUrl,
       key: key || null,
       models,
-      clientFingerprint: preset?.client_fingerprint ?? null,
-      headers: preset?.headers ?? null,
+      clientFingerprint: modelConnectionsController.editing?.provider.client_fingerprint ?? preset?.client_fingerprint ?? null,
+      headers: modelConnectionsController.editing?.provider.headers ?? preset?.headers ?? null,
     })) ?? [];
 
+    if (generation === routerDraftGeneration) {
+      if (keyInput) keyInput.value = "";
+      modelConnectionsController.editing = null;
+    }
     paintConfiguredRouters();
+    await modelConnectionsController.refresh();
     if (generation === routerDraftGeneration) {
       paintSettingsStatus(statusEl, t("settings.apiRouters.saved", "저장되었습니다"), {
-        standing: "connected",
+        standing: "unchecked",
       });
     }
   } catch (error) {
     // Said beside the button that was pressed, not only in a toast: a key
     // this machine cannot keep is a thing to act on here.
-    const reason = routerSaveRefusal(error);
+    const reason = modelConnectionsController.failure(error);
     if (generation === routerDraftGeneration) {
       paintSettingsStatus(statusEl, reason, { standing: "failed" });
       paintSettingsStanding(el("router-card-state"), "failed");
@@ -7453,6 +7494,9 @@ async function saveApiRouterEntry() {
  * keyless, which is what the words say to do. */
 function routerSaveRefusal(error) {
   const failure = failureOf(error);
+  if (failure.kind === "invalid-key") {
+    return t("settings.apiRouters.invalidKey", "API 키의 형식을 확인하세요. 공백과 줄바꿈은 사용할 수 없습니다.");
+  }
   return failure.kind === "keychain-unavailable"
     ? t(
       "settings.apiRouters.keychainUnavailable",

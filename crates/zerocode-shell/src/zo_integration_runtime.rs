@@ -306,6 +306,7 @@ fn parse_receipt(value: Value) -> Result<Receipt, Reason> {
         "subagent_steer",
         "subagent_resume",
         "exact_launch",
+        "providers_reload",
     ] {
         support[field] = public_object(
             &value["support"][field],

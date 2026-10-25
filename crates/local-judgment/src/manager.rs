@@ -2044,6 +2044,7 @@ impl Manager {
             base_url: format!("http://127.0.0.1:{}", address.port()),
             model: model.id.clone(),
             requires_auth: false,
+            connection: None,
         };
         let runtime = self.store.runtime_path(profile)?;
         let engine = self.model_engine(&runtime, profile, &path, model)?;

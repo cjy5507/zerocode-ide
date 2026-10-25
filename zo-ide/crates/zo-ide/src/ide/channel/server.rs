@@ -260,6 +260,14 @@ fn dispatch(
         // 세션과 무관한 하나 — 자격은 프로세스의 것이지 이 세션의 것이 아니라
         // `session_matches` 를 거치지 않는다.
         method::AUTH_RELOAD => auth_reload(state, params, id),
+        judgment_provider::connections::RELOAD_METHOD => {
+            if params.get("version").and_then(Value::as_u64) == Some(judgment_provider::connections::RELOAD_VERSION) {
+                let generation = api::note_provider_reload();
+                RpcResponse::ok(id, json!({"version":judgment_provider::connections::RELOAD_VERSION,"queued":true,"generation":generation}))
+            } else {
+                RpcResponse::err(id, CODE_INVALID_PARAMS, "unsupported provider reload protocol".to_string())
+            }
+        },
         method::TEAMMATE_CLOSE => teammate_close(state, params, id),
         method::HELPER_STOP => helper_stop(state, params, id),
         method::MCP_CALL => mcp_call(state, params, id),
@@ -577,6 +585,21 @@ mod tests {
 
     fn code_of(response: &RpcResponse) -> Option<i64> {
         response.error.as_ref().map(|error| error.code)
+    }
+
+    #[test]
+    fn provider_reload_is_versioned_and_never_enqueues_conversation_text() {
+        let state = ChannelState::new("reload-fixture".to_string());
+        let before = api::provider_reload_generation();
+        let invalid = dispatch(&state, &request(judgment_provider::connections::RELOAD_METHOD, json!({"version":0})), &mut None);
+        assert_eq!(code_of(&invalid), Some(CODE_INVALID_PARAMS));
+        let answer = dispatch(&state, &request(judgment_provider::connections::RELOAD_METHOD, json!({"version":judgment_provider::connections::RELOAD_VERSION})), &mut None);
+        let receipt = answer.result.expect("reload receipt");
+        assert_eq!(receipt["queued"], true);
+        assert!(receipt["generation"].as_u64().unwrap() > before);
+        assert!(state.take_commands().is_empty(), "connection changes are not user/orchestration messages");
+        let capabilities = dispatch(&state, &request("session.capabilities", json!({})), &mut None).result.unwrap();
+        assert_eq!(capabilities["support"]["providers_reload"]["version"], judgment_provider::connections::RELOAD_VERSION);
     }
 
     #[test]

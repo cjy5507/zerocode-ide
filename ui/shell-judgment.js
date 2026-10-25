@@ -213,6 +213,7 @@ const judgmentProviderController = {
     document.addEventListener("visibilitychange", () => {
       if (managedJudgmentController.visible()) void refreshTypeSafe();
     });
+    el("judgment-edit-linked")?.addEventListener("click", () => showSettingsPane("api-routers"));
     el("judgment-provider-kind")?.addEventListener("change", () => this.changeKind());
     for (const mode of ["managed", "manual"]) {
       el(`judgment-local-${mode}`)?.addEventListener("click", () => {
@@ -348,7 +349,11 @@ const judgmentProviderController = {
     if (!managedJudgmentController.snapshot && !managedJudgmentController.loading && !managedJudgmentController.statusError && managedJudgmentController.visible()) void managedJudgmentController.refresh();
   },
 
+  linkedCurrent() { return Boolean(this.state?.providerConnection && this.sameProvider(this.draft, this.state.provider)); },
+
   controls() {
+    const linked = this.linkedCurrent();
+    if (el("judgment-linked-notice")) el("judgment-linked-notice").hidden = !linked;
     const unavailable = !this.draft;
     const dirty = this.dirty();
     const busy = typesafeBusy || unavailable || managedJudgmentController.activating;
@@ -375,7 +380,7 @@ const judgmentProviderController = {
     if (revert) revert.disabled = busy || !dirty;
     const refresh = el("judgment-refresh-models");
     if (refresh) {
-      refresh.hidden = managed;
+      refresh.hidden = managed || linked;
       refresh.disabled = busy || this.loading || !this.draft.baseUrl;
     }
     const notice = el("judgment-provider-dirty");
@@ -383,17 +388,17 @@ const judgmentProviderController = {
     const keyState = el("typesafe-key-state");
     if (keyState) keyState.hidden = dirty;
     const keyField = el("typesafe-key-input")?.closest("label");
-    if (keyField) keyField.hidden = !auth;
+    if (keyField) keyField.hidden = !auth || linked;
     const saveKey = el("typesafe-save-btn");
-    if (saveKey) saveKey.hidden = managed || !auth;
+    if (saveKey) saveKey.hidden = managed || !auth || linked;
     const removeKey = el("typesafe-remove-btn");
     if (removeKey) {
-      removeKey.hidden = managed || !auth || dirty;
+      removeKey.hidden = managed || !auth || dirty || linked;
       removeKey.disabled = busy || dirty || !this.state?.keySaved;
     }
     const check = el("typesafe-check-btn");
     if (check) {
-      check.hidden = managed;
+      check.hidden = managed || linked;
       check.disabled = busy || !this.draft?.baseUrl || (!this.draft?.model && this.draft?.kind !== "jev") || (!dirty && this.state?.provider?.requiresAuth && !this.state.keySaved && !el("typesafe-key-input")?.value.trim());
     }
     const listed = el("judgment-listed-model");

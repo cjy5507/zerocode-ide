@@ -51460,3 +51460,23 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .jev-builtin-status { margin: 0; color: var(--ink-mist); }
 .jev-builtin-status.is-error { color: var(--signal-halt); }
 .jev-builtin-trash { margin: var(--space-3) 0; }
+
+/* Shared connections use the settings pane's width, including narrow split panes. */
+.connections-usage { margin-block: var(--space-5); }
+.connection-roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); margin-block: var(--space-4); }
+.connection-roles[data-connection-roles="judgment"] { grid-template-columns: minmax(0, 1fr); }
+.connection-role { min-width: 0; padding-block: var(--space-4); border-block-start: var(--rule-width) solid var(--edge-rule); }
+.connection-role > h3 { margin-block: 0 var(--space-2); }
+.connection-field { display: grid; gap: var(--space-2); margin-block: var(--space-4); }
+.connection-field .settings-input { width: 100%; min-width: 0; }
+.connection-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding-block: var(--space-4); border-block-end: var(--rule-width) solid var(--edge-rule); }
+.connection-row-copy { min-width: 0; flex: 1 1 240px; }
+.connection-row-copy > p { margin-block: var(--space-1); overflow-wrap: break-word; }
+.connection-role .settings-action-row, .connection-row .settings-action-row { flex-wrap: wrap; margin-inline-start: 0; }
+.connection-result { font: var(--type-copy-13); color: var(--ink-mist); word-break: keep-all; }
+.connection-result[data-state="failed"] { color: var(--signal-halt-ink); }
+@container settings (max-width: 640px) {
+  .connection-roles { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
+  .connection-row { align-items: start; }
+  .connection-role .btn { white-space: normal; }
+}

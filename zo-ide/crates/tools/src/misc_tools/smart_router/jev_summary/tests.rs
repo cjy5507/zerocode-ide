@@ -263,6 +263,7 @@ fn explicit_providers_do_not_borrow_unscoped_session_history() {
         base_url: "http://127.0.0.1:1234".to_string(),
         model: "acme/decision-model".to_string(),
         requires_auth: false,
+        connection: None,
     };
     for provider in [local, judgment_provider::Provider::jev(judgment_provider::JEV_DEFAULT_MODEL)] {
         let settings = json!({"smart": {(judgment_provider::SETTINGS_KEY): provider}});

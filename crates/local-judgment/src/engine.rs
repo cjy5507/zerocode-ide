@@ -1273,6 +1273,7 @@ async fn serve_with(
         base_url: format!("http://127.0.0.1:{port}"),
         model: model.id.clone(),
         requires_auth: false,
+        connection: None,
     };
     let id = uuid::Uuid::new_v4().to_string();
     let declared = engine

@@ -10,6 +10,7 @@ default = []
 model-fit-hints = []
 
 [dependencies]
+zerocode-core = { path = "../../../crates/zerocode-core" }
 judgment-provider = { path = "../../../crates/judgment-provider" }
 core-types = { path = "../core-types" }
 # The window's app-data folder, resolved by the same rules Tauri uses, so a zo

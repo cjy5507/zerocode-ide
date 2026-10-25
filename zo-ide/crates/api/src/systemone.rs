@@ -98,6 +98,7 @@ pub enum SystemOneFailure {
     Schema,
     /// No key is configured; nothing was sent.
     NoKey,
+    RestartRequired,
     Configuration,
     ResponseTooLarge,
     ContextTruncated,
@@ -119,6 +120,7 @@ impl SystemOneFailure {
             Self::Timeout => "timeout",
             Self::Schema => "schema",
             Self::NoKey => "no_key",
+            Self::RestartRequired => "provider_restart_required",
             Self::Configuration => "provider_settings",
             Self::ResponseTooLarge => "provider_response_too_large",
             Self::ContextTruncated => "provider_context_truncated",
@@ -661,24 +663,27 @@ impl SystemOneConfig {
     pub fn from_env_for(expected: Option<&str>) -> Result<Self, SystemOneFailure> {
         let settings_path = core_types::paths::default_config_home().join("settings.json");
         let provider = Provider::read(&settings_path).map_err(|_| SystemOneFailure::Configuration)?;
-        Self::from_provider(provider, expected)
+        Self::from_provider(provider, expected, Some(&settings_path))
     }
 
     #[cfg(test)]
     fn from_root(root: &serde_json::Value) -> Result<Self, SystemOneFailure> {
         let provider = Provider::from_root(root).map_err(|_| SystemOneFailure::Configuration)?;
-        Self::from_provider(provider, None)
+        Self::from_provider(provider, None, None)
     }
 
-    fn from_provider(mut provider: Provider, expected: Option<&str>) -> Result<Self, SystemOneFailure> {
+    fn from_provider(mut provider: Provider, expected: Option<&str>, settings_path: Option<&std::path::Path>) -> Result<Self, SystemOneFailure> {
         if expected.is_some_and(|identity| identity != provider.identity()) {
             return Err(SystemOneFailure::Configuration);
         }
         let credential = if provider.requires_auth {
-            Some(crate::providers::read_env_key(&provider.key_env())
-                .ok()
-                .flatten()
-                .ok_or(SystemOneFailure::NoKey)?)
+            let credential = if provider.connection.is_some() {
+                crate::connection_keys::judgment_credential(settings_path.ok_or(SystemOneFailure::Configuration)?, &provider)
+                    .map_err(|error| match error { crate::ApiError::ConnectionRestartRequired => SystemOneFailure::RestartRequired, _ => SystemOneFailure::Configuration })?
+            } else {
+                crate::providers::read_env_key(&provider.key_env()).ok().flatten()
+            };
+            Some(credential.ok_or(SystemOneFailure::NoKey)?)
         } else {
             None
         };
@@ -692,6 +697,9 @@ impl SystemOneConfig {
         let (api_key, key_source) = credential.map_or((String::new(), None), |(key, source)| (key, Some(source)));
         Ok(Self { base_url: provider.base_url.clone(), api_key, key_source, provider })
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_key_matches(&self, expected: &str) -> bool { self.api_key == expected }
 
     /// Which rung of that ladder this configuration's key came from.
     #[must_use]
@@ -952,7 +960,24 @@ impl SystemOneClient {
             .post(&self.endpoint)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(prepared.body.clone());
-        let request = if self.provider.requires_auth {
+        let request = if let Some(connection) = &self.provider.connection {
+            let mut request = request;
+            if !connection.headers.keys().any(|name| name.eq_ignore_ascii_case("User-Agent")) {
+                if let Some(agent) = connection.user_agent.as_deref().or_else(|| connection.client_fingerprint.as_deref()
+                    .and_then(crate::providers::openai_compat::client_fingerprint_user_agent)) {
+                    request = request.header("User-Agent", agent);
+                }
+            }
+            for (name, value) in &connection.headers {
+                request = request.header(name, value);
+            }
+            if self.provider.requires_auth {
+                let value = connection.auth.scheme.as_ref()
+                    .map_or_else(|| self.api_key.clone(), |scheme| format!("{scheme} {}", self.api_key));
+                request = request.header(&connection.auth.header, value);
+            }
+            request
+        } else if self.provider.requires_auth {
             request.bearer_auth(&self.api_key)
         } else {
             request
@@ -1103,6 +1128,7 @@ mod tests {
             base_url: mock.base_url.clone(),
             model: "fixture-decider".to_string(),
             requires_auth: false,
+            connection: None,
         };
         let body = serde_json::json!({
             "model":provider.identity(),"state":"The page is ready.",
@@ -1125,7 +1151,7 @@ mod tests {
 
     #[test]
     fn a_provider_mismatch_is_refused_before_any_credentials_are_read() {
-        assert_eq!(SystemOneConfig::from_provider(Provider::jev(SYSTEMONE_MODEL), Some("another-provider")),
+        assert_eq!(SystemOneConfig::from_provider(Provider::jev(SYSTEMONE_MODEL), Some("another-provider"), None),
             Err(SystemOneFailure::Configuration));
     }
 

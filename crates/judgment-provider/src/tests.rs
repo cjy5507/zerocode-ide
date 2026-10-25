@@ -9,6 +9,7 @@ fn local() -> Provider {
         base_url: "http://127.0.0.1:1234/v1".to_string(),
         model: "acme/small-judge".to_string(),
         requires_auth: false,
+        connection: None,
     }
 }
 

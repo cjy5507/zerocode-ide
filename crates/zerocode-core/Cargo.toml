@@ -32,6 +32,10 @@ regex = { workspace = true }
 # The supply-chain layer reads Cargo.lock — see the workspace note beside it.
 toml = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# The existing CLI lock owner probe, shared without introducing unsafe calls.
+nix = { version = "0.29", features = ["process", "signal"] }
+
 [dev-dependencies]
 # A fake `PATH` holding exactly the executables a test names, so agent presence
 # is measured against a directory this test made rather than against whatever

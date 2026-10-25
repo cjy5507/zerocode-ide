@@ -2269,3 +2269,50 @@ fn thinking_blocks_are_dropped_from_openai_request() {
     assert!(serialized.contains("the answer"), "{serialized}");
     assert!(serialized.contains("weather"), "{serialized}");
 }
+
+#[tokio::test]
+async fn a_shared_connections_authentication_header_is_used_for_coding_too() {
+    let config: super::CustomProviderConfig = serde_json::from_value(json!({
+        "name":"Fixture", "base_url":"https://gateway.example.com/v1", "auth_env":"FIXTURE_KEY", "models":["fixture-model"],
+        "connection":{"id":"fixture", "generation":1, "auth":{"header":"X-Fixture-Key", "scheme":null}}
+    })).unwrap();
+    let client = OpenAiCompatClient::new("fixture-only-value", config.to_static_config());
+    let request = client.http.post("https://gateway.example.com/v1/chat/completions");
+    let (request, sent) = client.apply_auth(request).await.unwrap();
+    let request = request.build().unwrap();
+    assert!(sent);
+    assert_eq!(request.headers().get("x-fixture-key").unwrap(), "fixture-only-value");
+    assert!(!request.headers().contains_key("authorization"));
+}
+
+static BOUND_FIXTURE_KEY: Mutex<&'static str> = Mutex::new("initial-fixture");
+fn bound_fixture_key(_service: &str) -> crate::providers::KeychainAnswer {
+    crate::providers::KeychainAnswer::Found(BOUND_FIXTURE_KEY.lock().unwrap().to_string())
+}
+
+#[test]
+fn a_bound_client_captures_a_fresh_key_only_for_the_same_saved_route() {
+    let _lock = crate::test_env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvVarGuard::set("ZO_CONFIG_HOME", Some(home.path().to_str().unwrap()));
+    let _key = EnvVarGuard::set("ZO_TEST_BOUND_KEY", None);
+    crate::providers::forget_adopted_launch_keys_for_test();
+    crate::providers::install_window_keychain(crate::providers::WindowKeyNames::Prefix("ZO_TEST_BOUND_".to_string()),"fixture.bound.",bound_fixture_key);
+    let mut row = json!({"name":"Fixture", "base_url":"https://gateway.example.com/v1", "auth_env":"ZO_TEST_BOUND_KEY", "requires_auth":true,"models":["fixture-model"],"connection":{"id":"bound-fixture","generation":1}});
+    let path = home.path().join("settings.json");
+    std::fs::write(&path,json!({"providers":[row.clone()]}).to_string()).unwrap();
+    let config: super::CustomProviderConfig = serde_json::from_value(row.clone()).unwrap();
+    let config = config.to_static_config();
+    *BOUND_FIXTURE_KEY.lock().unwrap() = "initial-fixture";
+    assert_eq!(crate::providers::read_env_non_empty("ZO_TEST_BOUND_KEY").unwrap().as_deref(),Some("initial-fixture"));
+    let first = OpenAiCompatClient::from_env(config).unwrap();
+    *BOUND_FIXTURE_KEY.lock().unwrap() = "rotated-fixture";
+    let second = OpenAiCompatClient::from_env(config).unwrap();
+    assert!(first.speaks_with_bearer("initial-fixture"),"a running request must keep its endpoint/key pair");
+    assert!(second.speaks_with_bearer("rotated-fixture"),"a new client used the adopted stale key");
+    row["base_url"] = json!("https://different.example.com/v1");
+    std::fs::write(&path,json!({"providers":[row]}).to_string()).unwrap();
+    assert!(matches!(OpenAiCompatClient::from_env(config),Err(ApiError::ConnectionChanged)),"an old endpoint was allowed to capture the new saved credential");
+    crate::providers::forget_adopted_launch_keys_for_test();
+}

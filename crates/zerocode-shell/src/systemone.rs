@@ -687,7 +687,11 @@ pub struct Asked {
 #[derive(Clone)]
 enum KeySource {
     /// Read already, when the wire was made.
-    Read { name: String, key: Option<String> },
+    Read {
+        name: String,
+        identity: String,
+        key: Option<String>,
+    },
     /// This machine's keychain, read only when a question is asked — a beat
     /// that builds a wire and asks nothing never touches the keychain.
     Keychain,
@@ -751,6 +755,7 @@ impl Wire {
         let mut wire = Self {
             keys: KeySource::Read {
                 name: String::new(),
+                identity: String::new(),
                 key: None,
             },
             base: base_url(),
@@ -760,16 +765,25 @@ impl Wire {
         };
         if let Ok(provider) = wire.provider() {
             let name = provider.key_env().into_owned();
-            let service = format!(
-                "{}{name}",
-                zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX
-            );
             let key = if provider.requires_auth {
-                trimmed(keys.read(&service).ok().flatten())
+                trimmed(
+                    wire.settings
+                        .as_deref()
+                        .map_or_else(
+                            || crate::typesafe_settings::provider_key(&provider, keys),
+                            |path| crate::typesafe_settings::provider_key_at(path, &provider, keys),
+                        )
+                        .ok()
+                        .flatten(),
+                )
             } else {
                 None
             };
-            wire.keys = KeySource::Read { name, key };
+            wire.keys = KeySource::Read {
+                name,
+                identity: provider.identity(),
+                key,
+            };
         }
         wire
     }
@@ -785,6 +799,7 @@ impl Wire {
             Self {
                 keys: KeySource::Read {
                     name: String::new(),
+                    identity: String::new(),
                     key: None,
                 },
                 base: base_url(),
@@ -812,6 +827,7 @@ impl Wire {
         let mut wire = Self {
             keys: KeySource::Read {
                 name: String::new(),
+                identity: String::new(),
                 key: None,
             },
             base: base.trim().to_string(),
@@ -822,6 +838,7 @@ impl Wire {
         if let Ok(provider) = wire.provider() {
             wire.keys = KeySource::Read {
                 name: provider.key_env().into_owned(),
+                identity: provider.identity(),
                 key: trimmed(Some(key.to_string())),
             };
         }
@@ -863,15 +880,31 @@ impl Wire {
         }
         let wanted = provider.key_env();
         match &self.keys {
-            KeySource::Read { name, key } => {
-                (name == wanted.as_ref()).then(|| key.clone()).flatten()
-            }
+            KeySource::Read {
+                name,
+                identity,
+                key,
+            } => (name == wanted.as_ref() && identity == &provider.identity())
+                .then(|| key.clone())
+                .flatten(),
             KeySource::Keychain => trimmed(
-                Keychain::of_this_machine()
-                    .read(&format!(
-                        "{}{wanted}",
-                        zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX
-                    ))
+                self.settings
+                    .as_deref()
+                    .map_or_else(
+                        || {
+                            crate::typesafe_settings::provider_key(
+                                provider,
+                                &Keychain::of_this_machine(),
+                            )
+                        },
+                        |path| {
+                            crate::typesafe_settings::provider_key_at(
+                                path,
+                                provider,
+                                &Keychain::of_this_machine(),
+                            )
+                        },
+                    )
                     .ok()
                     .flatten(),
             ),
@@ -1357,7 +1390,38 @@ impl Wire {
         } else {
             request
         };
-        let request = if let Some(key) = key {
+        let request = if let Some(connection) = &provider.connection {
+            let mut request = request;
+            let user_agent = if connection
+                .headers
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("User-Agent"))
+            {
+                None
+            } else {
+                connection.user_agent.clone().or_else(|| {
+                    crate::api_routers::presented_user_agent(
+                        connection.client_fingerprint.as_deref(),
+                        Some(&connection.headers),
+                    )
+                })
+            };
+            if let Some(user_agent) = user_agent {
+                request = request.header("User-Agent", user_agent);
+            }
+            for (name, value) in &connection.headers {
+                request = request.header(name, value);
+            }
+            if let Some(key) = key {
+                let value = connection
+                    .auth
+                    .scheme
+                    .as_ref()
+                    .map_or_else(|| key.to_string(), |scheme| format!("{scheme} {key}"));
+                request = request.header(&connection.auth.header, value);
+            }
+            request
+        } else if let Some(key) = key {
             request.bearer_auth(key)
         } else {
             request

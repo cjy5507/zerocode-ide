@@ -251,6 +251,7 @@ pub struct TypeSafeSettings {
     pub key_saved: bool,
     pub provider: judgment_provider::Provider,
     pub provider_identity: String,
+    pub provider_connection: Option<judgment_provider::connections::Reference>,
     pub jev_provider: judgment_provider::Provider,
     /// The one switch: whether Jev is in use here.
     pub jev: JevSwitch,
@@ -318,14 +319,22 @@ pub fn read_settings(
     let document = Value::Object(root.clone());
     let provider = judgment_provider::Provider::from_root(&document)
         .map_err(|reason| RouterRefusal::from(reason.token().to_string()))?;
-    let key_saved =
-        provider.requires_auth && key_saved_at(&provider_keychain_service(&provider), keys)?;
+    let key_saved = provider.requires_auth
+        && if provider.connection.is_some() {
+            provider_key(&provider, keys)?.is_some_and(|key| !key.trim().is_empty())
+        } else {
+            key_saved_at(&provider_keychain_service(&provider), keys)?
+        };
     let lineup = crate::summon_lineup::snapshot();
     let now_ms = crate::usage_runtime::epoch_ms_now();
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
         provider_identity: provider.identity(),
+        provider_connection: provider
+            .connection
+            .as_ref()
+            .map(|connection| connection.reference.clone()),
         provider,
         jev_provider: judgment_provider::Provider::jev(model_in(&document)),
         jev: JevSwitch::of(&document),
@@ -442,7 +451,47 @@ pub fn remove_key(keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
 
 #[must_use]
 pub fn provider_keychain_service(provider: &judgment_provider::Provider) -> String {
-    format!("{SERVICE_KEYCHAIN_SERVICE_PREFIX}{}", provider.key_env())
+    let prefix = if provider.connection.is_some() {
+        zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX
+    } else {
+        SERVICE_KEYCHAIN_SERVICE_PREFIX
+    };
+    format!("{prefix}{}", provider.key_env())
+}
+
+/// A linked connection reads its existing reference. No legacy hash-key fallback.
+pub(crate) fn provider_key(
+    provider: &judgment_provider::Provider,
+    keys: &dyn RouterKeys,
+) -> Result<Option<String>, RouterRefusal> {
+    if let Some(connection) = &provider.connection {
+        return crate::api_routers::read_connection_key(&connection.auth_env, keys);
+    }
+    keys.read(&provider_keychain_service(provider))
+}
+
+/// Capture a linked row and its key under the same lock used by saves.
+/// An edited row cannot supply its new credential to an older request endpoint.
+pub(crate) fn provider_key_at(
+    path: &Path,
+    provider: &judgment_provider::Provider,
+    keys: &dyn RouterKeys,
+) -> Result<Option<String>, RouterRefusal> {
+    let Some(connection) = &provider.connection else {
+        return provider_key(provider, keys);
+    };
+    crate::api_routers::with_zo_settings_root(path, |root| {
+        let current = judgment_provider::connections::candidate(
+            &Value::Object(root.clone()),
+            &connection.reference,
+        )
+        .map_err(|error| error.to_string())?;
+        if current.identity() != provider.identity() {
+            return Err("settings_changed".to_string());
+        }
+        provider_key(provider, keys).map_err(|error| error.message)
+    })
+    .map_err(RouterRefusal::from)
 }
 
 pub fn selected_provider(path: &Path) -> Result<judgment_provider::Provider, RouterRefusal> {
@@ -454,6 +503,9 @@ pub fn selected_provider(path: &Path) -> Result<judgment_provider::Provider, Rou
 fn selected_key_service(path: &Path, expected: Option<&str>) -> Result<String, RouterRefusal> {
     let provider = selected_provider(path)?;
     require_provider(&provider, expected)?;
+    if provider.connection.is_some() {
+        return Err("connection_in_use".to_string().into());
+    }
     Ok(provider_keychain_service(&provider))
 }
 
@@ -496,6 +548,11 @@ pub(crate) fn save_candidate_key(
 ) -> Result<(), RouterRefusal> {
     with_provider_locked(path, || {
         Ok(selected_provider(path).and_then(|current| {
+            if current.connection.is_some()
+                && serde_json::to_value(&current).ok() == serde_json::to_value(provider).ok()
+            {
+                return Err("connection_in_use".to_string().into());
+            }
             if let Some(expected) = expected {
                 require_provider(&current, Some(expected))?;
             }
@@ -560,15 +617,7 @@ pub(crate) fn set_provider_with_key_if_identity(
         &provider_keychain_service(&provider),
         key,
         keys,
-        |root| {
-            let smart = root
-                .entry(SMART_SETTINGS_KEY)
-                .or_insert_with(|| Value::Object(Map::new()));
-            let smart = smart
-                .as_object_mut()
-                .ok_or_else(|| "provider_settings".to_string())?;
-            write_provider_to_smart(smart, &provider, Some(expected), None)
-        },
+        |root| write_provider_to_root(root, &provider, Some(expected), None),
     )
 }
 
@@ -604,24 +653,31 @@ fn set_provider_checked(
     if binding.is_some_and(|binding| !binding.matches(&provider)) {
         return Err("managed_model_binding".to_string());
     }
-    update_smart(path, |smart| {
-        write_provider_to_smart(smart, &provider, expected, binding)
+    crate::api_routers::update_zo_settings_root(path, |root| {
+        write_provider_to_root(root, &provider, expected, binding)
     })
 }
 
-fn write_provider_to_smart(
-    smart: &mut Map<String, Value>,
+fn write_provider_to_root(
+    root: &mut Map<String, Value>,
     provider: &judgment_provider::Provider,
     expected: Option<&str>,
     binding: Option<&local_judgment::Binding>,
 ) -> Result<(), String> {
     if let Some(expected) = expected {
-        let current = judgment_provider::Provider::from_root(&serde_json::json!({"smart":smart}))
+        let current = judgment_provider::Provider::from_root(&Value::Object(root.clone()))
             .map_err(|reason| reason.to_string())?;
         if current.identity() != expected {
             return Err("settings_changed".to_string());
         }
     }
+    let smart = root
+        .entry(SMART_SETTINGS_KEY)
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or("provider_settings")?;
+    smart.remove(judgment_provider::connections::JUDGMENT_CONNECTION_KEY);
+    smart.remove(judgment_provider::connections::PREVIOUS_JUDGMENT_KEY);
     if provider.kind == judgment_provider::ProviderKind::Jev {
         if provider.model == DEFAULT_MODEL {
             smart.remove(MODEL_SETTING);
@@ -1095,7 +1151,7 @@ pub fn preflight_provider_with_key(
         if let Some(key) = entered_key.map(str::trim).filter(|key| !key.is_empty()) {
             Some(key.to_string())
         } else {
-            keys.read(&provider_keychain_service(&candidate))
+            provider_key_at(path, &candidate, keys)
                 .map_err(|refusal| refusal.message)?
                 .map(|key| key.trim().to_string())
                 .filter(|key| !key.is_empty())
@@ -1659,6 +1715,7 @@ mod tests {
             base_url: "http://127.0.0.1:43210".to_string(),
             model: "fixture-native".to_string(),
             requires_auth: false,
+            connection: None,
         };
         assert_eq!(
             set_provider_if_identity(&path, provider.clone(), "old-provider", None),
@@ -1697,6 +1754,7 @@ mod tests {
             base_url: "http://127.0.0.1:43210".to_string(),
             model: "fixture-native".to_string(),
             requires_auth: false,
+            connection: None,
         };
         let binding = local_judgment::Binding {
             model_id: provider.model.clone(),

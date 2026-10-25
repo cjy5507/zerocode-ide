@@ -18,6 +18,7 @@ fn local(base: &str) -> Provider {
         base_url: base.to_string(),
         model: "fixture-decision".to_string(),
         requires_auth: false,
+        connection: None,
     }
 }
 

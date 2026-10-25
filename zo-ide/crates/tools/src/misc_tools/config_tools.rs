@@ -109,6 +109,8 @@ pub fn execute_config(input: ConfigInput) -> Result<ConfigOutput, String> {
     };
 
     let path = config_file_for_scope(spec.scope)?;
+    let _guard = input.value.as_ref().map(|_| runtime::file_ops::SettingsFileLock::acquire(&path))
+        .transpose().map_err(|error| error.to_string())?;
     let effective_document = match spec.scope {
         ConfigScope::Global => read_global_config_object()?,
         ConfigScope::Settings => read_json_object(&path)?,

@@ -30,6 +30,12 @@ pub(crate) use managed_judgment::{
     managed_judgment_register_catalog, managed_judgment_remove, managed_judgment_start,
     managed_judgment_status, managed_judgment_stop, managed_judgment_switch_model,
 };
+#[path = "model_connections.rs"]
+pub(crate) mod model_connection_commands;
+pub(crate) use model_connection_commands::{
+    check_model_connection, clear_model_connection, model_connections, select_model_connection,
+    sync_model_connections,
+};
 pub(crate) mod onboarding;
 pub(crate) mod project;
 pub(crate) mod remote;
