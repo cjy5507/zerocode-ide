@@ -744,7 +744,10 @@ function boardScheduleTickRoom(ticks, zoom, measure) {
 function boardScheduleTicks(from, to, width, zoom, measure = null) {
   let sparsest = [];
   let room = zoom.tickRoomPx;
+  const fewest = Math.max(2, Math.floor(width / zoom.tickRoomPx));
   for (const step of zoom.ticksMs) {
+    // A step that is too many for the candidate's own room is too many for any wider one: its labels are not built.
+    if ((to - from) / step > fewest && step !== zoom.ticksMs.at(-1)) continue;
     const ticks = boardScheduleTickMoments(from, to, step);
     room = boardScheduleTickRoom(ticks, zoom, measure);
     if ((to - from) / step <= Math.max(2, Math.floor(width / room))) return { ticks, room };
