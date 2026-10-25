@@ -989,24 +989,26 @@ impl agent_teams::Host for TeamWindow {
                 .is_some_and(|queued| !queued.is_empty())
     }
 
-    /// The hook's word held still while it is read and while `commit` runs:
-    /// a report that the pane took a prompt or a tool waits on the same lock
-    /// the hook road writes `pane_states` under (t-46106). Words on their way
-    /// are asked first, under the typing door's locks and outside this one,
-    /// so the two never nest.
+    /// Hold prompt registration still from the empty observation through
+    /// commit. The pump takes deliveries before hook state too, so a pointer
+    /// either registers first and defers the move, or waits until it commits.
     fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {
-        if self.typing_in_flight(term) {
-            return;
-        }
         let state = self.app.state::<AppState>();
-        let states = state.pane_states();
-        let done = states
-            .get(&term)
-            .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
-        if done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term) {
-            commit();
-        }
-        drop(states);
+        crate::prompt_transaction::with_no_prompt_in_flight(
+            &state.shell_runtime().deliveries,
+            &state.shell_runtime().prompt_queue,
+            term,
+            &mut || {
+                let states = state.pane_states();
+                let done = states
+                    .get(&term)
+                    .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Done);
+                if done && turn_rests_on_an_empty_line(self, term) && output_settled(&state, term) {
+                    commit();
+                }
+                drop(states);
+            },
+        );
     }
 
     fn follow_account_switch(&self, now_ms: i64) {

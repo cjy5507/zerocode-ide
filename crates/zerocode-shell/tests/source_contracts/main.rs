@@ -20577,7 +20577,7 @@ mod tests {
     /// turns while words it typed there on its own are on their way. It reads
     /// the typing door's own record — the delivery the pump carries and the
     /// queue behind it — at the switch's every look and FIRST at the rest's
-    /// fence (outside the hook state's lock, so the two locks never nest), and
+    /// fence under the prompt registration lock, before the hook state, and
     /// it waits for the output to settle as the pointer does. A switch asks
     /// both questions through one function.
     #[test]
@@ -20604,16 +20604,12 @@ mod tests {
             backend,
             "    fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {",
         );
-        let asked = fence
-            .find("self.typing_in_flight(term)")
-            .expect("the fence no longer asks for words on their way");
-        let locked = fence
-            .find("state.pane_states()")
-            .expect("the fence no longer holds the hook state");
         assert!(
-            asked < locked && fence.contains("output_settled(&state, term)"),
-            "the fence asks for words on their way under the hook state's lock, or \
-             skips the settle:\n{fence}"
+            fence.contains("crate::prompt_transaction::with_no_prompt_in_flight(")
+                && fence.contains("&state.shell_runtime().deliveries,")
+                && fence.contains("&state.shell_runtime().prompt_queue,")
+                && fence.contains("output_settled(&state, term)"),
+            "the switch must observe and commit under the prompt registration lock:\n{fence}"
         );
         let switch = include_str!("../../src/account_switch.rs");
         let rests = block_after(
