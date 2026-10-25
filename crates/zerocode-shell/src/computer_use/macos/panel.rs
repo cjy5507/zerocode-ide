@@ -2,11 +2,16 @@
 //! a pending presentation; no helper reply delays command admission.
 
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
+use std::time::Duration;
 
 use serde_json::Value;
 
 use super::{PanelEndpoint, Wire};
 
+/// A busy provider is checked again without waiting for another presentation.
+const BUSY_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Clone)]
 struct Update {
     state: Value,
     endpoint: Option<PanelEndpoint>,
@@ -50,16 +55,27 @@ impl Mailbox {
         self.changed.notify_one();
     }
 
-    fn next(&self) -> Update {
+    fn next(&self, retry: Option<&Update>, retry_after: Duration) -> Update {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(update) = pending.latest.take() {
                 return update;
             }
-            pending = self
-                .changed
-                .wait(pending)
-                .unwrap_or_else(PoisonError::into_inner);
+            if let Some(retry) = retry {
+                let (held, timeout) = self
+                    .changed
+                    .wait_timeout_while(pending, retry_after, |pending| pending.latest.is_none())
+                    .unwrap_or_else(PoisonError::into_inner);
+                pending = held;
+                if timeout.timed_out() && pending.latest.is_none() {
+                    return retry.clone();
+                }
+            } else {
+                pending = self
+                    .changed
+                    .wait(pending)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
         }
     }
 }
@@ -71,6 +87,7 @@ struct Delivery {
     startup_attempted: bool,
     recovery_used: bool,
     startup_share: (Option<String>, u64),
+    retry: Option<Update>,
 }
 
 impl Delivery {
@@ -80,6 +97,8 @@ impl Delivery {
         mut connect: impl FnMut(&PanelEndpoint) -> Option<Wire>,
         mut ensure: impl FnMut() -> bool,
     ) {
+        // A new presentation supersedes a busy retry, including share end.
+        self.retry = None;
         let target = update.state.get("target").and_then(Value::as_str);
         let generation = update
             .state
@@ -106,6 +125,15 @@ impl Delivery {
         let Some(endpoint) = self.endpoint.as_ref() else {
             if !self.startup_attempted && target.is_some() {
                 self.startup_attempted = ensure();
+                if !self.startup_attempted {
+                    // try_lock was busy: no launch happened. Retry the last
+                    // state even if losing this helper was the last notice.
+                    self.retry = Some(Update {
+                        state: update.state,
+                        endpoint: None,
+                        helper_lost: false,
+                    });
+                }
             }
             return;
         };
@@ -143,7 +171,7 @@ pub(super) fn publish(state: &Value, endpoint: Option<PanelEndpoint>) {
             .spawn(move || {
                 let mut delivery = Delivery::default();
                 loop {
-                    let update = worker.next();
+                    let update = worker.next(delivery.retry.as_ref(), BUSY_RETRY_INTERVAL);
                     #[cfg(not(test))]
                     let ensure = super::super::ensure_share_panel;
                     // Tests never launch an application, even if a fixture advertises a panel.
