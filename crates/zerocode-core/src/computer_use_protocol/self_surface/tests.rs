@@ -168,3 +168,61 @@ fn only_the_look_and_the_three_presses_are_the_pages() {
         assert_eq!(Act::of_method(method), None, "{method}");
     }
 }
+
+/// The person's text leaves a look as its length; a choice, a state and the
+/// text of a field nobody marks the person's read as they are (t-74975).
+#[test]
+fn a_look_shows_the_persons_text_as_its_length() {
+    let words = "주소 SENTINEL";
+    let length = withheld_text(11);
+    for facts in [
+        Facts {
+            person_focus: true,
+            ..Facts::default()
+        },
+        Facts {
+            typed_ms_ago: Some(60_000),
+            ..Facts::default()
+        },
+        Facts {
+            setting: true,
+            ..Facts::default()
+        },
+        Facts {
+            beside_secret: true,
+            ..Facts::default()
+        },
+    ] {
+        for role in TEXT_ENTRY_ROLES {
+            assert_eq!(
+                shown_value(&facts, role, Some(words), None),
+                Some(length.clone()),
+                "{role} {facts:?}"
+            );
+        }
+        assert_eq!(
+            shown_value(&facts, "AXCheckBox", Some("checked"), None),
+            Some("checked".into()),
+            "{facts:?}"
+        );
+        assert_eq!(
+            shown_value(&facts, "AXTextField", Some(""), None),
+            Some(String::new())
+        );
+    }
+    let plain = Facts::default();
+    assert_eq!(
+        shown_value(&plain, "AXTextField", Some("main.rs"), None),
+        Some("main.rs".into())
+    );
+    assert_eq!(
+        shown_value(&plain, "AXTextArea", None, Some(42)),
+        Some(withheld_text(42))
+    );
+    let secret = Facts {
+        secret: true,
+        ..Facts::default()
+    };
+    assert_eq!(shown_value(&secret, "AXTextField", Some(words), None), None);
+    assert_eq!(shown_value(&secret, "AXTextField", None, Some(9)), None);
+}

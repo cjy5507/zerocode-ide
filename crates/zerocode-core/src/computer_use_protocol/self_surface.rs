@@ -48,6 +48,39 @@ pub fn withheld_text(chars: u64) -> String {
     format!("(withheld: {chars} characters)")
 }
 
+/// The helper's roles for a control a person writes text in.
+pub const TEXT_ENTRY_ROLES: &[&str] = &["AXTextField", "AXTextArea", "AXComboBox"];
+
+/// What a look shows of a control's value, from the page's answer: `value`
+/// as it said it, `withheld` the length of text it held back. A secret
+/// field shows nothing. Text the page held back, and the text of a field
+/// whose facts mark it the person's — their focus or their keys in it, a
+/// setting, a pane or a dialog that holds a secret — show only how long
+/// they are: a draft, an address or a name the person wrote is theirs to
+/// read. A choice, a state and any other text show as they are.
+#[must_use]
+pub fn shown_value(
+    facts: &Facts,
+    role: &str,
+    value: Option<&str>,
+    withheld: Option<u64>,
+) -> Option<String> {
+    if facts.secret {
+        return None;
+    }
+    if let Some(chars) = withheld {
+        return Some(withheld_text(chars));
+    }
+    let value = value?;
+    let persons =
+        facts.person_focus || facts.typed_ms_ago.is_some() || facts.setting || facts.beside_secret;
+    if persons && TEXT_ENTRY_ROLES.contains(&role) && !value.is_empty() {
+        let chars = u64::try_from(value.chars().count()).unwrap_or(u64::MAX);
+        return Some(withheld_text(chars));
+    }
+    Some(value.to_string())
+}
+
 /// What the page acts with: a look reads, the others press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

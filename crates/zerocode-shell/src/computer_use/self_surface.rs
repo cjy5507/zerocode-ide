@@ -17,7 +17,8 @@ use serde_json::{Value, json};
 use zerocode_core::computer_use::ComputerMethod;
 use zerocode_core::computer_use_protocol::render::{RenderNode, line, render_tree_text};
 use zerocode_core::computer_use_protocol::self_surface::{
-    Act, Facts, METHODS, OwnApp, PAGE_ANSWER_MS, PERSON_ONLY_GRACE_MS, judge, unsupported,
+    Act, Facts, METHODS, OwnApp, PAGE_ANSWER_MS, PERSON_ONLY_GRACE_MS, judge, shown_value,
+    unsupported,
 };
 use zerocode_core::computer_use_protocol::{AppIdentity, error_code};
 
@@ -127,6 +128,34 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "cancel_google_login",
     "github_login_intent",
     "github_select_account",
+    // Work that cannot be had back (t-74975): the person's uncommitted
+    // changes and a merge or rebase in progress, a push, a checkout, a
+    // project, a lane or a terminal and the program in it, a browser's
+    // sign-ins, Computer Use's own permissions, a saved launch, command,
+    // automation, artifact, note or model — and the questions that guard
+    // a removal or a close, turned off.
+    "discard_paths",
+    "delete_untracked",
+    "abort_conflict_operation",
+    "scm_push",
+    "remove_worktree",
+    "remove_project",
+    "close_lane",
+    "close_term",
+    "delete_browser_profile",
+    "reset_computer_use_permissions",
+    "reset_agent_launch",
+    "delete_quick_command",
+    "delete_automation",
+    "artifact_delete",
+    "delete_diff_note",
+    "clear_diff_notes",
+    "managed_judgment_remove",
+    "clear_model_connection",
+    "set_skip_delete_worktree_confirm",
+    "set_skip_delete_automation_confirm",
+    "set_skip_close_terminal_with_running_process_confirm",
+    "set_confirm_close_pinned",
 ];
 
 /// Commands whose names touch a key, a secret, a token, a password, a
@@ -165,6 +194,38 @@ pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[
     "term_key",
     "set_keybinding",
     "terminal_keyboard_layout",
+];
+
+/// Commands whose names discard, delete, remove, push, reset, close, clear or
+/// abort that an agent pressing in the window may still run: each takes
+/// nothing the person keeps, or only what is kept to be had back (the source
+/// contract `a_command_that_cannot_be_taken_back_is_decided_for` asks every
+/// such command to stand here or on [`PERSON_ONLY_COMMANDS`]).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the source contract off this file's text, and by a unit test"
+    )
+)]
+pub(crate) const AGENT_ALLOWED_DESTRUCTIVE_NAMED: &[&str] = &[
+    // Kept to be had back: a decision the store keeps to restore for its
+    // days, an untitled note removed only while it holds no bytes.
+    "delete_custom_decision",
+    "delete_untitled_markdown",
+    // A view closed or a mark taken down; nothing the person keeps goes.
+    "close_browser_pane",
+    "close_onboarding",
+    "browser_find_clear",
+    "clear_finish_mark",
+    // Only the review notes an agent was already handed, and only while
+    // they still read as they were handed.
+    "clear_delivered_diff_notes",
+    // A preference for the close button, not a guard on a close.
+    "set_minimize_to_tray_on_close",
+    // Presets, not a reset.
+    "api_router_presets",
+    "github_preset_query",
 ];
 
 /// The refusal the window's invoke handler answers a command with: `None`
@@ -430,12 +491,16 @@ fn snapshot(own: &OwnApp, answered: &Value) -> Result<Value, ComputerUseError> {
         let node = RenderNode {
             role: role.clone(),
             title: (!name.is_empty()).then(|| name.clone()),
-            // A secret field's value never leaves the page.
-            value: facts
-                .as_ref()
-                .is_ok_and(|facts| !facts.secret)
-                .then(|| control["value"].as_str().map(str::to_string))
-                .flatten(),
+            // A secret field's value never leaves the page, and the
+            // person's text leaves it as its length only.
+            value: facts.as_ref().ok().and_then(|facts| {
+                shown_value(
+                    facts,
+                    &role,
+                    control["value"].as_str(),
+                    control["withheld"].as_u64(),
+                )
+            }),
             ..RenderNode::default()
         };
         let mut row = line(at + 1, &node);

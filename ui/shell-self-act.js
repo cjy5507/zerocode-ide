@@ -5,7 +5,9 @@
  * (`computer_self_answer`). Three requests:
  *
  *  - `look`: the visible controls, each with a role, a name, a value (never a
- *    secret field's) and the facts the window already marks it with;
+ *    secret field's, and of the text in a field only its length unless an
+ *    agent's own fill put it there) and the facts the window already marks
+ *    it with;
  *  - `facts`: one control's facts again, read now, right before a press;
  *  - `do`: press that control — click it, fill it, or scroll it — only when
  *    its facts are still the facts the backend judged.
@@ -54,6 +56,8 @@ let selfActNextLook = 0;
 const selfActTyped = new WeakMap();
 /* When the backend last read a control's facts, by look and control. */
 const selfActFactsRead = new Map();
+/* The text an agent's own fill left in a field, and when, by field. */
+const selfActFilled = new WeakMap();
 
 for (const kind of ["keydown", "input", "paste"]) {
   document.addEventListener(kind, (event) => {
@@ -110,7 +114,8 @@ function selfActName(node) {
   const label = said(node.labels?.[0]?.textContent);
   if (label) return label;
   const title = said(node.getAttribute("title") ?? node.dataset.tip);
-  if (!(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) {
+  // A field's own text is its value, never its name.
+  if (!(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement || node.isContentEditable)) {
     const text = said(node.textContent);
     if (text) return text;
   }
@@ -133,14 +138,32 @@ function selfActFacts(node) {
   };
 }
 
+/* The text a field holds, or null for a control that holds none. */
+function selfActText(node) {
+  if (node.isContentEditable) return node.textContent ?? "";
+  return "value" in node && typeof node.value === "string" ? node.value : null;
+}
+
+/* What a look carries of a control's value. A secret field's, never. The
+ * text in any other field is the person's — a draft they typed, the address
+ * or the name a setting holds, the name beside a secret — and the page
+ * cannot tell it from text the window put there for them, so a look carries
+ * only how long it is (`withheld`, in characters), unless an agent's own
+ * fill left it and nobody typed in the field since. A choice and a state
+ * read as they are. */
 function selfActValue(node, facts) {
-  if (facts.secret) return null;
+  if (facts.secret) return { value: null };
   if (node instanceof HTMLInputElement && (node.type === "checkbox" || node.type === "radio")) {
-    return node.checked ? "checked" : "unchecked";
+    return { value: node.checked ? "checked" : "unchecked" };
   }
-  if ("value" in node && typeof node.value === "string") return node.value.slice(0, 200);
-  if (node.isContentEditable) return (node.textContent ?? "").slice(0, 200);
-  return null;
+  const text = selfActText(node);
+  if (text === null) return { value: null };
+  if (!selfActTextEntry(node)) return { value: text.slice(0, 200) };
+  const filled = selfActFilled.get(node);
+  const typed = selfActTyped.get(node);
+  const agents = filled !== undefined && filled.text === text && (typed === undefined || typed <= filled.at);
+  if (agents || text === "") return { value: text.slice(0, 200) };
+  return { value: null, withheld: [...text].length };
 }
 
 function selfActLook() {
@@ -157,7 +180,7 @@ function selfActLook() {
     focused: focused < 0 ? null : focused + 1,
     controls: nodes.map((node, id) => {
       const facts = selfActFacts(node);
-      return { id, role: selfActRole(node), name: selfActName(node), value: selfActValue(node, facts), facts };
+      return { id, role: selfActRole(node), name: selfActName(node), ...selfActValue(node, facts), facts };
     }),
   };
 }
@@ -198,6 +221,7 @@ function selfActFill(node, value) {
   }
   node.dispatchEvent(new Event("input", { bubbles: true }));
   node.dispatchEvent(new Event("change", { bubbles: true }));
+  if (selfActTextEntry(node)) selfActFilled.set(node, { text: selfActText(node), at: performance.now() });
   return true;
 }
 

@@ -2,9 +2,11 @@
 //! one function cannot see from inside it. The behaviour is the road's own
 //! tests (`computer_use::self_surface`), core's rule (`self_surface::judge`)
 //! and the window suite (`ui/tests/self-act.mjs`); these contracts hold that
-//! every person-only command checks the second wall, that the controls the
-//! window keeps for the person carry its mark, and that the page presses its
-//! controls without an OS-like event, a focus move or the clipboard.
+//! every person-only command checks the second wall, that a command named for
+//! a credential, an account or work that cannot be had back is decided for,
+//! that the controls the window keeps for the person carry its mark, and
+//! that the page presses its controls without an OS-like event, a focus move
+//! or the clipboard.
 
 use std::path::Path;
 
