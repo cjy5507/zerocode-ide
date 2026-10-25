@@ -721,9 +721,11 @@ async fn the_team_queue_is_bounded_and_a_rejected_request_never_arrives_late() {
     let rejected_body = axum::body::to_bytes(rejected.into_body(), 4096)
         .await
         .expect("busy body");
-    assert_eq!(
-        &rejected_body[..],
-        zerocode_hookd::TEAM_BUSY_MESSAGE.as_bytes()
+    // Which door refused is the three named-entrance tests' business below;
+    // this one only pins that the busy kind keeps its lead.
+    assert!(
+        rejected_body.starts_with(zerocode_hookd::busy::TEAM_BUSY_LEAD.as_bytes()),
+        "the busy kind lost its lead: {rejected_body:?}"
     );
 
     let mut seen = Vec::new();
@@ -2099,4 +2101,191 @@ async fn zerocode_find_asks_the_window_with_the_agents_words_folder_and_pane() {
         .expect("the usage");
     assert_eq!(&said[..], USAGE.as_bytes());
     assert_eq!(finder.asked.lock().expect("the asks").len(), 1);
+}
+
+/// What a refused team request says, with the status the shim's callers read
+/// as "busy" checked on the way (t-47458). Callers that read only the busy
+/// kind keep reading the 429 and the lead words; the entrance rides after.
+async fn busy_words(response: axum::response::Response) -> String {
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let bytes = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("busy body");
+    let words = String::from_utf8(bytes.to_vec()).expect("busy words are text");
+    assert!(
+        words.starts_with("tmux: this window is busy") && words.ends_with("; retry the request\n"),
+        "the busy kind's lead and tail moved: {words:?}"
+    );
+    words
+}
+
+/// Each entrance names itself and no other, so a reader of the refusal knows
+/// which door closed (t-47141 stood three hours at one of them, unnamed).
+fn assert_names_only(words: &str, entrance: &str) {
+    const ENTRANCES: [&str; 3] = ["body permit", "wait permit", "full queue"];
+    assert!(
+        words.contains(&format!("refused at the {entrance}")),
+        "the refusal does not name its entrance `{entrance}`: {words:?}"
+    );
+    for other in ENTRANCES.iter().filter(|name| **name != entrance) {
+        assert!(
+            !words.contains(other),
+            "the `{entrance}` refusal also names `{other}`: {words:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_at_the_body_permit_names_the_body_permit_and_how_long_it_has_been_held() {
+    let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state);
+    let polled = Arc::new(AtomicUsize::new(0));
+    let mut slow = Vec::new();
+    for _ in 0..zerocode_hookd::TEAM_BODY_READ_LIMIT {
+        let service = service.clone();
+        let polled = Arc::clone(&polled);
+        slow.push(tokio::spawn(async move {
+            service.oneshot(slow_team_post(polled)).await
+        }));
+    }
+    timeout(Duration::from_secs(2), async {
+        while polled.load(Ordering::SeqCst) != zerocode_hookd::TEAM_BODY_READ_LIMIT {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("every body-read credit is held");
+
+    let busy = timeout(
+        Duration::from_secs(2),
+        service.clone().oneshot(team_post("list-panes\u{1f}")),
+    )
+    .await
+    .expect("body admission is immediate")
+    .expect("busy response");
+    let words = busy_words(busy).await;
+    assert_names_only(&words, "body permit");
+    let limit = zerocode_hookd::TEAM_BODY_READ_LIMIT;
+    assert!(
+        words.contains(&format!("{limit} of {limit} held, oldest held ")),
+        "the body permit refusal does not say how many are held and for how long: {words:?}"
+    );
+    assert!(teams.try_recv().is_err(), "a refused request was enqueued");
+    for task in slow {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_at_the_wait_permit_names_the_wait_permit_and_how_long_it_has_been_held() {
+    let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state);
+    let mut waiting_handlers = Vec::new();
+    for index in 0..zerocode_hookd::TEAM_WAIT_LIMIT {
+        let service = service.clone();
+        waiting_handlers.push(tokio::spawn(async move {
+            service
+                .oneshot(team_post(format!("check\u{1f}--wait\u{1f}{index}\u{1f}")))
+                .await
+                .expect("waiting response")
+        }));
+    }
+    timeout(Duration::from_secs(2), async {
+        while teams.len() != zerocode_hookd::TEAM_WAIT_LIMIT {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the wait quota reaches the queue");
+
+    let ninth = timeout(
+        Duration::from_secs(2),
+        service
+            .clone()
+            .oneshot(team_post("check\u{1f}--wait\u{1f}ninth\u{1f}")),
+    )
+    .await
+    .expect("ninth wait is immediate")
+    .expect("ninth wait response");
+    let words = busy_words(ninth).await;
+    assert_names_only(&words, "wait permit");
+    let limit = zerocode_hookd::TEAM_WAIT_LIMIT;
+    assert!(
+        words.contains(&format!("{limit} of {limit} held, oldest held ")),
+        "the wait permit refusal does not say how many are held and for how long: {words:?}"
+    );
+
+    for _ in 0..zerocode_hookd::TEAM_WAIT_LIMIT {
+        let request = teams.recv().await.expect("waiting request");
+        let _ = request.answer.send(zerocode_hookd::TeamAnswer {
+            stdout: "{\"count\":0}\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        });
+    }
+    for handler in waiting_handlers {
+        assert_eq!(
+            handler.await.expect("wait handler").status(),
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_at_a_full_queue_names_the_full_queue_and_claims_no_holder_age() {
+    let (state, _events, mut teams, _browser) = BridgeState::new(TOKEN, BROWSER);
+    let service = router(state);
+    let mut pending = Vec::new();
+    for index in 0..zerocode_hookd::TEAM_QUEUE_CAPACITY {
+        let service = service.clone();
+        pending.push(tokio::spawn(async move {
+            service
+                .oneshot(team_post(format!("list-panes\u{1f}{index}\u{1f}")))
+                .await
+                .expect("queued team response")
+        }));
+    }
+    timeout(Duration::from_secs(2), async {
+        while teams.len() != zerocode_hookd::TEAM_QUEUE_CAPACITY {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the requests fill the queue");
+
+    let rejected = timeout(
+        Duration::from_secs(2),
+        service
+            .clone()
+            .oneshot(team_post("split-window\u{1f}rejected\u{1f}")),
+    )
+    .await
+    .expect("busy is immediate")
+    .expect("busy response");
+    let words = busy_words(rejected).await;
+    assert_names_only(&words, "full queue");
+    let capacity = zerocode_hookd::TEAM_QUEUE_CAPACITY;
+    assert!(
+        words.contains(&format!("{capacity} of {capacity} waiting")),
+        "the full queue refusal does not say how many wait: {words:?}"
+    );
+    // The queue keeps no clock per request, so the refusal says nothing it
+    // does not know.
+    assert!(
+        !words.contains("oldest"),
+        "the full queue refusal invented a holder age: {words:?}"
+    );
+
+    for _ in 0..zerocode_hookd::TEAM_QUEUE_CAPACITY {
+        let request = teams.recv().await.expect("queued request");
+        let _ = request.answer.send(zerocode_hookd::TeamAnswer {
+            stdout: "ok\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        });
+    }
+    for task in pending {
+        assert_eq!(task.await.expect("queued handler").status(), StatusCode::OK);
+    }
 }

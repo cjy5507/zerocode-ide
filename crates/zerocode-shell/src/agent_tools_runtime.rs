@@ -2472,34 +2472,40 @@ pub(super) fn beat_standing_orders(app: &AppHandle) {
 /// a reserved road forward.
 #[derive(Clone)]
 pub(super) struct TeamWorkBudget {
-    pub(super) active: Arc<tokio::sync::Semaphore>,
-    pub(super) waiting: Arc<tokio::sync::Semaphore>,
+    pub(super) active: zerocode_hookd::busy::Seats,
+    pub(super) waiting: zerocode_hookd::busy::Seats,
 }
 
 impl TeamWorkBudget {
     pub(super) fn new() -> Self {
         Self {
-            active: Arc::new(tokio::sync::Semaphore::new(
+            active: zerocode_hookd::busy::Seats::new(
+                zerocode_hookd::busy::BusyEntry::WindowCredit,
                 zerocode_hookd::TEAM_ACTIVE_LIMIT,
-            )),
-            waiting: Arc::new(tokio::sync::Semaphore::new(zerocode_hookd::TEAM_WAIT_LIMIT)),
+            ),
+            waiting: zerocode_hookd::busy::Seats::new(
+                zerocode_hookd::busy::BusyEntry::WindowWaitCredit,
+                zerocode_hookd::TEAM_WAIT_LIMIT,
+            ),
         }
     }
 
     pub(super) fn try_admit(
         &self,
         request: &zerocode_hookd::TeamRequest,
-    ) -> Option<TeamWorkPermit> {
+    ) -> Result<TeamWorkPermit, zerocode_hookd::busy::Busy> {
         // The narrower credit first. If the total is then full, returning drops
         // this one immediately; a rejected wait never withholds a future wait
-        // seat while occupying no active seat.
+        // seat while occupying no active seat. The refusal names the credit
+        // that was full, so a "busy" that stands for hours says which one
+        // (t-47458).
         let waiting = if request.reserves_wait_slot() {
-            Some(Arc::clone(&self.waiting).try_acquire_owned().ok()?)
+            Some(self.waiting.try_acquire()?)
         } else {
             None
         };
-        let active = Arc::clone(&self.active).try_acquire_owned().ok()?;
-        Some(TeamWorkPermit {
+        let active = self.active.try_acquire()?;
+        Ok(TeamWorkPermit {
             _active: active,
             _waiting: waiting,
         })
@@ -2509,8 +2515,8 @@ impl TeamWorkBudget {
 /// Credits travel into the blocking closure and are returned by `Drop`,
 /// including unwinding and every early-return/refusal path.
 pub(super) struct TeamWorkPermit {
-    pub(super) _active: tokio::sync::OwnedSemaphorePermit,
-    pub(super) _waiting: Option<tokio::sync::OwnedSemaphorePermit>,
+    pub(super) _active: zerocode_hookd::busy::Seat,
+    pub(super) _waiting: Option<zerocode_hookd::busy::Seat>,
 }
 
 /// Admit or refuse one dequeued request without parking another task behind a
@@ -2525,9 +2531,9 @@ pub(super) fn schedule_team_request(
         return;
     }
     match budget.try_admit(&request) {
-        Some(permit) => spawn(permit, request),
-        None => {
-            let _ = request.answer.send(zerocode_hookd::TeamAnswer::busy());
+        Ok(permit) => spawn(permit, request),
+        Err(busy) => {
+            let _ = request.answer.send(zerocode_hookd::TeamAnswer::busy(&busy));
         }
     }
 }
