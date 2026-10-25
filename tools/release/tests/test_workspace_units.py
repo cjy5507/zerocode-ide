@@ -70,7 +70,8 @@ class OnARealBuild(unittest.TestCase):
         write(self.repo / "tests/adds.rs", "#[test]\nfn adds() { assert_eq!(app::two(), 2); }\n")
 
     def cargo(self):
-        env = dict(os.environ, CARGO_TARGET_DIR=str(self.target), CARGO_INCREMENTAL="0")
+        # The log is read for cargo's words, so they are asked for without colour: CI sets CARGO_TERM_COLOR=always.
+        env = dict(os.environ, CARGO_TARGET_DIR=str(self.target), CARGO_INCREMENTAL="0", CARGO_TERM_COLOR="never")
         r = subprocess.run(["cargo", "test", "--no-run", "--offline", "-v", "--manifest-path", str(self.repo / "Cargo.toml")],
                            capture_output=True, text=True, env=env, timeout=300)
         self.assertEqual(r.returncode, 0, r.stderr)
