@@ -25,8 +25,8 @@ use crate::{Binding, Manager};
 /// `signal N` sends itself signal N, `mute` closes its output and runs on,
 /// `orphan N` leaves a process holding its output open for N seconds and
 /// exits with 7, `hold` leaves one holding it open until the file `release`
-/// appears and exits with 7. What the file `stderr` holds is the last it
-/// writes there.
+/// appears, when that one writes `fixture: released` there and goes, and
+/// exits with 7. What the file `stderr` holds is the last it writes there.
 const RUNTIME: &str = r#"import os,sys,time
 root=sys.argv[1]
 sys.stderr.write('x'*(1<<20)+'\n')
@@ -45,7 +45,7 @@ if how=='orphan':
  os._exit(7)
 if how=='hold':
  import subprocess
- subprocess.Popen([sys.executable,'-I','-c','import os,sys,time\nwhile not os.path.exists(sys.argv[1]): time.sleep(0.005)',os.path.join(root,'release')])
+ subprocess.Popen([sys.executable,'-I','-c','import os,sys,time\nwhile not os.path.exists(sys.argv[1]): time.sleep(0.005)\nprint("fixture: released",file=sys.stderr)',os.path.join(root,'release')])
  os._exit(7)
 time.sleep(60)
 "#;
@@ -288,7 +288,8 @@ async fn a_runtime_whose_output_another_process_holds_open_is_still_told_when_it
 /// The runtime here leaves its stderr open until another task on the same
 /// worker lets it go, and the runtime has that one worker (the test's own
 /// body runs beside it): while the read waits, the worker's other tasks run
-/// on.
+/// on, so the release comes while the read still waits and the end it keeps
+/// holds the line the holder writes once released.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn a_status_read_that_waits_for_an_ended_runtimes_stderr_leaves_the_async_worker_to_other_tasks()
  {
@@ -340,6 +341,21 @@ async fn a_status_read_that_waits_for_an_ended_runtimes_stderr_leaves_the_async_
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    // A read that held its worker let `STDERR_SETTLE` run out before the
+    // release, and kept the end without the holder's last line; one that let
+    // the worker go waited for that line. Any later step that lets the worker
+    // go cannot bring it back into an end already kept.
+    let kept = fixture.kept();
+    let record = kept
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record["cause"] == "runtime_exited")
+        .expect("the end is kept");
+    assert!(
+        tail(&record).iter().any(|line| line == "fixture: released"),
+        "the status read held its async worker while the ended runtime's stderr settled: {:?}",
+        tail(&record)
+    );
 }
 
 /// Records kept at the same instant by writers on different threads (a
