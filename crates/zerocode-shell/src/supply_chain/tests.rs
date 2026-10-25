@@ -420,9 +420,7 @@ fn a_refusal_is_its_status_word_and_a_non_json_answer_is_a_bad_answer() {
 
 #[test]
 fn a_seat_nobody_answers_is_offline() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
-    let addr = listener.local_addr().expect("its address");
-    drop(listener);
+    let addr = crate::test_host::silent_addr();
     let root = workspace(&[("Cargo.lock", &cargo_lock(&[("time", "0.1.45")]))]);
     let cache = tempfile::tempdir().expect("a cache");
 

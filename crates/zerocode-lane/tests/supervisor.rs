@@ -182,12 +182,27 @@ fn foreign_listener() -> (String, Arc<Mutex<Vec<String>>>) {
     (addr, received)
 }
 
-/// An address nothing is listening on: bind to get a free port, then release it.
+/// An address nothing is listening on, and no other test here can come to
+/// listen on: it lies below the ephemeral range, where every `bind(0)` in this
+/// binary and every outgoing connection draws from. A port released from that
+/// range can be taken by another test's listener before the probe asks about
+/// it (t-74716), and "not listening" would turn into "already running". Each
+/// call moves on from the last, and the process id keeps two test processes
+/// apart.
 fn free_addr() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    drop(listener);
-    addr.to_string()
+    use std::sync::atomic::{AtomicU32, Ordering};
+    const FIRST: u32 = 20_000;
+    const SPAN: u32 = 10_000;
+    static STEP: AtomicU32 = AtomicU32::new(0);
+    for _ in 0..256 {
+        let step = STEP.fetch_add(1, Ordering::Relaxed);
+        let port = FIRST + (std::process::id() + step) % SPAN;
+        let addr = format!("127.0.0.1:{port}");
+        if TcpListener::bind(&addr).is_ok() {
+            return addr;
+        }
+    }
+    panic!("no free loopback port in {FIRST}..{}", FIRST + SPAN);
 }
 
 fn pump_until(lane: &mut PtyHandle, predicate: impl Fn(&PtyHandle) -> bool) -> bool {

@@ -544,9 +544,7 @@ fn a_refused_request_keeps_the_servers_error_word_beside_its_status() {
         }
     }
 
-    let gone = TcpListener::bind("127.0.0.1:0")
-        .and_then(|seat| seat.local_addr())
-        .expect("a loopback address nobody holds");
+    let gone = crate::test_host::silent_addr();
     let asked = ask(&format!("http://{gone}"), Duration::from_secs(5));
     assert_eq!(asked.answer, Err(TRANSPORT.to_string()));
     assert_eq!(code_of(&asked.spent), None, "no server spoke");
