@@ -1776,9 +1776,8 @@ mod tests {
         let held = repository.lock().unwrap();
         let inherited = held.file.try_clone().unwrap();
         drop(held);
-        let next =
-            crate::durable_file::private_lock_file(&directory.path().join(".settings.lock"))
-                .unwrap();
+        let next = crate::durable_file::private_lock_file(&directory.path().join(".settings.lock"))
+            .unwrap();
         let taken = next.try_lock();
         drop(inherited);
         assert!(

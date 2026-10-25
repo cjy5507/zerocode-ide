@@ -360,13 +360,14 @@ mod macos {
             return None;
         }
         buffer.truncate(length as usize);
-        Some(PathBuf::from(<std::ffi::OsString as OsStringExt>::from_vec(
-            buffer,
-        )))
+        Some(PathBuf::from(
+            <std::ffi::OsString as OsStringExt>::from_vec(buffer),
+        ))
     }
 
     pub(super) fn has_open(pid: i32, device: u64, inode: u64) -> bool {
-        let bytes = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+        let bytes =
+            unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
         if bytes <= 0 {
             return false;
         }
@@ -411,7 +412,9 @@ mod macos {
     fn info<T>(pid: i32, flavor: c_int) -> Option<T> {
         let mut value = MaybeUninit::<T>::zeroed();
         let size = size_of::<T>() as c_int;
-        let got = unsafe { libc::proc_pidinfo(pid, flavor, 0, value.as_mut_ptr().cast::<c_void>(), size) };
+        let got = unsafe {
+            libc::proc_pidinfo(pid, flavor, 0, value.as_mut_ptr().cast::<c_void>(), size)
+        };
         (got == size).then(|| unsafe { value.assume_init() })
     }
 }
@@ -449,7 +452,13 @@ mod tests {
     #[test]
     fn every_other_holder_is_left_with_its_reason() {
         let cases = [
-            (Holder { pid: 500, ..stuck_launch() }, LeaveReason::ThisProcess),
+            (
+                Holder {
+                    pid: 500,
+                    ..stuck_launch()
+                },
+                LeaveReason::ThisProcess,
+            ),
             (
                 Holder {
                     uid: 502,
@@ -539,7 +548,10 @@ mod tests {
         .line(lock)
         .unwrap();
         assert!(line.contains("still held after 3000 ms"), "{line}");
-        assert!(line.contains("left pid 41 running (its parent pid 40 is alive)"), "{line}");
+        assert!(
+            line.contains("left pid 41 running (its parent pid 40 is alive)"),
+            "{line}"
+        );
     }
 
     /// Kills the process it names when the test ends, however it ends.
@@ -567,8 +579,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let repository = SettingsRepository::new(directory.path().join("settings"));
         assert!(repository.lock_free_within(Duration::ZERO).unwrap());
-        let window =
-            crate::durable_file::private_lock_file(&repository.lock_path()).unwrap();
+        let window = crate::durable_file::private_lock_file(&repository.lock_path()).unwrap();
         window.lock().unwrap();
 
         let mut ends = [0; 2];
