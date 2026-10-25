@@ -5446,7 +5446,7 @@ function scrollSidebarToPath(path) {
  * their session, opened another and was refused (2026-09-13, "네비바에 안
  * 보여서"). The rows are the same fact the card draws (`worktreeAgentRows`). */
 function shownWorktrees(project, { includeLandingFold = false } = {}) {
-  return placeFoldedUnder(project.worktrees.filter((worktree) =>
+  return project.worktrees.filter((worktree) =>
     !(hideAutomationWorkspaces && automationBornPaths.has(worktree.path))
     && !(hideDefaultBranchWorkspaces && worktree.is_main)
     && !(hideDetachedHeadWorkspaces && !worktree.is_folder && !worktree.branch)
@@ -5455,7 +5455,7 @@ function shownWorktrees(project, { includeLandingFold = false } = {}) {
       && !(keepDefaultBranchAwake && worktree.is_main))
     && !(worktree.external_hidden && worktreeAgentRows(worktree.path).length === 0)
     && !(taskFoldedPaths.has(worktree.path) && !worktree.active && worktreeAgentRows(worktree.path).length === 0)
-    && !(sidebarGroupBy === "repo" && !includeLandingFold && landingFoldedPaths.has(worktree.path))));
+    && !(sidebarGroupBy === "repo" && !includeLandingFold && landingFoldedPaths.has(worktree.path)));
 }
 
 /* A verified checkout keeps its unlanded commits under the project's
@@ -5551,6 +5551,9 @@ function foldTaskCheckouts(catalog) {
   taskFoldedPaths = folded;
   taskFoldsUnder = under;
   foldedOpenUnder = openUnder;
+  // The rows of an opened fold stand right under their lead in the project's own order, which every list built from
+  // it (the section, ⌘1–9, the arrows) reads.
+  for (const project of catalog) project.worktrees = placeFoldedUnder(project.worktrees ?? []);
 }
 
 /* A task's verify, Windows and red copies are named for the folder they copy: `<folder>-verify`, `-windows`,
