@@ -1582,23 +1582,24 @@ pub(crate) fn computer_confirm_answer(id: String, allow: bool) -> bool {
 /// The person takes control of the window shared with an agent (t-73906):
 /// the request in flight stops at its next step and every act after it is
 /// refused until they hand it back.
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn computer_take_control() {
     let _crumb = crate::crumbs::Command::enter("computer_take_control");
     computer_use::share::take_control();
 }
 
 /// The person hands the shared window back to the agent (t-73906).
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn computer_give_back() {
     let _crumb = crate::crumbs::Command::enter("computer_give_back");
     computer_use::share::give_back();
 }
 
 /// What is shared with an agent now, for the band's first paint (t-73906).
-#[tauri::command]
-pub(crate) fn computer_share_state() -> serde_json::Value {
+#[tauri::command(async)]
+pub(crate) fn computer_share_state(panel_label: Option<String>) -> serde_json::Value {
     let _crumb = crate::crumbs::Command::enter("computer_share_state");
+    computer_use::share::panel_label(panel_label);
     computer_use::share::state()
 }
 

@@ -198,3 +198,64 @@ fn enabling_required_sharing_stops_an_unshared_act_at_its_next_step() {
     required.store(false, Ordering::SeqCst);
     assert!(ensure_current().is_ok());
 }
+
+#[test]
+fn a_panel_press_takes_the_same_share_and_invalidates_the_inflight_request() {
+    let (_person, _) = person(Decision::Allowed);
+    let _request = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut panel = state();
+    panel["takenBack"] = true.into();
+    super::hear_panel(&json!({"shareControl": panel}));
+    assert_eq!(state()["takenBack"], true);
+    assert_eq!(
+        ensure_current().unwrap_err().code,
+        error_code::PERSON_TOOK_CONTROL
+    );
+}
+
+#[test]
+fn a_late_panel_press_cannot_take_a_replaced_or_handed_back_share() {
+    let (_person, _) = person(Decision::Allowed);
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut panel = state();
+    panel["takenBack"] = true.into();
+    let _ = admit(ComputerMethod::Click, &click("Another")).unwrap();
+    super::hear_panel(&json!({"shareControl": panel}));
+    assert_eq!(state()["takenBack"], false);
+    let mut current = state();
+    current["takenBack"] = true.into();
+    super::hear_panel(&json!({"shareControl": current.clone()}));
+    give_back();
+    super::hear_panel(&json!({"shareControl": current}));
+    assert_eq!(state()["takenBack"], false);
+}
+
+#[test]
+fn the_panel_carries_the_requests_explicit_window_selector() {
+    let (_person, _) = person(Decision::Allowed);
+    let _ = admit(
+        ComputerMethod::Click,
+        &json!({"app":"Sample", "windowId":41, "elementIndex":2}),
+    )
+    .unwrap();
+    assert_eq!(state()["windowId"], 41);
+    let _ = admit(
+        ComputerMethod::GetAppState,
+        &json!({"app":"Sample", "windowIndex":1}),
+    )
+    .unwrap();
+    assert_eq!(state()["windowIndex"], 1);
+    assert!(state()["windowId"].is_null());
+}
+
+#[test]
+fn the_panel_reuses_the_renderers_words_without_changing_the_share_stamp() {
+    let before = state()["revision"].clone();
+    super::panel_label(Some("Take control".into()));
+    assert_eq!(state()["buttonLabel"], "Take control");
+    assert_eq!(state()["revision"], before);
+    super::panel_label(Some("An arbitrary instruction".into()));
+    assert_eq!(state()["buttonLabel"], "Take control");
+    super::panel_label(Some(String::new()));
+    assert_eq!(state()["buttonLabel"], "Take control");
+}

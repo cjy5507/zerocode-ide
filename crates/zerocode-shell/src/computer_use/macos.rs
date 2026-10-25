@@ -189,6 +189,58 @@ impl Wire {
     }
 }
 
+/// A separate authenticated connection carries panel updates. It never takes
+/// the provider/session lock, so taking control can cancel an in-flight act.
+#[derive(Clone)]
+struct PanelEndpoint {
+    socket: PathBuf,
+    token: String,
+}
+
+static PANEL_ENDPOINT: std::sync::Mutex<Option<PanelEndpoint>> = std::sync::Mutex::new(None);
+
+fn remember_panel(socket: &Path, token: &str) {
+    *PANEL_ENDPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(PanelEndpoint {
+        socket: socket.to_path_buf(),
+        token: token.to_string(),
+    });
+}
+
+fn forget_panel(socket: &Path) {
+    let mut held = PANEL_ENDPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held
+        .as_ref()
+        .is_some_and(|endpoint| endpoint.socket == socket)
+    {
+        *held = None;
+    }
+}
+
+pub(super) fn sync_share_panel(state: &Value) {
+    let endpoint = PANEL_ENDPOINT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(endpoint) = endpoint else { return };
+    let Ok(stream) = std::os::unix::net::UnixStream::connect(&endpoint.socket) else {
+        return;
+    };
+    let Ok(mut wire) = Wire::new(stream, endpoint.token) else {
+        return;
+    };
+    // Presentation failure cannot hold the person's band for a whole request timeout.
+    let limit = Some(Duration::from_secs(2));
+    if wire.stream.set_read_timeout(limit).is_err() || wire.stream.set_write_timeout(limit).is_err()
+    {
+        return;
+    }
+    let _ = wire.request("sharePanel", state.clone());
+}
+
 /// The connection the window's waiting request rides, and its thread.
 struct StopWatch {
     stream: std::os::unix::net::UnixStream,
@@ -239,11 +291,15 @@ impl StopWatch {
             .name("computer-use-stop-watch".into())
             .spawn(move || {
                 let mut after: Option<u64> = None;
+                let mut after_share: Option<i64> = None;
                 loop {
                     let mut asked = serde_json::Map::new();
                     asked.insert("ms".into(), wait.into());
                     if let Some(after) = after {
                         asked.insert("after".into(), after.into());
+                    }
+                    if let Some(event) = after_share {
+                        asked.insert("afterShare".into(), event.into());
                     }
                     let heard = match wire.request(STOP_WATCH_METHOD, Value::Object(asked)) {
                         Ok(heard) => heard,
@@ -256,6 +312,8 @@ impl StopWatch {
                         }
                     };
                     super::guard::hear_watched(&heard);
+                    super::share::hear_panel(&heard);
+                    after_share = heard.pointer("/shareControl/event").and_then(Value::as_i64);
                     // An answer with no count to ask after is not this road's.
                     let Some(revision) = heard.get("stopRevision").and_then(Value::as_u64) else {
                         return lost(
@@ -435,6 +493,10 @@ impl Session {
         validate_guard_budget(&handshake)?;
         client.supports_background =
             handshake.pointer("/supports/actions/background") == Some(&Value::Bool(true));
+        if handshake.pointer("/supports/windows/shareControlPanel") == Some(&Value::Bool(true)) {
+            remember_panel(&socket, &client.wire.token);
+            sync_share_panel(&super::share::state());
+        }
         // The person's chord reaches the window as the helper hears it
         // (t-66753 B), not at the window's next command.
         client.watching = StopWatch::start(&socket, &client.wire.token);
@@ -452,6 +514,7 @@ impl SessionFailure {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        forget_panel(&self.directory.join("provider.sock"));
         if let Some(watching) = self.watching.take() {
             watching.end();
         }

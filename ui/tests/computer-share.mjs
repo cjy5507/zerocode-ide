@@ -37,6 +37,7 @@ const installHands = () => {
     },
     answered: [],
     taken: 0,
+    panelLabels: [],
     given: 0,
     said(id) {
       const node = document.getElementById(id);
@@ -79,6 +80,10 @@ const installHands = () => {
     T.given += 1;
     return null;
   };
+  window.__ANSWER__.computer_share_state = (args) => {
+    T.panelLabels.push(args.panelLabel);
+    return { target: null, takenBack: false };
+  };
   window.__SHARE_T__ = T;
 };
 
@@ -96,6 +101,26 @@ async function scenario(browser, origin, name, ok, body) {
 
 export async function testComputerShare(browser, origin, ok) {
   const words = SHARE_WORDS.ko;
+
+  await scenario(browser, origin, "native panel language", ok, async (page) => {
+    for (const [locale, words] of Object.entries(SHARE_WORDS)) {
+      const shown = await page.evaluate(async (locale) => {
+        setLocale(locale, { refresh: false, persist: false });
+        await __SHARE_T__.settle();
+        return __SHARE_T__.panelLabels.at(-1);
+      }, locale);
+      ok(`the native take-control panel uses the band's ${locale} words`, shown === words.take, String(shown));
+    }
+  });
+
+  await scenario(browser, origin, "late share snapshot", ok, async (page) => {
+    const band = await page.evaluate(() => {
+      takeComputerShare({ target: "Sample", label: "Sample", takenBack: true, revision: 2 });
+      takeComputerShare({ target: "Sample", label: "Sample", takenBack: false, revision: 1 });
+      return __SHARE_T__.band();
+    });
+    ok("a late read cannot repaint a taken-back share as acting", band.take === null && band.give !== null, JSON.stringify(band));
+  });
 
   await scenario(browser, origin, "required sharing setting", ok, async (page) => {
     const expected = {
