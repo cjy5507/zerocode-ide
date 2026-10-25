@@ -682,7 +682,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
     }
     ok("the evidence carries this machine's own count when zo answers, and says which",
       true,
-      real ? `real: ${real.zo}${real.recent ? " --recent 12" : " (no recent list: that zo predates the flag)"}` : "fixture: no zo answered");
+      real ? `real: ${real.zo}${real.recent ? " --recent 12" : " (no recent list: that zo predates the flag)"}` : "fixture: no zo named in JEV_ZO_BIN, or the one named did not answer");
 
     await page.setViewportSize(oneScreen);
 
