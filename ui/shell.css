@@ -1694,6 +1694,48 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   text-decoration: underline dashed;
 }
 
+/* Workers on one root task: one head row under the coordinator, closed until pressed; opened, its workers stand one
+ * step deeper than a plain worker. The chevron hangs to the left of the head's dot, so that dot stands where a plain
+ * worker's dot stands. */
+.team-group {
+  padding-left: calc(var(--space-2) + var(--nav-indent) - 12px - var(--space-1));
+}
+
+.team-group .team-title {
+  font-weight: 600;
+}
+
+.team-group .team-now {
+  margin-left: calc(8px + var(--space-1) + 12px + var(--space-1));
+}
+
+.team-chevron {
+  display: inline-flex;
+  flex: none;
+  width: 12px;
+  color: var(--ink-mist);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.team-chevron .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.team-group.is-open .team-chevron {
+  transform: rotate(90deg);
+}
+
+.team-worker.is-child {
+  padding-left: calc(var(--space-2) + var(--nav-indent) + 12px + var(--space-1));
+}
+
+/* A chip coming and going — a question asked, then answered — moves no line: the title line is as tall as the chip. */
+.team-worker .team-line,
+.team-group .team-line {
+  min-height: calc(var(--text-3xs) * 1.5);
+}
+
 .team-dot {
   flex: none;
   width: 8px;
@@ -1767,6 +1809,19 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
   font-size: var(--text-2xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: background-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+
+/* A worker that has said nothing keeps its line, dimmer, saying so; a sentence that just changed is lit for a moment
+ * (`TEAM_FRESH_MS`). */
+.team-now.is-idle {
+  color: var(--ink-label);
+}
+
+.team-now.is-fresh {
+  border-radius: var(--radius-xs);
+  background: var(--nav-plane-accent);
+  color: var(--ink-chalk);
 }
 
 /* The worker's second and third lines start under its title, past the dot. */
@@ -1884,6 +1939,12 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 
 .wt-fold[hidden] {
   display: none;
+}
+
+/* The rows of an opened task fold stand right under the row they fold under, one step in. */
+.wt-node.is-folded-under {
+  margin-left: var(--nav-indent);
+  border-left: var(--rule-width) solid var(--edge-mark);
 }
 
 /* A run's empty coordinator seat, said once on a line of its work (t-45938): the stage cell's shape, in the

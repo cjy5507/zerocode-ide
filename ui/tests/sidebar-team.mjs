@@ -724,7 +724,7 @@ const FAMILY_MOVES = `
       handler({ payload: { term: row.term, state: hook, agent: row.agent, session: "s-" + row.term, model: "claude-sonnet-5-5" } });
     }
   };
-  window.__ORDER__ = () => [...document.querySelectorAll("#sidebar-team > .team-row")].map((node) => node.dataset.teamKey);
+  window.__TEAM_KEYS__ = () => [...document.querySelectorAll("#sidebar-team > .team-row")].map((node) => node.dataset.teamKey);
 `;
 
 /* Eight beats of a ledger, a minute apart — what a person's eye would have to follow in the team view: the rows whose
@@ -745,10 +745,10 @@ const FAMILY_BEATS = [
 export async function playTeamBeats(page, { open = false } = {}) {
   await page.evaluate(FAMILY_MOVES);
   await page.evaluate(async (open) => {
-    if (open) {
-      for (const node of document.querySelectorAll("#sidebar-team .team-group")) node.click();
-      await window.__TEAM_SETTLED__();
+    for (const node of document.querySelectorAll("#sidebar-team .team-group")) {
+      if ((node.getAttribute("aria-expanded") === "true") !== open) node.click();
     }
+    await window.__TEAM_SETTLED__();
     const real = Date.now.bind(Date);
     window.__SKEW__ = 0;
     Date.now = () => real() + window.__SKEW__;
@@ -815,7 +815,7 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
     await page.evaluate(FAMILY_MOVES);
     const words = await page.evaluate(() => ({
       count4: t("sidebar.team.groupCount", "워커 {{count}}", { count: 4 }),
-      ask1: t("sidebar.team.groupAsking", "질문 {{count}}", { count: 1 }),
+      ask1: t("sidebar.team.questions", "질문 {{count}}", { count: 1 }),
       working: t("sidebar.team.stateWorking", "일하는 중"),
       waiting: t("sidebar.team.stateWaiting", "기다림"),
       nowNone: t("sidebar.team.nowNone", "아직 보낸 말 없음"),
@@ -832,7 +832,7 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
     });
 
     /* ① — one head row, closed. */
-    const closed = await page.evaluate(() => ({ order: window.__ORDER__(), inside: document.querySelectorAll("#sidebar-team .team-worker.is-child").length,
+    const closed = await page.evaluate(() => ({ order: window.__TEAM_KEYS__(), inside: document.querySelectorAll("#sidebar-team .team-worker.is-child").length,
       f1: document.querySelector('#sidebar-team [data-team-key="w:run-fam/w-f1"]') !== null }));
     const closedHead = await head();
     ok(
@@ -848,24 +848,24 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
     const opened = await page.evaluate(async () => {
       document.querySelector('#sidebar-team [data-team-key="g:run-fam/t-9100"]')?.click();
       await window.__TEAM_SETTLED__();
-      const out = { open: window.__ORDER__() };
+      const out = { open: window.__TEAM_KEYS__() };
       window.__MOVE__("w-f1", "waiting");
       window.__MOVE__("w-f3", "working");
       await window.__LEDGER_MOVED__();
-      out.swapped = window.__ORDER__();
+      out.swapped = window.__TEAM_KEYS__();
       window.__MOVE__("w-h1", "asking");
       await window.__LEDGER_MOVED__();
-      out.lone = window.__ORDER__();
+      out.lone = window.__TEAM_KEYS__();
       window.__MOVE__("w-f2", "asking");
       await window.__LEDGER_MOVED__();
-      out.family = window.__ORDER__();
+      out.family = window.__TEAM_KEYS__();
       out.chip = document.querySelector('#sidebar-team [data-team-key="g:run-fam/t-9100"] .team-chip')?.textContent ?? "";
       window.__MOVE__("w-f2", "working");
       window.__MOVE__("w-h1", "working");
       window.__MOVE__("w-f1", "working");
       window.__MOVE__("w-f3", "waiting");
       await window.__LEDGER_MOVED__();
-      out.settled = window.__ORDER__();
+      out.settled = window.__TEAM_KEYS__();
       return out;
     });
     const standing = ["c:run-fam", "g:run-fam/t-9100", "w:run-fam/w-f1", "w:run-fam/w-f2", "w:run-fam/w-f3", "w:run-fam/w-f4",
@@ -875,7 +875,8 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
       JSON.stringify(opened.open) === JSON.stringify(standing) && JSON.stringify(opened.swapped) === JSON.stringify(standing) &&
         JSON.stringify(opened.lone) === JSON.stringify(["c:run-fam", "w:run-fam/w-h1", "g:run-fam/t-9100", "w:run-fam/w-f1",
           "w:run-fam/w-f2", "w:run-fam/w-f3", "w:run-fam/w-f4", "w:run-fam/w-g1", "landing"]) &&
-        JSON.stringify(opened.family) === JSON.stringify(standing) && opened.chip === words.ask1 &&
+        JSON.stringify(opened.family) === JSON.stringify(["c:run-fam", "g:run-fam/t-9100", "w:run-fam/w-f1", "w:run-fam/w-f2",
+          "w:run-fam/w-f3", "w:run-fam/w-f4", "w:run-fam/w-h1", "w:run-fam/w-g1", "landing"]) && opened.chip === words.ask1 &&
         JSON.stringify(opened.settled) === JSON.stringify(standing),
       JSON.stringify(opened),
     );
@@ -889,9 +890,15 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
       const before = read();
       window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-h1"
         ? { ...row, last_status: { message_id: "m-h1-1", created_ms: Date.now(), line: "문구를 바꾸는 중. 곧 끝난다" } } : row);
+      const spokeAt = performance.now();
       await window.__LEDGER_MOVED__();
       const spoke = read();
       const fresh = node.querySelector(".team-now").classList.contains("is-fresh");
+      // The light goes out on its own; the clock below is read after it, so it is the only thing that could write.
+      while (document.querySelector("#sidebar-team .team-now.is-fresh") && performance.now() - spokeAt < 8000) {
+        await new Promise((done) => setTimeout(done, 25));
+      }
+      const lit = { stayedMs: performance.now() - spokeAt, gone: document.querySelector("#sidebar-team .team-now.is-fresh") === null };
       // Minutes pass with nothing said: the rows' clock beat only.
       const real = Date.now.bind(Date);
       window.__SKEW__ = 0;
@@ -912,7 +919,7 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
       // The tip tells how long ago, when pointed at.
       const sayer = document.querySelector('#sidebar-team [data-team-key="w:run-fam/w-f1"] .team-now');
       sayer.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
-      return { before, spoke, fresh, clock: { dressed: dressed() - from.dressed, same: words() === from.words, mutations: changed },
+      return { before, spoke, fresh, lit, clock: { dressed: dressed() - from.dressed, same: words() === from.words, mutations: changed },
         tip: sayer.dataset.tip };
     });
     ok(
@@ -927,11 +934,8 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
         line.tip.includes("입력창 높이를 재는 중.") && /(분|시간) 전|방금/.test(line.tip),
       JSON.stringify(line),
     );
-    const lit = await page.evaluate(async () => {
-      await new Promise((done) => setTimeout(done, 1900));
-      return document.querySelectorAll("#sidebar-team .team-now.is-fresh").length;
-    });
-    ok("the light on a changed sentence is gone after 1.6 s", lit === 0, JSON.stringify({ lit }));
+    ok("the light on a changed sentence stays about 1.6 s and then goes out on its own", line.lit.gone && line.lit.stayedMs >= 1500,
+      JSON.stringify(line.lit));
 
     /* ④ — eight beats, closed and open. The sketch's base commit measured this on the same beats. */
     const closedBeats = await playTeamBeats(page, { open: false });
@@ -951,7 +955,6 @@ export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
     const langs = await page.evaluate(() => {
       const KEYS = {
         "sidebar.team.groupCount": "워커 {{count}}",
-        "sidebar.team.groupAsking": "질문 {{count}}",
         "sidebar.team.groupTip": "같은 일에서 갈라진 과업 {{count}}개 — 누르면 펼치거나 접습니다",
         "sidebar.team.nowNone": "아직 보낸 말 없음",
       };
