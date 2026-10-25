@@ -422,10 +422,9 @@ fn keys_never_write_into_a_password_edit_and_set_value_is_not_read_back() {
     });
 }
 
-/// H3: a right-click on an element asks the element for its own menu
-/// (`ShowContextMenu`) and, when the proxy has none, right-clicks it with the
-/// pointer — and the menu that opens under the pointer is the target's own,
-/// not a change of recipient. Either road ends in a menu and an `Ok`.
+/// H3: a right-click on an element sends one guarded pointer click. A UIA
+/// acknowledgement without a menu must not short-circuit that delivery.
+/// The menu under the pointer belongs to the target, not a new recipient.
 #[test]
 fn a_right_click_on_an_element_opens_its_context_menu_without_a_false_failure() {
     with_fixture(|provider, fixture| {
@@ -452,21 +451,35 @@ fn a_right_click_on_an_element_opens_its_context_menu_without_a_false_failure() 
             desktop_probe(fixture),
             answer["action"]
         );
-        match answer["action"]["path"].as_str() {
-            Some("accessibility") => {
-                assert_eq!(
-                    answer["action"]["actionName"], "ShowContextMenu",
-                    "{answer}"
-                );
-            }
-            Some("synthetic") => {
-                assert_eq!(
-                    answer["action"]["fallbackReason"], "actionUnsupported",
-                    "{answer}"
-                );
-            }
-            other => panic!("unexpected path {other:?}: {answer}"),
-        }
+        assert_eq!(answer["action"]["path"], "synthetic", "{answer}");
+        assert_eq!(
+            answer["action"]["fallbackReason"], "actionUnsupported",
+            "{answer}"
+        );
+    });
+}
+
+#[test]
+fn a_background_right_click_is_refused_without_synthetic_input() {
+    with_fixture(|provider, fixture| {
+        let observed = observe(provider, fixture, false);
+        let button = index_of(&observed, " OK");
+        let before = input::attempted_events();
+        let menus = Fixture::menus();
+        let answer = provider
+            .handle(
+                "click",
+                json!({ "app": fixture.app_query(), "elementIndex": button,
+                    "mouseButton": "right", "background": true }),
+            )
+            .expect_err("Windows has no advertised background input support");
+        assert_eq!(answer.code, "unsupported_capability");
+        assert_eq!(
+            input::attempted_events(),
+            before,
+            "background attempted synthetic input"
+        );
+        assert_eq!(Fixture::menus(), menus, "background opened a menu");
     });
 }
 

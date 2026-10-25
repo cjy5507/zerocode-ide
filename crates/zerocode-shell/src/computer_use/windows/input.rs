@@ -38,6 +38,16 @@ use super::super::geometry::{virtual_desk_coordinate, wheel_delta};
 use super::super::typed_text::{characters_within, keystroke_units};
 use super::desktop_windows;
 
+#[cfg(test)]
+thread_local! {
+    static ATTEMPTED_EVENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn attempted_events() -> usize {
+    ATTEMPTED_EVENTS.get()
+}
+
 /// `SendInput` inserted fewer events than it was given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct InputRefusal {
@@ -58,6 +68,8 @@ impl InputRefusal {
 }
 
 fn send(inputs: &[INPUT]) -> Result<(), InputRefusal> {
+    #[cfg(test)]
+    ATTEMPTED_EVENTS.set(ATTEMPTED_EVENTS.get() + inputs.len());
     // SAFETY: `inputs` is a slice of fully initialised INPUT structs whose
     // size is passed alongside.
     let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) } as usize;

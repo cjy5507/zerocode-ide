@@ -207,6 +207,12 @@ fn run_shell(script: &str, cwd: &Path, env: &[(String, String)], budget: Duratio
     // a slow script.
     if let Some(mut pipe) = child.stdin.take() {
         let _ = pipe.write_all(script.as_bytes());
+        // cmd's stdin reader needs a line terminator to execute the last
+        // command; EOF alone can leave it at the continuation prompt.
+        #[cfg(windows)]
+        if !script.ends_with('\n') {
+            let _ = pipe.write_all(b"\r\n");
+        }
     }
 
     loop {
@@ -310,6 +316,17 @@ mod tests {
 
     fn scratch() -> tempfile::TempDir {
         tempfile::tempdir().expect("no temp dir")
+    }
+
+    #[test]
+    fn a_script_without_a_final_line_break_runs_its_last_command() {
+        let dir = scratch();
+        let marker = dir.path().join("last-command");
+        let script = crate::test_host::script_that_creates(&marker);
+        assert!(!script.ends_with('\n'));
+        let outcome = run_script(&script, dir.path(), dir.path());
+        assert!(matches!(outcome, ScriptOutcome::Ok { .. }), "{outcome:?}");
+        assert!(marker.is_file(), "the last command never ran: {outcome:?}");
     }
 
     #[test]

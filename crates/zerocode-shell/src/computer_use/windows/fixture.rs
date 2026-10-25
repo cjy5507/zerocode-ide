@@ -24,6 +24,7 @@ use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM
 use windows::Win32::Graphics::Gdi::{COLOR_WINDOW, ClientToScreen, HBRUSH};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::Controls::EM_REPLACESEL;
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, BM_GETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, CreatePopupMenu,
     CreateWindowExW, DC_HASDEFID, DM_GETDEFID, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -291,13 +292,24 @@ impl Fixture {
                         // A dialog's loop: Tab navigates, Enter presses the
                         // default button, and only what is left reaches
                         // the controls as characters. A tab CHARACTER typed
-                        // into the multi-line edit is text and not a way
-                        // on, so the dialog manager, which drops it, does
-                        // not see it.
+                        // into the multi-line edit is text. A standard EDIT
+                        // ignores that character once IsDialogMessage has
+                        // put it in dialog mode, even if we bypass the
+                        // manager here. Accept it as an editor would, while
+                        // leaving a real Tab KEY to navigate the dialog.
                         let tab_text = message.message == WM_CHAR
                             && message.wParam.0 == usize::from(b'\t')
                             && GetDlgCtrlID(message.hwnd) == MULTILINE_ID;
-                        if !tab_text && IsDialogMessageW(frame, &message).as_bool() {
+                        if tab_text {
+                            let _ = SendMessageW(
+                                message.hwnd,
+                                EM_REPLACESEL,
+                                Some(WPARAM(1)),
+                                Some(LPARAM(w!("\t").as_ptr() as isize)),
+                            );
+                            continue;
+                        }
+                        if IsDialogMessageW(frame, &message).as_bool() {
                             continue;
                         }
                         let _ = TranslateMessage(&message);
