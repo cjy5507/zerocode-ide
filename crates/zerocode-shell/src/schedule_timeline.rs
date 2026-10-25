@@ -420,6 +420,10 @@ struct Book {
     /// The `# task:` line of each ended job's file in `done/`, read once per
     /// version of it; no stamp while the file is not there yet.
     ended_tasks: BTreeMap<String, (Option<FileStamp>, Vec<String>)>,
+    /// Runs between tying the ended jobs and signing what was tied, so a test
+    /// can put a file into that gap (the review R5).
+    #[cfg(test)]
+    after_tie: Option<fn(&Roots)>,
 }
 
 impl Book {
@@ -508,8 +512,14 @@ impl Book {
         let paused = queue.as_ref().is_some_and(|look| look.paused);
         let mut jobs = self.jobs(queue.as_ref(), from_ms);
         self.tie_ended(&mut jobs);
-        // What this answer tied is no change the next time.
-        self.signature = with_ties(read_so_far, self.ties_now());
+        #[cfg(test)]
+        if let Some(act) = self.after_tie {
+            act(&self.roots);
+        }
+        // What this answer tied is no change the next time: signed with the
+        // stamps the tie was made from, never the disk's a moment later — a
+        // file that came in between is a change the next look reports.
+        self.signature = with_ties(read_so_far, self.ties_tied());
         Timeline {
             revision: self.revision,
             unchanged: false,
@@ -649,16 +659,24 @@ impl Book {
     }
 
     /// The ended jobs' files in `done/` as they stand now: each one the last
-    /// answer tied, or found missing, by name and stamp.
+    /// answer tied, or found missing, by name and the stamp the disk shows.
     fn ties_now(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        if let Some(done) = self.roots.line.as_ref().map(|line| line.join(QUEUE_DONE)) {
-            for name in self.ended_tasks.keys() {
-                name.hash(&mut hasher);
-                stamp(&done.join(format!("{name}{JOB_SUFFIX}"))).hash(&mut hasher);
-            }
-        }
-        hasher.finish()
+        let done = self.roots.line.as_ref().map(|line| line.join(QUEUE_DONE));
+        hash_ties(self.ended_tasks.keys().map(|name| {
+            let on_disk = done
+                .as_ref()
+                .and_then(|done| stamp(&done.join(format!("{name}{JOB_SUFFIX}"))));
+            (name, on_disk)
+        }))
+    }
+
+    /// The same ties by the stamps the last tie was made from, with no disk.
+    fn ties_tied(&self) -> u64 {
+        hash_ties(
+            self.ended_tasks
+                .iter()
+                .map(|(name, (tied_from, _))| (name, *tied_from)),
+        )
     }
 
     /// A job the runner's log says started, still without an end.
@@ -826,6 +844,16 @@ fn tasks_of(said: Option<&str>) -> Vec<String> {
     tasks.sort();
     tasks.dedup();
     tasks
+}
+
+/// The ended jobs' names with the stamps of their files, as one number.
+fn hash_ties<'a>(ties: impl Iterator<Item = (&'a String, Option<FileStamp>)>) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (name, stamp) in ties {
+        name.hash(&mut hasher);
+        stamp.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// A reading's signature with the ended jobs' files' ([`Book::ties_now`]).
