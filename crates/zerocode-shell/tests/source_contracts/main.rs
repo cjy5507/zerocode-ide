@@ -9624,34 +9624,27 @@ mod tests {
         );
     }
 
-    /// The Bluetooth usage descriptions (t-45873). The embedded Chromium reads
-    /// the devices paired with this Mac through IOBluetooth, and macOS ends a
-    /// process that does so without `NSBluetoothAlwaysUsageDescription` (a TCC
-    /// abort seen on 2026-10-11). Both keys sit in the main bundle's Info.plist,
-    /// the file tauri-bundler merges. build.rs writes another bundle's plist (the
-    /// Computer Use helper's), so the keys must not appear there.
+    /// macOS needs the Always key; Peripheral is for iOS before version 13.
     #[test]
     fn the_main_bundle_declares_the_bluetooth_usage_descriptions() {
+        // A readability floor for this contract, not an Apple requirement.
+        const MIN_USAGE_DESCRIPTION_WORDS: usize = 8;
         let plist = include_str!("../../Info.plist");
         let helper_plist = include_str!("../../build.rs");
-        for key in [
-            "NSBluetoothAlwaysUsageDescription",
-            "NSBluetoothPeripheralUsageDescription",
-        ] {
-            let text = plist
-                .split_once(&format!("<key>{key}</key>"))
-                .and_then(|(_, rest)| rest.split_once("<string>"))
-                .and_then(|(_, rest)| rest.split_once("</string>"))
-                .map_or("", |(body, _)| body.trim());
-            assert!(
-                text.split_whitespace().count() >= 8 && text.ends_with('.'),
-                "`{key}` is missing from Info.plist or is not a sentence a person can read: `{text}`"
-            );
-            assert!(
-                !helper_plist.contains(key),
-                "`{key}` belongs to one plist only: build.rs writes the Computer Use helper's"
-            );
-        }
+        let key = "NSBluetoothAlwaysUsageDescription";
+        let text = plist
+            .split_once(&format!("<key>{key}</key>"))
+            .and_then(|(_, rest)| rest.split_once("<string>"))
+            .and_then(|(_, rest)| rest.split_once("</string>"))
+            .map_or("", |(body, _)| body.trim());
+        assert!(
+            text.split_whitespace().count() >= MIN_USAGE_DESCRIPTION_WORDS && text.ends_with('.'),
+            "`{key}` is missing from Info.plist or is not a sentence a person can read: `{text}`"
+        );
+        assert!(
+            !helper_plist.contains(key),
+            "`{key}` belongs to one plist only: build.rs writes the Computer Use helper's"
+        );
     }
 
     /// The features the embedded Chromium is started with turned off, as the
@@ -20895,7 +20888,7 @@ mod tests {
     /// turns while words it typed there on its own are on their way. It reads
     /// the typing door's own record — the delivery the pump carries and the
     /// queue behind it — at the switch's every look and FIRST at the rest's
-    /// fence (outside the hook state's lock, so the two locks never nest), and
+    /// fence under the prompt registration lock, before the hook state, and
     /// it waits for the output to settle as the pointer does. A switch asks
     /// both questions through one function.
     #[test]
@@ -20922,16 +20915,12 @@ mod tests {
             backend,
             "    fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {",
         );
-        let asked = fence
-            .find("self.typing_in_flight(term)")
-            .expect("the fence no longer asks for words on their way");
-        let locked = fence
-            .find("state.pane_states()")
-            .expect("the fence no longer holds the hook state");
         assert!(
-            asked < locked && fence.contains("output_settled(&state, term)"),
-            "the fence asks for words on their way under the hook state's lock, or \
-             skips the settle:\n{fence}"
+            fence.contains("crate::prompt_transaction::with_no_prompt_in_flight(")
+                && fence.contains("&state.shell_runtime().deliveries,")
+                && fence.contains("&state.shell_runtime().prompt_queue,")
+                && fence.contains("output_settled(&state, term)"),
+            "the switch must observe and commit under the prompt registration lock:\n{fence}"
         );
         let switch = include_str!("../../src/account_switch.rs");
         let rests = block_after(

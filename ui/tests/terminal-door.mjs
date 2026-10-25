@@ -1,3 +1,7 @@
+// Simulate a native terminal open that takes longer than the former 800 ms nap.
+const TERMINAL_OPEN_DELAY_MS = 1200;
+const TERMINAL_OPEN_TIMEOUT_MS = 5000;
+
 /* The new-terminal door opens a TAB, not a second pane in the tab in front.
  *
  * ⌘T and the 명령 실행 button — the two doors this suite presses — ask for
@@ -19,14 +23,17 @@ export async function testTerminalDoor(browser, origin, standBackend, ok) {
   const faults = [];
   page.on("pageerror", (error) => faults.push(error?.stack ?? String(error)));
   await standBackend(page);
-  await page.addInitScript(() => {
+  await page.addInitScript((openDelayMs) => {
     const base = window.__TAURI__.core.invoke;
     window.__OPENED__ = 0;
     window.__TAURI__.core.invoke = (name, args) => {
       if (name === "open_term_tab") window.__OPENED__ += 1;
+      if (name === "open_term_tab") {
+        return new Promise((resolve) => setTimeout(resolve, openDelayMs)).then(() => base(name, args));
+      }
       return base(name, args);
     };
-  });
+  }, TERMINAL_OPEN_DELAY_MS);
   await page.goto(`${origin}/index.html`);
   await page.waitForFunction(() => typeof BOUND !== "undefined" && BOUND.size > 0);
   await page.evaluate(() => {
@@ -39,14 +46,18 @@ export async function testTerminalDoor(browser, origin, standBackend, ok) {
       tabs: tabs.filter((tab) => tab.kind === "term").length,
       panes: tabs.filter((tab) => tab.kind === "term").map((tab) => JSON.stringify(tab.layout).split('"type":"leaf"').length - 1),
     }));
+  await page.waitForFunction(() => tabs.some((tab) => tab.kind === "term"), null,
+    { timeout: TERMINAL_OPEN_TIMEOUT_MS });
   const before = await terminals();
   const primary = process.platform === "darwin" ? "Meta" : "Control";
 
   const opened = [];
   const step = async (label, act) => {
     const opening = await page.evaluate(() => window.__OPENED__);
+    const tabCount = (await terminals()).tabs;
     await act();
-    await page.waitForTimeout(800);
+    await page.waitForFunction((before) => tabs.filter((tab) => tab.kind === "term").length > before,
+      tabCount, { timeout: TERMINAL_OPEN_TIMEOUT_MS });
     const after = await terminals();
     const count = (await page.evaluate(() => window.__OPENED__)) - opening;
     opened.push({ label, count, after });
@@ -93,8 +104,10 @@ async function testTerminalBesideBrowser(browser, origin, standBackend, ok) {
   await page.waitForFunction(() => tabs.some((tab) => tab.kind === "browser"));
 
   const primary = process.platform === "darwin" ? "Meta" : "Control";
+  const tabCount = await page.evaluate(() => tabs.filter((tab) => tab.kind === "term").length);
   await page.keyboard.press(`${primary}+KeyT`);
-  await page.waitForTimeout(800);
+  await page.waitForFunction((before) => tabs.filter((tab) => tab.kind === "term").length > before,
+    tabCount, { timeout: TERMINAL_OPEN_TIMEOUT_MS });
 
   const seen = await page.evaluate(() => {
     const leaves = (node) => (node.type === "leaf" ? 1 : leaves(node.first) + leaves(node.second));

@@ -28,6 +28,29 @@ use super::*;
 
 use zerocode_pty::ready::{Line, Refusal, Step};
 
+/// Observe an empty prompt queue before committing a between-turns move.
+/// Prompt registration and pump settlement both take deliveries first.
+pub(super) fn with_no_prompt_in_flight(
+    deliveries: &Mutex<HashMap<TermId, PromptDelivery>>,
+    queue: &Mutex<HashMap<TermId, VecDeque<QueuedPrompt>>>,
+    term: TermId,
+    commit: &mut dyn FnMut(),
+) {
+    let held = deliveries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let busy = held.contains_key(&term)
+        || queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&term)
+            .is_some_and(|queued| !queued.is_empty());
+    if !busy {
+        commit();
+    }
+    drop(held);
+}
+
 /// What the window knows about a pane's line, gathered for one round.
 ///
 /// Permission and launch maps are read before the terminal lock. The hand
@@ -448,6 +471,74 @@ pub(super) fn settle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn followup_a_switch_observation_holds_prompt_registration_through_commit() {
+        let deliveries = Mutex::new(HashMap::new());
+        let queue = Mutex::new(HashMap::new());
+        let mut commits = 0;
+        with_no_prompt_in_flight(&deliveries, &queue, 47223, &mut || {
+            commits += 1;
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        assert!(
+                            matches!(
+                                deliveries.try_lock(),
+                                Err(std::sync::TryLockError::WouldBlock)
+                            ),
+                            "a pointer can register after the empty observation and before commit"
+                        );
+                    })
+                    .join()
+                    .unwrap();
+            });
+        });
+        assert_eq!(commits, 1);
+        assert!(
+            deliveries.try_lock().is_ok(),
+            "the commit left registration locked"
+        );
+    }
+
+    #[test]
+    fn followup_an_in_flight_prompt_defers_the_switch_until_it_settles() {
+        for queued in [false, true] {
+            let deliveries = Mutex::new(HashMap::new());
+            let queue = Mutex::new(HashMap::new());
+            let (prompt, _receipt) =
+                parked("mail", zerocode_pty::ready::Guard::for_its_own_line(None));
+            if queued {
+                queue
+                    .lock()
+                    .unwrap()
+                    .entry(47223)
+                    .or_insert_with(VecDeque::new)
+                    .push_back(prompt);
+            } else {
+                deliveries.lock().unwrap().insert(
+                    47223,
+                    PromptDelivery::new(
+                        "mail".to_string(),
+                        true,
+                        zerocode_pty::ReadySignal::Quiet,
+                        Instant::now(),
+                    ),
+                );
+            }
+            let mut commits = 0;
+            with_no_prompt_in_flight(&deliveries, &queue, 47223, &mut || commits += 1);
+            assert_eq!(commits, 0, "queued={queued}");
+            deliveries.lock().unwrap().clear();
+            queue.lock().unwrap().clear();
+            with_no_prompt_in_flight(&deliveries, &queue, 47223, &mut || commits += 1);
+            assert_eq!(
+                commits, 1,
+                "the move was lost instead of deferred; queued={queued}"
+            );
+        }
+    }
+
     use zerocode_pty::ready::{Guard, PATIENCE, QUIET, Refusal, SUBMIT_GAP, TIMEOUT};
 
     #[test]

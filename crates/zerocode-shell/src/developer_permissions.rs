@@ -957,22 +957,15 @@ mod tests {
         }
     }
 
-    /// The Bluetooth usage descriptions reach this binary too (t-45873). The
-    /// embedded Chromium reads the devices paired with this Mac, and macOS ends
-    /// a process that does so without a key, so the merge is checked here the
-    /// same way the capture test checks it.
+    /// macOS needs the Always key. The deprecated Peripheral key is iOS-only.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_bluetooth_usage_descriptions_reach_this_binary() {
-        for key in [
-            "NSBluetoothAlwaysUsageDescription",
-            "NSBluetoothPeripheralUsageDescription",
-        ] {
-            assert!(
-                bundle_declares(key),
-                "{key} did not reach this binary's Info.plist"
-            );
-        }
+    fn the_bluetooth_usage_description_reaches_this_binary() {
+        let key = "NSBluetoothAlwaysUsageDescription";
+        assert!(
+            bundle_declares(key),
+            "{key} did not reach this binary's Info.plist"
+        );
     }
 
     #[test]

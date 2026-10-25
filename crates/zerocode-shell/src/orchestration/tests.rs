@@ -12130,7 +12130,14 @@ fn unsubmitted_pointer_never_acquires_a_durable_delivery_watermark() {
         zerocode_pty::ready::Refusal::HandReached,
     ))
     .unwrap();
-    let _ = super::advice_standing(&Nowhere, run, address, 11_009, newest, false);
+    let _ = super::advice_standing(
+        &Nowhere,
+        run,
+        address,
+        11_009,
+        newest,
+        super::AdviceHistory::default(),
+    );
     assert!(
         !super::delivered_before(run, address, newest),
         "an Enter that was withheld permanently silenced unread mail"
@@ -28686,4 +28693,56 @@ fn a_handover_whose_replacement_cannot_start_says_so_by_code_and_leaves_the_task
         .find(|one| one.id == stood.task)
         .expect("the task");
     assert_eq!(task.status, zerocode_core::orchestration::TaskStatus::Ready);
+}
+
+/// Successful advice does not clear a notice that was never raised.
+#[test]
+fn followup_successful_advice_clears_only_a_previously_notified_condition() {
+    use zerocode_pty::{DeliveryOutcome, ready::Refusal};
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let host = BesideADraft {
+        term: 47223,
+        offered: Mutex::new(Vec::new()),
+        told: Mutex::new(Vec::new()),
+        cleared: Mutex::new(Vec::new()),
+    };
+    for outcome in [
+        DeliveryOutcome::Delivered,
+        DeliveryOutcome::Unsubmitted(Refusal::NotTaken),
+    ] {
+        for history in [
+            super::AdviceHistory::default(),
+            super::AdviceHistory {
+                noted: true,
+                notified: false,
+            },
+            super::AdviceHistory {
+                noted: true,
+                notified: true,
+            },
+        ] {
+            let notified = history.notified;
+            assert_eq!(
+                super::Standing::Advised { history }.told_not_typed(),
+                notified
+            );
+            let key = ("fixture-run".to_string(), "fixture-address".to_string());
+            let (send, receipt) = std::sync::mpsc::sync_channel(1);
+            send.send(outcome).unwrap();
+            super::pointer_receipts()
+                .lock()
+                .unwrap()
+                .insert(key.clone(), receipt);
+            host.cleared.lock().unwrap().clear();
+            let result =
+                super::advice_standing(&host, &key.0, &key.1, host.term, "fixture-mail", history);
+            assert!(result.is_some());
+            assert_eq!(
+                host.cleared().len(),
+                usize::from(notified),
+                "{outcome:?}, notified={notified}"
+            );
+        }
+    }
 }

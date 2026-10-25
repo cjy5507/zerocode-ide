@@ -20,7 +20,7 @@ import {
   selectBaselineRun,
   verifyArchiveDigest,
 } from "./package-baseline.mjs";
-import { assertBundledHelpers, assertChromiumBundle } from "./check-package-artifacts.mjs";
+import { assertBundledHelpers, assertChromiumBundle, assertPrivacyUsageDescriptions } from "./check-package-artifacts.mjs";
 import { CHROMIUM_FRAMEWORK, CHROMIUM_HELPERS, chromiumHelperPlist, stageChromium } from "./stage-chromium.mjs";
 import { STAGE_MANIFEST, verifyStageManifest, writeStageManifest } from "./package-stage-manifest.mjs";
 
@@ -365,4 +365,20 @@ test("binary smoke checks distinguish source references from root test routes", 
     await writeFile(binary, `${required}\0/tests/window.mjs\0`);
     await assert.rejects(assertEmbeddedRoutes(binary), /shipped forbidden/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("the macOS privacy check accepts only macOS usage keys and rejects the missing Bluetooth guard", async () => {
+  const app = await mkdtemp(join(tmpdir(), "zerocode-privacy-"));
+  try {
+    await mkdir(join(app, "Contents"));
+    const source = await readFile(new URL("../crates/zerocode-shell/Info.plist", import.meta.url), "utf8");
+    const macOnly = source.replace(/\s*<key>NSBluetoothPeripheralUsageDescription<\/key>\s*<string>[^<]*<\/string>/, "");
+    await writeFile(join(app, "Contents", "Info.plist"), macOnly);
+    await assertPrivacyUsageDescriptions(app);
+    const missingBluetooth = macOnly.replace(/\s*<key>NSBluetoothAlwaysUsageDescription<\/key>\s*<string>[^<]*<\/string>/, "");
+    await writeFile(join(app, "Contents", "Info.plist"), missingBluetooth);
+    await assert.rejects(assertPrivacyUsageDescriptions(app), /NSBluetoothAlwaysUsageDescription/);
+  } finally {
+    await rm(app, { recursive: true, force: true });
+  }
 });
