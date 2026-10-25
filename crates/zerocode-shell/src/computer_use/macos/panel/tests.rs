@@ -243,6 +243,27 @@ fn a_lost_helpers_restart_waits_for_a_busy_provider_without_spending_the_attempt
 }
 
 #[test]
+fn coalescing_presentations_keeps_a_helper_loss_until_delivery() {
+    let mailbox = Mailbox::default();
+    let mut delivery = Delivery::default();
+    delivery.send(update(1, None), |_| None, || true);
+    // The worker may not read the successful launch before its watch ends.
+    for (revision, endpoint) in [(2, Some(endpoint("short-lived"))), (3, None), (4, None)] {
+        mailbox.publish(&update(revision, None).state, endpoint);
+    }
+    let launches = Cell::new(0);
+    delivery.send(
+        mailbox.next(),
+        |_| None,
+        || {
+            launches.set(launches.get() + 1);
+            true
+        },
+    );
+    assert_eq!(launches.get(), 1, "coalescing must retain the loss");
+}
+
+#[test]
 fn an_ended_watch_forgets_its_endpoint_and_preserves_a_new_helpers_endpoint() {
     use crate::computer_use::macos::{PANEL_ENDPOINT, StopWatch, remember_panel};
     use std::os::unix::net::UnixListener;
