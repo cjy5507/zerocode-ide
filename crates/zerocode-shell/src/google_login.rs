@@ -1202,6 +1202,27 @@ mod tests {
         assert_ne!(attempt.expected_state, other.expected_state);
     }
 
+    /// A loopback seat below every range the kernel hands out on its own.
+    ///
+    /// `bind(0)` and every outgoing connection in this test binary draw from
+    /// the ephemeral range (macOS and Windows 49152.., Linux 32768..), so a
+    /// port released there can be taken by another test's listener in the gap
+    /// before it is bound again — and that listener may be gone again by the
+    /// time anyone asks who held it. Starting from the process id keeps two
+    /// test processes on one machine from probing the same port first.
+    fn quiet_seat() -> (TcpListener, u16) {
+        const FIRST: u16 = 20_000;
+        const SPAN: u16 = 10_000;
+        let start = (std::process::id() % u32::from(SPAN)) as u16;
+        for step in 0..256 {
+            let port = FIRST + (start + step) % SPAN;
+            if let Ok(seat) = bind_seat(port) {
+                return (seat, port);
+            }
+        }
+        panic!("no free loopback port in {FIRST}..{}", FIRST + SPAN);
+    }
+
     /// The seat can be retaken while the LAST sign-in's connection is still
     /// lingering.
     ///
@@ -1210,37 +1231,23 @@ mod tests {
     /// port is fixed by the OAuth client's registration, so a refused bind has
     /// nowhere else to go. Measured on macOS 26 — without the option, a rebind
     /// two hundred milliseconds after the connection closed answers
-    /// `EADDRINUSE`. On an ephemeral port, so no test ever contends for the
-    /// real callback seat or for a zo sign-in in flight.
+    /// `EADDRINUSE`. On a port of its own, so no test ever contends for the
+    /// real callback seat or for a zo sign-in in flight — and not an ephemeral
+    /// one (t-74682): the port is released before it is bound again, and on an
+    /// ephemeral port another test's `bind(0)` can take it in that gap.
     #[test]
     fn the_callback_seat_can_be_retaken_while_the_last_one_lingers() {
-        // The port is released before it is bound again, so in a parallel run
-        // another test can take it in between. Such a refusal is told from the
-        // one under test by asking who answers on the port: a thief listens,
-        // a lingering connection does not. A stolen port starts over on a new
-        // one; a refusal with nobody listening is the claim failing.
-        for _ in 0..20 {
-            let first = bind_seat(0).expect("a seat");
-            let port = first.local_addr().expect("its address").port();
-            let client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("a browser");
-            let (accepted, _) = first.accept().expect("the redirect");
-            // Closed from THIS side first, so it is our end of that connection
-            // that lingers on the port a second sign-in needs.
-            drop(accepted);
-            drop(first);
-            drop(client);
-            match bind_seat(port) {
-                Ok(_) => return,
-                Err(error) => {
-                    let stolen = std::net::TcpStream::connect(("127.0.0.1", port)).is_ok();
-                    assert!(
-                        stolen,
-                        "the seat could not be retaken while the last one lingered: {error}"
-                    );
-                }
-            }
+        let (first, port) = quiet_seat();
+        let client = std::net::TcpStream::connect(("127.0.0.1", port)).expect("a browser");
+        let (accepted, _) = first.accept().expect("the redirect");
+        // Closed from THIS side first, so it is our end of that connection
+        // that lingers on the port a second sign-in needs.
+        drop(accepted);
+        drop(first);
+        drop(client);
+        if let Err(error) = bind_seat(port) {
+            panic!("the seat could not be retaken while the last one lingered: {error}");
         }
-        panic!("twenty ports in a row were taken by other tests");
     }
 
     /// A redirect is accepted only when it is THIS attempt's answer.
