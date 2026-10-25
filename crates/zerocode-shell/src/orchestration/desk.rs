@@ -4126,4 +4126,136 @@ mod tests {
             "{shipped_times:?}"
         );
     }
+    /// The inbox page (t-67483) is a view over this snapshot and the panes:
+    /// the number it says for 질문 is the coordinator cards' sum and the desk's
+    /// 「답할 우편」, its 넘김 is the desk's `reported` stage, and its 막힘 and
+    /// 알림 together are the desk's 「소식」 plus the panes and the landing
+    /// line — one count, made in one place. Three questions over two runs
+    /// (2 + 1), a hand-in, a quota wall and a worker's death in the news, and
+    /// three panes (a stop, its own question, a finish).
+    #[test]
+    fn inbox_counts_equal_card_and_desk_counts() {
+        use crate::cmd::waiting::WaitingRow;
+        let start = crate::now_epoch_ms() - HOUR_MS;
+        let mut ledger = Ledger::new();
+        let (first, _) = a_worker_carrying_a_task(&mut ledger, start);
+        let second = ledger.create_run("desk-second", start + 50);
+        ledger
+            .start_worker(&second, "codex", ("team-second", "%3"), None, start + 51)
+            .expect("somebody is at the second run");
+        let ask = |ledger: &mut Ledger, run: &str, team: &str, at: i64| {
+            ledger
+                .post(
+                    run,
+                    Draft {
+                        from: format!("pane:{team}/%7"),
+                        to: format!("run:{run}"),
+                        kind: MessageKind::Question,
+                        body: Text::from("main에 올릴까요?"),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: None,
+                        dispatch: None,
+                    },
+                    start + at,
+                )
+                .expect("a question");
+        };
+        ask(&mut ledger, &first, "team-news", 60);
+        ask(&mut ledger, &first, "team-news", 61);
+        ask(&mut ledger, &second, "team-second", 62);
+        for (at, kind) in [(63, MessageKind::QuotaWalled), (64, MessageKind::WorkerDied)] {
+            ledger
+                .post(
+                    &first,
+                    a_notice(&first, kind, r#"{"workerId":"w-elsewhere"}"#),
+                    start + at,
+                )
+                .expect("a notice");
+        }
+        let task = ledger
+            .create_task(&first, "hand".into(), "hand".into(), vec![], None, start + 65)
+            .expect("a task");
+        let carrier = ledger
+            .start_worker(&first, "claude", ("team-news", "%4"), Some(&task), start + 66)
+            .expect("a worker carries it");
+        ledger
+            .post(
+                &first,
+                Draft {
+                    from: worker_address(&carrier.worker),
+                    to: ledger.run(&first).expect("the run").address(),
+                    kind: MessageKind::WorkerDone,
+                    body: Text::from(r#"{"ok":true,"head":"1234567"}"#.to_string()),
+                    subject: Text::default(),
+                    priority: Priority::Normal,
+                    payload: Text::default(),
+                    thread: None,
+                    task: Some(task.clone()),
+                    dispatch: carrier.dispatch.clone(),
+                },
+                start + 67,
+            )
+            .expect("the report");
+        let panes: Vec<WaitingRow> = [("blocked", 3), ("question", 4), ("finished", 5)]
+            .into_iter()
+            .map(|(waiting, at)| WaitingRow {
+                pane: format!("term:{at}"),
+                agent: "claude",
+                worktree: format!("/Users/dev/acme/wt-{at}"),
+                waiting,
+                since_ms: start + at,
+            })
+            .collect();
+
+        let desk = desk_snapshot(&ledger, |_| None, no_cost);
+        let inbox = super::inbox::inbox_of(&desk, &panes);
+        let cards: usize = desk.runs.iter().map(|run| run.mail).sum();
+        assert_eq!(desk.counts.mail, 3, "{:?}", desk.counts);
+        assert_eq!(
+            (inbox.counts.question, cards),
+            (3, 3),
+            "the page's 질문 is the cards' sum (2 + 1) and the desk's 「답할 우편」"
+        );
+        let reported = desk
+            .stages
+            .iter()
+            .find(|stage| stage.stage == "reported")
+            .map(|stage| stage.count);
+        assert_eq!(
+            (inbox.counts.handoff, reported),
+            (1, Some(1)),
+            "the page's 넘김 is the desk's reported stage"
+        );
+        let letters = |tab: &str| {
+            inbox
+                .items
+                .iter()
+                .filter(|item| item.tab == tab && item.letter.is_some())
+                .count()
+        };
+        assert_eq!(
+            letters("blocked") + letters("notice"),
+            desk.counts.news,
+            "the news is split between 막힘 and 알림, never counted twice or dropped"
+        );
+        assert_eq!(
+            (inbox.counts.blocked, inbox.counts.notice),
+            (1 + 2, 1 + 1),
+            "막힘 = the wall + the stopped pane + the pane's own question; \
+             알림 = the death + the finish"
+        );
+        assert_eq!(
+            inbox.counts.waiting,
+            inbox.counts.question + inbox.counts.handoff + inbox.counts.blocked,
+            "the sidebar's number is everything but the notices"
+        );
+        assert_eq!(inbox.counts.all, inbox.items.len(), "{:?}", inbox.counts);
+        let order: Vec<&str> = inbox.items.iter().map(|item| item.tab).collect();
+        let mut sorted = order.clone();
+        sorted.sort_by_key(|tab| super::inbox::TABS.iter().position(|one| one == tab));
+        assert_eq!(order, sorted, "the tabs stand in the page's order");
+    }
 }

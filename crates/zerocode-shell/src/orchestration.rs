@@ -33,6 +33,7 @@ pub(crate) mod gate_book;
 mod gate_meter;
 mod gate_snapshot;
 pub(crate) mod hand_in_keep;
+pub(crate) mod inbox;
 mod mail_triage;
 mod project_scope;
 pub(crate) mod restart_census;
