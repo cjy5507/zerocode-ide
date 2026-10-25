@@ -10,10 +10,15 @@
 //! came from, and what else today's lineup offers there.
 //!
 //! - A difficulty's default is the lineup's model for its rung (`easy`,
-//!   `medium`, `hard`), at the agent's ladder effort brought inside what that
-//!   model accepts. The shipped table is only the road back when no lineup
-//!   was read or it has no model for the rung, and a row says which road it
-//!   took.
+//!   `medium`, `hard`), at the shipped table's effort for that difficulty
+//!   brought inside what the model accepts — data a person can override,
+//!   never a rule in code (t-74181: a coded "easy and ordinary work at the
+//!   model's highest effort" put every default row at `max`). An agent the
+//!   table has no row for runs its ladder's effort. The table's model is
+//!   only the road back when no lineup was read or it has no model for the
+//!   rung, and a row says which road it took. Which pair a summons runs is
+//!   the model seat's to judge ([`crate::summon_model`]); these rows are what
+//!   runs when it abstains or does not act.
 //! - A row the person wrote is theirs and never moves; a saved row equal to
 //!   the shipped one is the shipped one.
 //! - A model without a band is offered only at the lowest difficulty: nothing
@@ -167,24 +172,16 @@ impl LiveModel {
             .map(|(_, effort)| effort.as_str())
     }
 
-    /// The effort this model runs at `difficulty` and the rule that set it:
-    /// at easy and ordinary work ([`CHALLENGED`]) the highest it accepts — a
-    /// model a tier down at its top effort before a tier up at a low one, the
-    /// person's first judgment (2026-09-29) until finished work says
-    /// otherwise — and elsewhere the agent's ladder effort brought inside
-    /// what it accepts.
-    fn effort_at(&self, difficulty: &str, ladder: &str) -> (String, EffortRule, Option<Clamp>) {
-        if CHALLENGED.contains(&difficulty)
-            && let Some(highest) = self.highest_effort()
-        {
-            return (highest.to_string(), EffortRule::Highest, None);
-        }
-        let clamped = self.clamp(ladder);
+    /// The effort this model runs at when `wanted` is the default effort the
+    /// rule `rule` named for the difficulty (the shipped table's word, or the
+    /// agent's ladder), brought inside what the model accepts.
+    fn effort_at(&self, wanted: &str, rule: EffortRule) -> (String, EffortRule, Option<Clamp>) {
+        let clamped = self.clamp(wanted);
         (
-            clamped.clone().unwrap_or_else(|| ladder.to_string()),
-            EffortRule::Ladder,
+            clamped.clone().unwrap_or_else(|| wanted.to_string()),
+            rule,
             clamped.map(|to| Clamp {
-                from: ladder.to_string(),
+                from: wanted.to_string(),
                 to,
             }),
         )
@@ -498,13 +495,12 @@ pub enum Source {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EffortRule {
-    /// The agent's ladder effort for the difficulty, inside the model's range.
+    /// The agent's ladder effort for the difficulty, inside the model's
+    /// range: the table has no row for this agent.
     Ladder,
-    /// The highest effort the model accepts: easy and ordinary work.
-    Highest,
     /// The person wrote it.
     Written,
-    /// The shipped table's word.
+    /// The shipped table's word for the difficulty, inside the model's range.
     Table,
 }
 
@@ -648,9 +644,18 @@ fn build(
         }
         let shipped = read(defaults.get(agent), difficulty)?;
         let person = read(written, difficulty)?.filter(|row| Some(row) != shipped.as_ref());
-        // The agent's own ladder effort: the measured launch table's word
-        // for this difficulty, ceiling included.
+        // The default effort for the difficulty: the shipped table's word —
+        // data, overridden by a person's row — and the agent's own ladder
+        // (the measured launch table's word, ceiling included) only where the
+        // table has no row for this agent.
         let ladder = crate::orchestration::difficulty_effort(agent, difficulty);
+        // An agent that takes no effort at all (no ladder) has none.
+        let default_effort = ladder.map(|ladder| {
+            shipped.as_ref().map_or_else(
+                || (ladder.to_string(), EffortRule::Ladder),
+                |row| (row.effort.clone(), EffortRule::Table),
+            )
+        });
         let (model, effort, from, effort_rule, effort_clamped) = if let Some(person) = person {
             super::launchable(agent, &person)?;
             let clamped = lineup
@@ -667,25 +672,29 @@ fn build(
                 EffortRule::Written,
                 clamped,
             )
-        } else if let Some((pick, ladder)) = lineup.zip(ladder).and_then(|(held, ladder)| {
-            let rung = Rung::of(difficulty)?;
-            let by_rung = held
-                .models
-                .iter()
-                .filter(|model| !model.folded() && model.rungs.contains(&rung))
-                .min_by_key(|model| home.as_ref() != Some(&model.provider));
-            // No model for the rung: the table's model stands while it is
-            // live here; only a folded one gives way to what
-            // the lineup offers at this difficulty.
-            let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
-            let pick = by_rung.or_else(|| {
-                (!table_stands)
-                    .then(|| offered(held, difficulty).next())
-                    .flatten()
-            })?;
-            Some((pick, ladder))
-        }) {
-            let (effort, rule, clamped) = pick.effort_at(difficulty, ladder);
+        } else if let Some((pick, (wanted, rule))) =
+            lineup
+                .zip(default_effort.clone())
+                .and_then(|(held, wanted)| {
+                    let rung = Rung::of(difficulty)?;
+                    let by_rung = held
+                        .models
+                        .iter()
+                        .filter(|model| !model.folded() && model.rungs.contains(&rung))
+                        .min_by_key(|model| home.as_ref() != Some(&model.provider));
+                    // No model for the rung: the table's model stands while it is
+                    // live here; only a folded one gives way to what
+                    // the lineup offers at this difficulty.
+                    let table_stands = shipped.as_ref().is_some_and(|row| held.live(&row.model));
+                    let pick = by_rung.or_else(|| {
+                        (!table_stands)
+                            .then(|| offered(held, difficulty).next())
+                            .flatten()
+                    })?;
+                    Some((pick, wanted))
+                })
+        {
+            let (effort, rule, clamped) = pick.effort_at(&wanted, rule);
             (pick.id.clone(), effort, Source::Lineup, rule, clamped)
         } else if let Some(table) =
             shipped.filter(|row| lineup.is_none_or(|held| held.live(&row.model)))
@@ -707,12 +716,12 @@ fn build(
         } else {
             continue;
         };
-        let candidates = match (lineup, ladder) {
-            (Some(held), Some(ladder)) => offered(held, difficulty)
+        let candidates = match (lineup, default_effort.as_ref()) {
+            (Some(held), Some((wanted, rule))) => offered(held, difficulty)
                 .filter(|candidate| candidate.id != held.canonical(&model))
                 .map(|candidate| Candidate {
                     model: candidate.id.clone(),
-                    effort: candidate.effort_at(difficulty, ladder).0,
+                    effort: candidate.effort_at(wanted, *rule).0,
                     fresh: seen.is_some_and(|seen| seen.fresh(agent, &candidate.id, now_ms)),
                 })
                 .collect(),
@@ -963,26 +972,28 @@ mod tests {
         );
     }
 
-    /// The person's first judgment (2026-09-29): easy and ordinary work runs a
-    /// model a tier down at the highest effort it takes, and the row says so;
-    /// hard work keeps the ladder's effort.
+    /// t-74181: a default row runs at the shipped table's effort for its
+    /// difficulty — data, inside the model's range — and no rule in code
+    /// raises it. Before, easy and ordinary work ran at the model's highest
+    /// effort, so every default row of every agent read `max`. An agent the
+    /// table has no row for runs its ladder's effort.
     #[test]
-    fn easy_and_ordinary_work_runs_a_tier_down_at_its_highest_effort() {
+    fn a_default_row_runs_at_the_shipped_tables_effort_and_never_at_a_coded_highest() {
         let mut easy = m("model-b", "rest", &["easy", "medium"]);
         easy.efforts = Some(&["low", "medium", "high", "xhigh", "max"]);
         let mut hard = m("model-a", "second", &["hard"]);
         hard.efforts = Some(&["low", "medium", "high", "xhigh", "max"]);
         let mut other = m("model-c", "rest", &[]);
         other.efforts = Some(&["high", "low"]);
-        let rows = read(&Value::Null, Some(&lineup(&[easy, hard, other])), None);
-        for difficulty in [LOW, MID] {
+        let today = lineup(&[easy, hard, other]);
+        let rows = read(&Value::Null, Some(&today), None);
+        for (difficulty, effort) in [(LOW, "medium"), (MID, "high")] {
             let at = row(&rows, difficulty);
             assert_eq!(
-                (at.model.as_str(), at.effort.as_str()),
-                ("model-b", "max"),
+                (at.model.as_str(), at.effort.as_str(), at.effort_rule),
+                ("model-b", effort, EffortRule::Table),
                 "{difficulty}"
             );
-            assert_eq!(at.effort_rule, EffortRule::Highest);
             assert_eq!(
                 at.band,
                 Some(Band::Rest),
@@ -995,15 +1006,50 @@ mod tests {
                 .iter()
                 .find(|c| c.model == "model-c")
                 .map(|c| c.effort.as_str()),
-            Some("high"),
-            "a candidate at its own highest"
+            Some("low"),
+            "a candidate at the table's effort, brought inside what it takes"
         );
         let high = row(&rows, HIGH);
         assert_eq!(
-            (high.model.as_str(), high.effort.as_str()),
-            ("model-a", LADDER[2].2)
+            (high.model.as_str(), high.effort.as_str(), high.effort_rule),
+            ("model-a", "max", EffortRule::Table)
         );
-        assert_eq!(high.effort_rule, EffortRule::Ladder);
+        // Every default row would have read max under the coded rule; the
+        // table's three words stand instead.
+        let efforts: Vec<&str> = rows.iter().map(|row| row.effort.as_str()).collect();
+        assert_eq!(efforts, ["medium", "high", "max"]);
+        // An agent with no row in the table: its ladder.
+        let bare = rows_with_defaults(&Value::Null, &json!({}), "claude", Some(&today), None, NOW)
+            .unwrap();
+        assert!(
+            bare.iter().all(|row| row.effort_rule == EffortRule::Ladder),
+            "{bare:?}"
+        );
+    }
+
+    /// t-74181: no effort is decided by a rule written in code — the default
+    /// effort is the table's word or the agent's ladder, brought inside the
+    /// model's range, and nothing else in `effort_at` reads the difficulty.
+    #[test]
+    fn no_rule_in_code_raises_a_default_rows_effort() {
+        let source = include_str!("lineup.rs");
+        let body = source
+            .split("fn effort_at(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .expect("effort_at");
+        for coded in ["CHALLENGED", "highest_effort", "difficulty", "\"max\""] {
+            assert!(!body.contains(coded), "effort_at reads `{coded}`:\n{body}");
+        }
+        let rules = source
+            .split("pub enum EffortRule {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("EffortRule");
+        assert!(
+            !rules.contains("Highest"),
+            "a coded highest rule is back:\n{rules}"
+        );
     }
 
     #[test]

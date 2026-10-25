@@ -18631,6 +18631,13 @@ const UNJUDGED_TIMEOUT: &str = "timeout";
 /// answer only recorded. Response codes and refusal words only: nothing here
 /// reads a key or a credential.
 fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
+    seat_unjudged("difficulty", outcome)
+}
+
+/// [`unjudged_reason`] for the seat named `seat` — the difficulty seat's, or
+/// the model seat's when its pair did not run (t-74181): the same words, with
+/// the seat's name in them.
+fn seat_unjudged(seat: &str, outcome: Option<&str>) -> serde_json::Value {
     use crate::jev::door::{ANSWERED_OUTCOME, Refused};
     let why = match outcome {
         None => UNJUDGED_NOT_ASKED,
@@ -18643,35 +18650,39 @@ fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
         .filter(|code| HTTP_STATUS_CODES.contains(code));
     let says = match (why, status, Refused::from_token(why)) {
         (UNJUDGED_NOT_ASKED, _, _) => {
-            "No difficulty judgment: it was not asked (its switch is off, or the summons named every dial).".to_string()
+            format!(
+                "No {seat} judgment: it was not asked (its switch is off, or the summons named every dial)."
+            )
         }
         (UNJUDGED_NOT_APPLIED, _, _) => {
-            "The difficulty judgment answered, but its answer was only recorded, not applied.".to_string()
+            format!("The {seat} judgment answered, but its answer was only recorded, not applied.")
         }
         (_, Some(code), _) => {
-            format!("No difficulty judgment: the judgment service refused the request (HTTP {code}).")
+            format!("No {seat} judgment: the judgment service refused the request (HTTP {code}).")
         }
         (UNJUDGED_TIMEOUT, _, _) => {
-            "No difficulty judgment: no answer came within its time limit.".to_string()
+            format!("No {seat} judgment: no answer came within its time limit.")
         }
-        (_, _, Some(Refused::Off)) => "No difficulty judgment: Jev is switched off.".to_string(),
-        (_, _, Some(Refused::NoKey)) => "No difficulty judgment: no Jev key is set.".to_string(),
+        (_, _, Some(Refused::Off)) => format!("No {seat} judgment: Jev is switched off."),
+        (_, _, Some(Refused::NoKey)) => format!("No {seat} judgment: no Jev key is set."),
         (_, _, Some(Refused::NotConsented)) => {
-            "No difficulty judgment: this folder is not one Jev may read.".to_string()
+            format!("No {seat} judgment: this folder is not one Jev may read.")
         }
         (_, _, Some(Refused::Budget)) => {
-            "No difficulty judgment: today's Jev request budget is spent.".to_string()
+            format!("No {seat} judgment: today's Jev request budget is spent.")
         }
         (_, _, Some(Refused::HourlyBudget)) => {
-            "No difficulty judgment: this hour's Jev request limit is spent.".to_string()
+            format!("No {seat} judgment: this hour's Jev request limit is spent.")
         }
         (_, _, Some(Refused::SettingsChanged)) => {
-            "No difficulty judgment: the Jev settings changed while it was asked.".to_string()
+            format!("No {seat} judgment: the Jev settings changed while it was asked.")
         }
         (_, _, Some(Refused::Resting)) => {
-            "No difficulty judgment: Jev is resting this seat until its provider can answer it.".to_string()
+            format!(
+                "No {seat} judgment: Jev is resting this seat until its provider can answer it."
+            )
         }
-        (word, None, None) => format!("No difficulty judgment: the request ended `{word}`."),
+        (word, None, None) => format!("No {seat} judgment: the request ended `{word}`."),
     };
     serde_json::json!({ "why": why, "says": says })
 }
@@ -22722,6 +22733,19 @@ fn plan_inner(
             // What the reply says about the dials the coordinator left open:
             // the difficulty and who chose it, where the model came from, and
             // what else today's lineup offers at that difficulty (t-14437).
+            // Where the model came from, said once for the reply and for the
+            // model seat's row when its pair did not run (t-74181).
+            let model_from = match (&model, &model_pick, &profile) {
+                (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
+                (None, Some((_, _, from)), _) => serde_json::json!(from),
+                (None, None, Some(row)) => serde_json::json!(row.from),
+                // Nothing here chose: the agent's own CLI picks, and
+                // the reply says so rather than leaving it unsaid.
+                (None, None, None) => serde_json::json!(DIALS_FROM_CLI_DEFAULT),
+            };
+            let ran_jev = model_pick
+                .as_ref()
+                .is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
             let dials = (model.is_none() || effort.is_none()).then(|| {
                 serde_json::json!({
                     // Always a word: the rung the answer chose, else the one
@@ -22740,14 +22764,15 @@ fn plan_inner(
                     "unjudged": chosen.is_none().then(|| unjudged_reason(
                         difficulty_receipt.as_ref().and_then(|row| row["outcome"].as_str()),
                     )),
-                    "modelFrom": match (&model, &model_pick, &profile) {
-                        (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
-                        (None, Some((_, _, from)), _) => serde_json::json!(from),
-                        (None, None, Some(row)) => serde_json::json!(row.from),
-                        // Nothing here chose: the agent's own CLI picks, and
-                        // the reply says so rather than leaving it unsaid.
-                        (None, None, None) => serde_json::json!(DIALS_FROM_CLI_DEFAULT),
-                    },
+                    "modelFrom": model_from.clone(),
+                    // Why the model seat's pair did not run, when the summons
+                    // left the model open and it did not (t-74181): the seat
+                    // was not asked, did not answer, or its answer was only
+                    // recorded — the evaluation reads it beside the pair.
+                    "modelUnjudged": (model.is_none() && !ran_jev).then(|| seat_unjudged(
+                        "model",
+                        receipts.model.as_ref().and_then(|row| row["outcome"].as_str()),
+                    )),
                     "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
                     // Why this pair, in the facts a person asks for: where the
@@ -22759,10 +22784,8 @@ fn plan_inner(
             });
             // The model question's row says its answer ran only when it did:
             // a person's row, a model the agent cannot run and a challenger's
-            // turn leave the answer written down, never carried out.
-            let ran_jev = model_pick
-                .as_ref()
-                .is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
+            // turn leave the answer written down, never carried out — and,
+            // for the evaluation, what ran instead (t-74181).
             let model_shadow = model_asked
                 .filter(|_| receipts.model.is_some() || model_turn.is_some())
                 .map(|ask| crate::summon_model::Shadow {
@@ -22770,6 +22793,7 @@ fn plan_inner(
                     receipt: receipts.model.map(|mut receipt| {
                         if !ran_jev {
                             receipt["applied"] = serde_json::json!(false);
+                            receipt["ranFrom"] = model_from.clone();
                         }
                         receipt
                     }),

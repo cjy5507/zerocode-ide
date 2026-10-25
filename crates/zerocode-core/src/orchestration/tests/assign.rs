@@ -182,6 +182,10 @@ fn one_request_carries_the_difficulty_and_the_model_pair() {
     assert_eq!(reply["effort"], "max", "{reply}");
     assert_eq!(reply["dials"]["difficultyFrom"], "jev");
     assert_eq!(reply["dials"]["modelFrom"], "jev");
+    assert!(
+        reply["dials"]["modelUnjudged"].is_null(),
+        "the seat's pair ran, and is said to have not: {reply}"
+    );
     let difficulty = prepared.difficulty_shadow.unwrap();
     assert_eq!(difficulty.receipt.unwrap()["applied"], true);
     let model = prepared.model_shadow.unwrap();
@@ -232,8 +236,22 @@ fn a_late_answer_leaves_both_defaults_after_one_wall() {
     assert_eq!(reply["dials"]["difficulty"], UNJUDGED_DIFFICULTY);
     assert_eq!(reply["dials"]["difficultyFrom"], "facts");
     assert_eq!(reply["dials"]["modelFrom"], "lineup");
+    // t-74181: why the seat's pair did not run, and what ran instead, are
+    // written where the evaluation reads them.
+    let unjudged = &reply["dials"]["modelUnjudged"];
+    assert!(
+        unjudged["why"]
+            .as_str()
+            .is_some_and(|why| why != "not_asked")
+            && unjudged["says"]
+                .as_str()
+                .is_some_and(|says| says.contains("model judgment")),
+        "{reply}"
+    );
     let model = prepared.model_shadow.unwrap();
-    assert_eq!(model.receipt.unwrap()["applied"], false);
+    let receipt = model.receipt.unwrap();
+    assert_eq!(receipt["applied"], false);
+    assert_eq!(receipt["ranFrom"], "lineup", "{receipt}");
 }
 
 /// t-45961: a summons nobody judged runs the provider's top implementation

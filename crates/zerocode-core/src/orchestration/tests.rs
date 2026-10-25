@@ -26520,6 +26520,7 @@ fn a_difficulty_answer_without_a_model_keeps_the_cli_defaults() {
             assert!(said["model"].is_null());
             assert!(said["effort"].is_null());
             assert_eq!(said["dials"]["modelFrom"], DIALS_FROM_CLI_DEFAULT);
+            assert_eq!(said["dials"]["modelUnjudged"]["why"], UNJUDGED_NOT_ASKED);
             assert_ne!(said["dials"]["why"]["effortRule"], "ladder");
             let receipt = planned
                 .prepared_worker_start
