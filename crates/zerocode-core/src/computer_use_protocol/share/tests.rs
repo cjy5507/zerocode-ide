@@ -365,9 +365,13 @@ fn a_request_in_flight_is_judged_again_without_moving_the_share() {
         );
     }
     assert_eq!(
-        share.still_holds(look(Some("calculator"))),
-        Ok(()),
-        "a look is no act"
+        share
+            .still_holds(look(Some("calculator")))
+            .map_err(|error| error.code)
+            .err()
+            .as_deref(),
+        Some(error_code::SHARE_SCOPE),
+        "a look outside the share is refused as the gate refuses it"
     );
     share.take_back();
     assert_eq!(
@@ -379,4 +383,119 @@ fn a_request_in_flight_is_judged_again_without_moving_the_share() {
         Some(error_code::PERSON_TOOK_CONTROL)
     );
     assert_eq!(share.target(), Some("notes"));
+}
+
+/// R3 (t-74826 again): handing over another app ends a request in flight
+/// outside it. Nothing shared, a request is admitted in an unanswered app,
+/// or looks at the whole screen, or acts naming no app; once the person
+/// hands over B only, its next step is refused as the gate refuses it — and
+/// judging it moves nothing.
+#[test]
+fn handing_over_another_app_refuses_the_next_step_of_a_request_outside_it() {
+    let mut share = Share::default();
+    share.answered("safari", Answer::Silent, NOW);
+    let in_flight = [act(Some("safari")), SCREEN, act(None), look(Some("safari"))];
+    for reach in in_flight {
+        assert_eq!(share.gate(reach, NOW), Gate::Go, "admitted: {reach:?}");
+    }
+    share.answered("notes", Answer::Shared, NOW);
+    let before = share.clone();
+    for reach in in_flight {
+        assert_eq!(
+            share
+                .still_holds(reach)
+                .map_err(|error| error.code)
+                .err()
+                .as_deref(),
+            Some(error_code::SHARE_SCOPE),
+            "{reach:?}"
+        );
+    }
+    assert_eq!(share, before, "judging a step in flight moves nothing");
+    assert_eq!(share.still_holds(act(Some("notes"))), Ok(()));
+}
+
+/// A step in flight is judged as the gate judges a new request, without
+/// moving anything: every refusal the gate gives, the step gets word for
+/// word; what the gate lets through (an app said yes to before included) the
+/// step may take; and what the gate would ask about, the step may not, since
+/// no card is raised mid-step.
+#[test]
+fn a_step_in_flight_is_judged_as_the_gate_judges_without_moving_anything() {
+    const APPS: [Option<&str>; 4] = [None, Some("safari"), Some("notes"), Some("mail")];
+    let answers = [
+        None,
+        Some(Answer::Shared),
+        Some(Answer::Declined),
+        Some(Answer::Silent),
+    ];
+    let mut states = Vec::new();
+    for required in [false, true] {
+        for safari in answers {
+            for notes in answers {
+                for target in [None, Some("safari"), Some("notes")] {
+                    for taken_back in [false, true] {
+                        let mut share = Share::default();
+                        share.set_required(required);
+                        for (app, answer) in [("safari", safari), ("notes", notes)] {
+                            if let Some(answer) = answer {
+                                share.answered(app, answer, NOW);
+                            }
+                        }
+                        if let Some(target) = target {
+                            if share.answers.get(target) != Some(&Answer::Shared) {
+                                continue;
+                            }
+                            share.answered(target, Answer::Shared, NOW);
+                        }
+                        if taken_back {
+                            share.take_back();
+                        }
+                        states.push(share);
+                    }
+                }
+            }
+        }
+    }
+    let mut judged = 0;
+    for share in &states {
+        for now in [NOW, SHARE_ASK_AGAIN_MS / 2, SHARE_ASK_AGAIN_MS] {
+            for app in APPS {
+                for (acts, whole_screen) in [(true, false), (false, false), (false, true)] {
+                    let reach = Reach {
+                        app,
+                        acts,
+                        whole_screen,
+                    };
+                    let gated = share.clone().gate(reach, now);
+                    let held = share.clone();
+                    let step = held.still_holds(reach);
+                    assert_eq!(
+                        &held, share,
+                        "the step moved the share: {reach:?} {share:?}"
+                    );
+                    match gated {
+                        Gate::Go => assert_eq!(step, Ok(()), "{reach:?} {share:?}"),
+                        Gate::Refuse(error) => {
+                            assert_eq!(step, Err(error), "{reach:?} {share:?}");
+                        }
+                        Gate::Ask(_) => {
+                            let wanted = if share.required() {
+                                error_code::SHARE_REQUIRED
+                            } else {
+                                error_code::SHARE_SCOPE
+                            };
+                            assert_eq!(
+                                step.map_err(|error| error.code).err().as_deref(),
+                                Some(wanted),
+                                "no card mid-step: {reach:?} {share:?}"
+                            );
+                        }
+                    }
+                    judged += 1;
+                }
+            }
+        }
+    }
+    assert!(judged > 1_000, "{judged} judged");
 }
