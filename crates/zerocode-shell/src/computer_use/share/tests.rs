@@ -261,6 +261,51 @@ fn a_late_panel_press_cannot_take_a_replaced_or_handed_back_share() {
 }
 
 #[test]
+fn a_panel_press_survives_a_window_selector_renotice() {
+    let (_person, _) = person(Decision::Allowed);
+    let _request = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut pressed = state();
+    pressed["takenBack"] = true.into();
+    let _look = admit(
+        ComputerMethod::GetAppState,
+        &json!({"app":"Sample", "windowId":41}),
+    )
+    .unwrap();
+    super::hear_panel(&json!({"shareControl": pressed}));
+    assert_eq!(state()["takenBack"], true);
+    assert_eq!(
+        ensure_current().unwrap_err().code,
+        error_code::PERSON_TOOK_CONTROL
+    );
+}
+
+#[test]
+fn a_previous_panel_press_cannot_take_the_same_target_after_it_was_replaced() {
+    let (_person, _) = person(Decision::Allowed);
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut pressed = state();
+    pressed["takenBack"] = true.into();
+    let _ = admit(ComputerMethod::Click, &click("Another")).unwrap();
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    super::hear_panel(&json!({"shareControl": pressed}));
+    assert_eq!(state()["takenBack"], false);
+}
+
+#[test]
+fn a_future_or_missing_panel_revision_cannot_take_control() {
+    let (_person, _) = person(Decision::Allowed);
+    let _ = admit(ComputerMethod::Click, &click("Sample")).unwrap();
+    let mut pressed = state();
+    pressed["takenBack"] = true.into();
+    pressed["revision"] = (pressed["revision"].as_u64().unwrap() + 1).into();
+    super::hear_panel(&json!({"shareControl": pressed.clone()}));
+    assert_eq!(state()["takenBack"], false);
+    pressed.as_object_mut().unwrap().remove("revision");
+    super::hear_panel(&json!({"shareControl": pressed}));
+    assert_eq!(state()["takenBack"], false);
+}
+
+#[test]
 fn the_panel_carries_the_requests_explicit_window_selector() {
     let (_person, _) = person(Decision::Allowed);
     let _ = admit(
