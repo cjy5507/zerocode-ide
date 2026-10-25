@@ -5066,8 +5066,24 @@ function windowedWorktreeList(members, held) {
     live: new Map(),
     start: 0,
     end: 0,
+    // 그리기마다 placeSidebarWindows가 읽는 뷰포트 속의 자리.
+    view: null,
   });
   return list;
+}
+
+/* 절마다 뷰포트의 어디에 섰는지를 어느 절도 고치기 전에 한 번에 읽는다. 한 절의
+ * 행을 옮긴 뒤에 다음 절의 자리를 읽으면, 그 읽기가 엔진에게 목록의 스타일과
+ * 레이아웃을 다시 셈하게 한다 — 그리기마다 절 하나에 한 번이다(t-73874). 앞 절의
+ * 새 행이 셈과 다른 높이로 서면 뒤 절은 그 차만큼 옮겨 서지만, 그 차는 창의
+ * overscan이 덮고 다음 그리기가 새 자리에서 다시 읽는다. */
+function placeSidebarWindows() {
+  const bounds = sidebarScroller.getBoundingClientRect();
+  for (const record of sidebarWindows) {
+    // 스페이서 위 가장자리가 곧 0번 행의 자리다 — 스크롤 좌표를 셈할 것 없이
+    // 뷰포트 좌표끼리 뺀다.
+    record.view = { start: bounds.top - record.top.getBoundingClientRect().top, height: bounds.height };
+  }
 }
 
 function renderSidebarWindow(record) {
@@ -5079,19 +5095,16 @@ function renderSidebarWindow(record) {
   for (let i = 0; i < members.length; i += 1) {
     offsets[i + 1] = offsets[i] + sidebarRowHeight(members[i].path);
   }
-  const bounds = sidebarScroller.getBoundingClientRect();
-  // 스페이서 위 가장자리가 곧 0번 행의 자리다 — 스크롤 좌표를 셈할 것 없이
-  // 뷰포트 좌표끼리 뺀다.
-  const viewStart = bounds.top - record.top.getBoundingClientRect().top;
-  const viewEnd = viewStart + bounds.height;
+  const { start: viewStart, height: viewHeight } = record.view;
+  const viewEnd = viewStart + viewHeight;
   let start = 0;
   let end = 0;
-  if (bounds.height <= 0) {
+  if (viewHeight <= 0) {
     // 높이를 모르는 창은 창이 아니다 — 재지 못하면 전부 세운다(가상화 이전과
     // 같은 값이고, 시험대처럼 판이 아직 눕혀지지 않은 곳에서 행이 사라지는
     // 것보다 낫다).
     end = members.length;
-  } else if (members.length && viewEnd > -bounds.height && viewStart < offsets[members.length] + bounds.height) {
+  } else if (members.length && viewEnd > -viewHeight && viewStart < offsets[members.length] + viewHeight) {
     // 한 화면 안의 이웃 절도 뷰포트 쪽 가장자리에 overscan만큼 선다 — WebKit은 스크롤의 새 자리를 스크롤
     // 이벤트보다 먼저 그리므로, 비어 있는 이웃 절은 그 한 프레임 동안 빈 스페이서로 비친다.
     while (start < members.length && offsets[start + 1] <= viewStart) start += 1;
@@ -5157,6 +5170,7 @@ function renderSidebarWindows() {
   const anchor = atTop ? null : carried ? carried.anchor : readSidebarAnchor();
   if (atTop) setSidebarDebt(0);
   if (resting) settleSidebarWindows(anchor);
+  placeSidebarWindows();
   let built = false;
   for (const record of sidebarWindows) built = renderSidebarWindow(record) || built;
   // 스크롤이 새로 세운 행은 지은 자리에서 다 입는다(makeWorktreeNode) —
