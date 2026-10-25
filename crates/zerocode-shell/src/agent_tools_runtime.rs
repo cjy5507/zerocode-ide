@@ -917,7 +917,7 @@ impl TeamWindow {
                             zerocode_pty::ReadySignal::Rest(Some(glyph)),
                             Instant::now(),
                             ready_quiet_for(agent),
-                            zerocode_pty::ready::TIMEOUT,
+                            ready_timeout_for(agent),
                         )
                         .clearing(false)
                         .guarded(zerocode_pty::ready::Guard::for_its_own_line(
