@@ -22766,10 +22766,12 @@ fn plan_inner(
                     )),
                     "modelFrom": model_from.clone(),
                     // Why the model seat's pair did not run, when the summons
-                    // left the model open and it did not (t-74181): the seat
+                    // left the model open and no pick ran (t-74181): the seat
                     // was not asked, did not answer, or its answer was only
-                    // recorded — the evaluation reads it beside the pair.
-                    "modelUnjudged": (model.is_none() && !ran_jev).then(|| seat_unjudged(
+                    // recorded — the evaluation reads it beside the pair. A
+                    // challenger's turn is a pick of its own, and `modelFrom`
+                    // says so; it is not the seat going unasked.
+                    "modelUnjudged": (model.is_none() && model_pick.is_none()).then(|| seat_unjudged(
                         "model",
                         receipts.model.as_ref().and_then(|row| row["outcome"].as_str()),
                     )),

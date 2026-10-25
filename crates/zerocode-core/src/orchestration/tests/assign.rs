@@ -204,6 +204,10 @@ fn a_challengers_turn_sends_the_difficulty_alone() {
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert!(asked[0].difficulty.is_some() && asked[0].model.is_none());
     assert_eq!(reply["dials"]["modelFrom"], "challenge", "{reply}");
+    assert!(
+        reply["dials"]["modelUnjudged"].is_null(),
+        "a challenger's turn was said to be an unasked seat: {reply}"
+    );
     assert_eq!(reply["model"], "model-c", "the low row's untried model");
     let model = prepared.model_shadow.expect("the question is kept");
     assert!(model.challenge);
