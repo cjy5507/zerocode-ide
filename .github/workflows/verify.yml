@@ -69,6 +69,13 @@ jobs:
         env:
           SETTINGS_QUALITY_REPORT: ${{ runner.temp }}/settings-quality.json
 
+      # Success and capability refusals are both evidence. Keep stdout even
+      # when every assertion passes or an earlier verification recipe fails.
+      - name: Observe Windows worktree path identity and aliases
+        if: always() && runner.os == 'Windows'
+        run: cargo test -p zerocode-shell --lib windows_path_observations -- --nocapture
+        shell: bash
+
       # The JSON carries every timing sample, its p95 budget and any long
       # tasks. Keep it even when a quality assertion fails so the regression
       # can be diagnosed without rerunning a platform-specific job locally.

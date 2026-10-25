@@ -111,7 +111,11 @@ fn a_git_listed_flat_sibling_stays_legacy_without_becoming_managed() {
     let listed = listed(&orchestrator, &sibling).expect("git lists the sibling");
     // Git resolves the macOS temporary-directory alias. Use that same base
     // while retaining this host's separator spelling for the configured root.
-    let configured = orchestrator.repo_root().parent().unwrap().join("worktrees/repo");
+    let configured = orchestrator
+        .repo_root()
+        .parent()
+        .unwrap()
+        .join("worktrees/repo");
     #[cfg(windows)]
     let configured = PathBuf::from(configured.to_str().unwrap().replace('/', "\\"));
     // Include the native spelling (backslashes on Windows) and a redundant
@@ -133,7 +137,9 @@ fn a_git_listed_flat_sibling_stays_legacy_without_becoming_managed() {
             zerocode_core::Ownership::UnknownLegacy,
             "configured={configured:?}, git={candidate:?}"
         );
-        assert!(!zerocode_core::worktree_ownership::is_zerocode_managed(facts, ours));
+        assert!(!zerocode_core::worktree_ownership::is_zerocode_managed(
+            facts, ours
+        ));
     }
 }
 
