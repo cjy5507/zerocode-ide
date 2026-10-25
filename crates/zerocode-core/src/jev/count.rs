@@ -274,3 +274,27 @@ fn hour_named(path: &Path) -> Option<String> {
     (hour_of(at, 0) == hour && key.strip_prefix('-').is_some_and(|key| !key.is_empty()))
         .then(|| hour.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::lock_hours;
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of the hour lock until the exec; the duplicate here is that copy,
+    /// without a launch winning a race. The next hour writer must not wait
+    /// on it.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_hour_writer() {
+        let home = tempfile::tempdir().unwrap();
+        let every = home.path().join("hour-every");
+        let held = lock_hours(&every).unwrap();
+        let inherited = held.try_clone().unwrap();
+        drop(held);
+        let next = lock_hours(&every);
+        drop(inherited);
+        assert!(
+            next.is_ok(),
+            "a lock its holder let go is still held by a copy: {next:?}"
+        );
+    }
+}

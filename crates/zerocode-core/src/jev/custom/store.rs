@@ -861,4 +861,22 @@ mod tests {
             );
         }
     }
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of the store's lock until the exec; the duplicate here is that
+    /// copy, without a launch winning a race. The next writer must not wait
+    /// on it.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_writer() {
+        let home = tempfile::tempdir().unwrap();
+        let held = lock(&root(home.path())).unwrap();
+        let inherited = held.try_clone().unwrap();
+        drop(held);
+        let next = lock(&root(home.path()));
+        drop(inherited);
+        assert!(
+            next.is_ok(),
+            "a lock its holder let go is still held by a copy: {next:?}"
+        );
+    }
 }

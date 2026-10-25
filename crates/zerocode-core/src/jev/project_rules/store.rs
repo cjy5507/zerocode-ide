@@ -780,6 +780,25 @@ mod tests {
         assert!(begin_check(home.path(), workspace.path(), "one", 1, "turn").is_err());
     }
 
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of the lock's descriptor until the exec; the duplicate here is
+    /// that copy, without a launch winning a race. The next check must not
+    /// wait on it.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_check() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("rules");
+        let held = lock(&root).unwrap();
+        let inherited = held.try_clone().unwrap();
+        drop(held);
+        let next = lock(&root);
+        drop(inherited);
+        assert!(
+            next.is_ok(),
+            "a lock its holder let go is still held by a copy: {next:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_source_link_outside_the_workspace_cannot_be_compiled() {
