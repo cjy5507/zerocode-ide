@@ -20756,7 +20756,13 @@ mod tests {
         let (transaction, _) = transaction
             .split_once("#[cfg(test)]")
             .unwrap_or((transaction, ""));
-        let swapping = block_after(transaction, "pub(super) fn settle(");
+        // A between-turns move's hold ends through the same swap (t-74974).
+        assert!(
+            block_after(transaction, "pub(super) fn settle(")
+                .contains("take_next(term, deliveries, waiters, queue, now);"),
+            "a settled delivery no longer hands its line to the next in queue"
+        );
+        let swapping = block_after(transaction, "fn take_next(");
         assert!(
             swapping.contains("row.pop_front()")
                 && swapping
@@ -20896,9 +20902,11 @@ mod tests {
     /// turns while words it typed there on its own are on their way. It reads
     /// the typing door's own record — the delivery the pump carries and the
     /// queue behind it — at the switch's every look and FIRST at the rest's
-    /// fence under the prompt registration lock, before the hook state, and
-    /// it waits for the output to settle as the pointer does. A switch asks
-    /// both questions through one function.
+    /// fence under the prompt registration lock, before the hook state —
+    /// where it marks the pane so later prompts queue, and lets the lock go
+    /// for the ledger's write (t-74974) — and it waits for the output to
+    /// settle as the pointer does. A switch asks both questions through one
+    /// function.
     #[test]
     fn a_pane_with_words_on_their_way_is_never_between_turns_for_a_switch() {
         let backend = shipped_backend();
@@ -20924,11 +20932,14 @@ mod tests {
             "    fn with_between_turns_observation(&self, term: TermId, commit: &mut dyn FnMut()) {",
         );
         assert!(
-            fence.contains("crate::prompt_transaction::with_no_prompt_in_flight(")
-                && fence.contains("&state.shell_runtime().deliveries,")
-                && fence.contains("&state.shell_runtime().prompt_queue,")
-                && fence.contains("output_settled(&state, term)"),
-            "the switch must observe and commit under the prompt registration lock:\n{fence}"
+            fence.contains("crate::prompt_transaction::with_no_prompt_in_flight(&lines, term,")
+                && fence.contains("deliveries: &runtime.deliveries,")
+                && fence.contains("queue: &runtime.prompt_queue,")
+                && fence.contains("moving: &runtime.moving_terms,")
+                && fence.contains("output_settled(&state, term)")
+                && fence.contains("state.cadence().wake()"),
+            "the switch must observe and hold the pane's prompts under the prompt \
+             registration lock, and wake the pump for one it held:\n{fence}"
         );
         let switch = include_str!("../../src/account_switch.rs");
         let rests = block_after(
@@ -23198,7 +23209,8 @@ mod tests {
         let backend = shipped_backend();
         let sending = block_after(backend, "fn type_prompt_at_term(");
         assert!(
-            sending.contains("deliveries.contains_key(&term)")
+            sending.contains("crate::prompt_transaction::line_is_taken(")
+                && sending.contains("&state.shell_runtime().moving_terms,")
                 && sending.contains("prompt_queue()")
                 && sending.contains("push_back(QueuedPrompt"),
             "a second prompt can interleave with the delivery already on the line:\n{sending}"
@@ -34409,8 +34421,7 @@ mod tests {
             .split_once("#[cfg(test)]")
             .unwrap_or((transaction, ""));
         assert!(
-            block_after(transaction, "pub(super) fn settle(")
-                .contains(".handing_back(next.hands_back)"),
+            block_after(transaction, "fn take_next(").contains(".handing_back(next.hands_back)"),
             "an activated queued prompt forgot whose words it carries"
         );
         let pumping = block_after(backend, "fn pump_loop(app: &AppHandle) {");

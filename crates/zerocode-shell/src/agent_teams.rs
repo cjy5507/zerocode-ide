@@ -1205,9 +1205,10 @@ pub trait Host {
     /// [`Self::between_turns`], observed under the locks that can change the
     /// answer — the fence an account switch rests a following worker in
     /// (t-46106). Call `commit` at most once, only while the pane is between
-    /// turns, and keep the locks until it returns; implementations must not
-    /// call the actor or the team table. Hosts without such a fence never
-    /// commit.
+    /// turns, and keep the pane from taking a prompt until it returns — its
+    /// prompts wait in its own queue, never behind a lock every pane needs
+    /// (t-74974); implementations must not call the actor or the team table.
+    /// Hosts without such a fence never commit.
     fn with_between_turns_observation(&self, _term: u32, _commit: &mut dyn FnMut()) {}
 
     /// Move one worker an account switch still owes a move to, now that its

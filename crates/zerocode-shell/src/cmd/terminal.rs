@@ -1154,7 +1154,13 @@ pub(crate) fn type_prompt_at_term(
         return Err(format!("터미널 {term}이(가) 없습니다"));
     }
     let (notify, waiting) = std::sync::mpsc::sync_channel(1);
-    if deliveries.contains_key(&term) {
+    // A pane whose account move is being written queues its prompts too
+    // (t-74974): the move marks it under this same lock.
+    if crate::prompt_transaction::line_is_taken(
+        &deliveries,
+        &state.shell_runtime().moving_terms,
+        term,
+    ) {
         state
             .prompt_queue()
             .entry(term)

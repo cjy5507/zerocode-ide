@@ -1037,6 +1037,12 @@ struct ShellRuntime {
     /// looks at every terminal at the display rate. A thread per pending
     /// prompt would be a second cadence to keep honest.
     deliveries: Mutex<HashMap<TermId, PromptDelivery>>,
+    /// Panes whose between-turns account move is being written to the
+    /// ledger (t-74974). Marked and cleared only under [`Self::deliveries`]
+    /// (`prompt_transaction::with_no_prompt_in_flight`): a prompt addressed
+    /// to one of them waits in [`AppState::prompt_queue`] until the move is
+    /// written, while the pump keeps turning every pane.
+    moving_terms: Mutex<std::collections::HashSet<TermId>>,
     /// Restart continuations awaiting the resumed agent's first working hook.
     pending_nudges: Mutex<restart_nudge_runtime::PendingNudges>,
     /// Fresh Zo worker briefings held until their pane event subscriber has
@@ -2454,6 +2460,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         tree_hooks: Mutex::new(file_tree_hooks::Pending::default()),
         resource_usage: Mutex::new(resource_usage::ResourceUsageState::default()),
         deliveries: Mutex::new(HashMap::new()),
+        moving_terms: Mutex::default(),
         pending_nudges: Mutex::new(restart_nudge_runtime::PendingNudges::default()),
         zo_worker_deliveries: Mutex::new(HashMap::new()),
         delivery_waiters: Mutex::new(HashMap::new()),
