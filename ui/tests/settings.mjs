@@ -368,6 +368,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "computer_confirm_transfer": true,
   "computer_confirm_delete": true,
   "computer_live_reflex": false,
+  "computer_share_required": false,
   "computer_input_policy": "background",
   "computer_generator_road": "auto",
   "emulator.keepBooted": true,
@@ -774,7 +775,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_window_blur", "set_agent_teams_mode", "set_claude_autoswitch_mode", "set_harness_settings", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
   "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
-  "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy",
+  "set_computer_live_reflex", "set_computer_generator_road", "set_computer_input_policy", "set_computer_share_required",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
   "patch_floating_workspace",
@@ -1395,6 +1396,10 @@ class StatefulBackend {
       case "set_computer_live_reflex":
         this.settings.computer_live_reflex = args.on === true;
         keys = ["computer_live_reflex"];
+        break;
+      case "set_computer_share_required":
+        this.settings.computer_share_required = args.on === true;
+        keys = ["computer_share_required"];
         break;
       case "set_computer_input_policy":
         if (!["background", "shared-desktop"].includes(args.policy)) throw "invalid input policy";
@@ -4519,6 +4524,39 @@ await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력�
     await peer.close();
     backend.settings.computer_input_policy = original;
     await backend.broadcast(null, ["computer_input_policy"]);
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
+});
+
+await test("Computer Use 공유 의무는 기본 꺼짐이며 저장과 다른 창의 변경을 따른다", async () => {
+  assertEqual(backend.settings.computer_share_required, false);
+  const peer = await context.newPage();
+  const peerId = "share-required-peer";
+  try {
+    if (PLATFORM_OVERRIDE) await addReportedPlatform(peer, PLATFORM_OVERRIDE);
+    await installTauri(peer, peerId);
+    attachFaultRecorder(peer, peerId);
+    await bootPage(peer, peerId);
+    await openSettings(pageA, "computer-use");
+    await openSettings(peer, "computer-use");
+    const first = pageA.locator("#computer-share-required");
+    const second = peer.locator("#computer-share-required");
+    assertEqual(await first.count(), 1, "share requirement setting is missing");
+    assert(!(await first.isChecked()));
+    assert(!(await second.isChecked()));
+    assertEqual(await first.getAttribute("aria-describedby"), "computer-share-required-about");
+    const before = backend.calls.length;
+    await first.check();
+    assertEqual((await backend.waitForCall("A", "set_computer_share_required", before)).args, { on: true });
+    await peer.waitForFunction(() => document.getElementById("computer-share-required").checked);
+    const restore = backend.calls.length;
+    await second.uncheck();
+    assertEqual((await backend.waitForCall(peerId, "set_computer_share_required", restore)).args, { on: false });
+    await pageA.waitForFunction(() => !document.getElementById("computer-share-required").checked);
+  } finally {
+    await peer.close();
+    backend.settings.computer_share_required = false;
+    await backend.broadcast(null, ["computer_share_required"]);
     await pageA.evaluate(() => setSettingsOpen(false));
   }
 });

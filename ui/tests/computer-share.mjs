@@ -97,6 +97,28 @@ async function scenario(browser, origin, name, ok, body) {
 export async function testComputerShare(browser, origin, ok) {
   const words = SHARE_WORDS.ko;
 
+  await scenario(browser, origin, "required sharing setting", ok, async (page) => {
+    const expected = {
+      ko: "공유를 의무로", en: "Require window sharing", ja: "ウィンドウの共有を必須にする",
+      zh: "必须共享窗口", es: "Exigir compartir la ventana",
+    };
+    for (const [locale, label] of Object.entries(expected)) {
+      const shown = await page.evaluate(async (locale) => {
+        await setLocale(locale, { refresh: false, persist: false });
+        const control = document.getElementById("computer-share-required");
+        return {
+          label: control?.closest("label")?.textContent.trim(),
+          personOnly: !!control?.closest("[data-person-only]"),
+          setting: !!control?.closest(".settings-pane"),
+          about: document.getElementById(control?.getAttribute("aria-describedby"))?.textContent.trim(),
+        };
+      }, locale);
+      ok(`${locale}: the required sharing setting names its purpose`, shown.label === label && !!shown.about, JSON.stringify(shown));
+      ok(`${locale}: the real setting is marked for the person`, shown.personOnly && shown.setting, JSON.stringify(shown));
+    }
+  });
+
+
   await scenario(browser, origin, "card", ok, async (page) => {
     const said = await page.evaluate(async () => {
       const T = window.__SHARE_T__;

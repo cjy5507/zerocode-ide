@@ -115,6 +115,8 @@ pub mod error_code {
     pub const PERSON_TYPING: &str = "person_typing";
     /// The act names an app or a window outside the one the person shared.
     pub const SHARE_SCOPE: &str = "share_scope";
+    /// The person requires an explicit app share before an act.
+    pub const SHARE_REQUIRED: &str = "share_required";
     /// The person took control of the shared window back; this request and
     /// every later one under that share is refused. Ask to share again.
     pub const PERSON_TOOK_CONTROL: &str = "person_took_control";

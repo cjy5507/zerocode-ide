@@ -29707,3 +29707,25 @@ fn a_report_that_is_not_a_whole_palette_dresses_no_pane() {
     named.background = "navy".to_string();
     assert!(named.to_colors().is_err(), "a colour name was taken");
 }
+
+#[test]
+fn required_computer_sharing_defaults_off_and_survives_the_settings_repository() {
+    let legacy: SettingsDocument = serde_json::from_str("{}").expect("old settings");
+    assert!(!legacy.computer_share_required);
+    assert!(!SettingsDocument::default().computer_share_required);
+    let directory = tempfile::tempdir().expect("settings sandbox");
+    let repository = settings::SettingsRepository::new(directory.path());
+    let enabled = mutate_settings(&repository, |settings| {
+        settings.computer_share_required = true;
+        Ok(())
+    }).expect("enable");
+    assert_eq!(serde_json::to_value(enabled).unwrap()["computer_share_required"], true);
+    drop(repository);
+    let restarted = settings::SettingsRepository::new(directory.path());
+    assert!(load_settings(&restarted).expect("restart").document.computer_share_required);
+    mutate_settings(&restarted, |settings| {
+        settings.computer_share_required = false;
+        Ok(())
+    }).expect("disable");
+    assert!(!load_settings(&restarted).expect("disabled").document.computer_share_required);
+}

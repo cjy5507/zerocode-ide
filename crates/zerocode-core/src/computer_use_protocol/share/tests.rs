@@ -145,3 +145,45 @@ fn taking_control_refuses_every_act_until_the_person_hands_back() {
 fn an_app_is_one_key_whatever_its_case() {
     assert_eq!(app_key(" Safari "), app_key("safari"));
 }
+
+#[test]
+fn required_sharing_refuses_silence_and_unnamed_acts_but_keeps_looks() {
+    let mut share = Share::default();
+    share.set_required(true);
+    assert_eq!(share.gate(act(Some("notes"))), Gate::Ask("notes".into()));
+    share.answered("notes", Answer::Silent);
+    for reach in [act(Some("notes")), act(None)] {
+        let Gate::Refuse(error) = share.gate(reach) else {
+            panic!("unshared act was admitted: {reach:?}");
+        };
+        assert_eq!(error.code, "share_required");
+        assert!(error.message.contains("share"));
+    }
+    assert_eq!(share.gate(look(Some("notes"))), Gate::Go);
+    assert_eq!(share.gate(SCREEN), Gate::Go);
+    share.set_required(false);
+    assert_eq!(share.gate(act(Some("notes"))), Gate::Go);
+}
+
+#[test]
+fn required_sharing_allows_a_yes_and_keeps_refusal_scope_and_take_back() {
+    let mut share = Share::default();
+    share.set_required(true);
+    share.answered("notes", Answer::Declined);
+    assert!(matches!(share.gate(act(Some("notes"))), Gate::Refuse(_)));
+    share.answered("safari", Answer::Shared);
+    assert_eq!(share.gate(act(Some("safari"))), Gate::Go);
+    assert_eq!(
+        code(share.gate(look(Some("notes")))).as_deref(),
+        Some(error_code::SHARE_SCOPE)
+    );
+    assert_eq!(
+        code(share.gate(SCREEN)).as_deref(),
+        Some(error_code::SHARE_SCOPE)
+    );
+    share.take_back();
+    assert_eq!(
+        code(share.gate(act(Some("safari")))).as_deref(),
+        Some(error_code::PERSON_TOOK_CONTROL)
+    );
+}

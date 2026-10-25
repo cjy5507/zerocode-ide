@@ -8,7 +8,7 @@
 //! "take control" and "hand back"; a request admitted under one generation
 //! is refused at its next provider step once the person took control.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 #[cfg(not(test))]
 use std::sync::{Arc, Mutex, RwLock};
@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use zerocode_core::computer_use::ComputerMethod;
 use zerocode_core::computer_use_protocol::share::{
-    Answer, Gate, Reach, SHARE_ASK_MS, Share, app_key, took_control,
+    Answer, Gate, Reach, SHARE_ASK_MS, Share, app_key, required, took_control,
 };
 
 use super::ComputerUseError;
@@ -55,15 +55,58 @@ struct Held {
 #[cfg(not(test))]
 static HELD: Mutex<Option<Held>> = Mutex::new(None);
 #[cfg(not(test))]
+static REQUIRED: RwLock<Option<Arc<Required>>> = RwLock::new(None);
+
+/// Reads the current policy from the settings repository.
+pub(crate) type Required = dyn Fn() -> bool + Send + Sync;
+
+pub(crate) fn install_required(read: Box<Required>) {
+    #[cfg(not(test))]
+    {
+        *REQUIRED
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::from(read));
+    }
+    #[cfg(test)]
+    stand_in::REQUIRED.with(|held| *held.borrow_mut() = Some(read));
+}
+
+fn refresh_required() {
+    #[cfg(test)]
+    stand_in::REQUIRED.with(|read| {
+        if let Some(read) = read.borrow().as_ref() {
+            with_held(|held| held.share.set_required(read()));
+        }
+    });
+    #[cfg(not(test))]
+    {
+        let read = REQUIRED
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(read) = read {
+            let required = read();
+            with_held(|held| held.share.set_required(required));
+        }
+    }
+}
+#[cfg(not(test))]
 static ROAD: RwLock<Option<(Arc<Asker>, Arc<Notice>)>> = RwLock::new(None);
 #[cfg(test)]
 thread_local! {
     static HELD: std::cell::RefCell<Held> = std::cell::RefCell::new(Held::default());
 }
 
+#[derive(Clone)]
+struct Admitted {
+    generation: u64,
+    app: Option<String>,
+    acts: bool,
+    whole_screen: bool,
+}
+
 thread_local! {
-    /// The share's generation the request this thread runs was admitted under.
-    static ADMITTED: Cell<Option<u64>> = const { Cell::new(None) };
+    static ADMITTED: RefCell<Option<Admitted>> = const { RefCell::new(None) };
 }
 
 fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
@@ -84,16 +127,16 @@ fn with_held<T>(touch: impl FnOnce(&mut Held) -> T) -> T {
 /// While this lives, the command it was admitted for is held to the share's
 /// generation it saw.
 pub(crate) struct Scope {
-    previous: Option<u64>,
+    previous: Option<Admitted>,
 }
 
 impl Drop for Scope {
     fn drop(&mut self) {
-        ADMITTED.with(|admitted| admitted.set(self.previous));
+        ADMITTED.with(|admitted| *admitted.borrow_mut() = self.previous.take());
     }
 }
 
-fn scope(generation: Option<u64>) -> Scope {
+fn scope(generation: Option<Admitted>) -> Scope {
     Scope {
         previous: ADMITTED.with(|admitted| admitted.replace(generation)),
     }
@@ -134,6 +177,7 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
     let acts = method.acts();
     let screen = whole_screen(method, params);
     loop {
+        refresh_required();
         let before = with_held(|held| held.share.target().map(str::to_string));
         let (gate, generation, after) = with_held(|held| {
             let gate = held.share.gate(Reach {
@@ -151,7 +195,14 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
             tell();
         }
         match gate {
-            Gate::Go => return Ok(scope(Some(generation))),
+            Gate::Go => {
+                return Ok(scope(Some(Admitted {
+                    generation,
+                    app: named.as_ref().map(|(key, _)| key.clone()),
+                    acts,
+                    whole_screen: screen,
+                })));
+            }
             Gate::Refuse(refused) => return Err(refused),
             Gate::Ask(key) => {
                 let label = named
@@ -179,14 +230,29 @@ pub(crate) fn admit(method: ComputerMethod, params: &Value) -> Result<Scope, Com
 /// Whether the request this thread runs is still under the share it was
 /// admitted to: refused once the person took control since.
 pub(crate) fn ensure_current() -> Result<(), ComputerUseError> {
-    let Some(admitted) = ADMITTED.with(Cell::get) else {
+    let Some(admitted) = ADMITTED.with(|held| held.borrow().clone()) else {
         return Ok(());
     };
-    if with_held(|held| held.share.generation()) == admitted {
-        Ok(())
-    } else {
-        Err(took_control())
+    refresh_required();
+    let before = with_held(|held| held.share.target().map(str::to_string));
+    let result = with_held(|held| {
+        if held.share.generation() != admitted.generation {
+            return Err(took_control());
+        }
+        match held.share.gate(Reach {
+            app: admitted.app.as_deref(),
+            acts: admitted.acts,
+            whole_screen: admitted.whole_screen,
+        }) {
+            Gate::Go => Ok(()),
+            Gate::Refuse(error) => Err(error),
+            Gate::Ask(_) => Err(required()),
+        }
+    });
+    if before != with_held(|held| held.share.target().map(str::to_string)) {
+        tell();
     }
+    result
 }
 
 /// The person takes control of the shared window.
@@ -274,12 +340,13 @@ pub(crate) mod stand_in {
 
     use serde_json::Value;
 
-    use super::{Decision, ShareAsk};
+    use super::{Decision, Required, ShareAsk};
 
     /// The person, as a test answers for them.
     pub(super) type Person = Rc<dyn Fn(&ShareAsk) -> Decision>;
 
     thread_local! {
+        pub(super) static REQUIRED: RefCell<Option<Box<Required>>> = const { RefCell::new(None) };
         pub(super) static ASKED: RefCell<Option<Person>> = const { RefCell::new(None) };
         pub(super) static NOTICES: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     }
@@ -291,6 +358,7 @@ pub(crate) mod stand_in {
     impl Drop for Standing {
         fn drop(&mut self) {
             ASKED.with(|asked| asked.borrow_mut().take());
+            REQUIRED.with(|read| read.borrow_mut().take());
             NOTICES.with(|notices| notices.borrow_mut().clear());
         }
     }
