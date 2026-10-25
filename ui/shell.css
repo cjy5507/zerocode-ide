@@ -18576,6 +18576,16 @@ button.helper-sib:hover {
   overflow-y: auto;
 }
 
+/* The view wraps for its narrow layout (t-74119), and a wrapping flex line is
+ * as tall as its tallest item: held to the view's height, the rail and the
+ * pane each scroll on their own again instead of growing the line and handing
+ * the scroll to the window, rail and search box included. The narrow layout
+ * below sets its own bounds. */
+.settings-rail,
+.settings-frame {
+  max-height: 100%;
+}
+
 /* The column FILLS, and the reading bound rides the prose instead.
  *
  * 56rem was `max-w-4xl`, Orca's own, and ours until somebody looked at it on a
@@ -51503,7 +51513,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 @container settings-view (max-width: 640px) {
   .settings-rail { width: 100%; max-height: calc(var(--space-6) * 5); flex-basis: 100%; border-right: 0; border-bottom: var(--rule-width) solid var(--edge-rule); }
   .settings-rail-top { padding-block: var(--space-2); }
-  .settings-frame { flex-basis: 100%; min-height: 0; padding-block-start: var(--space-4); }
+  .settings-frame { flex-basis: 100%; min-height: 0; max-height: calc(100% - var(--space-6) * 5 - var(--rule-width)); padding-block-start: var(--space-4); }
   .settings-frame > .settings-pane { padding-inline: var(--space-3); }
 }
 .connection-role .settings-action-row, .connection-row .settings-action-row { flex-wrap: wrap; margin-inline-start: 0; }
