@@ -1245,6 +1245,7 @@ async fn a_runtime_exit_after_the_check_fails_restoration() {
     let guarded_manager = fixture.manager.clone();
     let settings = fixture.settings.clone();
     let ending = fixture.control.path().join("end-1");
+    let pending = fixture.control.path().join("end-1.partial");
     fixture
         .manager
         .restore_guarded(
@@ -1252,7 +1253,8 @@ async fn a_runtime_exit_after_the_check_fails_restoration() {
             (
                 move |provider, expected, binding| save(&settings, provider, expected, binding),
                 move |action: &mut dyn FnMut() -> crate::Result<()>| {
-                    fs::write(&ending, b"code 3").map_err(|_| Error::Storage)?;
+                    fs::write(&pending, b"code 3").map_err(|_| Error::Storage)?;
+                    fs::rename(&pending, &ending).map_err(|_| Error::Storage)?;
                     let began = Instant::now();
                     while guarded_manager.snapshot().server.state != "failed" {
                         assert!(began.elapsed() < SETTLE, "checked runtime did not end");
