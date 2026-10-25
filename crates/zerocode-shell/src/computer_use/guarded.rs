@@ -380,6 +380,15 @@ pub fn page_agrees(
 /// The ledger file under its lock, for one read or one append.
 struct LedgerLock(File);
 
+impl Drop for LedgerLock {
+    /// Ends the flock itself rather than leaving it to the close: a launch
+    /// that forks before it execs holds a copy of the descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone (t-73907).
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 impl LedgerLock {
     fn shared(file: File) -> io::Result<Self> {
         file.lock_shared()?;

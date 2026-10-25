@@ -111,6 +111,15 @@ impl PreferenceStore {
 /// The store's lock file, held for one modification.
 struct StoreLock(std::fs::File);
 
+impl Drop for StoreLock {
+    /// Ends the flock itself rather than leaving it to the close: a launch
+    /// that forks before it execs holds a copy of the descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone (t-73907).
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

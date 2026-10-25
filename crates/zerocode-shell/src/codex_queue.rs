@@ -973,8 +973,19 @@ fn capability_with(
 }
 
 /// The command for `program`, under `env` alone when one is given.
+///
+/// A bare name is found on that env's own `PATH` first. std counts
+/// `env_clear` as a `PATH` change, and a bare name with a changed `PATH`
+/// makes std fork; a fork in the window can stand before its exec holding a
+/// copy of every descriptor the window has (t-73907; t-47141 for the doors
+/// `quiet_command_on_path` already serves).
 fn command_under(program: &Path, env: Option<&[(String, String)]>) -> std::process::Command {
-    let mut command = crate::proc::quiet_command(program);
+    let path = env.and_then(|env| {
+        env.iter()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, path)| path.as_str())
+    });
+    let mut command = crate::proc::quiet_command_on_path(program, path);
     if let Some(env) = env {
         command
             .env_clear()

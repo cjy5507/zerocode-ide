@@ -268,8 +268,20 @@ pub struct JiraStore {
 /// opens the same inode/path, so an atomic metadata replacement cannot split
 /// contenders across different lock objects.
 struct JiraStoreLock<'a> {
-    _file: File,
+    file: File,
     _process: MutexGuard<'a, ()>,
+}
+
+impl Drop for JiraStoreLock<'_> {
+    /// Ends the flock itself rather than leaving it to the close: a launch
+    /// that forks before it execs holds a copy of the descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone (t-73907).
+    /// Unix only: Windows forks nothing, and its one-byte `LockFile` is not
+    /// the range `File::unlock` names.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        let _ = self.file.unlock();
+    }
 }
 
 impl JiraStore {
@@ -967,7 +979,7 @@ impl JiraStore {
             .map_err(|source| io_error("Jira 설정 잠금 파일을 열지 못했습니다", source))?;
         lock_file_exclusively(&file)?;
         Ok(JiraStoreLock {
-            _file: file,
+            file,
             _process: process,
         })
     }
@@ -1328,7 +1340,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = JiraStore::new(directory.path());
         let held = store.lock().unwrap();
-        let inherited = held._file.try_clone().unwrap();
+        let inherited = held.file.try_clone().unwrap();
         drop(held);
         let next =
             crate::durable_file::private_lock_file(&directory.path().join(LOCK_FILE_NAME))
