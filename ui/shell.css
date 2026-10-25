@@ -26952,6 +26952,23 @@ select {
   pointer-events: none;
 }
 
+/* A surface that docks its button row at the bottom-right — an open drawer or
+ * a dialog — keeps that corner: the layer steps to the opposite edge while any
+ * of them stands (t-68117), so a save notice never covers Save/Close. The
+ * layer follows the DOM, so a drawer opened or closed under a standing toast
+ * moves it with no script. */
+body:has(
+  .jev-drawer:not([hidden]),
+  .artifacts-drawer .artifacts-detail:not([hidden]),
+  .scrim:not([hidden]),
+  .jev-custom-scrim:not([hidden]),
+  .sftp-dialog-scrim:not([hidden])
+) .toasts {
+  right: auto;
+  left: var(--space-4);
+  align-items: flex-start;
+}
+
 .toast {
   width: var(--toast-width);
   padding: var(--toast-inset);
