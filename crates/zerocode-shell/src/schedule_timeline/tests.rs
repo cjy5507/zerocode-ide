@@ -851,6 +851,131 @@ fn a_look_where_nothing_moved_answers_unchanged_and_one_that_moved_does_not() {
 /// landing that moved moves the revision as a file does: the window holding
 /// the last revision is told the new one, not `unchanged`; the same landings
 /// again move nothing.
+/// A line of jobs written here: their files in `in/` and `done/`, the
+/// runner's log of the ended ones, dated on the fixture's morning.
+fn line_of(scratch: &Path, ended: &[(&str, &str, i32, u32)], waiting: &[(&str, &str)]) -> Roots {
+    let queue = scratch.join("build-queue");
+    for folder in [QUEUE_IN, QUEUE_RUN, QUEUE_DONE] {
+        std::fs::create_dir_all(queue.join(folder)).expect("a queue folder");
+    }
+    let mut log = String::new();
+    for (minute, (name, header, rc, secs)) in (0..).zip(ended) {
+        std::fs::write(
+            queue.join(QUEUE_DONE).join(format!("{name}{JOB_SUFFIX}")),
+            header,
+        )
+        .expect("an ended job");
+        log.push_str(&format!(
+            "RUN {name} who=w lane=1 cap=1800s 09:{minute:02}:00\nDONE {name} rc={rc} {secs}s lane=1 09:{minute:02}:30 load=3\n"
+        ));
+    }
+    for (name, header) in waiting {
+        std::fs::write(
+            queue.join(QUEUE_IN).join(format!("{name}{JOB_SUFFIX}")),
+            header,
+        )
+        .expect("a waiting job");
+    }
+    let runner = queue.join(RUNNER_LOG);
+    std::fs::write(&runner, log).expect("the runner's log");
+    stamp_at(&runner, kst(21, 9, 30, 0));
+    Roots {
+        line: Some(queue),
+        release: None,
+    }
+}
+
+/// A job's `# task:` line ties its run to every ledger task it names, whole
+/// and never shared out; `# what:` is the person's words and ties nothing,
+/// and a piece that is no task id is dropped (t-73910).
+#[test]
+fn a_jobs_task_line_ties_its_run_to_each_task_it_names_and_shares_it() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let roots = line_of(
+        scratch.path(),
+        &[
+            (
+                "0-1792540000-coord-l78x-g2-tests",
+                "# who: coord-l78x\n# what: l78x 묶음 t-3\n# task: t-2, t-1,gate-l78x, t-, t-12a\n",
+                1,
+                600,
+            ),
+            (
+                "1792540100-w1-t1-red",
+                "# who: w1-t1\n# task: t-1\n",
+                0,
+                100,
+            ),
+        ],
+        &[("1792540200-w4-t4-red", "# who: w4-t4\n# task: t-4\n")],
+    );
+    let ask = Ask {
+        known: None,
+        from_ms: Some(NOW_MS - 5 * 24 * HOUR_MS),
+        log: None,
+    };
+    let read = Book::default().read(&roots, &ask, NOW_MS, KST);
+    assert_eq!(
+        job(&read, "0-1792540000-coord-l78x-g2-tests").tasks,
+        ["t-1", "t-2"]
+    );
+    assert_eq!(job(&read, "1792540200-w4-t4-red").tasks, ["t-4"]);
+    assert_eq!(
+        read.task_lines.get("t-1"),
+        Some(&TaskLine {
+            jobs: 2,
+            red: 1,
+            secs: 700,
+            shared: 2
+        })
+    );
+    assert_eq!(
+        read.task_lines.get("t-2"),
+        Some(&TaskLine {
+            jobs: 1,
+            red: 1,
+            secs: 600,
+            shared: 2
+        })
+    );
+    assert!(
+        !read.task_lines.contains_key("t-3"),
+        "`# what:` was read for a task"
+    );
+    assert!(
+        !read.task_lines.contains_key("t-4"),
+        "a waiting job has spent no line time"
+    );
+}
+
+/// A job naming no task ties itself to none, and the answer says nothing of
+/// tasks rather than a zero.
+#[test]
+fn a_job_naming_no_task_is_tied_to_none() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let roots = line_of(
+        scratch.path(),
+        &[(
+            "1792540300-w9-t9-red",
+            "# who: w9-t9\n# what: t-9 고침\n",
+            0,
+            40,
+        )],
+        &[],
+    );
+    let ask = Ask {
+        known: None,
+        from_ms: Some(NOW_MS - 5 * 24 * HOUR_MS),
+        log: None,
+    };
+    let read = Book::default().read(&roots, &ask, NOW_MS, KST);
+    assert!(job(&read, "1792540300-w9-t9-red").tasks.is_empty());
+    assert!(read.task_lines.is_empty());
+    let said = serde_json::to_value(&read).expect("json");
+    assert!(said.get("task_lines").is_none(), "{said}");
+    assert!(said["jobs"][0].get("tasks").is_none(), "{said}");
+}
+
 #[test]
 fn a_landing_rides_the_answer_and_moves_its_revision() {
     let scratch = copied();
