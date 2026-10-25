@@ -3132,9 +3132,11 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 .map(|held| held.display_name().to_string())
                 .unwrap_or_default();
             let task_id = carried.map(|held| held.id.clone()).unwrap_or_default();
-            // t-60498 red: the root is not read yet.
-            let root_id = String::new();
-            let root_title = String::new();
+            let root = carried.and_then(|held| run.root_task(&held.id));
+            let root_id = root.map(|held| held.id.clone()).unwrap_or_default();
+            let root_title = root
+                .map(|held| held.display_name().to_string())
+                .unwrap_or_default();
             let reported = dispatch.is_some_and(|one| !one.is_open());
             let failed = dispatch.is_some_and(|one| !one.is_open() && one.succeeded != Some(true));
             let dispatch_id = dispatch.map(|one| one.id.clone()).unwrap_or_default();

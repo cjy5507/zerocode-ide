@@ -3638,6 +3638,25 @@ impl Run {
         self.tasks.iter().find(|task| task.id == id)
     }
 
+    /// The topmost task of a task's `parent` chain — the piece of work the task
+    /// was broken out of, however many steps up. A task with no parent is its own
+    /// root; a chain that names a task this run does not hold ends at the last
+    /// one it does, and a chain that loops back ends where it first repeats, so a
+    /// damaged store cannot make a reader walk forever. `None` only where `id`
+    /// names no task of this run.
+    pub fn root_task(&self, id: &str) -> Option<&Task> {
+        let mut at = self.task(id)?;
+        let mut seen = vec![at.id.as_str()];
+        while let Some(up) = at.parent.as_deref().and_then(|parent| self.task(parent)) {
+            if seen.contains(&up.id.as_str()) {
+                break;
+            }
+            seen.push(up.id.as_str());
+            at = up;
+        }
+        Some(at)
+    }
+
     /// The task's newest attempt, open or ended — the one a review is
     /// written against, and the one a review is measured against.
     pub fn newest_attempt(&self, task_id: &str) -> Option<&Dispatch> {
