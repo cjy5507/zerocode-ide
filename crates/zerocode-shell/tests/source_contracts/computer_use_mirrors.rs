@@ -90,19 +90,34 @@ fn the_helpers_focus_moving_characters_are_the_cores() {
 
 /// Every reason the helper writes into an unverified action is one the core
 /// names — the words a walk judges a landing by (`value_unchanged`) and a
-/// model reads.
+/// model reads. A `reason:` the helper gives a hand it revokes is not an
+/// action's: it is the stop the request refused with, and it is held to the
+/// core's error codes instead (t-74581's take-control revoke).
 #[test]
 fn every_reason_the_helper_reports_is_the_cores() {
+    use zerocode_core::computer_use_protocol::error_code;
     use zerocode_core::computer_use_protocol::unverified_reason::ALL;
     let outcome = OUTCOME
         .split("public var unverifiedReason")
         .nth(1)
         .expect("the outcome's reasons are gone");
     let outcome = &outcome[..outcome.find("\n    }\n").unwrap_or(outcome.len())];
-    let spelled: std::collections::BTreeSet<&str> = literals_after(HELPER, "reason: \"")
-        .into_iter()
-        .chain(literals_after(outcome, "return \""))
-        .collect();
+    const MARKER: &str = "reason: \"";
+    let mut spelled = std::collections::BTreeSet::new();
+    let mut revoked = std::collections::BTreeSet::new();
+    for (at, _) in HELPER.match_indices(MARKER) {
+        let word = HELPER[at + MARKER.len()..]
+            .split('"')
+            .next()
+            .expect("a quoted reason");
+        let line = &HELPER[HELPER[..at].rfind('\n').map_or(0, |end| end + 1)..at];
+        if line.contains(".revoke(") {
+            revoked.insert(word);
+        } else {
+            spelled.insert(word);
+        }
+    }
+    spelled.extend(literals_after(outcome, "return \""));
     assert!(
         spelled.len() >= 6,
         "the helper's reasons were read: {spelled:?}"
@@ -111,6 +126,13 @@ fn every_reason_the_helper_reports_is_the_cores() {
         assert!(
             ALL.contains(&reason),
             "the helper reports `{reason}`, which the core's unverified_reason table does not name"
+        );
+    }
+    assert!(!revoked.is_empty(), "the helper's revoke reasons were read");
+    for reason in revoked {
+        assert!(
+            [error_code::PERSON_TOOK_CONTROL].contains(&reason),
+            "the helper revokes a hand with `{reason}`, which is not the core's stop code"
         );
     }
 }

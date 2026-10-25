@@ -27,6 +27,13 @@ use serde_json::Value;
 /// is a shell script launchd runs without this binary.
 const RELEASE_DIR: &[&str] = &[".local", "share", "zerocode", "release"];
 pub(crate) const STATUS_FILE: &str = "status.json";
+/// The lane's final verdict words, as `tools/release/lane.sh` writes them:
+/// `judge_sha` sets OUTCOME to green only after the release succeeds and to
+/// red on a failure, and `sweep_sha` ends the run's log with `== $OUTCOME`.
+/// Spelled here beside the lane's files, as RELEASE_DIR is, for the same
+/// reason: the lane is a shell script that runs without this binary.
+pub(crate) const LANE_GREEN: &str = "green";
+pub(crate) const LANE_RED: &str = "red";
 const INSTALLED_FILE: &str = "installed.json";
 /// The lane's own logs under the release folder (`OUT` in the same table):
 /// one `lane-<sha8>.log` per sha, which the task board's schedule reads

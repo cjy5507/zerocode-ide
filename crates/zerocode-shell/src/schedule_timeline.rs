@@ -2204,8 +2204,8 @@ fn result_of(run: &LaneRun) -> &'static str {
         return RUNNING;
     }
     match run.verdict.as_deref() {
-        Some("green") => PASSED,
-        Some("red") => FAILED,
+        Some(crate::update_runtime::LANE_GREEN) => PASSED,
+        Some(crate::update_runtime::LANE_RED) => FAILED,
         _ => ENDED,
     }
 }
