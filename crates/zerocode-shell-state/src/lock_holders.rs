@@ -41,6 +41,30 @@ pub struct Asker {
     pub windows: Vec<i32>,
 }
 
+impl Asker {
+    /// This process, knowing no window but itself: the single-instance lock
+    /// keeps a profile to one window, and a window asking is that one.
+    pub fn this_process() -> std::io::Result<Self> {
+        let pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        Ok(Self {
+            pid,
+            uid: current_uid(),
+            executable: std::env::current_exe()?,
+            windows: vec![pid],
+        })
+    }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u32 {
+    0
+}
+
 /// The pid launchd runs as; a process whose parent died is adopted by it.
 pub const LAUNCHD: i32 = 1;
 
@@ -72,8 +96,33 @@ pub enum LeaveReason {
 /// forked it is gone), and one thread (fork copies only the calling thread;
 /// every window runs dozens). Anything unread counts against ending it.
 #[must_use]
-pub fn judge(_holder: &Holder, _asker: &Asker) -> Verdict {
-    Verdict::Leave(LeaveReason::Unreadable("judge"))
+pub fn judge(holder: &Holder, asker: &Asker) -> Verdict {
+    if holder.pid == asker.pid {
+        return Verdict::Leave(LeaveReason::ThisProcess);
+    }
+    if asker.windows.contains(&holder.pid) {
+        return Verdict::Leave(LeaveReason::KnownWindow);
+    }
+    if holder.uid != asker.uid {
+        return Verdict::Leave(LeaveReason::OtherUser);
+    }
+    match &holder.executable {
+        None => return Verdict::Leave(LeaveReason::Unreadable("executable")),
+        Some(executable) if !same_file(executable, &asker.executable) => {
+            return Verdict::Leave(LeaveReason::OtherProgram);
+        }
+        Some(_) => {}
+    }
+    match holder.parent {
+        None => return Verdict::Leave(LeaveReason::Unreadable("parent")),
+        Some(LAUNCHD) => {}
+        Some(parent) => return Verdict::Leave(LeaveReason::HasParent(parent)),
+    }
+    match holder.threads {
+        None => Verdict::Leave(LeaveReason::Unreadable("threads")),
+        Some(1) => Verdict::EndStuckLaunch,
+        Some(threads) => Verdict::Leave(LeaveReason::Threads(threads)),
+    }
 }
 
 fn same_file(left: &Path, right: &Path) -> bool {
@@ -565,13 +614,7 @@ mod tests {
         assert_eq!(held.parent, Some(LAUNCHD), "{held:?}");
         assert_eq!(held.threads, Some(1), "{held:?}");
 
-        let me = std::process::id() as i32;
-        let asker = Asker {
-            pid: me,
-            uid: unsafe { libc::getuid() },
-            executable: std::env::current_exe().unwrap(),
-            windows: vec![me],
-        };
+        let asker = Asker::this_process().unwrap();
         let settled = settle(&repository, Duration::from_millis(200), &asker).unwrap();
         assert_eq!(settled.ended, vec![stuck.0], "{settled:?}");
         assert!(settled.free, "{settled:?}");
