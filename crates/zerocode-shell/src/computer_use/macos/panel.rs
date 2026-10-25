@@ -10,12 +10,14 @@ use super::{PanelEndpoint, Wire};
 struct Update {
     state: Value,
     endpoint: Option<PanelEndpoint>,
+    helper_lost: bool,
 }
 
 #[derive(Default)]
 struct Pending {
     latest: Option<Update>,
     revision: u64,
+    had_endpoint: bool,
 }
 
 #[derive(Default)]
@@ -32,9 +34,18 @@ impl Mailbox {
             return;
         }
         pending.revision = revision;
+        // Presentations coalesce, but a helper dying before the worker reads
+        // its endpoint must still permit the share's one recovery attempt.
+        let helper_lost = (pending.had_endpoint && endpoint.is_none())
+            || pending
+                .latest
+                .as_ref()
+                .is_some_and(|update| update.helper_lost);
+        pending.had_endpoint = endpoint.is_some();
         pending.latest = Some(Update {
             state: state.clone(),
             endpoint,
+            helper_lost,
         });
         self.changed.notify_one();
     }
@@ -58,6 +69,7 @@ struct Delivery {
     endpoint: Option<PanelEndpoint>,
     wire: Option<Wire>,
     startup_attempted: bool,
+    recovery_used: bool,
     startup_share: (Option<String>, u64),
 }
 
@@ -78,6 +90,13 @@ impl Delivery {
             // Remember a failed launch across notices of the same share, but
             // let a new target or ownership generation recover a lost helper.
             self.startup_share = (target.map(str::to_string), generation);
+            self.startup_attempted = false;
+            self.recovery_used = false;
+        }
+        let helper_lost =
+            update.helper_lost || (self.endpoint.is_some() && update.endpoint.is_none());
+        if helper_lost && !self.recovery_used {
+            self.recovery_used = true;
             self.startup_attempted = false;
         }
         if self.endpoint != update.endpoint {

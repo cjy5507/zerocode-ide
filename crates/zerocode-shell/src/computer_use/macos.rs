@@ -238,6 +238,9 @@ struct StopWatch {
     /// Set before the connection is shut on purpose: the request that ends
     /// because of it is no loss, and says nothing.
     leaving: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the watch thread as it ends, for whatever reason: the panel
+    /// worker reads it to know its helper connection is gone (t-75398).
+    ended: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StopWatch {
@@ -277,6 +280,9 @@ impl StopWatch {
         };
         // Begun before the thread can end, so an end is never overwritten.
         super::guard::watch_began();
+        let socket = socket.to_path_buf();
+        let ended = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_ended = std::sync::Arc::clone(&ended);
         let thread = std::thread::Builder::new()
             .name("computer-use-stop-watch".into())
             .spawn(move || {
@@ -295,10 +301,11 @@ impl StopWatch {
                         Ok(heard) => heard,
                         Err(failure) => {
                             let error = failure.into_error_pub();
-                            return lost(format!(
+                            lost(format!(
                                 "the waiting request failed: {} ({})",
                                 error.message, error.code
                             ));
+                            break;
                         }
                     };
                     super::guard::hear_watched(&heard);
@@ -306,18 +313,22 @@ impl StopWatch {
                     after_share = heard.pointer("/shareControl/event").and_then(Value::as_i64);
                     // An answer with no count to ask after is not this road's.
                     let Some(revision) = heard.get("stopRevision").and_then(Value::as_u64) else {
-                        return lost(
-                            "the helper's answer carried no stop count to ask after".to_string(),
-                        );
+                        lost("the helper's answer carried no stop count to ask after".to_string());
+                        break;
                     };
                     after = Some(revision);
                 }
+                // Publish liveness before forgetting the endpoint: that
+                // presentation can wake the panel worker before we return.
+                worker_ended.store(true, std::sync::atomic::Ordering::Release);
+                forget_panel(&socket);
             })
             .map_err(|error| format!("thread: {error}"))?;
         Ok(Self {
             stream: kept,
             thread,
             leaving,
+            ended,
         })
     }
 
@@ -426,6 +437,13 @@ fn launch() -> Result<Launched, ComputerUseError> {
 }
 
 impl Session {
+    #[cfg(not(test))]
+    pub(super) fn panel_watch_ended(&self) -> bool {
+        self.watching
+            .as_ref()
+            .is_some_and(|watch| watch.ended.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     /// Connect to a launched helper and shake hands — the second half of
     /// [`Session::start`]: the pid read off the socket, the token on every
     /// request, the protocol and the guard table held to this window's.

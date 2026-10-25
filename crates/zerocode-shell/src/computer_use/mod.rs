@@ -133,6 +133,12 @@ fn ensure_share_panel() -> bool {
         // A provider may already be starting; this is not a failed launch.
         return false;
     };
+    if held
+        .as_ref()
+        .is_some_and(platform::Session::panel_watch_ended)
+    {
+        discard_session(&mut held);
+    }
     if held.is_none()
         && let Ok(session) = platform::Session::start()
     {
@@ -227,11 +233,15 @@ pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
 /// A broken road's end: the session is discarded so the next call starts a
 /// clean one, and the break is the answer.
 fn discard(held: &mut Option<platform::Session>, error: ComputerUseError) -> ComputerUseError {
+    discard_session(held);
+    error
+}
+
+fn discard_session(held: &mut Option<platform::Session>) {
     *held = None;
     SESSION_EPOCH.fetch_add(1, Ordering::AcqRel);
     guard::remember_helper(None);
     evidence::end_session();
-    error
 }
 
 /// Whether a provider session stands right now — without starting one.
