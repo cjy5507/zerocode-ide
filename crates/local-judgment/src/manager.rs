@@ -3477,6 +3477,11 @@ pub(crate) mod test_support {
     pub(crate) use super::copy_import;
     use super::*;
 
+    /// Adds one record to the store's file of exits, as the manager does.
+    pub fn keep_exit(path: &Path, record: &Value) -> Result<()> {
+        super::keep_exit(path, record)
+    }
+
     pub fn manager(root: &Path, settings: &Path, model: Model) -> Arc<Manager> {
         manager_with_sink(root, settings, model, Arc::new(|_| {}))
     }

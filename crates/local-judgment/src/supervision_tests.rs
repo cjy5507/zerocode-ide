@@ -342,6 +342,59 @@ async fn a_status_read_that_waits_for_an_ended_runtimes_stderr_leaves_the_async_
     }
 }
 
+/// Records kept at the same instant by writers on different threads (a
+/// reap, a restart's attempt, a stop) each keep their line, and no staging
+/// file is left behind.
+#[test]
+fn records_kept_at_the_same_instant_each_keep_their_line() {
+    const WRITERS: usize = 8;
+    const EACH: usize = 25;
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("server-exits.jsonl");
+    let start = Arc::new(std::sync::Barrier::new(WRITERS));
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|writer| {
+            let (path, start) = (path.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                (0..EACH)
+                    .filter(|&n| {
+                        test_support::keep_exit(&path, &json!({"writer": writer, "n": n})).is_err()
+                    })
+                    .count()
+            })
+        })
+        .collect();
+    let refused: usize = writers
+        .into_iter()
+        .map(|writer| writer.join().unwrap())
+        .sum();
+    assert_eq!(
+        refused, 0,
+        "a record kept at the same instant as another was refused"
+    );
+    let kept: Vec<Value> = fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let lost: Vec<(usize, usize)> = (0..WRITERS)
+        .flat_map(|writer| (0..EACH).map(move |n| (writer, n)))
+        .filter(|&(writer, n)| !kept.contains(&json!({"writer": writer, "n": n})))
+        .collect();
+    assert!(
+        lost.is_empty(),
+        "{} of {} records kept at the same instant lost their line: {lost:?}",
+        lost.len(),
+        WRITERS * EACH
+    );
+    assert_eq!(kept.len(), WRITERS * EACH, "a record was kept twice");
+    assert!(
+        !path.with_extension("jsonl.partial").exists(),
+        "a staging file was left behind"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deadline_stop_keeps_the_task_its_request_named_and_never_free_text() {
     let home = tempfile::tempdir().unwrap();
