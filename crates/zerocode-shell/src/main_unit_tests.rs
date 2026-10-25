@@ -29736,3 +29736,24 @@ fn required_computer_sharing_defaults_off_and_survives_the_settings_repository()
     }).expect("disable");
     assert!(!load_settings(&restarted).expect("disabled").document.computer_share_required);
 }
+
+/// A mirror pane closes with no person's hand, and only a mirror does
+/// (t-75153, R7b): `close_mirror_term` refuses a term `open_mirror_term` did
+/// not start, and one it closed already.
+#[test]
+fn only_a_mirror_the_window_opened_closes_without_a_hand() {
+    use crate::cmd::terminal::{forget_mirror_term, mirror_close_allowed, note_mirror_term};
+    let mirror: TermId = 4_100_001;
+    let shell: TermId = 4_100_002;
+    note_mirror_term(mirror);
+    assert!(matches!(
+        mirror_close_allowed(shell),
+        Err(TerminalCloseError::NotMirror)
+    ));
+    assert!(mirror_close_allowed(mirror).is_ok());
+    forget_mirror_term(mirror);
+    assert!(matches!(
+        mirror_close_allowed(mirror),
+        Err(TerminalCloseError::NotMirror)
+    ));
+}

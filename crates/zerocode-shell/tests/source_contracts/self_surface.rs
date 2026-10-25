@@ -139,10 +139,33 @@ fn a_command_that_cannot_be_taken_back_is_decided_for() {
     const WORDS: [&str; 8] = [
         "discard", "delete", "remove", "push", "reset", "close", "clear", "abort",
     ];
+    // Ending a session, a process or a program (t-75153, R7b): `end` as a
+    // word of the name — `end_…` or `…_end_…`, never inside `append`,
+    // `send`, `pending` or `render` — and `kill` and `terminate` as words,
+    // never inside `skill`.
+    let says = |name: &str, word: &str| {
+        name == word
+            || name.starts_with(&format!("{word}_"))
+            || name.ends_with(&format!("_{word}"))
+            || name.contains(&format!("_{word}_"))
+    };
+    let cannot_be_had_back = |name: &str| {
+        WORDS.iter().any(|word| name.contains(word))
+            || ["end", "kill", "terminate"]
+                .iter()
+                .any(|word| says(name, word))
+    };
+    // A switch that turns a question off is the person's to turn (t-74975's
+    // set_skip_… and set_confirm_close_pinned, t-75153's set_computer_confirm).
+    let turns_a_question_off = |name: &str| {
+        name.starts_with("set_") && (name.contains("skip_") || name.contains("_confirm"))
+    };
     let person = person_only_commands();
     // The ones the review found outside the wall (R1, t-73906): the person's
     // uncommitted work, their checkouts and projects, their browser's
-    // sign-ins, Computer Use's own permissions, a push.
+    // sign-ins, Computer Use's own permissions, a push — and (R7b, t-75153)
+    // the sessions the session manager ends and Computer Use's own
+    // confirmations.
     for name in [
         "discard_paths",
         "delete_untracked",
@@ -152,6 +175,9 @@ fn a_command_that_cannot_be_taken_back_is_decided_for() {
         "close_lane",
         "delete_browser_profile",
         "reset_computer_use_permissions",
+        "end_terminal_session",
+        "end_all_terminal_sessions",
+        "set_computer_confirm",
     ] {
         assert!(person.contains(&name.to_string()), "{name} is the person's");
     }
@@ -159,7 +185,7 @@ fn a_command_that_cannot_be_taken_back_is_decided_for() {
     let registered = registered_commands();
     let undecided: Vec<&String> = registered
         .iter()
-        .filter(|name| WORDS.iter().any(|word| name.contains(word)))
+        .filter(|name| cannot_be_had_back(name) || turns_a_question_off(name))
         .filter(|name| !person.contains(name) && !allowed.contains(name))
         .collect();
     assert!(
@@ -172,8 +198,8 @@ fn a_command_that_cannot_be_taken_back_is_decided_for() {
             "{name} is allowed but not registered"
         );
         assert!(
-            WORDS.iter().any(|word| name.contains(word)),
-            "{name} is allowed but its name says none of {WORDS:?}"
+            cannot_be_had_back(name) || turns_a_question_off(name),
+            "{name} is allowed but its name says none of {WORDS:?}, end, kill or terminate"
         );
         assert!(!person.contains(name), "{name} is on both lists");
     }

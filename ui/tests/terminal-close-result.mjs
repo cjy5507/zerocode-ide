@@ -2,6 +2,13 @@ import { openWindowTestPage } from "./window-boot.mjs";
 
 const frame = (page) => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
 
+/* A scene's wait with a deadline: one that never ends fails its scene instead
+ * of holding the suite (t-75153). */
+const within = (promise, what, ms = 10_000) => Promise.race([
+  promise,
+  new Promise((_, refuse) => setTimeout(() => refuse(new Error(`${what} did not end within ${ms} ms`)), ms)),
+]);
+
 async function scene(browser, origin, split) {
   const opened = await openWindowTestPage(browser, origin);
   await opened.page.evaluate(async (split) => {
@@ -179,7 +186,7 @@ export async function testTerminalCloseResult(browser, origin, ok) {
       mirrorPanes.set(`${scene.first}:codex`, scene.going);
       let opened = 0;
       window.__ANSWER__.open_mirror_term = () => { opened += 1; return ++window.__NEXT_TERM__; };
-      window.__ANSWER__.close_term = () => { throw { kind: "unconfirmed" }; };
+      window.__ANSWER__.close_mirror_term = () => { throw { kind: "unconfirmed" }; };
       await openMirrorPane(scene.first, "codex", "/tmp/terminal-close-synthetic.ansi");
       return opened;
     });
@@ -250,6 +257,7 @@ export async function testTerminalCloseResult(browser, origin, ok) {
       window.__LATE_REMOVE_CALLS__ = 0;
       window.__LATE_CLOSE_CALLS__ = [];
       window.__ANSWER__.open_mirror_term = () => new Promise((resolve) => { window.__LATE_MIRROR_REPLY__ = () => resolve(mirror); });
+      // The mirror is closed by the project's removal, through close_term.
       window.__ANSWER__.close_term = ({ term }) => {
         window.__LATE_CLOSE_CALLS__.push(term);
         if (term === mirror) throw { kind: "unconfirmed" };
@@ -290,4 +298,162 @@ export async function testTerminalCloseResult(browser, origin, ok) {
     });
     ok("a late mirror close refusal preserves its project catalog and retry tab", result.listed && result.removed === 0 && result.retryTab && result.closes === 1, JSON.stringify(result));
   } finally { await late.page.close(); }
+
+  /* The second wall, as the backend keeps it: `close_term` ends a shell only
+   * on the person's hand (t-74975); a mirror pane — a `tail -F` the window
+   * opened over a run's log — closes by `close_mirror_term` with no hand
+   * (t-75153, R7b). */
+  const wall = () => {
+    window.__WALL__ = { closed: [], refused: [], mirrors: [] };
+    window.__ANSWER__.close_term = ({ term }, options) => {
+      const hand = options?.headers?.["zerocode-hand"] ?? null;
+      if (hand !== "person") {
+        window.__WALL__.refused.push([term, hand]);
+        throw "close_term is the person's to run, and this call does not say the person made it";
+      }
+      window.__WALL__.closed.push(term);
+      return null;
+    };
+    window.__ANSWER__.close_mirror_term = ({ term }) => {
+      window.__WALL__.mirrors.push(term);
+      return null;
+    };
+  };
+
+  // A run's mirror replaced on the backend's word, no person's event in sight.
+  const replaced = await scene(browser, origin, true);
+  try {
+    const result = await within(replaced.page.evaluate(async (wall) => {
+      eval(`(${wall})`)();
+      const scene = window.__CLOSE_SCENE__;
+      mirrorPanes.set(`${scene.first}:codex`, scene.going);
+      let opened = 0;
+      window.__ANSWER__.open_mirror_term = () => { opened += 1; return ++window.__NEXT_TERM__; };
+      await openMirrorPane(scene.first, "codex", "/tmp/terminal-close-replaced.ansi");
+      const tab = tabs.find((one) => one.id === scene.tab);
+      return { opened, wall: window.__WALL__, oldGone: !paneLeaves(tab.layout).includes(scene.going) };
+    }, wall.toString()), "scene step 1");
+    ok("a mirror replaced with no person's event closes the old mirror and opens the new one",
+      result.opened === 1 && result.oldGone && result.wall.refused.length === 0
+        && result.wall.mirrors.length === 1 && result.wall.closed.length === 0,
+      JSON.stringify(result));
+  } finally { await replaced.page.close(); }
+
+  // The parent leaves while its mirror is still opening: the mirror goes with it.
+  const orphan = await scene(browser, origin, false);
+  try {
+    const result = await within(orphan.page.evaluate(async (wall) => {
+      eval(`(${wall})`)();
+      const scene = window.__CLOSE_SCENE__;
+      const mirror = ++window.__NEXT_TERM__;
+      let reply;
+      window.__ANSWER__.open_mirror_term = () => new Promise((done) => { reply = () => done(mirror); });
+      const opening = openMirrorPane(scene.first, "codex", "/tmp/terminal-close-orphan.ansi");
+      await new Promise((done) => setTimeout(done, 0));
+      // The person closes the parent while the mirror is still being born.
+      await closeTermAndView(scene.first, "test-parent-left", "person");
+      reply();
+      await opening;
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      return { wall: window.__WALL__, mirror, left: !!tabOfTerm(mirror) };
+    }, wall.toString()), "scene step 2");
+    ok("a mirror whose parent left closes with no person's event",
+      result.wall.mirrors.includes(result.mirror) && !result.left && result.wall.refused.length === 0,
+      JSON.stringify(result));
+  } finally { await orphan.page.close(); }
+
+  // 「다른 탭 닫기」 over a document and a terminal: the document is let go of
+  // first (an await), and the terminal still closes as the person's (R7b).
+  const run = await scene(browser, origin, false);
+  try {
+    await within(run.page.evaluate(async (wall) => {
+      eval(`(${wall})`)();
+      window.__ANSWER__.read_text_file = () => ({ text: "# run", version: "1:1" });
+      window.__ANSWER__.file_version = () => "1:1";
+      await openFile("/tmp/terminal-close-run.md");
+      const button = document.createElement("button");
+      button.id = "close-run-probe";
+      button.type = "button";
+      button.textContent = "Close run";
+      button.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:99999";
+      document.body.append(button);
+      const term = tabs.find((one) => one.id === window.__CLOSE_SCENE__.tab);
+      const doc = tabs.find((one) => one.id === "file:/tmp/terminal-close-run.md");
+      button.addEventListener("click", () => void closeTabRun([doc, term]));
+    }, wall.toString()), "scene step 3");
+    await run.page.click("#close-run-probe");
+    await run.page.waitForFunction(() => window.__WALL__.closed.length + window.__WALL__.refused.length > 0, null, { timeout: 5000 });
+    const result = await within(run.page.evaluate(() => ({
+      wall: window.__WALL__,
+      termOpen: tabs.some((one) => one.id === window.__CLOSE_SCENE__.tab),
+    })), "scene step 4");
+    ok("closing a run of tabs ends its terminal as the person after letting go of a document",
+      result.wall.closed.length === 1 && result.wall.refused.length === 0 && !result.termOpen, JSON.stringify(result));
+  } finally { await run.page.close(); }
+
+  // ⌘W held down: the key's auto-repeat is no new press, so one close only.
+  const held = await scene(browser, origin, false);
+  try {
+    const modifier = await within(held.page.evaluate(async (wall) => {
+      eval(`(${wall})`)();
+      await openTermTab({ placement: "tab", door: "terminal" });
+      // The harness ships ⌘W unbound; the person's default chord, back.
+      delete keybindingOverrides["tab.close"];
+      rebuildBound();
+      return usesCommandModifier ? "Meta" : "Control";
+    }, wall.toString()), "scene step 5");
+    const before = await within(held.page.evaluate(() => tabs.filter((one) => one.kind === "term").length), "scene step 6");
+    await held.page.keyboard.down(modifier);
+    await held.page.keyboard.down("w");
+    await held.page.keyboard.down("w");
+    await held.page.keyboard.down("w");
+    await held.page.keyboard.up("w");
+    await held.page.keyboard.up(modifier);
+    await frame(held.page);
+    const result = await within(held.page.evaluate((before) => ({
+      before,
+      after: tabs.filter((one) => one.kind === "term").length,
+      wall: window.__WALL__,
+    }), before), "scene step 7");
+    ok("a held close chord closes one terminal, not one per auto-repeat",
+      result.before >= 2 && result.after === result.before - 1 && result.wall.closed.length === 1, JSON.stringify(result));
+  } finally { await held.page.close(); }
+
+  // Enter or Space held on a focused destructive button: the first keydown
+  // presses it as the person; the repeats press nothing more (R7b).
+  const pressed = await scene(browser, origin, false);
+  try {
+    await within(pressed.page.evaluate(() => {
+      window.__PRESSES__ = [];
+      window.__ANSWER__.remove_project = (args, options) => {
+        window.__PRESSES__.push(options?.headers?.["zerocode-hand"] ?? null);
+        return null;
+      };
+      // Keys reach a focused control only where something owns the keyboard
+      // (a dialog, a settings pane); elsewhere they go to the terminal.
+      const owner = document.createElement("div");
+      owner.dataset.keyboardOwner = "";
+      owner.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:99999";
+      const button = document.createElement("button");
+      button.id = "held-danger";
+      button.type = "button";
+      button.textContent = "Remove probe";
+      owner.append(button);
+      document.body.append(owner);
+      button.addEventListener("click", () => void invoke("remove_project", { path: "/tmp/held-probe" }, { hand: handNow() }));
+    }), "scene step 8");
+    const hold = async (key) => {
+      await pressed.page.focus("#held-danger");
+      await pressed.page.keyboard.down(key);
+      await pressed.page.keyboard.down(key);
+      await pressed.page.keyboard.down(key);
+      await pressed.page.keyboard.up(key);
+      await frame(pressed.page);
+      return pressed.page.evaluate(() => window.__PRESSES__.splice(0));
+    };
+    const enter = await hold("Enter");
+    const space = await hold(" ");
+    ok("Enter held on a focused button presses it once, as the person", enter.join() === "person", JSON.stringify(enter));
+    ok("Space held on a focused button presses it once, as the person", space.join() === "person", JSON.stringify(space));
+  } finally { await pressed.page.close(); }
 }
