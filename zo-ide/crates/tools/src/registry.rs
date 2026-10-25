@@ -502,7 +502,7 @@ const DEFERRED_TOOL_HOOKS: &[(&str, &str)] = &[
     ("Artifact", "Publish/export HTML."),
     (
         "Computer",
-        "Desktop UI, apps, OCR.",
+        "Web, desktop apps, OCR.",
     ),
     (
         "REPL",
