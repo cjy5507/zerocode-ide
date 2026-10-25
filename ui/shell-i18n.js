@@ -361,6 +361,20 @@ const CATALOG = {
     "skills.homeUnavailable": "사용자 홈 경로를 찾을 수 없습니다."
 },
   en: {
+    "settings.connections.authUnknown": "Authentication not checked",
+    "settings.connections.compare": "Compare assignments",
+    "settings.connections.active": "Currently active",
+    "settings.connections.proposed": "Draft assignment",
+    "settings.connections.unsupportedHelp": "The judgment response format did not pass. Choose another model or check the response protocol.",
+    "settings.connections.stoppedHelp": "The server could not be reached. Check its running state and address, or choose another model.",
+    "settings.connections.kept": "The current judgment model stays active.",
+
+    "settings.connections.serviceSettings": "Jev service · legacy compatibility",
+    "settings.connections.legacyHint": "Register new servers in Model connections. Previous judgment settings can still be read and applied.",
+
+    "jev.question.inputPreview": "Input preview",
+    "jev.question.previewAbout": "Preview the input format only. No model is called. Editing a question keeps the selected judgment model.",
+
     "settings.connections.scenarioLocal": "Local judgment + external coding",
     "settings.connections.scenarioRemote": "External judgment",
     "settings.connections.scenarioShared": "Share the same model",
@@ -381,7 +395,6 @@ const CATALOG = {
     "settings.connections.referenceHint": "Use only this connection’s saved key reference. The key is never read into the screen.",
     "settings.connections.back": "Back to connections",
 
-    "settings.connections.navigation": "Model settings",
     "settings.connections.usage": "Model use",
     "settings.connections.add": "Add connection",
     "settings.connections.registrationHint": "Registering a connection keeps the current models. Choose each role in Model use.",
@@ -1465,7 +1478,6 @@ const CATALOG = {
     "settings.models.useDefaultFolder": "Use default",
     "settings.models.inspect": "Check model",
     "settings.models.installUse": "Install and use",
-    "settings.models.advancedConnection": "Jev and existing-server connection settings",
     "settings.models.inspecting": "Checking the model format and runtime… No model weights are being downloaded.",
     "settings.models.inspected": "Model checked. Install and use handles preparation and connection automatically.",
     "settings.models.preparing": "Downloading, preparing and checking the model. Settings change only after a valid response; decisions may pause briefly while local models switch.",
@@ -1911,7 +1923,7 @@ const CATALOG = {
     "jev.custom.hourlyLegend": "Hourly limit",
     "jev.custom.hourlyAbout": "How many requests this decision sends in an hour: {{hourlyLeast}} to {{hourlyMost}}. All decisions together send at most {{hourlyAll}} an hour, and the daily limit still applies on top.",
     "jev.custom.modelLegend": "Model that answers",
-    "jev.custom.model": "{{provider}} · {{model}} — follows the Decision model in settings.",
+    "jev.custom.model": "{{provider}} · {{model}} — follows Model use in settings.",
     "jev.custom.modelAbout": "The decision model chosen in settings answers.",
     "jev.custom.lineLegend": "Line the agent reads",
     "jev.custom.lineAbout": "When a decision that is on answers above its bar, the agent reads this line.",
@@ -7272,6 +7284,20 @@ const CATALOG = {
     "exit.back": "Restarted",
   },
   ja: {
+    "settings.connections.authUnknown": "認証状態は未確認",
+    "settings.connections.compare": "割り当ての比較",
+    "settings.connections.active": "現在使用中",
+    "settings.connections.proposed": "割り当ての下書き",
+    "settings.connections.unsupportedHelp": "判断の応答形式を満たしませんでした。別のモデルを選ぶか、応答方式を確認してください。",
+    "settings.connections.stoppedHelp": "サーバーに接続できませんでした。実行状態とアドレスを確認するか、別のモデルを選んでください。",
+    "settings.connections.kept": "現在の判断モデルを維持します。",
+
+    "settings.connections.serviceSettings": "Jev サービス · 以前の設定との互換性",
+    "settings.connections.legacyHint": "新しいサーバーはモデル接続で登録してください。以前の判断設定も引き続き読み込み、適用できます。",
+
+    "jev.question.inputPreview": "入力形式のプレビュー",
+    "jev.question.previewAbout": "入力形式のみを確認します。モデルは呼び出しません。質問の編集で判断モデルは変わりません。",
+
     "settings.connections.scenarioLocal": "ローカルで判断＋外部でコーディング",
     "settings.connections.scenarioRemote": "外部で判断",
     "settings.connections.scenarioShared": "同じモデルを共有",
@@ -7292,7 +7318,6 @@ const CATALOG = {
     "settings.connections.referenceHint": "この接続の保存済みキー参照のみ使用します。画面にキーを読み込みません。",
     "settings.connections.back": "接続一覧に戻る",
 
-    "settings.connections.navigation": "モデル設定",
     "settings.connections.usage": "モデルの用途",
     "settings.connections.add": "接続を追加",
     "settings.connections.registrationHint": "接続を登録しても使用中のモデルは変わりません。モデルの用途で選択してください。",
@@ -8376,7 +8401,6 @@ const CATALOG = {
     "settings.models.useDefaultFolder": "既定に戻す",
     "settings.models.inspect": "モデルを確認",
     "settings.models.installUse": "インストールして使用",
-    "settings.models.advancedConnection": "Jev・既存サーバーの接続設定",
     "settings.models.inspecting": "モデル形式と実行方法を確認中…重みファイルはまだダウンロードしていません。",
     "settings.models.inspected": "モデルを確認しました。「インストールして使用」で準備と接続を自動で進めます。",
     "settings.models.preparing": "ダウンロード・実行準備・応答確認を行います。設定は応答確認後に切り替えます。ローカルモデルの切り替え中は判断が一時停止する場合があります。",
@@ -8822,7 +8846,7 @@ const CATALOG = {
     "jev.custom.hourlyLegend": "1 時間あたりの上限",
     "jev.custom.hourlyAbout": "この意思決定が 1 時間に送る要求の数です。{{hourlyLeast}}〜{{hourlyMost}} 回で決め、すべての意思決定を合わせて 1 時間に {{hourlyAll}} 回、さらに 1 日の上限もそのままかかります。",
     "jev.custom.modelLegend": "答えるモデル",
-    "jev.custom.model": "{{provider}} · {{model}} — 設定の「判断モデル」に従います。",
+    "jev.custom.model": "{{provider}} · {{model}} — 設定の「モデルの用途」に従います。",
     "jev.custom.modelAbout": "設定で選んだ判断モデルが答えます。",
     "jev.custom.lineLegend": "エージェントが読む行",
     "jev.custom.lineAbout": "オンの意思決定の答えが基準を超えると、エージェントがこの行を読みます。",
@@ -14182,6 +14206,20 @@ const CATALOG = {
     "exit.back": "再起動しました",
   },
   zh: {
+    "settings.connections.authUnknown": "身份验证状态未确认",
+    "settings.connections.compare": "分配比较",
+    "settings.connections.active": "当前使用",
+    "settings.connections.proposed": "分配草稿",
+    "settings.connections.unsupportedHelp": "判断响应格式未通过。请选择其他模型或检查响应协议。",
+    "settings.connections.stoppedHelp": "无法连接服务器。请检查运行状态和地址，或选择其他模型。",
+    "settings.connections.kept": "保留当前判断模型。",
+
+    "settings.connections.serviceSettings": "Jev 服务 · 旧设置兼容",
+    "settings.connections.legacyHint": "请在模型连接中注册新服务器。仍可读取并应用以前的判断设置。",
+
+    "jev.question.inputPreview": "输入形式预览",
+    "jev.question.previewAbout": "仅预览输入形式，不调用模型。编辑问题不会更改所选判断模型。",
+
     "settings.connections.scenarioLocal": "本地判断＋外部编码",
     "settings.connections.scenarioRemote": "外部判断",
     "settings.connections.scenarioShared": "共用同一模型",
@@ -14202,7 +14240,6 @@ const CATALOG = {
     "settings.connections.referenceHint": "仅使用此连接的已保存密钥引用。密钥不会读入页面。",
     "settings.connections.back": "返回连接列表",
 
-    "settings.connections.navigation": "模型设置",
     "settings.connections.usage": "模型用途",
     "settings.connections.add": "添加连接",
     "settings.connections.registrationHint": "注册连接不会更改当前模型。请在模型用途中分别选择。",
@@ -15468,7 +15505,7 @@ const CATALOG = {
     "jev.custom.hourlyLegend": "每小时上限",
     "jev.custom.hourlyAbout": "此决策每小时发送的请求数，可设为 {{hourlyLeast}}~{{hourlyMost}} 次；所有决策合计每小时最多 {{hourlyAll}} 次，每日上限也照常适用。",
     "jev.custom.modelLegend": "回答的模型",
-    "jev.custom.model": "{{provider}} · {{model}} — 遵循设置中的“判断模型”。",
+    "jev.custom.model": "{{provider}} · {{model}} — 遵循设置中的“模型用途”。",
     "jev.custom.modelAbout": "由设置中选择的判断模型回答。",
     "jev.custom.lineLegend": "代理读取的一行",
     "jev.custom.lineAbout": "开启的决策的答案超过标准时，代理会读取这一行。",
@@ -15794,7 +15831,6 @@ const CATALOG = {
     "settings.models.useDefaultFolder": "使用默认位置",
     "settings.models.inspect": "检查模型",
     "settings.models.installUse": "安装并使用",
-    "settings.models.advancedConnection": "Jev与已有服务器连接设置",
     "settings.models.inspecting": "正在检查模型格式和运行方式…尚未下载模型权重。",
     "settings.models.inspected": "模型已检查。点击“安装并使用”即可自动准备环境并连接。",
     "settings.models.preparing": "正在下载、准备运行环境并检查响应。仅在确认响应后更改设置；切换本地模型时，判断功能可能暂时暂停。",
@@ -21091,6 +21127,20 @@ const CATALOG = {
     "exit.back": "已重新启动",
   },
   es: {
+    "settings.connections.authUnknown": "Autenticación sin comprobar",
+    "settings.connections.compare": "Comparar asignaciones",
+    "settings.connections.active": "En uso",
+    "settings.connections.proposed": "Asignación propuesta",
+    "settings.connections.unsupportedHelp": "El formato de juicio no pasó. Elija otro modelo o revise el protocolo de respuesta.",
+    "settings.connections.stoppedHelp": "No se pudo conectar al servidor. Revise su estado y dirección o elija otro modelo.",
+    "settings.connections.kept": "Se mantiene el modelo de juicio actual.",
+
+    "settings.connections.serviceSettings": "Servicio Jev · compatibilidad con ajustes anteriores",
+    "settings.connections.legacyHint": "Registre los servidores nuevos en Conexiones de modelos. Los ajustes anteriores de juicio se pueden seguir leyendo y aplicando.",
+
+    "jev.question.inputPreview": "Vista previa de entrada",
+    "jev.question.previewAbout": "Solo se muestra el formato de entrada. No se llama a ningún modelo. Editar una pregunta mantiene el modelo de juicio elegido.",
+
     "settings.connections.scenarioLocal": "Juicio local y programación externa",
     "settings.connections.scenarioRemote": "Juicio externo",
     "settings.connections.scenarioShared": "Compartir el mismo modelo",
@@ -21111,7 +21161,6 @@ const CATALOG = {
     "settings.connections.referenceHint": "Se usa solo la referencia a la clave guardada de esta conexión. La clave nunca se lee en pantalla.",
     "settings.connections.back": "Volver a conexiones",
 
-    "settings.connections.navigation": "Configuración de modelos",
     "settings.connections.usage": "Uso de modelos",
     "settings.connections.add": "Añadir conexión",
     "settings.connections.registrationHint": "Registrar una conexión mantiene los modelos actuales. Elija cada función en Uso de modelos.",
@@ -22381,7 +22430,7 @@ const CATALOG = {
     "jev.custom.hourlyLegend": "Límite por hora",
     "jev.custom.hourlyAbout": "Cuántas solicitudes envía esta decisión en una hora: de {{hourlyLeast}} a {{hourlyMost}}. Entre todas las decisiones se envían como mucho {{hourlyAll}} por hora, y el límite diario sigue aplicándose encima.",
     "jev.custom.modelLegend": "Modelo que responde",
-    "jev.custom.model": "{{provider}} · {{model}} — sigue el «Modelo de decisión» de los ajustes.",
+    "jev.custom.model": "{{provider}} · {{model}} — sigue «Uso de modelos» en los ajustes.",
     "jev.custom.modelAbout": "Responde el modelo de decisión elegido en los ajustes.",
     "jev.custom.lineLegend": "Línea que lee el agente",
     "jev.custom.lineAbout": "Cuando una decisión activa responde por encima de su umbral, el agente lee esta línea.",
@@ -22707,7 +22756,6 @@ const CATALOG = {
     "settings.models.useDefaultFolder": "Usar valor predeterminado",
     "settings.models.inspect": "Comprobar modelo",
     "settings.models.installUse": "Instalar y usar",
-    "settings.models.advancedConnection": "Ajustes de Jev y servidores existentes",
     "settings.models.inspecting": "Comprobando el formato y el entorno… Aún no se descargan los pesos del modelo.",
     "settings.models.inspected": "Modelo comprobado. Instalar y usar prepara el entorno y la conexión automáticamente.",
     "settings.models.preparing": "Descargando, preparando y comprobando el modelo. Los ajustes cambian tras una respuesta válida; las decisiones pueden pausarse al cambiar de modelo local.",

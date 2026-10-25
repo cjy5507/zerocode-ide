@@ -1009,8 +1009,9 @@ function showSettingsPane(pane) {
     void refreshCliLogins();
   }
   if (pane === "judgment-models" && arriving) void modelConnectionsController.refresh();
-  if (pane === "api-routers" && arriving) {
-    void refreshApiRouters();
+  if (pane === "api-routers") {
+    modelConnectionsController.paintView("catalog");
+    if (arriving) void refreshApiRouters();
   }
   if (pane === "onboarding" && arriving) {
     paintSettingsOnboarding();
@@ -7021,7 +7022,8 @@ async function refreshTypeSafe() {
       if (managedJudgmentController.visible()) managedJudgmentController.render();
     });
   }
-  if (managedJudgmentController.visible() && !request.managed) {
+  const connectionsVisible = !settingsView.hidden && settingsPane === "api-routers" && !document.hidden;
+  if ((managedJudgmentController.visible() || connectionsVisible) && !request.managed) {
     managedJudgmentController.init();
     managedJudgmentController.loading = true;
     request.managed = settled(invoke("managed_judgment_status"));
@@ -7212,6 +7214,7 @@ function onRouterPresetChange(chosenId) {
     if (urlInput) urlInput.value = "";
     if (keyInput) keyInput.value = "";
   }
+  modelConnectionsController.preset(found);
 }
 
 function routerAccountRow(row) {

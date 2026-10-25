@@ -51465,10 +51465,14 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 
 /* Shared connections use the settings pane's width, including narrow split panes. */
 .connections-usage { margin-block: var(--space-5); }
-.connection-roles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-5); margin-block: var(--space-4); }
-.connection-roles[data-connection-roles="judgment"] { grid-template-columns: minmax(0, 1fr); }
+.connection-roles { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); margin-block: var(--space-4); }
 .connection-role { min-width: 0; padding-block: var(--space-4); border-block-start: var(--rule-width) solid var(--edge-rule); }
 .connection-role > h3 { margin-block: 0 var(--space-2); }
+.connection-role-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: var(--space-3); }
+.connection-role-heading p { margin: 0; }
+.connection-comparison { width: 100%; table-layout: fixed; border-collapse: collapse; margin-block: var(--space-4); font: var(--type-copy-13); }
+.connection-comparison caption { text-align: start; padding-block-end: var(--space-2); }
+.connection-comparison th, .connection-comparison td { text-align: start; vertical-align: top; padding: var(--space-2); border-block-end: var(--rule-width) solid var(--edge-rule); word-break: keep-all; overflow-wrap: break-word; }
 .connection-field { display: grid; gap: var(--space-2); margin-block: var(--space-4); }
 .connection-field .settings-input { width: 100%; min-width: 0; }
 .connection-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding-block: var(--space-4); border-block-end: var(--rule-width) solid var(--edge-rule); }
@@ -51480,9 +51484,22 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .connection-delete-note { flex-basis: 100%; min-width: 0; }
 .connection-delete-note .settings-action-row, .connection-scenarios, .connection-formats { flex-wrap: wrap; }
 .connection-role .settings-badge { white-space: normal; }
+.jev-input-preview-question { border-block-start: var(--rule-width) solid var(--edge-rule); padding-block: var(--space-3); }
+.jev-input-preview-question h3 { font: var(--type-label-13); margin-block: 0 var(--space-2); }
+.jev-input-preview-question p { white-space: pre-wrap; word-break: keep-all; overflow-wrap: break-word; }
+.jev-input-preview-question ol { padding-inline-start: var(--space-5); }
 .connection-model { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border-block-start: var(--rule-width) solid var(--edge-rule); }
 .connection-model > span { overflow-wrap: break-word; min-width: 0; }
 .connection-row .agent-row-name { white-space: normal; word-break: keep-all; }
+.connection-heading { display: flex; justify-content: space-between; align-items: start; flex-wrap: wrap; gap: var(--space-4); }
+.connection-heading > div { flex: 1 1 var(--field-md); min-width: 0; }
+.connection-editor > .settings-subhead { padding: 0; margin-block-end: var(--space-5); }
+.connection-catalog > .settings-subhead, .connection-catalog > .agent-list { padding-inline: 0; }
+.connection-catalog .connection-row { display: grid; grid-template-columns: var(--space-6) minmax(0, 1fr) auto; align-items: start; }
+.connection-icon { display: grid; place-items: center; width: var(--space-6); height: var(--space-6); box-shadow: var(--shadow-border); border-radius: var(--radius-md); color: var(--ink-mist); }
+.connection-badges { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block-start: var(--space-2); }
+.connection-badges .settings-badge { margin: 0; white-space: normal; }
+.connection-catalog .connection-models, .connection-catalog .connection-delete-note { grid-column: 2 / -1; }
 @container settings-view (max-width: 640px) {
   .settings-rail { width: 100%; max-height: calc(var(--space-6) * 5); flex-basis: 100%; border-right: 0; border-bottom: var(--rule-width) solid var(--edge-rule); }
   .settings-rail-top { padding-block: var(--space-2); }
@@ -51497,5 +51514,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   [data-connection-view] .agent-list { padding-inline: 0; }
   .connection-roles { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
   .connection-row { align-items: start; }
+  .connection-catalog .connection-row { grid-template-columns: var(--space-6) minmax(0, 1fr); }
+  .connection-catalog .connection-row > .settings-action-row { grid-column: 2; justify-content: start; }
   .connection-role .btn { white-space: normal; }
 }

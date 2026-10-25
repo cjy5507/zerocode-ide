@@ -3320,7 +3320,7 @@ function jevCustomModelLine() {
   say(line, () => {
     const provider = typesafeState?.provider;
     return provider
-      ? t("jev.custom.model", "{{provider}} · {{model}} — 설정의 「판단 모델」을 따릅니다.",
+      ? t("jev.custom.model", "{{provider}} · {{model}} — 설정의 「모델 사용」을 따릅니다.",
         { provider: judgmentProviderController.providerName(provider), model: provider.model })
       : t("jev.custom.modelAbout", "설정에서 고른 판단 모델이 답합니다.");
   });
@@ -3408,6 +3408,15 @@ function jevCustomFormOf(form, draft, rules) {
       jevText("jev.custom.lineAbout", "켠 결정의 답이 기준을 넘으면 에이전트가 이 줄을 읽습니다.", "p", "jev-custom-about-line"), line),
     jevNode("details", "jev-custom-preview", jevText("jev.custom.preview", "보내는 내용 미리보기", "summary"), questions));
   jevCustomAnswerFields(form, draft.answer, rules);
+  const preview = jevInputPreview(form, () => {
+    const draft = jevCustomDraftOf(form);
+    const answer = draft.answer;
+    const criteria = answer.kind === "choice" ? answer.options.map(option => [option.name, option.means])
+      : answer.kind === "score" ? answer.levels.map((level, index) => [String(index), level])
+        : [[t("jev.custom.yesMeans", "「예」의 뜻"), answer.yes], [t("jev.custom.noMeans", "「아니오」의 뜻"), answer.no]];
+    return [{ type: answer.kind, instructions: draft.question, criteria }];
+  });
+  answer.after(preview);
   jevCustomPointFields(form, draft.at, draft.reads, rules);
   jevCustomFieldsShown(form);
 }
@@ -3640,6 +3649,7 @@ function jevCustomOptionPressed(event) {
 function jevCustomCheckSoon(after = JEV_CUSTOM_CHECK_MS) {
   const drawer = jevCustomDrawer;
   if (!drawer) return;
+  paintJevInputPreview(el("jev-custom-form"));
   drawer.wanted += 1;
   const wanted = drawer.wanted;
   el("jev-custom-form").setAttribute("aria-busy", "true");
@@ -3897,6 +3907,41 @@ function jevQuestionSame(a, b) {
   return JSON.stringify(ordered(a)) === JSON.stringify(ordered(b));
 }
 
+/* This preview reads the form only. It never asks a model or writes a draft. */
+function jevInputPreview(form, read) {
+  let preview = form.querySelector("[data-jev-input-preview]");
+  if (!preview) {
+    preview = jevNode("details", "jev-custom-preview jev-input-preview",
+      jevText("jev.question.inputPreview", "입력 형태 미리보기", "summary"),
+      jevText("jev.question.previewAbout", "입력 형태만 미리 봅니다. 모델을 호출하지 않습니다. 문항 수정은 판단 모델을 바꾸지 않습니다.", "p", "jev-custom-about-line"),
+      jevNode("div", "jev-input-preview-body"));
+    preview.dataset.jevInputPreview = "";
+    preview.addEventListener("toggle", () => paintJevInputPreview(form));
+  }
+  preview.readQuestions = read;
+  return preview;
+}
+
+function paintJevInputPreview(form) {
+  const preview = form?.querySelector("[data-jev-input-preview]");
+  if (!preview?.open) return;
+  const body = preview.querySelector(".jev-input-preview-body");
+  const questions = preview.readQuestions();
+  if (!questions) {
+    body.replaceChildren(jevText("jev.question.invalidContent", "질문·보기의 내용이나 길이를 확인하세요.", "p", "jev-builtin-status is-error"));
+    return;
+  }
+  const words = value => typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  body.replaceChildren(...questions.map(question => {
+    const entries = question.criteria.map(([key, value]) => jevNode("li", "", jevNode("strong", "", document.createTextNode(key)),
+      jevNode("p", "jev-custom-about-line", document.createTextNode(words(value) ?? ""))));
+    const group = jevNode("section", "jev-input-preview-question", jevNode("h3", "", document.createTextNode(jevQuestionType(question.type))),
+      jevNode("p", "", document.createTextNode(words(question.instructions) ?? "")), jevNode("ol", "", ...entries));
+    group.dataset.previewType = question.type;
+    return group;
+  }));
+}
+
 function jevQuestionValue(label, value, cap) {
   const area = document.createElement("textarea");
   area.className = "jev-custom-area"; area.rows = 3;
@@ -3978,6 +4023,18 @@ function buildJevBuiltinQuestions() {
   const legacy = el("jev-builtin-legacy");
   legacy.hidden = !definition.canEditPrompt || (!definition.dynamic && !el("jev-builtin-question").value && !el("jev-builtin-criteria").value);
   legacy.open = !legacy.hidden;
+  const form = el("jev-builtin-form");
+  const preview = jevInputPreview(form, () => {
+    const questions = [];
+    for (const row of jevBuiltinEditor?.fields ?? []) {
+      const instructions = row.instructions.read();
+      const criteria = row.criteria.map(field => [field.key, field.read()]);
+      if (!instructions.valid || criteria.some(([, field]) => !field.valid)) return null;
+      questions.push({ type: row.question.type, instructions: instructions.value, criteria: criteria.map(([key, field]) => [key, field.value]) });
+    }
+    return questions;
+  });
+  legacy.after(preview);
 }
 
 function jevBuiltinQuestionDraft() {
@@ -4028,6 +4085,7 @@ function jevBuiltinDraft() {
 function paintJevBuiltinEditor() {
   const editor = jevBuiltinEditor;
   if (!editor) return;
+  paintJevInputPreview(el("jev-builtin-form"));
   const ready = Boolean(editor.definition);
   const draft = jevBuiltinDraft();
   const prior = editor.definition?.saved ?? {};
@@ -4059,6 +4117,8 @@ function paintJevBuiltinEditor() {
 async function openJevBuiltinEditor(id, opener) {
   const editor = { id, opener, definition: null, busy: false, reset: false, mode: "", opened: "", warned: false, defaultName: jevBuiltinDefaultName(id) };
   jevBuiltinEditor = editor;
+  const preview = el("jev-builtin-form").querySelector("[data-jev-input-preview]");
+  if (preview) preview.open = false;
   for (const name of ["name", "question", "criteria"]) el(`jev-builtin-${name}`).value = "";
   el("jev-builtin-mode").replaceChildren();
   el("jev-builtin-questions").replaceChildren();

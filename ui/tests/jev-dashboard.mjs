@@ -3223,6 +3223,13 @@ export async function testJevCustomDecisions(browser, origin, ok) {
     await options.nth(0).locator('[name="meaning"]').fill("코드 변경 필요");
     await options.nth(1).locator('[name="option_name"]').fill("조사");
     await options.nth(1).locator('[name="meaning"]').fill("원인 파악 필요");
+    const choicePreview = page.locator('#jev-custom-form [data-jev-input-preview]');
+    ok("custom Choice offers an input preview apart from the sent payload", await choicePreview.count() === 1);
+    if (await choicePreview.count()) {
+      await choicePreview.locator("summary").click();
+      await page.waitForFunction(() => document.querySelector('#jev-custom-form [data-jev-input-preview]')?.textContent.includes("코드 변경 필요"));
+      ok("custom Choice preview contains the draft option and criterion", (await choicePreview.textContent()).includes("수정") && (await choicePreview.textContent()).includes("코드 변경 필요"));
+    }
     await page.locator('[data-jev-custom-add="choice"]').click();
     ok("custom Choice can add and remove an option", await options.count() === 3);
     await options.nth(2).locator('[data-jev-custom-remove]').click();
@@ -3253,6 +3260,19 @@ export async function testJevCustomDecisions(browser, origin, ok) {
 export async function testJevBuiltinDecisions(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
+    const previewPicture = async kind => {
+      const folder = process.env.JEV_BUILTIN_SHOTS;
+      if (!folder) return;
+      await mkdir(folder, { recursive: true });
+      await setQualityTheme(page, "dark");
+      for (const width of kind === "score" ? [320, 768, 1440] : [768]) {
+        await page.setViewportSize({ width, height: 1069 });
+        await settlePaint(page);
+        await page.locator('#jev-builtin-form [data-jev-input-preview]').scrollIntoViewIfNeeded();
+        await page.screenshot({ path: join(folder, `preview-${kind}-dark-${width}.png`), animations: "disabled" });
+      }
+      await page.setViewportSize({ width: 1280, height: 900 });
+    };
     await page.evaluate(jevDashboardFixture);
     await page.locator("#nav-jev").click();
     await page.waitForSelector('#jev-view [data-jev-dash-row="recall"]');
@@ -3280,6 +3300,18 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     await page.locator("#jev-builtin-name").fill("바꾼 위키 판단");
     await page.locator('[data-jev-question-instructions="n*"]').fill("현재 요청을 직접 뒷받침하는 내용인가?");
     await page.locator('[data-jev-question-criterion="0"]').fill("명시적인 근거가 있는 내용을 우선한다.");
+    const inputPreview = page.locator('#jev-builtin-form [data-jev-input-preview]');
+    ok("built-in editing offers a model-free input preview", await inputPreview.count() === 1);
+    if (await inputPreview.count()) {
+      const calls = await page.evaluate(() => window.__JEV__.builtin.calls.length);
+      const modelCalls = await page.evaluate(() => ["check_model_connection", "select_model_connection", "preflight_judgment_provider", "check_typesafe_key"].map(command => window.__COUNTS__[command] ?? 0));
+      await inputPreview.locator("summary").click();
+      await page.waitForFunction(() => document.querySelector('#jev-builtin-form [data-jev-input-preview]')?.textContent.includes("명시적인 근거가 있는 내용을 우선한다."));
+      ok("Score preview uses the draft question and ordered criteria", (await inputPreview.textContent()).includes("현재 요청을 직접 뒷받침하는 내용인가?") && (await inputPreview.textContent()).includes("명시적인 근거가 있는 내용을 우선한다."));
+      ok("preview neither saves nor calls a model", await page.evaluate(() => window.__JEV__.builtin.calls.length) === calls);
+      ok("input preview sends no model IPC", JSON.stringify(await page.evaluate(() => ["check_model_connection", "select_model_connection", "preflight_judgment_provider", "check_typesafe_key"].map(command => window.__COUNTS__[command] ?? 0))) === JSON.stringify(modelCalls));
+      await previewPicture("score");
+    }
     await save();
     let saved = await page.evaluate(() => window.__JEV__.builtin.saved.recall);
     ok("editing a built-in question saves the wording and starts recording", saved.questions["n*"].instructions === "현재 요청을 직접 뒷받침하는 내용인가?"
@@ -3333,6 +3365,10 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
       && await page.evaluate(() => !window.__JEV__.builtin.saved.recall));
     await page.locator("#jev-builtin-cancel").click();
     await open("command_guard");
+    await page.locator('#jev-builtin-form [data-jev-input-preview] > summary').click();
+    await page.waitForSelector('[data-preview-type="noul"]');
+    ok("Noul preview separates both criteria", (await page.locator('[data-jev-input-preview]').textContent()).includes("원본을 잃는다"));
+    await previewPicture("noul");
     const irreversible = page.locator('[data-jev-question="irreversible"]');
     ok("both command-guard Nouls expose separate yes and no meanings", await page.locator("[data-jev-question]").count() === 2
       && await irreversible.locator('[data-jev-question-criterion="true"]').inputValue() === "원본을 잃는다"
@@ -3343,6 +3379,10 @@ export async function testJevBuiltinDecisions(browser, origin, ok) {
     ok("editing one Noul criterion leaves its neighboring question on defaults", noul.questions.irreversible.criteria.true === "복원할 방법이 없는 경우"
       && !Object.hasOwn(noul.questions, "outside") && noul.question === null && noul.criteria === null);
     await open("placement");
+    await page.locator('#jev-builtin-form [data-jev-input-preview] > summary').click();
+    await page.waitForSelector('[data-preview-type="choice"]');
+    ok("Choice preview preserves option keys and criteria", (await page.locator('[data-jev-input-preview]').textContent()).includes("tab"));
+    await previewPicture("choice");
     const choice = page.locator('[data-jev-question="placement"]');
     const tab = choice.locator('[data-jev-question-criterion="tab"]');
     ok("Choice shows its keys and preserves a structured option description", (await choice.innerText()).includes("Choice")

@@ -3738,7 +3738,7 @@
               </button>
               <button class="settings-rail-item" type="button" data-pane="judgment-models">
                 <svg class="icon" aria-hidden="true"><use href="#i-bot"></use></svg>
-                <span data-i18n="settings.judgment.title">판단 모델</span>
+                <span data-i18n="settings.connections.usage">모델 사용</span>
               </button>
               <button class="settings-rail-item" type="button" data-pane="orchestration">
                 <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>
@@ -4160,20 +4160,17 @@
              away, and the one thing to finish on a card is the only filled
              button on it. -->
         <section class="settings-pane" data-pane="api-routers" hidden>
-        <header class="settings-section-head">
+        <header class="settings-section-head connection-heading" id="connection-catalog-heading">
+          <div>
           <h2 class="settings-section-title" data-i18n="settings.apiRouters.title">모델 연결</h2>
           <p class="settings-section-desc" data-i18n="settings.apiRouters.about">
             로컬·외부 서버를 한곳에서 연결하고 코딩과 판단에 사용할 모델을 각각 고릅니다.
           </p>
+          </div>
+          <button type="button" class="btn btn--primary" id="connections-add" data-i18n="settings.connections.add">연결 추가</button>
         </header>
-
-        <nav class="settings-action-row connection-navigation" aria-label="모델 설정" data-i18n-aria="settings.connections.navigation">
-          <button type="button" class="btn" data-connection-nav="catalog" aria-pressed="true" data-i18n="settings.apiRouters.title">모델 연결</button>
-          <button type="button" class="btn" data-connection-nav="usage" aria-pressed="false" data-i18n="settings.connections.usage">모델 사용</button>
-          <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
-        </nav>
         <!-- Connected routers list -->
-        <div class="settings-card" data-connection-view="catalog">
+        <div class="connection-catalog" data-connection-view="catalog">
           <div class="settings-subhead settings-subhead--acts">
             <div>
               <h3 class="settings-subhead-title">
@@ -4184,35 +4181,22 @@
                 주소와 인증은 연결에 한 번 등록합니다. 같은 연결을 코딩과 판단에서 함께 사용할 수 있습니다.
               </p>
             </div>
-            <button type="button" class="btn btn--primary" id="connections-add" data-i18n="settings.connections.add">연결 추가</button>
           </div>
           <div class="agent-list" id="router-provider-list"></div>
           <p class="settings-hint" id="router-provider-note"></p>
           <p class="settings-hint" data-i18n="settings.connections.registrationHint">연결을 등록해도 현재 사용 모델은 바뀌지 않습니다. 모델 사용에서 용도에 맞게 선택하세요.</p>
+          <div class="settings-action-row connection-navigation">
+            <button type="button" class="btn" data-connection-nav="usage" data-i18n="settings.connections.usage">모델 사용</button>
+            <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
+          </div>
         </div>
 
-        <section class="connections-usage" data-connection-view="usage" hidden aria-labelledby="connection-usage-title">
-          <h3 class="settings-subhead-title" id="connection-usage-title" data-i18n="settings.connections.usesTitle">용도별 모델</h3>
-          <div class="settings-action-row connection-scenarios">
-            <button type="button" class="btn" data-connection-scenario="local" data-i18n="settings.connections.scenarioLocal">로컬 판단 + 외부 코딩</button>
-            <button type="button" class="btn" data-connection-scenario="remote" data-i18n="settings.connections.scenarioRemote">외부 판단</button>
-            <button type="button" class="btn" data-connection-scenario="shared" data-i18n="settings.connections.scenarioShared">같은 모델 공유</button>
-          </div>
-          <p class="settings-hint" id="connection-scenario-status" role="status"></p>
-          <div id="connection-comparison"></div>
-          <div class="connection-roles" data-connection-roles="all"></div>
-          <p class="settings-hint" data-i18n="settings.connections.boundary">같은 연결을 공유해도 판단 문항·기준과 기능별 기록·적용 설정은 유지합니다. 형식 확인은 판단 정확도 검증이 아닙니다.</p>
-          <p class="settings-hint" id="connections-sync-status" role="status" aria-live="polite"></p>
-          <div class="settings-action-row">
-            <button type="button" class="btn" id="connections-managed" data-i18n="settings.connections.managed">앱 관리 로컬 모델 · Jev</button>
-          </div>
-        </section>
 
         <!-- Add or configure router -->
-        <div class="settings-card" id="router-card" data-connection-view="add" hidden>
+        <div class="connection-editor" id="router-card" data-connection-view="add" hidden>
           <div class="settings-subhead settings-subhead--acts">
             <div>
-              <h3 class="settings-subhead-title" data-i18n="settings.connections.add">연결 추가</h3>
+              <h2 class="settings-section-title" id="connection-form-title" data-i18n="settings.connections.add">연결 추가</h2>
               <p class="settings-subhead-desc" id="connection-registration-note" data-i18n="settings.connections.registrationHint">연결을 등록해도 현재 사용 모델은 바뀌지 않습니다. 모델 사용에서 용도에 맞게 선택하세요.</p>
             </div>
             <span class="settings-state" id="router-card-state" data-state="unchecked"
@@ -4224,7 +4208,7 @@
             <li data-i18n="settings.apiRouters.modelsTitle">사용할 모델 선택</li>
             <li data-i18n="settings.connections.usage">모델 사용</li>
           </ol>
-          <label class="settings-field" for="connection-location">
+          <label class="settings-field" data-field="md" for="connection-location">
             <span class="settings-label" data-i18n="settings.connections.location">연결 위치</span>
             <select class="settings-input" id="connection-location">
               <option value="remote" data-i18n="settings.connections.locationRemote">외부 서버</option>
@@ -4235,7 +4219,6 @@
           </label>
           <div id="connection-service-action" hidden>
             <p class="settings-hint" data-i18n="settings.connections.serviceHint">앱 관리 모델과 Jev는 기존 관리 화면에서 설정합니다. 실행 중인 서버는 주소로 연결하세요.</p>
-            <button type="button" class="btn" id="connection-open-service" data-i18n="settings.connections.configure">설정</button>
           </div>
           <div id="connection-server-fields">
           <label class="settings-field" data-field="md" for="router-preset-select">
@@ -4265,7 +4248,7 @@
                    autocomplete="off" spellcheck="false" placeholder="https://openrouter.ai/api/v1" />
           </label>
 
-          <label class="settings-field" for="connection-auth">
+          <label class="settings-field" data-field="md" for="connection-auth">
             <span class="settings-label" data-i18n="settings.connections.authentication">인증</span>
             <select class="settings-input" id="connection-auth">
               <option value="new" data-i18n="settings.connections.newKey">키 저장 후 참조</option>
@@ -4336,12 +4319,11 @@
           </div>
 
           <!-- One thing to finish here, and it is the only filled button. -->
+          </div>
           <div class="settings-action-row">
             <button class="btn" id="router-test-btn" type="button" data-i18n="settings.apiRouters.testConnection">연결 시험</button>
             <button class="btn btn--primary" id="router-save-btn" type="button" disabled data-i18n="settings.apiRouters.save">저장</button>
-          </div>
-          </div>
-          <div class="settings-action-row">
+            <button type="button" class="btn" id="connection-open-service" hidden data-i18n="settings.connections.configure">설정</button>
             <button class="btn" type="button" data-connection-nav="catalog" data-i18n="settings.connections.back">연결 목록으로</button>
           </div>
         </div>
@@ -4355,14 +4337,30 @@
         <header class="settings-section-head">
           <div class="settings-subhead settings-subhead--acts">
             <div>
-              <h2 class="settings-section-title" data-i18n="settings.judgment.title">판단 모델</h2>
+              <h2 class="settings-section-title" data-i18n="settings.connections.usage">모델 사용</h2>
               <p class="settings-section-desc" data-i18n="settings.judgment.about">
                 선택·점수·참/거짓을 반환하는 모델을 고릅니다. 등록한 로컬·외부 연결을 재사용하며, 일반 모델도 판단 응답 형식이 확인되면 사용할 수 있습니다.
               </p>
             </div>
           </div>
         </header>
-        <div class="connection-roles" data-connection-roles="judgment"></div>
+                <section class="connections-usage" data-connection-view="usage" aria-labelledby="connection-usage-title">
+          <h3 class="settings-subhead-title" id="connection-usage-title" data-i18n="settings.connections.usesTitle">용도별 모델</h3>
+          <div class="settings-action-row connection-scenarios">
+            <button type="button" class="btn" data-connection-scenario="local" data-i18n="settings.connections.scenarioLocal">로컬 판단 + 외부 코딩</button>
+            <button type="button" class="btn" data-connection-scenario="remote" data-i18n="settings.connections.scenarioRemote">외부 판단</button>
+            <button type="button" class="btn" data-connection-scenario="shared" data-i18n="settings.connections.scenarioShared">같은 모델 공유</button>
+          </div>
+          <p class="settings-hint" id="connection-scenario-status" role="status"></p>
+          <div id="connection-comparison"></div>
+          <div class="connection-roles" data-connection-roles="all"></div>
+          <p class="settings-hint" data-i18n="settings.connections.boundary">같은 연결을 공유해도 판단 문항·기준과 기능별 기록·적용 설정은 유지합니다. 형식 확인은 판단 정확도 검증이 아닙니다.</p>
+          <p class="settings-hint" id="connections-sync-status" role="status" aria-live="polite"></p>
+          <div class="settings-action-row">
+            <button type="button" class="btn" id="connections-managed" data-i18n="settings.connections.managed">앱 관리 로컬 모델 · Jev</button>
+          </div>
+        </section>
+
         <div class="settings-card" id="typesafe-card">
           <section class="judgment-current-status" id="judgment-current-status" aria-labelledby="judgment-current-title">
             <div class="judgment-current-heading">
@@ -4535,7 +4533,11 @@
               <p class="settings-status" id="managed-judgment-status" role="status" aria-live="polite"></p>
             </section>
           <details class="settings-fold judgment-connection-settings" id="judgment-connection-settings">
-            <summary data-i18n="settings.models.advancedConnection">Jev · 기존 서버 연결 설정</summary>
+            <summary data-i18n="settings.connections.serviceSettings">Jev 서비스 · 이전 설정 호환</summary>
+            <div class="settings-notice">
+            <p class="settings-hint" data-i18n="settings.connections.legacyHint">새 서버는 모델 연결에서 등록하세요. 이전 판단 설정은 그대로 읽고 적용할 수 있습니다.</p>
+            <button type="button" class="btn" data-connection-nav="catalog" data-i18n="settings.apiRouters.title">모델 연결</button>
+            </div>
           <section id="judgment-provider-editor" aria-label="판단 모델 연결">
             <p class="settings-row-desc" id="judgment-provider-draft" role="status" aria-live="polite"></p>
             <label class="settings-field" data-field="md" for="judgment-provider-kind">
