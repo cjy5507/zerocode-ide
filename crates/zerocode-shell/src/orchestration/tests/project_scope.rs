@@ -234,6 +234,23 @@ fn logged(needles: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// A crossing line for `run`, as the boundary writes it, from a pane that is
+/// none of the calling test's: what another test's run of the same id left in
+/// the shared log.
+fn a_crossing_line_left_by_another_pane(run: &str) {
+    let root = super::super::BLACKBOX
+        .get()
+        .expect("the bench window's data root");
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: project boundary — `check` from terminal 1 (another-test/leader), \
+             working in an other project, into {run} of the project at an other project (made \
+             there): refused (met 1 time(s))"
+        ),
+    );
+}
+
 /// The boundary turned on for as long as this lives, and off again after —
 /// written where the window reads it, the way a person turns it on.
 struct BoundaryOn;
@@ -856,19 +873,33 @@ fn a_worker_is_not_opened_in_another_projects_checkout() {
 /// on, and nothing is written down about them.
 #[test]
 fn a_pane_in_another_worktree_of_the_same_repository_is_the_same_project() {
-    const A: u32 = 65_280;
-    const A_BESIDE: u32 = 65_281;
+    one_project_in_two_folders(65_280, 65_281, 65_290, false);
+}
+
+/// The same scene with the window log already holding a crossing line for the
+/// very run id this test is given, left by a pane that is none of its own — as
+/// another boundary test writes to the one log, and run ids repeat from one
+/// ledger to the next (t-74271). What a test reads is what its own panes wrote.
+#[test]
+fn a_crossing_line_of_another_pane_in_the_log_does_not_fail_the_same_project_scene() {
+    one_project_in_two_folders(65_282, 65_283, 65_291, true);
+}
+
+fn one_project_in_two_folders(a: u32, a_beside: u32, port: u32, foreign_line_in_log: bool) {
     let _window = the_window();
     let _turn = one_beat_at_a_time();
     let disk = Projects::lay_out();
-    let host = Placed::new(65_290);
+    let host = Placed::new(port);
     let leader = zerocode_core::agent_teams::LEADER_PANE;
-    let team_a = format!("team-project-same-a-{A}");
-    let team_beside = format!("team-project-same-beside-{A_BESIDE}");
-    a_leader(&host, &team_a, A, Some(&disk.a));
-    a_leader(&host, &team_beside, A_BESIDE, Some(&disk.a_beside));
+    let team_a = format!("team-project-same-a-{a}");
+    let team_beside = format!("team-project-same-beside-{a_beside}");
+    a_leader(&host, &team_a, a, Some(&disk.a));
+    a_leader(&host, &team_beside, a_beside, Some(&disk.a_beside));
     let run_id = a_run_from(&host, &team_a, "one-project");
     let _on = BoundaryOn::turn();
+    if foreign_line_in_log {
+        a_crossing_line_left_by_another_pane(&run_id);
+    }
 
     let took = from_leader(
         &host,
@@ -882,11 +913,11 @@ fn a_pane_in_another_worktree_of_the_same_repository_is_the_same_project() {
         &format!("send --run {run_id} --to run:{run_id} --type status --body landed"),
     );
     assert_eq!(sent.exit_code, 0, "{}", sent.stderr);
-    super::super::pane_turn_ended(A_BESIDE, 50, false, clock());
+    super::super::pane_turn_ended(a_beside, 50, false, clock());
     super::super::tick(&host, &[], clock());
     super::super::tick(&host, &[], clock());
     assert_eq!(
-        host.pointed_at(A_BESIDE),
+        host.pointed_at(a_beside),
         1,
         "a worktree of the run's own repository was not pointed at its mail"
     );
@@ -897,9 +928,9 @@ fn a_pane_in_another_worktree_of_the_same_repository_is_the_same_project() {
         "a verb within one project was written down as a crossing"
     );
 
-    super::super::pane_turn_began(A_BESIDE, clock());
-    crate::agent_teams::forget_term(A);
-    crate::agent_teams::forget_term(A_BESIDE);
+    super::super::pane_turn_began(a_beside, clock());
+    crate::agent_teams::forget_term(a);
+    crate::agent_teams::forget_term(a_beside);
 }
 
 /// Two runs of one project still write to each other with the boundary on:
