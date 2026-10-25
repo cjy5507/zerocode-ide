@@ -10,8 +10,57 @@
  * states, the permission modal, status-bar numbers. Unknown frame types flow
  * past silently (제품 원칙 5). */
 
-const { invoke, Channel: TauriChannel } = window.__TAURI__.core;
+const { invoke: invokeBackend, Channel: TauriChannel } = window.__TAURI__.core;
 const { listen: listenToBackend } = window.__TAURI__.event;
+
+/* Whose hand made a command (t-74927). The window runs a person-only command
+ * (`PERSON_ONLY_COMMANDS`, self_surface.rs) only when the page says the person
+ * made it, so every call says so in `zerocode-hand`:
+ *
+ *  - `agent` from an agent's press in this window (shell-self-act.js) on —
+ *    its click, what the click fired, and whatever runs after it, however
+ *    long it awaited — until the person's own next move;
+ *  - `person` once the person moved: a pointer, a touch or a key whose event
+ *    the browser marks `isTrusted`, made outside a press — an event a press
+ *    fires while it runs is the press's, whatever the browser marks it;
+ *  - `program`, asked for by name, for the one road no hand starts and the
+ *    window still runs a person-only command on: the update clock's quiet
+ *    download.
+ *
+ * No clock decides: a press does not hold the person's next click, and an
+ * agent's handler is not let through by waiting. */
+const HAND_HEADER = "zerocode-hand";
+const PERSON_MOVES = [
+  "pointerdown", "pointerup", "mousedown", "mouseup", "click", "auxclick", "dblclick", "contextmenu",
+  "touchstart", "touchend", "keydown", "keyup",
+];
+let pageHand = "person";
+let agentPressing = false;
+
+for (const kind of PERSON_MOVES) {
+  window.addEventListener(kind, (event) => {
+    if (event.isTrusted && !agentPressing) pageHand = "person";
+  }, true);
+}
+
+/* An agent's press: `press` runs as the agent's, and every command after it is
+ * the agent's until the person moves. */
+function asAgentPress(press) {
+  pageHand = "agent";
+  agentPressing = true;
+  try {
+    return press();
+  } finally {
+    agentPressing = false;
+  }
+}
+
+/* Tauri's `invoke`, saying whose hand made the call. `options.hand` names the
+ * `program` road; every other caller leaves it to the page. */
+const invoke = (command, args, options) => {
+  const { hand = pageHand, ...rest } = options ?? {};
+  return invokeBackend(command, args, { ...rest, headers: { ...rest.headers, [HAND_HEADER]: hand } });
+};
 
 /* The backend event this window is answering right now, by name — what the
  * black box says moved the stage when a program did (t-69526: a worker's pane

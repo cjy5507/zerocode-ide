@@ -280,3 +280,83 @@ fn required_sharing_reads_the_saved_policy_and_rechecks_each_provider_step() {
     assert!(current.contains("held.share.still_holds(Reach"));
     assert!(!current.contains(".gate("));
 }
+
+/// The second wall reads whose hand made a call, never a clock (t-74927): the
+/// gate reads the header the page's one `invoke` writes, under the same name
+/// on both sides; the page presses as the agent's hand; and the road that
+/// names its own hand is the update clock's alone.
+#[test]
+fn the_second_wall_reads_the_hand_the_page_says_and_no_clock() {
+    let road = code_only(ROAD);
+    let gate = block_after(&road, "pub(crate) fn person_only_gate<");
+    assert!(
+        gate.contains("hand_said(invoke.message.headers())"),
+        "the gate reads the call's hand off its headers"
+    );
+    for clock in ["Instant", "hold_until", "HELD_UNTIL", "GRACE"] {
+        assert!(!road.contains(clock), "the road keeps a clock: {clock}");
+    }
+    let header = ROAD
+        .split("pub(crate) const HAND_HEADER: &str = \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the road names its hand header");
+    let boot = ui_file("shell-boot.js");
+    assert!(
+        boot.contains(&format!("const HAND_HEADER = \"{header}\";")),
+        "shell-boot.js writes the header the gate reads ({header})"
+    );
+    let invoke = block_after(&boot, "const invoke = (command, args, options) => {");
+    assert!(
+        invoke.contains("[HAND_HEADER]: hand") && invoke.contains("invokeBackend("),
+        "the page's one invoke says the hand on every call"
+    );
+    assert!(
+        boot.contains(
+            "const { invoke: invokeBackend, Channel: TauriChannel } = window.__TAURI__.core;"
+        ),
+        "Tauri's own invoke is reached only through the page's"
+    );
+    let page = ui_file("shell-self-act.js");
+    assert!(
+        block_after(&page, "function selfActDo(request) {")
+            .contains("asAgentPress(() => selfActPress(node, request))"),
+        "a press runs as the agent's hand"
+    );
+    assert!(
+        !block_after(&page, "function selfActDo(request) {").contains("node.click()"),
+        "selfActDo presses only inside asAgentPress"
+    );
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui");
+    for entry in std::fs::read_dir(&ui).expect("ui reads") {
+        let path = entry.expect("ui entry").path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if !name.ends_with(".js") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        if name != "shell-boot.js" {
+            assert!(
+                !text.contains("__TAURI__.core") && !text.contains("__TAURI_INTERNALS__.invoke"),
+                "{name} reaches Tauri's invoke without saying the hand"
+            );
+        }
+        for line in text.lines().filter(|line| line.contains("invoke(")) {
+            let names_hand = line.contains("{ hand") || line.contains("hand:");
+            assert!(
+                !names_hand || name == "shell-update.js",
+                "{name} names its own hand: {line}"
+            );
+        }
+    }
+    let update = ui_file("shell-update.js");
+    assert!(
+        update
+            .contains("runUpdateDownload(knock === UPDATE_KNOCK.clock ? \"program\" : undefined)"),
+        "only the update clock's knock takes the program road"
+    );
+}

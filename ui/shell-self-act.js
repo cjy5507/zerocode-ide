@@ -15,7 +15,9 @@
  * value and its input event, a scroll — so no pointer moves, no focus moves
  * and no key is sent: the person keeps the window while an agent works in it.
  * The person's own keys are told apart by `isTrusted`; a press is dropped if
- * the person typed in that control after its facts were read. */
+ * the person typed in that control after its facts were read. A press runs as
+ * the agent's hand (shell-boot.js `asAgentPress`), so a person-only command it
+ * leads to says `agent` and the window refuses it (t-74927). */
 
 /* Looks the page still answers presses for, newest last: an older look's
  * index names nothing any more. */
@@ -234,20 +236,26 @@ function selfActDo(request) {
   const typed = selfActTyped.get(node);
   if (typed !== undefined && typed > read) return { done: false };
   selfActFactsRead.delete(`${request.lookId}:${request.id}`);
-  let done = false;
-  if (request.act === "click") {
-    node.click();
-    done = true;
-  } else if (request.act === "setValue") {
-    done = selfActFill(node, String(request.value ?? ""));
-    if (!done) {
-      return { error: { code: "value_not_settable", message: "that control of ZeroCode's window takes no typed value; click it instead" } };
-    }
-  } else if (request.act === "scroll") {
-    done = selfActScroll(node, request.direction, request.pages);
+  // The press and every command it leads to are the agent's (shell-boot.js
+  // `asAgentPress`): the window refuses a person-only one by that word.
+  const done = asAgentPress(() => selfActPress(node, request));
+  if (done === null) {
+    return { error: { code: "value_not_settable", message: "that control of ZeroCode's window takes no typed value; click it instead" } };
   }
   if (done) selfActOutline(node);
   return { done };
+}
+
+/* The press itself: whether it was made, or null for a value the control
+ * does not take. */
+function selfActPress(node, request) {
+  if (request.act === "click") {
+    node.click();
+    return true;
+  }
+  if (request.act === "setValue") return selfActFill(node, String(request.value ?? "")) || null;
+  if (request.act === "scroll") return selfActScroll(node, request.direction, request.pages);
+  return false;
 }
 
 function selfActAnswer(request) {

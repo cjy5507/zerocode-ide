@@ -95,7 +95,9 @@ async function askUpdateCheck(knock) {
   try {
     const report = await invoke("update_check", { knock });
     absorbUpdateReport(report);
-    if (report?.next === "download") await runUpdateDownload();
+    // The clock's knock is no hand's: its quiet download is the program road
+    // (shell-boot.js `invoke`), the window's only one.
+    if (report?.next === "download") await runUpdateDownload(knock === UPDATE_KNOCK.clock ? "program" : undefined);
     else if (report?.next === "announce") raiseUpdateAvailableToast();
     return report;
   } catch (error) {
@@ -109,11 +111,12 @@ async function askUpdateCheck(knock) {
 
 /* 「내려받기」 — download and verify, then stage beside the bundle: two
  * commands, one road, whichever policy asked for it. Progress arrives on
- * `update:progress` while the first one runs. */
-async function runUpdateDownload() {
+ * `update:progress` while the first one runs. `hand` is `program` for the
+ * clock's quiet download; a press leaves it to the page (t-74927). */
+async function runUpdateDownload(hand) {
   try {
-    if (updatePhase().phase === "available") absorbUpdateReport(await invoke("update_download"));
-    if (updatePhase().phase === "downloaded") absorbUpdateReport(await invoke("update_install"));
+    if (updatePhase().phase === "available") absorbUpdateReport(await invoke("update_download", undefined, { hand }));
+    if (updatePhase().phase === "downloaded") absorbUpdateReport(await invoke("update_install", undefined, { hand }));
   } catch (error) {
     showError(error);
   }
