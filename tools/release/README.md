@@ -171,6 +171,70 @@ ends red or refused keeps it for its next turn. `tests/test_coord_receipt.py`
 pins the reading; `tests/test_lane.py Receipt` pins the lane with stubs and
 `ReceiptOnGit` the same on a real repository.
 
+## The quick check before a batch (2026-10-25, t-73910)
+
+10-25's batch gate went round four times on reds a read of the text finds, each
+seen only when the gate reached it: a bundled skill's text with no release line
+(l78d, about 7 min in), a tools seed behind the Rust kinds it copies (l78d, about
+21 min), a launch road past the shell's literal count (l78g, about 13 min), a
+call at load the settings test's fake backend has no case for (l78h, about 90
+min). Before a batch head is gated — and a worker before it hands over —
+
+    python3 tools/release/prebatch.py --base main --head <batch head>
+
+reads the paths the two trees differ in and runs only the checks that read one
+of them: `skill-release`, `backend-count` (a count assert over a crate's
+`shipped_backend()`, with the test's own number), `settings-ipc`, and each
+`tools-test` line of the justfile whose test names a changed file, run in a
+checkout of the head made for it and removed after, four at once (over 30 s it
+is said unchecked: the gate's to run). `test_lane.py` and the computer bench's
+`test_bench.py` ran past that on every 10-25 head, so they run only with
+`--slow` and are otherwise said unchecked; the default run stays under 10 s. It prints `RC <check>=<rc> (<s>s)` with reasons,
+`unchecked <path>` for a path no check reads, and `RC prebatch=<rc>`; it exits 1
+on a red and 2 when a revision cannot be read. It runs no cargo and stands in for
+no gate: a green says only that these checks found nothing, and every recipe the
+gate owes still runs. `tests/test_prebatch.py` pins each rule.
+
+## Re-gating the same head from a receipt (`gate_receipt.py`, 2026-10-25, t-73910)
+
+The core's gate reuse (`orchestration::gate_reuse`) answers hit only for the same
+head, tree and declared inputs gated before under the same live coordinator: a
+batch rebuilt with any other member is always a miss
+(`a_different_head_with_the_same_tree_misses`). It pays where the same head goes
+up again — a batch whose only red was a measurement job, or a job withdrawn and
+put back. On 10-25 none of the last 300 build-line jobs used it, and the four
+l78 heads (c, f, g, h) were all different, so it would have saved 0 minutes that
+day.
+
+A build-line job reaches it only through the window's pinned launcher: called
+directly, `gate_receipt.py` answers `miss` ("use the independently pinned
+external launcher"). The shape of a job entry (not yet run on the line — every
+`<…>` is the coordinator's):
+
+    zerocode gate-bootstrap \
+      --launcher <pinned gate_launcher.py> --launcher-sha256 <sha256> \
+      --python <python> --python-sha256 <sha256> --stdlib <stdlib> --stdlib-sha256 <sha256> \
+      --gate-job '<JobIntent JSON, core gate_reuse::JobIntent>' \
+      -- --policy <manifest> --policy-sha256 <sha256> --repo <gate checkout> \
+      -- verify --repo <gate checkout> --gate gate-root --task <t-…> --attempt <dispatch|none> \
+         --scope deterministic --metadata <the first run's metadata.json> --log <its gate.log> \
+         -- just test
+
+`run` in place of `verify` (with `--output <folder>` for the metadata and log)
+executes and records the first time. A `measurement` or `nondeterministic` scope
+never hits: window measurements and benches always run. A hit still leaves the
+four mandatory checks (`native`, `windows`, `flake-judgment`, `publish`) owed.
+
+The policy is not pinned (`gate-policy-pin`), by the coordinator's decision
+(m-74459). Pinning would let a deterministic job on a head gated before skip as
+a hit, with "reused — original record r" kept in the ledger. Against it: every
+record misses after a coordinator generation change
+(`a_completed_receipt_misses_after_a_coordinator_generation_change`) or a change
+of the pinned policy bytes; without the pinned launcher and manifest every job
+misses (fail closed — an unrun check is never called passed); and each job pays
+the fingerprint (`timings.fingerprintMs` in the answer). The gain stays unknown
+until heads are gated again.
+
 ## The warm targets
 
 Each gate and build keeps its own cargo target under
