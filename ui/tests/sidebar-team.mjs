@@ -75,9 +75,10 @@ const TEAM_EXTRA_CHECKOUTS = Object.freeze(["/r/wt-a1-red", "/r/old-1", "/r/old-
  * opens on); `seated: false` stands the same panes with no coordinator in any seat. Every helper it leaves on the
  * page waits for the window's own beat to have painted. Used by `sidebar-team-perf.mjs` against a base tree too,
  * so it touches nothing the team view added. */
-export async function standTeamScene(page, { layout = null, seated = true, now = Date.now() } = {}) {
+export async function standTeamScene(page, { layout = null, seated = true, now = Date.now(), runs = TEAM_RUNS, workers = TEAM_WORKERS,
+  extras = TEAM_EXTRA_CHECKOUTS, project = "r", taskIds = false } = {}) {
   await page.waitForFunction(() => projectsRead);
-  await page.evaluate(async ({ runs, workers, extras, layout, seated, now }) => {
+  await page.evaluate(async ({ runs, workers, extras, layout, seated, now, project, taskIds }) => {
     if (typeof setLocale === "function") setLocale("ko", { persist: false });
     const tell = (name, payload) => {
       for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
@@ -120,8 +121,12 @@ export async function standTeamScene(page, { layout = null, seated = true, now =
     const paths = ["/r/main", ...runs.filter((one) => one.path !== "/r/main").map((one) => one.path),
       ...workers.map((one) => one.path), ...extras];
     const landingOf = (path) => workers.find((one) => one.path === path)?.landing ?? null;
+    // `taskIds`: the catalog names each checkout's task the way the backend does — by the id its folder carries, so a
+    // copy cut beside a worker's own (`<folder>-verify`) names the same task.
+    const taskOf = (path) => (taskIds
+      ? workers.find((one) => path === one.path || path.startsWith(`${one.path}-`))?.task_id : undefined);
     window.__ANSWER__.project_catalog = () => [{
-      name: "r", path: "/r",
+      name: project, path: "/r",
       external: { visibility: "show", legacy: false, authoritative: true, shown: 0, hidden: [], prompt: false, inbox: [] },
       worktrees: paths.map((path, at) => {
         const landing = landingOf(path);
@@ -129,6 +134,7 @@ export async function standTeamScene(page, { layout = null, seated = true, now =
           path, branch: path === "/r/main" ? "main" : `wt/${path.slice(3)}`, is_main: path === "/r/main",
           active: path === window.__ACTIVE__, is_folder: false, ownership: "zerocode-managed", external_hidden: false,
           last_activity_ms: at,
+          ...(taskOf(path) ? { task_id: taskOf(path) } : {}),
           ...(landing ? { landing: { compare_ref: "origin/main", dirty: false, ignored: false, detached: false,
             far_behind: false, ...landing } } : {}),
         };
@@ -156,6 +162,7 @@ export async function standTeamScene(page, { layout = null, seated = true, now =
         run: one.run, worker: one.worker, agent: one.agent, term: one.term, checkout: one.path, task: one.task,
         task_id: one.task_id, pane: one.pane, model: "claude-sonnet-5-5",
         ...ledger,
+        ...(one.root ?? {}),
         ...(wall ? { wall: { ...wall, stands_until_ms: now + wallFor } } : {}),
         ...(one.status ? { last_status: { message_id: `m-${one.worker}-1`, created_ms: now - one.status.minutes * 60_000,
           line: one.status.line } } : {}),
@@ -190,7 +197,7 @@ export async function standTeamScene(page, { layout = null, seated = true, now =
     await window.__LEDGER_MOVED__();
     // The first stand reads once more after the seats arrived; one more beat settles what that read painted.
     await window.__LEDGER_MOVED__();
-  }, { runs: TEAM_RUNS, workers: TEAM_WORKERS, extras: TEAM_EXTRA_CHECKOUTS, layout, seated, now });
+  }, { runs, workers, extras, layout, seated, now, project, taskIds });
 }
 
 /* What a person reads in the sidebar, by kind of row — read in the page (`window.__ROWS__`). */
@@ -220,6 +227,8 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
           question: node.querySelector(".team-chip")?.classList.contains("is-question") ?? false,
           pane: text(".team-pane"),
           now: text(".team-now"),
+          nowIdle: node.querySelector(".team-now")?.classList.contains("is-idle") ?? false,
+          nowTip: node.querySelector(".team-now")?.dataset.tip ?? "",
           dot: [...node.querySelector(".team-dot").classList].find((name) => name.startsWith("is-"))?.slice(3) ?? "",
           spinning: /\bwt-spin-\d+\b/.test(node.querySelector(".team-dot").className),
           moving: node.classList.contains("is-working"),
@@ -276,6 +285,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       ago2: t("sidebar.team.ago", "{{time}} 전", { time: agoWord(now - 2 * 60_000, Date.now()) }),
       checkFailed: t("board.desk.landCheckFailed", "점검 실패 (rc {{rc}})", { rc: 2 }),
       pane5: t("sidebar.team.pane", "판 {{pane}}", { pane: "%5" }),
+      nowNone: t("sidebar.team.nowNone", "아직 보낸 말 없음"),
     }), now);
     const cells = (worker) => read[worker]?.cells.join(",");
     ok(
@@ -308,10 +318,11 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       JSON.stringify(moving),
     );
     ok(
-      "the line under a worker is the first sentence of its last status — at most thirty characters — and when it was said; a worker that said nothing has no line; the title is the task and the pane is the ledger's",
-      read["w-a1"].now === `세 흐름 측정 결과 읽는 중. · ${words.ago2}` &&
-        [...read["w-b2"].now.split(" · ")[0]].length === 30 && read["w-b2"].now.split(" · ")[0].endsWith("…") &&
-        read["w-b1"].now === "" && read["w-a1"].title === "대화 화면 2단계" && read["w-a1"].pane === words.pane5 &&
+      "the line under a worker is the first sentence of its last status — at most thirty characters — and the clock is the line's tip, not its words; a worker that said nothing keeps the line, dimmed, saying so; the title is the task and the pane is the ledger's",
+      read["w-a1"].now === "세 흐름 측정 결과 읽는 중." && read["w-a1"].nowTip.endsWith(words.ago2) &&
+        [...read["w-b2"].now].length === 30 && read["w-b2"].now.endsWith("…") &&
+        read["w-b1"].now === words.nowNone && read["w-b1"].nowIdle && !read["w-a1"].nowIdle &&
+        read["w-a1"].title === "대화 화면 2단계" && read["w-a1"].pane === words.pane5 &&
         !read["w-a1"].title.includes("wt/"),
       JSON.stringify(read),
     );
@@ -452,7 +463,7 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
     ok(
       "a quiet beat writes no row; an account switch moves the pane number on the same row and writes only it; a status letter writes only its worker's row",
       beats.quiet === 0 && beats.moved.written === 1 && beats.moved.same && beats.moved.pane === beats.moved.expected &&
-        beats.letter.written === 1 && beats.letter.now === `초록 시험 돌리는 중 · ${beats.justNow}`,
+        beats.letter.written === 1 && beats.letter.now === "초록 시험 돌리는 중",
       JSON.stringify(beats),
     );
 
@@ -548,12 +559,12 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       JSON.stringify(unconfirmed),
     );
     ok(
-      "a worker at work keeps its row on landed work — its pane's hook working here, or the ledger alone saying it lives elsewhere — drawn working with every step at 착지",
+      "a worker at work keeps its row on landed work — its pane's hook working here, or the ledger alone saying it lives elsewhere — drawn working with every step at 착지, standing where the ledger's order puts it (after the older row, not lifted over it)",
       unconfirmed.here?.dot === "working" && unconfirmed.here.cells.join(",") === "on,past,past,on,on,on" &&
         unconfirmed.here.step === words.land && unconfirmed.elsewhere?.dot === "working" &&
         unconfirmed.elsewhere.cells.join(",") === "on,past,past,on,on,on" &&
-        unconfirmed.order.indexOf("w:run-team-c/w-c5") < unconfirmed.order.indexOf("w:run-team-c/w-c1") &&
-        unconfirmed.order.indexOf("w:run-team-c/w-c6") < unconfirmed.order.indexOf("w:run-team-c/w-c1"),
+        unconfirmed.order.indexOf("w:run-team-c/w-c5") > unconfirmed.order.indexOf("w:run-team-c/w-c1") &&
+        unconfirmed.order.indexOf("w:run-team-c/w-c6") > unconfirmed.order.indexOf("w:run-team-c/w-c5"),
       JSON.stringify(unconfirmed),
     );
 
@@ -597,18 +608,18 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       return { branches, team, restored };
     });
     ok(
-      "「브랜치 보기」 brings the branch list back — thirteen rows — and stores the choice; the list's switch brings the team back the same way; a restart's snapshot restores it",
+      "「브랜치 보기」 brings the branch list back — twelve rows, the worker's red copy folded under its row — and stores the choice; the list's switch brings the team back the same way; a restart's snapshot restores it",
       toggled.branches.layout === "branches" && toggled.branches.written?.layout === "branches" &&
-        toggled.branches.written?.groupBy === "repo" && toggled.branches.rows.branches === 13 &&
+        toggled.branches.written?.groupBy === "repo" && toggled.branches.rows.branches === 12 &&
         toggled.branches.teamHidden && toggled.branches.switchShown && toggled.branches.teamNodes === 0 &&
         toggled.team.layout === "team" && toggled.team.written?.layout === "team" && toggled.team.rows.team === 9 &&
-        toggled.restored.layout === "branches" && toggled.restored.rows.branches === 13,
+        toggled.restored.layout === "branches" && toggled.restored.rows.branches === 12,
       JSON.stringify(toggled),
     );
     /* The numbers the report quotes: the same scene, read as the branch list and as the team. */
     ok(
       "the numbers: rows a person reads, team against branches, and the sidebar's elements",
-      toggled.team.rows.coordinators + toggled.team.rows.workers === 8 && toggled.branches.rows.branches === 13,
+      toggled.team.rows.coordinators + toggled.team.rows.workers === 8 && toggled.branches.rows.branches === 12,
       JSON.stringify({ team: toggled.team.rows, branches: toggled.branches.rows }),
     );
 
@@ -649,11 +660,313 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
     });
     ok(
       "with no coordinator sitting the team reads nothing — the seats are asked once a beat, by the navigator as before — and the branch list stands as it was",
-      quiet.seatAsks === 3 && quiet.reads === 0 && !quiet.stood && quiet.rows.branches === 13 && !quiet.switchShown &&
+      quiet.seatAsks === 3 && quiet.reads === 0 && !quiet.stood && quiet.rows.branches === 12 && !quiet.switchShown &&
         quiet.teamNodes === 0,
       JSON.stringify(quiet),
     );
   } finally {
     await idle.page.close().catch(() => {});
+  }
+}
+
+/* Workers on one piece of work, as one row (t-60498; the person, 10-16 10:4x: 「같은 업무인데 여러 행·내용 바뀌어 헷갈림」,
+ * and 10-25 20:5x: 「추천안대로 진행해」 over the sketch p-94e57b887379e021).
+ *
+ * One coordinator, six workers: four on tasks that share a root task («대화 화면 개선»), one on a task that is its own
+ * root, one with no root at all.
+ *   ① workers whose tasks share a root stand under one head row with a count and a one-line tally, closed to begin
+ *      with; a worker alone on its root, and one with none, stay plain rows;
+ *   ② opened, the family's rows keep the ledger's order whatever their states do; a question lifts the family
+ *      among the rows — the head shows 「질문 N」 — and never a row inside it;
+ *   ③ the line under a worker is always there, holds one height before and after the worker speaks, and a minute
+ *      passing writes no word and no row; a sentence that changed is lit for 1.6 s;
+ *   ④ eight beats of a ledger, a minute apart, counted: the words that changed, the rows that moved, the rows that
+ *      changed height — against the same eight beats of the sketch's base commit (b428c18bc): 59 words, 9 moves,
+ *      2 height changes;
+ *   ⑤ every new word reads in the four other catalogues. */
+export const FAMILY_RUN = Object.freeze({ run: "run-fam", name: "묶음 런", generation: 1, term: 9601, path: "/r/main", agent: "claude",
+  model: "claude-opus-5-5", mail: 0, news: 0, landing: 0, batched: 0 });
+const FAMILY_ROOT = Object.freeze({ root_id: "t-9100", root_title: "대화 화면 개선" });
+export const FAMILY_WORKERS = Object.freeze([
+  { run: "run-fam", worker: "w-f1", term: 9611, path: "/r/wt-f1", pane: "%5", agent: "claude", hook: "working",
+    task: "입력창 고치기", task_id: "t-9101", root: FAMILY_ROOT, landing: { state: "unlanded", ahead: 2 },
+    status: { minutes: 2, line: "입력창 높이를 재는 중. 표로 정리한다" }, ledger: { progress: { stage: "working" } } },
+  { run: "run-fam", worker: "w-f2", term: 9612, path: "/r/wt-f2", pane: "%6", agent: "claude", hook: "working",
+    task: "목록 줄 맞추기", task_id: "t-9102", root: FAMILY_ROOT, landing: { state: "unlanded", ahead: 1 },
+    status: null, ledger: { progress: { stage: "working" } } },
+  { run: "run-fam", worker: "w-f3", term: 9613, path: "/r/wt-f3", pane: "%7", agent: "claude", hook: "done",
+    task: "문구 정리", task_id: "t-9103", root: FAMILY_ROOT, landing: { state: "unlanded", ahead: 3 },
+    status: { minutes: 6, line: "넘김 끝내고 코디 검증을 기다리는 중" },
+    ledger: { reported: true, handed_in: "f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3", progress: { stage: "report_only" } } },
+  { run: "run-fam", worker: "w-f4", term: 9614, path: "/r/wt-f4", pane: "%8", agent: "claude", hook: "working",
+    task: "색 고치기", task_id: "t-9104", root: FAMILY_ROOT, landing: { state: "unlanded", ahead: 1 },
+    status: null, ledger: { progress: { stage: "working" } } },
+  { run: "run-fam", worker: "w-g1", term: 9621, path: "/r/wt-g1", pane: "%9", agent: "claude", hook: "working",
+    task: "알림 소리 고르기", task_id: "t-9200", root: { root_id: "t-9200", root_title: "알림 소리 고르기" },
+    landing: { state: "unlanded", ahead: 1 },
+    status: { minutes: 3, line: "소리 후보 셋을 비교하는 중" }, ledger: { progress: { stage: "working" } } },
+  { run: "run-fam", worker: "w-h1", term: 9622, path: "/r/wt-h1", pane: "%4", agent: "claude", hook: "working",
+    task: "설정 문구 고치기", task_id: "t-9300", landing: { state: "unlanded", ahead: 1 },
+    status: null, ledger: { progress: { stage: "working" } } },
+]);
+const FAMILY_COPIES = Object.freeze(["/r/wt-f1-verify", "/r/wt-f1-windows", "/r/wt-g1-red", "/r/old-1"]);
+
+/* One worker's state moved, through the window's own roads: its pane's hook and the ledger's row. */
+const FAMILY_MOVES = `
+  window.__MOVE__ = (worker, state) => {
+    const row = window.__LEDGER__.find((one) => one.worker === worker);
+    row.asking = state === "asking";
+    row.reported = state === "waiting";
+    row.handed_in = state === "waiting" ? "ab".repeat(20) : null;
+    row.progress = { stage: state === "waiting" ? "report_only" : "working" };
+    const hook = state === "working" ? "working" : "done";
+    for (const handler of window.__LISTENERS__["hook:agent"] ?? []) {
+      handler({ payload: { term: row.term, state: hook, agent: row.agent, session: "s-" + row.term, model: "claude-sonnet-5-5" } });
+    }
+  };
+  window.__ORDER__ = () => [...document.querySelectorAll("#sidebar-team > .team-row")].map((node) => node.dataset.teamKey);
+`;
+
+/* Eight beats of a ledger, a minute apart — what a person's eye would have to follow in the team view: the rows whose
+ * words changed, the rows that moved, the rows that changed height. `open` stands the family open first. The same
+ * script reads the base commit's window (no family rows there), so the before and the after are one measurement
+ * (`sidebar-team-perf.mjs`). */
+const FAMILY_BEATS = [
+  `move("w-f4", "asking"); say("w-f1", "표를 정리해 보고서에 넣는 중. 거의 끝");`,
+  `say("w-f2", "목록 줄 높이를 맞추는 중");`,
+  `move("w-f3", "working"); say("w-f3", "검증 지적 두 건을 고치는 중");`,
+  `say("w-f1", "시험을 돌리는 중. 3분쯤 걸린다");`,
+  `move("w-f4", "working"); say("w-f4", "답을 받아 색을 바꾸는 중");`,
+  `say("w-f2", "목록 시험 통과. 넘길 준비"); say("w-h1", "문구 후보를 고르는 중");`,
+  `move("w-f3", "waiting"); say("w-f3", "고쳐서 다시 넘김");`,
+  `say("w-f1", "입력창 단계 끝. 넘김을 쓰는 중");`,
+];
+
+export async function playTeamBeats(page, { open = false } = {}) {
+  await page.evaluate(FAMILY_MOVES);
+  await page.evaluate(async (open) => {
+    if (open) {
+      for (const node of document.querySelectorAll("#sidebar-team .team-group")) node.click();
+      await window.__TEAM_SETTLED__();
+    }
+    const real = Date.now.bind(Date);
+    window.__SKEW__ = 0;
+    Date.now = () => real() + window.__SKEW__;
+    window.__SNAP__ = () => [...document.querySelectorAll("#sidebar-team > .team-row")]
+      .filter((node) => !node.hidden && node.getClientRects().length > 0)
+      .map((node) => ({
+        key: node.dataset.teamKey,
+        text: [...node.querySelectorAll("*")].filter((part) => part.children.length === 0 && !part.hidden && part.textContent.trim() !== "")
+          .map((part) => part.textContent.trim()).join("|"),
+        height: Math.round(node.getBoundingClientRect().height * 10) / 10,
+      }));
+  }, open);
+  const total = { words: 0, clock: 0, moved: 0, tall: 0, rows: 0, dressed: 0, built: 0, beats: [] };
+  let before = await page.evaluate(() => window.__SNAP__());
+  total.rows = before.length;
+  const counts = () => page.evaluate(() => window.__TEAM__("sidebarTeamCounts", { dressed: 0, built: 0 }));
+  const from = await counts();
+  for (let at = 0; at < FAMILY_BEATS.length; at += 1) {
+    await page.evaluate(async (body) => {
+      window.__SKEW__ += 60_000;
+      const now = Date.now();
+      const say = (worker, line) => {
+        const row = window.__LEDGER__.find((one) => one.worker === worker);
+        row.last_status = { message_id: `m-${worker}-${now}`, created_ms: now, line };
+      };
+      const move = window.__MOVE__;
+      // eslint-disable-next-line no-new-func
+      new Function("say", "move", body)(say, move);
+      await window.__LEDGER_MOVED__();
+      // The window's own minute beat.
+      if (typeof paintSidebarTeam === "function") paintSidebarTeam();
+    }, FAMILY_BEATS[at]);
+    await page.waitForTimeout(80);
+    const after = await page.evaluate(() => window.__SNAP__());
+    const was = new Map(before.map((row, index) => [row.key, { ...row, index }]));
+    const beat = { words: 0, clock: 0, moved: 0, tall: 0 };
+    after.forEach((row, index) => {
+      const old = was.get(row.key);
+      if (!old) return;
+      if (old.text !== row.text) {
+        beat.words += 1;
+        const bare = (text) => text.replace(/\d+\s*(?:분|초|시간) 전|방금/g, "");
+        if (bare(old.text) === bare(row.text)) beat.clock += 1;
+      }
+      if (old.index !== index) beat.moved += 1;
+      if (old.height !== row.height) beat.tall += 1;
+    });
+    for (const name of ["words", "clock", "moved", "tall"]) total[name] += beat[name];
+    total.beats.push(beat);
+    before = after;
+  }
+  const to = await counts();
+  total.dressed = to.dressed - from.dressed;
+  total.built = to.built - from.built;
+  return total;
+}
+
+export async function testSidebarTeamFamilies({ browser, origin, ok, faults }) {
+  const now = Date.now();
+  const { page } = await openWindowTestPage(browser, origin, { faults });
+  try {
+    await page.setViewportSize({ width: 1280, height: 1600 });
+    await standTeamScene(page, { now, runs: [FAMILY_RUN], workers: FAMILY_WORKERS, extras: FAMILY_COPIES });
+    await page.evaluate(FAMILY_MOVES);
+    const words = await page.evaluate(() => ({
+      count4: t("sidebar.team.groupCount", "워커 {{count}}", { count: 4 }),
+      ask1: t("sidebar.team.groupAsking", "질문 {{count}}", { count: 1 }),
+      working: t("sidebar.team.stateWorking", "일하는 중"),
+      waiting: t("sidebar.team.stateWaiting", "기다림"),
+      nowNone: t("sidebar.team.nowNone", "아직 보낸 말 없음"),
+    }));
+    const head = () => page.evaluate(() => {
+      const node = document.querySelector('#sidebar-team [data-team-key="g:run-fam/t-9100"]');
+      if (!node) return null;
+      const text = (selector) => {
+        const part = node.querySelector(selector);
+        return part && !part.hidden ? part.textContent : "";
+      };
+      return { title: text(".team-title"), count: text(".team-pane"), tally: text(".team-now"), chip: text(".team-chip"),
+        expanded: node.getAttribute("aria-expanded"), tip: node.dataset.tip ?? "" };
+    });
+
+    /* ① — one head row, closed. */
+    const closed = await page.evaluate(() => ({ order: window.__ORDER__(), inside: document.querySelectorAll("#sidebar-team .team-worker.is-child").length,
+      f1: document.querySelector('#sidebar-team [data-team-key="w:run-fam/w-f1"]') !== null }));
+    const closedHead = await head();
+    ok(
+      "workers whose tasks share a root stand under one head row with a count and a one-line tally, closed to begin with; a worker alone on its root and one with no root stay plain rows",
+      JSON.stringify(closed.order) === JSON.stringify(["c:run-fam", "g:run-fam/t-9100", "w:run-fam/w-g1", "w:run-fam/w-h1", "landing"]) &&
+        closedHead?.title === "대화 화면 개선" && closedHead.count === words.count4 &&
+        closedHead.tally === `${words.working} 3 · ${words.waiting} 1` && closedHead.chip === "" && closedHead.expanded === "false" &&
+        closed.inside === 0 && !closed.f1,
+      JSON.stringify({ closed, closedHead }),
+    );
+
+    /* ② — opened: the ledger's order, whatever the states do. */
+    const opened = await page.evaluate(async () => {
+      document.querySelector('#sidebar-team [data-team-key="g:run-fam/t-9100"]')?.click();
+      await window.__TEAM_SETTLED__();
+      const out = { open: window.__ORDER__() };
+      window.__MOVE__("w-f1", "waiting");
+      window.__MOVE__("w-f3", "working");
+      await window.__LEDGER_MOVED__();
+      out.swapped = window.__ORDER__();
+      window.__MOVE__("w-h1", "asking");
+      await window.__LEDGER_MOVED__();
+      out.lone = window.__ORDER__();
+      window.__MOVE__("w-f2", "asking");
+      await window.__LEDGER_MOVED__();
+      out.family = window.__ORDER__();
+      out.chip = document.querySelector('#sidebar-team [data-team-key="g:run-fam/t-9100"] .team-chip')?.textContent ?? "";
+      window.__MOVE__("w-f2", "working");
+      window.__MOVE__("w-h1", "working");
+      window.__MOVE__("w-f1", "working");
+      window.__MOVE__("w-f3", "waiting");
+      await window.__LEDGER_MOVED__();
+      out.settled = window.__ORDER__();
+      return out;
+    });
+    const standing = ["c:run-fam", "g:run-fam/t-9100", "w:run-fam/w-f1", "w:run-fam/w-f2", "w:run-fam/w-f3", "w:run-fam/w-f4",
+      "w:run-fam/w-g1", "w:run-fam/w-h1", "landing"];
+    ok(
+      "inside an opened family the rows keep the ledger's order — a worker going to rest or to work moves nothing — and a question lifts the family among the rows, or a lone row, and never a row inside the family",
+      JSON.stringify(opened.open) === JSON.stringify(standing) && JSON.stringify(opened.swapped) === JSON.stringify(standing) &&
+        JSON.stringify(opened.lone) === JSON.stringify(["c:run-fam", "w:run-fam/w-h1", "g:run-fam/t-9100", "w:run-fam/w-f1",
+          "w:run-fam/w-f2", "w:run-fam/w-f3", "w:run-fam/w-f4", "w:run-fam/w-g1", "landing"]) &&
+        JSON.stringify(opened.family) === JSON.stringify(standing) && opened.chip === words.ask1 &&
+        JSON.stringify(opened.settled) === JSON.stringify(standing),
+      JSON.stringify(opened),
+    );
+
+    /* ③ — the line under a worker. */
+    const line = await page.evaluate(async () => {
+      const node = document.querySelector('#sidebar-team [data-team-key="w:run-fam/w-h1"]');
+      const read = () => ({ height: node.getBoundingClientRect().height, now: node.querySelector(".team-now").textContent,
+        shown: !node.querySelector(".team-now").hidden && node.querySelector(".team-now").getClientRects().length > 0,
+        idle: node.querySelector(".team-now").classList.contains("is-idle") });
+      const before = read();
+      window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-h1"
+        ? { ...row, last_status: { message_id: "m-h1-1", created_ms: Date.now(), line: "문구를 바꾸는 중. 곧 끝난다" } } : row);
+      await window.__LEDGER_MOVED__();
+      const spoke = read();
+      const fresh = node.querySelector(".team-now").classList.contains("is-fresh");
+      // Minutes pass with nothing said: the rows' clock beat only.
+      const real = Date.now.bind(Date);
+      window.__SKEW__ = 0;
+      Date.now = () => real() + window.__SKEW__;
+      const dressed = () => window.__TEAM__("sidebarTeamCounts", { dressed: 0 }).dressed;
+      const words = () => [...document.querySelectorAll("#sidebar-team .team-now")].map((part) => part.textContent).join("|");
+      const from = { dressed: dressed(), words: words() };
+      let changed = 0;
+      const watch = new MutationObserver((records) => { changed += records.length; });
+      watch.observe(document.getElementById("sidebar-team"), { subtree: true, childList: true, characterData: true, attributes: true });
+      for (let minute = 0; minute < 8; minute += 1) {
+        window.__SKEW__ += 60_000;
+        paintSidebarTeam();
+      }
+      await new Promise((done) => setTimeout(done, 30));
+      watch.disconnect();
+      Date.now = real;
+      // The tip tells how long ago, when pointed at.
+      const sayer = document.querySelector('#sidebar-team [data-team-key="w:run-fam/w-f1"] .team-now');
+      sayer.dispatchEvent(new PointerEvent("pointerover", { bubbles: true }));
+      return { before, spoke, fresh, clock: { dressed: dressed() - from.dressed, same: words() === from.words, mutations: changed },
+        tip: sayer.dataset.tip };
+    });
+    ok(
+      "the line under a worker holds one height before and after it speaks — a worker that said nothing keeps the line, dimmed, saying so — and the sentence that changed is lit",
+      line.before.shown && line.before.idle && line.before.now === words.nowNone && line.spoke.shown && !line.spoke.idle &&
+        line.spoke.now === "문구를 바꾸는 중." && line.spoke.height === line.before.height && line.fresh,
+      JSON.stringify(line),
+    );
+    ok(
+      "a minute passing writes no word and no row — eight minutes of the clock beat change nothing in the team — and the line's tip says how long ago when pointed at",
+      line.clock.dressed === 0 && line.clock.same && line.clock.mutations === 0 &&
+        line.tip.includes("입력창 높이를 재는 중.") && /(분|시간) 전|방금/.test(line.tip),
+      JSON.stringify(line),
+    );
+    const lit = await page.evaluate(async () => {
+      await new Promise((done) => setTimeout(done, 1900));
+      return document.querySelectorAll("#sidebar-team .team-now.is-fresh").length;
+    });
+    ok("the light on a changed sentence is gone after 1.6 s", lit === 0, JSON.stringify({ lit }));
+
+    /* ④ — eight beats, closed and open. The sketch's base commit measured this on the same beats. */
+    const closedBeats = await playTeamBeats(page, { open: false });
+    ok(
+      "eight beats of the ledger, a minute apart, move no row and change no row's height — closed or open — and the clock writes no word",
+      closedBeats.moved === 0 && closedBeats.tall === 0 && closedBeats.clock === 0,
+      JSON.stringify(closedBeats),
+    );
+    const openBeats = await playTeamBeats(page, { open: true });
+    ok(
+      "opened, the same eight beats change only the sentences that were said and the head's tally — no row moves, no row grows, no clock writes a word",
+      openBeats.moved === 0 && openBeats.tall === 0 && openBeats.clock === 0,
+      JSON.stringify({ closed: closedBeats, open: openBeats }),
+    );
+
+    /* ⑤ — the new words. */
+    const langs = await page.evaluate(() => {
+      const KEYS = {
+        "sidebar.team.groupCount": "워커 {{count}}",
+        "sidebar.team.groupAsking": "질문 {{count}}",
+        "sidebar.team.groupTip": "같은 일에서 갈라진 과업 {{count}}개 — 누르면 펼치거나 접습니다",
+        "sidebar.team.nowNone": "아직 보낸 말 없음",
+      };
+      const found = {};
+      for (const code of ["en", "ja", "zh", "es"]) {
+        setLocale(code, { persist: false });
+        found[code] = Object.entries(KEYS).map(([key, fallback]) => ({ key, fallback: t(key, fallback) === fallback }));
+      }
+      setLocale("ko", { persist: false });
+      return found;
+    });
+    const missing = Object.entries(langs).flatMap(([code, list]) => list.filter((one) => one.fallback).map((one) => `${code}:${one.key}`));
+    ok("every new word of the family rows reads in English, Japanese, Chinese and Spanish, not in the Korean fallback", missing.length === 0,
+      JSON.stringify({ missing }));
+  } finally {
+    await page.close().catch(() => {});
   }
 }

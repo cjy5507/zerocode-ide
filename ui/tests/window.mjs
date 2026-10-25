@@ -127,7 +127,7 @@ import { testSidebarRoles } from "./sidebar-roles.mjs";
 import { testCloseGuard, testRestartNotice } from "./close-guard.mjs";
 import { testSidebarTaskFold } from "./sidebar-task-fold.mjs";
 import { testSidebarFinishedFold } from "./sidebar-finished-fold.mjs";
-import { testSidebarTeam } from "./sidebar-team.mjs";
+import { testSidebarTeam, testSidebarTeamFamilies } from "./sidebar-team.mjs";
 import { testSidebarTeamSettled } from "./sidebar-team-settled.mjs";
 import { testSidebarScroll } from "./sidebar-scroll.mjs";
 import { testLandingAlerts } from "./landing-alerts.mjs";
@@ -413,6 +413,7 @@ suite("sidebar-task-fold", testSidebarTaskFold);
 suite("sidebar-finished-fold", testSidebarFinishedFold);
 // The team view: coordinators, the workers under each, a row a worker's pane (t-56141).
 suite("sidebar-team", testSidebarTeam);
+suite("sidebar-team-families", testSidebarTeamFamilies);
 // A coordinator's finished sub-agents stand under it in the branch list, whatever the run or the agent (t-66539).
 suite("sidebar-team-settled", testSidebarTeamSettled);
 // The sidebar holds its rows while the person scrolls it, and reaches row 0 in one go (t-63568).
