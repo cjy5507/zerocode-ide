@@ -4380,11 +4380,21 @@ function paintScmMark() {
 
 listen("scm:notices", (event) => paintScmNotices(event.payload));
 
-el("sb-scm-notices").addEventListener("click", () => {
-  const row = scmStanding[0];
-  if (!row) return;
-  if (row.root !== activeWorktreePath) selectWorktree(row.root);
-  setActivityItem("checks");
+el("sb-scm-notices").addEventListener("click", (event) => {
+  const open = (row) => {
+    if (row.root !== activeWorktreePath) selectWorktree(row.root);
+    setActivityItem("checks");
+  };
+  if (scmStanding.length === 1) {
+    open(scmStanding[0]);
+  } else if (scmStanding.length > 1) {
+    const mark = event.currentTarget;
+    const box = mark.getBoundingClientRect();
+    openSidebarMenu(box.left, box.top, scmStanding.map((row) => ({
+      label: scmWords(row),
+      run: () => open(row),
+    })), mark);
+  }
 });
 
 /* Today's model lineup moved (t-14437): one line per agent, said once — a

@@ -4,7 +4,7 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../shell-status.js", import.meta.url), "utf8");
 const start = source.indexOf("/* PR conditions");
-const end = source.indexOf('listen("scm:notices"', start);
+const end = source.indexOf("/* Today's model lineup", start);
 assert.ok(start >= 0 && end > start, "SCM notifications use the existing toast surface");
 const TOAST_MS = Number(source.match(/const TOAST_MS = (\d+);/)?.[1]);
 
@@ -13,8 +13,15 @@ function openWindow() {
   const shown = [];
   const calls = [];
   const elements = new Map();
+  const menus = [];
+  const selected = [];
   const context = vm.createContext({
     Map, Set,
+    listen: () => {},
+    activeWorktreePath: "/wt/topic",
+    selectWorktree: (root) => selected.push(root),
+    setActivityItem: () => {},
+    openSidebarMenu: (_x, _y, rows) => menus.push(rows),
     t: (_key, fallback, values) => fallback.replace(/\{\{(\w+)\}\}/g, (_, k) => values[k]),
     toast: (text, kind, options) => {
       const note = { text, kind, options, removed: false, remove() { this.removed = true; } };
@@ -23,14 +30,15 @@ function openWindow() {
     invoke: (cmd, args) => { calls.push({ cmd, args }); return Promise.resolve(null); },
     el: (id) => {
       if (!elements.has(id)) {
-        elements.set(id, { hidden: true, dataset: {}, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; } });
+        elements.set(id, { addEventListener(name, fn) { this[name] = fn; }, getBoundingClientRect() { return { left: 0, top: 0 }; }, hidden: true, dataset: {}, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, removeAttribute(k) { delete this.attrs[k]; } });
       }
       return elements.get(id);
     },
   });
   vm.runInContext(source.slice(start, end), context);
   return {
-    shown, calls, elements,
+    shown, calls, elements, menus, selected,
+    click: () => elements.get("sb-scm-notices").click({ currentTarget: elements.get("sb-scm-notices") }),
     paint: (rows) => { context.rows = rows; vm.runInContext("paintScmNotices(rows)", context); },
   };
 }
@@ -85,7 +93,15 @@ const ci = { id: "pr:ci", root: "/wt/other", checkout: "other", number: 4, kind:
 many.paint([conflict, ci]);
 assert.equal(many.shown[1].text, "PR #4 CI 실패 · other", "a CI failure names its checkout");
 assert.equal(many.elements.get("sb-scm-notices-label").textContent, "PR 조건 2", "the mark counts both standing conditions");
+many.click();
+assert.equal(many.selected.length, 0, "multiple conditions wait for the person to select one");
+assert.equal(many.menus[0]?.length, 2, "every condition is selectable");
+many.menus[0][1].run();
+assert.deepEqual(many.selected, [ci.root], "the second condition opens its own checkout");
+console.log(`MEASURE selectable_conditions=${many.menus[0].length} conditions`);
 many.paint([{ ...conflict, resolved_at: 2 }, ci]);
+many.click();
+assert.deepEqual(many.selected, [ci.root, ci.root], "one condition opens directly");
 assert.equal(many.elements.get("sb-scm-notices-label").textContent, "PR 조건 1", "a resolved condition leaves the count");
 many.paint([]);
 assert.equal(many.elements.get("sb-scm-notices").hidden, true, "no standing condition hides the mark");

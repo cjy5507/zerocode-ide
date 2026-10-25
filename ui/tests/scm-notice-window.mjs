@@ -65,6 +65,21 @@ export async function testScmNoticeWindow(browser, origin, ok) {
     const opened = await first.evaluate(() => document.querySelector(".files")?.dataset.activity ?? "");
     ok("one click on the mark opens the Checks panel", opened === "checks", `activity=${opened}`);
 
+    await first.evaluate(() => {
+      window.__CHOSEN_SCM__ = [];
+      selectWorktree = (root) => window.__CHOSEN_SCM__.push(root);
+    });
+    const ci = { ...conflict, id: "pr:ci", root: "/wt/other", checkout: "other", number: 4, kind: "ci" };
+    await deliver(first, [conflict, ci]);
+    await first.click("#sb-scm-notices");
+    const choices = first.locator(".sidebar-menu-item");
+    const choiceCount = await choices.count();
+    console.log(`MEASURE selectable_conditions=${choiceCount} conditions`);
+    ok("the mark offers each standing PR condition", choiceCount === 2, `choices=${choiceCount}`);
+    await first.getByRole("menuitem", { name: "PR #4 CI 실패 · other", exact: true }).click();
+    const chosen = await first.evaluate(() => window.__CHOSEN_SCM__);
+    ok("the second condition opens its own checkout", chosen.length === 1 && chosen[0] === ci.root, JSON.stringify(chosen));
+
     const second = await openPage();
     await deliver(second, [{ ...conflict, shown_at: 7 }]);
     const again = await toastCount(second);
