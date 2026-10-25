@@ -238,9 +238,14 @@ fn crates_dir() -> PathBuf {
         .to_path_buf()
 }
 
+/// A source's name under `crates/`, or under the repository for a file a
+/// `#[path]` reaches outside it (tools/test-support's shared test helpers).
 fn relative_name(path: &Path) -> String {
-    path.strip_prefix(crates_dir())
-        .expect("a source under crates/")
+    let crates = crates_dir();
+    let repository = crates.parent().expect("the repository");
+    path.strip_prefix(&crates)
+        .or_else(|_| path.strip_prefix(repository))
+        .expect("a source in the repository")
         .to_string_lossy()
         .replace('\\', "/")
 }
