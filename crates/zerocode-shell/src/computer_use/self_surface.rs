@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use zerocode_core::computer_use::ComputerMethod;
 use zerocode_core::computer_use_protocol::render::{RenderNode, line, render_tree_text};
 use zerocode_core::computer_use_protocol::self_surface::{
-    Act, Facts, METHODS, OwnApp, PAGE_ANSWER_MS, PERSON_ONLY_GRACE_MS, judge, unsupported,
+    Act, Facts, METHODS, OwnApp, judge, unsupported,
 };
 use zerocode_core::computer_use_protocol::{AppIdentity, error_code};
 
@@ -49,11 +49,11 @@ struct Shown {
 /// The window's commands only the person may run: an answer to a question,
 /// Computer Use's own policy and stop, the coordinator's seat and landings,
 /// a merge, an update and a restart, a credential written or dropped, an
-/// account changed. Each refuses while an agent's press in ZeroCode's own
-/// window is in flight and for PERSON_ONLY_GRACE_MS after it — the second
-/// wall behind the page's marks, asked once for every command in the
-/// window's invoke handler ([`person_only_gate`]): a press the marks missed
-/// still runs none of these, whichever crate defines it.
+/// account changed. Each runs only when the page says the person's own hand
+/// made the call ([`HAND_HEADER`]) — the second wall behind the page's marks,
+/// asked once for every command in the window's invoke handler
+/// ([`person_only_gate`]): a press the marks missed still runs none of these,
+/// whichever crate defines it, and no clock holds the person's own hand.
 pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "answer_approval",
     "answer_ask",
@@ -171,88 +171,68 @@ pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[
     "terminal_keyboard_layout",
 ];
 
-/// The refusal the window's invoke handler answers a command with: `None`
-/// for a command not on [`PERSON_ONLY_COMMANDS`] or while no agent presses.
-pub(crate) fn person_only_refusal(command: &str) -> Option<String> {
+/// The header in which the page's one `invoke` says whose hand made a call
+/// (ui/shell-boot.js `HAND_HEADER`, t-74927): `person` once the person's own
+/// pointer, touch or key moved; `agent` from an agent's press in this window
+/// on, its click and whatever runs after it, until the person moves again;
+/// `program` for the one road no hand starts ([`PROGRAM_COMMANDS`]).
+pub(crate) const HAND_HEADER: &str = "zerocode-hand";
+
+/// The person-only commands a road no hand starts still runs: the update
+/// clock's quiet download and its staging. A `program` call of any other
+/// person-only command is refused.
+const PROGRAM_COMMANDS: &[&str] = &["update_download", "update_install"];
+
+/// The refusal the window's invoke handler answers a command with, given the
+/// hand the call said made it: `None` for a command not on
+/// [`PERSON_ONLY_COMMANDS`], or for one the person's hand made.
+pub(crate) fn person_only_refusal(command: &str, hand: Option<&str>) -> Option<String> {
     if !PERSON_ONLY_COMMANDS.contains(&command) {
         return None;
     }
-    person_only(command).err()
+    person_only(command, hand).err()
 }
 
 /// The window's invoke handler, asking the second wall first: a command on
-/// [`PERSON_ONLY_COMMANDS`] is refused in words while an agent presses in the
-/// window, and every other command goes to `handler` unasked.
+/// [`PERSON_ONLY_COMMANDS`] is refused in words unless the call says the
+/// person made it, and every other command goes to `handler` unasked.
 pub(crate) fn person_only_gate<R: tauri::Runtime>(
     handler: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
-    move |invoke| match person_only_refusal(invoke.message.command()) {
-        Some(refused) => {
-            invoke.resolver.reject(refused);
-            true
+    move |invoke| {
+        let hand = hand_said(invoke.message.headers());
+        match person_only_refusal(invoke.message.command(), hand) {
+            Some(refused) => {
+                invoke.resolver.reject(refused);
+                true
+            }
+            None => handler(invoke),
         }
-        None => handler(invoke),
     }
 }
 
-/// Whether person-only `command` may run now: refused while an agent's press
-/// in ZeroCode's own window is in flight, and for PERSON_ONLY_GRACE_MS after.
-pub(crate) fn person_only(command: &str) -> Result<(), String> {
-    person_only_at(command, std::time::Instant::now())
+/// The hand a call's headers say made it, if they say one.
+pub(crate) fn hand_said(headers: &tauri::http::HeaderMap) -> Option<&str> {
+    headers.get(HAND_HEADER)?.to_str().ok()
 }
 
-/// [`person_only`] at `now`.
-pub(crate) fn person_only_at(command: &str, now: std::time::Instant) -> Result<(), String> {
+/// Whether person-only `command` may run for a call `hand` made: the
+/// person's, or the program road's own commands; never an agent's press,
+/// however long ago it was, and never a call that names no hand.
+pub(crate) fn person_only(command: &str, hand: Option<&str>) -> Result<(), String> {
     debug_assert!(
         PERSON_ONLY_COMMANDS.contains(&command),
         "{command} asks the second wall but is not on PERSON_ONLY_COMMANDS"
     );
-    match held() {
-        Some(until) if now < until => Err(format!(
-            "{command} is the person's to run, and an agent is pressing in ZeroCode's window; run it again in a moment"
+    match hand {
+        Some("person") => Ok(()),
+        Some("program") if PROGRAM_COMMANDS.contains(&command) => Ok(()),
+        Some("agent") => Err(format!(
+            "{command} is the person's to run, and an agent's press in ZeroCode's window made this call; the person runs it with their own hand"
         )),
-        _ => Ok(()),
-    }
-}
-
-/// Until when the person-only commands are held: an agent's press in flight
-/// and PERSON_ONLY_GRACE_MS after it. A test's press holds its own thread
-/// only, so it never refuses a command another test runs beside it.
-#[cfg(not(test))]
-static HELD_UNTIL: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-#[cfg(test)]
-thread_local! {
-    static HELD_UNTIL: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
-}
-
-fn held() -> Option<std::time::Instant> {
-    #[cfg(not(test))]
-    {
-        *HELD_UNTIL
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-    #[cfg(test)]
-    {
-        HELD_UNTIL.with(std::cell::Cell::get)
-    }
-}
-
-/// Hold the person-only commands until `until`, never shortening a hold
-/// another press set.
-fn hold_until(until: std::time::Instant) {
-    if held().is_some_and(|standing| standing >= until) {
-        return;
-    }
-    #[cfg(not(test))]
-    {
-        *HELD_UNTIL
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(until);
-    }
-    #[cfg(test)]
-    {
-        HELD_UNTIL.with(|held| held.set(Some(until)));
+        _ => Err(format!(
+            "{command} is the person's to run, and this call does not say the person made it"
+        )),
     }
 }
 
@@ -539,13 +519,9 @@ fn press(
         }
         Act::Click | Act::Look => {}
     }
-    // The person-only commands are held while the press is in flight and a
-    // moment after it, for a handler that awaits before it calls one.
-    let grace = Duration::from_millis(PERSON_ONLY_GRACE_MS);
-    hold_until(std::time::Instant::now() + Duration::from_millis(PAGE_ANSWER_MS) + grace);
-    let done = page(&request);
-    hold_until(std::time::Instant::now() + grace);
-    let done = done?;
+    // The page presses as the agent's hand, so a person-only command the press
+    // leads to says so and the second wall refuses it ([`HAND_HEADER`]).
+    let done = page(&request)?;
     if done.get("done") != Some(&Value::Bool(true)) {
         return Err(not_found(
             "that element of ZeroCode's window changed before the press; nothing was pressed — look again",

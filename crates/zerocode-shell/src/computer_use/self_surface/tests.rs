@@ -339,18 +339,12 @@ fn the_page_answers_by_id_and_silence_is_unknown() {
     );
 }
 
-/// The second wall: while an agent's press in ZeroCode's own window is in
-/// flight — and a moment after, for a handler that awaits first — no
-/// person-only command runs, whatever the page's marks missed.
+/// The second wall: a call an agent's press made runs no person-only
+/// command — during the press, right after it, or however much later — and a
+/// call that names no hand runs none either, whatever the page's marks missed.
 #[test]
-fn an_agents_press_holds_every_person_only_command() {
-    use std::time::{Duration, Instant};
-
-    use zerocode_core::computer_use_protocol::self_surface::{
-        PAGE_ANSWER_MS, PERSON_ONLY_GRACE_MS,
-    };
-
-    use super::{PERSON_ONLY_COMMANDS, person_only, person_only_at};
+fn an_agents_call_runs_no_person_only_command() {
+    use super::{PERSON_ONLY_COMMANDS, person_only};
 
     let _hand = one_hand();
     let (_helper, _) = stand_helper();
@@ -366,7 +360,9 @@ fn an_agents_press_holds_every_person_only_command() {
         Arc::new(move |request: &Value| {
             if request["kind"] == "do" {
                 for command in PERSON_ONLY_COMMANDS {
-                    seen.lock().unwrap().push((*command, person_only(command)));
+                    seen.lock()
+                        .unwrap()
+                        .push((*command, person_only(command, Some("agent"))));
                 }
             }
             page_answer(&answering, request)
@@ -374,28 +370,36 @@ fn an_agents_press_holds_every_person_only_command() {
     );
     call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
     call("click", json!({ "app": "ZeroCode", "elementIndex": 2 })).unwrap();
-    let pressed = Instant::now();
 
     let during = during.lock().unwrap();
     assert_eq!(during.len(), PERSON_ONLY_COMMANDS.len());
     for (command, said) in during.iter() {
-        assert!(said.is_err(), "{command} ran during an agent's press");
+        assert!(said.is_err(), "{command} ran for an agent's press");
     }
     for command in PERSON_ONLY_COMMANDS {
+        let agent = person_only(command, Some("agent")).expect_err(command);
+        assert!(agent.contains("agent's press"), "{command}: {agent}");
         assert!(
-            person_only(command).is_err(),
-            "{command} ran right after an agent's press"
+            !agent.contains("in a moment"),
+            "{command} tells the person to wait: {agent}"
         );
-        let later = pressed + Duration::from_millis(PERSON_ONLY_GRACE_MS + PAGE_ANSWER_MS);
-        assert_eq!(person_only_at(command, later), Ok(()), "{command} later");
+        assert!(
+            person_only(command, None).is_err(),
+            "{command} with no hand"
+        );
+        assert!(
+            person_only(command, Some("someone")).is_err(),
+            "{command} with a hand the page never says"
+        );
     }
 }
 
-/// The invoke handler's question: a command on the person-only list is
-/// refused during an agent's press, any other command never is.
+/// R1 (t-74927): the person's own hand is never held by an agent's press —
+/// during it and right after it, the band's 「제어권 가져오기」, its hand-back
+/// and a question's answer still run when the person makes them.
 #[test]
-fn the_invoke_gate_refuses_only_the_persons_commands_under_a_press() {
-    use super::person_only_refusal;
+fn the_persons_take_control_runs_right_after_an_agents_press() {
+    use super::{PERSON_ONLY_COMMANDS, person_only};
 
     let _hand = one_hand();
     let (_helper, _) = stand_helper();
@@ -410,26 +414,85 @@ fn the_invoke_gate_refuses_only_the_persons_commands_under_a_press() {
         own(),
         Arc::new(move |request: &Value| {
             if request["kind"] == "do" {
-                for command in ["set_computer_input_policy", "jira_connect", "board_columns"] {
-                    seen.lock()
-                        .unwrap()
-                        .push((command, person_only_refusal(command).is_some()));
-                }
+                seen.lock()
+                    .unwrap()
+                    .push(person_only("computer_take_control", Some("person")));
             }
             page_answer(&answering, request)
         }),
     );
-    assert_eq!(person_only_refusal("set_computer_input_policy"), None);
     call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
-    call("click", json!({ "app": "ZeroCode", "elementIndex": 1 })).unwrap();
-    assert_eq!(
-        *during.lock().unwrap(),
-        vec![
-            ("set_computer_input_policy", true),
-            ("jira_connect", true),
-            ("board_columns", false),
-        ]
+    call("click", json!({ "app": "ZeroCode", "elementIndex": 2 })).unwrap();
+    assert_eq!(*during.lock().unwrap(), vec![Ok(())], "during the press");
+    for command in ["computer_take_control", "computer_give_back", "answer_ask"] {
+        assert_eq!(
+            person_only(command, Some("person")),
+            Ok(()),
+            "{command} right after a press"
+        );
+    }
+    for command in PERSON_ONLY_COMMANDS {
+        assert_eq!(person_only(command, Some("person")), Ok(()), "{command}");
+    }
+}
+
+/// R1 (t-74927): what an agent's press made stays refused however late it
+/// reaches the window — the wall reads the hand, and no press need still
+/// stand for an agent's call to be refused.
+#[test]
+fn an_agents_call_is_refused_however_late_it_comes() {
+    use super::person_only;
+
+    let _hand = one_hand();
+    let (_helper, _) = stand_helper();
+    let (page, _) = stand_page(ordinary_page());
+    call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
+    call("click", json!({ "app": "ZeroCode", "elementIndex": 2 })).unwrap();
+    drop(page);
+    assert!(
+        person_only("answer_ask", Some("agent")).is_err(),
+        "answer_ask long after the press, with no page standing"
     );
+}
+
+/// The program road runs only its own commands: the update clock's quiet
+/// download and staging, never an answer, a merge or a credential.
+#[test]
+fn the_program_road_runs_only_the_update_download() {
+    use super::{PERSON_ONLY_COMMANDS, person_only};
+
+    for command in PERSON_ONLY_COMMANDS {
+        let ran = person_only(command, Some("program")).is_ok();
+        assert_eq!(
+            ran,
+            ["update_download", "update_install"].contains(command),
+            "{command} for the program road"
+        );
+    }
+}
+
+/// The invoke handler's question: a command on the person-only list is
+/// refused unless the call's hand is the person's, any other command never
+/// is; the hand is read off the header the page's `invoke` writes.
+#[test]
+fn the_invoke_gate_refuses_only_the_persons_commands_made_by_another_hand() {
+    use tauri::http::{HeaderMap, HeaderValue};
+
+    use super::{HAND_HEADER, hand_said, person_only_refusal};
+
+    let mut headers = HeaderMap::new();
+    assert_eq!(hand_said(&headers), None);
+    headers.insert(HAND_HEADER, HeaderValue::from_static("agent"));
+    assert_eq!(hand_said(&headers), Some("agent"));
+
+    let refused = |command: &str, hand: Option<&str>| person_only_refusal(command, hand).is_some();
+    assert!(refused("computer_take_control", Some("agent")));
+    assert!(refused("jira_connect", Some("agent")));
+    assert!(refused("set_computer_input_policy", None));
+    assert!(!refused("computer_take_control", Some("person")));
+    assert!(!refused("answer_ask", Some("person")));
+    assert!(!refused("board_columns", Some("agent")));
+    assert!(!refused("board_columns", None));
 }
 
 /// A command is the person's or an agent may run it — never both.
