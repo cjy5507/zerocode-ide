@@ -338,3 +338,55 @@ fn the_page_answers_by_id_and_silence_is_unknown() {
         "nothing waits for an id never asked"
     );
 }
+
+/// The second wall: while an agent's press in ZeroCode's own window is in
+/// flight — and a moment after, for a handler that awaits first — no
+/// person-only command runs, whatever the page's marks missed.
+#[test]
+fn an_agents_press_holds_every_person_only_command() {
+    use std::time::{Duration, Instant};
+
+    use zerocode_core::computer_use_protocol::self_surface::{
+        PAGE_ANSWER_MS, PERSON_ONLY_GRACE_MS,
+    };
+
+    use super::{PERSON_ONLY_COMMANDS, person_only, person_only_at};
+
+    let _hand = one_hand();
+    let (_helper, _) = stand_helper();
+    let during = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&during);
+    let page = Arc::new(Mutex::new(Page {
+        controls: ordinary_page(),
+        pressed: Vec::new(),
+    }));
+    let answering = Arc::clone(&page);
+    let _page = stand_in::stand(
+        own(),
+        Arc::new(move |request: &Value| {
+            if request["kind"] == "do" {
+                for command in PERSON_ONLY_COMMANDS {
+                    seen.lock().unwrap().push((*command, person_only(command)));
+                }
+            }
+            page_answer(&answering, request)
+        }),
+    );
+    call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
+    call("click", json!({ "app": "ZeroCode", "elementIndex": 2 })).unwrap();
+    let pressed = Instant::now();
+
+    let during = during.lock().unwrap();
+    assert_eq!(during.len(), PERSON_ONLY_COMMANDS.len());
+    for (command, said) in during.iter() {
+        assert!(said.is_err(), "{command} ran during an agent's press");
+    }
+    for command in PERSON_ONLY_COMMANDS {
+        assert!(
+            person_only(command).is_err(),
+            "{command} ran right after an agent's press"
+        );
+        let later = pressed + Duration::from_millis(PERSON_ONLY_GRACE_MS + PAGE_ANSWER_MS);
+        assert_eq!(person_only_at(command, later), Ok(()), "{command} later");
+    }
+}

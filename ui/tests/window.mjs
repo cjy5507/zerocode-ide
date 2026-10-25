@@ -106,6 +106,7 @@ import { testKeybindingText } from "./keybinding-text.mjs";
 import { testTerminalCloseResult } from "./terminal-close-result.mjs";
 import { testPermissionCard } from "./permission-card.mjs";
 import { testAnswerDoor } from "./answer-door.mjs";
+import { testSelfAct } from "./self-act.mjs";
 import { testExplain } from "./explain.mjs";
 import { testAskPopup } from "./ask-popup.mjs";
 import { testSecretPrompt } from "./secret-prompt.mjs";
@@ -280,6 +281,8 @@ suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, 
 suite("waiting-list", ({ browser, origin, ok }) => testWaitingList(browser, origin, standBackend, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 suite("answer-door", ({ browser, origin, ok }) => testAnswerDoor(browser, origin, ok));
+/* ZeroCode's own window as a Computer Use target: the page's half (t-73906). */
+suite("self-act", ({ browser, origin, ok }) => testSelfAct(browser, origin, ok));
 suite("explain", ({ browser, origin, ok }) => testExplain(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));

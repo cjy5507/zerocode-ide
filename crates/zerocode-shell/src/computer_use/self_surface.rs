@@ -46,6 +46,50 @@ struct Shown {
     name: String,
 }
 
+/// The window's commands only the person may run: an answer to a question,
+/// Computer Use's own policy and stop, the coordinator's seat and landings,
+/// a merge, an update and a restart. Each refuses while an agent's press in
+/// ZeroCode's own window is in flight and for PERSON_ONLY_GRACE_MS after it
+/// ([`person_only`]) — the second wall behind the page's marks: a press the
+/// marks missed still runs none of these.
+pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
+    "answer_approval",
+    "answer_ask",
+    "answer_secret",
+    "respond_permission",
+    "wire_answer",
+    "computer_confirm_answer",
+    "computer_handoff_code",
+    "set_computer_input_policy",
+    "set_computer_live_reflex",
+    "computer_resume",
+    "claim_coordinator_seat",
+    "set_coordinator_handover",
+    "quota_wall_handover",
+    "land_batch_promote",
+    "land_batch_bisect",
+    "land_batch_cancel",
+    "land_batch_restack",
+    "commit_landings",
+    "merge_and_remove_worktree",
+    "github_merge_pr",
+    "gitlab_merge_mr",
+    "update_download",
+    "update_install",
+    "relaunch_window",
+];
+
+/// Whether person-only `command` may run now: refused while an agent's press
+/// in ZeroCode's own window is in flight, and for PERSON_ONLY_GRACE_MS after.
+pub(crate) fn person_only(command: &str) -> Result<(), String> {
+    person_only_at(command, std::time::Instant::now())
+}
+
+/// [`person_only`] at `now`.
+pub(crate) fn person_only_at(_command: &str, _now: std::time::Instant) -> Result<(), String> {
+    Ok(())
+}
+
 /// Requests the page has not answered yet, by id.
 static WAITING: Mutex<Option<HashMap<u64, mpsc::Sender<Value>>>> = Mutex::new(None);
 static NEXT_ASK: AtomicU64 = AtomicU64::new(0);

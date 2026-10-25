@@ -32,6 +32,11 @@ pub const METHODS: &[&str] = &[
 /// How long after the person's last key in a field the field stays theirs.
 pub const PERSON_TYPING_QUIET_MS: u64 = 2_000;
 
+/// How long after an agent's press in ZeroCode's own window a person-only
+/// command is still refused: a press whose handler calls such a command a
+/// moment later (after an await) is held by it too.
+pub const PERSON_ONLY_GRACE_MS: u64 = 1_500;
+
 /// How long the window waits for its page to answer one request. A press the
 /// page did not answer in time is reported unknown, never as pressed.
 pub const PAGE_ANSWER_MS: u64 = 3_000;
