@@ -39,6 +39,12 @@
 //!    the next queued prompt swap under one guard, exactly as they did under
 //!    the single pool lock — but never the other way around.
 //!
+//! 4. **The palette lock ([`TerminalPalette`]) is taken before the map lock
+//!    and a terminal lock, never after one.** A report holds it while it
+//!    walks the pool and locks each shell in turn; a new shell holds it from
+//!    its colour read to its insert. Code holding a terminal lock must not
+//!    reach the palette — the pump never does.
+//!
 //! # Exit removal
 //!
 //! Removal on exit goes through [`TerminalRegistry::remove_exact`], which
@@ -218,22 +224,33 @@ impl TerminalPalette {
     }
 
     /// Dress a new shell with the current colours and take it into the pool.
+    ///
+    /// The palette stays locked from the colour read to the insert. A report
+    /// takes the same lock to store its colours and walk the pool, so it runs
+    /// wholly before this (the newcomer then reads the new colours) or wholly
+    /// after (the newcomer is already in the pool for its walk). Between the
+    /// two it could not see a shell that had read the old colours and was not
+    /// yet listed, and that shell kept them until the next theme change.
     pub fn hold(&self, registry: &TerminalRegistry, term: TermId, mut pty: PtyHandle) {
-        let colors = self.lock().clone();
-        if let Some(colors) = colors {
-            pty.terminal_mut().grid_mut().set_colors(colors);
+        let palette = self.lock();
+        if let Some(colors) = palette.as_ref() {
+            pty.terminal_mut().grid_mut().set_colors(Arc::clone(colors));
         }
         registry.insert(term, pty);
     }
 
     /// Remember the colours the renderer reported and dress every open shell.
+    ///
+    /// Held across the walk so two reports cannot cross: the later one's walk
+    /// ends last, so every shell ends on the later colours.
     pub fn tell(&self, registry: &TerminalRegistry, colors: Arc<zerocode_pty::TerminalColors>) {
-        *self.lock() = Some(colors.clone());
+        let mut palette = self.lock();
+        *palette = Some(Arc::clone(&colors));
         for held in registry.handles() {
             lock_pty(&held)
                 .terminal_mut()
                 .grid_mut()
-                .set_colors(colors.clone());
+                .set_colors(Arc::clone(&colors));
         }
     }
 
@@ -536,7 +553,7 @@ mod tests {
     }
 
     impl ProbedTransport {
-        fn new(probe: impl FnMut() + Send + 'static) -> PtyHandle {
+        fn handle(probe: impl FnMut() + Send + 'static) -> PtyHandle {
             PtyHandle::new(Self {
                 terminal: Terminal::new(4, 20),
                 probe: Box::new(probe),
@@ -599,7 +616,7 @@ mod tests {
     }
 
     fn unprobed() -> PtyHandle {
-        ProbedTransport::new(|| {})
+        ProbedTransport::handle(|| {})
     }
 
     /// The race this type exists for: a shell born while the renderer reports.
@@ -618,7 +635,7 @@ mod tests {
         palette.hold(
             &registry,
             1,
-            ProbedTransport::new(move || record.lock().unwrap().push(during.is_held())),
+            ProbedTransport::handle(move || record.lock().unwrap().push(during.is_held())),
         );
 
         assert_eq!(
@@ -643,7 +660,7 @@ mod tests {
         let record = Arc::clone(&seen);
         registry.insert(
             1,
-            ProbedTransport::new(move || record.lock().unwrap().push(during.is_held())),
+            ProbedTransport::handle(move || record.lock().unwrap().push(during.is_held())),
         );
         palette.tell(&registry, painted(0x20));
 

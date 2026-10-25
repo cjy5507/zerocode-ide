@@ -448,7 +448,7 @@ use shell_runtime::*;
 use system_locale::{LOCALES, system_locale};
 use system_runtime::*;
 use terminal_prefs_runtime::*;
-use terminal_registry::{TerminalRegistry, lock_pty};
+use terminal_registry::{TerminalPalette, TerminalRegistry, lock_pty};
 use terminal_theme_import::{
     CUSTOM_THEME_SELECTION_PREFIX, CustomTerminalTheme, MAX_CUSTOM_TERMINAL_THEMES,
     WarpThemeImportSource, WarpThemePreview, has_custom_theme_selection, merge_custom_themes,
@@ -954,10 +954,10 @@ struct ShellRuntime {
     /// path here first and asks git only for a path this answer does not name.
     catalog_owners: Mutex<HashMap<String, (Orchestrator, Worktree)>>,
     /// The colours the renderer last said it paints terminals with (t-73869).
-    /// `None` until it says: a shell nobody has dressed answers no colour
-    /// query rather than an invented one. Every new shell is dressed with it
-    /// in `hold_terminal`; every open shell when the renderer reports.
-    terminal_colors: Mutex<Option<Arc<zerocode_pty::TerminalColors>>>,
+    /// Every new shell is dressed with it in `hold_terminal`; every open shell
+    /// when the renderer reports — each under the palette's own lock, so a
+    /// shell born during a report is never left on the old colours (t-74931).
+    terminal_palette: TerminalPalette,
     /// The shells a window is PREVIEWING — the board's cards, which show every
     /// running agent at once.
     ///
@@ -1456,10 +1456,8 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn terminal_colors(&self) -> MutexGuard<'_, Option<Arc<zerocode_pty::TerminalColors>>> {
-        self.terminal_colors
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn terminal_palette(&self) -> &TerminalPalette {
+        &self.terminal_palette
     }
 
     /// Take a freshly spawned shell into the window's keeping.
@@ -1486,11 +1484,9 @@ impl ShellRuntime {
         // The colours the window paints, when it has said (t-73869): a shell
         // born after the renderer reported must answer `OSC 10/11/12 ; ?`
         // from its first line. Before the first report there is nothing to
-        // tell, and the report itself dresses the shells already open.
-        if let Some(colors) = self.terminal_colors().clone() {
-            pty.terminal_mut().grid_mut().set_colors(colors);
-        }
-        self.terminals().insert(term, pty);
+        // tell, and the report itself dresses the shells already open. The
+        // palette reads its colours and lists the shell as one stretch.
+        self.terminal_palette.hold(&self.terminals, term, pty);
     }
 
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger> {
@@ -1877,7 +1873,7 @@ trait ShellStateExt {
     fn watched_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
     fn catalog_owners(&self) -> MutexGuard<'_, HashMap<String, (Orchestrator, Worktree)>>;
     fn previewed_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
-    fn terminal_colors(&self) -> MutexGuard<'_, Option<Arc<zerocode_pty::TerminalColors>>>;
+    fn terminal_palette(&self) -> &TerminalPalette;
     fn hold_terminal(&self, term: TermId, pty: impl Into<PtyHandle>);
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger>;
     fn quiet_rings(&self) -> MutexGuard<'_, zerocode_core::notify::Quiet<TermId>>;
@@ -2013,8 +2009,8 @@ impl ShellStateExt for AppState {
         self.shell_runtime().previewed_terms()
     }
 
-    fn terminal_colors(&self) -> MutexGuard<'_, Option<Arc<zerocode_pty::TerminalColors>>> {
-        self.shell_runtime().terminal_colors()
+    fn terminal_palette(&self) -> &TerminalPalette {
+        self.shell_runtime().terminal_palette()
     }
 
     fn hold_terminal(&self, term: TermId, pty: impl Into<PtyHandle>) {
@@ -2493,7 +2489,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         next_term: Mutex::new(FLOAT_TERM + 1),
         watched_terms: Mutex::new(HashMap::new()),
         catalog_owners: Mutex::new(HashMap::new()),
-        terminal_colors: Mutex::new(None),
+        terminal_palette: TerminalPalette::default(),
         previewed_terms: Mutex::new(HashMap::new()),
         subscriptions: Arc::new(Mutex::new(HashSet::new())),
         channels: Arc::new(Mutex::new(HashMap::new())),
