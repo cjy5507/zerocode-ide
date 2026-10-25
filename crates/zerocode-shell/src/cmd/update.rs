@@ -283,8 +283,6 @@ pub(crate) async fn update_download(
     held: State<'_, UpdateState>,
 ) -> Result<UpdateReport, String> {
     let _crumb = crate::crumbs::Command::enter("update_download");
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    crate::computer_use::self_surface::person_only("update_download")?;
     let update = held
         .lock()
         .announced
@@ -385,8 +383,6 @@ pub(crate) fn update_install(
     held: State<'_, UpdateState>,
 ) -> Result<UpdateReport, String> {
     let _crumb = crate::crumbs::Command::enter("update_install");
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    crate::computer_use::self_surface::person_only("update_install")?;
     let (version, archive) = held
         .lock()
         .archive

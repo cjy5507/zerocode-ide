@@ -1011,10 +1011,6 @@ pub(crate) fn take_census(app: &AppHandle) -> crate::orchestration::restart_cens
 /// notice stood) and leaves the note the next window says it came back by.
 pub(crate) fn relaunch_window(app: AppHandle, door: Option<String>) {
     let _crumb = crate::crumbs::Command::enter("relaunch_window");
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    if crate::computer_use::self_surface::person_only("relaunch_window").is_err() {
-        return;
-    }
     let road = crate::exit_runtime::begin(crate::exit_runtime::ExitRoad::Restart(
         door.as_deref()
             .and_then(crate::exit_runtime::RestartDoor::named),

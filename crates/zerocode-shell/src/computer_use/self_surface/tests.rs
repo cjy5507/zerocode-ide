@@ -431,3 +431,16 @@ fn the_invoke_gate_refuses_only_the_persons_commands_under_a_press() {
         ]
     );
 }
+
+/// A command is the person's or an agent may run it — never both.
+#[test]
+fn the_person_only_and_the_allowed_lists_never_share_a_command() {
+    use super::{AGENT_ALLOWED_SENSITIVE, PERSON_ONLY_COMMANDS};
+
+    for name in AGENT_ALLOWED_SENSITIVE {
+        assert!(
+            !PERSON_ONLY_COMMANDS.contains(name),
+            "{name} is on both lists"
+        );
+    }
+}

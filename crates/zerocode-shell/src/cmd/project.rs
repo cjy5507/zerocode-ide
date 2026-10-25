@@ -584,8 +584,6 @@ pub(crate) async fn respond_permission(
     prompt_id: u64,
     decision: String,
 ) -> Result<(), String> {
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    crate::computer_use::self_surface::person_only("respond_permission")?;
     let channel = zo_channel(&state, &session).map_err(|_| SESSION_UNREACHABLE.to_string())?;
     tauri::async_runtime::spawn_blocking(move || answer_prompt(channel, prompt_id, decision))
         .await

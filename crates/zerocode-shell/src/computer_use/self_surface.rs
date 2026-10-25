@@ -48,10 +48,12 @@ struct Shown {
 
 /// The window's commands only the person may run: an answer to a question,
 /// Computer Use's own policy and stop, the coordinator's seat and landings,
-/// a merge, an update and a restart. Each refuses while an agent's press in
-/// ZeroCode's own window is in flight and for PERSON_ONLY_GRACE_MS after it
-/// ([`person_only`]) — the second wall behind the page's marks: a press the
-/// marks missed still runs none of these.
+/// a merge, an update and a restart, a credential written or dropped, an
+/// account changed. Each refuses while an agent's press in ZeroCode's own
+/// window is in flight and for PERSON_ONLY_GRACE_MS after it — the second
+/// wall behind the page's marks, asked once for every command in the
+/// window's invoke handler ([`person_only_gate`]): a press the marks missed
+/// still runs none of these, whichever crate defines it.
 pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "answer_approval",
     "answer_ask",
@@ -75,7 +77,53 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "gitlab_merge_mr",
     "update_download",
     "update_install",
-    "relaunch_window",
+    // The two ways out the page offers; both reach `relaunch_window`.
+    "leave_now",
+    "leave_when_idle",
+    // A credential written, checked or dropped.
+    "save_api_router",
+    "remove_api_router",
+    "save_typesafe_key",
+    "remove_typesafe_key",
+    "check_typesafe_key",
+    "save_type_value_key",
+    "remove_type_value_key",
+    "ssh_submit_credential",
+    "save_ssh_host",
+    "remove_ssh_host",
+    "ssh_save_target",
+    "ssh_remove_target",
+    "save_remote_server",
+    "remove_remote_server",
+    "save_remote_workspace",
+    "remove_remote_workspace",
+    "set_opencode_cookie",
+    "import_browser_cookies",
+    "import_cookie_file",
+    "jira_connect",
+    "jira_disconnect",
+    "linear_connect",
+    "linear_disconnect",
+    // An account added, removed, switched, signed in or out.
+    "add_claude_account",
+    "add_codex_account",
+    "remove_claude_account",
+    "remove_codex_account",
+    "select_claude_account",
+    "select_codex_account",
+    "relogin_claude_account",
+    "relogin_codex_account",
+    "relogin_codex_login",
+    "logout_codex_login",
+    "use_system_claude_login",
+    "resolve_claude_account_identity",
+    "cli_login_start",
+    "cli_login_logout",
+    "google_login_start",
+    "google_login_finish",
+    "cancel_google_login",
+    "github_login_intent",
+    "github_select_account",
 ];
 
 /// Commands whose names touch a key, a secret, a token, a password, a
@@ -83,12 +131,61 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
 /// still run: each reads, or is not a credential at all (the source contract
 /// `a_command_named_for_a_credential_or_an_account_is_decided_for` asks every
 /// such command to stand here or on [`PERSON_ONLY_COMMANDS`]).
-pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[];
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the source contract off this file's text, and by a unit test"
+    )
+)]
+pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[
+    // Whether a keychain keeps router keys, which accounts stand, what they
+    // used, and whether their logins still hold: reads.
+    "api_router_keys_kept",
+    "claude_accounts",
+    "claude_account_usage",
+    "claude_token_usage",
+    "codex_account_list",
+    "codex_token_usage",
+    "google_account",
+    "type_value_keys",
+    "verify_claude_accounts",
+    "verify_codex_accounts",
+    // A login the person started, watched or let go of: no credential moves.
+    "cli_login_list",
+    "cli_login_witness",
+    "cli_login_wait",
+    "cli_login_witness_drop",
+    // Keys as in keyboard keys, not credentials: a terminal's input, a
+    // shortcut, the keyboard layout.
+    "key_input",
+    "term_key",
+    "set_keybinding",
+    "terminal_keyboard_layout",
+];
 
 /// The refusal the window's invoke handler answers a command with: `None`
 /// for a command not on [`PERSON_ONLY_COMMANDS`] or while no agent presses.
-pub(crate) fn person_only_refusal(_command: &str) -> Option<String> {
-    None
+pub(crate) fn person_only_refusal(command: &str) -> Option<String> {
+    if !PERSON_ONLY_COMMANDS.contains(&command) {
+        return None;
+    }
+    person_only(command).err()
+}
+
+/// The window's invoke handler, asking the second wall first: a command on
+/// [`PERSON_ONLY_COMMANDS`] is refused in words while an agent presses in the
+/// window, and every other command goes to `handler` unasked.
+pub(crate) fn person_only_gate<R: tauri::Runtime>(
+    handler: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    move |invoke| match person_only_refusal(invoke.message.command()) {
+        Some(refused) => {
+            invoke.resolver.reject(refused);
+            true
+        }
+        None => handler(invoke),
+    }
 }
 
 /// Whether person-only `command` may run now: refused while an agent's press

@@ -370,8 +370,6 @@ pub(crate) fn wire_answer(
     answers: Option<Vec<Vec<String>>>,
     message: Option<String>,
 ) -> Result<(), String> {
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    crate::computer_use::self_surface::person_only("wire_answer")?;
     state.shell_runtime().wires.get(id)?.answer(
         &ask,
         option.as_deref(),

@@ -27,6 +27,8 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zerocode_core::conflict::{self, ConflictKind, ConflictOperation};
 use zeroize::Zeroizing;
+
+use crate::computer_use::self_surface::person_only_gate;
 // 호스트 경계. 워크스페이스의 파일과 git이 어느 기계에 있는지는 `Host` 하나가
 // 답하고, 이 파일은 그 답을 들고 다닐 뿐 어느 변종인지 묻지 않는다.
 use zerocode_core::agent_teams::TeamsMode;
@@ -2616,7 +2618,8 @@ fn main() -> ExitCode {
         // t-67936).
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![
+        // Every command asks the second wall first (t-73906).
+        .invoke_handler(person_only_gate(tauri::generate_handler![
             api_router_keys_kept,
             api_router_presets,
             api_router_providers,
@@ -3368,7 +3371,7 @@ fn main() -> ExitCode {
             last_statuses,
             term_resize,
 
-        ])
+        ]))
         .setup(move |app| {
             computer_use::initialize(app.path().resource_dir().ok());
             run_evidence::install_window(app.handle().clone());

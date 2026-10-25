@@ -1481,8 +1481,6 @@ pub(crate) fn set_computer_input_policy(
     state: State<'_, AppState>,
     policy: zerocode_core::computer_use_protocol::execution::InputPolicy,
 ) -> Result<SettingsSnapshot, String> {
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    crate::computer_use::self_surface::person_only("set_computer_input_policy")?;
     let mut revoked = false;
     let snapshot = commit_setting(
         &app,
@@ -1519,8 +1517,6 @@ pub(crate) fn set_computer_live_reflex(
     state: State<'_, AppState>,
     on: bool,
 ) -> Result<SettingsSnapshot, String> {
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    crate::computer_use::self_surface::person_only("set_computer_live_reflex")?;
     commit_setting(
         &app,
         &webview,
@@ -1560,10 +1556,6 @@ pub(crate) fn set_computer_generator_road(
 #[tauri::command]
 pub(crate) fn computer_confirm_answer(id: String, allow: bool) -> bool {
     let _crumb = crate::crumbs::Command::enter("computer_confirm_answer");
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    if crate::computer_use::self_surface::person_only("computer_confirm_answer").is_err() {
-        return false;
-    }
     computer_use::confirm::answer(&id, allow)
 }
 
@@ -1587,10 +1579,6 @@ pub(crate) fn computer_handoff_code(
     code: String,
 ) -> computer_use::confirm::CodeVerdict {
     let _crumb = crate::crumbs::Command::enter("computer_handoff_code");
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    if crate::computer_use::self_surface::person_only("computer_handoff_code").is_err() {
-        return computer_use::confirm::CodeVerdict::Invalid;
-    }
     computer_use::confirm::answer_code(&id, &code)
 }
 
@@ -1617,8 +1605,6 @@ pub(crate) fn computer_resume(
     reset: bool,
     revision: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    // An agent pressing in ZeroCode's own window never runs this (t-73906).
-    crate::computer_use::self_surface::person_only("computer_resume")?;
     from_the_main_webview(&webview).map_err(|_| {
         "computer_resume_main_window_only: 정지는 메인 창의 띠에서만 다시 시작합니다".to_string()
     })?;
