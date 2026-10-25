@@ -45,6 +45,9 @@ import { median, quantile, webkitType } from "./coordinator-desk-perf.mjs";
  *      into the list, in any frame;
  *   ⑩ a cold list reveals its active workspace, a row never built below rows never measured: the row stands
  *      built, fully visible and focused;
+ *   ⑪ over every render of every page: no geometry read between the first section's window and the measure of the
+ *      rows comes after a change to the list — such a read makes the engine style and lay out the list again, once
+ *      more per section, inside the frame (t-73874);
  *   and, with no browser, two traces that show the mid-scroll classifier reads the page's order, not the clock.
  *
  *   node ui/tests/sidebar-scroll.mjs [--engine webkit] [--json <file>]   alone, with the frame trace
@@ -115,15 +118,41 @@ async function installScrollProbes(page) {
     const own = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop");
     const read = () => own.get.call(scroller);
     const probe = {
-      writes: [], events: [], frames: [], renders: [], recording: false, setup: false, writing: false, seq: 0, read,
+      writes: [], events: [], frames: [], renders: [], forced: [], recording: false, setup: false, writing: false, seq: 0,
+      read,
     };
     window.__PROBE__ = probe;
     const wrote = (before, via) => {
       if (!probe.setup) probe.writes.push({ at: performance.now(), seq: (probe.seq += 1), before, after: read(), via });
     };
+    // A read of the list's geometry after the window changed the list makes the engine style and lay it out again,
+    // inside the render (t-73874). A change is what a MutationObserver on the scroller sees — an attribute set to the
+    // value it had is none — and the reads are getBoundingClientRect and the scroller's scrollTop. `phase` is the
+    // render being timed; its window phase runs from the first section's window to the measure of the rows.
+    const changes = new MutationObserver(() => {});
+    changes.observe(scroller, { subtree: true, childList: true, characterData: true, attributes: true, attributeOldValue: true });
+    const changed = () =>
+      changes.takeRecords().some((one) => one.type !== "attributes" || one.target.getAttribute(one.attributeName) !== one.oldValue);
+    let phase = null;
+    const looked = () => {
+      if (changed() && phase.windows) phase.forced += 1;
+    };
+    const box = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function boxed() {
+      if (phase) looked();
+      return box.call(this);
+    };
+    for (const [name, windows] of [["renderSidebarWindow", true], ["measureSidebarRows", false]]) {
+      const held = window[name];
+      window[name] = function phased(...args) {
+        if (phase) phase.windows = windows;
+        return held.apply(this, args);
+      };
+    }
     Object.defineProperty(scroller, "scrollTop", {
       configurable: true,
       get() {
+        if (phase) looked();
         return own.get.call(this);
       },
       set(value) {
@@ -178,11 +207,17 @@ async function installScrollProbes(page) {
     }
     const render = window.renderSidebarWindows;
     window.renderSidebarWindows = function timedRender(...args) {
+      const outer = phase;
+      // What changed before the render is not the render's own change.
+      changed();
+      phase = { windows: false, forced: 0 };
       const started = performance.now();
       try {
         return render.apply(this, args);
       } finally {
         probe.renders.push(performance.now() - started);
+        probe.forced.push(phase.forced);
+        phase = outer;
       }
     };
     // The home: where the first section and row 0 stand now, at rest with the scroll at 0, in scroll coordinates.
@@ -651,7 +686,9 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     const taken = await page.evaluate(() => {
       const probe = window.__PROBE__;
       probe.stop();
-      return { frames: probe.frames, writes: probe.writes, events: probe.events, renders: probe.renders };
+      return { frames: probe.frames, writes: probe.writes, events: probe.events, renders: probe.renders, forced: probe.forced,
+        sections: document.querySelectorAll("#worktrees .worktree-list").length,
+      };
     });
     pages.push(taken);
     return taken;
@@ -970,6 +1007,17 @@ export async function testSidebarScroll({ browser, origin, ok, engine = "chromiu
     "⑩ revealing the active workspace, a row never built below rows never measured, stands it built, fully visible and focused",
     revealed.named && !revealed.builtBefore && revealed.built && revealed.shown && revealed.focused,
     JSON.stringify({ engine, ...revealed }),
+  );
+  // Every render on every page: the window reads where each section stands before it changes any section, so moving
+  // one section's rows never makes a later section's read style and lay out the list again — once per section a
+  // frame, on the efficiency cores a few ms each (t-73874). The scene stands two sections, so a window that read
+  // between them would count here.
+  const forced = pages.flatMap((one) => one.forced);
+  const sections = Math.min(...pages.map((one) => one.sections));
+  ok(
+    "⑪ no render reads the list's geometry between its first section window and its measure of the rows after changing the list — the reads that make the engine style and lay out the list again inside the frame",
+    sections >= 2 && forced.length > 0 && forced.every((count) => count === 0),
+    JSON.stringify({ engine, sections, renders: forced.length, forcedRenders: forced.filter((count) => count > 0).length, most: Math.max(0, ...forced) }),
   );
   const cases = { first, second, bottom, cleanup, past, fling };
   const arrivals = Object.values(cases).flatMap((one) => one.held.arrivals);
