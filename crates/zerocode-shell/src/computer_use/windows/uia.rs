@@ -23,25 +23,24 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::UI::Accessibility::{
     AutomationElementMode_Full, CUIAutomation8, ExpandCollapseState_Collapsed,
     ExpandCollapseState_Expanded, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationCondition,
-    IUIAutomationElement, IUIAutomationElement3, IUIAutomationExpandCollapsePattern,
-    IUIAutomationInvokePattern, IUIAutomationRangeValuePattern, IUIAutomationScrollItemPattern,
-    IUIAutomationScrollPattern, IUIAutomationSelectionItemPattern, IUIAutomationTextPattern,
-    IUIAutomationTogglePattern, IUIAutomationValuePattern, ScrollAmount_LargeDecrement,
-    ScrollAmount_LargeIncrement, ScrollAmount_NoAmount, TextPatternRangeEndpoint_End,
-    TextPatternRangeEndpoint_Start, TextUnit_Character, ToggleState_On, TreeScope_Children,
-    TreeScope_Element, UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId,
-    UIA_ClassNamePropertyId, UIA_ControlTypePropertyId,
-    UIA_ExpandCollapseExpandCollapseStatePropertyId, UIA_ExpandCollapsePatternId,
-    UIA_HasKeyboardFocusPropertyId, UIA_HelpTextPropertyId, UIA_InvokePatternId,
-    UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId, UIA_IsKeyboardFocusablePropertyId,
-    UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId, UIA_LocalizedControlTypePropertyId,
-    UIA_NamePropertyId, UIA_NativeWindowHandlePropertyId, UIA_ProcessIdPropertyId,
-    UIA_RangeValueIsReadOnlyPropertyId, UIA_RangeValuePatternId, UIA_RangeValueValuePropertyId,
-    UIA_ScrollHorizontallyScrollablePropertyId, UIA_ScrollItemPatternId, UIA_ScrollPatternId,
-    UIA_ScrollVerticallyScrollablePropertyId, UIA_SelectionItemIsSelectedPropertyId,
-    UIA_SelectionItemPatternId, UIA_TextPatternId, UIA_TogglePatternId,
-    UIA_ToggleToggleStatePropertyId, UIA_ValueIsReadOnlyPropertyId, UIA_ValuePatternId,
-    UIA_ValueValuePropertyId,
+    IUIAutomationElement, IUIAutomationExpandCollapsePattern, IUIAutomationInvokePattern,
+    IUIAutomationRangeValuePattern, IUIAutomationScrollItemPattern, IUIAutomationScrollPattern,
+    IUIAutomationSelectionItemPattern, IUIAutomationTextPattern, IUIAutomationTogglePattern,
+    IUIAutomationValuePattern, ScrollAmount_LargeDecrement, ScrollAmount_LargeIncrement,
+    ScrollAmount_NoAmount, TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start,
+    TextUnit_Character, ToggleState_On, TreeScope_Children, TreeScope_Element,
+    UIA_AutomationIdPropertyId, UIA_BoundingRectanglePropertyId, UIA_ClassNamePropertyId,
+    UIA_ControlTypePropertyId, UIA_ExpandCollapseExpandCollapseStatePropertyId,
+    UIA_ExpandCollapsePatternId, UIA_HasKeyboardFocusPropertyId, UIA_HelpTextPropertyId,
+    UIA_InvokePatternId, UIA_IsControlElementPropertyId, UIA_IsEnabledPropertyId,
+    UIA_IsKeyboardFocusablePropertyId, UIA_IsOffscreenPropertyId, UIA_IsPasswordPropertyId,
+    UIA_LocalizedControlTypePropertyId, UIA_NamePropertyId, UIA_NativeWindowHandlePropertyId,
+    UIA_ProcessIdPropertyId, UIA_RangeValueIsReadOnlyPropertyId, UIA_RangeValuePatternId,
+    UIA_RangeValueValuePropertyId, UIA_ScrollHorizontallyScrollablePropertyId,
+    UIA_ScrollItemPatternId, UIA_ScrollPatternId, UIA_ScrollVerticallyScrollablePropertyId,
+    UIA_SelectionItemIsSelectedPropertyId, UIA_SelectionItemPatternId, UIA_TextPatternId,
+    UIA_TogglePatternId, UIA_ToggleToggleStatePropertyId, UIA_ValueIsReadOnlyPropertyId,
+    UIA_ValuePatternId, UIA_ValueValuePropertyId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GA_ROOT, GetAncestor};
 use windows::core::{BSTR, IUnknown, Interface};
@@ -861,25 +860,6 @@ pub(super) fn place_caret(element: &IUIAutomationElement, utf16_offset: usize) {
         }
         let _ = range.Select();
     }
-}
-
-/// `AXShowMenu`: ask the element to open its own context menu, through
-/// `IUIAutomationElement3::ShowContextMenu`. The menu opens in the app's
-/// own way and no pointer is moved, so the click fence has nothing to judge.
-pub(super) fn show_context_menu(element: &IUIAutomationElement) -> Result<(), ProviderError> {
-    let Ok(element) = element.cast::<IUIAutomationElement3>() else {
-        return Err(ProviderError::new(
-            error_code::ACTION_NOT_SUPPORTED,
-            "this UI Automation client cannot show context menus",
-        ));
-    };
-    // SAFETY: a live COM call on the element.
-    unsafe { element.ShowContextMenu() }.map_err(|error| {
-        ProviderError::new(
-            error_code::ACTION_NOT_SUPPORTED,
-            format!("the element did not show a context menu: {error}"),
-        )
-    })
 }
 
 /// A UI Automation call that came back without an answer: the provider may
