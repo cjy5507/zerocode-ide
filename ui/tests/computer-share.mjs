@@ -15,7 +15,11 @@ import { openWindowTestPage } from "./window-boot.mjs";
  *    whatever the agent last did; pressing it calls `computer_take_control`;
  *  - after the person took control the band offers 「다시 맡기기」 alone,
  *    which calls `computer_give_back`;
- *  - both band buttons are the person's (`data-person-only`).
+ *  - both band buttons are the person's (`data-person-only`);
+ *  - with sharing required, the card's clock says the agent waits rather
+ *    than goes on unshared (t-74826), and an app left waiting is named on
+ *    the band with 「맡기기」, the person's, which calls
+ *    `computer_share_hand_over` with that app.
  *
  *   WINDOW_SUITES=computer-share node ui/tests/window.mjs */
 
@@ -29,6 +33,16 @@ export const SHARE_WORDS = Object.freeze({
   es: { title: "¿Ceder esta ventana?", allow: "Ceder", deny: "Rechazar", take: "Tomar el control", give: "Volver a ceder" },
 });
 
+/* What the card's clock says in each mode, one fragment a language: the
+ * seconds count down, so the fragment is the part that does not move. */
+export const SHARE_CLOCK_WORDS = Object.freeze({
+  ko: { unshared: "공유 없이 진행", waits: "에이전트가 기다립니다" },
+  en: { unshared: "goes on without sharing", waits: "keeps the agent waiting" },
+  ja: { unshared: "共有せずに続けます", waits: "エージェントは待ちます" },
+  zh: { unshared: "将不共享继续", waits: "智能体会等待" },
+  es: { unshared: "sigue sin compartir", waits: "el agente espera" },
+});
+
 const installHands = () => {
   const T = {
     settle: (ms = 120) => new Promise((done) => setTimeout(done, ms)),
@@ -37,6 +51,7 @@ const installHands = () => {
     },
     answered: [],
     taken: 0,
+    handed: [],
     panelLabels: [],
     given: 0,
     said(id) {
@@ -50,6 +65,7 @@ const installHands = () => {
         shown: !!scrim && !scrim.hidden,
         kind: section?.dataset.kind ?? null,
         title: T.said("ask-title"),
+        clock: T.said("ask-clock"),
         why: T.said("ask-why"),
         buttons: [...(scrim?.querySelectorAll("#ask-choices button") ?? [])].map((one) => one.textContent.trim()),
       };
@@ -58,7 +74,11 @@ const installHands = () => {
       const band = document.getElementById("computer-band");
       const take = document.getElementById("computer-band-take");
       const give = document.getElementById("computer-band-give");
+      const hand = document.getElementById("computer-band-hand");
       return {
+        wait: T.said("computer-band-wait"),
+        hand: hand && !hand.hidden ? hand.textContent.trim() : null,
+        handPersonOnly: hand?.hasAttribute("data-person-only") ?? false,
         shown: !!band && !band.hidden,
         share: T.said("computer-band-share"),
         take: take && !take.hidden ? take.textContent.trim() : null,
@@ -75,6 +95,10 @@ const installHands = () => {
   window.__ANSWER__.computer_take_control = () => {
     T.taken += 1;
     return null;
+  };
+  window.__ANSWER__.computer_share_hand_over = (args) => {
+    T.handed.push(JSON.parse(JSON.stringify(args)));
+    return true;
   };
   window.__ANSWER__.computer_give_back = () => {
     T.given += 1;
@@ -189,5 +213,55 @@ export async function testComputerShare(browser, origin, ok) {
     ok("after taking control the band offers to hand back alone", said.taken.give === words.give && said.taken.take === null, JSON.stringify(said.taken));
     ok("handing back asks the backend once", said.gives === 1, String(said.gives));
     ok("with nothing shared the band offers neither", said.gone.take === null && said.gone.give === null && said.gone.share === null, JSON.stringify(said.gone));
+  });
+
+  await scenario(browser, origin, "card clock by mode", ok, async (page) => {
+    for (const [locale, clock] of Object.entries(SHARE_CLOCK_WORDS)) {
+      const shown = await page.evaluate(async (locale) => {
+        const T = window.__SHARE_T__;
+        await setLocale(locale, { refresh: false, persist: false });
+        const seen = {};
+        for (const [mode, required] of [["off", false], ["on", true]]) {
+          const id = `share-${locale}-${mode}`;
+          T.fire("computer:share", { id, app: "Notes", timeoutMs: 30000, required });
+          await T.settle();
+          seen[mode] = T.popup().clock;
+          T.fire("computer:share-closed", { id });
+          await T.settle();
+        }
+        return seen;
+      }, locale);
+      ok(`${locale}: unrequired, the clock says the run goes on unshared`,
+        (shown.off ?? "").includes(clock.unshared) && !(shown.off ?? "").includes(clock.waits), JSON.stringify(shown));
+      ok(`${locale}: required, the clock says the agent waits`,
+        (shown.on ?? "").includes(clock.waits) && !(shown.on ?? "").includes(clock.unshared), JSON.stringify(shown));
+    }
+  });
+
+  await scenario(browser, origin, "waiting app", ok, async (page) => {
+    const said = await page.evaluate(async () => {
+      const T = window.__SHARE_T__;
+      T.fire("computer:share-state", { target: null, takenBack: false, waiting: "notes", waitingLabel: "Notes" });
+      await T.settle();
+      const waiting = T.band();
+      document.getElementById("computer-band-hand")?.click();
+      await T.settle();
+      T.fire("computer:share-state", { target: "safari", label: "Safari", takenBack: false, waiting: "notes", waitingLabel: "Notes" });
+      await T.settle();
+      const beside = T.band();
+      T.fire("computer:share-state", { target: "notes", label: "Notes", takenBack: false, waiting: null });
+      await T.settle();
+      return { waiting, beside, shared: T.band(), handed: T.handed };
+    });
+    ok("the band stands while an app waits for the person", said.waiting.shown, JSON.stringify(said.waiting));
+    ok("the band names the app that waits", (said.waiting.wait ?? "").includes("Notes"), JSON.stringify(said.waiting));
+    ok("the band offers to hand the waiting app over", said.waiting.hand === words.allow && said.waiting.take === null, JSON.stringify(said.waiting));
+    ok("the hand-over is the person's", said.waiting.handPersonOnly, JSON.stringify(said.waiting));
+    ok("the hand-over names the waiting app to the backend once",
+      said.handed.length === 1 && said.handed[0].app === "notes", JSON.stringify(said.handed));
+    ok("beside a share, both the shared app and the waiting one are named",
+      (said.beside.share ?? "").includes("Safari") && (said.beside.wait ?? "").includes("Notes") && said.beside.take === words.take,
+      JSON.stringify(said.beside));
+    ok("once handed over nothing waits", said.shared.wait === null && said.shared.hand === null, JSON.stringify(said.shared));
   });
 }

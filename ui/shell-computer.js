@@ -36,8 +36,10 @@ let computerBandTimer = null;
 /* The window shared with an agent, as the backend last said it (t-73906):
  * its key, the words the person knows it by, and whether the person took
  * control. The band stands while a window is shared, whatever the agent last
- * did, so 「제어권 가져오기」 is always one press away. */
-let computerShareState = { target: null, label: null, takenBack: false };
+ * did, so 「제어권 가져오기」 is always one press away. With sharing required,
+ * the app whose card went unanswered waits (t-74826): the band names it and
+ * offers 「맡기기」 for as long as it waits. */
+let computerShareState = { target: null, label: null, takenBack: false, waiting: null, waitingLabel: null };
 let computerShareRevision = null;
 /* The pane and assignment of the newest look the backend announced: what the
  * band's view opens. */
@@ -110,7 +112,8 @@ function paintComputerBand() {
   const kept = reach?.kept ?? 0;
   if (kept > computerBandKept) computerBandSlipAway();
   computerBandKept = kept;
-  const shared = computerShareState.target != null || computerShareState.takenBack;
+  const shared = computerShareState.target != null || computerShareState.takenBack ||
+    computerShareState.waiting != null;
   const show = stopped || state.active || state.stopping || state.resuming || kept > 0 || shared;
   band.hidden = !show;
   band.classList.toggle("is-stopped", stopped);
@@ -141,7 +144,8 @@ function paintComputerBand() {
 }
 
 /* The share's part of the band: which window an agent works in, the press
- * that takes it back, and — once taken — the press that hands it back. */
+ * that takes it back, and — once taken — the press that hands it back; and
+ * the app an agent waits for, with the press that hands it over. */
 function paintComputerShare() {
   const share = computerShareState;
   const app = share.label ?? share.target;
@@ -156,6 +160,15 @@ function paintComputerShare() {
   line.hidden = !words;
   el("computer-band-take").hidden = share.target == null || share.takenBack;
   el("computer-band-give").hidden = !share.takenBack;
+  const waiting = share.waitingLabel ?? share.waiting;
+  const wait = el("computer-band-wait");
+  const waitWords = waiting == null
+    ? null
+    : () => t("computer.share.waiting", "에이전트가 「{{app}}」 창을 맡겨 주기를 기다립니다", { app: waiting });
+  say(wait, waitWords);
+  if (!waitWords) wait.textContent = "";
+  wait.hidden = !waitWords;
+  el("computer-band-hand").hidden = share.waiting == null;
 }
 
 function takeComputerShare(said) {
@@ -166,6 +179,8 @@ function takeComputerShare(said) {
     target: said?.target ?? null,
     label: said?.label ?? null,
     takenBack: said?.takenBack === true,
+    waiting: said?.waiting ?? null,
+    waitingLabel: said?.waitingLabel ?? null,
   };
   paintComputerBand();
 }
@@ -180,6 +195,12 @@ syncComputerSharePanelWords();
 
 el("computer-band-take").addEventListener("click", () => {
   void invoke("computer_take_control").catch(() => {});
+});
+
+el("computer-band-hand").addEventListener("click", () => {
+  const app = computerShareState.waiting;
+  if (app == null) return;
+  void invoke("computer_share_hand_over", { app }).catch(() => {});
 });
 
 el("computer-band-give").addEventListener("click", () => {
@@ -799,8 +820,10 @@ registerAskKind("computer-handoff", {
 
 /* One window shared with an agent (t-73906): the first time an agent acts
  * in an app the person is asked once whether to hand that window over. The
- * refusal holds the focus; silence lets an unattended run go on unshared, as
- * the clock says. Same road as the confirm: the answer goes back by id. */
+ * refusal holds the focus; silence lets an unattended run go on unshared —
+ * or, with sharing required, keeps the agent waiting until the person hands
+ * the app over from the band (t-74826) — as the clock says. Same road as the
+ * confirm: the answer goes back by id. */
 registerAskKind("computer-share", {
   ...computerAnswerRoad,
   // The default edge, the one blue for what waits for the person — not the
@@ -819,9 +842,13 @@ registerAskKind("computer-share", {
     initial: 0,
     safe: 0,
   }),
-  clock: (ask) => t("computer.share.clock", "{{seconds}}초 동안 답이 없으면 공유 없이 진행합니다", {
-    seconds: computerAskSeconds(ask),
-  }),
+  clock: (ask) => ask.payload.required === true
+    ? t("computer.share.clockRequired", "{{seconds}}초 안에 답이 없으면 에이전트가 기다립니다 · 나중에 띠에서 맡길 수 있습니다", {
+      seconds: computerAskSeconds(ask),
+    })
+    : t("computer.share.clock", "{{seconds}}초 동안 답이 없으면 공유 없이 진행합니다", {
+      seconds: computerAskSeconds(ask),
+    }),
 });
 
 function raiseComputerAsk(kind, ask) {

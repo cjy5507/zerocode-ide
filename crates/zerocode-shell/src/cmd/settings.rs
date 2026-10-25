@@ -1595,6 +1595,14 @@ pub(crate) fn computer_give_back() {
     computer_use::share::give_back();
 }
 
+/// The person hands over, from the band, the app an agent waits for under
+/// required sharing (t-74826): that app only, and only while it waits.
+#[tauri::command]
+pub(crate) fn computer_share_hand_over(app: String) -> bool {
+    let _crumb = crate::crumbs::Command::enter("computer_share_hand_over");
+    computer_use::share::hand_over(&app)
+}
+
 /// What is shared with an agent now, for the band's first paint (t-73906).
 #[tauri::command(async)]
 pub(crate) fn computer_share_state(panel_label: Option<String>) -> serde_json::Value {
