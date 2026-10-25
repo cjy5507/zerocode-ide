@@ -391,6 +391,44 @@ fn an_agents_press_holds_every_person_only_command() {
     }
 }
 
+/// R1 (t-74927): the person's own hand is never held by an agent's press —
+/// right after one, the band's 「제어권 가져오기」 and a question's answer
+/// still run when the person makes them.
+#[test]
+fn the_persons_take_control_runs_right_after_an_agents_press() {
+    use super::person_only;
+
+    let _hand = one_hand();
+    let (_helper, _) = stand_helper();
+    let (_page, _) = stand_page(ordinary_page());
+    call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
+    call("click", json!({ "app": "ZeroCode", "elementIndex": 2 })).unwrap();
+    for command in ["computer_take_control", "computer_give_back", "answer_ask"] {
+        assert_eq!(person_only(command), Ok(()), "{command} right after a press");
+    }
+}
+
+/// R1 (t-74927): what an agent's press made stays refused however late it
+/// reaches the window — no clock lets an awaiting handler through.
+#[test]
+fn an_agents_call_is_refused_however_late_it_comes() {
+    use std::time::{Duration, Instant};
+
+    use zerocode_core::computer_use_protocol::self_surface::{
+        PAGE_ANSWER_MS, PERSON_ONLY_GRACE_MS,
+    };
+
+    use super::person_only_at;
+
+    let _hand = one_hand();
+    let (_helper, _) = stand_helper();
+    let (_page, _) = stand_page(ordinary_page());
+    call("getAppState", json!({ "app": "ZeroCode" })).unwrap();
+    call("click", json!({ "app": "ZeroCode", "elementIndex": 2 })).unwrap();
+    let late = Instant::now() + Duration::from_millis(PAGE_ANSWER_MS + PERSON_ONLY_GRACE_MS + 1);
+    assert!(person_only_at("answer_ask", late).is_err(), "answer_ask late");
+}
+
 /// The invoke handler's question: a command on the person-only list is
 /// refused during an agent's press, any other command never is.
 #[test]

@@ -199,4 +199,74 @@ export async function testSelfAct(browser, origin, ok) {
     ok("a press on a control gone presses nothing", said.pressed === false && said.clicks === 0, JSON.stringify(said));
     ok("a press from a look the page no longer holds presses nothing", said.old === false, JSON.stringify(said));
   });
+
+  /* Whose hand made a command (t-74927). The window refuses a person-only
+   * command by the hand the page says made it, never by a clock: every call
+   * carries `zerocode-hand`. What an agent's press makes — in its click, after
+   * an await, after a wait whose end nobody times, in a change the press
+   * fired — says `agent`; the person's own click right after it says
+   * `person`; the update clock's quiet download says `program`. */
+  await scenario(browser, origin, "hand", ok, async (page) => {
+    await page.evaluate(() => {
+      const T = window.__SELF_T__;
+      T.hands = [];
+      const said = (command) => (args, options) => {
+        T.hands.push([command, options?.headers?.["zerocode-hand"] ?? null]);
+        return command === "update_check" ? { phase: { phase: "available" }, next: "download" }
+          : command === "update_download" ? { phase: { phase: "idle" } }
+            : true;
+      };
+      for (const command of ["computer_take_control", "computer_give_back", "answer_ask", "answer_approval",
+        "jira_connect", "update_check", "update_download", "board_columns_probe"]) {
+        window.__ANSWER__[command] = said(command);
+      }
+      let release;
+      T.later = new Promise((done) => { release = done; });
+      T.release = release;
+      const fixture = document.getElementById("self-act-fixture");
+      fixture.insertAdjacentHTML("beforeend", `
+        <button id="hand-agent" type="button">Hand agent</button>
+        <input id="hand-check" type="checkbox" aria-label="Hand check">
+        <button id="hand-person" type="button">Hand person</button>`);
+      document.getElementById("hand-agent").addEventListener("click", async () => {
+        void invoke("computer_take_control");
+        await invoke("board_columns_probe");
+        void invoke("answer_ask");
+        await T.later;
+        void invoke("computer_give_back");
+      });
+      document.getElementById("hand-check").addEventListener("change", () => void invoke("jira_connect"));
+      document.getElementById("hand-person").addEventListener("click", () => void invoke("answer_approval"));
+    });
+    const agent = await page.evaluate(async () => {
+      const T = window.__SELF_T__;
+      const press = async (name) => {
+        const look = await T.ask({ kind: "look" });
+        const control = T.named(look, name);
+        const facts = await T.ask({ kind: "facts", lookId: look.ok.lookId, id: control.id });
+        return (await T.ask({ kind: "do", lookId: look.ok.lookId, id: control.id, act: "click", facts: facts.ok.facts }))?.ok?.done ?? null;
+      };
+      const pressed = [await press("Hand agent"), await press("Hand check")];
+      // The press's last step waits on something only the test ends: no clock
+      // decides whose hand it was when it ends.
+      T.release();
+      await T.later;
+      await new Promise((done) => setTimeout(done, 0));
+      return { pressed, hands: T.hands.splice(0) };
+    });
+    await page.click("#hand-person");
+    const person = await page.evaluate(async () => {
+      const T = window.__SELF_T__;
+      await askUpdateCheck(UPDATE_KNOCK.clock);
+      return T.hands.splice(0);
+    });
+    const hand = (hands, command) => hands.filter(([name]) => name === command).map(([, by]) => by);
+    ok("the agent's presses were made", agent.pressed.every((done) => done === true), JSON.stringify(agent.pressed));
+    ok("a command the press's click makes says agent", hand(agent.hands, "computer_take_control").join() === "agent", JSON.stringify(agent.hands));
+    ok("a command after the press's await says agent", hand(agent.hands, "answer_ask").join() === "agent", JSON.stringify(agent.hands));
+    ok("a command after a wait nobody timed says agent", hand(agent.hands, "computer_give_back").join() === "agent", JSON.stringify(agent.hands));
+    ok("a command a change the press fired makes says agent", hand(agent.hands, "jira_connect").join() === "agent", JSON.stringify(agent.hands));
+    ok("the person's own click right after says person", hand(person, "answer_approval").join() === "person", JSON.stringify(person));
+    ok("the update clock's quiet download says program", hand(person, "update_download").join() === "program", JSON.stringify(person));
+  });
 }
