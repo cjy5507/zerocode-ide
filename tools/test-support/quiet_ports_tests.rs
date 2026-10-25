@@ -16,12 +16,14 @@ fn bind_loopback(port: u16) -> std::io::Result<TcpListener> {
 /// Whether some other holder of the lock file (another process, here another
 /// handle) could take the lock now.
 fn lock_is_free(port: u16) -> bool {
+    let path = lock_path(port);
+    std::fs::create_dir_all(path.parent().expect("a folder")).expect("the lock folder");
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(lock_path(port))
+        .open(path)
         .expect("the lock file opens");
     file.try_lock().is_ok()
 }
