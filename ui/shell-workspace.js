@@ -3924,6 +3924,14 @@ function worktreeIgnoredWord() {
   return t("worktree.landIgnored", "무시된 파일 남음");
 }
 
+/* The work an unlanded checkout waits on, as the reclaimer read it (`waits`): its own commits and their base. */
+function reclaimWaiting(reason) {
+  const waits = reason?.waits;
+  return waits && Number.isFinite(waits.own) && typeof waits.base === "string" && waits.base !== ""
+    ? { own: waits.own, base: waits.base }
+    : null;
+}
+
 function worktreeReclaimWord(reason) {
   switch (reason.kind) {
     case "active": return t("worktree.reclaimActive", "현재 열어 둔 폴더");
@@ -3931,6 +3939,10 @@ function worktreeReclaimWord(reason) {
     case "locked": return t("worktree.reclaimLocked", "워크트리 잠김");
     case "ignored_file": return t("worktree.reclaimFile", "보존할 파일 있음");
     case "not_managed": return t("worktree.reclaimNotManaged", "자동 정리 대상 아님");
+    // What a checkout with the worker's own unlanded commits waits for (t-73910): how many are its own, and the base.
+    case "unlanded": return reclaimWaiting(reason)
+      ? t("worktree.reclaimUnlanded", "워커 커밋 {{own}}개 {{base}} 대기", reclaimWaiting(reason))
+      : t("worktree.reclaimKept", "정리 보류");
     default: return t("worktree.reclaimKept", "정리 보류");
   }
 }
@@ -4048,6 +4060,9 @@ function worktreeLandingSay(landing, { phase = "", merged = false, idle = false,
   if (reclaim) lines.push(t("worktree.reclaimTip", "자동 정리 보류: {{reason}}", {
     reason: `${worktreeReclaimWord(reclaim)}${reclaim.detail ? `\n${reclaim.detail}` : ""}`,
   }));
+  if (reclaim?.kind === "unlanded" && reclaimWaiting(reclaim)) {
+    lines.push(t("worktree.reclaimWaits", "워커가 여기서 만든 커밋 {{own}}개가 아직 {{base}}에 없습니다 — 들어가면 자동으로 정리합니다", reclaimWaiting(reclaim)));
+  }
   if (reclaim?.checked_ms) lines.push(t("worktree.reclaimChecked", "자동 정리 확인: {{time}}", {
     time: new Date(reclaim.checked_ms).toLocaleTimeString(),
   }));
@@ -5973,7 +5988,7 @@ const TEAM_CHECK_GOING = new Set(["started", "prepared"]);
  * `released` settles a worker in the ledger's eyes, and one whose release got no answer stood on landed work under
  * a running coordinator with every step green at 착지 (t-60850; the person, 10-16: 「코덱스가 돌고 있는데 착지라 표시되는
  * 버그」). A worker still at work keeps its row on such work (`teamWorkerAtWork`). */
-const TEAM_SETTLED_STAGES = new Set(["handedIn", "reviewing", "landWait", "failed"]);
+const TEAM_SETTLED_STAGES = new Set(["handedIn", "reviewing", "landWait", "failed", "stopped"]);
 const TEAM_LEFT_STAGES = new Set(["landed", "nothing", "closed"]);
 
 /* What a step's cell says in the strip's tip: done, where the work is, where it is held, no record — and a step
@@ -6128,12 +6143,14 @@ function teamSteps(row, held) {
   const committed = commits > 0 || landing?.state === "landed";
   const landed = phase === "landed" || phase === "nothing";
   const verified = landed || phase === "landWait" || row.review?.verified === true;
-  const handed = Boolean(row.handed_in) && !row.failed;
+  // An attempt that ended handing nothing in — failed on its own word, or stopped with no result seen (t-73910).
+  const ended = row.failed === true || row.stopped === true;
+  const handed = Boolean(row.handed_in) && !ended;
   let current = null;
   if (!landed) {
     if (verified) current = "land";
     else if (handed) current = "verify";
-    else if (row.failed) current = "handIn";
+    else if (ended) current = "handIn";
     else if (committed) current = "commit";
     else current = "read";
   }
@@ -6142,7 +6159,7 @@ function teamSteps(row, held) {
     read: current === "read" ? "cur" : "on",
     commit: committed ? (current === "commit" ? "cur" : "on") : "",
     check: check === null ? "" : TEAM_CHECK_PASSED.has(check) ? "on" : TEAM_CHECK_GOING.has(check) ? "cur" : "stuck",
-    handIn: row.failed ? "stuck" : handed || verified ? "on" : "",
+    handIn: ended ? "stuck" : handed || verified ? "on" : "",
     verify: verified ? "on" : current === "verify" ? "cur" : "",
     land: landed ? "on" : current === "land" ? "cur" : "",
   };
@@ -6198,11 +6215,22 @@ function teamWorkerAtWork(row, hook = teamWorkerHook(row)) {
   return hook === "working" || (hook === null && row.state === "working");
 }
 
+/* A failed turn in one line: 「턴 실패 — <the error's own words>」, or the word alone when the CLI gave none. */
+function teamTurnFailedLine(failed) {
+  const error = String(failed.error ?? "").trim();
+  return error === ""
+    ? t("sidebar.team.turnFailed", "턴 실패")
+    : t("sidebar.team.turnFailedLine", "턴 실패 — {{error}}", { error });
+}
+
 /* One worker's row, as words: its state and the one word of what holds it, its title, its pane, what it last
  * said it was doing, and its steps. */
 function teamWorkerEntry(row, at, now) {
   const stage = ledgerLandingStage(row);
-  const blocker = seatHealthBlockerWord(row, now) || seatStallWord(row, stage);
+  // A turn that failed on an error its CLI named (t-69010) holds the worker until somebody acts on it.
+  const failedTurn = row.turn_failed && typeof row.turn_failed === "object" ? row.turn_failed : null;
+  const blocker = (failedTurn ? t("sidebar.team.turnFailed", "턴 실패") : "") ||
+    seatHealthBlockerWord(row, now) || seatStallWord(row, stage);
   const hook = teamWorkerHook(row);
   let state = "resting";
   if (row.asking === true || hook === "needs-attention") state = "asking";
@@ -6226,8 +6254,10 @@ function teamWorkerEntry(row, at, now) {
     paneTip: row.pane && row.settled !== true
       ? t("sidebar.team.paneTip", "워커 {{worker}}의 판 — 계정이 바뀌어 판 번호가 옮겨도 이 행은 그 워커를 따라갑니다", { worker: row.worker })
       : "",
-    now: said?.line ? `${teamSentence(said.line)} · ${teamAgo(said.created_ms, now)}` : "",
-    nowTip: said?.line ?? "",
+    now: failedTurn
+      ? `${teamSentence(teamTurnFailedLine(failedTurn))} · ${teamAgo(failedTurn.at_ms, now)}`
+      : said?.line ? `${teamSentence(said.line)} · ${teamAgo(said.created_ms, now)}` : "",
+    nowTip: failedTurn ? teamTurnFailedLine(failedTurn) : said?.line ?? "",
     steps,
     step: steps.current === null ? teamStepWord("land", 0) : teamStepWord(steps.current, steps.commits),
     stepsTip: teamStepsTip(row, steps),

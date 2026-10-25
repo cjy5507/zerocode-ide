@@ -19550,6 +19550,39 @@ fn a_cancelled_zo_turn_end_is_an_interrupted_done() {
     );
 }
 
+/// t-69010: zo ends a turn that errored `failed` with the error beside it,
+/// and that error rides the report to the ledger — a turn that failed is
+/// still a turn that ended, and only `cancelled` is a person's interrupt.
+#[test]
+fn a_failed_zo_turn_end_carries_its_error_and_a_completed_or_cancelled_one_none() {
+    let ended = |outcome: &str, error: Option<&str>| {
+        let mut frame = json!({ "type": "turn", "phase": "end", "turn_id": 9, "outcome": outcome });
+        if let Some(error) = error {
+            frame["error"] = json!(error);
+        }
+        zo_channel_report(&frame).expect("a turn-end report")
+    };
+    let failed = ended(
+        "failed",
+        Some("  api failed after 3 attempts: stream_startup_no_progress  "),
+    );
+    assert_eq!(
+        (failed.state, failed.event, failed.interrupted),
+        (zerocode_core::hook::HookState::Done, "zo-turn-end", false)
+    );
+    assert_eq!(
+        failed.failure.as_deref(),
+        Some("api failed after 3 attempts: stream_startup_no_progress")
+    );
+    assert_eq!(
+        ended("failed", None).failure.as_deref(),
+        Some(""),
+        "a failure zo gave no words for is still a failure"
+    );
+    assert_eq!(ended("completed", Some("stale words")).failure, None);
+    assert_eq!(ended("cancelled", None).failure, None);
+}
+
 #[test]
 fn a_zo_channel_question_maps_to_the_workers_wait_state() {
     let report = zo_channel_report(&json!({

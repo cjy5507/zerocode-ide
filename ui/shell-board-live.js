@@ -861,6 +861,7 @@ const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
   { stage: "superseded", flag: "progress", key: "board.superseded", word: "다음 시도로 넘어감" },
   { stage: "unknown", flag: "progress", key: "board.stageUnknown", word: "상태 모름" },
   { stage: "failed", flag: "failed", key: "board.desk.stageFailed", word: "실패" },
+  { stage: "stopped", flag: "progress", key: "board.stageStopped", word: "중단" },
   { stage: "reported", flag: "reported", key: "board.awaitingReview", word: "검증 대기" },
 ]);
 

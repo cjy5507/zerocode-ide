@@ -109,6 +109,8 @@ const WANT_PHASE = {
   verified: "vouched", nothing_to_land: "vouched", merged: "vouched", deployed: "vouched", closed: "closed",
   // A person's waiver ends the work without a review: never counted as vouched (t-71220).
   waived: "unreviewable",
+  // An attempt nobody saw a result of keeps the old rule beside a failed one: no phase of its own (t-73910).
+  stopped: "",
   unknown: "",
 };
 

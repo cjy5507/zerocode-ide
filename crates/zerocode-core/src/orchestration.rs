@@ -52,7 +52,7 @@ pub mod task_cost;
 
 pub use progress::{WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
-pub use session_history::SessionHistory;
+pub use session_history::{CONVERSATION_HELD_ELSEWHERE, SessionHistory};
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -546,6 +546,16 @@ pub enum MessageKind {
     /// body wearing this kind from a worker would be a pass nobody saw. The road that writes it
     /// is [`Ledger::land_checked`].
     LandCheck,
+    /// Nobody said this either: the LEDGER read a worker's own turn end say
+    /// the turn FAILED, with the error it failed on (t-69010) — zo's channel
+    /// frame `turn` / `end` / `outcome: failed` and its `error`. Before this a
+    /// zo turn that died on a 240 s provider silence reached the coordinator
+    /// as `went_quiet` and nothing else: the error was read and thrown away.
+    /// Its own kind, for [`Self::WentQuiet`]'s reason: a failed turn is not a
+    /// silence — it is read, and its worker is resumed or seated again. Written
+    /// in place of that turn's `went_quiet`, once per turn; the road is
+    /// [`Ledger::worker_turn_failed`].
+    TurnFailed,
 }
 
 impl MessageKind {
@@ -573,6 +583,7 @@ impl MessageKind {
             Self::LandingStalled => "landing_stalled",
             Self::BranchDrifted => "branch_drifted",
             Self::LandCheck => "land_check",
+            Self::TurnFailed => "turn_failed",
         }
     }
 
@@ -602,6 +613,7 @@ impl MessageKind {
                 | Self::LandingStalled
                 | Self::BranchDrifted
                 | Self::LandCheck
+                | Self::TurnFailed
         )
     }
 }
@@ -633,6 +645,7 @@ impl std::str::FromStr for MessageKind {
             "landing_stalled" => Self::LandingStalled,
             "branch_drifted" => Self::BranchDrifted,
             "land_check" => Self::LandCheck,
+            "turn_failed" => Self::TurnFailed,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -1224,7 +1237,10 @@ pub struct Dispatch {
     pub started_ms: i64,
     pub ended_ms: Option<i64>,
     /// `None` while it is still open, `Some(true)` for a dispatch that reached
-    /// `worker_done`. A dispatch that ended without a word is `Some(false)`.
+    /// `worker_done` saying `ok:true` and `Some(false)` for one saying
+    /// `ok:false`. A dispatch that ended without a word — stopped, abandoned,
+    /// its terminal gone — stays `None`: nobody saw a result
+    /// ([`WorkStage::Stopped`]).
     pub succeeded: Option<bool>,
     /// The ended attempt this one replaces, when the coordinator said so.
     /// The link is ALL it carries — placement, agent, worktree were repeated
@@ -11579,6 +11595,82 @@ impl Ledger {
         self.record_quiet_observation(&run_id, told, task_id, dispatch_id, now_ms, false)
     }
 
+    /// A worker's turn ended in an error its own CLI named (t-69010): told to
+    /// the run's coordinator as [`MessageKind::TurnFailed`], once per turn,
+    /// in place of that turn's `went_quiet`. Answers the notice's id.
+    ///
+    /// The same seat reading as [`Self::worker_fell_silent`]: the worker sitting
+    /// there when the turn ended, carrying the attempt it ended in. The error
+    /// is the CLI's words, cut to [`TURN_FAILED_WORDS`] characters — a
+    /// coordinator reads what failed, and a provider's whole answer is not a
+    /// notice. A worker waiting on an answer it asked for is still told: its
+    /// turn failing is not the wait it chose.
+    pub fn worker_turn_failed(
+        &mut self,
+        seat: (&str, &str),
+        turn_ended_ms: i64,
+        error: &str,
+        now_ms: i64,
+    ) -> Option<String> {
+        let (team, pane) = seat;
+        let (run_id, worker_id) = self.runs.iter().find_map(|run| {
+            occupant_at(run, team, pane, turn_ended_ms)
+                .map(|worker| (run.id.clone(), worker.id.clone()))
+        })?;
+        let (body, task_id, dispatch_id) = {
+            let run = self.run(&run_id)?;
+            let worker = run.worker(&worker_id)?;
+            if worker.quiet_at == Some(turn_ended_ms) {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open()
+                || carried_at(run, &worker.id, turn_ended_ms).as_deref()
+                    != Some(dispatch.id.as_str())
+            {
+                return None;
+            }
+            let said: String = error.trim().chars().take(TURN_FAILED_WORDS).collect();
+            let body = serde_json::json!({
+                "workerId": worker.id,
+                "agent": worker.agent,
+                "pane": worker.pane,
+                "taskId": dispatch.task,
+                "dispatchId": dispatch.id,
+                "turnEndedMs": turn_ended_ms,
+                "error": said,
+                "model": worker.model,
+            });
+            (body, dispatch.task.clone(), dispatch.id.clone())
+        };
+        let address = self.run(&run_id)?.address();
+        let id = self.mint("m-");
+        let run = self.run_mut(&run_id)?;
+        // The turn is told once: its `went_quiet` reads this mark and stays
+        // away (`worker_fell_silent`).
+        run.workers
+            .iter_mut()
+            .find(|one| one.id == worker_id)?
+            .quiet_at = Some(turn_ended_ms);
+        run.messages.push(Message {
+            id: id.clone(),
+            from: LEDGER_ITSELF.to_string(),
+            to: address.clone(),
+            kind: MessageKind::TurnFailed,
+            body: body.to_string().into(),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: Some(task_id),
+            dispatch: Some(dispatch_id),
+            author_seat: None,
+            created_ms: now_ms,
+        });
+        run.inbox_mut(&address).pending.push_back(id.clone());
+        Some(id)
+    }
+
     /// Notify coordinators about workers the window has observed as stalled.
     ///
     /// The host supplies only worker ids and the first quiet stamp. The ledger
@@ -16116,6 +16208,11 @@ pub enum WallRefusal {
     WallNotNow {
         dispatch: String,
     },
+    /// A press for a failed turn the attempt does not stand at now
+    /// (t-69010): the worker spoke since, or another turn ended.
+    TurnNotNow {
+        dispatch: String,
+    },
     /// A continuation is being typed for the attempt ([`RESUME_IN_FLIGHT`]).
     ResumeInFlight,
     /// [`RESUME_POLICY`]`.attempts_max` continuations already.
@@ -16212,6 +16309,10 @@ impl std::fmt::Display for WallRefusal {
             Self::WallNotNow { dispatch } => write!(
                 f,
                 "the press names a wall dispatch {dispatch} does not stand at now"
+            ),
+            Self::TurnNotNow { dispatch } => write!(
+                f,
+                "the press names a failed turn dispatch {dispatch} does not stand at now"
             ),
             Self::ResumeInFlight => f.write_str(RESUME_IN_FLIGHT),
             Self::ResumeCeiling { dispatch, count } => write!(
@@ -16516,6 +16617,50 @@ pub const JEV_MARKER_SOURCE: &str = "jev";
 /// (a source contract pins who may mention it).
 pub const PERSON_MARKER_SOURCE: &str = "person";
 
+/// The source of the marker a person's 「다시 띄우기」 stands on (t-69010): a
+/// press at a worker whose turn failed. It waives the declared order and
+/// nothing else of [`resume_plan`] — a turn that failed is no wall, so the
+/// wall's refusal stands — and the press is about the failure the attempt
+/// stands at now. Built by [`person_turn_marker`] and by nothing else.
+pub const PERSON_TURN_MARKER_SOURCE: &str = "person-turn";
+
+/// The attempt's failed turn while it stands (t-69010): its newest letter,
+/// read past the continuation receipts (`resumed`) written to answer it, is
+/// a [`MessageKind::TurnFailed`]. A worker's word, a silence or another turn
+/// end after it is the attempt going on, and the failure is history. The one
+/// reading the board's row, the beat's marker and a person's press share.
+#[must_use]
+pub fn standing_turn_failure<'run>(run: &'run Run, dispatch_id: &str) -> Option<&'run Message> {
+    run.messages
+        .iter()
+        .rev()
+        .find(|one| {
+            one.dispatch.as_deref() == Some(dispatch_id) && one.kind != MessageKind::Resumed
+        })
+        .filter(|one| one.kind == MessageKind::TurnFailed)
+}
+
+/// The marker a person's press at a worker whose turn failed stands on —
+/// keyed by the attempt and the failure's letter, so one failure is typed at
+/// once. `None` for a worker with no open attempt or no standing failure.
+#[must_use]
+pub fn person_turn_marker(run: &Run, worker_id: &str) -> Option<TransientErrorMarker> {
+    let dispatch = run.worker(worker_id)?.dispatch.as_deref()?;
+    let failed = standing_turn_failure(run, dispatch)?;
+    Some(TransientErrorMarker {
+        source: PERSON_TURN_MARKER_SOURCE.to_string(),
+        line: "a person asked this worker to go on after its turn failed"
+            .to_string()
+            .into(),
+        key: person_turn_key(dispatch, &failed.id),
+    })
+}
+
+/// The key one failed turn of one attempt gives a person's press.
+fn person_turn_key(dispatch_id: &str, letter_id: &str) -> String {
+    format!("person-turn:{dispatch_id}:{letter_id}")
+}
+
 /// What a person's press types at a wall (t-39771). The beat's
 /// [`RESUME_LINE`] says the last turn died on a transient API error, which is
 /// not what a wall is, so the press has a sentence of its own — one English
@@ -16649,8 +16794,11 @@ pub fn resume_plan(
     // A person's press stands in for the declared order AND is asked at a wall
     // (t-39771): the two refusals it waives, and nothing else of the plan.
     let by_person = marker.source == PERSON_MARKER_SOURCE;
+    // A press at a failed turn (t-69010) stands in for the order alone.
+    let by_person_turn = marker.source == PERSON_TURN_MARKER_SOURCE;
     if marker.source != JEV_MARKER_SOURCE
         && !by_person
+        && !by_person_turn
         && run
             .handover
             .as_ref()
@@ -16711,6 +16859,15 @@ pub fn resume_plan(
             .is_none_or(|wall| person_wall_key(&dispatch.id, &wall.wall) != marker.key)
     {
         return refused(WallRefusal::WallNotNow {
+            dispatch: dispatch.id.clone(),
+        });
+    }
+    // A press is about ONE failure: the one the attempt stands at now.
+    if by_person_turn
+        && standing_turn_failure(run, &dispatch.id)
+            .is_none_or(|failed| person_turn_key(&dispatch.id, &failed.id) != marker.key)
+    {
+        return refused(WallRefusal::TurnNotNow {
             dispatch: dispatch.id.clone(),
         });
     }
@@ -18282,6 +18439,11 @@ fn kept_worker_model(
     )
 }
 
+/// How much of a failed turn's error a [`MessageKind::TurnFailed`] notice
+/// carries (t-69010): the start of the CLI's own words, enough to name the
+/// failure — a provider's whole answer is not a notice.
+pub const TURN_FAILED_WORDS: usize = 200;
+
 /// Whether a worker row in `state` still carries its conversation on
 /// (t-57717): at work, asleep for its coordinator to seat again, or orphaned
 /// with its pane perhaps still working. Every other state is a row that
@@ -18469,6 +18631,13 @@ const UNJUDGED_TIMEOUT: &str = "timeout";
 /// answer only recorded. Response codes and refusal words only: nothing here
 /// reads a key or a credential.
 fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
+    seat_unjudged("difficulty", outcome)
+}
+
+/// [`unjudged_reason`] for the seat named `seat` — the difficulty seat's, or
+/// the model seat's when its pair did not run (t-74181): the same words, with
+/// the seat's name in them.
+fn seat_unjudged(seat: &str, outcome: Option<&str>) -> serde_json::Value {
     use crate::jev::door::{ANSWERED_OUTCOME, Refused};
     let why = match outcome {
         None => UNJUDGED_NOT_ASKED,
@@ -18481,35 +18650,39 @@ fn unjudged_reason(outcome: Option<&str>) -> serde_json::Value {
         .filter(|code| HTTP_STATUS_CODES.contains(code));
     let says = match (why, status, Refused::from_token(why)) {
         (UNJUDGED_NOT_ASKED, _, _) => {
-            "No difficulty judgment: it was not asked (its switch is off, or the summons named every dial).".to_string()
+            format!(
+                "No {seat} judgment: it was not asked (its switch is off, or the summons named every dial)."
+            )
         }
         (UNJUDGED_NOT_APPLIED, _, _) => {
-            "The difficulty judgment answered, but its answer was only recorded, not applied.".to_string()
+            format!("The {seat} judgment answered, but its answer was only recorded, not applied.")
         }
         (_, Some(code), _) => {
-            format!("No difficulty judgment: the judgment service refused the request (HTTP {code}).")
+            format!("No {seat} judgment: the judgment service refused the request (HTTP {code}).")
         }
         (UNJUDGED_TIMEOUT, _, _) => {
-            "No difficulty judgment: no answer came within its time limit.".to_string()
+            format!("No {seat} judgment: no answer came within its time limit.")
         }
-        (_, _, Some(Refused::Off)) => "No difficulty judgment: Jev is switched off.".to_string(),
-        (_, _, Some(Refused::NoKey)) => "No difficulty judgment: no Jev key is set.".to_string(),
+        (_, _, Some(Refused::Off)) => format!("No {seat} judgment: Jev is switched off."),
+        (_, _, Some(Refused::NoKey)) => format!("No {seat} judgment: no Jev key is set."),
         (_, _, Some(Refused::NotConsented)) => {
-            "No difficulty judgment: this folder is not one Jev may read.".to_string()
+            format!("No {seat} judgment: this folder is not one Jev may read.")
         }
         (_, _, Some(Refused::Budget)) => {
-            "No difficulty judgment: today's Jev request budget is spent.".to_string()
+            format!("No {seat} judgment: today's Jev request budget is spent.")
         }
         (_, _, Some(Refused::HourlyBudget)) => {
-            "No difficulty judgment: this hour's Jev request limit is spent.".to_string()
+            format!("No {seat} judgment: this hour's Jev request limit is spent.")
         }
         (_, _, Some(Refused::SettingsChanged)) => {
-            "No difficulty judgment: the Jev settings changed while it was asked.".to_string()
+            format!("No {seat} judgment: the Jev settings changed while it was asked.")
         }
         (_, _, Some(Refused::Resting)) => {
-            "No difficulty judgment: Jev is resting this seat until its provider can answer it.".to_string()
+            format!(
+                "No {seat} judgment: Jev is resting this seat until its provider can answer it."
+            )
         }
-        (word, None, None) => format!("No difficulty judgment: the request ended `{word}`."),
+        (word, None, None) => format!("No {seat} judgment: the request ended `{word}`."),
     };
     serde_json::json!({ "why": why, "says": says })
 }
@@ -22560,6 +22733,19 @@ fn plan_inner(
             // What the reply says about the dials the coordinator left open:
             // the difficulty and who chose it, where the model came from, and
             // what else today's lineup offers at that difficulty (t-14437).
+            // Where the model came from, said once for the reply and for the
+            // model seat's row when its pair did not run (t-74181).
+            let model_from = match (&model, &model_pick, &profile) {
+                (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
+                (None, Some((_, _, from)), _) => serde_json::json!(from),
+                (None, None, Some(row)) => serde_json::json!(row.from),
+                // Nothing here chose: the agent's own CLI picks, and
+                // the reply says so rather than leaving it unsaid.
+                (None, None, None) => serde_json::json!(DIALS_FROM_CLI_DEFAULT),
+            };
+            let ran_jev = model_pick
+                .as_ref()
+                .is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
             let dials = (model.is_none() || effort.is_none()).then(|| {
                 serde_json::json!({
                     // Always a word: the rung the answer chose, else the one
@@ -22578,14 +22764,17 @@ fn plan_inner(
                     "unjudged": chosen.is_none().then(|| unjudged_reason(
                         difficulty_receipt.as_ref().and_then(|row| row["outcome"].as_str()),
                     )),
-                    "modelFrom": match (&model, &model_pick, &profile) {
-                        (Some(_), _, _) => serde_json::json!(DIALS_FROM_REQUEST),
-                        (None, Some((_, _, from)), _) => serde_json::json!(from),
-                        (None, None, Some(row)) => serde_json::json!(row.from),
-                        // Nothing here chose: the agent's own CLI picks, and
-                        // the reply says so rather than leaving it unsaid.
-                        (None, None, None) => serde_json::json!(DIALS_FROM_CLI_DEFAULT),
-                    },
+                    "modelFrom": model_from.clone(),
+                    // Why the model seat's pair did not run, when the summons
+                    // left the model open and no pick ran (t-74181): the seat
+                    // was not asked, did not answer, or its answer was only
+                    // recorded — the evaluation reads it beside the pair. A
+                    // challenger's turn is a pick of its own, and `modelFrom`
+                    // says so; it is not the seat going unasked.
+                    "modelUnjudged": (model.is_none() && model_pick.is_none()).then(|| seat_unjudged(
+                        "model",
+                        receipts.model.as_ref().and_then(|row| row["outcome"].as_str()),
+                    )),
                     "effortClamped": profile.as_ref().and_then(|row| row.effort_clamped.clone()),
                     "candidates": profile.as_ref().map_or_else(Vec::new, |row| row.candidates.clone()),
                     // Why this pair, in the facts a person asks for: where the
@@ -22597,10 +22786,8 @@ fn plan_inner(
             });
             // The model question's row says its answer ran only when it did:
             // a person's row, a model the agent cannot run and a challenger's
-            // turn leave the answer written down, never carried out.
-            let ran_jev = model_pick
-                .as_ref()
-                .is_some_and(|(_, _, from)| *from == DIALS_FROM_JEV);
+            // turn leave the answer written down, never carried out — and,
+            // for the evaluation, what ran instead (t-74181).
             let model_shadow = model_asked
                 .filter(|_| receipts.model.is_some() || model_turn.is_some())
                 .map(|ask| crate::summon_model::Shadow {
@@ -22608,6 +22795,7 @@ fn plan_inner(
                     receipt: receipts.model.map(|mut receipt| {
                         if !ran_jev {
                             receipt["applied"] = serde_json::json!(false);
+                            receipt["ranFrom"] = model_from.clone();
                         }
                         receipt
                     }),

@@ -1066,3 +1066,166 @@ fn every_reason_a_press_at_a_wall_can_meet_has_words_in_all_five_languages() {
         "a refused press shows what came back as it came:\n{pressing}"
     );
 }
+
+/// zo's source, from the workspace beside this one — read, never changed.
+fn zo_source(path: &str) -> String {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../zo-ide/crates");
+    std::fs::read_to_string(src.join(path)).unwrap_or_else(|why| panic!("{path}: {why}"))
+}
+
+/// The text of the Rust string literal that follows `declared` in `source`,
+/// as the compiler reads it: a `\` before a line break drops the break and
+/// the leading space after it, and `\"` is a quote.
+fn literal_after(source: &str, declared: &str) -> String {
+    let start = source
+        .find(declared)
+        .unwrap_or_else(|| panic!("`{declared}` is gone"));
+    let rest = &source[start + declared.len()..];
+    let open = rest.find('"').expect("the literal opens") + 1;
+    let mut text = String::new();
+    let mut chars = rest[open..].chars().peekable();
+    while let Some(one) = chars.next() {
+        match one {
+            '"' => return text,
+            '\\' => match chars.next() {
+                Some('\n') => {
+                    while chars.peek().is_some_and(|next| next.is_whitespace()) {
+                        chars.next();
+                    }
+                }
+                Some(escaped) => text.push(escaped),
+                None => break,
+            },
+            other => text.push(other),
+        }
+    }
+    panic!("`{declared}`'s literal never closes")
+}
+
+/// t-57445: the window's zo decline row holds the mail pointer on how zo's two
+/// recorded decline notices BEGIN, copied into `ZO_DECLINE_NOTICES` because the
+/// window links no zo crate. A notice zo rewords would leave the row reading
+/// nothing and the pointer retyping into a declined pane again — so the two
+/// beginnings are held against zo's own constants, read from its source.
+#[test]
+fn the_zo_decline_row_starts_where_zos_own_recorded_notices_start() {
+    let table = shell_source("quota_wall.rs");
+    let opens = "const ZO_DECLINE_NOTICES: &[&str] = &[";
+    let notices = &table[table.find(opens).expect("the zo decline row's notices")..];
+    let notices = &notices[..notices.find("\n];").expect("the notices close")];
+    let starts: Vec<&str> = notices
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix('"')?.strip_suffix("\","))
+        .collect();
+    let surfaced = literal_after(
+        &zo_source("runtime/src/conversation/fallback.rs"),
+        "const REFUSAL_SURFACED_NOTICE: &str =",
+    );
+    let standing = literal_after(
+        &zo_source("core-types/src/retry_signal.rs"),
+        "pub const REFUSAL_STANDING_NOTICE: &str =",
+    );
+    assert_eq!(starts.len(), 2, "the row lost a notice:\n{notices}");
+    for (start, notice, name) in [
+        (starts[0], &surfaced, "REFUSAL_SURFACED_NOTICE"),
+        (starts[1], &standing, "REFUSAL_STANDING_NOTICE"),
+    ] {
+        assert!(
+            !start.is_empty() && notice.starts_with(start),
+            "zo's {name} no longer begins with the row's words `{start}`:\n{notice}"
+        );
+    }
+}
+
+/// t-69010: the zo row of what a declared `--on-transient-error resume` types
+/// on reads two of zo's own words in a failed turn's error. Both are held
+/// against zo's source, read only: the stalled-stream error type, and the
+/// sentence its retries end with.
+#[test]
+fn the_zo_transient_turn_errors_are_words_zo_still_writes() {
+    let table = shell_source("quota_wall.rs");
+    let errors = zo_source("api/src/error.rs");
+    assert!(
+        table.contains(
+            "const ZO_TRANSIENT_TURN_ERRORS: &[&str] = &[\"stream_startup_no_progress\", \"api failed after \"];"
+        ),
+        "the zo transient row changed its words"
+    );
+    assert!(
+        errors.contains("error_type: Some(\"stream_startup_no_progress\".to_string())"),
+        "zo no longer names a stalled stream `stream_startup_no_progress`"
+    );
+    assert!(
+        errors.contains("\"api failed after {attempts} attempts: {last_error}\""),
+        "zo no longer ends its retries with `api failed after N attempts: …`"
+    );
+}
+
+/// t-69010: 「다시 띄우기」 is a person's press like the wall's two — one
+/// window command, main window only, off the main thread; the road reads the
+/// pane and the ledger again, plans on the press's own marker, reserves the
+/// receipt and only then types through the pointer's guarded door; and the
+/// renderer asks the person before it calls the command, from one place.
+#[test]
+fn the_failed_turn_press_asks_first_and_walks_the_retrys_guarded_road() {
+    let board = shell_source("cmd/board.rs");
+    let door = super::support::block_after(&board, "pub(crate) async fn turn_failed_retry(");
+    let main_only = door
+        .find("crate::from_the_main_webview(&webview)?")
+        .expect("the press proves the main window");
+    let pressed = door
+        .find("wall_press::retry_failed_turn(")
+        .expect("the press");
+    assert!(
+        main_only < pressed && door.contains("spawn_blocking"),
+        "the failed-turn press is open beyond the main window or runs on its thread:\n{door}"
+    );
+
+    let press = shell_source("orchestration/wall_press.rs");
+    let road = super::support::block_after(&press, "pub(crate) fn retry_failed_turn(");
+    let at = |needle: &str| {
+        road.find(needle)
+            .unwrap_or_else(|| panic!("the failed-turn press lost `{needle}`:\n{road}"))
+    };
+    let licensed = at("composer_at_rest(host, term, heard)");
+    let marked = at("person_turn_marker(failed, worker_id)");
+    let planned = at("resume_plan(failed, worker_id, &marker, now_ms)");
+    let lined = at("crate::account_switch::unless_switching(");
+    let reserved = at(".resume_begin(plan.clone(), now_ms)");
+    let typed = at("host.point(term, RESUME_LINE, true)");
+    assert!(
+        licensed < marked
+            && marked < planned
+            && planned < lined
+            && lined < reserved
+            && reserved < typed,
+        "the failed-turn press types before it is licensed, planned or reserved:\n{road}"
+    );
+    for forbidden in [".send(", ".paste(", "type_prompt_at_term("] {
+        assert!(
+            !road.contains(forbidden),
+            "the failed-turn press types around the pointer's guarded door: `{forbidden}`"
+        );
+    }
+
+    let window = super::support::window_source();
+    let pressing = super::support::block_after(window, "async function pressTurnFailed(");
+    let asked = pressing
+        .find("await askConfirm(")
+        .expect("the press asks first");
+    let answered = pressing
+        .find("if (said !== true) return;")
+        .expect("a press without a yes does nothing");
+    let invoked = pressing
+        .find("invoke(\"turn_failed_retry\"")
+        .expect("the command");
+    assert!(
+        asked < answered && answered < invoked,
+        "the renderer presses before the person said yes:\n{pressing}"
+    );
+    assert_eq!(
+        window.matches("\"turn_failed_retry\"").count(),
+        1,
+        "turn_failed_retry is invoked from more than the one press"
+    );
+}

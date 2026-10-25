@@ -277,6 +277,80 @@ export async function testSidebarTeamSettled({ browser, origin, ok, faults }) {
       JSON.stringify(sameRows),
     );
 
+    /* ⑥ — t-73910: an attempt that ended with no result seen is 중단, never 실패. On 2026-10-25 two released workers
+     * (w-73948, w-73950) stood painted 「실패」 while the ledger held neither as failed (`succeeded: null`). */
+    const ended = await page.evaluate(async ({ settled, path }) => {
+      const moved = (over) => {
+        window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === settled.worker ? { ...row, ...over } : row);
+      };
+      const read = () => {
+        const host = document.querySelector(`.wt-agents[data-worktree-path="${CSS.escape(path)}"]`);
+        const node = host?.querySelector(`.wt-agent[data-work="${CSS.escape(settled.worker)}"]`) ?? null;
+        return {
+          status: node?.querySelector(".wt-agent-state")?.textContent ?? null,
+          said: node?.querySelector(".wt-agent-said")?.textContent ?? null,
+          dotTip: node?.querySelector(".wt-agent-dot")?.dataset.tip ?? null,
+          text: node?.textContent ?? null,
+        };
+      };
+      moved({ handed_in: null, reported: true, failed: false, stopped: true, stalled: [], progress: { stage: "stopped" } });
+      await window.__LEDGER_MOVED__(() => checkoutLedger.get(path)?.progress?.stage === "stopped");
+      const stopped = read();
+      // The team view keeps the row while it waits on its coordinator, and its strip says 중단 at 넘김.
+      setSidebarView({ layout: "team" });
+      for (let tries = 0; tries < 100 && !sidebarTeamStood; tries += 1) await new Promise((done) => setTimeout(done, 20));
+      const key = `w:${settled.run}/${settled.worker}`;
+      await window.__LEDGER_MOVED__(() => document.querySelector(`#sidebar-team [data-team-key="${CSS.escape(key)}"]`) !== null);
+      const row = document.querySelector(`#sidebar-team [data-team-key="${CSS.escape(key)}"]`);
+      const team = {
+        stands: row !== null,
+        strip: row?.querySelector(".team-strip")?.dataset.tip ?? null,
+        held: [...(row?.querySelectorAll(".team-step") ?? [])].map((cell) => cell.className),
+      };
+      setSidebarView({ layout: "branches" });
+      await window.__PAINTED__();
+      moved({ stopped: false, failed: true, progress: { stage: "failed" } });
+      await window.__LEDGER_MOVED__(() => checkoutLedger.get(path)?.progress?.stage === "failed");
+      const failed = read();
+      // A stage this window has no word for — a newer ledger's — draws no word and breaks nothing.
+      moved({ failed: false, progress: { stage: "a_stage_from_a_newer_ledger" } });
+      await window.__LEDGER_MOVED__(() => checkoutLedger.get(path)?.progress?.stage === "a_stage_from_a_newer_ledger");
+      const unknown = read();
+      moved({ handed_in: settled.handed_in, stalled: ["no_review"], progress: { stage: "report_only" } });
+      await window.__LEDGER_MOVED__(() => checkoutLedger.get(path)?.progress?.stage === "report_only");
+      return {
+        stopped, failed, unknown, team,
+        words: {
+          stopped: t("board.stageStopped", "중단"),
+          failed: t("board.desk.stageFailed", "실패"),
+          stoppedTip: t(AGENT_STOPPED_TIP.key, AGENT_STOPPED_TIP.word),
+          failedTip: t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word),
+        },
+        missing: ["en", "ja", "zh", "es"].filter((code) =>
+          !CATALOG[code]?.["board.stageStopped"] || !CATALOG[code]?.["worktree.attemptStoppedTip"]),
+      };
+    }, { settled: SETTLED.delegation, path: DELEGATION.path });
+    ok(
+      "a released worker's attempt that ended with no result seen reads 중단 on its row and its dot — the word 실패 appears nowhere on it — and one the worker reported failed still reads 실패",
+      ended.stopped.status === ended.words.stopped && ended.stopped.said === ended.words.stopped &&
+        ended.stopped.dotTip === ended.words.stoppedTip && !ended.stopped.text?.includes(ended.words.failed) &&
+        ended.failed.status === ended.words.failed && ended.failed.dotTip === ended.words.failedTip &&
+        ended.words.stoppedTip !== ended.words.failedTip && ended.missing.length === 0,
+      JSON.stringify(ended),
+    );
+    ok(
+      "the team view keeps the stopped worker's row under its coordinator, its strip's tip says 중단 and never 실패, and 넘김 is held",
+      ended.team.stands && ended.team.strip?.includes(ended.words.stopped) && !ended.team.strip?.includes(ended.words.failed) &&
+        ended.team.held[3]?.includes("is-stuck"),
+      JSON.stringify(ended.team),
+    );
+    ok(
+      "a stage word this window does not know breaks nothing and is said as no word — never 실패, 중단 or a stage it is not: the row says nothing or does not stand, and the page raises no error",
+      (ended.unknown.status === null || ended.unknown.status === "") &&
+        ![ended.words.failed, ended.words.stopped].some((word) => ended.unknown.text?.includes(word)) && faults.length === 0,
+      JSON.stringify({ unknown: ended.unknown, faults }),
+    );
+
     /* ⑤ — the numbers, and the team view. */
     const lead = { before: before[LEAD.path] ?? [], after: after[LEAD.path] ?? [] };
     ok(

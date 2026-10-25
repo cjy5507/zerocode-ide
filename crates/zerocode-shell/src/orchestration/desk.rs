@@ -183,7 +183,7 @@ struct NewsTable {
     /// them, and the one night that filled the desk with 46 letters was a
     /// seven-hour gap. What is older is history, and `inbox` reads history.
     stands_ms: i64,
-    kinds: [(MessageKind, NewsLine); 8],
+    kinds: [(MessageKind, NewsLine); 9],
     /// Where a folded notice can still be acknowledged from the desk: in the
     /// batch its coordinator holds open, handed over and not acknowledged
     /// (t-9548) — the folded count then offers that whole batch, as a line
@@ -219,6 +219,7 @@ const DESK_NEWS: NewsTable = NewsTable {
         (MessageKind::ModelDeviated, NewsLine::PerNotice),
         (MessageKind::LandingStalled, NewsLine::PerNotice),
         (MessageKind::LandCheck, NewsLine::PerNotice),
+        (MessageKind::TurnFailed, NewsLine::PerNotice),
     ],
     folded_ack: "delivered",
 };
@@ -805,9 +806,11 @@ const fn completed_stage(work: WorkStage) -> &'static str {
         WorkStage::Waived => "waived",
         WorkStage::NothingToLand => "nothing_to_land",
         WorkStage::Closed => "closed",
-        WorkStage::Working | WorkStage::Failed | WorkStage::Superseded | WorkStage::Unknown => {
-            "unknown"
-        }
+        WorkStage::Working
+        | WorkStage::Failed
+        | WorkStage::Stopped
+        | WorkStage::Superseded
+        | WorkStage::Unknown => "unknown",
     }
 }
 
