@@ -7,11 +7,12 @@
 
 use std::convert::Infallible;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -28,6 +29,10 @@ pub const PATH_MIGRATION_RECOVERY_MARKERS: &[&str] = &[
     CORRUPT_MARKER,
     INTERRUPTED_REPLACEMENT_MARKER,
 ];
+
+const LOCK_FILE: &str = ".settings.lock";
+/// How often [`SettingsRepository::lock_free_within`] asks again.
+const LOCK_POLL: Duration = Duration::from_millis(25);
 
 static PROCESS_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static UNIQUE_FILE_ID: AtomicU64 = AtomicU64::new(1);
@@ -361,17 +366,41 @@ impl SettingsRepository {
         Ok(self.root.join(relative_path))
     }
 
-    fn lock(&self) -> Result<RepositoryLock, SettingsError> {
-        crate::durable_file::ensure_private_directory(&self.root)
-            .map_err(|source| io_error("create repository root", &self.root, source))?;
+    /// Where the root's cross-process lock lives.
+    #[must_use]
+    pub fn lock_path(&self) -> PathBuf {
+        self.root.join(LOCK_FILE)
+    }
 
-        let process = PROCESS_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let lock_path = self.root.join(".settings.lock");
-        let file = crate::durable_file::private_lock_file(&lock_path)
-            .map_err(|source| io_error("open repository lock", &lock_path, source))?;
+    /// Whether the cross-process lock comes free within `budget`. Taken and
+    /// let go at once; nothing is read or written. Every other entry point
+    /// waits on the lock for as long as its holder keeps it, which is right
+    /// for a commit stretched by a busy disk and wrong for a holder that will
+    /// never let go: on 2026-10-25 04:01 three new windows stood in that wait
+    /// behind a child that never reached its exec (t-73907). The boot asks
+    /// this first, so such a holder is named instead of waited on.
+    pub fn lock_free_within(&self, budget: Duration) -> Result<bool, SettingsError> {
+        let (_process, file, lock_path) = self.open_lock()?;
+        let until = Instant::now() + budget;
+        loop {
+            match file.try_lock() {
+                Ok(()) => {
+                    let _ = file.unlock();
+                    return Ok(true);
+                }
+                Err(TryLockError::WouldBlock) if Instant::now() < until => {
+                    std::thread::sleep(LOCK_POLL);
+                }
+                Err(TryLockError::WouldBlock) => return Ok(false),
+                Err(TryLockError::Error(source)) => {
+                    return Err(io_error("lock repository", &lock_path, source));
+                }
+            }
+        }
+    }
+
+    fn lock(&self) -> Result<RepositoryLock, SettingsError> {
+        let (process, file, lock_path) = self.open_lock()?;
         file.lock()
             .map_err(|source| io_error("lock repository", &lock_path, source))?;
 
@@ -379,6 +408,20 @@ impl SettingsRepository {
             _process: process,
             file,
         })
+    }
+
+    fn open_lock(&self) -> Result<(MutexGuard<'static, ()>, File, PathBuf), SettingsError> {
+        crate::durable_file::ensure_private_directory(&self.root)
+            .map_err(|source| io_error("create repository root", &self.root, source))?;
+
+        let process = PROCESS_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock_path = self.lock_path();
+        let file = crate::durable_file::private_lock_file(&lock_path)
+            .map_err(|source| io_error("open repository lock", &lock_path, source))?;
+        Ok((process, file, lock_path))
     }
 
     fn prepare_target(&self, target: &Path) -> Result<(), SettingsError> {

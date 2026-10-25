@@ -13,6 +13,7 @@ pub mod durable_file;
 pub mod jira_attachments;
 pub mod jira_store;
 pub mod linear_store;
+pub mod lock_holders;
 pub mod settings;
 pub mod work_item_store;
 
