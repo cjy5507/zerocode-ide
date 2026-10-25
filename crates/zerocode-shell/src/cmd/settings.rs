@@ -1559,6 +1559,15 @@ pub(crate) fn computer_confirm_answer(id: String, allow: bool) -> bool {
     computer_use::confirm::answer(&id, allow)
 }
 
+/// The page's answer to the window's request about its own controls
+/// (t-73906): a look, one control's facts, or a press it made. Called from
+/// the window's page and from nowhere else.
+#[tauri::command]
+pub(crate) fn computer_self_answer(id: u64, answer: serde_json::Value) -> bool {
+    let _crumb = crate::crumbs::Command::enter("computer_self_answer");
+    computer_use::self_surface::answered(id, answer)
+}
+
 /// The person's code for a person's-turn card that has a line for one
 /// (t-40807): what they typed, judged by core's one rule and handed once to
 /// the handoff that waits, for the window to type into the field the agent

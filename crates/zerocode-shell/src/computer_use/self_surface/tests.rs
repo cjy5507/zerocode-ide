@@ -295,3 +295,46 @@ fn an_index_the_page_never_showed_presses_nothing() {
     assert_eq!(refused.code, error_code::ELEMENT_NOT_FOUND);
     assert!(page.lock().unwrap().pressed.is_empty());
 }
+
+/// The window's road to its page: an answer by id comes back, a page's
+/// refusal keeps its code, and silence is reported unknown — never pressed.
+#[test]
+fn the_page_answers_by_id_and_silence_is_unknown() {
+    use std::time::Duration;
+
+    use super::{answered, ask_through};
+
+    let answering = |answer: Value| {
+        move |id: u64, _: &Value| {
+            let answer = answer.clone();
+            std::thread::spawn(move || assert!(answered(id, answer)));
+        }
+    };
+    let said = ask_through(
+        &answering(json!({ "ok": { "done": true } })),
+        &json!({ "kind": "do" }),
+        Duration::from_secs(5),
+    );
+    assert_eq!(said.unwrap(), json!({ "done": true }));
+
+    let refused = ask_through(
+        &answering(json!({ "error": { "code": "self_sensitive", "message": "kept" } })),
+        &json!({ "kind": "do" }),
+        Duration::from_secs(5),
+    )
+    .expect_err("a refusal answered ok");
+    assert_eq!(refused.code, error_code::SELF_SENSITIVE);
+
+    let silent = ask_through(
+        &|_, _| {},
+        &json!({ "kind": "do" }),
+        Duration::from_millis(20),
+    )
+    .expect_err("silence answered ok");
+    assert_eq!(silent.code, error_code::ACTION_TIMEOUT);
+    assert!(silent.message.contains("unknown"), "{}", silent.message);
+    assert!(
+        !answered(u64::MAX, json!({})),
+        "nothing waits for an id never asked"
+    );
+}

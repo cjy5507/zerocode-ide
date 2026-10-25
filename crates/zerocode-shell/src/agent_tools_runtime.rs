@@ -2757,6 +2757,7 @@ pub(super) async fn computer_loop(
     mut requests: tokio::sync::mpsc::UnboundedReceiver<zerocode_hookd::ComputerRequest>,
 ) {
     install_confirm_asker(app.clone());
+    install_self_surface(app.clone());
     install_frame_notice(app.clone());
     install_band_notice(app.clone());
     let sequences = computer_use::sequence::SequenceGate::default();
@@ -6505,6 +6506,42 @@ pub(super) fn install_confirm_asker(app: AppHandle) {
         );
         decision
     }));
+}
+
+/// ZeroCode's own window as a target (t-73906): an act that names this app
+/// is answered by the window's page, which presses its own controls without
+/// an OS event. Only the main page is asked; it answers by id through
+/// [`crate::cmd::settings::computer_self_answer`].
+fn install_self_surface(app: AppHandle) {
+    use zerocode_core::computer_use_protocol::self_surface::{OwnApp, PAGE_ANSWER_MS};
+
+    let stem = std::env::current_exe().ok().and_then(|path| {
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+    });
+    let own = OwnApp {
+        pid: std::process::id(),
+        bundle_id: app.config().identifier.clone(),
+        names: std::iter::once(app.package_info().name.clone())
+            .chain(stem)
+            .collect(),
+    };
+    computer_use::self_surface::install(
+        own,
+        std::sync::Arc::new(move |request| {
+            computer_use::self_surface::ask_through(
+                &|id, request| {
+                    let _ = app.emit_to(
+                        MAIN_WINDOW_LABEL,
+                        "computer:self-act",
+                        serde_json::json!({ "id": id, "request": request }),
+                    );
+                },
+                request,
+                std::time::Duration::from_millis(PAGE_ANSWER_MS),
+            )
+        }),
+    );
 }
 
 /// The band hears a stop the helper's waiting answer moved (t-66753 B): the

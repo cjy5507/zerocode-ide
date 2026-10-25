@@ -32,6 +32,10 @@ pub const METHODS: &[&str] = &[
 /// How long after the person's last key in a field the field stays theirs.
 pub const PERSON_TYPING_QUIET_MS: u64 = 2_000;
 
+/// How long the window waits for its page to answer one request. A press the
+/// page did not answer in time is reported unknown, never as pressed.
+pub const PAGE_ANSWER_MS: u64 = 3_000;
+
 /// What the page acts with: a look reads, the others press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,8 +88,49 @@ pub struct Facts {
 }
 
 /// Whether the page may make `act` on a control with these facts: refused in
-/// a fixed order, the first mark that refuses saying why.
-pub fn judge(_facts: &Facts, _act: Act) -> Result<(), ProviderError> {
+/// a fixed order, the first mark that refuses saying why. A look reads every
+/// control; a scroll moves no focus and no text, so the person's field does
+/// not refuse it.
+pub fn judge(facts: &Facts, act: Act) -> Result<(), ProviderError> {
+    if act == Act::Look {
+        return Ok(());
+    }
+    let marks = [
+        (
+            facts.asking,
+            "it stands in the popup where the window asks the person; the answer is theirs",
+        ),
+        (facts.secret, "it is a secret field"),
+        (
+            facts.beside_secret,
+            "it is in a pane or a dialog that holds a secret field",
+        ),
+        (
+            facts.terminal,
+            "it is in a terminal pane; a pane is driven through zerocode-orc",
+        ),
+        (facts.person_only, "the window keeps it for the person"),
+        (
+            facts.setting,
+            "a setting is the person's to change; looking and moving between panes are open",
+        ),
+    ];
+    if let Some((_, why)) = marks.iter().find(|(marked, _)| *marked) {
+        return Err(ProviderError::new(
+            error_code::SELF_SENSITIVE,
+            format!("not pressed: {why}"),
+        ));
+    }
+    let persons = facts.person_focus
+        || facts
+            .typed_ms_ago
+            .is_some_and(|ago| ago < PERSON_TYPING_QUIET_MS);
+    if persons && act != Act::Scroll {
+        return Err(ProviderError::new(
+            error_code::PERSON_TYPING,
+            "not pressed: the person is in that field of ZeroCode's window; look again in a moment",
+        ));
+    }
     Ok(())
 }
 
@@ -99,11 +144,21 @@ pub struct OwnApp {
 }
 
 impl OwnApp {
-    /// Whether `query` — an `--app` as an agent typed it — names this process.
+    /// Whether `query` — an `--app` as an agent typed it — names this process:
+    /// its pid, or its bundle identifier or one of its names the way the
+    /// helper matches any app (any case, never a fragment).
     #[must_use]
-    pub fn named_by(&self, _query: &str) -> bool {
-        let _ = identity::AppQuery::parse;
-        false
+    pub fn named_by(&self, query: &str) -> bool {
+        match identity::AppQuery::parse(query) {
+            Ok(identity::AppQuery::Pid(pid)) => pid == self.pid,
+            Ok(identity::AppQuery::Named(name)) => identity::matches_any(
+                &name,
+                "",
+                Some(&self.bundle_id),
+                self.names.iter().map(String::as_str),
+            ),
+            Err(_) => false,
+        }
     }
 }
 
