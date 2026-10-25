@@ -34,6 +34,7 @@ use super::ComputerUseError;
 use super::permissions::missing_permissions;
 use super::session::{ProviderSession, SessionFailure};
 
+mod panel;
 mod tcc;
 
 #[cfg(test)]
@@ -191,7 +192,7 @@ impl Wire {
 
 /// A separate authenticated connection carries panel updates. It never takes
 /// the provider/session lock, so taking control can cancel an in-flight act.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct PanelEndpoint {
     socket: PathBuf,
     token: String,
@@ -217,6 +218,8 @@ fn forget_panel(socket: &Path) {
         .is_some_and(|endpoint| endpoint.socket == socket)
     {
         *held = None;
+        drop(held);
+        sync_share_panel(&super::share::state());
     }
 }
 
@@ -225,20 +228,7 @@ pub(super) fn sync_share_panel(state: &Value) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let Some(endpoint) = endpoint else { return };
-    let Ok(stream) = std::os::unix::net::UnixStream::connect(&endpoint.socket) else {
-        return;
-    };
-    let Ok(mut wire) = Wire::new(stream, endpoint.token) else {
-        return;
-    };
-    // Presentation failure cannot hold the person's band for a whole request timeout.
-    let limit = Some(Duration::from_secs(2));
-    if wire.stream.set_read_timeout(limit).is_err() || wire.stream.set_write_timeout(limit).is_err()
-    {
-        return;
-    }
-    let _ = wire.request("sharePanel", state.clone());
+    panel::publish(state, endpoint);
 }
 
 /// The connection the window's waiting request rides, and its thread.

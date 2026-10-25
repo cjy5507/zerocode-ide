@@ -11,10 +11,13 @@ struct ShareControlState {
 
     mutating func update(target: String?, generation: Int, revision: Int, takenBack: Bool = false) {
         guard revision > self.revision else { return }
+        // A newer presentation is not a hand-back. Keep a physical press until
+        // the window acknowledges it or replaces this share's ownership.
+        let pendingPress = self.takenBack && self.target == target && self.generation == generation
         self.target = target
         self.generation = generation
         self.revision = revision
-        self.takenBack = takenBack
+        self.takenBack = takenBack || pendingPress
         event += 1
     }
 
@@ -42,7 +45,7 @@ final class ShareControlPanel {
     private var panel: ShareTakePanel?
     private var timer: DispatchSourceTimer?
     private var pinned: (pid_t, UInt32)?
-    private var label = ""
+    private var label = ShareControlPanel.controlLabel("")
     private var windowID: UInt32?
     private var windowIndex: Int?
     private var presentedTarget: String?
@@ -100,6 +103,10 @@ final class ShareControlPanel {
                 "revision": state.revision, "event": state.event, "takenBack": state.takenBack]
     }
 
+    nonisolated static func controlLabel(_ label: String) -> String {
+        label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Take control" : label
+    }
+
     nonisolated static func update(_ params: [String: JSONValue]) throws {
         let revision = try requiredInteger(params, "revision")
         let generation = try requiredInteger(params, "generation")
@@ -111,7 +118,7 @@ final class ShareControlPanel {
         let cancel = !wasTaken && state.takenBack
         lock.unlock()
         if cancel { cancelInput() }
-        let label = params["buttonLabel"]?.string ?? ""
+        let label = controlLabel(params["buttonLabel"]?.string ?? "")
         let windowID = params["windowId"]?.number.flatMap(UInt32.init(exactly:))
         let windowIndex = params["windowIndex"]?.number.flatMap(Int.init(exactly:))
         DispatchQueue.main.async {
@@ -228,7 +235,6 @@ final class ShareControlPanel {
         }) { hide(); return }
         let frame = CGRect(x: bounds.minX, y: CGDisplayBounds(CGMainDisplayID()).height - bounds.maxY,
                            width: bounds.width, height: bounds.height)
-        guard !label.isEmpty else { hide(); return }
         let shown: ShareTakePanel
         if let panel { shown = panel } else {
             shown = ShareTakePanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
