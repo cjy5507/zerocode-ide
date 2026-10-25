@@ -129,6 +129,9 @@ fn held_client() -> &'static Mutex<Option<platform::Session>> {
 /// later request gets one clean restart; provider refusals keep its snapshots.
 pub fn call(method: &str, params: Value) -> Result<Value, ComputerUseError> {
     input_policy::ensure_current()?;
+    // A request admitted to a window the person since took back goes no
+    // further (t-73906).
+    share::ensure_current()?;
     // ZeroCode's own app is the page's to answer, before any helper road
     // (t-73906): no OS event is made in the window the person works in.
     if let Some(answer) = self_surface::route(method, &params) {

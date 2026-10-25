@@ -1142,6 +1142,13 @@ a failed step in the log and is filed as a task for a person; write
   `[self_sensitive]` is the person's (a question to them, a secret field or
   its pane, a terminal, a setting, a control kept for them): do not press it,
   ask the person. A line tagged `[person_typing]` is the field they are in.
+- One window is shared with you at a time. The first time you act in an app
+  the person is asked once whether to hand that window over; wait for the
+  answer your command returns. While a window is shared, an act or a look at
+  another app, an act naming no app, or a whole-screen picture answers
+  `share_scope` — work in the shared app, or act in the other app to ask for
+  it. The person can take control at any time; then every act answers
+  `person_took_control` until they hand it back. Do not retry around either.
 - The person has one hand on you at all times: the desktop chord
   control+option+escape, `zerocode-computer stop`, and the window's stop
   button all stop the operator at its next event. A `stopped` answer means
@@ -1227,6 +1234,10 @@ a failed step in the log and is filed as a task for a person; write
   nothing was pressed. Do not look for another way to press it — ask them.
 - `person_typing`: the person is in that field of ZeroCode's own window, or
   typed in it a moment ago; nothing was pressed. Look again later.
+- `share_scope`: the request reaches outside the window the person shared, or
+  the person declined that app; nothing was done. Stay in the shared app.
+- `person_took_control`: the person took the shared window back; nothing was
+  done. Report where you were and wait for them to hand it back.
 
 ### Concurrent requests
 

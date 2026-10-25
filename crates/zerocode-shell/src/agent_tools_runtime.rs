@@ -2758,6 +2758,7 @@ pub(super) async fn computer_loop(
 ) {
     install_confirm_asker(app.clone());
     install_self_surface(app.clone());
+    install_share(app.clone());
     install_frame_notice(app.clone());
     install_band_notice(app.clone());
     let sequences = computer_use::sequence::SequenceGate::default();
@@ -5867,6 +5868,12 @@ pub(super) fn answer_computer_command_with(
     if let Err(error) = input_policy.prepare(&mut command) {
         return computer_cli_error(command.json, &error.code, &error.message);
     }
+    // One window shared with an agent (t-73906): the first act in an app asks
+    // the person once, and nothing outside the shared window is reached.
+    let _share = match computer_use::share::admit(command.method, &command.params) {
+        Ok(scope) => scope,
+        Err(error) => return computer_cli_error(command.json, &error.code, &error.message),
+    };
     let surface_context = computer_use::surface_execution::begin(command.method);
     let waiting = Waiting::new(&SessionHelper, permission_window);
     let result = if command.method == ComputerMethod::Stop {
@@ -6540,6 +6547,32 @@ fn install_self_surface(app: AppHandle) {
                 request,
                 std::time::Duration::from_millis(PAGE_ANSWER_MS),
             )
+        }),
+    );
+}
+
+/// One window shared with an agent (t-73906): the card the first act in an
+/// app raises in the question popup, answered by id like a confirm, and the
+/// band told what is shared whenever it moves.
+fn install_share(app: AppHandle) {
+    use computer_use::{confirm, share};
+
+    let asking = app.clone();
+    share::install(
+        Box::new(move |card| {
+            let receiver = confirm::open(&card.id);
+            let _ = asking.emit("computer:share", card);
+            let decision =
+                confirm::wait(&receiver, std::time::Duration::from_millis(card.timeout_ms));
+            confirm::close(&card.id);
+            let _ = asking.emit(
+                "computer:share-closed",
+                serde_json::json!({ "id": card.id, "decision": decision }),
+            );
+            decision
+        }),
+        Box::new(move |state| {
+            let _ = app.emit("computer:share-state", state);
         }),
     );
 }

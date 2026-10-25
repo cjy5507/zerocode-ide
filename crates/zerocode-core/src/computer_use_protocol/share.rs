@@ -86,19 +86,84 @@ impl Share {
 
     /// What `reach` may do now. A yes the person gave an app before makes it
     /// the shared one again without asking.
-    pub fn gate(&mut self, _reach: Reach<'_>) -> Gate {
-        Gate::Go
+    pub fn gate(&mut self, reach: Reach<'_>) -> Gate {
+        if reach.acts && self.taken_back {
+            return Gate::Refuse(took_control());
+        }
+        let Some(target) = self.target.clone() else {
+            if !reach.acts {
+                return Gate::Go;
+            }
+            return match reach.app {
+                None => Gate::Go,
+                Some(app) => self.first_act(app),
+            };
+        };
+        if reach.whole_screen {
+            return Gate::Refuse(scope(&format!(
+                "the person shared {target} only; look at that app's window, not the whole screen"
+            )));
+        }
+        match reach.app {
+            Some(app) if app == target => Gate::Go,
+            None if !reach.acts => Gate::Go,
+            None => Gate::Refuse(scope(&format!(
+                "the person shared {target} only; name it as --app"
+            ))),
+            Some(app) if !reach.acts => Gate::Refuse(scope(&format!(
+                "the person shared {target} only, not {app}"
+            ))),
+            Some(app) => match self.answers.get(app) {
+                Some(Answer::Shared) => {
+                    self.target = Some(app.to_string());
+                    Gate::Go
+                }
+                Some(Answer::Declined | Answer::Silent) => Gate::Refuse(scope(&format!(
+                    "the person shared {target} only, not {app}"
+                ))),
+                None => Gate::Ask(app.to_string()),
+            },
+        }
+    }
+
+    fn first_act(&mut self, app: &str) -> Gate {
+        match self.answers.get(app) {
+            Some(Answer::Shared) => {
+                self.target = Some(app.to_string());
+                Gate::Go
+            }
+            Some(Answer::Declined) => {
+                Gate::Refuse(scope(&format!("the person did not hand {app} over")))
+            }
+            Some(Answer::Silent) => Gate::Go,
+            None => Gate::Ask(app.to_string()),
+        }
     }
 
     /// The person's answer about `app`. A yes shares it.
-    pub fn answered(&mut self, _app: &str, _answer: Answer) {}
+    pub fn answered(&mut self, app: &str, answer: Answer) {
+        self.answers.insert(app.to_string(), answer);
+        if answer == Answer::Shared {
+            self.target = Some(app.to_string());
+        }
+    }
 
     /// The person takes control: every act is refused until they hand the
     /// window back, and a request in flight is refused at its next step.
-    pub fn take_back(&mut self) {}
+    pub fn take_back(&mut self) {
+        if !self.taken_back {
+            self.taken_back = true;
+            self.generation += 1;
+        }
+    }
 
     /// The person hands the window back to the agent.
-    pub fn give_back(&mut self) {}
+    pub fn give_back(&mut self) {
+        if self.taken_back {
+            self.taken_back = false;
+            self.generation += 1;
+        }
+    }
 }
 
 fn scope(message: &str) -> ProviderError {

@@ -77,6 +77,9 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "gitlab_merge_mr",
     "update_download",
     "update_install",
+    // The person's hand on a window shared with an agent.
+    "computer_take_control",
+    "computer_give_back",
     // The two ways out the page offers; both reach `relaunch_window`.
     "leave_now",
     "leave_when_idle",
@@ -329,6 +332,14 @@ fn standing() -> Option<(OwnApp, Arc<Page>)> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+}
+
+/// The one key ZeroCode's own app is held under, whatever name, bundle or
+/// pid a request gave it; `None` for another app.
+pub(crate) fn own_app_key(query: &str) -> Option<String> {
+    let (own, _) = standing()?;
+    own.named_by(query)
+        .then(|| own.names.first().unwrap_or(&own.bundle_id).to_lowercase())
 }
 
 /// The answer to a request that names ZeroCode's own app, or `None` when the
