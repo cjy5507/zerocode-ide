@@ -1132,6 +1132,43 @@ mod tests {
         );
     }
 
+    /// A release the helper's hand could not confirm is the person's to have
+    /// checked (t-68324 ②): the helper refuses an agent's resume over it. The
+    /// window relays that refusal as the helper worded it and keeps the stop
+    /// it holds — an agent's own, or none — instead of calling it lifted.
+    #[test]
+    fn a_refused_agent_resume_over_an_unconfirmed_release_leaves_the_window_as_it_was() {
+        let _hand = one_hand();
+        remember_helper(None);
+        let refused = || {
+            Err(ComputerUseError::new(
+                error_code::STOPPED,
+                "a release the hand posted could not be confirmed; the person checks the keys and buttons — only they lift it, from the window's band",
+            ))
+        };
+        for window_stop in [Some(STOP_REASON_REQUEST), None] {
+            lift();
+            if let Some(reason) = window_stop {
+                stop(reason);
+            }
+            let seen = revision();
+            let resumed = resume(Lifter::Agent, refused, || panic!("a stop is not re-sent"));
+            let standing = stopped_reason();
+            let after = revision();
+            let said = resumed.agent_answer();
+            lift();
+            assert_eq!(
+                standing.as_deref(),
+                window_stop,
+                "{window_stop:?}: stop as it was"
+            );
+            assert_eq!(after, seen, "{window_stop:?}: nothing moved");
+            let error = said.expect_err("the refusal reaches the agent, not a resumed: true");
+            assert_eq!(error.code, error_code::STOPPED);
+            assert!(error.message.contains("only they lift it"), "{error:?}");
+        }
+    }
+
     #[test]
     fn a_stop_is_a_reason_until_lifted_and_a_missing_helper_is_said_not_raised() {
         let _hand = crate::tests::computer_desktop_wait::ONE_HAND
