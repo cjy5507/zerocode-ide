@@ -353,7 +353,7 @@ fn the_typed_code_is_read_once_sent_by_one_door_and_kept_nowhere() {
         "the field is not emptied where the code leaves and where the card does"
     );
     assert_eq!(
-        card.matches("invoke(\"computer_handoff_code\", { id: ask.id, code: typed })")
+        card.matches("invoke(\"computer_handoff_code\", { id: ask.id, code: typed }, { hand })")
             .count(),
         1,
         "the code leaves by more than the one door, or with more than its card's id"

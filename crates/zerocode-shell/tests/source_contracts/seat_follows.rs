@@ -19,7 +19,7 @@ fn the_surface_says_which_panes_were_closed_with_their_agent_running() {
     // list, so the two cannot disagree about a pane.
     for (opens, written) in [
         (
-            "function closePaneLeaf(tab, going) {",
+            "function closePaneLeaf(tab, going, hand = handNow()) {",
             "detachedAgents.set(going, tab.worktree);\n    noteAgentDetachment(going, true);",
         ),
         (
