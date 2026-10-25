@@ -2003,3 +2003,207 @@ mod child_termination_tests {
         assert_eq!(child.signals, 1);
     }
 }
+
+/// What a lane's child gets from its start, held still while the start
+/// itself changes (t-73907: on macOS it no longer goes through a fork).
+#[cfg(all(test, unix))]
+mod launch_shape_tests {
+    use super::PtyLane;
+    use std::time::{Duration, Instant};
+
+    /// How long a test waits for what it is sure will come.
+    const PATIENCE: Duration = Duration::from_secs(20);
+
+    fn spawned(script: &str) -> PtyLane {
+        PtyLane::spawn(
+            "/bin/sh",
+            &["-c".to_string(), script.to_string()],
+            None,
+            &[],
+            24,
+            80,
+        )
+        .expect("a shell to run")
+    }
+
+    fn screen(lane: &PtyLane) -> String {
+        lane.terminal()
+            .grid()
+            .snapshot()
+            .rows
+            .iter()
+            .map(|row| row.cells.iter().map(|cell| cell.ch).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Pump until the screen shows `text`, and hand back the line it is on.
+    fn line_with(lane: &mut PtyLane, text: &str) -> String {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            lane.pump();
+            if let Some(line) = screen(lane).lines().find(|line| line.contains(text)) {
+                return line.trim().to_string();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{text:?} never came:\n{}",
+                screen(lane)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// The child leads a session of its own and the pty is its controlling
+    /// terminal, with its group in front: job control, `/dev/tty` and the
+    /// window's own foreground question all stand on these.
+    #[test]
+    fn the_child_leads_its_own_session_on_its_controlling_terminal() {
+        let mut lane = spawned(
+            "set -- $(ps -o pid=,pgid=,tpgid= -p $$); \
+             if (exec 3</dev/tty) 2>/dev/null; then t=open; else t=none; fi; \
+             echo \"SHAPE $1 $2 $3 $t\"; sleep 5",
+        );
+        let line = line_with(&mut lane, "SHAPE ");
+        let pid = lane.pid().expect("a child pid").to_string();
+        assert_eq!(
+            line,
+            format!("SHAPE {pid} {pid} {pid} open"),
+            "pid, group, terminal's group, /dev/tty"
+        );
+        assert_eq!(lane.foreground_is_child(), Some(true));
+    }
+
+    /// ^C typed into the pane reaches the child as SIGINT.
+    #[test]
+    fn an_interrupt_typed_reaches_the_child_as_sigint() {
+        let mut lane =
+            spawned("trap 'echo GOT-INT; exit 3' INT; echo READY; while :; do sleep 0.1; done");
+        line_with(&mut lane, "READY");
+        lane.write_input(b"\x03").unwrap();
+        line_with(&mut lane, "GOT-INT");
+    }
+
+    /// The child starts at the pane's size, and a resize reaches it as
+    /// SIGWINCH with the new size.
+    #[test]
+    fn the_window_size_reaches_the_child_and_a_resize_signals_it() {
+        let mut lane = spawned(
+            "trap 'echo WINCH $(stty size)' WINCH; echo SIZE $(stty size); \
+             while :; do sleep 0.1; done",
+        );
+        assert_eq!(line_with(&mut lane, "SIZE "), "SIZE 24 80");
+        lane.resize(30, 100).unwrap();
+        assert_eq!(line_with(&mut lane, "WINCH "), "WINCH 30 100");
+    }
+
+    /// A descriptor the window has open without close-on-exec does not
+    /// reach the child: nothing but the terminal on 0, 1 and 2.
+    #[test]
+    fn no_descriptor_but_the_terminal_reaches_the_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::ffi::CString::new(
+            directory
+                .path()
+                .join("held")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        let held = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o600) };
+        assert!(held > 2, "open: {}", std::io::Error::last_os_error());
+        let flags = unsafe { libc::fcntl(held, libc::F_GETFD) };
+        assert_eq!(flags & libc::FD_CLOEXEC, 0, "the probe must be inheritable");
+
+        let mut lane = spawned(&format!(
+            "if {{ : <&{held}; }} 2>/dev/null; then echo FD-LEAKED; else echo FD-CLEAN; fi; sleep 5"
+        ));
+        let line = line_with(&mut lane, "FD-");
+        unsafe { libc::close(held) };
+        assert_eq!(line, "FD-CLEAN");
+    }
+}
+
+/// The lane's start on macOS runs no fork in this process (t-73907).
+///
+/// A fork in a window that runs CEF can stand forever in a libSystem fork
+/// handler before its exec, holding a copy of every descriptor the window
+/// has open. Counted with a fork handler of our own: `pthread_atfork`'s
+/// prepare step runs in the thread that forks, before the fork, and
+/// `posix_spawn` runs no fork handler at all. The count is per thread, so a
+/// launch on another test's thread does not land in this one's.
+#[cfg(all(test, target_os = "macos"))]
+mod fork_free_tests {
+    use super::PtyLane;
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+
+    unsafe extern "C" {
+        fn pthread_atfork(
+            prepare: Option<unsafe extern "C" fn()>,
+            parent: Option<unsafe extern "C" fn()>,
+            child: Option<unsafe extern "C" fn()>,
+        ) -> libc::c_int;
+    }
+
+    thread_local! {
+        static FORKS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    unsafe extern "C" fn counted() {
+        FORKS.with(|forks| forks.set(forks.get() + 1));
+    }
+
+    fn count_forks() {
+        static REGISTERED: std::sync::Once = std::sync::Once::new();
+        REGISTERED.call_once(|| {
+            assert_eq!(unsafe { pthread_atfork(Some(counted), None, None) }, 0);
+        });
+    }
+
+    /// The control: a `pre_exec` closure is what makes std fork, and the
+    /// counter must see that fork, or the zero below proves nothing.
+    #[test]
+    fn the_counter_sees_a_fork() {
+        use std::os::unix::process::CommandExt as _;
+
+        count_forks();
+        let before = FORKS.with(Cell::get);
+        let mut command = std::process::Command::new("/usr/bin/true");
+        unsafe { command.pre_exec(|| Ok(())) };
+        assert!(command.status().unwrap().success());
+        assert_eq!(FORKS.with(Cell::get), before + 1, "a fork went uncounted");
+    }
+
+    #[test]
+    fn a_lane_starts_its_child_without_forking_this_process() {
+        count_forks();
+        let before = FORKS.with(Cell::get);
+        let mut lane = PtyLane::spawn(
+            "/bin/sh",
+            &["-c".to_string(), "echo STARTED; sleep 5".to_string()],
+            None,
+            &[],
+            24,
+            80,
+        )
+        .expect("a shell to run");
+        let forks = FORKS.with(Cell::get) - before;
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !lane
+            .terminal()
+            .grid()
+            .snapshot()
+            .rows
+            .iter()
+            .any(|row| row.cells.iter().map(|cell| cell.ch).collect::<String>().contains("STARTED"))
+        {
+            assert!(Instant::now() < deadline, "the child never ran");
+            lane.pump();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(forks, 0, "the lane's start forked this process");
+    }
+
+}
