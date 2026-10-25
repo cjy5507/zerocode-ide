@@ -6663,7 +6663,9 @@ function initApiRoutersEvents() {
   }
   el("router-name-input")?.addEventListener("input", routerDraftChanged);
   for (const id of ["router-auth-header", "router-auth-scheme"]) el(id)?.addEventListener("input", invalidateRouterProbe);
-  el("router-manual-add")?.addEventListener("click", () => {
+  // Typed model IDs become the row's models as the field is left: the card keeps
+  // its one footer, and leaving the field for 저장 lands them before the save.
+  el("router-manual-models")?.addEventListener("change", () => {
     const ids = [...new Set((el("router-manual-models")?.value ?? "").split(/\r?\n/).map(value => value.trim()).filter(Boolean))];
     if (!ids.length || ids.length > 2000 || ids.some(id => id.length > 256)) return;
     testedModels = ids.map(id => ({ id }));
@@ -6995,6 +6997,8 @@ async function refreshTypeSafe() {
         const held = managedJudgmentController.snapshot;
         const superseded = held?.instanceId === snapshot?.instanceId && held?.revision > snapshot?.revision;
         managedJudgmentController.statusError = Boolean(managed.error || (!superseded && !managedJudgmentController.accept(snapshot, true)));
+        // The connections list shows the held managed models from this same read.
+        if (modelConnectionsController.state) modelConnectionsController.render();
       }
       if (settings.error || !settings.value || typeof settings.value !== "object" || Array.isArray(settings.value)) {
         typesafeRefreshFailed = true;

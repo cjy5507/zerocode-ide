@@ -2918,8 +2918,15 @@ class StatefulBackend {
         return clone(this.zoSettings.providers);
       }
       case "remove_api_router": {
-        // Mirrors `remove_router`: the key is found on the row itself and
-        // deleted only when no other row still reads it.
+        // Mirrors `remove_api_router`: a row named with the id and generation
+        // the list showed goes only while it is still that row, half of that
+        // pair is refused, and the key is found on the row itself and deleted
+        // only when no other row still reads it.
+        if ((args.sourceId == null) !== (args.expectedGeneration == null)) throw "settings_changed";
+        if (args.sourceId != null) {
+          const held = this.modelConnections().connections.find((row) => row.id === args.sourceId);
+          if (!held || held.generation !== args.expectedGeneration || held.provider.name !== args.name) throw "settings_changed";
+        }
         const own = this.zoSettings.providers.find((p) => p.name === args.name)?.auth_env;
         this.zoSettings.providers = this.zoSettings.providers.filter((p) => p.name !== args.name);
         if (own?.startsWith("ZEROCODE_ROUTER_")
@@ -5925,15 +5932,17 @@ await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘
   assertEqual(keyOf("OpenRouter 회사"), "sk-or-corp", "a second OpenRouter row overwrote the first one's key");
   assertEqual(keyOf("OpenRouter"), "sk-or-mine", "the second OpenRouter row's key is missing");
 
-  // 지우기 on the renamed preset row sends its name alone; the key it read is
-  // gone and every other row keeps its own.
+  // 지우기 on the renamed preset row names the row the list showed — its name,
+  // id and generation, never an id the pane derived; the key it read is gone
+  // and every other row keeps its own.
   const renamed = backend.zoSettings.providers.find((p) => p.name === "OpenRouter 회사");
+  const listed = backend.modelConnections().connections.find((row) => row.provider.name === "OpenRouter 회사");
   const droppedAt = backend.calls.length;
   const rows = pageA.locator("#router-provider-list .account-row");
   const index = (await rows.locator(".agent-row-name").allTextContents()).indexOf("OpenRouter 회사");
   await rows.nth(index).locator(".account-drop").click();
   const removal = await backend.waitForCall("A", "remove_api_router", droppedAt);
-  assertEqual(Object.keys(removal.args), ["name"], "the removal still guesses a row id");
+  assertEqual(removal.args, { name: "OpenRouter 회사", sourceId: listed.id, expectedGeneration: listed.generation }, "the removal did not name the row the list showed");
   await pageA.waitForFunction(
     () => document.querySelectorAll("#router-provider-list .account-row").length === 3,
     null,

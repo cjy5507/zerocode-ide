@@ -25,8 +25,9 @@ const modelConnectionsController = {
   async refresh() {
     const sequence = ++this.sequence;
     try {
-      const [state, managed] = await Promise.all([invoke("model_connections"), invoke("managed_judgment_status").catch(() => null)]);
-      if (managed) managedJudgmentController.accept(managed, true);
+      // The judgment pane's one current server read (refreshTypeSafe) feeds the
+      // managed models listed here; this list reads only the connections.
+      const state = await invoke("model_connections");
       if (sequence !== this.sequence) return;
       if (!state || !Array.isArray(state.connections)) throw new Error("provider_settings");
       const signature = value => JSON.stringify([value?.activeProviderIdentity, value?.connections?.map(row => [row.id, row.generation])]);
@@ -40,7 +41,7 @@ const modelConnectionsController = {
         holder.replaceChildren(this.node("p", "settings-hint", this.failure(error)), this.button(t("settings.managed.refresh", "상태 새로고침"), () => void this.refresh()));
         if ((typeof error === "string" ? error : error?.message) === "settings_changed") {
           holder.append(this.button(t("settings.connections.clear", "용도 해제 · 이전 선택 복원"), async () => {
-            try { await invoke("clear_model_connection", { role: "judgment" }); await this.refresh(); }
+            try { await invoke("clear_model_connection", { role: "judgment" }); await refreshTypeSafe(); await this.refresh(); }
             catch (failure) { showError(this.failure(failure)); }
           }));
         }
