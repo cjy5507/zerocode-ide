@@ -880,69 +880,101 @@ impl TeamWindow {
     /// Only an agent whose row names a composer glyph is checked: the others
     /// have no measured screen to read it off.
     fn confirm_briefing(&self, term: TermId, pending: &PendingWorkerReadiness) -> Option<String> {
-        use zerocode_pty::briefing::{BRIEFING_WINDOW, BriefingWatch, WatchStep, briefing_shows};
+        use zerocode_pty::briefing::{BRIEFING_WINDOW, Unheard, Verdict, confirm};
         let glyph = pending.composer?;
         if pending.briefing.trim().is_empty() {
             return None;
         }
         let state = self.app.state::<AppState>();
-        let mut watch = BriefingWatch::new(Instant::now(), BRIEFING_WINDOW);
-        loop {
-            let Some(held) = state.terminals().handle(term) else {
+        let agent = state.agent_terms().get(&term).copied();
+        let mut pane = LaunchPane {
+            state: &state,
+            term,
+            briefing: &pending.briefing,
+            glyph,
+            agent,
+        };
+        let why = match confirm(
+            &mut pane,
+            &pending.briefing,
+            BRIEFING_WINDOW,
+            zerocode_pty::ready::SUBMIT_RECEIPT_PATIENCE,
+        ) {
+            Verdict::Taken => return None,
+            Verdict::Gone => {
                 return Some("the worker exited before its briefing was seen on its screen".into());
-            };
-            let screen = {
-                let pty = lock_pty(&held);
-                let grid = pty.terminal().grid();
-                let mut text = String::new();
-                for index in 0..grid.scrollback_len() {
-                    text.push_str(&grid.scrollback_line(index));
-                    text.push('\n');
-                }
-                text.push_str(&grid.visible_text());
-                text
-            };
-            match watch.poll(briefing_shows(&screen, &pending.briefing), Instant::now()) {
-                WatchStep::Taken => return None,
-                WatchStep::Waiting => std::thread::sleep(Duration::from_millis(100)),
-                WatchStep::Retype => {
-                    let agent = state.agent_terms().get(&term).copied();
-                    let (notify, _waiting) = std::sync::mpsc::sync_channel(1);
-                    state.delivery_waiters().insert(term, notify);
-                    state.deliveries().insert(
-                        term,
-                        PromptDelivery::with_deadlines(
-                            pending.briefing.clone(),
-                            true,
-                            zerocode_pty::ReadySignal::Rest(Some(glyph)),
-                            Instant::now(),
-                            ready_quiet_for(agent),
-                            ready_timeout_for(agent),
-                        )
-                        .clearing(false)
-                        .guarded(zerocode_pty::ready::Guard::for_its_own_line(
-                            crate::cmd::terminal::launch_of(&state, term),
-                        ))
-                        .words(composer_words_for(agent)),
-                    );
-                }
-                WatchStep::Undelivered => {
-                    state.deliveries().remove(&term);
-                    state.delivery_waiters().remove(&term);
-                    note_window_event(
-                        state.local_data_root(),
-                        &format!(
-                            "term {term} briefing not delivered: typed twice, never on its screen"
-                        ),
-                    );
-                    return Some(
-                        "briefing not delivered (브리핑 미전달): typed twice, and the worker's screen \
-                         never showed it"
-                            .into(),
-                    );
-                }
             }
+            Verdict::Undelivered(Unheard::NeverShown) => {
+                "typed twice, and the worker's screen never showed it".to_string()
+            }
+            Verdict::Undelivered(Unheard::RetypeEnded(outcome)) => {
+                format!(
+                    "typed again, and that delivery ended {outcome:?} before its Enter was taken"
+                )
+            }
+            Verdict::Undelivered(Unheard::RetypeUnanswered) => {
+                "typed again, and that delivery never answered".to_string()
+            }
+        };
+        note_window_event(
+            state.local_data_root(),
+            &format!("term {term} briefing not delivered: {why}"),
+        );
+        Some(format!("briefing not delivered (브리핑 미전달): {why}"))
+    }
+}
+
+/// A worker's pane as the briefing watch reads and types at it (t-74381).
+struct LaunchPane<'a> {
+    state: &'a AppState,
+    term: TermId,
+    briefing: &'a str,
+    glyph: char,
+    agent: Option<&'static str>,
+}
+
+impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
+    fn screen(&mut self) -> Option<String> {
+        let held = self.state.terminals().handle(self.term)?;
+        let pty = lock_pty(&held);
+        let grid = pty.terminal().grid();
+        let mut text = String::new();
+        for index in 0..grid.scrollback_len() {
+            text.push_str(&grid.scrollback_line(index));
+            text.push('\n');
         }
+        text.push_str(&grid.visible_text());
+        Some(text)
+    }
+
+    /// The briefing typed once more, to the composer that stands by now:
+    /// any sign of rest says go, on the agent's own quiet window and
+    /// deadline.
+    fn retype(&mut self) -> std::sync::mpsc::Receiver<DeliveryOutcome> {
+        let (notify, waiting) = std::sync::mpsc::sync_channel(1);
+        self.state.delivery_waiters().insert(self.term, notify);
+        self.state.deliveries().insert(
+            self.term,
+            PromptDelivery::with_deadlines(
+                self.briefing.to_string(),
+                true,
+                zerocode_pty::ReadySignal::Rest(Some(self.glyph)),
+                Instant::now(),
+                ready_quiet_for(self.agent),
+                ready_timeout_for(self.agent),
+            )
+            .clearing(false)
+            .guarded(zerocode_pty::ready::Guard::for_its_own_line(
+                crate::cmd::terminal::launch_of(self.state, self.term),
+            ))
+            .words(composer_words_for(self.agent)),
+        );
+        waiting
+    }
+
+    fn withdraw(&mut self) {
+        self.state.deliveries().remove(&self.term);
+        self.state.delivery_waiters().remove(&self.term);
     }
 }
 

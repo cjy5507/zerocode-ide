@@ -19751,7 +19751,7 @@ mod tests {
     /// and fails the launch with the briefing named undelivered when they
     /// still are not — before the success return, so no ledger line says the
     /// worker started over an empty composer. The pure half (what counts as
-    /// shown, the one retype) is `zerocode_pty::briefing`, held by
+    /// shown, the one retype) is `zerocode_pty::briefing::confirm`, held by
     /// `crates/zerocode-pty/tests/briefing_taken.rs` against fake Claude and
     /// Codex shaped programs; this pins that the launch road asks it.
     #[test]
@@ -19774,10 +19774,9 @@ mod tests {
         );
         let confirming = block_after(backend, "fn confirm_briefing(");
         assert!(
-            confirming.contains("BriefingWatch::new(")
-                && confirming.contains("briefing_shows(")
-                && confirming.contains("WatchStep::Retype")
-                && confirming.contains("WatchStep::Undelivered")
+            confirming.contains("confirm(")
+                && confirming.contains("Verdict::Taken => return None")
+                && confirming.contains("Unheard::RetypeEnded(outcome)")
                 && confirming.contains("briefing not delivered"),
             "the screen check lost a step:\n{confirming}"
         );

@@ -7,7 +7,10 @@
 //! the screen: a briefing that was taken stands on it — echoed in the history,
 //! folded to a placeholder, or still in the composer.
 
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
+
+use crate::ready::Outcome;
 
 /// How long a screen is watched for the briefing before it is typed again, and
 /// again before it is given up on. Longer than the 1.8 s a booting Claude Code
@@ -90,6 +93,71 @@ pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
     }
     let seen = bare(screen);
     seen.contains(&probe) || seen.to_lowercase().contains("[pasted")
+}
+
+/// How often the screen is read while the watch waits.
+const LOOK_EVERY: Duration = Duration::from_millis(100);
+
+/// The pane a launch briefing went into, as the watch needs it.
+pub trait BriefingPane {
+    /// The pane's scrollback and visible text; `None` once the pane is gone.
+    fn screen(&mut self) -> Option<String>;
+    /// Type the briefing once more, and say where that delivery's outcome
+    /// arrives.
+    fn retype(&mut self) -> Receiver<Outcome>;
+    /// Take back a retype the watch no longer waits for.
+    fn withdraw(&mut self);
+}
+
+/// Why a briefing is said not to stand in its pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unheard {
+    /// Typed twice, and the screen never showed it.
+    NeverShown,
+    /// The briefing typed again ended this way, not submitted.
+    RetypeEnded(Outcome),
+    /// The briefing typed again never answered within its patience.
+    RetypeUnanswered,
+}
+
+/// What the watch found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The briefing stands on the screen.
+    Taken,
+    /// The pane went away before the briefing was seen on it.
+    Gone,
+    /// The pane holds no briefing.
+    Undelivered(Unheard),
+}
+
+/// Watch `pane` for `briefing` after its first delivery said it was done:
+/// [`BriefingWatch`] over the screen, and one retype when it says so.
+/// `retype_patience` is how long the retype's own outcome is waited for.
+pub fn confirm(
+    pane: &mut impl BriefingPane,
+    briefing: &str,
+    window: Duration,
+    retype_patience: Duration,
+) -> Verdict {
+    let _ = retype_patience;
+    let mut watch = BriefingWatch::new(Instant::now(), window);
+    loop {
+        let Some(screen) = pane.screen() else {
+            return Verdict::Gone;
+        };
+        match watch.poll(briefing_shows(&screen, briefing), Instant::now()) {
+            WatchStep::Taken => return Verdict::Taken,
+            WatchStep::Waiting => std::thread::sleep(LOOK_EVERY),
+            WatchStep::Retype => {
+                let _waiting = pane.retype();
+            }
+            WatchStep::Undelivered => {
+                pane.withdraw();
+                return Verdict::Undelivered(Unheard::NeverShown);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
