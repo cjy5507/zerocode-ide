@@ -25296,6 +25296,9 @@ mod restore_seams;
 /// t-71220: work nobody is coming back to, and the person's one press that
 /// clears it (`tests/settle.rs`).
 mod settle;
+/// t-69010: a failed turn is told as a failure, once, in place of its
+/// silence (`tests/turn_failed.rs`).
+mod turn_failed;
 /// t-19328: the board stops counting work nothing can review as 검증 대기
 /// (`tests/unreviewable.rs`).
 mod unreviewable;

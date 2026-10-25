@@ -64,13 +64,45 @@ fn two_workers_in_one_folder_each_come_back_on_their_own_conversation() {
     let (theirs, _) = a_worker_on(&mut bench, THEIRS);
 
     assert!(
-        !bench
+        bench
             .ledger
             .worker_session_reported(("team-1", &my_pane), session(THEIRS)),
-        "the neighbour's live conversation was written onto this worker"
+        "the refusal wrote no letter"
     );
     assert_eq!(conversation_of(&bench, &mine).as_deref(), Some(MINE));
     assert_eq!(conversation_of(&bench, &theirs).as_deref(), Some(THEIRS));
+    // The refusal is told to the coordinator once — the pane may still be
+    // writing the neighbour's transcript — naming both workers and never the
+    // conversation.
+    let told: Vec<Message> = bench.ledger.runs()[0]
+        .messages()
+        .iter()
+        .filter(|one| one.from == LEDGER_ITSELF && one.kind == MessageKind::Status)
+        .cloned()
+        .collect();
+    assert_eq!(told.len(), 1, "the refusal was told {} times", told.len());
+    let said: serde_json::Value = serde_json::from_str(told[0].body.as_str()).expect("json");
+    assert_eq!(said["reason"], CONVERSATION_HELD_ELSEWHERE);
+    assert_eq!(
+        (said["workerId"].as_str(), said["holderId"].as_str()),
+        (Some(mine.as_str()), Some(theirs.as_str()))
+    );
+    assert!(!told[0].body.as_str().contains(THEIRS) && !told[0].subject.as_str().contains(THEIRS));
+    assert!(
+        !bench
+            .ledger
+            .worker_session_reported(("team-1", &my_pane), session(THEIRS)),
+        "the same refusal moved the ledger again"
+    );
+    assert_eq!(
+        bench.ledger.runs()[0]
+            .messages()
+            .iter()
+            .filter(|one| one.from == LEDGER_ITSELF && one.kind == MessageKind::Status)
+            .count(),
+        1,
+        "the same refusal was told twice"
+    );
     assert_eq!(
         bench
             .ledger
@@ -124,9 +156,13 @@ fn a_new_conversation_or_an_ended_workers_one_is_still_taken() {
         (WorkerState::Released, false),
     ] {
         set_state(&mut bench, &theirs, state);
-        let taken = bench
+        // The answer is whether the ledger moved — a refusal moves it too,
+        // the first time, by its letter — so the conversation written down
+        // is what says whether the report was taken.
+        bench
             .ledger
             .worker_session_reported(("team-1", &my_pane), session(THEIRS));
+        let taken = conversation_of(&bench, &mine).as_deref() == Some(THEIRS);
         assert_eq!(
             taken,
             !carries_on,

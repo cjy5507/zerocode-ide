@@ -22288,8 +22288,9 @@ fn a_finished_workers_row_says_whether_its_task_can_take_a_review() {
     assert_eq!(said(&by_hand), true, "{:?}", row(&by_hand));
     assert_eq!(said(&reported), false, "{:?}", row(&reported));
     // The attempt's own ending is still said apart from the task's: the stopped
-    // worker's attempt did not succeed, and the task is done all the same.
-    assert!(row(&by_hand).reported && row(&by_hand).failed);
+    // worker's attempt ended with no result anybody saw — stopped, never
+    // failed (t-73910) — and the task is done all the same.
+    assert!(row(&by_hand).reported && row(&by_hand).stopped && !row(&by_hand).failed);
 }
 
 /* ---- worktree-evidence, through the door an agent uses ----------------- */

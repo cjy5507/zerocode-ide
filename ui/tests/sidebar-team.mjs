@@ -612,6 +612,37 @@ export async function testSidebarTeam({ browser, origin, ok, faults }) {
       JSON.stringify({ team: toggled.team.rows, branches: toggled.branches.rows }),
     );
 
+    /* ⑪ — t-69010: a worker whose turn failed on an error its CLI named is held, and its row says the failure where
+     * its last status stood: 「턴 실패 — <the error>」. Before this a zo turn that died on a provider silence reached
+     * nobody as anything but quiet. The failure leaves the row once the ledger's row no longer carries it. */
+    const failedTurn = await page.evaluate(async (now) => {
+      setSidebarView({ layout: "team" });
+      for (let tries = 0; tries < 100 && !window.__TEAM__("sidebarTeamStood", false); tries += 1) {
+        await new Promise((done) => setTimeout(done, 20));
+      }
+      const error = "api failed after 3 attempts: stream_startup_no_progress";
+      const moved = async (over) => {
+        window.__LEDGER__ = window.__LEDGER__.map((row) => row.worker === "w-a1" ? { ...row, ...over } : row);
+        await window.__LEDGER_MOVED__();
+      };
+      await moved({ turn_failed: { error, at_ms: now - 60_000 } });
+      const failed = window.__READ_WORKER__("w-a1");
+      await moved({ turn_failed: undefined });
+      const back = window.__READ_WORKER__("w-a1");
+      return {
+        failed, back, error,
+        word: t("sidebar.team.turnFailed", "턴 실패"),
+        line: t("sidebar.team.turnFailedLine", "턴 실패 — {{error}}", { error }),
+      };
+    }, now);
+    ok(
+      "a worker whose turn failed is held — 턴 실패 on its chip, its row's sentence is the failure and the error's own first words — and the row goes back to its own words once the ledger stops carrying the failure",
+      failedTurn.failed?.dot === "blocked" && failedTurn.failed?.chip === failedTurn.word &&
+        failedTurn.failed?.now.startsWith(failedTurn.line.slice(0, 20)) &&
+        failedTurn.back?.chip !== failedTurn.word && !failedTurn.back?.now.includes(failedTurn.word),
+      JSON.stringify(failedTurn),
+    );
+
     /* ⑩ — the new words in every catalogue. */
     const langs = await page.evaluate(() => {
       const keys = Object.keys(CATALOG.en).filter((key) => key.startsWith("sidebar.team."));

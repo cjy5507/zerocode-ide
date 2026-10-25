@@ -52,7 +52,7 @@ pub mod task_cost;
 
 pub use progress::{WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
-pub use session_history::SessionHistory;
+pub use session_history::{CONVERSATION_HELD_ELSEWHERE, SessionHistory};
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -546,6 +546,16 @@ pub enum MessageKind {
     /// body wearing this kind from a worker would be a pass nobody saw. The road that writes it
     /// is [`Ledger::land_checked`].
     LandCheck,
+    /// Nobody said this either: the LEDGER read a worker's own turn end say
+    /// the turn FAILED, with the error it failed on (t-69010) — zo's channel
+    /// frame `turn` / `end` / `outcome: failed` and its `error`. Before this a
+    /// zo turn that died on a 240 s provider silence reached the coordinator
+    /// as `went_quiet` and nothing else: the error was read and thrown away.
+    /// Its own kind, for [`Self::WentQuiet`]'s reason: a failed turn is not a
+    /// silence — it is read, and its worker is resumed or seated again. Written
+    /// in place of that turn's `went_quiet`, once per turn; the road is
+    /// [`Ledger::worker_turn_failed`].
+    TurnFailed,
 }
 
 impl MessageKind {
@@ -573,6 +583,7 @@ impl MessageKind {
             Self::LandingStalled => "landing_stalled",
             Self::BranchDrifted => "branch_drifted",
             Self::LandCheck => "land_check",
+            Self::TurnFailed => "turn_failed",
         }
     }
 
@@ -602,6 +613,7 @@ impl MessageKind {
                 | Self::LandingStalled
                 | Self::BranchDrifted
                 | Self::LandCheck
+                | Self::TurnFailed
         )
     }
 }
@@ -633,6 +645,7 @@ impl std::str::FromStr for MessageKind {
             "landing_stalled" => Self::LandingStalled,
             "branch_drifted" => Self::BranchDrifted,
             "land_check" => Self::LandCheck,
+            "turn_failed" => Self::TurnFailed,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -1224,7 +1237,10 @@ pub struct Dispatch {
     pub started_ms: i64,
     pub ended_ms: Option<i64>,
     /// `None` while it is still open, `Some(true)` for a dispatch that reached
-    /// `worker_done`. A dispatch that ended without a word is `Some(false)`.
+    /// `worker_done` saying `ok:true` and `Some(false)` for one saying
+    /// `ok:false`. A dispatch that ended without a word — stopped, abandoned,
+    /// its terminal gone — stays `None`: nobody saw a result
+    /// ([`WorkStage::Stopped`]).
     pub succeeded: Option<bool>,
     /// The ended attempt this one replaces, when the coordinator said so.
     /// The link is ALL it carries — placement, agent, worktree were repeated
@@ -11579,6 +11595,82 @@ impl Ledger {
         self.record_quiet_observation(&run_id, told, task_id, dispatch_id, now_ms, false)
     }
 
+    /// A worker's turn ended in an error its own CLI named (t-69010): told to
+    /// the run's coordinator as [`MessageKind::TurnFailed`], once per turn,
+    /// in place of that turn's `went_quiet`. Answers the notice's id.
+    ///
+    /// The same seat reading as [`Self::worker_fell_silent`]: the worker sitting
+    /// there when the turn ended, carrying the attempt it ended in. The error
+    /// is the CLI's words, cut to [`TURN_FAILED_WORDS`] characters — a
+    /// coordinator reads what failed, and a provider's whole answer is not a
+    /// notice. A worker waiting on an answer it asked for is still told: its
+    /// turn failing is not the wait it chose.
+    pub fn worker_turn_failed(
+        &mut self,
+        seat: (&str, &str),
+        turn_ended_ms: i64,
+        error: &str,
+        now_ms: i64,
+    ) -> Option<String> {
+        let (team, pane) = seat;
+        let (run_id, worker_id) = self.runs.iter().find_map(|run| {
+            occupant_at(run, team, pane, turn_ended_ms)
+                .map(|worker| (run.id.clone(), worker.id.clone()))
+        })?;
+        let (body, task_id, dispatch_id) = {
+            let run = self.run(&run_id)?;
+            let worker = run.worker(&worker_id)?;
+            if worker.quiet_at == Some(turn_ended_ms) {
+                return None;
+            }
+            let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+            if !dispatch.is_open()
+                || carried_at(run, &worker.id, turn_ended_ms).as_deref()
+                    != Some(dispatch.id.as_str())
+            {
+                return None;
+            }
+            let said: String = error.trim().chars().take(TURN_FAILED_WORDS).collect();
+            let body = serde_json::json!({
+                "workerId": worker.id,
+                "agent": worker.agent,
+                "pane": worker.pane,
+                "taskId": dispatch.task,
+                "dispatchId": dispatch.id,
+                "turnEndedMs": turn_ended_ms,
+                "error": said,
+                "model": worker.model,
+            });
+            (body, dispatch.task.clone(), dispatch.id.clone())
+        };
+        let address = self.run(&run_id)?.address();
+        let id = self.mint("m-");
+        let run = self.run_mut(&run_id)?;
+        // The turn is told once: its `went_quiet` reads this mark and stays
+        // away (`worker_fell_silent`).
+        run.workers
+            .iter_mut()
+            .find(|one| one.id == worker_id)?
+            .quiet_at = Some(turn_ended_ms);
+        run.messages.push(Message {
+            id: id.clone(),
+            from: LEDGER_ITSELF.to_string(),
+            to: address.clone(),
+            kind: MessageKind::TurnFailed,
+            body: body.to_string().into(),
+            subject: Text::default(),
+            priority: Priority::Normal,
+            payload: Text::default(),
+            thread: None,
+            task: Some(task_id),
+            dispatch: Some(dispatch_id),
+            author_seat: None,
+            created_ms: now_ms,
+        });
+        run.inbox_mut(&address).pending.push_back(id.clone());
+        Some(id)
+    }
+
     /// Notify coordinators about workers the window has observed as stalled.
     ///
     /// The host supplies only worker ids and the first quiet stamp. The ledger
@@ -18281,6 +18373,11 @@ fn kept_worker_model(
             .unwrap_or_else(|| named.to_string()),
     )
 }
+
+/// How much of a failed turn's error a [`MessageKind::TurnFailed`] notice
+/// carries (t-69010): the start of the CLI's own words, enough to name the
+/// failure — a provider's whole answer is not a notice.
+pub const TURN_FAILED_WORDS: usize = 200;
 
 /// Whether a worker row in `state` still carries its conversation on
 /// (t-57717): at work, asleep for its coordinator to seat again, or orphaned

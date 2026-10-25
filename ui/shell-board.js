@@ -365,6 +365,8 @@ const DESK_MAIL = Object.freeze({
   model_deviated: { state: "needs-attention", key: "board.desk.mailDeviated", word: "모델 바뀜" },
   landing_stalled: { state: "needs-attention", key: "board.desk.mailLanding", word: "착지 점검" },
   land_check: { state: "needs-attention", key: "board.desk.mailLandCheck", word: "착지 전 점검" },
+  // A turn its CLI said failed (t-69010): the worker waits on its coordinator, like one that ended.
+  turn_failed: { state: "failed", key: "board.desk.mailTurnFailed", word: "턴 실패" },
 });
 
 /* 착지 전 점검의 판정 — 창이 준 증거의 낱말마다 한 줄(t-42447). 표에 없는 낱말은 합치기가 끝나지
