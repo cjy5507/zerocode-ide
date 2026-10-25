@@ -73,11 +73,30 @@ impl StallCause {
         matches!(self, Self::TransientApiError | Self::ClassifierDecline)
     }
 
-    /// Whether the next prompt meets this cause again for certain — the walls
-    /// the mail pointer holds its line back from. A transient error is the
+    /// Whether the mail pointer holds its line back from a pane whose own last
+    /// answer is this cause. A quota or login wall meets the next prompt again
+    /// for certain. A decline that stands meets a pointer the same way: zo
+    /// sends each one as a request and records one more decline notice
+    /// (t-57445, 18 in 84 s on 2026-10-15). A transient error is the
     /// opposite: the next prompt is the cure.
-    const fn answers_every_prompt(self) -> bool {
-        matches!(self, Self::QuotaWall | Self::LoginWall)
+    const fn holds_the_pointer(self) -> bool {
+        matches!(
+            self,
+            Self::QuotaWall | Self::LoginWall | Self::ClassifierDecline
+        )
+    }
+
+    /// Until when the pointer holds back from a pane whose record of this
+    /// cause was written at `at_ms`. A wall stands for its reset window
+    /// ([`zerocode_core::orchestration::wall_stands_until`]). A decline has no
+    /// reset: it stands until the pane answers otherwise or a person types,
+    /// both of which take the record off the last word, and at most
+    /// [`DECLINE_POINTER_HOLD_MS`], after which one pointer goes in.
+    fn pointer_held_until(self, at_ms: i64, resets_at_ms: Option<i64>) -> i64 {
+        match self {
+            Self::ClassifierDecline => at_ms.saturating_add(DECLINE_POINTER_HOLD_MS),
+            _ => zerocode_core::orchestration::wall_stands_until(at_ms, resets_at_ms),
+        }
     }
 
     /// The cause as the window's own log names it.
@@ -115,6 +134,11 @@ enum TranscriptRule {
         errors: &'static [&'static str],
         says: &'static [&'static [&'static str]],
     },
+    /// A zo session file: the NEWEST `message` record is an assistant
+    /// message whose text begins with one of `starts` — the synthetic answer
+    /// zo records for a decline it surfaced. A user or tool message after it
+    /// is the conversation going on.
+    ZoSession { starts: &'static [&'static str] },
 }
 
 /// One measured row: the agent, the cause, the phrases its SCREEN shows for
@@ -195,8 +219,13 @@ struct StallMarkerRule {
 ///   person's `switchModelsOnFlag: false`) writes nothing until answered,
 ///   and shows its choices: [`DECLINE_DIALOG_CHOICE`].
 /// - codex: no row — no decline in its records on this machine.
-/// - zo: no row — zo walks its own ladder in-process and says so on its own
-///   screen; the window reads no zo transcript.
+/// - zo: a row for the mail pointer only (t-57445). zo walks its own ladder
+///   in-process, and a decline it gives up on is recorded as a synthetic
+///   assistant message whose text is the notice itself
+///   (`REFUSAL_SURFACED_NOTICE`, `REFUSAL_STANDING_NOTICE`), dated by the
+///   record's `updated_at_ms`. No screen phrases: a decline on zo's screen is
+///   no witness for ending a worker ([`witnesses_declines`]), and the pointer
+///   reads records, which say when they were written.
 const STALL_MARKERS: &[StallMarkerRule] = &[
     StallMarkerRule {
         agent: "codex",
@@ -269,7 +298,32 @@ const STALL_MARKERS: &[StallMarkerRule] = &[
             says: &[&[DECLINE_SENTENCE]],
         },
     },
+    StallMarkerRule {
+        agent: "zo",
+        cause: StallCause::ClassifierDecline,
+        screen: &[],
+        transcript: TranscriptRule::ZoSession {
+            starts: ZO_DECLINE_NOTICES,
+        },
+    },
 ];
+
+/// How zo's two recorded decline notices begin (zo-ide 2026-10-25,
+/// `conversation/fallback.rs` and `core-types/src/retry_signal.rs`): a first
+/// decline it gave up retrying, and one that stood again on an unchanged
+/// conversation. The third sentence zo shows for a declined category, "…
+/// so this refusal stands", is a screen warning beside them and never the
+/// recorded answer.
+const ZO_DECLINE_NOTICES: &[&str] = &[
+    "The model's safety classifier declined this request",
+    "The safety classifier declined this again.",
+];
+
+/// The longest the mail pointer holds back from a pane whose last answer is
+/// a decline (t-57445). The window has no other re-notification bound, and
+/// the brief set this one: a pane nobody answers or types into is pointed at
+/// its mail once every half hour, instead of every five seconds.
+const DECLINE_POINTER_HOLD_MS: i64 = 30 * 60 * 1000;
 
 /// Claude Code's own words for a decline, in every spelling 2.1.281 has
 /// ("<Model>'s safeguards flagged this message", "This model's safeguards
@@ -315,6 +369,14 @@ fn rule_for(agent: &str, cause: StallCause) -> Option<&'static StallMarkerRule> 
 /// measured costs nothing per beat.
 pub(crate) fn has_rule(agent: &str, cause: StallCause) -> bool {
     rule_for(agent, cause).is_some()
+}
+
+/// Whether `agent`'s decline row can witness a decline at all — the screen
+/// sentence beside the record, the two the witness needs. Asked before a
+/// grid is copied or a transcript read for the decline sweep, so a row kept
+/// for the mail pointer alone (zo's) costs that sweep nothing.
+pub(crate) fn witnesses_declines(agent: &str) -> bool {
+    rule_for(agent, StallCause::ClassifierDecline).is_some_and(|rule| !rule.screen.is_empty())
 }
 
 /// The wall marker for `agent`, read off its screen and the bounded tail of
@@ -447,7 +509,7 @@ pub(crate) fn decline_reading_for(
     screen: Option<&str>,
     transcript_path: Option<&Path>,
 ) -> Option<DeclineReading> {
-    if !has_rule(agent, StallCause::ClassifierDecline) {
+    if !witnesses_declines(agent) {
         return None;
     }
     let lines = transcript_path.and_then(zerocode_core::transcript::tail_lines);
@@ -1040,7 +1102,7 @@ impl PaneWall {
 fn reads_pane_walls(agent: &str) -> bool {
     STALL_MARKERS.iter().any(|rule| {
         rule.agent == agent
-            && rule.cause.answers_every_prompt()
+            && rule.cause.holds_the_pointer()
             && !matches!(rule.transcript, TranscriptRule::None)
     })
 }
@@ -1067,17 +1129,14 @@ pub(crate) fn pane_wall_for(agent: &str, transcript_path: &Path) -> Option<PaneW
 pub(crate) fn pane_wall_in(agent: &str, lines: &[String]) -> Option<PaneWall> {
     STALL_MARKERS
         .iter()
-        .filter(|rule| rule.agent == agent && rule.cause.answers_every_prompt())
+        .filter(|rule| rule.agent == agent && rule.cause.holds_the_pointer())
         .find_map(|rule| {
             let found = read_transcript(rule, lines)?;
             let at_ms = found.at_ms?;
             Some(PaneWall {
                 cause: rule.cause,
                 line: found.line,
-                stands_until_ms: zerocode_core::orchestration::wall_stands_until(
-                    at_ms,
-                    found.resets_at_ms,
-                ),
+                stands_until_ms: rule.cause.pointer_held_until(at_ms, found.resets_at_ms),
             })
         })
 }
@@ -1114,7 +1173,64 @@ fn read_transcript(rule: &StallMarkerRule, lines: &[String]) -> Option<Found> {
         TranscriptRule::ClaudeJsonl { errors, says } => {
             claude_transcript_marker(lines, errors, says, rule.cause.needs_the_last_word())
         }
+        TranscriptRule::ZoSession { starts } => zo_session_marker(lines, starts),
     }
+}
+
+/// The NEWEST message of a zo session tail, when it is an assistant message
+/// whose text begins with one of `starts`.
+///
+/// Newest and nothing older, as for a Codex edge: a user message after the
+/// notice is a person or a pointer that went on, and a tool message is a
+/// turn at work. A system record is neither an answer nor a prompt and is
+/// read past. Decided on parsed fields: an assistant answer that quotes the
+/// notice mid-text, or a tool result carrying it, is no decline.
+fn zo_session_marker(lines: &[String], starts: &[&str]) -> Option<Found> {
+    for line in lines.iter().rev() {
+        let line = line.trim();
+        if !line.contains("\"message\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+        let message = value.get("message")?;
+        match message.get("role").and_then(|v| v.as_str()) {
+            Some("system") => continue,
+            Some("assistant") => {}
+            _ => return None,
+        }
+        let text = message
+            .get("blocks")
+            .and_then(|blocks| blocks.as_array())
+            .and_then(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| block["type"] == "text")
+                    .find_map(|block| block["text"].as_str())
+            })
+            .unwrap_or("")
+            .trim_start();
+        if !starts.iter().any(|start| text.starts_with(start)) {
+            return None;
+        }
+        let at_ms = value
+            .get("updated_at_ms")
+            .and_then(serde_json::Value::as_i64);
+        return Some(Found {
+            source: TRANSCRIPT,
+            line: clipped(text),
+            key: at_ms.map(|at| format!("zo-decline@{at}")),
+            at_ms,
+            resets_at_ms: None,
+            request: None,
+            parent: None,
+        });
+    }
+    None
 }
 
 fn clipped(line: &str) -> Text {
@@ -1930,10 +2046,143 @@ pub(crate) mod tests {
             pane_wall_in("codex", &lines(&[CODEX_WALL_EDGE, CODEX_CLEAN_EDGE])).is_none(),
             "a recovered codex session was still walled"
         );
-        // zo's wall is screen words only: the pointer never guesses from a
-        // screen, which cannot say when its line was written.
-        assert!(!reads_pane_walls("zo") && !reads_pane_walls("cursor"));
+        // zo's quota wall is screen words only: the pointer never guesses
+        // from a screen, which cannot say when its line was written. zo's
+        // records are read for its decline notice alone, and a Claude record
+        // in a zo file is nothing zo wrote.
+        assert!(reads_pane_walls("zo") && !reads_pane_walls("cursor"));
         assert!(pane_wall_in("zo", &lines(&[CLAUDE_SESSION_WALL_RECORD])).is_none());
+    }
+
+    /// zo's session records around a decline it surfaced (t-57445): the
+    /// person's request, the synthetic answer whose text is the notice, and
+    /// what may follow it. Shapes from `core-types/src/session` (`message`
+    /// records with `turn_index`, `updated_at_ms` and `message.blocks`).
+    const ZO_ASKED: &str = r#"{"type":"message","turn_index":4,"updated_at_ms":1792905000000,"message":{"role":"user","blocks":[{"type":"text","text":"Review the parser change."}]}}"#;
+    const ZO_DECLINED: &str = r#"{"type":"message","turn_index":4,"updated_at_ms":1792905001000,"message":{"role":"assistant","blocks":[{"type":"text","text":"The model's safety classifier declined this request; giving up on automatic retries. Rephrasing usually clears it, or /model to another provider — on a long session, /compact can too."}]}}"#;
+    const ZO_DECLINED_AGAIN: &str = r#"{"type":"message","turn_index":5,"updated_at_ms":1792905006000,"message":{"role":"assistant","blocks":[{"type":"text","text":"The safety classifier declined this again. The last turn's decline in this conversation stood after every automatic step, and the conversation has not changed materially since, so this turn asked once and stopped instead of running those steps again."}]}}"#;
+    const ZO_POINTER: &str = r#"{"type":"message","turn_index":5,"updated_at_ms":1792905005000,"message":{"role":"user","blocks":[{"type":"text","text":"You have 8 orchestration messages. Run `zerocode-orc check`."}]}}"#;
+    const ZO_ANSWERED: &str = r#"{"type":"message","turn_index":6,"updated_at_ms":1792905400000,"message":{"role":"assistant","blocks":[{"type":"text","text":"The parser change looks right; one test is missing."}]}}"#;
+    const ZO_QUOTING: &str = r#"{"type":"message","turn_index":6,"updated_at_ms":1792905400000,"message":{"role":"assistant","blocks":[{"type":"text","text":"Earlier zo said: The model's safety classifier declined this request; that was a sampling event."}]}}"#;
+    const ZO_TOOL_QUOTING: &str = r#"{"type":"message","turn_index":6,"updated_at_ms":1792905400000,"message":{"role":"tool","blocks":[{"type":"tool_result","tool_use_id":"t","tool_name":"bash","output":"The safety classifier declined this again.","is_error":false}]}}"#;
+    const ZO_SYSTEM: &str = r#"{"type":"message","turn_index":5,"updated_at_ms":1792905002000,"message":{"role":"system","blocks":[{"type":"text","text":"Conversation summary."}]}}"#;
+    const ZO_DECLINED_UNDATED: &str = r#"{"type":"message","turn_index":4,"message":{"role":"assistant","blocks":[{"type":"text","text":"The model's safety classifier declined this request; giving up on automatic retries."}]}}"#;
+
+    /// A decline that stands holds the pointer (t-57445): zo's recorded
+    /// notice and Claude's decline record are walls for it, until the pane
+    /// answers otherwise, a person types, or half an hour passes — and a
+    /// quote of either sentence is no decline.
+    #[test]
+    fn a_standing_decline_holds_the_pointer_until_an_answer_a_prompt_or_half_an_hour() {
+        let zo = |held: &[&str]| pane_wall_in("zo", &lines(held));
+        let first = zo(&[ZO_ASKED, ZO_DECLINED]).expect("zo's surfaced decline");
+        assert_eq!(first.cause, StallCause::ClassifierDecline);
+        assert!(first.line.as_str().starts_with(ZO_DECLINE_NOTICES[0]));
+        assert_eq!(
+            first.stands_until_ms,
+            1_792_905_001_000 + DECLINE_POINTER_HOLD_MS
+        );
+        assert!(first.stands(1_792_905_001_000 + DECLINE_POINTER_HOLD_MS - 1));
+        assert!(!first.stands(1_792_905_001_000 + DECLINE_POINTER_HOLD_MS));
+        let again = zo(&[ZO_ASKED, ZO_DECLINED, ZO_POINTER, ZO_DECLINED_AGAIN])
+            .expect("the decline standing again");
+        assert_eq!(
+            again.stands_until_ms,
+            1_792_905_006_000 + DECLINE_POINTER_HOLD_MS
+        );
+        assert!(
+            zo(&[ZO_ASKED, ZO_DECLINED, ZO_SYSTEM]).is_some(),
+            "a system record is neither an answer nor a prompt"
+        );
+        for (why, held) in [
+            ("a prompt after the notice", vec![ZO_DECLINED, ZO_POINTER]),
+            (
+                "an answer after the notice",
+                vec![ZO_DECLINED, ZO_POINTER, ZO_ANSWERED],
+            ),
+            ("an answer quoting the notice", vec![ZO_ASKED, ZO_QUOTING]),
+            (
+                "a tool result carrying it",
+                vec![ZO_DECLINED, ZO_TOOL_QUOTING],
+            ),
+            ("a notice with no time", vec![ZO_ASKED, ZO_DECLINED_UNDATED]),
+        ] {
+            assert!(zo(&held).is_none(), "zo: {why} held the pointer");
+        }
+
+        let claude = |held: &[&str]| pane_wall_in("claude", &lines(held));
+        let declined = claude(&[
+            CLAUDE_DECLINED_PARTIAL,
+            CLAUDE_NO_FALLBACK,
+            CLAUDE_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ])
+        .expect("Claude's decline record, its turn's end after it");
+        assert_eq!(declined.cause, StallCause::ClassifierDecline);
+        assert_eq!(
+            declined.stands_until_ms,
+            at("2026-09-24T04:29:48.711Z") + DECLINE_POINTER_HOLD_MS
+        );
+        assert!(
+            claude(&[CLAUDE_DECLINE_ERROR, CLAUDE_TURN_END, CLAUDE_PERSON_TYPED]).is_none(),
+            "a person's line after Claude's decline took nothing back"
+        );
+        assert!(
+            claude(&[CLAUDE_PLAIN_RECORD, CLAUDE_TOOL_QUOTING_THE_DECLINE]).is_none(),
+            "a tool result quoting Claude's decline held the pointer"
+        );
+
+        // A row kept for the pointer is no witness for ending a worker: the
+        // decline sweep reads no zo screen or file at all.
+        assert!(witnesses_declines("claude") && !witnesses_declines("zo"));
+        assert!(decline_reading_for("zo", Some(ZO_DECLINE_NOTICES[1]), None).is_none());
+    }
+
+    /// The 2026-10-15 kminus pane replayed through the reader the hold uses
+    /// (t-57445): a standing decline, mail waiting, and the pointer's beat
+    /// every 4.6 s for 84 s. Every pointer typed is one more request zo sends
+    /// and one more notice it records. Before this row, the pane was never
+    /// walled and the beat typed 18 pointers; now the first one meets the
+    /// decline and the hold keeps the other seventeen back.
+    #[test]
+    fn a_declined_zo_pane_is_pointed_at_its_mail_once_in_the_measured_minute_and_a_half() {
+        const BEAT_MS: i64 = 4_600;
+        const SPAN_MS: i64 = 84_000;
+        let started = 1_792_905_000_000_i64;
+        let record = |role: &str, text: &str, at: i64| {
+            serde_json::json!({
+                "type": "message",
+                "turn_index": 0,
+                "updated_at_ms": at,
+                "message": { "role": role, "blocks": [{ "type": "text", "text": text }] },
+            })
+            .to_string()
+        };
+        // zo's own words (`REFUSAL_STANDING_NOTICE`, retry_signal.rs), as its
+        // record carries them.
+        let notice = "The safety classifier declined this again. The last turn's decline in \
+                      this conversation stood after every automatic step.";
+        let mut transcript = vec![record("user", "Review the parser change.", started)];
+        let mut typed = 0;
+        let mut now = started + BEAT_MS;
+        while now <= started + SPAN_MS {
+            let held = pane_wall_in("zo", &transcript).is_some_and(|wall| wall.stands(now));
+            if !held {
+                typed += 1;
+                transcript.push(record(
+                    "user",
+                    &zerocode_core::orchestration::pointer_text(8),
+                    now,
+                ));
+                transcript.push(record("assistant", notice, now + 900));
+            }
+            now += BEAT_MS;
+        }
+        println!("MEASURE declined zo pane: {typed} pointers in {SPAN_MS} ms (before: 18)");
+        assert_eq!(
+            typed, 1,
+            "the hold let {typed} pointers into a declined pane"
+        );
     }
 
     /// The production road: the table first, then one bounded tail read.

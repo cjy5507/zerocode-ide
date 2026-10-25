@@ -25277,6 +25277,9 @@ mod landing_watch;
 /// t-59383: a root letter from the asked seat that names the question closes
 /// it for every count (`tests/letter_answers.rs`).
 mod letter_answers;
+/// t-68069: one conversation is one worker's, whatever seat a report comes by
+/// (`tests/one_conversation.rs`).
+mod one_conversation;
 /// t-47538: one reading of where a task's work stands (`tests/progress.rs`).
 mod progress;
 /// t-65286: which project a run belongs to, and the run a verb answers in

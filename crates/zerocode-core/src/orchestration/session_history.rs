@@ -74,6 +74,17 @@ impl SessionHistory {
 }
 
 impl Ledger {
+    /// Writes the conversation the pane at `seat` reported onto the worker
+    /// seated there, and onto its attempts' histories; whether anything moved.
+    ///
+    /// One conversation is one worker's (t-68069). A report naming the
+    /// conversation ANOTHER row still carries on is refused, whatever seat it
+    /// came by: on 2026-10-21 two workers shared one checkout, and a pane
+    /// continued after its tab closed ran its neighbour's conversation — two
+    /// processes writing one transcript. Taking that report would make the
+    /// neighbour's conversation this worker's own, and every later resume of
+    /// it would bring the neighbour's back. A pane whose agent was restarted
+    /// on a conversation of its own still reports a new id, and is taken.
     pub fn worker_session_reported(
         &mut self,
         seat: (&str, &str),
@@ -83,10 +94,27 @@ impl Ledger {
             return false;
         }
         let (team, pane) = seat;
+        let seated = |worker: &super::Worker| {
+            worker.team == team && worker.pane == pane && worker.state.may_occupy_pane()
+        };
+        // A conversation is its agent's: two CLIs may spell an id alike.
+        let rows = || self.runs.iter().flat_map(|run| run.workers.iter());
+        let agent = rows()
+            .find(|worker| seated(worker))
+            .map(|worker| worker.agent.as_str());
+        if rows().any(|worker| {
+            !seated(worker)
+                && Some(worker.agent.as_str()) == agent
+                && super::carries_its_conversation_on(worker.state)
+                && worker
+                    .session
+                    .as_ref()
+                    .is_some_and(|held| held.key == session.key && held.id == session.id)
+        }) {
+            return false;
+        }
         for run in &mut self.runs {
-            let Some(worker) = run.workers.iter_mut().find(|worker| {
-                worker.team == team && worker.pane == pane && worker.state.may_occupy_pane()
-            }) else {
+            let Some(worker) = run.workers.iter_mut().find(|worker| seated(worker)) else {
                 continue;
             };
             let carried = session.carrying_forward(worker.session.as_ref());

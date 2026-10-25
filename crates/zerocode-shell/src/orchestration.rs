@@ -7604,10 +7604,7 @@ fn note_paused_declines(host: &dyn Host, now_ms: i64) {
     let mut declined = Vec::new();
     for one in seated {
         if one.taken_over
-            || !crate::quota_wall::has_rule(
-                &one.agent,
-                crate::quota_wall::StallCause::ClassifierDecline,
-            )
+            || !crate::quota_wall::witnesses_declines(&one.agent)
             || host.quiet_since(one.term, one.started_ms, now_ms).is_some()
         {
             continue;
