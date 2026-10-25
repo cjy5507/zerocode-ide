@@ -386,8 +386,33 @@ pub(crate) struct TerminalColorsReport {
 }
 
 impl TerminalColorsReport {
-    pub(crate) fn into_colors(&self) -> Result<zerocode_pty::TerminalColors, String> {
-        Err("not wired yet".to_string())
+    /// The grid's colours, or why this report cannot dress a pane.
+    ///
+    /// All or nothing: sixteen named colours and three base ones, every one a
+    /// colour the renderer itself wrote. A half-understood report would have
+    /// the grid answer with a colour the window does not paint.
+    pub(crate) fn to_colors(&self) -> Result<zerocode_pty::TerminalColors, String> {
+        let parse = |what: &str, text: &str| {
+            zerocode_pty::parse_x_color_spec(text)
+                .ok_or_else(|| format!("{what} is not a colour: {text:?}"))
+        };
+        let mut named = [zerocode_pty::Rgb::default(); 16];
+        if self.ansi.len() != named.len() {
+            return Err(format!(
+                "{} named colours reported, {} expected",
+                self.ansi.len(),
+                named.len()
+            ));
+        }
+        for (slot, text) in named.iter_mut().zip(&self.ansi) {
+            *slot = parse("a named colour", text)?;
+        }
+        Ok(zerocode_pty::TerminalColors::with_standard_tail(
+            parse("the foreground", &self.foreground)?,
+            parse("the background", &self.background)?,
+            parse("the cursor", &self.cursor)?,
+            named,
+        ))
     }
 }
 

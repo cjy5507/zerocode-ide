@@ -156,6 +156,30 @@ pub(crate) fn set_terminal_prefs(
     Ok(snapshot)
 }
 
+/// The renderer says what it paints terminals with, and every shell is told.
+///
+/// The grid answers `OSC 10/11/12 ; ?` only with colours it was handed, and
+/// the renderer alone knows the resolved palette (theme, light or dark
+/// variant, the person's overrides), so it reports whenever that changes.
+/// Open shells are dressed here; shells opened later are dressed by
+/// `hold_terminal`. A program's own `OSC 11 ; rgb:…` override is dropped with
+/// the theme it was layered on (`Grid::set_colors`).
+#[tauri::command(async)]
+pub(crate) fn report_terminal_colors(
+    state: State<'_, AppState>,
+    report: TerminalColorsReport,
+) -> Result<(), String> {
+    let colors = Arc::new(report.to_colors()?);
+    *state.terminal_colors() = Some(colors.clone());
+    for pty in state.terminals().handles() {
+        lock_pty(&pty)
+            .terminal_mut()
+            .grid_mut()
+            .set_colors(colors.clone());
+    }
+    Ok(())
+}
+
 /// Store exactly one terminal control against the latest canonical record.
 /// This is the renderer path; the full-object command remains for compatible
 /// callers that intentionally replace the complete preference record.

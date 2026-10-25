@@ -8383,6 +8383,16 @@ function applyTerminalPalette() {
   if (signature !== terminalPaletteSignature) {
     terminalPaletteSignature = signature;
     forgetPalette();
+    // The shell's grid answers a program's `OSC 10/11/12 ; ?` with what the
+    // window paints, and only this function knows what that is (t-73869).
+    invoke("report_terminal_colors", {
+      report: {
+        foreground: colors.foreground,
+        background: colors.background,
+        cursor: colors.cursor,
+        ansi: terminalAnsiColorKeys().map((key) => colors[key]),
+      },
+    }).catch((error) => tellWindowLog(`terminal colours were not reported: ${error}`));
   }
   return true;
 }

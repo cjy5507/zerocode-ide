@@ -29506,7 +29506,7 @@ fn reported_theme(name: &str) -> TerminalColorsReport {
 /// What a program in the pane gets back for `ask`, once the pane was told
 /// `report` the way `hold_terminal` and `report_terminal_colors` tell it.
 fn answer_after_telling(report: &TerminalColorsReport, ask: &[u8]) -> Vec<u8> {
-    let colors = report.into_colors().expect("the window's own colours parse");
+    let colors = report.to_colors().expect("the window's own colours parse");
     let mut terminal = zerocode_pty::Terminal::new(4, 20);
     terminal.grid_mut().set_colors(Arc::new(colors));
     terminal.feed(ask);
@@ -29540,7 +29540,7 @@ fn a_theme_switch_changes_the_background_a_pane_answers() {
         (TERM_THEME_LIGHT, &b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"[..]),
     ] {
         let colors = reported_theme(theme)
-            .into_colors()
+            .to_colors()
             .expect("the window's own colours parse");
         terminal.grid_mut().set_colors(Arc::new(colors));
         terminal.feed(b"\x1b]11;?\x1b\\");
@@ -29552,8 +29552,8 @@ fn a_theme_switch_changes_the_background_a_pane_answers() {
 fn a_report_that_is_not_a_whole_palette_dresses_no_pane() {
     let mut short = reported_theme("Dracula");
     short.ansi.pop();
-    assert!(short.into_colors().is_err(), "fifteen colours were taken");
+    assert!(short.to_colors().is_err(), "fifteen colours were taken");
     let mut named = reported_theme("Dracula");
     named.background = "navy".to_string();
-    assert!(named.into_colors().is_err(), "a colour name was taken");
+    assert!(named.to_colors().is_err(), "a colour name was taken");
 }

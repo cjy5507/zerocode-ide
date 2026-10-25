@@ -1910,6 +1910,7 @@ class StatefulBackend {
         return answer;
       }
       case "apply_ui_zoom": return null;
+      case "report_terminal_colors": return null;
       // 창 안 경로 브라우저(t-2982)의 두 물음. 폴더 필드의 「폴더 선택」은 이제
       // OS 패널이 아니라 이 브라우저를 열고, 시험은 브라우저를 답으로 닫는다.
       case "browse_places": return { home: "/Users/tester", places: [

@@ -16088,12 +16088,12 @@ mod tests {
         );
         let reporting = block_after(shipped, "fn report_terminal_colors(");
         assert!(
-            reporting.contains("into_colors()")
+            reporting.contains("to_colors()")
                 && reporting.contains("state.terminals().handles()")
                 && reporting.contains("set_colors("),
             "a reported palette does not reach the shells already open:\n{reporting}"
         );
-        let painting = block_after(&window, "function applyTerminalPalette() {");
+        let painting = block_after(window, "function applyTerminalPalette() {");
         assert!(
             painting.contains("invoke(\"report_terminal_colors\"")
                 && painting.contains("terminalAnsiColorKeys()"),
