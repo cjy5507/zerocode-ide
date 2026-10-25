@@ -190,18 +190,31 @@ impl Watch {
 }
 
 /// What the sample taken after a hang was seen can speak for (t-72138).
+///
+/// `sample` starts only once the hang is seen and then runs a second, so a
+/// main thread that answers just past the threshold leaves the sample its
+/// idle loop: the 2,031 ms of 2026-10-23 05:19 inside Chromium's message
+/// pump was filed with `mach_msg` in 72 of 78 samples as its stack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Sampled {
     /// Still unanswered when the sample ended: every frame is the hang's.
     Open,
-    /// Answered this many ms after the ping, before the sample began.
+    /// Answered this many ms after the ping, before the sample began: no
+    /// frame is the hang's.
     Before(u64),
-    /// Answered this many ms after the ping, while the sample ran.
+    /// Answered this many ms after the ping, while the sample ran: the
+    /// frames hold the hang's end and then the idle loop.
     During(u64),
 }
 
-fn sampled(_sent: u64, _sample_from: u64, _answered: Option<u64>) -> Sampled {
-    Sampled::Open
+/// `sent` and `answered` are the ping's and its answer's ms on the monitor's
+/// clock, and `sample_from` is when the sampler was started on the same one.
+fn sampled(sent: u64, sample_from: u64, answered: Option<u64>) -> Sampled {
+    match answered {
+        None => Sampled::Open,
+        Some(at) if at < sample_from => Sampled::Before(at.saturating_sub(sent)),
+        Some(at) => Sampled::During(at.saturating_sub(sent)),
+    }
 }
 
 impl Sampled {
@@ -210,13 +223,20 @@ impl Sampled {
         self,
         sample: Result<Vec<String>, &'static str>,
     ) -> Result<Vec<String>, &'static str> {
-        sample
+        match self {
+            Self::Before(_) => sample.and(Err("answered_before_sample")),
+            Self::Open | Self::During(_) => sample,
+        }
     }
 }
 
 impl fmt::Display for Sampled {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Open => Ok(()),
+            Self::Before(ms) => write!(f, " lasted_ms={ms} answered_before_sample"),
+            Self::During(ms) => write!(f, " lasted_ms={ms} answered_during_sample"),
+        }
     }
 }
 
@@ -366,10 +386,18 @@ impl Monitor {
             // 20 255 ms of 2026-10-21 had to be traced to a settings read by
             // hand, from the command's name alone.
             crate::note_window_event(state.local_data_root(), &format!("hang io: {io}"));
-            let sample = if answered.is_none() {
-                crate::hang_sample::sample_main_thread()
+            let (sample, sampled) = if answered.is_none() {
+                let sample_from = self.start.elapsed().as_millis() as u64;
+                let sample = crate::hang_sample::sample_main_thread();
+                // Peeked, not taken: the next beat takes it and says the end.
+                let answered = (!self.answer.outstanding.load(Acquire))
+                    .then(|| self.answer.at_ms.load(Relaxed))
+                    .filter(|at| *at != 0);
+                // Unanswered at this beat, so the hang is the time since the ping.
+                let sampled = sampled(now.saturating_sub(ms), sample_from, answered);
+                (sampled.frames(sample), sampled)
             } else {
-                Err("answered_before_observation")
+                (Err("answered_before_observation"), Sampled::Open)
             };
             let frames = match sample {
                 Ok(frames) => {
@@ -389,7 +417,9 @@ impl Monitor {
             if let Err(error) = crate::crash::record(
                 state.local_data_root(),
                 crate::crash::Kind::Hang,
-                &format!("main thread unresponsive for {ms}ms; main_scope={scope}{census}"),
+                &format!(
+                    "main thread unresponsive for {ms}ms; main_scope={scope}{census}{sampled}"
+                ),
                 crate::crash::Origin {
                     thread: Some("main"),
                     backtrace: Some(&frames),

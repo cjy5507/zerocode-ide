@@ -3804,8 +3804,13 @@ fn main() -> ExitCode {
                     api.prevent_exit();
                     return;
                 }
-                #[cfg(not(all(target_os = "macos", feature = "chromium-browser")))]
-                let _ = api;
+                // The devices go down before the goodbye, as the browser's
+                // tabs do, and off the main thread (t-62468): an AVD's saved
+                // exit is up to thirty seconds.
+                if emulator::defer_exit(handle, code) {
+                    api.prevent_exit();
+                    return;
+                }
                 // The ledger hears the goodbye before any pane goes (t-3058):
                 // seated workers sleep instead of being settled by their own
                 // panes' exits on the way out — waited for no longer than the

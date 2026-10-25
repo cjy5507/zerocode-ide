@@ -645,7 +645,41 @@ fn put_away(returned: Vec<Loan>, end: LoanEnd) {
     announce_loans();
 }
 
-/// Where the window's exit stands with its devices (t-62468).
+/// Hold the window's exit while its devices go down on a thread of their own
+/// (t-62468), and exit again with `code` once they are down. `true` means the
+/// caller prevents this exit; `false` means it goes on, and [`shutdown_all`]
+/// on its way finds nothing slow left. A restart's exit is never held: tauri
+/// ignores `prevent_exit` for it, and the rest of the exit would be skipped.
+///
+/// An AVD's saved exit takes up to thirty seconds and a simulator's shutdown
+/// about one, and the exit ran both on the main thread: 2026-10-17's
+/// `event_exit_requested` hang stood in `nanosleep` under
+/// `ManagedEmulatorProcess::stop` in all 83 of its samples. The common window
+/// holds no device and exits as before.
+pub(crate) fn defer_exit(app: &AppHandle, code: Option<i32>) -> bool {
+    static PHASE: std::sync::Mutex<ExitPutAway> = std::sync::Mutex::new(ExitPutAway::Idle);
+    if code == Some(tauri::RESTART_EXIT_CODE) {
+        return false;
+    }
+    let keep_booted = prefs::of(app).keep_booted;
+    let devices = loans().summary().count > 0
+        || (!keep_booted && (android::holds_devices() || ios::holds_devices()));
+    if devices {
+        // Refused from now, not from when the thread reaches the AVDs: the
+        // window answers while it waits, and nothing may start behind it.
+        android::stop_launching();
+    }
+    let down = app.clone();
+    let again = app.clone();
+    defer_put_away(
+        &PHASE,
+        devices,
+        move || shutdown_all(&down),
+        move || again.exit(code.unwrap_or(0)),
+    )
+}
+
+/// Where the window's exit stands with its devices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExitPutAway {
     Idle,
@@ -653,13 +687,35 @@ enum ExitPutAway {
     Done,
 }
 
+/// [`defer_exit`]'s turns, with its two hands passed in: `put_away` runs on
+/// its own thread, and `then` exits again after the phase reads done.
 fn defer_put_away(
-    _phase: &'static std::sync::Mutex<ExitPutAway>,
-    _devices: bool,
-    _put_away: impl FnOnce() + Send + 'static,
-    _then: impl FnOnce() + Send + 'static,
+    phase: &'static std::sync::Mutex<ExitPutAway>,
+    devices: bool,
+    put_away: impl FnOnce() + Send + 'static,
+    then: impl FnOnce() + Send + 'static,
 ) -> bool {
-    false
+    let mut standing = session::held(phase);
+    match *standing {
+        ExitPutAway::Done => return false,
+        ExitPutAway::Pending => return true,
+        ExitPutAway::Idle if !devices => return false,
+        ExitPutAway::Idle => {}
+    }
+    let spawned = std::thread::Builder::new()
+        .name("emulator-exit".to_string())
+        .spawn(move || {
+            put_away();
+            *session::held(phase) = ExitPutAway::Done;
+            then();
+        });
+    // No thread to wait on: this exit puts them away on its own way out.
+    *standing = if spawned.is_ok() {
+        ExitPutAway::Pending
+    } else {
+        ExitPutAway::Done
+    };
+    spawned.is_ok()
 }
 
 /// [`put_away`]'s order, with the three hands passed in so the order is a
