@@ -41,6 +41,8 @@ pub(super) fn preserve(
     if lock.try_lock().is_err() {
         return;
     }
+    // Ended on every return below, whatever copy of it a launch keeps.
+    let _lock = zerocode_core::held_file_lock::HeldFileLock::locked(lock);
     let previous = read(&file).filter(|receipt| {
         receipt.version == 1
             && receipt.run == run

@@ -480,8 +480,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
-/// OS lock is released on process exit, including an interrupted publication.
-pub fn lock_store(root: &Path) -> Result<std::fs::File, String> {
+/// OS lock is released when the guard drops, and on process exit, including
+/// an interrupted publication.
+pub fn lock_store(root: &Path) -> Result<crate::held_file_lock::HeldFileLock, String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -493,7 +494,7 @@ pub fn lock_store(root: &Path) -> Result<std::fs::File, String> {
     let started = std::time::Instant::now();
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(crate::held_file_lock::HeldFileLock::locked(file)),
             Err(std::fs::TryLockError::WouldBlock)
                 if started.elapsed() < std::time::Duration::from_millis(STORE_LOCK_PATIENCE_MS) =>
             {

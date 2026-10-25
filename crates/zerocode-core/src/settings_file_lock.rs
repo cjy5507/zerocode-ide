@@ -85,18 +85,19 @@ fn reclaim_from_a_dead_owner(lock: &Path) -> bool {
     use io::Read as _;
     use std::os::unix::fs::MetadataExt as _;
 
-    let Ok(mut file) = fs::File::open(lock) else {
+    let Ok(file) = fs::File::open(lock) else {
         return false;
     };
     if file.try_lock().is_err() {
         return false;
     }
+    let file = crate::held_file_lock::HeldFileLock::locked(file);
     let still_this_file = match (file.metadata(), fs::metadata(lock)) {
         (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
         _ => false,
     };
     let mut owner = String::new();
-    if !still_this_file || file.read_to_string(&mut owner).is_err() {
+    if !still_this_file || (&*file).read_to_string(&mut owner).is_err() {
         return false;
     }
     owner

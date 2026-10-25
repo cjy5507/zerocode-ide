@@ -241,13 +241,14 @@ fn update_root(
 ///
 /// The lock file stays in place permanently and the OS lock rides the open
 /// descriptor: an unlink-and-recreate cycle would race, and a crash would
-/// leave an existence lock nobody can clear.
-fn hold_lock(path: &Path) -> Result<std::fs::File, String> {
+/// leave an existence lock nobody can clear. The guard ends the lock when it
+/// drops, so a copy of the descriptor in a forked launch cannot keep it.
+fn hold_lock(path: &Path) -> Result<zerocode_core::held_file_lock::HeldFileLock, String> {
     let lock_path = path.with_extension("json.lock");
     let file = durable_file::private_lock_file(&lock_path).map_err(|error| error.to_string())?;
     for attempt in 0..LOCK_TRIES {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(zerocode_core::held_file_lock::HeldFileLock::locked(file)),
             Err(error) => {
                 let error = std::io::Error::from(error);
                 if error.kind() != std::io::ErrorKind::WouldBlock {

@@ -58,6 +58,7 @@ pub mod git_prompt;
 pub mod guarded;
 pub mod guide;
 pub mod hand_in;
+pub mod held_file_lock;
 pub mod handoff_code;
 pub mod hook;
 pub mod hook_continuation;
