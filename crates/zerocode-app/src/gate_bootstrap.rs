@@ -10,6 +10,9 @@ use zerocode_core::orchestration::gate_reuse::{
 };
 use zerocode_core::user_preferences::content_key;
 
+// The private descriptor road; its one caller is unix-only, as the
+// descriptor is.
+#[cfg(unix)]
 mod gate_channel;
 mod runtime_libraries;
 mod startup_layout;

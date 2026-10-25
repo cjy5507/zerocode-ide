@@ -2,7 +2,6 @@ use std::io;
 use std::net::TcpStream;
 use std::process::{Child, Command};
 
-#[cfg(unix)]
 pub fn spawn(mut command: Command, channel: TcpStream) -> io::Result<Child> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
@@ -24,12 +23,4 @@ pub fn spawn(mut command: Command, channel: TcpStream) -> io::Result<Child> {
         });
     }
     command.spawn()
-}
-
-#[cfg(not(unix))]
-pub fn spawn(_command: Command, _channel: TcpStream) -> io::Result<Child> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "private gate descriptors are unavailable",
-    ))
 }
