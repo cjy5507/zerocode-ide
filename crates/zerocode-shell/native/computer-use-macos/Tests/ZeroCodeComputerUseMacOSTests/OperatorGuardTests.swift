@@ -233,7 +233,7 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertThrowsError(try hand.acquire(.request)) { error in
             XCTAssertEqual(error as? OperatorHand.Refusal, .stopped(StopReason.hotkey))
         }
-        hand.resume()
+        try hand.resume(by: .person)
         // Taken back without a stop, the same unconfirmed release still keeps
         // the next hold off.
         let run = try hand.acquire(.reflex("r"))
@@ -243,7 +243,7 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertThrowsError(try hand.acquire(.request)) { error in
             XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed)
         }
-        hand.resume()
+        try hand.resume(by: .person)
         XCTAssertNoThrow(try hand.acquire(.request), "a person's resume")
     }
 
@@ -321,7 +321,7 @@ final class OperatorGuardTests: XCTestCase {
         XCTAssertThrowsError(try hand.acquire(.request)) { error in
             XCTAssertEqual(error as? OperatorHand.Refusal, .releaseUnconfirmed)
         }
-        hand.resume()
+        try hand.resume(by: .person)
         XCTAssertNoThrow(try hand.acquire(.request), "a person's resume")
     }
 

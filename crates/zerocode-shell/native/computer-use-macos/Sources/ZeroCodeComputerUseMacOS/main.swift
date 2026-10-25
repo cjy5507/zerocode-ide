@@ -1036,7 +1036,7 @@ final class Provider {
         // then reads the app's own accessibility windows — that process's
         // alone, and never for an action, whose checks ask the server.
         let windowCandidates = readsTheTree
-            ? WindowList.forReading(listed: listed, pid: app.pid, accessibility: { accessibilityWindows(of: appElement) })
+            ? WindowList.forReading(listed: listed, pid: app.pid, accessibility: { accessibilityWindows(of: appElement, app: app) })
             : listed
         let throughTheTree = listed.isEmpty && !windowCandidates.isEmpty
         let focused = try focusedWindow(
@@ -1078,7 +1078,7 @@ final class Provider {
         let screenshotStatus: ScreenshotStatus = if screenshot != nil {
             .captured
         } else if includeScreenshot && throughTheTree {
-            .failed(treeOnlyReason(app: app))
+            .failed(treeOnlyReason(app: app, presence: windowCandidates.first { $0.windowId == capture.windowId && $0.bounds == capture.bounds }?.presence ?? .unknown))
         } else if includeScreenshot && !canCaptureScreenshot {
             .failed("Screen Recording permission is required for ZeroCode Computer Use; grant permission or pass --no-screenshot to inspect accessibility state only.")
         } else if includeScreenshot {
@@ -2130,29 +2130,45 @@ private func focusedWindow(appElement: AXUIElement, app: AppDescriptor, visibleW
 
 /// The app's own windows as its accessibility tree gives them (t-66753 C1),
 /// for a look at an app the window server lists no window of.
-private func accessibilityWindows(of appElement: AXUIElement) -> [AccessibilityWindow] {
-    (copyArray(appElement, kAXWindowsAttribute as String) ?? []).map { window in
+/// Where each is shown is only what the app (hidden or not) and the window
+/// server said of it (`AccessibilityWindow.presence`, t-68324 ③): the tree
+/// lists windows of other Spaces and of a hidden app too.
+private func accessibilityWindows(of appElement: AXUIElement, app: AppDescriptor) -> [AccessibilityWindow] {
+    let serverView = WindowList.serverView(
+        onScreen: windowServerInfos([.optionOnScreenOnly]),
+        all: windowServerInfos([.optionAll]),
+        pid: app.pid
+    )
+    return (copyArray(appElement, kAXWindowsAttribute as String) ?? []).map { window in
         var owner: pid_t = 0
         if AXUIElementGetPid(window, &owner) != .success {
             owner = 0
         }
+        let number = windowNumber(window)
         return AccessibilityWindow(
             pid: owner,
-            number: windowNumber(window),
+            number: number,
             frame: absoluteFrame(window),
             title: stringAttribute(window, kAXTitleAttribute as String),
-            minimized: boolAttribute(window, kAXMinimizedAttribute as String) == true
+            minimized: boolAttribute(window, kAXMinimizedAttribute as String) == true,
+            appHidden: app.app.isHidden,
+            serverOnScreen: number.flatMap { serverView[$0] }
         )
     }
 }
 
+private func windowServerInfos(_ options: CGWindowListOption) -> [[String: Any]] {
+    CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] ?? []
+}
+
 /// Why a look read through the app's own tree has no picture (t-66753 C1):
 /// said in the answer, so no one takes the tree for what the screen shows.
-private func treeOnlyReason(app: AppDescriptor) -> String {
+private func treeOnlyReason(app: AppDescriptor, presence: WindowPresence) -> String {
+    let placed = " " + WindowPresence.sentence(for: presence)
     if screenCaptureTrusted() {
-        return "the window server lists no window of '\(app.name)' it may picture (the app keeps its windows from capture): this answer is the window's accessibility tree alone, with no picture."
+        return "the window server lists no window of '\(app.name)' it may picture (the app keeps its windows from capture): this answer is the window's accessibility tree alone, with no picture." + placed
     }
-    return "Screen Recording is not granted to ZeroCode Computer Use, so the window server lists no window of '\(app.name)' to picture: this answer is the window's accessibility tree alone, with no picture. Grant it for a picture (zerocode-computer permissions --id screenshots)."
+    return "Screen Recording is not granted to ZeroCode Computer Use, so the window server lists no window of '\(app.name)' to picture: this answer is the window's accessibility tree alone, with no picture. Grant it for a picture (zerocode-computer permissions --id screenshots)." + placed
 }
 
 private func lookupUsableWindow(
@@ -6647,17 +6663,30 @@ enum OperatorGuardHost {
 
     /// Lift the stop for `lifter` (t-66753 A): the person's stop for the
     /// person — the window's band — alone; anyone else's resume of it is
-    /// refused and lifts nothing.
+    /// refused and lifts nothing. So is a release the hand could not confirm
+    /// (t-68324 ②): the hand answers for it, and an agent's resume over it
+    /// lifts neither that nor the stop standing beside it. The hand is asked
+    /// inside the ledger's turn, so a refusal leaves both as they were.
     static func resume(resetBudget: Bool, by lifter: StopLifter, hand: OperatorHand = OperatorHandHost.hand) throws {
-        let refused: String? = changing { ledger in
-            guard ledger.liftable(by: lifter) else { return ledger.stoppedReason ?? "" }
+        enum Outcome { case lifted, personsStop(String), personsRelease }
+        let outcome: Outcome = changing { ledger in
+            guard ledger.liftable(by: lifter) else { return .personsStop(ledger.stoppedReason ?? "") }
+            do {
+                try hand.resume(by: lifter)
+            } catch {
+                return .personsRelease
+            }
             ledger.resume(resetBudget: resetBudget)
-            return nil
+            return .lifted
         }
-        if let refused {
-            throw ProviderError.coded("stopped", "the operator is stopped (\(refused)); the person stopped it — only they lift it, from the window's band")
+        switch outcome {
+        case .lifted:
+            return
+        case let .personsStop(reason):
+            throw ProviderError.coded("stopped", "the operator is stopped (\(reason)); the person stopped it — only they lift it, from the window's band")
+        case .personsRelease:
+            throw ProviderError.coded("stopped", OperatorHandHost.releaseUnconfirmedWords)
         }
-        hand.resume()
     }
 
     /// The window's waiting request (t-66753 B): answered once the stop is
@@ -6847,6 +6876,10 @@ enum OperatorHandHost {
         return request
     }
 
+    /// What a release the platform refused says (t-68324 ②): the person
+    /// checks the keys and buttons and lifts it — an agent's `resume` does not.
+    static let releaseUnconfirmedWords = "a release the hand posted could not be confirmed; the person checks the keys and buttons — only they lift it, from the window's band"
+
     /// The hand's refusal in the words the skill recovers by — before an
     /// action (`acquiring`) or in the middle of one.
     static func providerError(_ refusal: OperatorHand.Refusal, acquiring: Bool) -> ProviderError {
@@ -6862,7 +6895,7 @@ enum OperatorHandHost {
         case .notHolder:
             return .coded("stopped", "this request no longer holds the hand")
         case .releaseUnconfirmed:
-            return .coded("stopped", "a release the hand posted could not be confirmed; check the keys and buttons, then `zerocode-computer resume`")
+            return .coded("stopped", releaseUnconfirmedWords)
         }
     }
 }

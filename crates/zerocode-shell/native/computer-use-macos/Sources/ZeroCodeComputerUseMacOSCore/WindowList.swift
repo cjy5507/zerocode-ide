@@ -9,7 +9,16 @@ public enum WindowPresence: String, Equatable, Sendable {
     case unknown = "unknown"
 
     /// What an answer through the tree says of where its window is.
-    public static func sentence(for presence: WindowPresence) -> String { "" }
+    public static func sentence(for presence: WindowPresence) -> String {
+        switch presence {
+        case .onScreen:
+            return "The window server lists this window as on the screen."
+        case .offScreen:
+            return "This window is not on the screen (its app is hidden, or the window server lists it only as off the screen, as it does a window of another Space): the tree is read, but nothing of it is shown."
+        case .unknown:
+            return "Where this window is — on the screen or not — is not known: the accessibility tree does not say and the window server lists no such window."
+        }
+    }
 }
 
 /// One window a look or an action may be aimed at, as the window server lists
@@ -82,6 +91,17 @@ public struct AccessibilityWindow: Equatable, Sendable {
     public let appHidden: Bool
     public let serverOnScreen: Bool?
 
+    /// Where the window is, as far as something said: a hidden app shows no
+    /// window; else what the window server said of its number; else unknown.
+    public var presence: WindowPresence {
+        if appHidden { return .offScreen }
+        switch serverOnScreen {
+        case true?: return .onScreen
+        case false?: return .offScreen
+        case nil: return .unknown
+        }
+    }
+
     public init(
         pid: pid_t, number: CGWindowID?, frame: CGRect?, title: String?, minimized: Bool,
         appHidden: Bool = false, serverOnScreen: Bool? = nil
@@ -98,6 +118,25 @@ public struct AccessibilityWindow: Equatable, Sendable {
 
 /// The windows of one app a look or an action may be aimed at.
 public enum WindowList {
+    /// What the window server says of `pid`'s windows by number: `true` for
+    /// one its on-screen list holds, `false` for one only its full list
+    /// holds (another Space, a hidden app's); a number it lists in neither is
+    /// absent — nothing was said of it.
+    public static func serverView(onScreen: [[String: Any]], all: [[String: Any]], pid: pid_t) -> [CGWindowID: Bool] {
+        func numbers(_ infos: [[String: Any]]) -> [CGWindowID] {
+            infos.compactMap { info in
+                guard (info[kCGWindowOwnerPID as String] as? pid_t) == pid,
+                      let number = info[kCGWindowNumber as String] as? NSNumber
+                else { return nil }
+                return CGWindowID(number.uint32Value)
+            }
+        }
+        var view: [CGWindowID: Bool] = [:]
+        for number in numbers(all) { view[number] = false }
+        for number in numbers(onScreen) { view[number] = true }
+        return view
+    }
+
     /// The smallest side, in points, of a window worth aiming at.
     public static let minimumSide: CGFloat = 48
 
@@ -141,7 +180,8 @@ public enum WindowList {
     /// windows, asked for only then: that process's alone, seen and big
     /// enough, the best first. They stand in for a read, never for an action,
     /// whose checks ask the window server; a window the app publishes no
-    /// number for stands in as window 0.
+    /// number for stands in as window 0. Each says where it is only as far as
+    /// something said (`AccessibilityWindow.presence`), never that it is shown.
     public static func forReading(
         listed: [WindowCandidate],
         pid: pid_t,
@@ -160,7 +200,7 @@ public enum WindowList {
                     bounds: frame,
                     title: window.title,
                     alpha: 1,
-                    isOnScreen: true,
+                    presence: window.presence,
                     sharingState: nil
                 )
             }

@@ -126,4 +126,18 @@ final class WindowListTests: XCTestCase {
         XCTAssertTrue(said[2].contains("not known"), said[2])
         XCTAssertFalse(said[2].contains("is on the screen"), "an unknown window is not called shown: \(said[2])")
     }
+
+    /// What the window server says of an app's windows by number (t-68324
+    /// ③): on its on-screen list → on the screen; only in its full list →
+    /// not on it; in neither → nothing said. Another app's windows are not
+    /// read at all.
+    func test_the_window_servers_two_lists_say_which_of_an_apps_windows_are_on_the_screen() {
+        let front = serverWindow(number: 1, bounds: notes)
+        let otherSpace = serverWindow(number: 2, bounds: notes)
+        let another = serverWindow(pid: Self.other, number: 3, bounds: notes)
+        let view = WindowList.serverView(onScreen: [front, another], all: [front, otherSpace, another], pid: Self.app)
+        XCTAssertEqual(view, [1: true, 2: false])
+        XCTAssertNil(view[3], "another app's window is not read")
+        XCTAssertNil(view[4], "a number it lists nowhere has no word")
+    }
 }
