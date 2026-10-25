@@ -170,13 +170,7 @@ pub(crate) fn report_terminal_colors(
     report: TerminalColorsReport,
 ) -> Result<(), String> {
     let colors = Arc::new(report.to_colors()?);
-    *state.terminal_colors() = Some(colors.clone());
-    for pty in state.terminals().handles() {
-        lock_pty(&pty)
-            .terminal_mut()
-            .grid_mut()
-            .set_colors(colors.clone());
-    }
+    state.terminal_palette().tell(state.terminals(), colors);
     Ok(())
 }
 

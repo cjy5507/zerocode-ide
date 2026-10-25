@@ -39,6 +39,12 @@
 //!    the next queued prompt swap under one guard, exactly as they did under
 //!    the single pool lock — but never the other way around.
 //!
+//! 4. **The palette lock ([`TerminalPalette`]) is taken before the map lock
+//!    and a terminal lock, never after one.** A report holds it while it
+//!    walks the pool and locks each shell in turn; a new shell holds it from
+//!    its colour read to its insert. Code holding a terminal lock must not
+//!    reach the palette — the pump never does.
+//!
 //! # Exit removal
 //!
 //! Removal on exit goes through [`TerminalRegistry::remove_exact`], which
@@ -52,7 +58,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use zerocode_lane::PtyHandle;
+use zerocode_lane::{PtyHandle, PtyTransport};
 
 use crate::TermId;
 
@@ -200,9 +206,67 @@ impl TerminalRegistry {
     }
 }
 
+/// The colours the renderer last said it paints terminals with, and the one
+/// door that dresses shells with them (t-73869, t-74931).
+///
+/// `None` until the renderer says: a shell nobody has dressed answers no
+/// colour query rather than an invented one.
+#[derive(Default)]
+pub struct TerminalPalette {
+    colors: Mutex<Option<Arc<zerocode_pty::TerminalColors>>>,
+}
+
+impl TerminalPalette {
+    fn lock(&self) -> MutexGuard<'_, Option<Arc<zerocode_pty::TerminalColors>>> {
+        self.colors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Dress a new shell with the current colours and take it into the pool.
+    ///
+    /// The palette stays locked from the colour read to the insert. A report
+    /// takes the same lock to store its colours and walk the pool, so it runs
+    /// wholly before this (the newcomer then reads the new colours) or wholly
+    /// after (the newcomer is already in the pool for its walk). Between the
+    /// two it could not see a shell that had read the old colours and was not
+    /// yet listed, and that shell kept them until the next theme change.
+    pub fn hold(&self, registry: &TerminalRegistry, term: TermId, mut pty: PtyHandle) {
+        let palette = self.lock();
+        if let Some(colors) = palette.as_ref() {
+            pty.terminal_mut().grid_mut().set_colors(Arc::clone(colors));
+        }
+        registry.insert(term, pty);
+    }
+
+    /// Remember the colours the renderer reported and dress every open shell.
+    ///
+    /// Held across the walk so two reports cannot cross: the later one's walk
+    /// ends last, so every shell ends on the later colours.
+    pub fn tell(&self, registry: &TerminalRegistry, colors: Arc<zerocode_pty::TerminalColors>) {
+        let mut palette = self.lock();
+        *palette = Some(Arc::clone(&colors));
+        for held in registry.handles() {
+            lock_pty(&held)
+                .terminal_mut()
+                .grid_mut()
+                .set_colors(Arc::clone(&colors));
+        }
+    }
+
+    /// Whether another thread holds the palette right now.
+    #[cfg(test)]
+    fn is_held(&self) -> bool {
+        matches!(
+            self.colors.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{TerminalRegistry, lock_pty};
+    use super::{TerminalPalette, TerminalRegistry, lock_pty};
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -477,5 +541,164 @@ mod tests {
             "the refill handed the buffer's capacity back, so every round pays \
              for a fresh one"
         );
+    }
+
+    /// A transport whose terminal runs a probe each time something reaches
+    /// for it to set colours — the point inside `hold` and `tell` where a
+    /// shell is half dressed. The probe is the test's eyes there; nothing
+    /// waits on the clock.
+    struct ProbedTransport {
+        terminal: Terminal,
+        probe: Box<dyn FnMut() + Send>,
+    }
+
+    impl ProbedTransport {
+        fn handle(probe: impl FnMut() + Send + 'static) -> PtyHandle {
+            PtyHandle::new(Self {
+                terminal: Terminal::new(4, 20),
+                probe: Box::new(probe),
+            })
+        }
+    }
+
+    impl PtyTransport for ProbedTransport {
+        fn pump(&mut self) -> Pumped {
+            Pumped {
+                bytes: 0,
+                ended: false,
+                answered: false,
+                unanswered_since: None,
+            }
+        }
+
+        fn terminal(&self) -> &Terminal {
+            &self.terminal
+        }
+
+        fn terminal_mut(&mut self) -> &mut Terminal {
+            (self.probe)();
+            &mut self.terminal
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn resize(&mut self, _rows: u16, _cols: u16) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn try_wait(&mut self) -> Result<Option<u32>, PtyTransportError> {
+            Ok(None)
+        }
+
+        fn kill(&mut self) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+    }
+
+    fn painted(shade: u8) -> Arc<zerocode_pty::TerminalColors> {
+        let colour = zerocode_pty::Rgb(shade, shade, shade);
+        Arc::new(zerocode_pty::TerminalColors {
+            foreground: colour,
+            background: colour,
+            cursor: colour,
+            ansi: [colour; zerocode_pty::ANSI_COLOR_COUNT],
+        })
+    }
+
+    fn colours_of(
+        registry: &TerminalRegistry,
+        term: crate::TermId,
+    ) -> Option<Arc<zerocode_pty::TerminalColors>> {
+        let held = registry.handle(term).expect("the shell is in the pool");
+        lock_pty(&held).terminal().grid().colors().cloned()
+    }
+
+    fn unprobed() -> PtyHandle {
+        ProbedTransport::handle(|| {})
+    }
+
+    /// The race this type exists for: a shell born while the renderer reports.
+    /// Reading the colours and entering the pool must be one stretch under the
+    /// palette's lock, or a report can store and walk the pool in between and
+    /// leave the newcomer with the old colours until the next theme change.
+    #[test]
+    fn a_new_shell_reads_its_colours_and_joins_the_pool_under_one_lock() {
+        let registry = TerminalRegistry::default();
+        let palette = Arc::new(TerminalPalette::default());
+        palette.tell(&registry, painted(0x10));
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let during = Arc::clone(&palette);
+        let record = Arc::clone(&seen);
+        palette.hold(
+            &registry,
+            1,
+            ProbedTransport::handle(move || record.lock().unwrap().push(during.is_held())),
+        );
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[true],
+            "a report could run between the colour read and the pool insert"
+        );
+        assert!(!palette.is_held(), "hold left the palette locked");
+        assert!(registry.contains_key(&1));
+    }
+
+    /// The other half: a report stores the colours and dresses the pool as one
+    /// stretch, so a shell that is mid-`hold` is either already in the pool
+    /// when the walk starts or reads the stored colours afterwards.
+    #[test]
+    fn a_report_stores_its_colours_and_dresses_the_pool_under_one_lock() {
+        let registry = TerminalRegistry::default();
+        let palette = Arc::new(TerminalPalette::default());
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let during = Arc::clone(&palette);
+        let record = Arc::clone(&seen);
+        registry.insert(
+            1,
+            ProbedTransport::handle(move || record.lock().unwrap().push(during.is_held())),
+        );
+        palette.tell(&registry, painted(0x20));
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[true],
+            "a shell could join the pool between the store and the walk"
+        );
+        assert!(!palette.is_held(), "tell left the palette locked");
+    }
+
+    #[test]
+    fn a_shell_born_before_any_report_answers_no_colour_and_every_other_is_dressed() {
+        let registry = TerminalRegistry::default();
+        let palette = TerminalPalette::default();
+        palette.hold(&registry, 1, unprobed());
+        assert!(colours_of(&registry, 1).is_none());
+
+        let told = painted(0x30);
+        palette.tell(&registry, Arc::clone(&told));
+        palette.hold(&registry, 2, unprobed());
+
+        for term in [1, 2] {
+            let have = colours_of(&registry, term).expect("the shell was dressed");
+            assert!(
+                Arc::ptr_eq(&have, &told),
+                "shell {term} wears other colours"
+            );
+        }
+
+        let later = painted(0x40);
+        palette.tell(&registry, Arc::clone(&later));
+        for term in [1, 2] {
+            let have = colours_of(&registry, term).expect("the shell was dressed");
+            assert!(
+                Arc::ptr_eq(&have, &later),
+                "shell {term} kept the old theme"
+            );
+        }
     }
 }
