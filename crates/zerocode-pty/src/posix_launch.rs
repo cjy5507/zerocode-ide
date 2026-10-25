@@ -117,12 +117,12 @@ pub(crate) fn spawn(
         envp.iter().map(|pair| pair.as_ptr().cast_mut()).collect();
     envp_ptrs.push(std::ptr::null_mut());
 
-    let actions = FileActions::new()?;
+    let mut actions = FileActions::new()?;
     actions.chdir(&dir)?;
     actions.open(0, &tty, libc::O_RDWR)?;
     actions.dup2(0, 1)?;
     actions.dup2(0, 2)?;
-    let attributes = Attributes::new()?;
+    let mut attributes = Attributes::new()?;
     attributes.set_signals()?;
     attributes.set_flags(
         POSIX_SPAWN_SETSID
@@ -174,28 +174,18 @@ impl FileActions {
         Ok(Self(unsafe { actions.assume_init() }))
     }
 
-    fn chdir(&self, dir: &CStr) -> io::Result<()> {
+    fn chdir(&mut self, dir: &CStr) -> io::Result<()> {
+        checked(unsafe { posix_spawn_file_actions_addchdir_np(&raw mut self.0, dir.as_ptr()) })
+    }
+
+    fn open(&mut self, fd: c_int, path: &CStr, flags: c_int) -> io::Result<()> {
         checked(unsafe {
-            posix_spawn_file_actions_addchdir_np((&raw const self.0).cast_mut(), dir.as_ptr())
+            libc::posix_spawn_file_actions_addopen(&raw mut self.0, fd, path.as_ptr(), flags, 0)
         })
     }
 
-    fn open(&self, fd: c_int, path: &CStr, flags: c_int) -> io::Result<()> {
-        checked(unsafe {
-            libc::posix_spawn_file_actions_addopen(
-                (&raw const self.0).cast_mut(),
-                fd,
-                path.as_ptr(),
-                flags,
-                0,
-            )
-        })
-    }
-
-    fn dup2(&self, from: c_int, to: c_int) -> io::Result<()> {
-        checked(unsafe {
-            libc::posix_spawn_file_actions_adddup2((&raw const self.0).cast_mut(), from, to)
-        })
+    fn dup2(&mut self, from: c_int, to: c_int) -> io::Result<()> {
+        checked(unsafe { libc::posix_spawn_file_actions_adddup2(&raw mut self.0, from, to) })
     }
 }
 
@@ -214,8 +204,8 @@ impl Attributes {
         Ok(Self(unsafe { attributes.assume_init() }))
     }
 
-    fn set_signals(&self) -> io::Result<()> {
-        let attributes = (&raw const self.0).cast_mut();
+    fn set_signals(&mut self) -> io::Result<()> {
+        let attributes = &raw mut self.0;
         let mut defaults: libc::sigset_t = 0;
         let mut mask: libc::sigset_t = 0;
         unsafe {
@@ -229,10 +219,10 @@ impl Attributes {
         checked(unsafe { libc::posix_spawnattr_setsigmask(attributes, &raw const mask) })
     }
 
-    fn set_flags(&self, flags: c_int) -> io::Result<()> {
+    fn set_flags(&mut self, flags: c_int) -> io::Result<()> {
         let flags = libc::c_short::try_from(flags)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "spawn flags"))?;
-        checked(unsafe { libc::posix_spawnattr_setflags((&raw const self.0).cast_mut(), flags) })
+        checked(unsafe { libc::posix_spawnattr_setflags(&raw mut self.0, flags) })
     }
 }
 
