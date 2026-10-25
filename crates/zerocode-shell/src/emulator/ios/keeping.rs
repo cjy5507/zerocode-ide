@@ -232,7 +232,7 @@ fn sweep_with(
 }
 
 /// Whether any device is this window's business at all.
-fn nothing_is_ours() -> bool {
+pub(super) fn nothing_is_ours() -> bool {
     clocks().is_empty()
 }
 
