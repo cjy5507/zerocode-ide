@@ -12456,11 +12456,14 @@ fn a_strangers_archive_script_waits_for_its_own_approval() {
     std::fs::create_dir_all(&repo_root).expect("repo root");
     let repository = settings::SettingsRepository::new(temp.path().join("settings"));
     let cloned = temp.path().join("cloned-marker");
+    // A block scalar, because the project file's reader strips only the quotes
+    // that wrap a one-line value and unescapes nothing: the backslashes and
+    // quotes of a Windows path would reach the shell as written in the file.
     std::fs::write(
         repo_root.join(zerocode_core::PROJECT_FILE),
         format!(
-            "scripts:\n  archive: {}\n",
-            serde_json::to_string(&crate::test_host::script_that_creates(&cloned)).expect("a line"),
+            "scripts:\n  archive: |\n    {}\n",
+            crate::test_host::script_that_creates(&cloned),
         ),
     )
     .expect("the repository's file");
@@ -12504,7 +12507,7 @@ fn a_strangers_archive_script_waits_for_its_own_approval() {
         .expect("the gate answers");
     assert!(
         matches!(outcome, script::ScriptOutcome::Ok { .. }) && cloned.exists(),
-        "the approved archive script did not run"
+        "the approved archive script did not run: {outcome:?} for {half:?}"
     );
 
     // Under RunBoth, the person's own half runs while the repo's
@@ -12516,19 +12519,22 @@ fn a_strangers_archive_script_waits_for_its_own_approval() {
     std::fs::create_dir_all(&other_root).expect("other repo");
     std::fs::write(
         other_root.join(zerocode_core::PROJECT_FILE),
-        format!("scripts:\n  archive: touch {}\n", strangers.display()),
+        format!(
+            "scripts:\n  archive: |\n    {}\n",
+            crate::test_host::script_that_creates(&strangers),
+        ),
     )
     .expect("the other repository's file");
     update_project_settings(&repository, &project_settings_key(&other_root), |entry| {
         entry.source = zerocode_core::ScriptSource::RunBoth;
-        entry.local_archive = Some(format!("touch {}", mine.display()));
+        entry.local_archive = Some(crate::test_host::script_that_creates(&mine));
     })
     .expect("their own settings");
     let outcome = archive_worktree(&repository, &config_root, &other_root, &other_root)
         .expect("the gate answers");
     assert!(
         matches!(outcome, script::ScriptOutcome::Ok { .. }) && mine.exists() && !strangers.exists(),
-        "the local half and the unapproved repo half parted wrong"
+        "the local half and the unapproved repo half parted wrong: {outcome:?}"
     );
 
     // And under SharedOnly a refusal runs nothing at all: the person said
