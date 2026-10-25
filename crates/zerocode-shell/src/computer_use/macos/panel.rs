@@ -58,6 +58,7 @@ struct Delivery {
     endpoint: Option<PanelEndpoint>,
     wire: Option<Wire>,
     startup_attempted: bool,
+    startup_share: (Option<String>, u64),
 }
 
 impl Delivery {
@@ -67,17 +68,24 @@ impl Delivery {
         mut connect: impl FnMut(&PanelEndpoint) -> Option<Wire>,
         mut ensure: impl FnMut() -> bool,
     ) {
+        let target = update.state.get("target").and_then(Value::as_str);
+        let generation = update
+            .state
+            .get("generation")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if self.startup_share.0.as_deref() != target || self.startup_share.1 != generation {
+            // Remember a failed launch across notices of the same share, but
+            // let a new target or ownership generation recover a lost helper.
+            self.startup_share = (target.map(str::to_string), generation);
+            self.startup_attempted = false;
+        }
         if self.endpoint != update.endpoint {
             self.endpoint = update.endpoint;
             self.wire = None;
         }
         let Some(endpoint) = self.endpoint.as_ref() else {
-            if !self.startup_attempted
-                && update
-                    .state
-                    .get("target")
-                    .is_some_and(|target| !target.is_null())
-            {
+            if !self.startup_attempted && target.is_some() {
                 self.startup_attempted = ensure();
             }
             return;

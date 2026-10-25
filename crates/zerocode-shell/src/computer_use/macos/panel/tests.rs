@@ -16,7 +16,7 @@ fn endpoint(name: &str) -> PanelEndpoint {
 
 fn update(revision: u64, endpoint: Option<PanelEndpoint>) -> Update {
     Update {
-        state: json!({"revision": revision, "target": "sample"}),
+        state: json!({"revision": revision, "target": "sample", "generation": 0}),
         endpoint,
     }
 }
@@ -130,6 +130,63 @@ fn a_failed_helper_start_is_remembered_across_notices() {
         );
     }
     assert_eq!(launches.get(), 1);
+}
+
+#[test]
+fn a_target_change_allows_one_new_helper_start_including_a_return_to_the_old_target() {
+    let mut delivery = Delivery::default();
+    let launches = Cell::new(0);
+    for (index, target) in ["sample", "sample", "another", "another", "sample", "sample"]
+        .into_iter()
+        .enumerate()
+    {
+        let mut notice = update(index as u64 + 1, None);
+        notice.state["target"] = target.into();
+        delivery.send(
+            notice,
+            |_| panic!("no endpoint"),
+            || {
+                launches.set(launches.get() + 1);
+                true
+            },
+        );
+    }
+    assert_eq!(
+        launches.get(),
+        3,
+        "one start per target transition, not per notice"
+    );
+}
+
+#[test]
+fn a_new_generation_allows_one_helper_start_after_an_endpoint_is_forgotten() {
+    let mut delivery = Delivery::default();
+    let launches = Cell::new(0);
+    for (revision, generation, endpoint) in [
+        (1, 0, None),
+        (2, 0, Some(endpoint("panel-fixture"))),
+        (3, 0, None),
+        (4, 1, None),
+        (5, 1, None),
+        (6, 2, None),
+        (7, 2, None),
+    ] {
+        let mut notice = update(revision, endpoint);
+        notice.state["generation"] = generation.into();
+        delivery.send(
+            notice,
+            |_| None,
+            || {
+                launches.set(launches.get() + 1);
+                true
+            },
+        );
+    }
+    assert_eq!(
+        launches.get(),
+        3,
+        "one start per generation, including after helper loss"
+    );
 }
 
 #[test]

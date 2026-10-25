@@ -57,6 +57,42 @@ final class ShareControlPanelTests: XCTestCase {
         XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack))
     }
 
+    func testPendingPressSurvivesATargetChangeUntilHandBack() throws {
+        var state = ShareControlState()
+        state.update(target: "Sample", generation: 0, revision: 1)
+        XCTAssertTrue(state.takeControl(displayedRevision: 1))
+        // The shell has not heard the press when an already shared app acts.
+        state.update(target: "Another", generation: 0, revision: 2)
+        XCTAssertEqual(state.target, "Another")
+        XCTAssertTrue(state.takenBack)
+        XCTAssertThrowsError(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack)) {
+            XCTAssertEqual(($0 as? ProviderError)?.code, "person_took_control")
+        }
+        state.update(target: "Another", generation: 1, revision: 3, takenBack: true)
+        XCTAssertTrue(state.takenBack)
+        state.update(target: "Another", generation: 2, revision: 4)
+        XCTAssertFalse(state.takenBack)
+        XCTAssertFalse(state.takeControl(displayedRevision: 1))
+        XCTAssertNoThrow(try ShareControlPanel.refuseInput(method: "type", params: [:], bounds: nil, taken: state.takenBack))
+    }
+
+    func testPendingPressSurvivesTargetChangesAwayAndBack() {
+        var state = ShareControlState()
+        state.update(target: "Sample", generation: 0, revision: 1)
+        XCTAssertTrue(state.takeControl(displayedRevision: 1))
+        state.update(target: "Another", generation: 0, revision: 2)
+        state.update(target: "Sample", generation: 0, revision: 3)
+        XCTAssertTrue(state.takenBack)
+    }
+
+    func testAStaleDisplayedTargetCannotStartANewPress() {
+        var state = ShareControlState()
+        state.update(target: "Sample", generation: 0, revision: 1)
+        state.update(target: "Another", generation: 0, revision: 2)
+        XCTAssertFalse(state.takeControl(displayedRevision: 1))
+        XCTAssertFalse(state.takenBack)
+    }
+
     func testHelperIsExcludedAndPanelCoordinatesAreBlockedEvenWithAllowSelf() throws {
         XCTAssertTrue(ShareControlPanel.isHelperPID(getpid()))
         XCTAssertThrowsError(try ShareControlPanel.refuseHelper(pid: getpid()))
