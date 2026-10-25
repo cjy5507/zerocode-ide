@@ -25,6 +25,7 @@ const FILES = Object.freeze([
   "shell-boot.js",
   "shell-browser.js",
   "shell-computer.js",
+  "shell-self-act.js",
   "shell-flow.js",
   "shell-doc.js",
   "shell-artifact-tasks.js",

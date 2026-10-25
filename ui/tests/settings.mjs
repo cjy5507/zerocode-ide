@@ -3265,6 +3265,9 @@ class StatefulBackend {
       // The boot timeline's marks (t-20078, boot_timeline.rs): the window
       // writes the phase down and answers nothing.
       case "boot_phase": return null;
+      // The computer-use band asks what is shared at boot (t-73906). Nothing
+      // is shared in these scenes, so the band stays hidden.
+      case "computer_share_state": return { target: null, label: null, takenBack: false };
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);

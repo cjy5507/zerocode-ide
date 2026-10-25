@@ -27,6 +27,8 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, State};
 use zerocode_core::conflict::{self, ConflictKind, ConflictOperation};
 use zeroize::Zeroizing;
+
+use crate::computer_use::self_surface::person_only_gate;
 // 호스트 경계. 워크스페이스의 파일과 git이 어느 기계에 있는지는 `Host` 하나가
 // 답하고, 이 파일은 그 답을 들고 다닐 뿐 어느 변종인지 묻지 않는다.
 use zerocode_core::agent_teams::TeamsMode;
@@ -274,8 +276,9 @@ use cmd::{
     clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
     close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
     codex_usage_stats, commit_failure_card, commit_file_diff, commit_files, commit_landings,
-    commit_staged, computer_awake_status, computer_confirm_answer, computer_guard_status,
-    computer_handoff_code, computer_live_reflex_check, computer_resume, computer_stop,
+    commit_staged, computer_awake_status, computer_confirm_answer, computer_give_back,
+    computer_guard_status, computer_handoff_code, computer_live_reflex_check, computer_resume,
+    computer_self_answer, computer_share_state, computer_stop, computer_take_control,
     computer_use_capabilities, computer_use_permission_status, computer_use_skill_report,
     computer_use_tcc_row_action, conflict_card, continuation_source, cookie_sources, crash_bundle,
     crash_open_log, create_browser_profile, create_project, create_pull_request,
@@ -2616,7 +2619,8 @@ fn main() -> ExitCode {
         // t-67936).
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![
+        // Every command asks the second wall first (t-73906).
+        .invoke_handler(person_only_gate(tauri::generate_handler![
             api_router_keys_kept,
             api_router_presets,
             api_router_providers,
@@ -3235,6 +3239,10 @@ fn main() -> ExitCode {
             set_computer_input_policy,
             computer_confirm_answer,
             computer_handoff_code,
+            computer_self_answer,
+            computer_share_state,
+            computer_take_control,
+            computer_give_back,
             computer_stop,
             computer_resume,
             computer_guard_status,
@@ -3368,7 +3376,7 @@ fn main() -> ExitCode {
             last_statuses,
             term_resize,
 
-        ])
+        ]))
         .setup(move |app| {
             computer_use::initialize(app.path().resource_dir().ok());
             run_evidence::install_window(app.handle().clone());

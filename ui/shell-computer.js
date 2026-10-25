@@ -33,6 +33,11 @@ let computerBandState = {
   resumeFailed: false,
 };
 let computerBandTimer = null;
+/* The window shared with an agent, as the backend last said it (t-73906):
+ * its key, the words the person knows it by, and whether the person took
+ * control. The band stands while a window is shared, whatever the agent last
+ * did, so 「제어권 가져오기」 is always one press away. */
+let computerShareState = { target: null, label: null, takenBack: false };
 /* The pane and assignment of the newest look the backend announced: what the
  * band's view opens. */
 let computerBandLook = null;
@@ -104,7 +109,8 @@ function paintComputerBand() {
   const kept = reach?.kept ?? 0;
   if (kept > computerBandKept) computerBandSlipAway();
   computerBandKept = kept;
-  const show = stopped || state.active || state.stopping || state.resuming || kept > 0;
+  const shared = computerShareState.target != null || computerShareState.takenBack;
+  const show = stopped || state.active || state.stopping || state.resuming || kept > 0 || shared;
   band.hidden = !show;
   band.classList.toggle("is-stopped", stopped);
   say(el("computer-band-word"), () => stopped
@@ -129,8 +135,47 @@ function paintComputerBand() {
   el("computer-band-resume").hidden = !stopped || state.revision == null || state.resuming || state.stopping ||
     (reach?.pausing ?? 0) > 0;
   el("computer-band-view").hidden = computerBandLook == null;
+  paintComputerShare();
   paintComputerProgressControl();
 }
+
+/* The share's part of the band: which window an agent works in, the press
+ * that takes it back, and — once taken — the press that hands it back. */
+function paintComputerShare() {
+  const share = computerShareState;
+  const app = share.label ?? share.target;
+  const line = el("computer-band-share");
+  const words = app == null
+    ? null
+    : share.takenBack
+      ? () => t("computer.share.taken", "「{{app}}」 제어권을 가져왔습니다", { app })
+      : () => t("computer.share.working", "에이전트가 「{{app}}」 창을 다루는 중", { app });
+  say(line, words);
+  if (!words) line.textContent = "";
+  line.hidden = !words;
+  el("computer-band-take").hidden = share.target == null || share.takenBack;
+  el("computer-band-give").hidden = !share.takenBack;
+}
+
+function takeComputerShare(said) {
+  computerShareState = {
+    target: said?.target ?? null,
+    label: said?.label ?? null,
+    takenBack: said?.takenBack === true,
+  };
+  paintComputerBand();
+}
+
+listen("computer:share-state", (event) => takeComputerShare(event.payload));
+void invoke("computer_share_state").then(takeComputerShare).catch(() => {});
+
+el("computer-band-take").addEventListener("click", () => {
+  void invoke("computer_take_control").catch(() => {});
+});
+
+el("computer-band-give").addEventListener("click", () => {
+  void invoke("computer_give_back").catch(() => {});
+});
 
 browserWorkspaceChromeReaders.add(paintComputerWorkBrowsers);
 
@@ -743,6 +788,33 @@ registerAskKind("computer-handoff", {
   }),
 });
 
+/* One window shared with an agent (t-73906): the first time an agent acts
+ * in an app the person is asked once whether to hand that window over. The
+ * refusal holds the focus; silence lets an unattended run go on unshared, as
+ * the clock says. Same road as the confirm: the answer goes back by id. */
+registerAskKind("computer-share", {
+  ...computerAnswerRoad,
+  // The default edge, the one blue for what waits for the person — not the
+  // confirm's red, which a payment or a delete wears.
+  tone: "computer-share",
+  view: (ask) => ({
+    agent: t("computerUse.title", "컴퓨터 사용"),
+    title: t("computer.share.title", "이 창을 맡길까요?"),
+    why: t("computer.share.why", "에이전트가 「{{app}}」 창 하나만 다룹니다. 포인터·포커스·키보드는 그대로 둡니다.", {
+      app: ask.payload.app ?? "",
+    }),
+    choices: [
+      { label: t("computer.share.deny", "거절"), allow: false, tone: "primary" },
+      { label: t("computer.share.allow", "맡기기"), allow: true, tone: "plain" },
+    ],
+    initial: 0,
+    safe: 0,
+  }),
+  clock: (ask) => t("computer.share.clock", "{{seconds}}초 동안 답이 없으면 공유 없이 진행합니다", {
+    seconds: computerAskSeconds(ask),
+  }),
+});
+
 function raiseComputerAsk(kind, ask) {
   if (!ask?.id) return;
   raiseAsk({
@@ -765,6 +837,8 @@ listen("computer:confirm", (event) => raiseComputerAsk("computer-confirm", event
 listen("computer:confirm-closed", (event) => closeComputerAsk(event.payload?.id));
 listen("computer:handoff", (event) => raiseComputerAsk("computer-handoff", event.payload));
 listen("computer:handoff-closed", (event) => closeComputerAsk(event.payload?.id));
+listen("computer:share", (event) => raiseComputerAsk("computer-share", event.payload));
+listen("computer:share-closed", (event) => closeComputerAsk(event.payload?.id));
 
 /* Both Settings and the refusal card name the row the list judges: the helper
  * for Accessibility, the app itself for Screen Recording (the report carries

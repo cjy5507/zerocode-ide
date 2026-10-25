@@ -256,9 +256,10 @@ pub(crate) use worktree::{
 };
 
 pub(crate) use settings::{
-    agent_teams_mode, claude_autoswitch_mode, computer_confirm_answer, computer_guard_status,
-    computer_handoff_code, computer_resume, computer_stop, floating_workspace_seat, harness_status,
-    list_system_fonts, pane_layouts, patch_editing_prefs, patch_floating_workspace,
+    agent_teams_mode, claude_autoswitch_mode, computer_confirm_answer, computer_give_back,
+    computer_guard_status, computer_handoff_code, computer_resume, computer_self_answer,
+    computer_share_state, computer_stop, computer_take_control, floating_workspace_seat,
+    harness_status, list_system_fonts, pane_layouts, patch_editing_prefs, patch_floating_workspace,
     patch_open_in_applications, patch_workspace_board_items, patch_workspace_board_status,
     patch_workspace_creation_prefs, read_primary_selection, save_pane_layouts, save_stage_layouts,
     scm_tree_rows, set_agent_teams_mode, set_artifacts_auto_open_beside,
