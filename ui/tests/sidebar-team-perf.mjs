@@ -17,6 +17,7 @@
  *   heap        the page's JS heap after two collections, and the DOM nodes and listeners (Chromium)
  *
  *   node ui/tests/sidebar-team-perf.mjs [--rounds 5] [--json out.json]
+ *   node ui/tests/sidebar-team-perf.mjs --beats        eight beats of the family scene (t-60498), team and branch list
  *   WINDOW_CPU_THROTTLE=4 node ui/tests/sidebar-team-perf.mjs          low spec (cpu ×4, Chromium)
  *   taskpolicy -b node ui/tests/sidebar-team-perf.mjs                  efficiency cores */
 import { writeFileSync } from "node:fs";
@@ -25,7 +26,7 @@ import { pathToFileURL } from "node:url";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
 import { median } from "./coordinator-desk-perf.mjs";
 import { loadNote } from "./machine-load.mjs";
-import { standTeamScene } from "./sidebar-team.mjs";
+import { FAMILY_RUN, FAMILY_WORKERS, playTeamBeats, standTeamScene } from "./sidebar-team.mjs";
 
 /* One beat of the ledger, after `change` rewrote the rows the stub answers: the rows a mutation touched and the
  * paint JS the beat cost. */
@@ -150,6 +151,55 @@ export async function measureSidebarTeam({ rounds = 5 } = {}) {
     faults: taken.flatMap((one) => one.faults ?? []).slice(0, 3),
   };
   return { summary, taken };
+}
+
+/* Eight beats of the family scene, a minute apart (`playTeamBeats`): the words that changed, the rows that moved and
+ * grew, the rows written and built — the team closed and opened — and the branch list's rows, with the task id on the
+ * catalog's rows and without. The base commit's window answers the same script (it has no family row, so the four
+ * workers of one root stand as four rows). */
+export async function measureFamilyBeats() {
+  const { files, origin } = await createWindowServer();
+  const browser = await chromium.launch({ headless: true });
+  const out = {};
+  try {
+    for (const open of [false, true]) {
+      const { page } = await openWindowTestPage(browser, origin);
+      try {
+        await page.setViewportSize({ width: 1280, height: 1600 });
+        await standTeamScene(page, { now: Date.now(), runs: [FAMILY_RUN], workers: FAMILY_WORKERS });
+        out[open ? "open" : "closed"] = await playTeamBeats(page, { open });
+      } finally {
+        await page.close();
+      }
+    }
+    for (const taskIds of [false, true]) {
+      const { page } = await openWindowTestPage(browser, origin);
+      try {
+        await page.setViewportSize({ width: 1280, height: 1700 });
+        await standTeamScene(page, { now: Date.now(), runs: [FAMILY_RUN], workers: FAMILY_WORKERS, taskIds,
+          extras: ["/r/wt-f1-verify", "/r/wt-f1-windows", "/r/wt-g1-red", "/r/old-1"] });
+        out[taskIds ? "branchesWithTaskIds" : "branchesNoTaskIds"] = await page.evaluate(async () => {
+          setSidebarView({ layout: "branches" });
+          await window.__TEAM_SETTLED__();
+          await new Promise((done) => setTimeout(done, 300));
+          return { rows: window.__ROWS__().branches, chips: [...document.querySelectorAll("#worktrees .wt-fold")]
+            .filter((node) => !node.hidden).map((node) => node.textContent) };
+        });
+      } finally {
+        await page.close();
+      }
+    }
+  } finally {
+    await browser.close();
+    files.close();
+  }
+  return out;
+}
+
+if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href && process.argv.includes("--beats")) {
+  const found = await measureFamilyBeats();
+  console.log(`SIDEBAR_TEAM_BEATS ${JSON.stringify(found)}`);
+  process.exit(0);
 }
 
 if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

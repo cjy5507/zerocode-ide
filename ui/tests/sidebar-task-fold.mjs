@@ -36,6 +36,14 @@ const BESIDE = ["/r/t-26584-before", "/r/t-26584-jev-evidence", "/r/t-26584-jev-
 const BUSY_LEAD = "/r/t-26591";
 const BUSY_BESIDE = "/r/t-26591-red";
 const WALLED = "/r/t-26592-walled";
+/* A task's verify, Windows and red copies fold under its row by their names (t-60498): the folder of the row they
+ * copy plus the suffix. One task whose rows carry no task id, one whose rows do, and one whose copy an agent runs in. */
+const NAMED = "/r/wt-n1";
+const NAMED_COPIES = ["/r/wt-n1-verify", "/r/wt-n1-windows"];
+const IDENTIFIED = "/r/t-26600-both";
+const IDENTIFIED_COPIES = ["/r/t-26600-both-verify", "/r/t-26600-both-windows"];
+const WORKED = "/r/wt-n2";
+const WORKED_COPY = "/r/wt-n2-red";
 
 /* The catalog's rows, as `project_catalog` ships them: each named for its task (`task_id`). */
 const ROWS = [
@@ -47,6 +55,14 @@ const ROWS = [
   { path: BUSY_LEAD, branch: "wt/t-26591", task_id: "t-26591", state: "unlanded", ahead: 1 },
   { path: BUSY_BESIDE, branch: null, task_id: "t-26591", state: "unlanded", ahead: 1 },
   { path: WALLED, branch: "wt/t-26592/walled", task_id: "t-26592", state: "unlanded", ahead: 1 },
+  { path: NAMED, branch: "wt/n1", state: "unlanded", ahead: 2 },
+  { path: NAMED_COPIES[0], branch: null, state: "unlanded", ahead: 2 },
+  { path: NAMED_COPIES[1], branch: null, state: "no_commits", ahead: 0 },
+  { path: IDENTIFIED, branch: "wt/t-26600/both", task_id: "t-26600", state: "unlanded", ahead: 1 },
+  { path: IDENTIFIED_COPIES[0], branch: null, task_id: "t-26600", state: "unlanded", ahead: 1 },
+  { path: IDENTIFIED_COPIES[1], branch: null, task_id: "t-26600", state: "no_commits", ahead: 0 },
+  { path: WORKED, branch: "wt/n2", state: "unlanded", ahead: 1 },
+  { path: WORKED_COPY, branch: null, state: "unlanded", ahead: 1 },
 ];
 
 export async function testSidebarTaskFold({ browser, origin, ok, faults }) {
@@ -91,6 +107,9 @@ export async function testSidebarTaskFold({ browser, origin, ok, faults }) {
       tabs.push({ kind: "term", worktree: scene.busyBeside, id: "tab-9701", layout: { type: "leaf", term: 9701 } });
       paneAgents.set(9701, "claude");
       tell("hook:agent", { term: 9701, state: "working", agent: "claude", session: "s-9701", model: "claude-opus-5-5" });
+      tabs.push({ kind: "term", worktree: scene.workedCopy, id: "tab-9703", layout: { type: "leaf", term: 9703 } });
+      paneAgents.set(9703, "claude");
+      tell("hook:agent", { term: 9703, state: "working", agent: "claude", session: "s-9703", model: "claude-opus-5-5" });
       tabs.push({ kind: "term", worktree: scene.walled, id: "tab-9702", layout: { type: "leaf", term: 9702 } });
       paneAgents.set(9702, "claude");
       tell("hook:agent", { term: 9702, state: "done", agent: "claude", session: "s-9702", model: "claude-opus-5-5" });
@@ -128,6 +147,7 @@ export async function testSidebarTaskFold({ browser, origin, ok, faults }) {
           fold: fold && !fold.hidden ? fold.textContent : "",
           foldTip: fold?.dataset.tip ?? "",
           expanded: fold?.getAttribute("aria-expanded") ?? "",
+          under: node.closest(".wt-node")?.classList.contains("is-folded-under") === true,
         } : null;
       };
       window.__PRESS_FOLD__ = async (path) => {
@@ -139,7 +159,7 @@ export async function testSidebarTaskFold({ browser, origin, ok, faults }) {
         return true;
       };
     }, {
-      rows: ROWS, own: OWN, busyLead: BUSY_LEAD, busyBeside: BUSY_BESIDE, walled: WALLED, head: HEAD,
+      rows: ROWS, own: OWN, busyLead: BUSY_LEAD, busyBeside: BUSY_BESIDE, walled: WALLED, workedCopy: WORKED_COPY, head: HEAD,
       nothing: NOTHING, wall: WALL,
     });
 
@@ -234,11 +254,55 @@ export async function testSidebarTaskFold({ browser, origin, ok, faults }) {
       JSON.stringify(cleanup),
     );
 
+    /* ⑦ — a task's verify, Windows and red copies fold under its row by their names, with or without a task id. */
+    const copies = await page.evaluate(async ({ named, identified, worked }) => {
+      const out = { shown: window.__SHOWN__() };
+      out.named = window.__WT__(named);
+      out.identified = window.__WT__(identified);
+      out.worked = window.__WT__(worked);
+      out.order = worktreeOrder.filter((path) => path.startsWith("/r/wt-n") || path.startsWith("/r/t-26600"));
+      await window.__PRESS_FOLD__(named);
+      out.openedNamed = { shown: window.__SHOWN__(), row: window.__WT__(named), order: worktreeOrder.filter((path) => path.startsWith("/r/wt-n1")) };
+      out.copyRows = ["/r/wt-n1-verify", "/r/wt-n1-windows"].map((path) => window.__WT__(path)?.under);
+      await window.__PRESS_FOLD__(named);
+      out.closedAgain = { shown: window.__SHOWN__(), order: worktreeOrder.filter((path) => path.startsWith("/r/wt-n1")) };
+      return out;
+    }, { named: NAMED, identified: IDENTIFIED, worked: WORKED });
+    const standing = (list, path) => list.filter((one) => one === path).length;
+    ok(
+      "a task's -verify and -windows checkouts fold under its row by their names — with no task id on the rows — and the row's chip says 「검증 사본 2」, naming them",
+      standing(copies.shown, NAMED) === 1 && NAMED_COPIES.every((path) => !copies.shown.includes(path)) &&
+        copies.named?.fold === "검증 사본 2" && NAMED_COPIES.every((path) => copies.named.foldTip.includes(path.slice(3))),
+      JSON.stringify({ shown: copies.shown, named: copies.named }),
+    );
+    ok(
+      "the same fold holds for rows that carry a task id — the copies fold, the chip says 「검증 사본 2」 — and a task whose other checkouts are not copies keeps the chip 「+4 접힘」",
+      IDENTIFIED_COPIES.every((path) => !copies.shown.includes(path)) && copies.identified?.fold === "검증 사본 2" &&
+        before?.fold === "+4 접힘",
+      JSON.stringify({ identified: copies.identified, before }),
+    );
+    ok(
+      "a folded copy is no row for the list's window or for ⌘1–9 — the order the shortcuts count leaves it out — and opened, the copies stand right under their task's row, one step in",
+      NAMED_COPIES.every((path) => !copies.order.includes(path)) &&
+        JSON.stringify(copies.openedNamed.order) === JSON.stringify([NAMED, ...NAMED_COPIES]) &&
+        copies.openedNamed.row?.fold === "접기" && copies.copyRows.every((under) => under === true) &&
+        JSON.stringify(copies.openedNamed.shown.filter((path) => path.startsWith("/r/wt-n1"))) === JSON.stringify([NAMED, ...NAMED_COPIES]) &&
+        NAMED_COPIES.every((path) => !copies.closedAgain.shown.includes(path) && !copies.closedAgain.order.includes(path)),
+      JSON.stringify(copies),
+    );
+    ok(
+      "a copy an agent runs in never folds: it stands under its task's row and the row wears no fold chip",
+      copies.shown.includes(WORKED) && copies.shown.includes(WORKED_COPY) && copies.worked?.fold === "",
+      JSON.stringify({ shown: copies.shown, worked: copies.worked }),
+    );
+
     /* ⑤ — the new sentences in every catalogue. */
     const langs = await page.evaluate(() => {
       const KEYS = {
         "worktree.taskFold": "+{{count}} 접힘",
         "worktree.taskFoldTip": "이 과업의 다른 체크아웃 {{count}}개({{names}})를 이 행 밑에 접었습니다 — 누르면 펼칩니다. 넘긴 머리에 담긴 것은 창이 거둡니다.",
+        "worktree.copyFold": "검증 사본 {{count}}",
+        "worktree.copyFoldTip": "이 과업의 검증·윈도·빨강 사본 {{count}}개({{names}})를 이 행 밑에 접었습니다 — 누르면 펼칩니다",
         "worktree.taskFoldOpen": "접기",
         "worktree.taskFoldOpenTip": "이 과업의 다른 체크아웃 {{count}}개를 다시 이 행 밑에 접습니다",
         "worktree.stall.noReview": "검증 늦음",
