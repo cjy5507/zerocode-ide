@@ -4511,23 +4511,35 @@ await test("Computer Use는 기본 배경 입력을 유지하고 공유 입력�
 
 await test("Computer Use 공유 의무는 기본 꺼짐이며 저장과 다른 창의 변경을 따른다", async () => {
   assertEqual(backend.settings.computer_share_required, false);
-  await openSettings(pageA, "computer-use");
-  await openSettings(pageB, "computer-use");
-  const first = pageA.locator("#computer-share-required");
-  const second = pageB.locator("#computer-share-required");
-  assertEqual(await first.count(), 1, "share requirement setting is missing");
-  assert(!(await first.isChecked()));
-  assertEqual(await first.getAttribute("aria-describedby"), "computer-share-required-about");
-  const before = backend.calls.length;
-  await first.check();
-  assertEqual((await backend.waitForCall("A", "set_computer_share_required", before)).args, { on: true });
-  await pageB.waitForFunction(() => document.getElementById("computer-share-required").checked);
-  const restore = backend.calls.length;
-  await second.uncheck();
-  assertEqual((await backend.waitForCall("B", "set_computer_share_required", restore)).args, { on: false });
-  await pageA.waitForFunction(() => !document.getElementById("computer-share-required").checked);
-  await pageA.evaluate(() => setSettingsOpen(false));
-  await pageB.evaluate(() => setSettingsOpen(false));
+  const peer = await context.newPage();
+  const peerId = "share-required-peer";
+  try {
+    if (PLATFORM_OVERRIDE) await addReportedPlatform(peer, PLATFORM_OVERRIDE);
+    await installTauri(peer, peerId);
+    attachFaultRecorder(peer, peerId);
+    await bootPage(peer, peerId);
+    await openSettings(pageA, "computer-use");
+    await openSettings(peer, "computer-use");
+    const first = pageA.locator("#computer-share-required");
+    const second = peer.locator("#computer-share-required");
+    assertEqual(await first.count(), 1, "share requirement setting is missing");
+    assert(!(await first.isChecked()));
+    assert(!(await second.isChecked()));
+    assertEqual(await first.getAttribute("aria-describedby"), "computer-share-required-about");
+    const before = backend.calls.length;
+    await first.check();
+    assertEqual((await backend.waitForCall("A", "set_computer_share_required", before)).args, { on: true });
+    await peer.waitForFunction(() => document.getElementById("computer-share-required").checked);
+    const restore = backend.calls.length;
+    await second.uncheck();
+    assertEqual((await backend.waitForCall(peerId, "set_computer_share_required", restore)).args, { on: false });
+    await pageA.waitForFunction(() => !document.getElementById("computer-share-required").checked);
+  } finally {
+    await peer.close();
+    backend.settings.computer_share_required = false;
+    await backend.broadcast(null, ["computer_share_required"]);
+    await pageA.evaluate(() => setSettingsOpen(false));
+  }
 });
 
 const LIVE_REFLEX_WORDS = Object.freeze({
