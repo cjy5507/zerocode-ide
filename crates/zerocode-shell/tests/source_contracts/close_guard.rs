@@ -15,7 +15,7 @@ use super::support::{block_after, shipped_backend, strip_rust_comments, window_s
 #[test]
 fn a_tab_holding_a_seat_asks_first_and_refuses_a_close_no_hand_made() {
     let window = window_source();
-    let closing = block_after(window, "function closeTab(id) {");
+    let closing = block_after(window, "function closeTab(id, started = handNow()) {");
     // The seats are asked about before the running switch is read, so the
     // person's 「도는 터미널에 대해 다시 묻지 않기」 cannot silence them.
     let seats = closing
@@ -32,7 +32,7 @@ fn a_tab_holding_a_seat_asks_first_and_refuses_a_close_no_hand_made() {
         "const road = closeRoadNow();",
         "const held = tabHoldings(tab);",
         "if (road.synthetic) {\n          refuseSyntheticClose(tab, road, held);\n          return;\n        }",
-        "askAboutSeats(held).then((proceed) => passCloseCheck(tab, road, held, true, proceed))",
+        "askAboutSeats(held).then((proceed) => passCloseCheck(tab, road, held, true, proceed, flowHand(started)))",
         "noteCloseRoad(tab, road, held, \"close requested\");",
     ] {
         assert!(
@@ -160,8 +160,8 @@ fn every_restart_stands_its_notice_first_and_says_its_door() {
         "listen(\"exit:notice\"",
         "invoke(\"leave_hold\"",
         "invoke(\"boot_after_restart\")",
-        "standExitNotice(await invoke(\"leave_now\", { road, door, by }))",
-        "invoke(\"leave_when_idle\", { road, door, by })",
+        "standExitNotice(await invoke(\"leave_now\", { road, door, by }, { hand: flowHand(started) }))",
+        "invoke(\"leave_when_idle\", { road, door, by }, { hand: flowHand(started) })",
     ] {
         assert!(
             window.contains(needle),

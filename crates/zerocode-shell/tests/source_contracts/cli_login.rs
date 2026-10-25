@@ -292,8 +292,8 @@ fn the_window_paints_the_rows_off_the_table_and_types_the_rows_own_commands() {
     );
     for road in [
         "invoke(\"cli_login_list\")",
-        "invoke(\"cli_login_start\", { agent: row.agent })",
-        "invoke(\"cli_login_logout\", { agent: row.agent })",
+        "invoke(\"cli_login_start\", { agent: row.agent }, { hand: handNow() })",
+        "invoke(\"cli_login_logout\", { agent: row.agent }, { hand })",
         "invoke(\"cli_login_witness\", { agent: row.agent })",
         "invoke(\"cli_login_witness_drop\", { witness })",
         "invoke(\"cli_login_wait\", { agent: row.agent, signedIn: true, witness })",

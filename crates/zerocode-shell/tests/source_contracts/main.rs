@@ -131,7 +131,7 @@ mod tests {
             asking.contains("invoke(\"busy_census\", { road: \"restart\", door })")
                 && asking.contains("if (census && !census.busy?.busy) {")
                 && asking.contains(
-                    "invoke(\"leave_now\", { road: \"restart\", door, by, unasked: true })"
+                    "invoke(\"leave_now\", { road: \"restart\", door, by, unasked: true }, { hand: flowHand(started) })"
                 ),
             "the restart question lost its census or its notice:\n{asking}"
         );
@@ -6619,7 +6619,7 @@ mod tests {
             asking.contains("await askConfirm({")
                 && asking.contains("danger: true,")
                 && asking.contains(
-                    "invoke(\"clear_diff_notes\", { workspace: activeWorktreePath, filePath })"
+                    "invoke(\"clear_diff_notes\", { workspace: activeWorktreePath, filePath }, { hand: flowHand(started) })"
                 ),
             "clearing notes stopped asking first, or reaches past this \
              checkout:\n{asking}"
@@ -6873,7 +6873,7 @@ mod tests {
     #[test]
     fn an_unsaved_file_is_not_closed_without_asking() {
         let window = window_source();
-        let closing = block_after(window, "function closeTab(id) {");
+        let closing = block_after(window, "function closeTab(id, started = handNow()) {");
         assert!(
             closing.contains("letGoOf(tab)"),
             "closing a document does not go through the door that asks about \
@@ -9515,7 +9515,7 @@ mod tests {
             dropping.contains("if (closed) rememberBrowserOpenTabs();"),
             "the browser's restore record is written by bookkeeping again:\n{dropping}"
         );
-        let closing = block_after(window, "function closeTab(id) {");
+        let closing = block_after(window, "function closeTab(id, started = handNow()) {");
         assert!(
             closing.contains("dropTab(id, { closed: true });"),
             "the person's own close stopped saying so, so the restore record \
@@ -9532,7 +9532,7 @@ mod tests {
 
         let window = window_source();
         let request = block_after(window, "function closeTermAndView(");
-        assert!(request.contains("invoke(\"close_term\", { term })).then(() => {"));
+        assert!(request.contains("invoke(\"close_term\", { term }, { hand })).then(() => {"));
         assert!(
             request.contains("dropClosedTermLeaf(term, road);")
                 && request.contains("showError(terminalCloseFailure(error))")
@@ -9547,12 +9547,14 @@ mod tests {
             "another close door bypasses the receipt"
         );
 
-        let closing = block_after(window, "function closeTab(id) {");
+        let closing = block_after(window, "function closeTab(id, started = handNow()) {");
         let terminals = block_after(closing, "if (tab.kind === \"term\") {");
-        assert!(terminals.contains("closeTerminalTab(tab, \"close-tab\")"));
+        assert!(terminals.contains("closeTerminalTab(tab, \"close-tab\", flowHand(started))"));
         assert!(!terminals.contains("dropTermView(") && !terminals.contains("dropTab("));
         let pane = block_after(window, "async function closePaneLeaf(");
-        assert!(pane.contains("if (!(await closeTermAndView(going, \"close-pane\"))) return;"));
+        assert!(
+            pane.contains("if (!(await closeTermAndView(going, \"close-pane\", hand))) return;")
+        );
         let project = block_after(window, "async function removeProjectFromList(");
         let fence = project
             .find("removingProjectPaths.add(path)")
@@ -14653,20 +14655,23 @@ mod tests {
         // deleted with nothing on screen addressing it is a leak.
         let removing = block_after(window, "async function removeWorktree(");
         assert!(
-            removing.contains("await finishWorktreeRemoval(worktree);"),
+            removing.contains("await finishWorktreeRemoval(worktree, flowHand(started));"),
             "the confirmed removal bypasses the one cleanup owner:\n{removing}"
         );
-        let finishing = block_after(window, "async function finishWorktreeRemoval(worktree) {");
+        let finishing = block_after(
+            window,
+            "async function finishWorktreeRemoval(worktree, hand) {",
+        );
         assert!(
-            finishing.contains("if (!(await dropWorktreeSurfaces(path))) return;"),
+            finishing.contains("if (!(await dropWorktreeSurfaces(path, hand))) return;"),
             "a removed worktree leaves its tabs behind again:\n{finishing}"
         );
-        let sweeping = block_after(window, "async function dropWorktreeSurfaces(path) {");
+        let sweeping = block_after(window, "async function dropWorktreeSurfaces(path, hand) {");
         assert!(
             sweeping.contains(concat!(
                 "  for (const held of tabs.filter((one) => one.worktree === path)) {\n",
                 "    if (held.kind === \"term\") {\n",
-                "      await closeTerminalTab(held, \"worktree-removed\");\n",
+                "      await closeTerminalTab(held, \"worktree-removed\", hand);\n",
                 "      continue;\n",
                 "    }\n",
                 "    dropTab(held.id);\n",
@@ -15044,7 +15049,7 @@ mod tests {
             )),
             "the standing no longer resolves to one action:\n{deciding}"
         );
-        let acting = block_after(window, "async function runScmAction(action) {");
+        let acting = block_after(window, "async function runScmAction(action, started) {");
         assert!(
             acting.contains(concat!(
                 "  await invoke(\"scm_pull\");\n",
@@ -15323,7 +15328,10 @@ mod tests {
         // `runScmRemote` is the one road every network verb takes — the
         // primary button and the menu alike — so the loop cannot be bypassed
         // by whichever surface asked.
-        let clicking = block_after(window, "async function runScmRemote(action) {");
+        let clicking = block_after(
+            window,
+            "async function runScmRemote(action, started = handNow()) {",
+        );
         assert!(
             clicking.contains(concat!(
                 "    if (kind === \"rejected\" || kind === \"stale-lease\") {\n",
@@ -21019,8 +21027,8 @@ mod tests {
             "the Claude system row grew an action this window may not take:\n{claude}"
         );
         for road in [
-            "invoke(\"relogin_codex_login\")",
-            "invoke(\"logout_codex_login\")",
+            "invoke(\"relogin_codex_login\", undefined, { hand: handNow() })",
+            "invoke(\"logout_codex_login\", undefined, { hand })",
         ] {
             assert!(window.contains(road), "the window no longer walks {road}");
         }
@@ -21368,9 +21376,9 @@ mod tests {
         // as well. Three roads used to sweep the tabs themselves in the same
         // shape — the removal dialog, the cleanup table, the space page — and
         // none of them forgot the stage layout keyed by the path.
-        let sweeping = block_after(window, "async function dropWorktreeSurfaces(path) {");
+        let sweeping = block_after(window, "async function dropWorktreeSurfaces(path, hand) {");
         assert!(
-            sweeping.contains("await closeTerminalTab(held, \"worktree-removed\");")
+            sweeping.contains("await closeTerminalTab(held, \"worktree-removed\", hand);")
                 && sweeping.contains("dropTab(held.id);")
                 && sweeping
                     .contains("if (tabs.some((one) => one.worktree === path)) return false;")
@@ -27909,10 +27917,13 @@ mod tests {
         // completion; the card's note says so while it waits.
         let signing = block_after(window, "async function startGoogleLogin(");
         assert!(
-            signing.contains(r#"invoke("google_login_start")"#)
-                && signing.contains("openGoogleConsentInSystemBrowser()")
+            signing.contains(
+                r#"invoke("google_login_start", undefined, { hand: flowHand(started) })"#
+            ) && signing.contains("openGoogleConsentInSystemBrowser()")
                 && !signing.contains("openBrowserTab(")
-                && signing.contains(r#"invoke("google_login_finish")"#)
+                && signing.contains(
+                    r#"invoke("google_login_finish", undefined, { hand: flowHand(started) })"#
+                )
                 && signing.contains("googleLoginMoved()"),
             "the sign-in no longer hands consent to the system browser and \
              waits for the loopback:\n{signing}"
@@ -29029,12 +29040,12 @@ mod tests {
         // comes off on the way through in both, so what actually closes the tab
         // is the ordinary close underneath (a document still asks about its
         // unsaved typing).
-        let closing = block_after(window, "function closeTab(id) {");
+        let closing = block_after(window, "function closeTab(id, started = handNow()) {");
         let gated = [
             format!("  if (tab.{}) {{", "pinned"),
             format!("    if (!{}) {{", "confirmClosePinnedTab"),
             format!("      tab.{} = false;", "pinned"),
-            format!("      {}(id);", "closeTab"),
+            format!("      {}(id, started);", "closeTab"),
             "      return;".to_string(),
             "    }".to_string(),
             format!("    void {}(tab).then((proceed) => {{", "askAboutPinned"),
@@ -29185,7 +29196,7 @@ mod tests {
             "set_skip_delete_worktree_confirm",
             "setting_key::SKIP_DELETE_WORKTREE_CONFIRM",
             "settings.skip_delete_worktree_confirm = skip;",
-            "function setAskBeforeDeletingWorktrees(on) {",
+            "function setAskBeforeDeletingWorktrees(on, hand = handNow()) {",
             "skip_delete_worktree_confirm",
             "skipDeleteWorktreeConfirm = snapshot.skip_delete_worktree_confirm === true;",
         );
@@ -29200,9 +29211,9 @@ mod tests {
             request.contains("if (!skipDeleteWorktreeConfirm)")
                 && request.contains("await askToRemoveWorktree(worktree)")
                 && request.contains(
-                    "await invoke(\"remove_worktree\", { path: worktree.path, discardChanges: false })",
+                    "await invoke(\"remove_worktree\", { path: worktree.path, discardChanges: false }, { hand: flowHand(started) })",
                 )
-                && request.contains("await finishWorktreeRemoval(worktree)")
+                && request.contains("await finishWorktreeRemoval(worktree, flowHand(started))")
                 && !request.contains("discardChanges: true"),
             "skipping the question no longer means safe-first with a review fallback:\n{request}"
         );
@@ -29406,7 +29417,7 @@ mod tests {
             "set_skip_delete_automation_confirm",
             "setting_key::SKIP_DELETE_AUTOMATION_CONFIRM",
             "settings.skip_delete_automation_confirm = skip;",
-            "function setAskBeforeDeletingAutomations(on) {",
+            "function setAskBeforeDeletingAutomations(on, hand = handNow()) {",
             "skip_delete_automation_confirm",
             "skipDeleteAutomationConfirm = snapshot.skip_delete_automation_confirm === true;",
         );
@@ -29424,8 +29435,9 @@ mod tests {
             request.contains("if (!skipDeleteAutomationConfirm)")
                 && request.contains("await askConfirm({")
                 && request.contains("askRemembered()")
-                && request.contains("setAskBeforeDeletingAutomations(false)")
-                && request.contains("await deleteAutomationAndHistory(automation)"),
+                && request.contains("setAskBeforeDeletingAutomations(false, flowHand(started))")
+                && request
+                    .contains("await deleteAutomationAndHistory(automation, flowHand(started))"),
             "automation deletion bypasses the stored question or its single delete owner:\n{request}"
         );
         let deleting = block_after(shipped, "fn delete_automation_and_run_history(");
@@ -33303,7 +33315,10 @@ mod tests {
             2,
             "a drop no longer reports the placed worker's move:\n{dragged}"
         );
-        let closed = block_after(window, "async function closePaneLeaf(tab, going) {");
+        let closed = block_after(
+            window,
+            "async function closePaneLeaf(tab, going, hand = handNow()) {",
+        );
         assert!(
             closed.contains("noteWorkerRoomChange(going, \"background\")"),
             "closing a tiled worker no longer reports the move:\n{closed}"
@@ -34230,8 +34245,9 @@ mod tests {
         // 5. The trash deletes the saved command, not the terminal's peace.
         let submenu = block_after(source, "async function openQuickCommands(anchor, term) {");
         assert!(
-            submenu.contains(r#"invoke("delete_quick_command", { id: command.id })"#)
-                && submenu.contains("event.stopPropagation();"),
+            submenu.contains(
+                r#"invoke("delete_quick_command", { id: command.id }, { hand: handNow() })"#
+            ) && submenu.contains("event.stopPropagation();"),
             "the quick-command trash is unwired or runs the row on the way \
              out:\n{submenu}"
         );
@@ -37394,7 +37410,10 @@ mod tests {
     fn closing_a_split_lets_the_agent_in_it_keep_running() {
         let window = window_source();
 
-        let closing = block_after(window, "async function closePaneLeaf(tab, going) {");
+        let closing = block_after(
+            window,
+            "async function closePaneLeaf(tab, going, hand = handNow()) {",
+        );
         assert!(
             closing.contains("if (termHoldsAgent(going)) {")
                 && closing.contains("detachedAgents.set(going, tab.worktree);")

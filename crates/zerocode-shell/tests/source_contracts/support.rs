@@ -390,7 +390,7 @@ pub(crate) fn assert_canonical_setting_round_trip(
     );
     let transport = block_after(window, "async function commitSetting(");
     assert!(
-        transport.contains("const snapshot = await invoke(command, args);")
+        transport.contains("const snapshot = await invoke(command, args, { hand });")
             && transport.contains("const snapshot = await fetchSettingsSnapshot();")
             && transport.contains("const mutationEpoch = ++settingsMutationEpoch;")
             && transport.contains("settingsMutationsInFlight += 1;")
