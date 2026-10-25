@@ -479,7 +479,7 @@ fn forced_onto_wire(name: &str) -> bool {
         .contains(name)
 }
 
-/// The line a ToolSearch answer that offers `Computer` opens with while the
+/// The line a `ToolSearch` answer that offers `Computer` opens with while the
 /// work browser is installed. It rides in the tool result, never in the
 /// system prompt or a schema, so it costs nothing on a turn that does not
 /// look for it.

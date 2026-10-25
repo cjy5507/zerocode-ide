@@ -1057,7 +1057,7 @@ fn jev_schema_is_measured_and_deferred() {
     assert!(est_tokens <= CEILING_TOKENS, "the schema grew to {est_tokens} tokens — past the {CEILING_TOKENS} a deferred lookup should cost");
 }
 
-/// A ToolSearch answer that names `Computer` while the window's work browser
+/// A `ToolSearch` answer that names `Computer` while the window's work browser
 /// is installed opens with one line saying where web pages go (t-74223): the
 /// incident session searched "browser playwright computer", read a 19,822-
 /// character answer with the work browser in one sentence of it, and drove a
