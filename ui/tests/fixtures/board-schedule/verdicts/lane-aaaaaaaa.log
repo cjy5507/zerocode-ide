@@ -1,0 +1,54 @@
+08:00:00 == lane aaaaaaaa start (dry=0)
+08:00:00 red: sha: aaaaaaaa is unknown to /workspace/repo
+08:00:00 == sweep
+08:00:01 sweep rc=0 1s free=30G load=0/0
+08:00:01 == red (sha: aaaaaaaa is unknown to /workspace/repo)
+08:01:00 == lane aaaaaaaa start (dry=0)
+08:01:00 == archive
+08:01:01 archive rc=0 1s free=30G load=0/0
+08:01:01 == gate-root
+08:01:11 gate-root rc=1 10s free=30G load=0/0
+08:01:11 == gate-zo
+08:01:21 gate-zo rc=0 10s free=30G load=0/0
+08:01:21 == flakes
+08:01:21 flakes rc=1 0s free=30G load=0/0
+08:01:21 red: gate red for real: root rc=1 zo rc=0 [test_failure]
+08:01:21 == sweep
+08:01:22 sweep rc=0 1s free=30G load=0/0
+08:01:22 == red (gate red for real: root rc=1 zo rc=0 [test_failure])
+08:02:00 == lane aaaaaaaa start (dry=0)
+08:02:00 refused: tools: cargo
+08:02:00 == sweep
+08:02:01 sweep rc=0 1s free=30G load=0/0
+08:02:01 == refused (tools: cargo)
+08:03:00 == lane aaaaaaaa start (dry=0)
+08:03:00 superseded: newer queued sha before archive
+08:03:00 == sweep
+08:03:01 sweep rc=0 1s free=30G load=0/0
+08:03:01 == superseded (newer queued sha before archive)
+08:04:00 == lane aaaaaaaa start (dry=0)
+08:04:00 == archive
+08:04:01 archive rc=0 1s free=30G load=0/0
+08:04:01 == gate-root
+08:04:11 gate-root rc=0 10s free=30G load=0/0
+08:04:11 == gate-zo
+08:04:21 gate-zo rc=0 10s free=30G load=0/0
+08:04:21 == flakes
+08:04:21 flakes rc=0 0s free=30G load=0/0
+08:04:21 == push
+08:04:22 push rc=0 1s free=30G load=0/0
+08:04:22 == build-app
+08:04:22 == build-zo
+08:04:32 build-app rc=0 10s free=30G load=0/0
+08:04:32 == swap-app
+08:04:33 swap-app rc=0 1s free=30G load=0/0
+08:04:33 build-zo rc=0 11s free=30G load=0/0
+08:04:33 == swap-zo
+08:04:34 swap-zo rc=0 1s free=30G load=0/0
+08:04:34 == bundle-updater
+08:04:44 bundle-updater rc=0 10s free=30G load=0/0
+08:04:44 == publish
+08:04:45 publish rc=0 1s free=30G load=0/0
+08:04:45 == sweep
+08:04:46 sweep rc=0 1s free=30G load=0/0
+08:04:46 == green

@@ -161,15 +161,20 @@ fn the_flow_is_read_off_the_main_thread_and_kept_by_the_bases_commit() {
         read.contains("crate::orchestration::ledger_image()"),
         "the flow reads the ledger some other way than the image this window holds:\n{read}"
     );
-    let git = block_after(&flow, "fn git_facts(");
+    let git = block_after(&flow, "fn git_facts_in(");
     assert!(
         git.contains("Host::for_workspace(root)")
             && git.contains("FLOW.git_fresh_ms")
-            && git.contains("one.oid == oid"),
+            && git.contains("one.oid == oid")
+            && block_after(&flow, "pub(crate) fn git_facts(").contains("git_facts_in("),
         "git is asked outside the host boundary, or its answer is not kept by the base's commit:\n{git}"
     );
+    // `use std::process::{Command}` and `Command::new(` are as much a spawn as the full path (the
+    // review t-69070 P3 ⑦).
     assert!(
-        !flow.contains("std::process::Command") && !flow.contains("std::fs::read"),
+        !flow.contains("std::process")
+            && !flow.contains("Command::new(")
+            && !flow.contains("std::fs::read"),
         "the flow spawns git or reads a file itself"
     );
     for road in ["main.rs", "cmd/mod.rs"] {
@@ -178,6 +183,68 @@ fn the_flow_is_read_off_the_main_thread_and_kept_by_the_bases_commit() {
             "`{road}` does not register the flow command"
         );
     }
+}
+
+/// What the flow asks of git is three questions — the refs, the first-parent
+/// log and the release notes' blob — each through the host boundary with the
+/// flow's own time budget, and the two that return text of any size with the
+/// flow's own byte bounds; nothing that writes or reaches the network (the
+/// review t-69070 P3 ⑦).
+#[test]
+fn the_flow_asks_git_three_bounded_questions_through_the_host() {
+    let flow = shell_source("artifact_flow.rs");
+    let code = flow.split("#[cfg(test)]").next().expect("the shipped half");
+    let asked: Vec<&str> = code.split(".vcs()").skip(1).collect();
+    assert!(
+        asked.len() >= 3,
+        "the flow's git questions moved: {}",
+        asked.len()
+    );
+    for call in &asked {
+        let call = call.split("\n}\n").next().unwrap_or(call);
+        assert!(
+            call.contains("text_within")
+                && call.contains("FLOW.git_budget")
+                && !call.contains(".text(")
+                && !call.contains("clone("),
+            "a git question leaves the host boundary or its time budget:\n{call}"
+        );
+    }
+    for bounded in ["FLOW.walk_bytes_max", "FLOW.notes_bytes_max", "\"--\","] {
+        assert!(code.contains(bounded), "the flow lost `{bounded}`");
+    }
+    for subcommand in ["for-each-ref", "\"log\"", "\"cat-file\""] {
+        assert!(
+            code.contains(subcommand),
+            "the flow no longer asks `{subcommand}`"
+        );
+    }
+    for writes in [
+        "\"fetch\"",
+        "\"pull\"",
+        "\"push\"",
+        "\"checkout\"",
+        "\"commit\"",
+        "\"reset\"",
+        "\"config\"",
+        "\"clone\"",
+        "\"remote\"",
+        "\"update-ref\"",
+        "\"worktree\"",
+        "\"merge\"",
+        "\"add\"",
+        "\"gc\"",
+    ] {
+        assert!(
+            !code.contains(writes),
+            "the flow asks git for what writes or reaches out ({writes})"
+        );
+    }
+    // The window draws only what the backend sent: `innerHTML` is the constant icon and nothing else.
+    let part = ui_source("shell-artifact-flow.js");
+    let sets = part.matches("innerHTML").count();
+    assert_eq!(sets, 1, "the flow part sets markup {sets} times");
+    assert!(part.contains("holder.innerHTML = icon(name);"));
 }
 
 /// git runs only in a repository this window lists (t-69070 P2). The command
@@ -271,6 +338,7 @@ fn the_flow_is_a_window_part_with_tips_and_its_own_classes() {
         "artifacts.tab.flow",
         "artifacts.flow.stageMerged",
         "artifacts.flow.groupNext",
+        "artifacts.flow.stale",
     ] {
         assert_eq!(
             i18n.matches(&format!("\"{key}\":")).count(),

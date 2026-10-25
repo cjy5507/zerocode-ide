@@ -103,7 +103,7 @@ fn the_runners_lines_are_read_as_the_runner_writes_them() {
             name: "0-1792535939-run11955-l60r-g1-build".into(),
             who: "run11955-l60r".into(),
             lane: Some(1),
-            cap_secs: 1800,
+            cap_secs: Some(1800),
             clock: 7 * 3600 + 39 * 60,
         }
     );
@@ -651,9 +651,10 @@ fn a_job_is_expected_to_take_the_median_of_its_kind_or_its_cap() {
         tests_expected.samples >= 3 && tests_expected.secs < 1800,
         "{tests_expected:?}"
     );
-    assert_eq!(cap_secs(Some("99999")), MOST_CAP_SECS);
-    assert_eq!(cap_secs(Some("12m")), DEFAULT_CAP_SECS);
-    assert_eq!(cap_secs(None), DEFAULT_CAP_SECS);
+    let caps = Caps::LAST_KNOWN;
+    assert_eq!(caps.cap_secs(Some("99999")), caps.most_secs);
+    assert_eq!(caps.cap_secs(Some("12m")), caps.default_secs);
+    assert_eq!(caps.cap_secs(None), caps.default_secs);
     assert_eq!(median(&[3, 1, 2]), Some(2));
     assert_eq!(median(&[1, 2, 3, 10]), Some(2));
     assert_eq!(median(&[]), None);
@@ -956,4 +957,622 @@ fn a_look_costs_little_when_nothing_moved() {
         "a quiet look: {middle:.0} µs median, {high:.0} µs p95 — every 5 s while the view is open"
     );
     assert!(middle < 5_000.0, "a quiet look took {middle:.0} µs");
+}
+
+/* ---- the review t-69069's P3 (t-69106) ------------------------------------ */
+
+/// A queue folder with nothing queued and a runner log of `text`, last
+/// written at `at_ms`.
+fn lone_queue(text: &str, at_ms: i64) -> (tempfile::TempDir, Roots) {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let queue = scratch.path().join("build-queue");
+    for place in [QUEUE_IN, QUEUE_RUN, QUEUE_DONE] {
+        std::fs::create_dir_all(queue.join(place)).expect("a queue folder");
+    }
+    std::fs::write(queue.join(RUNNER_LOG), text).expect("the runner log");
+    stamp_at(&queue.join(RUNNER_LOG), at_ms);
+    let roots = Roots {
+        line: Some(queue),
+        release: None,
+    };
+    (scratch, roots)
+}
+
+fn append(path: &Path, text: &str, at_ms: i64) {
+    let mut file = File::options().append(true).open(path).expect("the file");
+    std::io::Write::write_all(&mut file, text.as_bytes()).expect("a line");
+    stamp_at(path, at_ms);
+}
+
+fn runner_log(roots: &Roots) -> PathBuf {
+    roots.line.as_ref().expect("a queue").join(RUNNER_LOG)
+}
+
+/// `f` on its own thread, given `secs` to answer: a reader that waits on a
+/// pipe never does, and the test says so instead of hanging.
+#[cfg(unix)]
+fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tell, hear) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tell.send(f());
+    });
+    hear.recv_timeout(Duration::from_secs(secs)).ok()
+}
+
+/// A named pipe nobody writes to.
+#[cfg(unix)]
+fn pipe_at(path: &Path) {
+    let name = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()))
+        .expect("a name");
+    // SAFETY: `name` is a NUL-terminated path that outlives the call.
+    assert_eq!(
+        unsafe { libc::mkfifo(name.as_ptr(), 0o600) },
+        0,
+        "a pipe at {}",
+        path.display()
+    );
+}
+
+/// ① A runner log that gained more than a look reads is read by its last
+/// stretch, as a first look reads a long one — not whole.
+#[test]
+fn a_runner_log_that_grew_far_between_looks_is_read_by_its_last_stretch() {
+    let (_scratch, roots) = lone_queue(
+        "RUN 1792535000-w1-t1-early who=w1 lane=1 cap=900s 07:00:00\n",
+        kst(21, 7, 0, 1),
+    );
+    let mut book = Book::default();
+    book.read(&roots, &Ask::default(), kst(21, 7, 0, 2), KST);
+    let filler = "orchestration echo that tells nothing\n".repeat(6 * 1024 * 1024 / 38);
+    append(
+        &runner_log(&roots),
+        &format!(
+            "RUN 1792535100-w1-t1-gone who=w1 lane=1 cap=900s 07:01:00\n{filler}RUN 1792535400-w1-t1-late who=w1 lane=1 cap=900s 07:05:00\n"
+        ),
+        kst(21, 7, 6, 0),
+    );
+    book.read(&roots, &Ask::default(), kst(21, 7, 6, 5), KST);
+    let open: Vec<&str> = book.runner.open.keys().map(String::as_str).collect();
+    assert!(
+        open.contains(&"1792535400-w1-t1-late"),
+        "the last stretch is read: {open:?}"
+    );
+    assert!(
+        !open.contains(&"1792535100-w1-t1-gone"),
+        "a gain of 6 MiB was read from its first byte: {open:?}"
+    );
+}
+
+/// ② A rotated, replaced or rewritten log does not take the kinds' past with
+/// it: the estimate stays the median of what passed, not the cap.
+#[test]
+fn a_rotated_runner_log_keeps_the_past_the_estimates_stand_on() {
+    let passes: String = (0..3)
+        .map(|n| {
+            format!(
+                "RUN 17925359{n}0-w1-t1-g1-build who=w1 lane=1 cap=900s 07:3{n}:00\nDONE 17925359{n}0-w1-t1-g1-build rc=0 {}s lane=1 07:3{n}:30 load=1\n",
+                100 + n * 10
+            )
+        })
+        .collect();
+    let (scratch, roots) = lone_queue(&passes, kst(21, 7, 33, 0));
+    let mut book = Book::default();
+    book.read(&roots, &Ask::default(), kst(21, 7, 34, 0), KST);
+    let before = book.runner.expected(Some("g1-build"), 900);
+    assert_eq!((before.secs, before.samples), (110, 3));
+    // The runner starts a new log (the old one moved away): another file, one job in it.
+    let fresh = scratch.path().join("runner.new");
+    std::fs::write(
+        &fresh,
+        "RUN 1792536200-w2-t2-other who=w2 lane=2 cap=600s 07:50:00\n",
+    )
+    .expect("a new log");
+    stamp_at(&fresh, kst(21, 7, 50, 1));
+    std::fs::rename(&fresh, runner_log(&roots)).expect("the new log takes the name");
+    book.read(&roots, &Ask::default(), kst(21, 7, 51, 0), KST);
+    assert!(
+        book.runner.finished.is_empty(),
+        "the old log's jobs are gone"
+    );
+    let after = book.runner.expected(Some("g1-build"), 900);
+    assert_eq!(
+        (after.secs, after.samples),
+        (110, 3),
+        "a rotated log sent every estimate back to its cap"
+    );
+}
+
+/// ② The same file cut and grown past where it was read is another file too.
+#[test]
+fn a_runner_log_cut_and_grown_past_the_offset_is_read_again_from_its_start() {
+    let old = "RUN 1792535000-w1-t1-old-one who=w1 lane=1 cap=900s 07:00:00\n\
+               RUN 1792535010-w1-t1-old-two who=w1 lane=1 cap=900s 07:00:10\n";
+    let (_scratch, roots) = lone_queue(old, kst(21, 7, 0, 20));
+    let mut book = Book::default();
+    book.read(&roots, &Ask::default(), kst(21, 7, 0, 30), KST);
+    assert_eq!(book.runner.open.len(), 2);
+    // Written over in place — one inode, longer than before, other bytes where the offset was.
+    let rewritten = "RUN 1792536000-w9-t9-new-one who=w9 lane=2 cap=600s 08:00:00\n\
+                     RUN 1792536010-w9-t9-new-two who=w9 lane=2 cap=600s 08:00:10\n\
+                     RUN 1792536020-w9-t9-new-three who=w9 lane=2 cap=600s 08:00:20\n";
+    std::fs::write(runner_log(&roots), rewritten).expect("written over");
+    stamp_at(&runner_log(&roots), kst(21, 8, 0, 30));
+    book.read(&roots, &Ask::default(), kst(21, 8, 0, 40), KST);
+    let mut open: Vec<&str> = book.runner.open.keys().map(String::as_str).collect();
+    open.sort_unstable();
+    assert_eq!(
+        open,
+        [
+            "1792536000-w9-t9-new-one",
+            "1792536010-w9-t9-new-two",
+            "1792536020-w9-t9-new-three"
+        ],
+        "the log was read on from the old offset"
+    );
+}
+
+/// ③ A `RUN` no `DONE` ever follows is not held for ever: past its cap and a
+/// grace it leaves the open map, and the board still draws it, lost.
+#[test]
+fn a_run_with_no_done_line_expires_into_a_lost_job() {
+    let (_scratch, roots) = lone_queue(
+        "RUN 1792535000-w1-t1-stale who=w1 lane=1 cap=60s 07:00:00\n",
+        kst(21, 7, 0, 1),
+    );
+    let mut book = Book::default();
+    book.read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST);
+    assert!(book.runner.open.contains_key("1792535000-w1-t1-stale"));
+    // Two hours on the runner writes again; the job is far past its minute.
+    append(
+        &runner_log(&roots),
+        "PAUSE lifted 09:00:00 by coord4275: the lane ended\n",
+        kst(21, 9, 0, 1),
+    );
+    let later = book.read(&roots, &Ask::default(), kst(21, 9, 0, 5), KST);
+    assert!(
+        !book.runner.open.contains_key("1792535000-w1-t1-stale"),
+        "a run past its cap by two hours is still held open"
+    );
+    assert_eq!(
+        job(&later, "1792535000-w1-t1-stale").state,
+        LOST,
+        "the board still says it was lost"
+    );
+    // Its end line, if it ever comes, replaces the lost row rather than doubling it.
+    append(
+        &runner_log(&roots),
+        "DONE 1792535000-w1-t1-stale rc=0 59s lane=1 09:01:00 load=1\n",
+        kst(21, 9, 1, 1),
+    );
+    let ended = book.read(&roots, &Ask::default(), kst(21, 9, 1, 5), KST);
+    let rows: Vec<&Job> = ended
+        .jobs
+        .iter()
+        .filter(|job| job.name == "1792535000-w1-t1-stale")
+        .collect();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].state, PASSED);
+}
+
+#[test]
+fn a_quiet_runner_expires_only_after_the_cap_and_grace_and_moves_the_revision() {
+    let name = "1792535000-w1-t1-stale";
+    let (_scratch, roots) = lone_queue(
+        "RUN 1792535000-w1-t1-stale who=w1 lane=1 cap=60s 07:00:00\n",
+        kst(21, 7, 0, 1),
+    );
+    let mut book = Book::default();
+    let first = book.read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST);
+    let known = Ask {
+        known: Some(first.revision),
+        ..Ask::default()
+    };
+    let deadline = kst(21, 7, 0, 0) + 60_000 + LOST_AFTER_CAP_MS;
+    let at_cap = book.read(&roots, &known, deadline, KST);
+    assert!(
+        at_cap.unchanged,
+        "a run at its grace boundary expired early"
+    );
+    let expired = book.read(&roots, &known, deadline + 1, KST);
+    assert!(
+        !expired.unchanged,
+        "the clock moved past the grace but the answer did not"
+    );
+    assert!(expired.revision > first.revision);
+    assert_eq!(job(&expired, name).state, LOST);
+    assert!(!book.runner.open.contains_key(name));
+    let later = book.read(
+        &roots,
+        &Ask {
+            known: Some(expired.revision),
+            ..Ask::default()
+        },
+        deadline + HOUR_MS,
+        KST,
+    );
+    assert!(
+        later.unchanged,
+        "an already expired run kept moving the revision"
+    );
+    assert_eq!(
+        book.runner
+            .finished
+            .iter()
+            .filter(|job| job.name == name)
+            .count(),
+        1
+    );
+}
+
+/// A run still in `run/` is the runner's own to end: it is never expired.
+#[test]
+fn a_run_still_in_the_run_folder_is_not_expired() {
+    let (_scratch, roots) = lone_queue(
+        "RUN 1792535000-w1-t1-slow who=w1 lane=1 cap=60s 07:00:00\n",
+        kst(21, 7, 0, 1),
+    );
+    let queue = roots.line.clone().expect("a queue");
+    std::fs::write(
+        queue.join(QUEUE_RUN).join("1792535000-w1-t1-slow.job"),
+        "# who: w1\n",
+    )
+    .expect("a running job");
+    let mut book = Book::default();
+    let first = book.read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST);
+    let quiet = book.read(
+        &roots,
+        &Ask {
+            known: Some(first.revision),
+            ..Ask::default()
+        },
+        kst(21, 9, 0, 5),
+        KST,
+    );
+    assert!(quiet.unchanged, "a job still owned by the runner expired");
+    let later = book.read(&roots, &Ask::default(), kst(21, 9, 0, 5), KST);
+    assert!(book.runner.open.contains_key("1792535000-w1-t1-slow"));
+    assert_eq!(job(&later, "1792535000-w1-t1-slow").state, RUNNING);
+}
+
+/// ④ The runner's log is another process's file: a link in its place is not
+/// followed.
+#[cfg(unix)]
+#[test]
+fn a_runner_log_that_is_a_link_is_not_followed() {
+    let (scratch, roots) = lone_queue("", kst(21, 7, 0, 1));
+    let real = scratch.path().join("elsewhere.log");
+    std::fs::write(
+        &real,
+        "RUN 1792535000-w1-t1-linked who=w1 lane=1 cap=900s 07:00:00\n",
+    )
+    .expect("a real log");
+    stamp_at(&real, kst(21, 7, 0, 1));
+    std::fs::remove_file(runner_log(&roots)).expect("the log goes");
+    std::os::unix::fs::symlink(&real, runner_log(&roots)).expect("a link in its place");
+    let mut book = Book::default();
+    book.read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST);
+    assert!(
+        book.runner.open.is_empty(),
+        "the log was read through a link: {:?}",
+        book.runner.open
+    );
+}
+
+/// ④ The lane's `status.json` and the runner's `DISK_FLOOR` may not be a pipe
+/// the reader stands waiting on — with the book's lock held — nor a file of
+/// any size.
+#[cfg(unix)]
+#[test]
+fn a_pipe_in_place_of_status_or_the_disk_floor_does_not_hold_the_look() {
+    let (scratch, mut roots) = lone_queue("", kst(21, 7, 0, 1));
+    let release = scratch.path().join("release");
+    std::fs::create_dir_all(release.join("out")).expect("the lanes' folder");
+    pipe_at(&release.join("status.json"));
+    pipe_at(&roots.line.as_ref().expect("a queue").join(DISK_FLOOR_FLAG));
+    roots.release = Some(release);
+    let answered = within(5, move || {
+        Book::default()
+            .read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST)
+            .line
+            .disk_floor_gib
+    });
+    assert_eq!(answered, Some(None), "a pipe held the look");
+}
+
+#[test]
+fn a_status_file_or_disk_floor_past_its_cap_is_not_read() {
+    let (scratch, roots) = lone_queue("", kst(21, 7, 0, 1));
+    let queue = roots.line.clone().expect("a queue");
+    std::fs::write(
+        queue.join(DISK_FLOOR_FLAG),
+        format!("{}20", " ".repeat(8 * 1024)),
+    )
+    .expect("a long floor");
+    let heavy = format!(
+        "{{\"sha\": \"fc4abd39\", \"pad\": \"{}\", \"outcome\": null}}",
+        "x".repeat(2 * 1024 * 1024)
+    );
+    let release = scratch.path().join("release");
+    std::fs::create_dir_all(release.join("out")).expect("the lanes' folder");
+    std::fs::write(release.join("status.json"), heavy).expect("a heavy status");
+    assert!(
+        lane_status(&release.join("status.json")).is_none(),
+        "a 2 MiB status.json was read"
+    );
+    assert_eq!(read_floor(&queue.join(DISK_FLOOR_FLAG)), None);
+}
+
+/// ④ The tail the window opens reads a pipe as nothing at all.
+#[cfg(unix)]
+#[test]
+fn the_log_tail_of_a_pipe_is_missing_and_does_not_wait() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let pipe = scratch.path().join("job.log");
+    pipe_at(&pipe);
+    let tail = within(5, move || tail_of(Some(&pipe))).expect("the tail waited on a pipe");
+    assert!(tail.missing && tail.lines.is_empty());
+}
+
+/// ④ A lane log over its cap is read by its last stretch: the runs above it
+/// are not in the answer.
+#[test]
+fn a_lane_log_over_its_cap_is_read_by_its_last_stretch() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let release = scratch.path().join("release");
+    let out = release.join("out");
+    std::fs::create_dir_all(&out).expect("the lanes' folder");
+    let log = out.join("lane-aaaaaaa1.log");
+    let filler =
+        "08:00:01 a line that belongs to no stage and fills the log\n".repeat(8 * 1024 * 1024 / 60);
+    std::fs::write(
+        &log,
+        format!(
+            "08:00:00 == lane aaaaaaa1 start (dry=0)\n{filler}09:00:00 == lane aaaaaaa2 start (dry=0)\n09:00:01 == archive\n"
+        ),
+    )
+    .expect("a long lane log");
+    stamp_at(&log, kst(21, 9, 0, 2));
+    let roots = Roots {
+        line: None,
+        release: Some(release),
+    };
+    let timeline = Book::default().read(&roots, &Ask::default(), kst(21, 9, 1, 0), KST);
+    let shas: Vec<&str> = timeline.lanes.iter().map(|run| run.sha.as_str()).collect();
+    assert_eq!(
+        shas,
+        ["aaaaaaa2"],
+        "the 8 MiB log was read from its first byte"
+    );
+}
+
+/// ⑤ A lane's stages ahead come from the last lane that passed every stage,
+/// however many newer logs hold none — and the answer says whether it had one.
+#[test]
+fn a_full_green_older_than_the_newest_eight_logs_still_plans_the_stages_ahead() {
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let release = scratch.path().join("release");
+    let out = release.join("out");
+    std::fs::create_dir_all(&out).expect("the lanes' folder");
+    let write_log = |sha: &str, text: &str, at_ms: i64| {
+        let path = out.join(format!("lane-{sha}.log"));
+        std::fs::write(&path, text).expect("a lane log");
+        stamp_at(&path, at_ms);
+    };
+    write_log(
+        "aaaaaaa0",
+        "08:00:00 == lane aaaaaaa0 start (dry=0)\n08:00:00 == archive\n08:00:10 archive rc=0 10s free=20G\n\
+         08:00:10 == gate\n08:10:10 gate rc=0 600s free=20G\n08:10:10 == push\n08:10:20 push rc=0 10s free=20G\n08:10:20 == green\n",
+        kst(21, 8, 11, 0),
+    );
+    for n in 1..=8 {
+        let sha = format!("bbbbbbb{n}");
+        write_log(
+            &sha,
+            &format!(
+                "08:3{n}:00 == lane {sha} start (dry=0)\n08:3{n}:00 == archive\n08:3{n}:10 archive rc=0 10s free=20G\n\
+                 08:3{n}:10 == gate\n08:3{n}:30 gate rc=1 20s free=20G\n08:3{n}:30 == red (gate)\n"
+            ),
+            kst(21, 8, 40 + n, 0),
+        );
+    }
+    write_log(
+        "ccccccc0",
+        "09:30:00 == lane ccccccc0 start (dry=0)\n09:30:00 == archive\n09:30:10 archive rc=0 10s free=20G\n09:30:10 == gate\n",
+        kst(21, 9, 40, 0),
+    );
+    std::fs::write(
+        release.join("status.json"),
+        "{\"sha\": \"ccccccc0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"phase\": \"gate\", \"outcome\": null, \"version\": \"1.2.3\"}",
+    )
+    .expect("the status");
+    let roots = Roots {
+        line: None,
+        release: Some(release.clone()),
+    };
+    let timeline = Book::default().read(&roots, &Ask::default(), kst(21, 9, 50, 0), KST);
+    let running = lane(&timeline, "ccccccc0");
+    assert!(running.running, "{running:?}");
+    assert_eq!(
+        running
+            .ahead
+            .iter()
+            .map(|stage| stage.name.as_str())
+            .collect::<Vec<_>>(),
+        ["gate", "push"],
+        "nine newer logs hid the full green that plans the stages ahead"
+    );
+    let said = serde_json::to_value(running).expect("serializes");
+    assert_eq!(said["ahead_planned"], serde_json::json!(true));
+    // With no lane that passed every stage anywhere, the answer says it has no plan.
+    std::fs::remove_file(out.join("lane-aaaaaaa0.log")).expect("the green goes");
+    let bare = Book::default().read(&roots, &Ask::default(), kst(21, 9, 50, 0), KST);
+    let said = serde_json::to_value(lane(&bare, "ccccccc0")).expect("serializes");
+    assert_eq!(
+        said["ahead_planned"],
+        serde_json::json!(false),
+        "a lane with no plan was given an estimate that looks whole"
+    );
+}
+
+/// ⑥ The caps are the runner's own numbers, read off the runner's script in
+/// the queue folder — not copies of them. Without such a script: the runner's
+/// last known numbers.
+#[test]
+fn the_caps_are_read_off_the_runners_script_and_fall_back_without_one() {
+    let waiting = |folder: &Path, header: &str| {
+        std::fs::write(
+            folder.join(QUEUE_IN).join("1792543000-w1-t1-g1-build.job"),
+            format!("# who: w1\n# cwd: /x\n{header}"),
+        )
+        .expect("a waiting job");
+    };
+    let capped = |roots: &Roots| {
+        Book::default()
+            .read(roots, &Ask::default(), kst(21, 9, 50, 0), KST)
+            .jobs
+            .iter()
+            .map(|job| job.cap_secs)
+            .collect::<Vec<_>>()
+    };
+    let (_scratch, roots) = lone_queue("", kst(21, 9, 0, 0));
+    let queue = roots.line.clone().expect("a queue");
+    waiting(&queue, "");
+    assert_eq!(
+        capped(&roots),
+        [900],
+        "no script: the runner's last known default"
+    );
+    waiting(&queue, "# cap: 99999\n");
+    assert_eq!(
+        capped(&roots),
+        [1800],
+        "no script: the runner's last known most"
+    );
+    std::fs::write(
+        queue.join("runner10.sh"),
+        "#!/bin/zsh\ncap=$(field cap $job)\n  case \"$cap\" in ''|*[!0-9]*) cap=600;; esac; [ $cap -gt 1200 ] && cap=1200\n",
+    )
+    .expect("the runner's script");
+    assert_eq!(capped(&roots), [1200], "the script's most");
+    waiting(&queue, "# cap: 300\n");
+    assert_eq!(capped(&roots), [300]);
+    waiting(&queue, "# cap: nine\n");
+    assert_eq!(capped(&roots), [600], "the script's default");
+}
+
+/// ⑦ The answer says how each lane ended in the board's own words, so the
+/// window compares none of the lane's: `passed` for the explicit green
+/// verdict, `failed` for red, `ended` otherwise.
+#[test]
+fn a_lane_run_carries_the_result_the_window_reads() {
+    let scratch = copied();
+    let timeline = fixture_reading(scratch.path());
+    let said = serde_json::to_value(&timeline).expect("the answer serializes");
+    let lanes = said["lanes"].as_array().expect("lanes");
+    assert!(!lanes.is_empty());
+    for lane in lanes {
+        let verdict = lane["verdict"].as_str();
+        let want = match (verdict, lane["running"].as_bool()) {
+            (_, Some(true)) => "running",
+            (Some("green"), _) => "passed",
+            (Some("red"), _) => "failed",
+            _ => "ended",
+        };
+        assert_eq!(lane["result"], serde_json::json!(want), "{lane}");
+    }
+}
+
+/// lane.sh's judge_sha can reject an unknown sha before archive. sweep_sha
+/// still logs a successful sweep, then the explicit `== red (reason)` result.
+/// That cleanup must never teach the reader that red means passed.
+fn verdict_fixture() -> Vec<ParsedRun> {
+    let text = std::fs::read_to_string(fixture().join("verdicts/lane-aaaaaaaa.log"))
+        .expect("the scrubbed lane verdict log");
+    lane_runs(&text, kst(21, 8, 4, 46), KST)
+}
+
+#[test]
+fn lane_verdicts_do_not_learn_success_from_cleanup_only_failures() {
+    let parsed = verdict_fixture();
+    let read = |runs: &[&ParsedRun]| {
+        lane_view(runs, None)
+            .into_iter()
+            .map(|run| (run.verdict, run.result))
+            .collect::<Vec<_>>()
+    };
+    let alone = read(&[&parsed[1], &parsed[4]]);
+    let mixed = read(&parsed.iter().collect::<Vec<_>>());
+    eprintln!(
+        "gate failure alone: {}; with cleanup-only failures: {}",
+        alone[0].1, mixed[1].1
+    );
+    assert_eq!(
+        alone,
+        [(Some("red".into()), FAILED), (Some("green".into()), PASSED)]
+    );
+    assert_eq!(
+        mixed[1], alone[0],
+        "a cleanup-only red changed another red's result"
+    );
+    assert_eq!(mixed[4], alone[1], "the true green changed its result");
+    assert_eq!(mixed[0].1, FAILED, "unknown sha ended red");
+    assert_eq!(mixed[2].1, ENDED, "a refusal did not pass");
+    assert_eq!(mixed[3].1, ENDED, "a superseded run did not pass");
+}
+
+#[test]
+fn lane_verdicts_do_not_need_a_successful_neighbor_to_read_red() {
+    let parsed = verdict_fixture();
+    let runs = lane_view(&[&parsed[1]], None);
+    assert_eq!(runs[0].result, FAILED);
+}
+
+#[test]
+fn lane_verdicts_cleanup_only_failures_do_not_plan_a_running_lane() {
+    let parsed = verdict_fixture();
+    let runs = lane_view(&[&parsed[0], &parsed[2], &parsed[3]], None);
+    assert!(
+        lane_plan(&runs).is_empty(),
+        "failed cleanup became a successful lane plan"
+    );
+}
+
+#[test]
+fn lane_verdicts_failed_gate_durations_do_not_enter_successful_history() {
+    let parsed = verdict_fixture();
+    let runs = lane_view(&parsed.iter().collect::<Vec<_>>(), None);
+    assert_eq!(stage_past(&runs).get("gate-root"), Some(&vec![10]));
+}
+
+#[test]
+fn lane_verdicts_a_gate_cleared_by_flakes_is_still_successful() {
+    let mut parsed = verdict_fixture().remove(4);
+    // lane.sh accepts a failed gate once its solo flake judgments pass.
+    // The final green is authoritative even with that gate's nonzero code.
+    for mark in &mut parsed.marks {
+        if let LaneMark::End { name, rc, .. } = mark
+            && name == "gate-root"
+        {
+            *rc = 1;
+        }
+    }
+    let runs = lane_view(&[&parsed], None);
+    assert_eq!(runs[0].result, PASSED);
+    assert_eq!(stage_past(&runs).get("gate-root"), Some(&vec![10]));
+    assert!(lane_plan(&runs).iter().any(|name| name == "publish"));
+}
+
+#[test]
+fn lane_verdicts_an_unknown_outcome_is_not_learned_as_success() {
+    let mut parsed = verdict_fixture().remove(4);
+    for mark in &mut parsed.marks {
+        if let LaneMark::Begin { name, .. } = mark
+            && name == "green"
+        {
+            *name = "unknown-outcome".into();
+        }
+    }
+    let runs = lane_view(&[&parsed], None);
+    assert_eq!(runs[0].result, ENDED);
+    assert!(lane_plan(&runs).is_empty());
 }

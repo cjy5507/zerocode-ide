@@ -2856,6 +2856,7 @@
       "verdict": "green",
       "reason": null,
       "running": false,
+      "result": "passed",
       "stages": [
         {
           "name": "archive",
@@ -2942,7 +2943,8 @@
           "secs": 1
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "607e69e3",
@@ -2952,6 +2954,7 @@
       "verdict": "red",
       "reason": "solo root harness:knowledge run 2 rc=1",
       "running": false,
+      "result": "failed",
       "stages": [
         {
           "name": "archive",
@@ -2989,7 +2992,8 @@
           "secs": 2
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "607e69e3",
@@ -2999,6 +3003,7 @@
       "verdict": "red",
       "reason": "SIGTERM",
       "running": false,
+      "result": "failed",
       "stages": [
         {
           "name": "archive",
@@ -3029,7 +3034,8 @@
           "secs": 4
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "607e69e3",
@@ -3039,6 +3045,7 @@
       "verdict": "green",
       "reason": null,
       "running": false,
+      "result": "passed",
       "stages": [
         {
           "name": "archive",
@@ -3125,7 +3132,8 @@
           "secs": 1
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "c1e90189",
@@ -3135,6 +3143,7 @@
       "verdict": "green",
       "reason": null,
       "running": false,
+      "result": "passed",
       "stages": [
         {
           "name": "archive",
@@ -3221,7 +3230,8 @@
           "secs": 2
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "4e1ce638",
@@ -3231,6 +3241,7 @@
       "verdict": "green",
       "reason": null,
       "running": false,
+      "result": "passed",
       "stages": [
         {
           "name": "archive",
@@ -3317,7 +3328,8 @@
           "secs": 2
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "bba0342d",
@@ -3327,6 +3339,7 @@
       "verdict": "green",
       "reason": null,
       "running": false,
+      "result": "passed",
       "stages": [
         {
           "name": "archive",
@@ -3413,7 +3426,8 @@
           "secs": 1
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "76df2c46",
@@ -3423,6 +3437,7 @@
       "verdict": "green",
       "reason": null,
       "running": false,
+      "result": "passed",
       "stages": [
         {
           "name": "archive",
@@ -3509,7 +3524,8 @@
           "secs": 2
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "3e13aaef",
@@ -3519,6 +3535,7 @@
       "verdict": "green",
       "reason": null,
       "running": false,
+      "result": "passed",
       "stages": [
         {
           "name": "archive",
@@ -3605,7 +3622,8 @@
           "secs": 2
         }
       ],
-      "ahead": []
+      "ahead": [],
+      "ahead_planned": false
     },
     {
       "sha": "fc4abd39",
@@ -3615,6 +3633,7 @@
       "verdict": null,
       "reason": null,
       "running": true,
+      "result": "running",
       "stages": [
         {
           "name": "archive",
@@ -3709,7 +3728,8 @@
             "samples": 5
           }
         }
-      ]
+      ],
+      "ahead_planned": true
     }
   ]
 }

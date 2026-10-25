@@ -155,6 +155,7 @@ mod pane_layout;
 mod pane_runtime;
 mod pane_transcript;
 mod pick_runtime;
+mod plain_read;
 mod preference_runtime;
 mod primary_selection;
 mod proc;

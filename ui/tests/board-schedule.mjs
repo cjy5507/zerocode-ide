@@ -136,6 +136,21 @@ async function moveScheduleLine(page, facts) {
   return readBoardSchedule(page);
 }
 
+/* A lane of the answer changed by `patch` (found by its version), a new revision, and what the view drew
+ * once the moved answer stood. */
+async function patchScheduleLane(page, version, patch) {
+  await page.evaluate(async ({ version, patch }) => {
+    const held = window.__SCHEDULE__;
+    window.__SCHEDULE__ = { ...held, revision: held.revision + 1,
+      lanes: held.lanes.map((run) => (run.version === version ? { ...run, ...patch } : run)) };
+    refreshBoardSchedule();
+    await window.__UNTIL__(() => boardScheduleAnswer.revision === window.__SCHEDULE__.revision, "the moved answer");
+    paintBoardScheduleHosts();
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+  }, { version, patch });
+  return readBoardSchedule(page);
+}
+
 /* Finished worker tasks around `now` (t-71840), each ending the one way the person's photo showed wrong —
  * no landing in the ledger — and an answer saying what git says of them: t-80001 deployed, git merged it
  * seven hours ago; t-80002 nothing to land, verified four hours ago; t-80003 failed, its attempt ended two
@@ -524,6 +539,110 @@ export async function testBoardSchedule(browser, origin, ok) {
     }
     ok("the axis's labels stand apart in 1280px and 640px holders, a week or a day wide", crowded.length === 0,
       JSON.stringify(crowded));
+    /* 좁은 그릇과 큰 글자: 글 폭은 잰다 — 고정한 자리가 아니라 (검토 t-69069 P3 ⑧). 480 px와 360 px의 그릇에서
+     * 다섯 언어의 세 확대가, 그리고 글꼴이 커진 축에서도 글 사이에 4 px 넘는 틈이 서야 한다. */
+    const narrowCrowded = [];
+    for (const big of [false, true]) {
+      await page.evaluate((big) => {
+        document.getElementById("schedule-test-text")?.remove();
+        if (!big) return;
+        const style = document.createElement("style");
+        style.id = "schedule-test-text";
+        style.textContent = ".board-schedule-tick { font-size: 22px !important; }";
+        document.head.append(style);
+      }, big);
+      for (const tongue of ["ko", "en", "ja", "zh", "es"]) {
+        for (const zoom of ["now", "day", "week"]) {
+          for (const width of [480, 360]) {
+            const seen = await page.evaluate(async ({ tongue, zoom, width }) => {
+              setLocale(tongue, { refresh: false, persist: false });
+              const host = document.querySelector("#board-view .task-board-schedule");
+              host.style.width = `${width}px`;
+              const button = document.querySelector(`#board-view [data-schedule-zoom="${zoom}"]`);
+              if (button.getAttribute("aria-pressed") !== "true") {
+                button.click();
+                await window.__UNTIL__(() => !boardScheduleAsking, "the zoom's answer");
+              }
+              paintBoardScheduleHosts();
+              await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+              const boxes = [...host.querySelectorAll(".board-schedule-tick:not(.is-covered)")]
+                .map((tick) => tick.getBoundingClientRect()).sort((a, b) => a.left - b.left);
+              return { count: host.querySelectorAll(".board-schedule-tick").length,
+                gaps: boxes.slice(1).map((box, at) => Math.round(box.left - boxes[at].right)) };
+            }, { tongue, zoom, width });
+            if (seen.count === 0 || seen.gaps.some((gap) => gap <= 4)) narrowCrowded.push({ big, tongue, zoom, width, ...seen });
+          }
+        }
+      }
+    }
+    await page.evaluate(() => {
+      document.getElementById("schedule-test-text")?.remove();
+      setLocale("ko", { refresh: false, persist: false });
+      document.querySelector("#board-view .task-board-schedule").style.width = "";
+    });
+    ok("the axis's labels stand apart in 480px and 360px holders in all five languages, at the type's size and a larger one",
+      narrowCrowded.length === 0, JSON.stringify(narrowCrowded.slice(0, 6)));
+    /* ---- 360 px 창: 좁은 배치에서도 일정의 행이 서고 닿는다 (검토 t-69069 P3 ⑨) ------------------
+     * 창의 좁은 배치는 상황판을 위에 쌓고 그 아래 목록과 파일 칸을 쌓는다 — 높이 800 px 창에서 무대는
+     * 약 350 px, 일정 그릇의 스크롤 칸은 약 190 px다. 일정의 몫은 가로로 넘치지 않고 모든 행이 그 칸을
+     * 스스로 스크롤해 닿는 것이다. 칸이 낮은 까닭은 창의 배치 규칙이라 여기서 고치지 않고 숫자로 남긴다. */
+    await page.setViewportSize({ width: 360, height: 800 });
+    const small = await page.evaluate(async () => {
+      paintBoardScheduleHosts();
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const host = document.querySelector("#board-view .task-board-schedule");
+      const surface = host.closest(".task-board-surface");
+      const rows = [...host.querySelectorAll(".board-schedule-row")];
+      const unreached = [];
+      for (const row of rows) {
+        row.scrollIntoView({ block: "nearest" });
+        const seat = surface.getBoundingClientRect();
+        const box = row.getBoundingClientRect();
+        if (box.top < seat.top - 1 || box.bottom > seat.bottom + 1 || box.width < 200) unreached.push(row.dataset.key);
+      }
+      surface.scrollTop = 0;
+      return {
+        innerWidth, rows: rows.length, unreached: unreached.slice(0, 4),
+        hostScroll: host.scrollWidth, hostClient: host.clientWidth,
+        surfaceScroll: surface.scrollWidth, surfaceClient: surface.clientWidth,
+        surfaceHeight: Math.round(surface.clientHeight),
+      };
+    });
+    await page.screenshot({ path: "output/playwright/board-schedule/dark-window-360.png" });
+    await page.setViewportSize({ width: 1280, height: 860 });
+    ok("in a 360px window the schedule's rows stand, none wider than the holder, and the board's own scroll reaches every one",
+      small.innerWidth === 360 && small.rows > 10 && small.unreached.length === 0
+        && small.hostScroll <= small.hostClient + 1 && small.surfaceScroll <= small.surfaceClient + 1,
+      JSON.stringify(small));
+
+    /* 하루 보기로 돌아와 레인 행을 바꾼 답으로 읽는다. 답의 판이 올라가므로 조용한 박자 시험 뒤에 선다. */
+    await page.evaluate(async () => {
+      document.querySelector('#board-view [data-schedule-zoom="day"]').click();
+      await window.__UNTIL__(() => !boardScheduleAsking, "the day's answer");
+    });
+    /* ---- 레인의 끝 말은 답의 `result`가 말한다: 낱말을 비교하지 않는다 (검토 t-69069 P3 ⑦) ------ */
+    const other = await patchScheduleLane(page, "1.1.82", { verdict: "shipped", result: "passed" });
+    const shipped = laneOf(other.groups.lanes.rows, "1.1.82");
+    ok("a lane the answer says passed reads as done in the board's words, whatever word the lane itself used",
+      shipped?.state === "done" && shipped.said.startsWith("초록 · "), JSON.stringify(shipped));
+    const broke = await patchScheduleLane(page, "1.1.82", { verdict: "aborted", result: "failed" });
+    const failedRun = laneOf(broke.groups.lanes.rows, "1.1.82");
+    ok("a lane the answer says failed reads as failed in the board's words",
+      failedRun?.state === "failed" && failedRun.said.startsWith("빨강 · "), JSON.stringify(failedRun));
+    const wordOnly = await patchScheduleLane(page, "1.1.82", { verdict: "green", result: "ended" });
+    const unknownRun = laneOf(wordOnly.groups.lanes.rows, "1.1.82");
+    ok("a lane the answer says only ended is not called green because it used the word",
+      unknownRun?.state === "idle" && unknownRun.said.startsWith("green · "), JSON.stringify(unknownRun));
+    await patchScheduleLane(page, "1.1.82", { verdict: v82.verdict, result: v82.result });
+
+    /* ---- 레인의 남은 단계가 근거 없이 비면 끝 시각도 근거 없음이다 (검토 t-69069 P3 ⑤) ------- */
+    const planned = laneOf((await readBoardSchedule(page)).groups.lanes.rows, "1.1.83");
+    const bare = await patchScheduleLane(page, "1.1.83", { ahead_planned: false, ahead: running.ahead.slice(0, 1) });
+    const bareLane = laneOf(bare.groups.lanes.rows, "1.1.83");
+    ok("a running lane whose stages ahead no lane planned is drawn dotted, as no estimate; planned it stood on its history",
+      planned?.basis === "history" && bareLane?.basis === "none", JSON.stringify({ planned: planned?.basis, bare: bareLane?.basis }));
+    await patchScheduleLane(page, "1.1.83", { ahead_planned: running.ahead_planned, ahead: running.ahead });
+
     /* ---- 지연 중 꼬리표: 단계가 제 중앙값을 넘으면 끝은 「지금 + 남은 단계의 중앙값」 ---- */
     await page.evaluate(async () => {
       document.querySelector("#board-view .task-board-schedule").style.width = "";
