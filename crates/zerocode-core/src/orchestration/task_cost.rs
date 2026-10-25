@@ -51,7 +51,7 @@ use std::hash::{Hash, Hasher};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{Dispatch, MessageKind, Run};
+use super::{Dispatch, MessageKind, Run, TaskStatus, attempt_time};
 use crate::agent::AgentKind;
 use crate::jev::{self, JevUse, summary};
 use crate::{usage_ledger, usage_stats, usage_stats_codex};
@@ -389,6 +389,10 @@ impl JevBook {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum UsdReason {
+    /// No worker attempted the task: what it cost was spent in the
+    /// coordinator's own conversation, which runs across many tasks and is
+    /// never shared out among them (t-73910). Not zero.
+    CoordinatorConversation,
     /// An attempt ran on a CLI no scan reads: its tokens exist and nothing
     /// here can count them.
     UnsupportedAgent,
@@ -502,12 +506,56 @@ impl JevCost {
     }
 }
 
+/// How a task was carried, read off its attempts and its record (t-73910):
+/// the ledger keeps no column for it, and none is added.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskShape {
+    /// No worker attempted it and it is completed: the coordinator did it in
+    /// its own conversation.
+    Direct,
+    /// Carried by worker attempts: how many distinct workers, and the time
+    /// two or more of its attempts were open at once — `None` while one is
+    /// open ([`attempt_time::TaskTime::attempt_overlap_ms`]).
+    #[serde(rename_all = "camelCase")]
+    Delegated {
+        workers: usize,
+        overlap_ms: Option<i64>,
+    },
+    /// Neither an attempt nor a completion: nothing says how it is carried.
+    #[default]
+    Unknown,
+}
+
+/// [`TaskShape`] of `task_id` in `run`.
+#[must_use]
+pub fn task_shape(run: &Run, task_id: &str) -> TaskShape {
+    let attempts = attempts(run, task_id);
+    if attempts.is_empty() {
+        return if run
+            .task(task_id)
+            .is_some_and(|task| task.status == TaskStatus::Completed)
+        {
+            TaskShape::Direct
+        } else {
+            TaskShape::Unknown
+        };
+    }
+    let workers: HashSet<&str> = attempts.iter().map(|one| one.worker.as_str()).collect();
+    TaskShape::Delegated {
+        workers: workers.len(),
+        overlap_ms: attempt_time::attempt_cover(&attempts).map(|(_, overlap)| overlap),
+    }
+}
+
 /// What one task cost.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCost {
     /// Every attempt at the task, open or ended.
     pub attempts: usize,
+    /// Direct, delegated or unknown ([`task_shape`]).
+    pub shape: TaskShape,
     /// From the first attempt's start to the last one's end, waits included;
     /// `None` while an attempt is open, and for a task never attempted.
     pub wall_ms: Option<i64>,
@@ -540,6 +588,7 @@ pub fn task_cost(
     let attempts = attempts(run, task_id);
     TaskCost {
         attempts: attempts.len(),
+        shape: task_shape(run, task_id),
         wall_ms: wall_ms(&attempts),
         completion_wall_ms: run.task(task_id).and_then(|task| {
             let completed = run.completion_ms(task)?;
@@ -648,6 +697,9 @@ fn generation(
     let mut dollars = 0.0;
     let mut reason: Option<UsdReason> = None;
     let mut worse = |why: UsdReason| reason = Some(reason.map_or(why, |held| held.min(why)));
+    if attempts.is_empty() {
+        worse(UsdReason::CoordinatorConversation);
+    }
     let mut counted = HashSet::new();
     for attempt in attempts {
         let Some(worker) = run.worker(&attempt.worker) else {

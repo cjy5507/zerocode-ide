@@ -194,8 +194,25 @@ pub(crate) struct Timeline {
     /// carries. A task git says nothing of is not here.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) landings: BTreeMap<String, Landed>,
+    /// What the build line ran for each task its jobs' `# task:` lines name
+    /// (t-73910), over the jobs this answer sends. A task no job names is not
+    /// here: its line time is unknown, never zero.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) task_lines: BTreeMap<String, TaskLine>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) log: Option<LogTail>,
+}
+
+/// One task's time on the build line: the jobs that named it and ran to an
+/// end, how many of them were red, and their run time — each job's whole,
+/// never shared out among the tasks it named.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub(crate) struct TaskLine {
+    pub(crate) jobs: u32,
+    pub(crate) red: u32,
+    pub(crate) secs: u64,
+    /// The most tasks one of those jobs named: above 1, the time is a batch's.
+    pub(crate) shared: u32,
 }
 
 /// The build line as a whole: where it was looked for, and the flags its
@@ -249,6 +266,9 @@ pub(crate) struct Job {
     pub(crate) part: Option<String>,
     /// The header's `# what:`, while the job is in the queue.
     pub(crate) what: Option<String>,
+    /// The tasks its header's `# task:` line names ([`tasks_of`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tasks: Vec<String>,
     pub(crate) expected: Option<Expected>,
 }
 
@@ -397,6 +417,9 @@ struct Book {
     landed: u64,
     signature: u64,
     revision: u64,
+    /// The `# task:` line of each ended job's file in `done/`, read once per
+    /// version of it.
+    ended_tasks: HashMap<String, (FileStamp, Vec<String>)>,
 }
 
 impl Book {
@@ -479,6 +502,8 @@ impl Book {
             .unwrap_or(now_ms - DEFAULT_REACH_MS)
             .max(now_ms - REACH_MS);
         let paused = queue.as_ref().is_some_and(|look| look.paused);
+        let mut jobs = self.jobs(queue.as_ref(), from_ms);
+        self.tie_ended(&mut jobs);
         Timeline {
             revision: self.revision,
             unchanged: false,
@@ -494,7 +519,8 @@ impl Book {
                 runner_lanes: self.runner.lanes.iter().copied().collect(),
                 lanes_folder: lanes_folder.as_ref().map(|path| path.display().to_string()),
             },
-            jobs: self.jobs(queue.as_ref(), from_ms),
+            task_lines: task_lines(&jobs),
+            jobs,
             lanes: self
                 .lanes
                 .runs
@@ -552,6 +578,7 @@ impl Book {
             jobs.push(match self.runner.open.get(&queued.name) {
                 Some(started) => Job {
                     what: queued.header.what.clone(),
+                    tasks: queued.header.tasks.clone(),
                     ..self.started_job(&queued.name, started)
                 },
                 // In `run/` with no `RUN` line read: it started when the
@@ -565,6 +592,7 @@ impl Book {
                         cap_secs,
                         start_ms: Some(queued.stamp.changed_ms),
                         what: queued.header.what.clone(),
+                        tasks: queued.header.tasks.clone(),
                         expected: Some(self.runner.expected(named.kind.as_deref(), cap_secs)),
                         ..named
                     }
@@ -580,11 +608,40 @@ impl Book {
                 cap_secs,
                 queued_ms: named.queued_ms.or(Some(queued.stamp.modified_ms)),
                 what: queued.header.what.clone(),
+                tasks: queued.header.tasks.clone(),
                 expected: Some(self.runner.expected(named.kind.as_deref(), cap_secs)),
                 ..named
             });
         }
         jobs
+    }
+
+    /// Ties each ended job to the tasks its file in `done/` names.
+    fn tie_ended(&mut self, jobs: &mut [Job]) {
+        let Some(done) = self.roots.line.as_ref().map(|line| line.join(QUEUE_DONE)) else {
+            return;
+        };
+        let mut seen = HashSet::new();
+        for job in jobs
+            .iter_mut()
+            .filter(|job| job.end_ms.is_some() && one_name(&job.name))
+        {
+            let path = done.join(format!("{}{JOB_SUFFIX}", job.name));
+            let Some(stamp) = stamp(&path) else {
+                continue;
+            };
+            seen.insert(job.name.clone());
+            job.tasks = match self.ended_tasks.get(&job.name) {
+                Some((before, tasks)) if *before == stamp => tasks.clone(),
+                _ => {
+                    let tasks = read_header(&path).tasks;
+                    self.ended_tasks
+                        .insert(job.name.clone(), (stamp, tasks.clone()));
+                    tasks
+                }
+            };
+        }
+        self.ended_tasks.retain(|name, _| seen.contains(name));
     }
 
     /// A job the runner's log says started, still without an end.
@@ -731,6 +788,47 @@ struct Header {
     who: Option<String>,
     what: Option<String>,
     cap: Option<String>,
+    tasks: Vec<String>,
+}
+
+/// The tasks a job's `# task:` line names (t-73910): ledger ids — `t-` and
+/// digits — split on commas. Any other piece is dropped, never guessed at;
+/// `# what:` is the person's words and is not read for one.
+fn tasks_of(said: Option<&str>) -> Vec<String> {
+    let mut tasks: Vec<String> = said
+        .into_iter()
+        .flat_map(|line| line.split(','))
+        .map(str::trim)
+        .filter(|piece| {
+            piece.strip_prefix("t-").is_some_and(|digits| {
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+            })
+        })
+        .map(str::to_string)
+        .collect();
+    tasks.sort();
+    tasks.dedup();
+    tasks
+}
+
+/// Each task's [`TaskLine`] over `jobs`: a job that ran to an end counts its
+/// whole run time to every task it names.
+fn task_lines(jobs: &[Job]) -> BTreeMap<String, TaskLine> {
+    let mut lines: BTreeMap<String, TaskLine> = BTreeMap::new();
+    for job in jobs {
+        let Some(secs) = job.secs else {
+            continue;
+        };
+        let named = u32::try_from(job.tasks.len()).unwrap_or(u32::MAX);
+        for task in &job.tasks {
+            let line = lines.entry(task.clone()).or_default();
+            line.jobs += 1;
+            line.red += u32::from(job.state != PASSED);
+            line.secs += u64::from(secs);
+            line.shared = line.shared.max(named);
+        }
+    }
+    lines
 }
 
 /// A job file in `in/` or `run/`.
@@ -976,6 +1074,7 @@ fn read_header(path: &Path) -> Header {
         who: field("who"),
         what: field("what"),
         cap: field("cap"),
+        tasks: tasks_of(field("task").as_deref()),
     }
 }
 
@@ -1327,6 +1426,7 @@ impl Job {
             gate: parts.gate,
             part: parts.part,
             what: None,
+            tasks: Vec::new(),
             expected: None,
         }
     }

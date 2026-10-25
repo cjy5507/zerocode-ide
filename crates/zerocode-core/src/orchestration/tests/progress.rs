@@ -590,3 +590,36 @@ fn an_attempt_nobody_saw_a_result_of_is_stopped_and_a_reported_failure_is_failed
     assert_eq!(run.progress_of(held).stage, WorkStage::Working);
     assert_eq!(WorkStage::Stopped.word(), "stopped");
 }
+
+/// t-73910 W4-1: every stage says its next step in one place, and the steps a
+/// person acts on are the ones the plan names — a review for a report, a land
+/// for verified work, a ship for landed work, a fresh review for a stale one,
+/// another hand-out for a failure and a restart for a stop, never one for the
+/// other. Work that is over asks for nothing, and what the ledger cannot read
+/// asks for nothing it would have to guess.
+#[test]
+fn every_stage_names_one_next_step_and_no_two_stages_share_a_wrong_one() {
+    let expected = [
+        (WorkStage::Working, NextStep::Wait),
+        (WorkStage::ReportOnly, NextStep::Review),
+        (WorkStage::Failed, NextStep::RetryOrClose),
+        (WorkStage::Stopped, NextStep::RestartOrClose),
+        (WorkStage::Stale, NextStep::ReviewNewHead),
+        (WorkStage::Verified, NextStep::Land),
+        (WorkStage::Merged, NextStep::Ship),
+        (WorkStage::Unknown, NextStep::Unknown),
+    ];
+    for (stage, step) in expected {
+        assert_eq!(stage.next_step(), step, "{stage:?}");
+    }
+    for stage in WorkStage::ALL {
+        if !expected.iter().any(|(named, _)| *named == stage) {
+            assert_eq!(stage.next_step(), NextStep::Over, "{stage:?} is not over");
+        }
+    }
+    let words: std::collections::BTreeSet<String> = NextStep::ALL
+        .iter()
+        .map(|step| serde_json::to_value(step).expect("serializes").to_string())
+        .collect();
+    assert_eq!(words.len(), NextStep::ALL.len(), "two steps share a word");
+}

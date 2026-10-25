@@ -204,13 +204,7 @@ pub fn attempt_time(run: &Run, attempt: &Dispatch) -> AttemptTime {
 pub fn task_time(run: &Run, task: &Task) -> TaskTime {
     let attempts = task_cost::attempts(run, &task.id);
     let wall_ms = task_cost::wall_ms(&attempts);
-    let cover = wall_ms.map(|_| {
-        spread(
-            attempts
-                .iter()
-                .filter_map(|one| Some((one.started_ms, one.ended_ms?))),
-        )
-    });
+    let cover = attempt_cover(&attempts);
     TaskTime {
         task_id: task.id.clone(),
         attempts: attempts.len(),
@@ -331,6 +325,18 @@ fn totals(pieces: &[Piece]) -> (BTreeMap<Hold, i64>, i64, i64) {
         }
     }
     (held, overlap, unknown)
+}
+
+/// The time at least one of `attempts` was open and the time two or more
+/// were, or `None` while one is open ([`task_cost::wall_ms`]).
+pub(super) fn attempt_cover(attempts: &[&Dispatch]) -> Option<(i64, i64)> {
+    task_cost::wall_ms(attempts).map(|_| {
+        spread(
+            attempts
+                .iter()
+                .filter_map(|one| Some((one.started_ms, one.ended_ms?))),
+        )
+    })
 }
 
 /// The time at least one of `spans` was open, and the time two or more were.
