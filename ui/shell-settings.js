@@ -418,6 +418,7 @@ function applyWorkflowSettingsSnapshot(snapshot, first) {
     // The field shows a placeholder for "one is on file" and empties when the
     // person takes it back, so the box never claims to hold what it cannot.
     el("opencode-cookie").value = "";
+    opencodeCookieHand = "none";
     el("opencode-cookie").placeholder = opencodeCookieConfigured
       ? t("settings.opencode.cookieHeld", "저장됨 — 새 값을 붙여넣으면 바뀝니다")
       : "auth=Fe26.2**…";
