@@ -59,7 +59,9 @@ fn fake_cli(shape: &Shape, boot: &str) -> String {
         // A CLI that is up already throws nothing away.
         ":".to_string()
     } else {
-        format!("dd of=/dev/null bs=1 </dev/tty 2>/dev/null & D=$!; sleep {boot}; kill $D 2>/dev/null; wait $D 2>/dev/null")
+        format!(
+            "dd of=/dev/null bs=1 </dev/tty 2>/dev/null & D=$!; sleep {boot}; kill $D 2>/dev/null; wait $D 2>/dev/null"
+        )
     };
     format!(
         "stty raw -echo; printf '\\033[?2004h'; sleep 0.2; printf '{glyph} '; {discard}; \
@@ -105,7 +107,11 @@ fn launch(shape: &Shape, boot: &str) -> Journey {
     let mut pasted = 0;
     let give_up = Instant::now() + Duration::from_secs(40);
     let ended = loop {
-        assert!(Instant::now() < give_up, "the journey never ended: {:?}", all_text(&mut lane));
+        assert!(
+            Instant::now() < give_up,
+            "the journey never ended: {:?}",
+            all_text(&mut lane)
+        );
         let pumped = lane.pump();
         if let Some(running) = delivery.as_mut() {
             let listening_for = running.marker();
@@ -124,7 +130,10 @@ fn launch(shape: &Shape, boot: &str) -> Journey {
             match running.poll(seen, Instant::now()) {
                 DeliveryStep::Waiting => {}
                 DeliveryStep::Write(bytes) | DeliveryStep::Submit(bytes) => {
-                    if bytes.windows(BRIEFING.len()).any(|slice| slice == BRIEFING.as_bytes()) {
+                    if bytes
+                        .windows(BRIEFING.len())
+                        .any(|slice| slice == BRIEFING.as_bytes())
+                    {
                         pasted += 1;
                     }
                     lane.write_input(&bytes).expect("write to child");
@@ -156,7 +165,11 @@ fn launch(shape: &Shape, boot: &str) -> Journey {
         std::thread::sleep(Duration::from_millis(10));
     };
     let screen = all_text(&mut lane);
-    Journey { ended, pasted, screen }
+    Journey {
+        ended,
+        pasted,
+        screen,
+    }
 }
 
 /// The loss itself: the first briefing goes into a CLI that is still booting
@@ -167,8 +180,18 @@ fn launch(shape: &Shape, boot: &str) -> Journey {
 fn a_briefing_the_booting_cli_threw_away_is_typed_again_and_then_taken() {
     for shape in [&CLAUDE, &CODEX] {
         let journey = launch(shape, "1.5");
-        assert_eq!(journey.ended, WatchStep::Taken, "{}: {:?}", shape.name, journey.screen);
-        assert_eq!(journey.pasted, 2, "{}: the briefing was typed {} time(s)", shape.name, journey.pasted);
+        assert_eq!(
+            journey.ended,
+            WatchStep::Taken,
+            "{}: {:?}",
+            shape.name,
+            journey.screen
+        );
+        assert_eq!(
+            journey.pasted, 2,
+            "{}: the briefing was typed {} time(s)",
+            shape.name, journey.pasted
+        );
         assert_eq!(
             journey.screen.matches("T-STAMP-7").count(),
             1,
@@ -185,8 +208,18 @@ fn a_briefing_the_booting_cli_threw_away_is_typed_again_and_then_taken() {
 fn a_cli_that_never_takes_its_briefing_is_reported_undelivered_after_one_retype() {
     for shape in [&CLAUDE, &CODEX] {
         let journey = launch(shape, "forever");
-        assert_eq!(journey.ended, WatchStep::Undelivered, "{}: {:?}", shape.name, journey.screen);
-        assert_eq!(journey.pasted, 2, "{}: typed {} time(s), not twice", shape.name, journey.pasted);
+        assert_eq!(
+            journey.ended,
+            WatchStep::Undelivered,
+            "{}: {:?}",
+            shape.name,
+            journey.screen
+        );
+        assert_eq!(
+            journey.pasted, 2,
+            "{}: typed {} time(s), not twice",
+            shape.name, journey.pasted
+        );
     }
 }
 
@@ -196,7 +229,17 @@ fn a_cli_that_never_takes_its_briefing_is_reported_undelivered_after_one_retype(
 fn a_briefing_that_was_taken_the_first_time_is_not_typed_again() {
     for shape in [&CLAUDE, &CODEX] {
         let journey = launch(shape, "0");
-        assert_eq!(journey.ended, WatchStep::Taken, "{}: {:?}", shape.name, journey.screen);
-        assert_eq!(journey.pasted, 1, "{}: typed {} time(s)", shape.name, journey.pasted);
+        assert_eq!(
+            journey.ended,
+            WatchStep::Taken,
+            "{}: {:?}",
+            shape.name,
+            journey.screen
+        );
+        assert_eq!(
+            journey.pasted, 1,
+            "{}: typed {} time(s)",
+            shape.name, journey.pasted
+        );
     }
 }
