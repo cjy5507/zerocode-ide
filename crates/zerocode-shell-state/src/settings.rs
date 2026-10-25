@@ -377,7 +377,7 @@ impl SettingsRepository {
 
         Ok(RepositoryLock {
             _process: process,
-            _file: file,
+            file,
         })
     }
 
@@ -581,7 +581,19 @@ impl SettingsError {
 
 struct RepositoryLock {
     _process: MutexGuard<'static, ()>,
-    _file: File,
+    file: File,
+}
+
+impl Drop for RepositoryLock {
+    /// Ends the flock itself rather than leaving it to the close. A launch
+    /// that forks before it execs holds a copy of this descriptor until the
+    /// exec, and a close ends the lock only when every copy is gone; an
+    /// unlock ends it for all of them (t-73907: a child that never reached
+    /// its exec kept three new windows in `flock`). The file goes before the
+    /// process mutex, which the field order alone would release first.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 enum CommitBehavior {
@@ -1719,7 +1731,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let repository = SettingsRepository::new(directory.path());
         let held = repository.lock().unwrap();
-        let inherited = held._file.try_clone().unwrap();
+        let inherited = held.file.try_clone().unwrap();
         drop(held);
         let next =
             crate::durable_file::private_lock_file(&directory.path().join(".settings.lock"))
