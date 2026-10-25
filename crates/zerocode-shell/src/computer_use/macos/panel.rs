@@ -64,7 +64,7 @@ impl Mailbox {
             if let Some(retry) = retry {
                 let (held, timeout) = self
                     .changed
-                    .wait_timeout(pending, retry_after)
+                    .wait_timeout_while(pending, retry_after, |pending| pending.latest.is_none())
                     .unwrap_or_else(PoisonError::into_inner);
                 pending = held;
                 if timeout.timed_out() && pending.latest.is_none() {
@@ -97,6 +97,8 @@ impl Delivery {
         mut connect: impl FnMut(&PanelEndpoint) -> Option<Wire>,
         mut ensure: impl FnMut() -> bool,
     ) {
+        // A new presentation supersedes a busy retry, including share end.
+        self.retry = None;
         let target = update.state.get("target").and_then(Value::as_str);
         let generation = update
             .state
@@ -123,6 +125,15 @@ impl Delivery {
         let Some(endpoint) = self.endpoint.as_ref() else {
             if !self.startup_attempted && target.is_some() {
                 self.startup_attempted = ensure();
+                if !self.startup_attempted {
+                    // try_lock was busy: no launch happened. Retry the last
+                    // state even if losing this helper was the last notice.
+                    self.retry = Some(Update {
+                        state: update.state,
+                        endpoint: None,
+                        helper_lost: false,
+                    });
+                }
             }
             return;
         };

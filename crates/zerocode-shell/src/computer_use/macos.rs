@@ -258,6 +258,9 @@ impl StopWatch {
             Ok(watch) => Some(watch),
             Err(why) => {
                 super::guard::watch_lost(&format!("the waiting request could not start: {why}"));
+                // No watch thread exists to withdraw this endpoint. Wake the
+                // panel worker after the guard has recorded the lost watch.
+                forget_panel(socket);
                 None
             }
         }
@@ -440,7 +443,7 @@ impl Session {
     pub(super) fn panel_watch_ended(&self) -> bool {
         self.watching
             .as_ref()
-            .is_some_and(|watch| watch.ended.load(std::sync::atomic::Ordering::Acquire))
+            .is_none_or(|watch| watch.ended.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// Connect to a launched helper and shake hands — the second half of
