@@ -865,6 +865,11 @@ fn number_as_usize(number: &serde_json::Number) -> Option<usize> {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ToolSearchOutput {
+    /// Read before the matches: where web pages go, when the answer names
+    /// `Computer` and the window's work browser is installed (t-74223).
+    /// Absent otherwise, so every other answer reads as it always has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub matches: Vec<String>,
     /// Full definitions (description + input schema) of the matched tools —
     /// the payload a deferred-tool lookup exists for. Empty when no match
@@ -2618,6 +2623,7 @@ fn execute_memory_write(input: &MemoryWriteInput, ctx: &ToolContext) -> Result<V
             "`body` must not be empty".to_string(),
         ));
     }
+    refuse_kept_credentials(&[("summary", &input.summary), ("body", &input.body)])?;
     // The model writing this memory is the one the session is running right
     // now, and the shared context cell already carries it (a `/model` switch
     // refreshes every registry clone through it). Reading it here is what keeps
@@ -2695,6 +2701,35 @@ fn local_would_hide_global(slug: &str) -> String {
          otherwise use another slug. Explain this to the person in the language of the person's \
          request."
     )
+}
+
+/// Refuses text kept to be read again — a memory, a skill — when a line of it
+/// carries a credential VALUE (t-74223). The lines are read as the report
+/// keeper reads them ([`zerocode_core::credential::mask_named_values`]): a
+/// value something names (`password=…`, `Authorization: Bearer …`) is one; a
+/// sentence that only names a credential is prose the next session needs and
+/// saves, and so does a word that merely looks like a token (`disk-guard`
+/// holds `sk-`). The verdict names fields and lines, never what is on them.
+pub(super) fn refuse_kept_credentials(fields: &[(&str, &str)]) -> Result<(), ToolError> {
+    let carrying = fields
+        .iter()
+        .flat_map(|(field, text)| {
+            text.split('\n')
+                .enumerate()
+                .filter(|(_, line)| zerocode_core::credential::mask_named_values(line) != *line)
+                .map(move |(index, _)| format!("`{field}` line {}", index + 1))
+        })
+        .collect::<Vec<_>>();
+    if carrying.is_empty() {
+        return Ok(());
+    }
+    Err(ToolError::Declined(format!(
+        "nothing was saved: {} carries a credential value, and text kept for reuse must not. \
+         A credential belongs in the keychain or the work browser's signed-in session; where a \
+         saved procedure needs one, write a `{{{{name}}}}` parameter in its place. Write it again \
+         without the value, and do not repeat the value to the person.",
+        carrying.join(", ")
+    )))
 }
 
 fn body_with_hand_written_metadata(body: &str, active_model: Option<&str>) -> String {

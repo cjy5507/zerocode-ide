@@ -377,6 +377,11 @@ fn bash_targeted_tests_skip_branch_preflight() {
 
 #[test]
 fn repl_executes_python_code_in_a_persistent_kernel() {
+    // Held for the whole test: the kernel's python resolves through `PATH`,
+    // which the tests that hold `env_lock` change (t-21146, t-74362).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let result = run_tool(
         "REPL",
         &json!({"language": "python", "code": "print(1 + 1)", "timeout_ms": 20000}),
@@ -418,6 +423,11 @@ fn given_unsupported_language_when_repl_then_rejects_with_error() {
 
 #[test]
 fn given_timeout_ms_when_repl_blocks_then_returns_timeout_error() {
+    // Held for the whole test: the kernel's python resolves through `PATH`,
+    // which the tests that hold `env_lock` change (t-21146, t-74362).
+    let _env = env_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let result = run_tool(
         "REPL",
         &json!({

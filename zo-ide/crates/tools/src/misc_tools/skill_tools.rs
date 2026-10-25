@@ -377,6 +377,11 @@ pub(crate) fn execute_skill_distill(
         .filter(|value| !value.is_empty())
         .unwrap_or(&slug)
         .to_string();
+    super::refuse_kept_credentials(&[
+        ("name", &name),
+        ("description", &input.description),
+        ("body", &input.body),
+    ])?;
 
     let cwd = std::env::current_dir()?;
     let skill_dir = cwd.join(".zo").join("skills").join(&slug);
