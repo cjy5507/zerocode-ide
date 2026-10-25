@@ -13,7 +13,36 @@ fn build_computer_use_helper() {
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
     );
     let package = manifest.join("native/computer-use-macos");
-    announce_tree(&package);
+    let signing = manifest.join("../../tools/signing");
+    let inputs = helper_inputs(&package);
+    for path in &inputs {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    for script in [
+        "ensure-local-identity.sh",
+        "sign-computer-use.sh",
+        "sign-developer-id.sh",
+    ] {
+        println!("cargo:rerun-if-changed={}", signing.join(script).display());
+    }
+    println!("cargo:rerun-if-env-changed=ZEROCODE_SIGNING_KEYCHAIN");
+    println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
+    /* Leave the signed bundle alone when nothing it was made from changed.
+     *
+     * `tauri_build` below announces the bundle's own files as resources, and
+     * cargo compares them with the moment this script STARTED. A script that
+     * rebuilds and re-signs the bundle on every run therefore leaves files
+     * newer than its own start, so the next cargo call runs it again and
+     * recompiles the crate (about 50 s each, measured 2026-10-21). Writing
+     * nothing on an unchanged input settles it after one extra run. */
+    let release = package.join(".build/release");
+    let destination = release.join("ZeroCode Computer Use.app");
+    let stamp = release.join("computer-use-inputs.hash");
+    let fingerprint = helper_fingerprint(&manifest, &signing, &inputs);
+    if destination.is_dir() && std::fs::read_to_string(&stamp).is_ok_and(|seen| seen == fingerprint)
+    {
+        return;
+    }
     let status = std::process::Command::new("swift")
         .args(["build", "-c", "release", "--package-path"])
         .arg(&package)
@@ -21,10 +50,8 @@ fn build_computer_use_helper() {
         .expect("launch swift build for Computer Use");
     assert!(status.success(), "Computer Use Swift build failed");
 
-    let release = package.join(".build/release");
     let binary = release.join("zerocode-computer-use-macos");
     assert!(binary.is_file(), "Computer Use helper binary was not built");
-    let destination = release.join("ZeroCode Computer Use.app");
     let app = release.join("ZeroCode Computer Use.staging.app");
     let executable = app
         .join("Contents/MacOS")
@@ -50,16 +77,6 @@ fn build_computer_use_helper() {
     }
     std::fs::write(app.join("Contents/Info.plist"), computer_use_info_plist())
         .expect("write Computer Use Info.plist");
-    let signing = manifest.join("../../tools/signing");
-    for script in [
-        "ensure-local-identity.sh",
-        "sign-computer-use.sh",
-        "sign-developer-id.sh",
-    ] {
-        println!("cargo:rerun-if-changed={}", signing.join(script).display());
-    }
-    println!("cargo:rerun-if-env-changed=ZEROCODE_SIGNING_KEYCHAIN");
-    println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
     let signed = std::process::Command::new("bash")
         .arg(manifest.join("../../tools/signing/sign-computer-use.sh"))
         .arg(&app)
@@ -75,24 +92,70 @@ fn build_computer_use_helper() {
         std::fs::rename(&destination, &previous).expect("move previous helper bundle");
     }
     std::fs::rename(&app, &destination).expect("publish signed helper bundle");
+    std::fs::write(&stamp, fingerprint).expect("record Computer Use helper inputs");
 }
 
-fn announce_tree(root: &std::path::Path) {
-    println!("cargo:rerun-if-changed={}", root.display());
+/// What the signed bundle is made from, as one string: every input file's
+/// path and bytes, the signing scripts, the icon, the signing environment
+/// and the generated Info.plist.
+fn helper_fingerprint(
+    manifest: &std::path::Path,
+    signing: &std::path::Path,
+    inputs: &[std::path::PathBuf],
+) -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+    let extra = [
+        "ensure-local-identity.sh",
+        "sign-computer-use.sh",
+        "sign-developer-id.sh",
+    ]
+    .map(|script| signing.join(script));
+    let icon = manifest.join("icons/icon.icns");
+    for path in inputs.iter().chain(&extra).chain([&icon]) {
+        path.hash(&mut fingerprint);
+        // A folder has no bytes; a missing file hashes as absent, so adding
+        // or removing one changes the answer too.
+        std::fs::read(path).ok().hash(&mut fingerprint);
+    }
+    for key in ["ZEROCODE_SIGNING_KEYCHAIN", "APPLE_SIGNING_IDENTITY"] {
+        std::env::var_os(key).hash(&mut fingerprint);
+    }
+    computer_use_info_plist().hash(&mut fingerprint);
+    format!("{:016x}", fingerprint.finish())
+}
+
+/// What `swift build` writes under the package, so it is never an input.
+const HELPER_OUTPUT_DIRS: &[&str] = &[".build", ".swiftpm"];
+
+/// The helper package's inputs, never its own output, sorted.
+///
+/// `root` itself is left out: cargo scans a watched folder to its leaves,
+/// `.build` included, and this script writes the release build and the signed
+/// bundle there, so the folder is always newer than the last run. The files at
+/// the top and every folder below (which moves when a source is added or
+/// removed) stay in. A new file added straight under `root` is the one change
+/// this cannot see; it has to come with a `Package.swift` edit to be built
+/// anyway.
+fn helper_inputs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
-        return;
+        return found;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.file_name().is_some_and(|name| name == ".build") {
+        if path
+            .file_name()
+            .is_some_and(|name| HELPER_OUTPUT_DIRS.iter().any(|output| name == *output))
+        {
             continue;
         }
-        if path.is_dir() {
-            announce_tree(&path);
-        } else {
-            println!("cargo:rerun-if-changed={}", path.display());
-        }
+        let below = path.is_dir().then(|| helper_inputs(&path));
+        found.push(path);
+        found.extend(below.into_iter().flatten());
     }
+    found.sort();
+    found
 }
 
 fn computer_use_info_plist() -> String {
@@ -216,10 +279,13 @@ fn stamp_identity() {
             "cargo:rerun-if-changed={}",
             root.join("ui").join(name).display()
         );
-        println!(
-            "cargo:rerun-if-changed={}",
-            root.join("ui/dist").join(name).display()
-        );
+        // Only a dist that exists: cargo reads a missing watch as "changed"
+        // and re-runs this script on every invocation. A dist made later
+        // moves `ui/`, which `ui_digest` watches to its leaves.
+        let dist = root.join("ui/dist").join(name);
+        if dist.is_file() {
+            println!("cargo:rerun-if-changed={}", dist.display());
+        }
     }
     println!("cargo:rustc-env=ZEROCODE_COMMIT={}", commit(&manifest));
     println!("cargo:rustc-env=ZEROCODE_UI_DIGEST={}", ui_digest(&root));
@@ -349,7 +415,8 @@ fn digest_of(root: &std::path::Path, watch: bool) -> String {
     let mut digest = sha2::Sha256::new();
     for name in names {
         let path = root.join(name);
-        if watch {
+        // A file that is not there is never announced (see `stamp_identity`).
+        if watch && path.is_file() {
             println!("cargo:rerun-if-changed={}", path.display());
         }
         let Ok(bytes) = std::fs::read(&path) else {
