@@ -248,6 +248,9 @@ function buildInboxView() {
     inboxNode("div", "inbox-tools", tabsGroup, unread));
 
   const list = inboxNode("ol", "inbox-list");
+  // A row opens its letter, and a read leaves the ledger's ack (`ackInboxBatch`): an agent pressing in the
+  // window must not read for the person, so the rows carry the mark the desk's whole panel carries (t-74825).
+  list.dataset.personOnly = "";
   list.setAttribute("role", "listbox");
   list.setAttribute("aria-label", t("inbox.list.label", "편지 목록"));
   list.dataset.i18nAria = "inbox.list.label";
