@@ -45,7 +45,10 @@ const GUARDED_LOCKS: &[(&str, &str)] = &[
     ),
     ("zerocode-core/src/artifact_publish.rs", "fn lock_store("),
     ("zerocode-core/src/jev/custom/store.rs", "fn lock("),
-    ("zerocode-core/src/jev/project_rules/store.rs", "fn lock_file("),
+    (
+        "zerocode-core/src/jev/project_rules/store.rs",
+        "fn lock_file(",
+    ),
     ("zerocode-core/src/jev/count.rs", "fn lock_hours("),
     (
         "zerocode-core/src/settings_file_lock.rs",
@@ -351,7 +354,9 @@ fn window_files() -> Vec<WindowFile> {
                     (child, dir)
                 } else {
                     let mut dir = module_dir.clone();
-                    for (_, _, outer) in inline.iter().filter(|(from, to, _)| *from < at && at < *to) {
+                    for (_, _, outer) in
+                        inline.iter().filter(|(from, to, _)| *from < at && at < *to)
+                    {
                         dir.push(outer);
                     }
                     let flat = dir.join(format!("{module}.rs"));
@@ -371,7 +376,10 @@ fn window_files() -> Vec<WindowFile> {
             }
             for (at, included) in includes(&code, &text) {
                 let child = here.join(included);
-                let dir = child.parent().expect("an included file's folder").to_path_buf();
+                let dir = child
+                    .parent()
+                    .expect("an included file's folder")
+                    .to_path_buf();
                 pending.push((child, dir, test_only || in_test(at)));
             }
             files.push(WindowFile {

@@ -222,7 +222,11 @@ fn the_door_only_adds_a_flag() {
     let touches = |door: &str, spelling: &str| door.matches(spelling).count();
     for (name, body, allowed) in [
         ("quiet_command_with_env", with_env, [".envs("].as_slice()),
-        ("quiet_command_in_env", in_env, [".env_clear(", ".envs("].as_slice()),
+        (
+            "quiet_command_in_env",
+            in_env,
+            [".env_clear(", ".envs("].as_slice(),
+        ),
     ] {
         for spelling in [
             ".arg(",
