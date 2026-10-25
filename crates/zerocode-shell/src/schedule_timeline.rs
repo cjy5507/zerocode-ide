@@ -383,8 +383,8 @@ struct Book {
     signature: u64,
     revision: u64,
     /// The `# task:` line of each ended job's file in `done/`, read once per
-    /// version of it.
-    ended_tasks: HashMap<String, (FileStamp, Vec<String>)>,
+    /// version of it; no stamp while the file is not there yet.
+    ended_tasks: BTreeMap<String, (Option<FileStamp>, Vec<String>)>,
 }
 
 impl Book {
@@ -420,7 +420,11 @@ impl Book {
             .map(|release| release.join(crate::update_runtime::STATUS_FILE));
         let status_stamp = status_file.as_deref().and_then(stamp);
         self.lanes.look(lanes_folder.as_deref(), now_ms);
-        let signature = signature_of(queue.as_ref(), &self.lanes, status_stamp, self.landed);
+        let read_so_far = signature_of(queue.as_ref(), &self.lanes, status_stamp, self.landed);
+        // With the ended jobs' files as they stand: one that came after its
+        // runner line, or was written again, moves the revision (the review R2,
+        // P2-4).
+        let signature = with_ties(read_so_far, self.ties_now());
         if signature != self.signature || self.revision == 0 {
             self.signature = signature;
             self.revision += 1;
@@ -458,6 +462,8 @@ impl Book {
         let paused = queue.as_ref().is_some_and(|look| look.paused);
         let mut jobs = self.jobs(queue.as_ref(), from_ms);
         self.tie_ended(&mut jobs);
+        // What this answer tied is no change the next time.
+        self.signature = with_ties(read_so_far, self.ties_now());
         Timeline {
             revision: self.revision,
             unchanged: false,
@@ -581,21 +587,32 @@ impl Book {
             .filter(|job| job.end_ms.is_some() && one_name(&job.name))
         {
             let path = done.join(format!("{}{JOB_SUFFIX}", job.name));
-            let Some(stamp) = stamp(&path) else {
-                continue;
-            };
+            let now = stamp(&path);
             seen.insert(job.name.clone());
             job.tasks = match self.ended_tasks.get(&job.name) {
-                Some((before, tasks)) if *before == stamp => tasks.clone(),
+                Some((before, tasks)) if *before == now => tasks.clone(),
                 _ => {
-                    let tasks = read_header(&path).tasks;
+                    let tasks = now.map(|_| read_header(&path).tasks).unwrap_or_default();
                     self.ended_tasks
-                        .insert(job.name.clone(), (stamp, tasks.clone()));
+                        .insert(job.name.clone(), (now, tasks.clone()));
                     tasks
                 }
             };
         }
         self.ended_tasks.retain(|name, _| seen.contains(name));
+    }
+
+    /// The ended jobs' files in `done/` as they stand now: each one the last
+    /// answer tied, or found missing, by name and stamp.
+    fn ties_now(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        if let Some(done) = self.roots.line.as_ref().map(|line| line.join(QUEUE_DONE)) {
+            for name in self.ended_tasks.keys() {
+                name.hash(&mut hasher);
+                stamp(&done.join(format!("{name}{JOB_SUFFIX}"))).hash(&mut hasher);
+            }
+        }
+        hasher.finish()
     }
 
     /// A job the runner's log says started, still without an end.
@@ -754,6 +771,13 @@ fn tasks_of(said: Option<&str>) -> Vec<String> {
     tasks.sort();
     tasks.dedup();
     tasks
+}
+
+/// A reading's signature with the ended jobs' files' ([`Book::ties_now`]).
+fn with_ties(read: u64, ties: u64) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (read, ties).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Each task's [`TaskLine`] over `jobs`: a job that ran to an end counts its
