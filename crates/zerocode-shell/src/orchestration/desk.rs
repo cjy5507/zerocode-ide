@@ -540,6 +540,11 @@ pub(crate) struct DeskTask {
     /// sends, and read once for a completed task, whose stage it decides.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) progress: Option<WorkProgress>,
+    /// Whether the commit its work landed as (`progress.merge_head`) is on
+    /// the remote's default branch, as the beat last asked git (t-73910 W4-2,
+    /// [`crate::remote_landing`]); `None` until it was asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) on_remote: Option<crate::remote_landing::OnRemote>,
     /// When its work moved (t-67482): the task board's schedule draws the row
     /// on the time axis from these. Asked of the rows the desk sends; `None`
     /// for a task nobody has carried yet.
@@ -953,6 +958,7 @@ pub(crate) fn desk_snapshot(
                         .and_then(|parent| run.task(parent))
                         .map(|parent| parent.display_name().to_string()),
                     progress,
+                    on_remote: None,
                     gate: run
                         .pending_gate_on(&task.id)
                         .map(|gate| desk_gate(run, gate, &examined)),

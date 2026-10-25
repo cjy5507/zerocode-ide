@@ -474,6 +474,8 @@ pub(crate) async fn turn_failed_retry(
     webview: tauri::Webview,
     run: String,
     worker: String,
+    dispatch: String,
+    letter: String,
 ) -> Result<serde_json::Value, PressRefusal> {
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -482,6 +484,7 @@ pub(crate) async fn turn_failed_retry(
             &host,
             &run,
             &worker,
+            (&dispatch, &letter),
             crate::now_epoch_ms(),
         )
     })

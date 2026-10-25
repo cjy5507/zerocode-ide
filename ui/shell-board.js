@@ -1321,7 +1321,8 @@ async function pressTurnFailed(view, row) {
   deskTurnSaid.set(key, held);
   paintCoordinatorDesk(view);
   try {
-    await invoke("turn_failed_retry", { run: row.run, worker });
+    // The failure the person was shown, not the one standing when the answer lands (the review R2, P2-10).
+    await invoke("turn_failed_retry", { run: row.run, worker, dispatch: failed.dispatch, letter: failed.letter });
     held.ok = true;
     held.text = t("quotaWall.retried", "이어서 하라는 한 줄을 넣었습니다");
     refreshDeskLedger();

@@ -170,3 +170,53 @@ fn a_press_at_a_failed_turn_is_one_continuation_for_the_failure_that_stands() {
         "a press on a failure that no longer stands was taken"
     );
 }
+
+/// The review R2, P2-10: the confirm shows failure A, and while it stands open
+/// the attempt fails again (B). The press carries what the person was shown,
+/// so its approval is refused as a failure that no longer stands, and nothing
+/// is planned to be typed at B; a press shown B is planned.
+#[test]
+fn a_confirm_shown_one_failure_is_refused_once_another_failure_stands() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name shown");
+    let (worker, pane) = a_worker(&mut bench);
+    let shown = bench
+        .ledger
+        .worker_turn_failed(
+            ("team-1", &pane),
+            9_000,
+            "api failed after 3 attempts",
+            9_100,
+        )
+        .expect("failure A");
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|one| one.dispatch.clone())
+        .expect("the attempt");
+    let newer = bench
+        .ledger
+        .worker_turn_failed(
+            ("team-1", &pane),
+            19_000,
+            "api failed after 3 attempts",
+            19_100,
+        )
+        .expect("failure B");
+    assert_ne!(shown, newer);
+    let run = &bench.ledger.runs()[0];
+    assert!(
+        matches!(
+            resume_plan(
+                run,
+                &worker,
+                &person_turn_marker_at(&dispatch, &shown),
+                19_200
+            ),
+            Err(NotResumed::Refused(WallRefusal::TurnNotNow { .. }))
+        ),
+        "an approval of failure A was planned against failure B"
+    );
+    let marker = person_turn_marker_at(&dispatch, &newer);
+    assert_eq!(person_turn_marker(run, &worker), Some(marker.clone()));
+    assert!(resume_plan(run, &worker, &marker, 19_200).is_ok());
+}
