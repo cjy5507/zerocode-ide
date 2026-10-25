@@ -6359,6 +6359,10 @@ fn every_browser_verb_has_its_evidence_row() {
             "open" | "close" | "marks" => Some(false),
             "goto" | "eval" | "click" | "type" | "press" | "fill" | "wait" | "screenshot"
             | "viewport" | "scroll" | "find" => Some(true),
+            // `upload` is a form write like `fill`: a step with its frame. Its
+            // reply carries the file count and whether the page's file list
+            // matches by name and size; the bytes never enter a reply or log.
+            "upload" => Some(true),
             other => panic!("`{other}` joined VERBS without an evidence row in this table"),
         };
         assert_eq!(

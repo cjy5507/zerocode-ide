@@ -979,7 +979,7 @@ mod tests {
             bench::{Bench, command, walk_of},
         };
         use std::io::{BufRead, BufReader, Write};
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         struct Driver {
             child: std::process::Child,
@@ -1014,7 +1014,7 @@ mod tests {
             }
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut child = Command::new("node")
+        let mut child = crate::proc::quiet_command("node")
             .arg(root.join("ui/tests/expense-workflow-driver.mjs"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

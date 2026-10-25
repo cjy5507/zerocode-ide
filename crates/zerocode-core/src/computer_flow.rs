@@ -2131,8 +2131,29 @@ mod tests {
             ]))
             .is_err()
         );
+        // The tab flag rides recipe-run alone too, as the label a saved
+        // browser step replays in (a fresh tab, not the recorded one).
+        let tabbed = parse_command(&words(&[
+            "recipe-run",
+            "--name",
+            "pay",
+            "--tab",
+            "browser-2",
+        ]))
+        .expect("parsed");
+        assert_eq!(tabbed.params["tab"], json!("browser-2"));
+        assert!(
+            parse_command(&words(&[
+                "recipe-show",
+                "--name",
+                "pay",
+                "--tab",
+                "browser-2"
+            ]))
+            .is_err()
+        );
         assert!(usage().contains(
-            "recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--rescue] [--json]"
+            "recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--tab <browser-label>] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--rescue] [--json]"
         ));
         assert!(
             parse_command(&words(&["recipe-show", "--name", "pay", "--confirm", "x"])).is_err()
