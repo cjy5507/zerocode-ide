@@ -4167,8 +4167,13 @@
           </p>
         </header>
 
+        <nav class="settings-action-row connection-navigation" aria-label="모델 설정" data-i18n-aria="settings.connections.navigation">
+          <button type="button" class="btn" data-connection-nav="catalog" aria-pressed="true" data-i18n="settings.apiRouters.title">모델 연결</button>
+          <button type="button" class="btn" data-connection-nav="usage" aria-pressed="false" data-i18n="settings.connections.usage">모델 사용</button>
+          <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
+        </nav>
         <!-- Connected routers list -->
-        <div class="settings-card">
+        <div class="settings-card" data-connection-view="catalog">
           <div class="settings-subhead settings-subhead--acts">
             <div>
               <h3 class="settings-subhead-title">
@@ -4179,36 +4184,62 @@
                 주소와 인증은 연결에 한 번 등록합니다. 같은 연결을 코딩과 판단에서 함께 사용할 수 있습니다.
               </p>
             </div>
+            <button type="button" class="btn btn--primary" id="connections-add" data-i18n="settings.connections.add">연결 추가</button>
           </div>
           <div class="agent-list" id="router-provider-list"></div>
           <p class="settings-hint" id="router-provider-note"></p>
+          <p class="settings-hint" data-i18n="settings.connections.registrationHint">연결을 등록해도 현재 사용 모델은 바뀌지 않습니다. 모델 사용에서 용도에 맞게 선택하세요.</p>
         </div>
 
-        <section class="connections-usage" aria-labelledby="connection-usage-title">
+        <section class="connections-usage" data-connection-view="usage" hidden aria-labelledby="connection-usage-title">
           <h3 class="settings-subhead-title" id="connection-usage-title" data-i18n="settings.connections.usesTitle">용도별 모델</h3>
+          <div class="settings-action-row connection-scenarios">
+            <button type="button" class="btn" data-connection-scenario="local" data-i18n="settings.connections.scenarioLocal">로컬 판단 + 외부 코딩</button>
+            <button type="button" class="btn" data-connection-scenario="remote" data-i18n="settings.connections.scenarioRemote">외부 판단</button>
+            <button type="button" class="btn" data-connection-scenario="shared" data-i18n="settings.connections.scenarioShared">같은 모델 공유</button>
+          </div>
+          <p class="settings-hint" id="connection-scenario-status" role="status"></p>
+          <div id="connection-comparison"></div>
           <div class="connection-roles" data-connection-roles="all"></div>
+          <p class="settings-hint" data-i18n="settings.connections.boundary">같은 연결을 공유해도 판단 문항·기준과 기능별 기록·적용 설정은 유지합니다. 형식 확인은 판단 정확도 검증이 아닙니다.</p>
           <p class="settings-hint" id="connections-sync-status" role="status" aria-live="polite"></p>
           <div class="settings-action-row">
             <button type="button" class="btn" id="connections-managed" data-i18n="settings.connections.managed">앱 관리 로컬 모델 · Jev</button>
-            <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
           </div>
         </section>
 
         <!-- Add or configure router -->
-        <div class="settings-card" id="router-card">
+        <div class="settings-card" id="router-card" data-connection-view="add" hidden>
           <div class="settings-subhead settings-subhead--acts">
             <div>
-              <h3 class="settings-subhead-title" data-i18n="settings.apiRouters.addTitle">라우터 추가 / 설정</h3>
-              <p class="settings-subhead-desc" data-i18n="settings.apiRouters.addAbout">
-                프리셋을 선택하거나 직접 입력하여 API 키를 키체인에 저장하고 연결을 시험합니다.
-              </p>
+              <h3 class="settings-subhead-title" data-i18n="settings.connections.add">연결 추가</h3>
+              <p class="settings-subhead-desc" id="connection-registration-note" data-i18n="settings.connections.registrationHint">연결을 등록해도 현재 사용 모델은 바뀌지 않습니다. 모델 사용에서 용도에 맞게 선택하세요.</p>
             </div>
             <span class="settings-state" id="router-card-state" data-state="unchecked"
                   role="status" aria-live="polite"></span>
           </div>
 
+          <ol class="connection-steps" aria-label="연결 순서" data-i18n-aria="settings.connections.steps">
+            <li data-i18n="settings.connections.information">연결 정보</li>
+            <li data-i18n="settings.apiRouters.modelsTitle">사용할 모델 선택</li>
+            <li data-i18n="settings.connections.usage">모델 사용</li>
+          </ol>
+          <label class="settings-field" for="connection-location">
+            <span class="settings-label" data-i18n="settings.connections.location">연결 위치</span>
+            <select class="settings-input" id="connection-location">
+              <option value="remote" data-i18n="settings.connections.locationRemote">외부 서버</option>
+              <option value="local" data-i18n="settings.connections.locationLocal">이 컴퓨터 · 실행 중인 로컬 서버</option>
+              <option value="managed" data-i18n="settings.connections.locationManaged">이 컴퓨터 · 앱에서 관리</option>
+              <option value="jev" data-i18n="settings.connections.locationJev">Jev 서비스</option>
+            </select>
+          </label>
+          <div id="connection-service-action" hidden>
+            <p class="settings-hint" data-i18n="settings.connections.serviceHint">앱 관리 모델과 Jev는 기존 관리 화면에서 설정합니다. 실행 중인 서버는 주소로 연결하세요.</p>
+            <button type="button" class="btn" id="connection-open-service" data-i18n="settings.connections.configure">설정</button>
+          </div>
+          <div id="connection-server-fields">
           <label class="settings-field" data-field="md" for="router-preset-select">
-            <span class="settings-label" data-i18n="settings.apiRouters.preset">프리셋 선택</span>
+            <span class="settings-label" data-i18n="settings.judgment.protocol">연결 방식</span>
             <select class="settings-input" id="router-preset-select"></select>
           </label>
 
@@ -4234,7 +4265,16 @@
                    autocomplete="off" spellcheck="false" placeholder="https://openrouter.ai/api/v1" />
           </label>
 
-          <label class="settings-field" data-field="lg" for="router-key-input">
+          <label class="settings-field" for="connection-auth">
+            <span class="settings-label" data-i18n="settings.connections.authentication">인증</span>
+            <select class="settings-input" id="connection-auth">
+              <option value="new" data-i18n="settings.connections.newKey">키 저장 후 참조</option>
+              <option value="saved" data-i18n="settings.connections.savedKey" disabled>이 연결의 저장된 키 참조</option>
+              <option value="none" data-i18n="settings.connections.noKey">키 불필요</option>
+            </select>
+          </label>
+          <p class="settings-hint" id="connection-auth-note" role="status"></p>
+          <label class="settings-field" data-field="lg" id="connection-key-field" for="router-key-input">
             <span class="settings-field-copy">
               <span class="settings-label" data-i18n="settings.apiRouters.apiKey">API 키</span>
               <span class="settings-row-desc" id="router-keychain-hint" data-i18n="settings.apiRouters.keychainHint">
@@ -4299,6 +4339,10 @@
           <div class="settings-action-row">
             <button class="btn" id="router-test-btn" type="button" data-i18n="settings.apiRouters.testConnection">연결 시험</button>
             <button class="btn btn--primary" id="router-save-btn" type="button" disabled data-i18n="settings.apiRouters.save">저장</button>
+          </div>
+          </div>
+          <div class="settings-action-row">
+            <button class="btn" type="button" data-connection-nav="catalog" data-i18n="settings.connections.back">연결 목록으로</button>
           </div>
         </div>
 

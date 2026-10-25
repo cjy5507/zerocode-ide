@@ -18389,6 +18389,8 @@ button.helper-sib:hover {
  * take turns in one place and wear different floors read as two different
  * kinds of place. */
 .settings-view {
+  container: settings-view / inline-size;
+  flex-wrap: wrap;
   position: absolute;
   inset: 0;
   /* Above the tab strip and whatever document is staged under it, and below
@@ -51472,10 +51474,27 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .connection-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding-block: var(--space-4); border-block-end: var(--rule-width) solid var(--edge-rule); }
 .connection-row-copy { min-width: 0; flex: 1 1 240px; }
 .connection-row-copy > p { margin-block: var(--space-1); overflow-wrap: break-word; }
+.connection-navigation { flex-wrap: wrap; margin-block-end: var(--space-5); }
+.connection-steps { display: flex; flex-wrap: wrap; gap: var(--space-5); padding-inline-start: var(--space-5); color: var(--ink-mist); font: var(--type-label-12); }
+.connection-models { flex-basis: 100%; min-width: 0; }
+.connection-delete-note { flex-basis: 100%; min-width: 0; }
+.connection-delete-note .settings-action-row, .connection-scenarios, .connection-formats { flex-wrap: wrap; }
+.connection-role .settings-badge { white-space: normal; }
+.connection-model { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); border-block-start: var(--rule-width) solid var(--edge-rule); }
+.connection-model > span { overflow-wrap: break-word; min-width: 0; }
+.connection-row .agent-row-name { white-space: normal; word-break: keep-all; }
+@container settings-view (max-width: 640px) {
+  .settings-rail { width: 100%; max-height: calc(var(--space-6) * 5); flex-basis: 100%; border-right: 0; border-bottom: var(--rule-width) solid var(--edge-rule); }
+  .settings-rail-top { padding-block: var(--space-2); }
+  .settings-frame { flex-basis: 100%; min-height: 0; padding-block-start: var(--space-4); }
+  .settings-frame > .settings-pane { padding-inline: var(--space-3); }
+}
 .connection-role .settings-action-row, .connection-row .settings-action-row { flex-wrap: wrap; margin-inline-start: 0; }
 .connection-result { font: var(--type-copy-13); color: var(--ink-mist); word-break: keep-all; }
 .connection-result[data-state="failed"] { color: var(--signal-halt-ink); }
 @container settings (max-width: 640px) {
+  [data-connection-view] .settings-subhead--acts { flex-wrap: wrap; padding-inline: 0; }
+  [data-connection-view] .agent-list { padding-inline: 0; }
   .connection-roles { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); }
   .connection-row { align-items: start; }
   .connection-role .btn { white-space: normal; }

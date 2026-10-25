@@ -3559,6 +3559,7 @@ const pass = (name, detail = "") => results.push({ name, pass: true, detail });
 const fail = (name, detail) => results.push({ name, pass: false, detail: String(detail) });
 
 async function test(name, run) {
+  if (process.env.SETTINGS_FILTER && !new RegExp(process.env.SETTINGS_FILTER).test(name)) return;
   if (process.env.SETTINGS_TRACE) process.stderr.write(`settings START ${name}\n`);
   try {
     const detail = await run();
@@ -5652,6 +5653,7 @@ await test("a_timed_out_watch_still_rereads_the_gauge: 기다림이 시간을 �
 
 await test("라우터 추가→연결 시험→모델 셋 켬→settings.json providers 한 항목", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
 
   assert(
     await pageA.locator('.settings-pane[data-pane="api-routers"]').isVisible(),
@@ -5763,6 +5765,7 @@ await test("라우터 추가→연결 시험→모델 셋 켬→settings.json pr
 
 await test("라우터 모델 표의 머리칸 하나로 전체 선택·전체 해제", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "pick-all");
   await pageA.fill("#router-base-url-input", origin);
@@ -5805,6 +5808,7 @@ await test("라우터 모델 표의 머리칸 하나로 전체 선택·전체 �
 
 await test("라우터 연결 변경은 이전 모델 목록과 늦게 도착한 응답을 무효화한다", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "probe-generation");
   await pageA.fill("#router-base-url-input", origin);
@@ -5844,6 +5848,7 @@ await test("라우터 연결 변경은 이전 모델 목록과 늦게 도착한 
 
 await test("라우터 저장 중 이름이나 모델을 바꾸면 옛 저장 응답이 새 편집을 저장됐다고 하지 않는다", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "saved-draft");
   await pageA.fill("#router-base-url-input", origin);
@@ -5907,6 +5912,7 @@ async function addRouterRow(page, { preset, name, key }) {
 
 await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘이 서로의 키를 덮지 않고, 지우기는 제 키만", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   backend.zoSettings.providers = [];
   backend.keychain.clear();
   await pageA.evaluate(() => refreshApiRouters());
@@ -5955,6 +5961,7 @@ await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘
 
 await test("키체인이 없는 컴퓨터: 판이 키체인을 약속하지 않고 키 칸을 내주지 않으며, 키 없는 저장은 된다", async () => {
   await openSettings(pageA, "api-routers");
+  await pageA.evaluate(() => modelConnectionsController.add());
   backend.zoSettings.providers = [];
   backend.keychain.clear();
   backend.routerKeychainUnavailable = true;
@@ -14049,6 +14056,113 @@ await test("a profile card imports cookies from a file", async () => {
   return "file import summary + source line";
 });
 
+await test("model connection scenes: catalog separates registration, models and use", async () => {
+  const before = clone(backend.zoSettings);
+  try {
+    backend.zoSettings.providers = [{ name: "긴 한글 연결 이름으로 표시하는 외부 서버", base_url: "https://gateway.example.com/v1", models: ["choice-model", "coding-model"], requires_auth: false, connection: { id: "scene-external", generation: 1 } },
+      { name: "Local fixture", base_url: "http://127.0.0.1:8080/v1", models: ["local-model"], requires_auth: false, connection: { id: "scene-local", generation: 1 } }];
+    await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => refreshApiRouters());
+    assert(await pageA.locator("#router-card").isHidden(), "the add form still occupies the catalog");
+    const remote = pageA.locator('[data-connection-id="scene-external"]');
+    assert((await remote.textContent()).includes("외부 서버"), "the connection has no location");
+    assert(!(await remote.textContent()).includes("연결됨"), "registration invented a live server status");
+    await remote.locator("[data-connection-models]").click();
+    assertEqual(await remote.locator(".connection-model").count(), 2, "the model list is not expandable");
+    assert(await pageA.locator('[data-connection-id="jev"]').isVisible(), "Jev is outside the catalog");
+    assert((await pageA.locator('[data-connection-id="scene-local"]').textContent()).includes("실행 중인 로컬 서버"));
+    if (process.env.CONNECTION_SCENE_SHOTS) {
+      await mkdir(process.env.CONNECTION_SCENE_SHOTS, { recursive: true });
+      for (const theme of ["dark", "light"]) {
+        await setQualityTheme(pageA, theme);
+        for (const width of [320, 768, 1440]) {
+          await pageA.setViewportSize({ width, height: 960 });
+          await settlePaint(pageA);
+          await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, `catalog-${theme}-${width}.png`), animations: "disabled" });
+          const overflow = await pageA.evaluate(() => { const pane = document.querySelector('.settings-pane[data-pane="api-routers"]'); const right = pane.getBoundingClientRect().right; return [...pane.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > right + 1).map(node => [node.tagName, node.className, node.id, node.getBoundingClientRect().width]); });
+          assert(!overflow.length, "the catalog overflows its pane", overflow);
+        }
+      }
+    }
+  } finally {
+    backend.zoSettings = before;
+    await pageA.setViewportSize({ width: 1280, height: 900 });
+    await pageA.evaluate(() => refreshApiRouters());
+  }
+});
+
+await test("model connection scenes: add chooses location and authentication before listing models", async () => {
+  await openSettings(pageA, "api-routers");
+  await pageA.click("#connections-add");
+  assert(await pageA.locator("#router-card").isVisible());
+  assertEqual(await pageA.locator("#connection-location option").count(), 4, "location choices omit a source");
+  await pageA.selectOption("#connection-location", "local");
+  await pageA.fill("#router-base-url-input", "http://127.0.0.1:8080/v1");
+  await pageA.selectOption("#connection-auth", "none");
+  assert(await pageA.locator("#router-key-input").isHidden(), "keyless setup still requests a key");
+  assert((await pageA.locator("#connection-registration-note").textContent()).includes("현재 사용 모델은 바뀌지"));
+  const calls = backend.calls.length;
+  await pageA.selectOption("#connection-location", "managed");
+  assert(await pageA.locator("#connection-service-action").isVisible());
+  assert(await pageA.locator("#connection-server-fields").isHidden());
+  assertEqual(backend.calls.slice(calls).filter(call => ["save_api_router", "select_model_connection", "test_router_connection"].includes(call.command)).length, 0, "choosing a source made a server request");
+  await pageA.selectOption("#connection-location", "remote");
+  await pageA.evaluate(() => modelConnectionsController.show("catalog"));
+});
+
+await test("model connection scenes: assignment compares drafts and requires a current format check", async () => {
+  const before = clone(backend.zoSettings);
+  try {
+    backend.zoSettings.providers = [
+      { name: "Local fixture", base_url: "http://127.0.0.1:8080/v1", models: ["local-model"], requires_auth: false, connection: { id: "local-scene", generation: 1 } },
+      { name: "External fixture", base_url: "https://gateway.example.com/v1", models: ["external-model"], requires_auth: false, connection: { id: "external-scene", generation: 1 } },
+    ];
+    await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => refreshApiRouters());
+    await pageA.locator('[data-connection-nav="usage"]').click();
+    const calls = backend.calls.length;
+    await pageA.click('[data-connection-scenario="local"]');
+    const selected = await pageA.evaluate(() => [modelConnectionsController.selected("coding"), modelConnectionsController.selected("judgment")]);
+    assertEqual(selected.map(row => row.id), ["external-scene", "local-scene"]);
+    assertEqual(backend.calls.slice(calls).filter(call => call.command === "select_model_connection").length, 0);
+    const judgment = pageA.locator('[data-connection-roles="all"] [data-role="judgment"]');
+    assert(await judgment.locator('[data-connection-apply]').isDisabled(), "unchecked draft can be applied");
+    await judgment.locator('[data-connection-check]').click();
+    await pageA.waitForFunction(() => !modelConnectionsController.busy);
+    assert(await judgment.locator('[data-connection-apply]').isEnabled());
+    assertEqual(await judgment.locator('[data-format-state="ready"]').count(), 3);
+    await pageA.click('[data-connection-scenario="shared"]');
+    assert(await judgment.locator('[data-connection-apply]').isDisabled(), "changed assignment reused its check");
+    assertEqual(await pageA.evaluate(() => modelConnectionsController.selected("coding").id), "external-scene");
+    assert((await pageA.locator("#connection-comparison").textContent()).includes("External fixture"));
+    if (process.env.CONNECTION_SCENE_SHOTS) await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "assignment-draft.png"), animations: "disabled" });
+  } finally {
+    backend.zoSettings = before;
+    await pageA.evaluate(() => { modelConnectionsController.drafts.clear(); modelConnectionsController.results.clear(); modelConnectionsController.show("catalog"); return refreshApiRouters(); });
+  }
+});
+
+await test("model connection scenes: deletion explains used roles beside the connection", async () => {
+  const before = clone(backend.zoSettings);
+  try {
+    backend.zoSettings.providers = [{ name: "Used fixture", base_url: "https://gateway.example.com/v1", models: ["fixture-model"], requires_auth: false, connection: { id: "used-scene", generation: 1 } }];
+    backend.zoSettings.smart = { ...backend.zoSettings.smart, codingConnection: { id: "used-scene", generation: 1, model: "fixture-model", protocol: "openai_json" } };
+    await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => { modelConnectionsController.show("catalog"); return refreshApiRouters(); });
+    const from = backend.calls.length;
+    await pageA.locator('[data-connection-id="used-scene"] .account-drop').click();
+    const note = pageA.locator('[data-connection-id="used-scene"] .connection-delete-note');
+    assert(await note.isVisible(), "deletion advice is outside the connection");
+    assert((await note.textContent()).includes("코딩"));
+    assert(await note.getByRole("button", { name: "모델 사용", exact: true }).isVisible(), "deletion offers no route to replace the role");
+    assertEqual(backend.calls.slice(from).filter(call => call.command === "remove_api_router").length, 0);
+    if (process.env.CONNECTION_SCENE_SHOTS) await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "delete-used.png"), animations: "disabled" });
+  } finally {
+    backend.zoSettings = before;
+    await pageA.evaluate(() => refreshApiRouters());
+  }
+});
+
 await test("shared connection selection sends only its reference and preserves the active model on refusal", async () => {
   const before = clone(backend.zoSettings);
   try {
@@ -14102,6 +14216,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
   await pageA.setViewportSize({ width: 2000, height: 1200 });
   try {
     await openSettings(pageA, "api-routers");
+    await pageA.evaluate(() => modelConnectionsController.add());
     backend.keychain.delete(TYPESAFE_SERVICE);
     delete backend.zoSettings.smart;
     backend.zoSettings.providers = [];
