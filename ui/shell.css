@@ -46867,6 +46867,13 @@ button.jev-token:hover {
 
 }
 
+/* The shorthand above out-specifies the room every select reserves for its
+ * arrow (`select`'s own padding-inline-end), so the screen asks for it again
+ * with the control's own number (t-58297). */
+.skills-view select {
+  padding-inline-end: var(--select-room);
+}
+
 .skills-search {
   flex: 1;
 

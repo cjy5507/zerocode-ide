@@ -335,31 +335,32 @@ use cmd::{
     remote_workspaces, remove_api_router, remove_claude_account, remove_codex_account,
     remove_project, remove_remote_server, remove_remote_workspace, remove_ssh_host,
     remove_type_value_key, remove_typesafe_key, remove_worktree, render_mermaid, reopen_onboarding,
-    reorder_projects, repo_trust_standing, request_developer_permission, reset_agent_launch,
-    reset_computer_use_permissions, resize_lane, resolve_claude_account_identity, resolve_mr_base,
-    resolve_pr_base, resource_snapshot, respond_permission, resume_line, resume_session,
-    resume_vault_session, reveal_board_agent, reveal_run_evidence, reveal_skill,
-    reveal_vault_session, run_automation, save_agent_launch, save_agent_launch_env,
-    save_api_router, save_automation, save_clipboard_image, save_diff_note, save_launch_recipe,
-    save_onboarding_step, save_pane_layouts, save_quick_command, save_remote_server,
-    save_remote_workspace, save_ssh_host, save_stage_layouts, save_type_value_key,
-    save_typesafe_key, save_worktree_prefs, schedule_timeline, scm_fetch, scm_numstat,
-    scm_observer_dismiss, scm_observer_health, scm_observer_retry, scm_observer_shown, scm_pull,
-    scm_push, scm_status, scm_tree_rows, search_files, search_text, second_brain_export_html,
-    second_brain_graph, second_brain_link, second_brain_open, second_brain_page,
-    second_brain_paths, second_brain_relate, second_brain_seat_recalls, second_brain_setup,
-    second_brain_status, select_claude_account, select_codex_account, select_model_connection,
-    send_prompt, session_info, set_active_worktree, set_agent_activity_display,
-    set_agent_permission_mode, set_agent_teams_mode, set_app_font_family,
-    set_browser_default_profile, set_browser_default_zoom, set_browser_home_page,
-    set_browser_open_tabs, set_browser_restore_tabs, set_browser_search_engine, set_browser_visits,
-    set_browser_workspace_mode, set_claude_autoswitch_mode, set_clipboard_image,
-    set_compact_worktree_cards, set_computer_awake_mode, set_computer_confirm,
-    set_computer_generator_road, set_computer_input_policy, set_computer_live_reflex,
-    set_confirm_close_pinned, set_conversation_focus_view, set_crash_watchdog,
-    set_ctrl_tab_order_mode, set_default_agent, set_default_task_source, set_diff_side_by_side,
-    set_dock_badge, set_external_worktree_visibility, set_finish_notification_mode,
-    set_guide_dismissed, set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
+    reorder_projects, repo_trust_standing, report_terminal_colors, request_developer_permission,
+    reset_agent_launch, reset_computer_use_permissions, resize_lane,
+    resolve_claude_account_identity, resolve_mr_base, resolve_pr_base, resource_snapshot,
+    respond_permission, resume_line, resume_session, resume_vault_session, reveal_board_agent,
+    reveal_run_evidence, reveal_skill, reveal_vault_session, run_automation, save_agent_launch,
+    save_agent_launch_env, save_api_router, save_automation, save_clipboard_image, save_diff_note,
+    save_launch_recipe, save_onboarding_step, save_pane_layouts, save_quick_command,
+    save_remote_server, save_remote_workspace, save_ssh_host, save_stage_layouts,
+    save_type_value_key, save_typesafe_key, save_worktree_prefs, schedule_timeline, scm_fetch,
+    scm_numstat, scm_observer_dismiss, scm_observer_health, scm_observer_retry, scm_observer_shown,
+    scm_pull, scm_push, scm_status, scm_tree_rows, search_files, search_text,
+    second_brain_export_html, second_brain_graph, second_brain_link, second_brain_open,
+    second_brain_page, second_brain_paths, second_brain_relate, second_brain_seat_recalls,
+    second_brain_setup, second_brain_status, select_claude_account, select_codex_account,
+    select_model_connection, send_prompt, session_info, set_active_worktree,
+    set_agent_activity_display, set_agent_permission_mode, set_agent_teams_mode,
+    set_app_font_family, set_browser_default_profile, set_browser_default_zoom,
+    set_browser_home_page, set_browser_open_tabs, set_browser_restore_tabs,
+    set_browser_search_engine, set_browser_visits, set_browser_workspace_mode,
+    set_claude_autoswitch_mode, set_clipboard_image, set_compact_worktree_cards,
+    set_computer_awake_mode, set_computer_confirm, set_computer_generator_road,
+    set_computer_input_policy, set_computer_live_reflex, set_confirm_close_pinned,
+    set_conversation_focus_view, set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent,
+    set_default_task_source, set_diff_side_by_side, set_dock_badge,
+    set_external_worktree_visibility, set_finish_notification_mode, set_guide_dismissed,
+    set_harness_settings, set_hidden_shortcuts, set_hidden_task_sources,
     set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
@@ -955,6 +956,11 @@ struct ShellRuntime {
     /// by the path the sidebar row carries. A workspace click resolves its
     /// path here first and asks git only for a path this answer does not name.
     catalog_owners: Mutex<HashMap<String, (Orchestrator, Worktree)>>,
+    /// The colours the renderer last said it paints terminals with (t-73869).
+    /// `None` until it says: a shell nobody has dressed answers no colour
+    /// query rather than an invented one. Every new shell is dressed with it
+    /// in `hold_terminal`; every open shell when the renderer reports.
+    terminal_colors: Mutex<Option<Arc<zerocode_pty::TerminalColors>>>,
     /// The shells a window is PREVIEWING — the board's cards, which show every
     /// running agent at once.
     ///
@@ -1453,6 +1459,12 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn terminal_colors(&self) -> MutexGuard<'_, Option<Arc<zerocode_pty::TerminalColors>>> {
+        self.terminal_colors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Take a freshly spawned shell into the window's keeping.
     ///
     /// The one door, because there are SEVEN spawn sites — the float, a tab, an
@@ -1474,6 +1486,13 @@ impl ShellRuntime {
         pty.terminal_mut()
             .grid_mut()
             .set_scrollback_cap(prefs.scrollback);
+        // The colours the window paints, when it has said (t-73869): a shell
+        // born after the renderer reported must answer `OSC 10/11/12 ; ?`
+        // from its first line. Before the first report there is nothing to
+        // tell, and the report itself dresses the shells already open.
+        if let Some(colors) = self.terminal_colors().clone() {
+            pty.terminal_mut().grid_mut().set_colors(colors);
+        }
         self.terminals().insert(term, pty);
     }
 
@@ -1861,6 +1880,7 @@ trait ShellStateExt {
     fn watched_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
     fn catalog_owners(&self) -> MutexGuard<'_, HashMap<String, (Orchestrator, Worktree)>>;
     fn previewed_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
+    fn terminal_colors(&self) -> MutexGuard<'_, Option<Arc<zerocode_pty::TerminalColors>>>;
     fn hold_terminal(&self, term: TermId, pty: impl Into<PtyHandle>);
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger>;
     fn quiet_rings(&self) -> MutexGuard<'_, zerocode_core::notify::Quiet<TermId>>;
@@ -1994,6 +2014,10 @@ impl ShellStateExt for AppState {
 
     fn previewed_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>> {
         self.shell_runtime().previewed_terms()
+    }
+
+    fn terminal_colors(&self) -> MutexGuard<'_, Option<Arc<zerocode_pty::TerminalColors>>> {
+        self.shell_runtime().terminal_colors()
     }
 
     fn hold_terminal(&self, term: TermId, pty: impl Into<PtyHandle>) {
@@ -2474,6 +2498,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         next_term: Mutex::new(FLOAT_TERM + 1),
         watched_terms: Mutex::new(HashMap::new()),
         catalog_owners: Mutex::new(HashMap::new()),
+        terminal_colors: Mutex::new(None),
         previewed_terms: Mutex::new(HashMap::new()),
         subscriptions: Arc::new(Mutex::new(HashSet::new())),
         channels: Arc::new(Mutex::new(HashMap::new())),
@@ -3367,6 +3392,7 @@ fn main() -> ExitCode {
             terminal_prefs,
             terminal_windows_status,
             preview_warp_terminal_themes,
+            report_terminal_colors,
             preview_ghostty_import,
             apply_ghostty_import,
             set_terminal_prefs,

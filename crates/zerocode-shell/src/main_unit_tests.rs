@@ -29606,3 +29606,92 @@ fn managed_judgment_boot_restore_has_one_setup_call() {
 mod keybinding_input_tests {
     include!("keybinding_input_tests.rs");
 }
+
+/// What the renderer reports for one built-in theme: the same strings it
+/// paints with, so a test drives the pane with the real catalog.
+fn reported_theme(name: &str) -> TerminalColorsReport {
+    let theme = terminal_theme_catalog()
+        .get(name)
+        .expect("a built-in terminal theme");
+    TerminalColorsReport {
+        foreground: theme.foreground.clone(),
+        background: theme.background.clone(),
+        cursor: theme.cursor.clone(),
+        ansi: [
+            &theme.black,
+            &theme.red,
+            &theme.green,
+            &theme.yellow,
+            &theme.blue,
+            &theme.magenta,
+            &theme.cyan,
+            &theme.white,
+            &theme.bright_black,
+            &theme.bright_red,
+            &theme.bright_green,
+            &theme.bright_yellow,
+            &theme.bright_blue,
+            &theme.bright_magenta,
+            &theme.bright_cyan,
+            &theme.bright_white,
+        ]
+        .into_iter()
+        .cloned()
+        .collect(),
+    }
+}
+
+/// What a program in the pane gets back for `ask`, once the pane was told
+/// `report` the way `hold_terminal` and `report_terminal_colors` tell it.
+fn answer_after_telling(report: &TerminalColorsReport, ask: &[u8]) -> Vec<u8> {
+    let colors = report.to_colors().expect("the window's own colours parse");
+    let mut terminal = zerocode_pty::Terminal::new(4, 20);
+    terminal.grid_mut().set_colors(Arc::new(colors));
+    terminal.feed(ask);
+    terminal.grid_mut().take_replies()
+}
+
+#[test]
+fn a_pane_answers_the_colours_the_window_paints_it_with() {
+    let dracula = reported_theme("Dracula");
+    // #282a36 / #f8f8f2 / #f8f8f2, and bright blue #d6acff, sixteen bits a
+    // channel and ST-terminated — the form `report_color` writes.
+    assert_eq!(
+        answer_after_telling(&dracula, b"\x1b]11;?\x1b\\"),
+        b"\x1b]11;rgb:2828/2a2a/3636\x1b\\"
+    );
+    assert_eq!(
+        answer_after_telling(&dracula, b"\x1b]10;?\x1b\\\x1b]12;?\x1b\\"),
+        b"\x1b]10;rgb:f8f8/f8f8/f2f2\x1b\\\x1b]12;rgb:f8f8/f8f8/f2f2\x1b\\"
+    );
+    assert_eq!(
+        answer_after_telling(&dracula, b"\x1b]4;12;?\x1b\\"),
+        b"\x1b]4;12;rgb:d6d6/acac/ffff\x1b\\"
+    );
+}
+
+#[test]
+fn a_theme_switch_changes_the_background_a_pane_answers() {
+    let mut terminal = zerocode_pty::Terminal::new(4, 20);
+    for (theme, expected) in [
+        ("Dracula", &b"\x1b]11;rgb:2828/2a2a/3636\x1b\\"[..]),
+        (TERM_THEME_LIGHT, &b"\x1b]11;rgb:ffff/ffff/ffff\x1b\\"[..]),
+    ] {
+        let colors = reported_theme(theme)
+            .to_colors()
+            .expect("the window's own colours parse");
+        terminal.grid_mut().set_colors(Arc::new(colors));
+        terminal.feed(b"\x1b]11;?\x1b\\");
+        assert_eq!(terminal.grid_mut().take_replies(), expected, "{theme}");
+    }
+}
+
+#[test]
+fn a_report_that_is_not_a_whole_palette_dresses_no_pane() {
+    let mut short = reported_theme("Dracula");
+    short.ansi.pop();
+    assert!(short.to_colors().is_err(), "fifteen colours were taken");
+    let mut named = reported_theme("Dracula");
+    named.background = "navy".to_string();
+    assert!(named.to_colors().is_err(), "a colour name was taken");
+}
