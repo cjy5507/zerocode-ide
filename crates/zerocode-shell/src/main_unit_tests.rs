@@ -24660,9 +24660,8 @@ mod update_command_edges {
 
     #[test]
     fn a_dead_port_is_a_network_word_and_a_non_json_body_is_malformed() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead = format!("http://{}", listener.local_addr().unwrap());
-        drop(listener);
+        let silent = crate::test_host::quiet_ports::QuietPort::silent();
+        let dead = format!("http://{}", silent.addr());
         assert_eq!(
             tauri::async_runtime::block_on(fetch_releases(&dead)).unwrap_err(),
             FailureWord::Network
