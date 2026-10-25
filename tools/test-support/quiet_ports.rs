@@ -2,39 +2,108 @@
 //!
 //! One source file, `#[path]`-included by every test binary that needs it, so
 //! there is one way to pick a port and not one per crate (t-74864).
+//!
+//! A port a test frees and asks for again, or a port it wants nobody to answer
+//! on, cannot be held by a socket: macOS drops the SYN sent to a bound socket
+//! that does not listen (the connect times out instead of being refused,
+//! measured on macOS 26), and a socket that does listen answers. So the port is
+//! held by a lease instead, from two sides:
+//!
+//! - **Outside every dynamic range.** `bind(0)` and every outgoing connection
+//!   draw from the OS's dynamic range, so a port under it is out of their
+//!   reach however long it is free. Where that range starts is asked of the OS
+//!   (`/proc`, `sysctl`, `netsh`), not assumed, since an administrator can move
+//!   it.
+//! - **Locked among the tests.** The lease is an advisory lock on a file named
+//!   for the port, taken before the port is bound and kept until the lease is
+//!   dropped. Another test process, or another thread, asking for a port skips
+//!   one whose lock is held. The OS lets go of the lock if the process dies, so
+//!   nothing is left to clean up.
+//!
+//! What stays open is a program outside the tests that binds that exact port
+//! inside the gap. A port taken that way fails the bind the claim tries first,
+//! and the claim moves on.
 
 #![allow(dead_code)]
 
+use std::collections::hash_map::RandomState;
+use std::fs::{File, OpenOptions};
+use std::hash::BuildHasher;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
-const FIRST: u16 = 20_000;
-const SPAN: u16 = 10_000;
-static STEP: AtomicU32 = AtomicU32::new(0);
+/// Where the dynamic range is taken to start when the OS does not say: the
+/// lowest start any platform ships (Linux 32768; macOS and Windows 49152).
+const UNREPORTED_DYNAMIC_START: u16 = 32_768;
+/// How many ports a claim draws from, counted down from the dynamic range.
+const BAND_SPAN: u16 = 4_096;
+/// Under this the ports are privileged.
+const LOWEST_PORT: u16 = 1_024;
+/// The folder under the temp dir that holds the lock files.
+const LOCK_DIR: &str = "zerocode-test-ports";
 
 /// A port a test may count on until the value is dropped.
 pub struct QuietPort {
     port: u16,
+    _lock: File,
 }
 
 /// The ports a claim draws from when the OS says its dynamic range starts at
 /// `reported`.
-pub fn band_for(_reported: Option<u16>) -> Range<u16> {
-    FIRST..FIRST + SPAN
+pub fn band_for(reported: Option<u16>) -> Range<u16> {
+    let end = reported.unwrap_or(UNREPORTED_DYNAMIC_START);
+    let start = end.saturating_sub(BAND_SPAN).max(LOWEST_PORT);
+    assert!(
+        end > start,
+        "the OS starts its dynamic range at {end}, which leaves no port under it"
+    );
+    start..end
 }
 
 /// Where the lock that holds `port` lives.
 pub fn lock_path(port: u16) -> PathBuf {
-    std::env::temp_dir()
-        .join("zerocode-test-ports")
-        .join(port.to_string())
+    std::env::temp_dir().join(LOCK_DIR).join(port.to_string())
 }
 
 /// Where the OS says its dynamic range starts, when it says.
 pub fn os_dynamic_start() -> Option<u16> {
+    static START: OnceLock<Option<u16>> = OnceLock::new();
+    *START.get_or_init(read_dynamic_start)
+}
+
+#[cfg(target_os = "linux")]
+fn read_dynamic_start() -> Option<u16> {
+    let text = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").ok()?;
+    lowest_port(&text)
+}
+
+#[cfg(target_os = "macos")]
+fn read_dynamic_start() -> Option<u16> {
+    let said = std::process::Command::new("/usr/sbin/sysctl")
+        .args([
+            "-n",
+            "net.inet.ip.portrange.first",
+            "net.inet.ip.portrange.hifirst",
+        ])
+        .output()
+        .ok()?;
+    lowest_port(&String::from_utf8_lossy(&said.stdout))
+}
+
+#[cfg(windows)]
+fn read_dynamic_start() -> Option<u16> {
+    let said = std::process::Command::new("netsh")
+        .args(["int", "ipv4", "show", "dynamicport", "tcp"])
+        .output()
+        .ok()?;
+    netsh_start(&String::from_utf8_lossy(&said.stdout))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn read_dynamic_start() -> Option<u16> {
     None
 }
 
@@ -45,32 +114,60 @@ pub fn lowest_port(text: &str) -> Option<u16> {
         .min()
 }
 
-/// The start port in `netsh int ipv4 show dynamicport tcp` text.
+/// The start port in `netsh int ipv4 show dynamicport tcp` text: the first
+/// line that ends in a number after a colon, whatever language the label is in.
 pub fn netsh_start(text: &str) -> Option<u16> {
     text.lines()
         .filter_map(|line| line.rsplit_once(':'))
         .find_map(|(_, number)| number.trim().parse::<u16>().ok())
 }
 
+/// Takes the lock on `port`'s file, or `None` when another holder has it.
+fn lock_port(port: u16) -> Option<File> {
+    let path = lock_path(port);
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
 impl QuietPort {
+    /// Claims a port in this machine's quiet band that `bind` accepts, and
+    /// returns what `bind` made of it beside the lease.
     pub fn claim<T>(bind: impl FnMut(u16) -> io::Result<T>) -> (Self, T) {
         Self::claim_in(&band_for(os_dynamic_start()), bind)
     }
 
-    pub fn claim_in<T>(band: &Range<u16>, mut bind: impl FnMut(u16) -> io::Result<T>) -> (Self, T) {
-        let span = u32::from(band.end - band.start);
-        for _ in 0..256 {
-            let step = STEP.fetch_add(1, Ordering::Relaxed);
-            let offset = (std::process::id() + step) % span;
+    /// [`claim`](Self::claim) in a band of the caller's choosing.
+    pub fn claim_in<T>(
+        band: &Range<u16>,
+        mut bind: impl FnMut(u16) -> io::Result<T>,
+    ) -> (Self, T) {
+        let span = u64::from(band.end - band.start);
+        // Only spreads the processes over the band; the lock is what keeps
+        // two of them apart.
+        let first = RandomState::new().hash_one(std::process::id()) % span;
+        for step in 0..span {
+            let offset = (first + step) % span;
             let port = band.start + u16::try_from(offset).expect("the offset is below the span");
+            let Some(lock) = lock_port(port) else {
+                continue;
+            };
             if let Ok(held) = bind(port) {
-                return (Self { port }, held);
+                return (Self { port, _lock: lock }, held);
             }
         }
         panic!("no free loopback port in {band:?}");
     }
 
-    /// A loopback port nobody listens on: a connection to it is refused.
+    /// A loopback port nobody listens on, so a connection to it is refused, and
+    /// nobody else is given while the lease lasts.
     pub fn silent() -> Self {
         let (lease, listener) = Self::claim(|port| TcpListener::bind((Ipv4Addr::LOCALHOST, port)));
         drop(listener);
