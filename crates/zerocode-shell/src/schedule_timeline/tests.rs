@@ -1154,6 +1154,56 @@ fn a_run_with_no_done_line_expires_into_a_lost_job() {
     assert_eq!(rows[0].state, PASSED);
 }
 
+#[test]
+fn a_quiet_runner_expires_only_after_the_cap_and_grace_and_moves_the_revision() {
+    let name = "1792535000-w1-t1-stale";
+    let (_scratch, roots) = lone_queue(
+        "RUN 1792535000-w1-t1-stale who=w1 lane=1 cap=60s 07:00:00\n",
+        kst(21, 7, 0, 1),
+    );
+    let mut book = Book::default();
+    let first = book.read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST);
+    let known = Ask {
+        known: Some(first.revision),
+        ..Ask::default()
+    };
+    let deadline = kst(21, 7, 0, 0) + 60_000 + LOST_AFTER_CAP_MS;
+    let at_cap = book.read(&roots, &known, deadline, KST);
+    assert!(
+        at_cap.unchanged,
+        "a run at its grace boundary expired early"
+    );
+    let expired = book.read(&roots, &known, deadline + 1, KST);
+    assert!(
+        !expired.unchanged,
+        "the clock moved past the grace but the answer did not"
+    );
+    assert!(expired.revision > first.revision);
+    assert_eq!(job(&expired, name).state, LOST);
+    assert!(!book.runner.open.contains_key(name));
+    let later = book.read(
+        &roots,
+        &Ask {
+            known: Some(expired.revision),
+            ..Ask::default()
+        },
+        deadline + HOUR_MS,
+        KST,
+    );
+    assert!(
+        later.unchanged,
+        "an already expired run kept moving the revision"
+    );
+    assert_eq!(
+        book.runner
+            .finished
+            .iter()
+            .filter(|job| job.name == name)
+            .count(),
+        1
+    );
+}
+
 /// A run still in `run/` is the runner's own to end: it is never expired.
 #[test]
 fn a_run_still_in_the_run_folder_is_not_expired() {
@@ -1168,12 +1218,17 @@ fn a_run_still_in_the_run_folder_is_not_expired() {
     )
     .expect("a running job");
     let mut book = Book::default();
-    book.read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST);
-    append(
-        &runner_log(&roots),
-        "PAUSE lifted 09:00:00 by coord4275: x\n",
-        kst(21, 9, 0, 1),
+    let first = book.read(&roots, &Ask::default(), kst(21, 7, 0, 5), KST);
+    let quiet = book.read(
+        &roots,
+        &Ask {
+            known: Some(first.revision),
+            ..Ask::default()
+        },
+        kst(21, 9, 0, 5),
+        KST,
     );
+    assert!(quiet.unchanged, "a job still owned by the runner expired");
     let later = book.read(&roots, &Ask::default(), kst(21, 9, 0, 5), KST);
     assert!(book.runner.open.contains_key("1792535000-w1-t1-slow"));
     assert_eq!(job(&later, "1792535000-w1-t1-slow").state, RUNNING);
