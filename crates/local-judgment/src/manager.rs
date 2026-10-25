@@ -1049,7 +1049,7 @@ impl Manager {
             Some(running) if !running.engine.alive() => running.engine.clone(),
             _ => return,
         };
-        let ended = engine.ended();
+        let ended = off_the_worker(|| engine.ended());
         let mut inner = lock(&self.inner);
         let Some(running) = inner
             .running
@@ -1120,7 +1120,7 @@ impl Manager {
         if let Some(end) = end_of(record) {
             lock(&self.inner).last_end = Some(end);
         }
-        let _ = keep_exit(&self.exits, record);
+        let _ = off_the_worker(|| keep_exit(&self.exits, record));
     }
 
     /// What follows the end of `ended`: a restart after its wait when the
@@ -3133,6 +3133,20 @@ impl Manager {
         if let Some(record) = stopped {
             self.keep(&record);
         }
+    }
+}
+
+/// Runs `work`, which may wait on a runtime's pipe or the disk, so that it
+/// never holds up an async worker: on a worker of a multi-thread runtime the
+/// worker's other tasks move to another thread while it runs. Anywhere else
+/// (a thread of the manager's own, the blocking pool, a current-thread
+/// runtime, which cannot hand its tasks on) it runs as it is.
+fn off_the_worker<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
     }
 }
 
