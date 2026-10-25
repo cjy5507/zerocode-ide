@@ -41,6 +41,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Where the dynamic range is taken to start when the OS does not say: the
 /// lowest start any platform ships (Linux 32768; macOS and Windows 49152).
@@ -78,6 +79,10 @@ const APART_SPAN: u16 = 512;
 const APART_SLOT_SPAN: u16 = 64;
 /// The folder under the temp dir that holds the locks of the apart slots.
 const SLOT_DIR: &str = "zerocode-test-port-slots";
+/// Test binaries may briefly hold every slot at once. Bound their wait while
+/// allowing a holder to finish instead of failing at the first full scan.
+const SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const SLOT_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The folder the locks of the ports that every test draws from live in.
 pub fn lock_dir() -> PathBuf {
@@ -126,19 +131,44 @@ impl ApartSlot {
 /// does is that their bands never meet. A slot is held by a lock on a file in
 /// a folder every test names, and the OS lets go of it if the process dies.
 pub fn apart_slot(reported: Option<u16>) -> ApartSlot {
+    apart_slot_in(
+        &std::env::temp_dir().join(SLOT_DIR),
+        reported,
+        SLOT_WAIT_TIMEOUT,
+        std::thread::sleep,
+    )
+}
+
+/// The same claim in a caller's lock folder, with a bounded wait. The pause
+/// is supplied so the tests can observe an exhausted scan before releasing a
+/// slot, without guessing when the claiming thread has run.
+fn apart_slot_in(
+    dir: &Path,
+    reported: Option<u16>,
+    timeout: Duration,
+    mut pause: impl FnMut(Duration),
+) -> ApartSlot {
     let region = apart_region(reported);
     let slots = (region.end - region.start) / APART_SLOT_SPAN;
-    let dir = std::env::temp_dir().join(SLOT_DIR);
-    for slot in 0..slots {
-        if let Some(lock) = lock_port(&dir, slot) {
-            let start = region.start + slot * APART_SLOT_SPAN;
-            return ApartSlot {
-                band: start..start + APART_SLOT_SPAN,
-                _lock: lock,
-            };
+    let waiting = Instant::now();
+    loop {
+        for slot in 0..slots {
+            if let Some(lock) = lock_port(dir, slot) {
+                let start = region.start + slot * APART_SLOT_SPAN;
+                return ApartSlot {
+                    band: start..start + APART_SLOT_SPAN,
+                    _lock: lock,
+                };
+            }
         }
+        let remaining = timeout.saturating_sub(waiting.elapsed());
+        assert!(
+            !remaining.is_zero(),
+            "timed out after {timeout:?}: all {slots} bands of {region:?} are held by tests judging a release; slot locks: {}",
+            dir.display()
+        );
+        pause(SLOT_RETRY_INTERVAL.min(remaining));
     }
-    panic!("all {slots} bands of {region:?} are held by tests judging a release");
 }
 
 /// Where the OS says its dynamic range starts, when it says.
@@ -262,5 +292,73 @@ impl QuietPort {
 
     pub fn addr(&self) -> SocketAddr {
         SocketAddr::from((Ipv4Addr::LOCALHOST, self.port))
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    /// These tests claim only file locks, never sockets or the shared folder.
+    struct LockDir(PathBuf);
+
+    impl LockDir {
+        fn new() -> Self {
+            let nonce = RandomState::new().hash_one(std::process::id());
+            Self(std::env::temp_dir().join(format!("zerocode-slot-test-{nonce}")))
+        }
+    }
+
+    impl Drop for LockDir {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove the test's slot lock folder");
+        }
+    }
+
+    fn fill_slots(dir: &Path) -> Vec<ApartSlot> {
+        (0..8)
+            .map(|_| apart_slot_in(dir, None, Duration::ZERO, |_| unreachable!("a free slot")))
+            .collect()
+    }
+
+    #[test]
+    fn an_exhausted_slot_claim_waits_until_a_holder_releases_one() {
+        let dir = LockDir::new();
+        let mut held = fill_slots(&dir.0);
+        let released_band = held.last().expect("eight slots").band().clone();
+        let (waiting, exhausted) = sync_channel(1);
+        let (resume, released) = sync_channel(1);
+        std::thread::scope(|scope| {
+            let lock_dir = &dir.0;
+            let borrower = scope.spawn(move || {
+                apart_slot_in(lock_dir, None, SLOT_WAIT_TIMEOUT, |_| {
+                    waiting.send(()).expect("report the exhausted scan");
+                    released.recv().expect("the holder released a slot");
+                })
+            });
+            exhausted
+                .recv_timeout(SLOT_WAIT_TIMEOUT)
+                .expect("the borrower must wait with all eight slots still held");
+            drop(held.pop());
+            resume.send(()).expect("retry the exhausted claim");
+            let borrowed = borrower.join().expect("the waiting borrower gets a slot");
+            assert_eq!(borrowed.band(), &released_band);
+        });
+    }
+
+    #[test]
+    fn an_exhausted_slot_claim_times_out_and_names_its_lock_folder() {
+        let dir = LockDir::new();
+        let _held = fill_slots(&dir.0);
+        let panic = std::panic::catch_unwind(|| {
+            apart_slot_in(&dir.0, None, Duration::from_millis(20), std::thread::sleep)
+        })
+        .err()
+        .expect("a claim must time out while every slot stays held");
+        let message = panic.downcast_ref::<String>().expect("a panic message");
+        assert!(message.contains("timed out after 20ms"), "{message}");
+        assert!(message.contains("all 8 bands"), "{message}");
+        assert!(message.contains(&dir.0.display().to_string()), "{message}");
     }
 }

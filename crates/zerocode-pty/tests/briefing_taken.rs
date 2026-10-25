@@ -96,6 +96,7 @@ impl Gates {
     const HANDSHAKE_SEEN: &'static str = "handshake-seen";
     const BOOT_ENDED: &'static str = "boot-ended";
     const DISCARD_ALLOWED: &'static str = "discard-allowed";
+    const DISCARD_FINISHED: &'static str = "discard-finished";
     const COMPOSER_BACK: &'static str = "composer-back";
 
     fn new() -> Self {
@@ -138,14 +139,16 @@ fn fake_cli(shape: &Shape, boot: Boot, gates: &Gates) -> String {
     }
     let boot_ended = gates.path(Gates::BOOT_ENDED);
     let discard_allowed = until_said(&gates.path(Gates::DISCARD_ALLOWED));
+    let discard_finished = gates.path(Gates::DISCARD_FINISHED);
     let composer_back = until_said(&gates.path(Gates::COMPOSER_BACK));
     format!(
         "stty raw -echo min 0 time 1; printf '\\033[?2004h'; {handshake_seen}; printf '{glyph} '; \
          {discard_allowed}; left=1; while [ ! -e '{}' ] || [ \"$left\" != 0 ]; do \
          left=$(dd bs=4096 count=1 2>/dev/null | wc -c | tr -d ' '); done; \
-         printf '\\033[?2004l'; {composer_back}; \
+         printf '\\033[?2004l'; : > '{}'; {composer_back}; \
          printf '\\033[?2004h\\r\\n{glyph} '; stty cooked echo; {reads}",
-        boot_ended.display()
+        boot_ended.display(),
+        discard_finished.display()
     )
 }
 
@@ -382,9 +385,9 @@ fn launch_under(
         .recv_timeout(DELIVERY_DEADLINE * 2)
         .expect("the first delivery ended");
     assert_eq!(outcome, DeliveryOutcome::Delivered, "{}", shape.name);
-    // The first briefing is in the pane, written whole, and a booting CLI has
-    // thrown it away or is about to: its boot ends now, and its composer
-    // with it unless the test holds that back.
+    // A delivery's end says only that it wrote the input. The child must
+    // finish discarding it and the pump must read its lowered handshake
+    // before confirm can register a retype against the real composer.
     let mut releasing = None;
     if boot == Boot::Discarding {
         gates.say(Gates::BOOT_ENDED);
@@ -396,6 +399,25 @@ fn launch_under(
                 std::thread::sleep(load.discard_held_for);
                 std::fs::write(gate, b"").expect("the CLI may discard its queued input");
             }));
+        }
+        let waiting = Instant::now();
+        loop {
+            let discarded = gates.path(Gates::DISCARD_FINISHED).exists();
+            let handshake_lowered = !shared
+                .lock()
+                .expect("pane")
+                .lane
+                .terminal_mut()
+                .grid_mut()
+                .bracketed_paste();
+            if discarded && handshake_lowered {
+                break;
+            }
+            assert!(
+                waiting.elapsed() < DELIVERY_DEADLINE * 2,
+                "the child must finish discarding and the pump must read its lowered handshake"
+            );
+            std::thread::sleep(Duration::from_millis(10));
         }
         if composer == Composer::Back {
             gates.say(Gates::COMPOSER_BACK);
