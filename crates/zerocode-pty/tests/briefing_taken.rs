@@ -95,6 +95,7 @@ impl Gates {
     /// the CLI draws its glyph once it has been told it was seen.
     const HANDSHAKE_SEEN: &'static str = "handshake-seen";
     const BOOT_ENDED: &'static str = "boot-ended";
+    const DISCARD_ALLOWED: &'static str = "discard-allowed";
     const COMPOSER_BACK: &'static str = "composer-back";
 
     fn new() -> Self {
@@ -136,10 +137,11 @@ fn fake_cli(shape: &Shape, boot: Boot, gates: &Gates) -> String {
         );
     }
     let boot_ended = gates.path(Gates::BOOT_ENDED);
+    let discard_allowed = until_said(&gates.path(Gates::DISCARD_ALLOWED));
     let composer_back = until_said(&gates.path(Gates::COMPOSER_BACK));
     format!(
         "stty raw -echo min 0 time 1; printf '\\033[?2004h'; {handshake_seen}; printf '{glyph} '; \
-         left=1; while [ ! -e '{}' ] || [ \"$left\" != 0 ]; do \
+         {discard_allowed}; left=1; while [ ! -e '{}' ] || [ \"$left\" != 0 ]; do \
          left=$(dd bs=4096 count=1 2>/dev/null | wc -c | tr -d ' '); done; \
          printf '\\033[?2004l'; {composer_back}; \
          printf '\\033[?2004h\\r\\n{glyph} '; stty cooked echo; {reads}",
@@ -304,12 +306,14 @@ impl BriefingPane for Watched {
 struct Load {
     pump_starts_after: Duration,
     retype_registers_after: Duration,
+    discard_held_for: Duration,
 }
 
 impl Load {
     const NONE: Load = Load {
         pump_starts_after: Duration::ZERO,
         retype_registers_after: Duration::ZERO,
+        discard_held_for: Duration::ZERO,
     };
 }
 
@@ -343,6 +347,9 @@ fn launch_under(
     load: Load,
 ) -> Journey {
     let gates = Gates::new();
+    if boot == Boot::Forever {
+        gates.say(Gates::DISCARD_ALLOWED);
+    }
     let lane = PtyLane::spawn(
         "/bin/sh",
         &["-c".to_string(), fake_cli(shape, boot, &gates)],
@@ -378,8 +385,18 @@ fn launch_under(
     // The first briefing is in the pane, written whole, and a booting CLI has
     // thrown it away or is about to: its boot ends now, and its composer
     // with it unless the test holds that back.
+    let mut releasing = None;
     if boot == Boot::Discarding {
         gates.say(Gates::BOOT_ENDED);
+        if load.discard_held_for.is_zero() {
+            gates.say(Gates::DISCARD_ALLOWED);
+        } else {
+            let gate = gates.path(Gates::DISCARD_ALLOWED);
+            releasing = Some(std::thread::spawn(move || {
+                std::thread::sleep(load.discard_held_for);
+                std::fs::write(gate, b"").expect("the CLI may discard its queued input");
+            }));
+        }
         if composer == Composer::Back {
             gates.say(Gates::COMPOSER_BACK);
         }
@@ -403,7 +420,45 @@ fn launch_under(
     };
     drop(pane);
     pumping.join().expect("pump");
+    if let Some(releasing) = releasing {
+        releasing.join().expect("release the CLI's discard gate");
+    }
     journey
+}
+
+/// R7a: the child cannot discard even the first input until the test releases
+/// it, more than one watch window later. An old boot handshake must not let
+/// the retype finish before the real composer is allowed back.
+#[test]
+fn a_child_held_before_discarding_still_waits_for_its_real_composer() {
+    let window = Duration::from_secs(2);
+    let load = Load {
+        discard_held_for: Duration::from_secs(3),
+        ..Load::NONE
+    };
+    for shape in [&CLAUDE, &CODEX] {
+        let journey = launch_under(
+            shape,
+            Boot::Discarding,
+            Composer::After(window),
+            window,
+            false,
+            load,
+        );
+        assert_eq!(
+            journey.verdict,
+            Verdict::Taken,
+            "{}: retype {:?}, screen {:?}",
+            shape.name,
+            journey.retype,
+            journey.screen
+        );
+        let (took, how) = journey.retype.expect("the briefing was typed again");
+        assert_eq!(how, DeliveryOutcome::Delivered, "{}", shape.name);
+        assert!(took > window, "{}: retype took {took:?}", shape.name);
+        assert_eq!(journey.pasted, 2, "{}", shape.name);
+        assert_eq!(journey.screen.matches("T-STAMP-7").count(), 1);
+    }
 }
 
 /// The loss itself: the first briefing goes into a CLI that is still booting
