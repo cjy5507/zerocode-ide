@@ -22025,6 +22025,9 @@ pub(crate) mod computer_desktop_wait {
         let _policy = crate::computer_use::input_policy::enter(
             crate::computer_use::input_policy::InputPolicy::SharedDesktop,
         );
+        // The press is at a bare point: whatever app the person has in front
+        // would decide the browser route before the confirmation is asked.
+        let _not_a_browser = crate::computer_use::browser_route::tests::hold_not_a_browser();
         crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
         let command = batch_of(&serde_json::json!([
             ["wait", "--ms", "1"],
@@ -22341,6 +22344,9 @@ pub(crate) mod computer_desktop_wait {
         let _policy = crate::computer_use::input_policy::enter(
             crate::computer_use::input_policy::InputPolicy::SharedDesktop,
         );
+        // The press is at a bare point: whatever app the person has in front
+        // would decide the browser route before the confirmation is asked.
+        let _not_a_browser = crate::computer_use::browser_route::tests::hold_not_a_browser();
         let words = |argv: &[&str]| {
             argv.iter()
                 .map(|word| (*word).to_string())
