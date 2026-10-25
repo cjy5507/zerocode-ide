@@ -228,7 +228,9 @@ fn namespace_aliases_record_identity_and_git_compatibility() {
                     }
                 }
             }
-            if name == "plain" {
+            // The ordinary spelling is the required Git control. Whether
+            // this Git also accepts an extended spelling is an observation.
+            if name == "plain" && spelling == "adapted" {
                 assert!(
                     output.status.success(),
                     "plain git control failed: {output:?}"
