@@ -34,6 +34,8 @@ import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageGoogleLogin, testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
 import { testTerminalDoor } from "./terminal-door.mjs";
 import { testWaitingList } from "./waiting-list.mjs";
+import { testPaletteRecent } from "./palette-recent.mjs";
+import { testDesignSystem } from "./design-system.mjs";
 import { testAccountSwitch } from "./account-switch.mjs";
 import { testToastClearOfDrawer } from "./toast-clear-of-drawer.mjs";
 import { testSkillsPickers } from "./skills-pickers.mjs";
@@ -282,6 +284,8 @@ suite("usage-google-login", ({ browser, origin, ok }) => testUsageGoogleLogin(br
 suite("terminal-door", ({ browser, origin, ok }) => testTerminalDoor(browser, origin, standBackend, ok));
 suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("waiting-list", ({ browser, origin, ok }) => testWaitingList(browser, origin, standBackend, ok));
+suite("palette-recent", ({ browser, origin, ok }) => testPaletteRecent(browser, origin, standBackend, ok));
+suite("design-system", ({ browser, origin, ok }) => testDesignSystem(browser, origin, standBackend, ok));
 suite("toast-clear-of-drawer", ({ browser, origin, ok }) => testToastClearOfDrawer(browser, origin, ok));
 suite("skills-pickers", ({ browser, origin, ok }) => testSkillsPickers(browser, origin, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
@@ -937,7 +941,7 @@ ok(
 // remap contract is held by the finder's chord instead — whose label is not
 // a tooltip at all but the search button's keycap, the one composed surface
 // a [data-chord] sweep cannot reach.
-row = await rowFor("워크트리로 이동");
+row = await rowFor("어디로 갈까요");
 await page.evaluate((node) => node.querySelector(".keys-edit").click(), row);
 await page.keyboard.press(primaryPress("Alt", "J"));
 await page.waitForTimeout(200);
@@ -2570,7 +2574,7 @@ await page.evaluate(() => setLocale("en"));
 await page.waitForTimeout(250);
 const finderTitle = await page.evaluate(() => ({
   shown: document.getElementById("qo-title").textContent.trim(),
-  wanted: t("worktree.jump", "워크트리로 이동"),
+  wanted: t("worktree.jump", "어디로 갈까요"),
   file: t("file.goto", "파일로 이동"),
 }));
 ok(

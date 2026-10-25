@@ -1994,14 +1994,19 @@ function openBoard() {
  * 손은 첫 그림 **뒤에** 온다. 판이 카드를 들고 있지 않으면(끝난 워커) 보드만
  * 선다 — 답은 골랐는가다. 카드의 열쇠는 `agent:term:<n>`(`cardsFromPanes`). */
 async function revealTaskBoardPane(term) {
+  return revealTaskBoardMember(`agent:term:${term}`);
+}
+
+/* The same, for any card's key — what ⌘J's 「최근」 uses to open a task again. */
+async function revealTaskBoardMember(key) {
   leavePagesForStage();
   openBoard();
   const tab = boardTab();
   if (!tab) return false;
   await paintBoardView(tab, { force: true });
   const view = docHost(tab.pane, "board");
-  const key = `agent:term:${term}`;
   selectAgentGraphEntity(view, key, { focus: true });
+  noteTaskBoardPlace(view, key);
   return agentGraphSelectedKey === key;
 }
 
@@ -7405,7 +7410,17 @@ function taskBoardElement(tag, className, text = "") {
   return node;
 }
 
+/* A task the person opened is a place ⌘J can go back to. The row that holds
+ * the card names it; a card no row holds (a pane with no task) is not one. */
+function noteTaskBoardPlace(view, key) {
+  const group = [...view.querySelectorAll(".task-board-row")]
+    .map((row) => row.__group)
+    .find((one) => one?.members.some((entry) => entry.key === key));
+  if (group) rememberRecentPlace({ kind: "task", id: group.lead.key, label: group.title });
+}
+
 function selectTaskBoardMember(view, key) {
+  noteTaskBoardPlace(view, key);
   agentGraphSelectedKey = key;
   setAgentGraphInspectorOpen(view, true);
   const model = agentGraphModels.get(view);

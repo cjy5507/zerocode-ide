@@ -966,12 +966,20 @@ function paneMatches(pane, query) {
 }
 
 function settingsPaneAvailable(pane) {
+  // 숨은 페이지는 버전 줄을 5번 누른 창에만 있다 (shell-design.js).
+  if (pane === "design-system") return designPageAvailable();
   return pane !== "macos-permissions" || usesCommandModifier;
 }
 
 function showSettingsPane(pane) {
   const arriving = settingsView.hidden || pane !== settingsPane;
   settingsPane = pane;
+  // 디자인 페이지는 테마 스위치로 창의 테마 속성을 잠시 바꾼다: 떠나면 사람이 고른 테마로 돌아간다.
+  if (pane === "design-system") {
+    if (arriving && designPageAvailable()) enterDesignPage();
+  } else {
+    leaveDesignPage();
+  }
   // Twelve directory walks; asked for when the page is opened rather than at
   // boot, and only the first time — the row carries a 다시 읽기 for the rest.
   if (pane === "skills" || pane === "onboarding") void refreshSkills();
@@ -9635,6 +9643,7 @@ function setSettingsOpen(on, focus = null) {
   }
   settingsSection = on ? focus : null;
   settingsView.hidden = !on;
+  if (!on) leaveDesignPage();
   if (on && !wasOpen && settingsPane === "judgment-models") void refreshTypeSafe();
   if (on && focus) {
     const at = el(focus);

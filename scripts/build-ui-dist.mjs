@@ -52,6 +52,7 @@ const FILES = Object.freeze([
   "shell-sftp.js",
   "shell-scm.js",
   "shell-secret.js",
+  "shell-design.js",
   "shell-settings.js",
   "shell-managed-judgment.js",
   "shell-model-source.js",
