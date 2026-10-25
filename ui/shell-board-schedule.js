@@ -52,6 +52,9 @@ const BOARD_SCHEDULE = Object.freeze({
    * 거리 안에 선 눈금은 글을 감추고 시간 선만 남긴다 — 시안 v2의 칩은 정시 글 곁에 서지, 그 위에
    * 겹치지 않는다(t-71840). */
   nowChipPx: 48,
+  /* 눈금 글 둘 사이에 남기는 틈(CSS px). 한 글이 차지하는 자리는 `tickRoomPx`와 (잰 글 폭 + 이 틈) 가운데
+   * 큰 쪽이다 — 글꼴이 커지거나 낱말이 길어지면 자리가 따라 커진다(검토 t-69069 P3 ⑧). */
+  tickGapPx: 12,
   /* 끝난 것은 묶음마다 가장 최근에 끝난 이만큼만 행으로 서고, 나머지는 「+N 끝남」 접힌 줄 하나다 —
    * 사람이 그 줄을 누르면 다 선다. 도는 것·기다리는 것은 늘 다 선다. 네 묶음이 같은 규칙이다(t-71840;
    * 빌드 줄의 끝난 일감이 먼저 이렇게 섰다). */
@@ -305,7 +308,10 @@ function boardScheduleLaneEnd(run, now) {
   const due = Number(current.start_ms) + (Number(ahead[0].expected?.secs) || 0) * 1_000;
   let end = Math.max(now, due);
   for (const stage of ahead.slice(1)) end += (Number(stage.expected?.secs) || 0) * 1_000;
-  return { end, lateMs: Math.max(0, now - due), known: ahead.every((stage) => Number(stage.expected?.samples) > 0) };
+  // An answer that says its stages ahead had no lane's plan (`ahead_planned: false`) holds the stage it is in alone:
+  // what is left of the lane is not known.
+  return { end, lateMs: Math.max(0, now - due),
+    known: run.ahead_planned !== false && ahead.every((stage) => Number(stage.expected?.samples) > 0) };
 }
 
 /* 길이 한 마디: 1분이 안 되면 그렇다고. 글은 분 수로 정해진다. */
@@ -444,6 +450,9 @@ function boardScheduleJobRow(job, plan, now, stall, depth) {
   });
 }
 
+/* 레인이 끝난 결과(`result`) → 행의 상태. 여기 없는 결과(`ended`)는 그저 끝난 행이다. */
+const BOARD_SCHEDULE_LANE_STATES = Object.freeze({ passed: "done", failed: "failed" });
+
 function boardScheduleLaneRows(lanes, now) {
   return lanes.map((run) => {
     const stages = Array.isArray(run.stages) ? run.stages : [];
@@ -481,11 +490,13 @@ function boardScheduleLaneRows(lanes, now) {
         act: { log: { lane: run.sha } },
       });
     }
-    const verdict = run.verdict === "green" || run.verdict === "red"
-      ? t(DESK_RELEASE_VERDICTS[run.verdict].key, DESK_RELEASE_VERDICTS[run.verdict].word, { phase: "" })
+    // The answer says how the lane ended (`result`); the lane's own words are only its name for it.
+    const said = DESK_RELEASE_VERDICTS[DESK_RELEASE_OF_RESULT[run.result]];
+    const verdict = said
+      ? t(said.key, said.word, { phase: "" })
       : String(run.verdict ?? t("board.schedule.lost", "끝 기록 없음"));
     const end = Number(run.end_ms) || run.start_ms;
-    const state = run.verdict === "green" ? "done" : run.verdict === "red" ? "failed" : "idle";
+    const state = BOARD_SCHEDULE_LANE_STATES[run.result] ?? "idle";
     return boardScheduleRow({
       key: `lane:${run.sha}:${run.start_ms}`, label, tip: [tip, run.reason].filter(Boolean).join(" · "),
       start: run.start_ms, end, state,
@@ -678,10 +689,28 @@ function boardScheduleTaskRow({ task, landing, start, end, known }, now) {
   });
 }
 
-/* 눈금: 축의 폭에 들어가는 가장 촘촘한 간격으로, 그 간격의 현지 시각 경계마다. */
-function boardScheduleTicks(from, to, width, zoom) {
-  const room = Math.max(2, Math.floor(width / zoom.tickRoomPx));
-  const step = zoom.ticksMs.find((ms) => (to - from) / ms <= room) ?? zoom.ticksMs.at(-1);
+/* 눈금 글을 재는 자: 축의 눈금과 같은 글꼴로 낱말의 폭(CSS px)을 잰다. 글꼴은 서 있는 눈금이 말하고, 아직
+ * 눈금이 없으면 토큰이 말한다. 잴 수 없으면 null — 눈금은 간격 후보의 자리(`tickRoomPx`)만으로 선다. */
+let boardScheduleCanvas = null;
+
+function boardScheduleTickFont(axis) {
+  const tick = axis.querySelector(".board-schedule-tick");
+  return tick ? getComputedStyle(tick).font : getComputedStyle(axis).getPropertyValue("--type-label-12-mono").trim();
+}
+
+function boardScheduleTickMeasure(font) {
+  if (!font) return null;
+  boardScheduleCanvas ??= document.createElement("canvas").getContext("2d");
+  const context = boardScheduleCanvas;
+  if (!context) return null;
+  return (text) => boardScheduleRemembered(`measure:${font}:${text}`, () => {
+    context.font = font;
+    return context.measureText(text).width;
+  });
+}
+
+/* 한 간격의 눈금들: 그 간격의 현지 시각 경계마다. */
+function boardScheduleTickMoments(from, to, step) {
   const day = step >= 86_400_000;
   const first = new Date(from);
   first.setMinutes(0, 0, 0);
@@ -703,9 +732,34 @@ function boardScheduleTicks(from, to, width, zoom) {
   return ticks;
 }
 
+/* 눈금 글 하나의 자리: 간격 후보가 말하는 자리와 잰 가장 넓은 글 + 틈 가운데 큰 쪽. */
+function boardScheduleTickRoom(ticks, zoom, measure) {
+  if (!measure) return zoom.tickRoomPx;
+  const widest = Math.max(0, ...ticks.map((tick) => measure(tick.label)));
+  return Math.max(zoom.tickRoomPx, Math.ceil(widest + BOARD_SCHEDULE.tickGapPx));
+}
+
+/* 눈금: 축의 폭에 글이 들어가는 가장 촘촘한 간격으로. 어느 간격도 안 맞으면 가장 성긴 간격의 눈금을
+ * 솎아 글이 겹치지 않게 한다. */
+function boardScheduleTicks(from, to, width, zoom, measure = null) {
+  let sparsest = [];
+  let room = zoom.tickRoomPx;
+  const fewest = Math.max(2, Math.floor(width / zoom.tickRoomPx));
+  for (const step of zoom.ticksMs) {
+    // A step that is too many for the candidate's own room is too many for any wider one: its labels are not built.
+    if ((to - from) / step > fewest && step !== zoom.ticksMs.at(-1)) continue;
+    const ticks = boardScheduleTickMoments(from, to, step);
+    room = boardScheduleTickRoom(ticks, zoom, measure);
+    if ((to - from) / step <= Math.max(2, Math.floor(width / room))) return { ticks, room };
+    sparsest = ticks;
+  }
+  const every = Math.ceil(sparsest.length / Math.max(1, Math.floor(width / room)));
+  return { ticks: sparsest.filter((_, at) => at % every === 0), room };
+}
+
 /* 그릴 것 한 벌: 보이는 범위, 눈금, 묶음 넷과 그 행들. 백엔드의 답과 데스크의 과업,
  * 지금, 고른 것, 축의 폭에서 DOM 없이 짓는다 — 장면 시험이 이것을 그대로 읽는다. */
-function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
+function boardScheduleModel(answer, tasks, now, choice, width, loud = false, measure = null) {
   const zoom = BOARD_SCHEDULE.zooms[choice.zoom] ?? BOARD_SCHEDULE.zooms.now;
   const jobs = Array.isArray(answer?.jobs) ? answer.jobs : [];
   const lanes = Array.isArray(answer?.lanes) ? answer.lanes : [];
@@ -772,8 +826,9 @@ function boardScheduleModel(answer, tasks, now, choice, width, loud = false) {
   const heading = zoom === BOARD_SCHEDULE.zooms.now
     ? t("board.now.running", "지금 도는 일") : boardScheduleZoomWord(choice.zoom);
   const nowAt = percent(now);
-  const covers = (zoom.tickRoomPx + BOARD_SCHEDULE.nowChipPx) / 2;
-  return { from, to, now, nowAt, ticks: boardScheduleTicks(from, to, width, zoom).map((tick) => {
+  const axis = boardScheduleTicks(from, to, width, zoom, measure);
+  const covers = (axis.room + BOARD_SCHEDULE.nowChipPx) / 2;
+  return { from, to, now, nowAt, ticks: axis.ticks.map((tick) => {
     const at = percent(tick.at);
     return { ...tick, at, covered: (Math.abs(at - nowAt) / 100) * width < covers };
   }), groups, stall, heading };
@@ -955,8 +1010,10 @@ function paintBoardScheduleHost(host, view, now) {
   const before = boardSchedulePainted.get(host);
   if (before && before.every((one, at) => one === said[at])) return;
   boardSchedulePainted.set(host, said);
+  // The type the ticks are set in is read only when the schedule is drawn again — a look that changes nothing
+  // (the same answer, minute and width) does not ask the page's style.
   const model = boardScheduleModel(boardScheduleAnswer, desk?.tasks, minute, boardScheduleChoice, width,
-    machine?.load?.loud === true);
+    machine?.load?.loud === true, boardScheduleTickMeasure(boardScheduleTickFont(axis)));
   paintBoardScheduleHead(head, model);
   const [named, count, legend] = card.children;
   writeTextContent(named, model.heading);

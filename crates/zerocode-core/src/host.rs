@@ -710,6 +710,9 @@ pub enum Within {
 /// 문자열과 구별해서 돌려주며, [`Vcs::try_within`]은 그 위에 **왜 못 받았는지**를
 /// 얹고, [`Vcs::text_and_code`]는 **0이 아닌 종료값도 답인 명령**(충돌을 1로 알리는
 /// `merge-tree`)의 종료값과 표준 출력을 함께 준다. 하나로 합치면 넷 중 셋을 잃는다.
+///
+/// [`Vcs::text_within_max`]는 다섯째 모양이 아니라 [`Vcs::try_within`]의 한 인자다 — 남이 쓴
+/// 저장소의 로그나 파일을 읽는 자리가 **받는 바이트에 상한**을 거는 길이다.
 pub trait Vcs: Send + Sync {
     /// `root`에서 git을 돌리고 표준 출력을 준다. 실패하면 git이 표준 오류에
     /// 적은 말을 그대로 준다.
@@ -730,7 +733,35 @@ pub trait Vcs: Send + Sync {
     ///
     /// 기다리기를 그만두는 것과 죽이는 것은 다르다 — 앞의 것은 창이 사는 동안
     /// 매달려 있는 git을 하나 남긴다.
-    fn try_within(&self, root: &Path, args: &[&str], budget: Duration) -> Within;
+    fn try_within(&self, root: &Path, args: &[&str], budget: Duration) -> Within {
+        self.try_within_max(root, args, budget, None)
+    }
+
+    /// [`Vcs::try_within`] with a bound on what is kept: git's answer past `max`
+    /// bytes is no answer — git is killed once it has said more, and the result is
+    /// [`Within::Silent`]. For a caller that reads a repository somebody else wrote,
+    /// where a log or a blob may be any size. `None` is unbounded.
+    fn try_within_max(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: Option<usize>,
+    ) -> Within;
+
+    /// [`Vcs::text_within`] bounded by `max` bytes ([`Vcs::try_within_max`]).
+    fn text_within_max(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: usize,
+    ) -> Option<String> {
+        match self.try_within_max(root, args, budget, Some(max)) {
+            Within::Said(said) => Some(said),
+            Within::Refused(_) | Within::Silent => None,
+        }
+    }
 
     /// 같은 일을 하되 **이유를 묻지 않는** 자리를 위한 얼굴.
     ///
@@ -981,7 +1012,13 @@ impl Vcs for LocalVcs {
         Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
     }
 
-    fn try_within(&self, root: &Path, args: &[&str], budget: Duration) -> Within {
+    fn try_within_max(
+        &self,
+        root: &Path,
+        args: &[&str],
+        budget: Duration,
+        max: Option<usize>,
+    ) -> Within {
         let Ok(mut child) = lock_free_git(Command::new("git"))
             .args(args)
             .current_dir(root)
@@ -1003,9 +1040,18 @@ impl Vcs for LocalVcs {
         else {
             return Within::Silent;
         };
+        // 한 바이트를 더 읽어 보고 넘쳤는지 안다. 넘치면 이 스레드가 `over`를 세워 아래 기다림이
+        // git을 죽인다 — 파이프를 더 비우지 않으면 git은 쓰다가 멈춘다.
+        let over = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let said_over = std::sync::Arc::clone(&over);
         let draining = std::thread::spawn(move || {
             let mut said = Vec::new();
-            let _ = std::io::Read::read_to_end(&mut pipe, &mut said);
+            let limit = max.map_or(u64::MAX, |max| max as u64 + 1);
+            let _ =
+                std::io::Read::read_to_end(&mut std::io::Read::take(&mut pipe, limit), &mut said);
+            if max.is_some_and(|max| said.len() > max) {
+                said_over.store(true, std::sync::atomic::Ordering::Release);
+            }
             said
         });
         let listening = std::thread::spawn(move || {
@@ -1018,7 +1064,8 @@ impl Vcs for LocalVcs {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) => {
-                    if began.elapsed() >= budget {
+                    if over.load(std::sync::atomic::Ordering::Acquire) || began.elapsed() >= budget
+                    {
                         // 기다리기를 그만두는 것과 죽이는 것은 다르다. 앞의
                         // 것은 창이 사는 동안 매달려 있는 git을 하나 남긴다.
                         let _ = child.kill();
@@ -1035,6 +1082,9 @@ impl Vcs for LocalVcs {
         let (Ok(said), Ok(complained)) = (draining.join(), listening.join()) else {
             return Within::Silent;
         };
+        if over.load(std::sync::atomic::Ordering::Acquire) {
+            return Within::Silent;
+        }
         if status.success() {
             Within::Said(String::from_utf8_lossy(&said).into_owned())
         } else {

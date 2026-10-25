@@ -448,6 +448,11 @@ function buildArtifactFlow() {
   outside.hidden = true;
   outside.dataset.i18n = "artifacts.flow.outside";
   outside.textContent = t("artifacts.flow.outside", "등록된 저장소 밖 폴더 — git 기록 없음");
+  // git 답이 시간 안에 오지 않았다: 들고 있던 지난 답 그대로 두고 다시 읽는 중이라고만 한 줄로(t-69107 ③).
+  const stale = document.createElement("p");
+  stale.className = "artifact-flow-stale";
+  stale.hidden = true;
+  say(stale, () => t("artifacts.flow.stale", "다시 읽는 중"));
   const list = document.createElement("div");
   list.className = "artifact-flow-list";
   artifactFlowListSerial += 1;
@@ -483,7 +488,7 @@ function buildArtifactFlow() {
   all.dataset.i18n = "artifacts.flow.emptyAll";
   all.textContent = t("artifacts.flow.emptyAll", "전체 목록 보기");
   empty.append(mark, word, hint, steps, all);
-  flow.append(outside, list, empty);
+  flow.append(outside, stale, list, empty);
   return flow;
 }
 
@@ -1142,6 +1147,7 @@ function paintArtifactFlowList(view) {
   const empty = flowBox.querySelector(".artifact-flow-empty");
   const flow = artifactFlowAnswer;
   writeHidden(flowBox.querySelector(".artifact-flow-outside"), flow?.git !== "outside");
+  writeHidden(flowBox.querySelector(".artifact-flow-stale"), flow?.git !== "stale");
   const admitted = (group) => (group?.tasks ?? []).filter(artifactFlowAdmits);
   const narrowed = artifactFilter.query.trim() !== "" || Boolean(artifactFilter.agent);
   const now = admitted(flow?.now);
@@ -1307,6 +1313,8 @@ function paintArtifactFlowReader(drawer, row) {
   if (!line) return;
   const stage = artifactFlowStage(line);
   dressArtifactFlowMark(badge.querySelector(".artifact-flow-node"), stage.shape, stage.signal);
+  // The context line leads with the same step shape as the badge: it is built with an empty circle (t-69107 ⑨).
+  dressArtifactFlowMark(context.querySelector(".artifact-flow-node"), stage.shape, stage.signal);
   writeTextContent(badge.querySelector(".artifact-flow-badge-word"), artifactFlowStageWords(line));
   writeTextContent(context.querySelector(".artifact-flow-context-said"), line.gain ? `${line.said} — ${line.gain}` : line.said);
   const task = context.querySelector(".artifact-flow-context-task");

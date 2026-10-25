@@ -75,6 +75,13 @@ pub(crate) struct FlowTable {
     pub(crate) git_budget: Duration,
     /// The release notes, read at the base commit.
     pub(crate) notes_file: &'static str,
+    /// How long a git failure is remembered before git is asked again.
+    pub(crate) git_retry_ms: i64,
+    /// The most bytes of a git answer one read keeps: the first-parent walk
+    /// and the release notes' blob. A repository somebody else wrote may hold
+    /// either at any size.
+    pub(crate) walk_bytes_max: usize,
+    pub(crate) notes_bytes_max: usize,
 }
 
 pub(crate) const FLOW: FlowTable = FlowTable {
@@ -90,6 +97,11 @@ pub(crate) const FLOW: FlowTable = FlowTable {
     git_fresh_ms: 5_000,
     git_budget: Duration::from_secs(3),
     notes_file: "CHANGELOG.md",
+    git_retry_ms: 20_000,
+    // 240 first-parent commits are about 60 KiB on this repository.
+    walk_bytes_max: 2 * 1024 * 1024,
+    // This repository's CHANGELOG is 0.5 MiB after a month.
+    notes_bytes_max: 4 * 1024 * 1024,
 };
 
 /// Where a line's sentence came from — the order it is chosen in.
@@ -126,6 +138,9 @@ pub(crate) enum GitAsked {
     /// The folder is in no listed repository: git was not run, and the flow is
     /// the ledger's and the catalog's alone.
     Outside,
+    /// git did not answer in time and the flow stands on the last answer it
+    /// gave while it is read again (t-69107 ③).
+    Stale,
 }
 
 /// What the window asks: the project's folder as it lists the project, and the
@@ -319,9 +334,11 @@ pub(crate) struct FlowShip {
 /// release note's line and the rest of it.
 const LINE_MARK: &str = " — ";
 
-/// The format the walk asks git for: commit, parents, commit time, subject and
-/// the tags on it, a unit separator apart.
-const LOG_FORMAT: &str = "--format=%H%x1f%P%x1f%ct%x1f%s%x1f%D";
+/// The format the walk asks git for: commit, parents, commit time, the tags on
+/// it and its subject, a unit separator apart. The subject is last, and the
+/// line is split into five at the first four marks, so a subject that holds the
+/// mark itself stays a subject (t-69107 ④).
+const LOG_FORMAT: &str = "--format=%H%x1f%P%x1f%ct%x1f%D%x1f%s";
 
 /// One merge on the base branch's first-parent line.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -364,6 +381,9 @@ pub(crate) struct GitFacts {
     pub(crate) releases: Vec<GitRelease>,
     /// The release notes' line for each task they name.
     pub(crate) notes: HashMap<String, Note>,
+    /// git did not answer in time and this is the last answer it gave — the
+    /// repository is being read again.
+    pub(crate) stale: bool,
 }
 
 /// The walk of the base branch's first-parent line, as git printed it in
@@ -373,13 +393,16 @@ pub(crate) fn parse_log(text: &str) -> (Vec<GitMerge>, Vec<GitRelease>) {
     let mut unreleased = Vec::new();
     let mut releases: Vec<GitRelease> = Vec::new();
     for line in text.lines() {
-        let mut fields = line.split('\u{1f}');
-        let (Some(commit), Some(parents), Some(at), Some(subject)) =
-            (fields.next(), fields.next(), fields.next(), fields.next())
-        else {
+        let mut fields = line.splitn(5, '\u{1f}');
+        let (Some(commit), Some(parents), Some(at), Some(refs), Some(subject)) = (
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+            fields.next(),
+        ) else {
             continue;
         };
-        let refs = fields.next().unwrap_or_default();
         let at_ms = at
             .trim()
             .parse::<i64>()
@@ -573,11 +596,17 @@ struct GitHeld {
     root: PathBuf,
     oid: String,
     checked_ms: i64,
+    /// The last answer git gave, as it gave it.
     facts: Arc<GitFacts>,
+    /// What a read is handed: `facts`, or while git is failing a copy of them
+    /// that says so ([`GitFacts::stale`]).
+    shown: Arc<GitFacts>,
+    /// The last ask failed: git is asked again after [`FlowTable::git_retry_ms`].
+    failed: bool,
 }
 
 /// How many repositories' answers are kept. A window looks at a few projects;
-/// past this the oldest is asked again.
+/// past this the one used longest ago is asked again.
 const GIT_HELD_MAX: usize = 8;
 
 fn git_held() -> &'static Mutex<Vec<GitHeld>> {
@@ -629,33 +658,39 @@ fn base_of(host: &Host, root: &Path) -> Option<(String, String)> {
 
 /// The base's first-parent walk from `at` (a commit or a branch), as git prints
 /// it in [`LOG_FORMAT`].
-fn walk_at(root: &Path, at: &str) -> String {
-    Host::for_workspace(root)
-        .vcs()
-        .text_within(
-            root,
-            &[
-                "log",
-                "--first-parent",
-                "--no-color",
-                LOG_FORMAT,
-                "--decorate-refs=refs/tags/",
-                &format!("--max-count={}", FLOW.commits_walked),
-                at,
-            ],
-            FLOW.git_budget,
-        )
-        .unwrap_or_default()
+///
+/// `None` when git gave no answer — it failed, ran out of time or answered more
+/// than [`FlowTable::walk_bytes_max`]. The revision is ended by `--`, so a file
+/// in the work tree named like the branch does not make it ambiguous (t-69107 ⑤).
+fn walk_at(root: &Path, at: &str) -> Option<String> {
+    Host::for_workspace(root).vcs().text_within_max(
+        root,
+        &[
+            "log",
+            "--first-parent",
+            "--no-color",
+            LOG_FORMAT,
+            "--decorate-refs=refs/tags/",
+            &format!("--max-count={}", FLOW.commits_walked),
+            at,
+            "--",
+        ],
+        FLOW.git_budget,
+        FLOW.walk_bytes_max,
+    )
 }
 
 /// The release notes' line for each task, read at `at` (a commit or a branch).
+/// Notes past [`FlowTable::notes_bytes_max`] are not read: the lines the flow
+/// takes are the newest, and a file that size is not a changelog.
 fn notes_at(root: &Path, at: &str) -> HashMap<String, Note> {
     Host::for_workspace(root)
         .vcs()
-        .text_within(
+        .text_within_max(
             root,
             &["cat-file", "blob", &format!("{at}:{}", FLOW.notes_file)],
             FLOW.git_budget,
+            FLOW.notes_bytes_max,
         )
         .map(|text| parse_notes(&text, FLOW.releases_kept + 1))
         .unwrap_or_default()
@@ -663,7 +698,7 @@ fn notes_at(root: &Path, at: &str) -> HashMap<String, Note> {
 
 /// The walk and the notes at `at`: two questions git answers apart, so they are
 /// asked at once, the notes on a thread of their own.
-fn walk_and_notes(root: &Path, at: &str) -> (String, HashMap<String, Note>) {
+fn walk_and_notes(root: &Path, at: &str) -> (Option<String>, HashMap<String, Note>) {
     std::thread::scope(|scope| {
         let notes = scope.spawn(|| notes_at(root, at));
         let walked = walk_at(root, at);
@@ -680,13 +715,31 @@ fn walk_and_notes(root: &Path, at: &str) -> (String, HashMap<String, Note>) {
 /// when git names that base at the commit the walk began from; a later read asks
 /// only where the base stands, and walks again only when it moved.
 pub(crate) fn git_facts(root: &Path, now_ms: i64) -> Arc<GitFacts> {
+    git_facts_in(git_held(), GIT_HELD_MAX, root, now_ms)
+}
+
+/// [`git_facts`] over the answers `held` keeps, at most `most` of them — the
+/// last used kept, the one used longest ago let go.
+fn git_facts_in(
+    held: &Mutex<Vec<GitHeld>>,
+    most: usize,
+    root: &Path,
+    now_ms: i64,
+) -> Arc<GitFacts> {
     let known = {
-        let held = git_held().lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(one) = held
-            .iter()
-            .find(|one| one.root == root && now_ms - one.checked_ms < FLOW.git_fresh_ms)
-        {
-            return Arc::clone(&one.facts);
+        let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = held.iter().position(|one| {
+            let stands = if one.failed {
+                FLOW.git_retry_ms
+            } else {
+                FLOW.git_fresh_ms
+            };
+            one.root == root && now_ms - one.checked_ms < stands
+        }) {
+            let one = held.remove(at);
+            let shown = Arc::clone(&one.shown);
+            held.push(one);
+            return shown;
         }
         held.iter().any(|one| one.root == root)
     };
@@ -702,25 +755,33 @@ pub(crate) fn git_facts(root: &Path, now_ms: i64) -> Arc<GitFacts> {
         })
     };
     let Some((base, oid)) = based else {
-        return Arc::default();
+        return git_failed(held, most, root, now_ms);
     };
     {
-        let mut held = git_held().lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(one) = held
-            .iter_mut()
-            .find(|one| one.root == root && one.oid == oid)
+        let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = held
+            .iter()
+            .position(|one| one.root == root && one.oid == oid)
         {
+            let mut one = held.remove(at);
             one.checked_ms = now_ms;
-            return Arc::clone(&one.facts);
+            one.failed = false;
+            one.shown = Arc::clone(&one.facts);
+            let shown = Arc::clone(&one.shown);
+            held.push(one);
+            return shown;
         }
     }
     // The walk read ahead stands when git named its base at the commit it began
     // from; otherwise the base is walked where git says it is.
     let (walked, notes) = match ahead {
-        Some((walked, notes)) if base == guess && walked.starts_with(oid.as_str()) => {
-            (walked, notes)
+        Some((Some(walked), notes)) if base == guess && walked.starts_with(oid.as_str()) => {
+            (Some(walked), notes)
         }
         _ => walk_and_notes(root, &oid),
+    };
+    let Some(walked) = walked else {
+        return git_failed(held, most, root, now_ms);
     };
     let (unreleased, releases) = parse_log(&walked);
     let facts = Arc::new(GitFacts {
@@ -728,10 +789,11 @@ pub(crate) fn git_facts(root: &Path, now_ms: i64) -> Arc<GitFacts> {
         unreleased,
         releases,
         notes,
+        stale: false,
     });
-    let mut held = git_held().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
     held.retain(|one| one.root != root);
-    if held.len() >= GIT_HELD_MAX {
+    if held.len() >= most {
         held.remove(0);
     }
     held.push(GitHeld {
@@ -739,8 +801,43 @@ pub(crate) fn git_facts(root: &Path, now_ms: i64) -> Arc<GitFacts> {
         oid,
         checked_ms: now_ms,
         facts: Arc::clone(&facts),
+        shown: Arc::clone(&facts),
+        failed: false,
     });
     facts
+}
+
+/// git did not answer for `root`: a failure is remembered — it is not asked
+/// again for [`FlowTable::git_retry_ms`] — and the last answer it gave stands,
+/// saying it is [`GitFacts::stale`]. A repository git never answered for has
+/// no facts, and that is remembered the same way.
+fn git_failed(held: &Mutex<Vec<GitHeld>>, most: usize, root: &Path, now_ms: i64) -> Arc<GitFacts> {
+    let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut one = match held.iter().position(|one| one.root == root) {
+        Some(at) => held.remove(at),
+        None => GitHeld {
+            root: root.to_path_buf(),
+            oid: String::new(),
+            checked_ms: now_ms,
+            facts: Arc::default(),
+            shown: Arc::default(),
+            failed: true,
+        },
+    };
+    one.checked_ms = now_ms;
+    one.failed = true;
+    if one.facts.base.is_some() {
+        one.shown = Arc::new(GitFacts {
+            stale: true,
+            ..(*one.facts).clone()
+        });
+    }
+    let shown = Arc::clone(&one.shown);
+    if held.len() >= most {
+        held.remove(0);
+    }
+    held.push(one);
+    shown
 }
 
 /* ---- words a person reads ---------------------------------------------- */
@@ -1360,14 +1457,6 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
     let indexes: Vec<RunIndex<'_>> = ledger.map_or_else(Vec::new, |ledger| {
         ledger.runs().iter().map(RunIndex::of).collect()
     });
-    // Every task the ledger holds, by id: a merge on this project's base may
-    // carry a task another run of the ledger holds.
-    let mut held: HashMap<&str, (usize, &Task)> = HashMap::new();
-    for (at, index) in indexes.iter().enumerate() {
-        for task in &index.run.tasks {
-            held.entry(task.id.as_str()).or_insert((at, task));
-        }
-    }
     let ours = |index: &RunIndex<'_>| {
         project.is_some_and(|project| {
             index
@@ -1377,6 +1466,20 @@ pub(crate) fn assemble(reading: &Reading<'_>) -> Flow {
                 .is_some_and(|stated| stated.root == project)
         })
     };
+    // Every task this project's runs hold — and those of a run that states no
+    // project — by id: a merge on this project's base may carry a task another
+    // run of it holds. A run of another project is that project's: its
+    // attempts, models and hand-in words are not this flow's to show
+    // (t-69107 ①).
+    let mut held: HashMap<&str, (usize, &Task)> = HashMap::new();
+    for (at, index) in indexes.iter().enumerate() {
+        if index.run.project.is_some() && !ours(index) {
+            continue;
+        }
+        for task in &index.run.tasks {
+            held.entry(task.id.as_str()).or_insert((at, task));
+        }
+    }
     let by_task = merges_by_task(git);
     // Work that ended before the release past the kept ones stands in none of
     // them, unless a merge in them names it.
@@ -1793,6 +1896,8 @@ pub(crate) fn read(ask: &FlowAsk, listed: &[PathBuf], now_ms: i64) -> Flow {
     });
     if vouched.repo.is_none() {
         flow.git = GitAsked::Outside;
+    } else if git.stale {
+        flow.git = GitAsked::Stale;
     }
     if let Some(store) = crate::artifact_runtime::store() {
         let chips = store.chips(&flow.task_ids());

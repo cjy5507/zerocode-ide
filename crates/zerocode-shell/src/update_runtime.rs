@@ -803,10 +803,17 @@ pub(crate) fn release_dir() -> Option<PathBuf> {
 /// every one of those is `None`, because the window is a reader of another
 /// process's files and none of those is the window's error to raise. A file
 /// the lane is halfway through writing is the ordinary case, not a fault.
+///
+/// Another process's file: a plain file only (a link or a pipe is nothing), and
+/// no more than [`JSON_MOST_BYTES`] of it — the lane's two documents are a few
+/// hundred bytes.
 pub(crate) fn read_json(path: &Path) -> Option<Value> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = crate::plain_read::read_plain(path, JSON_MOST_BYTES)?;
     serde_json::from_slice(&bytes).ok()
 }
+
+/// The most a lane document read by [`read_json`] may hold.
+const JSON_MOST_BYTES: u64 = 1024 * 1024;
 
 /// What `release_status` hands the window: both files as read (`null` when
 /// absent or malformed) and the judgement over the installed one.

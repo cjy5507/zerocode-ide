@@ -56,8 +56,8 @@ const SETTLED_MS = 300;
  * rows no task is linked to. `heavy` lays thirty tasks over twelve releases instead; `empty` is a project
  * with nothing in it, and `outside` a folder in no repository the window lists, which the runtime asked
  * git nothing for (t-69070 P2). A page function: no closure. */
-export function standFlow(page, { heavy = null, empty = false, outside = false } = {}) {
-  return page.evaluate(({ heavy, empty, outside }) => {
+export function standFlow(page, { heavy = null, empty = false, outside = false, stale = false } = {}) {
+  return page.evaluate(({ heavy, empty, outside, stale }) => {
     const now = Date.now();
     const minute = 60 * 1000;
     const ago = (minutes) => now - minutes * minute;
@@ -182,7 +182,7 @@ export function standFlow(page, { heavy = null, empty = false, outside = false }
       };
     }
     // Whether the runtime asked git: only for a folder in a repository the window lists (t-69070 P2).
-    flow.git = outside ? "outside" : "kept";
+    flow.git = outside ? "outside" : stale ? "stale" : "kept";
     if (outside) flow.base = null;
     const seen = (window.__FLOW__ = { asks: [], flow });
     window.__ANSWER__.artifact_flow = (args) => {
@@ -190,7 +190,7 @@ export function standFlow(page, { heavy = null, empty = false, outside = false }
       return JSON.parse(JSON.stringify(seen.flow));
     };
     return { lines: [flow.now, flow.next, ...flow.releases].reduce((sum, one) => sum + one.tasks.length, 0), releases: flow.releases.length };
-  }, { heavy, empty, outside });
+  }, { heavy, empty, outside, stale });
 }
 
 /* Open the tab fresh, as a person does from the sidebar: nothing picked, nothing unfolded. */
@@ -410,6 +410,28 @@ export async function testArtifactFlow(browser, origin, ok) {
         && unfolded.bundles === 1 && unfolded.landTip.includes("git"),
       JSON.stringify(unfolded));
 
+    /* ---- the keyboard's place: one shape, the board's own (the review t-69070 P3 ⑧) ------------------ */
+    const focused = await page.evaluate(() => {
+      const view = artifactsView();
+      const aim = {
+        list: ".artifact-flow-list", item: ".artifact-flow-item", chip: ".artifact-flow-chip",
+        more: ".artifact-flow-more", release: ".artifact-flow-release-head", fold: ".artifact-flow-pile-fold",
+      };
+      const seen = {};
+      for (const [name, selector] of Object.entries(aim)) {
+        const node = view?.querySelector(selector);
+        if (!node) continue;
+        node.focus({ focusVisible: true });
+        const style = getComputedStyle(node);
+        seen[name] = { outline: `${style.outlineStyle} ${style.outlineWidth}`, ring: style.boxShadow.replace(/inset /g, "") !== "none" && /rgb\(\s*\d+/.test(style.boxShadow) };
+        node.blur();
+      }
+      return seen;
+    });
+    ok("every place the keyboard stands in the flow shows the board's focus outline — 2px solid, no ring shadow beside it",
+      Object.keys(focused).length >= 4 && Object.values(focused).every((one) => one.outline === "solid 2px" && !one.ring),
+      JSON.stringify(focused));
+
     /* ---- a chip stands its artifact in the reader, whose head says which step it is -------------- */
     const chip = (name) => `.artifact-flow-item[data-task="t-501"] > .artifact-flow-meta [data-flow-chip="${name}"]`;
     const reading = await page.evaluate(async ({ settled, report }) => {
@@ -437,6 +459,16 @@ export async function testArtifactFlow(browser, origin, ok) {
         && reading.badge === "반영됨" && reading.context.includes("사라지던 것을 고쳤다") && !reading.landing && reading.bar.length === 0
         && reading.pressed === "true",
       JSON.stringify(reading));
+    const marks = await page.evaluate(() => {
+      const drawer = artifactsView()?.querySelector(".artifacts-drawer");
+      const mark = (node) => ({ shape: node?._shape ?? null, signal: node?.dataset.signal ?? null, drawn: Boolean(node?.querySelector("svg")) });
+      return { badge: mark(drawer?.querySelector(".artifact-flow-badge .artifact-flow-node")),
+        context: mark(drawer?.querySelector(".artifact-flow-context .artifact-flow-node")) };
+    });
+    ok("the reader's context line leads with its task's own step shape and signal, the badge's — not the empty circle it is built with",
+      marks.badge.drawn && marks.badge.shape !== null && marks.badge.shape !== "wait"
+        && marks.context.shape === marks.badge.shape && marks.context.signal === marks.badge.signal && marks.context.drawn,
+      JSON.stringify(marks));
     const compared = await page.evaluate(async ({ settled, pair }) => {
       const view = artifactsView();
       view?.querySelector(pair)?.click();
@@ -664,6 +696,34 @@ export async function testArtifactFlow(browser, origin, ok) {
       ok(`that line keeps ${CONTRAST_MIN}:1 in ${theme}`, rows.length > 0 && low.length === 0, JSON.stringify(rows.slice(0, 4)));
     }
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+
+    /* ---- git did not answer: the flow stays, and says it is being read again (t-69107 ③) ------------- */
+    await standFlow(page, { stale: true });
+    const stale = await page.evaluate(async () => {
+      const view = artifactsView();
+      await refreshArtifactFlow(view);
+      const shown = (node) => Boolean(node) && !node.closest("[hidden]") && node.getClientRects().length > 0;
+      await window.__UNTIL__(() => shown(view?.querySelector(".artifact-flow-stale")), "the stale git notice");
+      const line = view?.querySelector(".artifact-flow-stale");
+      return {
+        shown: shown(line), word: line?.textContent ?? "",
+        size: line ? parseFloat(getComputedStyle(line).fontSize) : 0,
+        lines: view?.querySelectorAll(".artifact-flow-item").length ?? 0,
+        quietOutside: !shown(view?.querySelector(".artifact-flow-outside")),
+      };
+    });
+    ok("a flow read over git's last answer keeps its lines and says 「다시 읽는 중」 in one line",
+      stale.shown && stale.word === "다시 읽는 중" && stale.size >= TEXT_MIN_PX && stale.lines > 0 && stale.quietOutside,
+      JSON.stringify(stale));
+    await standFlow(page);
+    const staleGone = await page.evaluate(async () => {
+      const view = artifactsView();
+      await refreshArtifactFlow(view);
+      const hidden = () => Boolean(view?.querySelector(".artifact-flow-stale")?.closest("[hidden]") ?? view?.querySelector(".artifact-flow-stale")?.hidden);
+      await window.__UNTIL__(hidden, "the stale git notice to clear");
+      return hidden();
+    });
+    ok("and the line is gone once git answers", staleGone, "the line still stands");
 
     /* ---- thirty tasks over twelve releases: 400 elements, 3 ms a paint with the CPU slowed ----------- */
     const weight = await standFlow(page, { heavy: HEAVY });
