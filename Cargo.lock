@@ -8082,6 +8082,7 @@ dependencies = [
 name = "zerocode-app"
 version = "1.1.94"
 dependencies = [
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",

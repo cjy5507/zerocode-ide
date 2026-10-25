@@ -38,6 +38,7 @@ mod skills_view;
 mod support;
 mod type_value_keys;
 mod update;
+mod window_forks;
 pub(crate) use support as ui_source;
 
 mod tests {

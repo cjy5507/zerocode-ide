@@ -51,7 +51,6 @@ pub mod recent;
 pub mod reflex_decide;
 pub mod score;
 pub mod shard;
-pub(crate) mod store_lock;
 pub mod summary;
 pub mod threshold;
 pub mod tool_guard;

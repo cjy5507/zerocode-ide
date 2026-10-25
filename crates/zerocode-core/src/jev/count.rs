@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::store_lock::StoreLock;
+use crate::held_file_lock::HeldFileLock;
 
 /// The directory under zo's config home the day files live in.
 pub const REQUESTS_DIR: &str = "jev";
@@ -102,9 +102,9 @@ pub fn hour_path(config_home: &Path, key: &str, hour: &str) -> PathBuf {
         .join(format!("{HOUR_FILE_PREFIX}{hour}-{key}{DAY_FILE_SUFFIX}"))
 }
 
-/// Exclude every other hour writer until the returned file is dropped.
+/// Exclude every other hour writer until the returned guard is dropped.
 /// A lock that stays busy past [`HOURS_LOCK_WAIT`] returns `WouldBlock`.
-pub(super) fn lock_hours(every: &Path) -> io::Result<StoreLock> {
+pub(super) fn lock_hours(every: &Path) -> io::Result<HeldFileLock> {
     let path = every.with_file_name(HOURS_LOCK_FILE);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -120,7 +120,7 @@ pub(super) fn lock_hours(every: &Path) -> io::Result<StoreLock> {
     let until = Instant::now() + HOURS_LOCK_WAIT;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(StoreLock::held(file)),
+            Ok(()) => return Ok(HeldFileLock::locked(file)),
             Err(TryLockError::WouldBlock) if Instant::now() < until => {
                 thread::sleep(HOURS_LOCK_POLL);
             }
