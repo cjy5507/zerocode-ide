@@ -62,6 +62,7 @@
     <script defer src="./shell-computer.js"></script>
     <script defer src="./shell-self-act.js"></script>
     <script defer src="./shell-settings.js"></script>
+    <script defer src="./shell-design.js"></script>
     <script defer src="./shell-managed-judgment.js"></script>
     <script defer src="./shell-model-source.js"></script>
     <script defer src="./shell-judgment.js"></script>
@@ -3867,6 +3868,14 @@
                 <span data-i18n="settings.permissions.title">macOS 권한</span>
               </button>
             </div>
+            <!-- 숨은 페이지(t-67484): 「일반」의 버전 줄을 5번 누르면 나타난다. -->
+            <div class="settings-rail-group-box" data-group="design" hidden>
+              <p class="settings-rail-group" data-i18n="settings.rail.design">개발</p>
+              <button class="settings-rail-item" type="button" data-pane="design-system" hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-palette"></use></svg>
+                <span data-i18n="design.title">디자인 시스템</span>
+              </button>
+            </div>
           </div>
         </nav>
         <div class="settings-frame">
@@ -5100,8 +5109,29 @@
           <div class="settings-open-in-list" id="open-in-applications-list"
                aria-live="polite"></div>
         </div>
+        <!-- 버전 줄. 5번 누르면 설정 목록에 「디자인 시스템」이 나타난다(shell-design.js);
+             글은 「업데이트」 페이지의 첫 줄과 같은 낱말이다(`paintUpdatePane`). -->
+        <button class="settings-version" id="general-version" type="button">ZeroCode</button>
         </section>
 
+        <section class="settings-pane" data-pane="design-system" hidden data-keywords="design system token tokens component 디자인 토큰 컴포넌트">
+        <header class="settings-section-head">
+          <h2 class="settings-section-title" data-i18n="design.title">디자인 시스템</h2>
+          <p class="settings-section-desc" data-i18n="design.about">
+            설정의 숨은 페이지입니다. 디자인 게이트가 읽는 파일(tokens.css·shell.css)만 읽고 값을 다시 적지 않습니다.
+          </p>
+        </header>
+        <div class="settings-card">
+          <div class="ds-bar">
+            <div class="board-mode" role="group" data-i18n-aria="design.theme" aria-label="테마">
+              <button type="button" data-ds-theme="dark" data-i18n="design.themeDark">다크</button>
+              <button type="button" data-ds-theme="light" data-i18n="design.themeLight">라이트</button>
+            </div>
+          </div>
+          <div class="ds-stats" role="status"></div>
+          <div class="ds-body"></div>
+        </div>
+        </section>
         <!-- 「업데이트」 (t-3191, docs/design/versioned-auto-update.md §2.5): the
              running build, the channel, the policy (three radios), 「지금 확인」,
              one status line, the download / restart / skip roads, the zo
@@ -8312,7 +8342,7 @@
         <!-- What the keys do. Orca carries the same strip along the bottom of
              its command dialog, and it is what stops the panel ending in
              mid-air under the field. -->
-        <footer class="qo-foot" data-i18n="finder.keys">↑↓ 이동 · ↵ 열기 · esc 닫기</footer>
+        <footer class="qo-foot" id="qo-foot" data-i18n="finder.keys">↑↓ 이동 · ↵ 열기 · esc 닫기</footer>
       </section>
     </div>
 

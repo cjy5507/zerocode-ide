@@ -601,6 +601,8 @@ function paintUpdatePane() {
   el("update-running").textContent = running
     ? updateRunningWords(running)
     : t("settings.update.runningUnknown", "ZeroCode");
+  // 「일반」 끝의 버전 줄은 같은 낱말이다 — 누르면 숨은 페이지로 가는 길(shell-design.js).
+  el("general-version").textContent = el("update-running").textContent;
   const { words, tone } = updateStatusWords();
   const status = el("update-status");
   status.textContent = words;

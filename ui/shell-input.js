@@ -1112,7 +1112,7 @@ const ACTIONS = [
     // Orca's own, copied: `searchKeywords` on the definition
     // this mirrors (`plugin-manifest-Dq3wpxrr.js`).
     keywords: ["shortcut", "global", "worktree", "switch", "jump"],
-    title: () => t("worktree.jump", "워크트리로 이동"),
+    title: () => t("worktree.jump", "어디로 갈까요"),
     // Orca's own binding for this, and the reason it is not ⌘⇧P: there is no
     // general command palette to compete with (measured, 1-d).
     chord: "mod+j",
@@ -3323,6 +3323,7 @@ const qoTitle = el("qo-title");
 const qoInput = el("qo-input");
 const qoResults = el("qo-results");
 const qoEmpty = el("qo-empty");
+const qoFoot = el("qo-foot");
 /* The quick finder waits just long enough to collapse a typing burst without
  * making a keyboard-driven palette feel detached from the field. */
 const PALETTE_QUERY_DEBOUNCE_MS = 150;
@@ -3348,24 +3349,102 @@ function laneSlotOf(worktreePath) {
   return null;
 }
 
+/* ---- the places ⌘J remembers ----
+ *
+ * A task, a pane or an artifact the person opened comes back with one digit
+ * (t-67485). Five is the whole list: a recent list that grows is a second
+ * sidebar. It lives in this window's storage beside the other per-window
+ * conveniences, so a refusal of storage leaves the palette working with an
+ * empty list. A task's key and a pane's id are numbers this window handed out,
+ * so they are remembered for this run only; an artifact's id outlives it. */
+const RECENT_PLACES_KEY = "zerocode.palette-recent.v1";
+const RECENT_PLACES_LIMIT = 5;
+const RECENT_PLACES_RUN = Date.now();
+const RECENT_PLACE_KINDS = Object.freeze({
+  task: () => t("palette.kindTask", "과업"),
+  pane: () => t("palette.kindPane", "판"),
+  artifact: () => t("palette.kindArtifact", "아티팩트"),
+});
+
+function recentPlaceHolds(place) {
+  return Boolean(place) && Object.hasOwn(RECENT_PLACE_KINDS, place.kind)
+    && typeof place.id === "string" && typeof place.label === "string"
+    && (place.kind === "artifact" || place.run === RECENT_PLACES_RUN);
+}
+
+function readRecentPlaces() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(RECENT_PLACES_KEY) ?? "[]");
+    return Array.isArray(saved) ? saved.filter(recentPlaceHolds).slice(0, RECENT_PLACES_LIMIT) : [];
+  } catch { return []; }
+}
+
+/* The newest goes first, and opening one again moves it up instead of adding a
+ * second copy. */
+function rememberRecentPlace(place) {
+  const kept = { ...place, run: RECENT_PLACES_RUN };
+  if (!recentPlaceHolds(kept)) return;
+  const rest = readRecentPlaces().filter((held) => !(held.kind === kept.kind && held.id === kept.id));
+  try { localStorage.setItem(RECENT_PLACES_KEY, JSON.stringify([kept, ...rest].slice(0, RECENT_PLACES_LIMIT))); }
+  catch { /* Storage refusal keeps the palette working with what it had. */ }
+}
+
+/* Opening a remembered place is the same road its first opening took. A place
+ * that no longer stands (a pane that closed) opens nothing. */
+async function reopenRecentPlace(place) {
+  if (place.kind === "task") {
+    await revealTaskBoardMember(place.id);
+  } else if (place.kind === "pane") {
+    const tab = tabs.find((held) => held.id === place.id);
+    if (!tab) return;
+    await activateWorktree(tab.worktree);
+    setActiveTab(tab.id);
+  } else if (!(await openArtifactPageAt(place.path))) {
+    openPath(place.path);
+  }
+}
+
+/* The doors ⌘J lists under 「이동」: the ones the sidebar already has. A door
+ * with no screen yet (`open: null`) is not drawn; the table needs one line
+ * when its screen lands. */
+const GO_PLACES = Object.freeze([
+  { id: "board", icon: "#i-tasks", label: () => t("board.tasks.heading", "작업 상황판"), open: () => { setWorkspaceBoardOpen(false); showAgentBoard(); } },
+  { id: "inbox", icon: "#i-bell", label: () => t("palette.goInbox", "받은 편지함"), open: null },
+  { id: "artifacts", icon: "#i-ft-file-box", label: () => t("sidebar.artifacts", "아티팩트"), open: () => el("nav-artifacts").click() },
+  { id: "automations", icon: "#i-calendar-clock", label: () => t("sidebar.automations", "자동화"), shown: () => !el("nav-automations").hidden, open: () => el("nav-automations").click() },
+  { id: "vault", icon: "#i-archive", label: () => t("sidebar.vault", "보관함"), open: () => el("nav-vault").click() },
+  { id: "skills", icon: "#i-book", label: () => t("skills.title", "스킬"), open: () => el("nav-skills").click() },
+  { id: "settings", icon: "#i-gear", label: () => t("app.settings", "설정"), open: () => setSettingsOpen(true) },
+]);
+
 const FINDERS = {
   file: {
     title: () => t("file.goto", "파일로 이동"),
     placeholder: () => t("file.namePlaceholder", "파일 이름"),
     // A project is too big to list unasked, so this one waits for a word.
     listsEmpty: false,
+    keys: () => t("finder.keys", "↑↓ 이동 · ↵ 열기 · esc 닫기"),
     find: (query) => invoke("search_files", { query }),
     row: (hit) => ({ label: hit, hint: "", lane: null, run: () => openPath(hit, { preview: true }) }),
   },
   worktree: {
-    title: () => t("worktree.jump", "워크트리로 이동"),
-    placeholder: () => t("worktree.pathHint", "브랜치 또는 경로"),
-    // The jump list is short and known up front, so it is on screen before a
+    title: () => t("worktree.jump", "어디로 갈까요"),
+    placeholder: () => t("worktree.pathHint", "이름, 번호 또는 브랜치"),
+    keys: () => t("finder.keysWhere", "↑↓ 이동 · ↵ 열기 · 1–5 최근 바로 열기 · esc 닫기"),
+    // The list is short and known up front, so it is on screen before a
     // key is pressed — which is what makes it a jump rather than a search.
     listsEmpty: true,
+    // Three groups answer one word together: the person does not know which
+    // of them holds what they are looking for.
+    groups: {
+      recent: () => t("palette.groupRecent", "최근"),
+      go: () => t("palette.groupGo", "이동"),
+      tree: () => t("palette.groupTrees", "워크트리"),
+    },
     find: async (query) => {
       const worktrees = await invoke("list_worktrees");
       const needle = query.toLowerCase();
+      const named = (text) => text.toLowerCase().includes(needle);
       // The agents nested inside each workspace stay searchable — the tree
       // filter that used to walk `.wt-children` rows died with its field, and
       // a session you can name must still surface the workspace it lives in.
@@ -3378,21 +3457,48 @@ const FINDERS = {
         const at = entry.lane.worktree_id;
         laneWords.set(at, `${laneWords.get(at) ?? ""} ${laneTitle(entry.lane).toLowerCase()}`);
       }
-      return worktrees.filter(
-        (worktree) =>
-          (worktree.branch ?? "").toLowerCase().includes(needle) ||
-          worktree.path.toLowerCase().includes(needle) ||
-          (laneWords.get(worktree.path) ?? "").includes(needle),
-      );
+      // A recent place keeps the number of its place in the whole list: the
+      // digit that opens it is the same whatever the word narrowed to.
+      const recent = readRecentPlaces()
+        .map((place, at) => ({ group: "recent", place, number: at + 1 }))
+        .filter((item) => named(item.place.label));
+      const go = GO_PLACES
+        .filter((place) => place.open && (place.shown?.() ?? true) && named(place.label()))
+        .map((place) => ({ group: "go", place }));
+      const trees = worktrees
+        .filter(
+          (worktree) =>
+            (worktree.branch ?? "").toLowerCase().includes(needle) ||
+            worktree.path.toLowerCase().includes(needle) ||
+            (laneWords.get(worktree.path) ?? "").includes(needle),
+        )
+        .map((worktree) => ({ group: "tree", worktree }));
+      return [...recent, ...go, ...trees];
     },
-    row: (worktree) => ({
-      label: worktree.branch ?? basename(worktree.path),
-      hint: worktree.is_main && !worktree.is_folder
-        ? t("worktree.main", "기본")
-        : basename(worktree.path),
-      lane: laneSlotOf(worktree.path),
-      run: () => activateWorktree(worktree.path),
-    }),
+    row: (item) => {
+      if (item.group === "recent") {
+        const { place } = item;
+        return {
+          group: "recent", label: place.label, kind: RECENT_PLACE_KINDS[place.kind](), key: String(item.number),
+          icon: { task: "#i-tasks", pane: "#i-terminal", artifact: "#i-ft-file-box" }[place.kind],
+          recent: item.number, lane: null, run: () => reopenRecentPlace(place),
+        };
+      }
+      if (item.group === "go") {
+        return { group: "go", label: item.place.label(), icon: item.place.icon, lane: null, run: item.place.open };
+      }
+      const { worktree } = item;
+      return {
+        group: "tree",
+        label: worktree.branch ?? basename(worktree.path),
+        hint: worktree.is_main && !worktree.is_folder
+          ? t("worktree.main", "기본")
+          : basename(worktree.path),
+        icon: "#i-branch",
+        lane: laneSlotOf(worktree.path),
+        run: () => activateWorktree(worktree.path),
+      };
+    },
   },
 };
 
@@ -3414,6 +3520,7 @@ function openPalette(mode) {
   // exactly what `say` wants, so the title follows a language change instead
   // of reverting to whichever finder the markup happened to name.
   say(qoTitle, finder.title);
+  say(qoFoot, finder.keys);
   qoInput.placeholder = finder.placeholder();
   qoInput.value = "";
   qoResults.replaceChildren();
@@ -3463,17 +3570,34 @@ async function runPaletteQuery() {
   if (paletteMode !== asked) return;
   qoResults.replaceChildren();
   paletteRows = found.slice(0, 50).map((item) => finder.row(item));
+  let heading = null;
   paletteRows.forEach((row, index) => {
+    // A group's title stands once, above its first row. Only a finder that
+    // names its groups has them: the file finder is one flat list.
+    if (finder.groups && row.group !== heading) {
+      heading = row.group;
+      const title = document.createElement("div");
+      title.className = "qo-group";
+      title.setAttribute("role", "presentation");
+      say(title, finder.groups[heading]);
+      qoResults.appendChild(title);
+    }
     const node = document.createElement("div");
     node.className = `qo-row${index === 0 ? " is-sel" : ""}${row.lane ? ` ${row.lane} has-lane` : ""}`;
     node.id = `qo-row-${index}`;
     node.setAttribute("role", "option");
     node.setAttribute("aria-selected", index === 0 ? "true" : "false");
-    const icon = asked === "worktree" ? "#i-branch" : "#i-file";
-    node.innerHTML = `<svg class="icon qo-row-icon" aria-hidden="true"><use href="${icon}"></use></svg>` +
-      '<span class="qo-label"></span><span class="qo-hint"></span>';
+    node.innerHTML = `<svg class="icon qo-row-icon" aria-hidden="true"><use href="${row.icon ?? "#i-file"}"></use></svg>` +
+      '<span class="qo-label"></span>';
     node.querySelector(".qo-label").textContent = row.label;
-    node.querySelector(".qo-hint").textContent = row.hint;
+    // The word for the kind of place, the folder, and the digit that opens it.
+    for (const [className, text, tag] of [["qo-hint", row.kind ?? row.hint, "span"], ["qo-key", row.key, "kbd"]]) {
+      if (!text) continue;
+      const part = document.createElement(tag);
+      part.className = className;
+      part.textContent = text;
+      node.appendChild(part);
+    }
     node.dataset.tip = row.label;
     node.addEventListener("click", () => commitPaletteRow(index));
     qoResults.appendChild(node);
@@ -3503,8 +3627,12 @@ function qoSelected() {
   return qoResults.querySelector(".is-sel");
 }
 
+function qoRowNodes() {
+  return [...qoResults.querySelectorAll(".qo-row")];
+}
+
 function qoMove(step) {
-  const rows = [...qoResults.children];
+  const rows = qoRowNodes();
   if (rows.length === 0) return;
   const current = qoSelected();
   let index = current ? rows.indexOf(current) + step : 0;
@@ -3532,7 +3660,15 @@ qoInput.addEventListener("keydown", (event) => {
   } else if (event.key === "Enter") {
     event.preventDefault();
     const selected = qoSelected();
-    if (selected) commitPaletteRow([...qoResults.children].indexOf(selected));
+    if (selected) commitPaletteRow(qoRowNodes().indexOf(selected));
+  } else if (/^[1-5]$/.test(event.key) && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey
+    && paletteMode === "worktree" && qoInput.value === "") {
+    // The digit is a key only while it cannot be a letter of the word being
+    // typed — and a number with no recent place behind it is typed as usual.
+    const at = paletteRows.findIndex((row) => row.recent === Number(event.key));
+    if (at < 0) return;
+    event.preventDefault();
+    commitPaletteRow(at);
   } else if (event.key === "Escape") {
     event.preventDefault();
     closePalette();

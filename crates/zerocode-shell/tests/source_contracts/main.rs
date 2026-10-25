@@ -1829,6 +1829,221 @@ mod tests {
         );
     }
 
+    /// ⌘J asks where to go, and the window asks only two questions (t-67485).
+    ///
+    /// 「한 화면, 두 질문」: ⌘P asks which file and ⌘J asks where to go — not a
+    /// command bar that grew a third mode. What ⌘J added is three groups in one
+    /// answer (the five places the person opened last, the doors the sidebar
+    /// already has, the worktrees), a digit that opens a recent place only while
+    /// the field is empty, and a list that holds five and no more.
+    #[test]
+    fn the_palette_asks_two_questions_and_remembers_five_places() {
+        let window = strip_comments(window_source());
+        let finders = block_after(&window, "const FINDERS = {");
+        let asks: Vec<&str> = finders
+            .lines()
+            .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+            .filter_map(|line| line.trim().strip_suffix(": {"))
+            .collect();
+        assert_eq!(
+            asks,
+            ["file", "worktree"],
+            "the finder grew a question beyond \"which file\" and \"where to\":\n{finders}"
+        );
+        assert!(
+            finders
+                .split("\n  worktree: {")
+                .next()
+                .is_some_and(|file| file.contains("listsEmpty: false")),
+            "the file finder lists before a word is typed"
+        );
+        assert!(
+            window.contains("const RECENT_PLACES_LIMIT = 5;"),
+            "the recent list is no longer five places"
+        );
+        // Each road the person opens a place by leaves a mark on it.
+        for kind in ["task", "pane", "artifact"] {
+            assert!(
+                window.contains(&format!("rememberRecentPlace({{ kind: \"{kind}\",")),
+                "opening a {kind} no longer lands in the recent list"
+            );
+        }
+        // The digit is a key only while the field is empty, or it eats the
+        // first letters of a word being typed.
+        let keys = block_after(&window, "qoInput.addEventListener(\"keydown\"");
+        assert!(
+            keys.contains("/^[1-5]$/.test(event.key)") && keys.contains("qoInput.value === \"\""),
+            "a digit opens a recent place while a word is being typed:\n{keys}"
+        );
+    }
+
+    /// The design page draws every token `ui/tokens.css` declares (t-67484).
+    ///
+    /// The page keeps no list of names. It reads the file and takes the names
+    /// by one rule — a declaration at the start of a line — and this gate takes
+    /// them by the same rule, so a token added tomorrow is on the page without
+    /// anyone editing the page. The window test counts what is drawn against
+    /// the file; a token whose value does not resolve here is listed by name in
+    /// its failure message.
+    #[test]
+    fn every_token_in_tokens_css_is_drawn_by_the_design_page() {
+        let tokens = include_str!("../../../../ui/tokens.css");
+        let page = strip_comments(include_str!("../../../../ui/shell-design.js"));
+        let mut declared: Vec<&str> = tokens
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("--"))
+            .filter_map(|rest| rest.split_once(':').map(|(name, _)| name.trim_end()))
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+            .collect();
+        declared.sort_unstable();
+        declared.dedup();
+        assert!(
+            declared.len() > 1000,
+            "tokens.css stopped declaring tokens the way the page reads them: {} found",
+            declared.len()
+        );
+        assert!(
+            page.contains("fetch(\"./tokens.css\")") && page.contains("/^\\s*(--[\\w-]+)\\s*:/gm"),
+            "the design page no longer reads its names from tokens.css by the line-start rule"
+        );
+        // The page names no token of its own: a name written here is a name
+        // that can go stale. The two prefixes are how a family is told which
+        // property its sample sets.
+        let named: Vec<&str> = page
+            .split("\"--")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap_or(""))
+            .collect();
+        assert!(
+            named.iter().all(|name| matches!(*name, "type-" | "text-")),
+            "the design page writes token names of its own: {named:?}"
+        );
+    }
+
+    /// The design page restates no value (t-67484).
+    ///
+    /// Swatches, bars and specimens read `var(--token)`; the components are the
+    /// window's own classes. A colour, a length of time or a size written on the
+    /// page would be a second copy of a value the tokens already own, waiting to
+    /// disagree. Only the page's own script and its own block of the stylesheet
+    /// are read.
+    #[test]
+    fn the_design_page_restates_no_value() {
+        let page = strip_comments(include_str!("../../../../ui/shell-design.js"));
+        let styles = strip_comments(include_str!("../../../../ui/shell.css"));
+        let own = styles
+            .split_once(".settings-version {")
+            .map(|(_, rest)| rest)
+            .expect("the design page's block left ui/shell.css");
+        let literal = |line: &str| -> Option<&'static str> {
+            let bytes = line.as_bytes();
+            if line.contains("cubic-bezier(") {
+                return Some("an easing curve");
+            }
+            if line.contains("rgb(") || line.contains("hsl(") || line.contains("oklch(") {
+                return Some("a colour function");
+            }
+            for (at, byte) in bytes.iter().enumerate() {
+                if *byte == b'#'
+                    && bytes
+                        .get(at + 1..at + 4)
+                        .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+                {
+                    return Some("a hex colour");
+                }
+                if bytes[at..].starts_with(b"ms") && at > 0 && bytes[at - 1].is_ascii_digit() {
+                    return Some("a duration in ms");
+                }
+            }
+            None
+        };
+        for (name, text) in [
+            ("shell-design.js", page.as_str()),
+            ("its block of shell.css", own),
+        ] {
+            for line in text.lines() {
+                if let Some(found) = literal(line) {
+                    panic!("{name} restates {found}:\n{line}");
+                }
+            }
+        }
+        // Lengths: the stylesheet block takes its sizes from the tokens. The
+        // one pixel value it writes is the focus ring's, which every surface
+        // spells the same way (design skill, "Keyboard focus"), and the widths
+        // at which the page folds, which measure the page and are not design.
+        for line in own.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("@container") || trimmed.starts_with("outline") {
+                continue;
+            }
+            let bytes = trimmed.as_bytes();
+            let pixels = (0..bytes.len().saturating_sub(1))
+                .any(|at| &bytes[at..at + 2] == b"px" && at > 0 && bytes[at - 1].is_ascii_digit());
+            assert!(
+                !pixels,
+                "the design page's stylesheet block writes a length of its own:\n{trimmed}"
+            );
+        }
+        // Inline styles may set a property only to a token or to nothing.
+        for line in page.lines().filter(|line| line.contains(".style.")) {
+            assert!(
+                line.contains("var(${name})") || line.contains("cssText"),
+                "the design page sets an inline style to something other than a token:\n{line}"
+            );
+        }
+    }
+
+    /// The design page is a hidden page and loading is one definition (t-67484).
+    ///
+    /// The entry ships hidden in the markup and the settings list asks the page
+    /// whether it is available; five presses of the version line unlock it. A
+    /// control that is busy says so with `aria-busy="true"` and the stylesheet
+    /// gives all seven kinds the same look for it.
+    #[test]
+    fn the_design_page_is_hidden_until_the_version_line_is_pressed_five_times() {
+        let markup = include_str!("../../../../ui/index.html");
+        let page = strip_comments(include_str!("../../../../ui/shell-design.js"));
+        let styles = strip_comments(include_str!("../../../../ui/shell.css"));
+        assert!(
+            markup.contains("data-pane=\"design-system\" hidden>"),
+            "the design page's rail item no longer ships hidden"
+        );
+        assert!(
+            page.contains("const DESIGN_UNLOCK_PRESSES = 5;"),
+            "the version line no longer unlocks the page at five presses"
+        );
+        let settings = strip_comments(include_str!("../../../../ui/shell-settings.js"));
+        assert!(
+            block_after(&settings, "function settingsPaneAvailable(pane) {")
+                .contains("designPageAvailable()"),
+            "the settings list does not ask whether the design page is available"
+        );
+        let busy = block_after(&styles, ":is(.btn, .task-board-filter");
+        for kind in [
+            ".btn",
+            ".task-board-filter",
+            ".nav-row",
+            ".nav-badge",
+            ".settings-input",
+            ".auto-row-toggle",
+            ".board-mode button",
+        ] {
+            assert!(
+                busy.contains(kind),
+                "loading has no definition for `{kind}`:\n{busy}"
+            );
+        }
+        assert!(
+            busy.contains("[aria-busy=\"true\"]"),
+            "loading is not defined on aria-busy:\n{busy}"
+        );
+    }
+
     /// The palette is the Geist language the person passed (2026-10-21).
     ///
     /// Draft B of the task board — Vercel's Geist, artifact
