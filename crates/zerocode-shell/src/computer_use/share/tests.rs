@@ -334,3 +334,51 @@ fn the_panel_reuses_the_renderers_words_without_changing_the_share_stamp() {
     super::panel_label(Some(String::new()));
     assert_eq!(state()["buttonLabel"], "Take control");
 }
+
+#[test]
+fn the_panel_accepts_the_current_control_word_in_every_catalog() {
+    let catalog = include_str!("../../../../../ui/shell-i18n.js");
+    let renderer = include_str!("../../../../../ui/shell-computer.js");
+    let key = "\"computer.band.take\"";
+    let mut labels = Vec::new();
+    for line in catalog
+        .lines()
+        .filter(|line| line.trim_start().starts_with(key))
+    {
+        let (_, value) = line.split_once(':').unwrap();
+        labels.push(serde_json::from_str::<String>(value.trim().trim_end_matches(',')).unwrap());
+    }
+    let (_, fallback) = renderer.split_once("t(\"computer.band.take\", ").unwrap();
+    labels.push(serde_json::from_str::<String>(fallback.split_once(')').unwrap().0).unwrap());
+    assert_eq!(labels.len(), 5);
+    for label in labels {
+        super::panel_label(Some(label.clone()));
+        assert_eq!(state()["buttonLabel"], label);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn panel_notices_never_open_a_socket_or_spawn_a_helper_on_the_callers_thread() {
+    let source = include_str!("../macos.rs");
+    let sync = source
+        .split_once("pub(super) fn sync_share_panel(")
+        .unwrap()
+        .1;
+    let sync = sync.split_once("\n}\n").unwrap().0;
+    assert!(
+        !sync.contains("UnixStream::connect"),
+        "the caller must only queue the latest state"
+    );
+    assert!(
+        !sync.contains("wire.request("),
+        "a helper reply must not delay admission"
+    );
+    let source = include_str!("../share.rs");
+    let tell = source.split_once("fn tell() {").unwrap().1;
+    let tell = tell.split_once("\n}\n").unwrap().0;
+    assert!(
+        !tell.contains(".spawn("),
+        "one worker owns helper startup and delivery"
+    );
+}

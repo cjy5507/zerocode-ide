@@ -103,6 +103,8 @@ final class ShareControlPanel {
                 "revision": state.revision, "event": state.event, "takenBack": state.takenBack]
     }
 
+    nonisolated static func controlLabel(_ label: String) -> String { label }
+
     nonisolated static func update(_ params: [String: JSONValue]) throws {
         let revision = try requiredInteger(params, "revision")
         let generation = try requiredInteger(params, "generation")
@@ -114,7 +116,7 @@ final class ShareControlPanel {
         let cancel = !wasTaken && state.takenBack
         lock.unlock()
         if cancel { cancelInput() }
-        let label = params["buttonLabel"]?.string ?? ""
+        let label = controlLabel(params["buttonLabel"]?.string ?? "")
         let windowID = params["windowId"]?.number.flatMap(UInt32.init(exactly:))
         let windowIndex = params["windowIndex"]?.number.flatMap(Int.init(exactly:))
         DispatchQueue.main.async {

@@ -4,6 +4,12 @@ import XCTest
 
 /// Synthetic events and window rows only; no panel is ordered and no input is posted.
 final class ShareControlPanelTests: XCTestCase {
+    func testMissingOrBlankControlLabelKeepsTheHumanControlVisible() {
+        XCTAssertEqual(ShareControlPanel.controlLabel(""), "Take control")
+        XCTAssertEqual(ShareControlPanel.controlLabel(" \n"), "Take control")
+        XCTAssertEqual(ShareControlPanel.controlLabel("제어권 가져오기"), "제어권 가져오기")
+    }
+
     func testPanelNeverTakesKeyboardOrMainWindow() {
         MainActor.assumeIsolated {
             let panel = ShareTakePanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
