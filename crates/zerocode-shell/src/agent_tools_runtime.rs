@@ -2761,6 +2761,7 @@ pub(super) async fn computer_loop(
     install_share(app.clone());
     install_frame_notice(app.clone());
     install_band_notice(app.clone());
+    install_watch_notice(app.clone());
     let sequences = computer_use::sequence::SequenceGate::default();
     while let Some(request) = requests.recv().await {
         let steering = app.clone();
@@ -5905,6 +5906,7 @@ pub(super) fn answer_computer_command_with(
                 zerocode_core::computer_use::COMPUTER_PACE
             ),
             "helper": helper,
+            "stopWatch": computer_use::guard::watch_report(),
             "state": computer_use::state::snapshot(),
             "confirming": computer_use::confirm::open_questions(),
         }))
@@ -6586,6 +6588,14 @@ fn install_band_notice(app: AppHandle) {
             "computer:activity",
             computer_use::guard::activity_report(None),
         );
+    }));
+}
+
+/// A stop watch that ended while its session stood is written in the
+/// window's black box (t-68324 ①): `eprintln!` reaches nobody there.
+fn install_watch_notice(app: AppHandle) {
+    computer_use::guard::install_watch_notice(Box::new(move |line| {
+        crate::note_window_event(app.state::<AppState>().local_data_root(), line);
     }));
 }
 

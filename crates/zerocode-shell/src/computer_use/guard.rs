@@ -389,6 +389,92 @@ pub(super) fn hear_watched(answer: &Value) {
     }
 }
 
+/// The window's waiting request as the window knows it stands (t-68324 ①):
+/// while it waits, the person's chord is heard at once; once it has ended
+/// with the session still standing, the chord is heard only at the window's
+/// next command — and nothing said so. A watch that ended is kept with its
+/// reason until the session ends or a new one begins.
+enum Watch {
+    /// No session, or one whose watch ended with it.
+    Away,
+    Watching,
+    Ended {
+        reason: String,
+        at_ms: i64,
+    },
+}
+
+static WATCH: Mutex<Watch> = Mutex::new(Watch::Away);
+
+fn watch() -> std::sync::MutexGuard<'static, Watch> {
+    WATCH
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What takes the line a lost watch writes: installed by the window once,
+/// to put it in the window's black box.
+pub(crate) type WatchNotice = dyn Fn(&str) + Send + Sync;
+
+static WATCH_NOTICE: std::sync::OnceLock<Box<WatchNotice>> = std::sync::OnceLock::new();
+
+/// Install the lost watch's notice, once.
+pub(crate) fn install_watch_notice(notice: Box<WatchNotice>) {
+    let _ = WATCH_NOTICE.set(notice);
+}
+
+/// What a lost watch costs, in the words the line and the answer share.
+const WATCH_LOST_EFFECT: &str =
+    "the person's stop chord reaches the window at its next command, not at once";
+
+/// The black box's line for a watch that ended while its session stood.
+#[must_use]
+pub(crate) fn watch_lost_line(reason: &str) -> String {
+    format!("computer-use stop watch ended: {reason} — {WATCH_LOST_EFFECT}")
+}
+
+/// A session's waiting request is under way.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn watch_began() {
+    *watch() = Watch::Watching;
+}
+
+/// The watch ended with its session, on purpose: nothing was lost.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn watch_left() {
+    *watch() = Watch::Away;
+}
+
+/// The watch ended while its session stands — it never began, the road to
+/// the helper broke, or the helper's answer was not one it could ask after.
+/// Kept for the answer, and written down once.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn watch_lost(reason: &str) {
+    *watch() = Watch::Ended {
+        reason: reason.to_string(),
+        at_ms: crate::now_epoch_ms(),
+    };
+    if let Some(notice) = WATCH_NOTICE.get() {
+        notice(&watch_lost_line(reason));
+    }
+}
+
+/// What `status` says of the watch: that it waits, that none stands, or that
+/// it ended, why, when, and what that costs.
+#[must_use]
+pub fn watch_report() -> Value {
+    match &*watch() {
+        Watch::Away => serde_json::json!({ "state": "away" }),
+        Watch::Watching => serde_json::json!({ "state": "watching" }),
+        Watch::Ended { reason, at_ms } => serde_json::json!({
+            "state": "ended",
+            "reason": reason,
+            "atMs": at_ms,
+            "effect": WATCH_LOST_EFFECT,
+        }),
+    }
+}
+
 /// Held through one resume, from the check of the stop it names to stopping
 /// the helper again: a second resume inside that span would wake the helper
 /// the first is about to stop again, leaving the window running beside a
@@ -489,6 +575,32 @@ mod tests {
 
     fn revision() -> Option<u64> {
         activity_report(None)["revision"].as_u64()
+    }
+
+    #[test]
+    fn a_lost_watch_is_kept_with_its_reason_and_its_line_says_what_it_costs() {
+        let _hand = one_hand();
+        watch_left();
+        assert_eq!(watch_report()["state"], "away");
+        watch_began();
+        assert_eq!(watch_report()["state"], "watching");
+        watch_lost("the helper closed the connection");
+        let lost = watch_report();
+        watch_left();
+        let line = watch_lost_line("the helper closed the connection");
+        assert_eq!(lost["state"], "ended", "{lost}");
+        assert_eq!(lost["reason"], "the helper closed the connection", "{lost}");
+        assert!(lost["atMs"].as_i64().is_some_and(|at| at > 0), "{lost}");
+        assert_eq!(lost["effect"], WATCH_LOST_EFFECT, "{lost}");
+        assert!(
+            line.contains("the helper closed the connection") && line.contains(WATCH_LOST_EFFECT),
+            "the line names why and what it costs: {line}"
+        );
+        assert_eq!(
+            watch_report()["state"],
+            "away",
+            "an end with its session loses nothing"
+        );
     }
 
     #[test]

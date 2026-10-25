@@ -23093,6 +23093,110 @@ pub(crate) mod computer_desktop_wait {
         }
     }
 
+    /// The window's waiting request to the helper (t-68324 ①) ends three
+    /// ways while its session stands — the helper shuts the connection,
+    /// refuses the request, or answers with no stop count — and each was
+    /// silent: the person's chord then reached the window only at its next
+    /// command, and nothing said so. Now `status` says that it ended and why.
+    /// An end that comes with the session (a clean close) says nothing. The
+    /// helper is the stand-in: nothing is launched and no key is pressed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stop_watch_that_ends_while_its_session_stands_says_why_and_one_that_ends_with_it_says_nothing()
+    {
+        use crate::computer_use::guard;
+        use crate::computer_use::stand_in::{Shape, StandIn, WatchFault};
+        use std::time::{Duration, Instant};
+        const SAID_WITHIN: Duration = Duration::from_secs(2);
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let went_wrong = |fault: WatchFault| {
+            let helper = StandIn::start("watch-token", Shape::matching());
+            let session = helper
+                .connect_window("watch-token")
+                .expect("the window connects to the stand-in");
+            let standing = guard::watch_report();
+            helper.break_watch(fault);
+            let began = Instant::now();
+            let said = loop {
+                let report = guard::watch_report();
+                if report["state"] == "ended" {
+                    break Some(report);
+                }
+                if began.elapsed() >= SAID_WITHIN {
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            drop(session);
+            (standing, said, guard::watch_report())
+        };
+        for (fault, reason) in [
+            (WatchFault::HangUp, "closed the connection"),
+            (WatchFault::Refuse, "cannot wait for a stop"),
+            (WatchFault::NoCount, "no stop count"),
+        ] {
+            let (standing, said, after) = went_wrong(fault);
+            assert_eq!(
+                standing["state"], "watching",
+                "{fault:?}: a session waits for the stop: {standing}"
+            );
+            let said = said.unwrap_or_else(|| {
+                panic!("{fault:?}: the watch ended and status said nothing within {SAID_WITHIN:?}")
+            });
+            assert!(
+                said["reason"].as_str().is_some_and(|words| words.contains(reason)),
+                "{fault:?}: the reason names what went wrong ({reason}): {said}"
+            );
+            assert_eq!(
+                after["state"], "away",
+                "{fault:?}: the session's end ends the record: {after}"
+            );
+        }
+        let helper = StandIn::start("clean-token", Shape::matching());
+        let session = helper
+            .connect_window("clean-token")
+            .expect("the window connects to the stand-in");
+        drop(session);
+        assert_eq!(
+            guard::watch_report()["state"],
+            "away",
+            "a watch that ends with its session is no loss"
+        );
+    }
+
+    /// `status` carries the watch's state whether or not a helper session
+    /// stands (t-68324 ①): the window's own record, not the helper's.
+    #[test]
+    fn status_says_how_the_stop_watch_stands() {
+        use crate::computer_use::guard;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let words = |argv: &[&str]| {
+            argv.iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        guard::watch_lost("the helper closed the connection");
+        let ended = envelope(&answer_computer_command(&words(&["status", "--json"])));
+        guard::watch_left();
+        let away = envelope(&answer_computer_command(&words(&["status", "--json"])));
+        assert_eq!(ended["result"]["stopWatch"]["state"], "ended", "{ended}");
+        assert_eq!(
+            ended["result"]["stopWatch"]["reason"], "the helper closed the connection",
+            "{ended}"
+        );
+        assert!(
+            ended["result"]["stopWatch"]["effect"]
+                .as_str()
+                .is_some_and(|words| words.contains("next command")),
+            "status says what the lost watch costs: {ended}"
+        );
+        assert_eq!(away["result"]["stopWatch"]["state"], "away", "{away}");
+    }
+
     /// The person's chord the helper heard (t-66753 B): the window hears it
     /// at once — its stop is the person's and a work browser refuses the
     /// agent within 200 ms of the chord, with no command of the agent's in

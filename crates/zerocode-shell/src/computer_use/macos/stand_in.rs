@@ -77,6 +77,18 @@ pub(crate) struct Heard {
     pub(crate) token_ok: bool,
 }
 
+/// How the stand-in's waiting `stopWatch` goes wrong (t-68324 ①): the three
+/// ways the window's side of it can end while its session stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WatchFault {
+    /// The helper shuts the connection without an answer.
+    HangUp,
+    /// The helper refuses the request in its own words.
+    Refuse,
+    /// The helper answers, with no stop count to ask after.
+    NoCount,
+}
+
 struct Shared {
     token: String,
     shape: Shape,
@@ -84,11 +96,20 @@ struct Shared {
     changed: Condvar,
     heard: Mutex<Vec<Heard>>,
     closing: AtomicBool,
+    /// The fault the next `stopWatch` answer carries, once one is set.
+    watch_fault: Mutex<Option<WatchFault>>,
 }
 
 impl Shared {
     fn stop(&self) -> std::sync::MutexGuard<'_, Stop> {
         self.stop.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn watch_fault(&self) -> Option<WatchFault> {
+        *self
+            .watch_fault
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -127,6 +148,7 @@ impl StandIn {
             changed: Condvar::new(),
             heard: Mutex::new(Vec::new()),
             closing: AtomicBool::new(false),
+            watch_fault: Mutex::new(None),
         });
         let accepting = {
             let shared = Arc::clone(&shared);
@@ -177,6 +199,17 @@ impl StandIn {
         stop.reason = Some(CHORD.to_string());
         stop.revision += 1;
         drop(stop);
+        self.shared.changed.notify_all();
+    }
+
+    /// The waiting request goes wrong, as `fault` says: the one waiting now
+    /// hears it, and so does every one after it.
+    pub(crate) fn break_watch(&self, fault: WatchFault) {
+        *self
+            .shared
+            .watch_fault
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(fault);
         self.shared.changed.notify_all();
     }
 
@@ -293,6 +326,10 @@ fn serve(stream: &UnixStream, shared: &Shared) {
                 }),
             }
         };
+        // A hung-up watch answers nothing: the connection is shut on it.
+        if method == "stopWatch" && shared.watch_fault() == Some(WatchFault::HangUp) {
+            return;
+        }
         if writeln!(writer, "{said}")
             .and_then(|()| writer.flush())
             .is_err()
@@ -321,7 +358,10 @@ fn answer(method: &str, params: &Value, shared: &Shared) -> Result<Value, String
             let deadline = Instant::now() + Duration::from_millis(wait);
             let after = params.get("after").and_then(Value::as_u64);
             let mut stop = shared.stop();
-            while after == Some(stop.revision) && !shared.closing.load(Ordering::Acquire) {
+            while after == Some(stop.revision)
+                && !shared.closing.load(Ordering::Acquire)
+                && shared.watch_fault().is_none()
+            {
                 let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                     break;
                 };
@@ -331,7 +371,11 @@ fn answer(method: &str, params: &Value, shared: &Shared) -> Result<Value, String
                     .unwrap_or_else(PoisonError::into_inner)
                     .0;
             }
-            Ok(stop.status())
+            match shared.watch_fault() {
+                Some(WatchFault::Refuse) => Err("the helper cannot wait for a stop".to_string()),
+                Some(WatchFault::NoCount) => Ok(json!({ "stopped": false })),
+                Some(WatchFault::HangUp) | None => Ok(stop.status()),
+            }
         }
         "resume" => {
             let mut stop = shared.stop();
