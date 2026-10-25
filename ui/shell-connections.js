@@ -359,7 +359,7 @@ const modelConnectionsController = {
       this.render(); return;
     }
     if (!confirmed) { this.deletion = { id: row.id, confirm: true, message: t("settings.connections.deleteConfirm", "연결과 저장된 인증 참조를 삭제할까요? 서버와 모델 파일은 삭제하지 않습니다.") }; this.render(); return; }
-    try { await invoke("remove_api_router", { name: row.provider.name, sourceId: row.id, expectedGeneration: row.generation }); this.deletion = null; await this.refresh(); }
+    try { await invoke("remove_api_router", { name: row.provider.name, sourceId: row.id, expectedGeneration: row.generation }, { hand: handNow() }); this.deletion = null; await this.refresh(); }
     catch (error) { this.deletion = { id: row.id, message: this.failure(error) }; this.render(); }
   },
 };

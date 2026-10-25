@@ -4404,8 +4404,10 @@ const floatView = makeTermView(el("terminal"), el("term"), el("caret"), {
  *                element of the kind's own where the keyboard starts instead
  *                (a field the person types in); `safe` is Escape's
  *   clock(ask)   the words for a deadline the ask carries (Computer Use)
- *   deliver(ask, choice)  a promise that settles once the answer has reached
- *                whoever asked; a rejection keeps the ask on screen
+ *   deliver(ask, choice, hand)  a promise that settles once the answer has
+ *                reached whoever asked; a rejection keeps the ask on screen;
+ *                `hand` is the hand that answered (shell-boot.js `handNow`),
+ *                which a person-only answer carries (t-75209)
  *   refused(ask) the line under the reason when an answer did not arrive:
  *                where else the same question can be answered, for a kind
  *                that has such a place
@@ -4626,11 +4628,12 @@ async function answerAsk(choice) {
   // ask that was pressed.
   const answered = activeAsk;
   if (!answered || answered.sending === true) return;
+  const hand = handNow();
   answered.sending = true;
   for (const button of el("ask-choices").querySelectorAll("button")) button.disabled = true;
   const kind = askKindOf(answered);
   try {
-    await kind.deliver(answered, choice);
+    await kind.deliver(answered, choice, hand);
   } catch (error) {
     answered.sending = false;
     if (activeAsk !== answered) return;
@@ -4816,12 +4819,12 @@ const ASK_SESSION_UNREACHABLE = "zerocode:session-unreachable";
  * questions leave the way a session end takes them, and the person is told
  * the answer went nowhere (t-51007). */
 const askFromChannel = {
-  deliver: (ask, choice) =>
+  deliver: (ask, choice, hand) =>
     invoke("respond_permission", {
       session: ask.session,
       promptId: ask.frame.prompt_id,
       decision: choice.decision,
-    }).catch((error) => {
+    }, { hand }).catch((error) => {
       if (error === ASK_SESSION_UNREACHABLE) {
         withdrawPermissions(ask.session);
         toast(

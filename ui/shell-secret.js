@@ -130,7 +130,7 @@ registerAskKind("secret", {
   withdrawn(ask) {
     if (secretOwner === ask) wipeSecret();
   },
-  async deliver(ask, choice) {
+  async deliver(ask, choice, hand) {
     if (choice.decision === "cancel") {
       secretSettled.add(ask.key);
       wipeSecret();
@@ -142,7 +142,7 @@ registerAskKind("secret", {
       throw Object.assign(new Error("secret-empty"), { askHeld: true });
     }
     try {
-      await invoke("answer_secret", { term: ask.term, kind: ask.secretKind, line: ask.line, value });
+      await invoke("answer_secret", { term: ask.term, kind: ask.secretKind, line: ask.line, value }, { hand });
     } catch (error) {
       // The backend's refusal is its word; a thrown Error carries the same word in its message.
       const word = typeof error === "string" ? error : String(error?.message ?? error);

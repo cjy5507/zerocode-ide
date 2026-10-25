@@ -338,7 +338,7 @@ async function saveSshHost() {
         ...input,
         password: password === "" ? null : password,
       },
-    });
+    }, { hand: handNow() });
     if (generation !== sshHostGeneration) return;
     sshHostReport = normalizeSshHostReport(answer);
     closeSshHostDialog();
@@ -362,7 +362,7 @@ async function removeSshHost(host) {
   sshHostError = null;
   paintSshHosts();
   try {
-    const answer = await invoke("remove_ssh_host", { id: host.id });
+    const answer = await invoke("remove_ssh_host", { id: host.id }, { hand: handNow() });
     if (generation !== sshHostGeneration) return;
     sshHostReport = normalizeSshHostReport(answer);
   } catch (error) {
@@ -1063,7 +1063,7 @@ async function saveSshTarget() {
   clearSshTargetDialogError();
   el("ssh-target-save").disabled = true;
   try {
-    const answer = await invoke("ssh_save_target", { target: sshTargetDraft() });
+    const answer = await invoke("ssh_save_target", { target: sshTargetDraft() }, { hand: handNow() });
     if (generation !== sshTargetGeneration) return;
     sshTargets = normalizeSshTargets(answer);
     sshTargetError = null;
@@ -1082,6 +1082,7 @@ async function saveSshTarget() {
 
 async function requestRemoveSshTarget(target) {
   if (sshTargetMutation !== null) return;
+  const started = handNow();
   const said = await askConfirm({
     title: t("settings.ssh.removeTitle", "SSH 대상 제거"),
     body: t("settings.ssh.removeBody", "이 대상을 목록에서 제거합니다."),
@@ -1090,12 +1091,14 @@ async function requestRemoveSshTarget(target) {
     danger: true,
   });
   if (said !== true) return;
+  // The press's hand, joined by the answer's (shell-boot.js `flowHand`).
+  const hand = flowHand(started);
   const generation = ++sshTargetGeneration;
   sshTargetMutation = target.id;
   sshTargetError = null;
   paintSshTargets();
   try {
-    const answer = await invoke("ssh_remove_target", { id: target.id });
+    const answer = await invoke("ssh_remove_target", { id: target.id }, { hand });
     if (generation !== sshTargetGeneration) return;
     sshTargets = normalizeSshTargets(answer);
   } catch (error) {
@@ -1424,7 +1427,7 @@ async function saveRemoteWorkspace() {
     root: el("remote-workspace-verified-root").value,
   };
   try {
-    const answer = await invoke("save_remote_workspace", { input });
+    const answer = await invoke("save_remote_workspace", { input }, { hand: handNow() });
     if (generation !== remoteWorkspaceGeneration) return;
     remoteWorkspaceReport = normalizeRemoteWorkspaceReport(answer);
     closeRemoteWorkspaceDialog();
@@ -1446,7 +1449,7 @@ async function removeRemoteWorkspace(workspace) {
   remoteWorkspaceError = null;
   paintRemoteWorkspaces();
   try {
-    const answer = await invoke("remove_remote_workspace", { id: workspace.id });
+    const answer = await invoke("remove_remote_workspace", { id: workspace.id }, { hand: handNow() });
     if (generation !== remoteWorkspaceGeneration) return;
     remoteWorkspaceReport = normalizeRemoteWorkspaceReport(answer);
   } catch (error) {
@@ -1751,7 +1754,7 @@ async function saveRemoteServer() {
     accessLink: el("remote-server-access-link").value.trim(),
   };
   try {
-    const answer = await invoke("save_remote_server", { input });
+    const answer = await invoke("save_remote_server", { input }, { hand: handNow() });
     if (generation !== remoteServerGeneration) return;
     remoteServerReport = normalizeRemoteServerReport(answer);
     closeRemoteServerDialog();
@@ -1773,7 +1776,7 @@ async function removeRemoteServer(server) {
   remoteServerError = null;
   paintRemoteServers();
   try {
-    const answer = await invoke("remove_remote_server", { id: server.id });
+    const answer = await invoke("remove_remote_server", { id: server.id }, { hand: handNow() });
     if (generation !== remoteServerGeneration) return;
     remoteServerReport = normalizeRemoteServerReport(answer);
   } catch (error) {
@@ -2761,7 +2764,7 @@ async function selectGithubAccount(accountId) {
   if (!accountId || githubMutationAccountId !== null) return;
   const generation = beginGithubMutation(accountId);
   try {
-    const canonical = await invoke("github_select_account", { accountId });
+    const canonical = await invoke("github_select_account", { accountId }, { hand: handNow() });
     if (generation !== githubMutationGeneration) return;
     if (!acceptGithubMutation(canonical)) await refreshGithubIntegration();
   } catch (error) {
@@ -2814,7 +2817,7 @@ async function openGithubLoginTerminal() {
   githubIntegrationError = null;
   paintGithubIntegration();
   try {
-    const command = String(await invoke("github_login_intent"));
+    const command = String(await invoke("github_login_intent", undefined, { hand: handNow() }));
     if (!/^gh auth login(?: --hostname [a-z0-9.-]+)? --web$/.test(command)) {
       throw new Error("Invalid GitHub login intent");
     }
@@ -3307,7 +3310,7 @@ async function disconnectJiraSite(siteId) {
   if (!siteId || jiraMutationSiteId !== null) return;
   const generation = beginJiraMutation(siteId);
   try {
-    const canonical = await invoke("jira_disconnect", { siteId });
+    const canonical = await invoke("jira_disconnect", { siteId }, { hand: handNow() });
     if (generation !== jiraMutationGeneration) return;
     jiraTestResults.delete(siteId);
     if (!acceptJiraMutation(canonical)) await refreshJiraStatus();
@@ -4689,7 +4692,7 @@ el("jira-connect-submit").addEventListener("click", async () => {
       email: jiraNeedsIdentity() ? el("jira-identity").value.trim() : "",
       apiToken: el("jira-token").value,
       authType: jiraInstanceType,
-    });
+    }, { hand: handNow() });
     if (generation !== jiraMutationGeneration) return;
     closeJiraConnectDialog();
     if (!acceptJiraMutation(canonical)) await refreshJiraStatus();
@@ -5143,7 +5146,7 @@ el("linear-connect-submit").addEventListener("click", async () => {
   el("linear-connect-submit").disabled = true;
   el("linear-connect-cancel").disabled = true;
   try {
-    const answer = await invoke("linear_connect", { apiKey });
+    const answer = await invoke("linear_connect", { apiKey }, { hand: handNow() });
     if (generation !== linearMutationGeneration) return;
     linearStatus = normalizeLinearStatus(answer);
     linearConnecting = false;
@@ -5165,7 +5168,7 @@ el("integration-linear-refresh").addEventListener("click", () => void refreshLin
 el("integration-linear-disconnect").addEventListener("click", async () => {
   const generation = ++linearMutationGeneration;
   try {
-    const answer = await invoke("linear_disconnect");
+    const answer = await invoke("linear_disconnect", undefined, { hand: handNow() });
     if (generation !== linearMutationGeneration) return;
     linearStatus = normalizeLinearStatus(answer);
     paintLinearIntegration();

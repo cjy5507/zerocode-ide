@@ -13,40 +13,64 @@
 const { invoke: invokeBackend, Channel: TauriChannel } = window.__TAURI__.core;
 const { listen: listenToBackend } = window.__TAURI__.event;
 
-/* Whose hand made a command (t-74927). The window runs a person-only command
- * (`PERSON_ONLY_COMMANDS`, self_surface.rs) only when the page says the person
- * made it, so every call says so in `zerocode-hand`:
+/* Whose hand made a command (t-74927, t-75209). The window runs a person-only
+ * command (`PERSON_ONLY_COMMANDS`, self_surface.rs) only when the page says
+ * the person made it, so every call says so in `zerocode-hand`. The hand is
+ * the flow's, never the page's last input: the person moving elsewhere while
+ * an agent's flow awaits gives that flow nothing.
  *
- *  - `agent` from an agent's press in this window (shell-self-act.js) on —
- *    its click, what the click fired, and whatever runs after it, however
- *    long it awaited — until the person's own next move;
- *  - `person` once the person moved: a pointer, a touch or a key whose event
- *    the browser marks `isTrusted`, made outside a press — an event a press
- *    fires while it runs is the press's, whatever the browser marks it;
+ *  - `person` inside the person's own event — a pointer, a touch or a key the
+ *    browser marks `isTrusted`, what the page answers it with, and the
+ *    microtasks it settles (a question's answer) — made outside a press;
+ *  - `agent` inside an agent's press in this window (shell-self-act.js), and
+ *    for the rest of the flow it started, when the flow carries its hand;
+ *  - `none` anywhere else: after an await that left the event behind, a
+ *    timer, a backend event. A flow that awaits before its person-only
+ *    command carries the hand it started with (`flowHand`);
  *  - `program`, asked for by name, for the one road no hand starts and the
  *    window still runs a person-only command on: the update clock's quiet
  *    download.
  *
- * No clock decides: a press does not hold the person's next click, and an
- * agent's handler is not let through by waiting. */
+ * No clock decides, and no input a flow did not start with moves its hand. */
 const HAND_HEADER = "zerocode-hand";
 const PERSON_MOVES = [
   "pointerdown", "pointerup", "mousedown", "mouseup", "click", "auxclick", "dblclick", "contextmenu",
   "touchstart", "touchend", "keydown", "keyup",
 ];
-let pageHand = "person";
 let agentPressing = false;
+// The person's own event the browser is dispatching, if one is: a page's
+// `click()` inside it (Enter pressing a button) is still the person's.
+let personEvent = null;
 
 for (const kind of PERSON_MOVES) {
   window.addEventListener(kind, (event) => {
-    if (event.isTrusted && !agentPressing) pageHand = "person";
+    if (event.isTrusted && !agentPressing) personEvent = event;
   }, true);
 }
 
-/* An agent's press: `press` runs as the agent's, and every command after it is
- * the agent's until the person moves. */
+/* The hand of the event the page is answering right now. */
+function handNow() {
+  if (agentPressing) return "agent";
+  const event = window.event;
+  if (!event) return "none";
+  if (event.isTrusted) return "person";
+  return personEvent !== null && personEvent.eventPhase !== Event.NONE ? "person" : "none";
+}
+
+/* The hand of a flow that started with `started` (`handNow()` before its
+ * first await), said at one of its later steps: the agent's flow stays the
+ * agent's whatever the person pressed meanwhile — a question it opened too;
+ * a flow no hand started is the person's when the person's own answer is the
+ * event this step answers (the window's close, asked by the backend). */
+function flowHand(started) {
+  const now = handNow();
+  if (started === "agent" || now === "agent") return "agent";
+  return now === "person" ? "person" : started;
+}
+
+/* An agent's press: `press` runs as the agent's, and the flow it starts
+ * carries that hand. */
 function asAgentPress(press) {
-  pageHand = "agent";
   agentPressing = true;
   try {
     return press();
@@ -55,10 +79,11 @@ function asAgentPress(press) {
   }
 }
 
-/* Tauri's `invoke`, saying whose hand made the call. `options.hand` names the
- * `program` road; every other caller leaves it to the page. */
+/* Tauri's `invoke`, saying whose hand made the call: `options.hand` when the
+ * caller carries a flow's hand or names the `program` road, the event the
+ * page is answering otherwise. */
 const invoke = (command, args, options) => {
-  const { hand = pageHand, ...rest } = options ?? {};
+  const { hand = handNow(), ...rest } = options ?? {};
   return invokeBackend(command, args, { ...rest, headers: { ...rest.headers, [HAND_HEADER]: hand } });
 };
 
