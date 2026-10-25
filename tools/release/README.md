@@ -186,8 +186,10 @@ reads the paths the two trees differ in and runs only the checks that read one
 of them: `skill-release`, `backend-count` (a count assert over a crate's
 `shipped_backend()`, with the test's own number), `settings-ipc`, and each
 `tools-test` line of the justfile whose test names a changed file, run in a
-checkout of the head made for it and removed after (over 30 s it is said
-unchecked: the gate's to run). It prints `RC <check>=<rc> (<s>s)` with reasons,
+checkout of the head made for it and removed after, four at once (over 30 s it
+is said unchecked: the gate's to run). `test_lane.py` and the computer bench's
+`test_bench.py` ran past that on every 10-25 head, so they run only with
+`--slow` and are otherwise said unchecked; the default run stays under 10 s. It prints `RC <check>=<rc> (<s>s)` with reasons,
 `unchecked <path>` for a path no check reads, and `RC prebatch=<rc>`; it exits 1
 on a red and 2 when a revision cannot be read. It runs no cargo and stands in for
 no gate: a green says only that these checks found nothing, and every recipe the

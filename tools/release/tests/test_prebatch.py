@@ -148,9 +148,9 @@ class Fixture:
         git(self.repo, "commit", "-q", "--allow-empty", "-m", message, env=self.env)
         return git(self.repo, "rev-parse", "HEAD", env=self.env)
 
-    def check(self, base=None, head="HEAD"):
+    def check(self, base=None, head="HEAD", *more):
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "--repo", str(self.repo), "--base", base or self.base, "--head", head],
+            [sys.executable, str(SCRIPT), "--repo", str(self.repo), "--base", base or self.base, "--head", head, *more],
             capture_output=True, text=True, env=self.env, timeout=120,
         )
 
@@ -234,6 +234,20 @@ class PrebatchTest(unittest.TestCase):
         self.fx.append("ui/tests/settings.mjs", 'switch (command) {\n  case "share_state": return null;\n}\n')
         self.fx.commit("the fake backend answers it")
         self.assertGreen(self.fx.check(), "settings-ipc")
+
+    def test_a_slow_tools_test_is_unchecked_unless_slow_is_asked(self):
+        self.fx.write("tools/release/tests/test_lane.py", SEED_TEST.replace("parents[2]", "parents[3]"))
+        self.fx.write("justfile", self.fx.repo.joinpath("justfile").read_text().replace(
+            "    # a comment line is no test\n",
+            "    # a comment line is no test\n    python3 tools/release/tests/test_lane.py\n"))
+        self.fx.commit("the lane's test")
+        self.fx.append("crates/zerocode-core/src/orchestration.rs", "// touched\n")
+        self.fx.commit("a path both tests read")
+        said = self.fx.check(None, "HEAD")
+        self.assertGreen(said, "tools-test:tools/tests/test_kinds_seed.py")
+        self.assertIn("unchecked check tools-test:tools/release/tests/test_lane.py — slow", said.stdout)
+        self.assertNotIn("RC tools-test:tools/release/tests/test_lane.py", said.stdout)
+        self.assertGreen(self.fx.check(None, "HEAD", "--slow"), "tools-test:tools/release/tests/test_lane.py")
 
     def test_a_path_no_rule_covers_is_reported_unchecked_not_passed(self):
         self.fx.append("docs/notes.md", "more\n")

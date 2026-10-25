@@ -8,7 +8,7 @@ road more than the shell's literal count allows (l78g, about 13 minutes in) and 
 load the settings test's fake backend has no case for (l78h, about 90 minutes in). Each is
 a rule a test already holds; this reads the text that test reads, before anything is built:
 
-    prebatch.py --base <rev> --head <rev> [--repo DIR]
+    prebatch.py --base <rev> --head <rev> [--repo DIR] [--slow]
 
 It takes the paths that differ between the two trees and runs only the checks that read
 one of them. Every check is one entry of CHECKS below, and what it reads is said there:
@@ -24,7 +24,8 @@ one of them. Every check is one entry of CHECKS below, and what it reads is said
                         `case` for (settings: the stateful backend refused every command
                         the fixture did not define)
     tools-test:<file>   the justfile's tools-test line for <file>, run in a checkout of
-                        head made for it, when a path that test reads changed
+                        head made for it, when a path that test reads changed; four at
+                        once, each capped, and the SLOW ones only with --slow
 
 A changed path no check reads is printed `unchecked <path>`: nothing here passed it, and
 the gate still runs all it owes. Nothing here runs cargo, and nothing here stands in for a
@@ -34,6 +35,7 @@ when the repository or a revision cannot be read.
 """
 
 import argparse
+import concurrent.futures
 import os
 import posixpath
 import re
@@ -50,6 +52,13 @@ from pathlib import Path
 # unchecked, never red. On 10-25 the seeds took under 2 s each, test_lane and the
 # computer bench over 120 s.
 TEST_CAP_S = 30
+# The tools tests the quick check leaves to the gate unless --slow asks: each ran past
+# the cap above in the 10-25 replays of l78d-l78i, and the coordinator keeps the
+# default run under 10 s (m-74613). Said unchecked, never run, never passed.
+SLOW = ("tools/release/tests/test_lane.py", "tools/computer-bench/test_bench.py")
+# Tools tests run side by side, as many at once: the 10-25 heads' picks took 19 s one
+# after another and under 10 s four at a time.
+AT_ONCE = 4
 
 SKILL = re.compile(r"^skills/[^/]+/SKILL\.md$")
 SKILL_RELEASES = "crates/zerocode-core/src/skill_releases.tsv"
@@ -370,10 +379,10 @@ def tools_tests(head, base_paths, base_justfile):
     return checks
 
 
-def run_tools_test(words, checkout):
+def run_tools_test(words, checkout, cap=TEST_CAP_S):
     try:
         said = subprocess.run(
-            words, cwd=checkout, capture_output=True, text=True, timeout=TEST_CAP_S,
+            words, cwd=checkout, capture_output=True, text=True, timeout=cap,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
     except subprocess.TimeoutExpired:
@@ -391,6 +400,11 @@ def checkout_of(repo, head, into):
     return into
 
 
+def timed(run, *args):
+    started = time.monotonic()
+    return run(*args), time.monotonic() - started
+
+
 # -- the table ---------------------------------------------------------------------
 
 CHECKS = (skill_release, backend_count, settings_ipc, tools_tests)
@@ -401,6 +415,7 @@ def main(argv=None):
     parser.add_argument("--base", required=True, help="the tree the batch starts from (main)")
     parser.add_argument("--head", required=True, help="the tree the batch would gate")
     parser.add_argument("--repo", default=".", help="the repository (default: here)")
+    parser.add_argument("--slow", action="store_true", help="also run the slow tools tests (SLOW), uncapped")
     args = parser.parse_args(argv)
     # A stopped run still removes the checkout it made.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
@@ -420,33 +435,43 @@ def main(argv=None):
     print(f"base {base} · head {head_sha} · {len(changed)} paths changed")
     red_any, covered, scratch = False, set(), None
     try:
+        picked = []
         for make in CHECKS:
             for check in make(head, base_paths, base_justfile):
                 touched = [p for p in changed if check.reads(p)]
                 if check.fresh and "justfile" in changed:
                     touched.append("justfile")
-                if not touched:
-                    continue
-                if check.why_not:
-                    print(f"unchecked check {check.name} — {check.why_not}")
-                    continue
-                started = time.monotonic()
-                if isinstance(check.run, tuple):
-                    if scratch is None:
-                        scratch = Path(tempfile.mkdtemp(prefix="prebatch-"))
-                        checkout_of(repo, head_sha, scratch / "head")
-                    red = run_tools_test(check.run[1], scratch / "head")
-                else:
-                    red = check.run()
-                took = time.monotonic() - started
-                if red is None:
-                    print(f"unchecked check {check.name} — ran past {TEST_CAP_S} s; the gate runs it")
-                    continue
-                covered.update(touched)
-                red_any = red_any or bool(red)
-                print(f"RC {check.name}={1 if red else 0} ({took:.1f}s)")
-                for reason in red:
-                    print(f"  {reason}")
+                if touched:
+                    picked.append((check, touched))
+        tools = [check for check, _ in picked if isinstance(check.run, tuple) and not check.why_not]
+        slow = {check.name for check in tools if check.name.split(":", 1)[1] in SLOW}
+        running = {}
+        if any(check.name not in slow or args.slow for check in tools):
+            scratch = Path(tempfile.mkdtemp(prefix="prebatch-"))
+            checkout_of(repo, head_sha, scratch / "head")
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=AT_ONCE)
+        for check in tools:
+            if check.name in slow and not args.slow:
+                continue
+            cap = None if check.name in slow else TEST_CAP_S
+            running[check.name] = pool.submit(timed, run_tools_test, check.run[1], scratch / "head", cap)
+        for check, touched in picked:
+            if check.why_not:
+                print(f"unchecked check {check.name} — {check.why_not}")
+                continue
+            if check.name in slow and not args.slow:
+                print(f"unchecked check {check.name} — slow, --slow runs it; the gate runs it")
+                continue
+            red, took = running[check.name].result() if check.name in running else timed(check.run)
+            if red is None:
+                print(f"unchecked check {check.name} — ran past {TEST_CAP_S} s; the gate runs it")
+                continue
+            covered.update(touched)
+            red_any = red_any or bool(red)
+            print(f"RC {check.name}={1 if red else 0} ({took:.1f}s)")
+            for reason in red:
+                print(f"  {reason}")
+        pool.shutdown()
     except Unreadable as error:
         print(f"prebatch: {error}")
         return 2
