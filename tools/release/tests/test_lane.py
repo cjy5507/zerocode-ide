@@ -326,6 +326,40 @@ class Syntax(LaneCase):
         self.assertGreaterEqual(r.returncode, 128, r.stdout + r.stderr)
         self.assertEqual((work / "ran.txt").read_text().split(), ["first", "killed"])
 
+    def test_tools_test_runs_every_script_after_one_fails(self):
+        # t-74384: `just` ends a recipe at its first failed line, and the
+        # Windows leg's tools-test ended at its second script (test_lane.py), so
+        # 48 of the 50 never reported there. The real recipe, every script path
+        # swapped for a stub that logs a line, the second one red: all of them
+        # still run, the last line names the red one, and the exit is 1.
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        text = (REPO / "justfile").read_text(encoding="utf-8")
+        recipe = text[text.index("\ntools-test:\n") + 1:].split("\n\n")[0]
+        seen = []
+
+        def stub(match):
+            seen.append(match.group(0))
+            return "fail.py" if len(seen) == 2 else "ok.py"
+
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            'set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]\n\n'
+            + re.sub(r"tools/\S+\.py", stub, recipe) + "\n", encoding="utf-8")
+        (work / "ok.py").write_text('open("ran.txt", "a").write("ok\\n")\n')
+        (work / "fail.py").write_text('import sys\nopen("ran.txt", "a").write("fail\\n")\nsys.exit(1)\n')
+        calls, macos_only = len(seen), recipe.count("\n    macos ")
+        self.assertGreater(calls, 40, "the recipe lists the tools' tests")
+        r = subprocess.run(["just", "tools-test"], cwd=work, capture_output=True, text=True, timeout=120)
+        ran = (work / "ran.txt").read_text().split()
+        elsewhere = sys.platform != "darwin"  # the macOS-only scripts say SKIPPED aloud and do not run
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(len(ran), calls - (macos_only if elsewhere else 0), r.stdout + r.stderr)
+        self.assertEqual(ran.count("fail"), 1)
+        self.assertEqual(r.stdout.count("SKIPPED python3 "), macos_only if elsewhere else 0, r.stdout)
+        self.assertIn("tools-test: red scripts: fail.py", r.stderr)
+
     def test_the_end_names_every_red_recipe(self):
         # t-21326: a CI leg's log is read from its end. One run must say every
         # recipe that went red, not only the first — and a GitHub run also
