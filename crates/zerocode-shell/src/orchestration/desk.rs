@@ -19,9 +19,9 @@ use zerocode_core::orchestration::settle::{
 };
 use zerocode_core::orchestration::task_cost::TaskCost;
 use zerocode_core::orchestration::{
-    Closure, Delivery, Gate, GateStatus, LEDGER_ITSELF, Ledger, Message, MessageKind, Run,
-    SETTLE_QUIET_DAYS, Task, TaskStatus, WorkProgress, WorkStage, WorktreeRoom, last_touched_ms,
-    worktree_room,
+    Closure, Delivery, Gate, GateStatus, LEDGER_ITSELF, Ledger, Message, MessageKind, NextStep,
+    Run, SETTLE_QUIET_DAYS, Task, TaskStatus, WorkProgress, WorkStage, WorktreeRoom,
+    last_touched_ms, worktree_room,
 };
 use zerocode_core::plain_text::TextLint;
 
@@ -499,6 +499,9 @@ pub(crate) struct DeskTask {
     pub(crate) id: String,
     pub(crate) title: String,
     pub(crate) stage: &'static str,
+    /// What is to be done next ([`next_step`], t-73910 W4-1): the window
+    /// translates the word, and keeps no table of steps of its own.
+    pub(crate) next_step: NextStep,
     /// The task this one was written under (`task-create --parent`) and that
     /// task's name: the goal the board's 「지금 도는 일」 folds its rows under
     /// (t-67607). `None` for a task written at the top.
@@ -824,6 +827,26 @@ pub(crate) fn word_awaits_review(word: &str) -> bool {
         .any(|stage| awaits_review(stage) && completed_stage(stage) == word)
 }
 
+/// What comes next for a task at a desk stage: the work's own step
+/// ([`WorkStage::next_step`]) where its stage is where completed work stands,
+/// and for the task's own status otherwise. A completed task the ledger
+/// cannot read (`unknown`) asks for nothing it would have to guess.
+pub(crate) fn next_step(stage: &str, progress: Option<&WorkProgress>) -> NextStep {
+    match stage {
+        "pending" => NextStep::AwaitDependencies,
+        "ready" => NextStep::Summon,
+        "dispatched" => NextStep::Wait,
+        "gate" => NextStep::Decide,
+        "blocked" => NextStep::MendDependency,
+        "failed" => WorkStage::Failed.next_step(),
+        "closed" => WorkStage::Closed.next_step(),
+        word => progress
+            .map(|progress| progress.stage)
+            .filter(|work| completed_stage(*work) == word && word != "unknown")
+            .map_or(NextStep::Unknown, WorkStage::next_step),
+    }
+}
+
 /// A task's one stage word ([`STAGES`]) — the reading the desk, the board and
 /// the artifact tab's flow (t-68458) all draw, so no surface keeps a second one.
 pub(crate) fn stage_of(run: &Run, task: &Task) -> &'static str {
@@ -913,6 +936,7 @@ pub(crate) fn desk_snapshot(
             .collect();
         let left = left_behind_by(run, now_ms, |task| awaiting.contains(task.id.as_str()));
         for (task, (stage, progress)) in read {
+            let next_step = next_step(stage, progress.as_ref());
             staged_tasks.push((
                 run,
                 task,
@@ -921,6 +945,7 @@ pub(crate) fn desk_snapshot(
                     id: task.id.clone(),
                     title: task.display_name().to_string(),
                     stage,
+                    next_step,
                     parent: task.parent.clone(),
                     parent_title: task
                         .parent
@@ -3141,6 +3166,57 @@ mod tests {
             "an unreviewable row lost its cost"
         );
         assert!(finished(held, held.task(&by_hand[0]).expect("a task")));
+    }
+
+    /// t-73910 W4-1: every desk stage says what comes next. A task's own
+    /// status decides it before completion; after, the work's own step does,
+    /// and only where the row's word is that work's word — a word and a
+    /// reading that disagree, or a completed task the ledger cannot read, ask
+    /// for nothing.
+    #[test]
+    fn every_desk_stage_says_what_comes_next_and_completed_work_reads_its_own() {
+        let progress = |stage: WorkStage| WorkProgress {
+            stage,
+            claimed: None,
+            attempt: None,
+            source: None,
+            merge_head: None,
+            reviewed: None,
+            next: None,
+        };
+        for stage in STAGES {
+            if !FINISHED_STAGES.contains(&stage) {
+                let step = next_step(stage, None);
+                assert_eq!(
+                    step == NextStep::Unknown,
+                    stage == "unknown",
+                    "{stage}: {step:?}"
+                );
+            }
+        }
+        for (word, work, step) in [
+            ("reported", WorkStage::ReportOnly, NextStep::Review),
+            ("verified", WorkStage::Verified, NextStep::Land),
+            ("merged", WorkStage::Merged, NextStep::Ship),
+            ("stale", WorkStage::Stale, NextStep::ReviewNewHead),
+            ("deployed", WorkStage::Deployed, NextStep::Over),
+            ("nothing_to_land", WorkStage::NothingToLand, NextStep::Over),
+            ("unknown", WorkStage::Working, NextStep::Unknown),
+            ("verified", WorkStage::ReportOnly, NextStep::Unknown),
+        ] {
+            assert_eq!(
+                next_step(word, Some(&progress(work))),
+                step,
+                "{word} over {work:?}"
+            );
+        }
+        assert_eq!(next_step("ready", None), NextStep::Summon);
+        assert_eq!(next_step("gate", None), NextStep::Decide);
+        assert_eq!(next_step("failed", None), NextStep::RetryOrClose);
+        assert_eq!(
+            serde_json::to_value(NextStep::ReviewNewHead).expect("json"),
+            "review_new_head"
+        );
     }
 
     /// Work nobody is coming back to stands apart on the desk (t-71220): each

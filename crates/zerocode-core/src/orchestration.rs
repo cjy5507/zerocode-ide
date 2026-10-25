@@ -50,7 +50,7 @@ mod session_history;
 pub mod settle;
 pub mod task_cost;
 
-pub use progress::{WorkProgress, WorkStage};
+pub use progress::{NextStep, WorkProgress, WorkStage};
 pub use project_scope::{ProjectSource, Reach, RunProject, Scope};
 pub use session_history::{CONVERSATION_HELD_ELSEWHERE, SessionHistory};
 
