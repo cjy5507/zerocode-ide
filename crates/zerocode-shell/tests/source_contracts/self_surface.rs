@@ -189,6 +189,8 @@ fn the_persons_controls_carry_the_person_only_mark() {
     for part in [
         "reply.dataset.personOnly = \"\"",
         "actions.dataset.personOnly = \"\"",
+        // A row opens its letter and a read leaves the ledger's ack (t-74825).
+        "list.dataset.personOnly = \"\"",
     ] {
         assert!(inbox.contains(part), "the inbox's answer lost `{part}`");
     }
@@ -233,6 +235,13 @@ fn every_step_asks_the_share_and_the_band_is_the_persons() {
     for name in ["computer_take_control", "computer_give_back"] {
         assert!(person.contains(&name.to_string()), "{name} is the person's");
     }
+}
+
+/// The ledger's ack of a letter is the person's: the desk and the inbox both
+/// reach it, and the marks on their controls are the first wall (t-74825).
+#[test]
+fn the_ledger_ack_of_a_letter_is_a_person_only_command() {
+    assert!(person_only_commands().contains(&"desk_ack".to_string()));
 }
 
 #[test]
