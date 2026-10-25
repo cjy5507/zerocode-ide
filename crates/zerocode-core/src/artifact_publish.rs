@@ -483,6 +483,18 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// OS lock is released when the guard drops, and on process exit, including
 /// an interrupted publication.
 pub fn lock_store(root: &Path) -> Result<crate::held_file_lock::HeldFileLock, String> {
+    lock_store_with_clock(root, std::time::Instant::now, || {
+        std::thread::sleep(std::time::Duration::from_millis(STORE_LOCK_RETRY_MS));
+    })
+}
+
+/// The same OS lock and patience, with the wait's clock supplied by its caller.
+/// Tests release a real lock at a measured step instead of racing two threads.
+fn lock_store_with_clock(
+    root: &Path,
+    now: impl Fn() -> std::time::Instant,
+    mut wait: impl FnMut(),
+) -> Result<crate::held_file_lock::HeldFileLock, String> {
     std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -491,14 +503,15 @@ pub fn lock_store(root: &Path) -> Result<crate::held_file_lock::HeldFileLock, St
         .write(true)
         .open(root.join(".publish.lock"))
         .map_err(|e| e.to_string())?;
-    let started = std::time::Instant::now();
+    let started = now();
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(crate::held_file_lock::HeldFileLock::locked(file)),
             Err(std::fs::TryLockError::WouldBlock)
-                if started.elapsed() < std::time::Duration::from_millis(STORE_LOCK_PATIENCE_MS) =>
+                if now().duration_since(started)
+                    < std::time::Duration::from_millis(STORE_LOCK_PATIENCE_MS) =>
             {
-                std::thread::sleep(std::time::Duration::from_millis(STORE_LOCK_RETRY_MS));
+                wait();
             }
             Err(e) => return Err(format!("artifact store busy: {e}; retry publish")),
         }
@@ -831,16 +844,31 @@ mod tests {
     fn a_store_lock_held_for_a_moment_is_waited_out_and_one_held_on_is_busy() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("artifacts");
-        let held = lock_store(&root).unwrap();
-        let release = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(40));
-            drop(held);
-        });
         let started = std::time::Instant::now();
-        let second = lock_store(&root).expect("the moment is waited out");
-        assert!(started.elapsed() >= std::time::Duration::from_millis(30));
-        release.join().unwrap();
-        let busy = lock_store(&root).unwrap_err();
+        let clock = std::cell::Cell::new(started);
+        let held_for = std::time::Duration::from_millis(40);
+        let step = std::time::Duration::from_millis(STORE_LOCK_RETRY_MS);
+        let mut held = Some(lock_store(&root).unwrap());
+        let second = lock_store_with_clock(
+            &root,
+            || clock.get(),
+            || {
+                clock.set(clock.get() + step);
+                if clock.get().duration_since(started) >= held_for {
+                    drop(held.take());
+                }
+            },
+        )
+        .expect("the moment is waited out");
+        assert!(held.is_none(), "the waiter reached the release step");
+        assert_eq!(clock.get().duration_since(started), held_for);
+        let waiting_since = clock.get();
+        let busy = lock_store_with_clock(&root, || clock.get(), || clock.set(clock.get() + step))
+            .unwrap_err();
+        assert_eq!(
+            clock.get().duration_since(waiting_since),
+            std::time::Duration::from_millis(STORE_LOCK_PATIENCE_MS)
+        );
         assert!(busy.starts_with("artifact store busy"), "{busy}");
         drop(second);
         assert!(lock_store(&root).is_ok());

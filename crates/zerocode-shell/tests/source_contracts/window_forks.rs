@@ -43,7 +43,10 @@ const GUARDED_LOCKS: &[(&str, &str)] = &[
         "zerocode-shell/src/orchestration/cost_book/receipts.rs",
         "fn take_lock(",
     ),
-    ("zerocode-core/src/artifact_publish.rs", "fn lock_store("),
+    (
+        "zerocode-core/src/artifact_publish.rs",
+        "fn lock_store_with_clock(",
+    ),
     ("zerocode-core/src/jev/custom/store.rs", "fn lock("),
     (
         "zerocode-core/src/jev/project_rules/store.rs",
