@@ -1544,3 +1544,36 @@ fn lane_verdicts_failed_gate_durations_do_not_enter_successful_history() {
     let runs = lane_view(&parsed.iter().collect::<Vec<_>>(), None);
     assert_eq!(stage_past(&runs).get("gate-root"), Some(&vec![10]));
 }
+
+#[test]
+fn lane_verdicts_a_gate_cleared_by_flakes_is_still_successful() {
+    let mut parsed = verdict_fixture().remove(4);
+    // lane.sh accepts a failed gate once its solo flake judgments pass.
+    // The final green is authoritative even with that gate's nonzero code.
+    for mark in &mut parsed.marks {
+        if let LaneMark::End { name, rc, .. } = mark
+            && name == "gate-root"
+        {
+            *rc = 1;
+        }
+    }
+    let runs = lane_view(&[&parsed], None);
+    assert_eq!(runs[0].result, PASSED);
+    assert_eq!(stage_past(&runs).get("gate-root"), Some(&vec![10]));
+    assert!(lane_plan(&runs).iter().any(|name| name == "publish"));
+}
+
+#[test]
+fn lane_verdicts_an_unknown_outcome_is_not_learned_as_success() {
+    let mut parsed = verdict_fixture().remove(4);
+    for mark in &mut parsed.marks {
+        if let LaneMark::Begin { name, .. } = mark
+            && name == "green"
+        {
+            *name = "unknown-outcome".into();
+        }
+    }
+    let runs = lane_view(&[&parsed], None);
+    assert_eq!(runs[0].result, ENDED);
+    assert!(lane_plan(&runs).is_empty());
+}
