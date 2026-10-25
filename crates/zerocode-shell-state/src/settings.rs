@@ -1707,6 +1707,31 @@ mod tests {
         }
     }
 
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of every descriptor until the exec, and a flock belongs to the
+    /// open file description. On 2026-10-25 04:01 one such child never
+    /// reached its exec, and three new windows stood in `flock` behind the
+    /// copy of this lock it kept (t-73907). The duplicate here is that copy,
+    /// without a launch winning a race: letting the lock go must end it for
+    /// every copy, so another open of the lock file takes it at once.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_lock() {
+        let directory = tempdir().unwrap();
+        let repository = SettingsRepository::new(directory.path());
+        let held = repository.lock().unwrap();
+        let inherited = held._file.try_clone().unwrap();
+        drop(held);
+        let next =
+            crate::durable_file::private_lock_file(&directory.path().join(".settings.lock"))
+                .unwrap();
+        let taken = next.try_lock();
+        drop(inherited);
+        assert!(
+            taken.is_ok(),
+            "a lock its holder let go is still held by a copy: {taken:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn repository_lock_symlink_never_touches_the_external_file() {
