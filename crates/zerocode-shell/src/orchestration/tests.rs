@@ -1651,6 +1651,121 @@ fn a_workers_board_row_carries_its_last_status_and_its_tasks_newest_check() {
     );
 }
 
+/// The team view stands the workers of one piece of work under one row (t-60498), so a worker's
+/// board row names the root of its task's `parent` chain — the topmost task, however many steps up
+/// — and that root's name. Two workers on sibling tasks of one parent carry the same root.
+#[test]
+fn ledger_agents_row_carries_the_root_of_its_tasks_parent_chain() {
+    use zerocode_core::orchestration::Ledger;
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("families", 1);
+    let root = ledger
+        .create_task(
+            &run,
+            "improve the chat screen".into(),
+            "chat screen".into(),
+            vec![],
+            None,
+            2,
+        )
+        .unwrap();
+    let child = ledger
+        .create_task(
+            &run,
+            "a".into(),
+            "chat input".into(),
+            vec![],
+            Some(root.clone()),
+            3,
+        )
+        .unwrap();
+    let grandchild = ledger
+        .create_task(
+            &run,
+            "b".into(),
+            "chat input retry".into(),
+            vec![],
+            Some(child.clone()),
+            4,
+        )
+        .unwrap();
+    let other = ledger
+        .create_task(&run, "c".into(), "alert sound".into(), vec![], None, 5)
+        .unwrap();
+    let start = |ledger: &mut Ledger, pane: &str, task: &str| {
+        ledger
+            .start_worker(&run, "claude", ("team-fam", pane), Some(task), 6)
+            .unwrap()
+            .worker
+    };
+    let on_child = start(&mut ledger, "%2", &child);
+    let on_grandchild = start(&mut ledger, "%3", &grandchild);
+    let on_other = start(&mut ledger, "%4", &other);
+    let rows = super::ledger_agents_for_seats(&ledger, &super::TeamSeatIndex::new());
+    let root_of = |worker: &str| {
+        let row = rows
+            .iter()
+            .find(|one| one.worker == worker)
+            .expect("the worker's row");
+        (row.root_id.clone(), row.root_title.clone())
+    };
+    assert_eq!(
+        root_of(&on_child),
+        (root.clone(), "chat screen".to_string()),
+        "a child's root is its parent"
+    );
+    assert_eq!(
+        root_of(&on_grandchild),
+        (root, "chat screen".to_string()),
+        "a grandchild's root is two steps up"
+    );
+    assert_eq!(
+        root_of(&on_other),
+        (other, "alert sound".to_string()),
+        "an unrelated task has its own root"
+    );
+}
+
+/// A task with no parent is the root of its own family, and a worker with no task has none — an
+/// empty id the window reads as "not part of a family".
+#[test]
+fn a_task_without_a_parent_is_its_own_root() {
+    use zerocode_core::orchestration::Ledger;
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("alone", 1);
+    let task = ledger
+        .create_task(&run, "do it".into(), "alone task".into(), vec![], None, 2)
+        .unwrap();
+    let with_task = ledger
+        .start_worker(&run, "claude", ("team-alone", "%2"), Some(&task), 3)
+        .unwrap()
+        .worker;
+    let without = ledger
+        .start_worker(&run, "claude", ("team-alone", "%3"), None, 3)
+        .unwrap()
+        .worker;
+    let rows = super::ledger_agents_for_seats(&ledger, &super::TeamSeatIndex::new());
+    let row = |id: &str| {
+        rows.iter()
+            .find(|one| one.worker == id)
+            .expect("the worker's row")
+    };
+    assert_eq!(
+        (
+            row(&with_task).root_id.as_str(),
+            row(&with_task).root_title.as_str()
+        ),
+        (task.as_str(), "alone task")
+    );
+    assert_eq!(
+        (
+            row(&without).root_id.as_str(),
+            row(&without).root_title.as_str()
+        ),
+        ("", "")
+    );
+}
+
 /// The desk calls a run's coordinator seat this window's only where the pane
 /// the seat names (`team/pane`) is in this window's pane table (t-6588) —
 /// the seat a reply from the board is written as — and names the terminal

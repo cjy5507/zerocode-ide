@@ -2536,6 +2536,13 @@ pub(crate) struct LedgerAgent {
     /// The task's id, so a row can say which piece of work it is beside the
     /// title. Empty where there is no dispatch.
     pub(crate) task_id: String,
+    /// The topmost task of that task's `parent` chain (`Run::root_task`): the piece of
+    /// work this one was broken out of, so the sidebar's team view can stand the workers
+    /// of one piece of work under one row (t-60498). A task with no parent is its own
+    /// root. Worked out on every read and never stored; empty where there is no task.
+    pub(crate) root_id: String,
+    /// That root task's name, as `task` is this task's.
+    pub(crate) root_title: String,
     /// Whether the dispatch carrying that task has CLOSED — the worker
     /// reported, and the ledger wrote the ending down. This is the worker's
     /// own claim of being done; what a coordinator made of it is `review`.
@@ -3125,6 +3132,9 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 .map(|held| held.display_name().to_string())
                 .unwrap_or_default();
             let task_id = carried.map(|held| held.id.clone()).unwrap_or_default();
+            // t-60498 red: the root is not read yet.
+            let root_id = String::new();
+            let root_title = String::new();
             let reported = dispatch.is_some_and(|one| !one.is_open());
             let failed = dispatch.is_some_and(|one| !one.is_open() && one.succeeded != Some(true));
             let dispatch_id = dispatch.map(|one| one.id.clone()).unwrap_or_default();
@@ -3213,6 +3223,8 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 checkout: worker.checkout.clone().unwrap_or_default(),
                 task,
                 task_id,
+                root_id,
+                root_title,
                 reported,
                 failed,
                 settled: finished,
