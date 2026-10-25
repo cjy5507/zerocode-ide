@@ -1254,7 +1254,11 @@ mod live_path_tests {
         fn fresh_task(label: &str, wanted: impl Fn(&str) -> bool) -> String {
             loop {
                 let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos());
-                let task = format!("decision shadow case {label} {nanos}");
+                // Hex behind a letter: a bare run of 13-19 digits that passes
+                // Luhn is masked as a payment card in the judgment request
+                // (zerocode_core::credential), so a decimal clock reading made
+                // about one case in ten see `[redacted]` instead of its task.
+                let task = format!("decision shadow case {label} f{nanos:x}");
                 if wanted(&task) {
                     return task;
                 }
