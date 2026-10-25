@@ -60,8 +60,11 @@ fn the_os_answers_are_read_by_their_numbers_not_their_words() {
     assert_eq!(netsh_start("nothing here\n"), None);
 }
 
-#[test]
-fn a_port_stays_taken_until_its_holder_lets_go() {
+/// Sixteen claims, held, then let go; `parallel` runs between the letting go
+/// and the check, standing for another test that asks for ports in that
+/// moment and holds what it was given until the check is over. The lease's
+/// release is the one thing judged.
+fn release_is_seen<R>(parallel: impl FnOnce(&HashSet<u16>) -> R) {
     let held: Vec<_> = (0..16).map(|_| QuietPort::claim(bind_loopback)).collect();
     let ports: HashSet<u16> = held.iter().map(|(lease, _)| lease.port()).collect();
     assert_eq!(ports.len(), held.len(), "two holders were given one port");
@@ -69,9 +72,28 @@ fn a_port_stays_taken_until_its_holder_lets_go() {
         assert!(!lock_is_free(*port), "{port} is held by nothing");
     }
     drop(held);
+    let _other_test = parallel(&ports);
     for port in &ports {
         assert!(lock_is_free(*port), "{port} stayed locked after its holder");
     }
+}
+
+#[test]
+fn a_port_stays_taken_until_its_holder_lets_go() {
+    release_is_seen(|_| {});
+}
+
+/// R3 (t-75231): another test, in the same process or beside it, may be given
+/// a port the moment it is let go — a claim is that test's right. The check
+/// must still see that the lease's own hold ended.
+#[test]
+fn a_release_is_judged_though_another_test_is_given_the_port_at_once() {
+    release_is_seen(|ports| {
+        ports
+            .iter()
+            .map(|port| QuietPort::claim_in(&(*port..*port + 1), bind_loopback))
+            .collect::<Vec<_>>()
+    });
 }
 
 #[test]
