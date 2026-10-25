@@ -1,13 +1,15 @@
-//! The sidebar's 「나를 기다림」 list (t-26595): which pane waits on the person,
-//! and for what — a block, a question, or a finish nobody has looked at.
+//! The panes that wait on the person (t-26595), and the inbox they stand in
+//! (t-67483): which pane waits, and for what — a block, a question, or a
+//! finish nobody has looked at.
 //!
 //! The decisions are `zerocode_core::notify::waiting_for`, and a finish is listed
 //! only where the device's finish setting would ring it. What lives here is the
 //! lock around the rows and the names a click needs. The locks are taken one at
 //! a time, each only while its facts are copied: every row is read first, and
-//! the names are read after.
+//! the names are read after. The inbox page reads these rows beside the
+//! ledger's desk and counts them once (`orchestration::inbox`).
 //!
-//! Nothing here waits on the disk. The list is asked on the main thread after
+//! Nothing here waits on the disk. The inbox is asked on the main thread after
 //! every agent report, so the finish setting is the one this process last read
 //! or wrote (`remembered_settings`, t-67102).
 
@@ -15,7 +17,7 @@ use zerocode_core::notify::{Look, Waiting, turn_ms, waiting_for};
 
 use crate::*;
 
-/// One row of the list, as the sidebar paints it.
+/// One pane that waits, as the inbox lists it.
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct WaitingRow {
     /// The pane's id in the board's own form (`term:<n>`), which a click opens.
@@ -48,11 +50,22 @@ const fn word(waiting: Waiting) -> &'static str {
     }
 }
 
+/// The inbox (t-67483): what waits on the person from every project, in one
+/// list and one set of numbers — the ledger's desk and the panes together,
+/// counted once (`orchestration::inbox::inbox_of`).
+#[tauri::command]
+pub(crate) fn board_inbox(state: State<'_, AppState>) -> crate::orchestration::inbox::Inbox {
+    let _crumb = crate::crumbs::Command::enter("board_inbox");
+    let panes = pane_waits(&state);
+    crate::orchestration::inbox::inbox_of(
+        &crate::orchestration::board_ledger_snapshot().desk,
+        &panes,
+    )
+}
+
 /// Every pane that waits on the person now. Blocks and questions come first,
 /// then finishes; each kind lists its newest first.
-#[tauri::command]
-pub(crate) fn waiting_on_me(state: State<'_, AppState>) -> Vec<WaitingRow> {
-    let _crumb = crate::crumbs::Command::enter("waiting_on_me");
+pub(crate) fn pane_waits(state: &AppState) -> Vec<WaitingRow> {
     let mode = finish_mode(state.settings());
     let looks: Vec<(TermId, Look, i64)> = state
         .pane_states()
@@ -142,7 +155,7 @@ mod tests {
     const HELD_FOR: Duration = Duration::from_secs(3);
 
     /// 2026-10-21 05:32: a build saturated the disk, a settings commit held
-    /// the repository through its fsync, and `waiting_on_me` — asked on the
+    /// the repository through its fsync, and `board_inbox` — asked on the
     /// main thread after every agent report — read the finish setting
     /// behind it while the window stood for 20 255 ms. A commit of any
     /// settings document holds the one lock every settings read waits on;
@@ -209,15 +222,15 @@ mod tests {
         }
     }
 
-    /// The list's refresh beat, read off the sidebar's own constant.
+    /// The list's refresh beat, read off the inbox's own constant.
     #[cfg(unix)]
     fn list_beat() -> Duration {
         let ms = crate::ui_source::window_source()
-            .split("const WAITING_REFRESH_MS = ")
+            .split("const INBOX_REFRESH_MS = ")
             .nth(1)
             .and_then(|rest| rest.split(';').next())
             .and_then(|ms| ms.trim().parse().ok())
-            .expect("the sidebar's WAITING_REFRESH_MS");
+            .expect("the inbox's INBOX_REFRESH_MS");
         Duration::from_millis(ms)
     }
 

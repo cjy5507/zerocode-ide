@@ -24452,84 +24452,311 @@ progress:indeterminate::-webkit-progress-bar {
   font-weight: 700;
 }
 
-/* 나를 기다림 (t-26595): the column's top list. A block and a question wear the
- * attention colour, a finish the success colour. The rows truncate the place
- * name rather than widen the column. */
-.waiting-list {
-  display: grid;
-  gap: 2px;
-  padding: 6px var(--nav-inset) 8px;
-  border-bottom: 1px solid var(--edge-rule);
+/* 받은 편지함 (t-67483): the page that holds everything waiting on the person, a list beside
+ * its preview. The view measures its own width (a container, not the window): under it a
+ * split pane folds the preview below the list the way a narrow window does. Blue is spent on
+ * what waits for the person to answer (a question, a hand-in), amber on a block, grey on a
+ * notice; every kind also wears a glyph and its word. */
+.inbox-view {
+  position: relative;
+  container: inbox / inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  height: 100%;
+  padding: var(--space-5);
+  overflow: auto;
+  color: var(--ink-chalk);
+  background: var(--surface-deck);
+  word-break: keep-all;
 }
 
-.waiting-list[hidden] {
-  display: none;
+.inbox-view[hidden],
+.inbox-view [hidden] {
+  display: none !important;
 }
 
-.waiting-list-title {
+.inbox-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-4);
+}
+
+.inbox-heading {
+  min-width: 0;
+}
+
+.inbox-title {
   margin: 0;
-  color: var(--ink-mist);
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font: var(--type-heading-24);
 }
 
-.waiting-list-items {
+.inbox-sum {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+}
+
+.inbox-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.inbox-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.inbox-tab-count {
+  color: var(--ink-mist);
+  font-variant-numeric: tabular-nums;
+}
+
+.inbox-unread {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-label);
+  font: var(--type-label-13);
+}
+
+.inbox-body {
   display: grid;
-  gap: 2px;
+  flex: 1;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  gap: var(--space-4);
+  min-height: calc(var(--space-6) * 6);
+}
+
+.inbox-list,
+.inbox-preview {
+  min-width: 0;
+  min-height: calc(var(--space-6) * 5);
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-border);
+}
+
+.inbox-list {
   margin: 0;
   padding: 0;
   list-style: none;
+  background: var(--surface-well);
 }
 
-.waiting-row {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  min-height: 26px;
-  padding-inline: 6px;
-  border: 0;
-  border-radius: var(--radius-edge);
-  background: none;
-  color: var(--ink-chalk);
-  font: inherit;
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
-  transition: background-color var(--ease-standard);
-}
-
-.waiting-row:hover {
+.inbox-preview {
+  padding: var(--space-4);
   background: var(--surface-raised);
 }
 
-.waiting-row-agent {
-  color: var(--ink-chalk);
+/* Full-bleed rows divided by one rule, not a stack of cards. */
+.inbox-item + .inbox-item {
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.inbox-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: var(--type-label-13);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.inbox-row:hover {
+  background: var(--row-hover);
+}
+
+.inbox-row[aria-selected="true"] {
+  background: var(--row-selected);
+}
+
+/* The unread dot: a hollow ring when read, filled with the person's blue while unread. */
+.inbox-dot {
+  align-self: start;
+  width: var(--space-2);
+  height: var(--space-2);
+  margin-top: var(--space-1);
+  border: var(--rule-width) solid var(--edge-mark);
+  border-radius: var(--radius-pill);
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard);
+}
+
+.inbox-row[data-unread="true"] .inbox-dot {
+  border-color: var(--signal-you);
+  background: var(--signal-you);
+}
+
+.inbox-row-body {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.inbox-row-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.inbox-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-row[data-unread="true"] .inbox-row-title {
   font-weight: 600;
 }
 
-.waiting-row-kind {
+.inbox-age {
+  flex: none;
   color: var(--ink-mist);
-  font-size: var(--text-xs);
+  font: var(--type-label-12);
+  font-variant-numeric: tabular-nums;
 }
 
-.waiting-row[data-waiting="blocked"] .waiting-row-kind,
-.waiting-row[data-waiting="question"] .waiting-row-kind {
-  color: var(--lane-3);
-}
-
-.waiting-row[data-waiting="finished"] .waiting-row-kind {
-  color: var(--lane-1);
-}
-
-.waiting-row-place {
-  min-width: 0;
+.inbox-row-meta {
   overflow: hidden;
-  color: var(--ink-label);
+  color: var(--ink-mist);
+  font: var(--type-label-12);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.inbox-kind {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--ink-label);
+  font: var(--type-label-12);
+}
+
+.inbox-kind .icon {
+  width: var(--text-xs);
+  height: var(--text-xs);
+}
+
+[data-kind="question"] > .inbox-row-body .inbox-kind,
+[data-kind="handoff"] > .inbox-row-body .inbox-kind,
+.inbox-kind[data-kind="question"],
+.inbox-kind[data-kind="handoff"] {
+  background: var(--signal-you-ground);
+  color: var(--signal-you);
+}
+
+[data-kind="blocked"] > .inbox-row-body .inbox-kind,
+.inbox-kind[data-kind="blocked"] {
+  background: color-mix(in srgb, var(--signal-wait) 12%, transparent);
+  color: var(--signal-wait-ink);
+}
+
+.inbox-empty {
+  margin: 0;
+  padding: var(--space-5);
+  color: var(--ink-mist);
+  font: var(--type-copy-13);
+  text-align: center;
+}
+
+.inbox-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.inbox-pv-kind {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.inbox-pv-title {
+  margin: 0;
+  font: var(--type-label-14);
+  font-weight: 600;
+  overflow-wrap: break-word;
+}
+
+.inbox-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font: var(--type-label-13);
+}
+
+.inbox-facts dt {
+  color: var(--ink-mist);
+}
+
+.inbox-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.inbox-pv-body {
+  margin: 0;
+  font: var(--type-copy-13);
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.inbox-reply {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.inbox-reply-field {
+  width: 100%;
+  resize: vertical;
+}
+
+.inbox-error {
+  margin: 0;
+  color: var(--signal-halt-ink);
+  font: var(--type-label-12);
+}
+
+.inbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.inbox-note {
+  margin: 0;
+  color: var(--ink-mist);
+  font: var(--type-label-12);
+}
+
+@container inbox (max-width: 720px) {
+  .inbox-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
 }
 
 .action-hub-modal {

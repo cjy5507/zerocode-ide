@@ -205,7 +205,7 @@ pub(crate) use integration_prefs::{
     set_finish_notification_mode, set_notification_preference,
 };
 
-pub(crate) use waiting::{clear_finish_mark, waiting_on_me};
+pub(crate) use waiting::{board_inbox, clear_finish_mark};
 
 pub(crate) use workspace::{
     workspace_cleanup_scan, workspace_space_cancel, workspace_space_git, workspace_space_scan,
