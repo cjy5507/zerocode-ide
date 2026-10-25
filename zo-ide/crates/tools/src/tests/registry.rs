@@ -1056,3 +1056,71 @@ fn jev_schema_is_measured_and_deferred() {
     );
     assert!(est_tokens <= CEILING_TOKENS, "the schema grew to {est_tokens} tokens — past the {CEILING_TOKENS} a deferred lookup should cost");
 }
+
+/// A ToolSearch answer that names `Computer` while the window's work browser
+/// is installed opens with one line saying where web pages go (t-74223): the
+/// incident session searched "browser playwright computer", read a 19,822-
+/// character answer with the work browser in one sentence of it, and drove a
+/// separate browser for 45 minutes. The line lives in the tool result, so
+/// nothing is added to the system prompt or a schema.
+#[test]
+fn tool_search_leads_a_computer_answer_with_the_work_browser_when_its_shim_is_installed() {
+    let directory = tempfile::tempdir().expect("a PATH folder");
+    crate::browser_execution::tests::install_browser_shim(directory.path());
+    let _path = super::EnvGuard::set("PATH", directory.path().to_str().unwrap());
+    let found = GlobalToolRegistry::builtin().search("select:Computer", 3, None, None);
+    assert_eq!(found.matches, ["Computer"]);
+    let text = serde_json::to_string_pretty(&found).expect("serializable");
+    let first = text.lines().nth(1).expect("a first field");
+    for words in ["work browser", "signed-in", "recipe_list", "recipe_run", "zerocode-browser open", "fill", "batch", "walk"] {
+        assert!(first.contains(words), "the first line names {words:?}: {first}");
+    }
+}
+
+/// Without the installed shim the answer is today's, byte for byte.
+#[test]
+fn tool_search_answer_is_unchanged_without_the_work_browser() {
+    let directory = tempfile::tempdir().expect("an empty PATH folder");
+    let _path = super::EnvGuard::set("PATH", directory.path().to_str().unwrap());
+    let found = GlobalToolRegistry::builtin().search("select:Computer", 3, None, None);
+    assert_eq!(found.matches, ["Computer"]);
+    assert_eq!(serde_json::to_string_pretty(&found).expect("serializable"), todays_tool_search_answer(&found));
+}
+
+/// With the shim installed, an answer that does not name `Computer` carries
+/// no line.
+#[test]
+fn tool_search_answer_without_computer_carries_no_work_browser_line() {
+    let directory = tempfile::tempdir().expect("a PATH folder");
+    crate::browser_execution::tests::install_browser_shim(directory.path());
+    let _path = super::EnvGuard::set("PATH", directory.path().to_str().unwrap());
+    let found = GlobalToolRegistry::builtin().search("select:Jev", 3, None, None);
+    assert_eq!(found.matches, ["Jev"]);
+    assert_eq!(serde_json::to_string_pretty(&found).expect("serializable"), todays_tool_search_answer(&found));
+}
+
+/// The answer as it read before t-74223: these fields, in this order.
+fn todays_tool_search_answer(found: &crate::ToolSearchOutput) -> String {
+    #[derive(serde::Serialize)]
+    struct Today {
+        matches: Vec<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        schemas: Vec<api::ToolDefinition>,
+        query: String,
+        normalized_query: String,
+        total_deferred_tools: usize,
+        pending_mcp_servers: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mcp_degraded: Option<runtime::McpDegradedReport>,
+    }
+    serde_json::to_string_pretty(&Today {
+        matches: found.matches.clone(),
+        schemas: found.schemas.clone(),
+        query: found.query.clone(),
+        normalized_query: found.normalized_query.clone(),
+        total_deferred_tools: found.total_deferred_tools,
+        pending_mcp_servers: found.pending_mcp_servers.clone(),
+        mcp_degraded: found.mcp_degraded.clone(),
+    })
+    .expect("serializable")
+}

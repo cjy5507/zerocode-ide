@@ -101,28 +101,34 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     #[cfg(unix)]
     use zerocode_core::surface_execution::{ExecutionEnvelope, SurfaceEffect, SurfaceExecution};
 
-    #[test]
-    fn prepare_accepts_the_complete_installed_browser_shim() {
+    /// The browser shim bytes the window actually installs, written into
+    /// `directory` as the program `PATH` would find there.
+    pub(crate) fn install_browser_shim(directory: &std::path::Path) {
         use zerocode_core::agent_shims::{SurfaceShim, installed_script};
-        let directory = tempfile::tempdir().unwrap();
         #[cfg(not(windows))]
-        let program = directory.path().join(BROWSER_CLI);
+        let program = directory.join(BROWSER_CLI);
         #[cfg(windows)]
-        let program = directory.path().join(format!("{BROWSER_CLI}.cmd"));
+        let program = directory.join(format!("{BROWSER_CLI}.cmd"));
         #[cfg(not(windows))]
         std::fs::write(&program, installed_script(SurfaceShim::Browser, false)).unwrap();
         #[cfg(windows)]
         {
             let powershell = format!("{BROWSER_CLI}.impl.ps1");
             std::fs::write(&program, zerocode_core::agent_teams::shim_cmd(&powershell)).unwrap();
-            std::fs::write(directory.path().join(powershell), installed_script(SurfaceShim::Browser, true)).unwrap();
+            std::fs::write(directory.join(powershell), installed_script(SurfaceShim::Browser, true)).unwrap();
         }
+    }
+
+    #[test]
+    fn prepare_accepts_the_complete_installed_browser_shim() {
+        let directory = tempfile::tempdir().unwrap();
+        install_browser_shim(directory.path());
         let _path = crate::tests::EnvGuard::set("PATH", directory.path().to_str().unwrap());
         let input: BashCommandInput = serde_json::from_value(json!({"command":"zerocode-browser read browser-1"})).unwrap();
         assert!(BrowserExecution::prepare(&input).is_some(),
