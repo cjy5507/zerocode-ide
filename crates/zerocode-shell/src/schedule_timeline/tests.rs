@@ -1461,9 +1461,8 @@ fn the_caps_are_read_off_the_runners_script_and_fall_back_without_one() {
 }
 
 /// ⑦ The answer says how each lane ended in the board's own words, so the
-/// window compares none of the lane's: `passed` where the lane gave the word
-/// the lanes that passed every stage end with, `failed` for any other verdict
-/// of a lane that ran stages, `ended` otherwise.
+/// window compares none of the lane's: `passed` for the explicit green
+/// verdict, `failed` for red, `ended` otherwise.
 #[test]
 fn a_lane_run_carries_the_result_the_window_reads() {
     let scratch = copied();

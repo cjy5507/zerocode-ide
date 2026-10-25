@@ -15,7 +15,7 @@
 //!
 //! What a thing will take is read off the past alone: the median of the last
 //! five runs of the same name that passed — a lane's stage by its name (a
-//! stage of a lane that ended done counts whatever its own code), a build-line
+//! stage of a lane that ended green counts whatever its own code), a build-line
 //! job by the `-g…` tail its kind repeats in every landing. A job with no such
 //! past is bounded by its cap, and says so. Where on the clock a
 //! waiting job will start, and how much of a running one is left, is the
@@ -79,7 +79,7 @@ const SAMPLES: usize = 5;
 /// five runs of every stage even when one sha was launched three times.
 const LANE_FILES: usize = 8;
 /// The lane logs stamped: when the newest [`LANE_FILES`] hold no lane that
-/// passed every stage, the older of these are read too, until one does —
+/// ended green, the older of these are read too, until one does —
 /// the stages ahead of a running lane are that lane's.
 const LANE_FILES_FAR: usize = 32;
 /// How often the lane folder is listed again although it did not change: an
@@ -278,10 +278,9 @@ pub(crate) struct LaneRun {
     pub(crate) verdict: Option<String>,
     pub(crate) reason: Option<String>,
     pub(crate) running: bool,
-    /// How it ended, in the board's words: `running`, `passed` (its verdict is
-    /// the word the lanes that passed every stage end with), `failed` (any
-    /// other verdict of a lane that ran stages) or `ended`. The window compares
-    /// none of the lane's own words.
+    /// How it ended, in the board's words: `running`, `passed` (the lane's
+    /// explicit green verdict), `failed` (red) or `ended` (anything else).
+    /// The window compares none of the lane's own words.
     pub(crate) result: &'static str,
     pub(crate) stages: Vec<LaneStage>,
     /// While it runs: the stage it is in, then the stages the last full green
@@ -1792,7 +1791,7 @@ impl LaneBook {
 
     /// Read the files that changed, and fold every run they hold. The newest
     /// [`LANE_FILES`] are read; while a running lane has no stages ahead of it
-    /// to plan by (no lane in them passed every stage), the older ones too.
+    /// to plan by (no lane in them ended green), the older ones too.
     fn read(&mut self, offset_secs: i64, status: Option<&LaneStatus>) {
         let listed: HashSet<&PathBuf> = self.files.iter().map(|(path, _)| path).collect();
         self.parsed.retain(|path, _| listed.contains(path));
@@ -1945,10 +1944,8 @@ fn lane_view(parsed: &[&ParsedRun], status: Option<&LaneStatus>) -> Vec<LaneRun>
     }
     let past = stage_past(&runs);
     let plan = lane_plan(&runs);
-    let done = done_words(&runs);
-    let results: Vec<&'static str> = runs.iter().map(|run| result_of(run, &done)).collect();
-    for (run, result) in runs.iter_mut().zip(results) {
-        run.result = result;
+    for run in &mut runs {
+        run.result = result_of(run);
     }
     for run in runs.iter_mut().filter(|run| run.running) {
         let Some(current) = run.stages.last().filter(|stage| stage.end_ms.is_none()) else {
@@ -2044,18 +2041,13 @@ fn folded_run(run: &ParsedRun, stage_names: &HashSet<&str>, running: bool) -> La
 }
 
 /// Each stage's wall-clock seconds over the runs that ended, oldest first: the
-/// stages that passed, and every stage of a run that ended done — a gate whose
+/// stages that passed, and every stage of a run that ended green — a gate whose
 /// red the flaky-test judge cleared ran its whole length, while a stage of a
-/// run that ended red may have hung or been cut. A run ended done when its
-/// verdict is the word the runs that passed every stage end with.
+/// run that ended red may have hung or been cut.
 fn stage_past(runs: &[LaneRun]) -> HashMap<String, Vec<u32>> {
-    let done_words = done_words(runs);
     let mut past: HashMap<String, Vec<u32>> = HashMap::new();
     for run in runs.iter().filter(|run| !run.running) {
-        let done = run
-            .verdict
-            .as_deref()
-            .is_some_and(|word| done_words.contains(word));
+        let done = result_of(run) == PASSED;
         for stage in &run.stages {
             if let (Some(rc), Some(end_ms)) = (stage.rc, stage.end_ms)
                 && (rc == 0 || done)
@@ -2068,29 +2060,19 @@ fn stage_past(runs: &[LaneRun]) -> HashMap<String, Vec<u32>> {
     past
 }
 
-/// The verdict word the runs that passed every stage end with: what the lane
-/// says when it is done, whatever its spelling.
-fn done_words(runs: &[LaneRun]) -> HashSet<&str> {
-    runs.iter()
-        .filter(|run| {
-            !run.running
-                && !run.stages.is_empty()
-                && run.stages.iter().all(|stage| stage.rc == Some(0))
-        })
-        .filter_map(|run| run.verdict.as_deref())
-        .collect()
-}
-
-/// How a run ended, in the board's words: `passed` where its verdict is a
-/// done word, `failed` where it is any other word of a run that ran stages
-/// (and a done word is known to tell it from), `ended` where nobody can say.
-fn result_of(run: &LaneRun, done: &HashSet<&str>) -> &'static str {
+/// The protocol written by tools/release/lane.sh: judge_sha sets OUTCOME to
+/// green only after the release succeeds, or red on failure. sweep_sha writes
+/// `== $OUTCOME` after its own rc=0 cleanup, even for an unknown sha rejected
+/// before archive. Stage codes cannot define success: cleanup passes on red,
+/// and a failed gate can be cleared by the solo flake judge on green.
+/// Refused, superseded, missing and unknown verdicts merely ended.
+fn result_of(run: &LaneRun) -> &'static str {
     if run.running {
         return RUNNING;
     }
     match run.verdict.as_deref() {
-        Some(word) if done.contains(word) => PASSED,
-        Some(_) if !done.is_empty() && !run.stages.is_empty() => FAILED,
+        Some("green") => PASSED,
+        Some("red") => FAILED,
         _ => ENDED,
     }
 }
@@ -2105,19 +2087,14 @@ fn expected_of(past: Option<&[u32]>) -> Expected {
     }
 }
 
-/// The stages a lane runs, in order, as the latest of the lanes that passed
-/// every stage and gave a verdict ran them — the longest such list, so a lane
+/// The stages a lane runs, in order, as the latest lane that ended green ran
+/// them — the longest such list, so a lane
 /// that bowed out early does not cut the plan short.
 fn lane_plan(runs: &[LaneRun]) -> Vec<String> {
     let passed: Vec<&LaneRun> = runs
         .iter()
         .rev()
-        .filter(|run| {
-            !run.running
-                && run.verdict.is_some()
-                && !run.stages.is_empty()
-                && run.stages.iter().all(|stage| stage.rc == Some(0))
-        })
+        .filter(|run| result_of(run) == PASSED && !run.stages.is_empty())
         .collect();
     let longest = passed.iter().map(|run| run.stages.len()).max().unwrap_or(0);
     passed
