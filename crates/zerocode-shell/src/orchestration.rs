@@ -2503,6 +2503,36 @@ fn with_ledger_seats<T>(read: impl FnOnce(&Ledger, &TeamSeatIndex) -> T) -> Opti
 
 /// One worker the ledger still holds, as the board draws it.
 ///
+/// The marker a declared `--on-transient-error resume` types a continuation
+/// on, out of an attempt whose newest letter is a turn that failed on a
+/// transient fault (t-69010) — keyed by that letter, so one failure is typed
+/// at once however many beats see it.
+fn transient_failed_turn(
+    run: &zerocode_core::orchestration::Run,
+    agent: &str,
+    dispatch: &str,
+) -> Option<zerocode_core::orchestration::TransientErrorMarker> {
+    // The continuation's own receipt (`resumed`) is the beat answering this
+    // failure, not the attempt going on: read past it, so the marker stands
+    // with its key and the failure is typed at once and is no silence after.
+    let newest = run.messages().iter().rev().find(|one| {
+        one.dispatch.as_deref() == Some(dispatch)
+            && one.kind != zerocode_core::orchestration::MessageKind::Resumed
+    })?;
+    if newest.kind != zerocode_core::orchestration::MessageKind::TurnFailed {
+        return None;
+    }
+    let said: serde_json::Value = serde_json::from_str(newest.body.as_str()).ok()?;
+    let error = said["error"].as_str()?;
+    crate::quota_wall::transient_turn_failure(agent, error).then(|| {
+        zerocode_core::orchestration::TransientErrorMarker {
+            source: "turn_failed".to_string(),
+            line: error.into(),
+            key: format!("turn_failed:{}", newest.id),
+        }
+    })
+}
+
 /// A failed turn as a ledger row carries it (t-69010).
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub(crate) struct TurnFailed {
@@ -7204,6 +7234,11 @@ struct Stalled {
     /// Whether the run declared `--on-transient-error resume` — asked before
     /// a transcript is read, so an undeclared run costs nothing more.
     resume_declared: bool,
+    /// The attempt's newest letter, when it is a turn that failed on a fault
+    /// the next request may well not meet (t-69010): zo writes no provider
+    /// error into a transcript the window could read, and its channel's
+    /// failure reaches the ledger instead — so the marker is read there.
+    failed_turn: Option<zerocode_core::orchestration::TransientErrorMarker>,
     /// The record keys of this attempt's declines told already (t-6747):
     /// the same decline's silence is ordinary quiet news after that,
     /// reminded as any other — and a decline on another record of the same
@@ -7366,6 +7401,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                         .handover
                         .as_ref()
                         .is_some_and(|policy| policy.on_transient_error.is_some()),
+                    failed_turn: transient_failed_turn(run, &worker.agent, &dispatch.id),
                     declines_told: zerocode_core::orchestration::declines_told(run, &dispatch.id),
                     dispatch: dispatch.id.clone(),
                     task: dispatch.task.clone(),
@@ -7543,6 +7579,13 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                     ),
                 })
             });
+        // zo's failed turn, as the ledger holds it (t-69010): the table's
+        // transcript rows read no zo file.
+        let transient = transient.or_else(|| {
+            one.resume_declared
+                .then(|| one.failed_turn.clone())
+                .flatten()
+        });
         match transient {
             Some(marker) => stopped.push((one, marker)),
             None => {

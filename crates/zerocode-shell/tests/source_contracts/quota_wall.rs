@@ -1136,3 +1136,27 @@ fn the_zo_decline_row_starts_where_zos_own_recorded_notices_start() {
         );
     }
 }
+
+/// t-69010: the zo row of what a declared `--on-transient-error resume` types
+/// on reads two of zo's own words in a failed turn's error. Both are held
+/// against zo's source, read only: the stalled-stream error type, and the
+/// sentence its retries end with.
+#[test]
+fn the_zo_transient_turn_errors_are_words_zo_still_writes() {
+    let table = shell_source("quota_wall.rs");
+    let errors = zo_source("api/src/error.rs");
+    assert!(
+        table.contains(
+            "const ZO_TRANSIENT_TURN_ERRORS: &[&str] = &[\"stream_startup_no_progress\", \"api failed after \"];"
+        ),
+        "the zo transient row changed its words"
+    );
+    assert!(
+        errors.contains("error_type: Some(\"stream_startup_no_progress\".to_string())"),
+        "zo no longer names a stalled stream `stream_startup_no_progress`"
+    );
+    assert!(
+        errors.contains("\"api failed after {attempts} attempts: {last_error}\""),
+        "zo no longer ends its retries with `api failed after N attempts: …`"
+    );
+}

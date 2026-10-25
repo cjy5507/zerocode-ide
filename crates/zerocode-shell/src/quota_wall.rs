@@ -314,6 +314,40 @@ const ZO_DECLINE_NOTICES: &[&str] = &[
 const ZO_DECLINE_KEY: &str = "decline";
 const ZO_DECLINE_KINDS: &[&str] = &["surfaced", "standing"];
 
+/// zo's words, in the error a failed turn ends on, for a provider or
+/// transport fault the next request may well not meet (t-69010; zo-ide
+/// `api/src/error.rs`): a stream that started and sent nothing
+/// (`stream_startup_no_progress`), and retries that ran out ("api failed
+/// after N attempts: …"). zo writes these into no transcript; its channel
+/// says them as the turn's `error`, and the ledger keeps them.
+const ZO_TRANSIENT_TURN_ERRORS: &[&str] = &["stream_startup_no_progress", "api failed after "];
+
+/// The words that make one of those a wall or a refusal instead, which the
+/// next request meets again: a quota or rate wall, a login, a request the
+/// provider refused as malformed.
+const ZO_TURN_ERRORS_NOT_TRANSIENT: &[&str] = &[
+    "429",
+    "rate_limit",
+    "usage limit",
+    "401",
+    "403",
+    "invalid_request",
+];
+
+/// Whether a turn that failed with `error` failed on a fault the next
+/// request may well not meet — the zo row of what a declared
+/// `--on-transient-error resume` types a continuation on (t-69010). Every
+/// other agent's transient row reads its transcript ([`transient_error_in`]).
+pub(crate) fn transient_turn_failure(agent: &str, error: &str) -> bool {
+    agent == "zo"
+        && ZO_TRANSIENT_TURN_ERRORS
+            .iter()
+            .any(|said| error.contains(said))
+        && !ZO_TURN_ERRORS_NOT_TRANSIENT
+            .iter()
+            .any(|said| error.contains(said))
+}
+
 /// The longest the mail pointer holds back from a pane whose last answer is
 /// a decline (t-57445). The window has no other re-notification bound, and
 /// the brief set this one: a pane nobody answers or types into is pointed at
@@ -2158,6 +2192,32 @@ pub(crate) mod tests {
         // decline sweep reads no zo screen or file at all.
         assert!(witnesses_declines("claude") && !witnesses_declines("zo"));
         assert!(decline_reading_for("zo", Some(ZO_DECLINE_NOTICES[1]), None).is_none());
+    }
+
+    /// t-69010: zo's failed turn is transient on its own two words, and a
+    /// wall, a login or a refused request in the same error is not; no other
+    /// agent is read this way.
+    #[test]
+    fn a_zo_turn_that_failed_on_a_stalled_stream_or_spent_retries_is_transient_and_a_wall_is_not() {
+        for error in [
+            "api failed after 3 attempts: stream error: stream_startup_no_progress",
+            "stream_startup_no_progress: no response event within 240s",
+            "api failed after 4 attempts: connection reset by peer",
+        ] {
+            assert!(transient_turn_failure("zo", error), "{error}");
+        }
+        for error in [
+            "api failed after 3 attempts: 429 Too Many Requests rate_limit",
+            "api failed after 2 attempts: 401 Unauthorized",
+            "invalid_request: prompt is too long",
+            "",
+        ] {
+            assert!(!transient_turn_failure("zo", error), "{error}");
+        }
+        assert!(!transient_turn_failure(
+            "claude",
+            "api failed after 3 attempts: stream_startup_no_progress"
+        ));
     }
 
     /// The 2026-10-15 kminus pane replayed through the reader the hold uses

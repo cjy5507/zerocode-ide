@@ -5161,6 +5161,56 @@ fn a_worker_stopped_by_a_transient_api_error_is_typed_at_once_under_a_declared_o
     );
 }
 
+/// t-69010: a zo worker's turn died on a provider stream that never sent a
+/// byte (t-68710, 240 s), and its coordinator heard `went_quiet` and nothing
+/// else. zo's channel says the turn FAILED and why; the failure is told once,
+/// as `turn_failed` with the error's words, the turn is not also a silence,
+/// and under a declared `--on-transient-error resume` the beat types the
+/// continuation once — the same road a Claude transcript's transient stop
+/// takes. zo writes no such error into a file the window reads: the ledger's
+/// letter is the marker.
+#[test]
+fn a_zo_turn_that_failed_on_a_stalled_stream_is_told_failed_and_typed_at_once_under_a_declared_order()
+ {
+    let stood = StoppedWorker::stand_with(
+        96_500,
+        "--agent zo",
+        "--on-transient-error resume",
+        Vec::new(),
+    );
+    let error = "api failed after 3 attempts: stream_startup_no_progress";
+    let at = stood.began + 9_000;
+    *stood
+        .host
+        .busy
+        .lock()
+        .unwrap_or_else(|held| held.into_inner()) = false;
+    super::with_turn_failure(stood.host.worker_term, Some(error.to_string()), || {
+        super::pane_turn_ended(stood.host.worker_term, at - 1, false, at);
+    });
+    let failed = stood.news("turn_failed", at + 1);
+    assert_eq!(failed.len(), 1, "one failed turn, one notice: {failed:?}");
+    assert_eq!(failed[0]["error"], error);
+    for beat in [10_000, 11_000, 12_000] {
+        tick(&stood.host, &[], stood.began + beat);
+    }
+    let typed = stood.host.typed_at(96_501);
+    assert_eq!(
+        typed.len(),
+        2,
+        "not one continuation and its Enter: {typed:?}"
+    );
+    assert!(
+        typed[0].contains("continue from where you left off"),
+        "{typed:?}"
+    );
+    assert_eq!(
+        stood.news("went_quiet", stood.began + 12_001),
+        Vec::<serde_json::Value>::new(),
+        "the failed turn was also told as a silence"
+    );
+}
+
 /// A switch of model is read off the FILE the cursor counted into, and is
 /// the worker's whose attempt was open when it was written (t-7153, R3).
 /// A transcript replaced under its path by another — as long as the old
