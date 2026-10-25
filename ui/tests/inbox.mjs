@@ -260,6 +260,41 @@ export async function testInbox(browser, origin, standBackend, ok) {
   });
   ok("a refused answer is retried under the same name", retried.length === 2 && retried[0] === retried[1], JSON.stringify(retried));
 
+  // An agent pressing in the window (t-74825): the page answers a look with the marks it draws, and the
+  // backend refuses a control whose marks say it is the person's (core `judge`). This stands in for that
+  // refusal with the one mark under test, then presses what is left through the page's own road. A row
+  // that opens a letter reads it, and a read leaves the ledger's ack — so no row may be an agent's to press.
+  await setSnapshot(inboxFixture());
+  const agent = await page.evaluate(() => {
+    const view = document.querySelector(".inbox-view:not([hidden])");
+    view.querySelector('.inbox-tab[data-inbox-tab="notice"]').click();
+    window.__INBOX__.calls.length = 0;
+    const look = selfActAnswer({ kind: "look" });
+    const pressed = [];
+    let refused = 0;
+    let rowControls = 0;
+    for (const control of look.controls) {
+      const node = selfActLooks.get(look.lookId)[control.id];
+      if (!node.classList.contains("inbox-row")) continue;
+      rowControls += 1;
+      const said = selfActAnswer({ kind: "facts", lookId: look.lookId, id: control.id });
+      if (said.facts.personOnly || said.facts.asking || said.facts.secret || said.facts.terminal || said.facts.setting) {
+        refused += 1;
+        continue;
+      }
+      pressed.push(selfActAnswer({ kind: "do", lookId: look.lookId, id: control.id, act: "click", facts: said.facts }).done);
+    }
+    const dots = [...view.querySelectorAll(".inbox-row")].map((row) => row.dataset.unread);
+    return {
+      rowControls, refused, pressed: pressed.length,
+      acks: window.__INBOX__.calls.filter((call) => call.name === "desk_ack").length,
+      calls: window.__INBOX__.calls.length, dots,
+    };
+  });
+  ok("a look of the inbox shows its rows as controls (3 in the notice tab)", agent.rowControls === 3, JSON.stringify(agent));
+  ok("every row of the inbox is the person's: an agent's look finds none it may press", agent.refused === agent.rowControls && agent.pressed === 0, JSON.stringify(agent));
+  ok("an agent pressing the inbox sends no desk_ack and reads no letter", agent.acks === 0 && agent.calls === 0 && agent.dots.every((dot) => dot === "true"), JSON.stringify(agent));
+
   // Reading is immediate: the dot is off in the frame the letter opens, and the ack leaves in
   // the same task — but only when every letter of its batch is read (the ledger acks a batch).
   await setSnapshot(inboxFixture());
