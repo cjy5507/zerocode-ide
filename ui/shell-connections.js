@@ -1,34 +1,136 @@
-/* A saved connection is shared; choosing a role never copies its credential. */
+/* Settings › 모델 and 모델 연결, as the person approved them (t-75762 v2,
+ * 2026-10-26): two choices — the coding model and the judgment model — and
+ * one page of where each model is reached. Every name a list shows comes
+ * from zo's own model list (`zo_model_list`, the catalog the model menu
+ * already reads) or the saved connections (`model_connections`); every
+ * state a row wears comes from a real answer — zo's reports, a check, the
+ * managed server's snapshot — and says 「아직 확인 안 함」 until one came.
+ * A saved connection is shared; choosing a role never copies its credential. */
+
+/* The plain words a state is said in, and the badge each wears — one table
+ * for every row and every check on both pages (v2 대응표 8). */
+const MODEL_STATES = Object.freeze({
+  ok: { key: "settings.models.state.ok", word: "연결됨", badge: "connected" },
+  working: { key: "settings.models.state.working", word: "동작 중", badge: "connected" },
+  running: { key: "settings.models.state.running", word: "실행 중", badge: "connected" },
+  usable: { key: "settings.models.state.usable", word: "쓸 수 있음", badge: "connected" },
+  nokey: { key: "settings.models.state.nokey", word: "키를 찾지 못했습니다", badge: "error", todo: "settings.models.todo.nokey", todoWord: "모델 연결에서 이 연결의 키를 다시 붙여 넣으세요." },
+  unreadable: { key: "settings.models.state.nokey", word: "키를 찾지 못했습니다", badge: "error", todo: "settings.models.todo.unreadable", todoWord: "이 연결의 키는 창이 읽지 못하는 환경 변수({{env}})에 있습니다. 모델 연결의 「설정」에서 키를 붙여 넣으세요." },
+  badkey: { key: "settings.models.state.badkey", word: "키가 맞지 않습니다", badge: "error", todo: "settings.models.todo.badkey", todoWord: "키를 다시 붙여 넣으세요. 키 앞뒤에 빈칸이 들어갔는지도 보세요." },
+  down: { key: "settings.models.state.down", word: "서버가 응답하지 않습니다", badge: "error", todo: "settings.models.todo.down", todoWord: "서버를 켜거나 주소를 확인하세요. 켜지면 다시 고를 수 있습니다." },
+  schema: { key: "settings.models.state.schema", word: "판단 답을 정해진 모양으로 내지 못합니다", badge: "error", todo: "settings.models.todo.schema", todoWord: "다른 모델을 고르세요. 작은 모델일수록 자주 그렇습니다." },
+  failed: { key: "settings.models.state.failed", word: "확인하지 못했습니다", badge: "error", todo: "settings.models.todo.failed", todoWord: "잠시 뒤 다시 확인하세요. 자세한 내용은 아래에 있습니다." },
+  nologin: { key: "settings.models.state.nologin", word: "로그인 안 됨", badge: "checking", todo: "settings.models.todo.nologin", todoWord: "터미널에서 그 CLI에 로그인하면 여기에 저절로 나타납니다." },
+  unknown: { key: "settings.models.state.unknown", word: "아직 확인 안 함", badge: "unchecked" },
+  checking: { key: "settings.models.state.checking", word: "확인하는 중…", badge: "checking" },
+  restarting: { key: "settings.models.state.restarting", word: "다시 띄우는 중", badge: "checking" },
+  stopped: { key: "settings.models.state.stopped", word: "멈춤", badge: "error" },
+  busy: { key: "settings.models.state.busy", word: "다른 작업 중", badge: "checking" },
+  changed: { key: "settings.models.state.changed", word: "설정이 방금 바뀜", badge: "checking" },
+  none: { key: "settings.models.state.none", word: "없음", badge: "unchecked" },
+});
+
+/* What a failure a command answered is, in the table's states: a door's
+ * token (`no_key`, `unauthorized`, `transport`, `schema_…`, `http_503`…) or
+ * a router probe's sentence (`연결 실패: …`, `서버 오류: HTTP 401 …`). */
+function modelFailureState(error) {
+  const token = String(typeof error === "string" ? error : error?.message ?? error ?? "");
+  if (token === "no_key") return "nokey";
+  if (token === "unauthorized" || /HTTP 40[13]\b/.test(token)) return "badkey";
+  if (token === "schema" || token.startsWith("schema_")) return "schema";
+  if (["transport", "timeout", "provider_request", "overloaded"].includes(token) || /^http_5\d\d$/.test(token) ||
+      /^연결 실패/.test(token) || /HTTP 5\d\d\b/.test(token)) return "down";
+  return "failed";
+}
+
+function modelStateWords(state, vars) {
+  const row = MODEL_STATES[state] ?? MODEL_STATES.failed;
+  return { word: t(row.key, row.word), todo: row.todo ? t(row.todo, row.todoWord, vars) : "", badge: row.badge };
+}
+
+/* zo names a login's report by its provider's company and the login's model
+ * rows by the CLI's word; one spelling joins them. */
+const ZO_REPORT_PROVIDER = Object.freeze({ anthropic: "claude" });
+/* Each login zo reads, in the order they are drawn, by the CLI word its
+ * model rows carry; a provider zo adds later follows them under its word. */
+const MODEL_LOGINS = Object.freeze({
+  claude: () => t("settings.models.login.claude", "Claude 로그인"),
+  openai: () => t("settings.models.login.openai", "ChatGPT 로그인"),
+  google: () => t("settings.models.login.google", "Gemini 로그인"),
+  xai: () => t("settings.models.login.xai", "Grok 로그인"),
+  kimi: () => t("settings.models.login.kimi", "Kimi 로그인"),
+});
+const MODEL_LOGIN_ORDER = Object.freeze(Object.keys(MODEL_LOGINS));
+
+/* Where each preset's key is made (v2 대응표 5), by preset id. */
+const MODEL_KEY_HELP = Object.freeze({
+  openrouter: () => t("settings.models.keyHelp.openrouter", "openrouter.ai에 로그인해 Keys 페이지에서 「Create Key」로 만들고 복사합니다."),
+  agentrouter: () => t("settings.models.keyHelp.agentrouter", "agentrouter.org에 로그인해 API 키 페이지에서 새 키를 만들고 복사합니다."),
+  ollama: () => t("settings.models.keyHelp.ollama", "Ollama는 이 컴퓨터에서 돌아 키가 필요 없습니다. Ollama를 켜 두고 「연결 확인」을 누르세요."),
+});
+
+function modelNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function modelBadge(state, vars) {
+  const words = modelStateWords(state, vars);
+  const badge = modelNode("span", "settings-state model-state", words.word);
+  badge.dataset.state = words.badge;
+  badge.dataset.modelState = state;
+  return badge;
+}
+
+/* "49m old" — how zo says a report's age — as the reader's own language says it. */
+function modelReportAge(age) {
+  const found = /^(\d+)([smhd]) old$/.exec(String(age ?? ""));
+  if (!found) return "";
+  const unit = { s: "second", m: "minute", h: "hour", d: "day" }[found[2]];
+  try {
+    return new Intl.RelativeTimeFormat(document.documentElement.lang || "ko", { numeric: "auto" }).format(-Number(found[1]), unit);
+  } catch {
+    return "";
+  }
+}
+
 const modelConnectionsController = {
-  state: null, sequence: 0, busy: false, editing: null,
-  drafts: new Map(), results: new Map(), view: "catalog", expanded: new Set(), deletion: null,
+  state: null, zo: null, sequence: 0, busy: false, editing: null, view: "catalog", deletion: null,
+  /* The last check each saved connection had in this window, by id. */
+  checks: new Map(),
+  /* The last judgment check each candidate had, by its reference. */
+  judged: new Map(),
+  /* The daily cards: the role being changed, the row picked and its answer. */
+  picking: null, draft: null, said: new Map(),
+  /* The first question, while it stands. */
+  setup: null, setupDismissed: false,
 
   show(view) {
-    showSettingsPane(view === "usage" ? "judgment-models" : "api-routers");
+    showSettingsPane("api-routers");
     this.paintView(view);
   },
   paintView(view) {
     this.view = view;
     el("connection-catalog-heading").hidden = view === "add";
-    for (const node of document.querySelectorAll("[data-connection-view]")) node.hidden = node.dataset.connectionView === "usage" ? false : node.dataset.connectionView !== view;
-    for (const node of document.querySelectorAll("[data-connection-nav]")) node.setAttribute("aria-pressed", String(node.dataset.connectionNav === view));
+    for (const node of document.querySelectorAll("[data-connection-view]")) node.hidden = node.dataset.connectionView !== view;
   },
+  /* 「연결 추가」 asks the first question again (decision 7). */
   add() {
+    this.startSetup("add");
+    showSettingsPane("judgment-models");
+  },
+  /* A server the presets do not name, by its address — the editor. */
+  addManual() {
     onRouterPresetChange("custom");
     el("router-preset-select").value = "custom";
-    el("connection-location").value = "remote";
     el("connection-auth").value = el("router-key-input").disabled ? "none" : "new";
     say(el("connection-form-title"), () => t("settings.connections.add", "연결 추가"));
     this.addFields();
     this.show("add");
   },
   addFields() {
-    const service = ["managed", "jev"].includes(el("connection-location").value);
-    el("connection-server-fields").hidden = service;
-    el("connection-service-action").hidden = !service;
-    el("connection-open-service").hidden = !service;
-    el("router-test-btn").hidden = service;
-    el("router-save-btn").hidden = service;
     const requiresAuth = Boolean(this.editing?.provider.requires_auth);
     const saved = requiresAuth && this.editing.keyAvailable;
     el("connection-auth").querySelector('[value="saved"]').disabled = !saved;
@@ -38,22 +140,15 @@ const modelConnectionsController = {
     if (el("connection-auth").value !== "new") el("router-key-input").value = "";
     el("connection-auth-note").textContent = el("connection-auth").value === "saved"
       ? t("settings.connections.referenceHint", "저장된 키는 이 연결의 참조로만 사용합니다. 화면에 읽어오지 않습니다.")
-      : t("settings.connections.registrationHint", "연결을 등록해도 현재 사용 모델은 바뀌지 않습니다. 모델 사용에서 용도에 맞게 선택하세요.");
+      : t("settings.connections.registrationHint", "연결을 등록해도 지금 쓰는 모델은 바뀌지 않습니다. 「모델」에서 고르세요.");
   },
   preset(preset) {
-    if (preset) el("connection-location").value = this.location(preset.base_url);
-    el("connection-auth").value = el("connection-location").value === "local" || el("router-key-input").disabled ? "none" : "new";
+    el("connection-auth").value = (preset && this.location(preset.base_url) === "local") || el("router-key-input").disabled ? "none" : "new";
     this.addFields();
   },
 
-  node(tag, className, text) {
-    const node = document.createElement(tag);
-    if (className) node.className = className;
-    if (text != null) node.textContent = text;
-    return node;
-  },
   button(text, action, primary = false) {
-    const button = this.node("button", primary ? "btn btn--primary" : "btn", text);
+    const button = modelNode("button", primary ? "btn btn--primary" : "btn", text);
     button.type = "button";
     button.disabled = this.busy;
     button.addEventListener("click", action);
@@ -65,272 +160,1315 @@ const modelConnectionsController = {
     if (token === "connection_name_conflict") return t("settings.connections.nameConflict", "다른 연결과 구분되는 이름을 입력하세요.");
     return judgmentProviderController.failure(token) ?? routerSaveRefusal(error);
   },
-  async refresh() {
-    const sequence = ++this.sequence;
-    try {
-      // The shared status read (refreshTypeSafe) feeds the managed models;
-      // this request reads only saved connections.
-      const state = await invoke("model_connections");
-      if (sequence !== this.sequence) return;
-      if (!state || !Array.isArray(state.connections)) throw new Error("provider_settings");
-      const signature = value => JSON.stringify([value?.activeProviderIdentity, value?.connections?.map(row => [row.id, row.generation])]);
-      if (signature(state) !== signature(this.state)) this.results.clear();
-      this.state = state;
-      this.render();
-      void this.sync();
-    } catch (error) {
-      if (sequence !== this.sequence) return;
-      for (const holder of document.querySelectorAll("[data-connection-roles]")) {
-        holder.replaceChildren(this.node("p", "settings-hint", this.failure(error)), this.button(t("settings.managed.refresh", "상태 새로고침"), () => void this.refresh()));
-        if ((typeof error === "string" ? error : error?.message) === "settings_changed") {
-          holder.append(this.button(t("settings.connections.clear", "용도 해제 · 이전 선택 복원"), async () => {
-            try { await invoke("clear_model_connection", { role: "judgment" }, { hand: handNow() }); await refreshTypeSafe(); await this.refresh(); }
-            catch (failure) { showError(this.failure(failure)); }
-          }));
-        }
-      }
-    }
-  },
-  async sync() {
-    try {
-      const status = await invoke("sync_model_connections");
-      const node = el("connections-sync-status");
-      if (node) node.textContent = t("settings.connections.sync", "다음 요청에서 갱신 {{queued}}개 · 이전 버전 재시작 필요 {{restart}}개 · 상태 확인 불가 {{unknown}}개", { queued: status.queued, restart: status.restartRequired, unknown: status.unknown });
-    } catch (error) { const node = el("connections-sync-status"); if (node) node.textContent = this.failure(error); }
-  },
-  selected(role) { return this.drafts.has(role) ? this.drafts.get(role) : this.state?.[role] ?? null; },
-  key(reference) { return reference ? JSON.stringify([reference.id, reference.model]) : ""; },
-  change(role, reference) {
-    this.drafts.set(role, reference);
-    this.results.delete(role);
-    this.renderRoles();
-  },
-  scenario(kind) {
-    if (this.busy) return;
-    const connections = this.state?.connections ?? [];
-    const first = location => connections.find(row => row.provider.models?.length && (!location || this.location(row.provider.base_url) === location));
-    const local = first("local"), remote = first("remote");
-    const coding = kind === "local" || kind === "shared" ? remote : connections.find(row => row.id === this.selected("coding")?.id) ?? remote;
-    const judgment = kind === "local" ? local : remote;
-    if (!coding || !judgment) {
-      el("connection-scenario-status").textContent = t("settings.connections.missingScenario", "이 배정에 필요한 연결이 없습니다. 연결을 먼저 추가하세요.");
-      return;
-    }
-    el("connection-scenario-status").textContent = t("settings.connections.draftOnly", "배정 초안입니다. 형식을 확인하고 적용하기 전까지 현재 모델을 유지합니다.");
-    for (const [role, row] of [["coding", coding], ["judgment", judgment]]) {
-      const model = row.provider.models[0];
-      this.change(role, { id: row.id, generation: row.generation, model: typeof model === "string" ? model : model.id, protocol: "openai_json" });
-    }
-  },
-  referenceName(reference) {
-    const row = this.state?.connections.find(row => row.id === reference?.id);
-    return row ? `${row.provider.name} / ${reference.model}` : t("settings.connections.unselected", "선택하지 않음");
-  },
-  activeName(role) {
-    const reference = this.state?.[role];
-    if (reference) return this.referenceName(reference);
-    return (role === "coding" ? this.state?.codingModel : typesafeState?.provider?.model) || t("settings.connections.unselected", "선택하지 않음");
-  },
-  checked(role) {
-    const result = this.results.get(role);
-    return Boolean(result?.checked && result.reference === JSON.stringify(this.selected(role)) && result.identity === this.state?.activeProviderIdentity);
-  },
-  roleName(role) { return role === "coding" ? t("settings.connections.coding", "코딩 · 대화") : t("settings.judgment.title", "판단 모델"); },
-  rolePanel(role) {
-    const selected = this.selected(role);
-    const panel = this.node("section", "connection-role");
-    panel.dataset.role = role;
-    const heading = this.node("div", "connection-role-heading");
-    heading.append(this.node("h3", "settings-subhead-title", this.roleName(role)));
-    const active = this.state?.[role];
-    heading.append(this.node("p", "settings-badge", t("settings.connections.current", "현재: {{model}}", { model: this.activeName(role) })));
-    panel.append(heading);
-    const label = this.node("label", "connection-field");
-    label.append(this.node("span", "settings-label", t("settings.connections.choose", "연결과 모델 선택")));
-    const select = this.node("select", "settings-input");
-    select.disabled = this.busy;
-    const empty = this.node("option", "", t("settings.connections.choose", "연결과 모델 선택")); empty.value = ""; select.append(empty);
-    for (const row of this.state?.connections ?? []) {
-      const group = this.node("optgroup"); group.label = row.provider.name;
-      const ids = (row.provider.models ?? []).map(model => typeof model === "string" ? model : model.id);
-      if (selected?.id === row.id && !ids.includes(selected.model)) ids.push(selected.model);
-      for (const model of ids) {
-        const option = this.node("option", "", model); option.value = JSON.stringify([row.id, model]); group.append(option);
-      }
-      select.append(group);
-    }
-    select.value = this.key(selected);
-    select.addEventListener("change", () => {
-      if (!select.value) return this.change(role, null);
-      const [id, model] = JSON.parse(select.value);
-      const row = this.state.connections.find(row => row.id === id);
-      this.change(role, { id, generation: row.generation, model, protocol: selected?.protocol ?? "openai_json" });
-    });
-    label.append(select); panel.append(label);
-    if (this.drafts.has(role)) panel.append(this.node("p", "settings-hint", t("settings.connections.draftOnly", "배정 초안입니다. 형식을 확인하고 적용하기 전까지 현재 모델을 유지합니다.")));
-    if (role === "judgment") {
-      const protocolLabel = this.node("label", "connection-field");
-      protocolLabel.append(this.node("span", "settings-label", t("settings.connections.protocol", "판단 응답 방식")));
-      const protocol = this.node("select", "settings-input");
-      for (const [value, text] of [["openai_json", "OpenAI JSON"], ["system_one", "System One"]]) {
-        const option = this.node("option", "", text); option.value = value; protocol.append(option);
-      }
-      protocol.value = selected?.protocol ?? "openai_json"; protocol.disabled = this.busy || !selected;
-      protocol.addEventListener("change", () => this.change(role, { ...selected, protocol: protocol.value }));
-      protocolLabel.append(protocol); panel.append(protocolLabel);
-      panel.append(this.node("p", "settings-row-desc", t("settings.connections.checkHint", "선택·점수·참/거짓 응답을 실제 요청으로 확인합니다. 형식 통과는 판단 정확도와 다릅니다.")));
-      const formats = this.node("div", "settings-action-row connection-formats");
-      for (const type of ["Choice", "Score", "Noul"]) {
-        const format = this.node("span", "settings-badge", `${this.checked(role) ? "✓" : "○"} ${type}`);
-        format.dataset.formatState = this.checked(role) ? "ready" : "unchecked";
-        formats.append(format);
-      }
-      panel.append(formats, this.node("p", "settings-row-desc", judgmentProviderController.usageWords()));
-    }
-    const actions = this.node("div", "settings-action-row");
-    if (role === "judgment") {
-      const check = this.button(t("settings.connections.check", "세 유형 확인"), () => void this.run(role, "check"));
-      check.dataset.connectionCheck = "";
-      check.disabled ||= !selected; actions.append(check);
-    }
-    const apply = this.button(role === "judgment" ? t("settings.connections.applyJudge", "확인하고 사용") : t("settings.connections.applyCoding", "기본 코딩 모델로 사용"), () => void this.run(role, "apply"), true);
-    apply.dataset.connectionApply = "";
-    apply.disabled ||= !selected || role === "judgment" && !this.checked(role);
-    const clear = this.button(t("settings.connections.clear", "용도 해제 · 이전 선택 복원"), () => void this.run(role, "clear"));
-    clear.disabled ||= !active;
-    actions.append(apply, clear); panel.append(actions);
-    if (role === "coding") panel.append(this.node("p", "settings-row-desc", t("settings.connections.codingHint", "새 zo 세션의 기본 모델입니다. 실행 중인 세션과 명시적으로 지정한 모델은 유지합니다.")));
-    const result = this.results.get(role);
-    if (result) {
-      const status = this.node("p", "connection-result", result.message); status.setAttribute("role", "status"); status.dataset.state = result.failed ? "failed" : "ready"; panel.append(status);
-      if (result.failed && role === "judgment") {
-        const help = result.reason === "schema" ? t("settings.connections.unsupportedHelp", "판단 응답 형식을 충족하지 못했습니다. 다른 모델을 고르거나 응답 방식을 확인하세요.")
-          : result.reason === "provider_request" ? t("settings.connections.stoppedHelp", "서버에 연결하지 못했습니다. 실행 상태와 주소를 확인하거나 다른 모델을 선택하세요.") : "";
-        panel.append(this.node("p", "settings-notice connection-failure-help", `${help} ${t("settings.connections.kept", "현재 판단 모델은 유지합니다.")}`));
-      }
-      if (result.legacy || role === "judgment" && this.state?.legacyKeyPresent) panel.append(this.node("p", "settings-notice", t("settings.connections.legacyKey", "이 서버에는 이전 판단 설정의 키도 있습니다. 이전 버전이나 재시작 전 zo는 그 키를 사용할 수 있으므로 업데이트 후 다시 시작하세요.")));
-    }
-    return panel;
-  },
-  renderRoles() {
-    for (const holder of document.querySelectorAll("[data-connection-roles]")) {
-      const roles = holder.dataset.connectionRoles === "judgment" ? ["judgment"] : ["coding", "judgment"];
-      holder.replaceChildren(...roles.map(role => this.rolePanel(role)));
-    }
-    const comparison = el("connection-comparison");
-    if (comparison) {
-      const facts = this.node("table", "connection-comparison");
-      facts.append(this.node("caption", "settings-label", t("settings.connections.compare", "배정 비교")));
-      const head = this.node("thead"), titles = this.node("tr");
-      for (const label of [t("settings.connections.usesTitle", "용도별 모델"), t("settings.connections.active", "현재 사용"), t("settings.connections.proposed", "배정 초안")]) {
-        const cell = this.node("th", "", label); cell.scope = "col"; titles.append(cell);
-      }
-      head.append(titles); facts.append(head);
-      const body = this.node("tbody");
-      for (const role of ["coding", "judgment"]) {
-        const row = this.node("tr"), title = this.node("th", "", this.roleName(role)); title.scope = "row";
-        row.append(title, this.node("td", "", this.activeName(role)), this.node("td", "", this.referenceName(this.selected(role)))); body.append(row);
-      }
-      facts.append(body);
-      comparison.replaceChildren(facts);
-    }
-  },
-  render() {
-    this.renderRoles();
-    const list = el("router-provider-list"); if (!list) return;
-    const rows = (this.state?.connections ?? []).map(row => ({ ...row, kind: this.location(row.provider.base_url), models: row.provider.models ?? [] }));
-    const managed = managedJudgmentController.snapshot?.models?.filter(model => managedJudgmentController.held(model)) ?? [];
-    for (const model of managed) rows.push({ id: `managed:${model.id}`, kind: "managed", provider: { name: model.label }, models: [model.id], uses: typesafeState?.provider?.kind === "local" && typesafeState.provider.model === model.id ? ["judgment"] : [], status: managedJudgmentController.modelState(model) });
-    rows.push({ id: "jev", kind: "jev", provider: { name: "Jev" }, models: typesafeState?.jevProvider?.model ? [typesafeState.jevProvider.model] : [], uses: typesafeState?.provider?.kind === "jev" ? ["judgment"] : [], status: typesafeState?.provider?.kind === "jev" ? typesafeState.keySaved ? t("settings.connections.registered", "등록됨 · 응답 미확인") : t("settings.connections.needsKey", "인증 키 필요") : t("settings.connections.authUnknown", "인증 상태 미확인") });
-    list.replaceChildren(...rows.map(row => this.connectionRow(row)));
-    el("router-provider-count").textContent = String(rows.length);
-    el("router-provider-note").textContent = this.state?.connections.length ? "" : t("settings.apiRouters.noConnected", "연결된 API 라우터가 없습니다.");
-  },
   location(address) {
     try { const host = new URL(address).hostname; return ["localhost", "127.0.0.1", "[::1]"].includes(host) ? "local" : "remote"; }
     catch { return "remote"; }
   },
-  connectionRow(row) {
-    const line = this.node("div", "connection-row"); line.dataset.connectionId = row.id;
-    if (!["managed", "jev"].includes(row.kind)) line.classList.add("account-row");
-    const copy = this.node("div", "connection-row-copy");
-    const mark = this.node("div", "connection-icon");
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.classList.add("icon"); svg.setAttribute("aria-hidden", "true");
-    const use = document.createElementNS("http://www.w3.org/2000/svg", "use"); use.setAttribute("href", row.kind === "managed" ? "#i-terminal" : row.kind === "jev" ? "#i-bot" : "#i-server"); svg.append(use); mark.append(svg);
-    const location = row.kind === "managed" ? t("settings.connections.locationManaged", "이 컴퓨터 · 앱에서 관리")
-      : row.kind === "local" ? t("settings.connections.locationLocal", "이 컴퓨터 · 실행 중인 로컬 서버")
-        : row.kind === "jev" ? t("settings.connections.locationJev", "Jev 서비스") : t("settings.connections.locationRemote", "외부 서버");
-    copy.append(this.node("strong", "agent-row-name", row.provider.name), this.node("p", "settings-row-desc agent-row-cmd", `${location} · ${t("settings.connections.modelCount", "모델 {{count}}개", { count: row.models.length })}`));
-    const status = row.status ?? (row.keyAvailable ? t("settings.connections.registered", "등록됨 · 응답 미확인") : t("settings.connections.needsKey", "인증 키 필요"));
-    const uses = row.uses.map(role => this.roleName(role)).join(" · ") || t("settings.connections.noUse", "용도 미선택");
-    const badges = this.node("div", "connection-badges");
-    badges.append(this.node("span", "settings-badge", status), this.node("span", "settings-badge", uses));
-    copy.append(badges);
-    const actions = this.node("div", "settings-action-row");
-    const expanded = this.expanded.has(row.id);
-    const models = this.button(t("settings.connections.viewModels", "모델 보기"), () => { expanded ? this.expanded.delete(row.id) : this.expanded.add(row.id); this.render(); });
-    models.dataset.connectionModels = ""; models.setAttribute("aria-expanded", String(expanded));
-    const configure = () => {
-      if (row.kind === "managed" || row.kind === "jev") {
-        showSettingsPane("judgment-models");
-        if (row.kind === "jev") { el("judgment-connection-settings").open = true; el("judgment-provider-kind").value = "jev"; judgmentProviderController.changeKind(); }
-        else el("managed-judgment-panel").scrollIntoView({ block: "nearest" });
-      } else this.edit(row);
-    };
-    actions.append(models, this.button(t("settings.connections.configure", "설정"), configure));
-    if (!["managed", "jev"].includes(row.kind)) {
-      const remove = this.button(t("settings.connections.delete", "삭제"), () => void this.remove(row)); remove.classList.add("account-drop"); actions.append(remove);
-    }
-    line.append(mark, copy, actions);
-    if (this.deletion?.id === row.id) {
-      const note = this.node("div", "connection-delete-note settings-notice"); note.setAttribute("role", "status");
-      note.append(this.node("p", "", this.deletion.message));
-      const actions = this.node("div", "settings-action-row");
-      if (row.uses.length) actions.append(this.button(t("settings.connections.usage", "모델 사용"), () => this.show("usage")));
-      else if (this.deletion.confirm) actions.append(this.button(t("settings.connections.delete", "삭제"), () => void this.remove(row, true)));
-      actions.append(this.button(t("settings.connections.cancel", "취소"), () => { this.deletion = null; this.render(); }));
-      note.append(actions); line.append(note);
-    }
-    if (expanded) {
-      const holder = this.node("div", "connection-models");
-      for (const model of row.models) {
-        const id = typeof model === "string" ? model : model.id;
-        const item = this.node("div", "connection-model"); item.append(this.node("span", "", id));
-        if (!["managed", "jev"].includes(row.kind)) item.append(this.button(t("settings.connections.usage", "모델 사용"), () => { this.change("judgment", { id: row.id, generation: row.generation, model: id, protocol: "openai_json" }); this.show("usage"); }));
-        holder.append(item);
+
+  async refresh() {
+    const sequence = ++this.sequence;
+    const [state, zo] = await Promise.all([
+      invoke("model_connections").then((value) => ({ value }), (error) => ({ error })),
+      invoke("zo_model_list").then((value) => ({ value }), (error) => ({ error })),
+    ]);
+    if (sequence !== this.sequence) return;
+    if (!routerPresets.length) {
+      try {
+        routerPresets = (await invoke("api_router_presets")) ?? [];
+        populateRouterPresets();
+      } catch {
+        // The setup's service list says it has none; the editor still takes an address.
       }
-      if (!row.models.length) holder.append(this.node("p", "settings-hint", t("settings.connections.unselected", "선택하지 않음")));
-      line.append(holder);
+      if (sequence !== this.sequence) return;
     }
-    return line;
+    if (state.value && Array.isArray(state.value.connections)) {
+      const signature = (value) => JSON.stringify([value?.activeProviderIdentity, value?.connections?.map((row) => [row.id, row.generation])]);
+      if (signature(state.value) !== signature(this.state)) this.judged.clear();
+      this.state = state.value;
+      this.failed = null;
+    } else {
+      this.failed = state.error ?? "provider_settings";
+    }
+    if (zo.value) this.zo = zo.value;
+    this.autoSetup();
+    this.render();
   },
-  async run(role, action) {
-    if (this.busy) return;
-    const reference = this.selected(role); if (action !== "clear" && !reference) return;
-    const captured = JSON.stringify(reference);
-    const identity = this.state?.activeProviderIdentity;
-    this.busy = true;
-    this.results.set(role, { message: t("settings.connections.working", "실제 연결을 확인하고 있습니다…") }); this.renderRoles();
+
+  async sync() {
     try {
-      if (action === "check") {
-        const result = await invoke("check_model_connection", { reference, expectedProviderIdentity: this.state.activeProviderIdentity });
-        if (captured !== JSON.stringify(this.selected(role)) || identity !== this.state?.activeProviderIdentity || this.state?.connections.find(row => row.id === reference.id)?.generation !== reference.generation) return;
-        this.results.set(role, { failed: !result.preflight.answered, legacy: result.legacyKeyPresent,
-          reason: result.preflight.failure,
-          checked: result.preflight.answered, reference: captured, identity,
-          message: result.preflight.answered ? t("settings.connections.checked", "선택 · 점수 · 참/거짓 응답 형식 확인됨") : this.failure(result.preflight.failure) });
-      } else {
-        this.state = await invoke(action === "clear" ? "clear_model_connection" : "select_model_connection", {
-          role, reference, expectedReference: this.state?.[role] ?? null, expectedProviderIdentity: this.state.activeProviderIdentity,
-        }, { hand: handNow() });
-        this.drafts.delete(role);
-        this.results.set(role, { message: t("settings.connections.applied", "저장된 설정을 적용했습니다.") });
-        await refreshTypeSafe();
-        void this.sync();
-      }
-    } catch (error) { this.results.set(role, { failed: true, reason: typeof error === "string" ? error : error?.message, message: this.failure(error) }); }
-    finally { this.busy = false; this.render(); }
+      return await invoke("sync_model_connections");
+    } catch {
+      return null;
+    }
   },
+
+  /* ---- what zo lists ---------------------------------------------------- */
+
+  /* Every login zo knows of: the providers its model rows name and the ones
+   * its reports name, each with its rows and whether a report answered. */
+  logins() {
+    const rows = this.zo?.models ?? [];
+    const reports = this.zo?.reports ?? [];
+    const providers = new Set(rows.map((row) => row.provider));
+    for (const report of reports) providers.add(ZO_REPORT_PROVIDER[report.provider] ?? report.provider);
+    const order = (provider) => {
+      const at = MODEL_LOGIN_ORDER.indexOf(provider);
+      return at < 0 ? MODEL_LOGIN_ORDER.length : at;
+    };
+    return [...providers].sort((a, b) => order(a) - order(b)).map((provider) => {
+      const own = reports.filter((report) => (ZO_REPORT_PROVIDER[report.provider] ?? report.provider) === provider);
+      const answered = own.filter((report) => report.ok);
+      const models = rows.filter((row) => row.provider === provider);
+      return {
+        provider,
+        name: MODEL_LOGINS[provider]?.() ?? t("settings.models.login.other", "{{provider}} 로그인", { provider }),
+        state: answered.length ? "ok" : "nologin",
+        report: answered[0] ?? own[0] ?? null,
+        models: [...models.filter((row) => row.band !== "superseded"), ...models.filter((row) => row.band === "superseded")],
+      };
+    });
+  },
+  /* The routers zo reads — the settings' connections and any its own
+   * environment adds — with the saved connection behind each, if any. */
+  routers() {
+    return (this.zo?.customProviders ?? []).map((provider) => {
+      const row = this.state?.connections.find((connection) => connection.provider.name === provider.name) ?? null;
+      return {
+        name: provider.name,
+        row,
+        local: row ? this.location(row.provider.base_url) === "local" : false,
+        models: (provider.models ?? []).map((id) => ({ id, label: id.startsWith(`${provider.name}/`) ? id.slice(provider.name.length + 1) : id })),
+      };
+    });
+  },
+  /* Every model zo would run, one row each (덧붙임 B): every login model —
+   * an older generation marked, at the foot of its login — and every router
+   * model, as zo spells it. */
+  codingRows() {
+    const rows = [];
+    for (const login of this.logins()) {
+      for (const model of login.models) {
+        rows.push({ key: model.id, id: model.id, name: model.displayName || model.id, group: login.name, login, old: model.band === "superseded", band: model.band });
+      }
+    }
+    for (const router of this.routers()) {
+      for (const model of router.models) {
+        rows.push({ key: model.id, id: model.id, name: model.label, group: router.name, router });
+      }
+    }
+    return rows;
+  },
+  /* A saved `model` as zo reads it: an alias resolved to the row it names. */
+  codingKey(model) {
+    if (!model) return null;
+    const alias = (this.zo?.aliases ?? []).find((row) => row.alias === model);
+    return alias?.canonical ?? model;
+  },
+  codingWay(row) {
+    if (row.login) return row.login.name;
+    if (row.router?.local) return t("settings.models.wayLocal", "{{name}} · 이 컴퓨터", { name: row.router.name });
+    return t("settings.models.wayKey", "{{name}} · API 키", { name: row.router?.name ?? "" });
+  },
+  codingState(row) {
+    if (!row) return "unknown";
+    if (row.login) return row.login.state;
+    const connection = row.router?.row;
+    if (connection && connection.provider.requires_auth && !connection.keyAvailable) return this.keyMissing(connection);
+    return this.checks.get(connection?.id)?.state ?? "unknown";
+  },
+  keyMissing(connection) {
+    return connection.provider.auth_env && !connection.provider.auth_env.startsWith("ZEROCODE_ROUTER_") ? "unreadable" : "nokey";
+  },
+
+  /* ---- what judgment can use --------------------------------------------- */
+
+  judgmentRows() {
+    const rows = [];
+    const snapshot = managedJudgmentController.snapshot;
+    for (const model of snapshot?.models?.filter((entry) => managedJudgmentController.held(entry)) ?? []) {
+      rows.push({ key: `managed:${model.id}`, kind: "managed", model, name: model.label, way: t("settings.models.wayManaged", "이 컴퓨터 · 앱이 관리") });
+    }
+    if (typesafeState?.jevProvider) {
+      rows.push({ key: "jev", kind: "jev", name: "Jev", way: t("settings.models.wayJev", "Jev 서비스") });
+    }
+    for (const connection of this.state?.connections ?? []) {
+      const local = this.location(connection.provider.base_url) === "local";
+      for (const model of connection.provider.models ?? []) {
+        const id = typeof model === "string" ? model : model.id;
+        const reference = { id: connection.id, generation: connection.generation, model: id, protocol: "openai_json" };
+        rows.push({
+          key: JSON.stringify([connection.id, id]), kind: "connection", connection, reference, name: id,
+          way: local ? t("settings.models.wayLocal", "{{name}} · 이 컴퓨터", { name: connection.provider.name })
+            : t("settings.models.wayKey", "{{name}} · API 키", { name: connection.provider.name }),
+        });
+      }
+    }
+    return rows;
+  },
+  /* What the row can do for judgment before anything is sent: usable, asked
+   * when picked, or not — with the reason. Dimming is only ever an answer
+   * that came back, or a key the window cannot reach (ZO m-75925). */
+  judgmentStanding(row) {
+    if (row.kind === "managed") return { group: "usable", state: this.managedState(row.model) };
+    if (row.kind === "jev") return { group: "usable", state: typesafeState?.provider?.kind === "jev" && typesafeState.keySaved ? "ok" : "unknown" };
+    const connection = row.connection;
+    if (connection.provider.requires_auth && !connection.keyAvailable) return { group: "off", state: this.keyMissing(connection) };
+    const judged = this.judged.get(JSON.stringify(row.reference));
+    if (judged && judged.state !== "usable") return { group: "off", state: judged.state };
+    if (this.checks.get(connection.id)?.state === "down") return { group: "off", state: "down" };
+    return { group: "check", state: judged?.state ?? "unknown" };
+  },
+  currentJudgmentKey() {
+    const provider = typesafeState?.provider;
+    if (!provider) return null;
+    if (this.state?.judgment) return JSON.stringify([this.state.judgment.id, this.state.judgment.model]);
+    if (provider.kind === "jev") return "jev";
+    if (provider.kind === "local" && managedJudgmentController.snapshot?.models?.some((model) => model.id === provider.model)) return `managed:${provider.model}`;
+    return null;
+  },
+
+  /* The managed server's state, in the five words (t-59744 ④⑥). The model
+   * the settings select is read only through the server the settings name
+   * (`managedServer`): another model's server, or a snapshot of another
+   * settings identity, says nothing about it. */
+  managedState(model) {
+    const snapshot = managedJudgmentController.snapshot;
+    if (!snapshot) return "unknown";
+    if (this.said.get("managed")?.state === "changed") return "changed";
+    if (managedJudgmentController.operating()) return "busy";
+    const provider = typesafeState?.provider;
+    if (provider?.kind === "local" && provider.model === model.id) {
+      const server = judgmentProviderController.managedServer();
+      if (!server) return "unknown";
+      if (server.state === "starting") return server.exit ? "restarting" : "checking";
+      return server.state === "ready" ? "running" : "stopped";
+    }
+    const server = snapshot.server;
+    if (server.modelId !== model.id) return snapshot.configuredModelId === model.id ? "stopped" : "none";
+    if (server.state === "starting" && server.exit) return "restarting";
+    if (server.state === "starting") return "checking";
+    if (server.state === "ready") return "running";
+    return "stopped";
+  },
+  managedReason(model) {
+    const server = managedJudgmentController.snapshot?.server;
+    if (!server || server.modelId !== model.id || !server.exit) return "";
+    return managedJudgmentController.endedState(server.exit, server.state === "starting") ?? "";
+  },
+
+  /* ---- recommendations (decision 6) -------------------------------------- */
+
+  recommendCoding(choice) {
+    if (choice === "key" || choice === "local") {
+      const connection = this.state?.connections.find((row) => row.id === this.setup?.connectionId);
+      if (!connection) return null;
+      const model = connection.provider.models?.[0];
+      const id = typeof model === "string" ? model : model?.id;
+      return id ? { key: `${connection.provider.name}/${id}`, why: t("settings.models.recoKey", "이 연결에 들어 있는 첫 모델입니다.") } : null;
+    }
+    for (const login of this.logins().filter((entry) => entry.state === "ok")) {
+      const top = login.models.find((model) => model.band === "top");
+      if (top) return { key: top.id, why: t("settings.models.recoLogin", "로그인한 계정의 모델 중 zo 목록이 「최상위」로 표시한 모델입니다. 키도 요금 설정도 따로 필요 없습니다.") };
+    }
+    return null;
+  },
+  recommendJudgment() {
+    const snapshot = managedJudgmentController.snapshot;
+    const running = snapshot?.models?.find((model) => snapshot.server.state === "ready" && snapshot.server.modelId === model.id);
+    if (running) return { key: `managed:${running.id}`, why: t("settings.models.recoManaged", "이 컴퓨터 안에서 돌아 키도 요금도 없고, 지금 실행 중인 모델입니다.") };
+    if (this.setup?.choice === "jev" && this.setup.checked === "ok") return { key: "jev", why: t("settings.models.recoJevChecked", "방금 연결을 확인한 판단 전용 서비스입니다.") };
+    if (typesafeState?.jevProvider) return { key: "jev", why: t("settings.models.recoJev", "따로 설치할 것이 없고 판단 전용으로 만든 서비스입니다.") };
+    return null;
+  },
+
+  /* ---- the first question ------------------------------------------------ */
+
+  autoSetup() {
+    if (this.setup || this.setupDismissed || !this.state || !this.zo) return;
+    const logins = this.logins().some((login) => login.state === "ok");
+    if (!logins && this.state.connections.length === 0) this.startSetup("start");
+  },
+  startSetup(title) {
+    this.setup = { title, choice: null, checking: false, checked: null, failure: null, presetId: routerPresets[0]?.id ?? "custom", count: 0, connectionId: null, picking: null, draft: {}, result: null };
+    this.renderSetup();
+  },
+  closeSetup() {
+    this.setup = null;
+    this.setupDismissed = true;
+    this.render();
+  },
+  choose(choice) {
+    if (this.busy) return;
+    this.setup = { ...this.setup, choice, checking: false, checked: null, failure: null, count: 0, picking: null, draft: {}, result: null };
+    if (choice === "login") void this.checkLogins();
+    else if (choice === "local") void this.checkLocal();
+    else this.renderSetup();
+  },
+  async checkLogins() {
+    const setup = this.setup;
+    setup.checking = true;
+    this.renderSetup();
+    try {
+      this.zo = await invoke("zo_model_list");
+    } catch {
+      // The rows below say what was last read.
+    }
+    if (setup !== this.setup) return;
+    setup.checking = false;
+    setup.checked = this.logins().some((login) => login.state === "ok") ? "ok" : "fail";
+    setup.failure = setup.checked === "ok" ? null : "nologin";
+    this.render();
+  },
+  async checkLocal() {
+    const setup = this.setup;
+    setup.checking = true;
+    this.renderSetup();
+    await refreshTypeSafe();
+    if (setup !== this.setup) return;
+    setup.checking = false;
+    setup.checked = this.recommendJudgment()?.key?.startsWith("managed:") ? "ok" : "fail";
+    setup.failure = setup.checked === "ok" ? null : "none";
+    this.render();
+  },
+  /* ② 연결 확인: the router lists its models with the key just pasted; when
+   * it answers, the connection is saved and the key goes to the keychain. */
+  async checkKey() {
+    const setup = this.setup;
+    const started = handNow();
+    const preset = routerPresets.find((row) => row.id === setup.presetId);
+    const input = el("model-setup-key");
+    const key = input?.value.trim() ?? "";
+    if (!preset || this.busy) return;
+    const local = this.location(preset.base_url) === "local";
+    if (!key && !local) return;
+    this.busy = true;
+    setup.checking = true;
+    setup.checked = null;
+    this.renderSetup();
+    try {
+      const models = (await invoke("test_router_connection", {
+        sourceId: null, expectedGeneration: null, baseUrl: preset.base_url, auth: preset.auth,
+        key: key || null, modelsPath: preset.models?.path || "/models", idField: preset.models?.id_field || "id",
+        contextField: preset.models?.context_field || "context_length", clientFingerprint: preset.client_fingerprint || null,
+        headers: preset.headers || null,
+      })) ?? [];
+      if (setup !== this.setup) return;
+      await invoke("save_api_router", {
+        sourceId: null, expectedGeneration: null, auth: preset.auth, presetId: preset.id, name: preset.name,
+        baseUrl: preset.base_url, key: key || null,
+        models: models.map((model) => ({ id: model.id, context_window: model.context_length ?? null })),
+        clientFingerprint: preset.client_fingerprint ?? null, headers: preset.headers ?? null,
+      }, { hand: flowHand(started) });
+      // The field drawn now, not the one read at the press: a repaint replaced it.
+      const field = el("model-setup-key");
+      if (field) field.value = "";
+      await this.refresh();
+      if (setup !== this.setup) return;
+      const connection = this.state?.connections.find((row) => row.provider.name === preset.name);
+      setup.connectionId = connection?.id ?? null;
+      if (connection) this.checks.set(connection.id, { state: "ok", count: models.length });
+      setup.count = models.length;
+      setup.checked = "ok";
+    } catch (error) {
+      if (setup !== this.setup) return;
+      setup.checked = "fail";
+      setup.failure = modelFailureState(error);
+      setup.raw = typeof error === "string" ? error : error?.message ?? String(error);
+    } finally {
+      this.busy = false;
+      if (setup === this.setup) {
+        setup.checking = false;
+        this.render();
+      }
+    }
+  },
+  /* ④ Jev: the key is asked about once and kept on the page until 「추천대로
+   * 쓰기」 applies Jev with it — the keychain write is the apply's. */
+  async checkJev() {
+    const setup = this.setup;
+    const key = el("model-setup-jev-key")?.value.trim() ?? "";
+    if (!key || this.busy || !typesafeState?.jevProvider) return;
+    this.busy = true;
+    setup.checking = true;
+    this.renderSetup();
+    try {
+      const provider = judgmentProviderController.copy(typesafeState.jevProvider);
+      if (!provider.model) provider.model = typesafeState.model?.alias;
+      const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity: typesafeState.providerIdentity, key });
+      if (setup !== this.setup) return;
+      setup.checked = check.answered ? "ok" : "fail";
+      setup.failure = check.answered ? null : modelFailureState(check.failure);
+      setup.jevKey = check.answered ? key : null;
+    } catch (error) {
+      if (setup !== this.setup) return;
+      setup.checked = "fail";
+      setup.failure = modelFailureState(error);
+    } finally {
+      this.busy = false;
+      if (setup === this.setup) {
+        setup.checking = false;
+        this.render();
+      }
+    }
+  },
+  /* 「추천대로 쓰기」: both picks in one press, each said on its own line;
+   * a judgment that does not pass its check is not applied (대응표 17). */
+  async applySetup() {
+    const setup = this.setup;
+    const started = handNow();
+    if (this.busy) return;
+    this.busy = true;
+    this.renderSetup();
+    const result = { coding: null, judgment: null };
+    try {
+      if (setup.draft.coding) result.coding = await this.applyCoding(setup.draft.coding, flowHand(started));
+      if (setup.draft.judgment && setup.draft.judgment !== this.currentJudgmentKey()) {
+        result.judgment = await this.applyJudgment(setup.draft.judgment, flowHand(started), setup.jevKey);
+      } else if (setup.draft.judgment) {
+        result.judgment = { applied: true, key: setup.draft.judgment, kept: true };
+      }
+      result.sync = await this.sync();
+    } finally {
+      this.busy = false;
+    }
+    if (setup !== this.setup) return;
+    setup.result = result;
+    await this.refresh();
+  },
+
+  /* ---- applying ---------------------------------------------------------- */
+
+  /* A coding pick: a saved connection is checked first (its model list read
+   * with its saved key); a failed check keeps the current model. */
+  async applyCoding(key, hand) {
+    const row = this.codingRows().find((entry) => entry.key === key);
+    const connection = row?.router?.row;
+    if (connection) {
+      const check = await this.checkConnection(connection);
+      if (check.state !== "ok") return { applied: false, key, state: check.state, raw: check.raw };
+    }
+    try {
+      this.state = await invoke("select_coding_model", { model: key, expectedModel: this.state?.codingModel ?? null }, { hand });
+      return { applied: true, key };
+    } catch (error) {
+      return { applied: false, key, state: "failed", raw: this.failure(error) };
+    }
+  },
+  async applyJudgment(key, hand, jevKey = null) {
+    const row = this.judgmentRows().find((entry) => entry.key === key);
+    if (!row) return { applied: false, key, state: "failed" };
+    try {
+      if (row.kind === "managed") {
+        const applied = await managedJudgmentController.activate(row.model);
+        return applied ? { applied: true, key } : { applied: false, key, state: "failed", raw: managedJudgmentController.failure(managedJudgmentController.lastError) };
+      }
+      if (row.kind === "jev") {
+        const provider = judgmentProviderController.copy(typesafeState.jevProvider);
+        if (!provider.model) provider.model = typesafeState.model?.alias;
+        const expectedProviderIdentity = typesafeState.providerIdentity;
+        const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity, key: jevKey });
+        if (!check.answered) return { applied: false, key, state: modelFailureState(check.failure) };
+        await invoke("set_judgment_provider", { provider, expectedProviderIdentity, key: jevKey }, { hand });
+      } else {
+        this.state = await invoke("select_model_connection", {
+          role: "judgment", reference: row.reference, expectedReference: this.state?.judgment ?? null,
+          expectedProviderIdentity: this.state.activeProviderIdentity,
+        }, { hand });
+      }
+      await refreshTypeSafe();
+      return { applied: true, key };
+    } catch (error) {
+      return { applied: false, key, state: modelFailureState(error), raw: this.failure(error) };
+    }
+  },
+  /* A saved connection's model list, read with its saved key. */
+  async checkConnection(connection) {
+    // Checking a connection again lets its models be asked for judgment again.
+    for (const reference of [...this.judged.keys()]) {
+      if (JSON.parse(reference)?.id === connection.id) this.judged.delete(reference);
+    }
+    this.checks.set(connection.id, { state: "checking" });
+    this.render();
+    let answer;
+    try {
+      const models = (await invoke("test_router_connection", {
+        sourceId: connection.id, expectedGeneration: connection.generation, baseUrl: connection.provider.base_url,
+        auth: connection.auth, key: null, modelsPath: "/models", idField: "id", contextField: "context_length",
+        clientFingerprint: connection.provider.client_fingerprint ?? null, headers: connection.probeHeaders ?? connection.provider.headers ?? null,
+      })) ?? [];
+      answer = { state: "ok", count: models.length };
+    } catch (error) {
+      const raw = typeof error === "string" ? error : error?.message ?? String(error);
+      answer = { state: connection.provider.requires_auth && !connection.keyAvailable ? this.keyMissing(connection) : modelFailureState(raw), raw };
+    }
+    this.checks.set(connection.id, answer);
+    this.render();
+    return answer;
+  },
+  /* A judgment pick is checked the moment it is picked (대응표 19): the same
+   * door and request an apply makes (wiki: a candidate judgment provider is
+   * asked through the same door and post). */
+  async judge(row) {
+    const reference = JSON.stringify(row.reference ?? row.key);
+    this.judged.set(reference, { state: "checking" });
+    this.renderDaily();
+    let answer;
+    try {
+      if (row.kind === "connection") {
+        const result = await invoke("check_model_connection", { reference: row.reference, expectedProviderIdentity: this.state.activeProviderIdentity });
+        answer = result.preflight.answered ? { state: "usable" } : { state: modelFailureState(result.preflight.failure) };
+      } else if (row.kind === "jev") {
+        const provider = judgmentProviderController.copy(typesafeState.jevProvider);
+        if (!provider.model) provider.model = typesafeState.model?.alias;
+        const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity: typesafeState.providerIdentity, key: null });
+        answer = check.answered ? { state: "usable" } : { state: modelFailureState(check.failure) };
+      } else {
+        const state = this.managedState(row.model);
+        answer = { state: ["running", "none", "stopped"].includes(state) || managedJudgmentController.localSupported(row.model) ? "usable" : state };
+      }
+    } catch (error) {
+      answer = { state: modelFailureState(error) };
+    }
+    this.judged.set(reference, answer);
+    this.renderDaily();
+  },
+
+  /* The 이 컴퓨터 row's buttons are the managed server's own commands; a
+   * refusal because the settings moved first is said as such (t-59744 ⑥). */
+  async managedAction(action, model) {
+    this.said.delete("managed");
+    managedJudgmentController.lastError = null;
+    if (action === "stop") await managedJudgmentController.perform("managed_judgment_stop", { serverId: managedJudgmentController.snapshot.server.id });
+    else if (action === "start") await managedJudgmentController.activate(model);
+    else if (action === "cancel") await managedJudgmentController.cancel();
+    else await refreshTypeSafe();
+    const failed = managedJudgmentController.lastError;
+    if ((typeof failed === "string" ? failed : failed?.message ?? failed?.code) === "settings_changed") this.said.set("managed", { state: "changed" });
+    this.render();
+  },
+
+  /* The old judgment setting's key, moved only when a person presses, after
+   * one line says from where to where; a refused move changes nothing (ZO
+   * m-75925, coordinator m-75952). The old item is left as it was. */
+  async adoptLegacyKey(connection) {
+    const started = handNow();
+    this.adopting = null;
+    try {
+      this.state = await invoke("adopt_legacy_judgment_key", { id: connection.id, expectedGeneration: connection.generation }, { hand: flowHand(started) });
+      this.judged.clear();
+      this.said.set(connection.id, { words: t("settings.models.legacyMoved", "이전 판단 설정의 키를 이 연결로 옮겼습니다. 키 값은 화면에 읽어 오지 않았습니다.") });
+    } catch (error) {
+      this.said.set(connection.id, { words: t("settings.models.legacyRefused", "옮기지 않았습니다. 아무것도 바꾸지 않았습니다 — {{reason}}", { reason: this.failure(error) }) });
+    }
+    this.render();
+  },
+  legacyButton(connection) {
+    const move = this.button(t("settings.models.legacyMove", "이전 판단 키를 이 연결로 옮기기"), () => {
+      this.adopting = connection.id;
+      this.render();
+    });
+    move.dataset.legacyMove = connection.id;
+    return move;
+  },
+  legacyConfirm(connection) {
+    const note = modelNode("div", "settings-notice model-verdict");
+    note.setAttribute("role", "status");
+    note.dataset.legacyConfirm = connection.id;
+    note.append(modelNode("strong", "", t("settings.models.legacyWhere", "이전 판단 설정이 {{address}}에 쓰던 키를 이 연결({{name}})의 키로 옮깁니다.", { address: connection.provider.base_url, name: connection.provider.name })),
+      modelNode("span", "model-result-sub", t("settings.models.legacyHow", "키는 이 Mac의 키체인 안에서만 옮겨지고 화면에 나오지 않습니다. 이전 항목은 그대로 둡니다.")));
+    const row = modelNode("div", "settings-action-row");
+    const move = this.button(t("settings.models.legacyConfirm", "옮기기"), () => void this.adoptLegacyKey(connection), true);
+    move.dataset.legacyConfirmMove = connection.id;
+    row.append(move, this.button(t("settings.connections.cancel", "취소"), () => { this.adopting = null; this.render(); }));
+    note.append(row);
+    return note;
+  },
+
+  /* ---- drawing ------------------------------------------------------------ */
+
+  render() {
+    this.renderSetup();
+    this.renderDaily();
+    this.renderConnections();
+  },
+
+  /* One model, on one line: its name, how it is reached, a reason when it
+   * cannot be picked, and its state. */
+  pickRow(role, row, { selected, disabled, why, state, current }, onPick = null) {
+    const label = modelNode("label", `model-pick${disabled ? " is-off" : ""}`);
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = `model-pick-${role}`;
+    input.value = row.key;
+    input.checked = selected;
+    input.disabled = disabled || this.busy;
+    input.dataset.modelPick = row.key;
+    input.addEventListener("change", () => onPick?.(role, row));
+    const copy = modelNode("span", "model-pick-copy");
+    copy.append(modelNode("span", "model-pick-name", current ? t("settings.models.current", "{{name}} (지금 사용 중)", { name: row.name }) : row.name),
+      modelNode("span", "model-pick-way", row.way ?? this.codingWay(row)));
+    if (why) copy.append(modelNode("span", "model-pick-why", why));
+    label.append(input, copy);
+    if (state) label.append(state);
+    return label;
+  },
+  chooser(role, selected, onPick) {
+    const field = modelNode("fieldset", "model-chooser");
+    field.append(modelNode("legend", "settings-label", role === "coding" ? t("settings.models.pickCoding", "코딩 모델 고르기") : t("settings.models.pickJudgment", "판단 모델 고르기")));
+    const group = (label) => field.appendChild(modelNode("p", "model-pick-group", label));
+    if (role === "coding") {
+      const current = this.codingKey(this.state?.codingModel);
+      const rows = this.codingRows();
+      let last = null;
+      for (const row of rows) {
+        if (row.group !== last) {
+          last = row.group;
+          group(row.login ? row.group : row.router.local ? t("settings.models.wayLocal", "{{name}} · 이 컴퓨터", { name: row.group }) : t("settings.models.wayKey", "{{name}} · API 키", { name: row.group }));
+          if (row.login?.state === "nologin") field.append(modelNode("p", "model-pick-note", `${modelStateWords("nologin").word} — ${modelStateWords("nologin").todo}`));
+        }
+        const state = row.old ? modelNode("span", "settings-badge model-old", t("settings.models.older", "이전 세대")) : row.login ? null : modelBadge(this.codingState(row));
+        field.append(this.pickRow(role, row, { selected: selected === row.key, current: current === row.key, state }, onPick));
+      }
+      if (!rows.length) field.append(modelNode("p", "settings-hint", t("settings.models.noZoList", "zo 모델 목록을 읽지 못했습니다. zo가 설치돼 있는지 확인하세요.")));
+      return field;
+    }
+    const current = this.currentJudgmentKey();
+    const rows = this.judgmentRows().map((row) => ({ row, standing: this.judgmentStanding(row) }));
+    for (const [name, label] of [["usable", t("settings.models.groupUsable", "판단에 쓸 수 있음")], ["check", t("settings.models.groupCheck", "고르면 바로 확인합니다")], ["off", t("settings.models.groupOff", "지금은 쓸 수 없음")]]) {
+      const members = rows.filter((entry) => entry.standing.group === name);
+      if (!members.length) continue;
+      group(label);
+      for (const { row, standing } of members) {
+        const off = name === "off";
+        const words = modelStateWords(standing.state, { env: row.connection?.provider.auth_env ?? "" });
+        const line = this.pickRow(role, row, {
+          selected: selected === row.key, current: current === row.key, disabled: off,
+          why: off ? t("settings.models.cannot", "쓸 수 없음 — {{reason}}", { reason: [words.word, words.todo].filter(Boolean).join(" — ") }) : "",
+          state: modelBadge(standing.state, { env: row.connection?.provider.auth_env ?? "" }),
+        }, onPick);
+        if (off && row.connection?.legacyKey) {
+          const move = this.legacyButton(row.connection);
+          move.classList.add("model-pick-action");
+          line.append(move);
+        }
+        field.append(line);
+        if (off && row.connection?.legacyKey && this.adopting === row.connection.id) field.append(this.legacyConfirm(row.connection));
+      }
+    }
+    // Every login model, by name, dimmed with its reason (덧붙임 C).
+    const logins = this.logins().flatMap((login) => login.models.map((model) => ({ model, login })));
+    if (logins.length) {
+      group(t("settings.models.groupNever", "판단에는 쓰지 않음"));
+      const fold = modelNode("details", "model-pick-fold");
+      fold.dataset.modelLogins = "";
+      fold.open = this.loginsOpen === true;
+      fold.addEventListener("toggle", () => { this.loginsOpen = fold.open; });
+      fold.append(modelNode("summary", "", t("settings.models.loginModels", "로그인 모델 {{count}}개 — 판단에는 쓰지 않음", { count: logins.length })));
+      fold.append(modelNode("p", "model-pick-note", t("settings.models.loginWhy", "구독 로그인은 제품의 자동 요청에 쓰지 않습니다. 코딩 모델로는 고를 수 있습니다.")));
+      for (const { model, login } of logins) {
+        fold.append(this.pickRow(role, { key: `login:${model.id}`, name: model.displayName || model.id, way: login.name }, { selected: false, disabled: true }));
+      }
+      field.append(fold);
+    }
+    return field;
+  },
+  /* The settings fields a pick changes, for whoever wants to see them. */
+  changeTable(role, key) {
+    const fold = modelNode("details", "settings-fold model-changes");
+    fold.append(modelNode("summary", "", t("settings.models.changes", "고급 — 설정 파일에서 바뀌는 칸")));
+    const table = modelNode("table", "model-change-table");
+    const head = modelNode("tr");
+    for (const word of [t("settings.models.changeField", "설정 칸"), t("settings.models.changeNow", "지금"), t("settings.models.changeAfter", "적용 뒤")]) {
+      const cell = modelNode("th", "", word);
+      cell.scope = "col";
+      head.append(cell);
+    }
+    const body = modelNode("tbody");
+    const line = (field, now, after) => {
+      const row = modelNode("tr");
+      row.append(modelNode("td", "model-change-key", field), modelNode("td", "", now ?? "—"), modelNode("td", "", after ?? "—"));
+      body.append(row);
+    };
+    if (role === "coding") {
+      const row = this.codingRows().find((entry) => entry.key === key);
+      line("model", this.state?.codingModel, key);
+      line("smart.codingConnection", this.state?.coding ? `${this.state.coding.id} · ${this.state.coding.model}` : null, row?.router?.row ? `${row.router.row.id} · ${row.name}` : null);
+    } else {
+      const row = this.judgmentRows().find((entry) => entry.key === key);
+      const provider = typesafeState?.provider;
+      line("smart.judgmentProvider", provider ? `${provider.kind} · ${provider.model}` : null,
+        row?.kind === "connection" ? `openai_json · ${row.connection.provider.name} · ${row.name}` : row?.kind === "jev" ? "jev" : row ? `local · ${row.model.id}` : null);
+    }
+    const thead = modelNode("thead");
+    thead.append(head);
+    table.append(thead, body);
+    fold.append(table);
+    return fold;
+  },
+
+  renderDaily() {
+    const coding = document.querySelector('[data-model-role="coding"]');
+    const judgment = document.querySelector('[data-model-role="judgment"]');
+    if (!coding || !judgment) return;
+    const setupShown = Boolean(this.setup);
+    el("typesafe-card").hidden = setupShown;
+    if (this.failed && !this.state) {
+      coding.replaceChildren(modelNode("p", "settings-hint", this.failure(this.failed)), this.button(t("settings.managed.refresh", "상태 새로고침"), () => void this.refresh()));
+      judgment.replaceChildren();
+      return;
+    }
+    coding.replaceChildren(...this.roleBody("coding"));
+    judgment.replaceChildren(...this.roleBody("judgment"));
+    say(el("model-advanced-route"), () => this.routeWords());
+  },
+  routeWords() {
+    const coding = this.state?.coding;
+    const connection = coding && this.state.connections.find((row) => row.id === coding.id);
+    const words = [t("settings.models.routeCoding", "코딩: {{model}}", { model: this.state?.codingModel ?? "—" })];
+    if (connection) words.push(t("settings.models.routeConnection", "연결 형식 {{protocol}} (OpenAI JSON) · provider {{provider}} · endpoint는 모델 연결의 「설정」에 있습니다.", { protocol: coding.protocol, provider: connection.provider.name }));
+    const provider = typesafeState?.provider;
+    if (provider) words.push(t("settings.models.routeJudgment", "판단: {{kind}} · {{protocol}} · {{model}}", { kind: provider.kind, protocol: provider.protocol, model: provider.model }));
+    return words.join(" · ");
+  },
+  roleBody(role) {
+    const nodes = [];
+    const picking = this.picking === role;
+    if (role === "judgment" && typesafeState?.jev && !typesafeState.jev.on) {
+      nodes.push(modelNode("p", "settings-hint model-off", t("settings.models.judgmentOff", "판단을 껐습니다. 고른 모델은 남고, 판단 요청만 보내지 않습니다.")));
+    }
+    const line = modelNode("div", "model-line");
+    line.dataset.modelCurrent = role;
+    const copy = modelNode("div", "model-line-copy");
+    let state = "unknown";
+    if (role === "coding") {
+      const key = this.codingKey(this.state?.codingModel);
+      const row = this.codingRows().find((entry) => entry.key === key);
+      copy.append(modelNode("strong", "model-line-name", row?.name ?? this.state?.codingModel ?? t("settings.models.notChosen", "아직 없음")));
+      if (row) copy.append(modelNode("span", "model-line-way", this.codingWay(row)));
+      else if (this.state?.codingModel) copy.append(modelNode("span", "model-line-way", t("settings.models.notListed", "zo 목록에 없는 이름입니다.")));
+      copy.append(modelNode("span", "model-line-note", t("settings.models.codingNote", "새 zo 세션의 기본 모델입니다. 실행 중인 세션은 그대로입니다.")));
+      state = row ? this.codingState(row) : this.state?.codingModel ? "unknown" : "none";
+    } else {
+      const key = this.currentJudgmentKey();
+      const row = this.judgmentRows().find((entry) => entry.key === key);
+      const provider = typesafeState?.provider;
+      const name = row?.kind === "jev" && provider?.model ? `${row.name} · ${provider.model}` : row?.name ?? provider?.model;
+      copy.append(modelNode("strong", "model-line-name", name ?? t("settings.models.notChosen", "아직 없음")));
+      // A model a person named by its file is said as such: no
+      // check vouches for it the way a catalog model is vouched for.
+      const unverified = provider?.kind === "local" && provider.protocol === "openai_json";
+      copy.append(modelNode("span", "model-line-way", unverified || !row ? (provider ? judgmentProviderController.providerName(provider) : "") : row.way));
+      if (row?.kind === "managed") {
+        const reason = this.managedReason(row.model);
+        if (reason) copy.append(modelNode("span", "model-line-note", reason));
+      }
+      state = row ? this.judgmentStanding(row).state : provider ? "unknown" : "none";
+    }
+    const actions = modelNode("div", "model-line-actions");
+    const toggle = this.button(picking ? t("settings.models.close", "닫기") : t("settings.models.change", "바꾸기"), () => {
+      this.picking = picking ? null : role;
+      this.draft = null;
+      this.said.delete(role);
+      this.renderDaily();
+    });
+    toggle.setAttribute("aria-expanded", String(picking));
+    toggle.dataset.modelChange = role;
+    actions.append(modelBadge(state), toggle);
+    line.append(copy, actions);
+    nodes.push(line);
+    const said = this.said.get(role);
+    if (said) {
+      const note = modelNode("div", `settings-notice model-result${said.ok ? " is-ok" : ""}`);
+      note.setAttribute("role", said.ok ? "status" : "alert");
+      note.append(modelNode("strong", "", said.words));
+      if (said.sub) note.append(modelNode("span", "model-result-sub", said.sub));
+      nodes.push(note);
+    }
+    if (!picking) return nodes;
+    nodes.push(this.chooser(role, this.draft, (picked, row) => {
+      this.draft = row.key;
+      this.said.delete(role);
+      if (picked === "judgment") void this.judge(row);
+      else this.renderDaily();
+    }));
+    if (this.draft) {
+      if (role === "judgment") nodes.push(this.judgmentVerdict(this.draft));
+      if (role === "coding") {
+        const row = this.codingRows().find((entry) => entry.key === this.draft);
+        if (row?.router?.row && this.codingState(row) === "unknown") nodes.push(modelNode("p", "settings-hint", t("settings.models.checkFirst", "적용을 누르면 먼저 이 연결을 확인합니다(모델 목록 불러오기). 실패하면 지금 모델을 그대로 씁니다.")));
+      }
+      nodes.push(this.changeTable(role, this.draft));
+    }
+    const apply = this.button(t("settings.models.apply", "적용"), () => void this.applyDaily(role), true);
+    apply.dataset.modelApply = role;
+    apply.disabled ||= !this.draft || this.draft === (role === "coding" ? this.codingKey(this.state?.codingModel) : this.currentJudgmentKey()) ||
+      (role === "judgment" && !this.judgmentReady(this.draft));
+    const row = modelNode("div", "settings-action-row");
+    row.append(apply);
+    nodes.push(row);
+    return nodes;
+  },
+  judgmentReady(key) {
+    const row = this.judgmentRows().find((entry) => entry.key === key);
+    if (!row) return false;
+    return this.judged.get(JSON.stringify(row.reference ?? row.key))?.state === "usable";
+  },
+  judgmentVerdict(key) {
+    const row = this.judgmentRows().find((entry) => entry.key === key);
+    const judged = row ? this.judged.get(JSON.stringify(row.reference ?? row.key)) : null;
+    const note = modelNode("div", "settings-notice model-verdict");
+    note.dataset.verdict = judged?.state ?? "unknown";
+    if (!judged || judged.state === "checking") {
+      note.setAttribute("role", "status");
+      note.append(modelNode("strong", "", t("settings.models.checking", "연결을 확인하는 중…")), modelNode("span", "model-result-sub", t("settings.models.checkingSub", "판단 확인 질문 세 개를 실제로 보내 봅니다.")));
+      return note;
+    }
+    if (judged.state === "usable") {
+      note.classList.add("is-ok");
+      note.setAttribute("role", "status");
+      note.append(modelNode("strong", "", modelStateWords("usable").word), modelNode("span", "model-result-sub", t("settings.models.usableSub", "판단 확인을 통과했습니다. 적용을 누르면 다음 판단부터 이 모델을 씁니다.")));
+      return note;
+    }
+    const words = modelStateWords(judged.state, { env: row?.connection?.provider.auth_env ?? "" });
+    if (row?.kind === "jev" && judged.state === "nokey") words.todo = t("settings.models.todo.jevKey", "「고급 — Jev 키」에서 Jev 키를 저장하세요.");
+    note.setAttribute("role", "alert");
+    note.append(modelNode("strong", "", t("settings.models.cannot", "쓸 수 없음 — {{reason}}", { reason: words.word })),
+      modelNode("span", "model-result-sub", `${words.todo} ${t("settings.models.kept", "지금 판단 모델은 그대로 씁니다.")}`.trim()));
+    return note;
+  },
+  async applyDaily(role) {
+    const started = handNow();
+    const key = this.draft;
+    if (!key || this.busy) return;
+    this.busy = true;
+    this.renderDaily();
+    let result;
+    try {
+      result = role === "coding" ? await this.applyCoding(key, flowHand(started)) : await this.applyJudgment(key, flowHand(started));
+      if (result.applied) {
+        const sync = await this.sync();
+        this.picking = null;
+        this.draft = null;
+        const name = (role === "coding" ? this.codingRows() : this.judgmentRows()).find((entry) => entry.key === key)?.name ?? key;
+        this.said.set(role, {
+          ok: true,
+          words: role === "coding"
+            ? t("settings.models.appliedCoding", "적용했습니다. 새 zo 세션부터 {{model}}을(를) 씁니다.", { model: name })
+            : t("settings.models.appliedJudgment", "적용했습니다. 다음 판단부터 {{model}}을(를) 씁니다.", { model: name }),
+          sub: role === "coding" ? t("settings.models.runningKept", "이미 열린 zo 세션은 지금 모델을 그대로 씁니다.") : this.syncWords(sync),
+        });
+      } else {
+        const words = modelStateWords(result.state ?? "failed", { env: "" });
+        this.said.set(role, { words: t("settings.models.notApplied", "적용하지 않았습니다 — {{reason}}", { reason: words.word }), sub: [words.todo, result.raw].filter(Boolean).join(" ") });
+      }
+    } finally {
+      this.busy = false;
+    }
+    await this.refresh();
+  },
+  syncWords(sync) {
+    if (!sync) return "";
+    return t("settings.models.syncWords", "실행 중인 zo {{queued}}개는 다음 요청부터 바뀝니다. 다시 시작해야 하는 zo {{restart}}개 · 확인하지 못한 zo {{unknown}}개.", { queued: sync.queued, restart: sync.restartRequired, unknown: sync.unknown });
+  },
+
+  renderSetup() {
+    const holder = el("model-setup");
+    if (!holder) return;
+    holder.hidden = !this.setup;
+    if (el("typesafe-card")) el("typesafe-card").hidden = Boolean(this.setup);
+    if (!this.setup) {
+      holder.replaceChildren();
+      return;
+    }
+    const setup = this.setup;
+    const step = setup.result ? 3 : setup.checked === "ok" ? 2 : 1;
+    const head = modelNode("div", "model-setup-head");
+    head.append(modelNode("h3", "model-role-title", setup.title === "add" ? t("settings.connections.add", "연결 추가") : t("settings.models.setupTitle", "모델 설정 시작하기")));
+    const steps = modelNode("ol", "model-steps");
+    steps.setAttribute("aria-label", t("settings.models.stepsLabel", "단계"));
+    for (const [at, word] of [[1, t("settings.models.step1", "연결 고르기")], [2, t("settings.models.step2", "연결 확인")], [3, t("settings.models.step3", "추천대로 쓰기")]]) {
+      const item = modelNode("li", at === step ? "is-now" : "", word);
+      if (at === step) item.setAttribute("aria-current", "step");
+      steps.append(item);
+    }
+    head.append(steps);
+    const nodes = [head];
+    if (setup.result) {
+      nodes.push(this.setupDone());
+      holder.replaceChildren(...nodes);
+      return;
+    }
+    nodes.push(modelNode("h4", "model-question", t("settings.models.question", "어떻게 연결할까요?")));
+    const choices = modelNode("div", "model-choices");
+    choices.setAttribute("role", "group");
+    choices.setAttribute("aria-label", t("settings.models.question", "어떻게 연결할까요?"));
+    for (const [id, mark, title, about] of [
+      ["login", "①", t("settings.models.choiceLogin", "이미 로그인한 계정 쓰기"), t("settings.models.choiceLoginAbout", "Claude · ChatGPT · Gemini에 로그인돼 있으면 설정 없이 바로 씁니다.")],
+      ["key", "②", t("settings.models.choiceKey", "API 키 넣기"), t("settings.models.choiceKeyAbout", "OpenRouter 같은 서비스의 키를 붙여 넣습니다. 쓴 만큼 요금이 나갑니다.")],
+      ["local", "③", t("settings.models.choiceLocal", "이 컴퓨터에서 돌리기"), t("settings.models.choiceLocalAbout", "앱이 모델을 받아 이 Mac 안에서 돌립니다. 키도 요금도 없습니다.")],
+      ["jev", "④", t("settings.models.choiceJev", "Jev 서비스"), t("settings.models.choiceJevAbout", "판단 전용 서비스입니다. Jev 키가 필요합니다.")],
+    ]) {
+      const button = modelNode("button", "model-choice");
+      button.type = "button";
+      button.dataset.modelChoice = id;
+      button.setAttribute("aria-pressed", String(setup.choice === id));
+      button.disabled = this.busy;
+      button.append(modelNode("span", "model-choice-mark", mark), modelNode("strong", "", title), modelNode("span", "model-choice-about", about));
+      button.addEventListener("click", () => this.choose(id));
+      choices.append(button);
+    }
+    nodes.push(choices);
+    if (setup.choice === "login") nodes.push(this.setupLogin());
+    if (setup.choice === "key") nodes.push(this.setupKey());
+    if (setup.choice === "local") nodes.push(this.setupLocal());
+    if (setup.choice === "jev") nodes.push(this.setupJev());
+    if (setup.checked === "ok") nodes.push(this.setupReco());
+    if (setup.title === "add" || this.state?.connections.length || this.logins().some((login) => login.state === "ok")) {
+      const close = this.button(t("settings.models.setupClose", "닫기"), () => this.closeSetup());
+      close.dataset.modelSetupClose = "";
+      const row = modelNode("div", "settings-action-row");
+      row.append(close);
+      nodes.push(row);
+    }
+    const focused = document.activeElement?.id;
+    const typed = { key: el("model-setup-key")?.value ?? "", jev: el("model-setup-jev-key")?.value ?? "" };
+    holder.replaceChildren(...nodes);
+    if (el("model-setup-key")) el("model-setup-key").value = typed.key;
+    if (el("model-setup-jev-key")) el("model-setup-jev-key").value = typed.jev;
+    if (focused && el(focused)) el(focused).focus({ preventScroll: true });
+  },
+  checking() {
+    const note = modelNode("div", "settings-notice model-verdict");
+    note.setAttribute("role", "status");
+    note.append(modelNode("strong", "", t("settings.models.checking", "연결을 확인하는 중…")), modelNode("span", "model-result-sub", t("settings.models.checkingList", "모델 목록을 불러오고 있습니다.")));
+    return note;
+  },
+  loginLines() {
+    const lines = modelNode("div", "model-lines");
+    for (const login of this.logins()) {
+      const line = modelNode("div", "model-line");
+      line.dataset.modelLogin = login.provider;
+      const copy = modelNode("div", "model-line-copy");
+      copy.append(modelNode("strong", "model-line-name", login.name));
+      const age = modelReportAge(login.report?.age);
+      copy.append(modelNode("span", "model-line-way", login.state === "ok"
+        ? [t("settings.connections.modelCount", "모델 {{count}}개", { count: login.models.length }), age ? t("settings.models.zoChecked", "zo가 확인한 때: {{age}}", { age }) : ""].filter(Boolean).join(" · ")
+        : modelStateWords("nologin").todo));
+      if (login.models.length) copy.append(this.namesFold(login.models.map((model) => model.displayName || model.id), login.provider));
+      const actions = modelNode("div", "model-line-actions");
+      actions.append(modelBadge(login.state), ...this.usePills((role) => role === "coding" && login.models.some((model) => model.id === this.codingKey(this.state?.codingModel))));
+      line.append(copy, actions);
+      lines.append(line);
+    }
+    return lines;
+  },
+  /* 「모델 N개」, opened to every name (덧붙임 C). */
+  namesFold(names, id) {
+    const fold = modelNode("details", "model-names");
+    fold.dataset.modelNames = id;
+    fold.open = this.namesOpen?.has(id) ?? false;
+    fold.addEventListener("toggle", () => {
+      this.namesOpen ??= new Set();
+      if (fold.open) this.namesOpen.add(id); else this.namesOpen.delete(id);
+    });
+    fold.append(modelNode("summary", "", t("settings.models.showNames", "모델 {{count}}개 이름 보기", { count: names.length })));
+    const list = modelNode("ul", "model-name-list");
+    for (const name of names) list.append(modelNode("li", "", name));
+    fold.append(list);
+    return fold;
+  },
+  usePills(uses) {
+    return [["coding", t("settings.models.usedCoding", "코딩에 쓰는 중")], ["judgment", t("settings.models.usedJudgment", "판단에 쓰는 중")]]
+      .filter(([role]) => uses(role))
+      .map(([, word]) => {
+        const pill = modelNode("span", "settings-state model-use", word);
+        pill.dataset.state = "connected";
+        return pill;
+      });
+  },
+  setupLogin() {
+    const block = modelNode("section", "model-step");
+    block.append(modelNode("h4", "", t("settings.models.loginTitle", "① 이 컴퓨터에서 찾은 로그인")));
+    block.append(this.setup.checking ? this.checking() : this.loginLines());
+    block.append(modelNode("p", "settings-hint", t("settings.models.loginNote", "로그인은 각 CLI(Claude Code · Codex · Antigravity …)가 이미 해 둔 것을 씁니다. 이 화면은 비밀번호나 토큰을 묻지 않습니다.")));
+    return block;
+  },
+  setupKey() {
+    const setup = this.setup;
+    const block = modelNode("section", "model-step");
+    block.append(modelNode("h4", "", t("settings.models.keyTitle", "② API 키 넣기")));
+    const service = modelNode("label", "settings-field");
+    service.dataset.field = "md";
+    service.append(modelNode("span", "settings-label", t("settings.models.service", "어느 서비스인가요?")));
+    const select = modelNode("select", "settings-input");
+    select.id = "model-setup-service";
+    select.disabled = this.busy;
+    for (const preset of routerPresets) {
+      const option = modelNode("option", "", preset.name);
+      option.value = preset.id;
+      select.append(option);
+    }
+    const other = modelNode("option", "", t("settings.models.otherService", "다른 서비스 (주소 직접 넣기)"));
+    other.value = "custom";
+    select.append(other);
+    select.value = setup.presetId;
+    select.addEventListener("change", () => {
+      if (select.value === "custom") {
+        this.addManual();
+        return;
+      }
+      setup.presetId = select.value;
+      setup.checked = null;
+      this.renderSetup();
+    });
+    service.append(select);
+    block.append(service);
+    const preset = routerPresets.find((row) => row.id === setup.presetId);
+    const local = preset && this.location(preset.base_url) === "local";
+    const help = MODEL_KEY_HELP[setup.presetId]?.() ?? t("settings.models.keyHelp.other", "쓰는 서비스의 계정 페이지에서 API 키를 만들고 복사합니다.");
+    block.append(modelNode("p", "settings-hint", t("settings.models.keyWhere", "키 받는 곳: {{help}}", { help })));
+    const button = this.button(t("settings.models.check", "연결 확인"), () => void this.checkKey(), true);
+    button.id = "model-setup-check";
+    if (!local) {
+      const field = modelNode("label", "settings-field");
+      field.dataset.field = "lg";
+      field.append(modelNode("span", "settings-label", t("settings.models.pasteKey", "키 붙여넣기")));
+      const input = modelNode("input", "settings-input");
+      input.id = "model-setup-key";
+      input.type = "password";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = t("settings.models.pasteHere", "여기에 붙여 넣기");
+      input.disabled = this.busy || el("router-key-input")?.disabled;
+      input.addEventListener("input", () => { button.disabled = this.busy || !input.value.trim(); });
+      field.append(input);
+      block.append(field);
+      block.append(modelNode("p", "settings-hint", el("router-key-input")?.disabled
+        ? t("settings.apiRouters.noKeychainHint", "이 컴퓨터에는 API 키를 보관할 키체인이 없습니다. 키가 필요 없는 라우터(Ollama 등)만 저장할 수 있습니다.")
+        : t("settings.models.keychainNote", "키는 이 Mac의 키체인에 저장됩니다. 설정 파일에는 키 이름만 적고, 화면에 다시 보여 주지 않습니다.")));
+      button.disabled = true;
+    }
+    const row = modelNode("div", "settings-action-row");
+    row.append(button);
+    block.append(row);
+    if (setup.checking) block.append(this.checking());
+    else if (setup.checked === "ok") {
+      const note = modelNode("div", "settings-notice model-verdict is-ok");
+      note.setAttribute("role", "status");
+      note.append(modelNode("strong", "", t("settings.models.connected", "연결됨 — 모델 {{count}}개", { count: setup.count })),
+        modelNode("span", "model-result-sub", local ? t("settings.models.savedNoKey", "연결을 저장했습니다.") : t("settings.models.savedKey", "키는 키체인에 저장했습니다. 숫자는 서버가 알려 준 모델 수입니다.")));
+      block.append(note);
+    } else if (setup.checked === "fail") {
+      const words = modelStateWords(setup.failure);
+      const note = modelNode("div", "settings-notice model-verdict");
+      note.setAttribute("role", "alert");
+      note.append(modelNode("strong", "", words.word), modelNode("span", "model-result-sub", words.todo));
+      if (setup.raw) {
+        const fold = modelNode("details", "settings-fold");
+        fold.append(modelNode("summary", "", t("settings.status.evidence", "자세히")), modelNode("p", "", setup.raw));
+        note.append(fold);
+      }
+      block.append(note);
+    }
+    return block;
+  },
+  setupLocal() {
+    const setup = this.setup;
+    const block = modelNode("section", "model-step");
+    block.append(modelNode("h4", "", t("settings.models.localTitle", "③ 이 컴퓨터에서 돌리기")));
+    if (setup.checking) {
+      block.append(this.checking());
+      return block;
+    }
+    const lines = modelNode("div", "model-lines");
+    const managed = this.judgmentRows().filter((row) => row.kind === "managed");
+    for (const row of managed) {
+      const line = modelNode("div", "model-line");
+      const copy = modelNode("div", "model-line-copy");
+      copy.append(modelNode("strong", "model-line-name", t("settings.models.localJudgment", "판단 모델 · {{model}}", { model: row.name })), modelNode("span", "model-line-way", t("settings.models.localJudgmentWay", "앱이 받아 이 Mac에서 돌리는 모델 · 키 불필요")));
+      const actions = modelNode("div", "model-line-actions");
+      actions.append(modelBadge(this.managedState(row.model)));
+      line.append(copy, actions);
+      lines.append(line);
+    }
+    const servers = (this.state?.connections ?? []).filter((row) => this.location(row.provider.base_url) === "local");
+    const coding = modelNode("div", "model-line");
+    const copy = modelNode("div", "model-line-copy");
+    copy.append(modelNode("strong", "model-line-name", t("settings.models.coding", "코딩 모델")), modelNode("span", "model-line-way", servers.length
+      ? t("settings.models.localServers", "이 Mac에서 직접 띄운 서버: {{names}}", { names: servers.map((row) => row.provider.name).join(" · ") })
+      : t("settings.models.noLocalServer", "이 Mac에서 돌고 있는 코딩 모델 서버를 등록하지 않았습니다.")));
+    const actions = modelNode("div", "model-line-actions");
+    actions.append(modelBadge(servers.length ? "unknown" : "none"));
+    coding.append(copy, actions);
+    lines.append(coding);
+    block.append(lines);
+    if (!managed.length) {
+      const note = modelNode("div", "settings-notice model-verdict");
+      note.append(modelNode("strong", "", t("settings.models.noManaged", "이 컴퓨터에 받은 판단 모델이 없습니다.")), modelNode("span", "model-result-sub", t("settings.models.noManagedTodo", "「고급 — 이 컴퓨터에서 쓸 판단 모델 받기」에서 받으면 여기에 나타납니다.")));
+      const row = modelNode("div", "settings-action-row");
+      row.append(this.button(t("settings.models.receiveTitle", "이 컴퓨터에서 쓸 판단 모델 받기"), () => {
+        this.closeSetup();
+        el("model-advanced").open = true;
+        el("judgment-model-source")?.scrollIntoView({ block: "nearest" });
+      }));
+      note.append(row);
+      block.append(note);
+    }
+    const note = modelNode("div", "settings-notice model-verdict");
+    note.append(modelNode("strong", "", t("settings.models.localOnlyJudgment", "이 방법은 판단 모델만 채웁니다.")),
+      modelNode("span", "model-result-sub", t("settings.models.localOnlyJudgmentTodo", "코딩 모델은 ① 로그인 계정이나 ② API 키로 하나 더 연결하세요. 이 컴퓨터에서 큰 코딩 모델을 돌리는 것은 고급에서 합니다.")));
+    const row = modelNode("div", "settings-action-row");
+    row.append(this.button(t("settings.models.alsoLogin", "① 로그인 계정도 연결하기"), () => {
+      const carried = this.setup;
+      this.choose("login");
+      this.setup.carryJudgment = carried.checked === "ok";
+    }));
+    note.append(row);
+    block.append(note);
+    return block;
+  },
+  setupJev() {
+    const setup = this.setup;
+    const block = modelNode("section", "model-step");
+    block.append(modelNode("h4", "", t("settings.models.jevTitleStep", "④ Jev 서비스")));
+    block.append(modelNode("p", "settings-row-desc", t("settings.models.judgmentAbout", "판단 모델이란? ZeroCode가 작은 결정을 빠르게 내릴 때 쓰는 모델입니다. 예를 들어 「이 명령이 위험한가」, 「어느 파일부터 볼까」 같은 것입니다. 코딩 모델과 따로 고르며, 작고 빠른 모델이면 충분합니다.")));
+    block.append(modelNode("p", "settings-hint", t("settings.models.jevWhere", "키 받는 곳: Jev(TypeSafe) 계정 페이지에서 키를 만들고 복사합니다.")));
+    const field = modelNode("label", "settings-field");
+    field.dataset.field = "lg";
+    field.append(modelNode("span", "settings-label", t("settings.models.pasteJev", "Jev 키 붙여넣기")));
+    const input = modelNode("input", "settings-input");
+    input.id = "model-setup-jev-key";
+    input.type = "password";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.placeholder = t("settings.models.pasteHere", "여기에 붙여 넣기");
+    input.disabled = this.busy;
+    const button = this.button(t("settings.models.check", "연결 확인"), () => void this.checkJev(), true);
+    button.id = "model-setup-jev-check";
+    button.disabled = true;
+    input.addEventListener("input", () => { button.disabled = this.busy || !input.value.trim(); });
+    field.append(input);
+    block.append(field, modelNode("p", "settings-hint", t("settings.models.jevKeychain", "키는 「추천대로 쓰기」를 누를 때 이 Mac의 키체인에 저장됩니다.")));
+    const row = modelNode("div", "settings-action-row");
+    row.append(button);
+    block.append(row);
+    if (setup.checking) block.append(this.checking());
+    else if (setup.checked) {
+      const ok = setup.checked === "ok";
+      const words = ok ? null : modelStateWords(setup.failure);
+      const note = modelNode("div", `settings-notice model-verdict${ok ? " is-ok" : ""}`);
+      note.setAttribute("role", ok ? "status" : "alert");
+      note.append(modelNode("strong", "", ok ? t("settings.models.jevOk", "연결됨 — 판단에 쓸 수 있음") : words.word),
+        modelNode("span", "model-result-sub", ok ? t("settings.models.jevOkSub", "Jev는 판단 전용입니다. 코딩 모델은 ①이나 ②로 하나 더 연결하세요.") : words.todo));
+      block.append(note);
+    }
+    return block;
+  },
+  setupReco() {
+    const setup = this.setup;
+    const reco = {
+      coding: setup.choice === "login" || setup.choice === "key" || setup.carryJudgment ? this.recommendCoding(setup.choice === "key" ? "key" : "login") : null,
+      judgment: this.recommendJudgment(),
+    };
+    setup.draft.coding ??= reco.coding?.key ?? null;
+    setup.draft.judgment ??= reco.judgment?.key ?? null;
+    const block = modelNode("section", "model-step model-reco");
+    const head = modelNode("div", "model-role-head");
+    head.append(modelNode("h4", "", t("settings.models.step3", "추천대로 쓰기")), modelBadge("ok"));
+    block.append(head);
+    for (const role of ["coding", "judgment"]) {
+      const key = setup.draft[role];
+      const rows = role === "coding" ? this.codingRows() : this.judgmentRows();
+      const row = rows.find((entry) => entry.key === key);
+      const line = modelNode("div", "model-line");
+      line.dataset.modelReco = role;
+      const copy = modelNode("div", "model-line-copy");
+      copy.append(modelNode("span", "model-line-way", role === "coding" ? t("settings.models.coding", "코딩 모델") : t("settings.judgment.title", "판단 모델")));
+      copy.append(modelNode("strong", "model-line-name", row?.name ?? t("settings.models.notChosen", "아직 없음")));
+      if (row) copy.append(modelNode("span", "model-line-way", row.way ?? this.codingWay(row)));
+      else if (role === "coding") copy.append(modelNode("span", "model-line-note", t("settings.models.needCoding", "코딩 모델을 쓰려면 ①이나 ②로 하나 더 연결하세요.")));
+      const why = reco[role];
+      if (row) copy.append(modelNode("span", "model-line-note", key === why?.key ? t("settings.models.why", "추천 이유: {{why}}", { why: why.why }) : t("settings.models.picked", "직접 고름")));
+      const actions = modelNode("div", "model-line-actions");
+      if (row) {
+        const open = setup.picking === role;
+        const other = this.button(open ? t("settings.models.closeList", "목록 닫기") : t("settings.models.other", "다른 모델 고르기"), () => {
+          setup.picking = open ? null : role;
+          this.renderSetup();
+        });
+        other.setAttribute("aria-expanded", String(open));
+        other.dataset.modelOther = role;
+        actions.append(other);
+      }
+      line.append(copy, actions);
+      block.append(line);
+      if (setup.picking === role) {
+        block.append(this.chooser(role, key, (picked, picks) => {
+          setup.draft[picked] = picks.key;
+          if (picked === "judgment") void this.judge(picks).then(() => this.renderSetup());
+          this.renderSetup();
+        }));
+        if (role === "judgment" && key && key !== reco.judgment?.key) block.append(this.judgmentVerdict(key));
+      }
+    }
+    block.append(modelNode("p", "settings-row-desc", t("settings.models.judgmentAbout", "판단 모델이란? ZeroCode가 작은 결정을 빠르게 내릴 때 쓰는 모델입니다. 예를 들어 「이 명령이 위험한가」, 「어느 파일부터 볼까」 같은 것입니다. 코딩 모델과 따로 고르며, 작고 빠른 모델이면 충분합니다.")));
+    const judgmentOk = !setup.draft.judgment || setup.draft.judgment === reco.judgment?.key || this.judgmentReady(setup.draft.judgment);
+    const apply = this.button(t("settings.models.step3", "추천대로 쓰기"), () => void this.applySetup(), true);
+    apply.dataset.modelApplySetup = "";
+    apply.disabled ||= !(setup.draft.coding || setup.draft.judgment) || !judgmentOk;
+    const row = modelNode("div", "settings-action-row");
+    row.append(apply);
+    block.append(row, modelNode("p", "settings-hint", t("settings.models.applyNote", "한 번 누르면 두 모델을 함께 적용합니다. 코딩 모델은 새 zo 세션부터 바뀝니다. 판단 확인을 통과하지 못한 모델은 적용하지 않습니다.")));
+    return block;
+  },
+  setupDone() {
+    const result = this.setup.result;
+    const block = modelNode("section", "model-step");
+    const name = (role, key) => (role === "coding" ? this.codingRows() : this.judgmentRows()).find((entry) => entry.key === key)?.name ?? key;
+    const lines = [];
+    for (const role of ["coding", "judgment"]) {
+      const one = result[role];
+      if (!one) continue;
+      const label = role === "coding" ? t("settings.models.coding", "코딩 모델") : t("settings.judgment.title", "판단 모델");
+      if (one.applied) lines.push([true, t("settings.models.doneRole", "{{role}}: {{model}}", { role: label, model: name(role, one.key) })]);
+      else lines.push([false, t("settings.models.doneRoleFailed", "{{role}}: 적용하지 않았습니다 — {{reason}}", { role: label, reason: modelStateWords(one.state ?? "failed").word })]);
+    }
+    const ok = lines.every(([applied]) => applied);
+    const note = modelNode("div", `settings-notice model-verdict${ok ? " is-ok" : ""}`);
+    note.setAttribute("role", ok ? "status" : "alert");
+    note.dataset.modelDone = "";
+    note.append(modelNode("strong", "", ok ? t("settings.models.done", "끝났습니다.") : t("settings.models.doneSome", "일부만 적용했습니다.")));
+    for (const [, words] of lines) note.append(modelNode("span", "model-result-sub", words));
+    note.append(modelNode("span", "model-result-sub", t("settings.models.runningKept", "이미 열린 zo 세션은 지금 모델을 그대로 씁니다.")));
+    if (result.judgment?.applied && result.sync) note.append(modelNode("span", "model-result-sub", this.syncWords(result.sync)));
+    block.append(note);
+    const row = modelNode("div", "settings-action-row");
+    const view = this.button(t("settings.models.viewModels", "모델 화면 보기"), () => this.closeSetup(), true);
+    view.dataset.modelSetupDone = "";
+    row.append(view);
+    block.append(row);
+    return block;
+  },
+
+  renderConnections() {
+    const holder = el("model-connection-groups");
+    if (!holder) return;
+    if (this.failed && !this.state) {
+      holder.replaceChildren(modelNode("p", "settings-hint", this.failure(this.failed)), this.button(t("settings.managed.refresh", "상태 새로고침"), () => void this.refresh()));
+      return;
+    }
+    const group = (id, title, lines, after = []) => {
+      const section = modelNode("section", "model-group");
+      section.dataset.connectionGroup = id;
+      section.append(modelNode("h3", "model-role-title", title), ...after);
+      const list = modelNode("div", "model-lines");
+      list.append(...lines);
+      section.append(list);
+      return section;
+    };
+    const line = (id, name, sub, state, extra, actions) => {
+      const row = modelNode("div", "model-line");
+      row.dataset.connectionId = id;
+      const copy = modelNode("div", "model-line-copy");
+      copy.append(modelNode("strong", "model-line-name", name), modelNode("span", "model-line-way", sub), ...extra);
+      const tail = modelNode("div", "model-line-actions");
+      tail.append(state, ...actions);
+      row.append(copy, tail);
+      return row;
+    };
+    const codingKey = this.codingKey(this.state?.codingModel);
+    const judgmentKey = this.currentJudgmentKey();
+    const logins = this.loginLines();
+    const remote = [];
+    const local = [];
+    for (const connection of this.state?.connections ?? []) {
+      const isLocal = this.location(connection.provider.base_url) === "local";
+      const models = (connection.provider.models ?? []).map((model) => (typeof model === "string" ? model : model.id));
+      const check = this.checks.get(connection.id);
+      const missing = connection.provider.requires_auth && !connection.keyAvailable;
+      const state = missing ? this.keyMissing(connection) : check?.state ?? "unknown";
+      const words = modelStateWords(state, { env: connection.provider.auth_env ?? "" });
+      const extra = [];
+      if (words.todo && state !== "unknown") extra.push(modelNode("span", "model-line-note", words.todo));
+      else if (check?.state === "ok") extra.push(modelNode("span", "model-line-note", t("settings.models.connected", "연결됨 — 모델 {{count}}개", { count: check.count })));
+      const judgedOff = [...this.judged.entries()].find(([reference, answer]) => JSON.parse(reference)?.id === connection.id && answer.state !== "usable" && answer.state !== "checking");
+      if (judgedOff && !missing) extra.push(modelNode("span", "model-line-note", t("settings.models.judgedOff", "판단 확인: {{word}} — {{todo}}", { word: modelStateWords(judgedOff[1].state).word, todo: modelStateWords(judgedOff[1].state).todo })));
+      const said = this.said.get(connection.id);
+      if (said) extra.push(modelNode("span", "model-line-note", said.words));
+      extra.push(this.namesFold(models, connection.id));
+      const uses = this.usePills((role) => connection.uses?.includes(role) || (role === "coding" && models.some((model) => `${connection.provider.name}/${model}` === codingKey)));
+      const actions = [...uses];
+      const recheck = this.button(t("settings.models.recheck", "다시 확인"), () => void this.checkConnection(connection));
+      recheck.dataset.connectionCheck = "";
+      actions.push(recheck);
+      if (connection.legacyKey) actions.push(this.legacyButton(connection));
+      actions.push(this.button(t("settings.connections.configure", "설정"), () => this.edit(connection)));
+      const remove = this.button(t("settings.connections.delete", "삭제"), () => void this.remove(connection));
+      remove.classList.add("account-drop");
+      actions.push(remove);
+      const sub = `${connection.provider.base_url} · ${t("settings.connections.modelCount", "모델 {{count}}개", { count: models.length })}`;
+      const row = line(connection.id, connection.provider.name, sub, modelBadge(state, { env: connection.provider.auth_env ?? "" }), extra, actions);
+      if (this.deletion?.id === connection.id) row.append(this.deletionNote(connection));
+      if (connection.legacyKey && this.adopting === connection.id) row.append(this.legacyConfirm(connection));
+      (isLocal ? local : remote).push(row);
+    }
+    const managedLines = this.judgmentRows().filter((row) => row.kind === "managed").map((row) => {
+      const state = this.managedState(row.model);
+      const reason = this.managedReason(row.model);
+      const extra = [];
+      const about = {
+        restarting: t("settings.models.managedRestarting", "실행 환경이 스스로 끝나 앱이 다시 띄우고 있습니다. 「멈추기」를 누르면 다시 띄우지 않습니다."),
+        stopped: t("settings.models.managedStopped", "그동안 판단 요청은 보내지 않습니다. 「다시 시작」을 누르면 다시 띄우고 응답을 확인합니다."),
+        busy: t("settings.models.managedBusy", "모델을 받는 중이라 지금은 멈추거나 다시 시작할 수 없습니다. 받기가 끝나거나 취소하면 다시 누를 수 있습니다."),
+        changed: t("settings.models.managedChanged", "다른 창이나 zo가 설정을 먼저 바꿨습니다. 아무것도 바꾸지 않았습니다. 새로 읽은 뒤 다시 누르세요."),
+      }[state];
+      if (reason) extra.push(modelNode("span", "model-line-note", reason));
+      if (about) extra.push(modelNode("span", "model-line-note", about));
+      const actions = [...this.usePills((role) => role === "judgment" && judgmentKey === row.key)];
+      const action = (word, name, disabled = false) => {
+        const button = this.button(word, () => void this.managedAction(name, row.model));
+        button.dataset.managedAction = name;
+        button.disabled ||= disabled || managedJudgmentController.busy;
+        actions.push(button);
+      };
+      if (state === "running" || state === "restarting" || state === "checking") action(t("settings.models.stop", "멈추기"), "stop");
+      if (state === "stopped" || state === "none") action(t("settings.models.restart", "다시 시작"), "start", !managedJudgmentController.localSupported(row.model));
+      if (state === "busy") {
+        action(t("settings.models.stop", "멈추기"), "stop", true);
+        action(t("settings.models.cancelReceive", "받기 취소"), "cancel");
+      }
+      if (state === "changed") action(t("settings.models.reread", "새로 읽기"), "reread");
+      return line(row.key, row.name, t("settings.models.localJudgmentWay", "앱이 받아 이 Mac에서 돌리는 모델 · 키 불필요"), modelBadge(state), extra, actions);
+    });
+    const jev = typesafeState?.jevProvider ? [line("jev", "Jev", t("settings.models.jevWay", "판단 전용 서비스 · Jev 키는 키체인에"),
+      modelBadge(typesafeState.provider?.kind === "jev" && typesafeState.keySaved ? "ok" : "unknown"), [],
+      [...this.usePills((role) => role === "judgment" && judgmentKey === "jev"), this.button(t("settings.models.jevKey", "키"), () => {
+        showSettingsPane("judgment-models");
+        el("model-advanced").open = true;
+        el("judgment-connection-settings").open = true;
+        el("judgment-provider-kind").value = "jev";
+        judgmentProviderController.changeKind();
+        el("judgment-connection-settings").scrollIntoView({ block: "nearest" });
+      })])] : [];
+    holder.replaceChildren(
+      group("login", t("settings.models.groupLogin", "① 로그인 계정"), [...logins.children]),
+      group("key", t("settings.models.groupKey", "② API 키"), remote.length ? remote : [modelNode("p", "settings-hint", t("settings.apiRouters.noConnected", "연결된 API 라우터가 없습니다."))]),
+      group("local", t("settings.models.groupLocal", "③ 이 컴퓨터"), [...managedLines, ...local].length ? [...managedLines, ...local] : [modelNode("p", "settings-hint", t("settings.models.noManaged", "이 컴퓨터에 받은 판단 모델이 없습니다."))]),
+      group("jev", t("settings.models.groupJev", "④ Jev 서비스"), jev),
+    );
+  },
+  deletionNote(connection) {
+    const note = modelNode("div", "connection-delete-note settings-notice");
+    note.setAttribute("role", "status");
+    note.append(modelNode("p", "", this.deletion.message));
+    const actions = modelNode("div", "settings-action-row");
+    if (connection.uses.length) actions.append(this.button(t("settings.models.title", "모델"), () => showSettingsPane("judgment-models")));
+    else if (this.deletion.confirm) actions.append(this.button(t("settings.connections.delete", "삭제"), () => void this.remove(connection, true)));
+    actions.append(this.button(t("settings.connections.cancel", "취소"), () => { this.deletion = null; this.render(); }));
+    note.append(actions);
+    return note;
+  },
+
   edit(row) {
     this.editing = row;
     onRouterPresetChange("custom");
@@ -345,7 +1483,6 @@ const modelConnectionsController = {
     paintRouterModels(testedModels);
     testedRouterGeneration = routerProbeGeneration;
     updateRouterSaveButtonState();
-    el("connection-location").value = this.location(row.provider.base_url);
     el("connection-auth").value = row.provider.requires_auth ? row.keyAvailable ? "saved" : "new" : "none";
     this.addFields();
     say(el("connection-form-title"), () => t("settings.connections.configure", "설정"));
@@ -355,7 +1492,8 @@ const modelConnectionsController = {
   },
   async remove(row, confirmed = false) {
     if (row.uses.length) {
-      this.deletion = { id: row.id, message: `${row.uses.map(role => this.roleName(role)).join(" · ")} · ${t("settings.connections.inUse", "이 연결을 쓰는 용도를 먼저 해제하세요. 이름과 모델 목록은 그대로 수정할 수 있습니다.")}` };
+      const roles = row.uses.map((role) => (role === "coding" ? t("settings.models.coding", "코딩 모델") : t("settings.judgment.title", "판단 모델"))).join(" · ");
+      this.deletion = { id: row.id, message: `${roles} · ${t("settings.connections.inUseNote", "사용 중인 연결은 지울 수 없습니다. 지우려면 「모델」에서 다른 모델을 먼저 고르세요.")}` };
       this.render(); return;
     }
     if (!confirmed) { this.deletion = { id: row.id, confirm: true, message: t("settings.connections.deleteConfirm", "연결과 저장된 인증 참조를 삭제할까요? 서버와 모델 파일은 삭제하지 않습니다.") }; this.render(); return; }
@@ -364,20 +1502,8 @@ const modelConnectionsController = {
   },
 };
 
-el("connections-managed")?.addEventListener("click", () => showSettingsPane("judgment-models"));
 el("connections-decisions")?.addEventListener("click", () => openJevView());
-
+el("model-open-orchestration")?.addEventListener("click", () => showSettingsPane("orchestration"));
 for (const button of document.querySelectorAll("[data-connection-nav]")) button.addEventListener("click", () => modelConnectionsController.show(button.dataset.connectionNav));
-for (const button of document.querySelectorAll("[data-connection-scenario]")) button.addEventListener("click", () => modelConnectionsController.scenario(button.dataset.connectionScenario));
 el("connections-add")?.addEventListener("click", () => modelConnectionsController.add());
-el("connection-location")?.addEventListener("change", () => { invalidateRouterProbe(); modelConnectionsController.addFields(); });
 el("connection-auth")?.addEventListener("change", () => { invalidateRouterProbe(); modelConnectionsController.addFields(); });
-el("connection-open-service")?.addEventListener("click", () => {
-  showSettingsPane("judgment-models");
-  if (el("connection-location").value === "jev") {
-    el("judgment-connection-settings").open = true;
-    el("judgment-provider-kind").value = "jev";
-    judgmentProviderController.changeKind();
-    el("judgment-connection-settings").scrollIntoView({ block: "nearest" });
-  } else el("managed-judgment-panel").scrollIntoView({ block: "nearest" });
-});

@@ -72,63 +72,24 @@ const judgmentProviderController = {
     return null;
   },
 
-  checkStanding() {
-    if (!this.state?.providerIdentity) return "unchecked";
-    if (typesafeState?.providerIdentity === this.state.providerIdentity && typesafeChecked) return typesafeChecked;
-    const server = this.managedServer();
-    return server?.state === "ready" && server.checked === true ? "connected" : "unchecked";
-  },
-
   async refreshAfterApply() {
     if (typesafeRefreshing) await typesafeRefreshing.promise;
     await refreshTypeSafe();
   },
 
+  /* The one diagnosis line (고급 — 실제 작업 사용) and the old editor's
+   * draft line; the model and its state stand on the 모델 cards. */
   renderStatus() {
-    const state = this.state;
-    const provider = state?.provider;
-    say(el("judgment-active-model"), () => this.state?.provider
-      ? t("settings.judgment.activeProvider", "현재 적용된 설정: {{provider}} · {{model}}", {
-        provider: this.providerName(this.state.provider), model: this.state.provider.model,
-      })
-      : t("settings.judgment.activeUnknown", "현재 적용된 모델을 읽지 못했습니다. 연결 설정을 다시 확인하세요."));
-    const enablement = el("judgment-current-enablement");
-    enablement.dataset.state = typeof state?.jev?.on === "boolean" ? state.jev.on ? "enabled" : "disabled" : "unknown";
-    say(enablement, () => {
-      const jev = this.state?.jev;
-      if (typeof jev?.on !== "boolean") return t("settings.judgment.enablementUnknown", "요청 허용 상태를 읽지 못했습니다.");
-      if (!jev.on) return t("settings.judgment.requestsDisabled", "요청 비활성 · 기능 설정과 프로젝트 동의를 확인하세요.");
-      if (jev.everywhere) return t("settings.judgment.requestsEverywhere", "모든 프로젝트에서 요청 허용");
-      return Number.isSafeInteger(jev.folders) && jev.folders >= 0
-        ? t("settings.judgment.requestsPartial", "동의한 폴더 {{count}}개에서 요청 허용 · 현재 프로젝트 허용 여부 모름", { count: jev.folders })
-        : t("settings.judgment.requestsConsented", "동의한 프로젝트에서 요청 허용 · 현재 프로젝트 허용 여부 모름");
-    });
-    const server = el("judgment-current-server");
-    const managed = this.managedServer();
-    server.dataset.state = managed?.state ?? "unknown";
-    say(server, () => {
-      const current = this.managedServer();
-      if (current?.state === "ready") return t("settings.judgment.serverReady", "실행 중 · 실제 요청 사용과 별개");
-      if (current?.state === "starting") return t("settings.judgment.serverStarting", "시작 중");
-      if (current?.state === "stopped") return t("settings.judgment.serverStopped", "중지됨 · 적용된 설정은 유지됨");
-      if (current?.state === "failed") return t("settings.judgment.serverFailed", "실행 실패 · 적용된 설정은 유지됨");
-      return t("settings.judgment.serverUnknown", "현재 모델의 실행 상태를 확인할 수 없습니다.");
-    });
-    const check = el("judgment-current-check");
-    check.dataset.state = this.checkStanding();
-    say(check, () => this.checkStanding() === "connected"
-      ? t("settings.judgment.responseChecked", "응답 확인됨 · 시험 요청 결과이며 실제 사용과 별개")
-      : this.checkStanding() === "failed"
-        ? t("settings.judgment.responseFailed", "응답 확인 실패 · 실제 사용 이력과 별개")
-        : t("settings.judgment.responseUnknown", "현재 모델의 응답 확인 결과가 없습니다."));
-    el("judgment-current-usage").dataset.state = this.currentUsage()?.state ?? "unknown";
-    say(el("judgment-current-usage"), () => this.usageWords());
-    say(el("judgment-current-note"), () => typesafeRefreshing || managedJudgmentController.loading
-      ? t("settings.judgment.statusLoading", "현재 설정과 서버·실제 요청 기록을 읽는 중…")
-      : typesafeRefreshFailed || managedJudgmentController.statusError
-        ? t("settings.judgment.statusUnavailable", "현재 상태를 모두 읽지 못했습니다. 상태 새로고침으로 다시 확인하세요.") : "");
-    el("judgment-status-refresh").disabled = Boolean(typesafeRefreshing || managedJudgmentController.loading);
+    const provider = this.state?.provider;
+    const usage = el("judgment-current-usage");
+    if (usage) {
+      usage.dataset.state = this.currentUsage()?.state ?? "unknown";
+      say(usage, () => this.usageWords());
+    }
+    const refresh = el("judgment-status-refresh");
+    if (refresh) refresh.disabled = Boolean(typesafeRefreshing || managedJudgmentController.loading);
     const draft = el("judgment-provider-draft");
+    if (!draft) return;
     draft.dataset.state = this.dirty() ? "unapplied" : provider ? "applied" : "unknown";
     draft.classList.toggle("settings-notice", this.dirty());
     say(draft, () => this.dirty()

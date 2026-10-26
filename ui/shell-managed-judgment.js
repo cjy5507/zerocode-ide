@@ -304,6 +304,8 @@ const managedJudgmentController = {
     }
     for (const notify of this.waiters) notify();
     if (this.visible()) this.render();
+    // The model cards and the 이 컴퓨터 row read the server from this snapshot.
+    if (modelConnectionsController.state) modelConnectionsController.render();
     if (snapshot.operation?.kind === "restore" && snapshot.operation.state === "done" && snapshot.providerIdentity &&
         snapshot.providerIdentity !== judgmentProviderController.state?.providerIdentity) {
       const restored = `${snapshot.instanceId}:${snapshot.operation.id}`;
@@ -331,9 +333,11 @@ const managedJudgmentController = {
     }
     this.render();
     this.say("");
+    this.lastError = null;
     try {
       if (!this.accept(await invoke(command, args, { hand }))) throw new Error("invalid_snapshot");
     } catch (error) {
+      this.lastError = error;
       if (importing) {
         if (this.importAttempt.key === this.importKey()) this.sayImport(this.failure(error));
       } else this.say(this.failure(error));
@@ -349,6 +353,7 @@ const managedJudgmentController = {
     try {
       this.accept(await invoke("managed_judgment_cancel", { operationId: operation.id }));
     } catch (error) {
+      this.lastError = error;
       this.say(this.failure(error));
     }
   },
