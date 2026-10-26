@@ -1033,7 +1033,8 @@ impl Orchestrator {
     /// own word first (`origin/HEAD`, as `origin/main`) and the local branch
     /// of the same name (`main`). A repository whose `origin/HEAD` was never
     /// set is asked for the first of `fallbacks` that resolves, in order, and
-    /// answers that one alone — a guess names a branch that exists or none.
+    /// answers that name alone, with its remote-tracking branch (`origin/main`
+    /// beside `main`) — a guess names a branch that exists or none.
     ///
     /// Only names that resolve to a commit are returned, so a caller counting
     /// against them never meets "not found" as a reason to doubt.
@@ -1065,9 +1066,18 @@ impl Orchestrator {
                 candidates.push(local.to_string());
             }
         } else {
+            // The remote-tracking branch of the same name is asked beside the
+            // local one: a repository whose `origin/HEAD` was never set can
+            // have `origin/main` ahead of `main`, or no local `main` at all.
             for name in fallbacks {
-                if self.commit_of(worktree, name)?.is_some() {
-                    return Ok(vec![(*name).to_string()]);
+                let mut named = Vec::with_capacity(2);
+                for candidate in [format!("origin/{name}"), (*name).to_string()] {
+                    if self.commit_of(worktree, &candidate)?.is_some() {
+                        named.push(candidate);
+                    }
+                }
+                if !named.is_empty() {
+                    return Ok(named);
                 }
             }
         }
@@ -3748,6 +3758,63 @@ prunable gitdir file points to non-existent location
                 .default_branches(repo.path(), &usual)
                 .expect("names"),
             vec!["origin/main".to_string(), "main".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    /// A repository whose `origin/HEAD` was never set (t-76403 r2): the
+    /// remote-tracking branch of the usual name is asked beside the local
+    /// one, so a head pushed to `origin/main` while the local `main` stands
+    /// behind is landed, and a clone with no local `main` at all still has a
+    /// main line.
+    #[test]
+    fn default_branches_without_the_remote_word_still_ask_the_remote_tracking_branch() {
+        let repo = empty_repository();
+        configure_identity(repo.path());
+        let git = |args: &[&str]| {
+            let output = Command::new(GIT_EXECUTABLE)
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        std::fs::write(repo.path().join("a.txt"), "base\n").expect("write");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["branch", "-M", "main"]);
+        let orchestrator = Orchestrator::open(repo.path()).expect("open");
+        let usual = ["main", "master", "trunk", "develop"];
+        let remote = repo.path().with_file_name("default-branches-no-head.git");
+        let _ = std::fs::remove_dir_all(&remote);
+        let made = Command::new(GIT_EXECUTABLE)
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&remote)
+            .output()
+            .expect("git");
+        assert!(made.status.success());
+        git(&["remote", "add", "origin", &remote.to_string_lossy()]);
+        // `origin/HEAD` is never set here: only `origin/main` exists.
+        git(&["push", "-q", "origin", "main"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["origin/main".to_string(), "main".to_string()],
+            "the remote-tracking branch was not asked beside the local one"
+        );
+
+        // Only the remote-tracking branch is left: a clone that never made
+        // the local one.
+        git(&["checkout", "-q", "-b", "work"]);
+        git(&["branch", "-D", "main"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["origin/main".to_string()],
+            "a repository with only origin/main had no main line"
         );
         let _ = std::fs::remove_dir_all(&remote);
     }

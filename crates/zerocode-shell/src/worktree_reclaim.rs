@@ -400,6 +400,11 @@ enum Verdict {
         /// holding its head, not the base it was cut from (t-73910). Asked of
         /// every process on the machine before it goes.
         elsewhere: bool,
+        /// What made it safe is the repository's default branch holding its
+        /// head, with no record of the cut to say where the commits belong
+        /// (t-76403). Asked of every process on the machine before it goes,
+        /// as `elsewhere` is, though the branch did have commits of its own.
+        by_default_branch: bool,
     },
     /// It stays, and this is why. Prose, because the noes are many and each
     /// one is a different fact; they are written to the window log, where the
@@ -1203,7 +1208,7 @@ fn settle(
     if tells_the_hold {
         orchestration::checkout_examined(&candidate.worker, examined, now_ms);
     }
-    let (branch, base, takes, elsewhere) = match verdict {
+    let (branch, base, takes, elsewhere, by_default_branch) = match verdict {
         Verdict::Keep {
             because,
             kind,
@@ -1219,11 +1224,14 @@ fn settle(
             base,
             takes,
             elsewhere,
-        } => (branch, base, takes, elsewhere),
+            by_default_branch,
+        } => (branch, base, takes, elsewhere, by_default_branch),
     };
     // A branch with no commit of its own goes only once nothing stands in the
-    // directory at all (t-73910) — remembered like every refusal.
-    if elsewhere {
+    // directory at all (t-73910) — remembered like every refusal. So does one
+    // whose commits only the default branch vouches for (t-76403): that is an
+    // answer about the commits, not about who stands in the directory.
+    if elsewhere || by_default_branch {
         let refusal = match recheck.everyone.map(|count| count(&path)) {
             Some(Some(0)) => None,
             Some(Some(count)) => Some(format!("{count} process(es) on this machine stand in it")),
@@ -1625,6 +1633,7 @@ fn look(
                 base: main_line,
                 takes,
                 elsewhere: false,
+                by_default_branch: true,
             },
             Examined::Landed,
         );
@@ -1641,6 +1650,7 @@ fn look(
                 base,
                 takes,
                 elsewhere: false,
+                by_default_branch: false,
             },
             Examined::Landed,
         ),
@@ -1656,12 +1666,13 @@ fn look(
 
 /// The repository's main line, when it already holds every commit on
 /// `branch` (t-76403): `origin/main` or `main` as the remote's own word names
-/// them, else the first default-looking name that resolves.
+/// them, else the first default-looking name that resolves, with its
+/// `origin/` twin.
 ///
 /// Every doubt answers `None` and keeps the checkout: a name that does not
 /// resolve, a count git could not read, git failing. The branch itself is
 /// never its own proof — a worker's branch called `develop` is "in" `develop`
-/// by being it. And what makes a yes safe is the same as for a recorded base:
+/// by being it, nor is the `origin/` copy of what it pushed. And what makes a yes safe is the same as for a recorded base:
 /// the commits are reachable from a branch that is not this one, and the
 /// removal leaves the branch standing.
 fn default_branch_holding(
@@ -1673,7 +1684,7 @@ fn default_branch_holding(
         .default_branches(path, &crate::worktree_runtime::DEFAULT_BASE_NAMES)
         .ok()?
         .into_iter()
-        .filter(|name| name != branch)
+        .filter(|name| name != branch && name.strip_prefix("origin/") != Some(branch))
         .find(|name| matches!(orchestrator.commits_beyond(path, name, branch), Ok(Some(0))))
 }
 
@@ -1708,6 +1719,7 @@ fn unlanded(
                 base: holder,
                 takes,
                 elsewhere: true,
+                by_default_branch: false,
             },
             Examined::Landed,
         );
@@ -1766,6 +1778,7 @@ fn held_by_hand_in(
                 base: format!("{holder} at {}", short_commit(head)),
                 takes,
                 elsewhere: false,
+                by_default_branch: false,
             },
             Examined::Landed,
         ),
@@ -2128,6 +2141,7 @@ mod tests {
             base,
             takes,
             elsewhere,
+            ..
         } = judge(&orchestrator, &bench.listed(&path))
         else {
             panic!("a clean, landed worker checkout was not reclaimable");
@@ -3457,6 +3471,181 @@ mod tests {
             panic!("a head origin/main holds was kept");
         };
         assert_eq!(base, "origin/main");
+    }
+
+    /// A bare repository made as the `origin` of `bench.repo`, with `main`
+    /// pushed and `origin/HEAD` left unset (t-76403 r2).
+    fn origin_without_head(bench: &Bench, name: &str) -> PathBuf {
+        let remote = bench.repo.with_file_name(name);
+        git(
+            bench.repo.parent().expect("parent"),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                &remote.to_string_lossy(),
+            ],
+        );
+        git(
+            &bench.repo,
+            &["remote", "add", "origin", &remote.to_string_lossy()],
+        );
+        git(&bench.repo, &["push", "-q", "origin", "main"]);
+        remote
+    }
+
+    /// With `origin/HEAD` never set, a head pushed to `origin/main` is landed
+    /// although the local `main` stands behind it, and so is one in a
+    /// repository that has no local `main` at all (t-76403 r2).
+    #[test]
+    fn a_head_origin_main_holds_is_landed_without_an_origin_head() {
+        let bench = Bench::open();
+        let orchestrator = bench.orchestrator();
+        let remote = origin_without_head(&bench, "origin-no-head.git");
+
+        let path = cut_then_switched(&bench, "w-76648", "wt/t-76403-r2");
+        commit_work(&path, "pushed.txt");
+        assert!(
+            matches!(
+                judge(&orchestrator, &bench.listed(&path)),
+                Verdict::Keep { .. }
+            ),
+            "work no default branch holds was reclaimable"
+        );
+        git(&path, &["push", "-q", "origin", "HEAD:main"]);
+        let Verdict::Reclaim { base, .. } = judge(&orchestrator, &bench.listed(&path)) else {
+            panic!("a head origin/main holds was kept while origin/HEAD is unset");
+        };
+        assert_eq!(base, "origin/main");
+
+        // The local main line is gone altogether; the remote-tracking branch
+        // is all the repository has.
+        git(&bench.repo, &["checkout", "-q", "--detach"]);
+        git(&bench.repo, &["branch", "-D", "main"]);
+        let Verdict::Reclaim { base, .. } = judge(&orchestrator, &bench.listed(&path)) else {
+            panic!("a repository with only origin/main kept a head origin/main holds");
+        };
+        assert_eq!(base, "origin/main");
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    /// A worker's branch called like a default branch is not its own proof
+    /// through the remote either: pushing `develop` to `origin/develop` makes
+    /// the remote-tracking branch hold exactly what the worker holds.
+    #[test]
+    fn a_branch_pushed_under_a_default_name_is_not_its_own_proof() {
+        let bench = Bench::open();
+        let orchestrator = bench.orchestrator();
+        let remote = origin_without_head(&bench, "origin-self.git");
+
+        let path = cut_then_switched(&bench, "w-76648-self", "develop");
+        commit_work(&path, "own.txt");
+        // No `main` is left to be asked first: only the worker's `develop`
+        // and the `origin/develop` it pushed.
+        git(&bench.repo, &["checkout", "-q", "--detach"]);
+        git(&bench.repo, &["branch", "-m", "main", "side"]);
+        git(
+            &bench.repo,
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        git(&path, &["push", "-q", "origin", "develop"]);
+        let Verdict::Keep { .. } = judge(&orchestrator, &bench.listed(&path)) else {
+            panic!("a branch pushed under a default name vouched for itself");
+        };
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    /// The default branch holding the head is an answer to where the commits
+    /// belong, not to who stands in the directory (t-76403 r2): the machine's
+    /// processes are asked on this road as on the one resting on other
+    /// branches, and a process, or a table nobody could read, keeps the
+    /// checkout — with no recorded cut, with a cut whose base is gone, and
+    /// with a base the branch has moved ahead of.
+    #[test]
+    fn a_checkout_the_default_branch_holds_waits_for_every_process_to_leave() {
+        let _window = crate::orchestration::tests::the_window();
+        let bench = Bench::open();
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let road = Road::Report(bench.orchestrator());
+
+        let unrecorded = cut_then_switched(&bench, "w-76648-a", "wt/t-76403-unrecorded");
+        commit_work(&unrecorded, "unrecorded.txt");
+        git(
+            &bench.repo,
+            &["merge", "-q", "--ff-only", "wt/t-76403-unrecorded"],
+        );
+
+        let gone = bench.cut("w-76648-b");
+        git(
+            &gone,
+            &[
+                "config",
+                "--local",
+                "branch.wt/w-76648-b.base",
+                "no-such-base",
+            ],
+        );
+        commit_work(&gone, "gone.txt");
+        git(&bench.repo, &["merge", "-q", "--ff-only", "wt/w-76648-b"]);
+
+        let behind_base = bench.cut("w-76648-c-base");
+        let behind = bench.cut("w-76648-c");
+        git(
+            &behind,
+            &[
+                "config",
+                "--local",
+                "branch.wt/w-76648-c.base",
+                "wt/w-76648-c-base",
+            ],
+        );
+        commit_work(&behind, "behind.txt");
+        git(&bench.repo, &["merge", "-q", "--ff-only", "wt/w-76648-c"]);
+        assert!(behind_base.is_dir());
+
+        for (path, scene) in [
+            (&unrecorded, "no recorded cut"),
+            (&gone, "a recorded cut that is gone"),
+            (&behind, "a recorded cut the branch is ahead of"),
+        ] {
+            let worker = format!("w-{scene}");
+            let kept = |recheck: &Recheck<'_>, why: &str| {
+                let settled = settle(&finished(path, &worker), &road, &here, recheck, 1_000);
+                assert!(
+                    matches!(settled, Settled::Kept),
+                    "{scene}, {why}: the checkout went"
+                );
+                assert!(path.is_dir(), "{scene}, {why}: the directory is gone");
+            };
+            kept(&nobody_left_and(&|_| Some(1)), "a process stands in it");
+            kept(&nobody_left_and(&|_| None), "the table cannot be read");
+            kept(&nobody_left(), "no table was asked at all");
+            let settled = settle(
+                &finished(path, &worker),
+                &road,
+                &here,
+                &nobody_left_and(&|_| Some(0)),
+                1_000,
+            );
+            let Settled::Reclaimed {
+                base, elsewhere, ..
+            } = settled
+            else {
+                panic!("{scene}: with nobody standing in it the checkout was kept");
+            };
+            assert_eq!(base, "main", "{scene}");
+            assert!(
+                !elsewhere,
+                "{scene}: it was said to have no commit of its own"
+            );
+            assert!(!path.exists(), "{scene}: the checkout survived its reclaim");
+        }
     }
 
     /// Reclaiming wider must not reach work nobody else holds: every other
