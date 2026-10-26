@@ -582,22 +582,40 @@ fn an_applied_judgment_provider_keeps_its_time_until_another_is_applied() {
     let first = remember_applied(&path, "judgment-aaaa", &ids, CLOCK + 10).expect("applied");
     assert_eq!(first.applied.get("judgment-aaaa"), Some(&(CLOCK + 10)));
     let again = remember_applied(&path, "judgment-aaaa", &ids, CLOCK + 20).expect("again");
-    assert_eq!(again.applied.get("judgment-aaaa"), Some(&(CLOCK + 10)), "applied again is no new start");
+    assert_eq!(
+        again.applied.get("judgment-aaaa"),
+        Some(&(CLOCK + 10)),
+        "applied again is no new start"
+    );
     remember_applied(&path, "jev-latest", &ids, CLOCK + 30).expect("jev");
     let back = remember_applied(&path, "judgment-aaaa", &ids, CLOCK + 40).expect("back");
-    assert_eq!(back.applied.get("judgment-aaaa"), Some(&(CLOCK + 40)), "coming back starts again");
+    assert_eq!(
+        back.applied.get("judgment-aaaa"),
+        Some(&(CLOCK + 40)),
+        "coming back starts again"
+    );
     assert_eq!(back.applied.get("jev-latest"), Some(&(CLOCK + 30)));
     let held = read(&path, CLOCK + 50);
     assert_eq!(held.applied, back.applied, "a write is read back");
-    assert_eq!(held.connections["c1"].state, Some(Verdict::Ok), "the checks are untouched");
+    assert_eq!(
+        held.connections["c1"].state,
+        Some(Verdict::Ok),
+        "the checks are untouched"
+    );
 
     for n in 0..(MAX_APPLIED as u64 + 4) {
         remember_applied(&path, &format!("judgment-{n:04}"), &ids, CLOCK + 100 + n).expect("many");
     }
     let held = read(&path, CLOCK + 200);
     assert_eq!(held.applied.len(), MAX_APPLIED);
-    assert!(held.applied.contains_key(&format!("judgment-{:04}", MAX_APPLIED + 3)));
-    assert!(!held.applied.contains_key("judgment-aaaa"), "the oldest went first");
+    assert!(
+        held.applied
+            .contains_key(&format!("judgment-{:04}", MAX_APPLIED + 3))
+    );
+    assert!(
+        !held.applied.contains_key("judgment-aaaa"),
+        "the oldest went first"
+    );
 
     assert!(remember_applied(&path, "", &ids, CLOCK).is_err());
     assert!(remember_applied(&path, "bad\nidentity", &ids, CLOCK).is_err());
@@ -653,9 +671,15 @@ fn the_count_bound_keeps_the_newest_judgment_when_the_clock_was_set_back() {
         .map(|one| one.model.as_str())
         .collect();
     assert_eq!(models.len(), MAX_JUDGMENTS);
-    assert!(models.contains(&"newest"), "the connection's newest check went");
+    assert!(
+        models.contains(&"newest"),
+        "the connection's newest check went"
+    );
     assert!(models.contains(&"fresh"), "the check just written went");
-    assert!(!models.contains(&"m0"), "the oldest check stayed while a newer one went");
+    assert!(
+        !models.contains(&"m0"),
+        "the oldest check stayed while a newer one went"
+    );
 }
 
 /// A judgment that cannot be kept fails, and the file stays as it was
@@ -703,5 +727,9 @@ fn a_full_record_refuses_the_judgment_and_leaves_the_file_as_it_was() {
         remember_judgment(&path, &answer, &live(&["c1"]), CLOCK).expect_err("full"),
         "model_connection_checks_full"
     );
-    assert_eq!(std::fs::read(&path).expect("after"), before, "the file moved");
+    assert_eq!(
+        std::fs::read(&path).expect("after"),
+        before,
+        "the file moved"
+    );
 }

@@ -1053,10 +1053,16 @@ fn a_connection_bound_judgment_provider_carries_the_connections_name() {
     root["smart"] = json!({"judgmentProvider":provider,"judgmentConnection":reference});
     std::fs::write(&path, root.to_string()).unwrap();
     let state = read_settings(&path, &HeldKeys::default(), true).expect("settings");
-    assert_eq!(state.provider_connection_name.as_deref(), Some("Fixture Router"));
+    assert_eq!(
+        state.provider_connection_name.as_deref(),
+        Some("Fixture Router")
+    );
     assert!(state.provider_identity.starts_with("judgment-"));
 
     std::fs::write(&path, "{}").unwrap();
     let state = read_settings(&path, &HeldKeys::default(), true).expect("settings");
-    assert_eq!(state.provider_connection_name, None, "Jev has no saved connection");
+    assert_eq!(
+        state.provider_connection_name, None,
+        "Jev has no saved connection"
+    );
 }

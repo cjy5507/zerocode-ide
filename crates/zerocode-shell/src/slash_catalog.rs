@@ -676,7 +676,11 @@ fn credential_store(env: &[(String, String)]) -> String {
 /// missing, fails, says nothing readable or outlives [`MODELS_WAIT`] — killed
 /// then — leaves the catalog last read standing, or `Null` before any was.
 fn zo_models_catalog(home: &Path) -> serde_json::Value {
-    catalog_through(models_cache(), home, ACCOUNTS_ROOT.get().map(PathBuf::as_path))
+    catalog_through(
+        models_cache(),
+        home,
+        ACCOUNTS_ROOT.get().map(PathBuf::as_path),
+    )
 }
 
 /// A change the window just made to what zo lists — a connection saved,
@@ -935,7 +939,9 @@ mod tests {
         )
         .expect("codex auth");
         std::fs::write(
-            config.path().join(crate::codex_accounts::ACCOUNT_STORE_FILE),
+            config
+                .path()
+                .join(crate::codex_accounts::ACCOUNT_STORE_FILE),
             serde_json::json!({
                 "accounts": [{"id": "account-a", "home_dir": codex_home, "added_at": 0}],
                 "active": "account-a"
@@ -958,17 +964,27 @@ mod tests {
 
         let pane = crate::usage_runtime::account_env_for(config.path(), "zo").expect("pane env");
         assert_eq!(
-            catalog_through(&Mutex::new(ModelsCache::default()), home.path(), Some(config.path())),
+            catalog_through(
+                &Mutex::new(ModelsCache::default()),
+                home.path(),
+                Some(config.path())
+            ),
             serde_json::json!({"reports": []})
         );
         let seen = std::fs::read_to_string(&seen).expect("zo ran");
-        let seen: HashMap<&str, &str> = seen.lines().filter_map(|line| line.split_once('=')).collect();
+        let seen: HashMap<&str, &str> = seen
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect();
         for name in [
             zerocode_core::account::CONFIG_DIR_VAR,
             zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR,
             zerocode_core::codex_account::HOME_VAR,
         ] {
-            assert!(pane.iter().any(|(key, _)| key == name), "the pane gets {name}: {pane:?}");
+            assert!(
+                pane.iter().any(|(key, _)| key == name),
+                "the pane gets {name}: {pane:?}"
+            );
         }
         for (key, value) in &pane {
             assert_eq!(

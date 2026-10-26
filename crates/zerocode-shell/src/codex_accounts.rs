@@ -836,15 +836,16 @@ pub fn launch_env(config_root: &Path) -> Vec<(String, String)> {
 /// own `zo models` read names the home a zo pane is given, and writes
 /// nothing — it runs on the model list's clock, not on a person's launch.
 pub fn reading_env(config_root: &Path) -> Vec<(String, String)> {
-    chosen_env(config_root).map(|(_, env)| env).unwrap_or_default()
+    chosen_env(config_root)
+        .map(|(_, env)| env)
+        .unwrap_or_default()
 }
 
 /// The chosen account's own home and the runtime home a launch names, when
 /// an account is chosen and signed in.
 fn chosen_env(config_root: &Path) -> Option<(PathBuf, Vec<(String, String)>)> {
     let store = read_store(config_root);
-    let account =
-        zerocode_core::codex_account::active_account(&store.accounts, &store.selection)?;
+    let account = zerocode_core::codex_account::active_account(&store.accounts, &store.selection)?;
     let home = PathBuf::from(&account.home_dir);
     if !signed_in(&home) {
         return None;
