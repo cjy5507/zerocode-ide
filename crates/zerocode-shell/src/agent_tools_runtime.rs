@@ -1976,7 +1976,7 @@ impl agent_teams::Host for TeamWindow {
     ) -> Option<crate::quota_wall::DeclineReading> {
         // The table is asked before the grid is copied: an agent nobody
         // measured costs nothing per beat.
-        if !crate::quota_wall::has_rule(agent, crate::quota_wall::StallCause::ClassifierDecline) {
+        if !crate::quota_wall::witnesses_declines(agent) {
             return None;
         }
         let transcript = self
@@ -1994,7 +1994,7 @@ impl agent_teams::Host for TeamWindow {
         agent: &str,
         commit: &mut dyn FnMut(crate::quota_wall::DeclineReading, i64),
     ) {
-        if !crate::quota_wall::has_rule(agent, crate::quota_wall::StallCause::ClassifierDecline) {
+        if !crate::quota_wall::witnesses_declines(agent) {
             return;
         }
         let transcript = self

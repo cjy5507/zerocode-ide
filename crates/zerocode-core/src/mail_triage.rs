@@ -204,7 +204,8 @@ impl Triage {
 /// - Now: a question (its asker waits), a finished task (its review gates the
 ///   next one), a decision put to the coordinator, an escalation, and the
 ///   notices that leave a worker stopped until somebody acts — its death,
-///   its quota wall, a classifier's decline, a ring of waiting.
+///   its quota wall, a classifier's decline, a turn that failed, a ring of
+///   waiting.
 /// - Later: news the coordinator acts on in its own time — a worker's status,
 ///   a merge that is ready, a handoff or a dispatch, and the orchestration's
 ///   receipts of what it did for the coordinator (a standing order's
@@ -224,6 +225,7 @@ pub const fn kind_rule(kind: MessageKind) -> Triage {
         | MessageKind::WorkerDied
         | MessageKind::QuotaWalled
         | MessageKind::ClassifierDeclined
+        | MessageKind::TurnFailed
         | MessageKind::Deadlocked => Triage::AnswerNow,
         MessageKind::Status
         | MessageKind::MergeReady

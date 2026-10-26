@@ -33,8 +33,14 @@ pub enum WorkStage {
     /// Handed in, and no coordinator has written a review of it. A worker's
     /// own 「verified」 or 「merged」 rides beside it as [`WorkProgress::claimed`].
     ReportOnly,
-    /// The attempt ended without a successful report.
+    /// The attempt ended on the worker's own word that it failed: a
+    /// `worker_done` saying `ok:false`.
     Failed,
+    /// The attempt ended and nobody saw a result (t-73910): the coordinator
+    /// stopped or abandoned it, or its terminal went away — the ledger writes
+    /// `succeeded: None` for each, "a failure nobody observed" being the one
+    /// thing it will not record. Not a failure, and not a report to review.
+    Stopped,
     /// Completed, and every attempt ended handing nothing in: no review can
     /// ever be written ([`ReviewFacts::unreviewable`]). Over, not verified.
     Unreviewable,
@@ -66,10 +72,11 @@ pub enum WorkStage {
 
 impl WorkStage {
     /// Every stage, each once.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Working,
         Self::ReportOnly,
         Self::Failed,
+        Self::Stopped,
         Self::Unreviewable,
         Self::Waived,
         Self::Stale,
@@ -89,6 +96,7 @@ impl WorkStage {
             Self::Working => "working",
             Self::ReportOnly => "report_only",
             Self::Failed => "failed",
+            Self::Stopped => "stopped",
             Self::Unreviewable => "unreviewable",
             Self::Waived => "waived",
             Self::Stale => "stale",
@@ -206,7 +214,7 @@ impl Run {
                 WORKTREE_EVIDENCE_VERB,
                 vec!["--worker".into(), current?.worker.clone()],
             ),
-            WorkStage::Failed => (
+            WorkStage::Failed | WorkStage::Stopped => (
                 WORKER_TRANSCRIPT_VERB,
                 vec!["--worker".into(), current?.worker.clone()],
             ),
@@ -278,8 +286,10 @@ fn stage_of(
             WorkStage::Unreviewable
         } else if older.is_open() {
             WorkStage::Working
-        } else if older.succeeded != Some(true) {
+        } else if older.succeeded == Some(false) {
             WorkStage::Failed
+        } else if older.succeeded.is_none() {
+            WorkStage::Stopped
         } else {
             WorkStage::Superseded
         };
@@ -312,8 +322,12 @@ fn stage_of(
     if attempt.is_open() {
         return (WorkStage::Working, None);
     }
-    if attempt.succeeded != Some(true) {
+    // Its worker said it failed, or nobody saw a result (t-73910).
+    if attempt.succeeded == Some(false) {
         return (WorkStage::Failed, None);
+    }
+    if attempt.succeeded.is_none() {
+        return (WorkStage::Stopped, None);
     }
     if review.author == ReviewAuthor::Coordinator
         && (review.superseded_by.is_some() || review.source_now.is_some())

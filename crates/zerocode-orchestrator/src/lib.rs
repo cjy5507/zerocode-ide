@@ -292,6 +292,19 @@ pub struct LinesBeyond {
     pub removed: u64,
 }
 
+/// Where the commits a branch carries beyond its base live besides it
+/// ([`Orchestrator::commits_held_elsewhere`], t-73910).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeldElsewhere {
+    /// The commits beyond the base that no other local branch holds — the
+    /// branch's own work.
+    pub own: usize,
+    /// The first other local branch, by name, that holds the branch's head.
+    /// `None` when the commits are spread over several branches and none of
+    /// them holds them all.
+    pub holder: Option<String>,
+}
+
 /// Everything that would be lost if a worktree were deleted right now.
 ///
 /// The two lists are separate because git treats them completely differently
@@ -884,6 +897,86 @@ impl Orchestrator {
         // same "no answer" the unresolved ref gives, and a caller weighing a
         // removal has to keep the checkout on it.
         Ok(output.stdout.trim().parse::<usize>().ok())
+    }
+
+    /// Whether the commits `branch` carries beyond `base` are its own, or are
+    /// held by other local branches too (t-73910): how many no other branch
+    /// holds, and the first other branch that holds its head.
+    ///
+    /// A worker's branch cut on another worker's unlanded branch carries that
+    /// branch's commits, and [`Self::commits_beyond`] counts them as its own:
+    /// on 2026-10-25 a released worker's checkout read 「미반영 19」 in the
+    /// sidebar with not one commit of its own, and stood waiting for nothing
+    /// it held. A removal takes no commit from anybody there — the branch
+    /// itself stays, and every commit on it is on the branch that made it.
+    ///
+    /// `Ok(None)` when a name does not resolve here or a count cannot be read:
+    /// doubt, never zero, as [`Self::commits_beyond`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// [`OrchestratorError::GitUnavailable`] if git cannot be run, or
+    /// [`OrchestratorError::Git`] if `rev-list` or `for-each-ref` refuses.
+    pub fn commits_held_elsewhere(
+        &self,
+        worktree: impl AsRef<Path>,
+        base: &str,
+        branch: &str,
+    ) -> Result<Option<HeldElsewhere>, OrchestratorError> {
+        let worktree = worktree.as_ref();
+        let own_ref = format!("refs/heads/{branch}");
+        let (Some(base), Some(head)) = (
+            self.commit_of(worktree, base)?,
+            self.commit_of(worktree, &own_ref)?,
+        ) else {
+            return Ok(None);
+        };
+        // Every local branch but this one, and the base, on the other side:
+        // what is left is reachable from this branch alone. `--exclude`
+        // before `--branches` takes the name without `refs/heads/` — a full
+        // ref there excludes nothing, and the branch would hold itself.
+        let output = run(
+            &self.git,
+            worktree,
+            [
+                "rev-list",
+                "--count",
+                &head,
+                "--not",
+                &base,
+                &format!("--exclude={branch}"),
+                "--branches",
+                "--",
+            ],
+        )?;
+        if !output.ok {
+            return Err(self.failure("rev-list --count --not --branches", &output));
+        }
+        let Ok(own) = output.stdout.trim().parse::<usize>() else {
+            return Ok(None);
+        };
+        let output = run(
+            &self.git,
+            worktree,
+            [
+                "for-each-ref",
+                "--contains",
+                &head,
+                "--format=%(refname)",
+                "refs/heads",
+            ],
+        )?;
+        if !output.ok {
+            return Err(self.failure("for-each-ref --contains", &output));
+        }
+        let holder = output
+            .stdout
+            .lines()
+            .map(str::trim)
+            .find(|name| !name.is_empty() && *name != own_ref)
+            .and_then(|name| name.strip_prefix("refs/heads/"))
+            .map(str::to_string);
+        Ok(Some(HeldElsewhere { own, holder }))
     }
 
     /// The lines a checkout's tree has added and taken away since it forked

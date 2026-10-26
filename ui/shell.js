@@ -249,6 +249,7 @@ async function refreshPaneLedger() {
         ledger: row?.ledger ?? "",
         reported: row?.reported === true,
         failed: row?.failed === true,
+        stopped: row?.stopped === true,
         review: row?.review ?? null,
         progress: row?.progress ?? null,
         closed: row?.closed ?? null,
@@ -340,7 +341,7 @@ function paneLedgerSaid(map) {
   return [...map.entries()]
     .sort(([a], [b]) => a - b)
     .map(([term, f]) =>
-      `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}` +
+      `${term}:${f.taskId}:${f.task}:${f.ledger}:${f.reported ? 1 : 0}:${f.failed ? 1 : 0}:${f.stopped ? 1 : 0}` +
       `:${JSON.stringify(f.review)}:${JSON.stringify(f.progress)}:${JSON.stringify(f.closed)}:${f.review_since_ms ?? ""}` +
       `:${f.asking ? 1 : 0}:${f.wall?.stands_until_ms ?? ""}:${f.handed_in ?? ""}:${f.model ?? ""}` +
       `:${f.worker}:${f.takenOver ? 1 : 0}:${JSON.stringify(f.quotaWall)}:${(f.stalled ?? []).join("+")}` +
@@ -365,6 +366,8 @@ const WORK_STAGES = Object.freeze({
   stale: { key: "board.staleReview", word: "다시 검토 대기", phase: "review", landing: "handedIn", live: "stale" },
   superseded: { key: "board.superseded", word: "다음 시도로 넘어감", phase: "superseded", landing: null, live: "superseded" },
   failed: { key: "board.desk.stageFailed", word: "실패", phase: "", landing: "failed", live: "failed" },
+  // 결과를 아무도 보지 못하고 끝난 시도(t-73910): 코디가 멈췄거나 놓았거나, 판이 사라졌다. 실패가 아니다.
+  stopped: { key: "board.stageStopped", word: "중단", phase: "", landing: "stopped", live: "stopped" },
   unreviewable: { key: "board.noReviewRecord", word: "종료 — 검토 자료 없음", phase: "unreviewable", landing: "failed", live: "unreviewable" },
   // 사람이 검토를 생략한 일(t-71220): 아무도 기다리지 않는 것은 검토 기록 없음과 같고, 말만 다르다.
   waived: { key: "board.reviewWaived", word: "종료 — 검토 생략(사람)", phase: "unreviewable", landing: "failed", live: "waived" },
@@ -450,7 +453,7 @@ function ledgerReviewPhaseOf(facts) {
  * where a sweep compacted the task away and left its title empty — the failed
  * attempt that proves there was one (a closed dispatch always carried a task). */
 function ledgerHoldsTask(facts) {
-  return facts.failed === true || Boolean(facts.taskId || facts.task);
+  return facts.failed === true || facts.stopped === true || Boolean(facts.taskId || facts.task);
 }
 
 function seedPaneAgents() {
@@ -10367,6 +10370,7 @@ function agentRowPhase(row, state) {
   const said = ledgerReviewPhaseOf(facts);
   if (said !== "") return said === "review" ? "review" : "";
   if (facts.failed === true) return "failed";
+  if (facts.stopped === true) return "stopped";
   return ledgerHoldsTask(facts) ? "unsettled" : "";
 }
 
@@ -10377,7 +10381,7 @@ function agentRowPhase(row, state) {
  * have no glyph. */
 function agentRowMark(state, phase) {
   if (phase === "review") return "#i-hourglass";
-  if (state === "done") return phase === "unsettled" || phase === "failed" ? "" : "#i-circle-check";
+  if (state === "done") return phase === "unsettled" || phase === "failed" || phase === "stopped" ? "" : "#i-circle-check";
   return state === "needs-attention" ? "#i-msg-ask" : "";
 }
 
@@ -10400,19 +10404,24 @@ function agentDotNode(mark) {
 }
 
 /* What a failed attempt's dot says when it is pointed at: as much as the
- * ledger knows, which is one fact — the attempt ended without a successful
- * report (the worker said ok:false, or the attempt was stopped or abandoned).
+ * ledger knows, which is one fact — the worker reported it failed (ok:false).
+ * An attempt that was stopped or abandoned is 중단 (`AGENT_STOPPED_TIP`).
  * The reason's own words never reach this window: a ledger row carries
  * `failed`, not a summary. Keyed through `applyLocale` (`data-i18n-title`)
  * because a finished-work row is not rebuilt for a change of language. */
-const AGENT_FAILED_TIP = { key: "worktree.attemptFailedTip", word: "실패 — 원장에 성공 보고 없이 끝난 시도로 적혀 있습니다(워커가 ok:false로 보고했거나, 시도가 멈추거나 폐기됨)" };
+const AGENT_FAILED_TIP = { key: "worktree.attemptFailedTip", word: "실패 — 워커가 이 시도를 실패로 보고했습니다(ok:false)" };
 
-function dressFailedDot(dot) {
+/* An attempt nobody saw a result of (t-73910) says so, in words of its own: the ledger holds it as stopped, and
+ * calling it a failure was the sidebar inventing one — 2026-10-25, two released workers painted 「실패」. */
+const AGENT_STOPPED_TIP = { key: "worktree.attemptStoppedTip", word: "중단 — 결과 보고 없이 끝난 시도입니다(코디가 멈췄거나 놓았거나, 판이 사라짐). 실패로 적힌 것이 아닙니다" };
+
+function dressFailedDot(dot, tip = AGENT_FAILED_TIP) {
   if (!dot) return;
-  dot.dataset.tip = t(AGENT_FAILED_TIP.key, AGENT_FAILED_TIP.word);
-  dot.dataset.i18nTitle = AGENT_FAILED_TIP.key;
-  dot.dataset.i18nSourcedatatip = AGENT_FAILED_TIP.word;
+  dot.dataset.tip = t(tip.key, tip.word);
+  dot.dataset.i18nTitle = tip.key;
+  dot.dataset.i18nSourcedatatip = tip.word;
 }
+
 
 /* The task a workspace is working on, when the ledger seated one in a pane
  * here — the card's first words then, ahead of a branch named after a task id
@@ -10452,7 +10461,7 @@ function worktreeSeatFacts(path) {
  * (`reviewing`), verified and not yet merged (`landWait`), merged or deployed (`landed`). A failed attempt,
  * a closed task and a task with nothing to land say so. The gate the coordinator runs before landing is not
  * in the ledger, so no stage names it. */
-const WORKTREE_STAGE_RANK = Object.freeze({ closed: 0, landed: 1, nothing: 1, landWait: 2, reviewing: 3, handedIn: 4, failed: 5 });
+const WORKTREE_STAGE_RANK = Object.freeze({ closed: 0, landed: 1, nothing: 1, landWait: 2, reviewing: 3, handedIn: 4, stopped: 5, failed: 5 });
 
 function ledgerLandingStage(facts) {
   return ledgerWork(facts)?.landing ?? null;
@@ -10466,6 +10475,7 @@ function landingStageWord(stage) {
     case "landed": return t("worktree.stage.landed", "착지됨");
     case "nothing": return t("worktree.stage.nothing", "착지할 것 없음");
     case "failed": return t("board.desk.stageFailed", "실패");
+    case "stopped": return t("board.stageStopped", "중단");
     case "closed": return t("board.closed", "닫힘");
     default: return "";
   }
@@ -11012,6 +11022,7 @@ function makeAgentRow(row, gutter = false) {
   const phase = agentRowPhase(row, state);
   const dot = agentDotNode(agentRowMark(state, phase));
   if (phase === "failed") dressFailedDot(dot);
+  else if (phase === "stopped") dressFailedDot(dot, AGENT_STOPPED_TIP);
   // The agent's REAL face beside its state ("어떤 에이전트가 도는지 아이콘
   // 실제") — the registry's favicon chain, with its letter tile standing in
   // until the mark lands. A row that predates the registry, or a helper with
@@ -11311,6 +11322,7 @@ function makeFinishedWorkRow(path, work) {
     node.querySelector(".wt-agent-dot")?.replaceWith(agentDotNode(agentRowMark("done", phase)));
   }
   if (phase === "" && work.failed === true) dressFailedDot(node.querySelector(".wt-agent-dot"));
+  else if (phase === "" && work.stopped === true) dressFailedDot(node.querySelector(".wt-agent-dot"), AGENT_STOPPED_TIP);
   return node;
 }
 
@@ -16959,7 +16971,7 @@ listen("worktree:landing", () => {
  * that carries the deletions. Those go to the window log with their reason,
  * beside the refusals the existing automatic cleanup already writes there. */
 listen("worktree:reclaimed", (event) => {
-  const { name, branch, base, beside } = event.payload ?? {};
+  const { name, branch, base, beside, elsewhere } = event.payload ?? {};
   // The list refresh is not repeated here: the backend emits
   // `worktree:removed` for the same reclaim, and that listener already owns
   // it. This one carries the sentence and nothing else.
@@ -16967,6 +16979,18 @@ listen("worktree:reclaimed", (event) => {
   // A checkout a worker cut beside its own goes because its task was handed in
   // (t-45336): its sentence names the task, and the head that holds its commits.
   const handedIn = typeof beside === "string" && beside !== "";
+  // A worker that made no commit of its own (t-73910): its branch's commits are on another branch, which is named.
+  if (!handedIn && elsewhere === true) {
+    toast(
+      t(
+        "worktree.reclaimedElsewhere",
+        "워커가 끝나 워크스페이스 {{name}}을(를) 정리했습니다 — 워커가 만든 커밋은 0개이고, {{branch}}의 커밋은 모두 {{base}}에 있으며 저장되지 않은 변경은 없었습니다. 브랜치는 그대로 남아 있습니다.",
+        { name, branch: branch ?? "", base: base ?? "" },
+      ),
+      "done",
+    );
+    return;
+  }
   toast(
     handedIn
       ? t(

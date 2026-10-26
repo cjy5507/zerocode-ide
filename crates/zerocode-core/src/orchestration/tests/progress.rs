@@ -521,3 +521,72 @@ fn every_stage_has_its_own_wire_name() {
         );
     }
 }
+
+/// t-73910: an attempt the coordinator stopped or abandoned, or whose terminal
+/// went away, ended with no result anybody saw — `succeeded: None` — and reads
+/// [`WorkStage::Stopped`], never [`WorkStage::Failed`], which is the worker's own
+/// word. On 2026-10-25 two released workers stood painted 「실패」 in the sidebar
+/// while the ledger held neither as failed. An older attempt reads the same way
+/// once a newer one carries the task, and a stopped attempt points at the
+/// worker's conversation as a failed one does.
+#[test]
+fn an_attempt_nobody_saw_a_result_of_is_stopped_and_a_reported_failure_is_failed() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name stopped");
+    let run_id = bench.ledger.runs()[0].id.clone();
+
+    let stopped = task_of(&mut bench, "stopped");
+    let (worker, _, dispatch) = attempt_on(&mut bench, &stopped);
+    bench.json(&format!(
+        "worker-stop --worker {worker} --reason superseded"
+    ));
+    assert_eq!(
+        bench.ledger.runs()[0]
+            .dispatch(&dispatch)
+            .and_then(|one| one.succeeded),
+        None,
+        "a stop wrote a result nobody saw"
+    );
+    let (row, whole) = read(&bench, &stopped, &dispatch);
+    assert_eq!(
+        (row.stage, whole.stage),
+        (WorkStage::Stopped, WorkStage::Stopped)
+    );
+    assert_eq!(
+        row.next.as_deref(),
+        Some(format!("zerocode-orc worker-transcript --run {run_id} --worker {worker}").as_str())
+    );
+
+    let abandoned = task_of(&mut bench, "abandoned");
+    let (worker, _, dispatch) = attempt_on(&mut bench, &abandoned);
+    bench.json(&format!(
+        "worker-abandon --worker {worker} --reason unknown"
+    ));
+    assert_eq!(
+        read(&bench, &abandoned, &dispatch).0.stage,
+        WorkStage::Stopped
+    );
+
+    let failed = task_of(&mut bench, "failed");
+    let (_, pane, dispatch) = attempt_on(&mut bench, &failed);
+    bench.json_at(&pane, "send --type worker_done --body {\"ok\":false}");
+    assert_eq!(read(&bench, &failed, &dispatch).0.stage, WorkStage::Failed);
+
+    // The stopped attempt, once a newer one carries the task, still reads
+    // by its own end.
+    let (_, _, newer) = attempt_on(&mut bench, &stopped);
+    let run = &bench.ledger.runs()[0];
+    let held = run.task(&stopped).expect("the task");
+    let first = run
+        .dispatches
+        .iter()
+        .find(|one| one.task == stopped && one.id != newer)
+        .expect("the stopped attempt");
+    assert_eq!(
+        run.progress_from(Some(held), &run.review_of(held), Some(first))
+            .stage,
+        WorkStage::Stopped
+    );
+    assert_eq!(run.progress_of(held).stage, WorkStage::Working);
+    assert_eq!(WorkStage::Stopped.word(), "stopped");
+}

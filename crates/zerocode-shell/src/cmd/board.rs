@@ -464,6 +464,31 @@ pub(crate) async fn quota_wall_retry(
     .map_err(|error| error.to_string())?
 }
 
+/// 「다시 띄우기」 on a worker whose turn failed (t-69010): type one
+/// continuation at its composer, on the road 「지금 다시 시도」 takes
+/// (`wall_press::retry_failed_turn`). The main window only, after the
+/// renderer's confirm.
+#[tauri::command]
+pub(crate) async fn turn_failed_retry(
+    app: AppHandle,
+    webview: tauri::Webview,
+    run: String,
+    worker: String,
+) -> Result<serde_json::Value, PressRefusal> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let host = crate::agent_tools_runtime::TeamWindow { app };
+        crate::orchestration::wall_press::retry_failed_turn(
+            &host,
+            &run,
+            &worker,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// 「다른 에이전트로 넘기기」 on a quota-wall chip (t-39771): end the walled
 /// attempt and start `to` (`agent[:model[:effort]]`, or the alternative a
 /// standing order names when left out) on its task in the same checkout, with

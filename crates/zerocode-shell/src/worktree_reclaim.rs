@@ -177,6 +177,9 @@ enum ReclaimKind {
     IgnoredFile,
     NotManaged,
     Kept,
+    /// Commits the worker made itself are not in the base yet: the checkout
+    /// waits for them to land (t-73910).
+    Unlanded,
 }
 
 /// The reclaimer's observation, shared with the catalogue without another
@@ -187,6 +190,20 @@ pub(crate) struct ReclaimReason {
     detail: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     checked_ms: Option<i64>,
+    /// What an [`ReclaimKind::Unlanded`] checkout waits for: the commits on
+    /// its branch only, and the base they have to reach (t-73910). The sidebar
+    /// says them, so a row that stays says why and until when.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waits: Option<Waiting>,
+}
+
+/// The work a kept checkout waits on (t-73910): how many commits on its
+/// branch no other branch holds — the worker's own — and the base they have
+/// to land in before the checkout goes.
+#[derive(Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct Waiting {
+    own: usize,
+    base: String,
 }
 
 static REASON_REVISION: AtomicU64 = AtomicU64::new(0);
@@ -234,6 +251,7 @@ fn active_reason() -> ReclaimReason {
         kind: ReclaimKind::Active,
         detail: "the window is showing this checkout".to_string(),
         checked_ms: None,
+        waits: None,
     }
 }
 
@@ -242,6 +260,7 @@ fn occupied_reason(count: usize) -> ReclaimReason {
         kind: ReclaimKind::OpenConversation,
         detail: format!("this window holds {count} terminal(s) in this checkout"),
         checked_ms: None,
+        waits: None,
     }
 }
 
@@ -309,11 +328,19 @@ enum Verdict {
         /// trees this whole road exists to get back. Named in the window log
         /// so "reclaimed" is an accounting rather than an announcement.
         takes: Vec<String>,
+        /// The branch carries no commit of its own: `base` is another branch
+        /// holding its head, not the base it was cut from (t-73910). Asked of
+        /// every process on the machine before it goes.
+        elsewhere: bool,
     },
     /// It stays, and this is why. Prose, because the noes are many and each
     /// one is a different fact; they are written to the window log, where the
     /// existing automatic cleanup already writes exactly this news.
-    Keep { because: String, kind: ReclaimKind },
+    Keep {
+        because: String,
+        kind: ReclaimKind,
+        waits: Option<Waiting>,
+    },
 }
 
 /// What the window is told when a checkout is reclaimed.
@@ -338,6 +365,10 @@ pub(crate) struct Reclaimed {
     /// its own sentence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) beside: Option<String>,
+    /// The worker made no commit of its own (t-73910): every commit on
+    /// `branch` is on `base`, another branch, and the window says so.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) elsewhere: bool,
 }
 
 /// One pass over the checkouts the ledger has finished with.
@@ -717,6 +748,7 @@ fn look_beside(
             path: known.path.to_string_lossy().into_owned(),
             worker: one.worker.clone(),
             agent: one.agent.clone(),
+            run: one.run.clone(),
         };
         // What the sweep drops before any git: a pane of this window in it, or
         // a worker the ledger still counts summoned seated in it — and a
@@ -860,12 +892,21 @@ struct Recheck<'a> {
     /// window's pane registry knows neither. `None` from the question is
     /// "could not tell", which keeps the checkout.
     processes: Option<ProcessCount<'a>>,
+    /// The same count, asked before a checkout whose branch carries no
+    /// commit of its own goes (t-73910): that removal rests on the worker
+    /// being over, and a process standing in the directory says it is not.
+    /// `None` keeps every such checkout.
+    everyone: Option<ProcessCount<'a>>,
 }
 
 /// What one judgment came to, for the road that asked.
 enum Settled {
     /// It went, and these are the two names that made it safe.
-    Reclaimed { branch: String, base: String },
+    Reclaimed {
+        branch: String,
+        base: String,
+        elsewhere: bool,
+    },
     /// It stays, and the window log says why.
     Kept,
     /// Another road holds it, or has already taken it, and that road's answer
@@ -906,9 +947,30 @@ fn judge_and_act(
         terminals: &terminals,
         keeping: &keeping,
         processes: matches!(road, Road::HandedIn(_)).then_some(&processes as ProcessCount<'_>),
+        everyone: Some(&processes),
     };
     match settle(candidate, road, here, &recheck, now_ms) {
-        Settled::Reclaimed { branch, base } => {
+        Settled::Reclaimed {
+            branch,
+            base,
+            elsewhere,
+        } => {
+            // The ledger hears a removal it did not ask for when it rests on
+            // other branches (t-73910): the run's coordinator reads why the
+            // checkout went, in the place it reads every other observation.
+            if elsewhere {
+                orchestration::post_observation_once(
+                    Some(&candidate.run),
+                    &format!("run:{}", candidate.run),
+                    &format!(
+                        "reclaimed {}: worker {} made no commit of its own; every commit on \
+                         {branch} is on {base}, and {branch} stays",
+                        candidate.path, candidate.worker
+                    ),
+                    &format!("reclaimed-elsewhere:{}", candidate.path),
+                    now_ms,
+                );
+            }
             // The sidebar's existing refresh, and the sentence for the
             // person. Two events because they answer different questions:
             // one is "the list changed", the other is "something was deleted
@@ -930,6 +992,7 @@ fn judge_and_act(
                         Road::HandedIn(beside) => Some(beside.task.clone()),
                         Road::Sweep { .. } | Road::Report(_) => None,
                     },
+                    elsewhere,
                 },
             );
         }
@@ -1051,17 +1114,37 @@ fn settle(
     if tells_the_hold {
         orchestration::checkout_examined(&candidate.worker, examined, now_ms);
     }
-    let (branch, base, takes) = match verdict {
-        Verdict::Keep { because, kind } => {
-            remember_as(candidate, standing, &because, kind, data_root, now_ms);
+    let (branch, base, takes, elsewhere) = match verdict {
+        Verdict::Keep {
+            because,
+            kind,
+            waits,
+        } => {
+            remember_as(
+                candidate, standing, &because, kind, waits, data_root, now_ms,
+            );
             return Settled::Kept;
         }
         Verdict::Reclaim {
             branch,
             base,
             takes,
-        } => (branch, base, takes),
+            elsewhere,
+        } => (branch, base, takes, elsewhere),
     };
+    // A branch with no commit of its own goes only once nothing stands in the
+    // directory at all (t-73910) — remembered like every refusal.
+    if elsewhere {
+        let refusal = match recheck.everyone.map(|count| count(&path)) {
+            Some(Some(0)) => None,
+            Some(Some(count)) => Some(format!("{count} process(es) on this machine stand in it")),
+            Some(None) | None => Some("the processes standing in it could not be read".to_string()),
+        };
+        if let Some(because) = refusal {
+            remember(candidate, Standing::Kept, &because, data_root, now_ms);
+            return Settled::Kept;
+        }
+    }
     // Asked again, against the ledger as it stands. Everything above took git
     // processes to answer, and a coordinator coming back in that time seats
     // its sleeper straight into this directory.
@@ -1137,13 +1220,22 @@ fn settle(
                      {base}; it took {took}",
                     candidate.worker, beside.task
                 ),
+                Road::Sweep { .. } | Road::Report(_) if elsewhere => format!(
+                    "worker {} left it with no commit of its own; {branch} is clean and every \
+                     commit on it is on {base}; it took {took}",
+                    candidate.worker
+                ),
                 Road::Sweep { .. } | Road::Report(_) => format!(
                     "worker {} left it; {branch} is clean and fully in {base}; it took {took}",
                     candidate.worker
                 ),
             };
             crate::note_worktree_removal(data_root, road.source(), &path, &because);
-            Settled::Reclaimed { branch, base }
+            Settled::Reclaimed {
+                branch,
+                base,
+                elsewhere,
+            }
         }
         Err(refusal) => {
             remember(candidate, Standing::Kept, &refusal, data_root, now_ms);
@@ -1173,7 +1265,7 @@ fn remember(
     } else {
         ReclaimKind::Kept
     };
-    remember_as(candidate, standing, because, kind, data_root, now_ms);
+    remember_as(candidate, standing, because, kind, None, data_root, now_ms);
 }
 
 fn remember_as(
@@ -1181,6 +1273,7 @@ fn remember_as(
     standing: Standing,
     because: &str,
     kind: ReclaimKind,
+    waits: Option<Waiting>,
     data_root: &Path,
     now_ms: i64,
 ) {
@@ -1188,6 +1281,7 @@ fn remember_as(
         kind,
         detail: because.to_string(),
         checked_ms: None,
+        waits,
     };
     let repeat = {
         let mut marks = judged().lock().unwrap_or_else(|held| held.into_inner());
@@ -1292,6 +1386,7 @@ fn unknown_as(because: String, kind: ReclaimKind) -> (Verdict, Examined) {
         Verdict::Keep {
             because: because.clone(),
             kind,
+            waits: None,
         },
         Examined::Unknown { why: because },
     )
@@ -1304,6 +1399,7 @@ fn shared(because: String) -> (Verdict, Examined) {
         Verdict::Keep {
             because,
             kind: ReclaimKind::NotManaged,
+            waits: None,
         },
         Examined::Shared,
     )
@@ -1366,6 +1462,7 @@ fn look(
                             changes.join(", ")
                         ),
                         kind: ReclaimKind::Kept,
+                        waits: None,
                     },
                     Examined::Uncommitted {
                         changes: changes.len(),
@@ -1431,20 +1528,11 @@ fn look(
                 branch: branch.to_string(),
                 base,
                 takes,
+                elsewhere: false,
             },
             Examined::Landed,
         ),
-        Ok(Some(outstanding)) => (
-            Verdict::Keep {
-                because: format!("{outstanding} commit(s) on {branch} are not in {base} yet"),
-                kind: ReclaimKind::Kept,
-            },
-            Examined::Unlanded {
-                branch: branch.to_string(),
-                base,
-                commits: outstanding,
-            },
-        ),
+        Ok(Some(outstanding)) => unlanded(orchestrator, path, branch, base, outstanding, takes),
         Ok(None) => unknown(format!(
             "{base} cannot be resolved here, so whether {branch} has landed is unknown"
         )),
@@ -1452,6 +1540,62 @@ fn look(
             "git could not compare {branch} with {base}: {error}"
         )),
     }
+}
+
+/// A clean checkout whose branch carries `outstanding` commits its base has
+/// not taken (t-73910). They are the worker's own work, and the checkout
+/// waits for them to land — unless no commit on the branch is its own: a
+/// branch cut on another worker's unlanded branch carries that branch's
+/// commits, and when another local branch holds its head, the removal takes
+/// nothing from anybody. On 2026-10-25 two released workers' checkouts stood
+/// as 「미반영 19 · 정리 보류」 with not one commit of their own. A count that
+/// cannot be read keeps the checkout, waiting on every commit.
+fn unlanded(
+    orchestrator: &Orchestrator,
+    path: &Path,
+    branch: &str,
+    base: String,
+    outstanding: usize,
+    takes: Vec<String>,
+) -> (Verdict, Examined) {
+    let held = orchestrator
+        .commits_held_elsewhere(path, &base, branch)
+        .ok()
+        .flatten();
+    if let Some(zerocode_orchestrator::HeldElsewhere {
+        own: 0,
+        holder: Some(holder),
+    }) = held
+    {
+        return (
+            Verdict::Reclaim {
+                branch: branch.to_string(),
+                base: holder,
+                takes,
+                elsewhere: true,
+            },
+            Examined::Landed,
+        );
+    }
+    let own = held.map_or(outstanding, |held| held.own);
+    (
+        Verdict::Keep {
+            because: format!(
+                "{outstanding} commit(s) on {branch} are not in {base} yet, {own} of them on no \
+                 other branch"
+            ),
+            kind: ReclaimKind::Unlanded,
+            waits: Some(Waiting {
+                own,
+                base: base.clone(),
+            }),
+        },
+        Examined::Unlanded {
+            branch: branch.to_string(),
+            base,
+            commits: outstanding,
+        },
+    )
 }
 
 /// The last questions for a checkout beside a hand-in (t-45336): is it the
@@ -1486,6 +1630,7 @@ fn held_by_hand_in(
                     .unwrap_or_else(|| format!("the detached HEAD {}", short_commit(at))),
                 base: format!("{holder} at {}", short_commit(head)),
                 takes,
+                elsewhere: false,
             },
             Examined::Landed,
         ),
@@ -1707,6 +1852,7 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             worker: worker.to_string(),
             agent: "claude".to_string(),
+            run: "run-1".to_string(),
         }
     }
 
@@ -1727,6 +1873,7 @@ mod tests {
             terminals: &terminals,
             keeping: &kept,
             processes: None,
+            everyone: None,
         }
     }
 
@@ -1845,6 +1992,7 @@ mod tests {
             branch,
             base,
             takes,
+            elsewhere,
         } = judge(&orchestrator, &bench.listed(&path))
         else {
             panic!("a clean, landed worker checkout was not reclaimable");
@@ -1855,6 +2003,10 @@ mod tests {
             "the reclaim does not carry the two names its sentence is made of"
         );
         assert!(takes.is_empty(), "{takes:?}");
+        assert!(
+            !elsewhere,
+            "a branch fully in its own base rests on no other branch"
+        );
     }
 
     /// And the removal reaches the build directory, which is the whole reason
@@ -2073,6 +2225,197 @@ mod tests {
         assert!(foreign.is_dir(), "the hand-made checkout disappeared");
     }
 
+    /// t-73910: a worker checkout whose branch was moved onto another
+    /// worker's unlanded branch — two commits beyond `main`, not one of them
+    /// its own — the way the two released workers of 2026-10-25 stood as
+    /// 「미반영 19 · 정리 보류」. Answers the checkout and the branch holding
+    /// its commits.
+    fn cut_on_anothers_branch(bench: &Bench, name: &str) -> (PathBuf, String) {
+        let other = bench.cut(&format!("other-of-{name}"));
+        for step in ["one", "two"] {
+            std::fs::write(other.join(format!("{step}.txt")), step).expect("work");
+            git(&other, &["add", "."]);
+            git(&other, &["commit", "-q", "-m", step]);
+        }
+        let holder = bench
+            .listed(&other)
+            .branch
+            .expect("the other checkout's branch");
+        let path = bench.cut(name);
+        git(&path, &["reset", "-q", "--hard", &holder]);
+        (path, holder)
+    }
+
+    /// Every process count a recheck may answer for a removal resting on
+    /// other branches, and nothing else in the way.
+    fn nobody_left_and(everyone: ProcessCount<'_>) -> Recheck<'_> {
+        Recheck {
+            everyone: Some(everyone),
+            ..nobody_left()
+        }
+    }
+
+    /// The coordinator's four conditions, all met (t-73910): the worker is
+    /// over and nothing stands in the directory, no commit is its own, the
+    /// tree is clean, and the window cut it. It goes; its branch stays, the
+    /// reclaim names the branch holding the commits, and the log says why.
+    #[test]
+    fn a_finished_checkout_with_no_commit_of_its_own_goes_and_says_which_branch_holds_them() {
+        let bench = Bench::open();
+        bench.ignore_on_main("target/\n");
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let (projects, prefs) = bench.window();
+        let road = Road::Sweep { projects, prefs };
+        let (path, holder) = cut_on_anothers_branch(&bench, "t-73948");
+        Bench::build_tree(&path.join("target"));
+
+        let orchestrator = bench.orchestrator();
+        assert_eq!(
+            orchestrator
+                .commits_beyond(&path, "main", "wt/t-73948")
+                .expect("git"),
+            Some(2),
+            "the plain count reads the other branch's commits as this one's"
+        );
+        assert_eq!(
+            orchestrator
+                .commits_held_elsewhere(&path, "main", "wt/t-73948")
+                .expect("git"),
+            Some(zerocode_orchestrator::HeldElsewhere {
+                own: 0,
+                holder: Some(holder.clone()),
+            })
+        );
+
+        let settled = settle(
+            &finished(&path, "w-73948"),
+            &road,
+            &here,
+            &nobody_left_and(&|_| Some(0)),
+            1_000,
+        );
+        let Settled::Reclaimed {
+            branch,
+            base,
+            elsewhere,
+        } = settled
+        else {
+            panic!("a finished checkout with no commit of its own was kept");
+        };
+        assert_eq!(
+            (branch.as_str(), base.as_str(), elsewhere),
+            ("wt/t-73948", holder.as_str(), true)
+        );
+        assert!(!path.exists(), "the checkout survived its reclaim");
+        let listed = crate::proc::quiet_command("git")
+            .arg("-C")
+            .arg(&bench.repo)
+            .args(["branch", "--list", "wt/t-73948"])
+            .output()
+            .expect("git");
+        assert!(
+            !String::from_utf8_lossy(&listed.stdout).trim().is_empty(),
+            "the branch went with the directory"
+        );
+        let said = std::fs::read_to_string(data_root.path().join("window-errors.log"))
+            .expect("the window log");
+        assert!(
+            said.lines()
+                .any(|line| line.contains("no commit of its own")
+                    && line.contains(&format!("every commit on it is on {holder}"))),
+            "no removal line says the commits are on another branch:\n{said}"
+        );
+    }
+
+    /// Each condition missing keeps the checkout (t-73910): a process
+    /// standing in it or a count nobody could read, a ledger that seated
+    /// somebody in it again, one commit of the worker's own, an untracked
+    /// file, and a checkout this window did not cut. The one with work of its
+    /// own says what it waits for, in the catalogue's row.
+    #[test]
+    fn a_checkout_missing_any_condition_of_the_four_is_kept() {
+        let _window = crate::orchestration::tests::the_window();
+        let bench = Bench::open();
+        let data_root = tempfile::tempdir().expect("data root");
+        let here = Where {
+            active: bench.repo.clone(),
+            data_root: data_root.path().to_path_buf(),
+        };
+        let road = Road::Report(bench.orchestrator());
+        let kept = |path: &Path, recheck: &Recheck<'_>, why: &str| {
+            let settled = settle(&finished(path, "w-kept"), &road, &here, recheck, 1_000);
+            assert!(matches!(settled, Settled::Kept), "{why}: the checkout went");
+            assert!(path.is_dir(), "{why}: the directory is gone");
+        };
+
+        let (busy, busy_holder) = cut_on_anothers_branch(&bench, "t-busy");
+        kept(
+            &busy,
+            &nobody_left_and(&|_| Some(1)),
+            "a process standing in it",
+        );
+        let (unread, _) = cut_on_anothers_branch(&bench, "t-unread");
+        kept(
+            &unread,
+            &nobody_left_and(&|_| None),
+            "a process count nobody could read",
+        );
+        let (seated, _) = cut_on_anothers_branch(&bench, "t-seated");
+        kept(
+            &seated,
+            &Recheck {
+                settled: &|_| false,
+                ..nobody_left_and(&|_| Some(0))
+            },
+            "a ledger that seated somebody in it again",
+        );
+
+        let (own, _) = cut_on_anothers_branch(&bench, "t-own");
+        std::fs::write(own.join("mine.txt"), "the worker's own").expect("work");
+        git(&own, &["add", "mine.txt"]);
+        git(&own, &["commit", "-q", "-m", "the worker's own"]);
+        kept(
+            &own,
+            &nobody_left_and(&|_| Some(0)),
+            "one commit of its own",
+        );
+        let reason = catalog_reclaim(&bench, &own);
+        assert_eq!(reason["kind"], "unlanded", "{reason}");
+        assert_eq!(
+            reason["waits"],
+            serde_json::json!({ "own": 1, "base": "main" }),
+            "the row does not say what the checkout waits for: {reason}"
+        );
+
+        let (dirty, _) = cut_on_anothers_branch(&bench, "t-dirty");
+        std::fs::write(dirty.join("notes.txt"), "half a thought").expect("write");
+        kept(&dirty, &nobody_left_and(&|_| Some(0)), "an untracked file");
+
+        let temp = tempfile::tempdir().expect("a foreign directory");
+        let foreign = temp.path().join("mine");
+        git(
+            &bench.repo,
+            &[
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                "mine",
+                &foreign.to_string_lossy(),
+                &busy_holder,
+            ],
+        );
+        let Verdict::Keep { because, .. } = judge(&bench.orchestrator(), &bench.listed(&foreign))
+        else {
+            panic!("a hand-made checkout on another branch was reclaimable");
+        };
+        assert!(because.contains("ownership is `external`"), "{because}");
+    }
+
     /// The same refusal must not fill the log with a line a second, and a
     /// refusal that CHANGES must not be swallowed by the one before it.
     #[test]
@@ -2082,6 +2425,7 @@ mod tests {
             path: "/wt/t-1140".to_string(),
             worker: "w-1".to_string(),
             agent: "claude".to_string(),
+            run: "run-1".to_string(),
         };
         let log = data_root.path().join("window-errors.log");
 
@@ -2139,6 +2483,7 @@ mod tests {
             path: "/repo/main-checkout".to_string(),
             worker: "w-2".to_string(),
             agent: "codex".to_string(),
+            run: "run-1".to_string(),
         };
         let log = data_root.path().join("window-errors.log");
 
@@ -2391,7 +2736,10 @@ mod tests {
                 &nobody_left(),
                 1_000,
             );
-            let Settled::Reclaimed { branch: took, base } = settled else {
+            let Settled::Reclaimed {
+                branch: took, base, ..
+            } = settled
+            else {
                 panic!("{name}: a clean, landed checkout holding only its build was kept");
             };
             assert_eq!(
@@ -2511,6 +2859,7 @@ mod tests {
                     terminals: &terminals,
                     keeping,
                     processes: None,
+                    everyone: None,
                 };
                 assert!(
                     matches!(
@@ -2544,6 +2893,7 @@ mod tests {
                 terminals: &terminals,
                 keeping: &clear,
                 processes: None,
+                everyone: None,
             };
             assert!(
                 matches!(
@@ -2646,6 +2996,7 @@ mod tests {
             task: "t-26584".to_string(),
             worker: "w-26585".to_string(),
             agent: "claude".to_string(),
+            run: "run-1".to_string(),
             checkout: own.to_string_lossy().into_owned(),
             head: head.clone(),
         };
@@ -2659,6 +3010,7 @@ mod tests {
             terminals: &terminals,
             keeping: &clear,
             processes: Some(&processes as ProcessCount<'_>),
+            everyone: None,
         };
         let mut found: Vec<PathBuf> = Vec::new();
         if let Besides::Found(road, beside) =
@@ -2776,6 +3128,7 @@ mod tests {
             task: "t-30001".to_string(),
             worker: "w-30001".to_string(),
             agent: "claude".to_string(),
+            run: "run-1".to_string(),
             checkout: own.to_string_lossy().into_owned(),
             head,
         };

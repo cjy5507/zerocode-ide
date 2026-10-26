@@ -436,6 +436,9 @@ pub enum RuntimeRequest {
         term: u32,
         turn_ended_ms: i64,
         interrupted: bool,
+        /// The error the turn failed on, when its CLI said it failed
+        /// (t-69010): the seat's worker is told that instead of its silence.
+        failure: Option<String>,
         now_ms: i64,
     },
     /// Workers whose live panes the window measured as quiet past the stall
@@ -947,12 +950,17 @@ impl std::fmt::Debug for RuntimeRequest {
                 term,
                 turn_ended_ms,
                 interrupted,
+                failure,
                 now_ms,
             } => formatter
                 .debug_struct("RuntimeRequest::PaneTurnEnded")
                 .field("term", term)
                 .field("turn_ended_ms", turn_ended_ms)
                 .field("interrupted", interrupted)
+                .field(
+                    "failure",
+                    &format_args!("<{} bytes>", failure.as_deref().map_or(0, str::len)),
+                )
                 .field("now_ms", now_ms)
                 .finish(),
             Self::QuietSweep { stalled, now_ms } => formatter
@@ -2212,6 +2220,29 @@ impl RuntimeActor {
             term,
             turn_ended_ms,
             interrupted,
+            failure: None,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// A turn ended in a seat on an error its CLI named (t-69010): the same
+    /// transition as [`Self::pane_turn_ended`], with the worker told the turn
+    /// FAILED and why instead of that it went quiet.
+    pub fn pane_turn_failed(
+        &self,
+        term: u32,
+        turn_ended_ms: i64,
+        error: String,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::PaneTurnEnded {
+            term,
+            turn_ended_ms,
+            interrupted: false,
+            failure: Some(error),
             now_ms,
         })? {
             RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
@@ -3774,8 +3805,9 @@ impl RuntimeState {
                 term,
                 turn_ended_ms,
                 interrupted,
+                failure,
                 now_ms,
-            } => self.turn_ended(term, turn_ended_ms, interrupted, now_ms),
+            } => self.turn_ended(term, turn_ended_ms, interrupted, failure.as_deref(), now_ms),
             RuntimeRequest::QuietSweep { stalled, now_ms } => self.quiet_swept(&stalled, now_ms),
             RuntimeRequest::IdleSweep { idle, now_ms } => self.idle_swept(&idle, now_ms),
             RuntimeRequest::QuotaWalls { walled, now_ms } => self.quota_walled(&walled, now_ms),
@@ -4242,6 +4274,7 @@ impl RuntimeState {
         term: u32,
         turn_ended_ms: i64,
         interrupted: bool,
+        failure: Option<&str>,
         now_ms: i64,
     ) -> Result<RuntimeReply, RuntimeError> {
         if now_ms < 0 || turn_ended_ms < 0 {
@@ -4257,6 +4290,13 @@ impl RuntimeState {
                 // Any sound retires the readiness window — an interrupted
                 // turn is still an agent that was THERE for it.
                 let spoke = ledger.worker_spoke((team, pane), turn_ended_ms);
+                // A failed turn is told as one, and its silence is not told
+                // again (t-69010).
+                let failed = failure.is_some_and(|error| {
+                    ledger
+                        .worker_turn_failed((team, pane), turn_ended_ms, error, now_ms)
+                        .is_some()
+                });
                 let quiet = ledger
                     .worker_fell_silent((team, pane), turn_ended_ms, interrupted, now_ms)
                     .is_some();
@@ -4269,7 +4309,7 @@ impl RuntimeState {
                     interrupted,
                     now_ms,
                 ) > 0;
-                moved = quiet || spoke || told;
+                moved = failed || quiet || spoke || told;
             }
         });
         if !moved {
@@ -4612,7 +4652,7 @@ impl RuntimeState {
         let mut moved = false;
         self.panes.with_seat_of_term(term, &mut |seat| {
             if let Some((team, pane)) = seat {
-                moved = ledger.worker_session_reported((team, pane), session.clone());
+                moved = ledger.worker_session_reported_at((team, pane), session.clone(), now_ms);
             }
         });
         if !moved {
@@ -8590,6 +8630,35 @@ mod tests {
             "an interrupted turn is the person typing, not the worker quiet"
         );
         actor.shutdown().expect("join quiet actor");
+    }
+
+    /// t-69010: a turn its CLI said failed is told as failed — in the same
+    /// transition, and in place of its silence: the same turn's end heard
+    /// again writes nothing.
+    #[test]
+    fn a_turn_that_failed_is_told_as_failed_and_never_again_as_quiet() {
+        let fixture = Fixture::new();
+        let actor = start_with(
+            &fixture,
+            cutover(Some(a_seated_legacy()), 10),
+            a_seated_table(),
+            Box::new(NoLauncher),
+        );
+        assert_eq!(
+            actor
+                .pane_turn_failed(7, 15, "api failed after 3 attempts".to_string(), 20)
+                .expect("the failure"),
+            (true, 1),
+            "a failed turn writes the failure"
+        );
+        assert_eq!(
+            actor
+                .pane_turn_ended(7, 15, false, 21)
+                .expect("the same turn's end"),
+            (false, 1),
+            "the failed turn was told again as a silence"
+        );
+        actor.shutdown().expect("join failed-turn actor");
     }
 
     /// A seat somebody has a question open to (t-6740): an interrupted

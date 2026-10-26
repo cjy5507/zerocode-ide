@@ -33662,6 +33662,34 @@ details.task-board-section > summary {
   color: var(--signal-halt-ink);
 }
 
+/* 턴 실패 띠 (t-69010): 한도 벽 띠와 같은 행·같은 단추이고, 칩만 멈춤의 잉크다 — 실패는 기다림이 아니다. */
+.board-desk-worker-turn-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  font: var(--type-label-13);
+}
+
+.board-desk-worker-turn[hidden],
+.board-desk-worker-turn [hidden] {
+  display: none;
+}
+
+.board-desk-worker-turn-chip {
+  min-width: 0;
+  color: var(--signal-halt-ink);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.board-desk-worker-turn-said {
+  flex-basis: 100%;
+  color: var(--ink-mist);
+  overflow-wrap: anywhere;
+}
+
 /* 과업 흐름: 흐름의 단계는 작은 꺾쇠로 이어지고, 멈춰 선 단계는 한 칸 떨어져
  * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
  * 같은 옷(보기의 색)이다. */
