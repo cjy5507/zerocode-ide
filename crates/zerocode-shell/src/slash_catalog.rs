@@ -694,7 +694,7 @@ fn field(
 }
 
 /// A failed report as the window reads it (t-76968): by the fields zo sets
-/// for it — `failureKind` (one of zo's nine kinds) and `httpStatus` — and by
+/// for it — `failureKind` (one of zo's ten kinds) and `httpStatus` — and by
 /// no word of the error text, whose wording the window cannot know: zo's
 /// own advice, an address or a header's name can say "connect" or
 /// "timeout" in a failure that was neither. A report without the kind is an
@@ -714,6 +714,7 @@ fn diagnosis_of(
     let named = match kind {
         None => None,
         Some("no_credentials") => None,
+        Some("credential_unusable") => Some("credentialUnusable"),
         Some("auth_rejected") => Some("auth"),
         Some("forbidden") => Some("forbidden"),
         Some("not_found") => Some("notFound"),
@@ -1312,6 +1313,9 @@ mod tests {
                 // reads like the command's.
                 reported("google", "a later zo's kind".to_string(), "a_kind_from_a_later_zo", Some(99999)),
                 {"provider": "google", "source": "google-api", "ok": false, "count": 0, "detail": "x", "failure_kind": "rate_limited", "http_status": 429},
+                // A login that is there but cannot be used is not one that
+                // is missing: it is not skipped.
+                reported("anthropic", "the Claude Code sign-in expired".to_string(), "credential_unusable", None),
             ]
         });
         let home = tempfile::tempdir().expect("home");
@@ -1368,6 +1372,7 @@ mod tests {
                 diagnosis(None, Some("unknown"), false),
                 diagnosis(None, Some("unknown"), false),
                 diagnosis(Some(429), Some("rateLimit"), false),
+                diagnosis(None, Some("credentialUnusable"), false),
             ]
         );
         assert_eq!(list["reports"][9]["count"], 3, "an answer lost its count");

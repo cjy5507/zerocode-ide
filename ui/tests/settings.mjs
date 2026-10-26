@@ -14756,6 +14756,9 @@ await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 ·
   assert(failure.includes(`HTTP 503 · ${reason.unknown}`), "a status with an unknown kind lost one of them", failure);
   failure = await failureLine({ status: null, kind: null, skipped: false });
   assert(failure.includes(words.failed) && !failure.includes(`${words.failed}:`) && !failure.includes(reason.unknown) && !failure.includes(reason.network), "a report without a kind names one", failure);
+  failure = await failureLine({ status: null, kind: "credentialUnusable", skipped: false });
+  const unusable = await pageA.evaluate(() => t("settings.models.failure.credentialUnusable", "로그인은 있으나 쓸 수 없음 — 다시 로그인하세요"));
+  assert(failure.includes(`${words.failed}: ${unusable}`) && !failure.includes(words.nologin), "a login that cannot be used is said as missing or unknown", failure);
   failure = await failureLine({ status: null, kind: "network", skipped: false });
   assert(failure.includes(`${words.failed}: ${reason.network}`), "zo's network kind is not said as the network", failure);
   // A report from another credential store than a zo pane's says so; an

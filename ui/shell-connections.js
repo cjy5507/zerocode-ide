@@ -79,6 +79,7 @@ const MODEL_LOGIN_ORDER = Object.freeze(Object.keys(MODEL_LOGINS));
 /* Why a login's check failed, by the kind word the window keeps in place of
  * the provider's answer (t-76873): the answer itself never reaches here. */
 const MODEL_FAILURE_KINDS = Object.freeze({
+  credentialUnusable: () => t("settings.models.failure.credentialUnusable", "로그인은 있으나 쓸 수 없음 — 다시 로그인하세요"),
   auth: () => t("settings.models.failure.auth", "인증 거절"),
   forbidden: () => t("settings.models.failure.forbidden", "권한 없음"),
   notFound: () => t("settings.models.failure.notFound", "찾을 수 없음"),
