@@ -1028,6 +1028,58 @@ impl Orchestrator {
         Ok(Some(LinesBeyond { added, removed }))
     }
 
+    /// The branches this repository's main line goes by, the ones a worker's
+    /// commits are finished in once they are in them (t-76403): the remote's
+    /// own word first (`origin/HEAD`, as `origin/main`) and the local branch
+    /// of the same name (`main`). A repository whose `origin/HEAD` was never
+    /// set is asked for the first of `fallbacks` that resolves, in order, and
+    /// answers that one alone — a guess names a branch that exists or none.
+    ///
+    /// Only names that resolve to a commit are returned, so a caller counting
+    /// against them never meets "not found" as a reason to doubt.
+    ///
+    /// # Errors
+    ///
+    /// [`OrchestratorError::GitUnavailable`] if git cannot be run.
+    pub fn default_branches(
+        &self,
+        worktree: impl AsRef<Path>,
+        fallbacks: &[&str],
+    ) -> Result<Vec<String>, OrchestratorError> {
+        let worktree = worktree.as_ref();
+        let told = run(
+            &self.git,
+            worktree,
+            ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+        )?;
+        let mut candidates: Vec<String> = Vec::new();
+        if told.ok
+            && let Some(remote) = told
+                .stdout
+                .trim()
+                .strip_prefix("refs/remotes/")
+                .filter(|short| !short.is_empty())
+        {
+            candidates.push(remote.to_string());
+            if let Some((_, local)) = remote.split_once('/') {
+                candidates.push(local.to_string());
+            }
+        } else {
+            for name in fallbacks {
+                if self.commit_of(worktree, name)?.is_some() {
+                    return Ok(vec![(*name).to_string()]);
+                }
+            }
+        }
+        let mut resolved = Vec::with_capacity(candidates.len());
+        for name in candidates {
+            if self.commit_of(worktree, &name)?.is_some() {
+                resolved.push(name);
+            }
+        }
+        Ok(resolved)
+    }
+
     /// The commit one name stands for, or `None` when this repository has no
     /// such name. `--quiet` so an absent ref is an exit code rather than a
     /// sentence on stderr, `--end-of-options` so a stored name cannot become
@@ -3639,6 +3691,65 @@ prunable gitdir file points to non-existent location
                 .expect("count"),
             None
         );
+    }
+
+    /// The main line a landed head is measured against (t-76403): the remote's
+    /// own word and its local twin, else the first usual name that resolves,
+    /// and only names that resolve.
+    #[test]
+    fn default_branches_follow_the_remote_then_the_usual_names() {
+        let repo = empty_repository();
+        configure_identity(repo.path());
+        let git = |args: &[&str]| {
+            let output = Command::new(GIT_EXECUTABLE)
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        std::fs::write(repo.path().join("a.txt"), "base\n").expect("write");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["branch", "-M", "main"]);
+        let orchestrator = Orchestrator::open(repo.path()).expect("open");
+        let usual = ["main", "master", "trunk", "develop"];
+
+        // No remote word: the first usual name that resolves, alone.
+        git(&["branch", "master"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["main".to_string()]
+        );
+        // None resolves: no names, so nothing counts as landed.
+        assert!(
+            orchestrator
+                .default_branches(repo.path(), &["trunk", "develop"])
+                .expect("names")
+                .is_empty()
+        );
+
+        // The remote's word, and the local branch of the same name.
+        let remote = repo.path().with_file_name("default-branches-origin.git");
+        let made = Command::new(GIT_EXECUTABLE)
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .arg(&remote)
+            .output()
+            .expect("git");
+        assert!(made.status.success());
+        git(&["remote", "add", "origin", &remote.to_string_lossy()]);
+        git(&["push", "-q", "origin", "main"]);
+        git(&["remote", "set-head", "origin", "main"]);
+        assert_eq!(
+            orchestrator
+                .default_branches(repo.path(), &usual)
+                .expect("names"),
+            vec!["origin/main".to_string(), "main".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&remote);
     }
 
     /// The worker table's 바뀐 줄 (t-70264): the tree as it stands against the
