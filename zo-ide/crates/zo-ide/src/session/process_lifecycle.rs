@@ -195,6 +195,7 @@ fn event_message(session_id: &str, kind: &str, reason: &str) -> ConversationMess
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }
 }
 

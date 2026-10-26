@@ -1787,6 +1787,7 @@ mod tests {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         };
 
         // The exact request-build shape: reminder appended after the batch.

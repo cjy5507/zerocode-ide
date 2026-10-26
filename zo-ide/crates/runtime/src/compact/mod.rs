@@ -525,6 +525,7 @@ pub fn apply_compaction(plan: CompactionPlan, raw_summary: &str) -> CompactionRe
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     }];
     compacted_messages.extend(preserved_tail);
 

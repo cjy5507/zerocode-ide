@@ -105,6 +105,7 @@ fn a_searched_session_recall_runs_through_capability_invoke() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }]);
     session
         .save_to_path(session_dir.join("session-r49.jsonl"))

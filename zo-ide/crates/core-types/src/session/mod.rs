@@ -37,8 +37,9 @@ pub use mask::{
     WITHHELD_LINE_MARKER,
 };
 pub use message::{
-    is_reminder_lineage_text, ContentBlock, ConversationMessage, DeclineKind, MessageRole,
-    CLEARED_REMINDER_PLACEHOLDER, MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX, REMINDER_TAG_OPEN,
+    is_reminder_lineage_text, ContentBlock, ConversationMessage, DeclineKind, MessageOrigin,
+    MessageRole, CLEARED_REMINDER_PLACEHOLDER, MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX,
+    REMINDER_TAG_OPEN,
 };
 
 use json_field::{
@@ -375,6 +376,12 @@ pub struct Session {
     pub session_goal: Option<String>,
     first_message_index: u32,
     persistence: Option<SessionPersistence>,
+    /// Who opens the next turn when it is not the person (t-75726): marked by
+    /// the front-end before a turn a window notice opens, and taken by the
+    /// next user message pushed, whose record then carries it. Not persisted
+    /// and not part of equality: it is about a turn about to start, not the
+    /// conversation.
+    next_user_origin: Option<MessageOrigin>,
 }
 
 impl PartialEq for Session {
@@ -410,6 +417,7 @@ impl Session {
             session_goal: None,
             first_message_index: 0,
             persistence: None,
+            next_user_origin: None,
         }
     }
 
@@ -930,7 +938,8 @@ impl Session {
     }
 
     pub fn push_user_text(&mut self, text: impl Into<String>) -> Result<(), SessionError> {
-        self.push_message(ConversationMessage::user_text(text))
+        let message = self.with_next_user_origin(ConversationMessage::user_text(text));
+        self.push_message(message)
     }
 
     /// Push a user message that contains image attachments.
@@ -943,7 +952,32 @@ impl Session {
         text: impl Into<String>,
         images: Vec<(String, String)>,
     ) -> Result<(), SessionError> {
-        self.push_message(ConversationMessage::user_with_images(text, images))
+        let message = self.with_next_user_origin(ConversationMessage::user_with_images(text, images));
+        self.push_message(message)
+    }
+
+    /// Mark the next user message pushed as opened by `origin` (t-75726).
+    pub fn mark_next_user_origin(&mut self, origin: MessageOrigin) {
+        self.next_user_origin = Some(origin);
+    }
+
+    /// The origin the next user message pushed will carry, if one is marked.
+    #[must_use]
+    pub fn next_user_origin(&self) -> Option<MessageOrigin> {
+        self.next_user_origin
+    }
+
+    /// Drop a mark no user message took: a turn that ended before its input
+    /// was pushed must not lend its origin to the person's next words.
+    pub fn clear_next_user_origin(&mut self) {
+        self.next_user_origin = None;
+    }
+
+    fn with_next_user_origin(&mut self, message: ConversationMessage) -> ConversationMessage {
+        match self.next_user_origin.take() {
+            Some(origin) => message.with_origin(origin),
+            None => message,
+        }
     }
 
     /// Return a message view in which every `tool_use` block is immediately
@@ -1331,6 +1365,7 @@ impl Session {
             session_goal: self.session_goal.clone(),
             first_message_index: self.first_message_index,
             persistence: None,
+            next_user_origin: None,
         }
     }
 
@@ -1437,6 +1472,7 @@ impl Session {
             session_goal,
             first_message_index,
             persistence: None,
+            next_user_origin: None,
         })
     }
 
@@ -1575,6 +1611,7 @@ impl Session {
             session_goal,
             first_message_index,
             persistence: None,
+            next_user_origin: None,
         })
     }
 
@@ -2064,6 +2101,7 @@ pub fn reconcile_tool_history(
                 // that never had them.
                 updated_at_ms: message.updated_at_ms,
                 decline: message.decline,
+                origin: message.origin,
             }
         })
         .collect();
@@ -2182,6 +2220,11 @@ pub(super) fn parse_jsonl_record(
                 .get("decline")
                 .and_then(JsonValue::as_str)
                 .and_then(DeclineKind::parse);
+            // And who opened the turn, when a window notice did (t-75726).
+            message.origin = object
+                .get("origin")
+                .and_then(JsonValue::as_str)
+                .and_then(MessageOrigin::parse);
             SessionJsonlRecord::Message {
                 turn_index,
                 record_updated_at_ms,
@@ -2241,6 +2284,12 @@ fn message_record(
         object.insert(
             "decline".to_string(),
             JsonValue::String(decline.as_str().to_string()),
+        );
+    }
+    if let Some(origin) = message.origin {
+        object.insert(
+            "origin".to_string(),
+            JsonValue::String(origin.as_str().to_string()),
         );
     }
     object.insert("message".to_string(), message.to_json());

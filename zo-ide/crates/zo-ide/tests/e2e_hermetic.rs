@@ -804,6 +804,208 @@ async fn e2e_auth_reload_is_one_append_only_line_in_the_plain_frontend() {
     assert_eq!(plain.matches(&notice).count(), 1, "pty was:\n{plain}");
 }
 
+/// The window's mail pointer, as the window sends it in a notice (t-75726).
+const NOTICE_POINTER: &str = "You have 1 orchestration message. Run `zerocode-orc check`.";
+
+/// The user records of every transcript under `root`, in file order: the
+/// words of each and the `origin` its record names.
+fn user_records(root: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let mut records = Vec::new();
+    for path in transcripts(root) {
+        let contents = fs::read_to_string(&path).unwrap_or_default();
+        for record in contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        {
+            if record["type"] != "message" || record["message"]["role"] != "user" {
+                continue;
+            }
+            let words = record["message"]["blocks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            records.push((words, record["origin"].as_str().map(str::to_string)));
+        }
+    }
+    records
+}
+
+/// The turn-start frames the watcher has seen, each with the `origin` it
+/// names.
+fn turn_starts(frames: &Frames) -> Vec<Option<String>> {
+    frames
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|frame| frame["type"] == "turn" && frame["phase"] == "start")
+        .map(|frame| frame["origin"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// Wait until the watcher has seen `count` turns end.
+async fn wait_for_turn_ends(frames: &Frames, count: usize) {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        let ended = frames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|frame| frame["type"] == "turn" && frame["phase"] == "end")
+            .count();
+        if ended >= count {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{ended} of {count} turns ended");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The window's mail notice wakes an idle root (t-75726). The pointer opens a
+/// turn that is the window's: its start frame and its user record say
+/// `notice`, and the screen shows it as the window's line. The draft the
+/// person was typing is neither sent nor cleared — Enter after the turn sends
+/// it, as the person's own turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_notice_wakes_an_idle_root_and_leaves_the_draft() {
+    const DRAFT: &str = "half a thought";
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("Read the mail.")
+        .await
+        .expect("start provider");
+    let address = layout.root.path().join("notice.addr");
+    let address_text = address.to_string_lossy().into_owned();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &interactive_args(),
+        &[("ZO_EVENTS_ADDR_FILE", address_text.as_str()), ("ZO_SERVE_TOKEN", HELPER_STOP_TOKEN)],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(DRAFT.as_bytes()).expect("type a draft");
+    run.wait_for_screen(DRAFT, 40, TEST_TIMEOUT);
+
+    let mut client = connect_to_addr_file(&address, HELPER_STOP_TOKEN).await;
+    let info = client.call(method::INFO, serde_json::json!({})).await.expect("session.info");
+    let session = info["id"].as_str().expect("the channel names its session").to_string();
+    let (frames, watcher) = watch_frames(&address, &session).await;
+    let queued = client
+        .call(
+            method::STEER,
+            serde_json::json!({"id": session, "kind": "notice", "text": NOTICE_POINTER}),
+        )
+        .await
+        .expect("an idle root takes a notice");
+    assert!(queued["turn_id"].is_null(), "{queued}");
+    assert_eq!(queued["receipt"], "queued", "{queued}");
+    assert_eq!(queued["merged"], 0, "{queued}");
+
+    run.wait_for_history_row("창 알림 · You have 1 orchestration message", TEST_TIMEOUT);
+    wait_for_turn_ends(&frames, 1).await;
+    let bodies = service.request_bodies().await;
+    assert!(
+        bodies.iter().any(|body| {
+            serde_json::from_str::<serde_json::Value>(body)
+                .is_ok_and(|body| user_text_contains(&body, NOTICE_POINTER))
+        }),
+        "the notice opened a turn with the pointer as its words"
+    );
+    assert!(
+        !bodies.iter().any(|body| body.contains(DRAFT)),
+        "the draft was not sent with the notice"
+    );
+    run.wait_for_screen(DRAFT, 40, TEST_TIMEOUT);
+
+    run.send(b"\r").expect("send the draft");
+    wait_for_turn_ends(&frames, 2).await;
+    let bodies = service.request_bodies().await;
+    assert!(
+        bodies.iter().any(|body| {
+            serde_json::from_str::<serde_json::Value>(body)
+                .is_ok_and(|body| user_text_contains(&body, DRAFT))
+        }),
+        "the draft stayed in the composer and went out as the person's turn"
+    );
+    assert_eq!(
+        turn_starts(&frames),
+        vec![Some("notice".to_string()), None],
+        "the notice's turn says who opened it; the person's says nothing"
+    );
+    let records = user_records(&layout.sessions);
+    let origin_of = |words: &str| {
+        records
+            .iter()
+            .find(|(said, _)| said.contains(words))
+            .unwrap_or_else(|| panic!("no user record holds {words:?}: {records:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(origin_of(NOTICE_POINTER), Some("notice".to_string()), "{records:?}");
+    assert_eq!(origin_of(DRAFT), None, "{records:?}");
+    watcher.abort();
+    let _ = run.finish();
+}
+
+/// The plain front-end takes a notice between turns too (t-75726): the turn
+/// runs, its words show once, as the window's line and not as a prompt of
+/// the person's, and its record says `notice`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_notice_opens_a_turn_in_the_plain_frontend_as_the_windows() {
+    const TOKEN: &str = "plain-notice-token";
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("Read the mail.")
+        .await
+        .expect("start provider");
+    let address = layout.root.path().join("plain-notice.addr");
+    let address_text = address.to_string_lossy().into_owned();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &[
+            "--plain",
+            "--events-bind",
+            "127.0.0.1:0",
+            "--permission-mode",
+            "danger-full-access",
+        ],
+        &[("ZO_EVENTS_ADDR_FILE", address_text.as_str()), ("ZO_SERVE_TOKEN", TOKEN)],
+    )
+    .expect("spawn idle plain frontend");
+
+    let mut client = connect_to_addr_file(&address, TOKEN).await;
+    let info = client.call(method::INFO, serde_json::json!({})).await.expect("session.info");
+    let session = info["id"].as_str().expect("the channel names its session").to_string();
+    let queued = client
+        .call(
+            method::STEER,
+            serde_json::json!({"id": session, "kind": "notice", "text": NOTICE_POINTER}),
+        )
+        .await
+        .expect("an idle plain session takes a notice");
+    assert_eq!(queued["receipt"], "queued", "{queued}");
+    run.wait_for("Read the mail.", TEST_TIMEOUT);
+    let capture = run.finish();
+    let plain = strip_ansi(&String::from_utf8_lossy(&capture));
+    assert_eq!(plain.matches(NOTICE_POINTER).count(), 1, "pty was:\n{plain}");
+    assert!(plain.contains(&format!("창 알림 · {NOTICE_POINTER}")), "pty was:\n{plain}");
+    let records = user_records(&layout.sessions);
+    assert!(
+        records
+            .iter()
+            .any(|(said, origin)| said.contains(NOTICE_POINTER) && origin.as_deref() == Some("notice")),
+        "{records:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn e2e_interval_loop_wakes_twice_then_stops_from_human_input() {
     let layout = Layout::new();

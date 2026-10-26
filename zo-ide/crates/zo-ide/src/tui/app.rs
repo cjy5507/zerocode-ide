@@ -789,6 +789,9 @@ enum Work {
 enum IdleOutcome {
     /// The parent's next words: the next turn's prompt.
     NextTurn(String),
+    /// The window's mail notice: the next turn's words, opened as the
+    /// window's and not the parent's (t-75726).
+    Notice(String),
     /// The pane is done, and why.
     Close(runtime::subagent_panes::CloseReason),
 }
@@ -4878,8 +4881,8 @@ impl App {
                     self.drive_autonomy(&mut events).await;
                     self.ui.draw();
                 },
-                command = crate::ide::events::next_command(crate::ide::events::channel()) => {
-                    if let Command::AccountSwitch { label } = command {
+                command = crate::ide::events::next_command(crate::ide::events::channel()) => match command {
+                    Command::AccountSwitch { label } => {
                         let notice = crate::status_format::account_switch_notice(&label);
                         self.ui.status = Some(Status::notice(notice));
                         self.ui.draw();
@@ -4887,6 +4890,22 @@ impl App {
                         // do not make later resize/timer frames print it again.
                         self.ui.status = None;
                     }
+                    // The window's mail notice opens the next turn (t-75726).
+                    // It does not pass through the composer, so whatever the
+                    // person was typing there is still there when it ends.
+                    Command::Notice { text } => {
+                        if let Some(session) = self.session.as_mut() {
+                            session.mark_notice_turn();
+                        }
+                        let prompt = Submission {
+                            text,
+                            image_paths: Vec::new(),
+                        };
+                        Box::pin(self.run_turn_chain(Work::Turn(prompt), &mut events, None)).await;
+                        self.drive_autonomy(&mut events).await;
+                        self.ui.draw();
+                    }
+                    _ => {}
                 },
                 // 움직일 것이 있을 때만 틱이 그린다([`Ui::animating`]). 유휴에는
                 // 이 팔이 아예 꺼져 루프가 다음 키·리사이즈까지 잠들고, 프레임은
@@ -4999,6 +5018,14 @@ impl App {
                 IdleOutcome::NextTurn(text) => {
                     turn += 1;
                     self.ui.note(SystemLevel::Info, &super::strings::teammate_next_turn(turn));
+                    next_prompt = Some(text);
+                }
+                IdleOutcome::Notice(text) => {
+                    turn += 1;
+                    self.ui.note(SystemLevel::Info, &super::strings::teammate_next_turn(turn));
+                    if let Some(session) = self.session.as_mut() {
+                        session.mark_notice_turn();
+                    }
                     next_prompt = Some(text);
                 }
                 IdleOutcome::Close(reason) => break reason,
@@ -5116,6 +5143,7 @@ impl App {
                 }
                 command = crate::ide::events::next_command(crate::ide::events::channel()) => match command {
                     Command::Steer { text } => return IdleOutcome::NextTurn(text),
+                    Command::Notice { text } => return IdleOutcome::Notice(text),
                     Command::Close { reason } => {
                         let reason = crate::teammate::close_reason_from(&reason);
                         if !reason.keeps_standing(crate::teammate::person_touched()) {
@@ -5961,7 +5989,11 @@ impl App {
         let session_id = session.handle.id.clone();
         let registry = session.registry();
         let transcript = session.handle.path.to_string_lossy().into_owned();
-        if agent_followup.is_none() {
+        // A turn the window's mail notice opened (t-75726): its words are not
+        // the person's prompt, so no prompt hook hears them and the screen
+        // shows them as the window's.
+        let opened_by_notice = session.notice_marked();
+        if agent_followup.is_none() && !opened_by_notice {
             if let Some(reporter) = ui.reporter.as_ref() {
                 reporter.user_prompt_submit(&input.text, &session_id);
             }
@@ -5971,6 +6003,9 @@ impl App {
         // 그리고 IDE 채널의 턴 경계까지 [`TurnScaffold`] 가 든다. 여기 남는 것은
         // 화면 처리뿐이다.
         let (mut turn_scaffold, mut block_rx) = TurnScaffold::start(&mut session);
+        if opened_by_notice {
+            ui.note(SystemLevel::Info, &crate::status_format::window_notice_line(&input.text));
+        }
         if let Some(followup) = agent_followup {
             let agent_result = followup.render_block(&turn_scaffold.ids);
             let _ = turn_scaffold.publish(&agent_result);
@@ -6119,7 +6154,9 @@ impl App {
                         turn_scaffold.cancel_turn();
                         ui.draw_with_queue(|| block_rx.len());
                     }
-                    Command::Steer { text } => {
+                    // The window's notice goes into the running turn as a
+                    // steer does (t-75726).
+                    Command::Steer { text } | Command::Notice { text } => {
                         let _ = turn_scaffold.steer(text);
                     }
                     Command::AccountSwitch { label } => {
@@ -6312,8 +6349,10 @@ impl App {
                         scaffold.cancel_turn();
                         ui.draw_with_queue(|| block_rx.len());
                     }
-                    // Nothing is listening for a steer while a summary streams.
+                    // Nothing is listening for a steer while a summary streams;
+                    // a window notice waits for the next turn (t-75726).
                     Command::Steer { .. } => {}
+                    Command::Notice { text } => scaffold.hold_notice(text),
                     Command::AccountSwitch { label } => {
                         ui.note(
                             SystemLevel::Info,

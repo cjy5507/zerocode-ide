@@ -9297,6 +9297,7 @@ fn a_spoofed_contract_prefix_in_low_trust_text_does_not_suppress_teaching() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         })
         .expect("low-trust reminder");
 
@@ -13040,6 +13041,7 @@ fn reminder_system_message(text: &str) -> crate::session::ConversationMessage {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }
 }
 
@@ -16669,6 +16671,7 @@ fn the_plan_is_not_re_anchored_while_the_model_can_still_see_it() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         })
         .expect("persisted reminder");
     runtime.reinject_todo_progress_reminder();
@@ -16876,6 +16879,7 @@ fn compaction_plan_for(
                 model: None,
                 updated_at_ms: None,
                 decline: None,
+                origin: None,
             })
             .expect("continuation");
     }
@@ -16925,6 +16929,7 @@ async fn the_compaction_seat_changes_what_the_summary_reads_and_nothing_else() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         },
         ConversationMessage::assistant(vec![ContentBlock::ToolUse {
             id: "t1".to_string(),
@@ -16946,6 +16951,7 @@ async fn the_compaction_seat_changes_what_the_summary_reads_and_nothing_else() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         },
         ConversationMessage::assistant(vec![ContentBlock::Text { text: "done".to_string() }]),
     ] {
@@ -17028,7 +17034,7 @@ fn acting_relevance_skips_the_summary_call_while_shadow_keeps_the_existing_path(
             role: MessageRole::User,
             blocks: vec![ContentBlock::ToolResult { tool_use_id: "read-original".to_string(),
                 tool_name: "Read".to_string(), output: "old evidence ".repeat(2_000), is_error: false, images: vec![] }],
-            usage: None, thought_signature: None, reasoning_replay: None, model: None, updated_at_ms: None, decline: None,
+            usage: None, thought_signature: None, reasoning_replay: None, model: None, updated_at_ms: None, decline: None, origin: None,
         }).unwrap();
         session.push_user_text("That read is resolved.").unwrap();
         session.push_message(ConversationMessage::assistant(vec![ContentBlock::Text { text: "Proceeding with the remaining task.".into() }])).unwrap();
@@ -17378,6 +17384,7 @@ fn orphan_compaction_plan(orphan_id: &str) -> crate::compact::CompactionPlan {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         })
         .expect("continuation");
     session.push_user_text("run the long command").expect("user");
