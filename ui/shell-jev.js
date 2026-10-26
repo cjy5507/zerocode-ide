@@ -253,7 +253,7 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
  * nothing. The card's own step runner, so a refused press is said the same
  * way wherever it was made. */
 function setJevEnabled(on) {
-  return runTypeSafe(() => invoke("set_jev_enabled", { on }), (state) => {
+  return runKeyCardStep(JUDGMENT_SWITCH_CARD, () => invoke("set_jev_enabled", { on }), (state) => {
     const words = jevEnabledSaid(state);
     jevSayStatus(words);
     return words;
@@ -566,7 +566,7 @@ const JEV_TOTALS = Object.freeze([
  * (t-6243 D5), and `typesafe_settings.rs` holds it to zo's and the door's
  * tokens. The door's `off` is a mode word this page never spells. */
 const JEV_TOKENS = Object.freeze({
-  no_key: { key: "jev.token.noKey", word: "API 키 없음", fix: "key", saidKey: "settings.typesafe.noKey", said: "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요." },
+  no_key: { key: "jev.token.noKey", word: "API 키 없음", fix: "key", saidKey: "settings.typesafe.noKey", said: "키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요." },
   unauthorized: { key: "jev.token.unauthorized", word: "키 거절", fix: "key", saidKey: "settings.typesafe.unauthorized", said: "키가 거절되었습니다 — 키를 다시 확인하세요." },
   not_consented: { key: "jev.token.notConsented", word: "동의 안 된 폴더", fix: "consent" },
   settings_changed: { key: "jev.token.settingsChanged", word: "설정 변경으로 취소됨", saidKey: "settings.judgment.changed", said: "판단 제공자 설정을 다시 확인하세요. 이전 모델의 응답은 사용하지 않았습니다." },
@@ -2180,9 +2180,13 @@ function jevFix(fix) {
     return;
   }
   setSettingsOpen(true, fix === "consent" ? "jev-enabled" : "typesafe-status");
-  paintTypeSafeStatus(fix === "consent"
-    ? t("jev.help.consent", "동의한 폴더에서만 판단을 보냅니다. 「모든 폴더에서 사용」을 누르면 모든 폴더에서 보냅니다.")
-    : t("jev.help.budget", "오늘 보낼 수 있는 판단 요청을 다 썼습니다. 하루 한도는 zo 설정 파일(settings.json)의 smart.jev.dailyRequests입니다."));
+  // The consent help stands beside the switch it is about; the budget's
+  // beside the key card it belongs to.
+  if (fix === "consent") {
+    JUDGMENT_SWITCH_CARD.say(t("jev.help.consent", "동의한 폴더에서만 판단을 보냅니다. 「모든 폴더에서 사용」을 누르면 모든 폴더에서 보냅니다."));
+  } else {
+    paintTypeSafeStatus(t("jev.help.budget", "오늘 보낼 수 있는 판단 요청을 다 썼습니다. 하루 한도는 zo 설정 파일(settings.json)의 smart.jev.dailyRequests입니다."));
+  }
 }
 
 /* How often the judgment matched, over the judged window — or, while the

@@ -20,7 +20,7 @@ const PANE_OF = {
   "account-list": "provider-accounts",
   "codex-account-list": "provider-accounts",
   "google-account-list": "provider-accounts",
-  "router-provider-list": "api-routers",
+  "model-connection-groups": "api-routers",
   "router-preset-select": "api-routers",
   // The Jev dashboard's "in settings" and its consent chip land on the one
   // switch (§6.1), its key chip on the key field and its budget chip on the
@@ -28,6 +28,7 @@ const PANE_OF = {
   "jev-enabled": "judgment-models",
   "typesafe-key-input": "judgment-models",
   "typesafe-status": "judgment-models",
+  "model-judgment-status": "judgment-models",
   // The field of the key a page's typing asks with now (t-9537) — drawn per
   // key, and this id is the one a walk reads (`paintTypeValueSlot`).
   "type-value-key-input": "computer-use",
@@ -983,6 +984,9 @@ function showSettingsPane(pane) {
   if (pane === "orchestration" && orchReport === null && !orchLoading) {
     void refreshOrchestration();
   }
+  // The worker rows and the routing classifier stand here (t-75762 v2,
+  // decision 4) and paint from the same settings answer the model pane reads.
+  if (pane === "orchestration" && arriving) void refreshTypeSafe();
   if (pane === "computer-use" && arriving) {
     void refreshComputerUse();
   }
@@ -6562,7 +6566,6 @@ async function runKeyCardStep(card, step, said) {
  */
 
 let routerPresets = [];
-let configuredRouters = [];
 let testedModels = [];
 let apiRoutersInitialized = false;
 let routerProbeGeneration = 0;
@@ -6715,12 +6718,6 @@ async function refreshApiRouters() {
     showError(error);
   }
 
-  try {
-    configuredRouters = (await invoke("api_router_providers")) ?? [];
-  } catch (error) {
-    showError(error);
-  }
-  paintConfiguredRouters();
   await refreshTypeSafe();
   await modelConnectionsController.refresh();
 }
@@ -6796,7 +6793,7 @@ function initTypeSafeEvents() {
   });
   el("route-classifier-select")?.addEventListener("change", (event) => {
     const mode = event.target.value;
-    void runTypeSafe(() => invoke("set_route_classifier", { mode }), (state) => {
+    void runKeyCardStep(WORKER_MODELS_CARD, () => invoke("set_route_classifier", { mode }), (state) => {
       if (!state.classifier?.reaches) {
         return t("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다.");
       }
@@ -6819,7 +6816,7 @@ function initTypeSafeEvents() {
       const effort = effortInput?.value.trim() || effortInput?.placeholder || "";
       (profiles[agent] ??= {})[difficulty] = { model, effort };
     });
-    void runTypeSafe(() => invoke("set_summon_profiles", { profiles }), () =>
+    void runKeyCardStep(WORKER_MODELS_CARD, () => invoke("set_summon_profiles", { profiles }), () =>
       t("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
   });
 }
@@ -7079,6 +7076,8 @@ function paintTypeSafe(state) {
   // made here, or a fresh count, reaches it through this one paint.
   paintJevSwitches();
   paintJevViews();
+  // The judgment card names the model this answer selects.
+  if (modelConnectionsController.state) modelConnectionsController.render();
 }
 
 function paintTypeSafeSave() {
@@ -7093,6 +7092,37 @@ function paintTypeSafeSave() {
 function paintTypeSafeStatus(text, evidence = {}) {
   paintSettingsStatus(el("typesafe-status"), judgmentProviderController.failure(text) ?? text, evidence);
 }
+
+/* The worker rows and the classifier answer beside themselves, on the
+ * orchestration pane they moved to (t-75762 v2, decision 4); the rest of
+ * their hands are the TypeSafe card's, whose settings answer they paint. */
+const WORKER_MODELS_CARD = {
+  busy: () => typesafeBusy,
+  setBusy: (busy) => {
+    typesafeBusy = busy;
+  },
+  repaint: () => {
+    if (typesafeState) paintTypeSafe(typesafeState);
+  },
+  paint: (state) => paintTypeSafe(state),
+  say: (text, evidence) => paintSettingsStatus(el("orch-models-status"), judgmentProviderController.failure(text) ?? text, evidence),
+  standing: (state) => typesafeStanding(state),
+};
+
+/* The switch at the judgment card's head answers beside itself (t-75762
+ * v2, decision 1); the rest of its hands are the TypeSafe card's. */
+const JUDGMENT_SWITCH_CARD = {
+  busy: () => typesafeBusy,
+  setBusy: (busy) => {
+    typesafeBusy = busy;
+  },
+  repaint: () => {
+    if (typesafeState) paintTypeSafe(typesafeState);
+  },
+  paint: (state) => paintTypeSafe(state),
+  say: (text, evidence) => paintSettingsStatus(el("model-judgment-status"), judgmentProviderController.failure(text) ?? text, evidence),
+  standing: (state) => typesafeStanding(state),
+};
 
 /* This card's hands, for the step every key card runs (`runKeyCardStep`). */
 const TYPESAFE_CARD = {
@@ -7235,71 +7265,6 @@ function onRouterPresetChange(chosenId) {
     if (keyInput) keyInput.value = "";
   }
   modelConnectionsController.preset(found);
-}
-
-function routerAccountRow(row) {
-  const line = document.createElement("div");
-  line.className = "agent-row account-row";
-  const body = document.createElement("span");
-  body.className = "agent-row-body account-body";
-  const top = document.createElement("span");
-  top.className = "account-topline";
-  const who = document.createElement("span");
-  who.className = "agent-row-name";
-  who.textContent = row.name;
-  top.appendChild(who);
-  body.appendChild(top);
-  const under = document.createElement("span");
-  under.className = "agent-row-cmd";
-  const count = row.models?.length ?? 0;
-  under.textContent = t("settings.apiRouters.rowSummary", "{{base}} · 모델 {{count}}개", {
-    base: row.base_url,
-    count,
-  });
-  body.appendChild(under);
-  line.appendChild(body);
-
-  const drop = document.createElement("button");
-  drop.className = "account-drop";
-  drop.type = "button";
-  drop.textContent = t("settings.accounts.remove", "지우기");
-  drop.addEventListener("click", () => void dropConfiguredRouter(row));
-  line.appendChild(drop);
-  return line;
-}
-
-function paintConfiguredRouters() {
-  const list = el("router-provider-list");
-  if (!list) return;
-  list.replaceChildren();
-
-  const countEl = el("router-provider-count");
-  if (countEl) {
-    countEl.textContent = configuredRouters.length > 0 ? String(configuredRouters.length) : "";
-  }
-
-  for (const row of configuredRouters) {
-    list.appendChild(routerAccountRow(row));
-  }
-
-  const noteEl = el("router-provider-note");
-  if (noteEl) {
-    noteEl.textContent = configuredRouters.length === 0
-      ? t("settings.apiRouters.noConnected", "연결된 API 라우터가 없습니다.")
-      : "";
-  }
-}
-
-/* A row is removed by its name. Which key it read is the backend's to find, on
- * the row itself: a guess from the display name deleted some other item and
- * left the real key behind. */
-async function dropConfiguredRouter(row) {
-  try {
-    configuredRouters = (await invoke("remove_api_router", { name: row.name }, { hand: handNow() })) ?? [];
-  } catch (error) {
-    showError(error);
-  }
-  paintConfiguredRouters();
 }
 
 function currentRouterAuth() {
@@ -7471,7 +7436,7 @@ async function saveApiRouterEntry() {
     // The row's identity — which variable and keychain item its key lives
     // under — is the backend's, decided at the row's first save and kept. The
     // pane says only which preset the row came from, if any, and its name.
-    configuredRouters = (await invoke("save_api_router", {
+    await invoke("save_api_router", {
       sourceId: modelConnectionsController.editing?.id ?? null,
       expectedGeneration: modelConnectionsController.editing?.generation ?? null,
       auth: currentRouterAuth(),
@@ -7482,13 +7447,12 @@ async function saveApiRouterEntry() {
       models,
       clientFingerprint: modelConnectionsController.editing?.provider.client_fingerprint ?? preset?.client_fingerprint ?? null,
       headers: modelConnectionsController.editing?.provider.headers ?? preset?.headers ?? null,
-    }, { hand: handNow() })) ?? [];
+    }, { hand: handNow() });
 
     if (generation === routerDraftGeneration) {
       if (keyInput) keyInput.value = "";
       modelConnectionsController.editing = null;
     }
-    paintConfiguredRouters();
     await modelConnectionsController.refresh();
     if (generation === routerDraftGeneration) {
       paintSettingsStatus(statusEl, t("settings.apiRouters.saved", "저장되었습니다"), {
@@ -7822,6 +7786,8 @@ function setLocale(code) {
   // from the backend's answer and the features' template — each feature's
   // name and one-sentence tip — so `applyLocale` has no key on them to sweep.
   if (typesafeState) paintTypeSafe(typesafeState);
+  // The model pane and the connections page draw their rows from answers.
+  if (modelConnectionsController.state) modelConnectionsController.render();
   paintAutomations();
   // 정리 목록은 행을 직접 짓는다 — 칩과 필과 버튼의 말이 전부 여기서 나오므로,
   // 언어가 바뀌면 다시 지어야 한다. 열려 있지 않아도 사이드바의 한 줄은 이

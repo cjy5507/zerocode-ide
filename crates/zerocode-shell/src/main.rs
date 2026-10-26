@@ -260,6 +260,7 @@ use browser_nav_state::*;
 use browser_runtime::*;
 use cmd::judgment_latest_request;
 use cmd::note_term_detached;
+use cmd::{adopt_legacy_judgment_key, select_coding_model, zo_model_list};
 use cmd::{
     abort_conflict_operation, ack_board_agent, add_claude_account, add_codex_account, agent_icon,
     agent_launch_plans, agent_models, agent_teams_mode, agent_terms, answer_approval, answer_ask,
@@ -2666,6 +2667,7 @@ fn main() -> ExitCode {
             api_router_presets,
             api_router_providers,
             model_connections, sync_model_connections, check_model_connection, select_model_connection, clear_model_connection,
+            zo_model_list, select_coding_model, adopt_legacy_judgment_key,
             test_router_connection,
             save_api_router,
             remove_api_router,

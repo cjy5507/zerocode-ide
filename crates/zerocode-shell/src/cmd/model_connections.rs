@@ -58,6 +58,55 @@ pub(crate) async fn select_model_connection(
     .map_err(|error| error.to_string())?
 }
 
+/// zo's own model list — the catalog the window already reads and caches for
+/// the model menu (`slash_catalog::zo_model_list`), never a second read.
+#[tauri::command]
+pub(crate) async fn zo_model_list() -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = dirs::home_dir().ok_or("home")?;
+        Ok(crate::slash_catalog::zo_model_list(&home))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// A model zo lists, made the coding default of new zo sessions.
+#[tauri::command]
+pub(crate) async fn select_coding_model(
+    model: String,
+    expected_model: Option<String>,
+) -> Result<Catalog, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = path()?;
+        let home = dirs::home_dir().ok_or("home")?;
+        let listed = crate::slash_catalog::zo_model_list(&home);
+        store::apply_coding_model(&path, &model, expected_model.as_deref(), &listed)?;
+        store::catalog(&path, &Keychain::of_this_machine())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The old judgment setting's key for a connection's address, moved into the
+/// connection by a person's press (t-75762 ⑥).
+#[tauri::command]
+pub(crate) async fn adopt_legacy_judgment_key(
+    id: String,
+    expected_generation: u64,
+) -> Result<Catalog, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = path()?;
+        let keys = Keychain::of_this_machine();
+        store::adopt_legacy_judgment_key(&path, &id, expected_generation, &keys)?;
+        // The key moved under the row: whether zo can use it changed.
+        crate::slash_catalog::forget_zo_models();
+        super::managed_judgment::settings_changed();
+        store::catalog(&path, &keys)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub(crate) async fn clear_model_connection(
     role: Role,

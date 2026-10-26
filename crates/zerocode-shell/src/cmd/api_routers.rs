@@ -120,6 +120,7 @@ pub(crate) async fn save_api_router(
             },
             &api_routers::Keychain::of_this_machine(),
         )
+        .inspect(|_| crate::slash_catalog::forget_zo_models())
     })
     .await
     .map_err(|error| RouterRefusal::from(error.to_string()))?
@@ -134,7 +135,7 @@ pub(crate) async fn remove_api_router(
 ) -> Result<Vec<ProviderEntry>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = api_routers::zo_settings_path().ok_or("설정 경로를 찾을 수 없습니다")?;
-        match (source_id.as_deref(), expected_generation) {
+        let removed = match (source_id.as_deref(), expected_generation) {
             (Some(id), Some(generation)) => api_routers::remove_router_if_current(
                 &path,
                 &name,
@@ -145,7 +146,8 @@ pub(crate) async fn remove_api_router(
                 api_routers::remove_router(&path, &name, &api_routers::Keychain::of_this_machine())
             }
             _ => Err("settings_changed".to_string()),
-        }
+        };
+        removed.inspect(|_| crate::slash_catalog::forget_zo_models())
     })
     .await
     .map_err(|error| error.to_string())?

@@ -30,6 +30,9 @@ pub struct ConnectionRow {
     pub auth: connections::Authentication,
     pub probe_headers: Option<std::collections::BTreeMap<String, String>>,
     pub key_available: bool,
+    /// Whether the old judgment setting kept a key for this row's address
+    /// that the row itself cannot reach — what the pane offers to move.
+    pub legacy_key: bool,
     pub uses: Vec<Role>,
 }
 
@@ -154,6 +157,7 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
             || api_routers::read_connection_key(&provider.auth_env, keys)
                 .map_err(|error| error.message)?
                 .is_some_and(|key| !key.trim().is_empty());
+        let legacy_key = !key_available && legacy_key_of(&root, &metadata, row, keys)?.is_some();
         let uses = [
             (Role::Coding, coding.as_ref()),
             (Role::Judgment, judgment.as_ref()),
@@ -172,6 +176,7 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
             auth: metadata.auth,
             probe_headers: api_routers::probe_headers(row)?,
             key_available,
+            legacy_key,
             uses,
         });
     }
@@ -430,3 +435,207 @@ pub(crate) fn uses_connection(root: &Value, id: &str) -> bool {
             .flatten()
             .is_some_and(|reference| reference.id == id)
 }
+
+/// Whether `zo models --json` (`listed`) names `model`: a login model's id,
+/// or a router model as zo spells it (`<provider>/<model>`).
+fn zo_lists(listed: &Value, model: &str) -> bool {
+    let rows = |key: &str| {
+        listed
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+    };
+    rows("models")
+        .iter()
+        .any(|row| row.get("id").and_then(Value::as_str) == Some(model))
+        || rows("customProviders").iter().any(|provider| {
+            provider
+                .get("models")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|listed| listed.as_str() == Some(model))
+        })
+}
+
+/// The saved connection a router model (`<name>/<model>`) belongs to, when
+/// the settings keep one under that name with that model.
+fn connection_of(root: &Value, model: &str) -> Result<Option<Reference>, String> {
+    let Some((name, wanted)) = model.split_once('/') else {
+        return Ok(None);
+    };
+    for row in root
+        .get("providers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if !row
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|held| connections::names_match(held, name))
+        {
+            continue;
+        }
+        let declared = row
+            .get("models")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|model| {
+                model
+                    .as_str()
+                    .or_else(|| model.get("id").and_then(Value::as_str))
+            })
+            .find(|declared| declared.eq_ignore_ascii_case(wanted));
+        if let Some(declared) = declared {
+            let metadata = connections::metadata(row).map_err(|error| error.to_string())?;
+            return Ok(Some(Reference {
+                id: metadata.id,
+                generation: metadata.generation,
+                model: declared.to_string(),
+                protocol: judgment_provider::Protocol::OpenaiJson,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// A model `zo models --json` lists (`listed`), made the default of new zo
+/// sessions: `model` is what a new session reads. A router model the
+/// settings keep as a connection goes through that connection
+/// ([`apply_coding`]); any other — a login model, or a router zo reads from
+/// its own environment — is written as zo names it, and no coding connection
+/// claims it. `expected` is the `model` the person saw; a file that moved
+/// since is refused untouched.
+pub fn apply_coding_model(
+    path: &Path,
+    model: &str,
+    expected: Option<&str>,
+    listed: &Value,
+) -> Result<(), String> {
+    if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+        return Err("provider_model".to_string());
+    }
+    if !zo_lists(listed, model) {
+        return Err("provider_model".to_string());
+    }
+    let current = |document: &Map<String, Value>| {
+        document
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let root = root(path)?;
+    if let Some(reference) = connection_of(&root, model)? {
+        let Value::Object(document) = &root else {
+            return Err("provider_settings".to_string());
+        };
+        if current(document).as_deref() != expected {
+            return Err("settings_changed".to_string());
+        }
+        return apply_coding(path, &reference);
+    }
+    api_routers::update_zo_settings_root(path, |document| {
+        if current(document).as_deref() != expected {
+            return Err("settings_changed".to_string());
+        }
+        let previous = document.get("model").cloned().unwrap_or(Value::Null);
+        let smart = smart(document)?;
+        smart.remove(connections::CODING_CONNECTION_KEY);
+        smart.insert(connections::PREVIOUS_CODING_KEY.to_string(), previous);
+        document.insert("model".to_string(), Value::String(model.to_string()));
+        Ok(())
+    })
+}
+
+/// The key the old judgment setting kept for `id`'s address, moved into the
+/// row as the window's own router key — pressed by a person, never on its own.
+pub fn adopt_legacy_judgment_key(
+    path: &Path,
+    id: &str,
+    expected_generation: u64,
+    keys: &dyn RouterKeys,
+) -> Result<(), String> {
+    let root = root(path)?;
+    let row = connections::row(&root, id)
+        .map_err(|error| error.to_string())?
+        .clone();
+    let metadata = connections::metadata(&row).map_err(|error| error.to_string())?;
+    if metadata.generation != expected_generation {
+        return Err("settings_changed".to_string());
+    }
+    let key = legacy_key_of(&root, &metadata, &row, keys)?.ok_or("no_key")?;
+    let entry: ProviderEntry =
+        serde_json::from_value(row.clone()).map_err(|error| error.to_string())?;
+    api_routers::save_router(
+        path,
+        api_routers::RouterSave {
+            preset_id: None,
+            name: entry.name,
+            base_url: entry.base_url,
+            key: Some(key),
+            models: entry.models,
+            client_fingerprint: entry.client_fingerprint,
+            headers: entry.headers,
+            source_id: Some(id.to_string()),
+            expected_generation: Some(expected_generation),
+            auth: Some(metadata.auth),
+        },
+        keys,
+    )
+    .map_err(|refusal| refusal.message)?;
+    Ok(())
+}
+
+/// The key the old judgment setting kept for `row`'s address, under either
+/// way it could have asked — the item `provider_keychain_service` names for
+/// that address with no connection behind it.
+fn legacy_key_of(
+    root: &Value,
+    metadata: &connections::Metadata,
+    row: &Value,
+    keys: &dyn RouterKeys,
+) -> Result<Option<String>, String> {
+    let Some(model) = row
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| models.first())
+        .and_then(|model| {
+            model
+                .as_str()
+                .or_else(|| model.get("id").and_then(Value::as_str))
+        })
+    else {
+        return Ok(None);
+    };
+    for protocol in [
+        judgment_provider::Protocol::OpenaiJson,
+        judgment_provider::Protocol::SystemOne,
+    ] {
+        let reference = Reference {
+            id: metadata.id.clone(),
+            generation: metadata.generation,
+            model: model.to_string(),
+            protocol,
+        };
+        let Ok(mut legacy) = connections::candidate(root, &reference) else {
+            continue;
+        };
+        legacy.connection = None;
+        let held = keys
+            .read(&crate::typesafe_settings::provider_keychain_service(
+                &legacy,
+            ))
+            .map_err(|error| error.message)?
+            .filter(|key| !key.trim().is_empty());
+        if held.is_some() {
+            return Ok(held);
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+#[path = "model_connections_tests.rs"]
+mod tests;

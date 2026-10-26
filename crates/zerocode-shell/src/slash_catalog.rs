@@ -106,8 +106,14 @@ const PROBE_PROMPT: &str = "hi";
 /// Answers by (agent, checkout), each with the moment it was read.
 type CatalogCache = HashMap<(String, String), (Instant, SlashCatalog)>;
 /// zo's model catalog (`zo models --json`, whole), with the moment it was
-/// read.
-type ModelsCache = Option<(Instant, serde_json::Value)>;
+/// read — none once the window forgot it ([`forget_zo_models`]) — and how
+/// many times the window forgot it: a read that began before a forget does
+/// not keep what it read (t-76028 R2).
+#[derive(Default)]
+struct ModelsCache {
+    forgotten: u64,
+    held: Option<(Option<Instant>, serde_json::Value)>,
+}
 
 fn catalog_cache() -> &'static Mutex<CatalogCache> {
     static CACHE: OnceLock<Mutex<CatalogCache>> = OnceLock::new();
@@ -116,7 +122,7 @@ fn catalog_cache() -> &'static Mutex<CatalogCache> {
 
 fn models_cache() -> &'static Mutex<ModelsCache> {
     static CACHE: OnceLock<Mutex<ModelsCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    CACHE.get_or_init(|| Mutex::new(ModelsCache::default()))
 }
 
 /// The commands `agent` takes in `cwd`, cached for [`CATALOG_TTL`].
@@ -595,23 +601,90 @@ pub fn agent_lineup(
     }
 }
 
+/// What the model settings draw from zo's list (t-75762): every login model
+/// row, every router zo reads (`customProviders`), each source's report and
+/// the aliases a saved `model` may name — the same cached catalog the model
+/// menu and the lineup read, never a second `zo models` run.
+pub fn zo_model_list(home: &Path) -> serde_json::Value {
+    let catalog = zo_models_catalog(home);
+    let mut list = serde_json::Map::new();
+    for key in ["models", "customProviders", "reports", "aliases"] {
+        list.insert(
+            key.to_string(),
+            catalog
+                .get(key)
+                .filter(|value| value.is_array())
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        );
+    }
+    serde_json::Value::Object(list)
+}
+
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]. A zo that is
 /// missing, fails, says nothing readable or outlives [`MODELS_WAIT`] — killed
 /// then — leaves the catalog last read standing, or `Null` before any was.
 fn zo_models_catalog(home: &Path) -> serde_json::Value {
-    let held = models_cache().lock().ok().and_then(|cache| cache.clone());
-    if let Some((_, catalog)) = held.as_ref().filter(|(at, _)| at.elapsed() < MODELS_TTL) {
-        return catalog.clone();
+    catalog_through(models_cache(), home)
+}
+
+/// A change the window just made to what zo lists — a connection saved,
+/// edited or removed (t-76028 F2) — makes the next read ask zo again; until
+/// zo answers, the catalog last read still stands.
+pub fn forget_zo_models() {
+    forget_models_in(models_cache());
+}
+
+fn forget_models_in(cache: &Mutex<ModelsCache>) {
+    if let Ok(mut cache) = cache.lock() {
+        cache.forgotten += 1;
+        if let Some((at, _)) = cache.held.as_mut() {
+            *at = None;
+        }
     }
+}
+
+fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value {
     let bin = crate::zo_companion::zo_path_under(home);
-    let catalog = captured_lines(&bin, &["models", "--json"], MODELS_WAIT)
-        .and_then(|lines| serde_json::from_str::<serde_json::Value>(&lines.join("\n")).ok())
-        .or_else(|| held.map(|(_, catalog)| catalog))
-        .unwrap_or_default();
-    if let Ok(mut cache) = models_cache().lock() {
-        *cache = Some((Instant::now(), catalog.clone()));
+    catalog_read(cache, || {
+        captured_lines(&bin, &["models", "--json"], MODELS_WAIT)
+            .and_then(|lines| serde_json::from_str(&lines.join("\n")).ok())
+    })
+}
+
+/// The cached catalog, or what `read` — zo, asked — answers, held for
+/// [`MODELS_TTL`]; `None` from it leaves the catalog last read standing.
+/// An answer to a read the window forgot the list during may predate the
+/// change it forgot it for, so zo is asked again (t-76028 R2).
+fn catalog_read(
+    cache: &Mutex<ModelsCache>,
+    read: impl Fn() -> Option<serde_json::Value>,
+) -> serde_json::Value {
+    loop {
+        let Some((forgotten, held)) = cache
+            .lock()
+            .ok()
+            .map(|cache| (cache.forgotten, cache.held.clone()))
+        else {
+            return read().unwrap_or_default();
+        };
+        if let Some((_, catalog)) = held
+            .as_ref()
+            .filter(|(at, _)| at.is_some_and(|at| at.elapsed() < MODELS_TTL))
+        {
+            return catalog.clone();
+        }
+        let catalog = read()
+            .or_else(|| held.map(|(_, catalog)| catalog))
+            .unwrap_or_default();
+        let Ok(mut cache) = cache.lock() else {
+            return catalog;
+        };
+        if cache.forgotten == forgotten {
+            cache.held = Some((Some(Instant::now()), catalog.clone()));
+            return catalog;
+        }
     }
-    catalog
 }
 
 // ---- readers ----------------------------------------------------------------
@@ -686,6 +759,107 @@ fn markdown_files(dir: &Path) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cached list and a change the window makes to it (t-76028 F2): a
+    /// read inside the minute is the list held, and after the window forgets
+    /// it the next read is zo's own answer — never a second cache. zo here
+    /// answers with the list it is given, or not at all (t-76028 R4: no
+    /// process, so every platform runs it).
+    #[test]
+    fn a_saved_connection_is_in_the_next_zo_list_read() {
+        let routers = |names: &[&str]| {
+            serde_json::json!({"models": [], "customProviders": names
+                .iter()
+                .map(|name| serde_json::json!({"name": name, "models": [format!("{name}/model")]}))
+                .collect::<Vec<_>>()})
+        };
+        let listed = Mutex::new(Some(routers(&[])));
+        let zo = || listed.lock().expect("listed").clone();
+        let cache = Mutex::new(ModelsCache::default());
+        assert_eq!(catalog_read(&cache, zo), routers(&[]));
+        *listed.lock().expect("listed") = Some(routers(&["Fixture"]));
+        assert_eq!(
+            catalog_read(&cache, zo),
+            routers(&[]),
+            "a read inside the minute is the list held"
+        );
+        forget_models_in(&cache);
+        assert_eq!(
+            catalog_read(&cache, zo),
+            routers(&["Fixture"]),
+            "the read after a saved connection does not list it"
+        );
+        *listed.lock().expect("listed") = None;
+        forget_models_in(&cache);
+        assert_eq!(
+            catalog_read(&cache, zo),
+            routers(&["Fixture"]),
+            "a zo that cannot answer drops the list last read"
+        );
+    }
+
+    /// A list read that began before the window forgot it (t-76028 R2) — a
+    /// connection saved while zo was being asked — does not put its older
+    /// answer back for a minute: it asks again, and the list held after is
+    /// the one that names the saved connection. The order is fixed by
+    /// channels, not by a clock.
+    #[test]
+    fn a_list_read_that_outlives_a_save_does_not_bring_back_the_list_before_it() {
+        let before = serde_json::json!({"customProviders": []});
+        let after = serde_json::json!({"customProviders": [{"name": "Fixture"}]});
+        let cache = Mutex::new(ModelsCache::default());
+        let (asked_tx, asked) = std::sync::mpsc::channel();
+        let (answer, answer_rx) = std::sync::mpsc::channel::<()>();
+        let answer_rx = Mutex::new(answer_rx);
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let read = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                catalog_read(&cache, || {
+                    if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        asked_tx.send(()).expect("asked");
+                        answer_rx.lock().expect("answer").recv().expect("answer");
+                        Some(before.clone())
+                    } else {
+                        Some(after.clone())
+                    }
+                })
+            });
+            asked.recv().expect("zo was asked");
+            forget_models_in(&cache);
+            answer.send(()).expect("answer");
+            reader.join().expect("reader")
+        });
+        assert_eq!(
+            read, after,
+            "the read answered the list from before the save"
+        );
+        assert_eq!(
+            catalog_read(&cache, || panic!("a read inside the minute asked zo")),
+            after,
+            "the list held after the save is the one from before it"
+        );
+    }
+
+    /// The list is `zo models --json` from the zo under the home, whole.
+    /// The zo here is a POSIX script, so this one runs where one starts.
+    #[cfg(unix)]
+    #[test]
+    fn the_zo_list_is_what_the_zo_under_the_home_prints() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("home");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1 $2\" = 'models --json' ] && echo '{\"customProviders\":[{\"name\":\"Fixture\"}]}'\n",
+        )
+        .expect("zo");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        assert_eq!(
+            catalog_through(&Mutex::new(ModelsCache::default()), home.path()),
+            serde_json::json!({"customProviders": [{"name": "Fixture"}]})
+        );
+    }
 
     #[test]
     fn a_bundle_yields_name_and_description_pairs_once_each() {

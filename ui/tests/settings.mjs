@@ -42,6 +42,34 @@ const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(
 /* The keychain item the TypeSafe key lives in — `typesafe_settings.rs`
  * (`SERVICE_KEYCHAIN_SERVICE_PREFIX` + `TYPESAFE_API_KEY_ENV`). */
 const TYPESAFE_SERVICE = "dev.zerocode.key.TYPESAFE_API_KEY";
+/* The judgment card's current line and its state word (t-75762 v2): the
+   model the settings select, and what the server it runs on answered. */
+const JUDGMENT_NOW = '[data-model-current="judgment"] .model-line-name';
+const JUDGMENT_STATE = '[data-model-current="judgment"] .model-state';
+/* A saved connection's row on the connections page — the rows the settings'
+   providers make, not a login, a managed model or Jev (t-75762 v2). */
+const SAVED_CONNECTION_ROWS = '#model-connection-groups .model-line[data-connection-id]:not([data-connection-id^="managed:"]):not([data-connection-id="jev"])';
+/* A zo model list as `zo models --json` answers it (t-75762 덧붙임 D):
+   three providers' login models with an older generation among them, and
+   each source's report. Every id is the fixture's own; the screen reads
+   whatever zo lists, so no real name is needed to prove it. */
+const ZO_LIST_FIXTURE = Object.freeze({
+  models: [
+    { id: "fixture-claude-old", provider: "claude", displayName: "Fixture Claude Old", band: "superseded", supersededBy: "fixture-claude-top" },
+    { id: "fixture-claude-top", provider: "claude", displayName: "Fixture Claude Top", band: "top", supersededBy: null },
+    { id: "fixture-claude-second", provider: "claude", displayName: "Fixture Claude Second", band: "second", supersededBy: null },
+    { id: "fixture-openai-top", provider: "openai", displayName: "Fixture OpenAI Top", band: "top", supersededBy: null },
+    { id: "fixture-openai-old", provider: "openai", displayName: "Fixture OpenAI Old", band: "superseded", supersededBy: "fixture-openai-top" },
+    { id: "fixture-google-flash", provider: "google", displayName: "Fixture Google Flash", band: null, supersededBy: null },
+  ],
+  reports: [
+    { provider: "anthropic", source: "anthropic-api", ok: true, count: 3, detail: "3 model(s)", age: "5m old" },
+    { provider: "openai", source: "chatgpt-backend", ok: true, count: 2, detail: "2 model(s)", age: "12m old" },
+    { provider: "google", source: "antigravity-registry", ok: true, count: 1, detail: "1 model(s)", age: "2h old" },
+    { provider: "xai", source: "xai-api", ok: false, count: 0, detail: "skipped: no login", age: "12m old" },
+  ],
+  aliases: [{ alias: "fixture-claude", canonical: "fixture-claude-top", provider: "anthropic" }],
+});
 /* The value seat's table — the very file the product reads
  * (`zerocode_core::type_value`) — and the window's key store's prefix
  * (`zerocode_harness::SERVICE_KEYCHAIN_SERVICE_PREFIX`, held here by the Rust
@@ -806,6 +834,13 @@ class StatefulBackend {
     this.terminalSessions = [];
     this.routerPresets = [...ROUTER_PRESETS_CATALOG];
     this.zoSettings = { providers: [] };
+    // What `zo models --json` lists besides the settings' routers: the
+    // login models, the sources' reports and the aliases (t-75762) — a
+    // test swaps them. Routers zo reads from its own environment ride
+    // `zoEnvRouters`; the old judgment setting's keys ride `legacyKeys`.
+    this.zoList = clone(ZO_LIST_FIXTURE);
+    this.zoEnvRouters = [];
+    this.legacyKeys = new Map();
     this.keychain = new Map();
     // The CLI login card's rows — a test fills them; the pane paints what
     // the backend's table says and nothing of its own.
@@ -2806,10 +2841,47 @@ class StatefulBackend {
       case "api_router_presets": return clone(this.routerPresets);
       case "api_router_providers": return clone(this.zoSettings.providers);
       case "model_connections": return this.modelConnections();
+      case "zo_model_list": return this.zoListRead();
+      case "select_coding_model": {
+        // Mirrors `model_connections::apply_coding_model`, checked against
+        // the same cached list the screen read.
+        const listed = this.zoListRead();
+        const model = String(args.model ?? "");
+        const zoLists = listed.models.some((row) => row.id === model) || listed.customProviders.some((row) => row.models.includes(model));
+        if (!zoLists) throw "provider_model";
+        if ((this.zoSettings.model ?? null) !== (args.expectedModel ?? null)) throw "settings_changed";
+        const smart = this.zoSettings.smart ??= {};
+        const [name, ...rest] = model.split("/");
+        const wanted = rest.join("/");
+        const connection = rest.length ? this.modelConnections().connections.find((row) => row.provider.name.toLowerCase() === name.toLowerCase()
+          && (row.provider.models ?? []).some((one) => (typeof one === "string" ? one : one.id).toLowerCase() === wanted.toLowerCase())) : null;
+        smart.previousCodingSelection = this.zoSettings.model ?? null;
+        if (connection) smart.codingConnection = { id: connection.id, generation: connection.generation, model: wanted, protocol: "openai_json" };
+        else delete smart.codingConnection;
+        this.zoSettings.model = model;
+        return this.modelConnections();
+      }
+      case "adopt_legacy_judgment_key": {
+        // Mirrors `model_connections::adopt_legacy_judgment_key`: the key the
+        // old setting kept moves under a window router variable of the row's.
+        const row = this.modelConnections().connections.find((one) => one.id === args.id);
+        if (!row || row.generation !== args.expectedGeneration) throw "settings_changed";
+        const key = this.legacyKeys.get(args.id);
+        if (!key) throw "no_key";
+        const provider = this.zoSettings.providers.find((one) => (one.connection?.id ?? `fixture-${one.name}`) === args.id);
+        provider.auth_env = `ZEROCODE_ROUTER_${provider.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_KEY`;
+        this.keychain.set(`dev.zerocode.router.${provider.auth_env}`, key);
+        this.legacyKeys.delete(args.id);
+        this.zoListHeld = null;
+        return this.modelConnections();
+      }
       case "sync_model_connections": return clone(this.connectionReloadStatus ?? { queued: 1, restartRequired: 0, unknown: 0 });
       case "check_model_connection": {
         if (args.expectedProviderIdentity !== this.typesafeSettings().providerIdentity) throw "settings_changed";
-        const answer = await (this.connectionCheckWait ?? this.connectionCheck ?? { answered: true, failure: null });
+        const checked = this.modelConnections().connections.find((row) => row.id === args.reference.id);
+        // The door refuses a keyless request before anything is sent.
+        const keyless = checked && checked.provider.requires_auth && !checked.keyAvailable ? { answered: false, failure: "no_key" } : null;
+        const answer = await (this.connectionCheckWait ?? this.connectionCheck ?? keyless ?? { answered: true, failure: null });
         return { preflight: { ...answer, candidateIdentity: JSON.stringify(args.reference), activeProviderIdentity: args.expectedProviderIdentity, model: args.reference.model, elapsedMs: 1 }, legacyKeyPresent: false };
       }
       case "select_model_connection": {
@@ -2848,6 +2920,8 @@ class StatefulBackend {
            the body — which is the shape the pane has to keep off its first
            line. */
         if (this.routerProbeRefusal) throw new Error(this.routerProbeRefusal);
+        const answered = this.routerProbeAnswers?.[args.baseUrl];
+        if (answered) return answered.map((id) => ({ id, context_length: null }));
         const url = `${args.baseUrl.replace(/\/+$/, "")}${args.modelsPath || "/models"}`;
         const headers = { ...(args.headers ?? {}) };
         if (args.key) {
@@ -2913,6 +2987,8 @@ class StatefulBackend {
           entry.headers = args.headers;
         }
         const existingIdx = this.zoSettings.providers.findIndex((p) => p.name === args.name);
+        // Mirrors the command's `forget_zo_models`: the next read asks zo.
+        this.zoListHeld = null;
         if (existingIdx >= 0) {
           // Mirrors `resave_row`: the window's keys are replaced in place, a
           // provider-wide window is cleared, every other key stays.
@@ -2935,6 +3011,7 @@ class StatefulBackend {
         }
         const own = this.zoSettings.providers.find((p) => p.name === args.name)?.auth_env;
         this.zoSettings.providers = this.zoSettings.providers.filter((p) => p.name !== args.name);
+        this.zoListHeld = null;
         if (own?.startsWith("ZEROCODE_ROUTER_")
           && !this.zoSettings.providers.some((p) => p.auth_env === own)) {
           this.keychain.delete(`dev.zerocode.router.${own}`);
@@ -3077,6 +3154,13 @@ class StatefulBackend {
         return this.managedJudgmentSettings();
       }
       case "managed_judgment_stop": {
+        // A refusal a test puts in front of the next stop — the settings
+        // moved first (t-59744 ⑥) — consumed once.
+        if (this.managedStopRefusal) {
+          const refusal = this.managedStopRefusal;
+          delete this.managedStopRefusal;
+          throw refusal;
+        }
         if (this.managedModelState?.server.id !== args.serverId) throw "server_changed";
         this.managedModelState.server.state = "stopped";
         this.managedModelState.appliedModelId = null;
@@ -3366,10 +3450,39 @@ class StatefulBackend {
         return { id, generation: provider.connection?.generation ?? 0, provider,
           auth: provider.connection?.auth ?? { header: "Authorization", scheme: "Bearer" },
           keyAvailable: !provider.requires_auth || this.keychain.has(`dev.zerocode.router.${provider.auth_env}`),
+          legacyKey: provider.requires_auth && !this.keychain.has(`dev.zerocode.router.${provider.auth_env}`) && this.legacyKeys.has(id),
           uses: [["coding",coding],["judgment",judgment]].filter(([, ref]) => ref?.id === id).map(([role]) => role),
         };
       }), coding, judgment, codingModel: this.zoSettings.model ?? null,
       activeProviderIdentity: this.typesafeSettings().providerIdentity, legacyKeyPresent: false,
+    });
+  }
+
+  /* The list as `slash_catalog::zo_models_catalog` hands it out: with
+     `zoListCaching` on, the read held until it is forgotten, the way the
+     window's cache holds it; off, every read sees the settings at once. */
+  zoListRead() {
+    if (!this.zoListCaching) return this.zoModelList();
+    this.zoListHeld ??= this.zoModelList();
+    return clone(this.zoListHeld);
+  }
+
+  /* `zo models --json` as the window reads it (`zo_model_list`): zo spells
+     every router model `<name>/<model>`, the settings' routers first. */
+  zoModelList() {
+    return clone({
+      models: this.zoList.models,
+      reports: this.zoList.reports,
+      aliases: this.zoList.aliases,
+      customProviders: [
+        ...this.zoSettings.providers.map((provider) => ({
+          name: provider.name,
+          models: (provider.models ?? []).map((model) => `${provider.name}/${typeof model === "string" ? model : model.id}`),
+          usable: true,
+          credentialEnvVars: provider.auth_env ? [provider.auth_env] : [],
+        })),
+        ...this.zoEnvRouters,
+      ],
     });
   }
 
@@ -3608,11 +3721,15 @@ async function bootPage(page, id) {
   await renderSettled(page);
 }
 
+/* The model pane's 고급 fold holds the old judgment editor, the model
+   library and the diagnosis line (t-75762 v2): opened with it. */
 async function openJudgmentSettings(page) {
   const pane = await page.locator("#typesafe-card").evaluate((card) => card.closest(".settings-pane").dataset.pane);
   await openSettings(page, pane);
-  const advanced = page.locator("#judgment-connection-settings");
-  if (await advanced.count()) await advanced.evaluate((element) => { element.open = true; });
+  for (const fold of ["#model-advanced", "#judgment-connection-settings"]) {
+    const advanced = page.locator(fold);
+    if (await advanced.count()) await advanced.evaluate((element) => { element.open = true; });
+  }
 }
 
 async function withJudgmentStatus(run) {
@@ -3634,6 +3751,8 @@ async function withJudgmentStatus(run) {
   try {
     await bootPage(page, "judgment-status");
     await openSettings(page, "judgment-models");
+    // The model library and the diagnosis line wait in the 고급 fold (t-75762 v2).
+    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
     await page.waitForFunction(() => managedJudgmentController.snapshot?.server.id === "fixture-active-server");
     return await run(page, provider);
   } finally {
@@ -5712,7 +5831,7 @@ await test("a_timed_out_watch_still_rereads_the_gauge: 기다림이 시간을 �
 
 await test("라우터 추가→연결 시험→모델 셋 켬→settings.json providers 한 항목", async () => {
   await openSettings(pageA, "api-routers");
-  await pageA.evaluate(() => modelConnectionsController.add());
+  await pageA.evaluate(() => modelConnectionsController.addManual());
 
   assert(
     await pageA.locator('.settings-pane[data-pane="api-routers"]').isVisible(),
@@ -5785,11 +5904,11 @@ await test("라우터 추가→연결 시험→모델 셋 켬→settings.json pr
   const keychainService = "dev.zerocode.router.ZEROCODE_ROUTER_OPENROUTER_KEY";
   assertEqual(backend.keychain.get(keychainService), "sk-or-test-secret-98765", "secret stored in keychain under the service named by auth_env");
 
-  // Verify saved provider is rendered in the list using accountRow styling
-  const connectedRows = pageA.locator("#router-provider-list .account-row");
+  // The saved connection is a row of the connections page (t-75762 v2).
+  const connectedRows = pageA.locator(SAVED_CONNECTION_ROWS);
   assertEqual(await connectedRows.count(), 1, "connected router appears in list");
-  assertEqual(await connectedRows.locator(".agent-row-name").textContent(), "OpenRouter", "connected router name matches");
-  const cmdText = await connectedRows.locator(".agent-row-cmd").textContent();
+  assertEqual(await connectedRows.locator(".model-line-name").textContent(), "OpenRouter", "connected router name matches");
+  const cmdText = await connectedRows.locator(".model-line-way").first().textContent();
   assert(cmdText.includes("모델 3개"), `cmdText should include '모델 3개': ${cmdText}`);
 
   // AgentRouter refuses an unknown client before it weighs the key, so its
@@ -5807,8 +5926,8 @@ await test("라우터 추가→연결 시험→모델 셋 켬→settings.json pr
   await pageA.waitForSelector("#router-models-section:not([hidden])", { timeout: UI_TIMEOUT });
   await pageA.click("#router-save-btn");
   await pageA.waitForFunction(
-    () => document.querySelectorAll("#router-provider-list .account-row").length === 2,
-    null,
+    (rows) => document.querySelectorAll(rows).length === 2,
+    SAVED_CONNECTION_ROWS,
     { timeout: UI_TIMEOUT },
   );
   const agentRouter = backend.zoSettings.providers.find((p) => p.name === "AgentRouter");
@@ -5824,7 +5943,7 @@ await test("라우터 추가→연결 시험→모델 셋 켬→settings.json pr
 
 await test("라우터 모델 표의 머리칸 하나로 전체 선택·전체 해제", async () => {
   await openSettings(pageA, "api-routers");
-  await pageA.evaluate(() => modelConnectionsController.add());
+  await pageA.evaluate(() => modelConnectionsController.addManual());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "pick-all");
   await pageA.fill("#router-base-url-input", origin);
@@ -5867,7 +5986,7 @@ await test("라우터 모델 표의 머리칸 하나로 전체 선택·전체 �
 
 await test("라우터 연결 변경은 이전 모델 목록과 늦게 도착한 응답을 무효화한다", async () => {
   await openSettings(pageA, "api-routers");
-  await pageA.evaluate(() => modelConnectionsController.add());
+  await pageA.evaluate(() => modelConnectionsController.addManual());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "probe-generation");
   await pageA.fill("#router-base-url-input", origin);
@@ -5907,7 +6026,7 @@ await test("라우터 연결 변경은 이전 모델 목록과 늦게 도착한 
 
 await test("라우터 저장 중 이름이나 모델을 바꾸면 옛 저장 응답이 새 편집을 저장됐다고 하지 않는다", async () => {
   await openSettings(pageA, "api-routers");
-  await pageA.evaluate(() => modelConnectionsController.add());
+  await pageA.evaluate(() => modelConnectionsController.addManual());
   await pageA.selectOption("#router-preset-select", "custom");
   await pageA.fill("#router-name-input", "saved-draft");
   await pageA.fill("#router-base-url-input", origin);
@@ -5971,7 +6090,7 @@ async function addRouterRow(page, { preset, name, key }) {
 
 await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘이 서로의 키를 덮지 않고, 지우기는 제 키만", async () => {
   await openSettings(pageA, "api-routers");
-  await pageA.evaluate(() => modelConnectionsController.add());
+  await pageA.evaluate(() => modelConnectionsController.addManual());
   backend.zoSettings.providers = [];
   backend.keychain.clear();
   await pageA.evaluate(() => refreshApiRouters());
@@ -6003,16 +6122,16 @@ await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘
   const renamed = backend.zoSettings.providers.find((p) => p.name === "OpenRouter 회사");
   const listed = backend.modelConnections().connections.find((row) => row.provider.name === "OpenRouter 회사");
   const droppedAt = backend.calls.length;
-  const rows = pageA.locator("#router-provider-list .account-row");
-  const index = (await rows.locator(".agent-row-name").allTextContents()).indexOf("OpenRouter 회사");
+  const rows = pageA.locator(SAVED_CONNECTION_ROWS);
+  const index = (await rows.locator(".model-line-name").allTextContents()).indexOf("OpenRouter 회사");
   await pageA.evaluate(() => modelConnectionsController.show("catalog"));
   await rows.nth(index).locator(".account-drop").click();
   await rows.nth(index).locator(".connection-delete-note").getByRole("button", { name: "삭제", exact: true }).click();
   const removal = await backend.waitForCall("A", "remove_api_router", droppedAt);
   assertEqual(removal.args, { name: "OpenRouter 회사", sourceId: listed.id, expectedGeneration: listed.generation }, "the removal did not name the row the list showed");
   await pageA.waitForFunction(
-    () => document.querySelectorAll("#router-provider-list .account-row").length === 3,
-    null,
+    (rows) => document.querySelectorAll(rows).length === 3,
+    SAVED_CONNECTION_ROWS,
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.keychain.has(`dev.zerocode.router.${renamed.auth_env}`), false, "the renamed row's key outlived it");
@@ -6022,7 +6141,7 @@ await test("라우터 줄마다 제 키: 한글 이름 둘·같은 프리셋 둘
 
 await test("키체인이 없는 컴퓨터: 판이 키체인을 약속하지 않고 키 칸을 내주지 않으며, 키 없는 저장은 된다", async () => {
   await openSettings(pageA, "api-routers");
-  await pageA.evaluate(() => modelConnectionsController.add());
+  await pageA.evaluate(() => modelConnectionsController.addManual());
   backend.zoSettings.providers = [];
   backend.keychain.clear();
   backend.routerKeychainUnavailable = true;
@@ -6070,6 +6189,9 @@ await test("판단 모델 전용 화면은 HF 주소만 받아 기본 폴더에 
     assertEqual(await modelPage.locator('.settings-pane[data-pane="judgment-models"]').count(), 1, "model setup has no dedicated pane");
     await openSettings(modelPage, "judgment-models");
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.catalogFingerprint);
+    // Getting a model file is a 고급 item now (t-75762 v2): closed until asked for.
+    assert(await modelPage.locator("#judgment-source-repository").isHidden(), "model files are offered before 고급 is opened");
+    await modelPage.locator("#model-advanced > summary").click();
     assert(await modelPage.locator("#judgment-source-repository").isVisible(), "the basic view has no HF address input");
     assert(await modelPage.locator("#judgment-endpoint").isHidden(), "the basic view requires a server address");
     assert(await modelPage.locator("#typesafe-key-input").isHidden(), "the basic local view requires an API key");
@@ -6120,6 +6242,7 @@ await test("내 모델과 저장 폴더는 선택기로 고르고 설치 취소�
     assertEqual(await modelPage.locator("#judgment-source-local").count(), 1, "there is no local-folder entry point");
     await openSettings(modelPage, "judgment-models");
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.catalogFingerprint);
+    await modelPage.locator("#model-advanced > summary").click();
     backend.pickedPaths = ["/models/source-folder"];
     await modelPage.click("#judgment-source-local");
     await modelPage.waitForFunction(() => judgmentModelSourceController.directory === "/models/source-folder" && !judgmentModelSourceController.busy);
@@ -6158,13 +6281,13 @@ await test("판단 설정은 적용된 모델과 아직 연결하지 않은 선�
   await pageA.evaluate(() => refreshApiRouters());
   const applied = clone(backend.typesafeSettings().provider);
   try {
-    assert(await pageA.locator("#judgment-active-model").isVisible(), "the active model has no separate summary");
-    assert((await pageA.locator("#judgment-active-model").textContent()).includes(applied.model), "the summary does not name the applied model");
+    assert(await pageA.locator(JUDGMENT_NOW).isVisible(), "the active model has no separate summary");
+    assert((await pageA.locator(JUDGMENT_NOW).textContent()).includes(applied.model), "the summary does not name the applied model");
     await pageA.selectOption("#judgment-provider-kind", "remote");
     await pageA.fill("#judgment-endpoint", "");
     assertEqual(await pageA.locator("#judgment-setup-hint").getAttribute("data-step"), "connection", "the next step does not ask for a server");
     assert((await pageA.locator("#judgment-setup-hint").textContent()).trim(), "the next step has no instructions");
-    assert((await pageA.locator("#judgment-active-model").textContent()).includes(applied.model), "a draft replaced the active-model summary");
+    assert((await pageA.locator(JUDGMENT_NOW).textContent()).includes(applied.model), "a draft replaced the active-model summary");
     assertEqual(backend.typesafeSettings().provider, applied, "choosing a setup path applied it");
   } finally {
     await pageA.evaluate(() => { judgmentProviderController.draft = null; return refreshApiRouters(); });
@@ -6218,6 +6341,11 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     (expected) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === expected,
     words, { timeout: UI_TIMEOUT },
   );
+  // The switch answers beside itself, at the judgment card's head (t-75762 v2).
+  const switchSaid = async (words) => pageA.waitForFunction(
+    (expected) => document.querySelector("#model-judgment-status .settings-status-said")?.textContent === expected,
+    words, { timeout: UI_TIMEOUT },
+  );
 
   // Nothing saved: the badge says so, and nothing but typing a key is offered.
   assertEqual(
@@ -6246,9 +6374,14 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     visible: all.filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0).map((select) => select.id),
   }));
   assertEqual(selects, {
-    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model", "route-classifier-select"],
+    // Each saved connection's judgment format (t-76028 F3) is a protocol
+    // choice too, folded in 「고급 — 판단 응답 형식」.
+    ids: ["judgment-format-fixture-OpenRouter", "managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model"],
     visible: ["managed-judgment-filter", "judgment-provider-kind"],
   }, "the provider and candidate filter are visible; protocol and inactive choices stay folded");
+  // The worker rows and the classifier moved to the orchestration pane
+  // (t-75762 v2, decision 4), folded there as they were on the card.
+  assertEqual(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.closest(".settings-pane").dataset.pane), "orchestration");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
@@ -6286,7 +6419,7 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   const onAt = backend.calls.length;
   await toggle.click();
   assertEqual((await backend.waitForCall("A", "set_jev_enabled", onAt)).args.on, true);
-  await statusIs(await said("settings.typesafe.turnedOn", "켰습니다. 모든 폴더에서 기능마다 권장 설정으로 판단을 요청합니다."));
+  await switchSaid(await said("settings.typesafe.turnedOn", "켰습니다. 모든 폴더에서 기능마다 권장 설정으로 판단을 요청합니다."));
   assertEqual(doorObject(), { enabled: true, workspaces: [JEV_EVERY_WORKSPACE] });
   assertEqual(backend.zoSettings.providers, routers, "the switch moved the router rows");
   await pageA.evaluate(() => refreshApiRouters());
@@ -6333,7 +6466,7 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   const offAt = backend.calls.length;
   await toggle.click();
   assertEqual((await backend.waitForCall("A", "set_jev_enabled", offAt)).args.on, false);
-  await statusIs(await said("settings.typesafe.turnedOffAll", "껐습니다. 아무것도 보내지 않습니다."));
+  await switchSaid(await said("settings.typesafe.turnedOffAll", "껐습니다. 아무것도 보내지 않습니다."));
   assertEqual(doorObject(), { enabled: false, labelDrafts: true, workspaces: [JEV_EVERY_WORKSPACE] });
   assert(!(await toggle.isChecked()), "the switch stayed on");
 
@@ -6341,6 +6474,7 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   // with the alias behind it; a version pins it where the door reads it; an
   // empty field unpins — the key leaves the file — and a pin the door would
   // not read is refused and writes nothing.
+  await openSettings(pageA, "orchestration");
   await pageA.locator("#typesafe-advanced > summary").click();
   // A field nobody wrote is empty with what runs now behind it (t-14437);
   // saving writes only the filled row, at the effort that row runs now.
@@ -6354,7 +6488,10 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assertEqual(savedProfile.args.profiles.codex.low,
     { model: "gpt-test-profile", effort: SUMMON_PROFILES.codex.low.effort });
   assertEqual(savedProfile.args.profiles.claude, undefined, "automatic rows are not written");
-  await statusIs(await said("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
+  await pageA.waitForFunction(
+    (expected) => document.querySelector("#orch-models-status .settings-status-said")?.textContent === expected,
+    await said("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."), { timeout: UI_TIMEOUT },
+  );
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await profileModel.inputValue(), "gpt-test-profile");
   // Who put a row's model in its tier, and how sure that was (t-45961): said
@@ -6375,6 +6512,8 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     "지난 판정 뒤에 들어온 모델이라, 다음 판정 때까지 사실 규칙에 따른 임시 등급입니다."));
   assertEqual(tierNotes.person, "", "a written row says who placed its model");
   assertEqual(tierNotes.unsaid, "", "a row the lineup says nothing about said a source");
+  await pageA.locator("#typesafe-advanced > summary").click();
+  await openJudgmentSettings(pageA);
   const modelInput = pageA.locator("#typesafe-model-input");
   assertEqual(await modelInput.inputValue(), JEV_MODEL_ALIAS, "the active alias was not shown");
   assertEqual(await modelInput.getAttribute("placeholder"), JEV_MODEL_ALIAS);
@@ -6403,7 +6542,6 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await backend.waitForCall("A", "set_judgment_provider", unpinAt);
   await statusIs(await said("settings.judgment.checkedAndApplied", "응답을 확인한 모델을 적용했습니다. 연결 확인은 작업 정확도 검증과 별개입니다."));
   assert(!(JEV_MODEL_SETTING in backend.zoSettings.smart), "an unpin left the key in the file");
-  await pageA.locator("#typesafe-advanced > summary").click();
 
   // A removal forgets the key and takes back what only a saved key offers.
   const removedAt = backend.calls.length;
@@ -6435,11 +6573,12 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
 });
 
 await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제 사용을 구분한다", async () => withJudgmentStatus(async (page, provider) => {
-  assert(await page.locator("#judgment-current-status").isVisible(), "the applied model has no primary status area");
-  assert((await page.locator("#judgment-active-model").textContent()).includes(provider.model));
-  assertEqual(await page.locator("#judgment-current-enablement").getAttribute("data-state"), "disabled", "a running service enabled judgment requests");
-  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready");
-  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a matching native check was ignored");
+  assert(await page.locator("#model-judgment").isVisible(), "the applied model has no primary status area");
+  const label = backend.managedJudgmentSettings().models.find((model) => model.id === provider.model).label;
+  assert((await page.locator(JUDGMENT_NOW).textContent()).includes(label), "the card does not name the applied model");
+  assert(await page.locator("#model-judgment .model-off").isVisible(), "a running service read as judgment requests allowed");
+  assert(!(await page.locator("#jev-enabled").isChecked()), "the switch at the card's head reads on");
+  assertEqual(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state"), "running", "a matching checked server was not read as running");
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a native check was presented as task use");
   assert(!/\d/.test(await page.locator("#judgment-current-usage").textContent()), "usage without evidence invented a count or timestamp");
   assertEqual(await page.locator('.settings-pane[data-pane="judgment-models"] > header #typesafe-key-state').count(), 0, "the key/check badge still looks like the whole page's state");
@@ -6449,19 +6588,20 @@ await test("현재 판단 상태는 실행·요청 허용·응답 점검·실제
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(backend.calls.slice(reopenedAt).filter((call) => call.window_id === "judgment-status" && call.command === "typesafe_settings").length, 1, "reopening duplicated the settings read");
   assertEqual(backend.calls.slice(reopenedAt).filter((call) => call.window_id === "judgment-status" && call.command === "managed_judgment_status").length, 1, "reopening did not share one current server read");
-  const order = await page.evaluate(() => Boolean(document.getElementById("judgment-current-status").compareDocumentPosition(document.getElementById("judgment-model-changes")) & Node.DOCUMENT_POSITION_FOLLOWING));
+  const order = await page.evaluate(() => Boolean(document.getElementById("model-judgment").compareDocumentPosition(document.getElementById("model-advanced")) & Node.DOCUMENT_POSITION_FOLLOWING));
   assert(order, "model changes precede current status");
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   const before = backend.calls.length;
   await page.click("#judgment-source-jev");
   assert((await page.locator("#judgment-provider-draft").textContent()).includes("Jev"));
   assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
   assert(await page.locator("#typesafe-key-state").isHidden(), "the active provider's key/check badge was attributed to a draft provider");
-  assert((await page.locator("#judgment-active-model").textContent()).includes(provider.model), "a Jev draft replaced the applied identity");
+  assert((await page.locator(JUDGMENT_NOW).textContent()).includes(label), "a Jev draft replaced the applied identity");
   assert(!backend.calls.slice(before).some((call) => ["set_judgment_provider", "managed_judgment_start", "managed_judgment_check"].includes(call.command)), "opening a change performed a model action");
   await page.click("#typesafe-check-btn");
   await page.waitForFunction(() => !typesafeBusy);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a draft probe became actual usage");
-  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a draft probe replaced the current model's check");
+  assertEqual(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state"), "running", "a draft probe replaced the current model's state");
   return "running with requests disabled · matching check · usage unknown · explicit Jev draft";
 }));
 
@@ -6472,26 +6612,27 @@ await test("현재 모델과 다른 서버·점검 기록은 현재 상태로 �
   snapshot.server.modelId = "other-decision";
   snapshot.appliedModelId = "other-decision";
   await backend.emitManaged(snapshot);
-  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown", "another running model was attributed to the active provider");
-  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "unchecked", "another model's native check approved the active provider");
+  assert(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state") !== "running", "another running model was attributed to the active provider");
   snapshot.revision += 1;
   snapshot.providerIdentity = "other-provider-identity";
   snapshot.server.provider = provider;
   snapshot.server.modelId = provider.model;
   snapshot.appliedModelId = provider.model;
   await backend.emitManaged(snapshot);
-  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown", "a stale settings identity supplied current server status");
+  assertEqual(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state"), "unknown", "a stale settings identity supplied current server status");
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown");
   backend.judgmentSettingsWait = Promise.resolve({ ...backend.typesafeSettings(), provider: null, providerIdentity: null });
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
-  assertEqual(await page.locator("#judgment-current-enablement").getAttribute("data-state"), "disabled", "missing provider metadata erased known request permission");
+  assert(await page.locator("#model-judgment .model-off").isVisible(), "missing provider metadata erased known request permission");
   assert(await page.locator("#jev-enabled").isEnabled(), "missing provider metadata disabled the existing consent switch");
-  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown");
+  assert(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state") !== "running");
   return "server provider, model and canonical identity must agree";
 }));
 
 await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답을 버린다", async () => withJudgmentStatus(async (page, provider) => {
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   await page.click("#judgment-source-jev");
   await page.fill("#typesafe-model-input", "unapplied-cloud-model");
   const before = backend.calls.length;
@@ -6525,10 +6666,10 @@ await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답�
   delete backend.judgmentStatusWait;
   delete backend.judgmentUsageWait;
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
-  assert((await page.locator("#judgment-active-model").textContent()).includes("new-current-decision"), "a late read restored the old identity");
+  assert((await page.locator(JUDGMENT_NOW).textContent()).includes("new-current-decision"), "a late read restored the old identity");
   assertEqual(await page.inputValue("#typesafe-model-input"), "unapplied-cloud-model", "refresh discarded an unsaved draft");
   assertEqual(await page.locator("#judgment-provider-draft").getAttribute("data-state"), "unapplied");
-  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "unknown");
+  assert(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state") !== "running");
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "a late usage read was assigned to a new model");
   await page.evaluate(() => setSettingsOpen(false));
   const hiddenAt = backend.calls.length;
@@ -6538,7 +6679,7 @@ await test("현재 상태 새로고침은 초안을 보존하고 늦은 응답�
   await page.evaluate(() => setSettingsOpen(true));
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   await page.fill("#settings-search", "no-such-judgment-setting-fixture");
-  assert(await page.locator("#judgment-current-status").isHidden());
+  assert(await page.locator("#model-judgment").isHidden());
   const filteredAt = backend.calls.length;
   await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
   await renderSettled(page);
@@ -6555,6 +6696,7 @@ await test("실제 요청의 성공·실패·적용 결과는 응답 점검과 �
     lastRequest: { feature: "stall", atMs, outcome: "answered", elapsedMs: 37, applied: true },
   };
   const words = (key, fallback) => page.evaluate(([name, source]) => t(name, source), [key, fallback]);
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed", "a real request remained permanently unknown");
@@ -6572,8 +6714,7 @@ await test("실제 요청의 성공·실패·적용 결과는 응답 점검과 �
   assert(failed.includes(await words("settings.judgment.usageNotApplied", "결과 미적용")), "a failed request was presented as an applied result");
   assert(failed.includes(await words("settings.judgment.usageNewerUnknown", "더 새 기록에는 요청 당시 모델 정보가 없어 결과를 확인할 수 없습니다.")), "a newer unattributed request was hidden");
   assert(failed.includes("0 ms"), "the source's measured zero latency was replaced with an invented value");
-  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready", "a request failure was presented as a stopped server");
-  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected", "a real request overwrote a separate connection check");
+  assertEqual(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state"), "running", "a request failure was presented as a stopped server");
   return "real source time and feature · explicit application · HTTP failure is not server shutdown · newer history gap disclosed";
 }));
 
@@ -6585,6 +6726,7 @@ await test("로컬 판단 서버가 거절한 이유는 카드에 그대로 보�
   const words = (key, fallback) => page.evaluate(([name, said]) => t(name, said), [key, fallback]);
   const failed = await words("settings.judgment.usageFailed", "요청 실패");
   const discarded = await words("settings.judgment.usageDiscarded", "설정 변경으로 응답 미사용");
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   const unsaid = [];
   for (const outcome of refusals.values()) {
     backend.judgmentUsage = {
@@ -6608,6 +6750,7 @@ await test("실제 사용은 최근 미관측·출처 부족·다른 제공자·
     providerIdentity: backend.typesafeSettings().providerIdentity, observedAtMs: Date.now(), scope: "machine", coverage: "window_requests",
     state: "none_observed", reason: null, unattributedNewer: false, lastRequest: null,
   };
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "none_observed");
@@ -6628,8 +6771,7 @@ await test("실제 사용은 최근 미관측·출처 부족·다른 제공자·
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "unknown", "unsupported usage reporting fabricated activity");
-  assertEqual(await page.locator("#judgment-current-server").getAttribute("data-state"), "ready");
-  assertEqual(await page.locator("#judgment-current-check").getAttribute("data-state"), "connected");
+  assertEqual(await page.locator(JUDGMENT_STATE).getAttribute("data-model-state"), "running");
   return "recent evidence only · unknown legacy provenance · different provider discarded · old backend tolerated";
 }));
 
@@ -6639,6 +6781,7 @@ await test("실제 요청에 없는 시각과 적용 여부는 만들어 내지 
     state: "observed", reason: null, unattributedNewer: false,
     lastRequest: { feature: "stall", atMs: null, outcome: "answered", elapsedMs: null, applied: null },
   };
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
@@ -6657,7 +6800,7 @@ await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다"
   });
   const snapshot = backend.managedJudgmentSettings();
   backend.managedSourceError = "not_native_decision_model";
-  const current = await page.locator("#judgment-current-status").textContent();
+  const current = await page.locator("#model-judgment").textContent();
   await page.click("#judgment-source-inspect");
   await page.waitForFunction(() => !judgmentModelSourceController.busy);
   snapshot.revision += 1;
@@ -6666,7 +6809,7 @@ await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다"
   const error = await page.evaluate(() => managedJudgmentController.failure("not_native_decision_model"));
   assertEqual(await page.locator("#judgment-source-status").textContent(), error);
   assertEqual(await page.locator("#managed-judgment-status").textContent(), "", "the import warning leaked into model management");
-  assertEqual(await page.locator("#judgment-current-status").textContent(), current, "an unsupported import changed active status");
+  assertEqual(await page.locator("#model-judgment").textContent(), current, "an unsupported import changed active status");
   assertEqual(backend.typesafeSettings().provider, provider);
   await page.click("#judgment-source-hub");
   assertEqual(await page.locator("#judgment-source-status").textContent(), "", "an import warning followed a different draft");
@@ -6676,7 +6819,7 @@ await test("가져오기 실패는 해당 초안 옆에 한 번만 표시한다"
 await test("주소를 붙여 넣으면 정보만 확인하고 실행 검증 전 모델은 누른 뒤에 파일만 받는다", async () => withJudgmentStatus(async (page, provider) => {
   backend.managedSourceResult = nativeSourceInspection(backend.managedJudgmentSettings());
   const address = "https://huggingface.co/acme/native-decision";
-  const current = await page.locator("#judgment-current-status").textContent();
+  const current = await page.locator("#model-judgment").textContent();
   const words = await page.evaluate(() => ({
     absent: t("settings.models.badgeNotInstalled", "아직 받지 않음"),
     present: t("settings.models.badgeInstalled", "파일 준비됨"),
@@ -6716,7 +6859,7 @@ await test("주소를 붙여 넣으면 정보만 확인하고 실행 검증 전 
   assert(!commands.some((command) => ["managed_judgment_prepare_model_runtime", "managed_judgment_prepare_runtime", "managed_judgment_start", "managed_judgment_switch_model", "managed_judgment_check", "managed_judgment_apply"].includes(command)),
     "a download-only model reached runtime preparation, execution or application", commands);
   assertEqual(backend.typesafeSettings().provider, provider, "keeping files changed the active model");
-  assertEqual(await page.locator("#judgment-current-status").textContent(), current, "keeping files changed the status card");
+  assertEqual(await page.locator("#model-judgment").textContent(), current, "keeping files changed the status card");
   assertEqual(await page.locator("#judgment-source-badge-installed").textContent(), words.present);
   assert(await page.locator("#judgment-source-badge-current").isHidden(), "kept files looked applied");
   assert(await page.locator("#judgment-source-use").isHidden(), "kept files still offered an action");
@@ -6966,6 +7109,7 @@ await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 
     state: "observed", reason: null, unattributedNewer: true,
     lastRequest: { feature: "stall", atMs: Date.parse("2026-10-01T10:20:30Z"), outcome: "http_503", elapsedMs: 0, applied: null },
   };
+  await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
   await page.click("#judgment-status-refresh");
   await page.waitForFunction(() => !document.getElementById("judgment-status-refresh").disabled);
   assertEqual(await page.locator("#judgment-current-usage").getAttribute("data-state"), "observed");
@@ -6974,19 +7118,19 @@ await test("판단 상태는 다섯 언어·두 테마·좁은 폭에서 읽을 
     await page.evaluate(() => judgmentProviderController.controls());
     for (const theme of SETTINGS_QUALITY_SPEC.themes) {
       await setQualityTheme(page, theme);
-      assertEqual(await axeViolations(page, AxeBuilder, "#judgment-current-status"), [], `${locale}/${theme} current judgment accessibility`);
-      const usageWidth = await page.locator("#judgment-current-usage").evaluate((usage) => ({ row: usage.parentElement.getBoundingClientRect().width, grid: usage.closest("dl").getBoundingClientRect().width }));
-      assert(Math.abs(usageWidth.row - usageWidth.grid) <= 1, `${locale}/${theme} request history should use the status card's full width`, usageWidth);
+      assertEqual(await axeViolations(page, AxeBuilder, "#model-judgment"), [], `${locale}/${theme} current judgment accessibility`);
+      const usageWidth = await page.locator("#judgment-current-usage").evaluate((usage) => ({ row: usage.getBoundingClientRect().width, item: usage.closest(".model-advanced-item").getBoundingClientRect().width }));
+      assert(Math.abs(usageWidth.row - usageWidth.item) <= 1, `${locale}/${theme} request history should use the item's full width`, usageWidth);
       if (process.env.JUDGMENT_STATUS_SHOTS && locale === "ko") {
-        const status = page.locator("#judgment-current-status");
+        const status = page.locator("#model-judgment");
         await status.scrollIntoViewIfNeeded();
         await status.screenshot({ path: resolve(process.env.JUDGMENT_STATUS_SHOTS, `judgment-status-${theme}.png`), animations: "disabled" });
       }
     }
     await page.setViewportSize({ width: 980, height: 1069 });
-    const size = await page.locator("#judgment-current-status").evaluate((status) => ({ client: status.clientWidth, scroll: status.scrollWidth }));
+    const size = await page.locator("#model-judgment").evaluate((status) => ({ client: status.clientWidth, scroll: status.scrollWidth }));
     assert(size.client > 0 && size.scroll <= size.client + 1, `${locale} current judgment status overflows`, size);
-    const untranslated = await page.locator("#judgment-current-status").evaluate((status) => [...status.querySelectorAll("[data-i18n]")].filter((node) => !node.textContent.trim()).map((node) => node.dataset.i18n));
+    const untranslated = await page.locator("#model-judgment").evaluate((status) => [...status.querySelectorAll("[data-i18n]")].filter((node) => !node.textContent.trim()).map((node) => node.dataset.i18n));
     assertEqual(untranslated, [], `${locale} empty judgment status label`);
   }
   await page.locator("#judgment-status-refresh").focus();
@@ -7191,6 +7335,7 @@ await test("실행 중인 판단 모델은 원자적 전환 한 번으로 바꾸
   try {
     await bootPage(modelPage, "model-switch");
     await openSettings(modelPage, "judgment-models");
+    await modelPage.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
     await modelPage.waitForFunction(() => managedJudgmentController.snapshot?.appliedModelId === "fixture-decision");
     const switchingAt = backend.calls.length;
     const identity = backend.typesafeSettings().providerIdentity;
@@ -7272,6 +7417,7 @@ await test("스스로 멈춘 판단 서버는 중지됨과 그 까닭을 다섯 
   try {
     await bootPage(page, "server-exit");
     await openSettings(page, "judgment-models");
+    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
     await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "failed");
     const missing = await page.evaluate((names) => ["en", "ja", "zh", "es"].flatMap((code) => names
       .filter((key) => typeof CATALOG?.[code]?.[key] !== "string" || !CATALOG[code][key].trim()).map((key) => `${code}:${key}`)), keys);
@@ -7338,6 +7484,7 @@ await test("다시 띄우기를 기다리는 판단 서버는 다시 띄우는 �
   try {
     await bootPage(page, "server-restart");
     await openSettings(page, "judgment-models");
+    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
     await page.waitForFunction(() => managedJudgmentController.snapshot?.server.state === "starting");
     const missing = await page.evaluate(() => ["en", "ja", "zh", "es"].filter((code) =>
       typeof CATALOG?.[code]?.["settings.managed.restartingReason"] !== "string" || !CATALOG[code]["settings.managed.restartingReason"].includes("{{reason}}")));
@@ -7488,6 +7635,7 @@ async function photographManagedLibrary(folder) {
     await page.setViewportSize({ width: 1280, height: 2400 });
     await bootPage(page, "managed-photo");
     await openSettings(page, "judgment-models");
+    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
     await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
     await renderSettled(page);
     const drawn = await page.evaluate(() => ({
@@ -7543,6 +7691,7 @@ await test("받은 판단 모델만 목록 행으로 서고 받지 않은 카탈
   try {
     await bootPage(page, "managed-library");
     await openSettings(page, "judgment-models");
+    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
     await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 3);
     assertEqual(await page.locator("#managed-judgment-candidates").count(), 1, "the catalog models not received have no folded line");
     const words = await page.evaluate(() => ({
@@ -7678,6 +7827,7 @@ await test("받은 판단 모델도 연결된 서버도 없으면 목록은 빈 
   try {
     await bootPage(page, "managed-none");
     await openSettings(page, "judgment-models");
+    await page.locator("#model-advanced").evaluate((fold) => { fold.open = true; });
     await page.waitForFunction(() => managedJudgmentController.snapshot?.models.length === 1);
     assertEqual(await page.locator("#managed-judgment-none").count(), 1, "the library has no line for holding nothing");
     const seen = () => page.evaluate(() => {
@@ -8514,7 +8664,9 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await renderSettled(pageA);
   const said = (key, fallback) => pageA.evaluate(([one, words]) => t(one, words), [key, fallback]);
   const unreachable = pageA.locator("[data-jev-unreachable]");
-  // The classifier is folded under 고급 (§6.1): open it to reach it.
+  // The classifier is folded on the orchestration pane (t-75762 v2,
+  // decision 4): open it to reach it.
+  await openSettings(pageA, "orchestration");
   if (!await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)) {
     await pageA.locator("#typesafe-advanced > summary").click();
   }
@@ -8553,7 +8705,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await pageA.selectOption("#route-classifier-select", quiet);
   assertEqual((await backend.waitForCall("A", "set_route_classifier", chosenAt)).args.mode, quiet);
   await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
+    (words) => document.querySelector("#orch-models-status .settings-status-said")?.textContent === words,
     await said("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 빠른 등급 모델에게 묻지 않습니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -8567,8 +8719,10 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   // Turn Jev on: the gated feature now stands at its recommendation and asks,
   // and a word that calls no probe still reaches it — nothing to warn about.
   const onAt = backend.calls.length;
+  await openJudgmentSettings(pageA);
   await pageA.locator("#jev-enabled").click();
   await backend.waitForCall("A", "set_jev_enabled", onAt);
+  await openSettings(pageA, "orchestration");
   await renderSettled(pageA);
   assert(
     await unreachable.isHidden(),
@@ -8583,7 +8737,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await backend.waitForCall("A", "set_route_classifier", offAt);
   await pageA.waitForFunction(() => !document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
-    await statusSaid(pageA, "typesafe-status"),
+    await statusSaid(pageA, "orch-models-status"),
     await said("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다."),
   );
   assertEqual(
@@ -8599,7 +8753,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await backend.waitForCall("A", "set_route_classifier", backAt);
   await pageA.waitForFunction(() => document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
-    await statusSaid(pageA, "typesafe-status"),
+    await statusSaid(pageA, "orch-models-status"),
     await said("settings.classifier.nowProbes", "이제 빠른 등급 모델에게도 묻습니다."),
   );
 
@@ -14127,225 +14281,585 @@ await test("a profile card imports cookies from a file", async () => {
   return "file import summary + source line";
 });
 
-await test("model connection scenes: catalog separates registration, models and use", async () => {
-  backend.settings.locale = "ko";
-  await setQualityLocale(pageA, "ko");
-  const before = clone(backend.zoSettings);
-  const managedBefore = backend.managedModelState ? clone(backend.managedModelState) : null;
-  try {
-    backend.managedJudgmentSettings();
-    backend.managedModelState.models[0].installed = true;
-    backend.zoSettings.providers = [{ name: "긴 한글 연결 이름으로 표시하는 외부 서버", base_url: "https://gateway.example.com/v1", models: ["choice-model", "coding-model"], requires_auth: false, connection: { id: "scene-external", generation: 1 } },
-      { name: "Local fixture", base_url: "http://127.0.0.1:8080/v1", models: ["local-model"], requires_auth: false, connection: { id: "scene-local", generation: 1 } }];
-    await openSettings(pageA, "api-routers");
-    await pageA.evaluate(() => refreshApiRouters());
-    assert(await pageA.locator("#router-card").isHidden(), "the add form still occupies the catalog");
-    const remote = pageA.locator('[data-connection-id="scene-external"]');
-    assert((await remote.textContent()).includes("외부 서버"), "the connection has no location");
-    assert(!(await remote.textContent()).includes("연결됨"), "registration invented a live server status");
-    await remote.locator("[data-connection-models]").click();
-    assertEqual(await remote.locator(".connection-model").count(), 2, "the model list is not expandable");
-    assert(await pageA.locator('[data-connection-id="jev"]').isVisible(), "Jev is outside the catalog");
-    assertEqual(await pageA.locator('[data-connection-id^="managed:"]').count(), 1, "managed local models are outside the catalog");
-    assert((await pageA.locator('[data-connection-id="scene-local"]').textContent()).includes("실행 중인 로컬 서버"));
-    if (process.env.CONNECTION_SCENE_SHOTS) {
-      await mkdir(process.env.CONNECTION_SCENE_SHOTS, { recursive: true });
-      for (const theme of ["dark", "light"]) {
-        await setQualityTheme(pageA, theme);
-        for (const width of [320, 768, 1440]) {
-          await pageA.setViewportSize({ width, height: 960 });
-          await settlePaint(pageA);
-          await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, `catalog-${theme}-${width}.png`), animations: "disabled" });
-          const overflow = await pageA.evaluate(() => { const pane = document.querySelector('.settings-pane[data-pane="api-routers"]'); const right = pane.getBoundingClientRect().right; return [...pane.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > right + 1).map(node => [node.tagName, node.className, node.id, node.getBoundingClientRect().width]); });
-          assert(!overflow.length, "the catalog overflows its pane", overflow);
-        }
-      }
-      await setQualityTheme(pageA, "dark");
-      await pageA.setViewportSize({ width: 1440, height: 1069 });
-      await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => { pane.style.width = "320px"; });
-      await settlePaint(pageA);
-      const split = await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => ({ width: pane.clientWidth, scroll: pane.scrollWidth }));
-      assert(split.scroll <= split.width + 1, "the catalog overflows a narrow pane inside a wide window", split);
-      await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "catalog-split-320.png"), animations: "disabled" });
-      await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => { pane.style.width = ""; });
-      backend.zoSettings.providers = [];
-      await pageA.evaluate(() => refreshApiRouters());
-      assertEqual(await pageA.locator("#router-provider-list .account-row").count(), 0);
-      assert((await pageA.locator("#router-provider-note").textContent()).length > 0);
-      await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "catalog-empty.png"), animations: "disabled" });
-    }
-  } finally {
-    await pageA.locator('.settings-pane[data-pane="api-routers"]').evaluate(pane => { pane.style.width = ""; });
-    backend.zoSettings = before;
-    if (managedBefore) backend.managedModelState = managedBefore; else delete backend.managedModelState;
-    await pageA.setViewportSize({ width: 1280, height: 900 });
-    await pageA.evaluate(() => refreshApiRouters());
-  }
+/* ---- 모델 · 모델 연결, as the person approved them (t-75762 v2, t-75886) ----
+ *
+ * Every list on these two pages is zo's own list and the saved connections;
+ * every state is an answer that came back. What is pinned here is what the
+ * person asked for in words: the coding list shows every model zo shows,
+ * an older generation marked and at the foot of its login; the judgment
+ * list names every login model it does not use; a pick is checked before
+ * it is applied; one press applies the recommendation; the words a
+ * beginner reads carry no technical term; and the pages hold at 390px in
+ * five languages and two themes. `MODEL_SCENE_SHOTS=<folder>` keeps a
+ * picture of each scene. */
+const MODEL_TECH_WORDS = Object.freeze(["provider", "endpoint", "OpenAI JSON", "Choice", "Score", "Noul"]);
+const MODEL_FIXTURE_PRESET = Object.freeze({
+  id: "fixture-router", name: "Fixture Router", base_url: "", auth: { header: "Authorization", scheme: "Bearer" },
+  models: { path: "/models", id_field: "id", context_field: "context_length" },
 });
 
-await test("model connection scenes: add chooses location and authentication before listing models", async () => {
+async function withModelScene(prepare, run) {
+  const saved = {
+    zoSettings: clone(backend.zoSettings), zoList: clone(backend.zoList), zoEnvRouters: clone(backend.zoEnvRouters),
+    legacyKeys: new Map(backend.legacyKeys), keychain: new Map(backend.keychain), routerPresets: clone(backend.routerPresets),
+    managed: backend.managedModelState === undefined ? undefined : clone(backend.managedModelState),
+    connectionCheck: backend.connectionCheck, routerProbeRefusal: backend.routerProbeRefusal, routerProbeAnswers: backend.routerProbeAnswers,
+  };
   backend.settings.locale = "ko";
   await setQualityLocale(pageA, "ko");
+  try {
+    await prepare?.();
+    await openSettings(pageA, "judgment-models");
+    await pageA.evaluate(() => {
+      Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
+      routerPresets = [];
+      return refreshApiRouters();
+    });
+    await renderSettled(pageA);
+    return await run();
+  } finally {
+    Object.assign(backend, {
+      zoSettings: saved.zoSettings, zoList: saved.zoList, zoEnvRouters: saved.zoEnvRouters, legacyKeys: saved.legacyKeys,
+      keychain: saved.keychain, routerPresets: saved.routerPresets, connectionCheck: saved.connectionCheck,
+      routerProbeRefusal: saved.routerProbeRefusal, routerProbeAnswers: saved.routerProbeAnswers,
+    });
+    if (saved.managed === undefined) delete backend.managedModelState; else backend.managedModelState = saved.managed;
+    await pageA.setViewportSize({ width: 1280, height: 860 });
+    await setQualityTheme(pageA, "dark");
+    await pageA.evaluate(() => {
+      Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
+      routerPresets = [];
+      return refreshApiRouters();
+    });
+  }
+}
+
+/* A scene in both themes at 1280 and 390 wide, with nothing wider than its pane. */
+async function modelScenePictures(name) {
+  const pane = pageA.locator(".settings-pane:not([hidden])");
+  for (const theme of ["dark", "light"]) {
+    await setQualityTheme(pageA, theme);
+    for (const width of [1280, 390]) {
+      await pageA.setViewportSize({ width, height: 900 });
+      await settlePaint(pageA);
+      const wide = await pane.evaluate((root) => {
+        const right = root.getBoundingClientRect().right;
+        return [...root.querySelectorAll("*")].filter((node) => node.getClientRects().length && node.getBoundingClientRect().right > right + 1)
+          .map((node) => [node.tagName, node.className, Math.round(node.getBoundingClientRect().right - right)]).slice(0, 5);
+      });
+      assertEqual(wide, [], `${name} ${theme} ${width}px reaches past its pane`);
+      const scroll = await pane.evaluate((root) => root.scrollWidth - root.clientWidth);
+      assert(scroll <= 1, `${name} ${theme} ${width}px scrolls sideways`, scroll);
+      if (process.env.MODEL_SCENE_SHOTS) {
+        await mkdir(process.env.MODEL_SCENE_SHOTS, { recursive: true });
+        // The pane scrolls inside the settings frame: the window is made as
+        // tall as the pane's content so the picture holds all of it.
+        const tall = await pane.evaluate((root) => {
+          const frame = root.closest(".settings-frame") ?? root.parentElement;
+          frame.scrollTop = 0;
+          return Math.ceil(frame.scrollHeight + frame.getBoundingClientRect().top + 16);
+        });
+        await pageA.setViewportSize({ width, height: Math.min(6000, Math.max(900, tall)) });
+        await settlePaint(pageA);
+        await pane.screenshot({ path: resolve(process.env.MODEL_SCENE_SHOTS, `${name}-${theme}-${width}.png`), animations: "disabled" });
+      }
+    }
+  }
+  await pageA.setViewportSize({ width: 1280, height: 860 });
+  await setQualityTheme(pageA, "dark");
+}
+
+/* The chooser's rows in order, each with the group it stands under. */
+function chooserRows(role) {
+  return pageA.evaluate((which) => {
+    const field = [...document.querySelectorAll(".model-chooser")].find((one) => one.querySelector(`input[name="model-pick-${which}"]`));
+    const rows = [];
+    let group = null;
+    for (const node of field?.querySelectorAll(".model-pick-group, .model-pick") ?? []) {
+      if (node.classList.contains("model-pick-group")) { group = node.textContent; continue; }
+      const input = node.querySelector("input");
+      rows.push({ group, value: input.value, disabled: input.disabled, old: Boolean(node.querySelector(".model-old")), name: node.querySelector(".model-pick-name").textContent, why: node.querySelector(".model-pick-why")?.textContent ?? "" });
+    }
+    return rows;
+  }, role);
+}
+
+await test("모델 목록: 코딩 목록의 행은 zo가 보여 주는 모델 전부이고, 이전 세대는 표시를 달고 그 로그인 맨 아래에 선다 (덧붙임 B·D)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Gateway", base_url: "https://gateway.example.test/v1", models: ["vendor/coding-model", "second-model"], requires_auth: false, connection: { id: "gateway", generation: 1 } },
+    { name: "Bench", base_url: "http://127.0.0.1:8090/v1", models: ["bench-model"], requires_auth: false, connection: { id: "bench", generation: 1 } },
+  ];
+  backend.zoEnvRouters = [{ name: "Elsewhere", models: ["Elsewhere/env-only-model"], usable: true, credentialEnvVars: [] }];
+}, async () => {
+  const listed = backend.zoModelList();
+  const expected = [...listed.models.map((row) => row.id), ...listed.customProviders.flatMap((row) => row.models)];
+  await pageA.click('[data-model-change="coding"]');
+  const rows = await chooserRows("coding");
+  assertEqual(rows.map((row) => row.value).sort(), [...expected].sort(), "the coding list is not every model zo lists");
+  assertEqual(rows.length, expected.length, "a model was listed twice or folded away");
+  assert(!await pageA.locator('.model-chooser details').count(), "the coding list hides models behind a fold");
+  const words = await pageA.evaluate(() => t("settings.models.older", "이전 세대"));
+  for (const row of rows) {
+    const superseded = listed.models.find((model) => model.id === row.value)?.band === "superseded";
+    assertEqual(row.old, superseded, `${row.value} wears the wrong generation mark`);
+    if (!superseded) continue;
+    const group = rows.filter((other) => other.group === row.group);
+    assert(group.indexOf(row) > group.findLastIndex((other) => !other.old), `${row.value} stands above a current model of its login`, group);
+  }
+  assert(await pageA.locator(".model-chooser .model-old").first().textContent() === words);
+  await modelScenePictures("coding-list");
+  return `${rows.length} rows = ${listed.models.length} login + ${listed.customProviders.flatMap((row) => row.models).length} router models · ${rows.filter((row) => row.old).length} older generation at the foot`;
+}));
+
+/* `MODEL_REAL_ZO=<a copy of this machine's zo models --json>`: the coding
+   list the implemented screen draws for it, counted — names never printed. */
+if (process.env.MODEL_REAL_ZO) await test("이 기계의 zo 목록: 구현된 코딩 목록의 행 수 = zo models --json의 모델 수 + 라우터 모델 수", async () => withModelScene(async () => {
+  const real = JSON.parse(await readFile(process.env.MODEL_REAL_ZO, "utf8"));
+  backend.zoSettings.providers = [];
+  backend.zoList = { models: real.models, reports: real.reports, aliases: real.aliases };
+  backend.zoEnvRouters = real.customProviders;
+}, async () => {
+  await pageA.click('[data-model-change="coding"]');
+  const rows = await chooserRows("coding");
+  const listed = backend.zoModelList();
+  const models = listed.models.length;
+  const routers = listed.customProviders.flatMap((row) => row.models).length;
+  assertEqual(rows.length, models + routers, "the coding list on this machine is not zo's whole list");
+  await pageA.click('[data-model-change="judgment"]');
+  await pageA.locator("#model-judgment [data-model-logins] summary").click();
+  const logins = await pageA.locator("#model-judgment [data-model-logins] .model-pick-name").count();
+  assertEqual(logins, models, "the judgment list does not name every login model");
+  await modelScenePictures("real-judgment-list");
+  await pageA.click('[data-model-change="judgment"]');
+  await pageA.click('[data-model-change="coding"]');
+  await modelScenePictures("real-coding-list");
+  return `zoModels ${models} · zoCustomModels ${routers} · codingRows ${rows.length} · judgeLoginExpanded ${logins} · olderGeneration ${rows.filter((row) => row.old).length}`;
+}));
+
+await test("모델 목록: 판단 목록은 로그인 모델 전부를 펼쳐 이름으로 보이고, 고를 수 없게 이유를 단다 (덧붙임 C)", async () => withModelScene(null, async () => {
+  await pageA.click('[data-model-change="judgment"]');
+  const fold = pageA.locator("#model-judgment [data-model-logins]");
+  assertEqual(await fold.count(), 1, "the login models have no line of their own");
+  await fold.locator("summary").click();
+  const names = await fold.locator(".model-pick-name").allTextContents();
+  assertEqual(names.sort(), backend.zoList.models.map((model) => model.displayName).sort(), "the opened line does not name every login model");
+  assert(await fold.locator("input").evaluateAll((inputs) => inputs.every((input) => input.disabled)), "a login model can be picked for decisions");
+  assert((await fold.textContent()).includes(await pageA.evaluate(() => t("settings.models.loginWhy", "구독 로그인은 제품의 자동 요청에 쓰지 않습니다. 코딩 모델로는 고를 수 있습니다."))), "the reason is not said");
+  await modelScenePictures("judgment-list");
+  return `${names.length} login models, each named and dimmed with the reason`;
+}));
+
+await test("모델 연결: 네 묶음이 실제 상태로 서고, 로그인 줄은 펼치면 모델 이름 전부가 나온다", async () => withModelScene(() => {
+  backend.zoSettings.providers = [{ name: "Gateway", base_url: "https://gateway.example.test/v1", models: ["vendor/coding-model"], requires_auth: true, auth_env: "ZEROCODE_ROUTER_GATEWAY_KEY", connection: { id: "gateway", generation: 1 } }];
+}, async () => {
+  await openSettings(pageA, "api-routers");
+  await renderSettled(pageA);
+  assertEqual(await pageA.locator("#model-connection-groups > [data-connection-group]").evaluateAll((groups) => groups.map((group) => group.dataset.connectionGroup)), ["login", "key", "local", "jev"]);
+  const logins = await pageA.locator('[data-connection-group="login"] [data-model-login]').evaluateAll((rows) => rows.map((row) => [row.dataset.modelLogin, row.querySelector(".model-state").dataset.modelState]));
+  assertEqual(logins, [["claude", "ok"], ["openai", "ok"], ["google", "ok"], ["xai", "nologin"]], "a login's state is not its report's");
+  const claude = pageA.locator('[data-model-names="claude"]');
+  await claude.locator("summary").click();
+  assertEqual(await claude.locator("li").allTextContents(), backend.zoList.models.filter((model) => model.provider === "claude").sort((a, b) => (a.band === "superseded") - (b.band === "superseded")).map((model) => model.displayName));
+  const key = pageA.locator('[data-connection-id="gateway"]');
+  assertEqual(await key.locator(".model-state").getAttribute("data-model-state"), "nokey", "a connection with no key reads as reachable");
+  await modelScenePictures("connections");
+  backend.keychain.set("dev.zerocode.router.ZEROCODE_ROUTER_GATEWAY_KEY", "[합성-키]");
+  await pageA.evaluate(() => modelConnectionsController.refresh());
+  backend.routerProbeRefusal = "서버 오류: HTTP 401 — fixture refused";
+  await key.locator("[data-connection-check]").click();
+  await pageA.waitForFunction(() => modelConnectionsController.checks.get("gateway")?.state === "badkey");
+  assertEqual(await key.locator(".model-state").getAttribute("data-model-state"), "badkey", "a 401 is not said as a wrong key");
+  backend.routerProbeRefusal = "연결 실패: error sending request";
+  await key.locator("[data-connection-check]").click();
+  await pageA.waitForFunction(() => modelConnectionsController.checks.get("gateway")?.state === "down");
+  return "login · API key · this computer · Jev, each row's state from its answer";
+}));
+
+await test("처음 질문: 연결도 로그인도 없으면 저절로 묻고, 처음 화면에는 전문 용어가 없다 (결정 7, 시험 12)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+}, async () => {
+  const setup = pageA.locator("#model-setup");
+  assert(await setup.isVisible(), "a person with no connection and no login was not asked");
+  assert(await pageA.locator("#typesafe-card").isHidden(), "the daily cards stand beside the first question");
+  assertEqual(await setup.locator("[data-model-choice]").evaluateAll((choices) => choices.map((choice) => choice.dataset.modelChoice)), ["login", "key", "local", "jev"]);
+  for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+    await setQualityLocale(pageA, locale);
+    const seen = await setup.innerText();
+    const technical = MODEL_TECH_WORDS.filter((word) => seen.includes(word));
+    assertEqual(technical, [], `${locale}: the first question speaks technical terms`);
+    if (locale !== "ko") assert(!/[가-힣]/.test(seen), `${locale}: the first question is not translated`, seen);
+    for (const theme of SETTINGS_QUALITY_SPEC.themes) {
+      await setQualityTheme(pageA, theme);
+      assertEqual(await axeViolations(pageA, AxeBuilder, "#model-setup"), [], `${locale}/${theme} first question accessibility`);
+    }
+  }
+  await setQualityLocale(pageA, "ko");
+  await modelScenePictures("first-question");
+  await pageA.evaluate(() => modelConnectionsController.closeSetup());
+  backend.zoList.reports = clone(ZO_LIST_FIXTURE.reports);
+  await pageA.evaluate(() => { modelConnectionsController.setupDismissed = false; return modelConnectionsController.refresh(); });
+  assert(await setup.isHidden(), "a signed-in person was asked the first question by itself");
   await openSettings(pageA, "api-routers");
   await pageA.click("#connections-add");
-  assert(await pageA.locator("#router-card").isVisible());
-  assertEqual(await pageA.locator("#connection-location option").count(), 4, "location choices omit a source");
-  await pageA.selectOption("#connection-location", "local");
-  await pageA.fill("#router-base-url-input", "http://127.0.0.1:8080/v1");
-  await pageA.selectOption("#connection-auth", "none");
-  assert(await pageA.locator("#router-key-input").isHidden(), "keyless setup still requests a key");
-  assert((await pageA.locator("#connection-registration-note").textContent()).includes("현재 사용 모델은 바뀌지"));
-  await connectionScenePictures(pageA, "add-flow");
-  const calls = backend.calls.length;
-  await pageA.selectOption("#connection-location", "managed");
-  assert(await pageA.locator("#connection-service-action").isVisible());
-  assert(await pageA.locator("#connection-server-fields").isHidden());
-  assertEqual(backend.calls.slice(calls).filter(call => ["save_api_router", "select_model_connection", "test_router_connection"].includes(call.command)).length, 0, "choosing a source made a server request");
-  await pageA.selectOption("#connection-location", "remote");
-  await pageA.evaluate(() => modelConnectionsController.show("catalog"));
-});
+  assert(await setup.isVisible(), "「연결 추가」 does not ask the question");
+  return "asked only when nothing is connected · four choices · no technical word in five languages · axe clean";
+}));
 
-await test("model connection scenes: assignment compares drafts and requires a current format check", async () => {
-  backend.settings.locale = "ko";
-  await setQualityLocale(pageA, "ko");
-  const before = clone(backend.zoSettings);
+await test("② API 키: 연결 확인이 「연결됨 — 모델 N개」로 답하고 키는 키체인에만 간다; 401·닫힌 서버는 쉬운 말로 (시험 6·7)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
+  backend.routerProbeAnswers = { "https://fixture-router.example.test/v1": ["model-alpha", "model-beta", "model-gamma", "model-delta"] };
+}, async () => {
+  await pageA.click('[data-model-choice="key"]');
+  await pageA.selectOption("#model-setup-service", "fixture-router");
+  await pageA.fill("#model-setup-key", "[합성-키]");
+  backend.routerProbeRefusal = "서버 오류: HTTP 401 — fixture refused";
+  await pageA.click("#model-setup-check");
+  await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
+  const badkey = await pageA.evaluate(() => t("settings.models.state.badkey", "키가 맞지 않습니다"));
+  assert((await pageA.locator("#model-setup").textContent()).includes(badkey), "a 401 is not said as a wrong key");
+  assertEqual(backend.zoSettings.providers.length, 0, "a refused check saved the connection");
+  backend.routerProbeRefusal = "연결 실패: error sending request for url";
+  await pageA.fill("#model-setup-key", "[합성-키]");
+  await pageA.click("#model-setup-check");
+  await pageA.waitForFunction(() => modelConnectionsController.setup?.failure === "down");
+  backend.routerProbeRefusal = null;
+  await pageA.fill("#model-setup-key", "[합성-키]");
+  const at = backend.calls.length;
+  await pageA.click("#model-setup-check");
+  await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "ok");
+  const connected = await pageA.evaluate(() => t("settings.models.connected", "연결됨 — 모델 {{count}}개", { count: 4 }));
+  assert((await pageA.locator("#model-setup").textContent()).includes(connected), "the answer does not count the server's models");
+  const saved = backend.calls.slice(at).find((call) => call.command === "save_api_router");
+  assertEqual(saved.args.models.length, 4, "the connection was saved without the models the server listed");
+  const row = backend.zoSettings.providers[0];
+  assert(!JSON.stringify(backend.zoSettings).includes("[합성-키]"), "the key reached the settings file");
+  assertEqual(backend.keychain.get(`dev.zerocode.router.${row.auth_env}`), "[합성-키]", "the key is not in the keychain");
+  assertEqual(await pageA.inputValue("#model-setup-key").catch(() => ""), "", "the key stayed in the field");
+  await modelScenePictures("key-ok");
+  return "401 → wrong key · refused socket → no answer · 4 models counted · key in the keychain only";
+}));
+
+await test("추천대로 쓰기: 로그인 계정의 「최상위」를 코딩에, 실행 중인 이 컴퓨터 모델을 판단에 — 한 번에 적용하고 zo에 한 번 알린다 (결정 6, 시험 8)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32105", model: "fixture-decision", requiresAuth: false };
+  backend.zoSettings.smart = { judgmentProvider: provider };
+  backend.zoSettings.model = "fixture-openai-old";
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  Object.assign(backend.managedModelState, {
+    // A manager of its own: the window keeps the newest snapshot of the one it knew.
+    instanceId: "fixture-reco-instance",
+    configuredModelId: provider.model, appliedModelId: provider.model, runtime: { state: "ready", downloadBytes: 0, reason: null },
+    server: { id: "fixture-reco-server", state: "ready", modelId: provider.model, provider, checked: true, error: null },
+  });
+  backend.managedModelState.models[0].installed = true;
+}, async () => {
+  backend.zoList.reports = clone(ZO_LIST_FIXTURE.reports);
+  await pageA.click('[data-model-choice="login"]');
+  await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "ok");
+  const coding = pageA.locator('[data-model-reco="coding"]');
+  assert((await coding.textContent()).includes("Fixture Claude Top"), "the coding recommendation is not the signed-in account's top model");
+  assert((await pageA.locator('[data-model-reco="judgment"]').textContent()).includes("Fixture Decision"), "the decision recommendation is not the running model on this computer");
+  await modelScenePictures("login-reco");
+  const at = backend.calls.length;
+  await pageA.click("[data-model-apply-setup]");
+  await pageA.waitForSelector("[data-model-done]");
+  const calls = backend.calls.slice(at).map((call) => call.command);
+  assertEqual(calls.filter((command) => command === "select_coding_model").length, 1, "the coding model was not applied once");
+  assertEqual(calls.filter((command) => command === "sync_model_connections").length, 1, "running zo were not told once");
+  assert(!calls.includes("managed_judgment_apply"), "the decision model already in use was applied again");
+  assertEqual(backend.zoSettings.model, "fixture-claude-top");
+  assertEqual(backend.zoSettings.smart.previousCodingSelection, "fixture-openai-old");
+  assert((await pageA.locator("[data-model-done]").textContent()).includes(await pageA.evaluate(() => t("settings.models.runningKept", "이미 열린 zo 세션은 지금 모델을 그대로 씁니다."))), "the done line promises a change to sessions already open");
+  await modelScenePictures("done");
+  return "one press: coding → the account's top model, decision kept, one sync";
+}));
+
+await test("판단 모델: 고르면 확인이 저절로 돌고, 통과하지 못한 모델은 적용할 수 없다; 키 없는 연결은 미리 흐리게 (시험 9)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+    { name: "Locked", base_url: "https://locked.example.test/v1", models: ["locked-model"], requires_auth: true, auth_env: "ZEROCODE_ROUTER_LOCKED_KEY", connection: { id: "locked", generation: 1 } },
+  ];
+}, async () => {
+  await pageA.click('[data-model-change="judgment"]');
+  const rows = await chooserRows("judgment");
+  const locked = rows.find((row) => row.value === JSON.stringify(["locked", "locked-model"]));
+  assert(locked?.disabled, "a connection with no key can be picked for decisions");
+  assert(locked.why.includes(await pageA.evaluate(() => t("settings.models.state.nokey", "키를 찾지 못했습니다"))), "the dimmed row does not say why");
+  assert(!rows.find((row) => row.value === JSON.stringify(["judge", "judge-model"])).disabled, "a connection nobody has checked yet was dimmed");
+  backend.connectionCheck = { answered: false, failure: "schema" };
+  let at = backend.calls.length;
+  await pageA.locator(`input[value='${JSON.stringify(["judge", "judge-model"])}']`).check();
+  await backend.waitForCall("A", "check_model_connection", at);
+  await pageA.waitForSelector('[data-verdict="schema"]');
+  assert(await pageA.locator('[data-model-apply="judgment"]').isDisabled(), "a model that failed its check can be applied");
+  backend.connectionCheck = { answered: true, failure: null };
+  // A failed check dims the row; checking the connection again lets it be asked again.
+  assert(await pageA.locator(`input[value='${JSON.stringify(["judge", "judge-model"])}']`).isDisabled(), "a failed model stays pickable as if unchecked");
+  await pageA.evaluate(() => modelConnectionsController.checkConnection(modelConnectionsController.state.connections.find((row) => row.id === "judge")));
+  await pageA.click('[data-model-change="judgment"]');
+  await pageA.click('[data-model-change="judgment"]');
+  at = backend.calls.length;
+  await pageA.locator(`input[value='${JSON.stringify(["judge", "judge-model"])}']`).check();
+  await pageA.waitForSelector('[data-verdict="usable"]');
+  await pageA.click('[data-model-apply="judgment"]');
+  const applied = await backend.waitForCall("A", "select_model_connection", at);
+  assertEqual(applied.args.reference, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_json" }, "the apply named another connection");
+  await modelScenePictures("judgment-applied");
+  return "auto check on pick · failed check blocks apply · keyless row dimmed with its reason";
+}));
+
+await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면·「자세히」·로그 어디에도 그 키가 없다 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
+}, async () => {
+  const key = "[합성-키]-echo-7f3a";
+  const logged = [];
+  const listen = (message) => logged.push(message.text());
+  pageA.on("console", listen);
   try {
-    backend.zoSettings.providers = [
-      { name: "Local fixture", base_url: "http://127.0.0.1:8080/v1", models: ["local-model"], requires_auth: false, connection: { id: "local-scene", generation: 1 } },
-      { name: "External fixture", base_url: "https://gateway.example.com/v1", models: ["external-model"], requires_auth: false, connection: { id: "external-scene", generation: 1 } },
-    ];
-    await openSettings(pageA, "api-routers");
-    await pageA.evaluate(() => refreshApiRouters());
-    await pageA.locator('[data-connection-nav="usage"]').click();
-    const calls = backend.calls.length;
-    await pageA.click('[data-connection-scenario="local"]');
-    const selected = await pageA.evaluate(() => [modelConnectionsController.selected("coding"), modelConnectionsController.selected("judgment")]);
-    assertEqual(selected.map(row => row.id), ["external-scene", "local-scene"]);
-    assertEqual(backend.calls.slice(calls).filter(call => call.command === "select_model_connection").length, 0);
-    const judgment = pageA.locator('[data-connection-roles="all"] [data-role="judgment"]');
-    assert(await judgment.locator('[data-connection-apply]').isDisabled(), "unchecked draft can be applied");
-    await judgment.locator('[data-connection-check]').click();
-    await pageA.waitForFunction(() => !modelConnectionsController.busy);
-    assert(await judgment.locator('[data-connection-apply]').isEnabled());
-    assertEqual(await judgment.locator('[data-format-state="ready"]').count(), 3);
-    await pageA.click('[data-connection-scenario="shared"]');
-    assert(await judgment.locator('[data-connection-apply]').isDisabled(), "changed assignment reused its check");
-    assertEqual(await pageA.evaluate(() => modelConnectionsController.selected("coding").id), "external-scene");
-    assert((await pageA.locator("#connection-comparison").textContent()).includes("External fixture"));
-    await connectionScenePictures(pageA, "assignment-draft");
+    await pageA.click('[data-model-choice="key"]');
+    await pageA.selectOption("#model-setup-service", "fixture-router");
+    await pageA.fill("#model-setup-key", key);
+    // An answer that carries the key back whole: whatever road brought it,
+    // the screen keeps it off every line it draws.
+    backend.routerProbeRefusal = `서버 오류: HTTP 401 Unauthorized — invalid token Bearer ${key}`;
+    const at = backend.calls.length;
+    await pageA.click("#model-setup-check");
+    await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
+    await pageA.locator("#model-setup details summary").first().click().catch(() => {});
+    const held = await pageA.evaluate(() => JSON.stringify(modelConnectionsController.setup));
+    const drawn = await pageA.evaluate(() => document.body.innerHTML);
+    const noted = backend.calls.slice(at).filter((call) => call.command === "note_webview_error").map((call) => JSON.stringify(call.args));
+    assert(!held.includes(key), "the page holds the key it was handed back");
+    assert(!drawn.includes(key), "the key the server said back is drawn on the screen");
+    assert(!noted.some((text) => text.includes(key)), "the key reached the window's log");
+    assert(!logged.some((text) => text.includes(key)), "the key reached the console");
+    assert((await pageA.locator("#model-setup").textContent()).includes(await pageA.evaluate(() => t("settings.models.state.badkey", "키가 맞지 않습니다"))), "the 401 is not said as a wrong key");
+    assert(drawn.includes("invalid token"), "the server's reason is gone with the key");
+    await modelScenePictures("key-refused");
   } finally {
-    backend.zoSettings = before;
-    await pageA.evaluate(() => { modelConnectionsController.drafts.clear(); modelConnectionsController.results.clear(); modelConnectionsController.show("catalog"); return refreshApiRouters(); });
+    pageA.off("console", listen);
   }
-});
+  return "401 echoing the pasted key: page state 0 · DOM 0 · window log 0 · console 0 hits; reason kept";
+}));
 
-await test("model connection scenes: deletion explains used roles beside the connection", async () => {
-  backend.settings.locale = "ko";
-  await setQualityLocale(pageA, "ko");
-  const before = clone(backend.zoSettings);
+await test("검수 F2: 빈 zo 목록을 먼저 읽은 뒤 새 연결을 저장하면 곧바로 「추천대로 쓰기」가 그 연결의 모델로 적용된다 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
+  backend.routerProbeAnswers = { "https://fixture-router.example.test/v1": ["model-alpha", "model-beta"] };
+  // The window's zo list is `slash_catalog`'s cache: what was read stands
+  // until a change the window makes forgets it.
+  backend.zoListCaching = true;
+  backend.zoListHeld = null;
+}, async () => {
   try {
-    backend.zoSettings.providers = [{ name: "Used fixture", base_url: "https://gateway.example.com/v1", models: ["fixture-model"], requires_auth: false, connection: { id: "used-scene", generation: 1 } }];
-    backend.zoSettings.smart = { ...backend.zoSettings.smart, codingConnection: { id: "used-scene", generation: 1, model: "fixture-model", protocol: "openai_json" } };
-    await openSettings(pageA, "api-routers");
-    await pageA.evaluate(() => { modelConnectionsController.show("catalog"); return refreshApiRouters(); });
-    const from = backend.calls.length;
-    await pageA.locator('[data-connection-id="used-scene"] .account-drop').click();
-    const note = pageA.locator('[data-connection-id="used-scene"] .connection-delete-note');
-    assert(await note.isVisible(), "deletion advice is outside the connection");
-    assert((await note.textContent()).includes("코딩"));
-    assert(await note.getByRole("button", { name: "모델 사용", exact: true }).isVisible(), "deletion offers no route to replace the role");
-    assertEqual(backend.calls.slice(from).filter(call => call.command === "remove_api_router").length, 0);
-    if (process.env.CONNECTION_SCENE_SHOTS) await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, "delete-used.png"), animations: "disabled" });
+    assertEqual(backend.zoListHeld?.customProviders.length, 0, "the screen did not read the empty list first");
+    await pageA.click('[data-model-choice="key"]');
+    await pageA.selectOption("#model-setup-service", "fixture-router");
+    await pageA.fill("#model-setup-key", "[합성-키]");
+    await pageA.click("#model-setup-check");
+    await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "ok");
+    const coding = pageA.locator('[data-model-reco="coding"]');
+    assert((await coding.textContent()).includes("model-alpha"), "the new connection's model is not offered for coding", await coding.textContent());
+    const at = backend.calls.length;
+    await pageA.click("[data-model-apply-setup]");
+    await pageA.waitForSelector("[data-model-done]");
+    const applied = backend.calls.slice(at).find((call) => call.command === "select_coding_model");
+    assertEqual(applied?.args.model, "Fixture Router/model-alpha", "the recommendation was not applied");
+    assertEqual(backend.zoSettings.model, "Fixture Router/model-alpha", "the coding model is not the new connection's");
+    assert(await pageA.locator("[data-model-done].is-ok").count(), "the done line says the coding model was not applied", await pageA.locator("[data-model-done]").textContent());
   } finally {
-    backend.zoSettings = before;
-    await pageA.evaluate(() => refreshApiRouters());
+    backend.zoListCaching = false;
+    backend.zoListHeld = null;
   }
-});
+  return "empty list read → connection saved → recommendation applied as Fixture Router/model-alpha";
+}));
 
-await test("model connection scenes: model use absorbs the old judgment picker", async () => {
-  backend.settings.locale = "ko";
-  await setQualityLocale(pageA, "ko");
+await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System One과 OpenAI JSON 각각 확인·적용이 같은 형식이고, 바꾸는 것은 「고급」에서만 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Bench", base_url: "http://127.0.0.1:8091/v1", models: ["bench-a", "bench-b"], requires_auth: false, connection: { id: "bench", generation: 4 } },
+    { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+  ];
+  const reference = { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" };
+  backend.zoSettings.smart = {
+    judgmentConnection: reference,
+    judgmentProvider: { kind: "remote", protocol: "system_one", baseUrl: "http://127.0.0.1:8091/v1", model: "bench-a", requiresAuth: false },
+  };
+}, async () => {
+  const pickAndApply = async (connection, model) => {
+    if (!await pageA.locator('[data-model-apply="judgment"]').count()) await pageA.click('[data-model-change="judgment"]');
+    const at = backend.calls.length;
+    await pageA.locator(`input[name="model-pick-judgment"][value='${JSON.stringify([connection, model])}']`).check();
+    const checked = await backend.waitForCall("A", "check_model_connection", at);
+    await pageA.waitForSelector('[data-verdict="usable"]');
+    await pageA.click('[data-model-apply="judgment"]');
+    const applied = await backend.waitForCall("A", "select_model_connection", at);
+    await renderSettled(pageA);
+    return [checked.args.reference, applied.args.reference];
+  };
+  // System One: another model of the connection judgment already uses.
+  const [systemCheck, systemApply] = await pickAndApply("bench", "bench-b");
+  assertEqual(systemCheck, { id: "bench", generation: 4, model: "bench-b", protocol: "system_one" }, "the check asked another format than the connection's");
+  assertEqual(systemApply, systemCheck, "the apply wrote another reference than the one checked");
+  // OpenAI JSON: a connection judgment never used, in its default format.
+  const [openCheck, openApply] = await pickAndApply("judge", "judge-model");
+  assertEqual(openCheck, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_json" });
+  assertEqual(openApply, openCheck, "the apply wrote another reference than the one checked");
+  // The everyday list names no format; 「고급」 changes one, and the same
+  // model can then be applied in it.
+  assert(!(await pageA.locator('[data-model-role="judgment"]').innerText()).match(/OpenAI JSON|System One/), "the everyday list speaks a format");
+  await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; document.getElementById("model-advanced-format-fold").open = true; });
+  const format = pageA.locator('#model-advanced [data-judgment-format="judge"]');
+  assertEqual(await format.inputValue(), "openai_json", "「고급」 does not show the connection's format");
+  await format.selectOption("system_one");
+  await renderSettled(pageA);
+  await modelScenePictures("judgment-format");
+  const [againCheck, againApply] = await pickAndApply("judge", "judge-model");
+  assertEqual(againCheck.protocol, "system_one", "the format picked in 「고급」 was not asked");
+  assertEqual(againApply, againCheck, "the apply wrote another reference than the one checked");
+  return "System One kept for check+apply · OpenAI JSON kept for check+apply · 「고급」 switches judge to System One and re-applies";
+}));
+
+await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결로 돌아와도, 화면을 다시 열어도 그 연결의 판단 형식은 그대로다 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Bench", base_url: "http://127.0.0.1:8091/v1", models: ["bench-a", "bench-b"], requires_auth: false, connection: { id: "bench", generation: 4 } },
+    { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+  ];
+  backend.zoSettings.smart = {
+    judgmentConnection: { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" },
+    judgmentProvider: { kind: "remote", protocol: "system_one", baseUrl: "http://127.0.0.1:8091/v1", model: "bench-a", requiresAuth: false },
+  };
+}, async () => {
+  const pickAndApply = async (connection, model) => {
+    if (!await pageA.locator('[data-model-apply="judgment"]').count()) await pageA.click('[data-model-change="judgment"]');
+    const at = backend.calls.length;
+    await pageA.locator(`input[name="model-pick-judgment"][value='${JSON.stringify([connection, model])}']`).check();
+    const checked = await backend.waitForCall("A", "check_model_connection", at);
+    await pageA.waitForSelector('[data-verdict="usable"]');
+    await pageA.click('[data-model-apply="judgment"]');
+    const applied = await backend.waitForCall("A", "select_model_connection", at);
+    await renderSettled(pageA);
+    return [checked.args.reference, applied.args.reference];
+  };
+  const [judgeCheck] = await pickAndApply("judge", "judge-model");
+  assertEqual(judgeCheck.protocol, "openai_json", "a connection judgment never used was asked in another format");
+  await openSettings(pageA, "api-routers");
   await openSettings(pageA, "judgment-models");
-  assertEqual(await pageA.locator('.settings-rail-item[data-pane="judgment-models"]').textContent().then(text => text.trim()), "모델 사용");
-  assertEqual(await pageA.locator('[data-connection-roles="judgment"]').count(), 0, "a second role picker remains");
-  assert(await pageA.locator('[data-connection-roles="all"]').isVisible(), "coding and judgment are not selected together");
-  assert(!(await pageA.locator('#judgment-connection-settings > summary').textContent()).includes("기존 서버"));
-  await pageA.evaluate(() => modelConnectionsController.show("catalog"));
-});
+  await renderSettled(pageA);
+  await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; document.getElementById("model-advanced-format-fold").open = true; });
+  assertEqual(await pageA.locator('#model-advanced [data-judgment-format="bench"]').inputValue(), "system_one", "「고급」 shows Bench in another format once judgment moved on");
+  const [benchCheck, benchApply] = await pickAndApply("bench", "bench-a");
+  assertEqual(benchCheck, { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" }, "coming back to Bench asked it in another format");
+  assertEqual(benchApply, benchCheck, "the apply wrote another reference than the one checked");
+  assertEqual(await pageA.locator('#model-advanced [data-judgment-format="judge"]').inputValue(), "openai_json", "Judge's format changed with nobody touching 「고급」");
+  return "Bench system_one → Judge openai_json → (screen reopened) Bench system_one for check+apply";
+}));
 
-await test("model connection scenes: failed and stale checks keep the active judgment", async () => {
-  backend.settings.locale = "ko";
-  await setQualityLocale(pageA, "ko");
-  const before = clone(backend.zoSettings);
-  try {
-    backend.zoSettings.providers = [{ name: "Error fixture", base_url: "http://127.0.0.1:8080/v1", models: ["fixture-model"], requires_auth: false, connection: { id: "error-scene", generation: 1 } }];
-    await openSettings(pageA, "api-routers");
-    await pageA.evaluate(() => refreshApiRouters());
-    await pageA.evaluate(() => { modelConnectionsController.show("usage"); modelConnectionsController.change("judgment", { id: "error-scene", generation: 1, model: "fixture-model", protocol: "openai_json" }); });
-    const active = clone(backend.zoSettings.smart?.judgmentProvider ?? null);
-    for (const token of ["schema", "provider_request"]) {
-      backend.connectionCheck = { answered: false, failure: token };
-      await pageA.evaluate(() => modelConnectionsController.run("judgment", "check"));
-      const panel = pageA.locator('[data-connection-roles="all"] [data-role="judgment"]');
-      assert((await panel.locator(".connection-failure-help").textContent()).includes("현재 판단 모델"));
-      assert(await panel.locator("[data-connection-apply]").isDisabled());
-      assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null, active);
-      if (process.env.CONNECTION_SCENE_SHOTS) {
-        await panel.scrollIntoViewIfNeeded();
-        await pageA.screenshot({ path: resolve(process.env.CONNECTION_SCENE_SHOTS, `error-${token}.png`), animations: "disabled" });
-      }
-    }
-    let finish;
-    backend.connectionCheckWait = new Promise(resolve => { finish = resolve; });
-    const from = backend.calls.length;
-    const checking = pageA.evaluate(() => modelConnectionsController.run("judgment", "check"));
-    await backend.waitForCall("A", "check_model_connection", from);
-    backend.zoSettings.providers[0].connection.generation += 1;
-    await pageA.evaluate(() => modelConnectionsController.refresh());
-    finish({ answered: true, failure: null });
-    await checking;
-    assert(!await pageA.evaluate(() => modelConnectionsController.checked("judgment")), "an old-generation check became applicable");
-    assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null, active);
-  } finally {
-    delete backend.connectionCheck;
-    delete backend.connectionCheckWait;
-    backend.zoSettings = before;
-    await pageA.evaluate(() => { modelConnectionsController.drafts.clear(); modelConnectionsController.results.clear(); modelConnectionsController.show("catalog"); return refreshApiRouters(); });
-  }
-});
+await test("검수 F4: 멈춘 이 컴퓨터 모델을 고르면 요청 없이 「실행 뒤 확인합니다」라고만 말하고, 확인 전에는 통과라고 하지 않는다 (t-76028)", async () => withModelScene(() => {
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  Object.assign(backend.managedModelState, { instanceId: "fixture-stopped-instance", runtime: { state: "ready", downloadBytes: 0, reason: null } });
+  backend.managedModelState.models[0].installed = true;
+}, async () => {
+  await pageA.click('[data-model-change="judgment"]');
+  const at = backend.calls.length;
+  await pageA.locator(`input[name="model-pick-judgment"][value="managed:fixture-decision"]`).check();
+  await renderSettled(pageA);
+  const asked = backend.calls.slice(at).filter((call) => /^(check_model_connection|preflight_judgment_provider|managed_judgment_)/.test(call.command));
+  assertEqual(asked.length, 0, "picking asked something it does not wait for");
+  const verdict = pageA.locator('[data-model-role="judgment"] .model-verdict');
+  const words = await verdict.textContent();
+  const later = await pageA.evaluate(() => t("settings.models.state.later", "실행 뒤 확인합니다"));
+  const passed = await pageA.evaluate(() => t("settings.models.usableSub", "판단 확인을 통과했습니다. 적용을 누르면 다음 판단부터 이 모델을 씁니다."));
+  assert(words.includes(later), "a stopped model does not say it is checked once it runs", words);
+  assert(!words.includes(passed) && !words.includes(await pageA.evaluate(() => t("settings.models.state.usable", "쓸 수 있음"))), "a model nobody checked is said to have passed", words);
+  assert(!await pageA.locator('[data-model-apply="judgment"]').isDisabled(), "the apply that checks it cannot be pressed");
+  await modelScenePictures("managed-pick-later");
+  return `stopped model picked: ${asked.length} requests · says 「${later}」 · no pass words`;
+}));
 
-await test("shared connection selection sends only its reference and preserves the active model on refusal", async () => {
-  const before = clone(backend.zoSettings);
-  try {
-    backend.zoSettings.providers = [{name:"Shared fixture",base_url:"https://gateway.example.com/v1",models:["choice-model","coding-model"],requires_auth:true,auth_env:"ZEROCODE_ROUTER_SHARED_FIXTURE_KEY",connection:{id:"shared-fixture",generation:7}}];
-    backend.connectionReloadStatus = {queued:1,restartRequired:1,unknown:0};
-    await openSettings(pageA,"api-routers");
-    await pageA.evaluate(() => refreshApiRouters());
-    await pageA.evaluate(() => modelConnectionsController.change("judgment",{id:"shared-fixture",generation:7,model:"choice-model",protocol:"openai_json"}));
-    const active = clone(backend.zoSettings.smart?.judgmentProvider ?? null);
-    backend.connectionApplyError = "schema";
-    const from = backend.calls.length;
-    await pageA.evaluate(() => modelConnectionsController.run("judgment","apply"));
-    const sent = backend.calls.slice(from).find(call => call.command === "select_model_connection");
-    assertEqual(sent.args.reference,{id:"shared-fixture",generation:7,model:"choice-model",protocol:"openai_json"},"role request did not carry the saved identity");
-    assert(!("key" in sent.args) && !("baseUrl" in sent.args) && !("authEnv" in sent.args),"role selector forwarded credential material");
-    assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null,active,"a refused apply changed the active provider");
-    backend.connectionApplyError = null;
-    await pageA.evaluate(() => modelConnectionsController.run("judgment","check"));
-    assert(await pageA.locator('[data-connection-roles="all"] .connection-result').last().textContent(),"the response check was not displayed");
-    await pageA.evaluate(() => modelConnectionsController.change("judgment",{id:"shared-fixture",generation:7,model:"coding-model",protocol:"openai_json"}));
-    assertEqual(await pageA.evaluate(() => modelConnectionsController.results.has("judgment")),false,"old check survived a model change");
-    await pageA.evaluate(() => modelConnectionsController.run("judgment","apply"));
-    const removals = backend.count("A","remove_api_router");
-    await pageA.locator('#router-provider-list .account-drop').first().click();
-    assertEqual(backend.count("A","remove_api_router"),removals,"an in-use connection was silently deleted");
-    await pageA.evaluate(() => modelConnectionsController.run("judgment","clear"));
-    assertEqual(backend.zoSettings.smart?.judgmentProvider ?? null,active,"clearing a role lost the previous provider");
-  } finally {
-    backend.zoSettings = before; backend.connectionApplyError = null; backend.connectionReloadStatus = null;
-    await pageA.evaluate(() => { modelConnectionsController.drafts.clear(); modelConnectionsController.results.clear(); return refreshApiRouters(); });
-  }
-});
+await test("⑥ 창이 못 읽는 키 변수의 연결은 미리 그렇다고 말하고, 이전 판단 키는 어디서 어디로 옮기는지 보인 뒤 사람이 누를 때만 옮긴다", async () => withModelScene(() => {
+  backend.zoSettings.providers = [{ name: "Private gateway", base_url: "https://private.example.test/v1", models: ["reason-model"], requires_auth: true, auth_env: "FIXTURE_FOREIGN_LLM_KEY", connection: { id: "private", generation: 3 } }];
+  backend.legacyKeys.set("private", "[합성-이전-판단-키]");
+}, async () => {
+  await openSettings(pageA, "api-routers");
+  await renderSettled(pageA);
+  const row = pageA.locator('[data-connection-id="private"]');
+  assertEqual(await row.locator(".model-state").getAttribute("data-model-state"), "unreadable");
+  assert((await row.textContent()).includes("FIXTURE_FOREIGN_LLM_KEY"), "the row does not name the variable the window cannot read");
+  await modelScenePictures("key-unreadable");
+  const at = backend.calls.length;
+  await row.locator("[data-legacy-move]").click();
+  const confirm = row.locator('[data-legacy-confirm="private"]');
+  assert(await confirm.isVisible(), "the move does not say from where to where first");
+  assert((await confirm.textContent()).includes("https://private.example.test/v1"), "the move does not name the address the old key served");
+  assertEqual(backend.calls.slice(at).filter((call) => call.command === "adopt_legacy_judgment_key").length, 0, "the key moved before the person confirmed");
+  await confirm.locator("[data-legacy-confirm-move]").click();
+  await backend.waitForCall("A", "adopt_legacy_judgment_key", at);
+  await pageA.waitForFunction(() => !document.querySelector('[data-connection-id="private"] [data-legacy-move]'));
+  const moved = backend.zoSettings.providers[0];
+  assert(moved.auth_env.startsWith("ZEROCODE_ROUTER_"), "the row still names a variable the window cannot read");
+  assertEqual(backend.keychain.get(`dev.zerocode.router.${moved.auth_env}`), "[합성-이전-판단-키]");
+  return "unreadable variable said before any request · from→to line · moved on the person's press";
+}));
+
+await test("이 컴퓨터 판단 서버: 실행 중 · 다시 띄우는 중 · 멈춤 · 다른 작업 중 · 설정이 방금 바뀜을 실제 상태로 말하고 단추가 실제로 동작한다 (t-59744 ④⑥)", async () => withModelScene(() => {
+  const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32106", model: "fixture-decision", requiresAuth: false };
+  backend.zoSettings.smart = { judgmentProvider: provider };
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  Object.assign(backend.managedModelState, {
+    instanceId: "fixture-five-instance",
+    configuredModelId: provider.model, appliedModelId: provider.model, runtime: { state: "ready", downloadBytes: 0, reason: null },
+    server: { id: "fixture-five-server", state: "ready", modelId: provider.model, provider, checked: true, error: null },
+  });
+  backend.managedModelState.models[0].installed = true;
+}, async () => {
+  await openSettings(pageA, "api-routers");
+  await renderSettled(pageA);
+  const row = pageA.locator('[data-connection-id="managed:fixture-decision"]');
+  const state = () => row.locator(".model-state").getAttribute("data-model-state");
+  assertEqual(await state(), "running");
+  const at = backend.calls.length;
+  await row.locator('[data-managed-action="stop"]').click();
+  assertEqual((await backend.waitForCall("A", "managed_judgment_stop", at)).args.serverId, "fixture-five-server", "the stop did not name the running server");
+  await pageA.waitForFunction(() => document.querySelector('[data-connection-id="managed:fixture-decision"] .model-state')?.dataset.modelState === "stopped");
+  assert(await row.locator('[data-managed-action="start"]').isVisible(), "a stopped server offers no restart");
+  await modelScenePictures("managed-stopped");
+  const snapshot = backend.managedJudgmentSettings();
+  snapshot.revision += 1;
+  snapshot.server = { ...snapshot.server, state: "starting", exit: { cause: "runtime_exited", code: 7, signal: null, task: null } };
+  await backend.emitManaged(snapshot);
+  await pageA.waitForFunction(() => document.querySelector('[data-connection-id="managed:fixture-decision"] .model-state')?.dataset.modelState === "restarting");
+  assert(await row.locator('[data-managed-action="stop"]').isVisible(), "a restart that waits offers no stop");
+  snapshot.revision += 1;
+  snapshot.server = { ...snapshot.server, state: "stopped", exit: null };
+  snapshot.operation = { id: "fixture-download", kind: "download", state: "running", modelId: "fixture-decision", receivedBytes: 1, totalBytes: 4 };
+  await backend.emitManaged(snapshot);
+  await pageA.waitForFunction(() => document.querySelector('[data-connection-id="managed:fixture-decision"] .model-state')?.dataset.modelState === "busy");
+  assert(await row.locator('[data-managed-action="stop"]').isDisabled(), "a busy server can be stopped");
+  assert(await row.locator('[data-managed-action="cancel"]').isVisible(), "a download offers no cancel");
+  snapshot.revision += 1;
+  snapshot.operation = null;
+  snapshot.server = { ...snapshot.server, state: "ready", exit: null };
+  await backend.emitManaged(snapshot);
+  await pageA.waitForFunction(() => document.querySelector('[data-connection-id="managed:fixture-decision"] .model-state')?.dataset.modelState === "running");
+  backend.managedStopRefusal = "settings_changed";
+  await row.locator('[data-managed-action="stop"]').click();
+  await pageA.waitForFunction(() => document.querySelector('[data-connection-id="managed:fixture-decision"] .model-state')?.dataset.modelState === "changed");
+  assert(await row.locator('[data-managed-action="reread"]').isVisible(), "a refusal for moved settings offers no fresh read");
+  delete backend.managedStopRefusal;
+  return "running · restarting · stopped · busy · changed, each from the snapshot or the refusal";
+}));
 
 await test("Blank starts a deliberately plain terminal", async () => {
   await openSettings(pageB, "agents");
@@ -14367,7 +14881,7 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
   await pageA.setViewportSize({ width: 2000, height: 1200 });
   try {
     await openSettings(pageA, "api-routers");
-    await pageA.evaluate(() => modelConnectionsController.add());
+    await pageA.evaluate(() => modelConnectionsController.addManual());
     backend.keychain.delete(TYPESAFE_SERVICE);
     delete backend.zoSettings.smart;
     backend.zoSettings.providers = [];
@@ -14527,10 +15041,12 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
     );
 
     // ---- 6. one thing to finish, and it is the only filled button --------
-    for (const [card, finish] of [["router-card", "router-save-btn"], ["typesafe-card", "judgment-save-provider"]]) {
+    // The judgment editor is one item of the model pane's 고급 fold now
+    // (t-75762 v2); the rule holds for it as it held for the old card.
+    for (const [card, finish] of [["router-card", "router-save-btn"], ["judgment-connection-settings", "judgment-save-provider"]]) {
       const bottom = await pageA.evaluate((id) => {
         const box = document.getElementById(id);
-        const last = id === "typesafe-card" ? box.querySelector(".settings-judgment-actions") : box.lastElementChild;
+        const last = id === "judgment-connection-settings" ? box.querySelector(".settings-judgment-actions") : box.lastElementChild;
         const filled = [...box.querySelectorAll(".btn--primary")].filter((one) => !one.closest(".judgment-model-source")).map((one) => one.id);
         return {
           actions: last.className,

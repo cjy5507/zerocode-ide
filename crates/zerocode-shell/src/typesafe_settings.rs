@@ -2261,12 +2261,21 @@ mod tests {
                 "judgment-provider-kind",
                 "judgment-protocol",
                 "judgment-listed-model",
-                "route-classifier-select",
             ],
             "model selection and library filters do not add per-feature mode controls"
         );
         assert!(card.contains("id=\"judgment-provider-kind\""));
-        let advanced = &card[card
+        // The worker rows and the classifier stand on the orchestration pane
+        // (t-75762 v2, decision 4), still folded and still the only selects
+        // that name a mode.
+        let orchestration = &page[page
+            .find("<section class=\"settings-pane\" data-pane=\"orchestration\"")
+            .expect("the orchestration pane")..];
+        let orchestration = &orchestration["<section".len()..];
+        let orchestration = &orchestration[..orchestration
+            .find("<section class=\"settings-pane\"")
+            .expect("the next pane")];
+        let advanced = &orchestration[orchestration
             .find("<details class=\"settings-fold settings-jev-advanced\"")
             .expect("the advanced fold")..];
         assert!(

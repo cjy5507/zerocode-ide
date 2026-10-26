@@ -693,6 +693,8 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       await settlePaint(page);
       const basic = await page.evaluate(() => {
         const card = document.querySelector("#typesafe-card");
+        // Getting a model and the old editor stand in the 고급 fold (t-75762 v2).
+        document.getElementById("model-advanced").open = true;
         card.scrollIntoView({ block: "start" });
         const visible = (id) => {
           const node = document.getElementById(id);
@@ -735,7 +737,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
           && connection.keyVisible && connection.provider === basic.provider,
         JSON.stringify({ ...connection, faults: connection.faults.slice(0, 6), path: connectionPath, counted }));
       await page.locator("#judgment-connection-settings > summary").click();
-      await page.evaluate(() => setSettingsOpen(false));
+      await page.evaluate(() => { document.getElementById("model-advanced").open = false; setSettingsOpen(false); });
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {
@@ -1175,7 +1177,7 @@ export async function testJevDashboard(browser, origin, ok) {
       await window.__PAINTED__();
       view.querySelector('[data-jev-dash-row="notify"] .jev-token[data-token="not_consented"]').click();
       await window.__PAINTED__();
-      const consent = { open: !settingsView.hidden, said: document.querySelector("#typesafe-status")?.textContent ?? "",
+      const consent = { open: !settingsView.hidden, said: document.querySelector("#model-judgment-status")?.textContent ?? "",
         focus: document.activeElement?.id ?? null };
       setSettingsOpen(false);
       await window.__PAINTED__();
@@ -1191,7 +1193,7 @@ export async function testJevDashboard(browser, origin, ok) {
       paintTypeSafe({ ...saved, provider: null, providerIdentity: null });
       const result = {
         disabled: el("typesafe-key-input").disabled,
-        reason: el("judgment-active-model").textContent,
+        reason: el("judgment-provider-draft").textContent,
       };
       paintTypeSafe(saved);
       return result;

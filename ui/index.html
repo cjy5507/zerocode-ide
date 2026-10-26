@@ -3736,13 +3736,13 @@
                 <svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg>
                 <span data-i18n="settings.providerAccounts.title">AI 제공자 계정</span>
               </button>
+              <button class="settings-rail-item" type="button" data-pane="judgment-models">
+                <svg class="icon" aria-hidden="true"><use href="#i-bot"></use></svg>
+                <span data-i18n="settings.models.title">모델</span>
+              </button>
               <button class="settings-rail-item" type="button" data-pane="api-routers">
                 <svg class="icon" aria-hidden="true"><use href="#i-waypoints"></use></svg>
                 <span data-i18n="settings.apiRouters.title">모델 연결</span>
-              </button>
-              <button class="settings-rail-item" type="button" data-pane="judgment-models">
-                <svg class="icon" aria-hidden="true"><use href="#i-bot"></use></svg>
-                <span data-i18n="settings.connections.usage">모델 사용</span>
               </button>
               <button class="settings-rail-item" type="button" data-pane="orchestration">
                 <svg class="icon" aria-hidden="true"><use href="#i-workflow"></use></svg>
@@ -4171,38 +4171,20 @@
              of one table, a refusal says ours first and folds the server's
              away, and the one thing to finish on a card is the only filled
              button on it. -->
-        <section class="settings-pane" data-pane="api-routers" hidden>
+        <section class="settings-pane" data-pane="api-routers" data-keywords="로그인 API 키 연결 Jev 판단 서버 Claude ChatGPT Gemini OpenRouter AgentRouter Ollama" hidden>
         <header class="settings-section-head connection-heading" id="connection-catalog-heading">
           <div>
           <h2 class="settings-section-title" data-i18n="settings.apiRouters.title">모델 연결</h2>
-          <p class="settings-section-desc" data-i18n="settings.apiRouters.about">
-            로컬·외부 서버를 한곳에서 연결하고 코딩과 판단에 사용할 모델을 각각 고릅니다.
-          </p>
+          <p class="settings-section-desc" data-i18n="settings.apiRouters.about">모델이 어디로 연결되는지와 지금 상태를 모아 봅니다. 고르는 일은 「모델」에서 합니다.</p>
           </div>
           <button type="button" class="btn btn--primary" id="connections-add" data-i18n="settings.connections.add">연결 추가</button>
         </header>
-        <!-- Connected routers list -->
-        <div class="settings-card connection-catalog" data-connection-view="catalog">
-          <div class="settings-subhead settings-subhead--acts">
-            <div>
-              <h3 class="settings-subhead-title">
-                <span data-i18n="settings.apiRouters.connectedTitle">등록한 연결</span>
-                <span class="settings-badge" id="router-provider-count"></span>
-              </h3>
-              <p class="settings-subhead-desc" data-i18n="settings.apiRouters.connectedAbout">
-                주소와 인증은 연결에 한 번 등록합니다. 같은 연결을 코딩과 판단에서 함께 사용할 수 있습니다.
-              </p>
-            </div>
-          </div>
-          <div class="agent-list" id="router-provider-list"></div>
-          <p class="settings-hint" id="router-provider-note"></p>
-          <p class="settings-hint" data-i18n="settings.connections.registrationHint">연결을 등록해도 현재 사용 모델은 바뀌지 않습니다. 모델 사용에서 용도에 맞게 선택하세요.</p>
-          <div class="settings-action-row connection-navigation">
-            <button type="button" class="btn" data-connection-nav="usage" data-i18n="settings.connections.usage">모델 사용</button>
-            <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
-          </div>
-        </div>
-
+        <!-- Four kinds of connection, each drawn from what it really is
+             (t-75762 v2): the logins zo reads, the API keys the settings
+             keep, this computer, and Jev. `modelConnectionsController`
+             draws the rows. -->
+        <div class="model-connections" id="model-connection-groups" data-connection-view="catalog"></div>
+        <p class="settings-hint" data-connection-view="catalog" data-i18n="settings.connections.inUseNote">사용 중인 연결은 지울 수 없습니다. 지우려면 「모델」에서 다른 모델을 먼저 고르세요.</p>
 
         <!-- Add or configure router -->
         <div class="settings-card connection-editor" id="router-card" data-connection-view="add" hidden>
@@ -4218,21 +4200,8 @@
           <ol class="connection-steps" aria-label="연결 순서" data-i18n-aria="settings.connections.steps">
             <li data-i18n="settings.connections.information">연결 정보</li>
             <li data-i18n="settings.apiRouters.modelsTitle">사용할 모델 선택</li>
-            <li data-i18n="settings.connections.usage">모델 사용</li>
+            <li data-i18n="settings.models.title">모델</li>
           </ol>
-          <label class="settings-field" data-field="md" for="connection-location">
-            <span class="settings-label" data-i18n="settings.connections.location">연결 위치</span>
-            <select class="settings-input" id="connection-location">
-              <option value="remote" data-i18n="settings.connections.locationRemote">외부 서버</option>
-              <option value="local" data-i18n="settings.connections.locationLocal">이 컴퓨터 · 실행 중인 로컬 서버</option>
-              <option value="managed" data-i18n="settings.connections.locationManaged">이 컴퓨터 · 앱에서 관리</option>
-              <option value="jev" data-i18n="settings.connections.locationJev">Jev 서비스</option>
-            </select>
-          </label>
-          <div id="connection-service-action" hidden>
-            <p class="settings-hint" data-i18n="settings.connections.serviceHint">앱 관리 모델과 Jev는 기존 관리 화면에서 설정합니다. 실행 중인 서버는 주소로 연결하세요.</p>
-          </div>
-          <div id="connection-server-fields">
           <label class="settings-field" data-field="md" for="router-preset-select">
             <span class="settings-label" data-i18n="settings.judgment.protocol">연결 방식</span>
             <select class="settings-input" id="router-preset-select"></select>
@@ -4331,11 +4300,9 @@
           </div>
 
           <!-- One thing to finish here, and it is the only filled button. -->
-          </div>
           <div class="settings-action-row">
             <button class="btn" id="router-test-btn" type="button" data-i18n="settings.apiRouters.testConnection">연결 시험</button>
             <button class="btn btn--primary" id="router-save-btn" type="button" disabled data-i18n="settings.apiRouters.save">저장</button>
-            <button type="button" class="btn" id="connection-open-service" hidden data-i18n="settings.connections.configure">설정</button>
             <button class="btn" type="button" data-connection-nav="catalog" data-i18n="settings.connections.back">연결 목록으로</button>
           </div>
         </div>
@@ -4345,364 +4312,316 @@
              docs/design/jev-settings-20260917.md §6.1 — 「사용자는 켜고 끄는
              것만 알면 된다」). Where each feature stands is the dashboard's. -->
         </section>
-        <section class="settings-pane" data-pane="judgment-models" data-keywords="Hugging Face local model System One Jev 모델 다운로드 불러오기" hidden>
+        <section class="settings-pane" data-pane="judgment-models" data-keywords="모델 코딩 판단 로그인 추천 Hugging Face local model System One Jev 모델 다운로드 불러오기" hidden>
         <header class="settings-section-head">
-          <div class="settings-subhead settings-subhead--acts">
-            <div>
-              <h2 class="settings-section-title" data-i18n="settings.connections.usage">모델 사용</h2>
-              <p class="settings-section-desc" data-i18n="settings.judgment.about">
-                선택·점수·참/거짓을 반환하는 모델을 고릅니다. 등록한 로컬·외부 연결을 재사용하며, 일반 모델도 판단 응답 형식이 확인되면 사용할 수 있습니다.
-              </p>
-            </div>
-          </div>
+          <h2 class="settings-section-title" data-i18n="settings.models.title">모델</h2>
+          <p class="settings-section-desc" data-i18n="settings.models.about">ZeroCode가 쓰는 모델 두 가지입니다. 대부분은 바꿀 필요가 없습니다.</p>
         </header>
-                <section class="connections-usage" data-connection-view="usage" aria-labelledby="connection-usage-title">
-          <h3 class="settings-subhead-title" id="connection-usage-title" data-i18n="settings.connections.usesTitle">용도별 모델</h3>
-          <div class="settings-action-row connection-scenarios">
-            <button type="button" class="btn" data-connection-scenario="local" data-i18n="settings.connections.scenarioLocal">로컬 판단 + 외부 코딩</button>
-            <button type="button" class="btn" data-connection-scenario="remote" data-i18n="settings.connections.scenarioRemote">외부 판단</button>
-            <button type="button" class="btn" data-connection-scenario="shared" data-i18n="settings.connections.scenarioShared">같은 모델 공유</button>
-          </div>
-          <p class="settings-hint" id="connection-scenario-status" role="status"></p>
-          <div id="connection-comparison"></div>
-          <div class="connection-roles" data-connection-roles="all"></div>
-          <p class="settings-hint" data-i18n="settings.connections.boundary">같은 연결을 공유해도 판단 문항·기준과 기능별 기록·적용 설정은 유지합니다. 형식 확인은 판단 정확도 검증이 아닙니다.</p>
-          <p class="settings-hint" id="connections-sync-status" role="status" aria-live="polite"></p>
-          <div class="settings-action-row">
-            <button type="button" class="btn" id="connections-managed" data-i18n="settings.connections.managed">앱 관리 로컬 모델 · Jev</button>
-          </div>
-        </section>
-
-        <div class="settings-card" id="typesafe-card">
-          <section class="judgment-current-status" id="judgment-current-status" aria-labelledby="judgment-current-title">
-            <div class="judgment-current-heading">
-              <h3 id="judgment-current-title" data-i18n="settings.judgment.currentTitle">현재 판단 모델</h3>
-              <button type="button" class="settings-jev-link" id="judgment-status-refresh" data-i18n="settings.managed.refresh">상태 새로고침</button>
+        <!-- The first question, asked by itself only when nothing is
+             connected and nobody is signed in (t-75762 v2, decision 7), and
+             by 「연결 추가」 otherwise. `modelConnectionsController` draws it. -->
+        <div class="settings-card model-setup" id="model-setup" hidden></div>
+        <div class="settings-card model-settings" id="typesafe-card">
+          <section class="model-role" id="model-coding" aria-labelledby="model-coding-title">
+            <div class="model-role-head">
+              <h3 class="model-role-title" id="model-coding-title" data-i18n="settings.models.coding">코딩 모델</h3>
             </div>
-            <p class="judgment-active-model" id="judgment-active-model" role="status" aria-live="polite"></p>
-            <dl class="judgment-status-facts" aria-live="polite">
-              <div>
-                <dt data-i18n="settings.judgment.enablementLabel">판단 요청 허용</dt>
-                <dd id="judgment-current-enablement" data-state="unknown"></dd>
-              </div>
-              <div>
-                <dt data-i18n="settings.judgment.serverLabel">현재 모델 서버</dt>
-                <dd id="judgment-current-server" data-state="unknown"></dd>
-              </div>
-              <div>
-                <dt data-i18n="settings.judgment.checkLabel">마지막 응답 확인</dt>
-                <dd id="judgment-current-check" data-state="unchecked"></dd>
-              </div>
-              <div class="judgment-status-usage">
-                <dt data-i18n="settings.judgment.usageLabel">실제 작업 요청</dt>
-                <dd id="judgment-current-usage" data-state="unknown"></dd>
-              </div>
-            </dl>
-            <p class="settings-row-desc" id="judgment-current-note" role="status"></p>
+            <div class="model-role-body" data-model-role="coding"></div>
           </section>
-          <div class="settings-option-row settings-option-row--copy settings-jev-switch" data-jev-switch-row>
-            <label class="settings-check" for="jev-enabled">
-              <input type="checkbox" role="switch" id="jev-enabled" data-jev-switch />
-              <span>
-                <span class="settings-label" data-i18n="settings.judgment.use">판단 기능 사용</span>
-                <span class="settings-row-desc" data-i18n="settings.judgment.useAbout">
-                  켜면 동의한 프로젝트의 요청과 화면의 글로 선택한 모델에 판단을 요청합니다. 끄면 판단 요청을 보내지 않습니다.
-                </span>
-              </span>
-            </label>
-          </div>
-          <div class="settings-notice settings-notice--row settings-jev-partial" data-jev-partial hidden>
-            <span class="settings-jev-partial-said" data-jev-partial-said></span>
-            <button class="btn" type="button" data-jev-everywhere data-i18n="settings.typesafe.everyFolder">모든 폴더에서 사용</button>
-          </div>
-          <div class="settings-notice settings-notice--row" id="judgment-linked-notice" hidden>
-            <span data-i18n="settings.connections.editLinked">이 모델의 주소와 인증은 공통 연결에서 수정합니다.</span>
-            <button class="btn" type="button" id="judgment-edit-linked" data-i18n="settings.apiRouters.title">모델 연결</button>
-          </div>
-          <section class="judgment-model-changes" id="judgment-model-changes" aria-labelledby="judgment-changes-title">
-            <h3 id="judgment-changes-title" data-i18n="settings.judgment.changesTitle">모델 변경</h3>
-            <p class="settings-row-desc" data-i18n="settings.judgment.changesAbout">아래에서 고른 모델은 변경 초안입니다. 응답 확인과 적용을 마쳐야 현재 모델이 바뀝니다.</p>
-          <section class="judgment-model-source" aria-labelledby="judgment-source-title">
-            <h4 id="judgment-source-title" data-i18n="settings.models.add">모델 불러오기</h4>
-            <div class="settings-action-row judgment-source-choices">
-              <button type="button" class="btn" id="judgment-source-hub" aria-pressed="true" data-i18n="settings.models.fromHub">Hugging Face에서 받기</button>
-              <button type="button" class="btn" id="judgment-source-gguf" aria-pressed="false" data-i18n="settings.gguf.fromFile">GGUF 파일 불러오기</button>
-              <button type="button" class="btn" id="judgment-source-local" aria-pressed="false" data-i18n="settings.models.fromFolder">내 모델 불러오기</button>
-              <button type="button" class="btn" id="judgment-source-jev" data-i18n="settings.models.useJev">Jev 사용하기</button>
-            </div>
-            <p class="settings-row-desc" data-i18n="settings.gguf.sourceHint">GGUF는 파일 하나를 고르거나 Hugging Face의 특정 .gguf 파일 주소를 붙여 넣으세요. 모델이 함께 보낸 코드는 실행하지 않습니다.</p>
-            <div id="judgment-source-hub-fields">
-              <label class="settings-field" data-field="full" for="judgment-source-repository">
-                <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.models.address">Hugging Face 모델 주소 또는 ID</span></span>
-                <input class="settings-input" type="text" id="judgment-source-repository" aria-describedby="judgment-source-status" placeholder="https://huggingface.co/..." maxlength="8192" autocomplete="off" spellcheck="false" />
-              </label>
-            </div>
-            <div id="judgment-source-local-fields" hidden>
-              <p class="settings-row-desc" id="judgment-source-directory">이미 받은 모델의 폴더를 선택하세요. 원본 파일은 그대로 둡니다.</p>
-              <div class="settings-action-row">
-                <button type="button" class="btn" id="judgment-source-browse" aria-describedby="judgment-source-directory judgment-source-status" data-i18n="settings.models.pickFolder">모델 폴더 선택</button>
-              </div>
-            </div>
-            <div class="judgment-model-destination">
-              <span class="settings-label" data-i18n="settings.models.saveTo">저장 위치</span>
-              <span id="judgment-source-destination">기본 모델 폴더</span>
-              <div class="settings-action-row">
-                <button type="button" class="btn" id="judgment-source-change-destination" data-i18n="settings.models.changeFolder">폴더 변경</button>
-                <button type="button" class="btn" id="judgment-source-default-destination" data-i18n="settings.models.useDefaultFolder" hidden>기본값 사용</button>
-              </div>
-            </div>
-            <div class="settings-action-row">
-              <button type="button" class="btn" id="judgment-source-inspect" data-i18n="settings.models.inspect" disabled>모델 확인</button>
-            </div>
-            <article class="judgment-source-result" id="judgment-source-result" data-state="inspecting" data-i18n-aria="settings.models.resultLabel" aria-label="확인 결과" hidden>
-              <div class="judgment-source-result-heading">
-                <h4 id="judgment-source-model-name"></h4>
-                <span class="judgment-source-badges">
-                  <span class="judgment-source-badge" id="judgment-source-badge-current" data-badge="current" hidden></span>
-                  <span class="judgment-source-badge" id="judgment-source-badge-installed" data-badge="installed" hidden></span>
-                  <span class="judgment-source-badge" id="judgment-source-badge-readiness" data-badge="readiness" hidden></span>
-                </span>
-              </div>
-              <p class="settings-row-desc" id="judgment-source-model-info"></p>
-              <p class="settings-row-desc" id="judgment-source-model-support"></p>
-              <ol class="judgment-source-steps" id="judgment-source-steps" data-i18n-aria="settings.models.stepsLabel" aria-label="진행 단계" hidden></ol>
-              <progress id="judgment-source-progress" aria-labelledby="judgment-source-status" hidden></progress>
-              <div class="settings-action-row">
-                <button type="button" class="btn btn--primary" id="judgment-source-use" disabled>설치하고 사용</button>
-                <button type="button" class="btn" id="judgment-source-cancel" data-i18n="settings.managed.cancel" hidden>취소</button>
-                <button type="button" class="btn" id="judgment-source-retry" data-i18n="settings.models.retry" hidden>다시 시도</button>
-                <button type="button" class="btn" id="judgment-source-folder-instead" data-i18n="settings.models.folderInstead" hidden>폴더에서 불러오기</button>
-              </div>
-            </article>
-            <p class="settings-status" id="judgment-source-status" role="status" aria-live="polite"></p>
-          </section>
-            <section id="managed-judgment-panel" data-i18n-aria="settings.managed.panel" aria-label="로컬 판단 모델 관리" hidden>
-              <div class="managed-judgment-library-tools" id="managed-judgment-library-tools">
-                <label class="settings-field" data-field="lg" for="managed-judgment-search">
-                  <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.search">판단 모델 찾기</span></span>
-                  <input type="search" class="settings-input" id="managed-judgment-search" autocomplete="off" spellcheck="false" />
+          <section class="model-role" id="model-judgment" aria-labelledby="model-judgment-title">
+            <div class="model-role-head">
+              <h3 class="model-role-title" id="model-judgment-title" data-i18n="settings.judgment.title">판단 모델</h3>
+              <!-- The one switch (§6.1), at the head of the model it turns on
+                   and off (decision 1). The dashboard wears a copy. -->
+              <div class="model-switch settings-jev-switch" data-jev-switch-row>
+                <label class="settings-check" for="jev-enabled">
+                  <input type="checkbox" role="switch" id="jev-enabled" data-jev-switch />
+                  <span>
+                    <span class="settings-label" data-i18n="settings.judgment.use">판단 사용</span>
+                    <!-- Said in full where the dashboard wears this row; the
+                         card's head keeps the switch to its two words. -->
+                    <span class="settings-row-desc model-switch-about" data-i18n="settings.judgment.useAbout">켜면 동의한 프로젝트의 요청과 화면의 글로 선택한 모델에 판단을 요청합니다. 끄면 판단 요청을 보내지 않습니다.</span>
+                  </span>
                 </label>
-                <label class="settings-field" data-field="md" for="managed-judgment-filter">
-                  <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.filter">사용 방법</span></span>
-                  <select class="settings-input" id="managed-judgment-filter">
-                    <option value="all" data-i18n="settings.managed.filterAll">모든 모델</option>
-                    <option value="local" data-i18n="settings.managed.filterLocal">이 컴퓨터에서 직접 실행</option>
-                    <option value="server" data-i18n="settings.managed.filterServer">기존 판단 서버로 연결</option>
-                    <option value="installed" data-i18n="settings.managed.filterInstalled">다운로드한 모델</option>
+              </div>
+            </div>
+            <p class="settings-row-desc model-judgment-about" data-i18n="settings.models.judgmentAbout">판단 모델이란? ZeroCode가 작은 결정을 빠르게 내릴 때 쓰는 모델입니다. 예를 들어 「이 명령이 위험한가」, 「어느 파일부터 볼까」 같은 것입니다. 코딩 모델과 따로 고르며, 작고 빠른 모델이면 충분합니다.</p>
+            <div class="settings-notice settings-notice--row settings-jev-partial" data-jev-partial hidden>
+              <span class="settings-jev-partial-said" data-jev-partial-said></span>
+              <button class="btn" type="button" data-jev-everywhere data-i18n="settings.typesafe.everyFolder">모든 폴더에서 사용</button>
+            </div>
+            <!-- What the switch's press did, beside the switch. -->
+            <div class="settings-status" id="model-judgment-status" role="status" aria-live="polite"></div>
+            <div class="model-role-body" data-model-role="judgment"></div>
+          </section>
+          <!-- Every word a beginner does not need — provider, endpoint, the
+               response formats, model files, keys and the old settings —
+               waits here, closed. -->
+          <details class="settings-fold model-advanced" id="model-advanced">
+            <summary data-i18n="settings.models.advanced">고급 — 연결 방식 · 판단 응답 형식 · 모델 받기 · Jev 키 · 이전 설정</summary>
+            <section class="model-advanced-item" aria-labelledby="model-advanced-route-title">
+              <h4 id="model-advanced-route-title" data-i18n="settings.models.routeTitle">연결 방식 (전문 용어)</h4>
+              <p class="settings-row-desc" id="model-advanced-route"></p>
+            </section>
+            <section class="model-advanced-item" aria-labelledby="model-advanced-format-title">
+              <h4 id="model-advanced-format-title" data-i18n="settings.models.formatTitle">판단 응답 형식</h4>
+              <p class="settings-row-desc" data-i18n="settings.models.formatAbout">판단 확인은 세 유형(Choice · Score · Noul) 질문에 정해진 모양으로 답하는지 봅니다. 판단 정확도 검증은 아닙니다. 판단 문항과 기준은 의사결정 대시보드에서 고칩니다.</p>
+              <details class="settings-fold model-format-fold" id="model-advanced-format-fold" hidden>
+                <summary data-i18n="settings.models.formatFold">연결별 판단 형식 바꾸기</summary>
+                <p class="settings-row-desc" data-i18n="settings.models.formatPick">연결마다 판단을 묻는 형식입니다. 판단 서버가 System One으로만 답하면 System One을 고르세요. 바꾸면 그 연결의 모델을 다시 확인한 뒤 적용합니다.</p>
+                <div class="model-formats" id="model-advanced-formats"></div>
+              </details>
+              <div class="settings-action-row">
+                <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
+              </div>
+            </section>
+            <section class="model-advanced-item" aria-labelledby="model-advanced-receive-title">
+              <h4 id="model-advanced-receive-title" data-i18n="settings.models.receiveTitle">이 컴퓨터에서 쓸 판단 모델 받기</h4>
+              <p class="settings-row-desc" data-i18n="settings.models.receiveAbout">서버를 멈추거나 다시 시작하는 일은 「모델 연결」의 「이 컴퓨터」 줄에서 합니다.</p>
+              <section class="judgment-model-source" aria-labelledby="judgment-source-title">
+                <h4 id="judgment-source-title" data-i18n="settings.models.add">모델 불러오기</h4>
+                <div class="settings-action-row judgment-source-choices">
+                  <button type="button" class="btn" id="judgment-source-hub" aria-pressed="true" data-i18n="settings.models.fromHub">Hugging Face에서 받기</button>
+                  <button type="button" class="btn" id="judgment-source-gguf" aria-pressed="false" data-i18n="settings.gguf.fromFile">GGUF 파일 불러오기</button>
+                  <button type="button" class="btn" id="judgment-source-local" aria-pressed="false" data-i18n="settings.models.fromFolder">내 모델 불러오기</button>
+                  <button type="button" class="btn" id="judgment-source-jev" data-i18n="settings.models.useJev">Jev 사용하기</button>
+                </div>
+                <p class="settings-row-desc" data-i18n="settings.gguf.sourceHint">GGUF는 파일 하나를 고르거나 Hugging Face의 특정 .gguf 파일 주소를 붙여 넣으세요. 모델이 함께 보낸 코드는 실행하지 않습니다.</p>
+                <div id="judgment-source-hub-fields">
+                  <label class="settings-field" data-field="full" for="judgment-source-repository">
+                    <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.models.address">Hugging Face 모델 주소 또는 ID</span></span>
+                    <input class="settings-input" type="text" id="judgment-source-repository" aria-describedby="judgment-source-status" placeholder="https://huggingface.co/..." maxlength="8192" autocomplete="off" spellcheck="false" />
+                  </label>
+                </div>
+                <div id="judgment-source-local-fields" hidden>
+                  <p class="settings-row-desc" id="judgment-source-directory">이미 받은 모델의 폴더를 선택하세요. 원본 파일은 그대로 둡니다.</p>
+                  <div class="settings-action-row">
+                    <button type="button" class="btn" id="judgment-source-browse" aria-describedby="judgment-source-directory judgment-source-status" data-i18n="settings.models.pickFolder">모델 폴더 선택</button>
+                  </div>
+                </div>
+                <div class="judgment-model-destination">
+                  <span class="settings-label" data-i18n="settings.models.saveTo">저장 위치</span>
+                  <span id="judgment-source-destination">기본 모델 폴더</span>
+                  <div class="settings-action-row">
+                    <button type="button" class="btn" id="judgment-source-change-destination" data-i18n="settings.models.changeFolder">폴더 변경</button>
+                    <button type="button" class="btn" id="judgment-source-default-destination" data-i18n="settings.models.useDefaultFolder" hidden>기본값 사용</button>
+                  </div>
+                </div>
+                <div class="settings-action-row">
+                  <button type="button" class="btn" id="judgment-source-inspect" data-i18n="settings.models.inspect" disabled>모델 확인</button>
+                </div>
+                <article class="judgment-source-result" id="judgment-source-result" data-state="inspecting" data-i18n-aria="settings.models.resultLabel" aria-label="확인 결과" hidden>
+                  <div class="judgment-source-result-heading">
+                    <h4 id="judgment-source-model-name"></h4>
+                    <span class="judgment-source-badges">
+                      <span class="judgment-source-badge" id="judgment-source-badge-current" data-badge="current" hidden></span>
+                      <span class="judgment-source-badge" id="judgment-source-badge-installed" data-badge="installed" hidden></span>
+                      <span class="judgment-source-badge" id="judgment-source-badge-readiness" data-badge="readiness" hidden></span>
+                    </span>
+                  </div>
+                  <p class="settings-row-desc" id="judgment-source-model-info"></p>
+                  <p class="settings-row-desc" id="judgment-source-model-support"></p>
+                  <ol class="judgment-source-steps" id="judgment-source-steps" data-i18n-aria="settings.models.stepsLabel" aria-label="진행 단계" hidden></ol>
+                  <progress id="judgment-source-progress" aria-labelledby="judgment-source-status" hidden></progress>
+                  <div class="settings-action-row">
+                    <button type="button" class="btn btn--primary" id="judgment-source-use" disabled>설치하고 사용</button>
+                    <button type="button" class="btn" id="judgment-source-cancel" data-i18n="settings.managed.cancel" hidden>취소</button>
+                    <button type="button" class="btn" id="judgment-source-retry" data-i18n="settings.models.retry" hidden>다시 시도</button>
+                    <button type="button" class="btn" id="judgment-source-folder-instead" data-i18n="settings.models.folderInstead" hidden>폴더에서 불러오기</button>
+                  </div>
+                </article>
+                <p class="settings-status" id="judgment-source-status" role="status" aria-live="polite"></p>
+              </section>
+              <section id="managed-judgment-panel" data-i18n-aria="settings.managed.panel" aria-label="로컬 판단 모델 관리" hidden>
+                <div class="managed-judgment-library-tools" id="managed-judgment-library-tools">
+                  <label class="settings-field" data-field="lg" for="managed-judgment-search">
+                    <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.search">판단 모델 찾기</span></span>
+                    <input type="search" class="settings-input" id="managed-judgment-search" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="settings-field" data-field="md" for="managed-judgment-filter">
+                    <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.filter">사용 방법</span></span>
+                    <select class="settings-input" id="managed-judgment-filter">
+                      <option value="all" data-i18n="settings.managed.filterAll">모든 모델</option>
+                      <option value="local" data-i18n="settings.managed.filterLocal">이 컴퓨터에서 직접 실행</option>
+                      <option value="server" data-i18n="settings.managed.filterServer">기존 판단 서버로 연결</option>
+                      <option value="installed" data-i18n="settings.managed.filterInstalled">다운로드한 모델</option>
+                    </select>
+                  </label>
+                </div>
+                <p class="settings-row-desc" id="managed-judgment-library-summary" role="status" aria-live="polite"></p>
+                <p class="settings-row-desc" id="managed-judgment-runtime" role="status"></p>
+                <div class="settings-action-row">
+                  <button type="button" class="btn" id="managed-judgment-prepare" data-i18n="settings.managed.prepare" disabled>실행 환경 설치</button>
+                  <button type="button" class="btn" id="managed-judgment-refresh" data-i18n="settings.managed.refresh">상태 새로고침</button>
+                </div>
+                <div id="managed-judgment-progress" hidden>
+                  <p id="managed-judgment-progress-label" role="status" aria-live="polite"></p>
+                  <progress aria-labelledby="managed-judgment-progress-label"></progress>
+                  <button type="button" class="btn" id="managed-judgment-cancel" data-i18n="settings.managed.cancel">취소</button>
+                </div>
+                <!-- The library is what this computer holds: a model whose files
+                     were received, or one the setting or a server is bound to.
+                     Any other catalog model waits folded below, so a model that
+                     is not here shows no pinned revision (t-69998). -->
+                <div id="managed-judgment-models"></div>
+                <p class="settings-row-desc" id="managed-judgment-no-matches" data-i18n="settings.managed.noMatches" hidden>조건에 맞는 모델이 없습니다. 검색어나 사용 방법을 바꿔보세요.</p>
+                <p class="settings-row-desc" id="managed-judgment-none" data-i18n="settings.managed.noneReceived" hidden>받은 판단 모델이 없습니다 — 아래에서 불러오세요</p>
+                <p class="settings-row-desc" id="managed-judgment-empty" data-i18n="settings.managed.empty" hidden>설치할 수 있는 모델이 없습니다. 이미 실행 중인 판단 서버를 연결할 수 있습니다.</p>
+                <details class="settings-fold" id="managed-judgment-candidates" hidden>
+                  <summary id="managed-judgment-candidates-count"></summary>
+                  <div class="managed-judgment-candidates">
+                    <p class="settings-notice" data-i18n="settings.managed.experimental">실험용 판단 모델입니다. 다운로드나 연결 확인은 작업 정확도 검증이 아닙니다. 설치만으로 현재 모델이 바뀌지는 않습니다.</p>
+                    <ul id="managed-judgment-candidate-list"></ul>
+                  </div>
+                </details>
+                <details class="settings-fold" id="managed-judgment-register" hidden>
+                  <summary data-i18n="settings.managed.addCatalog">다른 모델 목록 추가</summary>
+                  <p class="settings-row-desc" data-i18n="settings.managed.catalogHint">호환 모델의 카탈로그 파일을 선택하세요. 출처·고정 버전·파일 무결성을 검사하며, 실행 코드나 새 엔진은 등록하지 않습니다.</p>
+                  <label class="settings-field" data-field="lg" for="managed-judgment-catalog-file">
+                    <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.catalogFile">모델 카탈로그 (.json)</span></span>
+                    <input type="file" class="settings-input" id="managed-judgment-catalog-file" accept=".json,application/json" />
+                  </label>
+                  <div class="settings-action-row">
+                    <button type="button" class="btn" id="managed-judgment-register-submit" data-i18n="settings.managed.registerCatalog" disabled>검사하고 목록에 추가</button>
+                  </div>
+                </details>
+                <details class="settings-fold" id="managed-judgment-import">
+                  <summary data-i18n="settings.managed.import">기존 파일 등록</summary>
+                  <p id="managed-judgment-import-model"></p>
+                  <label class="settings-field" data-field="lg" for="managed-judgment-import-path">
+                    <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.importPath">선택한 모델 파일이 있는 폴더</span></span>
+                    <input type="text" class="settings-input" id="managed-judgment-import-path" aria-describedby="managed-judgment-import-status" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <p class="settings-row-desc" data-i18n="settings.managed.importHint">목록에서 등록할 모델을 고르세요. 파일의 무결성을 확인해 앱에 복사하며, 원본은 이동하거나 삭제하지 않습니다.</p>
+                  <div class="settings-action-row">
+                    <button type="button" class="btn" id="managed-judgment-import-submit" data-i18n="settings.managed.importSubmit" disabled>검사하고 등록</button>
+                  </div>
+                  <p class="settings-status" id="managed-judgment-import-status" role="status" aria-live="polite"></p>
+                </details>
+                <p class="settings-status" id="managed-judgment-status" role="status" aria-live="polite"></p>
+              </section>
+            </section>
+            <section class="model-advanced-item" aria-labelledby="model-advanced-jev-title">
+              <h4 id="model-advanced-jev-title" data-i18n="settings.models.jevTitle">Jev 키 · 이전 판단 설정</h4>
+              <div class="settings-notice settings-notice--row" id="judgment-linked-notice" hidden>
+                <span data-i18n="settings.connections.editLinked">이 모델의 주소와 인증은 공통 연결에서 수정합니다.</span>
+                <button class="btn" type="button" id="judgment-edit-linked" data-i18n="settings.apiRouters.title">모델 연결</button>
+              </div>
+              <details class="settings-fold judgment-connection-settings" id="judgment-connection-settings">
+                <summary data-i18n="settings.connections.serviceSettings">Jev 키 · 이전 판단 설정 호환</summary>
+                <p class="settings-hint" data-i18n="settings.connections.legacyHint">Jev를 판단에 쓸 때의 키를 저장·확인·지웁니다. 예전 「다른 판단 서버」 설정도 그대로 읽고 적용합니다. 새 서버는 「모델 연결 › 연결 추가」에서 등록합니다.</p>
+              <section id="judgment-provider-editor" aria-label="판단 모델 연결">
+                <p class="settings-row-desc" id="judgment-provider-draft" role="status" aria-live="polite"></p>
+                <label class="settings-field" data-field="md" for="judgment-provider-kind">
+                  <span class="settings-field-copy">
+                    <span class="settings-label" data-i18n="settings.judgment.location">1. 어디에서 판단할까요?</span>
+                  </span>
+                  <select class="settings-input" id="judgment-provider-kind" disabled>
+                    <option value="jev">Jev · TypeSafe</option>
+                    <option value="local" data-i18n="settings.judgment.local">로컬 판단 모델</option>
+                    <option value="remote" data-i18n="settings.judgment.remote">다른 판단 서버</option>
                   </select>
                 </label>
-              </div>
-              <p class="settings-row-desc" id="managed-judgment-library-summary" role="status" aria-live="polite"></p>
-              <p class="settings-row-desc" id="managed-judgment-runtime" role="status"></p>
-              <div class="settings-action-row">
-                <button type="button" class="btn" id="managed-judgment-prepare" data-i18n="settings.managed.prepare" disabled>실행 환경 설치</button>
-                <button type="button" class="btn" id="managed-judgment-refresh" data-i18n="settings.managed.refresh">상태 새로고침</button>
-              </div>
-              <div id="managed-judgment-progress" hidden>
-                <p id="managed-judgment-progress-label" role="status" aria-live="polite"></p>
-                <progress aria-labelledby="managed-judgment-progress-label"></progress>
-                <button type="button" class="btn" id="managed-judgment-cancel" data-i18n="settings.managed.cancel">취소</button>
-              </div>
-              <!-- The library is what this computer holds: a model whose files
-                   were received, or one the setting or a server is bound to.
-                   Any other catalog model waits folded below, so a model that
-                   is not here shows no pinned revision (t-69998). -->
-              <div id="managed-judgment-models"></div>
-              <p class="settings-row-desc" id="managed-judgment-no-matches" data-i18n="settings.managed.noMatches" hidden>조건에 맞는 모델이 없습니다. 검색어나 사용 방법을 바꿔보세요.</p>
-              <p class="settings-row-desc" id="managed-judgment-none" data-i18n="settings.managed.noneReceived" hidden>받은 판단 모델이 없습니다 — 아래에서 불러오세요</p>
-              <p class="settings-row-desc" id="managed-judgment-empty" data-i18n="settings.managed.empty" hidden>설치할 수 있는 모델이 없습니다. 이미 실행 중인 판단 서버를 연결할 수 있습니다.</p>
-              <details class="settings-fold" id="managed-judgment-candidates" hidden>
-                <summary id="managed-judgment-candidates-count"></summary>
-                <div class="managed-judgment-candidates">
-                  <p class="settings-notice" data-i18n="settings.managed.experimental">실험용 판단 모델입니다. 다운로드나 연결 확인은 작업 정확도 검증이 아닙니다. 설치만으로 현재 모델이 바뀌지는 않습니다.</p>
-                  <ul id="managed-judgment-candidate-list"></ul>
+                <p class="settings-row-desc judgment-setup-hint" id="judgment-setup-hint" role="status" aria-live="polite"></p>
+                <div id="judgment-local-mode" class="settings-action-row" hidden>
+                  <button type="button" class="btn" id="judgment-local-managed" aria-pressed="true" data-i18n="settings.managed.manage">모델 다운로드·관리</button>
+                  <button type="button" class="btn" id="judgment-local-manual" aria-pressed="false" data-i18n="settings.managed.manual">이미 실행 중인 서버 연결</button>
                 </div>
-              </details>
-              <details class="settings-fold" id="managed-judgment-register" hidden>
-                <summary data-i18n="settings.managed.addCatalog">다른 모델 목록 추가</summary>
-                <p class="settings-row-desc" data-i18n="settings.managed.catalogHint">호환 모델의 카탈로그 파일을 선택하세요. 출처·고정 버전·파일 무결성을 검사하며, 실행 코드나 새 엔진은 등록하지 않습니다.</p>
-                <label class="settings-field" data-field="lg" for="managed-judgment-catalog-file">
-                  <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.catalogFile">모델 카탈로그 (.json)</span></span>
-                  <input type="file" class="settings-input" id="managed-judgment-catalog-file" accept=".json,application/json" />
-                </label>
-                <div class="settings-action-row">
-                  <button type="button" class="btn" id="managed-judgment-register-submit" data-i18n="settings.managed.registerCatalog" disabled>검사하고 목록에 추가</button>
-                </div>
-              </details>
-              <details class="settings-fold" id="managed-judgment-import">
-                <summary data-i18n="settings.managed.import">기존 파일 등록</summary>
-                <p id="managed-judgment-import-model"></p>
-                <label class="settings-field" data-field="lg" for="managed-judgment-import-path">
-                  <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.managed.importPath">선택한 모델 파일이 있는 폴더</span></span>
-                  <input type="text" class="settings-input" id="managed-judgment-import-path" aria-describedby="managed-judgment-import-status" autocomplete="off" spellcheck="false" />
-                </label>
-                <p class="settings-row-desc" data-i18n="settings.managed.importHint">목록에서 등록할 모델을 고르세요. 파일의 무결성을 확인해 앱에 복사하며, 원본은 이동하거나 삭제하지 않습니다.</p>
-                <div class="settings-action-row">
-                  <button type="button" class="btn" id="managed-judgment-import-submit" data-i18n="settings.managed.importSubmit" disabled>검사하고 등록</button>
-                </div>
-                <p class="settings-status" id="managed-judgment-import-status" role="status" aria-live="polite"></p>
-              </details>
-              <p class="settings-status" id="managed-judgment-status" role="status" aria-live="polite"></p>
-            </section>
-          <details class="settings-fold judgment-connection-settings" id="judgment-connection-settings">
-            <summary data-i18n="settings.connections.serviceSettings">Jev 서비스 · 이전 설정 호환</summary>
-            <div class="settings-notice">
-            <p class="settings-hint" data-i18n="settings.connections.legacyHint">새 서버는 모델 연결에서 등록하세요. 이전 판단 설정은 그대로 읽고 적용할 수 있습니다.</p>
-            <button type="button" class="btn" data-connection-nav="catalog" data-i18n="settings.apiRouters.title">모델 연결</button>
-            </div>
-          <section id="judgment-provider-editor" aria-label="판단 모델 연결">
-            <p class="settings-row-desc" id="judgment-provider-draft" role="status" aria-live="polite"></p>
-            <label class="settings-field" data-field="md" for="judgment-provider-kind">
-              <span class="settings-field-copy">
-                <span class="settings-label" data-i18n="settings.judgment.location">1. 어디에서 판단할까요?</span>
-              </span>
-              <select class="settings-input" id="judgment-provider-kind" disabled>
-                <option value="jev">Jev · TypeSafe</option>
-                <option value="local" data-i18n="settings.judgment.local">로컬 판단 모델</option>
-                <option value="remote" data-i18n="settings.judgment.remote">다른 판단 서버</option>
-              </select>
-            </label>
-            <p class="settings-row-desc judgment-setup-hint" id="judgment-setup-hint" role="status" aria-live="polite"></p>
-            <div id="judgment-local-mode" class="settings-action-row" hidden>
-              <button type="button" class="btn" id="judgment-local-managed" aria-pressed="true" data-i18n="settings.managed.manage">모델 다운로드·관리</button>
-              <button type="button" class="btn" id="judgment-local-manual" aria-pressed="false" data-i18n="settings.managed.manual">이미 실행 중인 서버 연결</button>
-            </div>
-            <div id="judgment-manual-fields">
-            <label class="settings-field" data-field="lg" id="judgment-protocol-field" for="judgment-protocol" hidden>
-              <span class="settings-field-copy">
-                <span class="settings-label" data-i18n="settings.judgment.protocol">연결 방식</span>
-                <span class="settings-row-desc" data-i18n="settings.judgment.protocolHint">API 라우터·일반 모델 서버는 OpenAI 호환을 선택하세요. 구조화된 판단 응답을 지원해야 합니다.</span>
-              </span>
-              <select class="settings-input" id="judgment-protocol" disabled>
-                <option value="openai_json" data-i18n="settings.judgment.openaiProtocol">OpenAI 호환 · 구조화된 응답</option>
-                <option value="system_one" data-i18n="settings.judgment.systemOneProtocol">System One · 판단 전용</option>
-              </select>
-            </label>
-            <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
-              <span class="settings-field-copy">
-                <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
-                <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">API 라우터처럼 기본 URL을 입력하세요. 외부 서버는 HTTPS, 이 컴퓨터와 사설망 IP는 HTTP로도 연결할 수 있습니다.</span>
-              </span>
-              <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
-            </label>
-            <label class="settings-check" id="judgment-auth-field" for="judgment-requires-auth" hidden>
-              <input type="checkbox" id="judgment-requires-auth" disabled />
-              <span data-i18n="settings.judgment.authentication">이 서버는 API 키가 필요합니다</span>
-            </label>
-            <label class="settings-field" data-field="lg" for="typesafe-key-input">
-              <span class="settings-field-copy">
-                <span class="settings-label" data-i18n="settings.typesafe.apiKey">API 키</span>
-                <span class="settings-state" id="typesafe-key-state" data-state="unchecked" role="status" aria-live="polite"></span>
-                <span class="settings-row-desc" id="typesafe-no-keychain-hint" data-i18n="settings.typesafe.noKeychainHint" hidden>
-                  이 컴퓨터에는 API 키를 보관할 키체인이 없습니다.
-                </span>
-              </span>
-              <input class="settings-input" id="typesafe-key-input" type="password"
-                     autocomplete="off" spellcheck="false" placeholder="apikey_..." />
-            </label>
-            <div class="settings-action-row judgment-connect-actions">
-              <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>연결하고 모델 불러오기</button>
-            </div>
-            <label class="settings-field" data-field="md" for="typesafe-model-input">
-              <span class="settings-field-copy">
-                <span class="settings-label" data-i18n="settings.judgment.model">판단 모델</span>
-                <span class="settings-row-desc" data-i18n="settings.judgment.modelHint">서버의 모델 목록에서 고르거나 모델 ID를 직접 입력합니다. 목록을 새로 읽어도 선택은 사라지지 않습니다.</span>
-              </span>
-              <input class="settings-input" id="typesafe-model-input" list="judgment-model-options" type="text" maxlength="256" autocomplete="off" spellcheck="false" disabled />
-              <datalist id="judgment-model-options"></datalist>
-            </label>
-            <label class="settings-field" data-field="md" id="judgment-listed-model-field" for="judgment-listed-model" hidden>
-              <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.judgment.serverModels">서버의 모델 목록</span></span>
-              <select class="settings-input" id="judgment-listed-model"></select>
-            </label>
-            <p class="settings-row-desc" id="judgment-provider-scope"></p>
-            <p class="settings-row-desc" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 응답을 확인하기 전에는 현재 모델을 바꾸지 않습니다.</p>
-            <p class="settings-row-desc" id="judgment-model-status" role="status" aria-live="polite"></p>
-            </div>
-          </section>
-          <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
-          <div class="settings-action-row settings-judgment-actions">
-            <button class="btn" id="typesafe-check-btn" type="button" disabled data-i18n="settings.typesafe.check">연결 확인</button>
-            <button class="btn" id="typesafe-remove-btn" type="button" disabled data-i18n="settings.typesafe.remove">키 지우기</button>
-            <button class="btn" id="typesafe-save-btn" type="button" disabled data-i18n="settings.judgment.saveKey">키 저장</button>
-            <button class="btn" id="judgment-revert-provider" type="button" data-i18n="settings.judgment.revert" disabled>변경 취소</button>
-            <button class="btn btn--primary" id="judgment-save-provider" type="button" data-i18n="settings.judgment.apply" disabled>확인하고 사용</button>
-          </div>
-          </details>
-          </section>
-          <!-- Where each feature stands while Jev is on (t-11989): acting,
-               or still recording with the samples its next judgment waits
-               on — the numbers `zo jev summary` answers, the dashboard's own
-               reading (`paintJevStandings`). Hidden while the switch is off. -->
-          <details class="settings-fold settings-jev-features" id="judgment-feature-details">
-            <summary data-i18n="settings.judgment.featureDetails">기능별 상태와 진단 보기</summary>
-            <p class="settings-row-desc" data-i18n="settings.judgment.historyAbout">아래는 과거 기능별 기록입니다. 현재 모델로 한정한 기록이 아니므로 현재 모델의 실제 사용 증거로 볼 수 없습니다.</p>
-          <section class="settings-jev-standings" data-jev-standings aria-labelledby="jev-standings-title" hidden>
-            <h4 class="settings-jev-standings-title" id="jev-standings-title" data-i18n="settings.typesafe.standings">기능별 상태</h4>
-            <p class="settings-row-desc" data-i18n="settings.typesafe.standingsAbout">켠 동안 기능마다 판단을 실제로 적용하는지, 아직 기록만 하는지 보여 줍니다. 기록 중인 기능 옆의 숫자는 다음 판정에 필요한 표본 중 모인 수입니다.</p>
-            <p class="settings-row-desc settings-jev-standings-note" data-jev-standings-note role="status"></p>
-            <ul class="settings-jev-standings-list" data-jev-standings-list></ul>
-          </section>
-
-          <!-- Each feature's numbers, accuracy and last judgments live on the
-               dashboard; the card says where, in one line. -->
-          <p class="settings-jev-dashboard settings-row-desc">
-            <span data-i18n="settings.typesafe.dashboardLine">기능별 사용 현황과 정확도는 의사결정 모델에서 봅니다.</span>
-            <button class="settings-jev-link" type="button" id="jev-open-dashboard" data-i18n="settings.typesafe.openDashboard">대시보드 열기</button>
-          </p>
-          </details>
-
-          <!-- What a person rarely changes, closed until asked for: the model
-               pin, and the classifier that decides whether the routing
-               feature is asked at all. -->
-          <details class="settings-fold settings-jev-advanced" id="typesafe-advanced">
-            <summary data-i18n="settings.typesafe.advanced">고급</summary>
-            <section aria-labelledby="summon-profiles-title">
-              <h4 id="summon-profiles-title" data-i18n="settings.typesafe.profiles">난이도별 워커 모델·사고 깊이</h4>
-              <p class="settings-row-desc" data-i18n="settings.typesafe.profilesHint">비워 둔 칸은 오늘 쓸 수 있는 모델 가운데서 자동으로 고릅니다(흐린 글씨가 지금 뜨는 모델입니다). 적은 칸만 그대로 쓰고, 소환에서 직접 지정한 값은 언제나 먼저입니다.</p>
-              <div id="summon-profiles-table"></div>
-              <button type="button" id="summon-profiles-save" data-i18n="settings.typesafe.profilesSave">선택 표 저장</button>
-            </section>
-            <!-- The gate in front of the routing seat.
-                 `smart.autoClassifier` decides how a spawn's difficulty is read,
-                 whether the chat probe is called (the probing word only), and
-                 whether the routing feature is asked at all (every word but
-                 `off`, t-6346). The four words and the coupling are
-                 `zerocode_core::jev`'s (`ClassifierMode`, `ClassifierRow.reaches`,
-                 `ClassifierRow.gates`); this card spells neither. -->
-            <div class="settings-jev-classifier" id="route-classifier-card">
-              <h4 class="settings-jev-advanced-title" data-i18n="settings.classifier.title">라우팅 분류기</h4>
-              <p class="settings-row-desc" data-i18n="settings.classifier.about">
-                zo가 과업의 난이도를 무엇으로 정할지 고릅니다. 「모델 선택 판단」은 「끔」이 아닌 모든 방식에서 판단을 요청합니다.
-              </p>
-              <label class="settings-field" data-field="md" for="route-classifier-select">
-                <span class="settings-field-copy">
-                  <span class="settings-label" data-i18n="settings.classifier.label">난이도 분류</span>
-                  <span class="settings-row-desc" data-i18n="settings.classifier.summary">
-                    낱말 표가 먼저 정하고, 고른 방식이 그 위에 무엇을 얹을지 정합니다.
+                <div id="judgment-manual-fields">
+                <label class="settings-field" data-field="lg" id="judgment-protocol-field" for="judgment-protocol" hidden>
+                  <span class="settings-field-copy">
+                    <span class="settings-label" data-i18n="settings.judgment.protocol">연결 방식</span>
+                    <span class="settings-row-desc" data-i18n="settings.judgment.protocolHint">API 라우터·일반 모델 서버는 OpenAI 호환을 선택하세요. 구조화된 판단 응답을 지원해야 합니다.</span>
                   </span>
-                </span>
-                <!-- The options are the classifier's own words, built from what
-                     `typesafe_settings` answers (`paintClassifierModes`). -->
-                <select class="settings-input" id="route-classifier-select"></select>
-              </label>
-              <details class="settings-fold">
-                <summary data-i18n="settings.status.evidence">자세히</summary>
-                <p data-i18n="settings.classifier.detail">
-                  낱말 표는 어느 방식에서나 먼저 돌고, 어느 방식에서도 대체되지 않습니다. 「낱말만」은 거기서 끝냅니다. 「표식까지」는 과업 글에 사람이 적어 둔 레인·형태 표식을 함께 읽습니다 — 이 방식 자체는 어디에도 묻지 않습니다. 「모델에게도」는 그 위에 빠른 등급 모델 프로브 하나(출력 200토큰 안팎)를 얹어 융합하며, 실패하거나 늦으면 낱말 표의 판정이 그대로 섭니다. zo가 TypeSafe에 묻는 라우팅 판단은 이와 따로 「끔」이 아닌 모든 방식에서 턴과 하위 에이전트마다 한 번 일어나고, 그 판단이 적용되는 동안에는 판단이 확신하지 못할 때만 프로브를 부릅니다. 「끔」은 자동 라우팅 자체를 쓰지 않습니다.
-                </p>
+                  <select class="settings-input" id="judgment-protocol" disabled>
+                    <option value="openai_json" data-i18n="settings.judgment.openaiProtocol">OpenAI 호환 · 구조화된 응답</option>
+                    <option value="system_one" data-i18n="settings.judgment.systemOneProtocol">System One · 판단 전용</option>
+                  </select>
+                </label>
+                <label class="settings-field" data-field="lg" id="judgment-endpoint-field" for="judgment-endpoint" hidden>
+                  <span class="settings-field-copy">
+                    <span class="settings-label" data-i18n="settings.judgment.endpoint">판단 서버 주소</span>
+                    <span class="settings-row-desc" data-i18n="settings.judgment.endpointHint">API 라우터처럼 기본 URL을 입력하세요. 외부 서버는 HTTPS, 이 컴퓨터와 사설망 IP는 HTTP로도 연결할 수 있습니다.</span>
+                  </span>
+                  <input class="settings-input" id="judgment-endpoint" type="url" maxlength="8192" autocomplete="off" spellcheck="false" disabled />
+                </label>
+                <label class="settings-check" id="judgment-auth-field" for="judgment-requires-auth" hidden>
+                  <input type="checkbox" id="judgment-requires-auth" disabled />
+                  <span data-i18n="settings.judgment.authentication">이 서버는 API 키가 필요합니다</span>
+                </label>
+                <label class="settings-field" data-field="lg" for="typesafe-key-input">
+                  <span class="settings-field-copy">
+                    <span class="settings-label" data-i18n="settings.typesafe.apiKey">API 키</span>
+                    <span class="settings-state" id="typesafe-key-state" data-state="unchecked" role="status" aria-live="polite"></span>
+                    <span class="settings-row-desc" id="typesafe-no-keychain-hint" data-i18n="settings.typesafe.noKeychainHint" hidden>
+                      이 컴퓨터에는 API 키를 보관할 키체인이 없습니다.
+                    </span>
+                  </span>
+                  <input class="settings-input" id="typesafe-key-input" type="password"
+                         autocomplete="off" spellcheck="false" placeholder="apikey_..." />
+                </label>
+                <div class="settings-action-row judgment-connect-actions">
+                  <button class="btn" id="judgment-refresh-models" type="button" data-i18n="settings.judgment.refresh" disabled>연결하고 모델 불러오기</button>
+                </div>
+                <label class="settings-field" data-field="md" for="typesafe-model-input">
+                  <span class="settings-field-copy">
+                    <span class="settings-label" data-i18n="settings.judgment.model">판단 모델</span>
+                    <span class="settings-row-desc" data-i18n="settings.judgment.modelHint">서버의 모델 목록에서 고르거나 모델 ID를 직접 입력합니다. 목록을 새로 읽어도 선택은 사라지지 않습니다.</span>
+                  </span>
+                  <input class="settings-input" id="typesafe-model-input" list="judgment-model-options" type="text" maxlength="256" autocomplete="off" spellcheck="false" disabled />
+                  <datalist id="judgment-model-options"></datalist>
+                </label>
+                <label class="settings-field" data-field="md" id="judgment-listed-model-field" for="judgment-listed-model" hidden>
+                  <span class="settings-field-copy"><span class="settings-label" data-i18n="settings.judgment.serverModels">서버의 모델 목록</span></span>
+                  <select class="settings-input" id="judgment-listed-model"></select>
+                </label>
+                <p class="settings-row-desc" id="judgment-provider-scope"></p>
+                <p class="settings-row-desc" id="judgment-provider-dirty" data-i18n="settings.judgment.unapplied" hidden>아직 적용하지 않은 선택입니다. 응답을 확인하기 전에는 현재 모델을 바꾸지 않습니다.</p>
+                <p class="settings-row-desc" id="judgment-model-status" role="status" aria-live="polite"></p>
+                </div>
+              </section>
+              <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
+              <div class="settings-action-row settings-judgment-actions">
+                <button class="btn" id="typesafe-check-btn" type="button" disabled data-i18n="settings.typesafe.check">연결 확인</button>
+                <button class="btn" id="typesafe-remove-btn" type="button" disabled data-i18n="settings.typesafe.remove">키 지우기</button>
+                <button class="btn" id="typesafe-save-btn" type="button" disabled data-i18n="settings.judgment.saveKey">키 저장</button>
+                <button class="btn" id="judgment-revert-provider" type="button" data-i18n="settings.judgment.revert" disabled>변경 취소</button>
+                <button class="btn btn--primary" id="judgment-save-provider" type="button" data-i18n="settings.judgment.apply" disabled>확인하고 사용</button>
+              </div>
               </details>
-              <!-- Shown by `paintClassifierGate` when the feature this
-                   classifier gates asks while automatic routing is off: its
-                   mode is one nothing can reach (`ClassifierRow.reaches`). Which feature that is, is
-                   the backend's answer (`classifier.gates`). -->
-              <p class="settings-notice settings-notice--row" id="route-classifier-unreachable" data-jev-unreachable
-                 data-i18n="settings.typesafe.routingUnreachable" hidden>
-                자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다.
-              </p>
-            </div>
-          </details>
+            </section>
+            <section class="model-advanced-item" aria-labelledby="model-advanced-usage-title">
+              <h4 id="model-advanced-usage-title" data-i18n="settings.models.usageTitle">실제 작업 사용 (진단 한 줄)</h4>
+              <p class="settings-row-desc" id="judgment-current-usage" data-state="unknown" role="status"></p>
+              <div class="settings-action-row">
+                <button type="button" class="btn" id="judgment-status-refresh" data-i18n="settings.managed.refresh">상태 새로고침</button>
+              </div>
+              <details class="settings-fold settings-jev-features" id="judgment-feature-details">
+                <summary data-i18n="settings.judgment.featureDetails">기능별 상태와 진단 보기</summary>
+                <p class="settings-row-desc" data-i18n="settings.judgment.historyAbout">아래는 과거 기능별 기록입니다. 현재 모델로 한정한 기록이 아니므로 현재 모델의 실제 사용 증거로 볼 수 없습니다.</p>
+              <section class="settings-jev-standings" data-jev-standings aria-labelledby="jev-standings-title" hidden>
+                <h4 class="settings-jev-standings-title" id="jev-standings-title" data-i18n="settings.typesafe.standings">기능별 상태</h4>
+                <p class="settings-row-desc" data-i18n="settings.typesafe.standingsAbout">켠 동안 기능마다 판단을 실제로 적용하는지, 아직 기록만 하는지 보여 줍니다. 기록 중인 기능 옆의 숫자는 다음 판정에 필요한 표본 중 모인 수입니다.</p>
+                <p class="settings-row-desc settings-jev-standings-note" data-jev-standings-note role="status"></p>
+                <ul class="settings-jev-standings-list" data-jev-standings-list></ul>
+              </section>
 
+              <!-- Each feature's numbers, accuracy and last judgments live on the
+                   dashboard; the card says where, in one line. -->
+              <p class="settings-jev-dashboard settings-row-desc">
+                <span data-i18n="settings.typesafe.dashboardLine">기능별 사용 현황과 정확도는 의사결정 모델에서 봅니다.</span>
+                <button class="settings-jev-link" type="button" id="jev-open-dashboard" data-i18n="settings.typesafe.openDashboard">대시보드 열기</button>
+              </p>
+              </details>
+            </section>
+            <section class="model-advanced-item" aria-labelledby="model-advanced-moved-title">
+              <h4 id="model-advanced-moved-title" data-i18n="settings.models.movedTitle">난이도별 워커 모델 · 라우팅 분류기</h4>
+              <p class="settings-row-desc" data-i18n="settings.models.movedAbout">판단 모델 고르기와 관계가 없어 「오케스트레이션」 설정으로 옮겼습니다.</p>
+              <div class="settings-action-row">
+                <button type="button" class="btn" id="model-open-orchestration" data-i18n="orch.title">오케스트레이션</button>
+              </div>
+            </section>
+          </details>
         </div>
 
         <!-- Every feature Jev judges for, in the use table's order: its name,
@@ -6553,6 +6472,62 @@
             <p class="orch-summary" id="orch-summary"></p>
             <div class="orch-chips" id="orch-chips"></div>
           </div>
+        </div>
+        <div class="settings-card orch-models">
+          <!-- Moved here from the model settings without a change of meaning
+               (t-75762 v2, decision 4): the rows a summons launches workers
+               with, and the classifier that decides whether the routing
+               feature is asked at all — which every zo session's turn reads,
+               not only a worker's. -->
+          <details class="settings-fold settings-jev-advanced" id="typesafe-advanced">
+            <summary data-i18n="settings.typesafe.advanced">워커 모델 · 라우팅 분류기</summary>
+            <section aria-labelledby="summon-profiles-title">
+              <h4 id="summon-profiles-title" data-i18n="settings.typesafe.profiles">난이도별 워커 모델·사고 깊이</h4>
+              <p class="settings-row-desc" data-i18n="settings.typesafe.profilesHint">비워 둔 칸은 오늘 쓸 수 있는 모델 가운데서 자동으로 고릅니다(흐린 글씨가 지금 뜨는 모델입니다). 적은 칸만 그대로 쓰고, 소환에서 직접 지정한 값은 언제나 먼저입니다.</p>
+              <div id="summon-profiles-table"></div>
+              <button type="button" id="summon-profiles-save" data-i18n="settings.typesafe.profilesSave">선택 표 저장</button>
+            </section>
+            <!-- The gate in front of the routing seat.
+                 `smart.autoClassifier` decides how a spawn's difficulty is read,
+                 whether the chat probe is called (the probing word only), and
+                 whether the routing feature is asked at all (every word but
+                 `off`, t-6346). The four words and the coupling are
+                 `zerocode_core::jev`'s (`ClassifierMode`, `ClassifierRow.reaches`,
+                 `ClassifierRow.gates`); this card spells neither. -->
+            <div class="settings-jev-classifier" id="route-classifier-card">
+              <h4 class="settings-jev-advanced-title" data-i18n="settings.classifier.title">라우팅 분류기</h4>
+              <p class="settings-notice" data-i18n="settings.classifier.everySession">모든 zo 세션에 적용 — 워커만이 아니라 zo 세션의 매 턴 모델 고르기가 이 설정을 읽습니다.</p>
+              <p class="settings-row-desc" data-i18n="settings.classifier.about">
+                zo가 과업의 난이도를 무엇으로 정할지 고릅니다. 「모델 선택 판단」은 「끔」이 아닌 모든 방식에서 판단을 요청합니다.
+              </p>
+              <label class="settings-field" data-field="md" for="route-classifier-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.classifier.label">난이도 분류</span>
+                  <span class="settings-row-desc" data-i18n="settings.classifier.summary">
+                    낱말 표가 먼저 정하고, 고른 방식이 그 위에 무엇을 얹을지 정합니다.
+                  </span>
+                </span>
+                <!-- The options are the classifier's own words, built from what
+                     `typesafe_settings` answers (`paintClassifierModes`). -->
+                <select class="settings-input" id="route-classifier-select"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.classifier.detail">
+                  낱말 표는 어느 방식에서나 먼저 돌고, 어느 방식에서도 대체되지 않습니다. 「낱말만」은 거기서 끝냅니다. 「표식까지」는 과업 글에 사람이 적어 둔 레인·형태 표식을 함께 읽습니다 — 이 방식 자체는 어디에도 묻지 않습니다. 「모델에게도」는 그 위에 빠른 등급 모델 프로브 하나(출력 200토큰 안팎)를 얹어 융합하며, 실패하거나 늦으면 낱말 표의 판정이 그대로 섭니다. zo가 TypeSafe에 묻는 라우팅 판단은 이와 따로 「끔」이 아닌 모든 방식에서 턴과 하위 에이전트마다 한 번 일어나고, 그 판단이 적용되는 동안에는 판단이 확신하지 못할 때만 프로브를 부릅니다. 「끔」은 자동 라우팅 자체를 쓰지 않습니다.
+                </p>
+              </details>
+              <!-- Shown by `paintClassifierGate` when the feature this
+                   classifier gates asks while automatic routing is off: its
+                   mode is one nothing can reach (`ClassifierRow.reaches`). Which feature that is, is
+                   the backend's answer (`classifier.gates`). -->
+              <p class="settings-notice settings-notice--row" id="route-classifier-unreachable" data-jev-unreachable
+                 data-i18n="settings.typesafe.routingUnreachable" hidden>
+                자동 라우팅이 꺼져 있어 「모델 선택 판단」은 판단을 요청하지 않습니다. 「끔」이 아닌 방식을 고르면 요청합니다.
+              </p>
+              <div class="settings-status" id="orch-models-status" role="status" aria-live="polite"></div>
+        </div>
+          </details>
         </div>
         <!-- 조율자가 띄우는 에이전트를 어디에 담을지. 기본은 꺼짐 —
              프로세스를 네 개 더 띄우는 기능은 사람이 켜는 것이지 발견하는

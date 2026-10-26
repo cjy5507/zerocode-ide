@@ -1200,6 +1200,73 @@ fn refusal_detail(body: &str) -> Option<String> {
     .map(str::to_string)
 }
 
+/// Shorter than this, a sent header value that names no credential is a
+/// word a refusal may hold for its own sake (`1`, `yes`), not a secret it
+/// says back.
+const SENT_VALUE_MIN_CHARS: usize = 6;
+
+/// Whether a header the row brings carries a credential: the probe's own
+/// auth header, or a name that says so (`X-Api-Key`, `X-Auth-Token`).
+fn header_carries_a_credential(name: &str, auth_header: &str) -> bool {
+    use zerocode_core::credential::{contains_ascii_case, names_a_credential};
+    name.eq_ignore_ascii_case(auth_header)
+        || names_a_credential(name)
+        || contains_ascii_case(name, "key")
+        || contains_ascii_case(name, "auth")
+}
+
+/// Every value a probe puts on the wire that a gateway could say back: the
+/// key, and each extra header's value, whole and without its scheme — a
+/// gateway says back the token behind `Bearer` as readily as the line. A
+/// credential is masked at any length (t-76028 R1); another header's value
+/// only from [`SENT_VALUE_MIN_CHARS`]. Longest first, so no shorter value
+/// splits a longer one before it is masked.
+fn sent_values<'a>(
+    key: Option<&'a str>,
+    auth_header: &str,
+    headers: Option<&'a std::collections::BTreeMap<String, String>>,
+) -> Vec<&'a str> {
+    let mut sent: Vec<&str> = key
+        .map(|key| (key, true))
+        .into_iter()
+        .chain(headers.into_iter().flatten().map(|(name, value)| {
+            (
+                value.as_str(),
+                header_carries_a_credential(name, auth_header),
+            )
+        }))
+        .flat_map(|(value, credential)| {
+            let token = value
+                .trim()
+                .split_once(char::is_whitespace)
+                .map(|(_, token)| token);
+            [Some(value), token]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .filter(move |value| {
+                    !value.is_empty()
+                        && (credential || value.chars().count() >= SENT_VALUE_MIN_CHARS)
+                })
+        })
+        .collect();
+    sent.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    sent.dedup();
+    sent
+}
+
+/// A probe's failure as the window may hold it (t-76028 F1): what the
+/// gateway or the transport said, with every value the probe sent and
+/// anything shaped like a credential masked — the IPC answer reaches the
+/// pane's 「자세히」 and the person's screen.
+fn without_sent(text: &str, sent: &[&str]) -> String {
+    let mut text = text.to_string();
+    for value in sent {
+        text = text.replace(value, zerocode_core::credential::MASK);
+    }
+    zerocode_core::credential::mask_values(&text)
+}
+
 /// One connection test: the row being connected, as the pane holds it.
 pub struct RouterProbe<'a> {
     pub base_url: &'a str,
@@ -1321,14 +1388,16 @@ pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<Discove
         req = req.header(&auth.header, auth_val);
     }
 
+    let sent = sent_values(key, &auth.header, headers);
     let res = req
         .send()
         .await
-        .map_err(|err| format!("연결 실패: {err}"))?;
+        .map_err(|err| without_sent(&format!("연결 실패: {err}"), &sent))?;
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
         let detail = refusal_detail(&body).unwrap_or_else(|| body.trim().to_string());
+        let detail = without_sent(&detail, &sent);
         return Err(if detail.is_empty() {
             format!("서버 오류: HTTP {status}")
         } else {
@@ -1515,6 +1584,144 @@ mod tests {
         // Nothing to quote: the caller falls back to the raw body or the status.
         assert_eq!(refusal_detail("<html>502</html>"), None);
         assert_eq!(refusal_detail(r#"{"error":{"code":401}}"#), None);
+    }
+
+    /// A loopback gateway that refuses every probe 401 and says back the
+    /// `Authorization` value it was sent — inside a JSON message on
+    /// `/models`, as a bare body on `/raw`, and on `/token` only the token
+    /// behind the scheme — with a key-shaped word beside it.
+    fn echoing_gateway() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let mut bytes = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => bytes.extend_from_slice(&buffer[..read]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&bytes).into_owned();
+                let sent = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                let sent = if head.starts_with("GET /token") {
+                    sent.split_once(' ')
+                        .map_or(sent.as_str(), |(_, token)| token)
+                        .to_string()
+                } else {
+                    sent
+                };
+                let echoed = format!("invalid token {sent} near fixtureShapedWord000111222333");
+                let body = if head.starts_with("GET /raw") {
+                    echoed
+                } else {
+                    serde_json::json!({"error": {"message": echoed}}).to_string()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A refusal that says the key back (t-76028 F1): the words the probe
+    /// hands over IPC keep the status and the gateway's reason, and lose the
+    /// key, the header value it rode in and anything shaped like a key.
+    #[tokio::test]
+    async fn a_refusal_that_says_the_key_back_reaches_the_window_without_it() {
+        let base = echoing_gateway();
+        let key = "[합성-키]-echo-0f3a";
+        let auth = RouterAuth {
+            header: "Authorization".to_string(),
+            scheme: Some("Bearer".to_string()),
+        };
+        for path in ["/models", "/raw"] {
+            let refusal = test_router_endpoint(&RouterProbe {
+                base_url: &base,
+                auth: &auth,
+                key: Some(key),
+                models_path: Some(path),
+                id_field: None,
+                context_field: None,
+                client_fingerprint: None,
+                headers: None,
+            })
+            .await
+            .expect_err("a 401 is a refusal");
+            assert!(refusal.contains("HTTP 401"), "{path}: the status stays");
+            assert!(
+                refusal.contains("invalid token"),
+                "{path}: the gateway's reason stays"
+            );
+            for secret in [key, "[합성-키]", "fixtureShapedWord000111222333"] {
+                assert!(
+                    !refusal.contains(secret),
+                    "{path}: a sent or key-shaped value went over IPC"
+                );
+            }
+        }
+    }
+
+    /// A refusal that says back what a length or a scheme hid (t-76028 R1):
+    /// a key shorter than any word rule, and the token of an `Authorization`
+    /// header the row brings itself, without its `Bearer`, in a hex shape the
+    /// credential rule lets pass. Neither goes over IPC.
+    #[tokio::test]
+    async fn a_refusal_that_says_back_a_short_key_or_a_bare_header_token_reaches_the_window_without_it()
+     {
+        let base = echoing_gateway();
+        let auth = RouterAuth {
+            header: "Authorization".to_string(),
+            scheme: Some("Bearer".to_string()),
+        };
+        let short_key = "q7z4";
+        let token = "12ab34cd56ef789012ab34cd56ef7890";
+        let row_headers = std::collections::BTreeMap::from([(
+            "Authorization".to_string(),
+            format!("Bearer {token}"),
+        )]);
+        for (key, headers, secret) in [
+            (Some(short_key), None, short_key),
+            (None, Some(&row_headers), token),
+        ] {
+            for path in ["/models", "/raw", "/token"] {
+                let refusal = test_router_endpoint(&RouterProbe {
+                    base_url: &base,
+                    auth: &auth,
+                    key,
+                    models_path: Some(path),
+                    id_field: None,
+                    context_field: None,
+                    client_fingerprint: None,
+                    headers,
+                })
+                .await
+                .expect_err("a 401 is a refusal");
+                assert!(refusal.contains("HTTP 401"), "{path}: the status stays");
+                assert!(
+                    refusal.contains("invalid token"),
+                    "{path}: the gateway's reason stays"
+                );
+                assert!(
+                    !refusal.contains(secret),
+                    "{path}: a sent value went over IPC: {refusal}"
+                );
+            }
+        }
     }
 
     /// The window writes where zo reads: `ZO_CONFIG_HOME`, then `ZO_HOME`,

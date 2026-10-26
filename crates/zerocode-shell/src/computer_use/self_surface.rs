@@ -90,6 +90,7 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     // A credential written, checked or dropped.
     "save_api_router",
     "remove_api_router",
+    "adopt_legacy_judgment_key",
     "save_typesafe_key",
     "remove_typesafe_key",
     "check_typesafe_key",
