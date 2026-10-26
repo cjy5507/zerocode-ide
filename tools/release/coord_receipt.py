@@ -165,6 +165,9 @@ def agreed(jobs):
         values = sorted({one[key] for one in jobs})
         if len(values) != 1:
             raise Refused(f"the jobs name more than one {key}: {' '.join(values)}")
+    for one in jobs:   # a job's own owner is one name: a "+" would make the joined owners look like a pair
+        if "+" in one["who"]:
+            raise Refused(f"job {one['name']}'s owner {one['who']} joins owners with +")
     owners = sorted({one["who"] for one in jobs})
     if len(owners) > 1 and not split_gate(owners):
         raise Refused(f"the jobs name more than one who: {' '.join(owners)}")

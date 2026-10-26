@@ -290,6 +290,24 @@ class SplitGate(ReceiptCase):
         said = self.read_cli(self.made(self.gate(SPLIT, who={"g1-build": "w-70906", "g3a-zo-lint": "w-70906"})))
         self.assertEqual(said.returncode, 1)
 
+    def test_a_plus_in_one_jobs_owner_is_refused_so_no_bundle_skips_the_pair_check(self):
+        """t-76396 r2: an owner that is itself coord-a+coord-b made the joined name look like two owners."""
+        for case, root, zo in (("a root-and-zo bundle on both", "coord-l9-root+coord-l10-zo", "coord-l9-root+coord-l10-zo"),
+                               ("a three-label bundle on both", "coord-l9+coord-l10+coord-l11", "coord-l9+coord-l10+coord-l11"),
+                               ("a bundle beside a plain line", "coord-l9-root+coord-l10-zo", "coord-l9-zo")):
+            with self.subTest(case=case):
+                self.assertIn("+", self.refused(lambda: coord_receipt.make(self.split(root, zo))))
+                shutil.rmtree(self.tmp / "build-queue")
+        for case, who in (("one job", "coord-l9-root+coord-l10-zo"), ("every job", "coord-l9+coord-l10+coord-l11")):
+            with self.subTest(case=case):
+                self.refused(lambda: coord_receipt.make(self.gate(SPLIT, who=who)))
+                shutil.rmtree(self.tmp / "build-queue")
+
+    def test_the_two_lines_of_one_label_and_one_plain_owner_still_make_a_receipt(self):
+        self.assertEqual(coord_receipt.make(self.split())["who"], "coord-l9-root+coord-l9-zo")
+        shutil.rmtree(self.tmp / "build-queue")
+        self.assertEqual(coord_receipt.make(self.gate(SPLIT, who="coord-l9"))["who"], "coord-l9")
+
     def test_the_run_is_still_the_lanes_for_both_lines(self):
         said = self.read_cli(self.made(self.split(run="run-11955")))
         self.assertIn("the jobs say run run-11955, not run-4275", said.stdout)
