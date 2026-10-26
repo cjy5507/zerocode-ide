@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 /* The plain-text secrets line (t-76698): once the settings are drawn, the
@@ -13,7 +15,8 @@ import { openWindowTestPage } from "./window-boot.mjs";
  * storages, the console and every backend call for the sentinel the backend
  * stub was built around, and checks the move sends the page nothing.
  *
- *   WINDOW_SUITES=settings-secrets node ui/tests/window.mjs */
+ *   WINDOW_SUITES=settings-secrets node ui/tests/window.mjs
+ *   SETTINGS_SECRETS_SHOTS_DIR=<dir> ...   the line at 1280px and at 390px */
 
 /* The value the backend is pretending to hold. Never shown, never sent. */
 const SENTINEL = "SENTINEL-not-a-secret-0123456789abcdefgh";
@@ -57,7 +60,7 @@ const stubBackend = () => {
     window.__SECRET_CALLS__.push({
       name: "move_settings_secrets",
       args: JSON.stringify(args ?? null),
-      hand: options?.hand ?? null,
+      hand: options?.headers?.["zerocode-hand"] ?? null,
     });
     if (S.moveThrows) throw S.moveThrows;
     const outcome = S.outcome;
@@ -87,6 +90,13 @@ const look = () => {
 };
 
 const settle = (page, ms = 250) => page.waitForTimeout(ms);
+
+const shot = async (page, file) => {
+  const dir = process.env.SETTINGS_SECRETS_SHOTS_DIR;
+  if (!dir) return;
+  mkdirSync(dir, { recursive: true });
+  await page.locator("#settings-secrets").screenshot({ path: join(dir, file) });
+};
 
 async function scenario(browser, origin, name, ok, body, { width = 1280 } = {}) {
   const { page } = await openWindowTestPage(browser, origin, {
@@ -135,6 +145,7 @@ async function named(browser, origin, ok) {
     ok("the window does not ask zo before the settings open", before.asked === 0 && !before.shown, JSON.stringify(before));
     await openSettings(page);
     const seen = await page.evaluate(look);
+    await shot(page, "named-1280.png");
     ok(
       "opening the settings asks once and names each secret, its count in the title",
       seen.asked === 1 && seen.shown && seen.title === SETTINGS_SECRET_WORDS.ko.title &&
@@ -156,6 +167,7 @@ async function moved(browser, origin, ok) {
     await page.click("#settings-secrets-move");
     await settle(page);
     const seen = await page.evaluate(look);
+    await shot(page, "moved-1280.png");
     ok(
       "the press moves once, sends nothing but the person's hand, and asks the listing again",
       seen.moves.length === 1 && seen.moves[0].args === "{}" && seen.moves[0].hand === "person" && seen.asked === 2,
@@ -275,6 +287,7 @@ async function narrow(browser, origin, ok) {
     await openSettings(page);
     await page.click("#settings-secrets-move");
     await settle(page);
+    await shot(page, "stopped-390.png");
     for (const code of Object.keys(SETTINGS_SECRET_WORDS)) {
       const spill = await page.evaluate(async (code) => {
         setLocale(code, { persist: false, refresh: false });

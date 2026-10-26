@@ -72,7 +72,7 @@ impl ZoDoor {
     /// One door's exit code and the JSON it printed, whatever the code; `None`
     /// when zo is missing, is killed for outliving the wait, or prints no JSON.
     fn ask(&self, args: &[&str]) -> Option<(i32, Value)> {
-        let mut command = crate::proc::quiet_command(&self.bin);
+        let mut command = crate::proc::quiet_command_with_env(&self.bin, &self.env);
         command
             .args(args)
             .stdin(Stdio::null())
@@ -84,7 +84,6 @@ impl ZoDoor {
                 command.env_remove(&*key);
             }
         }
-        command.envs(self.env.iter().map(|(key, value)| (key, value)));
         let mut child = command.spawn().ok()?;
         let mut stdout = child.stdout.take()?;
         let started = Instant::now();
@@ -282,15 +281,18 @@ fn move_one(
     match keys.read(&service) {
         Ok(Some(held)) if held == value => {}
         Ok(Some(_)) => return Err(stop("keychain_differs", None, false)),
-        Ok(None) => crate::typesafe_settings::save_key_at(
-            &service,
-            &value,
-            "비밀 값이 비어 있습니다",
-            keys,
-        )
-        .map_err(|refusal| stop("keychain", said_without(&refusal.message, &value), false))?,
+        Ok(None) => {
+            crate::typesafe_settings::save_key_at(&service, &value, "비밀 값이 비어 있습니다", keys)
+                .map_err(|refusal| {
+                    stop("keychain", said_without(&refusal.message, &value), false)
+                })?
+        }
         Err(refusal) => {
-            return Err(stop("keychain", said_without(&refusal.message, &value), false));
+            return Err(stop(
+                "keychain",
+                said_without(&refusal.message, &value),
+                false,
+            ));
         }
     }
     let name = literal.name.as_str();
@@ -301,7 +303,8 @@ fn move_one(
         }
         _ => return Err(stop("zo_silent", None, true)),
     }
-    let path = serde_json::to_string(&literal.path).map_err(|_| stop("cell_changed", None, true))?;
+    let path =
+        serde_json::to_string(&literal.path).map_err(|_| stop("cell_changed", None, true))?;
     let args = [
         "settings",
         "secrets",

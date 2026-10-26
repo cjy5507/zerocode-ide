@@ -24,6 +24,7 @@ export const requiredRoutes = [
   "/shell-sftp.js",
   "/shell-scm.js",
   "/shell-settings.js",
+  "/shell-settings-secrets.js",
   "/shell-judgment.js",
   "/shell-managed-judgment.js",
   "/shell-model-source.js",

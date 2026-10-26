@@ -18772,6 +18772,21 @@ button.helper-sib:hover {
   overflow-wrap: anywhere;
 }
 
+/* The plain-text secrets line (t-76698) wears the storage line's shape: the
+ * names in the face a variable is written in, and its one action under its
+ * words, wrapping before it would push the line past a narrow column. */
+.settings-secrets-names {
+  color: var(--ink-chalk);
+  font-family: var(--font-mono);
+}
+
+.settings-secrets-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
 /* Every section opens with its own name and a sentence saying what it is for,
  * ruled off from the controls under it — Orca's `SettingsSection` header
  * (:18592-18613): `text-2xl font-semibold` over `text-sm text-muted-foreground`,

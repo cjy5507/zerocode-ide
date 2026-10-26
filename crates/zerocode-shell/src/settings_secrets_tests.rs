@@ -79,8 +79,11 @@ impl Bench {
 
     fn answer(&self, door: &str, json: &str, code: i32) {
         std::fs::write(self.dir.path().join(format!("{door}.json")), json).expect("answer");
-        std::fs::write(self.dir.path().join(format!("{door}.code")), code.to_string())
-            .expect("code");
+        std::fs::write(
+            self.dir.path().join(format!("{door}.code")),
+            code.to_string(),
+        )
+        .expect("code");
     }
 
     fn zo(&self) -> ZoDoor {
@@ -131,7 +134,11 @@ fn move_call(bench: &Bench) -> Vec<String> {
 /// The value is in none of what the window said or handed zo.
 fn said_nowhere(bench: &Bench, said: &[String]) {
     for text in said.iter().chain(std::iter::once(&bench.args_log())) {
-        assert!(!text.contains(VALUE), "the value was said: {} bytes searched", text.len());
+        assert!(
+            !text.contains(VALUE),
+            "the value was said: {} bytes searched",
+            text.len()
+        );
     }
 }
 
@@ -170,7 +177,10 @@ fn consent_puts_the_value_in_the_keychain_then_checks_then_moves() {
         Some(VALUE),
         "the item zo reads holds exactly the value"
     );
-    assert_eq!(bench.calls(), vec![list_call(), check_call(), move_call(&bench)]);
+    assert_eq!(
+        bench.calls(),
+        vec![list_call(), check_call(), move_call(&bench)]
+    );
     said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
 }
 
@@ -195,7 +205,11 @@ fn a_different_value_under_the_name_is_not_overwritten() {
         keys.held(&keychain_service(NAME)).as_deref(),
         Some("fixture-other-value")
     );
-    assert_eq!(bench.calls(), vec![list_call()], "neither check nor move is asked");
+    assert_eq!(
+        bench.calls(),
+        vec![list_call()],
+        "neither check nor move is asked"
+    );
     said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
 }
 
@@ -207,7 +221,10 @@ fn the_same_value_already_in_the_keychain_is_used_as_it_is() {
     let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
     assert_eq!(outcome.stopped, None);
     assert_eq!(outcome.moved.len(), 1);
-    assert_eq!(bench.calls(), vec![list_call(), check_call(), move_call(&bench)]);
+    assert_eq!(
+        bench.calls(),
+        vec![list_call(), check_call(), move_call(&bench)]
+    );
 }
 
 #[test]
@@ -230,7 +247,11 @@ fn a_name_that_does_not_resolve_is_not_moved() {
             keychain_kept: true,
         })
     );
-    assert_eq!(bench.calls(), vec![list_call(), check_call()], "move is not asked");
+    assert_eq!(
+        bench.calls(),
+        vec![list_call(), check_call()],
+        "move is not asked"
+    );
     said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
 }
 
@@ -274,9 +295,19 @@ fn a_reason_from_zo_that_carries_the_value_is_not_said() {
         1,
     );
     let outcome = move_all(&bench.zo(), &bench.settings(), &HeldKeys::default());
-    assert_eq!(outcome.stopped.as_ref().map(|stop| stop.reason), Some("move_refused"));
-    assert_eq!(outcome.stopped.as_ref().and_then(|stop| stop.why.clone()), None);
-    assert!(!serde_json::to_string(&outcome).expect("json").contains(VALUE));
+    assert_eq!(
+        outcome.stopped.as_ref().map(|stop| stop.reason),
+        Some("move_refused")
+    );
+    assert_eq!(
+        outcome.stopped.as_ref().and_then(|stop| stop.why.clone()),
+        None
+    );
+    assert!(
+        !serde_json::to_string(&outcome)
+            .expect("json")
+            .contains(VALUE)
+    );
 }
 
 #[test]
@@ -288,7 +319,10 @@ fn a_zo_without_the_door_shows_nothing() {
     assert_eq!(notice(&missing, &bench.settings()), None);
     let outcome = move_all(&bench.zo(), &bench.settings(), &HeldKeys::default());
     assert!(outcome.moved.is_empty());
-    assert_eq!(outcome.stopped.as_ref().map(|stop| stop.reason), Some("zo_silent"));
+    assert_eq!(
+        outcome.stopped.as_ref().map(|stop| stop.reason),
+        Some("zo_silent")
+    );
 }
 
 #[test]
@@ -317,7 +351,10 @@ fn a_cell_that_changed_since_the_listing_stops_before_the_keychain() {
     std::fs::write(bench.settings(), r#"{"mcpServers":{}}"#).expect("changed");
     let keys = HeldKeys::default();
     let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
-    assert_eq!(outcome.stopped.as_ref().map(|stop| stop.reason), Some("cell_changed"));
+    assert_eq!(
+        outcome.stopped.as_ref().map(|stop| stop.reason),
+        Some("cell_changed")
+    );
     assert_eq!(keys.held(&keychain_service(NAME)), None);
     assert_eq!(bench.calls(), vec![list_call()]);
 }
@@ -333,7 +370,10 @@ fn a_value_with_spaces_around_it_is_not_trimmed_into_another() {
     .expect("padded");
     let keys = HeldKeys::default();
     let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
-    assert_eq!(outcome.stopped.as_ref().map(|stop| stop.reason), Some("padded"));
+    assert_eq!(
+        outcome.stopped.as_ref().map(|stop| stop.reason),
+        Some("padded")
+    );
     assert_eq!(keys.held(&keychain_service(NAME)), None);
     said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
 }

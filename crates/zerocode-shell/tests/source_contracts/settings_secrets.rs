@@ -50,17 +50,27 @@ const BACKEND_KEEPS: &[&str] = &[
 fn the_page_asks_for_names_and_sends_nothing_back() {
     let page = ui_file("shell-settings-secrets.js");
     for keep in PAGE_KEEPS {
-        assert!(!page.contains(keep), "the line names {keep}, a place the page keeps things");
+        assert!(
+            !page.contains(keep),
+            "the line names {keep}, a place the page keeps things"
+        );
     }
     assert_eq!(page.matches("invoke(").count(), 2, "one listing, one move");
-    assert_eq!(page.matches("invoke(\"settings_secret_literals\")").count(), 1);
     assert_eq!(
-        page.matches("invoke(\"move_settings_secrets\", {}, { hand })").count(),
+        page.matches("invoke(\"settings_secret_literals\")").count(),
+        1
+    );
+    assert_eq!(
+        page.matches("invoke(\"move_settings_secrets\", {}, { hand })")
+            .count(),
         1,
         "the move carries no value, path or name from the page — only the person's hand"
     );
     let markup = ui_file("index.html");
-    assert!(markup.contains("./shell-settings-secrets.js"), "the page loads the line's script");
+    assert!(
+        markup.contains("./shell-settings-secrets.js"),
+        "the page loads the line's script"
+    );
     let at = markup
         .find("id=\"settings-secrets\"")
         .expect("the settings frame has the line");
@@ -74,7 +84,10 @@ fn the_road_that_holds_a_value_keeps_it_nowhere() {
     for opens in ["fn move_one(", "fn cell(", "fn ask(", "fn said_without("] {
         let road = block_after(&module, opens);
         for keep in BACKEND_KEEPS {
-            assert!(!road.contains(keep), "{opens} names {keep}, a place a value could be kept");
+            assert!(
+                !road.contains(keep),
+                "{opens} names {keep}, a place a value could be kept"
+            );
         }
     }
     let move_one = block_after(&module, "fn move_one(");
@@ -90,7 +103,10 @@ fn the_road_that_holds_a_value_keeps_it_nowhere() {
         .collect::<Vec<_>>();
     assert!(!asks.is_empty(), "the check is asked in place");
     for said in asks.iter().copied().chain(std::iter::once(args)) {
-        assert!(!said.contains("value"), "zo is never handed the value: {said}");
+        assert!(
+            !said.contains("value"),
+            "zo is never handed the value: {said}"
+        );
     }
     let commands = strip_rust_comments(COMMANDS);
     for keep in BACKEND_KEEPS {
@@ -100,7 +116,16 @@ fn the_road_that_holds_a_value_keeps_it_nowhere() {
 
 #[test]
 fn only_the_persons_hand_moves_a_secret() {
-    let gate = block_after(SELF_SURFACE, "pub(crate) const PERSON_ONLY_COMMANDS");
+    let list = |opens: &str| {
+        let at = SELF_SURFACE.find(opens).expect("the list is defined");
+        &SELF_SURFACE[at..at + SELF_SURFACE[at..].find("\n];").expect("the list closes")]
+    };
+    let gate = list("pub(crate) const PERSON_ONLY_COMMANDS");
+    let reads = list("pub(crate) const AGENT_ALLOWED_SENSITIVE");
+    assert!(
+        reads.contains("\"settings_secret_literals\""),
+        "the listing is a read an agent may make: names, never a value"
+    );
     assert!(
         gate.contains("\"move_settings_secrets\""),
         "the move is a credential written, the person's alone"
