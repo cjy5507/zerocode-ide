@@ -1,11 +1,9 @@
 //! Whether a launch briefing really went into the pane (t-74381).
 //!
-//! A delivery's `Delivered` says the words were written and the Enter went. It
-//! cannot say the program kept them: Claude Code takes its first input handler
-//! down while it boots and drops what the handler held, and the pane is left
-//! with an empty composer while the ledger writes a success. What can say is
-//! the screen: a briefing that was taken stands on it — echoed in the history,
-//! folded to a placeholder, or still in the composer.
+//! A provider's submission receipt or turn start proves the briefing was
+//! taken, even when a TUI redraw removes its text. Without that evidence the
+//! screen is a fallback: a booting CLI can drop input after Enter, leaving an
+//! empty composer despite a completed terminal write.
 
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -101,11 +99,11 @@ const PROBE_CHARS: usize = 24;
 
 /// Whether `screen` — the pane's scrollback and visible text — shows `briefing`.
 ///
-/// Three things say a briefing was kept: the head of its words, which every
-/// agent echoes into its history or leaves in its composer; or the
+/// The head or tail of its words says a briefing was kept: a TUI can redraw
+/// a long prompt and remove its head from both screen and scrollback. So does the
 /// placeholder a long paste is folded to (`[Pasted text #1 +37 lines]`,
 /// `[Pasted Content 6021 chars]`). Whitespace and the box-drawing bars a
-/// composer wraps its text in are ignored on both sides, so a head that the
+/// composer wraps its text in are ignored on both sides, so a probe that the
 /// pane wrapped across rows is still found. A briefing with no visible
 /// characters is nothing to look for, and shows.
 pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
@@ -114,12 +112,20 @@ pub fn briefing_shows(screen: &str, briefing: &str) -> bool {
             .filter(|c| !c.is_whitespace() && !c.is_control() && !"│┃|".contains(*c))
             .collect()
     };
-    let probe: String = bare(briefing).chars().take(PROBE_CHARS).collect();
+    let words = bare(briefing);
+    let probe: String = words.chars().take(PROBE_CHARS).collect();
     if probe.is_empty() {
         return true;
     }
+    let tail_start = words
+        .char_indices()
+        .rev()
+        .nth(PROBE_CHARS - 1)
+        .map_or(0, |(offset, _)| offset);
     let seen = bare(screen);
-    seen.contains(&probe) || seen.to_lowercase().contains("[pasted")
+    seen.contains(&probe)
+        || seen.contains(&words[tail_start..])
+        || seen.to_lowercase().contains("[pasted")
 }
 
 /// How often the screen is read while the watch waits.
@@ -168,8 +174,9 @@ pub enum Verdict {
     Undelivered(Unheard),
 }
 
-/// Watch `pane` for `briefing` after its first delivery said it was done:
-/// [`BriefingWatch`] over the screen, and one retype when it says so.
+/// Confirm `briefing` after its first delivery ended. A provider's submission
+/// receipt or turn start needs no screen read or retype. Without either,
+/// [`BriefingWatch`] watches the screen and permits one retype.
 ///
 /// The retype's outcome comes first and the screen after it (t-74919): its
 /// pasted words stand in the composer before their Enter goes, and stay there
@@ -185,6 +192,9 @@ pub fn confirm(
 ) -> Verdict {
     let mut watch = BriefingWatch::new(Instant::now(), window);
     loop {
+        if pane.submitted() || pane.working() {
+            return Verdict::Taken;
+        }
         let Some(screen) = pane.screen() else {
             return Verdict::Gone;
         };
@@ -192,6 +202,11 @@ pub fn confirm(
             WatchStep::Taken => return Verdict::Taken,
             WatchStep::Waiting => std::thread::sleep(LOOK_EVERY),
             WatchStep::Retype => {
+                // A hook can arrive during the screen read. Check again at
+                // the decision to type, so an active turn is left alone.
+                if pane.submitted() || pane.working() {
+                    return Verdict::Taken;
+                }
                 let Ok(outcome) = pane.retype().recv_timeout(retype_patience) else {
                     pane.withdraw();
                     return match pane.screen() {

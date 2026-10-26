@@ -866,24 +866,13 @@ fn split_launch_agent(command: &str) -> Option<&'static str> {
 }
 
 impl TeamWindow {
-    /// Whether the briefing a worker was launched with stands on its screen
-    /// (t-74381); `None` when it does, else the sentence the launch fails with.
-    ///
-    /// The delivery that wrote it reports the words written and the Enter
-    /// pressed, never that the program kept them: Claude Code takes its first
-    /// input handler down while it boots and drops what the handler held,
-    /// which left a pane at an empty composer under a ledger line that said
-    /// the worker started. So the screen is read — the head of the briefing,
-    /// or the placeholder a long paste folds to — for [`BRIEFING_WINDOW`];
-    /// when it never shows, the briefing is typed once more to the composer
-    /// that stands by then, and when it still does not, the launch says so.
-    /// That retype is a success only once its own delivery says it was
-    /// submitted, and the screen is read after that (t-74919): its words
-    /// stand in the composer before their Enter, and stay there under an
-    /// Enter the delivery withholds. Its outcome is waited for on the
-    /// agent's own deadline and the submission receipt's patience, never the
-    /// watch's window. Only an agent whose row names a composer glyph is
-    /// checked: the others have no measured screen to read it off.
+    /// Confirm an entered briefing after its submission wait succeeded.
+    /// A provider receipt proves it was taken without reading a screen that
+    /// a TUI redraw may already have cleared (t-75907). Otherwise the watch
+    /// accepts a turn start, the briefing's head or tail, or a folded paste.
+    /// Only agents with a measured composer glyph need the screen fallback.
+    /// A retype still waits for its own delivery outcome before its echoed
+    /// words can count (t-74919).
     fn confirm_briefing(&self, term: TermId, pending: &PendingWorkerReadiness) -> Option<String> {
         use zerocode_pty::briefing::{BRIEFING_WINDOW, Unheard, Verdict, confirm};
         let glyph = pending.composer?;
@@ -900,6 +889,7 @@ impl TeamWindow {
             glyph,
             agent,
             deadline,
+            submitted: pending.submitted.is_some(),
         };
         let why = match confirm(
             &mut pane,
@@ -939,9 +929,22 @@ struct LaunchPane<'a> {
     agent: Option<&'static str>,
     /// The agent's own readiness deadline, which the retype pays.
     deadline: Duration,
+    /// `await_prompt_submission` already accepted this launch's receipt.
+    submitted: bool,
 }
 
 impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
+    fn submitted(&mut self) -> bool {
+        self.submitted || crate::human_input::taken(self.term) > 0
+    }
+
+    fn working(&mut self) -> bool {
+        self.state
+            .pane_states()
+            .get(&self.term)
+            .is_some_and(|pane| pane.turn_started_at.is_some())
+    }
+
     fn screen(&mut self) -> Option<String> {
         let held = self.state.terminals().handle(self.term)?;
         let pty = lock_pty(&held);
@@ -1808,9 +1811,10 @@ impl agent_teams::Host for TeamWindow {
         let accepted = entered
             && terminal_is_live
             && await_prompt_submission(pending.submitted.as_ref(), pending.deadline);
-        // Done is the words having been written, and a program still booting
-        // throws away what it is written (t-74381): the screen says whether
-        // the briefing stayed, and a pane that holds none is no success.
+        // A terminal write can be lost during boot (t-74381), but the
+        // provider's own receipt proves it was taken. The watch uses that
+        // first and only falls back to a screen when it has no receipt:
+        // a working TUI may have redrawn the briefing away (t-75907).
         let undelivered = if accepted && !pending.restoring {
             self.confirm_briefing(term, &pending)
         } else {
