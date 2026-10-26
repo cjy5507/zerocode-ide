@@ -581,6 +581,9 @@ async function testJevModelNames(browser, origin, ok) {
       named.words.includes("GME Router · gme-router · 일반 LLM") && !named.words.includes("judgment-"), JSON.stringify(named));
     ok("the identity waits in a folded detail", named.detail?.open === false && named.detail.raw === `${identity}:gme-router`, JSON.stringify(named.detail));
     ok("since when the model counts is said from the window's record", named.words.includes("바꿈"), named.words);
+    const caption = page.locator("#jev-view .jev-caption");
+    await caption.scrollIntoViewIfNeeded();
+    await page.locator("#jev-view .jev-table").screenshot({ path: join(EVIDENCE_DIR, "jev-dashboard-model-names-caption.png") });
     const unrecorded = await seen({ head: `${identity}:gme-router`, applied: {} });
     ok("an apply the window did not record says no time", !unrecorded.words.includes("바꿈"), unrecorded.words);
     const earlier = await seen({ head: `${identity}:gme-router`, other: "judgment-deadbeef:old-router", applied: {} });

@@ -14699,6 +14699,7 @@ await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 ·
   assert(said.includes("목록은 이전 확인 것") && said.includes(words.failed) && said.includes("HTTP 401 token expired"), "the line does not say the list is earlier and why now failed", said);
   assert(!said.includes("second line"), "the failure is said in more than one line", said);
   assertEqual(await state("xai"), "nologin", "a skipped source is not said as signed out");
+  await modelScenePictures("login-stale");
   // The coding chooser says the same beside the login's models.
   await openSettings(pageA, "judgment-models");
   await pageA.click('[data-model-change="coding"]');
@@ -14718,7 +14719,6 @@ await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 ·
   await pageA.evaluate(() => modelConnectionsController.refresh());
   assertEqual(await state("claude"), "ok", "the pane's own store was said as another's");
   delete backend.zoList.paneCredentialStore;
-  await modelScenePictures("login-stale");
   return "401 with an earlier list → 「목록은 이전 확인 것 · 지금 조회 실패」 · skipped → 로그인 안 됨 · keychain ≠ pane folder → 다른 환경의 조회";
 }));
 
