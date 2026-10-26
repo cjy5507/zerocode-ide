@@ -2789,6 +2789,38 @@ fn a_refusal_names_the_holder_and_a_free_lease_has_none() {
     let _ = fs::remove_file(super::lock_sibling_path(&path));
 }
 
+/// 잠금 파일이 말하지 못해도 거절은 보유자를 이름한다. Windows 의 잠금(LockFileEx)은 파일
+/// 전체를 배타로 잠가 다른 핸들이 읽지도 못하므로, 잠금 파일 안의 도장만으로는 거절이
+/// pid 0 을 댄다(v1.1.95 Windows CI 40252005838). 여기서는 잠금 파일의 도장을 비워 그
+/// 상태를 어느 플랫폼에서나 만든다.
+#[test]
+fn a_refusal_names_the_holder_when_the_lock_file_cannot_say() {
+    let path = temp_session_path("lease-holder-unreadable");
+    let lock = super::lock_sibling_path(&path);
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&lock);
+
+    let mut first = persisted_session(&path);
+    push_text(&mut first, "first").expect("the first writer takes the lease");
+    // On Windows the lease already keeps this write out, which is the state being made.
+    let _ = fs::write(&lock, b"");
+    let holder = super::writer_lease_holder(&path).expect("held by this process");
+    assert_eq!(holder.pid, std::process::id(), "{holder:?}");
+
+    let mut blocked = persisted_session(&path);
+    let text = format!("{}", push_text(&mut blocked, "blocked").expect_err("refused"));
+    assert!(
+        text.contains(&format!("writer lease held by zo pid {}", std::process::id())),
+        "the refusal names the holder: {text}"
+    );
+
+    first.release_writer_lease();
+    drop(first);
+    assert_eq!(super::writer_lease_holder(&path), None, "a released lease has no holder");
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&lock);
+}
+
 /// **리스 누수 회귀 핀** — 리스는 공유 writer 상태의 수명만큼 유지되고 `Session`
 /// 클론이 그 상태를 공유한다. 그래서 런타임이 세션을 갈아끼울 때 옛 세션의 클론이
 /// 하나라도 살아 있으면 **버려진 경로가 프로세스가 죽을 때까지 잠긴 채** 남았고,
