@@ -38,21 +38,15 @@ pub(super) fn size() -> std::io::Result<(u16, u16)> {
     crossterm::terminal::size()
 }
 
-/// Whether the terminal zo reads has hung up: the window closed the pane.
+/// Whether `terminal` has hung up: the window closed the pane.
 ///
 /// A pane's pty is zo's standard streams and nobody's controlling terminal, so
 /// closing it sends no SIGHUP; and crossterm's reader answers the end-of-file a
 /// closed pty gives every read by polling again, forever, so the input stream
 /// never ends either (t-76434). `poll` tells without taking a byte from that
 /// reader: a pty whose other end closed is `POLLHUP` (`POLLIN | POLLHUP` on
-/// macOS), a live one never is.
-#[cfg(unix)]
-pub(super) fn hung_up() -> bool {
-    use std::os::fd::AsFd as _;
-
-    hung_up_on(std::io::stdin().as_fd())
-}
-
+/// macOS), a live one never is. Windows panes are consoles, not ptys, and have
+/// nothing here to ask.
 #[cfg(unix)]
 pub(super) fn hung_up_on(terminal: std::os::fd::BorrowedFd<'_>) -> bool {
     use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
@@ -62,12 +56,6 @@ pub(super) fn hung_up_on(terminal: std::os::fd::BorrowedFd<'_>) -> bool {
         && fds[0]
             .revents()
             .is_some_and(|revents| revents.contains(PollFlags::POLLHUP))
-}
-
-/// Windows panes are consoles, not ptys; there is nothing here to ask.
-#[cfg(not(unix))]
-pub(super) fn hung_up() -> bool {
-    false
 }
 
 /// What `reclaim_foreground` found.
