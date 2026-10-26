@@ -44,7 +44,7 @@ use zerocode_core::jev::questions::{
 };
 
 use super::deep_gate::{bash_result_exited_zero, command_is_check_shaped};
-use super::repetition::{fingerprint_tool_call, TOOL_REPETITION_THRESHOLD};
+use super::repetition::{fingerprint_tool_call, legacy_repetition_call, TOOL_REPETITION_THRESHOLD};
 use super::tool::is_concurrency_safe;
 use super::{ApiClient, ContentBlock, ConversationMessage, ConversationRuntime, ToolExecutor};
 use crate::model_router::{RouteTaskComplexity, RubricAxis, COMPLEXITY_AXIS, INTENT_AXIS, RISK_AXIS};
@@ -70,6 +70,13 @@ pub const ROUTINE_STEPS_FOR_LIGHTER: u32 = 5;
 /// Read-only batches in a row a `Large` turn needs before a step reads as
 /// routine: one read in a hard task is orientation, not routine.
 const LARGE_ROUTINE_STEPS: u32 = 2;
+
+/// Desktop batches in a row — every call a `Computer` call, none failed —
+/// before a step reads as routine screen work and goes a rung lighter: a
+/// flow's first look and press are orientation; from the third the model is
+/// carrying out a form it has read (t-76055). The effort only — a model move
+/// costs the prompt cache, so screen work keeps its model.
+const SCREEN_STEPS_FOR_LIGHTER: u32 = 3;
 
 /// Batches with a tool error in a row that read as stuck rather than slipping.
 const STUCK_ERROR_STREAK: u32 = 2;
@@ -121,6 +128,9 @@ pub struct StepSignals {
     pub check_red: bool,
     /// Read-only batches in a row, this one included.
     pub routine_streak: u32,
+    /// Desktop batches in a row, this one included: every call a `Computer`
+    /// call and none failed. Not part of the seat's state.
+    pub screen_streak: u32,
     /// The turn's band, as the routing probe or judgment set it.
     pub band: RouteTaskComplexity,
 }
@@ -165,6 +175,7 @@ pub enum StepReason {
     SlippingRepeat,
     SlippingError,
     RoutineReads,
+    RoutineScreen,
     Working,
     /// The seat's fresh band overrode a weak table reading.
     Judged,
@@ -181,6 +192,7 @@ impl StepReason {
             Self::SlippingRepeat => "slipping_repeat",
             Self::SlippingError => "slipping_error",
             Self::RoutineReads => "routine_reads",
+            Self::RoutineScreen => "routine_screen",
             Self::Working => "working",
             Self::Judged => "judged",
         }
@@ -247,6 +259,7 @@ pub fn decide(step: u32, signals: &StepSignals, judgment: Option<StepJudgment>) 
         && !slipping
         && signals.batch == StepBatch::ReadOnly
         && signals.routine_streak >= routine_after;
+    let routine_screen = !strong && !slipping && signals.screen_streak >= SCREEN_STEPS_FOR_LIGHTER;
     let easy_band = matches!(
         signals.band,
         RouteTaskComplexity::Trivial | RouteTaskComplexity::Small
@@ -270,6 +283,8 @@ pub fn decide(step: u32, signals: &StepSignals, judgment: Option<StepJudgment>) 
         (1, reason)
     } else if routine {
         (-1, StepReason::RoutineReads)
+    } else if routine_screen {
+        (-1, StepReason::RoutineScreen)
     } else {
         (0, StepReason::Working)
     };
@@ -630,6 +645,7 @@ impl StepEffortConfig {
 struct BatchSeen {
     calls: u32,
     read_only: bool,
+    screen: bool,
     edited: bool,
     checked: bool,
     exec: bool,
@@ -682,6 +698,7 @@ pub(super) struct StepEffortState {
     batch: BatchSeen,
     error_streak: u32,
     routine_streak: u32,
+    screen_streak: u32,
     strong_streak: u32,
     judgment: Option<StepJudgment>,
     /// The step a fresh judgment was consulted at, awaiting its progress mark.
@@ -700,6 +717,7 @@ impl StepEffortState {
             batch: BatchSeen::default(),
             error_streak: 0,
             routine_streak: 0,
+            screen_streak: 0,
             strong_streak: 0,
             judgment: None,
             label_due: None,
@@ -713,6 +731,7 @@ impl StepEffortState {
         self.batch = BatchSeen::default();
         self.error_streak = 0;
         self.routine_streak = 0;
+        self.screen_streak = 0;
         self.strong_streak = 0;
         self.judgment = None;
         self.label_due = None;
@@ -729,6 +748,16 @@ fn unix_millis() -> u64 {
 
 /// The shell tool's name, as its results name it.
 const BASH_TOOL: &str = "bash";
+
+/// The desktop tool's name, as a direct call names it.
+const COMPUTER_TOOL: &str = "Computer";
+
+/// Whether a call drives the desktop: `Computer` itself, or `Computer`
+/// reached through `CapabilityInvoke`.
+fn is_desktop_call(tool_name: &str, tool_input: &str) -> bool {
+    tool_name == COMPUTER_TOOL
+        || legacy_repetition_call(tool_name, tool_input).is_some_and(|call| call.name == COMPUTER_TOOL)
+}
 
 /// The command a bash tool input carries, for the check-shaped test.
 fn bash_command(input: &str) -> Option<String> {
@@ -815,6 +844,7 @@ where
             seen.calls += 1;
             let read_only = is_concurrency_safe(tool_name);
             seen.read_only = read_only && (first || seen.read_only);
+            seen.screen = is_desktop_call(tool_name, tool_input) && (first || seen.screen);
             seen.errored |= *is_error;
             if super::is_edit_or_write_tool(tool_name) && !*is_error {
                 seen.edited = true;
@@ -964,6 +994,7 @@ impl StepEffortState {
         if batch.calls > 0 {
             self.error_streak = if batch.errored { self.error_streak + 1 } else { 0 };
             self.routine_streak = if kind == StepBatch::ReadOnly { self.routine_streak + 1 } else { 0 };
+            self.screen_streak = if batch.screen && !batch.errored { self.screen_streak + 1 } else { 0 };
         }
         // Revocation drains a waiting answer and retires any retained one.
         if let Some(seat) = self.config.seat.as_ref() {
@@ -977,6 +1008,7 @@ impl StepEffortState {
             error_streak: self.error_streak,
             check_red: batch.check_red,
             routine_streak: self.routine_streak,
+            screen_streak: self.screen_streak,
             band: self.config.band,
         };
         let decision = decide(step, &signals, self.judgment);
@@ -1098,6 +1130,7 @@ mod tests {
             error_streak,
             check_red,
             routine_streak,
+            screen_streak: 0,
             band: RouteTaskComplexity::Medium,
         }
     }
@@ -1499,5 +1532,50 @@ mod tests {
         let mut expected = STEP_STATE_KEYS.to_vec();
         expected.sort_unstable();
         assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn a_desktop_call_is_computer_itself_or_computer_through_capability_invoke() {
+        assert!(is_desktop_call("Computer", r#"{"action":"left_click","label":"Search","ocr":true}"#));
+        assert!(is_desktop_call("CapabilityInvoke", r#"{"name":"Computer","input":{"action":"type","text":"fixture"}}"#));
+        assert!(!is_desktop_call("CapabilityInvoke", r#"{"name":"WebFetch","input":{}}"#));
+        assert!(!is_desktop_call(BASH_TOOL, r#"{"command":"ls"}"#));
+    }
+
+    #[test]
+    fn desktop_work_goes_one_rung_lighter_from_its_third_clean_batch_and_keeps_its_model() {
+        let mut screen = signals(StepBatch::Other, 1, 0, false, 0);
+        screen.screen_streak = SCREEN_STEPS_FOR_LIGHTER - 1;
+        assert_eq!(decide(2, &screen, None).reason, StepReason::Working);
+        screen.screen_streak = SCREEN_STEPS_FOR_LIGHTER;
+        let lighter = decide(3, &screen, None);
+        assert_eq!((lighter.delta, lighter.reason), (-1, StepReason::RoutineScreen));
+        assert!(!lighter.routine, "only routine reads may move the model");
+        screen.repeats = TOOL_REPETITION_THRESHOLD - 1;
+        assert_eq!(decide(3, &screen, None).reason, StepReason::SlippingRepeat);
+        screen.repeats = TOOL_REPETITION_THRESHOLD;
+        assert_eq!(decide(3, &screen, None).reason, StepReason::StuckRepeat);
+    }
+
+    #[test]
+    fn desktop_batches_count_in_a_row_and_a_failure_or_other_work_starts_over() {
+        let mut state = StepEffortState::new(config(false));
+        let desktop = BatchSeen { calls: 1, screen: true, ..BatchSeen::default() };
+        for _ in 1..SCREEN_STEPS_FOR_LIGHTER {
+            state.batch = desktop;
+            assert_eq!(state.plan(Some("m"), "s@1").row.reason, StepReason::Working.token());
+        }
+        state.batch = desktop;
+        let third = state.plan(Some("m"), "s@1");
+        assert_eq!((third.row.reason, third.row.delta), (StepReason::RoutineScreen.token(), -1));
+        assert!(third.moved_to.is_none() && third.row.rung_move.is_none(), "screen work keeps its model");
+        state.batch = BatchSeen { calls: 1, screen: true, errored: true, ..BatchSeen::default() };
+        assert_eq!(state.plan(Some("m"), "s@1").row.reason, StepReason::SlippingError.token());
+        assert_eq!(state.screen_streak, 0);
+        state.batch = desktop;
+        state.plan(Some("m"), "s@1");
+        state.batch = BatchSeen { calls: 2, exec: true, ..BatchSeen::default() };
+        state.plan(Some("m"), "s@1");
+        assert_eq!(state.screen_streak, 0, "a shell command between presses is other work");
     }
 }
