@@ -819,6 +819,17 @@ impl PtyLane {
     /// `claude.exe` would never meet the agent table's `claude`.
     #[must_use]
     pub fn foreground_programs(&self) -> Vec<String> {
+        self.foreground_programs_read().0
+    }
+
+    /// [`Self::foreground_programs`], and whether every process on the line
+    /// said all it can say of itself (t-76489 r6): its image, and on unix
+    /// its argv too. A name missing because a road would not answer is not
+    /// a name the program lacks — a ConPTY's `cmd` read while the Claude
+    /// below it would not say, a `node` whose script would not be read —
+    /// so only a line read whole can say no agent holds the terminal.
+    #[must_use]
+    pub fn foreground_programs_read(&self) -> (Vec<String>, bool) {
         // `MasterPty::process_group_leader` exists on unix only (a ConPTY
         // has no foreground process group); Windows names the line the
         // process tree gives; anywhere else falls through to "no opinion" —
@@ -834,13 +845,308 @@ impl PtyLane {
         let holding: Vec<u32> = self.conpty().map(|seen| seen.named).unwrap_or_default();
         #[cfg(not(any(unix, windows)))]
         let holding: Vec<u32> = Vec::new();
-        let line: Vec<ProcessFacts> = holding
+        let line: Vec<Option<ProcessFacts>> = holding
             .into_iter()
-            .filter_map(|pid| i32::try_from(pid).ok())
-            .map(process_facts)
+            .map(|pid| i32::try_from(pid).ok().map(process_facts))
             .collect();
-        ordered_names(&line, std::env::consts::EXE_SUFFIX)
+        named_line(line, std::env::consts::EXE_SUFFIX, ARGV_ROAD)
     }
+
+    /// The names of every OTHER process in the terminal's foreground group,
+    /// one list per process, each best first by the roads
+    /// [`Self::foreground_programs`] takes — and whether they are all of
+    /// them ([`GroupPrograms`]).
+    ///
+    /// A launcher that does not `exec` its program leads the group while the
+    /// program runs below it: a shell script running `claude "$@"` and
+    /// waiting for its status names `sh` alone to
+    /// [`Self::foreground_programs`], and the agent it waits on is one of
+    /// these (t-76489 r4). A non-interactive shell does no job control, so
+    /// what it starts stays in its group.
+    ///
+    /// The group's list is pids alone, and a pid read after it may be
+    /// another process by then (t-76489 r5): a member that ended, its pid
+    /// taken by a program of another group, or of another person. A member
+    /// is named only while it is the same process — the same start — of
+    /// this group, this terminal's session and this user, before and after
+    /// its names are read (`group_programs`). One that is not, one that
+    /// will not say, and one past `FOREGROUND_GROUP_NAMED` leave the answer
+    /// [`GroupPrograms::Partial`]: what was not read is not known absent.
+    ///
+    /// Windows names the process line down from the holder in
+    /// [`Self::foreground_programs`] already, so it has nothing more to
+    /// give here: [`GroupPrograms::Whole`], and empty. Whether that line
+    /// was read whole is [`Self::foreground_programs_read`]'s to say.
+    #[must_use]
+    pub fn foreground_group_programs(&self) -> GroupPrograms {
+        #[cfg(unix)]
+        {
+            let Some(leader) = self.master.process_group_leader() else {
+                return GroupPrograms::Unread;
+            };
+            // The child leads a session of its own, so its pid is the
+            // session of every process on this terminal.
+            let Some(session) = self
+                .child
+                .process_id()
+                .and_then(|pid| i32::try_from(pid).ok())
+            else {
+                return GroupPrograms::Unread;
+            };
+            // SAFETY: `getuid` takes nothing and cannot fail.
+            let user = unsafe { libc::getuid() };
+            group_programs(
+                (leader, session, user),
+                group_members(leader),
+                &process_identity,
+                &|pid| {
+                    let facts = process_facts(pid);
+                    facts_whole(&facts, ARGV_ROAD)
+                        .then(|| ordered_names(&[facts], std::env::consts::EXE_SUFFIX))
+                },
+            )
+        }
+
+        #[cfg(windows)]
+        {
+            GroupPrograms::Whole(Vec::new())
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            GroupPrograms::Unread
+        }
+    }
+}
+
+/// What [`PtyLane::foreground_group_programs`] could say of the foreground
+/// group's other processes (t-76489 r5). No agent among them means the
+/// group runs none only when the answer is [`Self::Whole`]; otherwise the
+/// one not read may be it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupPrograms {
+    /// Every other process of the group, named.
+    Whole(Vec<Vec<String>>),
+    /// These were named, and at least one more process was not: the group
+    /// was listed in part, a process would not say its names or who it
+    /// is, it was not the same process of this group before and after its
+    /// names were read, or it came past the bound.
+    Partial(Vec<Vec<String>>),
+    /// The group could not be listed, or the platform will not say.
+    Unread,
+}
+
+impl GroupPrograms {
+    /// The names read, one list per process; none when nothing was.
+    #[must_use]
+    pub fn named(&self) -> &[Vec<String>] {
+        match self {
+            Self::Whole(named) | Self::Partial(named) => named,
+            Self::Unread => &[],
+        }
+    }
+}
+
+/// How many of a foreground group's other processes
+/// [`PtyLane::foreground_group_programs`] reads: a launcher's program is
+/// born right after it, and a build leading a group of hundreds is not read
+/// whole.
+#[cfg(unix)]
+const FOREGROUND_GROUP_NAMED: usize = 32;
+
+/// Who one process is, as the OS says it now: its group, its session, its
+/// user, and when it started — a pid reused is another start.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessIdentity {
+    group: i32,
+    session: i32,
+    user: u32,
+    started: u64,
+}
+
+/// [`PtyLane::foreground_group_programs`] off the platform's answers:
+/// `ours` the group, session and user a member must be of, `listed` the
+/// group's pids and whether that list is whole (`None` when it could not be
+/// read), `identity` who a pid is now and `names` what it is called —
+/// `None` when a road would not answer ([`facts_whole`]). The group's
+/// leader, whose pid is the group's, is not among the members.
+///
+/// A member's names count only when it is ours and the same process before
+/// and after they are read; any member they do not count for leaves the
+/// answer partial.
+#[cfg(unix)]
+fn group_programs(
+    ours: (i32, i32, u32),
+    listed: Option<(Vec<i32>, bool)>,
+    identity: &dyn Fn(i32) -> Option<ProcessIdentity>,
+    names: &dyn Fn(i32) -> Option<Vec<String>>,
+) -> GroupPrograms {
+    let (group, session, user) = ours;
+    let Some((pids, mut whole)) = listed else {
+        return GroupPrograms::Unread;
+    };
+    let mut named = Vec::new();
+    for (read, pid) in pids.into_iter().filter(|pid| *pid != group).enumerate() {
+        if read == FOREGROUND_GROUP_NAMED {
+            whole = false;
+            break;
+        }
+        let Some(before) = identity(pid)
+            .filter(|seen| seen.group == group && seen.session == session && seen.user == user)
+        else {
+            whole = false;
+            continue;
+        };
+        let Some(called) = names(pid).filter(|called| !called.is_empty()) else {
+            whole = false;
+            continue;
+        };
+        if identity(pid) != Some(before) {
+            whole = false;
+            continue;
+        }
+        named.push(called);
+    }
+    if whole {
+        GroupPrograms::Whole(named)
+    } else {
+        GroupPrograms::Partial(named)
+    }
+}
+
+/// The pids in process group `group`, lowest first, and whether that is all
+/// of them; `None` when the platform will not say.
+#[cfg(target_os = "macos")]
+fn group_members(group: i32) -> Option<(Vec<i32>, bool)> {
+    // `proc_listpids` out of libproc, declared here as `proc_pidpath` is;
+    // PROC_PGRP_ONLY is libproc's own selector for "the members of one
+    // process group". Asked once for the size, then for the pids, with room
+    // for a few born in between; a list that fills the room may have left
+    // some out.
+    unsafe extern "C" {
+        fn proc_listpids(kind: u32, typeinfo: u32, buffer: *mut i32, buffersize: i32) -> i32;
+    }
+    const PROC_PGRP_ONLY: u32 = 2;
+    let typeinfo = u32::try_from(group).ok()?;
+    let wanted = unsafe { proc_listpids(PROC_PGRP_ONLY, typeinfo, std::ptr::null_mut(), 0) };
+    let wanted = usize::try_from(wanted).ok().filter(|wanted| *wanted > 0)?;
+    let mut pids = vec![0i32; wanted / std::mem::size_of::<i32>() + 16];
+    let room = i32::try_from(pids.len() * std::mem::size_of::<i32>()).ok()?;
+    let filled = unsafe { proc_listpids(PROC_PGRP_ONLY, typeinfo, pids.as_mut_ptr(), room) };
+    listed_pids(filled, room, pids)
+}
+
+/// The pids `proc_listpids` put in `pids`, lowest first, off the bytes it
+/// answered it `filled` of the `room` it was given, and whether that is all
+/// of them; `None` for an answer that lists nothing (t-76489 r6).
+///
+/// libproc fails with 0 as well as with a negative — asked with one byte of
+/// room on 2026-10-27 it answered 0 and `ENOMEM` — and a group whose
+/// terminal names it has a member to list, so no answer of 0 is an empty
+/// group read whole. A list that fills the room may have left some out.
+#[cfg(target_os = "macos")]
+fn listed_pids(filled: i32, room: i32, mut pids: Vec<i32>) -> Option<(Vec<i32>, bool)> {
+    if filled <= 0 {
+        return None;
+    }
+    let whole = filled < room;
+    let filled = usize::try_from(filled).ok()?;
+    pids.truncate((filled / std::mem::size_of::<i32>()).min(pids.len()));
+    pids.retain(|pid| *pid > 0);
+    pids.sort_unstable();
+    pids.dedup();
+    Some((pids, whole))
+}
+
+/// The pids in process group `group`, lowest first, off `/proc` — the
+/// group is the fifth field of each `stat`, the first after the command's
+/// closing parenthesis but two — and whether that is all of them: a `stat`
+/// that will not be read or parsed may be a member. `None` where there is
+/// no `/proc`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn group_members(group: i32) -> Option<(Vec<i32>, bool)> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut whole = true;
+    let mut pids = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            whole = false;
+            continue;
+        };
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => match stat_fields(&stat).and_then(|fields| fields.get(2)?.parse().ok()) {
+                Some(of) if of == group => pids.push(pid),
+                Some(_) => {}
+                None => whole = false,
+            },
+            // A process that ended since the folder was read is no member.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => whole = false,
+        }
+    }
+    pids.sort_unstable();
+    Some((pids, whole))
+}
+
+/// The fields of a `/proc/<pid>/stat` after the command's closing
+/// parenthesis: the state first, then the parent, the group and the
+/// session, and the start the twentieth.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn stat_fields(stat: &str) -> Option<Vec<&str>> {
+    let (_, after) = stat.rsplit_once(')')?;
+    Some(after.split_whitespace().collect())
+}
+
+/// Who process `pid` is now, off libproc's BSD record and its session; `None`
+/// when it will not say — a process gone, or not ours to ask about.
+#[cfg(target_os = "macos")]
+fn process_identity(pid: i32) -> Option<ProcessIdentity> {
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: an all-zero `proc_bsdinfo` is a valid value of a plain C struct.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    // SAFETY: the buffer is `size` bytes of the struct the flavour fills.
+    let filled =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+    if filled != size {
+        return None;
+    }
+    // SAFETY: `getsid` reads a pid and answers -1 for one it cannot.
+    let session = unsafe { libc::getsid(pid) };
+    if session < 0 {
+        return None;
+    }
+    Some(ProcessIdentity {
+        group: i32::try_from(info.pbi_pgid).ok()?,
+        session,
+        user: info.pbi_uid,
+        started: info
+            .pbi_start_tvsec
+            .checked_mul(1_000_000)?
+            .checked_add(info.pbi_start_tvusec)?,
+    })
+}
+
+/// Who process `pid` is now, off `/proc/<pid>/stat` and the owner of its
+/// folder; `None` when it will not say.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn process_identity(pid: i32) -> Option<ProcessIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat_fields(&stat)?;
+    Some(ProcessIdentity {
+        group: fields.get(2)?.parse().ok()?,
+        session: fields.get(3)?.parse().ok()?,
+        user: std::fs::metadata(format!("/proc/{pid}")).ok()?.uid(),
+        started: fields.get(19)?.parse().ok()?,
+    })
 }
 
 /// What the OS says about one process: its image path and its argv.
@@ -848,6 +1154,36 @@ type ProcessFacts = (Option<String>, Vec<String>);
 
 fn process_facts(pid: i32) -> ProcessFacts {
     (executable_path(pid), argv_of(pid))
+}
+
+/// Whether this platform reads a process's argv ([`argv_of`]): Windows
+/// keeps it in the PEB and the name comes off the image alone.
+const ARGV_ROAD: bool = cfg!(unix);
+
+/// Whether `facts` hold everything the roads could say (t-76489 r6): the
+/// image, and the argv where `argv_road` reads one. A process whose image
+/// or argv would not be read may be named by the road that failed — a
+/// `node` running `codex.js`, the Claude under a ConPTY's `cmd`.
+fn facts_whole((exec, argv): &ProcessFacts, argv_road: bool) -> bool {
+    exec.is_some() && (!argv_road || !argv.is_empty())
+}
+
+/// [`ordered_names`] of a line of processes, `None` for one that could not
+/// be asked, and whether every one of them said everything
+/// ([`facts_whole`]); an empty line said nothing.
+fn named_line(
+    line: Vec<Option<ProcessFacts>>,
+    suffix: &str,
+    argv_road: bool,
+) -> (Vec<String>, bool) {
+    let whole = !line.is_empty()
+        && line.iter().all(|facts| {
+            facts
+                .as_ref()
+                .is_some_and(|facts| facts_whole(facts, argv_road))
+        });
+    let line: Vec<ProcessFacts> = line.into_iter().flatten().collect();
+    (ordered_names(&line, suffix), whole)
 }
 
 /// Every name a line of processes answers to, best first and without repeats
@@ -1330,7 +1666,53 @@ fn kill_known_child(child: &mut (impl portable_pty::Child + ?Sized)) -> std::io:
 
 #[cfg(test)]
 mod foreground_tests {
-    use super::{argv_in, conpty_foreground, ordered_names, program_name};
+    use super::{argv_in, conpty_foreground, named_line, ordered_names, program_name};
+
+    /// t-76489 r6, the codex review's second finding of r5: a line one of
+    /// whose processes would not say everything is not read whole, though
+    /// the names the others gave still stand. On Windows a ConPTY's `cmd`
+    /// gives its image while the Claude below it does not; on unix a
+    /// `node` gives its path while its argv — the script that names codex
+    /// — does not. Before, the names read were all there was, and a line
+    /// that named `cmd` alone said no agent held the terminal.
+    #[test]
+    fn a_line_a_process_of_which_would_not_say_everything_is_not_read_whole() {
+        let cmd = || Some((Some(r"C:\Windows\System32\cmd.exe".to_string()), Vec::new()));
+        let claude = || Some((Some(r"C:\Users\dev\claude.exe".to_string()), Vec::new()));
+        let (names, whole) = named_line(vec![cmd(), Some((None, Vec::new()))], ".exe", false);
+        assert!(names.iter().any(|name| name == "cmd"), "{names:?}");
+        assert!(
+            !whole,
+            "the Claude whose image would not be read was known absent"
+        );
+        assert!(
+            !named_line(vec![cmd(), None], ".exe", false).1,
+            "a pid not asked"
+        );
+        let (names, whole) = named_line(vec![cmd(), claude()], ".exe", false);
+        assert!(
+            whole && names.iter().any(|name| name == "claude"),
+            "{names:?}"
+        );
+
+        let node = || (Some("/usr/local/bin/node".to_string()), Vec::new());
+        let (names, whole) = named_line(vec![Some(node())], "", true);
+        assert_eq!(names.first().map(String::as_str), Some("node"));
+        assert!(
+            !whole,
+            "the script whose argv would not be read was known absent"
+        );
+        let read = (
+            Some("/usr/local/bin/node".to_string()),
+            vec!["node".to_string(), "/opt/codex/bin/codex.js".to_string()],
+        );
+        let (names, whole) = named_line(vec![Some(read)], "", true);
+        assert!(
+            whole && names.iter().any(|name| name == "codex"),
+            "{names:?}"
+        );
+        assert_eq!(named_line(Vec::new(), "", true), (Vec::new(), false));
+    }
 
     /// No birth time is known: nothing refutes a Toolhelp parent link.
     fn unknown(_pid: u32) -> Option<u64> {
@@ -2063,7 +2445,7 @@ mod child_termination_tests {
 /// itself changes (t-73907: on macOS it no longer goes through a fork).
 #[cfg(all(test, unix))]
 mod launch_shape_tests {
-    use super::PtyLane;
+    use super::{GroupPrograms, PtyLane};
     use std::time::{Duration, Instant};
 
     /// How long a test waits for what it is sure will come.
@@ -2127,6 +2509,36 @@ mod launch_shape_tests {
             "pid, group, terminal's group, /dev/tty"
         );
         assert_eq!(lane.foreground_is_child(), Some(true));
+    }
+
+    /// What a script runs without `exec` stays in the script's group and
+    /// is named among the group's other processes, the script itself not
+    /// (t-76489 r4), and the platform says who each is — the same process
+    /// of this group, session and user before and after its names are read
+    /// — so the answer is whole (t-76489 r5). The script says READY only
+    /// once `ps` names its `sleep`, so one reading after READY finds it,
+    /// waiting on no clock.
+    #[test]
+    fn a_program_a_script_runs_is_named_among_its_group() {
+        let mut lane = spawned(
+            "sleep 30 & until ps -o comm= -p $! | grep -q sleep; do :; done; echo READY; wait",
+        );
+        line_with(&mut lane, "READY");
+        let members = lane.foreground_group_programs();
+        let GroupPrograms::Whole(named) = &members else {
+            panic!("the script's group was not read whole: {members:?}");
+        };
+        assert!(
+            named
+                .iter()
+                .any(|names| names.iter().any(|name| name == "sleep")),
+            "the script's sleep was not named: {members:?}"
+        );
+        let leader = lane.foreground_programs();
+        assert!(
+            !named.contains(&leader),
+            "the group's leader {leader:?} named among its other processes: {members:?}"
+        );
     }
 
     /// ^C typed into the pane reaches the child as SIGINT.
@@ -2253,5 +2665,266 @@ mod fork_free_tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(forks, 0, "the lane's start forked this process");
+    }
+}
+
+/// Whose names a foreground group's reading counts (t-76489 r5): the
+/// platform's answers, faked, in the orders a pid can change under it.
+#[cfg(all(test, unix))]
+mod group_tests {
+    use std::cell::RefCell;
+    use std::collections::{HashMap, VecDeque};
+
+    use super::{FOREGROUND_GROUP_NAMED, GroupPrograms, ProcessIdentity, group_programs};
+
+    const GROUP: i32 = 500;
+    const SESSION: i32 = 400;
+    const USER: u32 = 501;
+
+    /// A process of the terminal's group, session and user, started at
+    /// `started`.
+    fn ours(started: u64) -> ProcessIdentity {
+        ProcessIdentity {
+            group: GROUP,
+            session: SESSION,
+            user: USER,
+            started,
+        }
+    }
+
+    /// A Claude Code another terminal runs: another group and session.
+    fn afar(started: u64) -> ProcessIdentity {
+        ProcessIdentity {
+            group: 900,
+            session: 800,
+            user: USER,
+            started,
+        }
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    fn claude() -> Vec<String> {
+        names(&["2.1.232", "versions", "claude"])
+    }
+
+    /// The OS, faked: each pid answers who it is off its queue, one answer
+    /// a question and the last for every question after, and what it is
+    /// called off its row — none for a pid with no row.
+    #[derive(Default)]
+    struct Os {
+        identities: RefCell<HashMap<i32, VecDeque<Option<ProcessIdentity>>>>,
+        called: HashMap<i32, Vec<String>>,
+        asked: RefCell<Vec<i32>>,
+    }
+
+    impl Os {
+        fn process(
+            mut self,
+            pid: i32,
+            answers: &[Option<ProcessIdentity>],
+            called: Vec<String>,
+        ) -> Self {
+            self.identities
+                .get_mut()
+                .insert(pid, answers.iter().copied().collect());
+            if !called.is_empty() {
+                self.called.insert(pid, called);
+            }
+            self
+        }
+
+        fn identity(&self, pid: i32) -> Option<ProcessIdentity> {
+            let mut all = self.identities.borrow_mut();
+            let answers = all.get_mut(&pid)?;
+            if answers.len() > 1 {
+                answers.pop_front().flatten()
+            } else {
+                answers.front().copied().flatten()
+            }
+        }
+
+        fn read(&self, listed: Option<(Vec<i32>, bool)>) -> GroupPrograms {
+            group_programs(
+                (GROUP, SESSION, USER),
+                listed,
+                &|pid| self.identity(pid),
+                &|pid| {
+                    self.asked.borrow_mut().push(pid);
+                    self.called.get(&pid).cloned()
+                },
+            )
+        }
+    }
+
+    /// A group read whole names every member but its leader, whose pid is
+    /// the group's.
+    #[test]
+    fn a_group_read_whole_names_every_member_but_its_leader() {
+        let os = Os::default()
+            .process(GROUP, &[Some(ours(1))], names(&["sh"]))
+            .process(501, &[Some(ours(2))], names(&["node"]))
+            .process(502, &[Some(ours(3))], claude());
+        assert_eq!(
+            os.read(Some((vec![GROUP, 501, 502], true))),
+            GroupPrograms::Whole(vec![names(&["node"]), claude()])
+        );
+        assert_eq!(
+            os.read(Some((vec![GROUP], true))),
+            GroupPrograms::Whole(Vec::new())
+        );
+    }
+
+    /// A group that cannot be listed is unread, and one listed in part is
+    /// partial: the member not listed may be the agent.
+    #[test]
+    fn a_group_listed_in_part_or_not_at_all_is_not_read_whole() {
+        let os = Os::default().process(501, &[Some(ours(2))], names(&["node"]));
+        assert_eq!(os.read(None), GroupPrograms::Unread);
+        assert_eq!(GroupPrograms::Unread.named(), &[] as &[Vec<String>]);
+        assert_eq!(
+            os.read(Some((vec![GROUP, 501], false))),
+            GroupPrograms::Partial(vec![names(&["node"])])
+        );
+    }
+
+    /// A member that will not say who it is, or what it is called, leaves
+    /// the answer partial: the others it names still count.
+    #[test]
+    fn a_member_that_will_not_say_leaves_the_answer_partial() {
+        let os = Os::default()
+            .process(501, &[Some(ours(2))], names(&["node"]))
+            .process(502, &[None], claude())
+            .process(503, &[Some(ours(4))], Vec::new())
+            .process(504, &[Some(ours(5)), None], claude());
+        assert_eq!(
+            os.read(Some((vec![GROUP, 501, 502, 503, 504], true))),
+            GroupPrograms::Partial(vec![names(&["node"])])
+        );
+    }
+
+    /// t-76489 r6, the codex review's third finding of r5: libproc answers
+    /// 0 when it fails as well as a negative, and a group its terminal
+    /// names has a member to list — so 0 lists no group, and only a list
+    /// that left room is all of it. Before, 0 was an empty group read
+    /// whole, and a launcher's pane held nothing.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_listing_of_nothing_or_of_a_failure_is_no_group_read() {
+        use super::listed_pids;
+        let size = i32::try_from(std::mem::size_of::<i32>()).expect("an int's size");
+        let room = 4 * size;
+        assert_eq!(listed_pids(0, room, vec![0; 4]), None, "0 and ENOMEM");
+        assert_eq!(listed_pids(-1, room, vec![0; 4]), None);
+        assert_eq!(
+            listed_pids(2 * size, room, vec![GROUP + 1, GROUP, 0, 0]),
+            Some((vec![GROUP, GROUP + 1], true))
+        );
+        assert_eq!(
+            listed_pids(room, room, vec![GROUP, GROUP + 1, GROUP + 2, GROUP + 3]),
+            Some((vec![GROUP, GROUP + 1, GROUP + 2, GROUP + 3], false)),
+            "a list that filled its room may have left some out"
+        );
+        let os = Os::default().process(GROUP, &[Some(ours(1))], names(&["sh"]));
+        assert_eq!(
+            os.read(listed_pids(0, room, vec![0; 4])),
+            GroupPrograms::Unread
+        );
+    }
+
+    /// The codex review's second finding of r4: a member listed in pane A's
+    /// group ends, and its pid is taken by the Claude Code another terminal
+    /// runs — before its names are read, or while they are. Its names are
+    /// that Claude's, and they are not A's: the answer is partial and names
+    /// no claude. A pid that came back in A's own group as another start is
+    /// not the member listed either. Before, the names were read with no
+    /// question of who answered them, and A held B's conversation.
+    #[test]
+    fn a_pid_reused_by_another_groups_claude_is_not_named() {
+        for (answers, scene) in [
+            (
+                vec![Some(ours(2)), Some(afar(9))],
+                "reused while its names were read",
+            ),
+            (vec![Some(afar(9))], "reused before its names were read"),
+            (
+                vec![Some(ours(2)), Some(ours(9))],
+                "reused in the group by another start",
+            ),
+        ] {
+            let os = Os::default()
+                .process(501, &[Some(ours(1))], names(&["make"]))
+                .process(502, &answers, claude());
+            let read = os.read(Some((vec![GROUP, 501, 502], true)));
+            assert_eq!(
+                read,
+                GroupPrograms::Partial(vec![names(&["make"])]),
+                "{scene}"
+            );
+        }
+    }
+
+    /// A member that leaves the group while it is read, or that is another
+    /// person's or another session's, is not named.
+    #[test]
+    fn a_member_of_another_group_user_or_session_is_not_named() {
+        let moved = ProcessIdentity {
+            group: 900,
+            ..ours(2)
+        };
+        let root = ProcessIdentity { user: 0, ..ours(2) };
+        let elsewhere = ProcessIdentity {
+            session: 800,
+            ..ours(2)
+        };
+        for (answers, scene) in [
+            (
+                vec![Some(ours(2)), Some(moved)],
+                "left the group while read",
+            ),
+            (vec![Some(root)], "another user's"),
+            (vec![Some(elsewhere)], "another session's"),
+        ] {
+            let os = Os::default().process(502, &answers, claude());
+            assert_eq!(
+                os.read(Some((vec![GROUP, 502], true))),
+                GroupPrograms::Partial(Vec::new()),
+                "{scene}"
+            );
+        }
+    }
+
+    /// The reading stops at its bound, and a group past it is read in part:
+    /// the agent past the bound is neither asked nor known absent.
+    #[test]
+    fn a_group_past_the_bound_is_read_in_part() {
+        let bound = i32::try_from(FOREGROUND_GROUP_NAMED).expect("a small bound");
+        let mut os = Os::default();
+        for pid in 1..=bound {
+            os = os.process(
+                GROUP + pid,
+                &[Some(ours(u64::from(pid.unsigned_abs())))],
+                names(&["cc"]),
+            );
+        }
+        let within: Vec<i32> = (0..=bound).map(|pid| GROUP + pid).collect();
+        assert_eq!(
+            os.read(Some((within.clone(), true))),
+            GroupPrograms::Whole(vec![names(&["cc"]); FOREGROUND_GROUP_NAMED])
+        );
+        let agent = GROUP + bound + 1;
+        os = os.process(agent, &[Some(ours(99))], claude());
+        os.asked.borrow_mut().clear();
+        let past: Vec<i32> = within.into_iter().chain([agent]).collect();
+        assert_eq!(
+            os.read(Some((past, true))),
+            GroupPrograms::Partial(vec![names(&["cc"]); FOREGROUND_GROUP_NAMED])
+        );
+        assert!(
+            !os.asked.borrow().contains(&agent),
+            "the member past the bound was read"
+        );
     }
 }

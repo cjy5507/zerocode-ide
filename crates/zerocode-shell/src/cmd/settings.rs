@@ -1112,7 +1112,7 @@ pub(crate) fn opened_set(file: &std::path::Path, worktree: &str) -> pane_layout:
     pane_layout::without_finished(stored, |wake| {
         finished
             .as_ref()
-            .and_then(|finished| finished(&wake.agent, &wake.id))
+            .and_then(|finished| finished(&wake.agent, &wake.key, &wake.id))
     })
 }
 
@@ -1124,7 +1124,7 @@ pub(crate) fn standing_set(file: &std::path::Path) -> Vec<String> {
     if let Some(finished) = crate::orchestration::finished_conversations() {
         for tabs in layouts.values_mut() {
             *tabs = pane_layout::without_finished(std::mem::take(tabs), |wake| {
-                finished(&wake.agent, &wake.id)
+                finished(&wake.agent, &wake.key, &wake.id)
             })
             .kept();
         }
@@ -1170,6 +1170,12 @@ pub(crate) fn carry_zo_pane_sessions(
     sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
     agents: &HashMap<TermId, &'static str>,
 ) {
+    // Every conversation the set names as sent, for the owed rule below.
+    let named: Vec<(String, String)> = layouts
+        .iter()
+        .flat_map(|layout| layout.agents.values())
+        .map(|wake| (wake.agent.clone(), wake.id.clone()))
+        .collect();
     for layout in layouts {
         for (&ordinal, &term) in &layout.terms {
             if agents.get(&term).copied() != Some(AgentKind::Zo.slug()) {
@@ -1192,7 +1198,7 @@ pub(crate) fn carry_zo_pane_sessions(
             layout
                 .running
                 .insert(ordinal, AgentKind::Zo.slug().to_string());
-            layout.agents.insert(
+            let displaced = layout.agents.insert(
                 ordinal,
                 pane_layout::WakeAgent {
                     agent: AgentKind::Zo.slug().to_string(),
@@ -1202,8 +1208,64 @@ pub(crate) fn carry_zo_pane_sessions(
                     interrupted,
                 },
             );
+            // Another conversation the leaf stood for is owed, never dropped
+            // (t-76489, t-12063): a record that named a claude coordinator
+            // here and now names the pane's zo must not forget the claude —
+            // unless another leaf of the set names it, where it stands.
+            if let Some(displaced) = displaced
+                && (displaced.agent != AgentKind::Zo.slug() || displaced.id != session.id)
+                && named
+                    .iter()
+                    .filter(|(agent, id)| *agent == displaced.agent && *id == displaced.id)
+                    .count()
+                    < 2
+            {
+                layout.owed.push(displaced);
+            }
         }
     }
+}
+
+/// Whether the shell `term` holds the conversation `wake` names now
+/// (t-76489): the agent this window knows the pane as and the session it
+/// reported — the two records [`crate::conversation_wake::panes_naming`]
+/// reads — and `in_front`, that the pane's agent still holds its terminal
+/// ([`crate::agent_tools_runtime::agent_in_front_within`]: the program in
+/// front of its shell is that agent, not the shell and not a command run
+/// after it). Both records outlive an agent quit back to its shell, so a
+/// pane that ended the conversation and the pane that reopened it since
+/// would both answer by the records alone, and the first by order would
+/// take the second's place. `None` when the records name the conversation
+/// and `in_front` cannot tell (t-76489 r5).
+pub(crate) fn pane_holds(
+    sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
+    agents: &HashMap<TermId, &'static str>,
+    in_front: &dyn Fn(TermId) -> Option<bool>,
+    wake: &pane_layout::WakeAgent,
+    term: TermId,
+) -> Option<bool> {
+    let named = agents.get(&term).copied() == Some(wake.agent.as_str())
+        && sessions
+            .get(&term)
+            .is_some_and(|session| session.id == wake.id);
+    if named { in_front(term) } else { Some(false) }
+}
+
+/// One line in the window's log for the leaves a pane-layout road took a
+/// conversation off because another leaf names it too (t-76489) — nothing
+/// when it took none.
+fn note_doubled(state: &AppState, road: &str, struck: &[String]) {
+    if struck.is_empty() {
+        return;
+    }
+    note_window_event(
+        state.local_data_root(),
+        &format!(
+            "pane layouts: the {road} kept one leaf per conversation and took {} off {} other leaf(s)",
+            struck.join(", "),
+            struck.len()
+        ),
+    );
 }
 
 /// Remember one worktree's terminal tabs — the whole set, replacing what was
@@ -1243,10 +1305,32 @@ pub(crate) fn save_pane_layouts(
     // a tab born in this session is nameless until the file names it, and the
     // stage can only say where a named tab stands. One name per tab sent, in
     // the order sent — none for a tab the save struck whole.
-    let named =
-        pane_layout::save_window_set(&file, worktree, left.kept(), &crate::exit_runtime::leaving)
-            .map(Option::unwrap_or_default)
-            .map_err(|error| error.to_string())?;
+    // One leaf per conversation across the file (t-76489): the leaf whose
+    // pane holds it keeps it, so a dead pane's copy — a split that died at
+    // the writer lease of a conversation a tab beside it held — never wakes
+    // in the living one's place.
+    let (named, doubled) = pane_layout::save_window_set(
+        &file,
+        worktree,
+        left.kept(),
+        &crate::exit_runtime::leaving,
+        &|wake, term| {
+            let in_front = |term| {
+                let shell_pane = { state.shell_panes().contains(&term) };
+                crate::agent_tools_runtime::agent_in_front_within(
+                    state.terminals(),
+                    shell_pane,
+                    term,
+                    wake.agent.as_str(),
+                    None,
+                )
+            };
+            pane_holds(&sessions, &agents, &in_front, wake, term)
+        },
+    )
+    .map(Option::unwrap_or_default)
+    .map_err(|error| error.to_string())?;
+    note_doubled(&state, "save", &doubled);
     let mut named = named.into_iter();
     Ok(kept
         .into_iter()

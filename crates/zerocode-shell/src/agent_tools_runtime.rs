@@ -736,6 +736,107 @@ pub(super) fn shell_in_front_of(state: &AppState, term: TermId) -> bool {
     front == Some(true)
 }
 
+/// Whether `term`'s own agent, `agent`, holds its terminal now (t-76489):
+/// the terminal stands, and on a shell pane the program in front of the
+/// shell is that agent ([`front_is_agent`]). An agent quit back to its shell
+/// keeps the window's record of its conversation
+/// (`pane_runtime::clear_departed_agent`) — the 이어서 menu reopens it from
+/// there — yet holds nothing, and another pane may have reopened the same
+/// conversation since. `shell_pane` is whether the pty's child is the shell
+/// itself; `patience` bounds the wait for the pane's lock — `None` waits as
+/// [`shell_in_front_of`] does.
+///
+/// `None` is "cannot tell" (t-76489 r5): a pane busy past the patience, a
+/// terminal that will not say, or a group not read whole. Not knowing is
+/// not knowing it holds nothing — the exit keeps such a pane standing with
+/// what it ran, and no conversation is taken off a record on its word.
+pub(crate) fn agent_in_front_within(
+    terminals: &TerminalRegistry,
+    shell_pane: bool,
+    term: TermId,
+    agent: &str,
+    patience: Option<Duration>,
+) -> Option<bool> {
+    let Some(held) = terminals.handle(term) else {
+        return Some(false);
+    };
+    if !shell_pane {
+        return Some(true);
+    }
+    let ask = |pty: &zerocode_lane::PtyHandle| {
+        front_is_agent(
+            pty.foreground_is_child(),
+            || pty.foreground_programs_read(),
+            || pty.foreground_group_programs(),
+            agent,
+        )
+    };
+    match patience {
+        Some(patience) => {
+            terminal_registry::lock_pty_within(&held, patience).and_then(|pty| ask(&pty))
+        }
+        None => ask(&lock_pty(&held)),
+    }
+}
+
+/// Whether the program in front of a shell pane is `agent` (t-76489 r3):
+/// `child_in_front` is the kernel's word that the shell itself is, and
+/// `programs` the names of what holds the terminal otherwise, read only
+/// then — the sweep's own road (`pane_runtime::sweep_arrived_agents`). A
+/// shell in front holds nothing; neither does an ordinary command run in
+/// it after its agent quit — a `vim`, a build — which leads its own group
+/// just as an agent does, so the group alone cannot tell them apart.
+///
+/// A leader whose names are no agent's may be a launcher: a script that
+/// runs `claude` without `exec` and waits for its status leads the group
+/// as `sh` while the agent runs below it (t-76489 r4). So `members`, the
+/// names of the group's other processes, are read then, and the pane is
+/// standing with `agent` when one of them is it. A leader that names
+/// another agent holds the terminal for that one.
+///
+/// `None` is "cannot tell" (t-76489 r5): a terminal that will not say, or
+/// names nothing it can read, and a group whose members were not all read
+/// — listed in part or not at all, a member that would not say who it is,
+/// one past the bound — when none of those read is `agent`. The one not
+/// read may be it, so no agent among the rest is no answer. So too a line
+/// of holders not read whole (r6, `programs`' second half): a ConPTY's
+/// `cmd` named while the Claude below it would not say, a `node` whose
+/// script would not be read. An agent a road did name still answers.
+pub(crate) fn front_is_agent(
+    child_in_front: Option<bool>,
+    programs: impl FnOnce() -> (Vec<String>, bool),
+    members: impl FnOnce() -> zerocode_pty::GroupPrograms,
+    agent: &str,
+) -> Option<bool> {
+    let named = |names: &[String]| {
+        names
+            .iter()
+            .find_map(|program| zerocode_core::agent::agent_spec_by_process(program))
+    };
+    match child_in_front {
+        Some(true) => Some(false),
+        None => None,
+        Some(false) => {
+            let (programs, read_whole) = programs();
+            if let Some(spec) = named(&programs) {
+                return Some(spec.id == agent);
+            }
+            let members = members();
+            if members
+                .named()
+                .iter()
+                .any(|names| named(names).is_some_and(|spec| spec.id == agent))
+            {
+                return Some(true);
+            }
+            match members {
+                zerocode_pty::GroupPrograms::Whole(_) if read_whole => Some(false),
+                _ => None,
+            }
+        }
+    }
+}
+
 /// Whether `term`'s last turn ended at rest with its agent in front, as the
 /// mail pointer reads it ([`crate::orchestration::turn_rests`]), and no
 /// person's words wait on its line — the two halves of "between turns" that

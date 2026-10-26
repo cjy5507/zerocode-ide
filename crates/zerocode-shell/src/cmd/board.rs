@@ -1756,7 +1756,7 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
     // why a conversation came back and whose it was — the 2026-10-15/16
     // lines that brought three finished workers back said neither.
     let road = window.road();
-    let row = crate::orchestration::worker_of_conversation(agent, &session.id);
+    let row = crate::orchestration::worker_of_conversation(agent, &session);
     let origin = restart_nudge_runtime::origin(road.word(), &row);
     let note = |line: String| window.note(&restart_nudge_runtime::with_origin(line, &origin));
     // A conversation whose last program an account switch closed and nobody

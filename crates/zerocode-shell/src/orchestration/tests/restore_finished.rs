@@ -675,3 +675,561 @@ fn the_three_unsummoned_resumes_are_none_and_the_sleepers_reseat_stays_one() {
         crate::agent_teams::forget_term(pane);
     }
 }
+
+/// The claude coordinator's conversation and the zo one a person's tab held
+/// beside it, as 2026-10-26's window had them (t-76489): the tab of the
+/// coordinator's pane, split by `zo --resume` of the zo conversation, and the
+/// person's zo tab.
+fn the_coordinators_tab(coordinator: &str, zo: &str) -> crate::pane_layout::TabLayout {
+    serde_json::from_value(serde_json::json!({
+        "root": { "type": "split", "direction": "vertical",
+                  "first": { "type": "leaf" }, "second": { "type": "leaf" } },
+        "agents": {
+            "0": { "agent": "claude", "key": "session_id", "id": coordinator },
+            "1": { "agent": "zo", "key": "session_id", "id": zo },
+        },
+        "running": { "0": "claude", "1": "zo" },
+        "focused": true,
+        "terms": { "0": 1, "1": 17 },
+    }))
+    .expect("the coordinator's tab")
+}
+
+/// t-76489 red ④: a conversation that holds a run's coordinator seat is the
+/// person's on every road that reads it off a stored record, whatever worker
+/// row once carried it — a first visit's read keeps it, the boot puts its
+/// workspace back, and the door on each road opens it — and still after the
+/// restart vacated the seat. A finished worker's conversation stored beside
+/// it is still struck. Before, only the window's save asked for the seat:
+/// the read struck it as the finished worker, the boot left its workspace
+/// out, and every door declined it.
+#[test]
+fn a_coordinators_conversation_comes_back_whatever_worker_once_carried_it() {
+    const LEADER: u32 = 764_890;
+    const FIRST: u32 = 764_891;
+    const SEATED: u32 = 764_895;
+    const DOOR: u32 = 764_900;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    let worker_checkout = root.path().join("t-76489");
+    for folder in [&main, &worker_checkout] {
+        std::fs::create_dir_all(folder).expect("a checkout");
+    }
+    let at = |folder: &std::path::Path| folder.to_string_lossy().into_owned();
+    let host = Restoring::new(&main, FIRST, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "coord-read");
+    // The conversation the second run's coordinator is (`test_actor`),
+    // carried first by a worker of the first run, which finished.
+    let seat = format!("test-session-of-term-{SEATED}");
+    let finished = "76489a1c-0000-4000-8000-000000000001";
+    let (_task, carried, _) = a_worker(&host, &team, "--agent claude", Some(&seat));
+    let (_task, done, _) = a_worker(&host, &team, "--agent claude", Some(finished));
+    for worker in [&carried, &done] {
+        say(
+            &host,
+            &team,
+            &format!("worker-stop --worker {worker} --reason handed-in"),
+        );
+    }
+    let (_seated_team, _seated_run) = a_run(&host, SEATED, "coord-seat");
+    let file = root.path().join("pane-layouts.json");
+    crate::pane_layout::rewrite(&file, |held| {
+        crate::pane_layout::store(held, at(&main), vec![record("claude", &seat)]);
+        crate::pane_layout::store(held, at(&worker_checkout), vec![record("claude", finished)]);
+        true
+    })
+    .expect("the stored sets");
+
+    let mut wrong = Vec::new();
+    for moment in ["seat held", "after the restart"] {
+        let read = crate::cmd::settings::opened_set(&file, &at(&main));
+        if !read.struck.is_empty() || read.clone().kept().len() != 1 {
+            wrong.push(format!(
+                "{moment}: the read struck the coordinator: {read:?}"
+            ));
+        }
+        let finished_read = crate::cmd::settings::opened_set(&file, &at(&worker_checkout));
+        if finished_read.struck != vec![done.clone()] {
+            wrong.push(format!(
+                "{moment}: the finished worker's read: {finished_read:?}"
+            ));
+        }
+        if crate::cmd::settings::standing_set(&file) != vec![at(&main)] {
+            wrong.push(format!(
+                "{moment}: the boot puts back {:?}",
+                crate::cmd::settings::standing_set(&file)
+            ));
+        }
+        let door = Door::new(&main);
+        for (road, term) in STORED_RECORD_ROADS.into_iter().zip(DOOR..) {
+            door.on_road(road);
+            match door.wake(term, "claude", &seat) {
+                Ok(woke) if woke.finished.is_none() => {}
+                other => wrong.push(format!("{moment}, {}: {other:?}", road.word())),
+            }
+            crate::agent_teams::forget_term(term);
+        }
+        if !door.noted(" did not resume ").is_empty() {
+            wrong.push(format!("{moment}: {:?}", door.noted(" did not resume ")));
+        }
+        if moment == "seat held" {
+            the_next_boot(SEATED);
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    for pane in [FIRST, FIRST + 1, LEADER, SEATED] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-76489 red ②③, the 2026-10-26 window closing and the next one opening,
+/// through the save, the exit's own write and the read: the coordinator's tab
+/// holds its claude (term 1) and a split (term 17) of `zo --resume` that died
+/// at the writer lease of the zo conversation the person's tab (term 16)
+/// holds. The save keeps the claude coordinator — a worker once carried its
+/// conversation — and gives the zo conversation to the leaf whose pane holds
+/// it; the exit marks both tabs standing; the next window reads both
+/// conversations, once each, and puts their workspace back. And the shape the
+/// 10-26 file really had — no line for the coordinator at all: the exit's own
+/// write files it from its live pane, as a tab of its own that does not take
+/// the eye.
+#[test]
+fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
+    const LEADER: u32 = 764_910;
+    const FIRST: u32 = 764_911;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    std::fs::create_dir_all(&main).expect("a checkout");
+    let main = main.to_string_lossy().into_owned();
+    let host = Restoring::new(std::path::Path::new(&main), FIRST, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "coord-tab");
+    let coordinator = format!("test-session-of-term-{LEADER}");
+    let zo = "session-1792758210243-0";
+    // A worker once carried the coordinator's conversation, and finished.
+    let (_task, carried, _) = a_worker(&host, &team, "--agent claude", Some(&coordinator));
+    say(
+        &host,
+        &team,
+        &format!("worker-stop --worker {carried} --reason handed-in"),
+    );
+    let zo_tab = || {
+        let mut tab = record("zo", zo);
+        tab.focused = false;
+        tab.terms = std::collections::HashMap::from([(0, 16)]);
+        tab
+    };
+    // Terms 1 and 16 hold their conversations; term 17 died at birth.
+    let live = std::collections::HashMap::from([
+        (1, ("claude", coordinator.clone())),
+        (16, ("zo", zo.to_string())),
+    ]);
+    let holds = |wake: &crate::pane_layout::WakeAgent, term: u32| {
+        Some(
+            live.get(&term)
+                .is_some_and(|(agent, id)| *agent == wake.agent && *id == wake.id),
+        )
+    };
+    let screens = |term: u32| {
+        live.contains_key(&term)
+            .then(|| format!("screen of {term}"))
+    };
+    let file = root.path().join("pane-layouts.json");
+
+    let saved =
+        crate::cmd::settings::saved_set(vec![the_coordinators_tab(&coordinator, zo), zo_tab()]);
+    assert!(
+        saved.struck.is_empty(),
+        "the save struck {:?}",
+        saved.struck
+    );
+    let (_, doubled) =
+        crate::pane_layout::save_window_set(&file, main.clone(), saved.kept(), &|| false, &holds)
+            .expect("the save")
+            .expect("not leaving");
+    assert_eq!(
+        doubled,
+        vec!["zo session-".to_string()],
+        "the dead split's copy"
+    );
+    crate::pane_layout::rewrite(&file, |layouts| {
+        crate::pane_layout::capture_exit(layouts, screens);
+        true
+    })
+    .expect("the exit's write");
+    let back = crate::cmd::settings::opened_set(&file, &main);
+    assert!(back.struck.is_empty(), "{back:?}");
+    let back = back.kept();
+    let named: Vec<Vec<Option<String>>> = back
+        .iter()
+        .map(|tab| {
+            (0..tab.root.leaves())
+                .map(|at| {
+                    tab.agents
+                        .get(&at)
+                        .map(|one| format!("{} {}", one.agent, one.id))
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            vec![Some(format!("claude {coordinator}")), None],
+            vec![Some(format!("zo {zo}"))],
+        ]
+    );
+    assert!(
+        back.iter().all(|tab| tab.awake),
+        "a tab the exit found standing is not awake"
+    );
+    assert_eq!(
+        crate::cmd::settings::standing_set(&file),
+        vec![main.clone()]
+    );
+
+    // The 10-26 file: no line for the coordinator. The exit files it.
+    crate::pane_layout::save_window_set(&file, main.clone(), vec![zo_tab()], &|| false, &holds)
+        .expect("the save")
+        .expect("not leaving");
+    let mut filed = Vec::new();
+    crate::pane_layout::rewrite(&file, |layouts| {
+        filed = crate::pane_layout::file_unheld(
+            layouts,
+            vec![crate::pane_layout::LivePane {
+                term: 1,
+                worktree: main.clone(),
+                wake: crate::pane_layout::WakeAgent {
+                    agent: "claude".to_string(),
+                    key: "session_id".to_string(),
+                    id: coordinator.clone(),
+                    transcript_path: None,
+                    interrupted: false,
+                },
+                sure: true,
+            }],
+            |term| live.contains_key(&term),
+        );
+        crate::pane_layout::capture_exit(layouts, screens);
+        true
+    })
+    .expect("the exit's write");
+    assert!(
+        matches!(filed[..], [crate::pane_layout::Filed::Tab(_)]),
+        "{filed:?}"
+    );
+    let back = crate::cmd::settings::opened_set(&file, &main).kept();
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[1].agents[&0].id, coordinator);
+    assert!(back[1].awake && !back[1].focused);
+    assert_eq!(
+        crate::cmd::settings::standing_set(&file),
+        vec![main.clone()]
+    );
+    for pane in [FIRST, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-76489 r6, the boot's half of keeping both: no pane is known to hold
+/// the coordinator's conversation — one runs a build, the other cannot be
+/// told of — so the window's save keeps it on both leaves. The next boot
+/// reads both off the file and wakes each in turn: the first opens it, and
+/// the second is told the pane that holds it and starts nothing, standing a
+/// plain shell. One process holds it, and nothing is lost. When the first
+/// leaf's spawn is refused, the second opens it itself.
+#[test]
+fn a_conversation_two_leaves_name_comes_back_once_and_is_never_lost() {
+    const FIRST: u32 = 764_960;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    std::fs::create_dir_all(&main).expect("a checkout");
+    let at = main.to_string_lossy().into_owned();
+    let coordinator = "76489b2c-0000-4000-8000-000000000001";
+    let leaf = |term: u32| {
+        let mut tab = record("claude", coordinator);
+        tab.focused = term == 8;
+        tab.terms = std::collections::HashMap::from([(0, term)]);
+        tab
+    };
+    let file = root.path().join("pane-layouts.json");
+    let (_, doubled) = crate::pane_layout::save_window_set(
+        &file,
+        at.clone(),
+        vec![leaf(3), leaf(8)],
+        &|| false,
+        &|_, term| (term == 3).then_some(false),
+    )
+    .expect("the save")
+    .expect("not leaving");
+    assert!(
+        doubled.is_empty(),
+        "a record taken off on a guess: {doubled:?}"
+    );
+    let back = crate::cmd::settings::opened_set(&file, &at);
+    assert!(back.struck.is_empty(), "{back:?}");
+    let wakes: Vec<crate::pane_layout::WakeAgent> = back
+        .kept()
+        .into_iter()
+        .flat_map(|tab| tab.agents.into_values())
+        .collect();
+    assert_eq!(wakes.len(), 2, "{wakes:?}");
+    assert_eq!(crate::cmd::settings::standing_set(&file), vec![at.clone()]);
+
+    for refused in [false, true] {
+        let door = Door::new(&main);
+        door.on_road(WakeRoad::RestoreFront);
+        if refused {
+            door.refuse_start(FIRST);
+        }
+        let answers: Vec<_> = (FIRST..)
+            .zip(&wakes)
+            .map(|(term, wake)| door.wake(term, &wake.agent, &wake.id))
+            .collect();
+        if refused {
+            assert!(answers[0].is_err(), "{answers:?}");
+            assert_eq!(answers[1], Ok(ConversationWake::opened(FIRST + 1)));
+        } else {
+            assert_eq!(answers[0], Ok(ConversationWake::opened(FIRST)));
+            assert_eq!(
+                answers[1],
+                Ok(ConversationWake::standing(FIRST)),
+                "the second leaf woke a second process on one conversation"
+            );
+        }
+        assert_eq!(resumes(&door), 1, "refused={refused}: {:?}", door.started());
+        for term in [FIRST, FIRST + 1] {
+            crate::agent_teams::forget_term(term);
+        }
+    }
+}
+
+/// t-76489 r2 ③, through the ledger: the exit found run's coordinator in no
+/// saved leaf and filed it as a tab, and then its write failed — or the way
+/// out moved on before it was done. The window's log says so under the run's
+/// name, and the run's board gets one letter from the ledger itself with the
+/// conversation's id; the same exit told twice is one letter. A write that
+/// was done sends no letter. Before, a failed or cancelled write was logged
+/// "written as tab" and the board heard nothing.
+#[test]
+fn a_coordinator_lost_with_the_exits_write_is_told_to_its_run() {
+    const LEADER: u32 = 764_920;
+    const FIRST: u32 = 764_921;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    std::fs::create_dir_all(&main).expect("a checkout");
+    let host = Restoring::new(&main, FIRST, (0, test_actor(LEADER)));
+    let (_team, run) = a_run(&host, LEADER, "exit-lost");
+    let coordinator = format!("test-session-of-term-{LEADER}");
+    let live = vec![(
+        crate::pane_layout::LivePane {
+            term: 1,
+            worktree: main.to_string_lossy().into_owned(),
+            wake: crate::pane_layout::WakeAgent {
+                agent: "claude".to_string(),
+                key: "session_id".to_string(),
+                id: coordinator.clone(),
+                transcript_path: None,
+                interrupted: false,
+            },
+            sure: true,
+        },
+        Some(run.clone()),
+    )];
+    let exited = |written| crate::system_runtime::Exited {
+        doubled: Vec::new(),
+        filed: vec![crate::pane_layout::Filed::Tab(2)],
+        written,
+    };
+    let letters = |receipt: &str| {
+        the_rows()
+            .messages
+            .into_iter()
+            .filter(|mail| mail.run == run && mail.subject.as_str() == receipt)
+            .collect::<Vec<_>>()
+    };
+    let local = tempfile::tempdir().expect("the window's own folder");
+    let log = || {
+        std::fs::read_to_string(local.path().join(crate::system_runtime::WINDOW_LOG))
+            .unwrap_or_default()
+    };
+
+    crate::system_runtime::exit_notices(
+        local.path(),
+        &live,
+        &exited(crate::system_runtime::Written::Done),
+    );
+    assert!(
+        letters(&format!("exit-unwritten:{run}:{coordinator}")).is_empty()
+            && letters(&format!("exit-unplaced:{run}:{coordinator}")).is_empty(),
+        "a coordinator the file holds was told to its board"
+    );
+    assert!(log().contains("written as tab 2"), "{}", log());
+
+    let failed = exited(crate::system_runtime::Written::Failed(
+        "Not a directory (os error 20)".to_string(),
+    ));
+    crate::system_runtime::exit_notices(local.path(), &live, &failed);
+    crate::system_runtime::exit_notices(local.path(), &live, &failed);
+    let told = letters(&format!("exit-unwritten:{run}:{coordinator}"));
+    assert_eq!(told.len(), 1, "one exit, one letter");
+    assert_eq!(
+        (told[0].from.as_str(), told[0].to.as_str()),
+        (
+            zerocode_core::orchestration::LEDGER_ITSELF,
+            format!("run:{run}").as_str()
+        )
+    );
+    assert!(
+        told[0].body.as_str().contains(&coordinator) && !told[0].body.as_str().contains("os error"),
+        "{}",
+        told[0].body.as_str()
+    );
+    let lines = log();
+    assert!(
+        lines
+            .lines()
+            .any(|line| line.contains(&format!("run:{run}"))
+                && line.contains("the write failed: Not a directory")),
+        "{lines}"
+    );
+
+    // Cancelled: the same letter road, the same receipt, still one letter.
+    crate::system_runtime::exit_notices(
+        local.path(),
+        &live,
+        &exited(crate::system_runtime::Written::Cancelled),
+    );
+    assert_eq!(
+        letters(&format!("exit-unwritten:{run}:{coordinator}")).len(),
+        1
+    );
+    assert!(
+        log().contains("moved on before it was written"),
+        "{}",
+        log()
+    );
+    for pane in [FIRST, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-76489 r7, the codex review's finding of r6, through the exit's own
+/// write and the next boot: run's coordinator C runs in pane 9 of a
+/// workspace not in front, the last save left that pane out, and nobody can
+/// tell whether it holds C. The workspace's only record of C is an old one —
+/// its pane gone, or no pane named. The exit keeps the old record and writes
+/// pane 9 beside it, the tab stands with its screen, the boot puts the
+/// workspace back behind the front, and its door opens C. Before, the old
+/// record's name alone answered: the exit wrote nothing for pane 9, its tab
+/// was stored asleep, the boot left the workspace out, and no line or letter
+/// said C was lost.
+#[test]
+fn a_coordinator_beside_a_dead_record_comes_back_with_the_next_boot() {
+    const LEADER: u32 = 764_970;
+    const FIRST: u32 = 764_971;
+    const DOOR: u32 = 764_975;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let front = root.path().join("zerocode");
+    let behind = root.path().join("t-76489");
+    for folder in [&front, &behind] {
+        std::fs::create_dir_all(folder).expect("a checkout");
+    }
+    let at = |folder: &std::path::Path| folder.to_string_lossy().into_owned();
+    let host = Restoring::new(&front, FIRST, (0, test_actor(LEADER)));
+    let (_team, _run) = a_run(&host, LEADER, "exit-dead-record");
+    let coordinator = format!("test-session-of-term-{LEADER}");
+    let pane = crate::pane_layout::LivePane {
+        term: 9,
+        worktree: at(&behind),
+        wake: crate::pane_layout::WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: coordinator.clone(),
+            transcript_path: None,
+            interrupted: false,
+        },
+        sure: false,
+    };
+
+    for (scene, dead) in [
+        ("a dead pane's record", Some(5)),
+        ("a record of no pane", None),
+    ] {
+        let file = root
+            .path()
+            .join(format!("{}.json", dead.map_or(0, |term| term)));
+        let mut old = record("claude", &coordinator);
+        old.focused = false;
+        old.terms = dead
+            .map(|term| std::collections::HashMap::from([(0, term)]))
+            .unwrap_or_default();
+        crate::pane_layout::rewrite(&file, |held| {
+            crate::pane_layout::store(held, at(&front), vec![shell()]);
+            crate::pane_layout::store(held, at(&behind), vec![old.clone()]);
+            true
+        })
+        .expect("the stored sets");
+        let exited = crate::system_runtime::exit_write(
+            &file,
+            vec![pane.clone()],
+            &|_, _| None,
+            &|term| term == 9,
+            &|term| (term == 9).then(|| "screen of 9".to_string()),
+            &|| true,
+        );
+        assert_eq!(
+            exited.written,
+            crate::system_runtime::Written::Done,
+            "{scene}"
+        );
+        assert!(
+            matches!(exited.filed[..], [crate::pane_layout::Filed::Tab(_)]),
+            "{scene}: {:?}",
+            exited.filed
+        );
+        assert_eq!(
+            crate::cmd::settings::standing_set(&file),
+            vec![at(&behind)],
+            "{scene}: the boot leaves the coordinator's workspace out"
+        );
+        let back = crate::cmd::settings::opened_set(&file, &at(&behind));
+        assert!(back.struck.is_empty(), "{scene}: {back:?}");
+        let back = back.kept();
+        assert!(
+            back.iter().any(|tab| tab.awake
+                && tab.agents.get(&0).map(|wake| wake.id.as_str()) == Some(&coordinator)),
+            "{scene}: no standing tab of C: {back:#?}"
+        );
+        // The visit's read leaves the screens to their own door; the file
+        // holds pane 9's.
+        assert!(
+            crate::pane_layout::read(&file)[&at(&behind)]
+                .iter()
+                .any(|tab| tab.buffers.get(&0).map(String::as_str) == Some("screen of 9")),
+            "{scene}: pane 9's screen was not captured"
+        );
+        assert_eq!(
+            back.iter()
+                .filter(|tab| tab.agents.values().any(|wake| wake.id == coordinator))
+                .count(),
+            2,
+            "{scene}: the old record went"
+        );
+        let door = Door::new(&behind);
+        door.on_road(WakeRoad::RestoreBehind);
+        match door.wake(DOOR, "claude", &coordinator) {
+            Ok(woke) if woke.finished.is_none() => {}
+            other => panic!("{scene}: the boot's door: {other:?}"),
+        }
+        assert_eq!(resumes(&door), 1, "{scene}: {:?}", door.started());
+        crate::agent_teams::forget_term(DOOR);
+    }
+    for pane in [FIRST, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
