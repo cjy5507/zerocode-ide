@@ -1141,6 +1141,24 @@ pub(crate) fn read_keychain_service_if_present(service: &str) -> Result<Option<S
     }
 }
 
+/// The item `service` holds under any account — the read zo makes of a
+/// router key (`read_router_key`), which names no account.
+pub(crate) fn read_keychain_service_any_account(service: &str) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        match security_command(&["find-generic-password", "-s", service, "-w"], None) {
+            Ok(key) => Ok(Some(key).filter(|key| !key.trim().is_empty())),
+            Err(error) if error.contains(NO_SUCH_ITEM) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = service;
+        Ok(None)
+    }
+}
+
 /// Put the credentials into the scoped service this home answers to.
 fn write_keychain(home: &Path, credentials: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]

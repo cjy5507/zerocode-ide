@@ -595,6 +595,26 @@ pub fn agent_lineup(
     }
 }
 
+/// What the model settings draw from zo's list (t-75762): every login model
+/// row, every router zo reads (`customProviders`), each source's report and
+/// the aliases a saved `model` may name — the same cached catalog the model
+/// menu and the lineup read, never a second `zo models` run.
+pub fn zo_model_list(home: &Path) -> serde_json::Value {
+    let catalog = zo_models_catalog(home);
+    let mut list = serde_json::Map::new();
+    for key in ["models", "customProviders", "reports", "aliases"] {
+        list.insert(
+            key.to_string(),
+            catalog
+                .get(key)
+                .filter(|value| value.is_array())
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        );
+    }
+    serde_json::Value::Object(list)
+}
+
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]. A zo that is
 /// missing, fails, says nothing readable or outlives [`MODELS_WAIT`] — killed
 /// then — leaves the catalog last read standing, or `Null` before any was.

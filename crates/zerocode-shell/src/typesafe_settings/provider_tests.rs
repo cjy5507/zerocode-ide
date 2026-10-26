@@ -810,6 +810,63 @@ fn a_connection_takes_the_old_judgment_key_for_its_address_with_one_press() {
     assert!(endpoint.asked()[0].contains("[합성-이전-판단-키]"));
 }
 
+/// t-75762 시험 3: a connection model applied for judgment is the model
+/// field of the next judgment request, which goes to that connection.
+#[test]
+fn an_applied_judgment_connection_model_is_the_next_requests_model() {
+    use judgment_provider::connections::Reference;
+    use zerocode_core::jev::JEV_USES;
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = home.path().join("settings.json");
+    let (selected, _) = selected_with_managed_model(&path);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut root: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    root["providers"] = json!([{
+        "name":"Fixture judge", "base_url":format!("{}/route", endpoint.base()),
+        "requires_auth":false, "models":["fixture-other","fixture-judge-model"],
+        "connection":{"id":"fixture-judge", "generation":4}
+    }]);
+    root["smart"]["jev"] = json!({"enabled":true,"workspaces":[door::resolved_path(workspace.path())]});
+    let seat = &JEV_USES[0];
+    root["smart"][seat.setting] = json!(
+        seat.modes
+            .iter()
+            .find(|mode| mode.asks())
+            .expect("asking mode")
+            .key()
+    );
+    std::fs::write(&path, root.to_string()).expect("write");
+    let reference = Reference {
+        id: "fixture-judge".to_string(),
+        generation: 4,
+        model: "fixture-judge-model".to_string(),
+        protocol: Protocol::SystemOne,
+    };
+    crate::model_connection_store::apply_judgment(
+        &path,
+        &reference,
+        &selected.identity(),
+        &HeldKeys::default(),
+        &settings_wire(&path),
+    )
+    .expect("apply");
+    let applied = endpoint.count();
+    let _ = settings_wire(&path).ask(
+        seat,
+        Some(workspace.path()),
+        crate::systemone::request_body(&json!("Ready"), &json!({"ready":{"type":"noul","instructions":"Ready?"}})),
+        std::time::Duration::from_secs(5),
+    );
+    let asked = endpoint.asked();
+    assert_eq!(asked.len(), applied + 1, "the next judgment did not reach the connection");
+    let (head, body) = asked[applied].split_once("\r\n\r\n").expect("request");
+    assert!(head.starts_with("POST /route/systemone "), "{head}");
+    let body: Value = serde_json::from_str(body).expect("JSON");
+    assert_eq!(body["model"], "fixture-judge-model");
+}
+
 #[test]
 fn returning_from_a_connection_restores_the_previous_managed_selection() {
     use judgment_provider::connections::{self, Reference};

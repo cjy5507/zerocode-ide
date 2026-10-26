@@ -2664,6 +2664,7 @@ fn main() -> ExitCode {
             api_router_presets,
             api_router_providers,
             model_connections, sync_model_connections, check_model_connection, select_model_connection, clear_model_connection,
+            zo_model_list, select_coding_model, adopt_legacy_judgment_key,
             test_router_connection,
             save_api_router,
             remove_api_router,

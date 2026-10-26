@@ -33,8 +33,8 @@ pub(crate) use managed_judgment::{
 #[path = "model_connections.rs"]
 pub(crate) mod model_connection_commands;
 pub(crate) use model_connection_commands::{
-    check_model_connection, clear_model_connection, model_connections, select_model_connection,
-    sync_model_connections,
+    adopt_legacy_judgment_key, check_model_connection, clear_model_connection, model_connections,
+    select_coding_model, select_model_connection, sync_model_connections, zo_model_list,
 };
 pub(crate) mod onboarding;
 pub(crate) mod project;
