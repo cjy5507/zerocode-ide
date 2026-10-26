@@ -226,6 +226,8 @@ mod tests {
             "{{password}}",
             "password=$secret_password",
             "password={{password}}",
+            "password=${TOKEN}",
+            "Bearer ${TOKEN}",
             "https://example.test/?password=$secret_password",
         ] {
             assert!(
@@ -233,12 +235,18 @@ mod tests {
                 "a reference is not a stored value"
             );
         }
-        for value in [
+        let unsafe_values = [
             "password=SYNTHETIC_INPUT_ONLY",
+            "password=$(printf hunter2)",
+            "password=$(gh auth token)",
+            "password=$(printf '%s' \"$(gh auth token)\")",
             "https://example.test/?password=SYNTHETIC_INPUT_ONLY",
-        ] {
-            assert!(unsafe_location_or_value(value));
-        }
+        ];
+        let failures: Vec<_> = unsafe_values
+            .into_iter()
+            .filter(|value| !unsafe_location_or_value(value))
+            .collect();
+        assert!(failures.is_empty(), "unsafe values accepted: {failures:?}");
     }
 
     #[test]

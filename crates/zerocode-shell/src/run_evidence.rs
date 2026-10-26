@@ -742,11 +742,36 @@ fn walk_files(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn literal_command_credentials_do_not_survive_input_redaction() {
+        // Synthetic key-shaped inputs only; no fixture is a usable key.
+        let values = [
+            "password=$(printf hunter2)".to_owned(),
+            "password=$(gh auth token)".to_owned(),
+            "password=$(printf '%s' \"$(gh auth token)\")".to_owned(),
+            format!("export GITHUB_TOKEN=$(echo ghp_{})", "FAKE".repeat(9)),
+            format!("password=$(printf '%s' sk-{})", "FAKE".repeat(8)),
+            format!("password=$(echo {})", "FAKE0".repeat(6)),
+            format!("password=$(echo {})", "4111".to_owned() + &"1111".repeat(3)),
+            format!(
+                "password=$(printf '%s' \"$(echo ghp_{})\")",
+                "FAKE".repeat(9)
+            ),
+        ];
+        let failures: Vec<_> = values
+            .into_iter()
+            .filter(|value| {
+                let argv = words(&["type", "--text", value]);
+                redacted("computer", &argv) == argv
+            })
+            .collect();
+        assert!(failures.is_empty(), "literal inputs retained: {failures:?}");
+    }
+
+    #[test]
     fn whole_credential_references_survive_input_redaction() {
         for value in [
             "password={{password}}",
             "password=${PASSWORD}",
-            "password=$(gh auth token)",
             "Authorization: Bearer ${TOKEN}",
         ] {
             let argv = words(&["type", "--text", value]);

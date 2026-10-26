@@ -502,18 +502,143 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
 mod tests {
     use super::*;
 
+    // Deliberately synthetic values, constructed so no fixture is a real key.
+    fn literal_command_values() -> Vec<String> {
+        vec![
+            "$(printf hunter2)".to_owned(),
+            "$(gh auth token)".to_owned(),
+            "$(printf '%s' \"$(gh auth token)\")".to_owned(),
+            format!("$(echo ghp_{})", "FAKE".repeat(9)),
+            format!("$(printf '%s' sk-{})", "FAKE".repeat(8)),
+            format!("$(echo {})", "FAKE0".repeat(6)),
+            format!("$(printf '%s' \"$(echo ghp_{})\")", "FAKE".repeat(9)),
+            format!("$(echo {})", "4111".to_owned() + &"1111".repeat(3)),
+            format!("$(echo '{}')", ["4111", "1111", "1111", "1111"].join(" ")),
+        ]
+    }
+
+    #[test]
+    fn literal_command_values_are_not_references() {
+        let failures: Vec<_> = literal_command_values()
+            .into_iter()
+            .filter(|value| is_reference_value(value))
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "literal commands accepted: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn literal_command_values_are_fully_masked() {
+        let mut failures = Vec::new();
+        for value in literal_command_values() {
+            for text in [
+                format!("password={value}"),
+                format!("export GITHUB_TOKEN={value}"),
+                format!("client --password {value}"),
+                format!("password=\"{value}\""),
+            ] {
+                for masked in [mask_named_values(&text), mask_values(&text)] {
+                    if !masked.contains(MASK)
+                        || masked.contains("FAKE")
+                        || masked.contains("4111")
+                        || masked.contains("1111")
+                        || masked.contains("hunter2")
+                        || masked.contains("$(")
+                    {
+                        failures.push((text.clone(), masked));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "literal commands retained: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn literal_command_values_trigger_credential_cues() {
+        let failures: Vec<_> = literal_command_values()
+            .into_iter()
+            .map(|value| format!("password={value}"))
+            .filter(|text| !may_carry_a_credential(text))
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "literal commands omitted: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn command_values_are_masked_through_their_end() {
+        let mut failures = Vec::new();
+        for value in [
+            "$(printf hunter2)",
+            "\"$(printf hunter2)\"",
+            "'$(printf hunter2)'",
+            "$(printf '%s' \"$(printf hunter2)\")",
+            "$(printf '%s' 'hunter2)')",
+            "$(printf '%s' hunter2\\))",
+            "$(printf hunter2)suffix",
+            "prefix$(printf hunter2)",
+            "$(printf hello)$(printf hunter2)",
+            "\"prefix $(printf '%s %s' hunter2 hunter3)\"",
+            "\"$(printf hunter2)\\\"suffix secret\"",
+            "$(printf '%s' \"$(printf '%s' 'hunter2)')\")",
+            "$(printf '%s' '비밀 값')",
+        ] {
+            for (text, expected) in [
+                (
+                    format!("password={value} && make"),
+                    format!("password={MASK} && make"),
+                ),
+                (
+                    format!("client --password {value} next"),
+                    format!("client --password {MASK} next"),
+                ),
+            ] {
+                for masked in [mask_named_values(&text), mask_values(&text)] {
+                    if masked != expected {
+                        failures.push((text.clone(), masked, expected.clone()));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "incorrect command spans: {failures:?}");
+    }
+
+    #[test]
+    fn incomplete_command_values_mask_the_remaining_line() {
+        let failures: Vec<_> = [
+            "password=$(printf hunter2",
+            "password=\"$(printf hunter2) suffix",
+            "password=$(printf '%s' \"$(printf hunter2)",
+        ]
+        .into_iter()
+        .filter(|text| {
+            [mask_named_values(text), mask_values(text)]
+                .iter()
+                .any(|masked| masked != &format!("password={MASK}"))
+        })
+        .collect();
+        assert!(
+            failures.is_empty(),
+            "incomplete commands retained: {failures:?}"
+        );
+    }
+
     #[test]
     fn whole_reference_values_keep_their_text_in_both_masking_readings() {
         for text in [
             "password={{password}}",
             "password=${PASSWORD}",
             "TASK_TOKEN=${TOKEN}",
-            "export GITHUB_TOKEN=$(gh auth token)",
             "Authorization: Bearer ${TOKEN}",
             "Bearer {{token}}",
             "client --password \"${PASSWORD}\" next",
             "password='{{비밀번호}}'",
-            "password=$(printf '%s' \"$(gh auth token)\")",
         ] {
             assert_eq!(mask_named_values(text), text, "named: {text}");
             assert_eq!(mask_values(text), text, "shapes: {text}");
@@ -525,7 +650,6 @@ mod tests {
         for text in [
             "password={{password}}",
             "password=${PASSWORD}",
-            "export GITHUB_TOKEN=$(gh auth token)",
             "Authorization: Bearer ${TOKEN}",
             "Bearer {{token}}",
             "{{token}}",
