@@ -16,6 +16,11 @@ pub const STEER_SCOPE_ROOT: &str = "active-root-turn";
 /// `support.steer.scope` of a teammate pane (t-2513 §2.2): the running turn,
 /// or — while the pane is idle between turns — its next one.
 pub const STEER_SCOPE_TEAMMATE: &str = "active-root-turn | idle-next-turn";
+/// The `session.steer` kind of the window's mail notice (t-75726).
+pub const NOTICE_KIND: &str = "notice";
+/// `support.notice.scope`: a running turn takes a notice as it takes a steer,
+/// and an idle session — root or teammate — opens its next turn with it.
+pub const NOTICE_SCOPE: &str = "idle-next-turn";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Requested {
@@ -131,6 +136,7 @@ impl Snapshot {
             support: json!({
                 "roster":{"supported":true,"transport":"subagents-snapshot","method":null,"registry_ordering":true},
                 "steer":{"supported":true,"method":"session.steer","scope":STEER_SCOPE_ROOT},
+                "notice":{"supported":true,"method":"session.steer","kind":NOTICE_KIND,"scope":NOTICE_SCOPE},
                 "resume":{"supported":true,"transport":"cli","selector":"--resume","continuation":"composer"},
                 "subagent_panes":{"supported":true},
                 // Implemented ability on this binary (t-2513): a child is
@@ -360,6 +366,8 @@ mod tests {
         assert!(root.identity["registry_locator"].is_null());
         assert!(root.launch["harness"].is_null());
         assert_eq!(root.support["steer"]["scope"], STEER_SCOPE_ROOT);
+        let notice = json!({"supported": true, "method": "session.steer", "kind": "notice", "scope": "idle-next-turn"});
+        assert_eq!(root.support["notice"], notice, "a root says it takes the window's notice");
 
         let harness = ResolvedHarness {
             system_prompt: vec!["You review.".to_string()],
@@ -381,6 +389,7 @@ mod tests {
         assert_eq!(child.launch["harness"], "carried");
         assert_eq!(child.launch["harness_digest"], harness.digest());
         assert_eq!(child.support["steer"]["scope"], STEER_SCOPE_TEAMMATE);
+        assert_eq!(child.support["notice"], notice, "so does a teammate");
         assert_eq!(child.support["subagent_steer"]["supported"], true);
 
         // A v1 brief (no harness) is said to be derived; a stale one, stale.

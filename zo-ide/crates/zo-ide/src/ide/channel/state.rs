@@ -77,6 +77,14 @@ pub enum Command {
         /// 넣을 텍스트.
         text: String,
     },
+    /// The window's mail notice (`session.steer` with `kind: "notice"`,
+    /// t-75726): folded into a running turn as a steer is, and otherwise the
+    /// opening words of the next turn, which is the window's and not the
+    /// person's. The composer draft is not touched either way.
+    Notice {
+        /// The pointer text, as the window wrote it.
+        text: String,
+    },
     /// A successful `auth.reload` whose display label should be shown once by
     /// whichever frontend currently owns the pane.
     AccountSwitch {
@@ -667,6 +675,33 @@ impl ChannelState {
         self.commands_arrived.notify_waiters();
     }
 
+    /// Queue a window notice in place of any not yet taken, and say how many
+    /// it replaced (t-75726): notices that arrive before a turn takes one are
+    /// one turn, carrying the latest words.
+    pub fn queue_notice(&self, text: String) -> usize {
+        let mut commands = self.commands.lock().unwrap_or_else(PoisonError::into_inner);
+        let before = commands.len();
+        commands.retain(|command| !matches!(command, Command::Notice { .. }));
+        let replaced = before - commands.len();
+        commands.push_back(Command::Notice { text });
+        drop(commands);
+        self.commands_arrived.notify_waiters();
+        replaced
+    }
+
+    /// Put back a notice a frontend took and could not use (t-75726), unless
+    /// a later one is already waiting: the later words win, as in
+    /// [`Self::queue_notice`].
+    pub fn restore_notice(&self, text: String) {
+        let mut commands = self.commands.lock().unwrap_or_else(PoisonError::into_inner);
+        if commands.iter().any(|command| matches!(command, Command::Notice { .. })) {
+            return;
+        }
+        commands.push_back(Command::Notice { text });
+        drop(commands);
+        self.commands_arrived.notify_waiters();
+    }
+
     /// 큐를 비우고 가져간다.
     #[must_use]
     pub fn take_commands(&self) -> Vec<Command> {
@@ -925,5 +960,18 @@ mod tests {
             state.wait_command().await,
             Command::CancelTurn { turn_id: None }
         );
+    }
+
+    /// A notice put back after a compaction opens the next turn, unless a
+    /// later one came meanwhile: the later words win (t-75726).
+    #[test]
+    fn a_restored_notice_gives_way_to_a_later_one() {
+        let state = ChannelState::new("s".to_string());
+        state.restore_notice("held".to_string());
+        assert_eq!(state.take_commands(), vec![Command::Notice { text: "held".to_string() }]);
+
+        assert_eq!(state.queue_notice("later".to_string()), 0);
+        state.restore_notice("held".to_string());
+        assert_eq!(state.take_commands(), vec![Command::Notice { text: "later".to_string() }]);
     }
 }

@@ -175,6 +175,11 @@ pub struct TurnFrame<'a> {
     pub outcome: Option<TurnOutcome>,
     /// 끝이 실패였을 때의 사유.
     pub error: Option<&'a str>,
+    /// Who opened the turn when it was not the person (t-75726): `"notice"`
+    /// for a turn the window's mail notice opened. Absent otherwise, so the
+    /// frame of a person's turn is what it always was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<&'a str>,
 }
 
 impl<'a> TurnFrame<'a> {
@@ -187,6 +192,16 @@ impl<'a> TurnFrame<'a> {
             phase: TurnPhase::Start,
             outcome: None,
             error: None,
+            origin: None,
+        }
+    }
+
+    /// A turn something other than the person opened started (t-75726).
+    #[must_use]
+    pub fn started_by(turn_id: u64, origin: &'a str) -> Self {
+        Self {
+            origin: Some(origin),
+            ..Self::started(turn_id)
         }
     }
 
@@ -199,6 +214,7 @@ impl<'a> TurnFrame<'a> {
             phase: TurnPhase::End,
             outcome: Some(outcome),
             error,
+            origin: None,
         }
     }
 }
@@ -326,6 +342,13 @@ mod tests {
 
     #[test]
     fn the_wire_spells_phases_and_outcomes_in_snake_case() {
+        // A turn the window's notice opened says so; a person's says nothing
+        // of who opened it (t-75726).
+        let by_notice = serde_json::to_value(TurnFrame::started_by(5, "notice")).expect("serialize");
+        assert_eq!(by_notice["origin"], serde_json::json!("notice"));
+        assert_eq!(by_notice["phase"], serde_json::json!("start"));
+        let by_person = serde_json::to_value(TurnFrame::started(5)).expect("serialize");
+        assert!(by_person.get("origin").is_none(), "{by_person}");
         let ended = serde_json::to_value(TurnFrame::ended(4, TurnOutcome::Failed, Some("boom")))
             .expect("serialize");
         assert_eq!(ended["phase"], serde_json::json!("end"));

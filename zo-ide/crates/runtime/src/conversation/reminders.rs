@@ -427,6 +427,7 @@ where
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         };
         if let Err(error) = self.session.push_message(message) {
             eprintln!(

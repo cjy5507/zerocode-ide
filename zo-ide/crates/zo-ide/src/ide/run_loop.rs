@@ -346,14 +346,40 @@ async fn run_frontend(
                 }
                 renderer.idle_marker();
             },
-            command = events::next_command(events::channel()) => {
-                if let Command::AccountSwitch { label } = command {
+            command = events::next_command(events::channel()) => match command {
+                Command::AccountSwitch { label } => {
                     note(
                         &mut renderer,
                         &crate::status_format::account_switch_notice(&label),
                     );
                     renderer.idle_marker();
                 }
+                // The window's mail notice opens the next turn (t-75726).
+                Command::Notice { text } => {
+                    session.mark_notice_turn();
+                    if run_one_turn(&mut session, &text, &mut renderer, &mut input_rx, reporter.as_ref(), false, false).await.exit
+                        == TurnExit::ExitAfter
+                    {
+                        break ExitReason::UserExit;
+                    }
+                    if drive_autonomy(
+                        &mut session,
+                        &mut renderer,
+                        &mut input_rx,
+                        reporter.as_ref(),
+                        headless_loop.as_ref().and_then(HeadlessLoopRun::id),
+                    )
+                    .await
+                        == Drive::Leaving
+                    {
+                        break ExitReason::UserExit;
+                    }
+                    if let Some(reason) = headless_exit_reason(&session, headless_loop.as_ref()) {
+                        break reason;
+                    }
+                    renderer.idle_marker();
+                }
+                _ => {}
             },
             _ = tokio::signal::ctrl_c() => {
                 if headless_loop.is_some() {
@@ -667,7 +693,11 @@ async fn run_one_turn<W: Write>(
     let session_id = session.handle.id.clone();
     let registry = session.registry();
     let transcript_path = session.handle.path.to_string_lossy().into_owned();
-    if let Some(reporter) = reporter {
+    // A turn the window's mail notice opened (t-75726): its words are not the
+    // person's prompt, so no prompt hook hears them and they show as the
+    // window's.
+    let opened_by_notice = session.notice_marked();
+    if let Some(reporter) = reporter.filter(|_| !opened_by_notice) {
         reporter.user_prompt_submit(input, &session_id);
     }
     // 훅 보고용 관찰 상태: 툴 이름(id→name), 이번 턴의 마지막 어시스턴트 텍스트.
@@ -677,10 +707,19 @@ async fn run_one_turn<W: Write>(
     // 그리고 IDE 채널의 턴 경계까지 [`TurnScaffold`] 가 든다. 여기 남는 것은
     // 화면 처리뿐이다.
     let (mut turn_scaffold, mut block_rx) = TurnScaffold::start(session);
-    renderer.push(RenderBlock::UserMessage {
-        id: turn_scaffold.ids.next(),
-        text: input.to_string(),
-    });
+    let opening = if opened_by_notice {
+        RenderBlock::System {
+            id: turn_scaffold.ids.next(),
+            level: SystemLevel::Info,
+            text: crate::status_format::window_notice_line(input),
+        }
+    } else {
+        RenderBlock::UserMessage {
+            id: turn_scaffold.ids.next(),
+            text: input.to_string(),
+        }
+    };
+    renderer.push(opening);
     // Read before the turn borrows the session: the unattended decision
     // needs the mode while the turn is in flight.
     let permission_mode = session.permission_mode;
@@ -769,7 +808,9 @@ async fn run_one_turn<W: Write>(
                     }
                     turn_scaffold.cancel_turn();
                 }
-                Command::Steer { text } => {
+                // The window's notice goes into the running turn as a steer
+                // does (t-75726).
+                Command::Steer { text } | Command::Notice { text } => {
                     let _ = turn_scaffold.steer(text);
                 }
                 Command::AccountSwitch { label } => {
@@ -1127,6 +1168,8 @@ async fn run_compaction<W: Write>(
                 command = events::next_command(turn_scaffold.ide) => match command {
                     Command::CancelTurn { .. } | Command::Close { .. } => turn_scaffold.cancel_turn(),
                     Command::Steer { .. } => {}
+                    // A window notice waits for the next turn (t-75726).
+                    Command::Notice { text } => turn_scaffold.hold_notice(text),
                     Command::AccountSwitch { label } => {
                         note(renderer, &crate::status_format::account_switch_notice(&label));
                     }

@@ -1023,6 +1023,7 @@ mod tests {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         }
     }
 
@@ -1427,6 +1428,7 @@ mod tests {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         };
         (
             build(ContentBlock::Image {
@@ -1845,6 +1847,7 @@ mod tests {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         };
         let plain = message_plain(&m);
         assert!(plain.contains("running it"));
@@ -1872,6 +1875,7 @@ mod tests {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         }
     }
 

@@ -102,6 +102,36 @@ impl DeclineKind {
     }
 }
 
+/// Who opened the turn a user message begins when it was not the person
+/// ([`ConversationMessage::origin`]), named on its record as `notice`
+/// (t-75726).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageOrigin {
+    /// The window's mail notice (`session.steer` with `kind: "notice"`) woke
+    /// an idle session with its pointer text.
+    Notice,
+}
+
+impl MessageOrigin {
+    /// The word a record's `origin` key holds.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Notice => "notice",
+        }
+    }
+
+    /// The origin a record's `origin` word names; `None` for a word this zo
+    /// does not know, which names no origin.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "notice" => Some(Self::Notice),
+            _ => None,
+        }
+    }
+}
+
 /// Structured message content stored inside a [`Session`](super::Session).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlock {
@@ -212,6 +242,16 @@ pub struct ConversationMessage {
     /// message: [`Self::to_json`] leaves it out, no wire encoder reads it, and
     /// equality ignores it.
     pub decline: Option<DeclineKind>,
+    /// Who opened the turn this user message begins, when it was not the
+    /// person (t-75726): set on the message a window notice woke an idle
+    /// session with, and written as the `origin` key of its record in the
+    /// session file, so a reader of the record does not take the pointer
+    /// text for the person's words. `None` for the person's own input and for
+    /// everything else.
+    ///
+    /// A record key like [`Self::decline`]: [`Self::to_json`] leaves it out,
+    /// no wire encoder reads it, and equality ignores it.
+    pub origin: Option<MessageOrigin>,
 }
 
 impl PartialEq for ConversationMessage {
@@ -220,7 +260,8 @@ impl PartialEq for ConversationMessage {
         // struct stops compiling here until someone decides whether it is
         // content. `updated_at_ms` is not: it says when the line was written,
         // not what the message says. Nor is `decline`: it names what the
-        // record is, and the words stay the message's own.
+        // record is, and the words stay the message's own. Nor is `origin`:
+        // it names who opened the turn, not what was said.
         let Self {
             role,
             blocks,
@@ -230,6 +271,7 @@ impl PartialEq for ConversationMessage {
             model,
             updated_at_ms: _,
             decline: _,
+            origin: _,
         } = self;
         let Self {
             role: other_role,
@@ -240,6 +282,7 @@ impl PartialEq for ConversationMessage {
             model: other_model,
             updated_at_ms: _,
             decline: _,
+            origin: _,
         } = other;
         role == other_role
             && blocks == other_blocks
@@ -264,6 +307,7 @@ impl ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         }
     }
 
@@ -284,6 +328,7 @@ impl ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         }
     }
 
@@ -298,6 +343,7 @@ impl ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         }
     }
 
@@ -312,6 +358,7 @@ impl ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         }
     }
 
@@ -359,6 +406,14 @@ impl ConversationMessage {
     #[must_use]
     pub fn with_decline(mut self, decline: DeclineKind) -> Self {
         self.decline = Some(decline);
+        self
+    }
+
+    /// The same message, recorded as opened by `origin`: its record carries
+    /// the `origin` key. See [`Self::origin`].
+    #[must_use]
+    pub fn with_origin(mut self, origin: MessageOrigin) -> Self {
+        self.origin = Some(origin);
         self
     }
 
@@ -440,6 +495,7 @@ impl ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         }
     }
 
@@ -468,6 +524,7 @@ impl ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         }
     }
 
@@ -570,6 +627,7 @@ impl ConversationMessage {
             // the record parser puts them here.
             updated_at_ms: None,
             decline: None,
+            origin: None,
         })
     }
 }

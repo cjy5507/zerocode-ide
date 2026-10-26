@@ -46,6 +46,14 @@ pub fn account_switch_notice(label: &str) -> String {
     format!("계정 전환 · {label}")
 }
 
+/// The line a turn the window's mail notice opened shows in place of the
+/// person's prompt (t-75726), in both frontends.
+#[must_use]
+pub fn window_notice_line(text: &str) -> String {
+    let text = crate::util::ansi::sanitize_inline(text.trim());
+    format!("창 알림 · {text}")
+}
+
 /// Context occupancy as a clamped percentage in the inclusive `0..=100` range.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]

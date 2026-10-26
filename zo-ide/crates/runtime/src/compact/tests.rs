@@ -30,6 +30,7 @@ fn tool_result_message(id: usize, output: &str, image_count: usize) -> Conversat
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     }
 }
 
@@ -60,6 +61,7 @@ fn edit_result_message(id: usize, path: &str) -> ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     }
 }
 
@@ -83,6 +85,7 @@ fn state_distill_summarizes_working_state_without_mutating_transcript() {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         })
         .expect("assistant message");
     let before = session.messages.clone();
@@ -247,6 +250,7 @@ fn microcompact_clears_old_standalone_images_but_keeps_recent() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     };
     let mut session = Session::new();
     session.messages = ::std::sync::Arc::new((0..7).map(image_message).collect());
@@ -301,6 +305,7 @@ fn edited_file_paths_skips_cleared_and_unparseable_envelopes() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     };
     let garbage = ConversationMessage {
         role: MessageRole::User,
@@ -317,6 +322,7 @@ fn edited_file_paths_skips_cleared_and_unparseable_envelopes() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     };
     assert!(edited_file_paths(&[cleared, garbage]).is_empty());
 }
@@ -486,6 +492,7 @@ fn compacts_older_messages_into_a_system_summary() {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         },
     ]);
 
@@ -588,6 +595,7 @@ fn ignores_existing_compacted_summary_when_deciding_to_recompact() {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         },
         ConversationMessage::user_text("tiny"),
         ConversationMessage::assistant(vec![ContentBlock::Text {
@@ -1255,6 +1263,7 @@ fn an_images_only_pass_still_sets_the_reminder_frontier() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     };
     let mut messages = vec![reminder_message(&reminder)];
     messages.extend((0..7).map(image_message));
@@ -1298,6 +1307,7 @@ fn reminder_message(text: &str) -> ConversationMessage {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }
 }
 
@@ -1525,6 +1535,7 @@ fn continuation_vault_affordance_is_emitted_and_excluded_from_legacy_reparse() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     };
     let extracted = super::extract_existing_compacted_summary(&system_message)
         .expect("continuation is recognized as a compacted summary");
@@ -1597,6 +1608,7 @@ fn microcompact_cleared_body_is_restored_to_vault_on_compaction() {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         })
         .expect("push tool result");
     session
@@ -1850,6 +1862,7 @@ fn a_second_clear_in_the_same_message_reseals_both_originals() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         })
         .expect("push paired results");
     session
@@ -2099,6 +2112,7 @@ fn pasted_image_message(caption: &str, data: &str) -> ConversationMessage {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }
 }
 
@@ -2209,6 +2223,7 @@ fn a_second_image_cleared_in_the_same_message_does_not_bury_the_first() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
         })
         .expect("push a message with two pasted images");
     session.push_user_text("some work happened").expect("push");
@@ -2269,6 +2284,7 @@ fn an_image_seal_belonging_to_a_different_turn_is_refused() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }];
     super::restore_microcompacted_bodies(&mut messages, &session, &[0]);
 
@@ -2317,6 +2333,7 @@ fn an_image_seal_that_two_turns_could_own_heals_neither_of_them() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     };
     let session = Session::new().with_persistence_path(path.clone());
     assert!(
@@ -2338,6 +2355,7 @@ fn an_image_seal_that_two_turns_could_own_heals_neither_of_them() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     };
     let mut messages = vec![blanked(), blanked(), blanked()];
     super::restore_microcompacted_bodies(&mut messages, &session, &[0, 1, 2]);
@@ -2673,6 +2691,7 @@ fn estimate_message_tokens_image_uses_fixed_estimate() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     };
     let tokens = super::estimate_message_tokens(&msg);
     // 1600 (fixed image estimate) + 4 (message overhead) = 1604
@@ -2701,6 +2720,7 @@ fn compact_summary_mentions_images_without_copying_base64() {
                     model: None,
                     updated_at_ms: None,
                     decline: None,
+                    origin: None,
         },
         ConversationMessage::assistant(vec![ContentBlock::Text {
             text: "I inspected it.".to_string(),
@@ -3137,6 +3157,7 @@ fn the_quote_prices_a_head_rewrite_far_above_an_identical_tail_rewrite() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     };
 
     // History BEHIND the rewrite: everything after message 0 is re-billed.

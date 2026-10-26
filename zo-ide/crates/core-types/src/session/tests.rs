@@ -1,8 +1,8 @@
 use super::{
     cleanup_rotated_logs, reconcile_tool_history, rotate_session_file_if_needed,
     seal_orphan_tool_uses, vault_path_for, AnchorSummary, ContentBlock, ConversationMessage,
-    DeclineKind, MessageRole, Session, SessionError, SessionFork, MODEL_HANDOFF_PREFIX,
-    PROCESS_EVENT_PREFIX,
+    DeclineKind, MessageOrigin, MessageRole, Session, SessionError, SessionFork,
+    MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX,
 };
 use crate::json::JsonValue;
 use crate::usage::TokenUsage;
@@ -1050,6 +1050,7 @@ fn record_compaction_rewrites_persisted_snapshot_to_compacted_state() {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     }];
     session.messages = std::sync::Arc::new(compacted.clone());
     session.record_compaction("summarized earlier work", 3);
@@ -1922,6 +1923,7 @@ fn make_tool_result_message(tool_use_id: &str) -> ConversationMessage {
             model: None,
             updated_at_ms: None,
             decline: None,
+            origin: None,
     }
 }
 
@@ -2027,6 +2029,7 @@ fn rewind_treats_a_cleared_reminder_as_the_annotation_it_replaced() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     };
     assert!(
         cleared.is_reminder_annotation(),
@@ -2914,6 +2917,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     };
     let summary = ConversationMessage {
         role: MessageRole::System,
@@ -2926,6 +2930,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     };
 
     let mut session = Session::new();
@@ -4278,5 +4283,103 @@ fn a_pushed_decline_is_named_on_its_line_and_read_back_by_that_name() {
         vec![None, Some(DeclineKind::Standing)],
         "a load reads the decline back by its name"
     );
+    cleanup_session_file(&path);
+}
+
+// The `origin` key (t-75726): who opened a turn when it was not the person,
+// read as the window reads the file.
+
+/// The `origin` word of every message record in `jsonl`, in order; `None`
+/// for a record that names none.
+fn message_origins_in(jsonl: &str) -> Vec<Option<String>> {
+    jsonl
+        .lines()
+        .filter_map(|line| JsonValue::parse(line).ok())
+        .filter_map(|record| {
+            let record = record.as_object()?;
+            (record.get("type")?.as_str()? == "message").then(|| {
+                record
+                    .get("origin")
+                    .and_then(JsonValue::as_str)
+                    .map(ToOwned::to_owned)
+            })
+        })
+        .collect()
+}
+
+/// Whether a message record in `jsonl` carries an `origin` key inside its
+/// message, which is what a wire encoder reads.
+fn a_message_in_names_an_origin(jsonl: &str) -> bool {
+    jsonl
+        .lines()
+        .filter_map(|line| JsonValue::parse(line).ok())
+        .any(|record| {
+            record
+                .as_object()
+                .and_then(|record| record.get("message"))
+                .and_then(JsonValue::as_object)
+                .is_some_and(|message| message.contains_key("origin"))
+        })
+}
+
+/// The window's notice opens a turn: the marked push, and only it, is
+/// recorded as the notice's, on its line and back through a load and a full
+/// rewrite; the message a model is sent never carries the key.
+#[test]
+fn a_marked_push_is_the_notices_and_the_next_one_is_the_persons() {
+    let path = temp_session_path("origin-push");
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
+    session.push_user_text("what is left?").unwrap();
+    session.mark_next_user_origin(MessageOrigin::Notice);
+    assert_eq!(session.next_user_origin(), Some(MessageOrigin::Notice));
+    session
+        .push_user_text("You have 1 orchestration message. Run `zerocode-orc check`.")
+        .unwrap();
+    assert_eq!(session.next_user_origin(), None, "the push took the mark");
+    session
+        .push_message(ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "Read it.".to_string(),
+        }]))
+        .unwrap();
+    session.push_user_text("and now this").unwrap();
+
+    let written = fs::read_to_string(&*path).expect("read the session file");
+    let expected = vec![None, Some("notice".to_string()), None, None];
+    assert_eq!(message_origins_in(&written), expected, "only the marked line names the notice");
+    assert!(
+        !a_message_in_names_an_origin(&written),
+        "the origin is the record's key and never part of the message a model is sent"
+    );
+    let loaded = Session::load_from_path(&path).expect("load the file");
+    assert_eq!(
+        loaded.messages.iter().map(|message| message.origin).collect::<Vec<_>>(),
+        vec![None, Some(MessageOrigin::Notice), None, None],
+        "a load reads the origin back"
+    );
+    let rewritten = loaded.render_jsonl_snapshot().expect("render the full rewrite");
+    assert_eq!(message_origins_in(&rewritten), expected, "a full rewrite keeps it");
+    cleanup_session_file(&path);
+}
+
+/// A mark no push took is dropped without touching a message, and a word this
+/// zo does not know names no origin while the record still loads.
+#[test]
+fn a_cleared_mark_and_an_unknown_origin_name_no_origin() {
+    let mut session = Session::new();
+    session.mark_next_user_origin(MessageOrigin::Notice);
+    session.clear_next_user_origin();
+    session.push_user_text("the person's words").unwrap();
+    assert_eq!(session.messages[0].origin, None);
+
+    let contents = [
+        r#"{"created_at_ms":1790000000000,"session_id":"session-origin-0","type":"session_meta","updated_at_ms":1790000001000,"version":1}"#,
+        r#"{"message":{"blocks":[{"text":"mail","type":"text"}],"role":"user"},"origin":"pager","turn_index":0,"type":"message","updated_at_ms":1790000002000}"#,
+    ]
+    .join("\n");
+    let path = write_temp_session_file("origin-unknown", &contents);
+    let loaded =
+        Session::load_from_path(&path).expect("a record naming an unknown origin still loads");
+    assert_eq!(loaded.messages.len(), 1);
+    assert_eq!(loaded.messages[0].origin, None);
     cleanup_session_file(&path);
 }

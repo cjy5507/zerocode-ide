@@ -935,7 +935,7 @@ impl PlainSession {
         user_cancel_requested: Arc<AtomicBool>,
     ) -> Result<runtime::TurnSummary, String> {
         self.sync_project_rule_advice();
-        self.refresh_credentials_for_turn(&block_tx).await?;
+        self.refresh_credentials_for_turn(&block_tx).await.inspect_err(|_| self.clear_notice_mark())?;
         let origin = self.begin_task_continuity(input, &block_tx).await;
         self.runtime
             .set_hook_abort_signal(hook_abort_signal.clone());
@@ -1039,6 +1039,7 @@ impl PlainSession {
         if let Some(plan) = plan_turn {
             plan.finish(&self.cwd, &self.handle.id, &result);
         }
+        self.clear_notice_mark();
         self.end_task_continuity(origin, user_cancel_requested.load(Ordering::SeqCst));
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
@@ -1057,6 +1058,32 @@ impl PlainSession {
     /// words, lowered for this turn.
     pub(crate) fn send_words_for_turn(&self) -> SendWords {
         self.send_words.for_turn()
+    }
+
+    /// Mark the next turn as opened by the window's mail notice (t-75726):
+    /// its input is recorded with `origin: notice`, its start frame says so,
+    /// and the continuity reminder does not take it for the person's words.
+    pub(crate) fn mark_notice_turn(&mut self) {
+        if let Some(inner) = self.runtime.try_runtime_mut() {
+            inner
+                .session_mut()
+                .mark_next_user_origin(core_types::session::MessageOrigin::Notice);
+        }
+    }
+
+    /// Whether the next turn is the window's notice ([`Self::mark_notice_turn`]).
+    pub(crate) fn notice_marked(&self) -> bool {
+        self.runtime
+            .try_runtime()
+            .is_some_and(|inner| inner.session().next_user_origin().is_some())
+    }
+
+    /// Drop a notice mark no input took, so it cannot pass to the person's
+    /// next words.
+    fn clear_notice_mark(&mut self) {
+        if let Some(inner) = self.runtime.try_runtime_mut() {
+            inner.session_mut().clear_next_user_origin();
+        }
     }
 
     /// Who this turn's input is from, and what the model is told on the way
@@ -1347,6 +1374,7 @@ impl PlainSession {
                 model: None,
                 updated_at_ms: None,
                 decline: None,
+                origin: None,
             };
             if let Err(error) = runtime.session_mut().push_message(message) {
                 eprintln!("zo: could not record the workspace rewind ({error})");
@@ -1515,6 +1543,7 @@ impl PlainSession {
                 model: None,
                 updated_at_ms: None,
                 decline: None,
+                origin: None,
             }) {
                 eprintln!("zo: could not record the model handoff ({error})");
             }

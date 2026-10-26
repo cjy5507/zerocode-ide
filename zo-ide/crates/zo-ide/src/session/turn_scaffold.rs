@@ -67,6 +67,10 @@ pub(crate) struct TurnScaffold {
     pump: JoinHandle<Result<(), PermissionBridgeError>>,
     /// 턴 future 에 넘길 재료 — [`Self::launch`] 가 한 번만 꺼낸다.
     launch: Option<TurnLaunch>,
+    /// A window notice that came while nothing could take it — a compaction
+    /// has no turn to steer (t-75726). [`Self::finish`] puts it back, so it
+    /// opens the next turn instead of being lost.
+    held_notice: Option<String>,
 }
 
 /// `run_turn` 에 넘길 재료 한 벌. 한 턴에 한 번만 존재한다 — 소유로 넘겨야
@@ -86,7 +90,11 @@ impl TurnScaffold {
     /// 첫 블록보다 **먼저** 턴이 열린 것을 본다.
     pub(crate) fn start(session: &mut PlainSession) -> (Self, mpsc::Receiver<RenderBlock>) {
         let ide = events::channel();
-        let turn_id = ide.map(EventsChannel::begin_turn);
+        let opened_by = session.notice_marked().then_some(core_types::session::MessageOrigin::Notice);
+        let turn_id = ide.map(|ide| match opened_by {
+            Some(origin) => ide.begin_turn_by(origin.as_str()),
+            None => ide.begin_turn(),
+        });
         let (block_tx, block_rx) = mpsc::channel::<RenderBlock>(RENDER_CHANNEL_CAPACITY);
         let ids = BlockIdGen::default();
 
@@ -122,6 +130,7 @@ impl TurnScaffold {
                 abort,
                 cancel,
             }),
+            held_notice: None,
         };
         (scaffold, block_rx)
     }
@@ -166,6 +175,12 @@ impl TurnScaffold {
     /// 취소가 남기는 "receiver dropped" 는 사고가 아니라 사람의 뜻이다.
     pub(crate) fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// Keep a window notice for the turn after this one
+    /// ([`Self::held_notice`]); a later one replaces it.
+    pub(crate) fn hold_notice(&mut self, text: String) {
+        self.held_notice = Some(text);
     }
 
     /// 사람이 턴 중에 넣은 줄을 스티어 큐에 넣는다. 줄이 큐에 들어갔으면 참 —
@@ -219,8 +234,11 @@ impl TurnScaffold {
     /// 결과 판정은 한 벌이다: 오류면 실패, 오류가 없고 사람이 끊었으면 취소,
     /// 아니면 완료. 취소된 턴이 실패로 나가면 창의 카드가 빨개진다. 턴과
     /// `/compact` 가 같은 판정을 지난다 — 결과의 모양만 다르다.
-    pub(crate) fn finish<T>(self, outcome: &Result<T, String>) {
+    pub(crate) fn finish<T>(mut self, outcome: &Result<T, String>) {
         self.pump.abort();
+        if let (Some(text), Some(channel)) = (self.held_notice.take(), self.ide) {
+            channel.restore_notice(text);
+        }
         let (Some(channel), Some(turn_id)) = (self.ide, self.turn_id) else {
             return;
         };

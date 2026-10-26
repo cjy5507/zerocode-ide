@@ -183,7 +183,8 @@ impl TaskContinuity {
         C: runtime::ApiClient,
         T: runtime::ToolExecutor,
     {
-        let origin = self.observe(input, runtime.is_autonomous_surface());
+        let notice = runtime.session().next_user_origin().is_some();
+        let origin = self.observe(input, runtime.is_autonomous_surface(), notice);
         let facts = if matches!(origin, TurnOrigin::MailPointer | TurnOrigin::Person) {
             WorkFacts {
                 open_items: open_items(cwd, &runtime.session().session_id),
@@ -200,14 +201,16 @@ impl TaskContinuity {
     }
 
     /// Who `input` is from. The person's words are kept, and they are newer
-    /// than any unattended turn before them.
-    fn observe(&mut self, input: &str, unattended: bool) -> TurnOrigin {
+    /// than any unattended turn before them. Words the window's notice opened
+    /// the turn with (`notice`, t-75726) are never the person's: the pointer
+    /// text is the mail's, and anything else the window's.
+    fn observe(&mut self, input: &str, unattended: bool, notice: bool) -> TurnOrigin {
         let said = input.trim();
         let origin = if unattended {
             TurnOrigin::Unattended
         } else if zerocode_core::orchestration::is_pointer_text(said) {
             TurnOrigin::MailPointer
-        } else if super::agent_completion_pump::is_followup_text(said) {
+        } else if notice || super::agent_completion_pump::is_followup_text(said) {
             TurnOrigin::HostNotice
         } else {
             TurnOrigin::Person

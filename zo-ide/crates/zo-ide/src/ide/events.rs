@@ -387,6 +387,25 @@ impl EventsChannel {
         turn_id
     }
 
+    /// A turn something other than the person opened (t-75726): the same as
+    /// [`Self::begin_turn`], with `origin` on its start frame.
+    #[must_use]
+    pub fn begin_turn_by(&self, origin: &str) -> u64 {
+        let turn_id = self.state.begin_turn();
+        self.state.publish_snapshot(
+            FRAME_TURN,
+            &channel::wire::TurnFrame::started_by(turn_id, origin),
+        );
+        turn_id
+    }
+
+    /// Put a window notice back on the queue (t-75726): one a compaction
+    /// took while nothing could read it opens the next turn instead of being
+    /// lost, unless a later notice is already waiting.
+    pub fn restore_notice(&self, text: String) {
+        self.state.restore_notice(text);
+    }
+
     /// 턴 종료 — 남은 프롬프트를 거두고, `turn{phase:"end"}` 를 낸 뒤 도는
     /// 턴을 지운다.
     ///

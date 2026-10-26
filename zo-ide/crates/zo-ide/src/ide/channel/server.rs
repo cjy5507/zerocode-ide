@@ -517,6 +517,19 @@ fn steer(state: &ChannelState, params: &Value, id: u64) -> RpcResponse {
     if text.trim().is_empty() {
         return RpcResponse::err(id, CODE_INVALID_PARAMS, "session.steer needs non-empty text");
     }
+    match params.get("kind") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(kind)) if kind == super::capabilities::NOTICE_KIND => {
+            return notice(state, params, text, id);
+        }
+        Some(_) => {
+            return RpcResponse::err(
+                id,
+                CODE_INVALID_PARAMS,
+                "session.steer knows one kind, \"notice\"; a steer names none",
+            );
+        }
+    }
     let Some(running) = state.turn() else {
         // A teammate between turns opens its NEXT turn with the words
         // (`steer.scope: idle-next-turn`, t-2513 §2.2). The answer carries no
@@ -564,6 +577,50 @@ fn steer(state: &ChannelState, params: &Value, id: u64) -> RpcResponse {
     RpcResponse::ok(
         id,
         json!({ "turn_id": running, "receipt": runtime::subagent_panes::SteerReceipt::Consumed.as_str() }),
+    )
+}
+
+/// The window's mail notice (`kind: "notice"`, t-75726). Unlike a steer it is
+/// taken by a root between turns as well: the next turn opens with it, and
+/// the person's draft in the composer stays where it is. A running turn takes
+/// it as it takes a steer. Notices no turn has taken yet are one turn with the
+/// latest words, and `merged` says how many this one replaced. A notice is
+/// never a slash command: those are the person's to type.
+fn notice(state: &ChannelState, params: &Value, text: &str, id: u64) -> RpcResponse {
+    if text.trim_start().starts_with('/') {
+        return RpcResponse::err(
+            id,
+            CODE_INVALID_PARAMS,
+            "a notice is not a slash command; those are the person's to type",
+        );
+    }
+    let running = state.turn();
+    match (params.get("turn_id").and_then(Value::as_u64), running) {
+        (Some(_), None) => {
+            return RpcResponse::err(
+                id,
+                CODE_STEER_DENIED,
+                "no turn is running; a notice for the next turn names none",
+            );
+        }
+        (Some(asked), Some(running)) if asked != running => {
+            return RpcResponse::err(
+                id,
+                CODE_STEER_DENIED,
+                format!("turn {asked} is not the one running ({running})"),
+            );
+        }
+        _ => {}
+    }
+    let merged = state.queue_notice(text.to_string());
+    let receipt = if running.is_some() {
+        runtime::subagent_panes::SteerReceipt::Consumed
+    } else {
+        runtime::subagent_panes::SteerReceipt::Queued
+    };
+    RpcResponse::ok(
+        id,
+        json!({ "turn_id": running, "receipt": receipt.as_str(), "merged": merged }),
     )
 }
 
@@ -684,6 +741,95 @@ mod tests {
                 text: "wait".to_string()
             }]
         );
+    }
+
+    /// The window's mail notice wakes an idle root (t-75726): queued as the
+    /// next turn's words, `queued` with no turn, and `merged` counts the
+    /// notices a later one replaced before any turn took them. A steer with
+    /// no kind is still refused there: the idle composer is the person's.
+    #[test]
+    fn a_notice_wakes_an_idle_root_as_its_next_turn() {
+        let state = ChannelState::new("s".to_string());
+        let mut subscribed = None;
+        let first = dispatch(
+            &state,
+            &request(
+                method::STEER,
+                json!({"id": "s", "kind": "notice", "text": "You have 1 orchestration message. Run `zerocode-orc check`."}),
+            ),
+            &mut subscribed,
+        );
+        assert!(first.error.is_none(), "{first:?}");
+        let result = first.result.expect("result");
+        assert!(result["turn_id"].is_null());
+        assert_eq!(result["receipt"], "queued");
+        assert_eq!(result["merged"], 0);
+
+        let later = "You have 2 orchestration messages. Run `zerocode-orc check`.";
+        let second = dispatch(
+            &state,
+            &request(method::STEER, json!({"id": "s", "kind": "notice", "text": later})),
+            &mut subscribed,
+        );
+        assert_eq!(second.result.expect("result")["merged"], 1, "the later notice replaces the queued one");
+        assert_eq!(state.take_commands(), vec![Command::Notice { text: later.to_string() }]);
+
+        let steer = dispatch(
+            &state,
+            &request(method::STEER, json!({"id": "s", "text": "wait"})),
+            &mut subscribed,
+        );
+        assert_eq!(code_of(&steer), Some(CODE_STEER_DENIED));
+        assert!(state.take_commands().is_empty());
+    }
+
+    /// A running turn takes a notice as it takes a steer, `consumed` with the
+    /// turn; a notice naming another turn is refused (t-75726).
+    #[test]
+    fn a_running_turn_takes_a_notice_as_consumed() {
+        let state = ChannelState::new("s".to_string());
+        let mut subscribed = None;
+        let turn = state.begin_turn();
+        let live = dispatch(
+            &state,
+            &request(method::STEER, json!({"id": "s", "kind": "notice", "text": "mail"})),
+            &mut subscribed,
+        );
+        let result = live.result.expect("result");
+        assert_eq!(result["turn_id"], json!(turn));
+        assert_eq!(result["receipt"], "consumed");
+        assert_eq!(result["merged"], 0);
+        assert_eq!(state.take_commands(), vec![Command::Notice { text: "mail".to_string() }]);
+
+        let wrong = dispatch(
+            &state,
+            &request(
+                method::STEER,
+                json!({"id": "s", "kind": "notice", "text": "mail", "turn_id": turn + 1}),
+            ),
+            &mut subscribed,
+        );
+        assert_eq!(code_of(&wrong), Some(CODE_STEER_DENIED));
+        assert!(state.take_commands().is_empty());
+    }
+
+    /// A notice is never a slash command, which is the person's to type, and
+    /// a kind this zo does not know is refused rather than read as a steer
+    /// (t-75726).
+    #[test]
+    fn a_slash_notice_and_an_unknown_kind_are_refused() {
+        let state = ChannelState::new("s".to_string());
+        let mut subscribed = None;
+        for params in [
+            json!({"id": "s", "kind": "notice", "text": "/login"}),
+            json!({"id": "s", "kind": "notice", "text": "  /model opus"}),
+            json!({"id": "s", "kind": "mail", "text": "mail"}),
+            json!({"id": "s", "kind": 1, "text": "mail"}),
+        ] {
+            let refused = dispatch(&state, &request(method::STEER, params.clone()), &mut subscribed);
+            assert_eq!(code_of(&refused), Some(CODE_INVALID_PARAMS), "{params}");
+        }
+        assert!(state.take_commands().is_empty());
     }
 
     /// A teammate between turns takes a steer as its next turn and says

@@ -28,6 +28,7 @@ fn user_text(text: &str) -> ConversationMessage {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }
 }
 
@@ -55,6 +56,7 @@ fn result(id: &str, tool: &str, output: &str) -> ConversationMessage {
         model: None,
         updated_at_ms: None,
         decline: None,
+        origin: None,
     }
 }
 
