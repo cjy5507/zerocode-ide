@@ -827,6 +827,17 @@ async fn a_summons_that_outlasts_the_bridge_is_told_where_to_look() {
         body.contains("timed out waiting for the window") && body.contains("worker-list"),
         "a summons' time-out did not say where the worker would show: {body}"
     );
+    // The plain list shows the run this pane is bound to, so a worker summoned
+    // with `--run B` is missing from it while standing. The answer is "not
+    // settled", points at the list of the run it was asked in, never says an
+    // absent worker did not start, and asks for a retry under the same name.
+    assert!(body.contains("not settled"), "{body}");
+    assert!(body.contains("worker-list --run"), "{body}");
+    assert!(body.contains("--retry-request"), "{body}");
+    assert!(
+        !body.contains("did not start") && !body.contains("new name"),
+        "a time-out must not turn a missing list entry into a failure: {body}"
+    );
     // A command that is not a summons keeps its plain sentence.
     let (_, plain) = a_summons_answered_late("list-panes\u{1f}", Duration::from_secs(60)).await;
     assert!(
