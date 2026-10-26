@@ -1861,6 +1861,21 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(TEST_POLL_MS));
         }
+        // Delivered means the pty took the Enter, not that the fake's `cat`
+        // has read that line and written it out: stopping it here lost the
+        // nudge once under load (l79k2, "stdin transcript: \"\""). End its
+        // input — the fake's cooked line discipline reads ^D at a line start
+        // as end of file — and let it finish before it is stopped.
+        pty.write_input(b"\x04").expect("end fake codex input");
+        let drained = Instant::now() + Duration::from_secs(TEST_DEADLINE_SECS);
+        while pty.try_wait().expect("fake codex status").is_none() {
+            assert!(
+                Instant::now() < drained,
+                "fake Codex never finished reading its input"
+            );
+            pty.pump();
+            thread::sleep(Duration::from_millis(TEST_POLL_MS));
+        }
         pty.kill().expect("stop fake codex");
         FakeCodexRun {
             stdin: fs::read_to_string(&stdin_path).expect("captured stdin"),
