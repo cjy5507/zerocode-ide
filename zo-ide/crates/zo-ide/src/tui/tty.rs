@@ -54,7 +54,7 @@ pub(super) fn hung_up() -> bool {
 }
 
 #[cfg(unix)]
-fn hung_up_on(terminal: std::os::fd::BorrowedFd<'_>) -> bool {
+pub(super) fn hung_up_on(terminal: std::os::fd::BorrowedFd<'_>) -> bool {
     use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
     let mut fds = [PollFd::new(terminal, PollFlags::POLLIN)];

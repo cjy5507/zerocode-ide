@@ -137,8 +137,13 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    #[cfg(unix)]
+    use std::os::fd::{AsFd as _, OwnedFd};
     use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
+    #[cfg(unix)]
+    use std::sync::OnceLock;
+    use std::time::Duration;
 
     use crossterm::event::{KeyCode, KeyEvent};
 
@@ -257,6 +262,75 @@ mod tests {
         assert!(woke.count() > 0, "nothing woke the loop to look at the closed pane");
         assert!(matches!(Pin::new(&mut events).poll_next(&mut cx), Poll::Ready(None)));
         assert_eq!(terminal.polls(), 1, "a look read the terminal");
+    }
+
+    /// 원시 모드의 pty 한 쌍 — 주 끝을 닫는 것이 창이 판을 닫는 것이다.
+    #[cfg(unix)]
+    fn open_pty() -> nix::pty::OpenptyResult {
+        use nix::sys::termios::{cfmakeraw, tcgetattr, tcsetattr, SetArg};
+
+        let pty = nix::pty::openpty(None::<&nix::pty::Winsize>, None::<&nix::sys::termios::Termios>)
+            .expect("open a pty");
+        let mut raw = tcgetattr(&pty.slave).expect("the pty's modes");
+        cfmakeraw(&mut raw);
+        tcsetattr(&pty.slave, SetArg::TCSANOW, &raw).expect("raw mode");
+        pty
+    }
+
+    /// 창이 판을 닫으면 그 닫힘이 루프를 깨우고 흐름을 그 자리에서 끝낸다 — 가짜
+    /// 시계는 한 틱도 가지 않는다. 간격마다 묻는 흐름이었다면 그 간격이 오기 전에는
+    /// 깨우지도 끝나지도 않는다.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_pane_that_closes_ends_its_stream_on_the_spot() {
+        static SLAVE: OnceLock<OwnedFd> = OnceLock::new();
+        fn hung_up() -> bool {
+            super::super::tty::hung_up_on(SLAVE.get().expect("the pty").as_fd())
+        }
+
+        let pty = open_pty();
+        SLAVE.set(pty.slave).expect("one pty");
+        let terminal = Fake::default();
+        let mut events = TerminalEvents::over(terminal.clone(), hung_up);
+        let woke = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut events).poll_next(&mut cx).is_pending());
+
+        let closed = tokio::time::Instant::now();
+        drop(pty.master);
+        // 기다리지 않고 양보한다: 멈춘 시계는 같은 스레드의 깨움이 와도 다음 타이머까지
+        // 스스로 가지만(tokio current_thread), 양보는 반응기만 한 번 돌린다.
+        tokio::task::yield_now().await;
+        assert!(woke.count() > 0, "the closed pane did not wake the loop");
+        assert!(
+            matches!(Pin::new(&mut events).poll_next(&mut cx), Poll::Ready(None)),
+            "the closed pane did not end the stream"
+        );
+        assert_eq!(closed.elapsed(), Duration::ZERO, "the clock moved, so a timer may have ended the stream");
+        assert_eq!(terminal.polls(), 1, "a closed pane was read");
+    }
+
+    /// 살아 있는 판이 조용하면 이 흐름은 루프를 한 번도 깨우지 않는다 — 유휴
+    /// 깨움 목표(`IDLE_TEND`, 0.5/s 이하)에 타이머 하나 보태지 않는다.
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn a_live_quiet_pane_never_wakes_its_loop() {
+        static SLAVE: OnceLock<OwnedFd> = OnceLock::new();
+        fn hung_up() -> bool {
+            super::super::tty::hung_up_on(SLAVE.get().expect("the pty").as_fd())
+        }
+
+        let pty = open_pty();
+        SLAVE.set(pty.slave).expect("one pty");
+        let mut events = TerminalEvents::over(Fake::default(), hung_up);
+        let woke = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&woke));
+        assert!(Pin::new(&mut events).poll_next(&mut Context::from_waker(&waker)).is_pending());
+
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(woke.count(), 0, "a live, quiet pane woke the loop");
+        drop(pty.master);
     }
 
     /// 틱이 서른 번, 블록이 백 번 깨워도 조용한 터미널은 한 번만 묻는다.
