@@ -638,7 +638,7 @@ fn receipt_word(receipt: Option<Duration>) -> String {
 }
 
 /// The first characters of a session id, as every wake's line carries it.
-fn session_prefix(session_id: &str) -> String {
+pub(crate) fn session_prefix(session_id: &str) -> String {
     session_id
         .chars()
         .take(RESUME_LOG_SESSION_PREFIX_CHARS)

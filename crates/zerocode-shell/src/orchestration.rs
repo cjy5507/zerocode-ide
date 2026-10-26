@@ -1107,10 +1107,17 @@ pub(crate) fn coordinates_a_run(agent: &str, session: &zerocode_core::ProviderSe
     let Ok(ledger) = cached_ledger(&held, &image) else {
         return false;
     };
+    seats(&ledger, &actor)
+}
+
+/// Whether some run's coordinator seat names `actor` (t-76489): held, or
+/// vacated by a restart and kept for whoever sits next. One reading for every
+/// road that must not take a coordinator's conversation for a worker's.
+fn seats(ledger: &Ledger, actor: &str) -> bool {
     ledger
         .runs()
         .iter()
-        .any(|run| seated_as(run.coordinator.as_ref(), &actor))
+        .any(|run| seated_as(run.coordinator.as_ref(), actor))
 }
 
 /// Whether `seat` is the chair `actor` — one conversation — holds.
@@ -6276,6 +6283,13 @@ static GOODBYE_UNANSWERED: std::sync::atomic::AtomicBool =
 /// and the next boot's sweep puts every seat the ledger still holds live to
 /// sleep, as it does after a crash ([`RuntimeActor::window_restarted`]). What
 /// is lost is the census's note of what each turn was cut in.
+/// Whether the ledger answered this way out's goodbye (t-76489): a road
+/// after it on the way out reads the ledger only then — a ledger that did
+/// not answer the goodbye would hold the exit's own write past its patience.
+pub(crate) fn goodbye_answered() -> bool {
+    !GOODBYE_UNANSWERED.load(std::sync::atomic::Ordering::Acquire)
+}
+
 pub(crate) fn goodbye_within(
     now_ms: i64,
     road: crate::exit_runtime::ExitRoad,
@@ -6389,15 +6403,23 @@ pub(crate) struct ConversationWorker {
 /// a conversation no worker reported, and for a window with no durable ledger
 /// at all; `Err` with why for a ledger on this disk that does not answer now
 /// ([`holds_ledger`]) — never read as "nobody's".
+///
+/// A conversation that holds a run's coordinator seat is never `finished`
+/// (t-76489), whatever worker row once carried it: it is the person's, and a
+/// road that read it off a stored record brings it back.
 pub(crate) fn worker_of_conversation(
     agent: &str,
-    session_id: &str,
+    session: &zerocode_core::ProviderSession,
 ) -> Result<Option<ConversationWorker>, String> {
     let Some((_, ledger)) = holds_ledger()? else {
         return Ok(None);
     };
+    let seated = seats(
+        &ledger,
+        &zerocode_core::orchestration::receipt_actor(agent, session.key, &session.id),
+    );
     Ok(ledger
-        .worker_of_conversation(agent, session_id)
+        .worker_of_conversation(agent, &session.id)
         .map(|row| ConversationWorker {
             worker: row.id.clone(),
             word: if row.taken_over {
@@ -6405,21 +6427,54 @@ pub(crate) fn worker_of_conversation(
             } else {
                 row.state.as_str()
             },
-            finished: ledger.finished_worker_of(agent, session_id).is_some(),
+            finished: !seated && ledger.finished_worker_of(agent, &session.id).is_some(),
         }))
 }
 
 /// Which stored conversations are finished workers' (t-57717), the ledger read
-/// once for a whole set of records: the worker, by `agent` and session id.
+/// once for a whole set of records: the worker, by `agent`, the record's key
+/// word (`session_id`, `conversation_id`) and the id. A conversation that
+/// holds a run's coordinator seat is the person's, whatever worker row once
+/// carried it (t-76489) — the same exception [`worker_conversations`] makes.
 /// `None` when this window has no ledger to ask or cannot read it now — the
 /// records then pass as they stand, so a ledger fault never takes a person's
 /// own conversation out of what a workspace opens with.
-pub(crate) fn finished_conversations() -> Option<impl Fn(&str, &str) -> Option<String>> {
+pub(crate) fn finished_conversations() -> Option<impl Fn(&str, &str, &str) -> Option<String>> {
     let (_, ledger) = holds_ledger().ok()??;
-    Some(move |agent: &str, session_id: &str| {
+    Some(move |agent: &str, key: &str, session_id: &str| {
+        if seats(&ledger, &stored_actor(agent, key, session_id)) {
+            return None;
+        }
         ledger
             .finished_worker_of(agent, session_id)
             .map(|worker| worker.id.clone())
+    })
+}
+
+/// The receipt identity of a stored record's conversation: `agent`, the
+/// record's key word and the id (t-57717, t-76489).
+fn stored_actor(agent: &str, key: &str, session_id: &str) -> String {
+    let key = if key == "conversation_id" {
+        zerocode_core::SessionKey::ConversationId
+    } else {
+        zerocode_core::SessionKey::SessionId
+    };
+    zerocode_core::orchestration::receipt_actor(agent, key, session_id)
+}
+
+/// Which run's coordinator seat a conversation holds (t-76489), the ledger
+/// read once for a whole set of panes: the run id, by `agent`, the record's
+/// key word and the id. `None` when this window has no ledger to ask or
+/// cannot read it now.
+pub(crate) fn seated_conversations() -> Option<impl Fn(&str, &str, &str) -> Option<String>> {
+    let (_, ledger) = holds_ledger().ok()??;
+    Some(move |agent: &str, key: &str, session_id: &str| {
+        let actor = stored_actor(agent, key, session_id);
+        ledger
+            .runs()
+            .iter()
+            .find(|run| seated_as(run.coordinator.as_ref(), &actor))
+            .map(|run| run.id.clone())
     })
 }
 
@@ -6432,17 +6487,7 @@ pub(crate) fn finished_conversations() -> Option<impl Fn(&str, &str) -> Option<S
 pub(crate) fn worker_conversations() -> Option<impl Fn(&str, &str, &str) -> Option<String>> {
     let (_, ledger) = holds_ledger().ok()??;
     Some(move |agent: &str, key: &str, session_id: &str| {
-        let key = if key == "conversation_id" {
-            zerocode_core::SessionKey::ConversationId
-        } else {
-            zerocode_core::SessionKey::SessionId
-        };
-        let actor = zerocode_core::orchestration::receipt_actor(agent, key, session_id);
-        if ledger
-            .runs()
-            .iter()
-            .any(|run| seated_as(run.coordinator.as_ref(), &actor))
-        {
+        if seats(&ledger, &stored_actor(agent, key, session_id)) {
             return None;
         }
         ledger

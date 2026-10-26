@@ -29202,10 +29202,16 @@ mod exit_capture {
                 && !capture.contains("lock_pty("),
             "the exit capture reads a lock without its patience:\n{capture}"
         );
-        let live = body("fn live_zo_panes(");
+        let live = body("fn live_unheld_panes(");
         assert!(
             live.contains("seated_teammates()") && !live.contains("agent_teams::teams()"),
             "the exit reads the team table without its patience:\n{live}"
+        );
+        // The seats only off a ledger that answered the goodbye (t-76489).
+        assert!(
+            live.contains("goodbye_answered()")
+                && live.find("goodbye_answered()") < live.find("seated_conversations"),
+            "the exit reads the ledger whether or not it answered the goodbye:\n{live}"
         );
     }
 }

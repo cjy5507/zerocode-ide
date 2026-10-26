@@ -675,3 +675,255 @@ fn the_three_unsummoned_resumes_are_none_and_the_sleepers_reseat_stays_one() {
         crate::agent_teams::forget_term(pane);
     }
 }
+
+/// The claude coordinator's conversation and the zo one a person's tab held
+/// beside it, as 2026-10-26's window had them (t-76489): the tab of the
+/// coordinator's pane, split by `zo --resume` of the zo conversation, and the
+/// person's zo tab.
+fn the_coordinators_tab(coordinator: &str, zo: &str) -> crate::pane_layout::TabLayout {
+    serde_json::from_value(serde_json::json!({
+        "root": { "type": "split", "direction": "vertical",
+                  "first": { "type": "leaf" }, "second": { "type": "leaf" } },
+        "agents": {
+            "0": { "agent": "claude", "key": "session_id", "id": coordinator },
+            "1": { "agent": "zo", "key": "session_id", "id": zo },
+        },
+        "running": { "0": "claude", "1": "zo" },
+        "focused": true,
+        "terms": { "0": 1, "1": 17 },
+    }))
+    .expect("the coordinator's tab")
+}
+
+/// t-76489 red ④: a conversation that holds a run's coordinator seat is the
+/// person's on every road that reads it off a stored record, whatever worker
+/// row once carried it — a first visit's read keeps it, the boot puts its
+/// workspace back, and the door on each road opens it — and still after the
+/// restart vacated the seat. A finished worker's conversation stored beside
+/// it is still struck. Before, only the window's save asked for the seat:
+/// the read struck it as the finished worker, the boot left its workspace
+/// out, and every door declined it.
+#[test]
+fn a_coordinators_conversation_comes_back_whatever_worker_once_carried_it() {
+    const LEADER: u32 = 764_890;
+    const FIRST: u32 = 764_891;
+    const SEATED: u32 = 764_895;
+    const DOOR: u32 = 764_900;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    let worker_checkout = root.path().join("t-76489");
+    for folder in [&main, &worker_checkout] {
+        std::fs::create_dir_all(folder).expect("a checkout");
+    }
+    let at = |folder: &std::path::Path| folder.to_string_lossy().into_owned();
+    let host = Restoring::new(&main, FIRST, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "coord-read");
+    // The conversation the second run's coordinator is (`test_actor`),
+    // carried first by a worker of the first run, which finished.
+    let seat = format!("test-session-of-term-{SEATED}");
+    let finished = "76489a1c-0000-4000-8000-000000000001";
+    let (_task, carried, _) = a_worker(&host, &team, "--agent claude", Some(&seat));
+    let (_task, done, _) = a_worker(&host, &team, "--agent claude", Some(finished));
+    for worker in [&carried, &done] {
+        say(
+            &host,
+            &team,
+            &format!("worker-stop --worker {worker} --reason handed-in"),
+        );
+    }
+    let (_seated_team, _seated_run) = a_run(&host, SEATED, "coord-seat");
+    let file = root.path().join("pane-layouts.json");
+    crate::pane_layout::rewrite(&file, |held| {
+        crate::pane_layout::store(held, at(&main), vec![record("claude", &seat)]);
+        crate::pane_layout::store(held, at(&worker_checkout), vec![record("claude", finished)]);
+        true
+    })
+    .expect("the stored sets");
+
+    let mut wrong = Vec::new();
+    for moment in ["seat held", "after the restart"] {
+        let read = crate::cmd::settings::opened_set(&file, &at(&main));
+        if !read.struck.is_empty() || read.clone().kept().len() != 1 {
+            wrong.push(format!(
+                "{moment}: the read struck the coordinator: {read:?}"
+            ));
+        }
+        let finished_read = crate::cmd::settings::opened_set(&file, &at(&worker_checkout));
+        if finished_read.struck != vec![done.clone()] {
+            wrong.push(format!(
+                "{moment}: the finished worker's read: {finished_read:?}"
+            ));
+        }
+        if crate::cmd::settings::standing_set(&file) != vec![at(&main)] {
+            wrong.push(format!(
+                "{moment}: the boot puts back {:?}",
+                crate::cmd::settings::standing_set(&file)
+            ));
+        }
+        let door = Door::new(&main);
+        for (road, term) in STORED_RECORD_ROADS.into_iter().zip(DOOR..) {
+            door.on_road(road);
+            match door.wake(term, "claude", &seat) {
+                Ok(woke) if woke.finished.is_none() => {}
+                other => wrong.push(format!("{moment}, {}: {other:?}", road.word())),
+            }
+            crate::agent_teams::forget_term(term);
+        }
+        if !door.noted(" did not resume ").is_empty() {
+            wrong.push(format!("{moment}: {:?}", door.noted(" did not resume ")));
+        }
+        if moment == "seat held" {
+            the_next_boot(SEATED);
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+    for pane in [FIRST, FIRST + 1, LEADER, SEATED] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-76489 red ②③, the 2026-10-26 window closing and the next one opening,
+/// through the save, the exit's own write and the read: the coordinator's tab
+/// holds its claude (term 1) and a split (term 17) of `zo --resume` that died
+/// at the writer lease of the zo conversation the person's tab (term 16)
+/// holds. The save keeps the claude coordinator — a worker once carried its
+/// conversation — and gives the zo conversation to the leaf whose pane holds
+/// it; the exit marks both tabs standing; the next window reads both
+/// conversations, once each, and puts their workspace back. And the shape the
+/// 10-26 file really had — no line for the coordinator at all: the exit's own
+/// write files it from its live pane, as a tab of its own that does not take
+/// the eye.
+#[test]
+fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
+    const LEADER: u32 = 764_910;
+    const FIRST: u32 = 764_911;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    std::fs::create_dir_all(&main).expect("a checkout");
+    let main = main.to_string_lossy().into_owned();
+    let host = Restoring::new(std::path::Path::new(&main), FIRST, (0, test_actor(LEADER)));
+    let (team, _run) = a_run(&host, LEADER, "coord-tab");
+    let coordinator = format!("test-session-of-term-{LEADER}");
+    let zo = "session-1792758210243-0";
+    // A worker once carried the coordinator's conversation, and finished.
+    let (_task, carried, _) = a_worker(&host, &team, "--agent claude", Some(&coordinator));
+    say(
+        &host,
+        &team,
+        &format!("worker-stop --worker {carried} --reason handed-in"),
+    );
+    let zo_tab = || {
+        let mut tab = record("zo", zo);
+        tab.focused = false;
+        tab.terms = std::collections::HashMap::from([(0, 16)]);
+        tab
+    };
+    // Terms 1 and 16 hold their conversations; term 17 died at birth.
+    let live = std::collections::HashMap::from([
+        (1, ("claude", coordinator.clone())),
+        (16, ("zo", zo.to_string())),
+    ]);
+    let holds = |wake: &crate::pane_layout::WakeAgent, term: u32| {
+        live.get(&term)
+            .is_some_and(|(agent, id)| *agent == wake.agent && *id == wake.id)
+    };
+    let screens = |term: u32| {
+        live.contains_key(&term)
+            .then(|| format!("screen of {term}"))
+    };
+    let file = root.path().join("pane-layouts.json");
+
+    let saved =
+        crate::cmd::settings::saved_set(vec![the_coordinators_tab(&coordinator, zo), zo_tab()]);
+    assert!(
+        saved.struck.is_empty(),
+        "the save struck {:?}",
+        saved.struck
+    );
+    let (_, doubled) =
+        crate::pane_layout::save_window_set(&file, main.clone(), saved.kept(), &|| false, &holds)
+            .expect("the save")
+            .expect("not leaving");
+    assert_eq!(
+        doubled,
+        vec!["zo session-".to_string()],
+        "the dead split's copy"
+    );
+    crate::pane_layout::rewrite(&file, |layouts| {
+        crate::pane_layout::capture_exit(layouts, screens);
+        true
+    })
+    .expect("the exit's write");
+    let back = crate::cmd::settings::opened_set(&file, &main);
+    assert!(back.struck.is_empty(), "{back:?}");
+    let back = back.kept();
+    let named: Vec<Vec<Option<String>>> = back
+        .iter()
+        .map(|tab| {
+            (0..tab.root.leaves())
+                .map(|at| {
+                    tab.agents
+                        .get(&at)
+                        .map(|one| format!("{} {}", one.agent, one.id))
+                })
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            vec![Some(format!("claude {coordinator}")), None],
+            vec![Some(format!("zo {zo}"))],
+        ]
+    );
+    assert!(
+        back.iter().all(|tab| tab.awake),
+        "a tab the exit found standing is not awake"
+    );
+    assert_eq!(
+        crate::cmd::settings::standing_set(&file),
+        vec![main.clone()]
+    );
+
+    // The 10-26 file: no line for the coordinator. The exit files it.
+    crate::pane_layout::save_window_set(&file, main.clone(), vec![zo_tab()], &|| false, &holds)
+        .expect("the save")
+        .expect("not leaving");
+    let mut filed = Vec::new();
+    crate::pane_layout::rewrite(&file, |layouts| {
+        filed = crate::pane_layout::file_unheld(
+            layouts,
+            vec![crate::pane_layout::LivePane {
+                term: 1,
+                worktree: main.clone(),
+                wake: crate::pane_layout::WakeAgent {
+                    agent: "claude".to_string(),
+                    key: "session_id".to_string(),
+                    id: coordinator.clone(),
+                    transcript_path: None,
+                    interrupted: false,
+                },
+            }],
+        );
+        crate::pane_layout::capture_exit(layouts, screens);
+        true
+    })
+    .expect("the exit's write");
+    assert!(
+        matches!(filed[..], [crate::pane_layout::Filed::Tab(_)]),
+        "{filed:?}"
+    );
+    let back = crate::cmd::settings::opened_set(&file, &main).kept();
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[1].agents[&0].id, coordinator);
+    assert!(back[1].awake && !back[1].focused);
+    assert_eq!(
+        crate::cmd::settings::standing_set(&file),
+        vec![main.clone()]
+    );
+    for pane in [FIRST, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
