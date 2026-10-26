@@ -50,7 +50,7 @@ const CODEX: Shape = Shape {
     working: "Working (0s \\342\\200\\242 esc to interrupt)",
 };
 
-const BRIEFING: &str = "You are a worker in this window's orchestration, carrying task T-STAMP-7";
+const BRIEFING: &str = "You are a worker in this window's orchestration, carrying task T-STAMP-7. Now do this: check the redraw for REDRAW-TAIL-9.";
 
 /// The launch the pane holds, as the window fingerprints it; a relaunch under
 /// the briefing typed again makes it the next one.
@@ -720,4 +720,150 @@ fn a_retype_registered_late_still_outlasts_the_watch_window() {
         );
         assert_eq!(journey.pasted, 2, "{}", shape.name);
     }
+}
+
+/// Evidence left by the fake CLI after it consumes the submitted input.
+#[derive(Clone, Copy)]
+enum RedrawEvidence {
+    Receipt,
+    Working,
+    Tail,
+}
+
+struct Redrawn {
+    watched: Watched,
+    evidence: RedrawEvidence,
+    receipt: PathBuf,
+}
+
+impl BriefingPane for Redrawn {
+    fn submitted(&mut self) -> bool {
+        matches!(self.evidence, RedrawEvidence::Receipt) && self.receipt.exists()
+    }
+
+    fn working(&mut self) -> bool {
+        matches!(self.evidence, RedrawEvidence::Working) && self.receipt.exists()
+    }
+
+    fn screen(&mut self) -> Option<String> {
+        self.watched.screen()
+    }
+
+    fn retype(&mut self) -> Receiver<DeliveryOutcome> {
+        self.watched.retype()
+    }
+
+    fn withdraw(&mut self) {
+        self.watched.withdraw();
+    }
+}
+
+/// A redraw removes both the echoed input and its scrollback. The file and
+/// AFTER-REDRAW marker order the test after the child read and the pump read;
+/// elapsed time never decides whether the CLI consumed the first briefing.
+fn after_redraw(evidence: RedrawEvidence) -> Journey {
+    let gates = Gates::new();
+    let receipt = gates.path("input-taken");
+    let reads = gates.path("reads");
+    let handshake_seen = until_said(&gates.path(Gates::HANDSHAKE_SEEN));
+    let tail = if matches!(evidence, RedrawEvidence::Tail) {
+        "Now do this: check the redraw for REDRAW-TAIL-9."
+    } else {
+        ""
+    };
+    let script = format!(
+        "stty cooked echo; printf '\\033[?2004h'; {handshake_seen}; \
+         printf '\\342\\235\\257 '; while IFS= read -r line; do \
+         printf 'read\\n' >> '{}'; printf '\\033[2J\\033[3J\\033[H'; \
+         printf '{tail}\\r\\nAFTER-REDRAW working\\r\\n'; : > '{}'; done",
+        reads.display(),
+        receipt.display()
+    );
+    let lane = PtyLane::spawn("/bin/sh", &["-c".into(), script], None, &[], 8, 60)
+        .expect("spawn the redrawing CLI");
+    let (notify, first) = sync_channel(1);
+    let shared = Arc::new(Mutex::new(Pane {
+        lane,
+        delivery: Some((delivery(ReadySignal::Prompt(CLAUDE.glyph)), notify)),
+        relaunch_under_retype: false,
+        launch: LAUNCH,
+        pasted: 0,
+        retyped_at: None,
+        retype_ended: None,
+        composer_after: None,
+        handshake_gate: Some(gates.path(Gates::HANDSHAKE_SEEN)),
+        stop: false,
+    }));
+    let pumping = pump(Arc::clone(&shared), Duration::ZERO);
+    assert_eq!(
+        first
+            .recv_timeout(DELIVERY_DEADLINE * 2)
+            .expect("first delivery"),
+        DeliveryOutcome::Delivered
+    );
+    let started = Instant::now();
+    loop {
+        let screen = all_text(&mut shared.lock().expect("pane").lane);
+        if receipt.exists() && screen.contains("AFTER-REDRAW") {
+            assert!(!screen.contains("You are a worker"), "redraw kept the head");
+            break;
+        }
+        assert!(started.elapsed() < DELIVERY_DEADLINE, "CLI never redrew");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut pane = Redrawn {
+        watched: Watched {
+            shared: Arc::clone(&shared),
+            glyph: CLAUDE.glyph,
+            retype_registers_after: Duration::ZERO,
+        },
+        evidence,
+        receipt,
+    };
+    let verdict = confirm(
+        &mut pane,
+        BRIEFING,
+        Duration::from_millis(200),
+        DELIVERY_DEADLINE * 2,
+    );
+    let mut pane = shared.lock().expect("pane");
+    pane.stop = true;
+    let journey = Journey {
+        verdict,
+        pasted: pane.pasted,
+        screen: all_text(&mut pane.lane),
+        retype: None,
+    };
+    drop(pane);
+    pumping.join().expect("pump");
+    assert_eq!(
+        std::fs::read_to_string(reads)
+            .expect("CLI reads")
+            .lines()
+            .count(),
+        1,
+        "a CLI already processing the briefing received it again"
+    );
+    journey
+}
+
+#[test]
+fn a_submission_receipt_survives_a_cli_clearing_its_screen_and_scrollback() {
+    let journey = after_redraw(RedrawEvidence::Receipt);
+    assert_eq!(journey.pasted, 1, "{:?}", journey.screen);
+    assert_eq!(journey.verdict, Verdict::Taken);
+}
+
+#[test]
+fn a_started_turn_survives_a_cli_clearing_its_screen_and_scrollback() {
+    let journey = after_redraw(RedrawEvidence::Working);
+    assert_eq!(journey.pasted, 1, "{:?}", journey.screen);
+    assert_eq!(journey.verdict, Verdict::Taken);
+}
+
+#[test]
+fn a_briefing_tail_survives_a_cli_clearing_the_head_and_scrollback() {
+    let journey = after_redraw(RedrawEvidence::Tail);
+    assert_eq!(journey.pasted, 1, "{:?}", journey.screen);
+    assert_eq!(journey.verdict, Verdict::Taken);
 }
