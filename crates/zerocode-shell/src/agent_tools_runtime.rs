@@ -936,10 +936,7 @@ struct LaunchPane<'a> {
 /// SessionStart also initializes the turn clock, so that clock alone proves
 /// no input was taken. A real finish can arrive before the watch starts;
 /// unlike a session boundary it does prove that the agent ran a turn.
-pub(super) fn briefing_work_reported(
-    state: zerocode_core::hook::HookState,
-    session_boundary: bool,
-) -> bool {
+fn briefing_work_reported(state: zerocode_core::hook::HookState, session_boundary: bool) -> bool {
     use zerocode_core::hook::HookState;
     match state {
         HookState::Working | HookState::NeedsAttention => true,
@@ -8771,4 +8768,23 @@ pub(super) fn write_agent_screenshot(
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned())
+}
+
+#[cfg(test)]
+mod briefing_tests {
+    use super::briefing_work_reported;
+    use zerocode_core::hook::HookState;
+
+    #[test]
+    fn a_worker_briefing_accepts_a_real_turn_but_not_a_session_boundary() {
+        assert!(!briefing_work_reported(HookState::Done, true));
+        assert!(!briefing_work_reported(HookState::Idle, false));
+        for state in [
+            HookState::Working,
+            HookState::NeedsAttention,
+            HookState::Done,
+        ] {
+            assert!(briefing_work_reported(state, false), "{state:?}");
+        }
+    }
 }
