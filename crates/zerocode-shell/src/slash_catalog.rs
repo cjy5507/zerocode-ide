@@ -517,6 +517,17 @@ fn agy_help_row(line: &str) -> Option<SlashCommand> {
 /// A short-lived command's stdout as lines, or `None` when it fails or
 /// outlives `wait` — the child is killed then, never left behind.
 pub(crate) fn captured_lines(binary: &Path, args: &[&str], wait: Duration) -> Option<Vec<String>> {
+    captured_lines_in(binary, args, wait, &[])
+}
+
+/// [`captured_lines`] with `env` set on the child after the window's own
+/// `ZEROCODE*` names are taken away.
+fn captured_lines_in(
+    binary: &Path,
+    args: &[&str],
+    wait: Duration,
+    env: &[(String, String)],
+) -> Option<Vec<String>> {
     let mut command = crate::proc::quiet_command(binary);
     command
         .args(args)
@@ -529,6 +540,7 @@ pub(crate) fn captured_lines(binary: &Path, args: &[&str], wait: Duration) -> Op
             command.env_remove(&*key);
         }
     }
+    command.envs(env.iter().map(|(key, value)| (key, value)));
     let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let started = Instant::now();
@@ -604,7 +616,9 @@ pub fn agent_lineup(
 /// What the model settings draw from zo's list (t-75762): every login model
 /// row, every router zo reads (`customProviders`), each source's report and
 /// the aliases a saved `model` may name — the same cached catalog the model
-/// menu and the lineup read, never a second `zo models` run.
+/// menu and the lineup read, never a second `zo models` run — and where a
+/// zo pane reads its Claude login (`paneCredentialStore`), so a report made
+/// from another place can be said to be one (t-76598).
 pub fn zo_model_list(home: &Path) -> serde_json::Value {
     let catalog = zo_models_catalog(home);
     let mut list = serde_json::Map::new();
@@ -618,14 +632,51 @@ pub fn zo_model_list(home: &Path) -> serde_json::Value {
                 .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
         );
     }
+    if let Some(root) = ACCOUNTS_ROOT.get() {
+        list.insert(
+            "paneCredentialStore".to_string(),
+            serde_json::Value::String(credential_store(&listing_env(root))),
+        );
+    }
     serde_json::Value::Object(list)
+}
+
+/// Where the window keeps its accounts, named once at boot. Until it is,
+/// zo is asked with the window's own environment.
+static ACCOUNTS_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn configure_accounts(config_root: PathBuf) {
+    let _ = ACCOUNTS_ROOT.set(config_root);
+}
+
+/// The account variables a zo pane is launched with (t-76598), read and
+/// never written: the window's `zo models` read once ran with none, so it
+/// alone found no Claude login, and wrote that failure over the list a pane
+/// reads too. A look, not a launch — it runs on the list's clock, so nothing
+/// is materialized and a signed-out account does not stop the read.
+fn listing_env(config_root: &Path) -> Vec<(String, String)> {
+    let mut env = crate::accounts::reading_env_for(config_root, "zo");
+    env.extend(crate::codex_accounts::reading_env(config_root));
+    env
+}
+
+/// Where a zo given `env` reads its Claude login, in the words zo's report
+/// says it in (`credentialStore`): the folder it is pointed at, else the
+/// keychain.
+fn credential_store(env: &[(String, String)]) -> String {
+    env.iter()
+        .find(|(key, value)| key == zerocode_core::account::CONFIG_DIR_VAR && !value.is_empty())
+        .map_or_else(
+            || "keychain".to_string(),
+            |(key, value)| format!("{key}:{value}"),
+        )
 }
 
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]. A zo that is
 /// missing, fails, says nothing readable or outlives [`MODELS_WAIT`] — killed
 /// then — leaves the catalog last read standing, or `Null` before any was.
 fn zo_models_catalog(home: &Path) -> serde_json::Value {
-    catalog_through(models_cache(), home)
+    catalog_through(models_cache(), home, ACCOUNTS_ROOT.get().map(PathBuf::as_path))
 }
 
 /// A change the window just made to what zo lists — a connection saved,
@@ -644,10 +695,15 @@ fn forget_models_in(cache: &Mutex<ModelsCache>) {
     }
 }
 
-fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value {
+fn catalog_through(
+    cache: &Mutex<ModelsCache>,
+    home: &Path,
+    accounts: Option<&Path>,
+) -> serde_json::Value {
     let bin = crate::zo_companion::zo_path_under(home);
     catalog_read(cache, || {
-        captured_lines(&bin, &["models", "--json"], MODELS_WAIT)
+        let env = accounts.map(listing_env).unwrap_or_default();
+        captured_lines_in(&bin, &["models", "--json"], MODELS_WAIT, &env)
             .and_then(|lines| serde_json::from_str(&lines.join("\n")).ok())
     })
 }
@@ -856,9 +912,82 @@ mod tests {
         .expect("zo");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
         assert_eq!(
-            catalog_through(&Mutex::new(ModelsCache::default()), home.path()),
+            catalog_through(&Mutex::new(ModelsCache::default()), home.path(), None),
             serde_json::json!({"customProviders": [{"name": "Fixture"}]})
         );
+    }
+
+    /// The window's `zo models` read gets a zo pane's account variables
+    /// (t-76598): before, it ran with none, so on a machine whose Claude login
+    /// lives in the window's account home only the window's read failed — and
+    /// the settings said 「로그인 안 됨」 while every zo pane answered.
+    #[cfg(unix)]
+    #[test]
+    fn the_zo_list_is_read_with_the_account_variables_a_zo_pane_gets() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("home");
+        let config = tempfile::tempdir().expect("config root");
+        let codex_home = config.path().join("codex-accounts/account-a/home");
+        std::fs::create_dir_all(&codex_home).expect("codex account home");
+        std::fs::write(
+            codex_home.join(crate::codex_accounts::AUTH_FILE),
+            r#"{"OPENAI_API_KEY":"fixture"}"#,
+        )
+        .expect("codex auth");
+        std::fs::write(
+            config.path().join(crate::codex_accounts::ACCOUNT_STORE_FILE),
+            serde_json::json!({
+                "accounts": [{"id": "account-a", "home_dir": codex_home, "added_at": 0}],
+                "active": "account-a"
+            })
+            .to_string(),
+        )
+        .expect("codex account store");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        let seen = home.path().join("seen-env");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nenv > '{}'\necho '{{\"reports\":[]}}'\n",
+                seen.display()
+            ),
+        )
+        .expect("zo");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+        let pane = crate::usage_runtime::account_env_for(config.path(), "zo").expect("pane env");
+        assert_eq!(
+            catalog_through(&Mutex::new(ModelsCache::default()), home.path(), Some(config.path())),
+            serde_json::json!({"reports": []})
+        );
+        let seen = std::fs::read_to_string(&seen).expect("zo ran");
+        let seen: HashMap<&str, &str> = seen.lines().filter_map(|line| line.split_once('=')).collect();
+        for name in [
+            zerocode_core::account::CONFIG_DIR_VAR,
+            zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR,
+            zerocode_core::codex_account::HOME_VAR,
+        ] {
+            assert!(pane.iter().any(|(key, _)| key == name), "the pane gets {name}: {pane:?}");
+        }
+        for (key, value) in &pane {
+            assert_eq!(
+                seen.get(key.as_str()).copied(),
+                Some(value.as_str()),
+                "the list's zo did not get the pane's {key}"
+            );
+        }
+        let folder = pane
+            .iter()
+            .find(|(key, _)| key == zerocode_core::account::CONFIG_DIR_VAR)
+            .map(|(_, value)| value.clone())
+            .expect("folder");
+        assert_eq!(
+            credential_store(&listing_env(config.path())),
+            format!("CLAUDE_CONFIG_DIR:{folder}"),
+            "the place the settings compare a report with is the pane's"
+        );
+        assert_eq!(credential_store(&[]), "keychain");
     }
 
     #[test]

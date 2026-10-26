@@ -7,6 +7,11 @@
 //! judgment checks of its models. Only words from [`Verdict`] are kept — never
 //! a key, a header or a server's own words — so nothing secret can reach the
 //! file. A record made against another generation says the setting changed.
+//!
+//! Beside them, when each judgment provider was applied from this window
+//! (t-76598), by the provider's identity: the dashboard says since when the
+//! model it shows has counted, and says nothing for a choice made before the
+//! window kept this.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -30,6 +35,10 @@ const MAX_CONNECTIONS: usize = 64;
 const MAX_JUDGMENTS: usize = 256;
 const MAX_MODEL_CHARS: usize = 256;
 const MAX_PROTOCOL_CHARS: usize = 32;
+/// The judgment providers whose apply is kept, newest first: the one judging
+/// now and the ones a person may come back to.
+const MAX_APPLIED: usize = 16;
+const MAX_IDENTITY_CHARS: usize = 256;
 
 /// One read-modify-write at a time: two checks answering together must not
 /// cost either its record.
@@ -79,6 +88,8 @@ pub struct Record {
 struct File {
     version: u32,
     connections: BTreeMap<String, Record>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    applied: BTreeMap<String, u64>,
 }
 
 /// What the page reads: the records, the clock they are read against, and
@@ -89,6 +100,9 @@ pub struct Remembered {
     pub now_ms: u64,
     pub every_ms: u64,
     pub connections: BTreeMap<String, Record>,
+    /// When each judgment provider was applied from this window, by its
+    /// identity.
+    pub applied: BTreeMap<String, u64>,
 }
 
 /// A connection check, as the page answers it.
@@ -118,29 +132,35 @@ pub struct JudgmentAnswer {
     pub state: Verdict,
 }
 
-fn read_file(path: &Path) -> BTreeMap<String, Record> {
+fn read_file(path: &Path) -> File {
+    let empty = File {
+        version: VERSION,
+        connections: BTreeMap::new(),
+        applied: BTreeMap::new(),
+    };
     let Ok(meta) = std::fs::metadata(path) else {
-        return BTreeMap::new();
+        return empty;
     };
     if !meta.is_file() || meta.len() > MAX_BYTES {
-        return BTreeMap::new();
+        return empty;
     }
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<File>(&bytes).ok())
         .filter(|file| file.version == VERSION)
-        .map(|file| file.connections)
-        .unwrap_or_default()
+        .unwrap_or(empty)
 }
 
 /// The records as the file holds them, read against `now_ms`. A missing,
 /// unreadable or foreign file is no record.
 #[must_use]
 pub fn read(path: &Path, now_ms: u64) -> Remembered {
+    let file = read_file(path);
     Remembered {
         now_ms,
         every_ms: QUIET_EVERY_MS,
-        connections: read_file(path),
+        connections: file.connections,
+        applied: file.applied,
     }
 }
 
@@ -205,22 +225,18 @@ fn write(
     live: &BTreeSet<String>,
     now_ms: u64,
     keep: Option<&Keep>,
-    change: impl FnOnce(&mut BTreeMap<String, Record>),
+    change: impl FnOnce(&mut File),
 ) -> Result<Remembered, String> {
     let _held = WRITING
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut connections = read_file(path);
-    change(&mut connections);
+    let mut file = read_file(path);
+    change(&mut file);
     // A connection that is no longer saved takes its record with it.
-    connections.retain(|id, _| live.contains(id));
-    if connections.len() > MAX_CONNECTIONS {
+    file.connections.retain(|id, _| live.contains(id));
+    if file.connections.len() > MAX_CONNECTIONS {
         return Err("model_connection_checks_full".to_string());
     }
-    let mut file = File {
-        version: VERSION,
-        connections,
-    };
     // The counts and lengths above do not bound the bytes (a model name of
     // 256 wide characters is 1 KiB).
     let bytes = fit(&mut file, MAX_BYTES, keep)?;
@@ -232,6 +248,7 @@ fn write(
         now_ms,
         every_ms: QUIET_EVERY_MS,
         connections: file.connections,
+        applied: file.applied,
     })
 }
 
@@ -262,8 +279,8 @@ pub fn remember_check(
     if !valid_id(&answer.id) || answer.state == Verdict::Usable {
         return Err("model_connection_check".to_string());
     }
-    write(path, live, now_ms, None, |connections| {
-        let record = record_for(connections, &answer.id, answer.generation);
+    write(path, live, now_ms, None, |file| {
+        let record = record_for(&mut file.connections, &answer.id, answer.generation);
         record.state = Some(answer.state);
         record.count = answer.count.filter(|_| answer.state == Verdict::Ok);
         record.checked_ms = Some(now_ms);
@@ -298,8 +315,8 @@ pub fn remember_judgment(
         model: &answer.model,
         protocol: &answer.protocol,
     };
-    write(path, live, now_ms, Some(&keep), |connections| {
-        let record = record_for(connections, &answer.id, answer.generation);
+    write(path, live, now_ms, Some(&keep), |file| {
+        let record = record_for(&mut file.connections, &answer.id, answer.generation);
         record
             .judgments
             .retain(|kept| !(kept.model == answer.model && kept.protocol == answer.protocol));
@@ -311,6 +328,45 @@ pub fn remember_judgment(
         });
         let over = record.judgments.len().saturating_sub(MAX_JUDGMENTS);
         record.judgments.drain(..over);
+    })
+}
+
+/// Keep that the judgment provider `identity` was applied at `now_ms`. The
+/// provider applied last applied again keeps its time — its judgments did
+/// not start over — and one coming back after another is applied anew.
+pub fn remember_applied(
+    path: &Path,
+    identity: &str,
+    live: &BTreeSet<String>,
+    now_ms: u64,
+) -> Result<Remembered, String> {
+    if identity.is_empty()
+        || identity.chars().count() > MAX_IDENTITY_CHARS
+        || identity.chars().any(char::is_control)
+    {
+        return Err("model_judgment_applied".to_string());
+    }
+    write(path, live, now_ms, None, |file| {
+        let newest = file
+            .applied
+            .iter()
+            .max_by_key(|(_, at)| **at)
+            .map(|(held, _)| held.clone());
+        if newest.as_deref() != Some(identity) {
+            file.applied.insert(identity.to_string(), now_ms);
+        }
+        while file.applied.len() > MAX_APPLIED {
+            let Some(oldest) = file
+                .applied
+                .iter()
+                .filter(|(held, _)| held.as_str() != identity)
+                .min_by_key(|(_, at)| **at)
+                .map(|(held, _)| held.clone())
+            else {
+                break;
+            };
+            file.applied.remove(&oldest);
+        }
     })
 }
 

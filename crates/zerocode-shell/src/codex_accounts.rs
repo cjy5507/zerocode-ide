@@ -824,23 +824,39 @@ pub fn remove_account(
 /// The environment a Codex launch gets, pointing at the single shared runtime
 /// home so conversations and sessions are shared across account switches.
 pub fn launch_env(config_root: &Path) -> Vec<(String, String)> {
-    let store = read_store(config_root);
-    let Some(account) =
-        zerocode_core::codex_account::active_account(&store.accounts, &store.selection)
-    else {
+    let Some((home, env)) = chosen_env(config_root) else {
         return Vec::new();
     };
-    let runtime = resolve_runtime_home(config_root);
-    let home = Path::new(&account.home_dir);
-    if !signed_in(home) {
-        return Vec::new();
+    carry_settings_into(&home);
+    let _ = materialize_into(config_root, &resolve_runtime_home(config_root));
+    env
+}
+
+/// The same variable for a LOOK rather than a launch (t-76598): the window's
+/// own `zo models` read names the home a zo pane is given, and writes
+/// nothing — it runs on the model list's clock, not on a person's launch.
+pub fn reading_env(config_root: &Path) -> Vec<(String, String)> {
+    chosen_env(config_root).map(|(_, env)| env).unwrap_or_default()
+}
+
+/// The chosen account's own home and the runtime home a launch names, when
+/// an account is chosen and signed in.
+fn chosen_env(config_root: &Path) -> Option<(PathBuf, Vec<(String, String)>)> {
+    let store = read_store(config_root);
+    let account =
+        zerocode_core::codex_account::active_account(&store.accounts, &store.selection)?;
+    let home = PathBuf::from(&account.home_dir);
+    if !signed_in(&home) {
+        return None;
     }
-    carry_settings_into(home);
-    let _ = materialize_into(config_root, &runtime);
-    vec![(
-        zerocode_core::codex_account::HOME_VAR.to_string(),
-        runtime.to_string_lossy().into_owned(),
-    )]
+    let runtime = resolve_runtime_home(config_root);
+    Some((
+        home,
+        vec![(
+            zerocode_core::codex_account::HOME_VAR.to_string(),
+            runtime.to_string_lossy().into_owned(),
+        )],
+    ))
 }
 
 #[cfg(test)]

@@ -218,3 +218,20 @@ pub(crate) async fn sync_model_connections(
     }
     Ok(status)
 }
+
+/// Keep that the judgment provider the settings name NOW was applied
+/// (t-76598): read back off zo's settings after an apply, never taken from
+/// the page, so the time is the one of what is actually written there.
+#[tauri::command]
+pub(crate) async fn remember_judgment_applied(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<checks::Remembered, String> {
+    let path = checks_path(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let provider = judgment_provider::Provider::read(&self::path()?)
+            .map_err(|reason| reason.token().to_string())?;
+        checks::remember_applied(&path, &provider.identity(), &saved_ids()?, now_ms())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}

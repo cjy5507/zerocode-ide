@@ -338,7 +338,8 @@ use cmd::{
     project_scripts, pull_request_seed, quota_wall_handover, quota_wall_retry, read_image_file,
     read_primary_selection, read_text_file, recall_folder_panel, record_archive_trust,
     record_repo_trust, release_status, release_untitled_markdown, relogin_claude_account,
-    relogin_codex_account, relogin_codex_login, remember_model_connection_check,
+    relogin_codex_account, relogin_codex_login, remember_judgment_applied,
+    remember_model_connection_check,
     remember_model_judgment_check, remembered_model_connection_checks, remote_servers,
     remote_workspaces, remove_api_router, remove_claude_account, remove_codex_account,
     remove_project, remove_remote_server, remove_remote_workspace, remove_ssh_host,
@@ -2673,6 +2674,7 @@ fn main() -> ExitCode {
             model_connections, sync_model_connections, check_model_connection, select_model_connection, clear_model_connection,
             zo_model_list, select_coding_model, adopt_legacy_judgment_key,
             remembered_model_connection_checks, remember_model_connection_check, remember_model_judgment_check,
+            remember_judgment_applied,
             test_router_connection,
             save_api_router,
             remove_api_router,
@@ -3542,6 +3544,9 @@ fn main() -> ExitCode {
             // Today's model lineup for the summons's choices (t-14437): read
             // once now on a thread of its own, then whenever a reader finds
             // it older than zo's refresh rule.
+            // zo's model list is read with a zo pane's account variables
+            // (t-76598), named before the lineup's first read asks for it.
+            slash_catalog::configure_accounts(managed.config_root().to_path_buf());
             if let Some(home) = dirs::home_dir() {
                 summon_lineup::configure(handle.clone(), home, managed.config_root().to_path_buf());
             }

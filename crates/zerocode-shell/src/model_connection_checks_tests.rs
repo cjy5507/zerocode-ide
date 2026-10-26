@@ -306,6 +306,7 @@ fn widest_file(path: &Path, last: usize) -> BTreeSet<String> {
     let bytes = serde_json::to_vec(&File {
         version: VERSION,
         connections,
+        applied: BTreeMap::new(),
     })
     .expect("seed");
     std::fs::write(path, bytes).expect("seed file");
@@ -465,6 +466,7 @@ fn a_file_that_cannot_fit_without_the_current_judgment_says_so() {
     let mut file = File {
         version: VERSION,
         connections: BTreeMap::new(),
+        applied: BTreeMap::new(),
     };
     for id in ["c1", "c2"] {
         let judgments = (0..3_u64)
@@ -504,6 +506,7 @@ fn a_file_that_cannot_fit_without_the_current_judgment_says_so() {
                 ..Record::default()
             },
         )]),
+        applied: BTreeMap::new(),
     })
     .expect("fits")
     .len() as u64;
@@ -564,4 +567,38 @@ fn a_model_name_of_wide_characters_still_leaves_a_file_the_read_accepts() {
             .map(|one| one.checked_ms),
         Some(300)
     );
+}
+
+/// When a judgment provider was applied is kept by its identity (t-76598):
+/// the provider applied again keeps its first time, one coming back after
+/// another is applied anew, the oldest go past the bound, and the record of
+/// a connection's checks stays as it was.
+#[test]
+fn an_applied_judgment_provider_keeps_its_time_until_another_is_applied() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("checks.json");
+    let ids = live(&["c1"]);
+    remember_check(&path, &check("c1", 1, Verdict::Ok, Some(3)), &ids, CLOCK).expect("check");
+    let first = remember_applied(&path, "judgment-aaaa", &ids, CLOCK + 10).expect("applied");
+    assert_eq!(first.applied.get("judgment-aaaa"), Some(&(CLOCK + 10)));
+    let again = remember_applied(&path, "judgment-aaaa", &ids, CLOCK + 20).expect("again");
+    assert_eq!(again.applied.get("judgment-aaaa"), Some(&(CLOCK + 10)), "applied again is no new start");
+    remember_applied(&path, "jev-latest", &ids, CLOCK + 30).expect("jev");
+    let back = remember_applied(&path, "judgment-aaaa", &ids, CLOCK + 40).expect("back");
+    assert_eq!(back.applied.get("judgment-aaaa"), Some(&(CLOCK + 40)), "coming back starts again");
+    assert_eq!(back.applied.get("jev-latest"), Some(&(CLOCK + 30)));
+    let held = read(&path, CLOCK + 50);
+    assert_eq!(held.applied, back.applied, "a write is read back");
+    assert_eq!(held.connections["c1"].state, Some(Verdict::Ok), "the checks are untouched");
+
+    for n in 0..(MAX_APPLIED as u64 + 4) {
+        remember_applied(&path, &format!("judgment-{n:04}"), &ids, CLOCK + 100 + n).expect("many");
+    }
+    let held = read(&path, CLOCK + 200);
+    assert_eq!(held.applied.len(), MAX_APPLIED);
+    assert!(held.applied.contains_key(&format!("judgment-{:04}", MAX_APPLIED + 3)));
+    assert!(!held.applied.contains_key("judgment-aaaa"), "the oldest went first");
+
+    assert!(remember_applied(&path, "", &ids, CLOCK).is_err());
+    assert!(remember_applied(&path, "bad\nidentity", &ids, CLOCK).is_err());
 }
