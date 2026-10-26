@@ -2004,16 +2004,23 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     return cell.spread !== 0 || cell.wideScale !== 1;
   }
 
-  function hasRoom() {
+  function measuredRoom() {
     // CSS can report fixed dimensions under a hidden ancestor. Only a box
     // participating in layout can supply font metrics or a terminal grid.
-    return host.isConnected && host.clientWidth > 0 && host.clientHeight > 0;
+    // Check for a CSS box without adding client-size reads to a tab switch;
+    // the computed dimensions below are already the grid's layout query.
+    if (!host.isConnected || !host.checkVisibility()) return null;
+    const style = getComputedStyle(host);
+    const width = parseFloat(style.width);
+    const height = parseFloat(style.height);
+    if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) return null;
+    return { width, height, style };
   }
 
   function measure() {
-    if (!hasRoom()) return;
     const under = metricsKey();
     if (under === measuredUnder) return;
+    if (measuredRoom() === null) return;
     // The probe is built exactly like a painted row — a block .term-row with
     // an inline run inside — so the measured box is the box the renderer
     // will actually lay out. An inline-only probe reads the line box (~16px)
@@ -3442,7 +3449,6 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
   findShut.addEventListener("click", () => closeTermFind());
 
   function gridSize() {
-    if (!hasRoom()) return { rows: 24, cols: 96, blind: true };
     // Computed values, not a rect: the float measures its grid while its
     // `surface-enter` frame still wears scale(0.95), and a rect read through
     // that transform sized the pty against a box that does not exist — the
@@ -3450,18 +3456,15 @@ function makeTermView(host, pre, caret, owner = { address: () => null }) {
     // window's border-box sizing the computed width IS the border box, so
     // the stylesheet's padding comes off it exactly as it came off the rect
     // — all from the one style object this function was already paying for.
-    const style = getComputedStyle(host);
-    const width = parseFloat(style.width);
-    const height = parseFloat(style.height);
     // `blind` marks the guess: a host that lays nothing out — display:none
-    // somewhere above it — computes no width, and the numbers below are a
-    // default, not a measurement. A caller SIZING something new wants the
-    // default; a caller about to TELL a pty its room must not repeat a guess
+    // somewhere above it — has no CSS box, even with a fixed computed width.
+    // The numbers below are a default, not a measurement. A caller sizing
+    // something new wants that default; a caller telling a pty its room
+    // must not repeat a guess
     // (`resizeTermTab` refuses on it).
-    if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
-      return { rows: 24, cols: 96, blind: true };
-    }
-    const grid = gridFor(width, height, style);
+    const room = measuredRoom();
+    if (room === null) return { rows: 24, cols: 96, blind: true };
+    const grid = gridFor(room.width, room.height, room.style);
     placeGrid(grid);
     return grid;
   }
