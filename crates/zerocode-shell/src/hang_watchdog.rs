@@ -1136,6 +1136,7 @@ mod tests {
         monitor: Monitor,
         up: u64,
         wall: u64,
+        limits: Limits,
         lines: Vec<ActorLine>,
     }
 
@@ -1146,6 +1147,7 @@ mod tests {
                 monitor: Monitor::new(),
                 up: 0,
                 wall: 1_800_000_000_000,
+                limits: Limits::DEFAULT,
                 lines: Vec::new(),
             };
             machine.run(Limits::DEFAULT.warmup_ms + Limits::DEFAULT.ping_ms, None);
@@ -1170,7 +1172,7 @@ mod tests {
                 nap,
                 seen: true,
             };
-            let (beaten, lines) = self.monitor.judge(beat, Limits::DEFAULT, || Some(serving));
+            let (beaten, lines) = self.monitor.judge(beat, self.limits, || Some(serving));
             if beaten.queue {
                 self.monitor.answer.answer(self.up);
             }
@@ -1185,7 +1187,9 @@ mod tests {
         }
 
         /// A sleep the nap straddled: the resume thread says so instead of
-        /// beating, as `main` does.
+        /// beating, as `main` does. `main` tells it only by the wall clock
+        /// running `ms` past the nap, so a clock set ahead inside a nap is
+        /// this too.
         fn sleep(&mut self, ms: u64) {
             self.up += Limits::DEFAULT.ping_ms;
             self.wall += Limits::DEFAULT.ping_ms + ms;
@@ -1238,78 +1242,117 @@ mod tests {
         );
     }
 
-    /// The wall clock set an hour ahead while the actor stands: to a watch
-    /// with two clocks that is a sleep, so the request is timed again from
-    /// the watch's return, and no line carries the hour.
-    #[test]
-    fn an_actor_request_never_carries_a_wall_clock_set_ahead() {
-        let mut machine = Machine::watching();
-        let request = machine.take("window_exiting");
-        machine.run(1_000, Some(request));
-        machine.wall += 3_600_000;
-        machine.run(30_000, Some(request));
-        machine.run(250, None);
-        // Back at the beat after the jump, warm 15 s later; said 2 s after that.
-        assert_eq!(
-            machine.lines,
-            [
-                ActorLine::Busy {
-                    verb: "window_exiting",
-                    ms: 2_000
-                },
-                ActorLine::Busy {
-                    verb: "window_exiting",
-                    ms: 12_000
-                },
-                ActorLine::Answered {
-                    verb: "window_exiting",
-                    ms: 15_000
-                },
-            ]
-        );
+    /// The lines a request the actor stands on for `ms` is said with, from
+    /// the moment it was taken, ending a beat after it is answered.
+    fn stood(ms: u64) -> Vec<ActorLine> {
+        let mut lines: Vec<ActorLine> = (Limits::DEFAULT.first_ms..ms)
+            .step_by(STILL_OPEN_EVERY_MS as usize)
+            .map(|ms| ActorLine::Busy {
+                verb: "window_exiting",
+                ms,
+            })
+            .collect();
+        lines.push(ActorLine::Answered {
+            verb: "window_exiting",
+            ms: ms + Limits::DEFAULT.ping_ms,
+        });
+        lines
     }
 
-    /// A one-second request the machine slept 30 s in the middle of, or the
-    /// process was not run for 30 s of (a lid-closed DarkWake), is not a busy
-    /// actor: the watch was not there, as it is not for the main thread.
+    /// The wall clock set an hour either way a second into a request, with
+    /// no sleep (t-75646 r3): the request is timed on the monotonic clock
+    /// alone, so it is said at the first threshold, every ten seconds after
+    /// and at its end. A clock set ahead used to read as a sleep and blind
+    /// the actor watch for the watch's 15 s warm-up: a 10 s stand left no
+    /// line at all, and a 25 s one was first said at about 18 s.
+    #[test]
+    fn an_actor_request_is_said_on_time_whichever_way_the_wall_clock_is_set() {
+        for set in [3_600_000, -3_600_000_i64] {
+            for ms in [10_000, 25_000] {
+                let mut machine = Machine::watching();
+                let request = machine.take("window_exiting");
+                machine.run(1_000, Some(request));
+                machine.wall = machine.wall.saturating_add_signed(set);
+                machine.run(ms - 1_000, Some(request));
+                machine.run(250, None);
+                assert_eq!(machine.lines, stood(ms), "set {set} ms, {ms} ms stand");
+            }
+        }
+    }
+
+    /// The wall clock set an hour ahead inside a nap reads to `main` as a
+    /// sleep, and the monitor is told it resumed: the actor watch still
+    /// times the request on the monotonic clock and says it on time.
+    #[test]
+    fn an_actor_request_is_said_on_time_when_the_wall_clock_jumps_inside_a_nap() {
+        for ms in [10_000, 25_000] {
+            let mut machine = Machine::watching();
+            let request = machine.take("window_exiting");
+            machine.run(1_000, Some(request));
+            machine.sleep(3_600_000);
+            machine.run(ms - 1_000 - Limits::DEFAULT.ping_ms, Some(request));
+            machine.run(250, None);
+            assert_eq!(machine.lines, stood(ms), "{ms} ms stand");
+        }
+    }
+
+    /// A watch turned off in the settings says nothing of the actor either.
+    #[test]
+    fn a_watch_turned_off_says_nothing_of_the_actor() {
+        let mut machine = Machine::watching();
+        machine.limits.watchdog = false;
+        let request = machine.take("window_exiting");
+        machine.run(25_000, Some(request));
+        machine.run(250, None);
+        assert!(machine.lines.is_empty(), "{:?}", machine.lines);
+    }
+
+    /// A one-second request the machine slept 30 s in the middle of is not
+    /// a busy actor: the monotonic clock stops while the machine sleeps, so
+    /// the request ran one second of it, wherever the sleep fell. A request
+    /// held 25 s with no sleep is still said at the first threshold.
     #[test]
     fn a_short_actor_request_across_a_sleep_says_nothing() {
-        /// One way the watch is away while the request stands.
-        type Away = fn(&mut Machine, Served);
-        let away: [(&str, Away); 3] = [
-            ("slept in the nap", |machine, _| machine.sleep(30_000)),
-            ("slept between beats", |machine, _| machine.wall += 30_000),
-            ("not run", |machine, request| {
-                machine.beat(30_000, Some(request));
-            }),
+        /// One way the machine sleeps while the request stands.
+        type Away = fn(&mut Machine);
+        let away: [(&str, Away); 2] = [
+            ("slept in the nap", |machine| machine.sleep(30_000)),
+            ("slept between beats", |machine| machine.wall += 30_000),
         ];
         for (how, away) in away {
             let mut machine = Machine::watching();
             let request = machine.take("view");
             machine.run(500, Some(request));
-            away(&mut machine, request);
+            away(&mut machine);
             machine.run(500, Some(request));
             machine.run(250, None);
             assert!(machine.lines.is_empty(), "{how}: {:?}", machine.lines);
         }
+        let mut machine = Machine::watching();
+        let request = machine.take("window_exiting");
+        machine.run(25_000, Some(request));
+        machine.run(250, None);
+        assert_eq!(machine.lines, stood(25_000));
     }
 
-    /// A request still standing after the watch was away is timed again
-    /// from the watch's return: none of the time before counts.
+    /// A beat that comes back 30 s late is not taken back for the actor
+    /// (t-75646 r3): the process may not have been run, but the actor held
+    /// the request all that time on the monotonic clock, so the request is
+    /// said for all of it — and then every ten seconds, as ever.
     #[test]
-    fn an_actor_request_the_watch_was_away_for_is_timed_from_its_return() {
+    fn an_actor_request_held_through_a_late_beat_is_said_for_all_of_it() {
         let mut machine = Machine::watching();
         let request = machine.take("land_check");
         machine.run(1_500, Some(request));
         machine.beat(30_000, Some(request));
         machine.run(18_000, Some(request));
         machine.run(250, None);
-        assert_eq!(machine.busy(), [2_000]);
+        assert_eq!(machine.busy(), [31_500, 41_500]);
         assert_eq!(
             machine.lines.last(),
             Some(&ActorLine::Answered {
                 verb: "land_check",
-                ms: 3_250
+                ms: 49_750
             })
         );
     }
