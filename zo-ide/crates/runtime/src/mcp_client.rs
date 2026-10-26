@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use crate::config::{ConfigSource, McpOAuthConfig, McpServerConfig, ScopedMcpServerConfig};
 use crate::mcp::{mcp_server_signature, mcp_tool_prefix, normalize_name_for_mcp};
@@ -56,6 +57,11 @@ pub struct McpClientBootstrap {
     pub signature: Option<String>,
     pub transport: McpClientTransport,
     pub is_project_scoped: bool,
+    /// The person's own settings file that declared the server, when the
+    /// loader found it to be one ([`ScopedMcpServerConfig::keychain_grant`]).
+    /// Only then may a `${NAME}` reference read the window's keychain
+    /// ([`crate::mcp_references`]).
+    pub keychain_grant: Option<PathBuf>,
 }
 
 impl McpClientBootstrap {
@@ -68,6 +74,7 @@ impl McpClientBootstrap {
             signature: mcp_server_signature(&config.config),
             transport: McpClientTransport::from_config(&config.config),
             is_project_scoped: config.scope == ConfigSource::Project,
+            keychain_grant: config.keychain_grant.clone(),
         }
     }
 }
@@ -146,6 +153,7 @@ mod tests {
     fn bootstraps_stdio_servers_into_transport_targets() {
         let config = ScopedMcpServerConfig {
             scope: ConfigSource::User,
+            keychain_grant: None,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
                 command: "uvx".to_string(),
                 args: vec!["mcp-server".to_string()],
@@ -179,6 +187,7 @@ mod tests {
     fn bootstraps_remote_servers_with_oauth_auth() {
         let config = ScopedMcpServerConfig {
             scope: ConfigSource::Project,
+            keychain_grant: None,
             config: McpServerConfig::Http(McpRemoteServerConfig {
                 url: "https://vendor.example/mcp".to_string(),
                 headers: BTreeMap::from([("X-Test".to_string(), "1".to_string())]),
@@ -216,6 +225,7 @@ mod tests {
     fn bootstraps_websocket_and_sdk_transports_without_oauth() {
         let ws = ScopedMcpServerConfig {
             scope: ConfigSource::Local,
+            keychain_grant: None,
             config: McpServerConfig::Ws(McpWebSocketServerConfig {
                 url: "wss://vendor.example/mcp".to_string(),
                 headers: BTreeMap::new(),
@@ -224,6 +234,7 @@ mod tests {
         };
         let sdk = ScopedMcpServerConfig {
             scope: ConfigSource::Local,
+            keychain_grant: None,
             config: McpServerConfig::Sdk(McpSdkServerConfig {
                 name: "sdk-server".to_string(),
             }),

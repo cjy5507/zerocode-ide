@@ -44,6 +44,9 @@ fn main() -> ExitCode {
         &[api::SYSTEMONE_API_KEY_ENV],
         zo_ide::ide::SERVICE_KEYCHAIN_SERVICE_PREFIX,
     );
+    // A `${NAME}` in the person's own MCP settings finds the value the window
+    // keeps for it in the same keychain items, read when a server launches.
+    api::find_reference_keys_in_keychain(zo_ide::ide::SERVICE_KEYCHAIN_SERVICE_PREFIX);
     // An expired Claude Code login is renewed by its own CLI, never by zo
     // (t-11045): this is the road the credential chain asks.
     zo_ide::claude_renewal::install();
@@ -130,6 +133,7 @@ const ANSWERED_BEFORE_A_SESSION: &[(&str, Answer)] = &[
     ("decision-shadow", run_decision_shadow),
     ("jev", run_jev),
     ("mcp", run_mcp),
+    ("settings", run_settings),
     ("vault", run_vault),
 ];
 
@@ -376,6 +380,27 @@ fn run_mcp(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Er
         Err(message) => {
             eprintln!("zo mcp: {message}");
             ("mcp-refused", 1)
+        }
+    })
+}
+
+/// `zo settings secrets …` finds, checks and moves the credentials written
+/// out in the person's own MCP settings: one JSON object on stdout, never a
+/// value, exit 0 when it did what was asked and 1 when it did not.
+fn run_settings(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    Ok(match zo_ide::settings_cli::run(args, &cwd) {
+        Ok(answer) => {
+            println!("{}", answer.json);
+            if answer.code == 0 {
+                success("settings")
+            } else {
+                ("settings-refused", answer.code)
+            }
+        }
+        Err(message) => {
+            eprintln!("zo settings: {message}");
+            ("settings-refused", 1)
         }
     })
 }

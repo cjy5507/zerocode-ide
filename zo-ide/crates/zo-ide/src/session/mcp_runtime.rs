@@ -1440,6 +1440,7 @@ mod tests {
     fn stdio_server(command: &str, args: &[&str]) -> runtime::ScopedMcpServerConfig {
         runtime::ScopedMcpServerConfig {
             scope: runtime::ConfigSource::User,
+            keychain_grant: None,
             config: runtime::McpServerConfig::Stdio(runtime::McpStdioServerConfig {
                 command: command.to_string(),
                 args: args.iter().map(ToString::to_string).collect(),
@@ -1452,6 +1453,7 @@ mod tests {
     fn http_server(url: &str) -> runtime::ScopedMcpServerConfig {
         runtime::ScopedMcpServerConfig {
             scope: runtime::ConfigSource::User,
+            keychain_grant: None,
             config: runtime::McpServerConfig::Http(runtime::McpRemoteServerConfig {
                 url: url.to_string(),
                 headers: std::collections::BTreeMap::new(),

@@ -1,4 +1,5 @@
 mod mcp_edit;
+mod mcp_secrets;
 mod parsers;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,10 @@ use crate::sandbox::SandboxConfig;
 
 pub use self::mcp_edit::{
     remove_mcp_server, trust_mcp_server, untrust_mcp_server, write_mcp_server, McpEdit,
+};
+pub use self::mcp_secrets::{
+    mcp_literal_secrets, move_mcp_literal_to_reference, persons_own_literal_secrets,
+    slot_holds_literal_secret, McpLiteralSecret,
 };
 
 use self::parsers::mcp_keys;
@@ -414,6 +419,12 @@ pub struct LspConfigCollection {
 pub struct ScopedMcpServerConfig {
     pub scope: ConfigSource,
     pub config: McpServerConfig,
+    /// Where the person's own settings file that declared the server stands,
+    /// judged by the file the loader opened and read. Only a server holding
+    /// one lets a `${NAME}` reference read the window's keychain; a `User`
+    /// scope alone does not, since a user settings file can be a link into
+    /// the workspace.
+    pub keychain_grant: Option<PathBuf>,
 }
 
 /// LSP server config paired with the scope that defined it.
@@ -539,6 +550,9 @@ pub struct ConfigLoader {
     config_home: PathBuf,
     config_roots: Vec<PathBuf>,
     mcp_config: Option<PathBuf>,
+    /// The person's home folder, whose `.zo/settings.json` is theirs even in
+    /// a workspace that holds it.
+    person_home: Option<PathBuf>,
 }
 
 impl ConfigLoader {
@@ -550,6 +564,7 @@ impl ConfigLoader {
             config_roots: vec![config_home.clone()],
             config_home,
             mcp_config: None,
+            person_home: person_home(),
         }
     }
 
@@ -566,7 +581,17 @@ impl ConfigLoader {
             config_home,
             config_roots,
             mcp_config: None,
+            person_home: person_home(),
         }
+    }
+
+    /// The loader with the person's home folder given, for a test that
+    /// stands a fake one beside its workspace.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_person_home(mut self, home: impl Into<PathBuf>) -> Self {
+        self.person_home = Some(home.into());
+        self
     }
 
     /// Add one explicit MCP config file from `--mcp-config`.
@@ -831,7 +856,24 @@ impl ConfigLoader {
                 loaded_project_mcp = true;
             }
 
-            let Some(mut value) = read_discovered_entry(&entry)? else {
+            // The person's own file is judged by the file opened, and only
+            // the bytes read through it are parsed under its grant.
+            let persons_own = (entry.source == ConfigSource::User)
+                .then(|| {
+                    PersonsOwnSettingsFile::read_with(&entry.path, &self.cwd, self.person_home.as_deref(), &|| {})
+                        .ok()
+                })
+                .flatten();
+            let (value, keychain_grant) = match persons_own {
+                Some((file, contents)) => {
+                    let contents = String::from_utf8(contents).map_err(|error| {
+                        ConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+                    })?;
+                    (Some(parse_json_object_contents(&entry.path, &contents)?), Some(file.real))
+                }
+                None => (read_discovered_entry(&entry)?, None),
+            };
+            let Some(mut value) = value else {
                 continue;
             };
             // Repo-committed Project documents are attacker-controllable on clone,
@@ -893,7 +935,13 @@ impl ConfigLoader {
                         &trusted_project_servers,
                     )?;
                 } else {
-                    merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
+                    merge_mcp_servers(
+                        &mut mcp_servers,
+                        entry.source,
+                        &value,
+                        &entry.path,
+                        keychain_grant.as_deref(),
+                    )?;
                 }
             }
             merge_lsp_servers(&mut lsp_servers, entry.source, &value, &entry.path)?;
@@ -954,7 +1002,7 @@ impl ConfigLoader {
                     format!("--mcp-config file not found: {}", path.display()),
                 )));
             };
-            merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
+            merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path, None)?;
             loaded_entries.push(entry);
         }
 
@@ -1058,6 +1106,166 @@ fn enable_all_project_flag(settings: &BTreeMap<String, JsonValue>, flag: &str) -
         .get(flag)
         .and_then(JsonValue::as_bool)
         .unwrap_or(false)
+}
+
+/// The documents under `<workspace>/.zo` the loader reads as the project's.
+#[cfg(unix)]
+const PROJECT_SETTINGS_DOCUMENTS: [&str; 3] = ["settings.json", "settings.local.json", "mcp.json"];
+
+/// Why a user settings file is not taken as the person's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(super) enum NotPersonsOwn {
+    /// Not there, not readable, or changed while it was read.
+    Unreadable,
+    /// The path ends at a link.
+    Link,
+    /// Not a regular file with one name, or it stands in the workspace or is
+    /// one of its project documents.
+    Workspaces,
+    /// This system cannot tell where an open file stands.
+    Unsupported,
+}
+
+/// A user settings file found to be the person's own, judged by the file
+/// opened rather than by its path. The path is opened once without following
+/// a link at its end; the open file must be a regular file with one name, and
+/// where the system says that file stands must be outside the workspace and
+/// none of its project documents — or be the person's settings path itself
+/// (`~/.zo/settings.json`), the one file a workspace holding the home may
+/// hold. Only the bytes read through that open file are parsed, so a link that
+/// changes on the way cannot put another file's servers under this file's
+/// grant. The loader, `zo settings secrets` and its move all ask here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(super) struct PersonsOwnSettingsFile {
+    /// Where the open file stands, as the system names it.
+    pub(super) real: PathBuf,
+    identity: FilesystemIdentity,
+}
+
+impl PersonsOwnSettingsFile {
+    /// `path` read as the person's own settings file next to `workspace`.
+    pub(super) fn read(path: &Path, workspace: &Path) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
+        Self::read_with(path, workspace, person_home().as_deref(), &|| {})
+    }
+
+    /// [`Self::read`] with the person's home folder given, and `between`
+    /// called once the file is judged and before it is read, and again before
+    /// it is judged a second time: where a test changes the way to the file.
+    #[cfg(unix)]
+    pub(super) fn read_with(
+        path: &Path,
+        workspace: &Path,
+        home: Option<&Path>,
+        between: &dyn Fn(),
+    ) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
+        use std::io::Read as _;
+        use rustix::fs::{Mode, OFlags};
+
+        let opened = rustix::fs::open(path, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty());
+        let mut file = match opened {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(rustix::io::Errno::LOOP) => return Err(NotPersonsOwn::Link),
+            Err(_) => return Err(NotPersonsOwn::Unreadable),
+        };
+        let checked = Self::judge(&file, workspace, home)?;
+        between();
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).map_err(|_| NotPersonsOwn::Unreadable)?;
+        between();
+        if Self::judge(&file, workspace, home)? != checked {
+            return Err(NotPersonsOwn::Unreadable);
+        }
+        Ok((checked, contents))
+    }
+
+    /// No identity, no place: this system does not tell the person's own file.
+    #[cfg(not(unix))]
+    pub(super) fn read_with(
+        _path: &Path,
+        _workspace: &Path,
+        _home: Option<&Path>,
+        _between: &dyn Fn(),
+    ) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
+        Err(NotPersonsOwn::Unsupported)
+    }
+
+    /// The open `file` as the person's own settings file next to `workspace`.
+    #[cfg(unix)]
+    fn judge(file: &std::fs::File, workspace: &Path, home: Option<&Path>) -> Result<Self, NotPersonsOwn> {
+        let metadata = file.metadata().map_err(|_| NotPersonsOwn::Unreadable)?;
+        if !metadata.is_file() {
+            return Err(NotPersonsOwn::Workspaces);
+        }
+        let identity = filesystem_identity(&metadata).map_err(|_| NotPersonsOwn::Unreadable)?;
+        // A second name could stand anywhere, the workspace too.
+        if identity.links != 1 {
+            return Err(NotPersonsOwn::Workspaces);
+        }
+        let real = held_file_path(file).ok_or(if can_tell_persons_own_settings_file() {
+            NotPersonsOwn::Unreadable
+        } else {
+            NotPersonsOwn::Unsupported
+        })?;
+        let workspace = workspace.canonicalize().map_err(|_| NotPersonsOwn::Unreadable)?;
+        let at_the_persons_own_path = home
+            .and_then(|home| home.canonicalize().ok())
+            .is_some_and(|home| real == home.join(core_types::paths::ZO_DIR_NAME).join("settings.json"));
+        if !at_the_persons_own_path {
+            let names_a_project_document = PROJECT_SETTINGS_DOCUMENTS.iter().any(|name| {
+                std::fs::metadata(workspace.join(".zo").join(name))
+                    .ok()
+                    .and_then(|metadata| filesystem_identity(&metadata).ok())
+                    .is_some_and(|project| project.device == identity.device && project.inode == identity.inode)
+            });
+            if real.starts_with(&workspace) || names_a_project_document {
+                return Err(NotPersonsOwn::Workspaces);
+            }
+        }
+        Ok(Self { real, identity })
+    }
+
+    /// Whether `path` still opens to this same file, unchanged, holding `contents`.
+    pub(super) fn still_holds(&self, path: &Path, workspace: &Path, contents: &[u8]) -> bool {
+        Self::read(path, workspace).is_ok_and(|(now, now_contents)| now == *self && now_contents == contents)
+    }
+}
+
+/// Where the open `file` stands, as the system names it (`F_GETPATH`).
+#[cfg(target_os = "macos")]
+fn held_file_path(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let path = rustix::fs::getpath(file).ok()?;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(path.into_bytes())))
+}
+
+/// Where the open `file` stands, as the system names it.
+#[cfg(target_os = "linux")]
+fn held_file_path(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd as _;
+
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
+}
+
+/// This system does not say where an open file stands.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn held_file_path(_file: &std::fs::File) -> Option<PathBuf> {
+    None
+}
+
+/// The person's home folder, the parent of their conventional `~/.zo`.
+fn person_home() -> Option<PathBuf> {
+    conventional_config_home().and_then(|zo| zo.parent().map(Path::to_path_buf))
+}
+
+/// Whether this system can tell the person's own settings file from a
+/// workspace's: where it cannot, `zo settings secrets` says so rather than
+/// listing nothing, and no `${NAME}` reads the keychain.
+#[must_use]
+pub const fn can_tell_persons_own_settings_file() -> bool {
+    cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
 /// Scope for `cwd/.zo/settings.local.json`. It is trusted (`Local`) only when
@@ -1917,7 +2125,7 @@ fn merge_trusted_project_mcp_servers(
     }
     let mut gated_root = BTreeMap::new();
     gated_root.insert(mcp_keys::SERVERS.to_string(), JsonValue::Object(allowed));
-    merge_mcp_servers(target, ConfigSource::Project, &gated_root, path)
+    merge_mcp_servers(target, ConfigSource::Project, &gated_root, path, None)
 }
 
 fn parse_enabled_flag(root: &JsonValue, key: &str) -> Result<bool, ConfigError> {

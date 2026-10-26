@@ -31,6 +31,7 @@ pub mod lsp_client;
 pub mod live_output;
 mod mcp;
 mod mcp_client;
+pub mod mcp_references;
 pub mod mcp_http;
 pub mod mcp_http_common;
 pub mod mcp_lifecycle_hardened;
@@ -144,7 +145,9 @@ pub use config::{
     RuntimeSecondBrainConfig, RuntimeShipConfig, ScopedMcpServerConfig, UntrustedMcpServer,
     TRUSTED_MCP_SERVERS_FILE, ZO_SETTINGS_SCHEMA_NAME,
     persist_allow_always_rules, remove_mcp_server, trust_mcp_server, untrust_mcp_server,
-    write_mcp_server,
+    write_mcp_server, mcp_literal_secrets, move_mcp_literal_to_reference,
+    slot_holds_literal_secret, persons_own_literal_secrets, can_tell_persons_own_settings_file,
+    McpLiteralSecret,
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{
@@ -232,6 +235,10 @@ pub use mcp_client::{
     McpRemoteTransport, McpSdkTransport, McpStdioTransport,
 };
 pub use mcp_http::{connect_mcp_http, McpHttpProcess};
+pub use mcp_references::{
+    is_reference_name, resolve_reference_name, LaunchReferenceKeys, ReferenceKeys, ReferenceMiss,
+    ReferenceSource,
+};
 pub use mcp_lifecycle_hardened::{
     McpDegradedReport, McpErrorSurface, McpFailedServer, McpLifecyclePhase, McpLifecycleState,
     McpLifecycleValidator, McpPhaseResult,

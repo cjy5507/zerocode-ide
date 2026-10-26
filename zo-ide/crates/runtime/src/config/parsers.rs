@@ -177,6 +177,7 @@ pub(super) fn merge_mcp_servers(
     source: ConfigSource,
     root: &BTreeMap<String, JsonValue>,
     path: &Path,
+    keychain_grant: Option<&Path>,
 ) -> Result<(), ConfigError> {
     let Some(mcp_servers) = root.get(mcp_keys::SERVERS) else {
         return Ok(());
@@ -197,6 +198,7 @@ pub(super) fn merge_mcp_servers(
             ScopedMcpServerConfig {
                 scope: source,
                 config: parsed,
+                keychain_grant: keychain_grant.map(Path::to_path_buf),
             },
         );
     }
