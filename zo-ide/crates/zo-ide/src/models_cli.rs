@@ -146,6 +146,7 @@ impl Report<'_> {
                 "fetchedAt": report.fetched_at,
                 "age": describe_age(report.fetched_at, self.now),
                 "origin": report.origin,
+                "credentialStore": report.credential_store,
             })).collect::<Vec<_>>(),
             "models": self.rows.iter().map(|row| json!({
                 "provider": row.provider.key(),

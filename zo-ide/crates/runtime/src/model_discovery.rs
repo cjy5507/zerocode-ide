@@ -727,7 +727,8 @@ pub fn refresh_with(
 /// source keeps last time's rows ([`carry_forward`]), and a selected model
 /// the sources stopped listing stays as an unlisted row ([`keep_selected`]).
 /// `store` names the credential store this process reads each source from
-/// ([`Source::store`]).
+/// ([`Source::store`]); a failure or skip never replaces a success another
+/// store answered ([`answered_under_another_store`]).
 pub fn refresh_under(
     previous: Option<&DiscoveredCatalog>,
     due: &[&str],
@@ -736,35 +737,32 @@ pub fn refresh_under(
     fetch: impl Fn(&'static str) -> SourceAnswer,
     store: impl Fn(&'static str) -> String,
 ) -> DiscoveredCatalog {
-    let _ = &store;
     let mut catalog = DiscoveredCatalog {
         fetched_at: now_secs,
         ..Default::default()
     };
     for Source { provider, key: source, .. } in &SOURCES {
         let (provider, source) = (*provider, *source);
+        let last = previous.and_then(|catalog| catalog.reports.iter().find(|report| report.source == source));
+        let keep = |catalog: &mut DiscoveredCatalog, report: &SourceReport| {
+            catalog.reports.push(report.clone());
+            if let Some(previous) = previous {
+                catalog.models.extend(
+                    previous
+                        .models
+                        .iter()
+                        .filter(|model| model.source == source)
+                        .cloned(),
+                );
+            }
+        };
         if !due.contains(&source) {
-            let carried = previous.and_then(|catalog| {
-                catalog
-                    .reports
-                    .iter()
-                    .find(|report| report.source == source)
-                    .cloned()
-            });
-            if let Some(report) = carried {
-                catalog.reports.push(report);
-                if let Some(previous) = previous {
-                    catalog.models.extend(
-                        previous
-                            .models
-                            .iter()
-                            .filter(|model| model.source == source)
-                            .cloned(),
-                    );
-                }
+            if let Some(report) = last {
+                keep(&mut catalog, report);
                 continue;
             }
         }
+        let asked_under = store(source);
         match fetch(source) {
             Ok(answered) => {
                 let count = answered.models.len();
@@ -780,25 +778,45 @@ pub fn refresh_under(
                     count,
                     fetched_at: answered.fetched_at,
                     origin: answered.origin,
-                    credential_store: String::new(),
+                    credential_store: asked_under,
                 });
                 catalog.models.extend(answered.models);
             }
-            Err((source, detail)) => catalog.reports.push(SourceReport {
-                provider: provider.to_string(),
-                source,
-                ok: false,
-                detail,
-                count: 0,
-                fetched_at: now_secs,
-                origin: String::new(),
-                credential_store: String::new(),
-            }),
+            Err((asked, detail)) => match last.filter(|last| answered_under_another_store(last, &asked_under)) {
+                Some(last) => {
+                    eprintln!(
+                        "[zo] model discovery: {source}: kept the answer from {}; this process ({asked_under}) could not ask: {detail}",
+                        last.credential_store
+                    );
+                    keep(&mut catalog, last);
+                }
+                None => catalog.reports.push(SourceReport {
+                    provider: provider.to_string(),
+                    source: asked,
+                    ok: false,
+                    detail,
+                    count: 0,
+                    fetched_at: now_secs,
+                    origin: String::new(),
+                    credential_store: asked_under,
+                }),
+            },
         }
     }
     let catalog = carry_forward(catalog, previous);
     let catalog = keep_selected(catalog, previous, selected, now_secs);
     withdraw_shipped(catalog, previous, now_secs)
+}
+
+/// Whether a failure or skip asked under `asking` leaves `last` standing:
+/// `last` is a success another named store answered, so this process's miss
+/// says nothing about that login. The window's own `zo models --json`, run
+/// without a pane's account variables, cannot see the pane's Claude login —
+/// and its refusal overwrote the panes' success in the shared cache, so
+/// Settings said "not signed in" while every conversation worked (t-76621).
+/// Either store unknown is the old rule: the miss is the answer.
+fn answered_under_another_store(last: &SourceReport, asking: &str) -> bool {
+    last.ok && !last.credential_store.is_empty() && !asking.is_empty() && last.credential_store != asking
 }
 
 /// The shipped rows each complete list ([`Source::lists_every_model`]) no
