@@ -693,6 +693,8 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       await settlePaint(page);
       const basic = await page.evaluate(() => {
         const card = document.querySelector("#typesafe-card");
+        // Getting a model and the old editor stand in the 고급 fold (t-75762 v2).
+        document.getElementById("model-advanced").open = true;
         card.scrollIntoView({ block: "start" });
         const visible = (id) => {
           const node = document.getElementById(id);
@@ -735,7 +737,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
           && connection.keyVisible && connection.provider === basic.provider,
         JSON.stringify({ ...connection, faults: connection.faults.slice(0, 6), path: connectionPath, counted }));
       await page.locator("#judgment-connection-settings > summary").click();
-      await page.evaluate(() => setSettingsOpen(false));
+      await page.evaluate(() => { document.getElementById("model-advanced").open = false; setSettingsOpen(false); });
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {

@@ -7517,6 +7517,7 @@ const CATALOG = {
     "settings.models.legacyHow": "The key moves only inside this Mac's Keychain and never appears on screen. The old item stays as it is.",
     "settings.models.legacyConfirm": "Move",
     "settings.models.todo.jevKey": "Save the Jev key under “Advanced — Jev key”.",
+    "settings.judgment.useAbout": "When enabled, asks the selected model about requests and screen text from consented projects. When disabled, sends no judgment requests.",
   },
   ja: {
 
@@ -14674,6 +14675,7 @@ const CATALOG = {
     "settings.models.legacyHow": "キーはこの Mac のキーチェーンの中だけで移り、画面には出ません。以前の項目はそのまま残します。",
     "settings.models.legacyConfirm": "移す",
     "settings.models.todo.jevKey": "「詳細 — Jev キー」で Jev キーを保存してください。",
+    "settings.judgment.useAbout": "有効にすると、同意したプロジェクトの依頼と画面の文字について選択したモデルに判断を求めます。無効では送信しません。",
   },
   zh: {
 
@@ -21830,6 +21832,7 @@ const CATALOG = {
     "settings.models.legacyHow": "密钥只在这台 Mac 的钥匙串内移动，不会显示在屏幕上。旧项目保持不变。",
     "settings.models.legacyConfirm": "移动",
     "settings.models.todo.jevKey": "请在“高级 — Jev 密钥”中保存 Jev 密钥。",
+    "settings.judgment.useAbout": "启用后，就已授权项目的请求及屏幕文字向所选模型发送判断请求。停用后不发送请求。",
   },
   es: {
 
@@ -28994,6 +28997,7 @@ const CATALOG = {
     "settings.models.legacyHow": "La clave solo se mueve dentro del Llavero de este Mac y nunca aparece en pantalla. El elemento anterior se queda como está.",
     "settings.models.legacyConfirm": "Mover",
     "settings.models.todo.jevKey": "Guarda la clave de Jev en «Avanzado — Clave de Jev».",
+    "settings.judgment.useAbout": "Si está activo, consulta al modelo sobre las solicitudes y el texto de pantalla de los proyectos autorizados. Si está desactivado, no envía consultas.",
   },
 };
 

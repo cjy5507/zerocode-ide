@@ -275,21 +275,25 @@ fn first_request_of_a_new_session(
     extra: &[(&str, String)],
     server: &FirstRequest,
 ) -> (String, Value) {
-    let mut command = std::process::Command::new(installed_zo());
+    // The child's whole environment is this list: the window's own door for
+    // a child with an environment of its own (`proc::quiet_command_in_env`).
+    let mut env: Vec<(String, String)> = vec![
+        ("HOME".to_string(), home.to_string_lossy().into_owned()),
+        ("TERM".to_string(), "dumb".to_string()),
+        ("ZO_DISABLE_KEYCHAIN".to_string(), "1".to_string()),
+    ];
+    env.extend(
+        extra
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone())),
+    );
+    let mut command = crate::proc::quiet_command_in_env(installed_zo(), &env);
     command
         .arg("-p")
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin")
-        .env("TERM", "dumb")
-        .env("ZO_DISABLE_KEYCHAIN", "1")
         .current_dir(home)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    for (name, value) in extra {
-        command.env(name, value);
-    }
     let mut child = command.spawn().expect("zo starts");
     child
         .stdin

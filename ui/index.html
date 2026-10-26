@@ -4320,8 +4320,8 @@
         <!-- The first question, asked by itself only when nothing is
              connected and nobody is signed in (t-75762 v2, decision 7), and
              by 「연결 추가」 otherwise. `modelConnectionsController` draws it. -->
-        <div class="model-setup" id="model-setup" hidden></div>
-        <div class="model-settings" id="typesafe-card">
+        <div class="settings-card model-setup" id="model-setup" hidden></div>
+        <div class="settings-card model-settings" id="typesafe-card">
           <section class="model-role" id="model-coding" aria-labelledby="model-coding-title">
             <div class="model-role-head">
               <h3 class="model-role-title" id="model-coding-title" data-i18n="settings.models.coding">코딩 모델</h3>
@@ -4336,7 +4336,12 @@
               <div class="model-switch settings-jev-switch" data-jev-switch-row>
                 <label class="settings-check" for="jev-enabled">
                   <input type="checkbox" role="switch" id="jev-enabled" data-jev-switch />
-                  <span class="settings-label" data-i18n="settings.judgment.use">판단 사용</span>
+                  <span>
+                    <span class="settings-label" data-i18n="settings.judgment.use">판단 사용</span>
+                    <!-- Said in full where the dashboard wears this row; the
+                         card's head keeps the switch to its two words. -->
+                    <span class="settings-row-desc model-switch-about" data-i18n="settings.judgment.useAbout">켜면 동의한 프로젝트의 요청과 화면의 글로 선택한 모델에 판단을 요청합니다. 끄면 판단 요청을 보내지 않습니다.</span>
+                  </span>
                 </label>
               </div>
             </div>

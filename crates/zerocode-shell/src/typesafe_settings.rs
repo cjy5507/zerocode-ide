@@ -2269,8 +2269,9 @@ mod tests {
         // (t-75762 v2, decision 4), still folded and still the only selects
         // that name a mode.
         let orchestration = &page[page
-            .find("data-pane=\"orchestration\"")
+            .find("<section class=\"settings-pane\" data-pane=\"orchestration\"")
             .expect("the orchestration pane")..];
+        let orchestration = &orchestration["<section".len()..];
         let orchestration = &orchestration[..orchestration
             .find("<section class=\"settings-pane\"")
             .expect("the next pane")];

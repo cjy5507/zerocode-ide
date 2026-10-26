@@ -51895,6 +51895,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
   .model-line .btn, .model-choice, .model-pick .btn { white-space: normal; }
 }
 .model-role-head .settings-jev-switch { margin: 0; padding: 0; border: 0; background: none; }
+.model-role-head .model-switch-about { display: none; }
 
 /* ---- 로딩 (t-67484) -----------------------------------------------------------
  * 로딩은 한 정의다: `aria-busy="true"`를 켜면 일곱 컴포넌트가 모두 같은 모습이 된다 — 이전에는
