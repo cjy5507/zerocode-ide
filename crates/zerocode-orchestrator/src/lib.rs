@@ -3743,7 +3743,8 @@ prunable gitdir file points to non-existent location
         );
 
         // The remote's word, and the local branch of the same name.
-        let remote = repo.path().with_file_name("default-branches-origin.git");
+        let remote_home = tempfile::tempdir().expect("tempdir");
+        let remote = remote_home.path().join("origin.git");
         let made = Command::new(GIT_EXECUTABLE)
             .args(["init", "-q", "--bare", "-b", "main"])
             .arg(&remote)
@@ -3759,7 +3760,6 @@ prunable gitdir file points to non-existent location
                 .expect("names"),
             vec!["origin/main".to_string(), "main".to_string()]
         );
-        let _ = std::fs::remove_dir_all(&remote);
     }
 
     /// A repository whose `origin/HEAD` was never set (t-76403 r2): the
@@ -3786,8 +3786,8 @@ prunable gitdir file points to non-existent location
         git(&["branch", "-M", "main"]);
         let orchestrator = Orchestrator::open(repo.path()).expect("open");
         let usual = ["main", "master", "trunk", "develop"];
-        let remote = repo.path().with_file_name("default-branches-no-head.git");
-        let _ = std::fs::remove_dir_all(&remote);
+        let remote_home = tempfile::tempdir().expect("tempdir");
+        let remote = remote_home.path().join("no-head.git");
         let made = Command::new(GIT_EXECUTABLE)
             .args(["init", "-q", "--bare", "-b", "main"])
             .arg(&remote)
@@ -3816,7 +3816,6 @@ prunable gitdir file points to non-existent location
             vec!["origin/main".to_string()],
             "a repository with only origin/main had no main line"
         );
-        let _ = std::fs::remove_dir_all(&remote);
     }
 
     /// The worker table's 바뀐 줄 (t-70264): the tree as it stands against the
