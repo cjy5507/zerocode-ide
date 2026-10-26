@@ -687,6 +687,65 @@ fn memory_write_local_targets_local_overlay_not_durable_store() {
     std::fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
+/// A memory is kept to be read again, so it must not carry a credential
+/// VALUE (t-74223): a line where something names its value is refused, the
+/// verdict names the line and never the value, and nothing is written.
+#[test]
+fn memory_write_refuses_a_line_that_carries_a_credential_value() {
+    let _guard = env_lock();
+    let root = temp_dir();
+    std::fs::create_dir_all(&root).expect("temp root");
+    let config_home = root.join("home").join(".zo");
+    std::fs::create_dir_all(&config_home).expect("config home");
+    let config_home = std::fs::canonicalize(config_home).expect("canonical config home");
+    let ctx = ToolContext::new().with_cwd(root.clone());
+    let memory_dir = with_config_home(&config_home, || {
+        runtime::memory::paths::memory_write_dir(&root, false)
+    });
+
+    for (body, line, value) in [
+        ("# Portal login\n\npassword=fixture-pass-7731\nthen open the inbox.", "3", "fixture-pass-7731"),
+        ("# Portal API\nAuthorization: Bearer fixture-bearer-4410", "2", "fixture-bearer-4410"),
+    ] {
+        let refused = with_config_home(&config_home, || {
+            super::run_memory_write(
+                &super::MemoryWriteInput {
+                    slug: "portal-login".to_string(),
+                    summary: "how the portal login goes".to_string(),
+                    body: body.to_string(),
+                    local: false,
+                },
+                &ctx,
+            )
+        })
+        .expect_err("a credential value is not kept for reuse");
+        let ToolError::Declined(verdict) = &refused else {
+            panic!("a refusal, not a failure: {refused:?}");
+        };
+        assert!(verdict.contains(&format!("line {line}")), "{verdict}");
+        assert!(!verdict.contains(value), "the verdict never echoes the value: {verdict}");
+        assert!(verdict.contains("keychain") && verdict.contains("{{"), "{verdict}");
+        assert!(!memory_dir.join("portal-login.md").exists(), "nothing was written");
+    }
+
+    // A sentence that only names a credential is a note the next session needs.
+    with_config_home(&config_home, || {
+        super::run_memory_write(
+            &super::MemoryWriteInput {
+                slug: "portal-login".to_string(),
+                summary: "the portal takes the keychain password".to_string(),
+                body: "Type the keychain password into the password field, then press Sign in.".to_string(),
+                local: false,
+            },
+            &ctx,
+        )
+    })
+    .expect("a sentence that names a credential saves");
+    assert!(memory_dir.join("portal-login.md").exists());
+
+    std::fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
 /// `MemoryWrite` is deferred (t-68770): its schema never reaches the provider.
 /// Called through `CapabilityInvoke`, whose `input` is a bare `object` on the
 /// wire, or by name, `local` can arrive as the words `"false"`/`"true"`. The

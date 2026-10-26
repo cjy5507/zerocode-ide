@@ -4681,6 +4681,12 @@ printf '%s
         std::fs::write(&road.program, "#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"error\":{\"code\":\"stopped\",\"message\":\"the operator is stopped\"}}' >&2\nexit 1\n").unwrap();
         let refused = run_computer(&json!({ "action": "type", "text": "x" }), &ctx, &road).expect_err("a refusal");
         assert!(refused.to_string().contains("stopped"), "{refused}");
+        // A recipe the window will not keep (a step that carries a credential
+        // value, t-74223) is refused in the window's own words: zo keeps no
+        // check of its own on this road.
+        std::fs::write(&road.program, "#!/bin/sh\nprintf '%s\\n' '{\"ok\":false,\"error\":{\"code\":\"invalid_argument\",\"message\":\"step 3 carries a credential value; use a {{name}} parameter\"}}' >&2\nexit 1\n").unwrap();
+        let refused = run_computer(&json!({ "action": "recipe_save", "name": "Portal" }), &ctx, &road).expect_err("the window's refusal");
+        assert_eq!(refused.to_string(), "execution error: invalid_argument: step 3 carries a credential value; use a {{name}} parameter");
 
         // No shim on PATH: an honest refusal, not a desktop.
         let missing = ComputerRoad { program: dir.path().join("nothing-here") };

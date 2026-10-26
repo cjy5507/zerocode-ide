@@ -479,6 +479,15 @@ fn forced_onto_wire(name: &str) -> bool {
         .contains(name)
 }
 
+/// The line a `ToolSearch` answer that offers `Computer` opens with while the
+/// work browser is installed. It rides in the tool result, never in the
+/// system prompt or a schema, so it costs nothing on a turn that does not
+/// look for it.
+const COMPUTER_WEB_NOTE: &str = "Web pages: use the work browser, which carries the person's signed-in tabs. \
+     A saved procedure runs with Computer recipe_list, then recipe_run; otherwise \
+     `zerocode-browser open <url>`, then fields/fill and click. Do known steps as one batch; \
+     walk only where the screen decides.";
+
 /// System-prompt section naming every deferred builtin tool. Deferral only
 /// works if the model knows the hidden tools exist — it cannot `ToolSearch`
 /// for a name it has never seen. Derived from the deferred factories (same
@@ -493,7 +502,7 @@ const DEFERRED_TOOL_HOOKS: &[(&str, &str)] = &[
     ("Artifact", "Publish/export HTML."),
     (
         "Computer",
-        "Desktop UI, apps, OCR.",
+        "Web, desktop apps, OCR.",
     ),
     (
         "REPL",
@@ -1018,7 +1027,15 @@ impl GlobalToolRegistry {
         // the model runs a found tool through a schema that is ALWAYS on the
         // wire, so the wire never has to change and the prefix stays
         // byte-identical for the whole session.
+        // The work browser carries the person's signed-in tabs; a separate
+        // browser starts signed out. The incident session that drove one for
+        // 45 minutes had read the work browser in one sentence of a 19,822-
+        // character answer, so the answer that offers `Computer` says it first.
+        let note = (matches.iter().any(|name| name == "Computer")
+            && crate::browser_execution::installed_program().is_some())
+        .then(|| COMPUTER_WEB_NOTE.to_string());
         ToolSearchOutput {
+            note,
             matches,
             schemas,
             query,
