@@ -1982,6 +1982,22 @@ impl agent_teams::Host for TeamWindow {
         );
     }
 
+    fn line_holds_a_draft(&self, term: TermId) -> bool {
+        let state = self.app.state::<AppState>();
+        let agent = state.agent_terms().get(&term).copied();
+        if let (Some(agent), Some(held)) = (agent, state.terminals().handle(term)) {
+            let pty = lock_pty(&held);
+            crate::human_input::recheck_grid(
+                term,
+                agent,
+                pty.terminal().grid(),
+                pty.last_output_at(),
+                Instant::now(),
+            );
+        }
+        crate::human_input::line_of(term).0
+    }
+
     fn point(
         &self,
         term: TermId,

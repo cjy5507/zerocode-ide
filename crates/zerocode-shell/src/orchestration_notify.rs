@@ -33,6 +33,8 @@ const NOTIFICATION_WORKER_STACK_BYTES: usize = 256 * 1024;
 /// Provider adapters are required to finish sooner; this outer fence prevents
 /// a defective adapter from suppressing the proven-safe PTY fallback forever.
 const NOTIFICATION_RESULT_DEADLINE: Duration = Duration::from_secs(10);
+const NOTICE_RETRY_DELAY: Duration = Duration::from_secs(2);
+const NOTICE_MAX_ATTEMPTS: u8 = 3;
 
 /// One incarnation of a provider route attached to a terminal.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -51,6 +53,17 @@ impl std::fmt::Debug for RouteGeneration {
 struct RouteEntry {
     generation: RouteGeneration,
     notifier: Arc<dyn SessionNotifier>,
+    notice_only: bool,
+}
+
+impl RouteEntry {
+    fn failed(&self, outcome: NotificationOutcome) -> PointerOffer {
+        if self.notice_only {
+            PointerOffer::NativeFailed(outcome)
+        } else {
+            PointerOffer::PtyFallback(outcome)
+        }
+    }
 }
 
 impl std::fmt::Debug for RouteEntry {
@@ -69,6 +82,7 @@ struct AttemptKey {
     generation: RouteGeneration,
 }
 
+#[derive(Clone, Copy)]
 enum AttemptState {
     Pending { started_at: Instant },
     Finished(NotificationOutcome),
@@ -77,10 +91,14 @@ enum AttemptState {
 struct AttemptSlot {
     notice: NoticeId,
     state: AttemptState,
+    reported: Option<PointerOffer>,
+    attempt: u8,
+    retry_at: Option<Instant>,
 }
 
 struct NotificationJob {
     key: AttemptKey,
+    attempt: u8,
     notice: PointerNotice,
     notifier: Arc<dyn SessionNotifier>,
 }
@@ -91,6 +109,7 @@ struct HubInner {
     next_generation: AtomicU64,
     sender: Mutex<Option<SyncSender<NotificationJob>>>,
     result_deadline: Duration,
+    retry_delay: Duration,
 }
 
 impl HubInner {
@@ -106,7 +125,13 @@ impl HubInner {
         }
     }
 
-    fn finish_if_current(&self, key: AttemptKey, notice: &NoticeId, outcome: NotificationOutcome) {
+    fn finish_if_current(
+        &self,
+        key: AttemptKey,
+        notice: &NoticeId,
+        attempt: u8,
+        outcome: NotificationOutcome,
+    ) {
         let mut attempts = self
             .attempts
             .lock()
@@ -114,8 +139,12 @@ impl HubInner {
         let Some(slot) = attempts.get_mut(&key) else {
             return;
         };
-        if slot.notice == *notice && matches!(slot.state, AttemptState::Pending { .. }) {
+        if slot.notice == *notice
+            && slot.attempt == attempt
+            && matches!(slot.state, AttemptState::Pending { .. })
+        {
             slot.state = AttemptState::Finished(outcome);
+            slot.retry_at = Some(Instant::now() + self.retry_delay);
         }
     }
 
@@ -162,6 +191,9 @@ pub(crate) enum PointerOffer {
     NativePending,
     /// The provider confirmed acceptance; no PTY pointer is needed.
     Confirmed,
+    /// This route owns notices independently of the composer. Its failure
+    /// must be reported, never compensated by typing beside a person's draft.
+    NativeFailed(NotificationOutcome),
     /// Use the PTY path. `Unknown` is safe here because the payload is an
     /// idempotent pointer, not mail or a completion receipt.
     PtyFallback(NotificationOutcome),
@@ -225,6 +257,15 @@ impl SessionNotificationHub {
     }
 
     fn with_limits(capacity: usize, workers: usize, result_deadline: Duration) -> Self {
+        Self::with_retry_delay(capacity, workers, result_deadline, NOTICE_RETRY_DELAY)
+    }
+
+    fn with_retry_delay(
+        capacity: usize,
+        workers: usize,
+        result_deadline: Duration,
+        retry_delay: Duration,
+    ) -> Self {
         assert!(capacity > 0, "notification queue capacity must be positive");
         assert!(workers > 0, "notification worker count must be positive");
         let (sender, receiver) = sync_channel(capacity);
@@ -235,6 +276,7 @@ impl SessionNotificationHub {
             next_generation: AtomicU64::new(0),
             sender: Mutex::new(Some(sender)),
             result_deadline,
+            retry_delay,
         });
         let mut joined = Vec::with_capacity(workers);
         for index in 0..workers {
@@ -259,6 +301,15 @@ impl SessionNotificationHub {
         term: u32,
         notifier: Arc<dyn SessionNotifier>,
     ) -> RouteLease {
+        self.register(term, notifier, false)
+    }
+
+    fn register(
+        &self,
+        term: u32,
+        notifier: Arc<dyn SessionNotifier>,
+        notice_only: bool,
+    ) -> RouteLease {
         let generation = self.inner.next_generation();
         self.inner
             .routes
@@ -269,6 +320,7 @@ impl SessionNotificationHub {
                 RouteEntry {
                     generation,
                     notifier,
+                    notice_only,
                 },
             );
         self.inner
@@ -298,7 +350,7 @@ impl SessionNotificationHub {
             term,
             generation: route.generation,
         };
-        {
+        let attempt = {
             let mut attempts = self
                 .inner
                 .attempts
@@ -307,37 +359,52 @@ impl SessionNotificationHub {
             if let Some(slot) = attempts.get_mut(&key)
                 && slot.notice == *notice.id()
             {
-                return match slot.state {
-                    AttemptState::Pending { started_at }
-                        if started_at.elapsed() < self.inner.result_deadline =>
-                    {
-                        PointerOffer::NativePending
+                if let AttemptState::Pending { started_at } = slot.state {
+                    if started_at.elapsed() < self.inner.result_deadline {
+                        return PointerOffer::NativePending;
                     }
-                    AttemptState::Pending { .. } => {
-                        slot.state = AttemptState::Finished(NotificationOutcome::Unknown);
-                        PointerOffer::PtyFallback(NotificationOutcome::Unknown)
+                    slot.state = AttemptState::Finished(NotificationOutcome::Unknown);
+                    slot.retry_at = Some(Instant::now() + self.inner.retry_delay);
+                }
+                if let AttemptState::Finished(outcome) = slot.state {
+                    if outcome == NotificationOutcome::Confirmed {
+                        return PointerOffer::Confirmed;
                     }
-                    AttemptState::Finished(NotificationOutcome::Confirmed) => {
-                        PointerOffer::Confirmed
+                    if !route.notice_only || slot.attempt >= NOTICE_MAX_ATTEMPTS {
+                        return route.failed(outcome);
                     }
-                    AttemptState::Finished(outcome) => PointerOffer::PtyFallback(outcome),
-                };
-            }
-            attempts.insert(
-                key,
-                AttemptSlot {
-                    notice: notice.id().clone(),
-                    state: AttemptState::Pending {
+                    if slot.retry_at.is_some_and(|at| Instant::now() < at) {
+                        return PointerOffer::NativePending;
+                    }
+                    slot.attempt += 1;
+                    slot.state = AttemptState::Pending {
                         started_at: Instant::now(),
+                    };
+                    slot.retry_at = None;
+                }
+                slot.attempt
+            } else {
+                attempts.insert(
+                    key,
+                    AttemptSlot {
+                        notice: notice.id().clone(),
+                        state: AttemptState::Pending {
+                            started_at: Instant::now(),
+                        },
+                        reported: None,
+                        attempt: 1,
+                        retry_at: None,
                     },
-                },
-            );
-        }
+                );
+                1
+            }
+        };
 
         let job = NotificationJob {
             key,
+            attempt,
             notice,
-            notifier: route.notifier,
+            notifier: Arc::clone(&route.notifier),
         };
         let sender = self
             .inner
@@ -349,9 +416,14 @@ impl SessionNotificationHub {
             self.inner.finish_if_current(
                 key,
                 job.notice.id(),
+                job.attempt,
                 NotificationOutcome::DefinitelyUnsent,
             );
-            return PointerOffer::PtyFallback(NotificationOutcome::DefinitelyUnsent);
+            return if route.notice_only {
+                PointerOffer::NativePending
+            } else {
+                route.failed(NotificationOutcome::DefinitelyUnsent)
+            };
         };
         match sender.try_send(job) {
             Ok(()) => PointerOffer::NativePending,
@@ -359,9 +431,14 @@ impl SessionNotificationHub {
                 self.inner.finish_if_current(
                     key,
                     job.notice.id(),
+                    job.attempt,
                     NotificationOutcome::DefinitelyUnsent,
                 );
-                PointerOffer::PtyFallback(NotificationOutcome::DefinitelyUnsent)
+                if route.notice_only {
+                    PointerOffer::NativePending
+                } else {
+                    route.failed(NotificationOutcome::DefinitelyUnsent)
+                }
             }
         }
     }
@@ -376,6 +453,41 @@ impl SessionNotificationHub {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(&term)
+    }
+
+    fn notice_only(&self, term: u32) -> bool {
+        self.inner
+            .routes
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            .is_some_and(|route| route.notice_only)
+    }
+
+    fn changed(&self, term: u32, notice: &PointerNotice, offered: PointerOffer) -> bool {
+        let generation = self
+            .inner
+            .routes
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            .map(|route| route.generation);
+        let Some(generation) = generation else {
+            return false;
+        };
+        let mut attempts = self
+            .inner
+            .attempts
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let Some(slot) = attempts.get_mut(&AttemptKey { term, generation }) else {
+            return false;
+        };
+        if slot.notice != *notice.id() || slot.reported == Some(offered) {
+            return false;
+        }
+        slot.reported = Some(offered);
+        true
     }
 }
 
@@ -429,7 +541,7 @@ fn notification_worker(receiver: Arc<Mutex<Receiver<NotificationJob>>>, hub: Wea
         let Some(hub) = hub.upgrade() else {
             return;
         };
-        hub.finish_if_current(job.key, job.notice.id(), outcome);
+        hub.finish_if_current(job.key, job.notice.id(), job.attempt, outcome);
     }
 }
 
@@ -454,6 +566,20 @@ pub(crate) fn register_route(term: u32, notifier: Arc<dyn SessionNotifier>) -> R
     global_hub().register_route(term, notifier)
 }
 
+pub(crate) fn register_notice_route(term: u32, notifier: Arc<dyn SessionNotifier>) -> RouteLease {
+    global_hub().register(term, notifier, true)
+}
+
+pub(crate) fn notice_only(term: u32) -> bool {
+    GLOBAL_HUB.get().is_some_and(|hub| hub.notice_only(term))
+}
+
+pub(crate) fn changed(term: u32, notice: &PointerNotice, offered: PointerOffer) -> bool {
+    GLOBAL_HUB
+        .get()
+        .is_some_and(|hub| hub.changed(term, notice, offered))
+}
+
 /// Forget without initializing an otherwise-unused optional fast path.
 pub(crate) fn forget_term(term: u32) {
     if let Some(hub) = GLOBAL_HUB.get() {
@@ -468,6 +594,111 @@ mod tests {
     use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
     use super::*;
+
+    fn finish_notice_attempt(hub: &SessionNotificationHub) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if hub
+                .inner
+                .attempts
+                .lock()
+                .unwrap()
+                .values()
+                .all(|slot| matches!(slot.state, AttemptState::Finished(_)))
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the notice attempt did not finish"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn notice_failures_retry_with_a_bound_and_never_use_the_composer() {
+        for final_outcome in [NotificationOutcome::Confirmed, NotificationOutcome::Unknown] {
+            let hub = SessionNotificationHub::with_retry_delay(
+                4,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(3600),
+            );
+            let notifier = Arc::new(ScriptedNotifier::new([
+                NotificationOutcome::Unknown,
+                NotificationOutcome::DefinitelyUnsent,
+                final_outcome,
+            ]));
+            let _lease = hub.register(75_726, notifier.clone(), true);
+            let notice = notice("m-1");
+            for attempt in 1..=NOTICE_MAX_ATTEMPTS {
+                assert_eq!(
+                    hub.offer(75_726, notice.clone()),
+                    PointerOffer::NativePending
+                );
+                finish_notice_attempt(&hub);
+                assert_eq!(notifier.calls.load(Ordering::SeqCst), usize::from(attempt));
+                if attempt < NOTICE_MAX_ATTEMPTS {
+                    assert_eq!(
+                        hub.offer(75_726, notice.clone()),
+                        PointerOffer::NativePending,
+                        "a retry wait fell back to the composer"
+                    );
+                    let mut attempts = hub.inner.attempts.lock().unwrap();
+                    attempts.values_mut().next().unwrap().retry_at = Some(Instant::now());
+                }
+            }
+
+            let expected = if final_outcome == NotificationOutcome::Confirmed {
+                PointerOffer::Confirmed
+            } else {
+                PointerOffer::NativeFailed(NotificationOutcome::Unknown)
+            };
+            for _ in 0..20 {
+                assert_eq!(hub.offer(75_726, notice.clone()), expected);
+            }
+            assert_eq!(
+                notifier.calls.load(Ordering::SeqCst),
+                usize::from(NOTICE_MAX_ATTEMPTS)
+            );
+        }
+    }
+
+    #[test]
+    fn a_late_notice_answer_cannot_answer_the_retry() {
+        let hub = SessionNotificationHub::with_limits(1, 1, Duration::from_secs(1));
+        let lease = hub.register(75_729, Arc::new(ScriptedNotifier::new([])), true);
+        let notice = notice("m-1");
+        let key = AttemptKey {
+            term: 75_729,
+            generation: lease.generation(),
+        };
+        hub.inner.attempts.lock().unwrap().insert(
+            key,
+            AttemptSlot {
+                notice: notice.id().clone(),
+                state: AttemptState::Pending {
+                    started_at: Instant::now(),
+                },
+                reported: None,
+                attempt: 2,
+                retry_at: None,
+            },
+        );
+        hub.inner
+            .finish_if_current(key, notice.id(), 1, NotificationOutcome::Confirmed);
+        assert!(matches!(
+            hub.inner.attempts.lock().unwrap()[&key].state,
+            AttemptState::Pending { .. }
+        ));
+        hub.inner
+            .finish_if_current(key, notice.id(), 2, NotificationOutcome::Unknown);
+        assert!(matches!(
+            hub.inner.attempts.lock().unwrap()[&key].state,
+            AttemptState::Finished(NotificationOutcome::Unknown)
+        ));
+    }
 
     struct ScriptedNotifier {
         outcomes: Mutex<VecDeque<NotificationOutcome>>,

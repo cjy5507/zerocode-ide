@@ -8637,6 +8637,101 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
 /// seconds. So a fresh line is not typed at a pane standing at its wall
 /// ([`Standing::Walled`]): the window says so once, and speaks again when the
 /// pane answers again or the wall's own window runs out.
+/// One native notice's admission or final result. Mail remains in the inbox
+/// until `check`; these observations describe only its fixed notification.
+struct NoticeDelivery {
+    run: String,
+    address: String,
+    newest: String,
+    term: u32,
+    offered: crate::orchestration_notify::PointerOffer,
+    notice_only: bool,
+}
+
+fn notice_without_composer(
+    run: &zerocode_core::orchestration::Run,
+    address: &str,
+    term: u32,
+    seat: &str,
+    running: bool,
+    now_ms: i64,
+) -> Option<Option<NoticeDelivery>> {
+    if !crate::orchestration_notify::has_route(term) {
+        return None;
+    }
+    let newest = if running {
+        run.newest_pending(address)
+    } else {
+        run.newest_unread(address)
+    }?;
+    if !is_news(run, newest, now_ms) {
+        return None;
+    }
+    let notice_only = crate::orchestration_notify::notice_only(term);
+    if notice_only && delivered_before(&run.id, address, newest) {
+        return Some(None);
+    }
+    let count = if running {
+        run.pointer_wanted(address, Some(seat))
+    } else {
+        run.unread_wanted(address, Some(seat))
+    }?;
+    let notice =
+        zerocode_hookd::session_notify::PointerNotice::new(run.id.clone(), address, newest, count)?;
+    let offered = crate::orchestration_notify::offer(term, notice.clone());
+    if offered.needs_pty() {
+        return None;
+    }
+    Some(
+        crate::orchestration_notify::changed(term, &notice, offered).then(|| NoticeDelivery {
+            run: run.id.clone(),
+            address: address.to_string(),
+            newest: newest.to_string(),
+            term,
+            offered,
+            notice_only,
+        }),
+    )
+}
+
+fn tell_notice_delivery(host: &dyn Host, delivery: NoticeDelivery, now_ms: i64) {
+    use crate::orchestration_notify::PointerOffer;
+    let status = match delivery.offered {
+        PointerOffer::NativePending => "deferred",
+        PointerOffer::Confirmed => "accepted",
+        PointerOffer::NativeFailed(_) => "failed",
+        PointerOffer::PtyFallback(_) => return,
+    };
+    if delivery.offered == PointerOffer::Confirmed {
+        if delivery.notice_only {
+            note_delivered(&delivery.run, &delivery.address, &delivery.newest);
+        }
+        host.mail_waiting_cleared(delivery.term);
+    }
+    let body = format!(
+        "message {} to {}: native notice {status} at terminal {}. \
+        The inbox keeps the message until its agent reads it with `check`.",
+        delivery.newest, delivery.address, delivery.term
+    );
+    if let Some(root) = BLACKBOX.get() {
+        crate::note_window_event(root, &format!("orchestration: {body}"));
+    }
+    // Routine admission and acceptance stay in the black box; only failures
+    // need the sender's attention and another agent turn.
+    if matches!(delivery.offered, PointerOffer::NativeFailed(_))
+        && let Some(sender) = message_sender(&delivery.run, &delivery.newest)
+        && sender != zerocode_core::orchestration::LEDGER_ITSELF
+    {
+        post_observation_once(
+            Some(&delivery.run),
+            &sender,
+            &body,
+            &format!("notice:{}:{}:{status}", delivery.newest, delivery.term),
+            now_ms,
+        );
+    }
+}
+
 fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     let Some(held) = runtime() else {
         return;
@@ -8694,6 +8789,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
         history: AdviceHistory,
     }
     let mut pointing: Vec<Pointing> = Vec::new();
+    let mut notices = Vec::new();
     /// A pointer this pass could not type and has not told anyone about:
     /// told after the locks are down, because the telling is a ledger write.
     struct Unsaid {
@@ -8961,6 +9057,25 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                         .get(&worker.team)
                         .and_then(|team| team.term_of(&worker.pane))
                     {
+                        if crate::orchestration_notify::notice_only(term) {
+                            let address = zerocode_core::orchestration::worker_address(&worker.id);
+                            match project_scope::pane_scope(host, &mut roots, run, &address, term) {
+                                project_scope::PaneScope::Noted
+                                | project_scope::PaneScope::Pass => {
+                                    seats.push((
+                                        address,
+                                        term,
+                                        format!("{}/{}", worker.team, worker.pane),
+                                    ));
+                                    continue;
+                                }
+                                project_scope::PaneScope::Held(project, root) => {
+                                    crossed.push((address, term, project, root));
+                                    continue;
+                                }
+                                project_scope::PaneScope::Unknown => {}
+                            }
+                        }
                         taken.push((
                             zerocode_core::orchestration::worker_address(&worker.id),
                             term,
@@ -9145,6 +9260,20 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                     turns.get(&term).copied().map(PaneTurn::as_read),
                     held_inside_question,
                 );
+                if !waiting.contains(&key)
+                    && !held_inside_question
+                    && let Some(delivery) = notice_without_composer(
+                        run,
+                        &address,
+                        term,
+                        &seat,
+                        matches!(heard, Some(PaneTurn::Running { .. })),
+                        now_ms,
+                    )
+                {
+                    notices.extend(delivery);
+                    continue;
+                }
                 /* The moment a WORKING pane can be reached without a
                  * keystroke, and the one this pass used to have nothing to
                  * say about.
@@ -9405,7 +9534,7 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                      * the guard would refuse the same line on the same fact,
                      * and every refusal is a toast. Once the draft is sent or
                      * gone, the arm below offers the line again, once. */
-                    Some(Standing::HeldByADraft) if crate::human_input::line_of(term).0 => {
+                    Some(Standing::HeldByADraft) if host.line_holds_a_draft(term) => {
                         continue;
                     }
                     /* New mail, a new pane, nothing yet — or an advice line
@@ -9525,6 +9654,9 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                 }
             }
         }
+    }
+    for delivery in notices {
+        tell_notice_delivery(host, delivery, now_ms);
     }
     for told in unsaid {
         tell_unpointed(

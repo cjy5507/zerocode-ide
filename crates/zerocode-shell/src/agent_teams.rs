@@ -973,6 +973,11 @@ pub trait Host {
     /// over: its pointer landed there, or no mail waits for it any longer, so
     /// the next one the pane raises is said afresh (t-45801).
     fn mail_waiting_cleared(&self, _term: u32) {}
+    /// Re-read a held draft before suppressing another pointer. The real
+    /// host observes the live field under the same lock as human input.
+    fn line_holds_a_draft(&self, term: u32) -> bool {
+        crate::human_input::line_of(term).0
+    }
     /// Whether this window still holds the pane behind `term`.
     ///
     /// The default keeps small and test-only hosts source-compatible. The

@@ -579,7 +579,8 @@ pub fn prompt_typed_by_a_person(path: &Path, prompt_id: &str) -> Option<bool> {
 /// background task's notice; a person's is `typed` or `queued`) (t-11540).
 fn spoken_by_the_cli(record: &serde_json::Map<String, serde_json::Value>) -> bool {
     let flag = |key: &str| record.get(key).and_then(serde_json::Value::as_bool) == Some(true);
-    flag("isMeta")
+    record.get("origin").and_then(serde_json::Value::as_str) == Some("notice")
+        || flag("isMeta")
         || flag("isCompactSummary")
         || flag("isSidechain")
         || record
@@ -2041,6 +2042,13 @@ pub fn turns_in_with(chunk: &str, detail: Detail) -> Vec<TranscriptTurn> {
             _ => continue,
         };
         if kind != "user" && kind != "assistant" && kind != "tool" {
+            continue;
+        }
+        // zo's native mail reminder opens a system turn. Its stored user
+        // envelope is transport, not a person's contribution, just like the
+        // harness's system messages omitted above.
+        if kind == "user" && row.get("origin").and_then(serde_json::Value::as_str) == Some("notice")
+        {
             continue;
         }
         // The parts of the message: `content` for Claude Code, `blocks` for zo.
@@ -3526,6 +3534,25 @@ mod tests {
             ],
             "zo's store came back with its wire in it, or short of a turn"
         );
+    }
+
+    #[test]
+    fn a_notice_record_never_uses_the_persons_voice() {
+        let notice = serde_json::json!({"type":"message","origin":"notice",
+            "message":{"role":"user","blocks":[{"type":"text","text":"a fixed mail notice"}]}});
+        let mut content_notice = notice.clone();
+        content_notice["message"]["content"] = serde_json::json!("a fixed mail notice");
+        assert!(
+            typed_prompt(&content_notice.to_string()).is_none(),
+            "a notice became the person's naming prompt"
+        );
+        assert!(
+            turns_in(&notice.to_string()).is_empty(),
+            "a notice appeared in the conversation as the person"
+        );
+        let mut typed = notice;
+        typed.as_object_mut().unwrap().remove("origin");
+        assert_eq!(turns_in(&typed.to_string())[0].role, "user");
     }
     /// Reasoning is a turn of its own, never prose. zo writes the model's
     /// thought as a `thinking` block and carries an earlier turn's thought

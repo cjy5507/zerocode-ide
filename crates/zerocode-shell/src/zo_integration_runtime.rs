@@ -322,6 +322,10 @@ fn parse_receipt(value: Value) -> Result<Receipt, Reason> {
             ],
         );
     }
+    support["notice"] = public_object(
+        &value["support"]["notice"],
+        &["supported", "method", "kind", "scope"],
+    );
     let current = if value["current"].is_object() {
         json!({"revision":value["current"]["revision"].as_u64(), "effective":selection(&value["current"]["effective"]), "catalog":catalog(&value["current"]["catalog"])})
     } else {
@@ -717,6 +721,21 @@ pub(crate) fn is_current(state: &AppState, owner: ZoChannelOwner, epoch: u64) ->
         .is_some_and(|r| r.epoch == epoch)
 }
 
+pub(crate) fn supports_notice(state: &AppState, owner: ZoChannelOwner, epoch: u64) -> bool {
+    records(state)
+        .records
+        .get(&owner_key(owner))
+        .is_some_and(|record| {
+            record.epoch == epoch
+                && record.reason == Reason::Verified
+                && !record.stale
+                && record
+                    .receipt
+                    .as_ref()
+                    .is_some_and(|receipt| crate::zo_notice::supported(&receipt.support))
+        })
+}
+
 pub(crate) fn adoption_reason(app: &AppHandle, term: TermId, pid: u32, reason: Reason) {
     if app
         .state::<AppState>()
@@ -900,6 +919,19 @@ mod tests {
         assert_eq!(record.reason, Reason::ProcessReplaced);
         assert_eq!(record.receipt, Some(first));
         assert!(record.stale);
+    }
+
+    #[test]
+    fn a_notice_capability_keeps_the_idle_root_contract() {
+        let mut value = fixture();
+        value["support"]["notice"] = json!({"supported":true,"method":"session.steer",
+            "kind":"notice","scope":"idle-next-turn","private":"CANARY"});
+        let receipt = parse_receipt(value).unwrap();
+        assert_eq!(
+            receipt.support["notice"],
+            json!({"supported":true,
+            "method":"session.steer","kind":"notice","scope":"idle-next-turn"})
+        );
     }
 
     #[test]

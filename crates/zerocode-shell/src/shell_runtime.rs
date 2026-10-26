@@ -500,7 +500,7 @@ fn with_client_or<T: Send + 'static>(
     with_client_deadline(addr, token, unconnected, None, exchange)
 }
 
-fn with_client_deadline<T: Send + 'static>(
+pub(super) fn with_client_deadline<T: Send + 'static>(
     addr: String,
     token: Option<String>,
     unconnected: fn(zerocode_harness::HarnessError) -> String,
@@ -978,7 +978,7 @@ pub(super) fn zo_channel_report(frame: &serde_json::Value) -> Option<ZoChannelRe
             state: zerocode_core::hook::HookState::Working,
             event: "zo-turn-start",
             interrupted: false,
-            acknowledges_prompt: true,
+            acknowledges_prompt: frame["origin"] != "notice",
             ask: None,
             failure: None,
         }),
@@ -1531,11 +1531,27 @@ pub(super) fn spawn_subscriber(
         let probe_addr = addr.clone();
         let probe_token = token.clone();
         let result = with_client(addr, token, async move |client| {
-            zo_integration_runtime::negotiate(&emitter, owner, epoch, &probe_addr, probe_token)
-                .await;
+            zo_integration_runtime::negotiate(
+                &emitter,
+                owner,
+                epoch,
+                &probe_addr,
+                probe_token.clone(),
+            )
+            .await;
             if !zo_integration_runtime::is_current(&emitter.state::<AppState>(), owner, epoch) {
                 return Ok(());
             }
+            let channel = zo_channel_entry(probe_addr.clone(), probe_token.clone());
+            let mut notice_route = None;
+            crate::zo_notice::sync_route(
+                &mut notice_route,
+                &emitter,
+                owner,
+                epoch,
+                &session,
+                &channel,
+            );
             let hydrated = client
                 .subscribe(&session, true)
                 .await
@@ -1568,6 +1584,16 @@ pub(super) fn spawn_subscriber(
                             return Ok(());
                         }
                         zo_integration_runtime::frame(&emitter, owner, epoch, &frame);
+                        if frame["type"] == "session_capabilities" {
+                            crate::zo_notice::sync_route(
+                                &mut notice_route,
+                                &emitter,
+                                owner,
+                                epoch,
+                                &session,
+                                &channel,
+                            );
+                        }
                         note_zo_session_frame(&emitter, &session, &frame);
                         let _ = emitter.emit(
                             "session:frame",

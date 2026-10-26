@@ -3404,6 +3404,10 @@ pub(super) fn pump_loop(app: &AppHandle) {
                 } else {
                     zerocode_pty::ready::Line::default()
                 };
+                let draft_agent = deliveries
+                    .contains_key(id)
+                    .then(|| state.agent_terms().get(id).copied())
+                    .flatten();
                 let mut pty = lock_pty(held);
                 /* Drain this shell, rather than take one budget off it.
                  *
@@ -3469,6 +3473,15 @@ pub(super) fn pump_loop(app: &AppHandle) {
                     clipboard_writes.push(text);
                 }
                 if let Some(delivery) = deliveries.get_mut(id) {
+                    if let Some(agent) = draft_agent {
+                        crate::human_input::recheck_grid(
+                            *id,
+                            agent,
+                            pty.terminal().grid(),
+                            pty.last_output_at(),
+                            Instant::now(),
+                        );
+                    }
                     // Human input records its marker before releasing this
                     // same pty lock. Refresh after acquiring it, so a key or
                     // IME commit that won the lock cannot be missed.
