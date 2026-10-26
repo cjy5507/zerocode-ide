@@ -969,20 +969,6 @@ fn security_command(args: &[&str], stdin: Option<&str>) -> Result<String, String
         // Refused in the tool's own words, out of the same constant the real
         // exit code is translated with — a classification that read one word on
         // a Mac and another in a test would be a gate that proves nothing.
-        // Like the tool: a find that names no account answers an item under
-        // any account of that service.
-        Some("find-generic-password") if !args.contains(&"-a") => {
-            let service = format!("{}\u{0}", value_after("-s"));
-            let mut found: Vec<_> = table
-                .iter()
-                .filter(|(held, _)| held.starts_with(&service))
-                .collect();
-            found.sort_by(|left, right| left.0.cmp(right.0));
-            found
-                .first()
-                .map(|(_, value)| (*value).clone())
-                .unwrap_or_else(|| Err(format!("security {NO_SUCH_ITEM}")))
-        }
         Some("find-generic-password") => table
             .get(&key)
             .cloned()
@@ -1130,24 +1116,6 @@ pub(crate) fn read_keychain_service_if_present(service: &str) -> Result<Option<S
     {
         match read_keychain_service(service) {
             Ok(key) => Ok(Some(key)),
-            Err(error) if error.contains(NO_SUCH_ITEM) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = service;
-        Ok(None)
-    }
-}
-
-/// The item `service` holds under any account — the read zo makes of a
-/// router key (`read_router_key`), which names no account.
-pub(crate) fn read_keychain_service_any_account(service: &str) -> Result<Option<String>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        match security_command(&["find-generic-password", "-s", service, "-w"], None) {
-            Ok(key) => Ok(Some(key).filter(|key| !key.trim().is_empty())),
             Err(error) if error.contains(NO_SUCH_ITEM) => Ok(None),
             Err(error) => Err(error),
         }
@@ -2936,46 +2904,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     fn this_machines_account() -> String {
         keychain_user().expect("this machine names who is running the suite")
-    }
-
-    /// t-75762 ⑥: zo reads a model connection's key from the window's
-    /// keychain item by its service alone (`read_router_key`), so an item filed
-    /// under another account name answers zo's coding requests. The judgment
-    /// check reads the same connection, so it finds the same item.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_router_key_filed_under_another_account_is_found_as_zo_finds_it() {
-        let service = format!(
-            "{}ZEROCODE_ROUTER_T75762_OTHER_ACCOUNT_KEY",
-            zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX
-        );
-        let other = format!("{}-not-this-account", this_machines_account());
-        security_command(
-            &["add-generic-password", "-A", "-s", &service, "-a", &other, "-w", "[합성-키]"],
-            None,
-        )
-        .expect("an item under another account");
-        let found = <crate::api_routers::Keychain as crate::api_routers::RouterKeys>::read(
-            &crate::api_routers::Keychain::of_this_machine(),
-            &service,
-        )
-        .expect("read");
-        assert_eq!(found.as_deref(), Some("[합성-키]"));
-        let unrelated = "dev.zerocode.key.T75762_OTHER_ACCOUNT_SERVICE_KEY";
-        security_command(
-            &["add-generic-password", "-A", "-s", unrelated, "-a", &other, "-w", "[합성-키]"],
-            None,
-        )
-        .expect("a service item under another account");
-        assert_eq!(
-            <crate::api_routers::Keychain as crate::api_routers::RouterKeys>::read(
-                &crate::api_routers::Keychain::of_this_machine(),
-                unrelated,
-            )
-            .expect("read"),
-            None,
-            "only a router item is read past its account, as zo reads only those"
-        );
     }
 
     #[cfg(target_os = "macos")]

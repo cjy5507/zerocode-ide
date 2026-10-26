@@ -156,28 +156,14 @@ pub(crate) fn read_connection_key(
     auth_env: &str,
     keys: &dyn RouterKeys,
 ) -> Result<Option<String>, RouterRefusal> {
-    read_connection_key_from(auth_env, keys, |name| std::env::var(name))
-}
-
-/// A connection's key in zo's own order (`connection_credential`): the
-/// variable the row names first, then — for one of the window's router
-/// variables — the keychain item the window keeps under it. The judgment
-/// check reads a connection the way zo's coding requests read it, so a key
-/// that answers one answers the other (t-75762 ⑥).
-fn read_connection_key_from(
-    auth_env: &str,
-    keys: &dyn RouterKeys,
-    environment: impl Fn(&str) -> Result<String, std::env::VarError>,
-) -> Result<Option<String>, RouterRefusal> {
-    match environment(auth_env) {
-        Ok(value) if !value.trim().is_empty() => return Ok(Some(value)),
-        Ok(_) | Err(std::env::VarError::NotPresent) => {}
-        Err(_) => return Err("provider_settings".to_string().into()),
-    }
     if is_router_env(auth_env) {
         return keys.read(&router_keychain_service_for_env(auth_env));
     }
-    Ok(None)
+    match std::env::var(auth_env) {
+        Ok(value) => Ok((!value.trim().is_empty()).then_some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(_) => Err("provider_settings".to_string().into()),
+    }
 }
 
 /// Whether `auth_env` is one of the window's own router variables — the mark
@@ -464,14 +450,7 @@ impl RouterKeys for Keychain {
         if !self.available {
             return Ok(None);
         }
-        let held =
-            crate::accounts::read_keychain_service_if_present(service).map_err(RouterRefusal::from)?;
-        if held.is_some() || !service.starts_with(zerocode_harness::ROUTER_KEYCHAIN_SERVICE_PREFIX) {
-            return Ok(held);
-        }
-        // zo reads a router item by its service alone (`read_router_key`), so
-        // an item filed under another account name is zo's key all the same.
-        crate::accounts::read_keychain_service_any_account(service).map_err(RouterRefusal::from)
+        crate::accounts::read_keychain_service_if_present(service).map_err(RouterRefusal::from)
     }
 
     fn write(&self, service: &str, secret: &str) -> Result<(), RouterRefusal> {
@@ -1709,52 +1688,6 @@ mod tests {
             )
             .unwrap()
             .is_empty()
-        );
-    }
-
-    /// t-75762 ⑥: zo takes a connection's key from its environment first and
-    /// the window's keychain item second (`connection_credential`). The
-    /// judgment check reads the same connection in the same order, so a key
-    /// that answers zo's coding requests answers the check too.
-    #[test]
-    fn a_connection_key_is_read_in_zos_order_environment_then_keychain() {
-        let name = "ZEROCODE_ROUTER_T75762_FIXTURE_KEY";
-        let keys = HeldKeys::default();
-        let environment = |asked: &str| {
-            if asked == name {
-                Ok("[합성-환경-키]".to_string())
-            } else {
-                Err(std::env::VarError::NotPresent)
-            }
-        };
-        assert_eq!(
-            read_connection_key_from(name, &keys, environment)
-                .unwrap()
-                .as_deref(),
-            Some("[합성-환경-키]"),
-            "a key zo finds in its environment was not found by the check"
-        );
-        keys.write(&router_keychain_service_for_env(name), "[합성-키체인-키]")
-            .unwrap();
-        assert_eq!(
-            read_connection_key_from(name, &keys, environment)
-                .unwrap()
-                .as_deref(),
-            Some("[합성-환경-키]"),
-            "the environment comes first, as it does for zo"
-        );
-        assert_eq!(
-            read_connection_key_from(name, &keys, |_| Err(std::env::VarError::NotPresent))
-                .unwrap()
-                .as_deref(),
-            Some("[합성-키체인-키]")
-        );
-        assert_eq!(
-            read_connection_key_from(name, &keys, |_| Ok("  ".to_string()))
-                .unwrap()
-                .as_deref(),
-            Some("[합성-키체인-키]"),
-            "an empty variable is no key, as zo reads it"
         );
     }
 
