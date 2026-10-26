@@ -1857,8 +1857,13 @@ async fn openai_compat_restart_budget_exhausted_surfaces_error() {
     let addr = listener.local_addr().unwrap();
     let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let server_hits = hits.clone();
+    // The server holds each stream open with nothing on it until the test is
+    // done: only the client's idle timeout can end a stream, never this side
+    // closing first on a loaded machine (l79m3: an EOF came before the timer).
+    let (done, finished) = tokio::sync::oneshot::channel::<()>();
 
     let server = tokio::spawn(async move {
+        let mut held = Vec::new();
         for _ in 0..2 {
             let (mut conn, _) = listener.accept().await.unwrap();
             server_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1868,8 +1873,10 @@ async fn openai_compat_restart_budget_exhausted_surfaces_error() {
                 .await
                 .unwrap();
             conn.flush().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            held.push(conn);
         }
+        let _ = finished.await;
+        drop(held);
     });
 
     let _idle = EnvVarGuard::set(crate::providers::STREAM_IDLE_TIMEOUT_ENV, Some("300"));
@@ -1894,6 +1901,7 @@ async fn openai_compat_restart_budget_exhausted_surfaces_error() {
         ),
         "expected idle-timeout after restart budget exhausted"
     );
+    let _ = done.send(());
     server.await.unwrap();
     assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
