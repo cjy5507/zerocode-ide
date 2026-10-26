@@ -1396,6 +1396,24 @@ pub(super) fn account_env_for(
     Ok(env)
 }
 
+/// The variables [`account_env_for`] gives a launch of `agent`, computed
+/// and nothing else (t-76759): no login is put into a home, no setting is
+/// carried, and a signed-out account does not refuse. For a LOOK that must
+/// see what a pane sees — the window's own `zo models` read — and for a test
+/// that must not touch the person's homes.
+pub(crate) fn account_vars_for(config_root: &Path, agent: &str) -> Vec<(String, String)> {
+    use zerocode_core::account::{Provider, providers_for};
+
+    let mut env = Vec::new();
+    for provider in providers_for(agent) {
+        match provider {
+            Provider::Anthropic => env.extend(accounts::reading_env_for(config_root, agent)),
+            Provider::OpenAi => env.extend(codex_accounts::reading_env(config_root)),
+        }
+    }
+    env
+}
+
 /// Every agent's chosen account at once.
 ///
 /// For a PLAIN shell, which is not a launch of anything and could be a launch

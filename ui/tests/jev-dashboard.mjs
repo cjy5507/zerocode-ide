@@ -524,7 +524,9 @@ async function testJevLongModelIds(browser, origin, ok) {
           const wide = [view, ...view.querySelectorAll(".jev-table-wrap, .jev-table, .jev-caption")]
             .filter((node) => node.scrollWidth > node.clientWidth + 1).map((node) => node.className);
           return {
-            text: caption.textContent, fullModel: caption.textContent.endsWith(id),
+            // The id stands whole inside the caption's words (t-76598: the
+            // caption names the way and the place around it).
+            text: caption.textContent, fullModel: caption.textContent.includes(id),
             faults: window.__JEV_TEXT_FAULTS__(view), wide,
             width: view.getBoundingClientRect().width,
             theme: document.documentElement.dataset.theme ?? "dark",
@@ -543,9 +545,73 @@ async function testJevLongModelIds(browser, origin, ok) {
   }
 }
 
+/* The model over the table, as a person reads it (t-76598): the
+ * connection's name, the model and the way it judges — never the provider's
+ * `judgment-…` identity, which stays in a folded detail; an identity the
+ * settings no longer name is 「이전 판단 모델」; since when it counts is said
+ * only from the window's record of the apply; and a model applied but not
+ * yet answered says the table's numbers are the earlier one's. */
+async function testJevModelNames(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  const identity = "judgment-0f107e000000a0123456789abcdef";
+  try {
+    await page.evaluate(jevDashboardFixture);
+    await page.evaluate(() => el("nav-jev").click());
+    await page.waitForFunction(() => document.querySelector("#jev-view .jev-caption")?.textContent.includes("jev-1.13.0"));
+    const seen = (state) => page.evaluate(({ identity, state }) => {
+      typesafeState = {
+        ...typesafeState, providerIdentity: identity, providerConnectionName: "Fixture Router",
+        provider: { kind: "remote", protocol: "openai_json", baseUrl: "http://192.0.2.8:4000/v1", model: "fixture-model", requiresAuth: true },
+        model: { ...typesafeState.model, pinned: false },
+      };
+      jevApplied = state.applied;
+      jevNumbers = (state.rows ? jevNumbers.slice(0, state.rows) : jevNumbers).map((held, at) => ({ ...held, model: at === 0 && state.other ? state.other : state.head }));
+      paintJevViews();
+      const view = document.querySelector("#jev-view");
+      const caption = view.querySelector(".jev-caption");
+      const detail = caption.querySelector(".jev-caption-detail");
+      return {
+        words: caption.querySelector(".jev-caption-words")?.textContent ?? caption.textContent,
+        detail: detail ? { open: detail.open, raw: detail.querySelector("code")?.textContent ?? "" } : null,
+        rows: [...view.querySelectorAll(".jev-status-fact")].map((node) => node.textContent),
+      };
+    }, { identity, state });
+    const named = await seen({ head: `${identity}:fixture-model`, applied: { [identity]: Date.UTC(2026, 9, 27, 0, 35) } });
+    ok("the caption names the connection, the model and the general way, never the identity",
+      named.words.includes("Fixture Router · fixture-model · 일반 LLM") && !named.words.includes("judgment-"), JSON.stringify(named));
+    ok("the identity waits in a folded detail", named.detail?.open === false && named.detail.raw === `${identity}:fixture-model`, JSON.stringify(named.detail));
+    ok("since when the model counts is said from the window's record", named.words.includes("바꿈"), named.words);
+    const caption = page.locator("#jev-view .jev-caption");
+    await caption.scrollIntoViewIfNeeded();
+    await page.locator("#jev-view .jev-table").screenshot({ path: join(EVIDENCE_DIR, "jev-dashboard-model-names-caption.png") });
+    const unrecorded = await seen({ head: `${identity}:fixture-model`, applied: {} });
+    ok("an apply the window did not record says no time", !unrecorded.words.includes("바꿈"), unrecorded.words);
+    const earlier = await seen({ head: `${identity}:fixture-model`, other: "judgment-deadbeef:old-router", applied: {} });
+    ok("a row answered by a provider the settings no longer name reads 「이전 판단 모델」",
+      earlier.rows.some((row) => row === "이전 판단 모델 · old-router") && earlier.rows.every((row) => !row.includes("judgment-")), JSON.stringify(earlier.rows));
+    const waiting = await seen({ head: "judgment-deadbeef:old-router", applied: { [identity]: Date.UTC(2026, 9, 27, 0, 35) } });
+    ok("a model applied and not yet answered says the numbers are the earlier model's",
+      waiting.words.includes("판단 모델: Fixture Router · fixture-model · 일반 LLM") && waiting.words.includes("이전 판단 모델 · old-router의 것") && !waiting.words.includes("judgment-"),
+      waiting.words);
+    // A mix: one feature answered with the model applied, two still hold the
+    // earlier one's newest answer (the head) — the caption may not say the
+    // new model has not answered, nor that every number is the earlier one's.
+    const mixed = await seen({ head: "judgment-deadbeef:old-router", other: `${identity}:fixture-model`, rows: 3, applied: { [identity]: Date.UTC(2026, 9, 27, 0, 35) } });
+    ok("a table mixing one row of the model applied and two of the earlier one says both, not 「아직 답이 없음」",
+      mixed.words.includes("판단 모델: Fixture Router · fixture-model · 일반 LLM") && mixed.words.includes("기능 1개는 이 모델이 답했고, 2개는 아직 이전 판단 모델 · old-router의 기록")
+        && !mixed.words.includes("아직 이 모델의 답이 없") && mixed.words.includes("바꿈") && !mixed.words.includes("judgment-"),
+      mixed.words);
+    await page.screenshot({ path: join(EVIDENCE_DIR, "jev-dashboard-model-names.png") });
+    ok("model name fixtures have no JavaScript errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
 export async function testJevDashboardEvidence(browser, origin, ok) {
   await mkdir(EVIDENCE_DIR, { recursive: true });
   await testJevLongModelIds(browser, origin, ok);
+  await testJevModelNames(browser, origin, ok);
   const real = realSummary({ root: ROOT });
   // The table carries every seat of the card; the numbers, trends and card
   // lines are drawn for the seats the answering zo could count. An installed
@@ -1201,7 +1267,8 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("an old response without provider details explains why connection editing is unavailable",
       legacyProvider.disabled && legacyProvider.reason.includes("현재 적용된 모델을 읽지 못했습니다"), JSON.stringify(legacyProvider));
     ok("the model is named once, over the table, and a row names a version only when it is another",
-      opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 "))),
+      // t-76598: the caption names the place, the model and the way.
+      opened.caption === "판단 모델: Jev 서비스 · jev-1.13.0 · System One" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 "))),
       JSON.stringify({ caption: opened.caption }));
     ok("the global switch stands over the table while per-feature edits use their own dialog",
       opened.switchOver !== null && opened.switchOver.checked === true && opened.switchOver.id === null

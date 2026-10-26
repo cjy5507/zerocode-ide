@@ -517,7 +517,18 @@ fn agy_help_row(line: &str) -> Option<SlashCommand> {
 /// A short-lived command's stdout as lines, or `None` when it fails or
 /// outlives `wait` — the child is killed then, never left behind.
 pub(crate) fn captured_lines(binary: &Path, args: &[&str], wait: Duration) -> Option<Vec<String>> {
-    let mut command = crate::proc::quiet_command(binary);
+    captured_lines_in(binary, args, wait, &[])
+}
+
+/// [`captured_lines`] with `env` set on the child after the window's own
+/// `ZEROCODE*` names are taken away.
+fn captured_lines_in(
+    binary: &Path,
+    args: &[&str],
+    wait: Duration,
+    env: &[(String, String)],
+) -> Option<Vec<String>> {
+    let mut command = crate::proc::quiet_command_with_env(binary, env);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -525,7 +536,7 @@ pub(crate) fn captured_lines(binary: &Path, args: &[&str], wait: Duration) -> Op
         .stderr(Stdio::null());
     for (key, _) in std::env::vars_os() {
         let key = key.to_string_lossy();
-        if key.starts_with("ZEROCODE") {
+        if key.starts_with("ZEROCODE") && !env.iter().any(|(given, _)| *given == *key) {
             command.env_remove(&*key);
         }
     }
@@ -604,9 +615,26 @@ pub fn agent_lineup(
 /// What the model settings draw from zo's list (t-75762): every login model
 /// row, every router zo reads (`customProviders`), each source's report and
 /// the aliases a saved `model` may name — the same cached catalog the model
-/// menu and the lineup read, never a second `zo models` run.
+/// menu and the lineup read, never a second `zo models` run — and where a
+/// zo pane reads its Claude login (`paneCredentialStore`), so a report made
+/// from another place can be said to be one (t-76598).
 pub fn zo_model_list(home: &Path) -> serde_json::Value {
-    let catalog = zo_models_catalog(home);
+    let mut list = model_list_of(&zo_models_catalog(home));
+    if let Some(root) = ACCOUNTS_ROOT.get() {
+        list.insert(
+            "paneCredentialStore".to_string(),
+            serde_json::Value::String(credential_store(&lookup_env(&listing_env(root), |name| {
+                std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+            }))),
+        );
+    }
+    serde_json::Value::Object(list)
+}
+
+/// The settings' part of zo's catalog, as the screen may hold it — its
+/// reports already carry a diagnosis in place of zo's words
+/// ([`diagnosed`]).
+fn model_list_of(catalog: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     let mut list = serde_json::Map::new();
     for key in ["models", "customProviders", "reports", "aliases"] {
         list.insert(
@@ -618,14 +646,162 @@ pub fn zo_model_list(home: &Path) -> serde_json::Value {
                 .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
         );
     }
-    serde_json::Value::Object(list)
+    list
+}
+
+/// zo's catalog as the window keeps it (t-76873 P1): a report's `detail` is
+/// what a provider answered — an HTTP error body zo already cut, where a
+/// query token, a header's value on its next line or an address cut before
+/// its `@` hides from any masking rule — so it never enters the window. A
+/// failed report keeps only its diagnosis: the HTTP status and the kind of
+/// failure zo names in its own fields, and whether the source was skipped
+/// for want of a credential.
+fn diagnosed(mut catalog: serde_json::Value) -> serde_json::Value {
+    let reports = catalog
+        .get_mut("reports")
+        .and_then(serde_json::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_object_mut);
+    for report in reports {
+        let detail = report.remove("detail");
+        if report.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
+        let detail = detail
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let kind = field(report, "failureKind", "failure_kind");
+        let status = field(report, "httpStatus", "http_status");
+        report.remove("failureKind");
+        report.remove("failure_kind");
+        report.remove("httpStatus");
+        report.remove("http_status");
+        report.insert("diagnosis".to_string(), diagnosis_of(kind, status, detail));
+    }
+    catalog
+}
+
+/// A report's field as `zo models --json` spells it (camelCase) or its cache
+/// file does (snake_case, which an older window reads the same way).
+fn field(
+    report: &serde_json::Map<String, serde_json::Value>,
+    camel: &str,
+    snake: &str,
+) -> Option<serde_json::Value> {
+    report.get(camel).or_else(|| report.get(snake)).cloned()
+}
+
+/// A failed report as the window reads it (t-76968): by the fields zo sets
+/// for it — `failureKind` (one of zo's ten kinds) and `httpStatus` — and by
+/// no word of the error text, whose wording the window cannot know: zo's
+/// own advice, an address or a header's name can say "connect" or
+/// "timeout" in a failure that was neither. A report without the kind is an
+/// older zo's: it names none, and only zo's fixed `skipped:` head, which it
+/// has always written, says a source was skipped for want of a credential.
+/// A kind this window does not know is `unknown`, not a guess.
+fn diagnosis_of(
+    kind: Option<serde_json::Value>,
+    status: Option<serde_json::Value>,
+    detail: &str,
+) -> serde_json::Value {
+    let kind = kind.as_ref().and_then(serde_json::Value::as_str);
+    let status = status
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+        .filter(|status| (100..=599).contains(status));
+    let named = match kind {
+        None => None,
+        Some("no_credentials") => None,
+        Some("credential_unusable") => Some("credentialUnusable"),
+        Some("auth_rejected") => Some("auth"),
+        Some("forbidden") => Some("forbidden"),
+        Some("not_found") => Some("notFound"),
+        Some("rate_limited") => Some("rateLimit"),
+        Some("server_error") => Some("server"),
+        Some("network") => Some("network"),
+        Some("timeout") => Some("timeout"),
+        Some(_) => Some("unknown"),
+    };
+    let skipped = match kind {
+        Some(kind) => kind == "no_credentials",
+        None => detail.starts_with("skipped:"),
+    };
+    serde_json::json!({
+        "status": status,
+        "kind": named,
+        "skipped": skipped,
+    })
+}
+
+/// Where the window keeps its accounts, named once at boot. Until it is,
+/// zo is asked with the window's own environment.
+static ACCOUNTS_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+pub(crate) fn configure_accounts(config_root: PathBuf) {
+    let _ = ACCOUNTS_ROOT.set(config_root);
+}
+
+/// The account variables a zo pane is launched with (t-76598), read and
+/// never written: the window's `zo models` read once ran with none, so it
+/// alone found no Claude login, and wrote that failure over the list a pane
+/// reads too. A look, not a launch — it runs on the list's clock, so nothing
+/// is materialized and a signed-out account does not stop the read.
+fn listing_env(config_root: &Path) -> Vec<(String, String)> {
+    crate::usage_runtime::account_vars_for(config_root, "zo")
+}
+
+/// The Claude folder variables a lookup's zo ends with (t-76873 P2 ②): the
+/// ones `env` names, and those it leaves out as the zo inherits them from
+/// the window — the system's default account names none, and its zo reads
+/// the folder the window was started with.
+fn lookup_env(
+    env: &[(String, String)],
+    inherited: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+    let mut ends = env.to_vec();
+    for name in [SECURE_STORAGE_CONFIG_DIR_VAR, CONFIG_DIR_VAR] {
+        if !env.iter().any(|(key, _)| key == name)
+            && let Some(folder) = inherited(name)
+        {
+            ends.push((name.to_string(), folder));
+        }
+    }
+    ends
+}
+
+/// Where a zo given `env` reads its Claude login, in the words zo's report
+/// says it in (`credentialStore`), by zo's own rule (`ClaudeCodeStore::
+/// from_folders`, ZO m-76774): the credential folder variable decides
+/// whenever it is set — empty, it names the keychain — and only its absence
+/// hands over to the config folder; no folder is the keychain.
+fn credential_store(env: &[(String, String)]) -> String {
+    use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+    let named = |name: &'static str| {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, folder)| (name, folder.as_str()))
+    };
+    named(SECURE_STORAGE_CONFIG_DIR_VAR)
+        .or_else(|| named(CONFIG_DIR_VAR))
+        .filter(|(_, folder)| !folder.is_empty())
+        .map_or_else(
+            || "keychain".to_string(),
+            |(name, folder)| format!("{name}:{folder}"),
+        )
 }
 
 /// `zo models --json`, whole, cached for [`MODELS_TTL`]. A zo that is
 /// missing, fails, says nothing readable or outlives [`MODELS_WAIT`] — killed
 /// then — leaves the catalog last read standing, or `Null` before any was.
 fn zo_models_catalog(home: &Path) -> serde_json::Value {
-    catalog_through(models_cache(), home)
+    catalog_through(
+        models_cache(),
+        home,
+        ACCOUNTS_ROOT.get().map(PathBuf::as_path),
+    )
 }
 
 /// A change the window just made to what zo lists — a connection saved,
@@ -644,11 +820,17 @@ fn forget_models_in(cache: &Mutex<ModelsCache>) {
     }
 }
 
-fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value {
+fn catalog_through(
+    cache: &Mutex<ModelsCache>,
+    home: &Path,
+    accounts: Option<&Path>,
+) -> serde_json::Value {
     let bin = crate::zo_companion::zo_path_under(home);
     catalog_read(cache, || {
-        captured_lines(&bin, &["models", "--json"], MODELS_WAIT)
+        let env = accounts.map(listing_env).unwrap_or_default();
+        captured_lines_in(&bin, &["models", "--json"], MODELS_WAIT, &env)
             .and_then(|lines| serde_json::from_str(&lines.join("\n")).ok())
+            .map(diagnosed)
     })
 }
 
@@ -856,9 +1038,344 @@ mod tests {
         .expect("zo");
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
         assert_eq!(
-            catalog_through(&Mutex::new(ModelsCache::default()), home.path()),
+            catalog_through(&Mutex::new(ModelsCache::default()), home.path(), None),
             serde_json::json!({"customProviders": [{"name": "Fixture"}]})
         );
+    }
+
+    /// The window's `zo models` read gets a zo pane's account variables
+    /// (t-76598): before, it ran with none, so on a machine whose Claude login
+    /// lives in the window's account home only the window's read failed — and
+    /// the settings said 「로그인 안 됨」 while every zo pane answered.
+    ///
+    /// The fake zo writes down the account variables alone, never the rest of
+    /// the environment it inherits (t-76759), and the variables are compared
+    /// with [`crate::usage_runtime::account_vars_for`] — the launch's own
+    /// variables, computed without putting a login anywhere or carrying the
+    /// person's `~/.codex` into the fixture account.
+    #[cfg(unix)]
+    #[test]
+    fn the_zo_list_is_read_with_the_account_variables_a_zo_pane_gets() {
+        use std::os::unix::fs::PermissionsExt;
+        use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+        use zerocode_core::codex_account::HOME_VAR;
+        let home = tempfile::tempdir().expect("home");
+        let config = tempfile::tempdir().expect("config root");
+        let codex_home = config.path().join("codex-accounts/account-a/home");
+        std::fs::create_dir_all(&codex_home).expect("codex account home");
+        std::fs::write(
+            codex_home.join(crate::codex_accounts::AUTH_FILE),
+            r#"{"OPENAI_API_KEY":"fixture"}"#,
+        )
+        .expect("codex auth");
+        std::fs::write(
+            config
+                .path()
+                .join(crate::codex_accounts::ACCOUNT_STORE_FILE),
+            serde_json::json!({
+                "accounts": [{"id": "account-a", "home_dir": codex_home, "added_at": 0}],
+                "active": "account-a"
+            })
+            .to_string(),
+        )
+        .expect("codex account store");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        let seen = home.path().join("seen-env");
+        let pane = crate::usage_runtime::account_vars_for(config.path(), "zo");
+        assert!(
+            !codex_home.join("config.toml").exists() && !codex_home.join("AGENTS.md").exists(),
+            "computing the pane's variables carried settings into the account"
+        );
+        for name in [CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR, HOME_VAR] {
+            assert!(
+                pane.iter().any(|(key, _)| key == name),
+                "the pane gets {name}: {pane:?}"
+            );
+        }
+        // The pane's own variable names, and nothing else of what the fake
+        // zo inherits.
+        let names: Vec<&str> = pane.iter().map(|(key, _)| key.as_str()).collect();
+        let script: String = names
+            .iter()
+            .map(|name| format!("[ \"${{{name}+set}}\" = set ] && printf '%s=%s\\n' {name} \"${name}\" >> '{}'\n", seen.display()))
+            .collect();
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\n: > '{}'\n{script}echo '{{\"reports\":[]}}'\n",
+                seen.display()
+            ),
+        )
+        .expect("zo");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+        assert_eq!(
+            catalog_through(
+                &Mutex::new(ModelsCache::default()),
+                home.path(),
+                Some(config.path())
+            ),
+            serde_json::json!({"reports": []})
+        );
+        let seen = std::fs::read_to_string(&seen).expect("zo ran");
+        let seen: HashMap<&str, &str> = seen
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect();
+        assert!(
+            seen.keys().all(|key| names.contains(key)),
+            "the fake zo wrote down more than the account variables: {:?}",
+            seen.keys().collect::<Vec<_>>()
+        );
+        for (key, value) in &pane {
+            assert_eq!(
+                seen.get(key.as_str()).copied(),
+                Some(value.as_str()),
+                "the list's zo did not get the pane's {key}"
+            );
+        }
+        assert_eq!(
+            credential_store(&listing_env(config.path())),
+            credential_store(&pane),
+            "the place the settings compare a report with is not the pane's"
+        );
+    }
+
+    /// The label a report is compared with is the one zo would write for the
+    /// pane's variables (ZO m-76774, `ClaudeCodeStore::from_folders`): the
+    /// credential folder wins whenever it is named — empty, it is the
+    /// keychain — and the config folder only when it is not.
+    #[test]
+    fn the_pane_store_is_named_by_zos_own_rule() {
+        use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+        let env = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect()
+        };
+        assert_eq!(
+            credential_store(&env(&[(CONFIG_DIR_VAR, "/fixture/runtime")])),
+            "CLAUDE_CONFIG_DIR:/fixture/runtime"
+        );
+        assert_eq!(
+            credential_store(&env(&[
+                (CONFIG_DIR_VAR, "/fixture/runtime"),
+                (SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/account")
+            ])),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/account"
+        );
+        assert_eq!(
+            credential_store(&env(&[
+                (CONFIG_DIR_VAR, "/fixture/runtime"),
+                (SECURE_STORAGE_CONFIG_DIR_VAR, "")
+            ])),
+            "keychain",
+            "an empty credential folder names the keychain, not the config folder"
+        );
+        assert_eq!(credential_store(&env(&[(CONFIG_DIR_VAR, "")])), "keychain");
+        assert_eq!(credential_store(&[]), "keychain");
+    }
+
+    /// The label is made from the variables the list's zo ends with, not
+    /// only those the window names (t-76873 P2 ②): the system's default
+    /// account names no Claude folder, and the zo then reads the one it
+    /// inherits from the window — the same place a pane reads, which is not
+    /// 「다른 환경」. What the window names wins over what is inherited, by
+    /// zo's rule, and an empty credential folder is still the keychain.
+    #[test]
+    fn the_pane_store_counts_the_folder_the_lookup_inherits() {
+        use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+        let env = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect()
+        };
+        let inheriting = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+        let store = |given: &[(&str, &str)], inherited: &'static [(&'static str, &'static str)]| {
+            credential_store(&lookup_env(&env(given), inheriting(inherited)))
+        };
+        assert_eq!(
+            store(
+                &[("ANTHROPIC_API_KEY", "")],
+                &[(CONFIG_DIR_VAR, "/fixture/ambient")]
+            ),
+            "CLAUDE_CONFIG_DIR:/fixture/ambient",
+            "the default account's lookup reads the inherited folder"
+        );
+        assert_eq!(
+            store(
+                &[],
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/ambient-account")]
+            ),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/ambient-account"
+        );
+        assert_eq!(
+            store(
+                &[(CONFIG_DIR_VAR, "/fixture/runtime")],
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/ambient-account")]
+            ),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/ambient-account",
+            "an inherited credential folder wins over a named config folder, by zo's rule"
+        );
+        assert_eq!(
+            store(
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/account")],
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/ambient-account")]
+            ),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/account",
+            "an inherited folder overrode the one the window names"
+        );
+        assert_eq!(
+            store(
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "")],
+                &[(CONFIG_DIR_VAR, "/fixture/ambient")]
+            ),
+            "keychain",
+            "an empty credential folder named by the window is the keychain"
+        );
+        assert_eq!(
+            store(
+                &[],
+                &[
+                    (SECURE_STORAGE_CONFIG_DIR_VAR, ""),
+                    (CONFIG_DIR_VAR, "/fixture/ambient")
+                ]
+            ),
+            "keychain",
+            "an empty inherited credential folder is the keychain"
+        );
+        assert_eq!(store(&[], &[]), "keychain");
+    }
+
+    /// A login report's `detail` is a provider's answer — an HTTP error body
+    /// zo cut at 160 characters — and no masking rule reads every credential
+    /// such a body can hold: a query token without a digit, a header value on
+    /// the line after its name, an address cut before its `@` (t-76873 P1).
+    /// So the text never enters the window: the list keeps a diagnosis made of
+    /// the status, one kind word and whether zo skipped the source, and
+    /// neither the answer to the screen nor the list the window holds carries
+    /// a word of the body. Synthetic values only; the zo is a POSIX script.
+    #[cfg(unix)]
+    #[test]
+    fn a_login_failure_reaches_the_window_as_a_diagnosis_and_never_as_its_body() {
+        use std::os::unix::fs::PermissionsExt;
+        let secrets = [
+            "fixtureonlyletters",
+            "fixturemultilinevalue",
+            "fixturecutpassword",
+            "fixturebearerletters",
+            "abcdefabcdef",
+            "sk-ant-api03-TESTONLYxxxxxxxxxxxxxxxxxxxxxxxx",
+        ];
+        let failed = |provider: &str, detail: String| serde_json::json!({"provider": provider, "source": format!("{provider}-api"), "ok": false, "count": 0, "detail": detail});
+        // A report as zo sets it (t-76968): the kind and the status in
+        // fields of their own, whatever the text says.
+        let reported = |provider: &str, detail: String, kind: &str, status: Option<u64>| {
+            let mut report = failed(provider, detail);
+            report["failureKind"] = serde_json::json!(kind);
+            if let Some(status) = status {
+                report["httpStatus"] = serde_json::json!(status);
+            }
+            report
+        };
+        let printed = serde_json::json!({
+            "reports": [
+                reported("anthropic", format!("HTTP 401 Unauthorized at https://example.test/?access_token={}", secrets[0]), "auth_rejected", Some(401)),
+                reported("anthropic", format!("HTTP 403 Forbidden: echoed Authorization:\n{}", secrets[1]), "forbidden", Some(403)),
+                reported("openai", format!("HTTP 404 Not Found: {{\"url\":\"https://fixtureuser:{}", secrets[2]), "not_found", Some(404)),
+                reported("openai", format!("HTTP 429 Too Many Requests: Authorization: Bearer {}", secrets[3]), "rate_limited", Some(429)),
+                reported("google", format!("HTTP 503 Service Unavailable: https://files.example.test/o?X-Amz-Signature={}", secrets[4]), "server_error", Some(503)),
+                reported("anthropic", format!("error sending request for url (https://example.test/v1/models?key={}) · kept 3 model(s) from the previous refresh", secrets[5]), "network", None),
+                reported("xai", format!("operation timed out after reading {}", secrets[0]), "timeout", None),
+                reported("xai", "skipped: no login".to_string(), "no_credentials", None),
+                reported("google", format!("unexpected answer {}", secrets[3]), "unknown", None),
+                {"provider": "google", "source": "google-api", "ok": true, "count": 3, "detail": format!("3 model(s) · {}", secrets[0])},
+                // An older zo names no kind: the window names none either,
+                // reads no status out of the text, and takes only zo's
+                // fixed `skipped:` head for a missing credential.
+                failed("anthropic", format!("HTTP 401 Unauthorized {}", secrets[0])),
+                failed("xai", "skipped: no key".to_string()),
+                // The text never changes the kind: "connect", "timeout" and
+                // a status in the words of a failure zo calls unknown.
+                reported("openai", format!("the next connection asks again · connect timeout HTTP 503 {}", secrets[3]), "unknown", None),
+                // A kind this window does not know is unknown, a status that
+                // is no HTTP status is none, and the cache file's spelling
+                // reads like the command's.
+                reported("google", "a later zo's kind".to_string(), "a_kind_from_a_later_zo", Some(99999)),
+                {"provider": "google", "source": "google-api", "ok": false, "count": 0, "detail": "x", "failure_kind": "rate_limited", "http_status": 429},
+                // A login that is there but cannot be used is not one that
+                // is missing: it is not skipped.
+                reported("anthropic", "the Claude Code sign-in expired".to_string(), "credential_unusable", None),
+            ]
+        });
+        let home = tempfile::tempdir().expect("home");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        let answer = home.path().join("answer.json");
+        std::fs::write(&answer, printed.to_string()).expect("answer");
+        std::fs::write(&bin, format!("#!/bin/sh\ncat '{}'\n", answer.display())).expect("zo");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+        let cache = Mutex::new(ModelsCache::default());
+        let list = model_list_of(&catalog_through(&cache, home.path(), None));
+        let held = cache.lock().expect("cache").held.clone().expect("held").1;
+        for (place, said) in [
+            (
+                "the answer to the screen",
+                serde_json::to_string(&list).expect("json"),
+            ),
+            ("the list the window holds", held.to_string()),
+        ] {
+            for secret in secrets {
+                assert!(!said.contains(secret), "{secret} reached {place}: {said}");
+            }
+            assert!(
+                !said.contains("\"detail\""),
+                "a body reached {place}: {said}"
+            );
+            for raw in ["failureKind", "failure_kind", "httpStatus", "http_status"] {
+                assert!(!said.contains(raw), "{raw} reached {place}: {said}");
+            }
+        }
+        let diagnoses: Vec<serde_json::Value> = list["reports"]
+            .as_array()
+            .expect("reports")
+            .iter()
+            .map(|report| report.get("diagnosis").cloned().unwrap_or_default())
+            .collect();
+        let diagnosis = |status: Option<u16>, kind: Option<&str>, skipped: bool| serde_json::json!({"status": status, "kind": kind, "skipped": skipped});
+        assert_eq!(
+            diagnoses,
+            [
+                diagnosis(Some(401), Some("auth"), false),
+                diagnosis(Some(403), Some("forbidden"), false),
+                diagnosis(Some(404), Some("notFound"), false),
+                diagnosis(Some(429), Some("rateLimit"), false),
+                diagnosis(Some(503), Some("server"), false),
+                diagnosis(None, Some("network"), false),
+                diagnosis(None, Some("timeout"), false),
+                diagnosis(None, None, true),
+                diagnosis(None, Some("unknown"), false),
+                serde_json::Value::Null,
+                diagnosis(None, None, false),
+                diagnosis(None, None, true),
+                diagnosis(None, Some("unknown"), false),
+                diagnosis(None, Some("unknown"), false),
+                diagnosis(Some(429), Some("rateLimit"), false),
+                diagnosis(None, Some("credentialUnusable"), false),
+            ]
+        );
+        assert_eq!(list["reports"][9]["count"], 3, "an answer lost its count");
     }
 
     #[test]

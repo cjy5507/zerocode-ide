@@ -91,6 +91,9 @@ const JEV_CHART = Object.freeze({
  * it stays null on a zo too old to know the verb — the switches then stand
  * without numbers rather than not at all. */
 let jevNumbers = null;
+/* When each judgment provider was applied from this window, by its identity
+ * (`model_connection_checks`, t-76598) — `null` until the record is read. */
+let jevApplied = null;
 /* Whether the answer in hand carries the recent list — the dashboard's
  * ask; the card's answer does not. */
 let jevNumbersRecent = false;
@@ -207,12 +210,17 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
     const began = performance.now();
     let held = null;
     try {
-      [held, jevDay] = await Promise.all([
+      let remembered;
+      [held, jevDay, remembered] = await Promise.all([
         invoke("jev_summary", { ...(recent ? { recent: JEV_RECENT_ROWS } : {}), scope: jevNumbersAskingScope }),
         // The dashboard's strip reads the day's count beside the ledgers: a
         // file's length, so it rides every refresh; the card draws none.
         recent ? invoke("jev_day").catch(() => null) : jevDay,
+        // Since when the model over the table counts: the window's record of
+        // its applies, a small file — the dashboard's alone.
+        recent ? invoke("remembered_model_connection_checks").catch(() => null) : null,
       ]);
+      if (remembered?.applied) jevApplied = remembered.applied;
       jevNumbersError = null;
     } catch (error) {
       held = null;
@@ -462,7 +470,7 @@ function jevAskersLine(held) {
  * did — the reason a thin window gives for itself. */
 function jevCutWords(held) {
   if (!held.verdict?.cutModel) return "";
-  return t("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: held.verdict.cutModel });
+  return t("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: jevVersion(held.verdict.cutModel).short });
 }
 
 /* ---- the dashboard ---- */
@@ -1982,13 +1990,119 @@ function jevHeadModel(numbers) {
   return best;
 }
 
+/* How a judgment provider is said to a person (t-76598): where it is
+ * reached, the model, and how it judges — never the provider's identity,
+ * a hash nobody can read a connection or a model off. */
+const JUDGMENT_WAYS = Object.freeze({
+  system_one: { key: "jev.way.systemOne", word: "System One" },
+  openai_json: { key: "jev.way.general", word: "일반 LLM" },
+});
+
+function judgmentWayWords(protocol) {
+  const way = JUDGMENT_WAYS[protocol];
+  return way ? t(way.key, way.word) : "";
+}
+
+/* 「연결 이름 · 모델 · 방식」 for the provider the settings name now, with
+ * `model` in place of its own when an answer named another. */
+function judgmentProviderWords(state = typesafeState, model = state?.provider?.model) {
+  const provider = state?.provider;
+  if (!provider) return "";
+  const place = provider.kind === "jev" ? t("jev.place.jev", "Jev 서비스")
+    : state.providerConnectionName || (provider.kind === "local" ? t("jev.place.local", "이 컴퓨터") : t("jev.place.remote", "다른 판단 서버"));
+  return [place, model, judgmentWayWords(provider.protocol)].filter(Boolean).join(" · ");
+}
+
+/* An answered version as zo records it: `<identity>:<model>` for a provider
+ * of the person's own (`judgment_provider::protocol`), the bare model for
+ * Jev's. */
+const JUDGMENT_VERSION = /^(judgment-[0-9a-f]+):(.+)$/;
+
+/* What a version from the table is, for a person: `words` names the
+ * provider judging now in full (the caption's), `short` only what tells it
+ * from the one over the table (a row's, the drawer's, a cut's) — the model,
+ * or 「이전 판단 모델」 for an identity the settings no longer name; `raw` is
+ * what zo wrote, for the folded detail, when the words leave something out.
+ * `current` is whether the settings name it now. */
+function jevVersion(model) {
+  const found = JUDGMENT_VERSION.exec(model ?? "");
+  if (found) {
+    const current = found[1] === typesafeState?.providerIdentity;
+    const earlier = t("jev.model.earlier", "이전 판단 모델 · {{model}}", { model: found[2] });
+    return {
+      current,
+      words: current ? judgmentProviderWords(typesafeState, found[2]) : earlier,
+      short: current ? found[2] : earlier,
+      raw: model,
+    };
+  }
+  const current = typesafeState?.provider?.kind === "jev";
+  return {
+    current,
+    words: current ? judgmentProviderWords(typesafeState, model) : model,
+    short: model,
+    raw: null,
+  };
+}
+
 function paintJevCaption(view, numbers) {
   const caption = view.querySelector(".jev-caption");
   const model = jevHeadModel(numbers);
-  caption.hidden = !model;
-  caption.textContent = !model ? "" : typesafeState?.model?.pinned
-    ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model })
-    : t("settings.typesafe.seatVersion", "모델 {{model}}", { model });
+  const now = judgmentProviderWords();
+  caption.hidden = !model && !now;
+  if (caption.hidden) {
+    caption.replaceChildren();
+    return;
+  }
+  const version = model ? jevVersion(model) : null;
+  const words = [];
+  if (typesafeState?.model?.pinned && version) {
+    words.push(t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model: version.words }));
+  } else if (!version || version.current) {
+    words.push(t("jev.caption.now", "판단 모델: {{model}}", { model: version?.words ?? now }));
+    const since = jevApplied?.[typesafeState?.providerIdentity];
+    if (Number.isFinite(since)) words.push(t("jev.caption.since", "{{time}}에 바꿈 — 이 모델의 판단은 그때부터 셉니다", { time: jevSinceTime(since) }));
+    if (!version) words.push(t("jev.caption.noAnswer", "아직 이 모델의 답이 없습니다"));
+  } else {
+    // Most features' newest answers name an earlier model. Whether this one
+    // answered any is asked apart: once some features answer with it, the
+    // table is a mix, and says so rather than 「아직 답이 없음」.
+    const named = numbers.filter((held) => held.model);
+    const answered = named.filter((held) => jevVersion(held.model).current).length;
+    words.push(t("jev.caption.now", "판단 모델: {{model}}", { model: now }));
+    if (answered) {
+      const since = jevApplied?.[typesafeState?.providerIdentity];
+      if (Number.isFinite(since)) words.push(t("jev.caption.since", "{{time}}에 바꿈 — 이 모델의 판단은 그때부터 셉니다", { time: jevSinceTime(since) }));
+      words.push(t("jev.caption.mixedNumbers", "기능 {{answered}}개는 이 모델이 답했고, {{earlier}}개는 아직 {{model}}의 기록입니다",
+        { answered: jevCount(answered), earlier: jevCount(named.length - answered), model: version.words }));
+    } else {
+      // Applied, and nothing answered since: the numbers are the earlier
+      // model's, and the caption says both rather than the one zo last wrote.
+      words.push(t("jev.caption.earlierNumbers", "아직 이 모델의 답이 없어 표의 숫자는 {{model}}의 것입니다", { model: version.words }));
+    }
+  }
+  const said = jevNode("span", "jev-caption-words", document.createTextNode(words.join(" · ")));
+  const parts = [said];
+  const raw = version?.raw ?? null;
+  if (raw) {
+    const detail = jevNode("details", "jev-caption-detail");
+    detail.append(jevNode("summary", "", document.createTextNode(t("jev.caption.detail", "자세한 값"))),
+      jevNode("code", "", document.createTextNode(raw)));
+    parts.push(detail);
+  }
+  const open = caption.querySelector(".jev-caption-detail")?.open ?? false;
+  caption.replaceChildren(...parts);
+  const detail = caption.querySelector(".jev-caption-detail");
+  if (detail) detail.open = open;
+}
+
+/* A moment in the reader's own language and local time, to the minute. */
+function jevSinceTime(ms) {
+  try {
+    return new Intl.DateTimeFormat(document.documentElement.lang || "ko", { dateStyle: "medium", timeStyle: "short" }).format(new Date(ms));
+  } catch {
+    return new Date(ms).toISOString();
+  }
 }
 
 /* The rest zo's door holds a feature in (t-58193), while it lasts: `null`
@@ -2075,8 +2189,10 @@ function jevStatusCell(held, choice, standing, head) {
     said.dataset.jevWhy = "";
     cell.append(said);
   }
-  const other = held.model && held.model !== head
-    ? t("settings.typesafe.seatVersion", "모델 {{model}}", { model: held.model }) : "";
+  const version = held.model && held.model !== head ? jevVersion(held.model) : null;
+  // An earlier provider's words already say it is a model.
+  const other = !version ? "" : version.raw && !version.current ? version.short
+    : t("settings.typesafe.seatVersion", "모델 {{model}}", { model: version.short });
   for (const fact of [other, jevCutWords(held)]) {
     if (fact) cell.append(jevNode("p", "jev-status-fact", document.createTextNode(fact)));
   }
@@ -2472,9 +2588,10 @@ function paintJevDrawer(view, id, held) {
   const models = [];
   const model = typesafeState?.model?.pinned ? held?.askedModel : held?.model;
   if (model) {
+    const words = jevVersion(model).short;
     models.push({ key: "jev.drawer.model", word: "응답한 모델", said: typesafeState?.model?.pinned
-      ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model })
-      : t("settings.typesafe.seatVersion", "모델 {{model}}", { model }) });
+      ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model: words })
+      : t("settings.typesafe.seatVersion", "모델 {{model}}", { model: words }) });
   }
   const cut = jevCutWords(held ?? {});
   if (cut) models.push({ key: "jev.drawer.cut", word: "버전 변경", said: cut });

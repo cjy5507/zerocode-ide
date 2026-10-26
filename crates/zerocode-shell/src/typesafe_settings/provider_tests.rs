@@ -1033,3 +1033,36 @@ fn a_captured_window_key_cannot_follow_a_reused_reference_to_another_endpoint() 
         "a captured key was reused for the changed endpoint"
     );
 }
+
+/// A judgment provider bound to a saved connection is named by that
+/// connection's own name (t-76598): the dashboard and the settings say
+/// 「Fixture」 where they once said the provider's `judgment-…` identity.
+#[test]
+fn a_connection_bound_judgment_provider_carries_the_connections_name() {
+    use judgment_provider::connections::{self, Reference};
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join("settings.json");
+    let mut root = json!({"providers":[{"name":"Fixture Router","base_url":"https://gateway.example.com/v1","auth_env":"ZEROCODE_ROUTER_NAMED_KEY","requires_auth":true,"models":["fixture-model"],"connection":{"id":"named","generation":1}}]});
+    let reference = Reference {
+        id: "named".to_string(),
+        generation: 1,
+        model: "fixture-model".to_string(),
+        protocol: Protocol::OpenaiJson,
+    };
+    let provider = connections::candidate(&root, &reference).unwrap();
+    root["smart"] = json!({"judgmentProvider":provider,"judgmentConnection":reference});
+    std::fs::write(&path, root.to_string()).unwrap();
+    let state = read_settings(&path, &HeldKeys::default(), true).expect("settings");
+    assert_eq!(
+        state.provider_connection_name.as_deref(),
+        Some("Fixture Router")
+    );
+    assert!(state.provider_identity.starts_with("judgment-"));
+
+    std::fs::write(&path, "{}").unwrap();
+    let state = read_settings(&path, &HeldKeys::default(), true).expect("settings");
+    assert_eq!(
+        state.provider_connection_name, None,
+        "Jev has no saved connection"
+    );
+}

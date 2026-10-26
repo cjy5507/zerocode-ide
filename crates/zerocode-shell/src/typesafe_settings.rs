@@ -252,6 +252,9 @@ pub struct TypeSafeSettings {
     pub provider: judgment_provider::Provider,
     pub provider_identity: String,
     pub provider_connection: Option<judgment_provider::connections::Reference>,
+    /// The name the person gave that connection, so the screens say which
+    /// connection judges instead of the provider's identity (t-76598).
+    pub provider_connection_name: Option<String>,
     pub jev_provider: judgment_provider::Provider,
     /// The one switch: whether Jev is in use here.
     pub jev: JevSwitch,
@@ -335,6 +338,13 @@ pub fn read_settings(
             .connection
             .as_ref()
             .map(|connection| connection.reference.clone()),
+        provider_connection_name: provider.connection.as_ref().and_then(|connection| {
+            judgment_provider::connections::row(&document, &connection.reference.id)
+                .ok()?
+                .get("name")?
+                .as_str()
+                .map(str::to_string)
+        }),
         provider,
         jev_provider: judgment_provider::Provider::jev(model_in(&document)),
         jev: JevSwitch::of(&document),

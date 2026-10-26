@@ -21,6 +21,8 @@ const MODEL_STATES = Object.freeze({
   schema: { key: "settings.models.state.schema", word: "판단 답을 정해진 모양으로 내지 못합니다", badge: "error", todo: "settings.models.todo.schema", todoWord: "다른 모델을 고르세요. 작은 모델일수록 자주 그렇습니다." },
   failed: { key: "settings.models.state.failed", word: "확인하지 못했습니다", badge: "error", todo: "settings.models.todo.failed", todoWord: "잠시 뒤 다시 확인하세요. 자세한 내용은 아래에 있습니다." },
   nologin: { key: "settings.models.state.nologin", word: "로그인 안 됨", badge: "checking", todo: "settings.models.todo.nologin", todoWord: "터미널에서 그 CLI에 로그인하면 여기에 저절로 나타납니다." },
+  stale: { key: "settings.models.state.stale", word: "목록은 이전 확인 것", badge: "checking" },
+  elsewhere: { key: "settings.models.state.elsewhere", word: "다른 환경의 조회", badge: "checking", todo: "settings.models.todo.elsewhere", todoWord: "zo 창이 쓰는 로그인과 다른 곳에서 읽은 목록입니다." },
   unknown: { key: "settings.models.state.unknown", word: "아직 확인 안 함", badge: "unchecked" },
   checking: { key: "settings.models.state.checking", word: "확인하는 중…", badge: "checking" },
   later: { key: "settings.models.state.later", word: "실행 뒤 확인합니다", badge: "unchecked" },
@@ -74,6 +76,19 @@ const MODEL_LOGINS = Object.freeze({
   kimi: () => t("settings.models.login.kimi", "Kimi 로그인"),
 });
 const MODEL_LOGIN_ORDER = Object.freeze(Object.keys(MODEL_LOGINS));
+/* Why a login's check failed, by the kind word the window keeps in place of
+ * the provider's answer (t-76873): the answer itself never reaches here. */
+const MODEL_FAILURE_KINDS = Object.freeze({
+  credentialUnusable: () => t("settings.models.failure.credentialUnusable", "로그인은 있으나 쓸 수 없음 — 다시 로그인하세요"),
+  auth: () => t("settings.models.failure.auth", "인증 거절"),
+  forbidden: () => t("settings.models.failure.forbidden", "권한 없음"),
+  notFound: () => t("settings.models.failure.notFound", "찾을 수 없음"),
+  rateLimit: () => t("settings.models.failure.rateLimit", "한도 초과"),
+  server: () => t("settings.models.failure.server", "서버 오류"),
+  network: () => t("settings.models.failure.network", "네트워크 오류"),
+  timeout: () => t("settings.models.failure.timeout", "시간 초과"),
+  unknown: () => t("settings.models.failure.unknown", "알 수 없는 까닭"),
+});
 
 /* Where each preset's key is made (v2 대응표 5), by preset id. */
 const MODEL_KEY_HELP = Object.freeze({
@@ -109,10 +124,36 @@ function modelReportAge(age) {
   }
 }
 
+/* How long ago a kept check was made, in the reader's own language: seconds
+ * under a minute, minutes under an hour, hours under two days, then days. */
+function modelCheckAge(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const [value, unit] = seconds < 60 ? [seconds, "second"] : seconds < 3600 ? [Math.floor(seconds / 60), "minute"]
+    : seconds < 172800 ? [Math.floor(seconds / 3600), "hour"] : [Math.floor(seconds / 86400), "day"];
+  try {
+    return new Intl.RelativeTimeFormat(document.documentElement.lang || "ko", { numeric: "auto" }).format(-value, unit);
+  } catch {
+    return "";
+  }
+}
+
+/* The states a finished check is kept in — `model_connection_checks::Verdict`. */
+const KEPT_CHECK_STATES = Object.freeze(["ok", "usable", "nokey", "unreadable", "badkey", "down", "schema", "failed"]);
+
+/* The quiet check waits for the window's first paint and then an idle
+ * moment, so a window start never waits on a provider (t-76500 B). */
+const QUIET_CHECK_AFTER_PAINT_MS = 10_000;
+
 const modelConnectionsController = {
   state: null, zo: null, sequence: 0, busy: false, editing: null, view: "catalog", deletion: null,
-  /* The last check each saved connection had in this window, by id. */
+  /* The last check each saved connection had, by id: made in this window,
+   * or kept from an earlier start (`recalled`), with the generation it was
+   * made against and when (t-76500). */
   checks: new Map(),
+  /* The window's record of those checks as last read or written, with the
+   * page's clock at that moment; `false` while it cannot be read — then
+   * nothing is checked unasked, as its spacing cannot be kept. */
+  memory: null, recalled: new Set(), quieting: false, quietQueued: false,
   /* The last judgment check each candidate had, by its reference. */
   judged: new Map(),
   /* A judgment format picked in 「고급」 for a connection, by its id. */
@@ -188,6 +229,7 @@ const modelConnectionsController = {
     const [state, zo] = await Promise.all([
       invoke("model_connections").then((value) => ({ value }), (error) => ({ error })),
       invoke("zo_model_list").then((value) => ({ value }), (error) => ({ error })),
+      this.recall(),
     ]);
     if (sequence !== this.sequence) return;
     if (!routerPresets.length) {
@@ -208,8 +250,133 @@ const modelConnectionsController = {
       this.failed = state.error ?? "provider_settings";
     }
     if (zo.value) this.zo = zo.value;
+    this.takeRecalled();
     this.autoSetup();
     this.render();
+    this.quietSoon();
+  },
+
+  /* ---- the kept checks (t-76500) ----------------------------------------- */
+
+  async recall() {
+    try {
+      this.memory = this.taken(await invoke("remembered_model_connection_checks"));
+    } catch {
+      this.memory = false;
+    }
+  },
+  /* A record answer as the page holds it, or `false` for anything else. */
+  taken(read) {
+    if (!Number.isFinite(read?.nowMs) || !Number.isFinite(read?.everyMs) || typeof read.connections !== "object") return false;
+    return { ...read, readAt: performance.now() };
+  },
+  nowMs() {
+    return this.memory ? this.memory.nowMs + (performance.now() - this.memory.readAt) : null;
+  },
+  /* A kept check stands for a connection this page has no answer for yet,
+   * once per page and generation; a kept judgment check only for the
+   * generation it was made against. */
+  takeRecalled() {
+    if (!this.memory) return;
+    for (const connection of this.state?.connections ?? []) {
+      const kept = this.memory.connections?.[connection.id];
+      if (!kept || this.recalled.has(`${connection.id}:${kept.generation}`)) continue;
+      this.recalled.add(`${connection.id}:${kept.generation}`);
+      if (kept.state && !this.checks.has(connection.id)) {
+        this.checks.set(connection.id, { state: kept.state, count: kept.count, checkedMs: kept.checkedMs, generation: kept.generation, recalled: true });
+      }
+      if (kept.generation !== connection.generation) continue;
+      for (const judged of kept.judgments ?? []) {
+        const reference = JSON.stringify({ id: connection.id, generation: kept.generation, model: judged.model, protocol: judged.protocol });
+        if (!this.judged.has(reference)) this.judged.set(reference, { state: judged.state, checkedMs: judged.checkedMs, recalled: true });
+      }
+    }
+  },
+  /* A finished check, written to the record: state words only, never what a
+   * server said. A record the window refused to write answers `{ unsaved }`
+   * (t-76500 r4): the page shows the check, and says the next start will not
+   * — the file still holds the one before it. */
+  async keep(command, answer) {
+    if (!KEPT_CHECK_STATES.includes(answer.state)) return null;
+    try {
+      const memory = this.taken(await invoke(command, { answer }));
+      if (!memory) return null;
+      this.memory = memory;
+      return memory.connections?.[answer.id] ?? null;
+    } catch (error) {
+      return { unsaved: String(error?.message ?? error) };
+    }
+  },
+  /* A saved connection's state: its key out of reach, its last check, or
+   * 「설정이 바뀜」 when that check was made against another generation. */
+  connectionCheck(connection) {
+    if (connection.provider.requires_auth && !connection.keyAvailable) return { state: this.keyMissing(connection), check: null };
+    const check = this.checks.get(connection.id);
+    if (!check) return { state: "unknown", check: null };
+    if (check.generation != null && check.generation !== connection.generation) return { state: "changed", check: null };
+    return { state: check.state, check };
+  },
+  /* A check the record refused stays on the page marked as not kept, while
+   * it is still the check `standing` answers. */
+  unsaved(kept, standing) {
+    const check = kept?.unsaved ? standing() : null;
+    if (!check) return;
+    check.unsaved = true;
+    this.render();
+  },
+  /* Whether a connection is checked without a press: never checked, checked
+   * against another generation, or longer ago than the record's spacing —
+   * and never while it is being checked or its key is out of reach. */
+  dueQuietly(connection) {
+    if (!this.memory || (connection.provider.requires_auth && !connection.keyAvailable)) return false;
+    const check = this.checks.get(connection.id);
+    if (!check) return true;
+    if (check.state === "checking") return false;
+    if (check.generation != null && check.generation !== connection.generation) return true;
+    return check.checkedMs != null && this.nowMs() - check.checkedMs >= this.memory.everyMs;
+  },
+  /* After what called it has finished its own turn — a press that checks a
+   * connection itself marks it first. */
+  quietSoon() {
+    if (this.quietQueued || !this.memory) return;
+    this.quietQueued = true;
+    window.setTimeout(() => {
+      this.quietQueued = false;
+      void this.quietRecheck();
+    }, 0);
+  },
+  /* The due connections, one at a time, with the light check only — the
+   * model list, never a judgment request (ZO m-76513 ③). */
+  async quietRecheck() {
+    if (this.quieting) return;
+    this.quieting = true;
+    const asked = new Set();
+    try {
+      for (;;) {
+        const connection = (this.state?.connections ?? []).find((one) => !asked.has(one.id) && this.dueQuietly(one));
+        if (!connection) break;
+        asked.add(connection.id);
+        await this.checkConnection(connection, { quiet: true });
+      }
+    } finally {
+      this.quieting = false;
+    }
+  },
+  /* The window's start: after the first paint and an idle moment, the
+   * record is read and the due connections are checked (t-76500 B). */
+  async wake() {
+    await this.recall();
+    if (!this.memory) return;
+    if (!this.state) {
+      try {
+        this.hold(await invoke("model_connections"));
+      } catch {
+        return;
+      }
+    }
+    this.takeRecalled();
+    this.render();
+    await this.quietRecheck();
   },
 
   async sync() {
@@ -240,11 +407,55 @@ const modelConnectionsController = {
       return {
         provider,
         name: MODEL_LOGINS[provider]?.() ?? t("settings.models.login.other", "{{provider}} 로그인", { provider }),
-        state: answered.length ? "ok" : "nologin",
+        state: this.loginState(own, answered, models),
         report: answered[0] ?? own[0] ?? null,
         models: [...models.filter((row) => row.band !== "superseded"), ...models.filter((row) => row.band === "superseded")],
       };
     });
+  },
+  /* What a login's reports say, as zo divides them (ZO m-76593, m-76597): a
+   * report from another place than a zo pane reads its login is that place's
+   * (`credentialStore`; an older zo sends none); an answer is the list now;
+   * a source zo skipped for want of a credential is no login; any other
+   * failure kept last time's list, which is said as such — never 「로그인 안
+   * 됨」, which a failed read of a signed-in account is not (t-76598). */
+  loginState(own, answered, models) {
+    // The pane's label names where a zo pane reads its CLAUDE login, so only
+    // a Claude report is held to it; a report without a label is not judged.
+    const pane = this.zo?.paneCredentialStore;
+    const store = (report) => report.credentialStore ?? report.credential_store ?? null;
+    if (pane && own.some((report) => report.provider === "anthropic" && store(report) && store(report) !== pane)) return "elsewhere";
+    if (answered.length) return "ok";
+    if (!own.length) return models.length ? "unknown" : "nologin";
+    if (own.some((report) => report.diagnosis?.skipped === true)) return "nologin";
+    return models.length ? "stale" : "failed";
+  },
+  /* A login whose models zo would run: one it lists, unless it is not
+   * signed in. */
+  loginUsable(login) {
+    return login.models.length > 0 && login.state !== "nologin";
+  },
+  /* What a login's line says beyond its badge: how many models and when zo
+   * checked them, or why the list is not today's, in one line — the failure
+   * by the window's diagnosis, its status and kind, never the provider's
+   * answer (t-76873). */
+  loginWords(login) {
+    const age = modelReportAge(login.report?.age);
+    const failure = login.report?.diagnosis;
+    // zo's own fields say what failed (`failureKind`, `httpStatus`); an older
+    // zo names none, and then the line only says it failed (t-76968).
+    const kind = failure && typeof failure.kind === "string" ? (MODEL_FAILURE_KINDS[failure.kind] ?? MODEL_FAILURE_KINDS.unknown)() : "";
+    const detail = failure && Number.isInteger(failure.status) ? [`HTTP ${failure.status}`, kind].filter(Boolean).join(" · ") : kind;
+    if (login.state === "ok") {
+      return [t("settings.connections.modelCount", "모델 {{count}}개", { count: login.models.length }), age ? t("settings.models.zoChecked", "zo가 확인한 때: {{age}}", { age }) : ""].filter(Boolean).join(" · ");
+    }
+    if (login.state === "stale") {
+      return [age ? t("settings.models.staleWhen", "목록은 이전 확인 것({{age}})", { age }) : modelStateWords("stale").word,
+        detail ? t("settings.models.staleFailed", "지금 조회 실패: {{detail}}", { detail }) : t("settings.models.staleFailedPlain", "지금 조회 실패")].join(" · ");
+    }
+    if (login.state === "failed") return detail ? t("settings.models.staleFailed", "지금 조회 실패: {{detail}}", { detail }) : t("settings.models.staleFailedPlain", "지금 조회 실패");
+    if (login.state === "unknown") return t("settings.models.loginUnchecked", "zo가 아직 이 로그인을 확인하지 않았습니다.");
+    return modelStateWords(login.state).todo;
   },
   /* The routers zo reads — the settings' connections and any its own
    * environment adds — with the saved connection behind each, if any. */
@@ -291,8 +502,7 @@ const modelConnectionsController = {
     if (!row) return "unknown";
     if (row.login) return row.login.state;
     const connection = row.router?.row;
-    if (connection && connection.provider.requires_auth && !connection.keyAvailable) return this.keyMissing(connection);
-    return this.checks.get(connection?.id)?.state ?? "unknown";
+    return connection ? this.connectionCheck(connection).state : "unknown";
   },
   keyMissing(connection) {
     return connection.provider.auth_env && !connection.provider.auth_env.startsWith("ZEROCODE_ROUTER_") ? "unreadable" : "nokey";
@@ -303,11 +513,12 @@ const modelConnectionsController = {
   judgmentRows() {
     const rows = [];
     const snapshot = managedJudgmentController.snapshot;
+    const way = (words, protocol) => [words, judgmentWayWords(protocol)].filter(Boolean).join(" · ");
     for (const model of snapshot?.models?.filter((entry) => managedJudgmentController.held(entry)) ?? []) {
-      rows.push({ key: `managed:${model.id}`, kind: "managed", model, name: model.label, way: t("settings.models.wayManaged", "이 컴퓨터 · 앱이 관리") });
+      rows.push({ key: `managed:${model.id}`, kind: "managed", model, protocol: model.protocol, name: model.label, way: way(t("settings.models.wayManaged", "이 컴퓨터 · 앱이 관리"), model.protocol) });
     }
     if (typesafeState?.jevProvider) {
-      rows.push({ key: "jev", kind: "jev", name: "Jev", way: t("settings.models.wayJev", "Jev 서비스") });
+      rows.push({ key: "jev", kind: "jev", protocol: typesafeState.jevProvider.protocol, name: "Jev", way: way(t("settings.models.wayJev", "Jev 서비스"), typesafeState.jevProvider.protocol) });
     }
     for (const connection of this.state?.connections ?? []) {
       const local = this.location(connection.provider.base_url) === "local";
@@ -315,9 +526,9 @@ const modelConnectionsController = {
         const id = typeof model === "string" ? model : model.id;
         const reference = { id: connection.id, generation: connection.generation, model: id, protocol: this.judgmentFormat(connection) };
         rows.push({
-          key: JSON.stringify([connection.id, id]), kind: "connection", connection, reference, name: id,
-          way: local ? t("settings.models.wayLocal", "{{name}} · 이 컴퓨터", { name: connection.provider.name })
-            : t("settings.models.wayKey", "{{name}} · API 키", { name: connection.provider.name }),
+          key: JSON.stringify([connection.id, id]), kind: "connection", connection, reference, protocol: reference.protocol, name: id,
+          way: way(local ? t("settings.models.wayLocal", "{{name}} · 이 컴퓨터", { name: connection.provider.name })
+            : t("settings.models.wayKey", "{{name}} · API 키", { name: connection.provider.name }), reference.protocol),
         });
       }
     }
@@ -333,7 +544,7 @@ const modelConnectionsController = {
     if (connection.provider.requires_auth && !connection.keyAvailable) return { group: "off", state: this.keyMissing(connection) };
     const judged = this.judged.get(JSON.stringify(row.reference));
     if (judged && judged.state !== "usable") return { group: "off", state: judged.state };
-    if (this.checks.get(connection.id)?.state === "down") return { group: "off", state: "down" };
+    if (this.connectionCheck(connection).state === "down") return { group: "off", state: "down" };
     return { group: "check", state: judged?.state ?? "unknown" };
   },
   /* A connections answer, taken: judgment's format is kept by connection,
@@ -412,7 +623,7 @@ const modelConnectionsController = {
       const id = typeof model === "string" ? model : model?.id;
       return id ? { key: `${connection.provider.name}/${id}`, why: t("settings.models.recoKey", "이 연결에 들어 있는 첫 모델입니다.") } : null;
     }
-    for (const login of this.logins().filter((entry) => entry.state === "ok")) {
+    for (const login of this.logins().filter((entry) => this.loginUsable(entry))) {
       const top = login.models.find((model) => model.band === "top");
       if (top) return { key: top.id, why: t("settings.models.recoLogin", "로그인한 계정의 모델 중 zo 목록이 「최상위」로 표시한 모델입니다. 키도 요금 설정도 따로 필요 없습니다.") };
     }
@@ -431,7 +642,7 @@ const modelConnectionsController = {
 
   autoSetup() {
     if (this.setup || this.setupDismissed || !this.state || !this.zo) return;
-    const logins = this.logins().some((login) => login.state === "ok");
+    const logins = this.logins().some((login) => this.loginUsable(login));
     if (!logins && this.state.connections.length === 0) this.startSetup("start");
   },
   startSetup(title) {
@@ -461,7 +672,7 @@ const modelConnectionsController = {
     }
     if (setup !== this.setup) return;
     setup.checking = false;
-    setup.checked = this.logins().some((login) => login.state === "ok") ? "ok" : "fail";
+    setup.checked = this.logins().some((login) => this.loginUsable(login)) ? "ok" : "fail";
     setup.failure = setup.checked === "ok" ? null : "nologin";
     this.render();
   },
@@ -512,7 +723,12 @@ const modelConnectionsController = {
       if (setup !== this.setup) return;
       const connection = this.state?.connections.find((row) => row.provider.name === preset.name);
       setup.connectionId = connection?.id ?? null;
-      if (connection) this.checks.set(connection.id, { state: "ok", count: models.length });
+      if (connection) {
+        this.checks.set(connection.id, { state: "ok", count: models.length, generation: connection.generation, checkedMs: this.nowMs() });
+        const check = this.checks.get(connection.id);
+        void this.keep("remember_model_connection_check", { id: connection.id, generation: connection.generation, state: "ok", count: models.length, forgetJudgments: true })
+          .then((kept) => this.unsaved(kept, () => this.checks.get(connection.id) === check && check));
+      }
       setup.count = models.length;
       setup.checked = "ok";
     } catch (error) {
@@ -603,37 +819,65 @@ const modelConnectionsController = {
   async applyJudgment(key, hand, jevKey = null) {
     const row = this.judgmentRows().find((entry) => entry.key === key);
     if (!row) return { applied: false, key, state: "failed" };
+    // The pick as it stood when pressed, kept whole: what the settings must
+    // hold after, whatever the rows are redrawn to meanwhile.
+    const picked = this.judgmentPick(row);
     try {
       if (row.kind === "managed") {
         const applied = await managedJudgmentController.activate(row.model);
-        return applied ? { applied: true, key } : { applied: false, key, state: "failed", raw: managedJudgmentController.failure(managedJudgmentController.lastError) };
-      }
-      if (row.kind === "jev") {
-        const provider = judgmentProviderController.copy(typesafeState.jevProvider);
-        if (!provider.model) provider.model = typesafeState.model?.alias;
+        if (!applied) return { applied: false, key, state: "failed", raw: managedJudgmentController.failure(managedJudgmentController.lastError) };
+        picked.provider = managedJudgmentController.appliedProvider;
+      } else if (row.kind === "jev") {
+        const provider = picked.provider;
         const expectedProviderIdentity = typesafeState.providerIdentity;
         const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity, key: jevKey });
         if (!check.answered) return { applied: false, key, state: modelFailureState(check.failure) };
         await invoke("set_judgment_provider", { provider, expectedProviderIdentity, key: jevKey }, { hand });
       } else {
         this.hold(await invoke("select_model_connection", {
-          role: "judgment", reference: row.reference, expectedReference: this.state?.judgment ?? null,
+          role: "judgment", reference: picked.reference, expectedReference: this.state?.judgment ?? null,
           expectedProviderIdentity: this.state.activeProviderIdentity,
         }, { hand }));
       }
+      // Read back what was written, whatever wrote it: zo's settings and
+      // the connections.
       await refreshTypeSafe();
-      return { applied: true, key };
+      try {
+        this.hold(await invoke("model_connections"));
+      } catch {
+        // The difference below reads zo's settings alone then.
+      }
+      const differs = this.appliedDifference(picked);
+      if (differs === null) await this.rememberApplied();
+      return { applied: true, key, differs };
     } catch (error) {
       return { applied: false, key, state: modelFailureState(error), raw: this.failure(error) };
     }
   },
-  /* A saved connection's model list, read with its saved key. */
-  async checkConnection(connection) {
-    // Checking a connection again lets its models be asked for judgment again.
-    for (const reference of [...this.judged.keys()]) {
-      if (JSON.parse(reference)?.id === connection.id) this.judged.delete(reference);
+  /* Since when the judgment model counts: the window keeps the moment the
+   * provider its settings name now was applied (t-76598). A record that
+   * cannot be written leaves the dashboard without the line, nothing else. */
+  async rememberApplied() {
+    try {
+      const memory = this.taken(await invoke("remember_judgment_applied"));
+      if (!memory) return;
+      this.memory = memory;
+      jevApplied = memory.applied ?? jevApplied;
+    } catch {
+      // No line on the dashboard; the apply stands.
     }
-    this.checks.set(connection.id, { state: "checking" });
+  },
+  /* A saved connection's model list, read with its saved key: pressed, or
+   * quietly because its check is due. The answer is kept for the next start. */
+  async checkConnection(connection, { quiet = false } = {}) {
+    // Checking a connection again by hand lets its models be asked for
+    // judgment again; a quiet check keeps what they answered.
+    if (!quiet) {
+      for (const reference of [...this.judged.keys()]) {
+        if (JSON.parse(reference)?.id === connection.id) this.judged.delete(reference);
+      }
+    }
+    this.checks.set(connection.id, { state: "checking", generation: connection.generation });
     this.render();
     let answer;
     try {
@@ -647,8 +891,14 @@ const modelConnectionsController = {
       const raw = typeof error === "string" ? error : error?.message ?? String(error);
       answer = { state: connection.provider.requires_auth && !connection.keyAvailable ? this.keyMissing(connection) : modelFailureState(raw), raw };
     }
+    Object.assign(answer, { generation: connection.generation, checkedMs: this.nowMs() });
     this.checks.set(connection.id, answer);
     this.render();
+    const kept = await this.keep("remember_model_connection_check", {
+      id: connection.id, generation: connection.generation, state: answer.state, count: answer.count ?? null, forgetJudgments: !quiet,
+    });
+    if (kept?.checkedMs != null && this.checks.get(connection.id) === answer) answer.checkedMs = kept.checkedMs;
+    this.unsaved(kept, () => this.checks.get(connection.id) === answer && answer);
     return answer;
   },
   /* A judgment pick is checked the moment it is picked (대응표 19): the same
@@ -676,6 +926,11 @@ const modelConnectionsController = {
     }
     this.judged.set(reference, answer);
     this.renderDaily();
+    if (row.kind === "connection") {
+      const { id, generation, model, protocol } = row.reference;
+      const kept = await this.keep("remember_model_judgment_check", { id, generation, model, protocol, state: answer.state });
+      this.unsaved(kept, () => this.judged.get(reference) === answer && answer);
+    }
   },
 
   /* The 이 컴퓨터 row's buttons are the managed server's own commands; a
@@ -769,7 +1024,7 @@ const modelConnectionsController = {
         if (row.group !== last) {
           last = row.group;
           group(row.login ? row.group : row.router.local ? t("settings.models.wayLocal", "{{name}} · 이 컴퓨터", { name: row.group }) : t("settings.models.wayKey", "{{name}} · API 키", { name: row.group }));
-          if (row.login?.state === "nologin") field.append(modelNode("p", "model-pick-note", `${modelStateWords("nologin").word} — ${modelStateWords("nologin").todo}`));
+          if (row.login && row.login.state !== "ok") field.append(modelNode("p", "model-pick-note", `${modelStateWords(row.login.state).word} — ${this.loginWords(row.login)}`));
         }
         const state = row.old ? modelNode("span", "settings-badge model-old", t("settings.models.older", "이전 세대")) : row.login ? null : modelBadge(this.codingState(row));
         field.append(this.pickRow(role, row, { selected: selected === row.key, current: current === row.key, state }, onPick));
@@ -779,6 +1034,12 @@ const modelConnectionsController = {
     }
     const current = this.currentJudgmentKey();
     const rows = this.judgmentRows().map((row) => ({ row, standing: this.judgmentStanding(row) }));
+    // Jev's own guidance (docs.typesafe.ai, System One): a System One model
+    // answers with calibrated confidence, which the act lines are set
+    // against; a general model asked for JSON does not (t-76598).
+    const advice = modelNode("p", "settings-hint model-judgment-advice", t("settings.models.judgmentAdvice", "권장: System One 방식(이 컴퓨터 모델 · Jev 서비스). 판단마다 보정된 확률을 주어 자동 적용 기준이 제대로 섭니다."));
+    advice.dataset.judgmentAdvice = "";
+    field.append(advice);
     for (const [name, label] of [["usable", t("settings.models.groupUsable", "판단에 쓸 수 있음")], ["check", t("settings.models.groupCheck", "고르면 바로 확인합니다")], ["off", t("settings.models.groupOff", "지금은 쓸 수 없음")]]) {
       const members = rows.filter((entry) => entry.standing.group === name);
       if (!members.length) continue;
@@ -900,13 +1161,16 @@ const modelConnectionsController = {
     el("model-advanced-format-fold").hidden = !fields.length;
     list.replaceChildren(...fields);
   },
+  /* Where each choice is sent, in a beginner's words (t-76598): the
+   * connection by the name the person gave it, the way it is asked, and
+   * where its address is changed — no provider, endpoint or raw format. */
   routeWords() {
     const coding = this.state?.coding;
     const connection = coding && this.state.connections.find((row) => row.id === coding.id);
     const words = [t("settings.models.routeCoding", "코딩: {{model}}", { model: this.state?.codingModel ?? "—" })];
-    if (connection) words.push(t("settings.models.routeConnection", "연결 형식 {{protocol}} (OpenAI JSON) · provider {{provider}} · endpoint는 모델 연결의 「설정」에 있습니다.", { protocol: coding.protocol, provider: connection.provider.name }));
-    const provider = typesafeState?.provider;
-    if (provider) words.push(t("settings.models.routeJudgment", "판단: {{kind}} · {{protocol}} · {{model}}", { kind: provider.kind, protocol: provider.protocol, model: provider.model }));
+    if (connection) words.push(t("settings.models.routeConnection", "「{{name}}」 연결로 보냅니다. 주소와 키는 모델 연결의 「설정」에서 바꿉니다.", { name: connection.provider.name }));
+    const judged = judgmentProviderWords();
+    if (judged) words.push(t("settings.models.routeJudgment", "판단: {{model}}", { model: judged }));
     return words.join(" · ");
   },
   roleBody(role) {
@@ -941,6 +1205,11 @@ const modelConnectionsController = {
         const reason = this.managedReason(row.model);
         if (reason) copy.append(modelNode("span", "model-line-note", reason));
       }
+      if (provider?.protocol === "openai_json") {
+        const limit = modelNode("span", "model-line-note", t("settings.models.generalLimit", "일반 LLM은 보정된 확률이 없어 자동 적용으로 늦게 오르거나 오르지 않을 수 있습니다."));
+        limit.dataset.judgmentLimit = "current";
+        copy.append(limit);
+      }
       state = row ? this.judgmentStanding(row).state : provider ? "unknown" : "none";
     }
     const actions = modelNode("div", "model-line-actions");
@@ -959,6 +1228,7 @@ const modelConnectionsController = {
     if (said) {
       const note = modelNode("div", `settings-notice model-result${said.ok ? " is-ok" : ""}`);
       note.setAttribute("role", said.ok ? "status" : "alert");
+      if (said.differs) note.dataset.appliedDiffers = "";
       note.append(modelNode("strong", "", said.words));
       if (said.sub) note.append(modelNode("span", "model-result-sub", said.sub));
       nodes.push(note);
@@ -971,7 +1241,7 @@ const modelConnectionsController = {
       else this.renderDaily();
     }));
     if (this.draft) {
-      if (role === "judgment") nodes.push(this.judgmentVerdict(this.draft));
+      if (role === "judgment") nodes.push(this.judgmentVerdict(this.draft), ...this.judgmentCaveats(this.draft));
       if (role === "coding") {
         const row = this.codingRows().find((entry) => entry.key === this.draft);
         if (row?.router?.row && this.codingState(row) === "unknown") nodes.push(modelNode("p", "settings-hint", t("settings.models.checkFirst", "적용을 누르면 먼저 이 연결을 확인합니다(모델 목록 불러오기). 실패하면 지금 모델을 그대로 씁니다.")));
@@ -987,10 +1257,85 @@ const modelConnectionsController = {
     nodes.push(row);
     return nodes;
   },
+  /* What a judgment pick costs, said before it is applied (t-76598): a
+   * general model's answers carry no calibrated confidence, and any change
+   * of judgment model starts each feature's judging over. */
+  judgmentCaveats(key) {
+    const row = this.judgmentRows().find((entry) => entry.key === key);
+    if (!row || key === this.currentJudgmentKey()) return [];
+    const lines = [];
+    if (this.judgmentGeneral(row)) {
+      const limit = modelNode("p", "settings-hint model-judgment-limit", t("settings.models.generalLimit", "일반 LLM은 보정된 확률이 없어 자동 적용으로 늦게 오르거나 오르지 않을 수 있습니다."));
+      limit.dataset.judgmentLimit = "";
+      lines.push(limit);
+    }
+    const restart = modelNode("p", "settings-hint", t("settings.models.judgmentRestart", "판단 모델을 바꾸면 기능마다 판정이 처음부터 다시 쌓입니다."));
+    restart.dataset.judgmentRestart = "";
+    lines.push(restart);
+    return lines;
+  },
+  /* A row that would judge as a general model: asked for JSON rather than
+   * through System One. */
+  judgmentGeneral(row) {
+    return row?.protocol === "openai_json";
+  },
+  /* A judgment row's pick, copied whole when Apply is pressed: the kind,
+   * the managed model — and, once activated, the provider it applied — the
+   * Jev provider it writes, or the connection's full reference — its
+   * generation too. */
+  judgmentPick(row) {
+    if (row.kind === "managed") return { kind: "managed", model: row.model.id, provider: null };
+    if (row.kind === "jev") {
+      const provider = judgmentProviderController.copy(typesafeState.jevProvider);
+      if (!provider.model) provider.model = typesafeState.model?.alias;
+      return { kind: "jev", provider };
+    }
+    return { kind: "connection", reference: { ...row.reference } };
+  },
+  /* What the settings say after an apply, against the pick (t-76598 ③):
+   * read back from zo's settings and the connections, never assumed. `null`
+   * when they hold the pick — a connection's at the generation picked, so an
+   * address or key changed meanwhile under the same id is a difference; else
+   * the words of what they hold. A read that failed holds nothing. */
+  appliedDifference(picked) {
+    const provider = typesafeRefreshFailed ? null : typesafeState?.provider;
+    const unread = t("settings.models.appliedUnread", "설정을 다시 읽지 못했습니다");
+    if (!provider) return unread;
+    const same = (a, b) => Boolean(a) && Boolean(b) && ["id", "generation", "model", "protocol"].every((field) => a[field] === b[field]);
+    const held = (() => {
+      if (picked.kind === "jev") return provider.kind === "jev" && (!picked.provider.model || provider.model === picked.provider.model);
+      // The whole provider the activation applied — another local server or
+      // another protocol under the same model id is another provider — and
+      // no connection, which a managed server is never bound to.
+      if (picked.kind === "managed") return judgmentProviderController.sameProvider(provider, picked.provider) && !typesafeState.providerConnection;
+      const judgment = this.state?.judgment;
+      return provider.model === picked.reference.model && provider.protocol === picked.reference.protocol &&
+        same(typesafeState.providerConnection, picked.reference) && (!judgment || same(judgment, picked.reference));
+    })();
+    if (held) return null;
+    const words = judgmentProviderWords() || unread;
+    const connection = typesafeState.providerConnection;
+    // The same connection and model under another generation reads the same
+    // in words: say what moved.
+    if (picked.kind === "connection" && connection?.id === picked.reference.id && connection.model === picked.reference.model &&
+      connection.generation !== picked.reference.generation) {
+      return t("settings.models.appliedGeneration", "{{words}} (그 사이 연결의 주소나 키가 바뀜)", { words });
+    }
+    // The same model id read back from another server reads the same too.
+    if (picked.kind === "managed" && provider.model === picked.provider?.model) {
+      return t("settings.models.appliedServer", "{{words}} (같은 모델 이름이지만 다른 판단 서버)", { words });
+    }
+    return words;
+  },
   judgmentReady(key) {
     const row = this.judgmentRows().find((entry) => entry.key === key);
     if (!row) return false;
     return ["usable", "later"].includes(this.judged.get(JSON.stringify(row.reference ?? row.key))?.state);
+  },
+  unsavedNote() {
+    const line = modelNode("span", "model-result-sub", t("settings.models.unsaved", "이 확인 결과를 저장하지 못했습니다 — 창을 다시 켜면 이전 결과가 보입니다."));
+    line.dataset.checkUnsaved = "";
+    return line;
   },
   judgmentVerdict(key) {
     const row = this.judgmentRows().find((entry) => entry.key === key);
@@ -1006,6 +1351,7 @@ const modelConnectionsController = {
       note.classList.add("is-ok");
       note.setAttribute("role", "status");
       note.append(modelNode("strong", "", modelStateWords("usable").word), modelNode("span", "model-result-sub", t("settings.models.usableSub", "판단 확인을 통과했습니다. 적용을 누르면 다음 판단부터 이 모델을 씁니다.")));
+      if (judged.unsaved) note.append(this.unsavedNote());
       return note;
     }
     if (judged.state === "later") {
@@ -1018,6 +1364,7 @@ const modelConnectionsController = {
     note.setAttribute("role", "alert");
     note.append(modelNode("strong", "", t("settings.models.cannot", "쓸 수 없음 — {{reason}}", { reason: words.word })),
       modelNode("span", "model-result-sub", `${words.todo} ${t("settings.models.kept", "지금 판단 모델은 그대로 씁니다.")}`.trim()));
+    if (judged.unsaved) note.append(this.unsavedNote());
     return note;
   },
   async applyDaily(role) {
@@ -1034,12 +1381,18 @@ const modelConnectionsController = {
         this.picking = null;
         this.draft = null;
         const name = (role === "coding" ? this.codingRows() : this.judgmentRows()).find((entry) => entry.key === key)?.name ?? key;
-        this.said.set(role, {
+        if (result.differs) this.said.set(role, {
+          ok: false, differs: true,
+          words: t("settings.models.appliedDiffers", "적용을 눌렀지만 다시 읽은 판단 모델은 {{read}}입니다.", { read: result.differs }),
+          sub: t("settings.models.appliedDiffersSub", "고른 모델: {{model}}. 다른 창이나 zo가 설정을 바꿨을 수 있습니다. 새로 읽은 뒤 다시 적용하세요.", { model: name }),
+        });
+        else this.said.set(role, {
           ok: true,
           words: role === "coding"
             ? t("settings.models.appliedCoding", "적용했습니다. 새 zo 세션부터 {{model}}을(를) 씁니다.", { model: name })
             : t("settings.models.appliedJudgment", "적용했습니다. 다음 판단부터 {{model}}을(를) 씁니다.", { model: name }),
-          sub: role === "coding" ? t("settings.models.runningKept", "이미 열린 zo 세션은 지금 모델을 그대로 씁니다.") : this.syncWords(sync),
+          sub: role === "coding" ? t("settings.models.runningKept", "이미 열린 zo 세션은 지금 모델을 그대로 씁니다.")
+            : [t("settings.models.appliedRead", "다시 읽은 설정도 {{model}}입니다.", { model: judgmentProviderWords() }), this.syncWords(sync)].filter(Boolean).join(" "),
         });
       } else {
         const words = modelStateWords(result.state ?? "failed", { env: "" });
@@ -1107,7 +1460,7 @@ const modelConnectionsController = {
     if (setup.choice === "local") nodes.push(this.setupLocal());
     if (setup.choice === "jev") nodes.push(this.setupJev());
     if (setup.checked === "ok") nodes.push(this.setupReco());
-    if (setup.title === "add" || this.state?.connections.length || this.logins().some((login) => login.state === "ok")) {
+    if (setup.title === "add" || this.state?.connections.length || this.logins().some((login) => this.loginUsable(login))) {
       const close = this.button(t("settings.models.setupClose", "닫기"), () => this.closeSetup());
       close.dataset.modelSetupClose = "";
       const row = modelNode("div", "settings-action-row");
@@ -1134,10 +1487,7 @@ const modelConnectionsController = {
       line.dataset.modelLogin = login.provider;
       const copy = modelNode("div", "model-line-copy");
       copy.append(modelNode("strong", "model-line-name", login.name));
-      const age = modelReportAge(login.report?.age);
-      copy.append(modelNode("span", "model-line-way", login.state === "ok"
-        ? [t("settings.connections.modelCount", "모델 {{count}}개", { count: login.models.length }), age ? t("settings.models.zoChecked", "zo가 확인한 때: {{age}}", { age }) : ""].filter(Boolean).join(" · ")
-        : modelStateWords("nologin").todo));
+      copy.append(modelNode("span", "model-line-way", this.loginWords(login)));
       if (login.models.length) copy.append(this.namesFold(login.models.map((model) => model.displayName || model.id), login.provider));
       const actions = modelNode("div", "model-line-actions");
       actions.append(modelBadge(login.state), ...this.usePills((role) => role === "coding" && login.models.some((model) => model.id === this.codingKey(this.state?.codingModel))));
@@ -1414,7 +1764,8 @@ const modelConnectionsController = {
       const one = result[role];
       if (!one) continue;
       const label = role === "coding" ? t("settings.models.coding", "코딩 모델") : t("settings.judgment.title", "판단 모델");
-      if (one.applied) lines.push([true, t("settings.models.doneRole", "{{role}}: {{model}}", { role: label, model: name(role, one.key) })]);
+      if (one.applied && one.differs) lines.push([false, t("settings.models.appliedDiffers", "적용을 눌렀지만 다시 읽은 판단 모델은 {{read}}입니다.", { read: one.differs })]);
+      else if (one.applied) lines.push([true, t("settings.models.doneRole", "{{role}}: {{model}}", { role: label, model: name(role, one.key) })]);
       else lines.push([false, t("settings.models.doneRoleFailed", "{{role}}: 적용하지 않았습니다 — {{reason}}", { role: label, reason: modelStateWords(one.state ?? "failed").word })]);
     }
     const ok = lines.every(([applied]) => applied);
@@ -1468,15 +1819,27 @@ const modelConnectionsController = {
     for (const connection of this.state?.connections ?? []) {
       const isLocal = this.location(connection.provider.base_url) === "local";
       const models = (connection.provider.models ?? []).map((model) => (typeof model === "string" ? model : model.id));
-      const check = this.checks.get(connection.id);
       const missing = connection.provider.requires_auth && !connection.keyAvailable;
-      const state = missing ? this.keyMissing(connection) : check?.state ?? "unknown";
+      const { state, check } = this.connectionCheck(connection);
       const words = modelStateWords(state, { env: connection.provider.auth_env ?? "" });
       const extra = [];
-      if (words.todo && state !== "unknown") extra.push(modelNode("span", "model-line-note", words.todo));
-      else if (check?.state === "ok") extra.push(modelNode("span", "model-line-note", t("settings.models.connected", "연결됨 — 모델 {{count}}개", { count: check.count })));
+      // A check kept from an earlier start says how long ago it was made.
+      const ago = check?.recalled && check.checkedMs != null && this.memory ? modelCheckAge(this.nowMs() - check.checkedMs) : "";
+      if (words.todo && state !== "unknown") {
+        extra.push(modelNode("span", "model-line-note", words.todo));
+        if (ago) extra.push(modelNode("span", "model-line-note", t("settings.models.checkedAgo", "{{ago}} 확인", { ago })));
+      } else if (check?.state === "ok") {
+        extra.push(modelNode("span", "model-line-note", ago
+          ? t("settings.models.connectedAgo", "연결됨 · {{ago}} 확인 — 모델 {{count}}개", { ago, count: check.count ?? 0 })
+          : t("settings.models.connected", "연결됨 — 모델 {{count}}개", { count: check.count })));
+      }
       const judgedOff = [...this.judged.entries()].find(([reference, answer]) => JSON.parse(reference)?.id === connection.id && answer.state !== "usable" && answer.state !== "checking");
       if (judgedOff && !missing) extra.push(modelNode("span", "model-line-note", t("settings.models.judgedOff", "판단 확인: {{word}} — {{todo}}", { word: modelStateWords(judgedOff[1].state).word, todo: modelStateWords(judgedOff[1].state).todo })));
+      if (check?.unsaved || judgedOff?.[1].unsaved) {
+        const unsaved = modelNode("span", "model-line-note", t("settings.models.unsaved", "이 확인 결과를 저장하지 못했습니다 — 창을 다시 켜면 이전 결과가 보입니다."));
+        unsaved.dataset.checkUnsaved = connection.id;
+        extra.push(unsaved);
+      }
       const said = this.said.get(connection.id);
       if (said) extra.push(modelNode("span", "model-line-note", said.words));
       extra.push(this.namesFold(models, connection.id));
@@ -1586,6 +1949,11 @@ const modelConnectionsController = {
   },
 };
 
+requestAnimationFrame(() => window.setTimeout(() => {
+  const wake = () => void modelConnectionsController.wake();
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(wake, { timeout: QUIET_CHECK_AFTER_PAINT_MS });
+  else wake();
+}, QUIET_CHECK_AFTER_PAINT_MS));
 el("connections-decisions")?.addEventListener("click", () => openJevView());
 el("model-open-orchestration")?.addEventListener("click", () => showSettingsPane("orchestration"));
 for (const button of document.querySelectorAll("[data-connection-nav]")) button.addEventListener("click", () => modelConnectionsController.show(button.dataset.connectionNav));

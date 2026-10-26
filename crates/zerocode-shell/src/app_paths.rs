@@ -76,6 +76,9 @@ pub(crate) mod artifact_file {
     /// 판마다의 마지막 소식, 재시작 너머로 (P0-13) — Orca의
     /// `last-status.json`(agent-hooks/server.ts:180)과 같은 이름, 같은 임무.
     pub(crate) const LAST_STATUS: &str = "last-status.json";
+    /// The last check each saved model connection had, so a window start
+    /// says 「연결됨 · 3시간 전 확인」 instead of 「아직 확인 안 함」 (t-76500).
+    pub(crate) const MODEL_CONNECTION_CHECKS: &str = "model-connection-checks.json";
     pub(crate) const WEBVIEW_ERRORS: &str = "webview-errors.log";
     pub(crate) const SERVE_TOKEN_PREFIX: &str = zerocode_lane::SERVE_TOKEN_PREFIX;
     pub(crate) const CODEX_HOOK_BACKUP: &str = "hooks.json.pre-zerocode";
