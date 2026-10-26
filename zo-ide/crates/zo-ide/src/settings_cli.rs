@@ -124,14 +124,23 @@ fn lexical(path: &Path) -> PathBuf {
 }
 
 fn list(loader: &ConfigLoader) -> Answer {
+    // Where the person's own file cannot be told from a workspace's, an empty
+    // list would say there is nothing to move; say why instead.
+    if !runtime::can_tell_persons_own_settings_file() {
+        return Answer {
+            json: json!({
+                "literals": [],
+                "supported": false,
+                "why": "this system cannot tell your own settings file from a workspace's.",
+            }),
+            code: 0,
+        };
+    }
     let mut literals = Vec::new();
     for file in user_settings_files(loader) {
-        // A user settings file that is the workspace's own document under
-        // another name is not the person's to list or to move.
-        if !runtime::is_persons_own_settings_file(&file, loader.cwd()) {
-            continue;
-        }
-        match runtime::mcp_literal_secrets(&file) {
+        // Only the file opened and judged to be the person's own is read: a
+        // link, a file in the workspace or one with a second name lists none.
+        match runtime::persons_own_literal_secrets(&file, loader.cwd()) {
             Ok(found) => literals.extend(found.iter().map(|slot| {
                 json!({
                     "file": file.display().to_string(),
@@ -149,6 +158,18 @@ fn list(loader: &ConfigLoader) -> Answer {
 }
 
 fn check(name: &str, keys: &dyn ReferenceKeys) -> Answer {
+    // Where the person's own file cannot be told, nothing can be moved, so a
+    // check says that rather than which road would answer.
+    if !runtime::can_tell_persons_own_settings_file() {
+        return Answer {
+            json: json!({
+                "name": name,
+                "resolves": false,
+                "why": "this system cannot tell your own settings file from a workspace's.",
+            }),
+            code: 1,
+        };
+    }
     match runtime::resolve_reference_name(name, keys, true) {
         Ok((_, from)) => Answer {
             json: json!({ "name": name, "resolves": true, "from": from.token() }),
@@ -289,8 +310,9 @@ mod tests {
             let (request, _) = parse(&args).expect("parses");
             let answered = answer(&request, &self.loader(), keys);
             let printed = answered.json.to_string();
-            assert!(!printed.contains(LITERAL), "a value was printed: {printed}");
-            assert!(!printed.contains(ENV_VALUE), "a value was printed: {printed}");
+            // Said without the answer, which would carry the value.
+            assert!(!printed.contains(LITERAL), "a value was printed");
+            assert!(!printed.contains(ENV_VALUE), "a value was printed");
             answered
         }
     }
@@ -298,6 +320,7 @@ mod tests {
 
     const TOKEN_PATH: &str = r#"["mcpServers","github","env","GITHUB_PERSONAL_ACCESS_TOKEN"]"#;
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn secrets_lists_the_user_files_literal_slots_by_name_only() {
         let scratch = Scratch::new();
@@ -314,6 +337,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn check_says_which_road_answers_and_never_the_value() {
         let scratch = Scratch::new();
@@ -335,6 +359,7 @@ mod tests {
         assert!(absent.json["why"].as_str().is_some_and(|why| !why.is_empty()), "{}", absent.json);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn move_rewrites_the_user_file_once_the_name_resolves_to_the_same_value() {
         let scratch = Scratch::new();
@@ -394,9 +419,22 @@ mod tests {
         );
     }
 
+    /// Where the person's own file cannot be told from a workspace's, the
+    /// list says so instead of listing nothing.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn secrets_says_it_cannot_tell_the_persons_own_file_rather_than_listing_nothing() {
+        let scratch = Scratch::new();
+        let answered = scratch.run(&["secrets", "--json"], &Keys::default());
+        assert_eq!(answered.code, 0);
+        assert_eq!(answered.json["supported"], json!(false), "{}", answered.json);
+        assert_eq!(answered.json["literals"], json!([]), "{}", answered.json);
+        assert!(answered.json["why"].as_str().is_some_and(|why| !why.is_empty()), "{}", answered.json);
+    }
+
     /// The person's settings file is a link to the workspace's own
     /// `.zo/settings.json`: neither path is the person's to list or rewrite.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_user_settings_link_into_the_workspace_is_neither_listed_nor_moved() {
         let scratch = Scratch::new();

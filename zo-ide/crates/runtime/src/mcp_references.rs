@@ -366,6 +366,15 @@ mod tests {
         )
     }
 
+    /// The refusal `resolved` holds. A bootstrap that resolved after all is
+    /// not printed: it carries the values.
+    fn refused(resolved: Result<McpClientBootstrap, super::UnresolvedReference>, why: &str) -> super::UnresolvedReference {
+        match resolved {
+            Ok(_) => panic!("resolved: {why}"),
+            Err(unresolved) => unresolved,
+        }
+    }
+
     fn stdio_env(bootstrap: &McpClientBootstrap) -> (BTreeMap<String, String>, Vec<String>) {
         match &bootstrap.transport {
             McpClientTransport::Stdio(stdio) => (stdio.env.clone(), stdio.args.clone()),
@@ -394,12 +403,12 @@ mod tests {
 
         let resolved = resolve_launch_references(&bootstrap, &keys).expect("every reference resolves");
         let (env, args) = stdio_env(&resolved);
-        assert_eq!(env["A_TOKEN"], ENV_VALUE, "environment hit");
-        assert_eq!(env["B_TOKEN"], ENV_VALUE, "the environment wins over the keychain");
-        assert_eq!(env["C_TOKEN"], format!("Bearer {KEYCHAIN_VALUE}"), "keychain hit inside text");
-        assert_eq!(env["D_TOKEN"], "fallback-text", "the default when no road answers");
-        assert_eq!(env["E_TOKEN"], KEYCHAIN_VALUE, "a found value wins over the default");
-        assert_eq!(args, vec![format!("--token={ENV_VALUE}"), "plain".to_string()]);
+        assert!(env["A_TOKEN"] == ENV_VALUE, "environment hit");
+        assert!(env["B_TOKEN"] == ENV_VALUE, "the environment wins over the keychain");
+        assert!(env["C_TOKEN"] == format!("Bearer {KEYCHAIN_VALUE}"), "keychain hit inside text");
+        assert!(env["D_TOKEN"] == "fallback-text", "the default when no road answers");
+        assert!(env["E_TOKEN"] == KEYCHAIN_VALUE, "a found value wins over the default");
+        assert!(args == vec![format!("--token={ENV_VALUE}"), "plain".to_string()], "args resolve");
         // The settings keep the reference: the bootstrap a session holds, and
         // its signature, are untouched.
         let (kept, _) = stdio_env(&bootstrap);
@@ -430,7 +439,7 @@ mod tests {
         let McpClientTransport::Http(remote) = &resolved.transport else {
             panic!("expected http");
         };
-        assert_eq!(remote.headers["Authorization"], format!("Bearer {KEYCHAIN_VALUE}"));
+        assert!(remote.headers["Authorization"] == format!("Bearer {KEYCHAIN_VALUE}"), "the header resolves");
     }
 
     #[test]
@@ -441,10 +450,10 @@ mod tests {
             &[("A_FIRST", "${PRESENT}"), ("B_SECOND", "${MISSING_NAME}")],
             &[],
         );
-        let unresolved = resolve_launch_references(&bootstrap, &keys).expect_err("one is missing");
+        let unresolved = refused(resolve_launch_references(&bootstrap, &keys), "one is missing");
         assert_eq!(unresolved.to_string(), "unresolved reference ${MISSING_NAME}");
         let said = format!("{unresolved} {unresolved:?}");
-        assert!(!said.contains(ENV_VALUE), "no value in what is said: {said}");
+        assert!(!said.contains(ENV_VALUE), "no value in what is said");
     }
 
     #[test]
@@ -452,8 +461,10 @@ mod tests {
         for scope in [ConfigSource::Project, ConfigSource::Local] {
             let keys = Keys::default().with_keychain("REPO_WANTS_THIS", KEYCHAIN_VALUE);
             let bootstrap = stdio(scope, &[("TOKEN", "${REPO_WANTS_THIS}")], &[]);
-            let unresolved = resolve_launch_references(&bootstrap, &keys)
-                .expect_err("the keychain is not a road for a repository's server");
+            let unresolved = refused(
+                resolve_launch_references(&bootstrap, &keys),
+                "the keychain is not a road for a repository's server",
+            );
             assert_eq!(unresolved.to_string(), "unresolved reference ${REPO_WANTS_THIS}");
             assert!(keys.asked().is_empty(), "{scope:?}: keychain asked for {:?}", keys.asked());
 
@@ -468,8 +479,8 @@ mod tests {
             );
             let resolved = resolve_launch_references(&bootstrap, &keys).expect("env and default");
             let (env, _) = stdio_env(&resolved);
-            assert_eq!(env["A"], ENV_VALUE);
-            assert_eq!(env["B"], "plain");
+            assert!(env["A"] == ENV_VALUE, "{scope:?}: the environment applies");
+            assert!(env["B"] == "plain", "{scope:?}: the default applies");
             assert!(keys.asked().is_empty(), "{scope:?}: keychain asked for {:?}", keys.asked());
         }
     }
@@ -487,11 +498,12 @@ mod tests {
             "${HOME_LIKE:default}",
             "{{name}}",
         ] {
-            assert_eq!(resolve_references(text, &keys, true).as_deref(), Ok(text), "{text}");
+            assert!(resolve_references(text, &keys, true).as_deref() == Ok(text), "{text}");
         }
-        assert_eq!(
-            resolve_references("a ${ and ${HOME_LIKE} b", &keys, true).as_deref(),
-            Ok(format!("a ${{ and {ENV_VALUE} b").as_str())
+        assert!(
+            resolve_references("a ${ and ${HOME_LIKE} b", &keys, true).as_deref()
+                == Ok(format!("a ${{ and {ENV_VALUE} b").as_str()),
+            "a reference after a lone `${{` resolves"
         );
         assert_eq!(resolve_references("${EMPTY_DEFAULT:-}", &keys, true).as_deref(), Ok(""));
     }
@@ -501,17 +513,22 @@ mod tests {
         let keys = Keys::default()
             .with_env("ON_ENV", ENV_VALUE)
             .with_keychain("ON_KEYCHAIN", KEYCHAIN_VALUE);
-        assert_eq!(
-            resolve_reference_name("ON_ENV", &keys, true),
-            Ok((ENV_VALUE.to_string(), ReferenceSource::Environment))
+        assert!(
+            resolve_reference_name("ON_ENV", &keys, true)
+                == Ok((ENV_VALUE.to_string(), ReferenceSource::Environment)),
+            "the environment answers"
         );
-        assert_eq!(
-            resolve_reference_name("ON_KEYCHAIN", &keys, true),
-            Ok((KEYCHAIN_VALUE.to_string(), ReferenceSource::Keychain))
+        assert!(
+            resolve_reference_name("ON_KEYCHAIN", &keys, true)
+                == Ok((KEYCHAIN_VALUE.to_string(), ReferenceSource::Keychain)),
+            "the keychain answers"
         );
-        assert_eq!(resolve_reference_name("ON_KEYCHAIN", &keys, false), Err(ReferenceMiss::Absent));
-        assert_eq!(resolve_reference_name("NOWHERE", &keys, true), Err(ReferenceMiss::Absent));
-        assert_eq!(resolve_reference_name("not-a-name", &keys, true), Err(ReferenceMiss::NotAName));
+        assert!(
+            resolve_reference_name("ON_KEYCHAIN", &keys, false) == Err(ReferenceMiss::Absent),
+            "no keychain road, no keychain answer"
+        );
+        assert!(resolve_reference_name("NOWHERE", &keys, true) == Err(ReferenceMiss::Absent), "nowhere");
+        assert!(resolve_reference_name("not-a-name", &keys, true) == Err(ReferenceMiss::NotAName), "not a name");
         let unreadable = Keys {
             unreadable: true,
             ..Keys::default()
@@ -538,7 +555,7 @@ mod tests {
                 }),
             },
         );
-        let unresolved = resolve_launch_references(&bootstrap, &keys).expect_err("no grant, no keychain");
+        let unresolved = refused(resolve_launch_references(&bootstrap, &keys), "no grant, no keychain");
         assert_eq!(unresolved.to_string(), "unresolved reference ${PERSON_KEY}");
         assert!(keys.asked().is_empty(), "keychain asked for {:?}", keys.asked());
     }
@@ -565,7 +582,7 @@ mod tests {
 
     /// A workspace and a person's config home side by side, loaded the way a
     /// session loads them, the keychain a fake one.
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     mod loaded {
         use std::path::{Path, PathBuf};
 
@@ -619,6 +636,35 @@ mod tests {
                     .map(|_| ())
                     .map_err(|unresolved| unresolved.to_string())
             }
+        }
+
+        /// What launching the server named `name` asks of `keys`, loaded in
+        /// `workspace` with the config home at `config_home` and the person's
+        /// home folder at `home`; a server not loaded is not launched.
+        fn launch_beside(workspace: &Path, config_home: &Path, home: &Path, name: &str, keys: &Keys) -> Result<(), String> {
+            let config = ConfigLoader::new(workspace, config_home)
+                .with_person_home(home)
+                .load()
+                .expect("loads");
+            let Some(server) = config.mcp().get(name) else {
+                return Err("not loaded".to_string());
+            };
+            let bootstrap = McpClientBootstrap::from_scoped_config(name, server);
+            resolve_launch_references(&bootstrap, keys)
+                .map(|_| ())
+                .map_err(|unresolved| unresolved.to_string())
+        }
+
+        /// A person's home inside a canonical root, a repository in the home
+        /// whose project document asks for the person's key.
+        fn home_with_a_repository() -> (TempDir, PathBuf, PathBuf) {
+            let root = tempfile::tempdir().expect("root");
+            let base = root.path().canonicalize().expect("canonical root");
+            let home = base.join("home");
+            let repository = home.join("repository");
+            std::fs::create_dir_all(repository.join(".zo")).expect("repository .zo");
+            std::fs::write(repository.join(".zo").join("settings.json"), PROJECT_DOCUMENT).expect("project document");
+            (root, home, repository)
         }
 
         fn person_keys() -> Keys {
@@ -689,6 +735,80 @@ mod tests {
                 config.mcp().get("own-server").and_then(|server| server.keychain_grant.clone()),
                 Some(home.join("settings.json"))
             );
+        }
+
+        /// A session whose workspace holds the person's home — the home, or
+        /// `/` (here the root above the home) — reads the keychain for the
+        /// person's settings path itself and for nothing a link or a config
+        /// home puts in a repository there.
+        #[test]
+        fn a_workspace_holding_the_home_reads_the_keychain_only_for_the_persons_settings_path_itself() {
+            let (root, home, _) = home_with_a_repository();
+            let base = root.path().canonicalize().expect("canonical root");
+            std::fs::create_dir_all(home.join(".zo")).expect("home .zo");
+            std::fs::write(
+                home.join(".zo").join("settings.json"),
+                r#"{"mcpServers": {"own-server": {"command": "npx", "env": {"TOKEN": "${PERSON_KEY}"}}}}"#,
+            )
+            .expect("user document");
+            for workspace in [&home, &base] {
+                let keys = person_keys();
+                assert_eq!(launch_beside(workspace, &home.join(".zo"), &home, "own-server", &keys), Ok(()));
+                assert_eq!(keys.asked(), vec!["PERSON_KEY".to_string()], "{}", workspace.display());
+            }
+
+            // The settings file a link into the repository, the config home a
+            // link to the repository's `.zo`, the config home the repository's `.zo`.
+            let scenes: [fn(&Path, &Path) -> PathBuf; 3] = [
+                |home, repository| {
+                    std::fs::create_dir_all(home.join(".zo")).expect("home .zo");
+                    std::os::unix::fs::symlink(
+                        repository.join(".zo").join("settings.json"),
+                        home.join(".zo").join("settings.json"),
+                    )
+                    .expect("link the file");
+                    home.join(".zo")
+                },
+                |home, repository| {
+                    std::os::unix::fs::symlink(repository.join(".zo"), home.join(".zo")).expect("link the home");
+                    home.join(".zo")
+                },
+                |_, repository| repository.join(".zo"),
+            ];
+            for (at, scene) in scenes.iter().enumerate() {
+                let (root, home, repository) = home_with_a_repository();
+                let base = root.path().canonicalize().expect("canonical root");
+                let config_home = scene(&home, &repository);
+                for workspace in [&home, &base] {
+                    let keys = person_keys();
+                    assert_ne!(
+                        launch_beside(workspace, &config_home, &home, "repo-server", &keys),
+                        Ok(()),
+                        "scene {at} in {}",
+                        workspace.display()
+                    );
+                    assert!(keys.asked().is_empty(), "scene {at} in {}: keychain asked", workspace.display());
+                }
+            }
+        }
+
+        /// A user settings file that is a repository file under a name no
+        /// loader reads — a second name, a hard link — never reads the keychain.
+        #[test]
+        fn a_user_settings_file_with_a_second_name_in_the_repository_never_reads_the_keychain() {
+            let scene = Scene::new();
+            let dotfiles = scene.workspace.join("dotfiles");
+            std::fs::create_dir_all(&dotfiles).expect("dotfiles");
+            std::fs::write(dotfiles.join("zo-settings.json"), PROJECT_DOCUMENT).expect("repository file");
+            let home = scene.outside.join(".zo");
+            std::fs::create_dir_all(&home).expect("home");
+            std::fs::hard_link(dotfiles.join("zo-settings.json"), home.join("settings.json")).expect("hard link");
+            let keys = person_keys();
+            assert_eq!(
+                scene.launch(&home, "repo-server", &keys),
+                Err("unresolved reference ${PERSON_KEY}".to_string())
+            );
+            assert!(keys.asked().is_empty(), "keychain asked for {:?}", keys.asked());
         }
     }
 }

@@ -23,7 +23,7 @@ use core_types::paths::{write_private_file, ParentDirPolicy};
 use crate::json::JsonValue;
 use crate::mcp_references::ReferenceShape;
 
-use super::PersonsOwnSettingsFile;
+use super::{NotPersonsOwn, PersonsOwnSettingsFile};
 use super::parsers::{mcp_keys, mcp_server_context, parse_json_object_contents, parse_mcp_server_config};
 
 /// One `env` or `headers` slot of an MCP server that holds a credential as
@@ -75,12 +75,35 @@ pub fn slot_holds_literal_secret(name: &str, value: &str) -> bool {
 ///
 /// One sentence: the file could not be read, or is not a JSON object.
 pub fn mcp_literal_secrets(path: &Path) -> Result<Vec<McpLiteralSecret>, String> {
-    let contents = match std::fs::read_to_string(path) {
+    let contents = match std::fs::read(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(_) => return Err(format!("{} could not be read.", path.display())),
     };
-    let root = parse_json_object_contents(path, &contents)
+    literal_secrets_in(path, &contents)
+}
+
+/// The slots of the person's own settings file at `path` next to
+/// `workspace` that hold a credential written out, read through the file
+/// judged to be theirs ([`PersonsOwnSettingsFile`]). A file that is not
+/// theirs — absent, a link, the workspace's — holds none.
+///
+/// # Errors
+///
+/// One sentence: the file is not a JSON object, or this system cannot tell
+/// the person's own file ([`super::can_tell_persons_own_settings_file`]).
+pub fn persons_own_literal_secrets(path: &Path, workspace: &Path) -> Result<Vec<McpLiteralSecret>, String> {
+    match PersonsOwnSettingsFile::read(path, workspace) {
+        Ok((_, contents)) => literal_secrets_in(path, &contents),
+        Err(NotPersonsOwn::Unsupported) => Err(cannot_tell()),
+        Err(NotPersonsOwn::Unreadable | NotPersonsOwn::Link | NotPersonsOwn::Workspaces) => Ok(Vec::new()),
+    }
+}
+
+fn literal_secrets_in(path: &Path, contents: &[u8]) -> Result<Vec<McpLiteralSecret>, String> {
+    let contents =
+        std::str::from_utf8(contents).map_err(|_| format!("{} is not UTF-8 text.", path.display()))?;
+    let root = parse_json_object_contents(path, contents)
         .map_err(|_| format!("{} is not a JSON object.", path.display()))?;
     let Some(servers) = root.get(mcp_keys::SERVERS).and_then(JsonValue::as_object) else {
         return Ok(Vec::new());
@@ -114,9 +137,10 @@ pub fn mcp_literal_secrets(path: &Path) -> Result<Vec<McpLiteralSecret>, String>
 /// Rewrite the slot at `key_path` of the document at `path` to `${name}`, and
 /// answer where the document as it was is kept.
 ///
-/// `path` must be the person's own settings file next to `workspace`
-/// ([`super::is_persons_own_settings_file`]), and not itself a link: the file
-/// checked is the file read, and the file read is the file replaced.
+/// `path` must open to the person's own settings file next to `workspace`
+/// ([`PersonsOwnSettingsFile`]), and not be a link itself: the bytes compared
+/// are the bytes read through the file judged, and that file, unchanged, is
+/// the file replaced.
 /// `resolve` answers what `name` resolves to (or one sentence why it does not);
 /// it is asked after the document is read and before it is written. The
 /// rewrite happens only when that value is byte-equal to the slot's and the
@@ -172,11 +196,12 @@ fn move_with(
         Ok(_) => return Err("the settings file is not a regular file; nothing was written.".to_string()),
         Err(_) => return Err("the settings file could not be read.".to_string()),
     }
-    let checked = PersonsOwnSettingsFile::check(path, workspace).ok_or_else(|| {
-        "the settings file is in the workspace or is one of its project files; only your own is rewritten."
-            .to_string()
+    let (checked, before) = PersonsOwnSettingsFile::read(path, workspace).map_err(|why| match why {
+        NotPersonsOwn::Link => "the settings file is a link; edit it by hand where it points.".to_string(),
+        NotPersonsOwn::Workspaces => "the settings file is in the workspace, is one of its project files or has another name; only your own is rewritten.".to_string(),
+        NotPersonsOwn::Unsupported => format!("{} Nothing was written.", cannot_tell()),
+        NotPersonsOwn::Unreadable => "the settings file could not be read.".to_string(),
     })?;
-    let before = checked.read(path).ok_or_else(changed)?;
     let contents = String::from_utf8(before.clone())
         .map_err(|_| "the settings file is not UTF-8 text.".to_string())?;
     let mut root = parse_json_object_contents(path, &contents)
@@ -231,9 +256,7 @@ fn move_with(
         }
     };
     prepared();
-    let unchanged = checked.still_holds(path, workspace)
-        && std::fs::read(path).ok().as_deref() == Some(before.as_slice());
-    if !unchanged {
+    if !checked.still_holds(path, workspace, &before) {
         let _ = std::fs::remove_file(&temp);
         let _ = std::fs::remove_file(&backup);
         return Err(changed());
@@ -244,6 +267,10 @@ fn move_with(
         return Err("the settings file could not be replaced; it is as it was.".to_string());
     }
     Ok(backup)
+}
+
+fn cannot_tell() -> String {
+    "this system cannot tell your own settings file from a workspace's.".to_string()
 }
 
 fn changed() -> String {
@@ -335,7 +362,12 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{mcp_literal_secrets, move_mcp_literal_to_reference, move_with, McpLiteralSecret};
+    use super::{
+        mcp_literal_secrets, move_mcp_literal_to_reference, move_with, persons_own_literal_secrets,
+        McpLiteralSecret,
+    };
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    use crate::config::PersonsOwnSettingsFile;
 
     /// A value no real key has, so a leak is a string a test can look for.
     const LITERAL: &str = "fixture-literal-token-40cc0c0ffee0ddba11fee1dead00";
@@ -429,6 +461,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_move_rewrites_the_slot_atomically_keeps_an_owner_only_backup_and_the_rest_of_the_document() {
         let dir = tempfile::tempdir().expect("dir");
@@ -465,7 +498,7 @@ mod tests {
             "{}",
             backup.display()
         );
-        assert_eq!(std::fs::read_to_string(&backup).expect("backup"), DOCUMENT);
+        assert!(std::fs::read_to_string(&backup).expect("backup") == DOCUMENT, "the backup is the document as it was");
         #[cfg(unix)]
         {
             assert_eq!(mode(&path), 0o600);
@@ -481,6 +514,7 @@ mod tests {
         assert!(left.is_empty(), "no temporary file is left: {left:?}");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_move_refuses_a_mismatch_a_reference_a_changed_file_and_a_path_that_is_not_a_slot() {
         let dir = tempfile::tempdir().expect("dir");
@@ -524,7 +558,7 @@ mod tests {
         assert!(whys[4].contains("is not a reference name"), "{}", whys[4]);
         assert!(whys[5].contains("changed while it was being moved"), "{}", whys[5]);
         for why in &whys {
-            assert!(!why.contains(LITERAL), "no value in a refusal: {why}");
+            assert!(!why.contains(LITERAL), "no value in a refusal");
         }
         let still = std::fs::read_to_string(&path).expect("read");
         assert!(still.contains("github.changed") && still.contains(LITERAL), "nothing was written");
@@ -539,6 +573,7 @@ mod tests {
         assert_eq!(backups, 0, "a refused move keeps no backup");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_value_with_a_reference_in_it_is_not_listed_and_is_not_moved() {
         let dir = tempfile::tempdir().expect("dir");
@@ -572,10 +607,11 @@ mod tests {
         assert!(whys[0].contains("already holds a reference"), "{}", whys[0]);
         assert!(whys[1].contains("edit it by hand"), "{}", whys[1]);
         assert!(whys[2].contains("edit it by hand"), "{}", whys[2]);
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), DOCUMENT, "nothing was written");
+        assert!(std::fs::read_to_string(&path).expect("read") == DOCUMENT, "nothing was written");
         assert!(names_in(dir.path(), ".bak-").is_empty(), "a refused move keeps no backup");
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn an_edit_saved_once_the_backup_and_the_new_document_are_ready_is_kept() {
         let edited = DOCUMENT.replace("github.example", "github.edited-meanwhile");
@@ -604,13 +640,13 @@ mod tests {
             )
             .expect_err("refused");
             assert!(why.contains("changed while it was being moved"), "{in_place}: {why}");
-            assert_eq!(std::fs::read_to_string(&path).expect("read"), edited, "{in_place}: the edit is kept");
+            assert!(std::fs::read_to_string(&path).expect("read") == edited, "{in_place}: the edit is kept");
             assert!(names_in(dir.path(), ".bak-").is_empty(), "{in_place}: no backup is left");
             assert!(names_in(dir.path(), "zo-move").is_empty(), "{in_place}: no temporary file is left");
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn a_move_refuses_a_link_a_file_in_the_workspace_and_a_project_file_by_another_name() {
         let token = slot_path("github", "env", "GITHUB_PERSONAL_ACCESS_TOKEN");
@@ -641,35 +677,174 @@ mod tests {
         assert!(whys[0].contains("is a link"), "{}", whys[0]);
         assert!(whys[1].contains("only your own is rewritten"), "{}", whys[1]);
         assert!(whys[2].contains("only your own is rewritten"), "{}", whys[2]);
-        assert_eq!(std::fs::read_to_string(&project).expect("project"), DOCUMENT, "the project file is as it was");
+        assert!(std::fs::read_to_string(&project).expect("project") == DOCUMENT, "the project file is as it was");
         for dir in [workspace.path().join(".zo"), home.path().to_path_buf(), other_home.path().to_path_buf()] {
             assert!(names_in(&dir, ".bak-").is_empty(), "no backup in {}", dir.display());
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn a_workspace_that_holds_the_persons_home_is_no_repository() {
-        use crate::config::PersonsOwnSettingsFile;
+    /// A person's home inside `base`, with a repository in it whose
+    /// project document declares the servers the repository wants keys for.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    struct HomeScene {
+        _root: TempDir,
+        base: PathBuf,
+        home: PathBuf,
+        repository: PathBuf,
+    }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    impl HomeScene {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("root");
+            let base = root.path().canonicalize().expect("canonical root");
+            let home = base.join("home");
+            let repository = home.join("repository");
+            std::fs::create_dir_all(repository.join(".zo")).expect("repository .zo");
+            std::fs::create_dir_all(home.join(".zo")).expect("home .zo");
+            std::fs::write(repository.join(".zo").join("settings.json"), DOCUMENT).expect("project");
+            Self {
+                _root: root,
+                base,
+                home,
+                repository,
+            }
+        }
+
+        fn persons_settings(&self) -> PathBuf {
+            self.home.join(".zo").join("settings.json")
+        }
+
+        /// Whether `path` reads as the person's own next to `workspace`.
+        fn persons_own(&self, path: &Path, workspace: &Path) -> bool {
+            PersonsOwnSettingsFile::read_with(path, workspace, Some(&self.home), &|| {}).is_ok()
+        }
+    }
+
+    /// A workspace that holds the person's home (the home, `/`, or any
+    /// folder above it) leaves only the person's settings path itself as
+    /// theirs: not a link from it into a repository, not a config home
+    /// linked there, not a config home placed in one.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn in_a_workspace_holding_the_home_only_the_persons_settings_path_itself_is_theirs() {
+        let own = HomeScene::new();
+        std::fs::write(own.persons_settings(), DOCUMENT).expect("settings");
+        let workspaces = |scene: &HomeScene| vec![scene.home.clone(), scene.base.clone(), PathBuf::from("/")];
+        for workspace in workspaces(&own) {
+            assert!(own.persons_own(&own.persons_settings(), &workspace), "{}", workspace.display());
+        }
+
+        let linked_file = HomeScene::new();
+        std::os::unix::fs::symlink(
+            linked_file.repository.join(".zo").join("settings.json"),
+            linked_file.persons_settings(),
+        )
+        .expect("link the file");
+        let linked_home = HomeScene::new();
+        std::fs::remove_dir(linked_home.home.join(".zo")).expect("drop .zo");
+        std::os::unix::fs::symlink(linked_home.repository.join(".zo"), linked_home.home.join(".zo"))
+            .expect("link the config home");
+        let placed = HomeScene::new();
+        let placed_settings = placed.repository.join(".zo").join("settings.json");
+        for (scene, path) in [
+            (&linked_file, linked_file.persons_settings()),
+            (&linked_home, linked_home.persons_settings()),
+            (&placed, placed_settings),
+        ] {
+            for workspace in workspaces(scene) {
+                assert!(
+                    !scene.persons_own(&path, &workspace),
+                    "{} next to {}",
+                    path.display(),
+                    workspace.display()
+                );
+            }
+        }
+    }
+
+    /// The file read is the file judged: a link on the way that points the
+    /// path at the workspace's project document between the judging and the
+    /// reading, and back before the second judging, hands over nothing of it.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_link_that_changes_on_the_way_never_hands_over_another_files_bytes() {
         let root = tempfile::tempdir().expect("root");
         let base = root.path().canonicalize().expect("canonical root");
-        let home = base.join("home");
-        let file = home.join(".zo").join("settings.json");
-        std::fs::create_dir_all(file.parent().expect("parent")).expect(".zo");
-        std::fs::write(&file, DOCUMENT).expect("settings");
-        for workspace in [&home, &base] {
-            assert!(
-                PersonsOwnSettingsFile::check_beside(&file, workspace, Some(&home)).is_some(),
-                "{}",
-                workspace.display()
-            );
-        }
-        let elsewhere = base.join("elsewhere");
-        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
-        assert!(
-            PersonsOwnSettingsFile::check_beside(&file, &home, Some(&elsewhere)).is_none(),
-            "a workspace holding the file but not the home is the workspace's"
-        );
+        let workspace = base.join("workspace");
+        let project_folder = workspace.join(".zo");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&project_folder).expect("project folder");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let project_bytes = DOCUMENT.replace("github.example", "project.example");
+        std::fs::write(project_folder.join("settings.json"), &project_bytes).expect("project");
+        std::fs::write(outside.join("settings.json"), DOCUMENT).expect("person's file");
+        // The way runs through a link that stands in the workspace.
+        let way = workspace.join("way");
+        std::os::unix::fs::symlink(&outside, &way).expect("way");
+        let person = base.join("person");
+        std::fs::create_dir_all(&person).expect("person");
+        std::os::unix::fs::symlink(&way, person.join(".zo")).expect("config home");
+        let path = person.join(".zo").join("settings.json");
+
+        let turns = std::cell::Cell::new(0);
+        let read = PersonsOwnSettingsFile::read_with(&path, &workspace, None, &|| {
+            let to = if turns.get() == 0 { &project_folder } else { &outside };
+            turns.set(turns.get() + 1);
+            std::fs::remove_file(&way).expect("unlink the way");
+            std::os::unix::fs::symlink(to, &way).expect("relink the way");
+        });
+        assert_eq!(turns.get(), 2, "changed between the judging and the reading, and back");
+        let (file, bytes) = read.expect("the person's file is read");
+        assert!(bytes == DOCUMENT.as_bytes(), "the bytes read are the person's file's, not the project's");
+        assert_eq!(file.real, outside.join("settings.json"));
+    }
+
+    /// A user settings file that is also a file in the repository under a
+    /// name no loader reads is, by its second name, the repository's: it is
+    /// neither listed nor moved.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_settings_file_with_a_second_name_in_the_repository_is_neither_listed_nor_moved() {
+        let workspace = workspace();
+        let dotfiles = workspace.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).expect("dotfiles");
+        let repository_name = dotfiles.join("zo-settings.json");
+        std::fs::write(&repository_name, DOCUMENT).expect("repository file");
+        let home = tempfile::tempdir().expect("home");
+        let path = home.path().join("settings.json");
+        std::fs::hard_link(&repository_name, &path).expect("hard link");
+
+        assert_eq!(persons_own_literal_secrets(&path, workspace.path()).expect("list"), Vec::new());
+        let why = move_mcp_literal_to_reference(
+            &path,
+            workspace.path(),
+            &slot_path("github", "env", "GITHUB_PERSONAL_ACCESS_TOKEN"),
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            &|_| Ok(LITERAL.to_string()),
+        )
+        .expect_err("refused");
+        assert!(why.contains("only your own is rewritten"), "{why}");
+        assert!(std::fs::read_to_string(&repository_name).expect("read") == DOCUMENT, "the repository file is as it was");
+        assert!(names_in(home.path(), ".bak-").is_empty(), "a refused move keeps no backup");
+    }
+
+    /// Where the person's own file cannot be told, a move says so.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn a_move_says_this_system_cannot_tell_the_persons_own_file() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = settings(&dir);
+        let workspace = workspace();
+        let why = move_mcp_literal_to_reference(
+            &path,
+            workspace.path(),
+            &slot_path("github", "env", "GITHUB_PERSONAL_ACCESS_TOKEN"),
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            &|_| Ok(LITERAL.to_string()),
+        )
+        .expect_err("refused");
+        assert!(why.contains("cannot tell your own settings file"), "{why}");
+        assert!(std::fs::read_to_string(&path).expect("read") == DOCUMENT, "nothing was written");
     }
 }
