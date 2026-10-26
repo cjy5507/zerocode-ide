@@ -4573,8 +4573,36 @@ const TREELESS_CHECK_MS: u64 = 5_000;
 /// named no app, or a window with a tree.
 #[must_use]
 pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
-    let _ = (params, answer, TREELESS_CHECK_MS);
-    None
+    let app = params.get("app")?.as_str()?.trim();
+    let at_a_point = ["x", "y"].iter().all(|key| params.get(*key).is_some());
+    if app.is_empty() || !at_a_point {
+        return None;
+    }
+    if answer.pointer("/snapshot/elementCount")?.as_u64()? > 1 {
+        return None;
+    }
+    let check_ms = TREELESS_CHECK_MS.to_string();
+    let commands = json!([
+        ["click", "--app", app, "--ocr", "--text", "<words it shows>"],
+        ["type-text", "--app", app, "--text", "<text>"],
+        ["press-key", "--app", app, "--key", "Return"],
+        [
+            "wait-for",
+            "--app",
+            app,
+            "--ocr",
+            "--text",
+            "<words of the result>",
+            "--timeout-ms",
+            check_ms
+        ],
+    ]);
+    // One shell word: a quote in the app's name closes, escapes and reopens.
+    let quoted = commands.to_string().replace('\'', r"'\''");
+    Some(format!(
+        "this window shows no accessibility tree, so a point goes stale with its layout: press by the words it shows, click --app {} --ocr --text <words>, and send one screen as one batch whose last step is the check: batch --commands '{quoted}'",
+        Value::String(app.to_string())
+    ))
 }
 
 /// `click --app A --text T | --label L | --role R [--label L]`: the control by

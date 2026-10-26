@@ -6293,6 +6293,18 @@ pub(super) fn answer_computer_command_with(
                     }),
                 );
             }
+            // A point pressed on a window with no tree (a mirrored phone)
+            // says the road by words, in the same answer (t-76055).
+            if command.method == ComputerMethod::Click
+                && let Some(next) =
+                    zerocode_core::computer_use::treeless_click_next(&command.params, &result)
+                && let Some(answered) = result.as_object_mut()
+            {
+                answered.insert(
+                    zerocode_core::computer_use::CLICK_NEXT_KEY.into(),
+                    next.into(),
+                );
+            }
             let png = computer_use::export_screenshot(&mut result);
             if command.method == ComputerMethod::Screenshot
                 && let Some(png) = png
