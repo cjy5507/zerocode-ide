@@ -6,7 +6,7 @@
 //! making the registry branch on local versus remote execution.
 
 use zerocode_core::host::HostError;
-use zerocode_pty::{PtyError, PtyLane, Pumped, Terminal};
+use zerocode_pty::{GroupPrograms, PtyError, PtyLane, Pumped, Terminal};
 
 /// A safe, transport-neutral failure at the live terminal boundary.
 #[derive(Debug, thiserror::Error)]
@@ -99,11 +99,12 @@ pub trait PtyTransport: Send {
     }
 
     /// The names of the foreground group's other processes, one list per
-    /// process — what a launcher leading the group runs below it. Used only
-    /// to tell whose program holds the terminal; a transport that cannot
-    /// prove process identity returns none.
-    fn foreground_group_programs(&self) -> Vec<Vec<String>> {
-        Vec::new()
+    /// process — what a launcher leading the group runs below it — and
+    /// whether they are all of them. Used only to tell whose program holds
+    /// the terminal; a transport that cannot prove process identity has
+    /// read none ([`GroupPrograms::Unread`]).
+    fn foreground_group_programs(&self) -> GroupPrograms {
+        GroupPrograms::Unread
     }
 
     /// Whether the terminal echoes typed bytes right now. `None` is "cannot
@@ -201,7 +202,7 @@ impl PtyTransport for PtyHandle {
         self.transport.foreground_programs()
     }
 
-    fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+    fn foreground_group_programs(&self) -> GroupPrograms {
         self.transport.foreground_group_programs()
     }
 
@@ -275,7 +276,7 @@ impl PtyTransport for PtyLane {
         PtyLane::foreground_programs(self)
     }
 
-    fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+    fn foreground_group_programs(&self) -> GroupPrograms {
         PtyLane::foreground_group_programs(self)
     }
 

@@ -42,7 +42,7 @@ pub use input::{
     encode_typed, sanitize_paste,
 };
 pub use lane::{
-    DECLARED_TERMINAL, INHERITED_SESSION_MARKERS, INHERITED_TERMINAL_IDENTITY,
+    DECLARED_TERMINAL, GroupPrograms, INHERITED_SESSION_MARKERS, INHERITED_TERMINAL_IDENTITY,
     PTY_OUTPUT_BYTE_BUDGET, PtyError, PtyLane, Pumped,
 };
 pub use readers::{

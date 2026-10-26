@@ -654,11 +654,12 @@ pub(super) fn stage_layouts_file(config_root: &Path) -> PathBuf {
 /// lose: on 2026-10-26 the saved set had no line for run-4275's claude, and
 /// the next window brought back the zo beside it alone. Never a pane seated
 /// under another pane's team — a ledger worker comes back on the ledger's
-/// road and a teammate is its leader's. `in_front` says the pane's agent
-/// still holds its terminal ([`exit_agent_in_front`]).
+/// road and a teammate is its leader's. `in_front` says whether the pane's
+/// agent still holds its terminal, `None` when it cannot tell
+/// ([`exit_agent_in_front`]).
 fn live_unheld_panes(
     state: &AppState,
-    in_front: &dyn Fn(TermId) -> bool,
+    in_front: &dyn Fn(TermId) -> Option<bool>,
 ) -> Vec<(pane_layout::LivePane, Option<String>)> {
     // Without the teammates a teammate would be filed as a tab of its own, so
     // a team table held past the patience files nothing this time (t-51380).
@@ -694,17 +695,19 @@ pub(super) type SeatOf<'a> = &'a dyn Fn(&str, &str, &str) -> Option<String>;
 /// a pane's agent holds its terminal now. A pane whose agent was quit back
 /// to its shell keeps both records yet holds nothing (t-76489): it is no
 /// pane to write down, and a coordinator it once was is now another pane's.
+/// A pane `in_front` cannot tell of (`None`) is written down as it ran
+/// (t-76489 r5): not knowing is not knowing it holds nothing.
 pub(super) fn unheld_panes(
     agents: HashMap<TermId, &'static str>,
     sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
     statuses: &HashMap<String, crate::last_status::LastStatus>,
     seated: &std::collections::HashSet<u32>,
     coordinators: Option<SeatOf<'_>>,
-    in_front: &dyn Fn(TermId) -> bool,
+    in_front: &dyn Fn(TermId) -> Option<bool>,
 ) -> Vec<(pane_layout::LivePane, Option<String>)> {
     let mut live: Vec<_> = agents
         .into_iter()
-        .filter(|(term, _)| !seated.contains(term) && in_front(*term))
+        .filter(|(term, _)| !seated.contains(term) && in_front(*term) != Some(false))
         .filter_map(|(term, agent)| {
             let session = sessions.get(&term)?;
             let key = match session.key {
@@ -737,12 +740,12 @@ pub(super) fn unheld_panes(
 }
 
 /// Whether `term`'s agent holds its terminal as the window goes (t-76489),
-/// each pane's lock waited for at most [`EXIT_LOCK_PATIENCE`]. A pane the
-/// window knows no agent of holds nothing.
-fn exit_agent_in_front(state: &AppState, term: TermId) -> bool {
+/// each pane's lock waited for at most [`EXIT_LOCK_PATIENCE`] — `None` when
+/// it cannot tell. A pane the window knows no agent of holds nothing.
+fn exit_agent_in_front(state: &AppState, term: TermId) -> Option<bool> {
     let shell_pane = { state.shell_panes().contains(&term) };
     let Some(agent) = ({ state.agent_terms().get(&term).copied() }) else {
-        return false;
+        return Some(false);
     };
     crate::agent_tools_runtime::agent_in_front_within(
         state.terminals(),
@@ -922,7 +925,7 @@ pub(crate) enum Written {
 pub(super) fn exit_write(
     file: &Path,
     live: Vec<pane_layout::LivePane>,
-    holds: &dyn Fn(&pane_layout::WakeAgent, u32) -> bool,
+    holds: &dyn Fn(&pane_layout::WakeAgent, u32) -> Option<bool>,
     standing: &dyn Fn(u32) -> bool,
     screen: &dyn Fn(u32) -> Option<String>,
     wanted: &dyn Fn() -> bool,

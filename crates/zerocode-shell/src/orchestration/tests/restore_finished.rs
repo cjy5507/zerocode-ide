@@ -826,8 +826,10 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
         (16, ("zo", zo.to_string())),
     ]);
     let holds = |wake: &crate::pane_layout::WakeAgent, term: u32| {
-        live.get(&term)
-            .is_some_and(|(agent, id)| *agent == wake.agent && *id == wake.id)
+        Some(
+            live.get(&term)
+                .is_some_and(|(agent, id)| *agent == wake.agent && *id == wake.id),
+        )
     };
     let screens = |term: u32| {
         live.contains_key(&term)

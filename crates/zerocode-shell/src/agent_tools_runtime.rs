@@ -744,20 +744,24 @@ pub(super) fn shell_in_front_of(state: &AppState, term: TermId) -> bool {
 /// there — yet holds nothing, and another pane may have reopened the same
 /// conversation since. `shell_pane` is whether the pty's child is the shell
 /// itself; `patience` bounds the wait for the pane's lock — `None` waits as
-/// [`shell_in_front_of`] does — and a pane busy past it is standing with
-/// what it ran, as the exit's capture reads it.
+/// [`shell_in_front_of`] does.
+///
+/// `None` is "cannot tell" (t-76489 r5): a pane busy past the patience, a
+/// terminal that will not say, or a group not read whole. Not knowing is
+/// not knowing it holds nothing — the exit keeps such a pane standing with
+/// what it ran, and no conversation is taken off a record on its word.
 pub(crate) fn agent_in_front_within(
     terminals: &TerminalRegistry,
     shell_pane: bool,
     term: TermId,
     agent: &str,
     patience: Option<Duration>,
-) -> bool {
+) -> Option<bool> {
     let Some(held) = terminals.handle(term) else {
-        return false;
+        return Some(false);
     };
     if !shell_pane {
-        return true;
+        return Some(true);
     }
     let ask = |pty: &zerocode_lane::PtyHandle| {
         front_is_agent(
@@ -769,7 +773,7 @@ pub(crate) fn agent_in_front_within(
     };
     match patience {
         Some(patience) => {
-            terminal_registry::lock_pty_within(&held, patience).is_none_or(|pty| ask(&pty))
+            terminal_registry::lock_pty_within(&held, patience).and_then(|pty| ask(&pty))
         }
         None => ask(&lock_pty(&held)),
     }
@@ -788,33 +792,48 @@ pub(crate) fn agent_in_front_within(
 /// as `sh` while the agent runs below it (t-76489 r4). So `members`, the
 /// names of the group's other processes, are read then, and the pane is
 /// standing with `agent` when one of them is it. A leader that names
-/// another agent holds the terminal for that one. A terminal that will not
-/// say, or names nothing it can read, has no opinion and is standing with
-/// its agent.
+/// another agent holds the terminal for that one.
+///
+/// `None` is "cannot tell" (t-76489 r5): a terminal that will not say, or
+/// names nothing it can read, and a group whose members were not all read
+/// — listed in part or not at all, a member that would not say who it is,
+/// one past the bound — when none of those read is `agent`. The one not
+/// read may be it, so no agent among the rest is no answer.
 pub(crate) fn front_is_agent(
     child_in_front: Option<bool>,
     programs: impl FnOnce() -> Vec<String>,
-    members: impl FnOnce() -> Vec<Vec<String>>,
+    members: impl FnOnce() -> zerocode_pty::GroupPrograms,
     agent: &str,
-) -> bool {
+) -> Option<bool> {
     let named = |names: &[String]| {
         names
             .iter()
             .find_map(|program| zerocode_core::agent::agent_spec_by_process(program))
     };
     match child_in_front {
-        Some(true) => false,
-        None => true,
+        Some(true) => Some(false),
+        None => None,
         Some(false) => {
             let programs = programs();
             if let Some(spec) = named(&programs) {
-                return spec.id == agent;
+                return Some(spec.id == agent);
             }
             let members = members();
-            members
+            if members
+                .named()
                 .iter()
                 .any(|names| named(names).is_some_and(|spec| spec.id == agent))
-                || (programs.is_empty() && members.iter().all(Vec::is_empty))
+            {
+                return Some(true);
+            }
+            match members {
+                zerocode_pty::GroupPrograms::Whole(named)
+                    if !programs.is_empty() || named.iter().any(|names| !names.is_empty()) =>
+                {
+                    Some(false)
+                }
+                _ => None,
+            }
         }
     }
 }

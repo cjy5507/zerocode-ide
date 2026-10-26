@@ -28989,7 +28989,7 @@ mod exit_capture {
     };
     use std::sync::mpsc::channel;
     use zerocode_lane::{PtyHandle, PtyTransport, PtyTransportError};
-    use zerocode_pty::{Pumped, Terminal};
+    use zerocode_pty::{GroupPrograms, Pumped, Terminal};
 
     /// How long a test gives the way out before calling it stuck: spent only
     /// on failure, and long enough for a loaded machine.
@@ -29188,8 +29188,9 @@ mod exit_capture {
     /// A terminal whose foreground is the shell itself (`Some(true)`), a
     /// program started in it (`Some(false)`), or unknown (`None`) — the
     /// names that program goes by, empty when the terminal will not say,
-    /// and the names of the other processes in its group, one list each.
-    struct Front(Terminal, Option<bool>, Vec<String>, Vec<Vec<String>>);
+    /// and what it says of the other processes in its group: their names,
+    /// one list each, and whether that is all of them.
+    struct Front(Terminal, Option<bool>, Vec<String>, GroupPrograms);
 
     impl PtyTransport for Front {
         fn pump(&mut self) -> Pumped {
@@ -29233,7 +29234,7 @@ mod exit_capture {
             self.2.clone()
         }
 
-        fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+        fn foreground_group_programs(&self) -> GroupPrograms {
             self.3.clone()
         }
     }
@@ -29252,7 +29253,12 @@ mod exit_capture {
         let front = |registry: &TerminalRegistry, term: TermId, shell: Option<bool>| {
             registry.insert(
                 term,
-                PtyHandle::new(Front(Terminal::new(4, 20), shell, Vec::new(), Vec::new())),
+                PtyHandle::new(Front(
+                    Terminal::new(4, 20),
+                    shell,
+                    Vec::new(),
+                    GroupPrograms::Whole(Vec::new()),
+                )),
             );
         };
         front(&registry, 3, Some(true));
@@ -29269,13 +29275,16 @@ mod exit_capture {
                 Some(Duration::from_millis(50)),
             )
         };
+        // Pane 8's front names nothing and pane 11's will not say: neither
+        // can tell (t-76489 r5), and the exit files them as they ran.
         assert_eq!(
             [3, 4, 8, 11, 12].map(in_front),
-            [false, false, true, true, false],
-            "a shell in front holds nothing, an agent or an unknown front holds its terminal, a gone one nothing"
+            [Some(false), Some(false), None, None, Some(false)],
+            "a shell in front holds nothing, a front that cannot be told is unknown, a gone one nothing"
         );
-        assert!(
+        assert_eq!(
             crate::agent_tools_runtime::agent_in_front_within(&registry, false, 3, "claude", None),
+            Some(true),
             "a pane whose child is the agent itself holds its terminal while it stands"
         );
 
@@ -29313,7 +29322,7 @@ mod exit_capture {
             &HashMap::new(),
             &std::collections::HashSet::new(),
             Some(&seats),
-            &|term| registry.handle(term).is_some(),
+            &|term| Some(registry.handle(term).is_some()),
         );
         assert_eq!(before.len(), 3);
     }
@@ -29334,7 +29343,12 @@ mod exit_capture {
         let front = |term: TermId, child: Option<bool>, programs: Vec<String>| {
             registry.insert(
                 term,
-                PtyHandle::new(Front(Terminal::new(4, 20), child, programs, Vec::new())),
+                PtyHandle::new(Front(
+                    Terminal::new(4, 20),
+                    child,
+                    programs,
+                    GroupPrograms::Whole(Vec::new()),
+                )),
             );
         };
         front(3, Some(false), names(&["vim"]));
@@ -29353,7 +29367,7 @@ mod exit_capture {
         };
         assert_eq!(
             [(3, "claude"), (8, "claude"), (8, "zo"), (11, "claude")].map(|(t, a)| asked(t, a)),
-            [false, true, false, true],
+            [Some(false), Some(true), Some(false), None],
             "a command in front holds nothing, the agent itself holds it, another agent's \
              name does not, and a front that names nothing has no opinion"
         );
@@ -29399,7 +29413,11 @@ mod exit_capture {
         };
         let agents = HashMap::from([(3, "claude"), (8, "claude")]);
         let sessions = HashMap::from([(3, session.clone()), (8, session)]);
-        let in_front = |term: TermId| agents.get(&term).is_some_and(|agent| asked(term, agent));
+        let in_front = |term: TermId| {
+            agents
+                .get(&term)
+                .map_or(Some(false), |agent| asked(term, agent))
+        };
         let seats = |agent: &str, _: &str, id: &str| {
             (agent == "claude" && id == ENDED).then(|| "run-4275".to_string())
         };
@@ -29494,7 +29512,7 @@ mod exit_capture {
         let exited = exit_write(
             &file,
             vec![pane.clone()],
-            &|_, _| false,
+            &|_, _| Some(false),
             &|term| term == 9,
             &|term| (term == 9).then(|| "screen".to_string()),
             &|| true,
@@ -29536,7 +29554,12 @@ mod exit_capture {
         let front = |term: TermId, programs: Vec<String>, members: Vec<Vec<String>>| {
             registry.insert(
                 term,
-                PtyHandle::new(Front(Terminal::new(4, 20), Some(false), programs, members)),
+                PtyHandle::new(Front(
+                    Terminal::new(4, 20),
+                    Some(false),
+                    programs,
+                    GroupPrograms::Whole(members),
+                )),
             );
         };
         let launcher = || names(&["sh", "launch-session", "bin"]);
@@ -29576,7 +29599,7 @@ mod exit_capture {
                 (14, "codex"),
             ]
             .map(|(t, a)| asked(t, a)),
-            [false, true, false, false, true, false, false, true],
+            [false, true, false, false, true, false, false, true].map(Some),
             "a build holds nothing, claude under a launcher holds its pane, a launcher of \
              another agent or of none does not, and a leader that is an agent answers for it"
         );
@@ -29622,7 +29645,11 @@ mod exit_capture {
         };
         let agents = HashMap::from([(3, "claude"), (8, "claude")]);
         let sessions = HashMap::from([(3, session.clone()), (8, session)]);
-        let in_front = |term: TermId| agents.get(&term).is_some_and(|agent| asked(term, agent));
+        let in_front = |term: TermId| {
+            agents
+                .get(&term)
+                .map_or(Some(false), |agent| asked(term, agent))
+        };
         let seats = |agent: &str, _: &str, id: &str| {
             (agent == "claude" && id == ENDED).then(|| "run-4275".to_string())
         };
@@ -29664,9 +29691,218 @@ mod exit_capture {
         assert_eq!(set[1].agents[&0].id, ENDED, "B lost its conversation");
         assert_eq!(set[1].running[&0], "claude", "B lost its program");
         assert_eq!(set[1].id, Some(2), "B lost its place");
-        assert_eq!(set[1].buffers[&0], "screen of 8", "B's screen was not its own");
+        assert_eq!(
+            set[1].buffers[&0], "screen of 8",
+            "B's screen was not its own"
+        );
         assert!(set[1].focused && set[1].awake);
         assert_eq!(pane_layout::standing_worktrees(&stored), vec![main.clone()]);
+    }
+
+    /// t-76489 r5 ①, the codex review's first finding of r4: the scene of
+    /// r4 ① — A (term 3) runs a build after it ended conversation C, and B
+    /// (term 8) runs C under a launcher leading its group as `sh` — when
+    /// B's group is not read whole: it could not be listed, a member would
+    /// not say its names or who it is (a pid another group's claude took
+    /// while it was read is one: the lane leaves it out), or claude came
+    /// past the bound. B cannot tell, which is not "holds nothing": the exit
+    /// files B as the run's coordinator, and neither the exit nor the save
+    /// takes C off B's leaf. A is known to run a build, yet with B unknown
+    /// nobody here can say which pane wakes C, so both leaves keep it. A
+    /// group read in part that names claude still answers for it. Before, a
+    /// group not read whole was a group with no claude: the exit filed
+    /// nobody, and A, first by order, took C off B's leaf.
+    #[test]
+    fn a_launcher_whose_group_is_not_read_whole_keeps_its_conversation() {
+        let names =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|name| name.to_string()).collect() };
+        let launcher = || names(&["sh", "launch-session", "bin"]);
+        let claude = || names(&["2.1.232", "versions", "claude"]);
+        let session = zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: ENDED.to_string(),
+            transcript_path: None,
+        };
+        let agents = HashMap::from([(3, "claude"), (8, "claude")]);
+        let sessions = HashMap::from([(3, session.clone()), (8, session)]);
+        let seats = |agent: &str, _: &str, id: &str| {
+            (agent == "claude" && id == ENDED).then(|| "run-4275".to_string())
+        };
+        let wake = pane_layout::WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: ENDED.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        };
+        let leaf = |id: u64, term: u32, focused: bool| pane_layout::TabLayout {
+            id: Some(id),
+            root: pane_layout::PaneNode::Leaf,
+            titles: HashMap::new(),
+            names: HashMap::new(),
+            agents: HashMap::from([(0, wake.clone())]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            active: 0,
+            expanded: None,
+            pinned: false,
+            focused,
+            terms: HashMap::from([(0, term)]),
+            buffers: HashMap::new(),
+            owed: Vec::new(),
+            awake: false,
+        };
+        for (members, scene) in [
+            (GroupPrograms::Unread, "a group that could not be listed"),
+            (
+                GroupPrograms::Partial(vec![names(&["node"])]),
+                "a member that would not say, or whose pid another group's claude took",
+            ),
+            (
+                GroupPrograms::Partial(vec![names(&["cc"]); 32]),
+                "claude past the bound",
+            ),
+        ] {
+            let registry = TerminalRegistry::default();
+            registry.insert(
+                3,
+                PtyHandle::new(Front(
+                    Terminal::new(4, 20),
+                    Some(false),
+                    names(&["make"]),
+                    GroupPrograms::Whole(vec![names(&["cc"])]),
+                )),
+            );
+            registry.insert(
+                8,
+                PtyHandle::new(Front(
+                    Terminal::new(4, 20),
+                    Some(false),
+                    launcher(),
+                    members,
+                )),
+            );
+            let shell_panes = std::collections::HashSet::from([3, 8]);
+            let asked = |term: TermId, agent: &str| {
+                crate::agent_tools_runtime::agent_in_front_within(
+                    &registry,
+                    shell_panes.contains(&term),
+                    term,
+                    agent,
+                    Some(Duration::from_millis(50)),
+                )
+            };
+            assert_eq!(
+                [asked(3, "claude"), asked(8, "claude")],
+                [Some(false), None],
+                "{scene}: a build holds nothing, and a launcher not read whole cannot tell"
+            );
+            let in_front = |term: TermId| {
+                agents
+                    .get(&term)
+                    .map_or(Some(false), |agent| asked(term, agent))
+            };
+            let holds = |wake: &pane_layout::WakeAgent, term: u32| {
+                crate::cmd::settings::pane_holds(&sessions, &agents, &in_front, wake, term)
+            };
+            let live = unheld_panes(
+                agents.clone(),
+                &sessions,
+                &HashMap::new(),
+                &std::collections::HashSet::new(),
+                Some(&seats),
+                &in_front,
+            );
+            assert_eq!(
+                live.iter()
+                    .map(|(pane, run)| (pane.term, run.clone()))
+                    .collect::<Vec<_>>(),
+                vec![(8, Some("run-4275".to_string()))],
+                "{scene}: the exit did not find the coordinator under its launcher"
+            );
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let main = dir.path().join("zerocode");
+            std::fs::create_dir_all(&main).expect("a checkout");
+            let main = main.to_string_lossy().into_owned();
+            let file = dir.path().join("pane-layouts.json");
+            pane_layout::rewrite(&file, |layouts| {
+                layouts.insert(main.clone(), vec![leaf(1, 3, false), leaf(2, 8, true)]);
+                true
+            })
+            .expect("the saved set");
+            let exited = exit_write(
+                &file,
+                live.into_iter().map(|(pane, _)| pane).collect(),
+                &holds,
+                &|term| registry.handle(term).is_some(),
+                &|term| registry.handle(term).map(|_| format!("screen of {term}")),
+                &|| true,
+            );
+            assert_eq!(exited.written, Written::Done, "{scene}");
+            assert!(
+                exited.doubled.is_empty(),
+                "{scene}: the exit took C off a leaf on a group it did not read whole: {:?}",
+                exited.doubled
+            );
+            assert_eq!(exited.filed, vec![pane_layout::Filed::Named], "{scene}");
+            let stored = pane_layout::read(&file);
+            let set = &stored[&main];
+            assert_eq!(
+                set[1].agents[&0].id, ENDED,
+                "{scene}: B lost its conversation"
+            );
+            assert_eq!(set[1].running[&0], "claude", "{scene}: B lost its program");
+            assert_eq!(set[1].buffers[&0], "screen of 8", "{scene}");
+            assert!(set[1].focused && set[1].awake, "{scene}");
+            assert_eq!(
+                set[0].agents[&0].id, ENDED,
+                "{scene}: A's record went on a guess"
+            );
+            assert_eq!(pane_layout::standing_worktrees(&stored), vec![main.clone()]);
+
+            let (_, doubled) = pane_layout::save_window_set(
+                &file,
+                main.clone(),
+                vec![leaf(1, 3, false), leaf(2, 8, true)],
+                &|| false,
+                &holds,
+            )
+            .expect("a save")
+            .expect("a window that is not leaving saves");
+            assert!(
+                doubled.is_empty(),
+                "{scene}: the save took C off a leaf on a group it did not read whole: {doubled:?}"
+            );
+            let set = &pane_layout::read(&file)[&main];
+            assert_eq!(
+                set[1].agents[&0].id, ENDED,
+                "{scene}: the save lost B's conversation"
+            );
+            assert_eq!(set[1].running[&0], "claude", "{scene}");
+        }
+
+        // A group read in part that names claude answers for claude; for
+        // another agent the one not read may be it.
+        let registry = TerminalRegistry::default();
+        registry.insert(
+            8,
+            PtyHandle::new(Front(
+                Terminal::new(4, 20),
+                Some(false),
+                launcher(),
+                GroupPrograms::Partial(vec![names(&["node"]), claude()]),
+            )),
+        );
+        let asked = |agent: &str| {
+            crate::agent_tools_runtime::agent_in_front_within(
+                &registry,
+                true,
+                8,
+                agent,
+                Some(Duration::from_millis(50)),
+            )
+        };
+        assert_eq!([asked("claude"), asked("codex")], [Some(true), None]);
     }
 
     /// t-76489 r4 ②, the codex review's second finding of r3, the exit end
@@ -29726,7 +29962,7 @@ mod exit_capture {
         let exited = exit_write(
             &file,
             vec![pane.clone()],
-            &|_, _| false,
+            &|_, _| Some(false),
             &|term| term == 9,
             &|term| (term == 9).then(|| "screen".to_string()),
             &|| true,
@@ -29793,7 +30029,7 @@ mod exit_capture {
             exit_write(
                 file,
                 vec![pane.clone()],
-                &|_, _| false,
+                &|_, _| Some(false),
                 &|term| term == 1,
                 &|term| (term == 1).then(|| "screen".to_string()),
                 wanted,

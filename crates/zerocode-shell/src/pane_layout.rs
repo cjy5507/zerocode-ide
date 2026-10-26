@@ -423,14 +423,15 @@ pub(crate) fn rewrite(
 /// under the writer's own lock, so a save cannot land between the exit's own
 /// snapshot and the process ending. Then one leaf per conversation across
 /// the whole file, under the same lock (t-76489, [`one_wake_each`]): `holds`
-/// says which shell holds a conversation now. Answers what the save did
+/// says which shell holds a conversation now, `None` when it cannot tell.
+/// Answers what the save did
 /// ([`Saved`]), or `None` when the set was not written.
 pub(crate) fn save_window_set(
     file: &Path,
     worktree: String,
     tabs: Vec<TabLayout>,
     leaving: &dyn Fn() -> bool,
-    holds: &dyn Fn(&WakeAgent, u32) -> bool,
+    holds: &dyn Fn(&WakeAgent, u32) -> Option<bool>,
 ) -> std::io::Result<Option<Saved>> {
     let mut saved = None;
     rewrite(file, |held| {
@@ -844,6 +845,12 @@ pub(crate) enum Filed {
 /// plain shell, its wake and its program gone. Answers each conversation it
 /// took off a leaf, once per leaf.
 ///
+/// `holds` answers `None` for a shell it cannot tell of — a pane busy past
+/// its patience, a launcher whose group was not read whole (t-76489 r5).
+/// Not knowing is not knowing it holds nothing: with no leaf known to hold
+/// the conversation and one that may, every leaf naming it stays, since
+/// the one that may is as likely the living pane as the first by order.
+///
 /// On 2026-10-26 23:03 a coordinator split `zo --resume` of a conversation a
 /// person's tab beside it already held; the split died at zo's writer lease.
 /// A record naming one conversation twice is what wakes it twice: the second
@@ -852,15 +859,16 @@ pub(crate) enum Filed {
 /// pane holds it, so a dead pane's copy never takes the living one's place.
 pub(crate) fn one_wake_each(
     layouts: &mut Layouts,
-    holds: impl Fn(&WakeAgent, u32) -> bool,
+    holds: impl Fn(&WakeAgent, u32) -> Option<bool>,
 ) -> Vec<String> {
     let mut paths: Vec<String> = layouts.keys().cloned().collect();
     paths.sort();
     // Every leaf naming a conversation, in the order the rule reads them:
     // the conversation, and the leaf — its workspace, tab and ordinal, and
-    // whether its shell holds the conversation now. Asked only of a
-    // conversation two leaves name: the asking reads each pane's terminal.
-    type Leaf = (String, usize, usize, bool);
+    // whether its shell holds the conversation now (`None`: cannot tell). A
+    // leaf with no pane holds nothing. Asked only of a conversation two
+    // leaves name: the asking reads each pane's terminal.
+    type Leaf = (String, usize, usize, Option<bool>);
     type Place = (String, usize, usize);
     let mut named: Vec<((String, String), Place)> = Vec::new();
     for path in &paths {
@@ -885,11 +893,13 @@ pub(crate) fn one_wake_each(
                 .count()
                 > 1;
             let tab = &layouts[path][*index];
-            let held = twice
-                && tab
-                    .terms
+            let held = if twice {
+                tab.terms
                     .get(at)
-                    .is_some_and(|term| holds(&tab.agents[at], *term));
+                    .map_or(Some(false), |term| holds(&tab.agents[at], *term))
+            } else {
+                Some(false)
+            };
             (conversation.clone(), (path.clone(), *index, *at, held))
         })
         .collect();
@@ -909,11 +919,13 @@ pub(crate) fn one_wake_each(
             continue;
         }
         // The leaf whose pane holds it; with none, the first — but only
-        // within one workspace: zo opens a conversation from its own folder
-        // alone, so between two workspaces' records nobody can tell here
-        // which one opens, and the boot's one-process judge decides.
-        let keeper = match leaves.iter().position(|(_, _, _, held)| *held) {
+        // when no leaf's pane may hold it, and only within one workspace: zo
+        // opens a conversation from its own folder alone, so between two
+        // workspaces' records nobody can tell here which one opens, and the
+        // boot's one-process judge decides.
+        let keeper = match leaves.iter().position(|(.., held)| *held == Some(true)) {
             Some(held) => held,
+            None if leaves.iter().any(|(.., held)| held.is_none()) => continue,
             None if leaves.iter().all(|(path, ..)| *path == leaves[0].0) => 0,
             None => continue,
         };
@@ -1363,7 +1375,7 @@ mod tests {
                             tree.clone(),
                             vec![bare(PaneNode::Leaf)],
                             &|| false,
-                            &|_, _| false,
+                            &|_, _| Some(false),
                         )
                         .expect("a save");
                         assert!(saved.is_some(), "a window that is not leaving was refused");
@@ -1397,7 +1409,7 @@ mod tests {
                 tree.clone(),
                 vec![bare(PaneNode::Leaf), bare(split(None))],
                 &|| false,
-                &|_, _| false,
+                &|_, _| Some(false),
             )
             .expect("a save")
             .is_some()
@@ -1406,9 +1418,11 @@ mod tests {
         // The last tab's shell ended on the way out; the window saves the
         // set without it.
         assert!(
-            save_window_set(&file, tree.clone(), Vec::new(), &|| true, &|_, _| false)
-                .expect("a refusal")
-                .is_none()
+            save_window_set(&file, tree.clone(), Vec::new(), &|| true, &|_, _| Some(
+                false
+            ))
+            .expect("a refusal")
+            .is_none()
         );
         assert_eq!(
             std::fs::read(&file).expect("the list"),
@@ -1610,7 +1624,7 @@ mod tests {
         );
         let live = HashMap::from([(1, COORDINATOR), (16, ZO_COORDINATOR)]);
         let struck = one_wake_each(&mut layouts, |wake, term| {
-            live.get(&term) == Some(&wake.id.as_str())
+            Some(live.get(&term) == Some(&wake.id.as_str()))
         });
         assert_eq!(struck, vec![format!("zo {}", &ZO_COORDINATOR[..8])]);
         assert_eq!(
@@ -1634,7 +1648,7 @@ mod tests {
         };
         let mut asleep = Layouts::new();
         asleep.insert("/w/a".to_string(), vec![asleep_tab(), asleep_tab()]);
-        assert_eq!(one_wake_each(&mut asleep, |_, _| false).len(), 1);
+        assert_eq!(one_wake_each(&mut asleep, |_, _| Some(false)).len(), 1);
         assert!(
             asleep["/w/a"][0].agents.contains_key(&0),
             "the first keeps it"
@@ -1644,12 +1658,63 @@ mod tests {
         apart.insert("/w/a".to_string(), vec![asleep_tab()]);
         apart.insert("/w/b".to_string(), vec![asleep_tab()]);
         let before = apart.clone();
-        assert!(one_wake_each(&mut apart, |_, _| false).is_empty());
+        assert!(one_wake_each(&mut apart, |_, _| Some(false)).is_empty());
         assert_eq!(apart, before, "a guess between two folders");
         // One conversation per leaf already: nothing moves.
         let before = layouts.clone();
-        assert!(one_wake_each(&mut layouts, |_, _| false).is_empty());
+        assert!(one_wake_each(&mut layouts, |_, _| Some(false)).is_empty());
         assert_eq!(layouts, before);
+    }
+
+    /// t-76489 r5: a leaf whose pane cannot be told of — busy past its
+    /// patience, a launcher whose group was not read whole — loses nothing
+    /// on that word. With no pane known to hold the conversation and one
+    /// that may, every leaf naming it stays, even the one known to run a
+    /// command; a pane known to hold it still keeps it alone. Before, a pane
+    /// that could not tell answered as one that held nothing, and the first
+    /// by order kept the conversation.
+    #[test]
+    fn a_leaf_whose_pane_cannot_be_told_of_loses_nothing() {
+        let tab = |id: u64, term: u32| TabLayout {
+            id: Some(id),
+            agents: HashMap::from([(0, claude(COORDINATOR))]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            terms: HashMap::from([(0, term)]),
+            ..bare(PaneNode::Leaf)
+        };
+        let set = || {
+            let mut layouts = Layouts::new();
+            layouts.insert(
+                "/w/zerocode".to_string(),
+                vec![tab(1, 3), tab(2, 8), tab(3, 9)],
+            );
+            layouts
+        };
+        let mut layouts = set();
+        let before = layouts.clone();
+        let struck = one_wake_each(&mut layouts, |_, term| match term {
+            3 => Some(false),
+            _ => None,
+        });
+        assert!(struck.is_empty(), "a guess took {struck:?}");
+        assert_eq!(layouts, before);
+
+        let mut layouts = set();
+        let struck = one_wake_each(&mut layouts, |_, term| match term {
+            9 => Some(true),
+            3 => Some(false),
+            _ => None,
+        });
+        assert_eq!(struck.len(), 2);
+        assert_eq!(
+            named_in(&layouts, "/w/zerocode"),
+            vec![
+                vec![None],
+                vec![None],
+                vec![Some(format!("claude {COORDINATOR}"))]
+            ],
+            "the pane known to hold it lost it"
+        );
     }
 
     /// t-76489 red ④, the exit's net: a run's coordinator conversation the
@@ -1787,7 +1852,7 @@ mod tests {
         };
         let sessions = HashMap::from([(3, session.clone()), (8, session)]);
         let agents = HashMap::from([(3, "claude"), (8, "claude")]);
-        let in_front = |term: u32| term == 8;
+        let in_front = |term: u32| Some(term == 8);
         let struck = one_wake_each(&mut layouts, |wake, term| {
             crate::cmd::settings::pane_holds(&sessions, &agents, &in_front, wake, term)
         });
@@ -1803,20 +1868,26 @@ mod tests {
         assert!(set[1].focused, "B lost the person's eye");
         // The records alone, as before: the shell in front of A counts for
         // nothing, so the first by order would keep it.
-        assert!(crate::cmd::settings::pane_holds(
-            &sessions,
-            &agents,
-            &|_| true,
-            &claude(COORDINATOR),
-            3
-        ));
-        assert!(!crate::cmd::settings::pane_holds(
-            &sessions,
-            &agents,
-            &in_front,
-            &claude(COORDINATOR),
-            3
-        ));
+        assert_eq!(
+            crate::cmd::settings::pane_holds(
+                &sessions,
+                &agents,
+                &|_| Some(true),
+                &claude(COORDINATOR),
+                3
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            crate::cmd::settings::pane_holds(
+                &sessions,
+                &agents,
+                &in_front,
+                &claude(COORDINATOR),
+                3
+            ),
+            Some(false)
+        );
     }
 
     /// t-76489 r2 ②, the codex review's second finding: the saved set names
@@ -1974,7 +2045,7 @@ mod tests {
         assert_eq!(layouts[&b][0].agents[&0], claude(COORDINATOR));
         assert_eq!(layouts[&b][0].owed, vec![other]);
         assert!(layouts[&a][0].agents.is_empty(), "C named twice");
-        assert!(one_wake_each(&mut layouts, |_, _| false).is_empty());
+        assert!(one_wake_each(&mut layouts, |_, _| Some(false)).is_empty());
 
         // A zo coordinator running in B is written into B as well: B is a
         // folder it opens the conversation from, for it runs it there now.
@@ -2018,7 +2089,7 @@ mod tests {
         layouts.insert(a.clone(), vec![unwoken(zo(ZO_COORDINATOR))]);
         layouts.insert(b.clone(), vec![unwoken(zo(ZO_COORDINATOR))]);
         let before = layouts.clone();
-        assert!(one_wake_each(&mut layouts, |_, _| false).is_empty());
+        assert!(one_wake_each(&mut layouts, |_, _| Some(false)).is_empty());
         assert_eq!(layouts, before);
     }
 

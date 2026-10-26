@@ -1235,19 +1235,20 @@ pub(crate) fn carry_zo_pane_sessions(
 /// after it). Both records outlive an agent quit back to its shell, so a
 /// pane that ended the conversation and the pane that reopened it since
 /// would both answer by the records alone, and the first by order would
-/// take the second's place.
+/// take the second's place. `None` when the records name the conversation
+/// and `in_front` cannot tell (t-76489 r5).
 pub(crate) fn pane_holds(
     sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
     agents: &HashMap<TermId, &'static str>,
-    in_front: &dyn Fn(TermId) -> bool,
+    in_front: &dyn Fn(TermId) -> Option<bool>,
     wake: &pane_layout::WakeAgent,
     term: TermId,
-) -> bool {
-    agents.get(&term).copied() == Some(wake.agent.as_str())
+) -> Option<bool> {
+    let named = agents.get(&term).copied() == Some(wake.agent.as_str())
         && sessions
             .get(&term)
-            .is_some_and(|session| session.id == wake.id)
-        && in_front(term)
+            .is_some_and(|session| session.id == wake.id);
+    if named { in_front(term) } else { Some(false) }
 }
 
 /// One line in the window's log for the leaves a pane-layout road took a
