@@ -1049,7 +1049,7 @@ impl Manager {
             Some(running) if !running.engine.alive() => running.engine.clone(),
             _ => return,
         };
-        let ended = engine.ended();
+        let ended = off_the_worker(|| engine.ended());
         let mut inner = lock(&self.inner);
         let Some(running) = inner
             .running
@@ -1120,7 +1120,7 @@ impl Manager {
         if let Some(end) = end_of(record) {
             lock(&self.inner).last_end = Some(end);
         }
-        let _ = keep_exit(&self.exits, record);
+        let _ = off_the_worker(|| keep_exit(&self.exits, record));
     }
 
     /// What follows the end of `ended`: a restart after its wait when the
@@ -3136,6 +3136,20 @@ impl Manager {
     }
 }
 
+/// Runs `work`, which may wait on a runtime's pipe or the disk, so that it
+/// never holds up an async worker: on a worker of a multi-thread runtime the
+/// worker's other tasks move to another thread while it runs. Anywhere else
+/// (a thread of the manager's own, the blocking pool, a current-thread
+/// runtime, which cannot hand its tasks on) it runs as it is.
+fn off_the_worker<T>(work: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 async fn wait_ready(engine: &Arc<Engine>, cancel: &Cancel) -> Result<()> {
     wait_ready_for(engine, cancel, engine::START_TIMEOUT).await
 }
@@ -3462,6 +3476,11 @@ pub async fn native_check(provider: &Provider) -> Result<()> {
 pub(crate) mod test_support {
     pub(crate) use super::copy_import;
     use super::*;
+
+    /// Adds one record to the store's file of exits, as the manager does.
+    pub fn keep_exit(path: &Path, record: &Value) -> Result<()> {
+        super::keep_exit(path, record)
+    }
 
     pub fn manager(root: &Path, settings: &Path, model: Model) -> Arc<Manager> {
         manager_with_sink(root, settings, model, Arc::new(|_| {}))
