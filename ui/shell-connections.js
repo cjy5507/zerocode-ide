@@ -43,6 +43,14 @@ function modelFailureState(error) {
   return "failed";
 }
 
+/* What a failure said, without a value the page sent with it: a server
+ * that says the pasted key back must not put it on the screen (t-76028 F1;
+ * the probe masks it before IPC too, with the same mark). */
+const MASKED_VALUE = "[redacted]";
+function withoutValue(text, value) {
+  return value ? text.split(value).join(MASKED_VALUE) : text;
+}
+
 function modelStateWords(state, vars) {
   const row = MODEL_STATES[state] ?? MODEL_STATES.failed;
   return { word: t(row.key, row.word), todo: row.todo ? t(row.todo, row.todoWord, vars) : "", badge: row.badge };
@@ -473,7 +481,7 @@ const modelConnectionsController = {
       if (setup !== this.setup) return;
       setup.checked = "fail";
       setup.failure = modelFailureState(error);
-      setup.raw = typeof error === "string" ? error : error?.message ?? String(error);
+      setup.raw = withoutValue(typeof error === "string" ? error : error?.message ?? String(error), key);
     } finally {
       this.busy = false;
       if (setup === this.setup) {
