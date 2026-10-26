@@ -1230,10 +1230,12 @@ pub(crate) fn carry_zo_pane_sessions(
 /// (t-76489): the agent this window knows the pane as and the session it
 /// reported — the two records [`crate::conversation_wake::panes_naming`]
 /// reads — and `in_front`, that the pane's agent still holds its terminal
-/// ([`crate::agent_tools_runtime::agent_in_front_within`]). Both records
-/// outlive an agent quit back to its shell, so a pane that ended the
-/// conversation and the pane that reopened it since would both answer by
-/// the records alone, and the first by order would take the second's place.
+/// ([`crate::agent_tools_runtime::agent_in_front_within`]: the program in
+/// front of its shell is that agent, not the shell and not a command run
+/// after it). Both records outlive an agent quit back to its shell, so a
+/// pane that ended the conversation and the pane that reopened it since
+/// would both answer by the records alone, and the first by order would
+/// take the second's place.
 pub(crate) fn pane_holds(
     sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
     agents: &HashMap<TermId, &'static str>,
@@ -1318,6 +1320,7 @@ pub(crate) fn save_pane_layouts(
                     state.terminals(),
                     shell_pane,
                     term,
+                    wake.agent.as_str(),
                     None,
                 )
             };

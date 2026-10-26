@@ -736,19 +736,21 @@ pub(super) fn shell_in_front_of(state: &AppState, term: TermId) -> bool {
     front == Some(true)
 }
 
-/// Whether `term`'s own agent holds its terminal now (t-76489): the terminal
-/// stands, and on a shell pane the shell is not back in front of it. An
-/// agent quit back to its shell keeps the window's record of its
-/// conversation (`pane_runtime::clear_departed_agent`) — the 이어서 menu
-/// reopens it from there — yet holds nothing, and another pane may have
-/// reopened the same conversation since. `shell_pane` is whether the pty's
-/// child is the shell itself; `patience` bounds the wait for the pane's lock
-/// — `None` waits as [`shell_in_front_of`] does — and a pane busy past it is
-/// standing with what it ran, as the exit's capture reads it.
+/// Whether `term`'s own agent, `agent`, holds its terminal now (t-76489):
+/// the terminal stands, and on a shell pane the program in front of the
+/// shell is that agent ([`front_is_agent`]). An agent quit back to its shell
+/// keeps the window's record of its conversation
+/// (`pane_runtime::clear_departed_agent`) — the 이어서 menu reopens it from
+/// there — yet holds nothing, and another pane may have reopened the same
+/// conversation since. `shell_pane` is whether the pty's child is the shell
+/// itself; `patience` bounds the wait for the pane's lock — `None` waits as
+/// [`shell_in_front_of`] does — and a pane busy past it is standing with
+/// what it ran, as the exit's capture reads it.
 pub(crate) fn agent_in_front_within(
     terminals: &TerminalRegistry,
     shell_pane: bool,
     term: TermId,
+    agent: &str,
     patience: Option<Duration>,
 ) -> bool {
     let Some(held) = terminals.handle(term) else {
@@ -757,13 +759,47 @@ pub(crate) fn agent_in_front_within(
     if !shell_pane {
         return true;
     }
-    let front = match patience {
-        Some(patience) => {
-            terminal_registry::lock_pty_within(&held, patience).map(|pty| pty.foreground_is_child())
-        }
-        None => Some(lock_pty(&held).foreground_is_child()),
+    let ask = |pty: &zerocode_lane::PtyHandle| {
+        front_is_agent(
+            pty.foreground_is_child(),
+            || pty.foreground_programs(),
+            agent,
+        )
     };
-    front.is_none_or(|front| front != Some(true))
+    match patience {
+        Some(patience) => {
+            terminal_registry::lock_pty_within(&held, patience).is_none_or(|pty| ask(&pty))
+        }
+        None => ask(&lock_pty(&held)),
+    }
+}
+
+/// Whether the program in front of a shell pane is `agent` (t-76489 r3):
+/// `child_in_front` is the kernel's word that the shell itself is, and
+/// `programs` the names of what holds the terminal otherwise, read only
+/// then — the sweep's own road (`pane_runtime::sweep_arrived_agents`). A
+/// shell in front holds nothing; neither does an ordinary command run in
+/// it after its agent quit — a `vim`, a build — which leads its own group
+/// just as an agent does, so the group alone cannot tell them apart. A
+/// terminal that will not say, or names nothing it can read, has no
+/// opinion and is standing with its agent.
+pub(crate) fn front_is_agent(
+    child_in_front: Option<bool>,
+    programs: impl FnOnce() -> Vec<String>,
+    agent: &str,
+) -> bool {
+    match child_in_front {
+        Some(true) => false,
+        None => true,
+        Some(false) => {
+            let programs = programs();
+            programs.is_empty()
+                || programs
+                    .iter()
+                    .find_map(|program| zerocode_core::agent::agent_spec_by_process(program))
+                    .is_some_and(|spec| spec.id == agent)
+        }
+    }
 }
 
 /// Whether `term`'s last turn ended at rest with its agent in front, as the

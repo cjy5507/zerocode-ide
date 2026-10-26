@@ -737,13 +737,18 @@ pub(super) fn unheld_panes(
 }
 
 /// Whether `term`'s agent holds its terminal as the window goes (t-76489),
-/// each pane's lock waited for at most [`EXIT_LOCK_PATIENCE`].
+/// each pane's lock waited for at most [`EXIT_LOCK_PATIENCE`]. A pane the
+/// window knows no agent of holds nothing.
 fn exit_agent_in_front(state: &AppState, term: TermId) -> bool {
     let shell_pane = { state.shell_panes().contains(&term) };
+    let Some(agent) = ({ state.agent_terms().get(&term).copied() }) else {
+        return false;
+    };
     crate::agent_tools_runtime::agent_in_front_within(
         state.terminals(),
         shell_pane,
         term,
+        agent,
         Some(EXIT_LOCK_PATIENCE),
     )
 }

@@ -648,10 +648,21 @@ pub(crate) struct LivePane {
 /// a leaf holding the pane's shell while naming another conversation names
 /// this one now, and owes the one it named, never dropping it; else a leaf
 /// naming it in the pane's workspace from a pane not `standing` now stands
-/// for this pane and keeps its place; else a tab this window never woke in
-/// another workspace keeps it, as before; else the pane is written as a tab
-/// of its own. The other leaves naming it come back plain shells — one
+/// for this pane and keeps its place; else a zo tab this window never woke
+/// in another workspace keeps it, as before; else the pane is written as a
+/// tab of its own. The other leaves naming it come back plain shells — one
 /// conversation, one wake.
+///
+/// A tab this window never woke, in another workspace, is a record nobody
+/// here can confirm, and the pane is one whose hold on the conversation is
+/// confirmed now. For zo that record still keeps its word, the pane's
+/// workspace notwithstanding: between two folders nobody here can tell
+/// which one zo opens it from (one_wake_each's own rule). Any other agent's
+/// pane that named its workspace is written there whatever such a record
+/// says, and the record comes back a plain shell on every road: on
+/// 2026-10-26 the record of a workspace not opened in front answered for a
+/// claude coordinator running in another, and that one was stored nowhere
+/// and said nowhere lost (t-76489 r3).
 pub(crate) fn file_unheld(
     layouts: &mut Layouts,
     live: Vec<LivePane>,
@@ -663,12 +674,14 @@ pub(crate) fn file_unheld(
             filed.push(Filed::Named);
             continue;
         }
-        // A tab this window never woke, in another workspace, keeps its word
-        // on the conversation: between two folders nobody here can tell
-        // which one zo opens it from (one_wake_each's own rule).
         let (afar, stale): (Vec<_>, Vec<_>) = leaves_naming(layouts, &pane.wake)
             .into_iter()
             .partition(|(path, _, _, term)| term.is_none() && *path != pane.worktree);
+        // The records afar that give way to this pane: none for zo or for a
+        // pane placed nowhere; every one otherwise.
+        let placed = pane.wake.agent != zerocode_core::agent::AgentKind::Zo.slug()
+            && !pane.worktree.is_empty();
+        let yielded: &[_] = if placed { &afar } else { &[] };
         let holder = layouts.values().flatten().find_map(|tab| {
             let at = tab
                 .terms
@@ -683,6 +696,7 @@ pub(crate) fn file_unheld(
                 before.keeps() && !names_anywhere(layouts, before, Some(pane.term))
             });
             strike(layouts, &stale);
+            strike(layouts, yielded);
             if let Some(tab) = layouts
                 .values_mut()
                 .flatten()
@@ -708,10 +722,11 @@ pub(crate) fn file_unheld(
             let mut others = stale;
             others.remove(place);
             strike(layouts, &others);
+            strike(layouts, yielded);
             filed.push(Filed::Relinked);
             continue;
         }
-        if !afar.is_empty() {
+        if !afar.is_empty() && !placed {
             filed.push(Filed::Named);
             continue;
         }
@@ -720,6 +735,7 @@ pub(crate) fn file_unheld(
             continue;
         }
         strike(layouts, &stale);
+        strike(layouts, yielded);
         let tabs = layouts.entry(pane.worktree).or_default();
         let id = tabs.iter().filter_map(|tab| tab.id).max().unwrap_or(0) + 1;
         let agent = pane.wake.agent.clone();
@@ -803,8 +819,9 @@ fn strike(layouts: &mut Layouts, leaves: &[(String, usize, usize, Option<u32>)])
 /// What [`file_unheld`] did with one live pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Filed {
-    /// The leaf holding its shell already names its conversation, or it
-    /// names none that could wake: nothing written.
+    /// The leaf holding its shell already names its conversation, a zo tab
+    /// this window never woke in another workspace keeps it, or it names
+    /// none that could wake: nothing written.
     Named,
     /// The stored leaf holding its shell now names its conversation.
     Renamed,
@@ -1870,6 +1887,87 @@ mod tests {
             named_in(&layouts, &main),
             vec![vec![None], vec![Some(format!("claude {COORDINATOR}"))]]
         );
+    }
+
+    /// t-76489 r3 ②, the codex review's second finding of r2: workspace A's
+    /// set names coordinator C in a tab this window never woke (no shell),
+    /// while C runs in pane 9 of workspace B, which the last save left out.
+    /// The pane's hold is confirmed and A's record is not: C is written into
+    /// B as a tab of its own, its screen captured and its tab standing, so
+    /// the next boot puts B back with C in it; A's leaf comes back a plain
+    /// shell, C named once. When B's own leaf holds pane 9 while naming
+    /// another conversation, that leaf names C and A's record goes too.
+    /// A zo's record afar keeps its word as before. Before, A's record alone
+    /// answered `Named`: nothing was written for pane 9, A's tab was stored
+    /// asleep, and neither a restore nor a notice followed.
+    #[test]
+    fn a_record_afar_does_not_answer_for_a_coordinator_running_elsewhere() {
+        let root = tempfile::tempdir().expect("the checkouts");
+        let path = |name: &str| {
+            let at = root.path().join(name);
+            std::fs::create_dir_all(&at).expect("a checkout");
+            at.to_string_lossy().into_owned()
+        };
+        let (a, b) = (path("a"), path("b"));
+        let unwoken = |wake: WakeAgent| TabLayout {
+            id: Some(4),
+            running: HashMap::from([(0, wake.agent.clone())]),
+            agents: HashMap::from([(0, wake)]),
+            ..bare(PaneNode::Leaf)
+        };
+        let living = |wake: WakeAgent| LivePane {
+            term: 9,
+            worktree: b.clone(),
+            wake,
+        };
+        let standing = |term: u32| term == 9;
+        let screens = |term: u32| standing(term).then(|| format!("screen of {term}"));
+
+        let mut layouts = Layouts::new();
+        layouts.insert(a.clone(), vec![unwoken(claude(COORDINATOR))]);
+        let filed = file_unheld(&mut layouts, vec![living(claude(COORDINATOR))], standing);
+        assert_eq!(filed, vec![Filed::Tab(1)], "the record afar answered for B");
+        capture_exit(&mut layouts, screens);
+        let tab = &layouts[&b][0];
+        assert_eq!(tab.agents[&0], claude(COORDINATOR));
+        assert_eq!(tab.running[&0], "claude");
+        assert_eq!(tab.buffers[&0], "screen of 9");
+        assert!(tab.awake, "B's coordinator was stored asleep");
+        assert!(
+            layouts[&a][0].agents.is_empty() && layouts[&a][0].running.is_empty(),
+            "C named twice"
+        );
+        assert_eq!(standing_worktrees(&layouts), vec![b.clone()]);
+
+        // B's leaf holds pane 9 and names another conversation: it names C
+        // now, owes the one it named, and A's record goes on this road too.
+        let other = claude("3b7f0c2e-0000-4000-8000-000000000003");
+        let mut layouts = Layouts::new();
+        layouts.insert(a.clone(), vec![unwoken(claude(COORDINATOR))]);
+        layouts.insert(
+            b.clone(),
+            vec![TabLayout {
+                id: Some(1),
+                agents: HashMap::from([(0, other.clone())]),
+                terms: HashMap::from([(0, 9)]),
+                ..bare(PaneNode::Leaf)
+            }],
+        );
+        let filed = file_unheld(&mut layouts, vec![living(claude(COORDINATOR))], standing);
+        assert_eq!(filed, vec![Filed::Renamed]);
+        assert_eq!(layouts[&b][0].agents[&0], claude(COORDINATOR));
+        assert_eq!(layouts[&b][0].owed, vec![other]);
+        assert!(layouts[&a][0].agents.is_empty(), "C named twice");
+        assert!(one_wake_each(&mut layouts, |_, _| false).is_empty());
+
+        // A zo record afar keeps its word: between two folders nobody here
+        // can tell which one zo opens it from.
+        let mut layouts = Layouts::new();
+        layouts.insert(a.clone(), vec![unwoken(zo(ZO_COORDINATOR))]);
+        let before = layouts.clone();
+        let filed = file_unheld(&mut layouts, vec![living(zo(ZO_COORDINATOR))], standing);
+        assert_eq!(filed, vec![Filed::Named]);
+        assert_eq!(layouts, before);
     }
 
     /// The file names every tab it keeps and hands the names back in the
