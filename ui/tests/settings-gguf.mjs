@@ -74,7 +74,7 @@ export async function runSettingsGguf({ test, assert, assertEqual, backend, with
       assert(commands.includes("managed_judgment_switch_model") || commands.includes("managed_judgment_check"), "application did not verify the native response");
       assertEqual(backend.typesafeSettings().provider.protocol, "openai_json", "GGUF was applied as a native System One head");
       const words = await page.evaluate(() => t("settings.gguf.unverified", "사람이 지정한 검증 안 된 모델"));
-      assert((await page.locator("#judgment-active-model").textContent()).includes(words), "the applied model lost its unverified marker");
+      assert((await page.locator('#model-judgment [data-model-current="judgment"]').textContent()).includes(words), "the applied model lost its unverified marker");
       return "owned copy · selected runtime · verified response · explicit unverified model";
     }));
 

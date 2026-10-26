@@ -1175,7 +1175,7 @@ export async function testJevDashboard(browser, origin, ok) {
       await window.__PAINTED__();
       view.querySelector('[data-jev-dash-row="notify"] .jev-token[data-token="not_consented"]').click();
       await window.__PAINTED__();
-      const consent = { open: !settingsView.hidden, said: document.querySelector("#typesafe-status")?.textContent ?? "",
+      const consent = { open: !settingsView.hidden, said: document.querySelector("#model-judgment-status")?.textContent ?? "",
         focus: document.activeElement?.id ?? null };
       setSettingsOpen(false);
       await window.__PAINTED__();
@@ -1191,7 +1191,7 @@ export async function testJevDashboard(browser, origin, ok) {
       paintTypeSafe({ ...saved, provider: null, providerIdentity: null });
       const result = {
         disabled: el("typesafe-key-input").disabled,
-        reason: el("judgment-active-model").textContent,
+        reason: el("judgment-provider-draft").textContent,
       };
       paintTypeSafe(saved);
       return result;
