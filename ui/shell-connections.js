@@ -407,9 +407,11 @@ const modelConnectionsController = {
    * failure kept last time's list, which is said as such — never 「로그인 안
    * 됨」, which a failed read of a signed-in account is not (t-76598). */
   loginState(own, answered, models) {
+    // The pane's label names where a zo pane reads its CLAUDE login, so only
+    // a Claude report is held to it; a report without a label is not judged.
     const pane = this.zo?.paneCredentialStore;
     const store = (report) => report.credentialStore ?? report.credential_store ?? null;
-    if (pane && own.some((report) => store(report) && store(report) !== pane)) return "elsewhere";
+    if (pane && own.some((report) => report.provider === "anthropic" && store(report) && store(report) !== pane)) return "elsewhere";
     if (answered.length) return "ok";
     if (!own.length) return models.length ? "unknown" : "nologin";
     if (own.some((report) => String(report.detail ?? "").startsWith("skipped:"))) return "nologin";
