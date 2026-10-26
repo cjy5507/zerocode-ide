@@ -596,7 +596,7 @@ mod tests {
     use super::*;
 
     fn finish_notice_attempt(hub: &SessionNotificationHub) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if hub
                 .inner

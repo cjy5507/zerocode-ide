@@ -15538,7 +15538,7 @@ fn a_notice_wakes_an_idle_root_and_leaves_the_draft() {
     let _window = the_window();
     let _beat = one_beat_at_a_time();
     let team = format!("team-idle-notice-{LEADER}");
-    let (run_id, _, pane) = an_agent_carrying_work("zo", &team, LEADER, WORKER);
+    let (_, _, pane) = an_agent_carrying_work("zo", &team, LEADER, WORKER);
     let held = crate::agent_teams::current_pane_capability(&team, &pane).unwrap();
     let host = BesideADraft {
         term: LEADER,

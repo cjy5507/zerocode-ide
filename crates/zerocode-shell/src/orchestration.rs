@@ -8716,7 +8716,10 @@ fn tell_notice_delivery(host: &dyn Host, delivery: NoticeDelivery, now_ms: i64) 
     if let Some(root) = BLACKBOX.get() {
         crate::note_window_event(root, &format!("orchestration: {body}"));
     }
-    if let Some(sender) = message_sender(&delivery.run, &delivery.newest)
+    // Routine admission and acceptance stay in the black box; only failures
+    // need the sender's attention and another agent turn.
+    if matches!(delivery.offered, PointerOffer::NativeFailed(_))
+        && let Some(sender) = message_sender(&delivery.run, &delivery.newest)
         && sender != zerocode_core::orchestration::LEDGER_ITSELF
     {
         post_observation_once(
