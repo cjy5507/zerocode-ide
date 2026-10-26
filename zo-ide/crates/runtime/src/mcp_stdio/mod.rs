@@ -1749,6 +1749,22 @@ async fn open_mcp_process(bootstrap: &McpClientBootstrap) -> io::Result<ManagedM
             bootstrap.server_name
         );
     }
+    // The settings keep `${NAME}`; only the transport this launch opens holds
+    // the value. A reference without one keeps the server from starting, so it
+    // is never handed the text `${NAME}` in place of its token.
+    let bootstrap = &crate::mcp_references::resolve_launch_references(
+        bootstrap,
+        &crate::mcp_references::LaunchReferenceKeys,
+    )
+    .map_err(|unresolved| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "MCP server `{}` was not started: {unresolved}",
+                bootstrap.server_name
+            ),
+        )
+    })?;
 
     match &bootstrap.transport {
         McpClientTransport::Stdio(_) => {

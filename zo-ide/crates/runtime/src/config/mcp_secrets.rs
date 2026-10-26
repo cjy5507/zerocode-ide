@@ -67,8 +67,40 @@ pub fn slot_holds_literal_secret(name: &str, value: &str) -> bool {
 ///
 /// One sentence: the file could not be read, or is not a JSON object.
 pub fn mcp_literal_secrets(path: &Path) -> Result<Vec<McpLiteralSecret>, String> {
-    let _ = path;
-    Ok(Vec::new())
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(_) => return Err(format!("{} could not be read.", path.display())),
+    };
+    let root = parse_json_object_contents(path, &contents)
+        .map_err(|_| format!("{} is not a JSON object.", path.display()))?;
+    let Some(servers) = root.get(mcp_keys::SERVERS).and_then(JsonValue::as_object) else {
+        return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    for (server, definition) in servers {
+        let Some(definition) = definition.as_object() else {
+            continue;
+        };
+        for section in SECRET_SECTIONS {
+            let Some(slots) = definition.get(section).and_then(JsonValue::as_object) else {
+                continue;
+            };
+            for (name, value) in slots {
+                if value
+                    .as_str()
+                    .is_some_and(|value| slot_holds_literal_secret(name, value))
+                {
+                    found.push(McpLiteralSecret {
+                        server: server.clone(),
+                        section,
+                        name: name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// Rewrite the slot at `key_path` of the document at `path` to `${name}`, and
@@ -89,8 +121,62 @@ pub fn move_mcp_literal_to_reference(
     name: &str,
     resolve: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<PathBuf, String> {
-    let _ = (path, key_path, name, resolve);
-    Err("not implemented yet".to_string())
+    let [servers_key, server, section, slot] = key_path else {
+        return Err(not_a_slot());
+    };
+    if servers_key != mcp_keys::SERVERS || !SECRET_SECTIONS.contains(&section.as_str()) {
+        return Err(not_a_slot());
+    }
+    if !crate::mcp_references::is_reference_name(name) {
+        return Err(format!("{name} is not a reference name."));
+    }
+    let _guard = crate::file_ops::SettingsFileLock::acquire(path)
+        .map_err(|_| "another process is writing the settings file; nothing was written.".to_string())?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err("the settings file is not a regular file; nothing was written.".to_string()),
+        Err(_) => return Err("the settings file could not be read.".to_string()),
+    }
+    let before = std::fs::read(path).map_err(|_| "the settings file could not be read.".to_string())?;
+    let contents = String::from_utf8(before.clone())
+        .map_err(|_| "the settings file is not UTF-8 text.".to_string())?;
+    let mut root = parse_json_object_contents(path, &contents)
+        .map_err(|_| "the settings file is not a JSON object.".to_string())?;
+
+    let literal = slot_value(&mut root, server, section, slot).ok_or_else(not_a_slot)?;
+    let JsonValue::String(literal_text) = &*literal else {
+        return Err("the slot does not hold text.".to_string());
+    };
+    if zerocode_core::credential::is_reference_value(literal_text) {
+        return Err("the slot already holds a reference; nothing was written.".to_string());
+    }
+    let value = resolve(name).map_err(|why| format!("{name} does not resolve: {why}"))?;
+    if value.as_bytes() != literal_text.as_bytes() {
+        return Err(format!(
+            "the value {name} resolves to is not the value in the slot; nothing was written."
+        ));
+    }
+    drop(value);
+    *literal = JsonValue::String(format!("${{{name}}}"));
+
+    let rendered = JsonValue::Object(root.clone()).render_pretty();
+    let read_back = parse_json_object_contents(path, &rendered)
+        .map_err(|_| "the rewritten settings did not survive the JSON round-trip; nothing was written.".to_string())?;
+    let server_survives = read_back
+        .get(mcp_keys::SERVERS)
+        .and_then(JsonValue::as_object)
+        .and_then(|servers| servers.get(server.as_str()))
+        .is_some_and(|value| parse_mcp_server_config(server, value, &mcp_server_context(path, server)).is_ok());
+    if read_back != root || !server_survives {
+        return Err("the rewritten settings did not survive the JSON round-trip; nothing was written.".to_string());
+    }
+
+    if std::fs::read(path).ok().as_deref() != Some(before.as_slice()) {
+        return Err("the settings file changed while it was being moved; nothing was written.".to_string());
+    }
+    let backup = write_backup(path, &before)?;
+    replace_owner_only(path, rendered.as_bytes())?;
+    Ok(backup)
 }
 
 fn not_a_slot() -> String {

@@ -122,8 +122,22 @@ pub fn resolve_reference_name(
     keys: &dyn ReferenceKeys,
     keychain: bool,
 ) -> Result<(String, ReferenceSource), ReferenceMiss> {
-    let _ = (name, keys, keychain);
-    Err(ReferenceMiss::Absent)
+    if !is_reference_name(name) {
+        return Err(ReferenceMiss::NotAName);
+    }
+    if let Some(value) = keys.environment(name) {
+        return Ok((value, ReferenceSource::Environment));
+    }
+    if !keychain {
+        return Err(ReferenceMiss::Absent);
+    }
+    match keys.keychain(name) {
+        api::ReferenceKey::Found(value) if !value.is_empty() => {
+            Ok((value, ReferenceSource::Keychain))
+        }
+        api::ReferenceKey::Found(_) | api::ReferenceKey::Absent => Err(ReferenceMiss::Absent),
+        api::ReferenceKey::Unreadable => Err(ReferenceMiss::KeychainUnreadable),
+    }
 }
 
 /// `text` with every `${NAME}` and `${NAME:-default}` replaced. A `$` not
@@ -138,8 +152,32 @@ pub fn resolve_references(
     keys: &dyn ReferenceKeys,
     keychain: bool,
 ) -> Result<String, UnresolvedReference> {
-    let _ = (keys, keychain);
-    Ok(text.to_string())
+    if !text.contains("${") {
+        return Ok(text.to_string());
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 2..];
+        let Some((name, default, consumed)) = reference_at(after) else {
+            out.push_str("${");
+            rest = after;
+            continue;
+        };
+        match (resolve_reference_name(name, keys, keychain), default) {
+            (Ok((value, _)), _) => out.push_str(&value),
+            (Err(_), Some(default)) => out.push_str(default),
+            (Err(_), None) => {
+                return Err(UnresolvedReference {
+                    name: name.to_string(),
+                });
+            }
+        }
+        rest = &after[consumed..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// The reference that opens `after` (the text just past `${`): its name, its
@@ -173,8 +211,25 @@ pub fn resolve_launch_references(
     bootstrap: &McpClientBootstrap,
     keys: &dyn ReferenceKeys,
 ) -> Result<McpClientBootstrap, UnresolvedReference> {
-    let _ = keys;
-    Ok(bootstrap.clone())
+    let keychain = bootstrap.scope == ConfigSource::User;
+    let mut resolved = bootstrap.clone();
+    match &mut resolved.transport {
+        McpClientTransport::Stdio(stdio) => {
+            stdio.env = resolve_values(&stdio.env, keys, keychain)?;
+            stdio.args = stdio
+                .args
+                .iter()
+                .map(|arg| resolve_references(arg, keys, keychain))
+                .collect::<Result<_, _>>()?;
+        }
+        McpClientTransport::Sse(remote)
+        | McpClientTransport::Http(remote)
+        | McpClientTransport::WebSocket(remote) => {
+            remote.headers = resolve_values(&remote.headers, keys, keychain)?;
+        }
+        McpClientTransport::Sdk(_) | McpClientTransport::ManagedProxy(_) => {}
+    }
+    Ok(resolved)
 }
 
 fn resolve_values(
