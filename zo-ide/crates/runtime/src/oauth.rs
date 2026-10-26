@@ -98,6 +98,7 @@ pub fn is_mcp_token_expired(token: &OAuthTokenSet) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
@@ -114,9 +115,11 @@ mod tests {
     }
 
     fn temp_config_home_at(nanos: u128) -> std::path::PathBuf {
+        static MADE: AtomicU64 = AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "runtime-oauth-test-{}-{nanos}",
-            std::process::id()
+            "runtime-oauth-test-{}-{nanos}-{}",
+            std::process::id(),
+            MADE.fetch_add(1, Ordering::Relaxed)
         ))
     }
 
