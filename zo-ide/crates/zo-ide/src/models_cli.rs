@@ -571,6 +571,52 @@ mod tests {
         assert!(json["reports"][1].get("httpStatus").is_none(), "no response, no number: {}", json["reports"][1]);
     }
 
+    /// t-77146: a report without a kind — a skip an older zo cached, a success
+    /// — leaves `failureKind` out of the JSON, as the cache leaves it out. The
+    /// window reads "no field" as an older zo and checks the `skipped:` words
+    /// itself; an empty `failureKind` would read as an unknown kind and turn a
+    /// "not signed in" row into a failed one. A kind that is there is kept,
+    /// `unknown` included.
+    #[test]
+    fn a_report_without_a_kind_leaves_failure_kind_out_of_the_json() {
+        use runtime::model_catalog::ModelCatalog;
+        use runtime::model_discovery::{DiscoveredCatalog, Overlay, SourceReport, UpdatePolicy};
+        let home = tempfile::tempdir().expect("an overlay home");
+        let user = ModelCatalog::load_from_home(home.path()).expect("an empty overlay");
+        let rows = user.rows(&super::ALL_PROVIDERS, false);
+        let report = |value: serde_json::Value| -> SourceReport { serde_json::from_value(value).expect("a report") };
+        let catalog = DiscoveredCatalog {
+            fetched_at: 1_790_300_000,
+            reports: vec![
+                report(serde_json::json!({
+                    "provider": "anthropic", "source": runtime::model_discovery::ANTHROPIC_SOURCE, "ok": false,
+                    "detail": "skipped: no Anthropic credential", "count": 0,
+                    "fetched_at": 1_790_300_000_u64, "origin": ""
+                })),
+                report(serde_json::json!({
+                    "provider": "xai", "source": runtime::model_discovery::XAI_SOURCE, "ok": false,
+                    "detail": "a body that is not the list", "count": 0,
+                    "fetched_at": 1_790_300_000_u64, "origin": "", "failure_kind": "unknown"
+                })),
+            ],
+            ..Default::default()
+        };
+        let overlay = Overlay::default();
+        let report = super::Report {
+            policy: UpdatePolicy::Auto,
+            catalog: &catalog,
+            user: &user,
+            rows: &rows,
+            overlay: &overlay,
+            merged: None,
+            tiers: &[],
+            now: 1_790_300_060,
+        };
+        let json: serde_json::Value = serde_json::from_str(&report.json().expect("json")).unwrap();
+        assert!(json["reports"][0].get("failureKind").is_none(), "an old skip has no kind: {}", json["reports"][0]);
+        assert_eq!(json["reports"][1]["failureKind"], "unknown", "a kind that is there is kept");
+    }
+
     /// C4 (t-6248): a shipped row its provider withdrew says so on its own
     /// line — in the picker's words, with the local clock of the first list
     /// without it — and the family alias left with no living release says

@@ -5535,6 +5535,71 @@ mod tests {
         }
     }
 
+    /// A local backend that sends the head of `status_line` with a body
+    /// length it never fulfils — 400 bytes promised, 8 sent — and closes, so
+    /// the client has its status and then fails reading the body. No clock
+    /// and no second connection is involved.
+    fn cut_body_backend(status_line: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/backend-api/codex/models", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && socket.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let response = format!("HTTP/1.1 {status_line}\r\nconnection: close\r\ncontent-length: 400\r\n\r\n{{\"error\"");
+            socket.write_all(response.as_bytes()).unwrap();
+            socket.flush().unwrap();
+        });
+        (url, handle)
+    }
+
+    /// t-77146: a response that failed keeps its status when its body then
+    /// breaks off — the number and the kind are made where the status is
+    /// received, and the body only adds words. A refused key (401) whose
+    /// body is cut is still `auth_rejected (HTTP 401)`, in the report and on
+    /// the stderr line; a success whose body is cut has no status to keep.
+    #[test]
+    fn a_body_that_breaks_off_after_a_failed_status_keeps_the_status() {
+        let now = 1_790_300_000;
+        for (status_line, kind, status) in [
+            ("401 Unauthorized", "auth_rejected", 401_u64),
+            ("403 Forbidden", "forbidden", 403),
+            ("429 Too Many Requests", "rate_limited", 429),
+            ("503 Service Unavailable", "server_error", 503),
+            ("418 I'm a teapot", "unknown", 418),
+        ] {
+            let dir = scratch("cut-body");
+            let _machine = bare_machine(&dir);
+            let (url, backend) = cut_body_backend(status_line);
+            let cache_path = dir.join("account").join(super::CODEX_MODELS_CACHE_FILE);
+            let live = super::chatgpt_backend_models_at(&url, &openai_tokens(), &cache_path, None, now);
+            backend.join().unwrap();
+            let (_, fault) = live.clone().expect_err("a refused status is a failure");
+            assert_eq!((fault.kind.key(), fault.http_status), (kind, Some(status as u16)), "{status_line}: {}", fault.detail);
+            assert!(!fault.detail.contains("secret-bearer"), "{status_line}: {}", fault.detail);
+            let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
+            let report = report_json(super::OPENAI_SOURCE, &answer, now);
+            assert_eq!(report["failure_kind"], json!(kind), "{status_line}: {}", report["detail"]);
+            assert_eq!(report["http_status"], json!(status), "{status_line}: {}", report["detail"]);
+            let lines = openai_kept_lines(&answer, now);
+            assert!(lines.len() == 1 && lines[0].contains(&format!("{kind} (HTTP {status})")), "{status_line}: {lines:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let dir = scratch("cut-body-ok");
+        let _machine = bare_machine(&dir);
+        let (url, backend) = cut_body_backend("200 OK");
+        let cache_path = dir.join("account").join(super::CODEX_MODELS_CACHE_FILE);
+        let live = super::chatgpt_backend_models_at(&url, &openai_tokens(), &cache_path, None, now);
+        backend.join().unwrap();
+        let (_, fault) = live.expect_err("a success cut short is not an answer");
+        assert_eq!(fault.http_status, None, "a 200 is not a failed status: {}", fault.detail);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// t-76984: a request that never got a response is `network` when the
     /// connection was refused — no HTTP number — and a machine with no login
     /// at all is `no_credentials`, even when the cache it looked in sits in a
@@ -5634,7 +5699,7 @@ mod tests {
         }))
         .expect("an old report parses");
         let written = serde_json::to_value(&old).expect("a report serializes");
-        assert_eq!(written["failure_kind"], json!(""), "no kind was ever written");
+        assert!(written.get("failure_kind").is_none(), "no kind was ever written, so none is: {written}");
         assert!(written.get("http_status").is_none(), "{written}");
         let failed: super::SourceReport = serde_json::from_value(json!({
             "provider": "openai", "source": super::OPENAI_SOURCE, "ok": false,
