@@ -1379,7 +1379,7 @@ const RECALL_SNIPPET_MAX_BYTES: usize = 900;
 const RECALL_CLASSIFICATION_READ_BYTES: usize = 64 * 1024;
 const RECALL_RENDERED_SNIPPET_MAX_BYTES: usize = 1_200;
 const MAX_RECALLED_SNIPPETS: usize = 2;
-const SENSITIVE_SNIPPET_LINE_MARKERS: &[&str] = &[
+pub(crate) const SENSITIVE_SNIPPET_LINE_MARKERS: &[&str] = &[
     "api_key",
     "apikey",
     "access_key",

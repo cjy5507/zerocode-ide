@@ -61,6 +61,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, Once, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::memory::recall::SENSITIVE_SNIPPET_LINE_MARKERS;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -799,8 +800,10 @@ pub fn refresh_noting(
             Err((asked, detail)) => match last.filter(|last| answered_under_another_store(last, &asked_under)) {
                 Some(last) => {
                     note(&format!(
-                        "[zo] model discovery: {source}: kept the answer from {}; this process ({asked_under}) could not ask: {detail}",
-                        last.credential_store
+                        "[zo] model discovery: {source}: kept the answer from {}; this process ({}) could not ask: {}",
+                        one_line_without_values(&last.credential_store),
+                        one_line_without_values(&asked_under),
+                        one_line_without_values(&detail),
                     ));
                     keep(&mut catalog, last);
                 }
@@ -820,6 +823,60 @@ pub fn refresh_noting(
     let catalog = carry_forward(catalog, previous);
     let catalog = keep_selected(catalog, previous, selected, now_secs);
     withdraw_shipped(catalog, previous, now_secs)
+}
+
+/// What a failure's detail or a store's name may say on stderr: one line,
+/// with every value-shaped word masked. A failed response repeats whatever
+/// the provider echoes — a key, a bearer — and a folder name or a body may
+/// carry line breaks, so the line the person reads holds neither (t-76829).
+/// A word is value-shaped when it begins like a key, runs 40 or more
+/// characters, or runs 20 or more with letters and digits both; and the word
+/// after a name of [`SENSITIVE_SNIPPET_LINE_MARKERS`] is a value when a `:`
+/// or `=` joins them (or the name is `bearer`). `/` ends a word, so a
+/// store's folder stays readable.
+fn one_line_without_values(text: &str) -> String {
+    const KEY_PREFIXES: [&str; 8] = ["sk-", "ghp_", "gho_", "xox", "eyj", "akia", "aiza", "ya29."];
+    let is_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+');
+    let value_shaped = |word: &str| {
+        let lower = word.to_ascii_lowercase();
+        let long = word.chars().count();
+        KEY_PREFIXES.iter().any(|prefix| lower.starts_with(prefix) && long >= 12)
+            || long >= 40
+            || (long >= 20 && word.chars().any(|c| c.is_ascii_digit()) && word.chars().any(|c| c.is_ascii_alphabetic()))
+    };
+    let names_a_value = |word: &str| {
+        let word = word.to_ascii_lowercase().replace('-', "_");
+        SENSITIVE_SNIPPET_LINE_MARKERS
+            .iter()
+            .map(|marker| marker.trim_end_matches([':', ' ']))
+            .any(|marker| word == marker || word.ends_with(&format!("_{marker}")))
+    };
+    let spaced: String = text.chars().map(|c| if c.is_control() || c.is_whitespace() { ' ' } else { c }).collect();
+    let mut line = String::with_capacity(spaced.len());
+    let mut pending = false;
+    let mut rest = spaced.as_str();
+    while let Some(first) = rest.chars().next() {
+        let word = is_word(first);
+        let split = rest.find(|c| is_word(c) != word).unwrap_or(rest.len());
+        let (run, tail) = rest.split_at(split);
+        rest = tail;
+        if !word {
+            pending = pending && run.chars().all(|c| matches!(c, ' ' | '"' | '\'' | ':' | '='));
+            line.push_str(run);
+        } else if pending && !matches!(run.to_ascii_lowercase().as_str(), "bearer" | "basic") {
+            pending = false;
+            line.push_str("[redacted]");
+        } else if value_shaped(run) {
+            line.push_str("[redacted]");
+        } else {
+            pending = pending || (names_a_value(run) && {
+                let gap = rest.split(is_word).next().unwrap_or("");
+                run.eq_ignore_ascii_case("bearer") || gap.contains([':', '='])
+            });
+            line.push_str(run);
+        }
+    }
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Whether a failure or skip asked under `asking` leaves `last` standing:
@@ -5176,6 +5233,22 @@ mod tests {
         }
         assert!(err.contains("HTTP 401 Unauthorized"), "the reason that is not a value stays: {err:?}");
         assert!(err.contains("CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane"), "a store's folder stays: {err:?}");
+    }
+
+    /// t-76829: the masking takes a value and leaves the words around it.
+    #[test]
+    fn the_one_line_form_masks_values_and_keeps_the_words_and_folders() {
+        let line = super::one_line_without_values;
+        assert_eq!(line("claude token expired\nsign in again"), "claude token expired sign in again");
+        assert_eq!(line("token: abc123def456"), "token: [redacted]");
+        assert_eq!(line("Authorization: Bearer abc.def"), "Authorization: Bearer [redacted]");
+        assert_eq!(line("x-api-key=hunter2 failed"), "x-api-key=[redacted] failed");
+        assert_eq!(
+            line("CLAUDE_CONFIG_DIR:/Users/joe/zerocode/workspaces/w-76675/accounts"),
+            "CLAUDE_CONFIG_DIR:/Users/joe/zerocode/workspaces/w-76675/accounts"
+        );
+        assert_eq!(line("sk-ant-api03-Zq8Vn2Lk0Pw4Xt7Yb1Mc"), "[redacted]");
+        assert_eq!(line(""), "");
     }
 
     /// t-76621: a failure stays due at every connection — one written under
