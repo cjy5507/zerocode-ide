@@ -2170,6 +2170,37 @@ fn compaction_curation_gate_skips_an_empty_workspace_without_writing_markers() {
 }
 
 #[test]
+fn an_automatic_pass_that_promotes_nothing_leaves_the_config_home_untouched() {
+    // The curated stores live under the config home, one project folder per
+    // workspace; a pass that writes no lesson must not create one there.
+    let config_home = tempfile::tempdir().unwrap();
+    let env_lock = crate::test_env_lock();
+    with_config_home(&env_lock, config_home.path(), || {
+        let workspace = tempfile::tempdir().unwrap();
+        let cwd = workspace.path();
+        let dream_dir = cwd.join(".zo").join("dream");
+        fs::create_dir_all(&dream_dir).unwrap();
+        let seen_once = serde_json::to_string(&obs("seen once", "s1", true)).unwrap();
+        fs::write(dream_dir.join("s.jsonl"), format!("{seen_once}\n")).unwrap();
+
+        let on_compaction =
+            super::maybe_auto_dream_on_compaction(cwd, std::time::Duration::ZERO, None)
+                .unwrap()
+                .expect("the workspace has evidence, so the pass runs");
+        let at_startup = super::maybe_auto_dream(cwd, std::time::Duration::ZERO, None)
+            .unwrap()
+            .expect("an unthrottled pass runs");
+        assert!(on_compaction.is_noop() && at_startup.is_noop());
+
+        let left: Vec<_> = fs::read_dir(config_home.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert!(left.is_empty(), "nothing was promoted, yet the passes left {left:?}");
+    });
+}
+
+#[test]
 fn a_promoted_lesson_records_the_model_whose_pass_promoted_it() {
     // Observations are mined from turn logs that carry no model of their own,
     // so the honest stamp is the model running the pass — and recall compares
