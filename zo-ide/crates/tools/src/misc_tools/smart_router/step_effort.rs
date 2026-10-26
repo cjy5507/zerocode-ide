@@ -646,6 +646,7 @@ mod tests {
             error_streak: 1,
             check_red: false,
             routine_streak: 3,
+            screen_streak: 0,
             band: RouteTaskComplexity::Medium,
         };
         let ask = OwnedAsk {

@@ -222,7 +222,7 @@ fn invalid_capability_call(input: &str) -> ResolvedToolCall {
     ResolvedToolCall { name:"CapabilityInvoke".into(), input }
 }
 
-fn legacy_repetition_call(tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
+pub(super) fn legacy_repetition_call(tool_name: &str, input: &str) -> Option<ResolvedToolCall> {
     if tool_name != "CapabilityInvoke" { return None; }
     let value: serde_json::Value = serde_json::from_str(input).ok()?;
     Some(ResolvedToolCall {

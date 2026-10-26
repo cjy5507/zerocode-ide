@@ -506,6 +506,8 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             keys/text/waits, app/window management, element/OCR reads, clipboard read/write and programs. \
             For web pages use zerocode-browser open <url>, then read, marks, click, type and fill; set \
             browser_chrome only when the person explicitly requests browser menus, tabs or extension UI. \
+            Windows without trees (mirrored phones): one batch, not a call per click: \
+            left_click {label, ocr: true, after_text: line above}, type, key Return, wait_for {ocr: true, text}. \
             For background work, observe {app}, retain \
             app/window_id and set background: true. Never fall back to activation or global input. \
             Unverified keyboard receiver: use a verified writable-field capability or handoff. \
@@ -514,9 +516,7 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             pixels are omitted. observe {app} shows the accessibility tree; left_click {app, window_id, \
             element_index} presses its control. label/role resolve a fresh control in that window. \
             list_windows {app} keeps that app's windows (all if none match); \"true\"/\"250\" strings work. \
-            Batch familiar steps once with one final look; see steps for scope/waits. For windows without \
-            trees (mirrored phones), left_click {app, label, ocr: true, after_text: the preceding line} presses \
-            freshly read words; wait_for {app, ocr: true, text} checks values. listen_start hears machine/app; \
+            Batch familiar steps once with one final look; see steps for scope/waits. listen_start hears machine/app; \
             sound_wait {text: \"alarm_clock,siren\"} waits, sound_read reads, listen_stop ends. watch waits \
             for change or quiet without pictures. recipe_save keeps successful steps; recipe_run substitutes \
             params for {{names}}, reports where it stopped and start for resuming. walk {goal: one sentence, \
@@ -1845,7 +1845,7 @@ fn run_computer_batch(mut input: ComputerInput, ctx: &ToolContext, road: &Comput
             }
         }
         if step.app.is_some() && (step.coordinate.is_some() || step.start_coordinate.is_some()) {
-            return Err(ToolError::InvalidInput("an app-coordinate action needs its own observed window frame; run it separately or use label-based batch steps".into()));
+            return Err(ToolError::InvalidInput("an app-coordinate action needs its own observed window frame; run it separately or use label-based batch steps (windows without trees: left_click {label, ocr: true})".into()));
         }
     }
     zerocode_core::computer_use::parse_command(&batch_argv(&steps, ShotFrame::UNIT)?).map_err(ToolError::InvalidInput)?;
@@ -2591,6 +2591,15 @@ pub(crate) mod tests {
         let description = tool_specs()[0].description;
         assert!(description.contains("For web pages use zerocode-browser open <url>"), "the Computer description must name the work browser");
         assert!(description.contains("browser_chrome") && description.contains("menus, tabs or extension UI"), "the exception must claim browser chrome");
+    }
+
+    #[test]
+    fn the_computer_description_leads_windows_without_trees_to_one_batch_of_read_words() {
+        let description = tool_specs()[0].description;
+        let road = description.find("Windows without trees (mirrored phones): one batch").expect("the tree-less road is named");
+        assert!(road < description.find("Positions/sizes").unwrap(), "it leads, ahead of the frame rules");
+        assert!(description[road..].contains("left_click {label, ocr: true"), "it presses read words, not coordinates");
+        assert_eq!(description.matches("mirrored phones").count(), 1, "said once");
     }
 
     #[test]
@@ -3796,6 +3805,52 @@ pub(crate) mod tests {
             assert!(run_computer(&fields, &ctx, &road).is_err(), "unsafe step: {fields}");
         }
         assert!(calls(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_app_coordinate_batch_step_is_pointed_to_read_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let fields = json!({"action": "batch", "app": "Fixture", "window_id": 41, "steps": [
+            {"action": "left_click", "coordinate": [20, 40]},
+            {"action": "type", "text": "fixture"},
+        ]});
+        let error = run_computer(&fields, &ctx, &road).expect_err("an app coordinate cannot ride in a batch").to_string();
+        assert!(error.contains("left_click {label, ocr: true}"), "{error}");
+        assert!(calls(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mirrored_phone_form_goes_as_one_batch_of_read_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let (road, _) = fake_shim(dir.path());
+        let ctx = crate::tests::tool_context_outside_cwd_windows();
+        let reports = json!([
+            {"n": 1, "ok": true, "result": {"action": {"targetWindowId": 41}}},
+            {"n": 2, "ok": true, "result": {"snapshot": {"window": {"id": 41}}}},
+            {"n": 3, "ok": true, "result": {"snapshot": {"window": {"id": 41}}}},
+            {"n": 4, "ok": true, "result": {"window": {"id": 41}}},
+        ]);
+        std::fs::write(dir.path().join("batch"), json!({"ok": true, "result": {"ran": 4, "steps": reports}}).to_string()).unwrap();
+        let response = run_computer(&json!({"action": "batch", "app": "iPhone Mirroring", "window_id": 41, "steps": [
+            {"action": "left_click", "label": "Search", "ocr": true, "after_text": "Browse"},
+            {"action": "type", "text": "fixture"},
+            {"action": "key", "text": "Return"},
+            {"action": "wait_for", "ocr": true, "text": "Results", "timeout_ms": 50},
+        ]}), &ctx, &road).unwrap();
+        let answer: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(answer["ran"], 4);
+        let trips = calls(dir.path());
+        assert_eq!(trips.iter().filter(|call| call.as_str() == "batch").count(), 1, "{trips:?}");
+        assert!(trips.iter().all(|call| matches!(call.as_str(), "batch" | "observe")), "one trip and its looks: {trips:?}");
+        let commands: Vec<Vec<String>> = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch-commands")).unwrap()).unwrap();
+        assert_eq!(commands.len(), 4);
+        assert_eq!(commands[0][0], "click");
+        assert!(commands[0].iter().any(|word| word == "--ocr") && commands[3].iter().any(|word| word == "--ocr"), "{commands:?}");
+        assert!(commands.iter().flatten().all(|word| word != "--x" && word != "--y"), "no coordinate rides along: {commands:?}");
     }
 
     #[cfg(unix)]
