@@ -179,16 +179,23 @@ pub(crate) struct Busy {
     /// Workers the window could not read: never heard, or no table.
     pub(crate) unknown: usize,
     /// Conversations whose turn is under way or stopped at a question — a
-    /// run's coordinator or a person's tab (t-76434). Read by their turn
-    /// alone: a pane that never reported is not counted, since a person's
-    /// tab whose agent runs no hooks would otherwise ask at every restart.
+    /// run's coordinator or a person's tab (t-76434), read by their turn
+    /// alone.
     #[serde(default)]
     pub(crate) conversations: usize,
+    /// Conversations this window knows — a run's coordinator, or a tab
+    /// holding a conversation — whose turn it has not heard since it began
+    /// (t-76504). Not known to be at rest, so busy, as an unread worker is:
+    /// a coordinator that had not reported yet was restarted over all the
+    /// same.
+    #[serde(default)]
+    pub(crate) unheard_conversations: usize,
     /// Commands running under every worker's pane, whatever its turn —
     /// what 「끝나면」 waits out.
     pub(crate) running: usize,
     /// The first gap 「끝나면」 leaves at: nothing runs under any worker's
-    /// pane, nothing is unread, and no conversation is in a turn. A worker's
+    /// pane, nothing is unread, and no conversation is in a turn or unheard.
+    /// A worker's
     /// turn under way with nothing running under it is a gap — the cut is
     /// its reply in flight, which the restart nudge picks up; a command cut
     /// is work done again. A conversation's commands are not read, so its
@@ -206,6 +213,7 @@ impl Default for Busy {
             background: 0,
             unknown: 0,
             conversations: 0,
+            unheard_conversations: 0,
             running: 0,
             gap: true,
         }
@@ -228,14 +236,20 @@ impl RestartCensus {
             }
             said.running += one.commands.as_ref().map_or(0, Vec::len);
         }
-        said.conversations = self
-            .coordinators
-            .iter()
-            .chain(&self.tabs)
-            .filter(|one| matches!(one.turn, Turn::Running | Turn::Asking))
-            .count();
-        said.busy = said.turning + said.unknown + said.background + said.conversations > 0;
-        said.gap = said.conversations == 0
+        for one in self.coordinators.iter().chain(&self.tabs) {
+            match one.turn {
+                Turn::Running | Turn::Asking => said.conversations += 1,
+                Turn::Unheard => said.unheard_conversations += 1,
+                Turn::Rest | Turn::Interrupted => {}
+            }
+        }
+        said.busy = said.turning
+            + said.unknown
+            + said.background
+            + said.conversations
+            + said.unheard_conversations
+            > 0;
+        said.gap = said.conversations + said.unheard_conversations == 0
             && self.workers.iter().all(|one| {
                 one.turn != Turn::Unheard && one.commands.as_ref().is_some_and(Vec::is_empty)
             });
@@ -752,13 +766,14 @@ pub(crate) fn goodbye_lines(road: &str, choice: &str, census: &RestartCensus) ->
     let busy = census.busy();
     let mut lines = vec![format!(
         "exit by {road} · workers {} · mid-turn {} · background {} · running {} · unknown {} · \
-         conversations {} · busy {} · choice {choice} · census {} ms",
+         conversations {} · unheard {} · busy {} · choice {choice} · census {} ms",
         busy.workers,
         busy.turning,
         busy.background,
         busy.running,
         busy.unknown,
         busy.conversations,
+        busy.unheard_conversations,
         if busy.busy { "yes" } else { "no" },
         census.took_ms
     )];
@@ -882,8 +897,9 @@ mod tests {
     /// rest with nothing under it, and four coordinators whose turns were
     /// running — `busy no · choice unasked`, and the update toast restarted
     /// without a word over them. A conversation in a turn, or stopped at a
-    /// question, is busy; one at rest, interrupted or never heard is not —
-    /// and nobody busy still asks nothing.
+    /// question, is busy; one at rest or interrupted is not — and nobody
+    /// busy still asks nothing. A conversation never heard is
+    /// `a_conversation_never_heard_is_busy_to_a_restart`'s.
     #[test]
     fn a_conversation_in_a_turn_is_busy_to_a_restart() {
         let census = |coordinators: Vec<KeyedCut>, tabs: Vec<KeyedCut>| {
@@ -926,10 +942,10 @@ mod tests {
                 keyed("run:a", 3, Turn::Rest),
                 keyed("run:b", 4, Turn::Interrupted),
             ],
-            vec![keyed("tab:z", 5, Turn::Unheard)],
+            vec![keyed("tab:z", 5, Turn::Rest)],
         );
         assert!(!quiet.busy && quiet.gap, "{quiet:?}");
-        assert_eq!(quiet.conversations, 0);
+        assert_eq!((quiet.conversations, quiet.unheard_conversations), (0, 0));
         assert_eq!(
             goodbye_lines(
                 "restart:update-toast",
@@ -942,7 +958,55 @@ mod tests {
                 }
             )[0],
             "exit by restart:update-toast · workers 0 · mid-turn 0 · background 0 · running 0 · \
-             unknown 0 · conversations 1 · busy yes · choice unasked · census 0 ms"
+             unknown 0 · conversations 1 · unheard 0 · busy yes · choice unasked · census 0 ms"
+        );
+    }
+
+    /// t-76504 F4: a coordinator, or a tab holding a conversation, that this
+    /// window has not heard from yet is not known to be at rest. With no
+    /// worker busy and every other conversation at rest, it alone makes the
+    /// restart ask, and 「끝나면」 finds no gap until it is heard.
+    #[test]
+    fn a_conversation_never_heard_is_busy_to_a_restart() {
+        let census = |coordinators: Vec<KeyedCut>, tabs: Vec<KeyedCut>| RestartCensus {
+            workers: vec![worker(Turn::Rest, Some(&[]))],
+            coordinators,
+            tabs,
+            took_ms: 0,
+        };
+        let coordinator = census(
+            vec![
+                keyed("run:run-4275", 3, Turn::Rest),
+                keyed("run:run-11955", 4, Turn::Unheard),
+            ],
+            Vec::new(),
+        )
+        .busy();
+        assert!(coordinator.busy, "{coordinator:?}");
+        assert!(
+            !coordinator.gap,
+            "「끝나면」 left over a coordinator never heard"
+        );
+        assert_eq!(
+            (
+                coordinator.conversations,
+                coordinator.unheard_conversations,
+                coordinator.unknown
+            ),
+            (0, 1, 0),
+            "counted apart from turns and from workers"
+        );
+        let tab = census(Vec::new(), vec![keyed("tab:z", 5, Turn::Unheard)]).busy();
+        assert!(tab.busy && !tab.gap, "{tab:?}");
+        assert_eq!(tab.unheard_conversations, 1);
+        assert_eq!(
+            goodbye_lines(
+                "restart:update-toast",
+                "asked",
+                &census(vec![keyed("run:run-11955", 4, Turn::Unheard)], Vec::new()),
+            )[0],
+            "exit by restart:update-toast · workers 1 · mid-turn 0 · background 0 · running 0 · \
+             unknown 0 · conversations 0 · unheard 1 · busy yes · choice asked · census 0 ms"
         );
     }
 
@@ -1513,7 +1577,7 @@ mod tests {
         assert_eq!(
             lines[0],
             "exit by close · workers 2 · mid-turn 1 · background 1 · running 1 · unknown 0 · \
-             conversations 0 · busy yes · choice gap · census 38 ms"
+             conversations 0 · unheard 0 · busy yes · choice gap · census 38 ms"
         );
         assert_eq!(
             lines[1],
@@ -1529,7 +1593,7 @@ mod tests {
             goodbye_lines("terminate", "unasked", &RestartCensus::default()),
             vec![
                 "exit by terminate · workers 0 · mid-turn 0 · background 0 · running 0 · unknown 0 · \
-                 conversations 0 · busy no · choice unasked · census 0 ms"
+                 conversations 0 · unheard 0 · busy no · choice unasked · census 0 ms"
                     .to_string()
             ]
         );

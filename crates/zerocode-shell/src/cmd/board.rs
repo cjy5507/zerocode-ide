@@ -2338,6 +2338,8 @@ impl WakeWindow for ResumeDoor<'_> {
         if let Some(screen) = &self.restore {
             super::settings::replay_stored_screen(state.config_root(), screen, pty.terminal_mut());
         }
+        // The one process of this pane a way out may end (t-76504).
+        crate::pane_leftovers::launched(term, zerocode_lane::PtyTransport::pid(&pty), kind.slug());
         state.hold_terminal(term, pty);
         if !team_env.is_empty() {
             state.team_envs().insert(term, env.clone());

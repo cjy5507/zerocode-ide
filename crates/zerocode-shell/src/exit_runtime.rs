@@ -839,6 +839,7 @@ const UNREAD: crate::orchestration::restart_census::Busy =
         background: 0,
         unknown: 1,
         conversations: 0,
+        unheard_conversations: 0,
         running: 0,
         gap: false,
     };
@@ -1020,6 +1021,7 @@ mod tests {
             running,
             unknown,
             conversations: 0,
+            unheard_conversations: 0,
             gap: running == 0 && unknown == 0,
         }
     }

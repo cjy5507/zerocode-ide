@@ -435,9 +435,10 @@ export async function testRestartNotice({ browser, origin, ok, faults }) {
     });
 
     /* ④b — t-76434: no worker busy, four coordinators mid-turn (2026-10-26
-     * 22:56, `choice unasked`). The door asks, and the question names them. */
+     * 22:56, `choice unasked`). The door asks, and the question names them —
+     * and a fifth this window has not heard from yet (t-76504). */
     await page.evaluate(() => {
-      window.__CENSUS__ = { busy: true, workers: 1, turning: 0, background: 0, unknown: 0, conversations: 4, running: 0, gap: false };
+      window.__CENSUS__ = { busy: true, workers: 1, turning: 0, background: 0, unknown: 0, conversations: 4, unheardConversations: 1, running: 0, gap: false };
       window.__ROAD__ = [];
       void askBeforeRestart("update-toast");
     });
@@ -446,6 +447,7 @@ export async function testRestartNotice({ browser, origin, ok, faults }) {
       questioned: !document.getElementById("ask-scrim").hidden,
       body: document.getElementById("ask-scrim").textContent ?? "",
       want: t("exit.busyConversations", "턴 중인 대화 {{n}}개", { n: 4 }),
+      wantUnheard: t("exit.busyUnheardConversations", "상태를 모르는 대화 {{n}}개", { n: 1 }),
       road: window.__ROAD__.map(([kind]) => kind),
     }));
     if (talking.questioned) await press("#ask-cancel").catch(() => false);
@@ -454,8 +456,8 @@ export async function testRestartNotice({ browser, origin, ok, faults }) {
       for (const note of document.querySelectorAll(".toast")) note.remove();
     });
     ok(
-      "a restart over conversations mid-turn and no busy worker asks first, and its question says 「턴 중인 대화 4개」 — it no longer goes unasked (t-76434)",
-      talking.questioned && talking.body.includes(talking.want) && !talking.road.includes("now"),
+      "a restart over conversations mid-turn and no busy worker asks first, and its question says 「턴 중인 대화 4개」 and 「상태를 모르는 대화 1개」 — it no longer goes unasked (t-76434, t-76504)",
+      talking.questioned && talking.body.includes(talking.want) && talking.body.includes(talking.wantUnheard) && !talking.road.includes("now"),
       JSON.stringify(talking),
     );
 
@@ -495,7 +497,7 @@ export async function testRestartNotice({ browser, origin, ok, faults }) {
 
     /* ⑥ — the new words in every catalogue. */
     const langs = await page.evaluate(() => {
-      const KEYS = ["exit.noticeTo", "exit.notice", "exit.noticeHeld", "exit.backTo", "exit.backToBuild", "exit.back", "exit.busyConversations"];
+      const KEYS = ["exit.noticeTo", "exit.notice", "exit.noticeHeld", "exit.backTo", "exit.backToBuild", "exit.back", "exit.busyConversations", "exit.busyUnheardConversations"];
       const found = {};
       for (const code of ["en", "ja", "zh", "es"]) {
         found[code] = KEYS.filter((key) => typeof CATALOG[code]?.[key] !== "string");

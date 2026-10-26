@@ -3663,6 +3663,11 @@ function busyWords(busy) {
   if (busy.conversations > 0) {
     parts.push(t("exit.busyConversations", "턴 중인 대화 {{n}}개", { n: busy.conversations }));
   }
+  // One this window has not heard from yet is not known to be at rest
+  // (t-76504), as a worker never heard is not.
+  if (busy.unheardConversations > 0) {
+    parts.push(t("exit.busyUnheardConversations", "상태를 모르는 대화 {{n}}개", { n: busy.unheardConversations }));
+  }
   return parts.join(" · ");
 }
 

@@ -3994,10 +3994,13 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
     }
 
     fn hang_up_panes(&self) {
-        let state = self.0.state::<AppState>();
+        // The panes' agents are read on the way out's own thread (t-76504):
+        // the window's pane maps can be held by a stuck thread, and this one
+        // waits on none of them past `pane_leftovers::WRITE_PATIENCE`.
+        let app = self.0.clone();
         pane_leftovers::leave(
-            state.local_data_root().to_path_buf(),
-            pane_leftovers::pane_groups(state.inner()),
+            self.0.state::<AppState>().local_data_root().to_path_buf(),
+            move || pane_leftovers::pane_groups(app.state::<AppState>().inner()),
             note_window_event,
         );
     }
