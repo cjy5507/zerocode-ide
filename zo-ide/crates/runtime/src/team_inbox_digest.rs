@@ -1666,6 +1666,21 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// A pane the window opens carries `ZO_TEAM_INBOX_STORE`, naming the person's own
+    /// inbox (t-76332). A test that holds the env lock never sees it, so the store a
+    /// turn of that test reads is the one the test made under its cwd.
+    #[test]
+    fn a_test_under_the_env_lock_reads_its_own_store_not_the_panes() {
+        let pane_store = temp_dir("pane-store");
+        {
+            let _env = crate::test_env_lock();
+            std::env::set_var(STORE_ENV, &pane_store);
+        }
+        let _env = crate::test_env_lock();
+        let cwd = temp_dir("own-cwd");
+        assert_eq!(store_root(&cwd), cwd.join(".zo").join("team_inbox"));
+    }
+
     #[test]
     fn failure_retries_then_marks_stale_and_advances_cursor() {
         let root = temp_dir("delivery-failure");
