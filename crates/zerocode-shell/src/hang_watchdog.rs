@@ -423,17 +423,35 @@ impl Monitor {
     pub(crate) fn resumed(&mut self) {
         self.armed = false;
     }
+
+    /// One beat's judgments, the main thread's and the actor's, without the
+    /// app: `look` reads what the actor serves.
+    fn judge(
+        &mut self,
+        beat: Beat,
+        limits: Limits,
+        look: impl FnOnce() -> Option<Option<Served>>,
+    ) -> (Beaten, Vec<ActorLine>) {
+        if !self.armed {
+            let count = self.watch.count;
+            self.watch = Watch::new(beat.now);
+            self.watch.count = count;
+            self.armed = true;
+        }
+        let beaten = beat_once(&mut self.watch, &self.answer, beat, limits);
+        let actor = if limits.watchdog {
+            let wall = i64::try_from(beat.wall).unwrap_or(i64::MAX);
+            self.actor.step(look(), wall, limits.first_ms)
+        } else {
+            Vec::new()
+        };
+        (beaten, actor)
+    }
     /// One beat, after a nap that really took `nap` of wall time.
     pub(crate) fn tick(&mut self, app: &tauri::AppHandle, nap: Duration) {
         let now = self.start.elapsed().as_millis() as u64;
         if !READY.load(Relaxed) {
             return;
-        }
-        if !self.armed {
-            let count = self.watch.count;
-            self.watch = Watch::new(now);
-            self.watch.count = count;
-            self.armed = true;
         }
         let first_ms = FIRST_MS.load(Relaxed);
         let limits = Limits {
@@ -450,23 +468,20 @@ impl Monitor {
             nap: u64::try_from(nap.as_millis()).unwrap_or(u64::MAX),
             seen: screens_awake(),
         };
-        let Beaten {
-            tick,
-            answered,
-            queue,
-        } = beat_once(&mut self.watch, &self.answer, beat, limits);
-        if limits.watchdog {
-            let wall = i64::try_from(beat.wall).unwrap_or(i64::MAX);
-            for line in self
-                .actor
-                .step(crate::orchestration::actor_serving(), wall, first_ms)
-            {
-                crate::crumbs::record("ledger_actor", format_args!("{line}"));
-                crate::note_window_event(
-                    app.state::<crate::AppState>().local_data_root(),
-                    &line.to_string(),
-                );
-            }
+        let (
+            Beaten {
+                tick,
+                answered,
+                queue,
+            },
+            actor,
+        ) = self.judge(beat, limits, crate::orchestration::actor_serving);
+        for line in actor {
+            crate::crumbs::record("ledger_actor", format_args!("{line}"));
+            crate::note_window_event(
+                app.state::<crate::AppState>().local_data_root(),
+                &line.to_string(),
+            );
         }
         if let Some(Voided { ms, why }) = tick.voided {
             // Said once per withdrawn judgment, so a week of these lines
@@ -1072,6 +1087,193 @@ mod tests {
                 .count();
         }
         assert!((1..=6).contains(&busy), "{busy} busy lines in 60 s");
+    }
+
+    /// A monitor on made-up clocks (t-75646 r2): uptime, which every
+    /// judgment runs on and which stops while the machine sleeps, and the
+    /// wall clock, which a sleep runs ahead and a person or ntp can set back
+    /// or forward. The main thread answers every ping at once, so only the
+    /// actor is judged.
+    struct Machine {
+        monitor: Monitor,
+        up: u64,
+        wall: u64,
+        lines: Vec<ActorLine>,
+    }
+
+    impl Machine {
+        /// A monitor already warmed up and watching.
+        fn watching() -> Self {
+            let mut machine = Self {
+                monitor: Monitor::new(),
+                up: 0,
+                wall: 1_800_000_000_000,
+                lines: Vec::new(),
+            };
+            machine.run(Limits::DEFAULT.warmup_ms + Limits::DEFAULT.ping_ms, None);
+            machine
+        }
+
+        /// What the actor stamps a request it takes now with.
+        fn take(&self, verb: &'static str) -> Served {
+            Served {
+                verb,
+                since_ms: i64::try_from(self.wall).unwrap(),
+            }
+        }
+
+        /// One beat after a nap that took `nap` ms of uptime and of wall time.
+        fn beat(&mut self, nap: u64, serving: Option<Served>) {
+            self.up += nap;
+            self.wall += nap;
+            let beat = Beat {
+                now: self.up,
+                wall: self.wall,
+                nap,
+                seen: true,
+            };
+            let (beaten, lines) = self
+                .monitor
+                .judge(beat, Limits::DEFAULT, || Some(serving));
+            if beaten.queue {
+                self.monitor.answer.answer(self.up);
+            }
+            self.lines.extend(lines);
+        }
+
+        /// On-time beats for `ms`, the actor serving `serving` throughout.
+        fn run(&mut self, ms: u64, serving: Option<Served>) {
+            for _ in 0..ms / Limits::DEFAULT.ping_ms {
+                self.beat(Limits::DEFAULT.ping_ms, serving);
+            }
+        }
+
+        /// A sleep the nap straddled: the resume thread says so instead of
+        /// beating, as `main` does.
+        fn sleep(&mut self, ms: u64) {
+            self.up += Limits::DEFAULT.ping_ms;
+            self.wall += Limits::DEFAULT.ping_ms + ms;
+            self.monitor.resumed();
+        }
+
+        fn busy(&self) -> Vec<u64> {
+            self.lines
+                .iter()
+                .filter_map(|line| match line {
+                    ActorLine::Busy { ms, .. } => Some(*ms),
+                    ActorLine::Answered { .. } => None,
+                })
+                .collect()
+        }
+    }
+
+    /// The wall clock set back an hour while the actor stands: the request is
+    /// timed on uptime, so it is said at the first threshold and every ten
+    /// seconds after as if nothing happened — the wall clock used to make it
+    /// zero, and the stand went unsaid until the clock caught up.
+    #[test]
+    fn an_actor_request_is_said_on_time_when_the_wall_clock_goes_back() {
+        let mut machine = Machine::watching();
+        let request = machine.take("window_exiting");
+        machine.run(1_000, Some(request));
+        machine.wall -= 3_600_000;
+        machine.run(24_000, Some(request));
+        machine.run(250, None);
+        assert_eq!(
+            machine.lines,
+            [
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 2_000
+                },
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 12_000
+                },
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 22_000
+                },
+                ActorLine::Answered {
+                    verb: "window_exiting",
+                    ms: 25_250
+                },
+            ]
+        );
+    }
+
+    /// The wall clock set an hour ahead while the actor stands: to a watch
+    /// with two clocks that is a sleep, so the request is timed again from
+    /// the watch's return, and no line carries the hour.
+    #[test]
+    fn an_actor_request_never_carries_a_wall_clock_set_ahead() {
+        let mut machine = Machine::watching();
+        let request = machine.take("window_exiting");
+        machine.run(1_000, Some(request));
+        machine.wall += 3_600_000;
+        machine.run(30_000, Some(request));
+        machine.run(250, None);
+        // Back at the beat after the jump, warm 15 s later; said 2 s after that.
+        assert_eq!(
+            machine.lines,
+            [
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 2_000
+                },
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 12_000
+                },
+                ActorLine::Answered {
+                    verb: "window_exiting",
+                    ms: 15_000
+                },
+            ]
+        );
+    }
+
+    /// A one-second request the machine slept 30 s in the middle of, or the
+    /// process was not run for 30 s of (a lid-closed DarkWake), is not a busy
+    /// actor: the watch was not there, as it is not for the main thread.
+    #[test]
+    fn a_short_actor_request_across_a_sleep_says_nothing() {
+        let away: [(&str, fn(&mut Machine, Served)); 3] = [
+            ("slept in the nap", |machine, _| machine.sleep(30_000)),
+            ("slept between beats", |machine, _| machine.wall += 30_000),
+            ("not run", |machine, request| {
+                machine.beat(30_000, Some(request));
+            }),
+        ];
+        for (how, away) in away {
+            let mut machine = Machine::watching();
+            let request = machine.take("view");
+            machine.run(500, Some(request));
+            away(&mut machine, request);
+            machine.run(500, Some(request));
+            machine.run(250, None);
+            assert!(machine.lines.is_empty(), "{how}: {:?}", machine.lines);
+        }
+    }
+
+    /// A request still standing after the watch was away is timed again
+    /// from the watch's return: none of the time before counts.
+    #[test]
+    fn an_actor_request_the_watch_was_away_for_is_timed_from_its_return() {
+        let mut machine = Machine::watching();
+        let request = machine.take("land_check");
+        machine.run(1_500, Some(request));
+        machine.beat(30_000, Some(request));
+        machine.run(18_000, Some(request));
+        machine.run(250, None);
+        assert_eq!(machine.busy(), [2_000]);
+        assert_eq!(
+            machine.lines.last(),
+            Some(&ActorLine::Answered {
+                verb: "land_check",
+                ms: 3_250
+            })
+        );
     }
 
     #[test]
