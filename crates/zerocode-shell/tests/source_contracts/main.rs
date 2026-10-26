@@ -34,6 +34,7 @@ mod scm_observer_lock;
 mod seat_follows;
 mod secret_prompt;
 mod self_surface;
+mod settings_secrets;
 mod skills_view;
 mod support;
 mod type_value_keys;
