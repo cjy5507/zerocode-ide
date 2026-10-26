@@ -12,6 +12,7 @@ use super::support::{block_after, block_after_css, strip_rust_comments};
 const MODULE: &str = include_str!("../../src/settings_secrets.rs");
 const COMMANDS: &str = include_str!("../../src/cmd/settings_secrets.rs");
 const SELF_SURFACE: &str = include_str!("../../src/computer_use/self_surface.rs");
+const KEY_SAVES: &str = include_str!("../../src/typesafe_settings.rs");
 
 /// A window file, read when the test runs: a missing one fails this contract
 /// alone, not the whole target it sits in.
@@ -81,7 +82,13 @@ fn the_page_asks_for_names_and_sends_nothing_back() {
 #[test]
 fn the_road_that_holds_a_value_keeps_it_nowhere() {
     let module = strip_rust_comments(MODULE);
-    for opens in ["fn move_one(", "fn cell(", "fn ask(", "fn said_without("] {
+    for opens in [
+        "fn move_one(",
+        "fn cell(",
+        "fn read_pinned(",
+        "fn ask(",
+        "fn said_without(",
+    ] {
         let road = block_after(&module, opens);
         for keep in BACKEND_KEEPS {
             assert!(
@@ -92,9 +99,30 @@ fn the_road_that_holds_a_value_keeps_it_nowhere() {
     }
     let move_one = block_after(&module, "fn move_one(");
     assert!(
-        move_one.contains("save_key_at("),
+        move_one.contains("typesafe_settings::save_key_unless_another_at("),
         "the value is kept through the window's one keychain save, not a road of its own"
     );
+    let saves = strip_rust_comments(KEY_SAVES);
+    for opens in [
+        "pub fn save_key_at(",
+        "pub(crate) fn save_key_unless_another_at<",
+        "pub fn remove_key_at(",
+    ] {
+        let save = block_after(&saves, opens);
+        assert!(
+            save.contains("KeyItems::take()"),
+            "{opens} takes the one guard over keychain items"
+        );
+    }
+    for opens in [
+        "pub fn save_key_at(",
+        "pub(crate) fn save_key_unless_another_at<",
+    ] {
+        assert!(
+            block_after(&saves, opens).contains("save_key_held("),
+            "{opens} writes through the one save"
+        );
+    }
     let args_at = move_one.find("let args = [").expect("the move's arguments");
     let args = &move_one[args_at..args_at + move_one[args_at..].find("];").expect("closed")];
     let asks = move_one

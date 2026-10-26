@@ -412,7 +412,6 @@ use cmd::{
     worktree_stamp, write_primary_selection, write_text_file,
 };
 use cmd::{adopt_legacy_judgment_key, select_coding_model, zo_model_list};
-use cmd::{move_settings_secrets, settings_secret_literals};
 use cmd::{
     artifact_bundle, artifact_copy_path, artifact_counts, artifact_delete, artifact_document,
     artifact_export, artifact_feedback_record, artifact_flow, artifact_import_transcripts,
@@ -435,6 +434,7 @@ use cmd::{
     integration_queue_setting, land_batch_bisect, land_batch_cancel, land_batch_promote,
     land_batch_restack, set_integration_queue_enabled,
 };
+use cmd::{move_settings_secrets, settings_secret_literals};
 use emulator::{
     acknowledge_emulator_payload, android_accessibility_tree, android_accessibility_tree_direct,
     android_button, android_button_direct, android_emulators, android_emulators_direct,

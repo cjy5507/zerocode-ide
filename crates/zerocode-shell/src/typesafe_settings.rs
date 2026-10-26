@@ -399,6 +399,52 @@ pub fn key_saved_at(service: &str, keys: &dyn RouterKeys) -> Result<bool, Router
         .is_some_and(|key| !key.trim().is_empty()))
 }
 
+/// The window's one guard over the keychain items it keeps keys in. Every
+/// save and removal of a key takes it, and so does a move of a plain-text
+/// secret (`settings_secrets`) across its look at the item and its write — so
+/// no save from the settings, another page or another window lands between a
+/// look that found the item empty and a write that would cover it (t-76698).
+/// The keychain's own write is two `security` runs and has its own lock
+/// (`accounts::KEYCHAIN_WRITES`); this one spans the look before it.
+static KEY_ITEMS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+thread_local! {
+    /// Whether this thread holds [`KEY_ITEMS`]: a second take on the same
+    /// thread would wait on itself.
+    static KEY_ITEMS_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// [`KEY_ITEMS`], held.
+struct KeyItems {
+    _held: std::sync::MutexGuard<'static, ()>,
+}
+
+impl KeyItems {
+    fn take() -> Self {
+        debug_assert!(
+            !KEY_ITEMS_HERE.with(std::cell::Cell::get),
+            "the key guard is taken once per thread"
+        );
+        let held = KEY_ITEMS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        KEY_ITEMS_HERE.with(|here| here.set(true));
+        Self { _held: held }
+    }
+}
+
+impl Drop for KeyItems {
+    fn drop(&mut self) {
+        KEY_ITEMS_HERE.with(|here| here.set(false));
+    }
+}
+
+/// Whether this thread holds the window's guard over keychain items.
+#[cfg(test)]
+pub(crate) fn key_items_held_here() -> bool {
+    KEY_ITEMS_HERE.with(std::cell::Cell::get)
+}
+
 /// Keep `key` in the keychain item `service`, trimmed. An empty key is refused
 /// in `empty`, the card's own sentence, rather than saved as "configured,
 /// empty".
@@ -411,6 +457,17 @@ pub fn save_key_at(
     empty: &str,
     keys: &dyn RouterKeys,
 ) -> Result<(), RouterRefusal> {
+    let _held = KeyItems::take();
+    save_key_held(service, key, empty, keys)
+}
+
+/// [`save_key_at`]'s write, for a caller holding [`KeyItems`].
+fn save_key_held(
+    service: &str,
+    key: &str,
+    empty: &str,
+    keys: &dyn RouterKeys,
+) -> Result<(), RouterRefusal> {
     let key = key.trim();
     if key.is_empty() {
         return Err(empty.to_string().into());
@@ -418,10 +475,42 @@ pub fn save_key_at(
     keys.write(service, key)
 }
 
-/// Whether this thread holds the window's guard over keychain items.
-#[cfg(test)]
-pub(crate) fn key_items_held_here() -> bool {
-    false
+/// Why [`save_key_unless_another_at`] kept nothing.
+#[derive(Debug)]
+pub(crate) enum KeptNot<E> {
+    /// The item already holds another value; it is left as it is.
+    Another,
+    /// The caller's last look, just before the write, refused.
+    Changed(E),
+    /// The keychain refused the look or the write.
+    Refused(RouterRefusal),
+}
+
+/// [`save_key_at`], unless the item already holds another value: the look
+/// and the write are one step under the guard every key save takes, so a
+/// value saved in between is never covered. An item already holding `key` is
+/// left as it is. `still` is the caller's last look, asked under the guard
+/// just before the write (or before answering that the item holds `key`).
+///
+/// # Errors
+/// [`KeptNot`]: another value held, `still` refusing, or the keychain.
+pub(crate) fn save_key_unless_another_at<E>(
+    service: &str,
+    key: &str,
+    empty: &str,
+    keys: &dyn RouterKeys,
+    still: impl FnOnce() -> Result<(), E>,
+) -> Result<(), KeptNot<E>> {
+    let _held = KeyItems::take();
+    let held = keys.read(service).map_err(KeptNot::Refused)?;
+    if held.as_deref().is_some_and(|held| held != key) {
+        return Err(KeptNot::Another);
+    }
+    still().map_err(KeptNot::Changed)?;
+    if held.is_some() {
+        return Ok(());
+    }
+    save_key_held(service, key, empty, keys).map_err(KeptNot::Refused)
 }
 
 /// Forget the key kept in the keychain item `service`. Nothing saved is not
@@ -430,6 +519,7 @@ pub(crate) fn key_items_held_here() -> bool {
 /// # Errors
 /// A refused keychain deletion.
 pub fn remove_key_at(service: &str, keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
+    let _held = KeyItems::take();
     keys.delete(service)
 }
 
