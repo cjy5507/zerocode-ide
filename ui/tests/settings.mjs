@@ -15380,18 +15380,47 @@ await test("모델 연결: 설정을 열지 않아도 창이 뜬 뒤 한가할 �
   try {
     await installTauri(page, "memory-boot");
     attachFaultRecorder(page, "memory-boot");
+    /* The page's start holds its next frame, its 10 s timer and its idle
+       moment in the test's hands: nothing here waits on a real frame, a real
+       10 s or a real idle callback. Only what shell-connections.js asks for
+       is held; every other frame and timer runs as it does. */
+    await page.addInitScript(() => {
+      const held = { frames: [], timers: [], idles: [] };
+      window.__BOOT_CLOCK__ = held;
+      const mine = () => new Error().stack.includes("shell-connections.js");
+      const frame = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = (callback) => (mine() ? held.frames.push(callback) : frame(callback));
+      const timer = window.setTimeout.bind(window);
+      window.setTimeout = (callback, delay, ...rest) => (mine() && delay >= 10_000 ? held.timers.push({ callback, delay }) : timer(callback, delay, ...rest));
+      const idle = window.requestIdleCallback.bind(window);
+      window.requestIdleCallback = (callback, options) => (mine() ? held.idles.push({ callback, options }) : idle(callback, options));
+    });
     const from = backend.calls.length;
     await bootPage(page, "memory-boot");
     const probes = () => backend.calls.slice(from).filter((call) => call.command === "test_router_connection").map((call) => call.args.sourceId);
+    const clock = () => page.evaluate(() => ({ frames: window.__BOOT_CLOCK__.frames.length, timers: window.__BOOT_CLOCK__.timers.map((one) => one.delay), idles: window.__BOOT_CLOCK__.idles.map((one) => one.options?.timeout ?? null) }));
+    const settle = () => page.evaluate(() => new Promise((done) => window.setTimeout(done, 0)));
+    // The first frame has not come: no timer, no idle moment, no provider asked.
+    assertEqual(await clock(), { frames: 1, timers: [], idles: [] }, "the start did not wait for its first frame");
     assertEqual(probes(), [], "the window asked a provider before its first paint settled");
-    const started = Date.now();
-    await backend.waitForCall("memory-boot", "test_router_connection", from, 20_000);
-    const waited = Date.now() - started;
+    // The frame comes: the 10 s wait is set, and still nothing is asked.
+    await page.evaluate(() => { const [frame] = window.__BOOT_CLOCK__.frames.splice(0); frame(performance.now()); });
+    assertEqual(await clock(), { frames: 0, timers: [10_000], idles: [] }, "the first frame did not set exactly one 10 s wait");
+    await settle();
+    assertEqual(probes(), [], "the window asked a provider before its 10 s wait was over");
+    // The 10 s pass: an idle moment is asked for, and still nothing is asked.
+    await page.evaluate(() => { const [one] = window.__BOOT_CLOCK__.timers.splice(0); one.callback(); });
+    assertEqual(await clock(), { frames: 0, timers: [], idles: [10_000] }, "the 10 s wait did not ask for one idle moment");
+    await settle();
+    assertEqual(probes(), [], "the window asked a provider before an idle moment came");
+    // The idle moment comes: the one old connection is checked, once.
+    await page.evaluate(() => { const [one] = window.__BOOT_CLOCK__.idles.splice(0); one.callback({ didTimeout: false, timeRemaining: () => 50 }); });
+    await backend.waitForCall("memory-boot", "test_router_connection", from);
     await page.waitForFunction(() => !modelConnectionsController.quieting, null, { timeout: UI_TIMEOUT });
     assertEqual(probes(), ["gateway"], "the start did not check exactly the old connection once");
     assertEqual(backend.connectionMemory.connections.gateway.checkedMs, T0, "the start's quiet check was not kept");
     assert(await page.evaluate(() => !document.querySelector(".settings-pane:not([hidden])")?.offsetParent), "the quiet check opened settings");
-    return `1 quiet check ${Math.round(waited / 100) / 10} s after the first paint settled; the 1 h old one not asked`;
+    return "0 asked before the frame, the 10 s wait and the idle moment; then 1 quiet check; the 1 h old one not asked";
   } finally {
     backend.zoSettings.providers = saved.providers;
     backend.routerProbeAnswers = saved.answers;
