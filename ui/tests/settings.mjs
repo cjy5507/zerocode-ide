@@ -2854,8 +2854,10 @@ class StatefulBackend {
         if (!this.connectionMemory) throw new Error("model_connection_checks");
         const applied = this.connectionMemory.applied ??= {};
         const identity = this.typesafeSettings().providerIdentity;
-        const newest = Object.entries(applied).sort((a, b) => b[1] - a[1])[0]?.[0];
-        if (newest !== identity) applied[identity] = this.connectionMemory.nowMs;
+        // The identity applied last is the record's own word (t-76759).
+        const last = this.connectionMemory.lastApplied ?? Object.entries(applied).sort((a, b) => b[1] - a[1])[0]?.[0];
+        if (last !== identity) applied[identity] = this.connectionMemory.nowMs;
+        this.connectionMemory.lastApplied = identity;
         return this.connectionMemoryRead();
       }
       case "zo_model_list": return this.zoListRead();
@@ -14736,6 +14738,24 @@ await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 ·
     ? { ...report, credentialStore: "CLAUDE_CONFIG_DIR:/fixture/pane-home" } : report);
   await pageA.evaluate(() => modelConnectionsController.refresh());
   assertEqual(await state("claude"), "ok", "the pane's own store was said as another's");
+  // zo's rule (ZO m-76774): a pane given the credential folder too is named
+  // by it. Two pane shapes × two report labels; another provider's label
+  // (`CODEX_HOME:…`) and an empty label are never held to the Claude pane's.
+  const shapes = [
+    ["CLAUDE_CONFIG_DIR:/fixture/runtime-home", "CLAUDE_CONFIG_DIR:/fixture/runtime-home", "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/account"],
+    ["CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/account", "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/account", "CLAUDE_CONFIG_DIR:/fixture/runtime-home"],
+  ];
+  for (const [pane, same, other] of shapes) {
+    backend.zoList.paneCredentialStore = pane;
+    for (const [label, expected] of [[same, "ok"], [other, "elsewhere"], ["", "ok"]]) {
+      backend.zoList.reports = backend.zoList.reports.map((report) => report.provider === "anthropic" ? { ...report, credentialStore: label }
+        : report.provider === "openai" ? { ...report, credentialStore: "CODEX_HOME:/fixture/codex-runtime" } : report);
+      await pageA.evaluate(() => modelConnectionsController.refresh());
+      assertEqual(await state("claude"), expected, `pane ${pane} · report ${label || "(empty)"}`);
+      assert(await pageA.evaluate(() => modelConnectionsController.logins().every((login) => login.provider === "claude" || login.state !== "elsewhere")),
+        "another provider's report was held to the Claude pane's store");
+    }
+  }
   delete backend.zoList.paneCredentialStore;
   return "401 with an earlier list → 「목록은 이전 확인 것 · 지금 조회 실패」 · skipped → 로그인 안 됨 · keychain ≠ pane folder → 다른 환경의 조회";
 }));
