@@ -1200,6 +1200,40 @@ fn refusal_detail(body: &str) -> Option<String> {
     .map(str::to_string)
 }
 
+/// Shorter than this, a sent value is a word a refusal may hold for its own
+/// sake (`1`, `yes`), not a secret it says back.
+const SENT_VALUE_MIN_CHARS: usize = 6;
+
+/// Every value a probe puts on the wire that a gateway could say back: the
+/// key, and each extra header's value. The key's scheme (`Bearer`) is not
+/// one; the key behind it is.
+fn sent_values<'a>(
+    key: Option<&'a str>,
+    headers: Option<&'a std::collections::BTreeMap<String, String>>,
+) -> Vec<&'a str> {
+    key.into_iter()
+        .chain(
+            headers
+                .into_iter()
+                .flat_map(|headers| headers.values().map(String::as_str)),
+        )
+        .map(str::trim)
+        .filter(|value| value.chars().count() >= SENT_VALUE_MIN_CHARS)
+        .collect()
+}
+
+/// A probe's failure as the window may hold it (t-76028 F1): what the
+/// gateway or the transport said, with every value the probe sent and
+/// anything shaped like a credential masked — the IPC answer reaches the
+/// pane's 「자세히」 and the person's screen.
+fn without_sent(text: &str, sent: &[&str]) -> String {
+    let mut text = text.to_string();
+    for value in sent {
+        text = text.replace(value, zerocode_core::credential::MASK);
+    }
+    zerocode_core::credential::mask_values(&text)
+}
+
 /// One connection test: the row being connected, as the pane holds it.
 pub struct RouterProbe<'a> {
     pub base_url: &'a str,
@@ -1321,14 +1355,16 @@ pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<Discove
         req = req.header(&auth.header, auth_val);
     }
 
+    let sent = sent_values(key, headers);
     let res = req
         .send()
         .await
-        .map_err(|err| format!("연결 실패: {err}"))?;
+        .map_err(|err| without_sent(&format!("연결 실패: {err}"), &sent))?;
     if !res.status().is_success() {
         let status = res.status();
         let body = res.text().await.unwrap_or_default();
         let detail = refusal_detail(&body).unwrap_or_else(|| body.trim().to_string());
+        let detail = without_sent(&detail, &sent);
         return Err(if detail.is_empty() {
             format!("서버 오류: HTTP {status}")
         } else {
