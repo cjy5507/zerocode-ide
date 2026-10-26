@@ -180,8 +180,11 @@ fn a_model_zo_does_not_list_or_a_moved_selection_leaves_the_file_unchanged() {
     assert_eq!(std::fs::read(&path).expect("after"), before);
 }
 
-/// A loopback server that records the first request it reads and answers it
-/// 400, which zo does not retry.
+/// A loopback server that records the first request carrying a turn and
+/// answers it 400, which zo does not retry. Nothing else listens: the zo it
+/// talks to runs with a cleared environment, a temporary HOME and the
+/// keychain switched off, so no setting, session or credential of the
+/// person's is read, copied or written.
 struct FirstRequest {
     addr: std::net::SocketAddr,
     seen: std::sync::mpsc::Receiver<String>,
@@ -220,6 +223,18 @@ impl FirstRequest {
                             break;
                         }
                     }
+                }
+                // A model list a session asks for on its way up is answered
+                // empty; the first request that carries a turn is the one
+                // recorded.
+                if bytes.starts_with(b"GET ") {
+                    let empty = "{\"data\":[]}";
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{empty}",
+                        empty.len()
+                    );
+                    continue;
                 }
                 let answer =
                     "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"fixture\"}}";
