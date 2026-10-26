@@ -743,6 +743,23 @@ fn walk_files(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn whole_credential_references_survive_input_redaction() {
+        for value in [
+            "password={{password}}",
+            "password=${PASSWORD}",
+            "password=$(gh auth token)",
+            "Authorization: Bearer ${TOKEN}",
+        ] {
+            let argv = words(&["type", "--text", value]);
+            assert_eq!(redacted("computer", &argv), argv, "{value}");
+        }
+        for value in ["Bearer $TOKEN", "password=hunter2", "4111111111111111"] {
+            let argv = words(&["type", "--text", value]);
+            assert_ne!(redacted("computer", &argv), argv, "{value}");
+        }
+    }
+
+    #[test]
     fn secret_input_facts_and_credential_rejections_survive_value_redaction() {
         let root = tempfile::tempdir().unwrap();
         let marker = "SYNTHETIC_INPUT_ONLY";

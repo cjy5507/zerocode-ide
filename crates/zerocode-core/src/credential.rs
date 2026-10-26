@@ -334,6 +334,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn whole_reference_values_keep_their_text_in_both_masking_readings() {
+        for text in [
+            "password={{password}}",
+            "password=${PASSWORD}",
+            "export GITHUB_TOKEN=$(gh auth token)",
+            "Authorization: Bearer ${TOKEN}",
+            "Bearer {{token}}",
+            "client --password \"${PASSWORD}\" next",
+            "password='{{비밀번호}}'",
+            "password=$(printf '%s' \"$(gh auth token)\")",
+        ] {
+            assert_eq!(mask_named_values(text), text, "named: {text}");
+            assert_eq!(mask_values(text), text, "shapes: {text}");
+        }
+    }
+
+    #[test]
+    fn whole_reference_values_do_not_trigger_credential_cues() {
+        for text in [
+            "password={{password}}",
+            "password=${PASSWORD}",
+            "export GITHUB_TOKEN=$(gh auth token)",
+            "Authorization: Bearer ${TOKEN}",
+            "Bearer {{token}}",
+            "{{token}}",
+        ] {
+            assert!(!may_carry_a_credential(text), "{text}");
+            assert!(!location_segment_may_carry_a_credential(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn references_do_not_exempt_literal_or_incomplete_credential_values() {
+        for text in [
+            "Bearer $TOKEN",
+            "password=hunter2",
+            "password={{password}}suffix",
+            "password=prefix${PASSWORD}",
+            "password=${PASSWORD}suffix",
+            "password=$(gh auth token)suffix",
+            "password={{}}",
+            "password=${}",
+            "password=$()",
+            "password={{password}",
+            "password=$(gh auth token",
+            "password={{password}} password=hunter2",
+            "Authorization: Bearer ${TOKEN} literal",
+        ] {
+            assert!(may_carry_a_credential(text), "{text}");
+            assert_ne!(mask_named_values(text), text, "{text}");
+        }
+        assert!(may_carry_a_credential("export X=hunter2 password={{password}}"));
+        for text in ["4111111111111111", "4111 1111 1111 1111"] {
+            assert!(may_carry_a_credential(text), "{text}");
+            assert_eq!(mask_values(text), MASK, "{text}");
+        }
+    }
+
+    #[test]
     fn values_are_masked_and_their_keys_and_the_prose_around_them_stay() {
         for (said, kept, gone) in [
             (
