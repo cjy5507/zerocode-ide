@@ -130,6 +130,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::Mutex;
 
     use crossterm::event::{KeyCode, KeyEvent};
@@ -198,6 +199,57 @@ mod tests {
         assert!(matches!(poll(&mut events), Poll::Ready(None)));
         assert!(matches!(poll(&mut events), Poll::Ready(None)), "an ended stream came back");
         assert_eq!(terminal.polls(), 0, "a hung-up terminal was read");
+    }
+
+    /// 흐름을 폴링하는 태스크가 깨워진 횟수.
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+
+    impl Wakes {
+        fn count(&self) -> usize {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.wake_by_ref();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    /// 판이 끊긴 것을 이 흐름만 알 때 — 키도 틱도 없고, 유휴 루프는 다음
+    /// `IDLE_TEND` 까지 잔다 — 흐름이 스스로 깨어 한 간격 안에 끝을 말한다.
+    /// 간격 전에는 깨우지도 다시 묻지도 않고, 묻는 데 터미널을 읽지 않는다.
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_terminal_that_hangs_up_wakes_its_loop_to_end() {
+        static HUNG_UP: AtomicBool = AtomicBool::new(false);
+        fn hung_up() -> bool {
+            HUNG_UP.load(Ordering::Acquire)
+        }
+
+        let terminal = Fake::default();
+        let mut events = TerminalEvents::over(terminal.clone(), hung_up);
+        let wakes = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        let mut cx = Context::from_waker(&waker);
+        assert!(Pin::new(&mut events).poll_next(&mut cx).is_pending());
+
+        HUNG_UP.store(true, Ordering::Release);
+        tokio::time::advance(HANG_UP_LOOK / 2).await;
+        assert_eq!(wakes.count(), 0, "the stream woke its loop before a look was due");
+        assert!(
+            Pin::new(&mut events).poll_next(&mut cx).is_pending(),
+            "the stream looked again before a look was due"
+        );
+
+        tokio::time::advance(HANG_UP_LOOK).await;
+        assert!(wakes.count() > 0, "nothing woke the loop to look at the closed pane");
+        assert!(matches!(Pin::new(&mut events).poll_next(&mut cx), Poll::Ready(None)));
+        assert_eq!(terminal.polls(), 1, "a look read the terminal");
     }
 
     /// 틱이 서른 번, 블록이 백 번 깨워도 조용한 터미널은 한 번만 묻는다.
