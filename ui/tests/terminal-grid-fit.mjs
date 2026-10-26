@@ -7,10 +7,16 @@ import { installHarnessWaits } from "./harness-waits.mjs";
  * window participates in this test. */
 export async function testTerminalGridFit(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
+  const within = (work, label) => {
+    let timer;
+    return Promise.race([work, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 15000);
+    })]).finally(() => clearTimeout(timer));
+  };
   try {
     await installHarnessWaits(page);
-    const seen = await page.evaluate(async () => {
-      
+    const seen = await within(page.evaluate(async () => {
+
       const worktree = "/tmp/terminal-grid-fit";
       const sizes = new Map();
       const resizes = [];
@@ -140,7 +146,7 @@ export async function testTerminalGridFit(browser, origin, ok) {
       } finally {
         window.__GRID_FIT_SETTLE__ = settle;
       }
-    });
+    }), "restoring and fitting terminals");
     console.log(`MEASURE terminal grid fit ${JSON.stringify(seen)}`);
     ok("a restored hidden tab sends no resize and a CSS-sized hidden box remains unmeasured",
       seen.hiddenResizes === 0 && seen.hiddenResizeAfterFit === 0 && seen.hiddenProbes === 0 && seen.hiddenBlind, JSON.stringify(seen));
@@ -152,7 +158,7 @@ export async function testTerminalGridFit(browser, origin, ok) {
       seen.localFits && seen.localSize.actual.cols < seen.split[0].actual.cols, JSON.stringify(seen.localSize));
     ok("a zero-height terminal never supplies a measured grid", seen.zeroHeightBlind, JSON.stringify(seen));
     await page.setViewportSize({ width: 1040, height: 720 });
-    const resized = await page.evaluate((terms) => window.__GRID_FIT_SETTLE__(terms, "window resize fits the restored terminals"), seen.terms);
+    const resized = await within(page.evaluate((terms) => window.__GRID_FIT_SETTLE__(terms, "window resize fits the restored terminals"), seen.terms), "resized terminal frames");
     console.log(`MEASURE resized terminal grid fit ${JSON.stringify(resized)}`);
     if (process.env.TERMINAL_GRID_FIT_CAPTURE) await page.screenshot({ path: process.env.TERMINAL_GRID_FIT_CAPTURE });
     ok("resizing the window fits the restored terminals again", resized.every((one) => one.matches), JSON.stringify(resized));
