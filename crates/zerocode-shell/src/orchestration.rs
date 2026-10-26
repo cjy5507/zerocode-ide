@@ -11796,7 +11796,7 @@ fn carried(
                         actor,
                         minted.as_deref(),
                         now_ms,
-                        "this request was already carried out — read worker-list for the worker it started",
+                        "this request's pane was already cut once — worker-list shows a worker it started; if none came up, ask again under a new name",
                     );
                 }
                 Ok((BeginEffect::Refused(_), _)) => {
@@ -11999,7 +11999,14 @@ fn carried(
                      * A failed waiter owns host cleanup. We defensively remove
                      * the recorded seat if it still names this term so a fake
                      * or future host cannot leave a ghost table row behind. */
-                    if let Err(failure) = host.await_worker_ready(term) {
+                    /* A restore waits here, with its split still open in the
+                     * journal: it is a window-start road, it is retried under
+                     * the same name, and a failed wait must settle it as
+                     * retryable, which an applied split cannot be. A summons
+                     * waits after the split is settled, below (t-76680). */
+                    if reseating.is_some()
+                        && let Err(failure) = host.await_worker_ready(term)
+                    {
                         let destination = lease.binding().destination_pane().to_string();
                         {
                             let mut tables = crate::agent_teams::teams();
@@ -12099,6 +12106,35 @@ fn carried(
                         return refused_by_runtime(why);
                     }
                     rang(true);
+                    /* The pane is cut and the split is settled as applied: the
+                     * journal lets one pane be cut at a time, and cutting is
+                     * all this walk was. Waiting for the new worker's TUI can
+                     * take minutes (a login screen, a slow start), and holding
+                     * the split open through it made every other seat's
+                     * summons answer "another pane is still being cut" until
+                     * it ended (t-76680). The wait is the summoner's own: a
+                     * worker that never gets ready is closed and refused here
+                     * with its reason, and its seat row goes back. The same
+                     * request name asked again meets the applied split and is
+                     * told to ask under a new name (see the replay arm). */
+                    if reseating.is_none()
+                        && let Err(failure) = host.await_worker_ready(term)
+                    {
+                        {
+                            let mut tables = crate::agent_teams::teams();
+                            if let Some(team) = tables.get_mut(team_id)
+                                && team.term_of(&new_pane) == Some(term)
+                            {
+                                team.remove_pane(&new_pane);
+                            }
+                        }
+                        return roll_back_the_seat(
+                            actor,
+                            minted.as_deref(),
+                            now_ms,
+                            &failure.to_string(),
+                        );
+                    }
                     if let Some(prepared) = reseating.as_ref() {
                         // The continuation owns this pane from before the
                         // seat it is owed to is durable — the moment the mail

@@ -19430,6 +19430,195 @@ fn worker_readiness_runs_without_the_team_lock_and_reports_its_screen() {
     crate::agent_teams::forget_term(LEADER_TERM);
 }
 
+/// A host whose first worker waits for its readiness until the test lets it
+/// go, and whose every other worker is ready at once — the window answering
+/// slowly for ONE seat's summons (t-76680). A worker's term is its leader's
+/// plus [`Self::OFFSET`], so each seat's pane is told apart without a table.
+struct SlowReady {
+    /// The leader whose worker is the slow one.
+    slow_leader: u32,
+    /// Told once the slow worker has begun waiting for its readiness.
+    entered: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    /// What the slow worker waits on; a sender dropped counts as the go-ahead.
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    /// How the slow worker's wait ends once let go.
+    verdict: Result<(), &'static str>,
+}
+
+impl SlowReady {
+    const OFFSET: u32 = 1_000;
+}
+
+impl Host for SlowReady {
+    fn split(
+        &self,
+        _team: &str,
+        leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        Some(leader_term + Self::OFFSET)
+    }
+    fn await_worker_ready(&self, term: u32) -> Result<(), crate::agent_teams::HostStartFailure> {
+        if term != self.slow_leader + Self::OFFSET {
+            return Ok(());
+        }
+        let _ = self
+            .entered
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .send(());
+        // A bounded wait, so a broken test fails instead of hanging; the
+        // test lets this go long before it runs out.
+        let _ = self
+            .release
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .recv_timeout(std::time::Duration::from_secs(60));
+        self.verdict
+            .map_err(|why| crate::agent_teams::HostStartFailure::new(why, None))
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        true
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        Some(String::new())
+    }
+    fn focus(&self, _term: u32) -> bool {
+        true
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        Some(test_actor(term))
+    }
+}
+
+/// Two seats summon at once while the window is slow to ready the first
+/// seat's worker. Returns the second seat's answer and the first's, in that
+/// order, and the first seat's team name.
+fn a_second_seat_summons_while_the_first_waits_for_its_worker(
+    first_leader: u32,
+    second_leader: u32,
+    verdict: Result<(), &'static str>,
+) -> (
+    zerocode_hookd::TeamAnswer,
+    zerocode_hookd::TeamAnswer,
+    String,
+) {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let host = SlowReady {
+        slow_leader: first_leader,
+        entered: std::sync::Mutex::new(entered_tx),
+        release: std::sync::Mutex::new(release_rx),
+        verdict,
+    };
+    let first_team = format!("team-slow-ready-{first_leader}");
+    let second_team = format!("team-slow-ready-{second_leader}");
+    seat_a_team(&first_team, first_leader);
+    seat_a_team(&second_team, second_leader);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    for (team, name) in [
+        (&first_team, format!("slow-ready-{first_leader}")),
+        (&second_team, format!("slow-ready-{second_leader}")),
+    ] {
+        let opened = run(
+            &host,
+            Vec::new(),
+            team,
+            leader,
+            TEST_CAPABILITY,
+            &words(&format!("run-create --name {name}")),
+            clock(),
+        );
+        assert_eq!(opened.exit_code, 0, "{}", opened.stderr);
+    }
+    let (second, first) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            run(
+                &host,
+                Vec::new(),
+                &first_team,
+                leader,
+                TEST_CAPABILITY,
+                &words("worker-start --agent claude"),
+                clock(),
+            )
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the first worker began waiting for its readiness");
+        let second = run(
+            &host,
+            Vec::new(),
+            &second_team,
+            leader,
+            TEST_CAPABILITY,
+            &words("worker-start --agent claude"),
+            clock(),
+        );
+        drop(release_tx);
+        (second, first.join().expect("the first summons returned"))
+    });
+    (second, first, first_team)
+}
+
+/// A worker waiting to be ready is not a pane being cut: another seat's
+/// summons goes through while it waits, instead of being told "another pane
+/// is still being cut" for as long as the window is slow to answer (t-76680).
+#[test]
+fn a_seat_waiting_for_its_worker_does_not_hold_up_another_seats_summons() {
+    let _window = the_window();
+    let (second, first, _) =
+        a_second_seat_summons_while_the_first_waits_for_its_worker(91_360, 91_361, Ok(()));
+    assert_eq!(
+        second.exit_code, 0,
+        "the second seat's summons was held up by the first seat's wait: {}",
+        second.stderr
+    );
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    crate::agent_teams::forget_term(91_360);
+    crate::agent_teams::forget_term(91_361);
+}
+
+/// The first seat's worker never becoming ready is said to that seat with
+/// its reason, whatever the other seat was doing meanwhile — and the seat it
+/// cut leaves nothing behind (t-76680).
+#[test]
+fn a_worker_that_never_became_ready_is_refused_with_its_reason_while_others_go_on() {
+    let _window = the_window();
+    let (second, first, first_team) = a_second_seat_summons_while_the_first_waits_for_its_worker(
+        91_362,
+        91_363,
+        Err("composer never became ready"),
+    );
+    assert_eq!(
+        second.exit_code, 0,
+        "the second seat's summons was held up by the first seat's wait: {}",
+        second.stderr
+    );
+    assert_eq!(
+        first.exit_code, 1,
+        "a worker that never became ready started"
+    );
+    assert!(
+        first.stderr.contains("composer never became ready"),
+        "the reason did not come back with the refusal: {}",
+        first.stderr
+    );
+    assert!(
+        crate::agent_teams::teams()
+            .get(&first_team)
+            .is_none_or(|held| held.term_of("%2").is_none()),
+        "a refused readiness left a ghost pane in the team table"
+    );
+    crate::agent_teams::forget_term(91_362);
+    crate::agent_teams::forget_term(91_363);
+}
+
 /// A road that reads a seat has not let go of the table before it acts
 /// on what it read.
 ///
