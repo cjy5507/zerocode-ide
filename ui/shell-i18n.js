@@ -1693,7 +1693,7 @@ const CATALOG = {
     "settings.typesafe.standingsAsking": "Asking zo where each feature stands…",
     "settings.typesafe.standingsUnanswered": "zo did not say where each feature stands.",
     "settings.typesafe.standingWith": "{{state}} · {{detail}}",
-    "settings.typesafe.advanced": "Advanced",
+    "settings.typesafe.advanced": "Worker models · routing classifier",
     "settings.typesafe.turnedOn": "Turned on. Every feature now requests judgments at its recommended setting, in every folder.",
     "settings.typesafe.turnedOffAll": "Turned off. Nothing is sent.",
     "settings.typesafe.apiKey": "API key",
@@ -7413,6 +7413,7 @@ const CATALOG = {
     "exit.backTo": "Restarted on {{version}} (update)",
     "exit.backToBuild": "Restarted on a new build ({{sha}}) (update)",
     "exit.back": "Restarted",
+    "settings.classifier.everySession": "Applies to every zo session — not only workers: each turn of every zo session reads this setting when it picks a model.",
   },
   ja: {
     "settings.connections.authUnknown": "認証状態は未確認",
@@ -8747,7 +8748,7 @@ const CATALOG = {
     "settings.typesafe.standingsAsking": "zo に機能ごとの状態を問い合わせています…",
     "settings.typesafe.standingsUnanswered": "zo が機能ごとの状態を返しませんでした。",
     "settings.typesafe.standingWith": "{{state}} · {{detail}}",
-    "settings.typesafe.advanced": "詳細設定",
+    "settings.typesafe.advanced": "ワーカーモデル・ルーティング分類器",
     "settings.typesafe.turnedOn": "オンにしました。すべてのフォルダーで、機能ごとの推奨設定で判断を依頼します。",
     "settings.typesafe.turnedOffAll": "オフにしました。何も送りません。",
     "settings.typesafe.apiKey": "APIキー",
@@ -14466,6 +14467,7 @@ const CATALOG = {
     "exit.backTo": "{{version}} で再起動しました（アップデート）",
     "exit.backToBuild": "新しいビルド（{{sha}}）で再起動しました（アップデート）",
     "exit.back": "再起動しました",
+    "settings.classifier.everySession": "すべての zo セッションに適用 — ワーカーだけでなく、zo セッションの毎ターンのモデル選択がこの設定を読みます。",
   },
   zh: {
     "settings.connections.authUnknown": "身份验证状态未确认",
@@ -15537,7 +15539,7 @@ const CATALOG = {
     "settings.typesafe.standingsAsking": "正在向 zo 询问各功能状态…",
     "settings.typesafe.standingsUnanswered": "zo 没有返回各功能状态。",
     "settings.typesafe.standingWith": "{{state}} · {{detail}}",
-    "settings.typesafe.advanced": "高级",
+    "settings.typesafe.advanced": "工作者模型 · 路由分类器",
     "settings.typesafe.turnedOn": "已开启。所有文件夹中的每个功能都将按推荐设置请求判断。",
     "settings.typesafe.turnedOffAll": "已关闭。不发送任何内容。",
     "settings.typesafe.apiKey": "API 密钥",
@@ -21518,6 +21520,7 @@ const CATALOG = {
     "exit.backTo": "已以 {{version}} 重新启动（更新）",
     "exit.backToBuild": "已以新构建（{{sha}}）重新启动（更新）",
     "exit.back": "已重新启动",
+    "settings.classifier.everySession": "适用于所有 zo 会话——不只是工作者：每个 zo 会话在每一轮选择模型时都会读取此设置。",
   },
   es: {
     "settings.connections.authUnknown": "Autenticación sin comprobar",
@@ -22593,7 +22596,7 @@ const CATALOG = {
     "settings.typesafe.standingsAsking": "Preguntando a zo el estado de cada función…",
     "settings.typesafe.standingsUnanswered": "zo no dijo el estado de cada función.",
     "settings.typesafe.standingWith": "{{state}} · {{detail}}",
-    "settings.typesafe.advanced": "Avanzado",
+    "settings.typesafe.advanced": "Modelos de workers · clasificador de enrutado",
     "settings.typesafe.turnedOn": "Activado. Cada función pide juicios con su ajuste recomendado, en todas las carpetas.",
     "settings.typesafe.turnedOffAll": "Desactivado. No se envía nada.",
     "settings.typesafe.apiKey": "Clave de API",
@@ -28578,6 +28581,7 @@ const CATALOG = {
     "exit.backTo": "Reiniciado con {{version}} (actualización)",
     "exit.backToBuild": "Reiniciado con una compilación nueva ({{sha}}) (actualización)",
     "exit.back": "Reiniciado",
+    "settings.classifier.everySession": "Se aplica a todas las sesiones de zo, no solo a los workers: cada turno de cada sesión de zo lee este ajuste al elegir el modelo.",
   },
 };
 

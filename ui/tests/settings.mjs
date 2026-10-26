@@ -6246,9 +6246,12 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     visible: all.filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0).map((select) => select.id),
   }));
   assertEqual(selects, {
-    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model", "route-classifier-select"],
+    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model"],
     visible: ["managed-judgment-filter", "judgment-provider-kind"],
   }, "the provider and candidate filter are visible; protocol and inactive choices stay folded");
+  // The worker rows and the classifier moved to the orchestration pane
+  // (t-75762 v2, decision 4), folded there as they were on the card.
+  assertEqual(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.closest(".settings-pane").dataset.pane), "orchestration");
   assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
@@ -6341,6 +6344,7 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   // with the alias behind it; a version pins it where the door reads it; an
   // empty field unpins — the key leaves the file — and a pin the door would
   // not read is refused and writes nothing.
+  await openSettings(pageA, "orchestration");
   await pageA.locator("#typesafe-advanced > summary").click();
   // A field nobody wrote is empty with what runs now behind it (t-14437);
   // saving writes only the filled row, at the effort that row runs now.
@@ -6354,7 +6358,10 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   assertEqual(savedProfile.args.profiles.codex.low,
     { model: "gpt-test-profile", effort: SUMMON_PROFILES.codex.low.effort });
   assertEqual(savedProfile.args.profiles.claude, undefined, "automatic rows are not written");
-  await statusIs(await said("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
+  await pageA.waitForFunction(
+    (expected) => document.querySelector("#orch-models-status .settings-status-said")?.textContent === expected,
+    await said("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."), { timeout: UI_TIMEOUT },
+  );
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await profileModel.inputValue(), "gpt-test-profile");
   // Who put a row's model in its tier, and how sure that was (t-45961): said
@@ -6375,6 +6382,8 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     "지난 판정 뒤에 들어온 모델이라, 다음 판정 때까지 사실 규칙에 따른 임시 등급입니다."));
   assertEqual(tierNotes.person, "", "a written row says who placed its model");
   assertEqual(tierNotes.unsaid, "", "a row the lineup says nothing about said a source");
+  await pageA.locator("#typesafe-advanced > summary").click();
+  await openJudgmentSettings(pageA);
   const modelInput = pageA.locator("#typesafe-model-input");
   assertEqual(await modelInput.inputValue(), JEV_MODEL_ALIAS, "the active alias was not shown");
   assertEqual(await modelInput.getAttribute("placeholder"), JEV_MODEL_ALIAS);
@@ -6403,7 +6412,6 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
   await backend.waitForCall("A", "set_judgment_provider", unpinAt);
   await statusIs(await said("settings.judgment.checkedAndApplied", "응답을 확인한 모델을 적용했습니다. 연결 확인은 작업 정확도 검증과 별개입니다."));
   assert(!(JEV_MODEL_SETTING in backend.zoSettings.smart), "an unpin left the key in the file");
-  await pageA.locator("#typesafe-advanced > summary").click();
 
   // A removal forgets the key and takes back what only a saved key offers.
   const removedAt = backend.calls.length;
@@ -8514,7 +8522,9 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await renderSettled(pageA);
   const said = (key, fallback) => pageA.evaluate(([one, words]) => t(one, words), [key, fallback]);
   const unreachable = pageA.locator("[data-jev-unreachable]");
-  // The classifier is folded under 고급 (§6.1): open it to reach it.
+  // The classifier is folded on the orchestration pane (t-75762 v2,
+  // decision 4): open it to reach it.
+  await openSettings(pageA, "orchestration");
   if (!await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)) {
     await pageA.locator("#typesafe-advanced > summary").click();
   }
@@ -8553,7 +8563,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await pageA.selectOption("#route-classifier-select", quiet);
   assertEqual((await backend.waitForCall("A", "set_route_classifier", chosenAt)).args.mode, quiet);
   await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
+    (words) => document.querySelector("#orch-models-status .settings-status-said")?.textContent === words,
     await said("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 빠른 등급 모델에게 묻지 않습니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -8567,8 +8577,10 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   // Turn Jev on: the gated feature now stands at its recommendation and asks,
   // and a word that calls no probe still reaches it — nothing to warn about.
   const onAt = backend.calls.length;
+  await openJudgmentSettings(pageA);
   await pageA.locator("#jev-enabled").click();
   await backend.waitForCall("A", "set_jev_enabled", onAt);
+  await openSettings(pageA, "orchestration");
   await renderSettled(pageA);
   assert(
     await unreachable.isHidden(),
@@ -8583,7 +8595,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await backend.waitForCall("A", "set_route_classifier", offAt);
   await pageA.waitForFunction(() => !document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
-    await statusSaid(pageA, "typesafe-status"),
+    await statusSaid(pageA, "orch-models-status"),
     await said("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다."),
   );
   assertEqual(
@@ -8599,7 +8611,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await backend.waitForCall("A", "set_route_classifier", backAt);
   await pageA.waitForFunction(() => document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
-    await statusSaid(pageA, "typesafe-status"),
+    await statusSaid(pageA, "orch-models-status"),
     await said("settings.classifier.nowProbes", "이제 빠른 등급 모델에게도 묻습니다."),
   );
 

@@ -983,6 +983,9 @@ function showSettingsPane(pane) {
   if (pane === "orchestration" && orchReport === null && !orchLoading) {
     void refreshOrchestration();
   }
+  // The worker rows and the routing classifier stand here (t-75762 v2,
+  // decision 4) and paint from the same settings answer the model pane reads.
+  if (pane === "orchestration" && arriving) void refreshTypeSafe();
   if (pane === "computer-use" && arriving) {
     void refreshComputerUse();
   }
@@ -6796,7 +6799,7 @@ function initTypeSafeEvents() {
   });
   el("route-classifier-select")?.addEventListener("change", (event) => {
     const mode = event.target.value;
-    void runTypeSafe(() => invoke("set_route_classifier", { mode }), (state) => {
+    void runKeyCardStep(WORKER_MODELS_CARD, () => invoke("set_route_classifier", { mode }), (state) => {
       if (!state.classifier?.reaches) {
         return t("settings.classifier.nowOff", "자동 라우팅을 껐습니다 — 「모델 선택 판단」도 판단을 요청하지 않습니다.");
       }
@@ -6819,7 +6822,7 @@ function initTypeSafeEvents() {
       const effort = effortInput?.value.trim() || effortInput?.placeholder || "";
       (profiles[agent] ??= {})[difficulty] = { model, effort };
     });
-    void runTypeSafe(() => invoke("set_summon_profiles", { profiles }), () =>
+    void runKeyCardStep(WORKER_MODELS_CARD, () => invoke("set_summon_profiles", { profiles }), () =>
       t("settings.typesafe.profilesSaved", "선택 표를 저장했습니다."));
   });
 }
@@ -7093,6 +7096,22 @@ function paintTypeSafeSave() {
 function paintTypeSafeStatus(text, evidence = {}) {
   paintSettingsStatus(el("typesafe-status"), judgmentProviderController.failure(text) ?? text, evidence);
 }
+
+/* The worker rows and the classifier answer beside themselves, on the
+ * orchestration pane they moved to (t-75762 v2, decision 4); the rest of
+ * their hands are the TypeSafe card's, whose settings answer they paint. */
+const WORKER_MODELS_CARD = {
+  busy: () => typesafeBusy,
+  setBusy: (busy) => {
+    typesafeBusy = busy;
+  },
+  repaint: () => {
+    if (typesafeState) paintTypeSafe(typesafeState);
+  },
+  paint: (state) => paintTypeSafe(state),
+  say: (text, evidence) => paintSettingsStatus(el("orch-models-status"), judgmentProviderController.failure(text) ?? text, evidence),
+  standing: (state) => typesafeStanding(state),
+};
 
 /* This card's hands, for the step every key card runs (`runKeyCardStep`). */
 const TYPESAFE_CARD = {
