@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, TcpListener as StdListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak};
 use std::time::{Duration, Instant};
 
 use judgment_provider::Provider;
@@ -468,6 +468,10 @@ pub struct Manager {
     settings: PathBuf,
     instance: String,
     inner: Mutex<Inner>,
+    /// Status reads take turns, so the read that notes a runtime's end has
+    /// kept it before another read looks: no read tells an end the store has
+    /// not kept.
+    reads: Mutex<()>,
     sink: Arc<dyn Fn(Snapshot) + Send + Sync>,
     closed: AtomicBool,
     #[cfg(test)]
@@ -628,6 +632,7 @@ impl Manager {
                 runtime: None,
                 serve_limits: engine::Limits::DEFAULT,
             }),
+            reads: Mutex::new(()),
             sink,
             closed: AtomicBool::new(false),
             #[cfg(test)]
@@ -638,6 +643,7 @@ impl Manager {
     }
 
     pub fn snapshot(&self) -> Snapshot {
+        let _turn = self.read_turn();
         self.reap();
         let restores_at_start = RunIntent::read(&self.run_intent_path).is_some();
         let mut inner = lock(&self.inner);
@@ -1045,11 +1051,23 @@ impl Manager {
         (self.sink)(self.snapshot());
     }
 
+    /// The turn of one status read. A read that finds another one noting an
+    /// end waits off the async worker, as the reap itself waits for the
+    /// runtime's stderr.
+    fn read_turn(&self) -> MutexGuard<'_, ()> {
+        match self.reads.try_lock() {
+            Ok(turn) => turn,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => off_the_worker(|| lock(&self.reads)),
+        }
+    }
+
     /// Notices that the owned runtime ended, whether its own end or a status
     /// read asks first: the server comes down, and how the runtime ended stays
     /// with the state and in the store's record of exits. When the person's
     /// press still wants the server, the ended server keeps its port and
-    /// waits for its restart instead.
+    /// waits for its restart instead. Its caller holds the read turn until it
+    /// has read the state, so no read sees the end before it is kept.
     fn reap(&self) {
         let engine = match &lock(&self.inner).running {
             Some(running) if !running.engine.alive() => running.engine.clone(),
