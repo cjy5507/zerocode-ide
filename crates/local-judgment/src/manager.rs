@@ -480,6 +480,10 @@ pub struct Manager {
     /// record is kept.
     #[cfg(test)]
     before_exit_kept: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The threads whose status read found another read's turn and waited
+    /// for it.
+    #[cfg(test)]
+    waited_for_turn: Mutex<Vec<std::thread::ThreadId>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -639,6 +643,8 @@ impl Manager {
             engine_factory: Mutex::new(None),
             #[cfg(test)]
             before_exit_kept: Mutex::new(None),
+            #[cfg(test)]
+            waited_for_turn: Mutex::new(Vec::new()),
         }))
     }
 
@@ -1058,7 +1064,11 @@ impl Manager {
         match self.reads.try_lock() {
             Ok(turn) => turn,
             Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-            Err(TryLockError::WouldBlock) => off_the_worker(|| lock(&self.reads)),
+            Err(TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                lock(&self.waited_for_turn).push(std::thread::current().id());
+                off_the_worker(|| lock(&self.reads))
+            }
         }
     }
 
@@ -3710,6 +3720,13 @@ pub(crate) mod test_support {
     #[cfg(unix)]
     pub fn before_exit_kept(manager: &Manager, hook: impl FnOnce() + Send + 'static) {
         *lock(&manager.before_exit_kept) = Some(Box::new(hook));
+    }
+
+    /// Whether a status read of `manager` on `thread` found another read's
+    /// turn and waited for it.
+    #[cfg(unix)]
+    pub fn waited_for_its_turn(manager: &Manager, thread: std::thread::ThreadId) -> bool {
+        lock(&manager.waited_for_turn).contains(&thread)
     }
 
     #[cfg(unix)]
