@@ -240,21 +240,21 @@ mod tests {
 
         let terminal = Fake::default();
         let mut events = TerminalEvents::over(terminal.clone(), hung_up);
-        let wakes = Arc::new(Wakes::default());
-        let waker = Waker::from(Arc::clone(&wakes));
+        let woke = Arc::new(Wakes::default());
+        let waker = Waker::from(Arc::clone(&woke));
         let mut cx = Context::from_waker(&waker);
         assert!(Pin::new(&mut events).poll_next(&mut cx).is_pending());
 
         HUNG_UP.store(true, Ordering::Release);
         tokio::time::advance(HANG_UP_LOOK / 2).await;
-        assert_eq!(wakes.count(), 0, "the stream woke its loop before a look was due");
+        assert_eq!(woke.count(), 0, "the stream woke its loop before a look was due");
         assert!(
             Pin::new(&mut events).poll_next(&mut cx).is_pending(),
             "the stream looked again before a look was due"
         );
 
         tokio::time::advance(HANG_UP_LOOK).await;
-        assert!(wakes.count() > 0, "nothing woke the loop to look at the closed pane");
+        assert!(woke.count() > 0, "nothing woke the loop to look at the closed pane");
         assert!(matches!(Pin::new(&mut events).poll_next(&mut cx), Poll::Ready(None)));
         assert_eq!(terminal.polls(), 1, "a look read the terminal");
     }
