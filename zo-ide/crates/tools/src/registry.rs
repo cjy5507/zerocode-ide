@@ -1006,6 +1006,24 @@ impl GlobalToolRegistry {
         pending_mcp_servers: Option<Vec<String>>,
         mcp_degraded: Option<McpDegradedReport>,
     ) -> ToolSearchOutput {
+        self.search_with_work_browser(query, max_results, pending_mcp_servers, mcp_degraded, || {
+            crate::browser_execution::installed_program().is_some()
+        })
+    }
+
+    /// [`Self::search`], told whether the work browser is installed instead of
+    /// looking on PATH; it asks only for an answer that offers `Computer`. The
+    /// answer's tests tell it, so none of them swaps PATH under a test that
+    /// starts a program through it (t-74362).
+    #[must_use]
+    pub(crate) fn search_with_work_browser(
+        &self,
+        query: &str,
+        max_results: usize,
+        pending_mcp_servers: Option<Vec<String>>,
+        mcp_degraded: Option<McpDegradedReport>,
+        work_browser_installed: impl FnOnce() -> bool,
+    ) -> ToolSearchOutput {
         let query = query.trim().to_string();
         let normalized_query = misc_tools::normalize_tool_search_query(&query);
         let specs = self.searchable_tool_specs();
@@ -1031,9 +1049,8 @@ impl GlobalToolRegistry {
         // browser starts signed out. The incident session that drove one for
         // 45 minutes had read the work browser in one sentence of a 19,822-
         // character answer, so the answer that offers `Computer` says it first.
-        let note = (matches.iter().any(|name| name == "Computer")
-            && crate::browser_execution::installed_program().is_some())
-        .then(|| COMPUTER_WEB_NOTE.to_string());
+        let note = (matches.iter().any(|name| name == "Computer") && work_browser_installed())
+            .then(|| COMPUTER_WEB_NOTE.to_string());
         ToolSearchOutput {
             note,
             matches,
