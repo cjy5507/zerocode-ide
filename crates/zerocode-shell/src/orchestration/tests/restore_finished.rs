@@ -907,6 +907,7 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
                     transcript_path: None,
                     interrupted: false,
                 },
+                sure: true,
             }],
             |term| live.contains_key(&term),
         );
@@ -928,6 +929,80 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
     );
     for pane in [FIRST, LEADER] {
         crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-76489 r6, the boot's half of keeping both: no pane is known to hold
+/// the coordinator's conversation — one runs a build, the other cannot be
+/// told of — so the window's save keeps it on both leaves. The next boot
+/// reads both off the file and wakes each in turn: the first opens it, and
+/// the second is told the pane that holds it and starts nothing, standing a
+/// plain shell. One process holds it, and nothing is lost. When the first
+/// leaf's spawn is refused, the second opens it itself.
+#[test]
+fn a_conversation_two_leaves_name_comes_back_once_and_is_never_lost() {
+    const FIRST: u32 = 764_960;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    std::fs::create_dir_all(&main).expect("a checkout");
+    let at = main.to_string_lossy().into_owned();
+    let coordinator = "76489b2c-0000-4000-8000-000000000001";
+    let leaf = |term: u32| {
+        let mut tab = record("claude", coordinator);
+        tab.focused = term == 8;
+        tab.terms = std::collections::HashMap::from([(0, term)]);
+        tab
+    };
+    let file = root.path().join("pane-layouts.json");
+    let (_, doubled) = crate::pane_layout::save_window_set(
+        &file,
+        at.clone(),
+        vec![leaf(3), leaf(8)],
+        &|| false,
+        &|_, term| (term == 3).then_some(false),
+    )
+    .expect("the save")
+    .expect("not leaving");
+    assert!(
+        doubled.is_empty(),
+        "a record taken off on a guess: {doubled:?}"
+    );
+    let back = crate::cmd::settings::opened_set(&file, &at);
+    assert!(back.struck.is_empty(), "{back:?}");
+    let wakes: Vec<crate::pane_layout::WakeAgent> = back
+        .kept()
+        .into_iter()
+        .flat_map(|tab| tab.agents.into_values())
+        .collect();
+    assert_eq!(wakes.len(), 2, "{wakes:?}");
+    assert_eq!(crate::cmd::settings::standing_set(&file), vec![at.clone()]);
+
+    for refused in [false, true] {
+        let door = Door::new(&main);
+        door.on_road(WakeRoad::RestoreFront);
+        if refused {
+            door.refuse_start(FIRST);
+        }
+        let answers: Vec<_> = (FIRST..)
+            .zip(&wakes)
+            .map(|(term, wake)| door.wake(term, &wake.agent, &wake.id))
+            .collect();
+        if refused {
+            assert!(answers[0].is_err(), "{answers:?}");
+            assert_eq!(answers[1], Ok(ConversationWake::opened(FIRST + 1)));
+        } else {
+            assert_eq!(answers[0], Ok(ConversationWake::opened(FIRST)));
+            assert_eq!(
+                answers[1],
+                Ok(ConversationWake::standing(FIRST)),
+                "the second leaf woke a second process on one conversation"
+            );
+        }
+        assert_eq!(resumes(&door), 1, "refused={refused}: {:?}", door.started());
+        for term in [FIRST, FIRST + 1] {
+            crate::agent_teams::forget_term(term);
+        }
     }
 }
 
@@ -960,6 +1035,7 @@ fn a_coordinator_lost_with_the_exits_write_is_told_to_its_run() {
                 transcript_path: None,
                 interrupted: false,
             },
+            sure: true,
         },
         Some(run.clone()),
     )];

@@ -29189,8 +29189,10 @@ mod exit_capture {
     /// program started in it (`Some(false)`), or unknown (`None`) — the
     /// names that program goes by, empty when the terminal will not say,
     /// and what it says of the other processes in its group: their names,
-    /// one list each, and whether that is all of them.
-    struct Front(Terminal, Option<bool>, Vec<String>, GroupPrograms);
+    /// one list each, and whether that is all of them — and whether every
+    /// process holding it said all its names (t-76489 r6). A line that
+    /// named nothing was not read whole, as on a real lane.
+    struct Front(Terminal, Option<bool>, Vec<String>, GroupPrograms, bool);
 
     impl PtyTransport for Front {
         fn pump(&mut self) -> Pumped {
@@ -29234,6 +29236,10 @@ mod exit_capture {
             self.2.clone()
         }
 
+        fn foreground_programs_read(&self) -> (Vec<String>, bool) {
+            (self.2.clone(), self.4 && !self.2.is_empty())
+        }
+
         fn foreground_group_programs(&self) -> GroupPrograms {
             self.3.clone()
         }
@@ -29258,6 +29264,7 @@ mod exit_capture {
                     shell,
                     Vec::new(),
                     GroupPrograms::Whole(Vec::new()),
+                    true,
                 )),
             );
         };
@@ -29348,6 +29355,7 @@ mod exit_capture {
                     child,
                     programs,
                     GroupPrograms::Whole(Vec::new()),
+                    true,
                 )),
             );
         };
@@ -29455,6 +29463,10 @@ mod exit_capture {
         assert_eq!(set[1].agents[&0].id, ENDED, "B lost its conversation");
         assert_eq!(set[1].running[&0], "claude", "B lost its program");
         assert!(set[1].focused && set[1].awake);
+        assert!(
+            claude_leaves(&pane_layout::read(&file), ENDED) >= 1,
+            "r3 ①: C lost"
+        );
     }
 
     /// t-76489 r3 ②, the exit end to end: workspace A's set names the
@@ -29508,6 +29520,7 @@ mod exit_capture {
             term: 9,
             worktree: b.clone(),
             wake,
+            sure: true,
         };
         let exited = exit_write(
             &file,
@@ -29527,6 +29540,7 @@ mod exit_capture {
         );
         let stored = pane_layout::read(&file);
         assert_eq!(stored[&b][0].agents[&0].id, ENDED);
+        assert!(claude_leaves(&stored, ENDED) >= 1, "r3 ②: C lost");
         assert!(stored[&a][0].agents.is_empty(), "the conversation named twice");
         assert_eq!(
             pane_layout::standing_worktrees(&stored),
@@ -29559,6 +29573,7 @@ mod exit_capture {
                     Some(false),
                     programs,
                     GroupPrograms::Whole(members),
+                    true,
                 )),
             );
         };
@@ -29691,6 +29706,7 @@ mod exit_capture {
         assert_eq!(set[1].agents[&0].id, ENDED, "B lost its conversation");
         assert_eq!(set[1].running[&0], "claude", "B lost its program");
         assert_eq!(set[1].id, Some(2), "B lost its place");
+        assert!(claude_leaves(&stored, ENDED) >= 1, "r4 ①: C lost");
         assert_eq!(
             set[1].buffers[&0], "screen of 8",
             "B's screen was not its own"
@@ -29770,6 +29786,7 @@ mod exit_capture {
                     Some(false),
                     names(&["make"]),
                     GroupPrograms::Whole(vec![names(&["cc"])]),
+                    true,
                 )),
             );
             registry.insert(
@@ -29779,6 +29796,7 @@ mod exit_capture {
                     Some(false),
                     launcher(),
                     members,
+                    true,
                 )),
             );
             let shell_panes = std::collections::HashSet::from([3, 8]);
@@ -29847,6 +29865,7 @@ mod exit_capture {
             assert_eq!(exited.filed, vec![pane_layout::Filed::Named], "{scene}");
             let stored = pane_layout::read(&file);
             let set = &stored[&main];
+            assert_eq!(claude_leaves(&stored, ENDED), 2, "{scene}: a leaf lost C");
             assert_eq!(
                 set[1].agents[&0].id, ENDED,
                 "{scene}: B lost its conversation"
@@ -29891,6 +29910,7 @@ mod exit_capture {
                 Some(false),
                 launcher(),
                 GroupPrograms::Partial(vec![names(&["node"]), claude()]),
+                true,
             )),
         );
         let asked = |agent: &str| {
@@ -29903,6 +29923,274 @@ mod exit_capture {
             )
         };
         assert_eq!([asked("claude"), asked("codex")], [Some(true), None]);
+    }
+
+    /// How many leaves of `stored` name claude conversation `id` and would
+    /// start claude again (t-76489 r6).
+    fn claude_leaves(stored: &pane_layout::Layouts, id: &str) -> usize {
+        stored
+            .values()
+            .flatten()
+            .map(|tab| {
+                tab.agents
+                    .iter()
+                    .filter(|(at, one)| {
+                        one.agent == "claude"
+                            && one.id == id
+                            && tab.running.get(at).map(String::as_str) == Some("claude")
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// t-76489 r6, the codex review of r5, its three scenes through the
+    /// window's save and the exit's write, with every saved set the scene
+    /// could have left: no living coordinator is lost, and no record goes
+    /// on a guess.
+    ///
+    /// ① Pane A (term 3) is known to hold coordinator C — claude is in
+    /// front — and pane B (term 8), a launcher whose group was read in
+    /// part, cannot be told of; both window records name C. A's leaf keeps
+    /// C, its program and its screen whether B's leaf named C too, the
+    /// last save left B out, or it left A out. ② On Windows, B's line names
+    /// `cmd` while the Claude below it would not give its image; on unix,
+    /// B's `node` gave its path but not the argv naming its script. ③ On
+    /// macOS libproc listed B's group with 0. In ② and ③ pane A runs a
+    /// build after its agent quit and still names C; B is no pane known to
+    /// hold nothing, and C stays on B's leaf — on A's as well, for nobody
+    /// knows which pane holds it — or, with B left out, on A's alone.
+    /// Before, ① took A's leaf off as a dead pane's record and gave C to
+    /// B, and ②③ read B as holding nothing: the save and the exit kept A's
+    /// leaf alone and B's conversation was gone with B's leaf.
+    #[test]
+    fn the_review_scenes_of_r5_lose_no_living_coordinator() {
+        let names =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|name| name.to_string()).collect() };
+        let session = zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: ENDED.to_string(),
+            transcript_path: None,
+        };
+        let agents = HashMap::from([(3, "claude"), (8, "claude")]);
+        let sessions = HashMap::from([(3, session.clone()), (8, session)]);
+        let seats = |agent: &str, _: &str, id: &str| {
+            (agent == "claude" && id == ENDED).then(|| "run-4275".to_string())
+        };
+        let wake = pane_layout::WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: ENDED.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        };
+        let leaf = |id: u64, term: u32| pane_layout::TabLayout {
+            id: Some(id),
+            root: pane_layout::PaneNode::Leaf,
+            titles: HashMap::new(),
+            names: HashMap::new(),
+            agents: HashMap::from([(0, wake.clone())]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            active: 0,
+            expanded: None,
+            pinned: false,
+            focused: false,
+            terms: HashMap::from([(0, term)]),
+            buffers: HashMap::new(),
+            owed: Vec::new(),
+            awake: false,
+        };
+        let front = |programs: &[&str], members: GroupPrograms, whole: bool| {
+            Front(
+                Terminal::new(4, 20),
+                Some(false),
+                names(programs),
+                members,
+                whole,
+            )
+        };
+        let launcher = ["sh", "launch-session", "bin"];
+        let make = || front(&["make"], GroupPrograms::Whole(vec![names(&["cc"])]), true);
+        let scenes = [
+            (
+                "① A known, B a launcher read in part",
+                front(
+                    &["2.1.232", "versions", "claude"],
+                    GroupPrograms::Whole(Vec::new()),
+                    true,
+                ),
+                front(
+                    &launcher,
+                    GroupPrograms::Partial(vec![names(&["node"])]),
+                    true,
+                ),
+                [Some(true), None],
+            ),
+            (
+                "② Windows: cmd named, the Claude below it not",
+                make(),
+                front(
+                    &["cmd", "System32", "Windows", "C:"],
+                    GroupPrograms::Whole(Vec::new()),
+                    false,
+                ),
+                [Some(false), None],
+            ),
+            (
+                "② unix: node's path read, its argv not",
+                make(),
+                front(
+                    &["node", "bin", "local", "usr"],
+                    GroupPrograms::Whole(Vec::new()),
+                    false,
+                ),
+                [Some(false), None],
+            ),
+            (
+                "③ macOS: the group listed with 0",
+                make(),
+                front(&launcher, GroupPrograms::Unread, true),
+                [Some(false), None],
+            ),
+        ];
+        for (scene, a, b, judged) in scenes {
+            let registry = TerminalRegistry::default();
+            registry.insert(3, PtyHandle::new(a));
+            registry.insert(8, PtyHandle::new(b));
+            let asked = |term: TermId| {
+                crate::agent_tools_runtime::agent_in_front_within(
+                    &registry,
+                    true,
+                    term,
+                    "claude",
+                    Some(Duration::from_millis(50)),
+                )
+            };
+            assert_eq!([asked(3), asked(8)], judged, "{scene}: the judge");
+            let in_front = |term: TermId| agents.get(&term).map_or(Some(false), |_| asked(term));
+            let holds = |wake: &pane_layout::WakeAgent, term: u32| {
+                crate::cmd::settings::pane_holds(&sessions, &agents, &in_front, wake, term)
+            };
+            let a_known = judged[0] == Some(true);
+            for saved in [
+                vec![leaf(1, 3), leaf(2, 8)],
+                vec![leaf(1, 3)],
+                vec![leaf(2, 8)],
+            ] {
+                let left: Vec<u32> = saved.iter().map(|tab| tab.terms[&0]).collect();
+                let scene = format!("{scene}, saved with the leaves of {left:?}");
+                let dir = tempfile::tempdir().expect("tempdir");
+                let main = dir.path().join("zerocode");
+                std::fs::create_dir_all(&main).expect("a checkout");
+                let main = main.to_string_lossy().into_owned();
+                let file = dir.path().join("pane-layouts.json");
+
+                // The window's save.
+                pane_layout::save_window_set(&file, main.clone(), saved.clone(), &|| false, &holds)
+                    .expect("a save")
+                    .expect("a window that is not leaving saves");
+                let stored = pane_layout::read(&file);
+                assert!(
+                    claude_leaves(&stored, ENDED) >= 1,
+                    "{scene}: the save lost the coordinator"
+                );
+                if !a_known {
+                    assert_eq!(
+                        stored[&main].len(),
+                        saved.len(),
+                        "{scene}: the save took a tab"
+                    );
+                    assert_eq!(
+                        claude_leaves(&stored, ENDED),
+                        saved.len(),
+                        "{scene}: the save took C off a leaf on a guess"
+                    );
+                }
+
+                // The exit's write, over what the save left: both panes'
+                // hooks last named this workspace.
+                let reported = |term: u32| crate::last_status::LastStatus {
+                    worktree: main.clone(),
+                    agent: "claude".into(),
+                    state: zerocode_core::hook::HookState::Working,
+                    at: 1_000,
+                    state_started_at: 1_000,
+                    you: None,
+                    said: None,
+                    session: Some(sessions[&term].clone()),
+                    resumable: true,
+                    received_at: 1_000,
+                    session_boundary: false,
+                    interrupted: false,
+                };
+                let statuses = HashMap::from(
+                    [3, 8].map(|term| (crate::last_status::key(&main, term), reported(term))),
+                );
+                let live = unheld_panes(
+                    agents.clone(),
+                    &sessions,
+                    &statuses,
+                    &std::collections::HashSet::new(),
+                    Some(&seats),
+                    &in_front,
+                );
+                let filed_terms: Vec<(u32, bool)> = live
+                    .iter()
+                    .map(|(pane, _)| (pane.term, pane.sure))
+                    .collect();
+                let expected: Vec<(u32, bool)> = if a_known {
+                    vec![(3, true), (8, false)]
+                } else {
+                    vec![(8, false)]
+                };
+                assert_eq!(filed_terms, expected, "{scene}: the panes the exit found");
+                let exited = exit_write(
+                    &file,
+                    live.into_iter().map(|(pane, _)| pane).collect(),
+                    &holds,
+                    &|term| registry.handle(term).is_some(),
+                    &|term| registry.handle(term).map(|_| format!("screen of {term}")),
+                    &|| true,
+                );
+                assert_eq!(exited.written, Written::Done, "{scene}");
+                let stored = pane_layout::read(&file);
+                let set = &stored[&main];
+                assert!(
+                    claude_leaves(&stored, ENDED) >= 1,
+                    "{scene}: the exit lost the coordinator: {set:#?}"
+                );
+                let screens: Vec<&String> = set
+                    .iter()
+                    .filter(|tab| tab.agents.get(&0) == Some(&wake))
+                    .filter_map(|tab| tab.buffers.get(&0))
+                    .collect();
+                if a_known {
+                    // A's leaf, or A's tab of its own, holds C with A's screen.
+                    assert!(
+                        screens.iter().any(|screen| *screen == "screen of 3"),
+                        "{scene}: A lost C: {set:#?}"
+                    );
+                } else {
+                    // Every leaf the save kept still names C, and nothing
+                    // was taken off on the exit's word.
+                    assert!(exited.doubled.is_empty(), "{scene}: {:?}", exited.doubled);
+                    assert_eq!(
+                        claude_leaves(&stored, ENDED),
+                        saved.len(),
+                        "{scene}: the exit took C off a leaf on a guess"
+                    );
+                    assert!(
+                        screens.iter().any(|screen| *screen == "screen of 8") || !left.contains(&8),
+                        "{scene}: B's leaf lost C: {set:#?}"
+                    );
+                }
+                assert!(
+                    set.iter().all(|tab| tab.awake),
+                    "{scene}: a tab stored asleep"
+                );
+                assert_eq!(pane_layout::standing_worktrees(&stored), vec![main.clone()]);
+            }
+        }
     }
 
     /// t-76489 r4 ②, the codex review's second finding of r3, the exit end
@@ -29958,6 +30246,7 @@ mod exit_capture {
             term: 9,
             worktree: b.clone(),
             wake,
+            sure: true,
         };
         let exited = exit_write(
             &file,
@@ -29987,6 +30276,13 @@ mod exit_capture {
         let stored = pane_layout::read(&file);
         let tab = &stored[&b][0];
         assert_eq!(tab.agents[&0].id, ZO_COORDINATOR);
+        assert!(
+            stored
+                .values()
+                .flatten()
+                .any(|tab| tab.agents.values().any(|one| one.id == ZO_COORDINATOR)),
+            "r4 ②: the zo coordinator lost"
+        );
         assert_eq!(tab.running[&0], "zo");
         assert_eq!(tab.buffers[&0], "screen", "B's screen was not its own");
         assert!(tab.awake, "B's zo coordinator was stored asleep");
@@ -30024,6 +30320,7 @@ mod exit_capture {
                 transcript_path: None,
                 interrupted: false,
             },
+            sure: true,
         };
         let write = |file: &std::path::Path, wanted: &dyn Fn() -> bool| {
             exit_write(
@@ -30041,6 +30338,10 @@ mod exit_capture {
         assert_eq!(done.written, Written::Done);
         assert!(matches!(done.filed[..], [pane_layout::Filed::Tab(1)]));
         assert_eq!(pane_layout::read(&file)[&main][0].agents[&0].id, ENDED);
+        assert!(
+            claude_leaves(&pane_layout::read(&file), ENDED) >= 1,
+            "r2 ③: C lost"
+        );
         let line = coordinator_filed_line(&pane, "run-4275", done.filed[0], &done.written)
             .expect("a line");
         assert!(line.contains("written as tab 1"), "{line}");

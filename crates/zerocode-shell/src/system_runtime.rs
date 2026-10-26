@@ -696,7 +696,9 @@ pub(super) type SeatOf<'a> = &'a dyn Fn(&str, &str, &str) -> Option<String>;
 /// to its shell keeps both records yet holds nothing (t-76489): it is no
 /// pane to write down, and a coordinator it once was is now another pane's.
 /// A pane `in_front` cannot tell of (`None`) is written down as it ran
-/// (t-76489 r5): not knowing is not knowing it holds nothing.
+/// (t-76489 r5): not knowing is not knowing it holds nothing — and it is
+/// filed as one not known to hold its conversation (r6,
+/// [`pane_layout::LivePane::sure`]), which adds and takes nothing away.
 pub(super) fn unheld_panes(
     agents: HashMap<TermId, &'static str>,
     sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
@@ -707,8 +709,12 @@ pub(super) fn unheld_panes(
 ) -> Vec<(pane_layout::LivePane, Option<String>)> {
     let mut live: Vec<_> = agents
         .into_iter()
-        .filter(|(term, _)| !seated.contains(term) && in_front(*term) != Some(false))
+        .filter(|(term, _)| !seated.contains(term))
         .filter_map(|(term, agent)| {
+            let sure = match in_front(term) {
+                Some(false) => return None,
+                held => held == Some(true),
+            };
             let session = sessions.get(&term)?;
             let key = match session.key {
                 zerocode_core::SessionKey::SessionId => "session_id",
@@ -730,6 +736,7 @@ pub(super) fn unheld_panes(
                         transcript_path: session.transcript_path.clone(),
                         interrupted: false,
                     },
+                    sure,
                 },
                 run,
             ))

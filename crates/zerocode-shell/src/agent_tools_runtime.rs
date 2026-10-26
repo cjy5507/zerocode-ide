@@ -766,7 +766,7 @@ pub(crate) fn agent_in_front_within(
     let ask = |pty: &zerocode_lane::PtyHandle| {
         front_is_agent(
             pty.foreground_is_child(),
-            || pty.foreground_programs(),
+            || pty.foreground_programs_read(),
             || pty.foreground_group_programs(),
             agent,
         )
@@ -798,10 +798,13 @@ pub(crate) fn agent_in_front_within(
 /// names nothing it can read, and a group whose members were not all read
 /// — listed in part or not at all, a member that would not say who it is,
 /// one past the bound — when none of those read is `agent`. The one not
-/// read may be it, so no agent among the rest is no answer.
+/// read may be it, so no agent among the rest is no answer. So too a line
+/// of holders not read whole (r6, `programs`' second half): a ConPTY's
+/// `cmd` named while the Claude below it would not say, a `node` whose
+/// script would not be read. An agent a road did name still answers.
 pub(crate) fn front_is_agent(
     child_in_front: Option<bool>,
-    programs: impl FnOnce() -> Vec<String>,
+    programs: impl FnOnce() -> (Vec<String>, bool),
     members: impl FnOnce() -> zerocode_pty::GroupPrograms,
     agent: &str,
 ) -> Option<bool> {
@@ -814,7 +817,7 @@ pub(crate) fn front_is_agent(
         Some(true) => Some(false),
         None => None,
         Some(false) => {
-            let programs = programs();
+            let (programs, read_whole) = programs();
             if let Some(spec) = named(&programs) {
                 return Some(spec.id == agent);
             }
@@ -827,11 +830,7 @@ pub(crate) fn front_is_agent(
                 return Some(true);
             }
             match members {
-                zerocode_pty::GroupPrograms::Whole(named)
-                    if !programs.is_empty() || named.iter().any(|names| !names.is_empty()) =>
-                {
-                    Some(false)
-                }
+                zerocode_pty::GroupPrograms::Whole(_) if read_whole => Some(false),
                 _ => None,
             }
         }

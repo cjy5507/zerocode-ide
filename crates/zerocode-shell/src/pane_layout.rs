@@ -619,12 +619,14 @@ pub(crate) fn without_finished(
 
 /// A pane the window found running a conversation as it went: its shell,
 /// the workspace its agent last reported from — empty when it named none —
-/// and the conversation.
+/// the conversation, and whether its agent is known to hold its terminal
+/// (`sure`) or the window could not tell (t-76489 r6).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LivePane {
     pub(crate) term: u32,
     pub(crate) worktree: String,
     pub(crate) wake: WakeAgent,
+    pub(crate) sure: bool,
 }
 
 /// Write down every live pane the stored sets do not name, each as a tab of
@@ -666,6 +668,14 @@ pub(crate) struct LivePane {
 /// shared `ZO_SESSION_ROOT` opens it from any. Only between two records
 /// with no pane confirming either does nobody here know which folder zo
 /// opens it from, and [`one_wake_each`] keeps both.
+///
+/// All of that is for a pane known to hold its conversation (`sure`): the
+/// conversation stays on its leaf, so no other leaf's copy is lost. A pane
+/// the window could not tell of only adds (t-76489 r6): on its own empty
+/// leaf, else as a tab of its own in its workspace when no leaf there
+/// names it, and it takes no record off any leaf and puts none over
+/// another conversation. In r5 such a pane took a pane known to hold the
+/// same conversation off its leaf, as a record of a pane gone.
 pub(crate) fn file_unheld(
     layouts: &mut Layouts,
     live: Vec<LivePane>,
@@ -675,6 +685,10 @@ pub(crate) fn file_unheld(
     for pane in live {
         if !pane.wake.keeps() || named_at(layouts, &pane.wake, pane.term) {
             filed.push(Filed::Named);
+            continue;
+        }
+        if !pane.sure {
+            filed.push(add_unconfirmed(layouts, pane));
             continue;
         }
         let (afar, stale): (Vec<_>, Vec<_>) = leaves_naming(layouts, &pane.wake)
@@ -738,28 +752,70 @@ pub(crate) fn file_unheld(
         }
         strike(layouts, &stale);
         strike(layouts, yielded);
-        let tabs = layouts.entry(pane.worktree).or_default();
-        let id = tabs.iter().filter_map(|tab| tab.id).max().unwrap_or(0) + 1;
-        let agent = pane.wake.agent.clone();
-        tabs.push(TabLayout {
-            id: Some(id),
-            root: PaneNode::Leaf,
-            titles: HashMap::new(),
-            names: HashMap::new(),
-            agents: HashMap::from([(0, pane.wake)]),
-            running: HashMap::from([(0, agent)]),
-            active: 0,
-            expanded: None,
-            pinned: false,
-            focused: false,
-            terms: HashMap::from([(0, pane.term)]),
-            buffers: HashMap::new(),
-            owed: Vec::new(),
-            awake: false,
-        });
-        filed.push(Filed::Tab(id));
+        filed.push(Filed::Tab(tab_of_its_own(layouts, pane)));
     }
     filed
+}
+
+/// [`file_unheld`] for a pane the window could not tell holds its
+/// conversation (t-76489 r6): it adds the conversation where it is
+/// missing and takes nothing off any leaf. A leaf naming it in the pane's
+/// workspace — or, for a pane that named none, anywhere — stands for it as
+/// it is; else its own leaf names it when that leaf names nothing; else it
+/// is a tab of its own in its workspace, beside whatever else names it.
+/// A conversation two leaves name wakes in one of them, and the other
+/// comes back a plain shell (`spawnStoredLeaf`): two leaves lose nothing,
+/// and taking one off on a guess loses the pane that held it.
+fn add_unconfirmed(layouts: &mut Layouts, pane: LivePane) -> Filed {
+    let placed = !pane.worktree.is_empty();
+    let standing_for = leaves_naming(layouts, &pane.wake)
+        .iter()
+        .any(|(path, ..)| !placed || *path == pane.worktree);
+    if standing_for {
+        return Filed::Named;
+    }
+    let empty_own = layouts.values_mut().flatten().find_map(|tab| {
+        let at = tab
+            .terms
+            .iter()
+            .find_map(|(at, term)| (*term == pane.term).then_some(*at))?;
+        (!tab.agents.contains_key(&at)).then_some((tab, at))
+    });
+    if let Some((tab, at)) = empty_own {
+        tab.running.insert(at, pane.wake.agent.clone());
+        tab.agents.insert(at, pane.wake);
+        return Filed::Renamed;
+    }
+    if !placed {
+        return Filed::Unplaced;
+    }
+    Filed::Tab(tab_of_its_own(layouts, pane))
+}
+
+/// Write `pane` as a tab of its own at the end of its workspace's set,
+/// never in front, its shell kept so the exit captures its screen; answers
+/// the tab's name.
+fn tab_of_its_own(layouts: &mut Layouts, pane: LivePane) -> u64 {
+    let tabs = layouts.entry(pane.worktree).or_default();
+    let id = tabs.iter().filter_map(|tab| tab.id).max().unwrap_or(0) + 1;
+    let agent = pane.wake.agent.clone();
+    tabs.push(TabLayout {
+        id: Some(id),
+        root: PaneNode::Leaf,
+        titles: HashMap::new(),
+        names: HashMap::new(),
+        agents: HashMap::from([(0, pane.wake)]),
+        running: HashMap::from([(0, agent)]),
+        active: 0,
+        expanded: None,
+        pinned: false,
+        focused: false,
+        terms: HashMap::from([(0, pane.term)]),
+        buffers: HashMap::new(),
+        owed: Vec::new(),
+        awake: false,
+    });
+    id
 }
 
 /// Whether a leaf of `layouts` names `wake`'s conversation — any but the one
@@ -824,9 +880,11 @@ pub(crate) enum Filed {
     /// The leaf holding its shell already names its conversation, a tab
     /// this window never woke in another workspace keeps it for a pane that
     /// named no workspace, or it names none that could wake: nothing
-    /// written.
+    /// written. For a pane the window could not tell of, also: a leaf of
+    /// its workspace names it.
     Named,
-    /// The stored leaf holding its shell now names its conversation.
+    /// The stored leaf holding its shell now names its conversation — for
+    /// a pane the window could not tell of, only a leaf that named nothing.
     Renamed,
     /// The leaf that named its conversation from a pane that is gone now
     /// stands for this pane, in its place.
@@ -838,18 +896,23 @@ pub(crate) enum Filed {
     Tab(u64),
 }
 
-/// One leaf per conversation across every stored set (t-76489): a
-/// conversation two leaves name keeps the leaf whose shell `holds` it now —
-/// else, when every leaf naming it is in one workspace's set, the first by
-/// tab and leaf order — and every other leaf naming it keeps its place as a
-/// plain shell, its wake and its program gone. Answers each conversation it
-/// took off a leaf, once per leaf.
+/// One leaf per conversation across every stored set (t-76489), where a
+/// pane is known to hold it: a conversation two leaves name keeps the leaf
+/// whose shell `holds` it now, and every other leaf naming it keeps its
+/// place as a plain shell, its wake and its program gone. Answers each
+/// conversation it took off a leaf, once per leaf.
 ///
-/// `holds` answers `None` for a shell it cannot tell of — a pane busy past
-/// its patience, a launcher whose group was not read whole (t-76489 r5).
-/// Not knowing is not knowing it holds nothing: with no leaf known to hold
-/// the conversation and one that may, every leaf naming it stays, since
-/// the one that may is as likely the living pane as the first by order.
+/// With no leaf whose pane is known to hold it, every leaf naming it stays
+/// (t-76489 r6). `holds` answers `None` for a shell it cannot tell of — a
+/// pane busy past its patience, a launcher whose group was not read whole
+/// — and its `Some(false)` is a reading of process names, which a road
+/// that failed without saying so has turned into a pane holding nothing
+/// (r5's review: a ConPTY's Claude whose image would not be read, a group
+/// list libproc failed with 0). A record taken off on such a word is a
+/// conversation lost; two leaves naming one conversation lose nothing, for
+/// it wakes in one and the other comes back a plain shell
+/// (`spawnStoredLeaf`). Before r6, with every leaf known to hold nothing
+/// the first by order in one workspace kept it.
 ///
 /// On 2026-10-26 23:03 a coordinator split `zo --resume` of a conversation a
 /// person's tab beside it already held; the split died at zo's writer lease.
@@ -918,16 +981,10 @@ pub(crate) fn one_wake_each(
         if leaves.len() < 2 {
             continue;
         }
-        // The leaf whose pane holds it; with none, the first — but only
-        // when no leaf's pane may hold it, and only within one workspace: zo
-        // opens a conversation from its own folder alone, so between two
-        // workspaces' records nobody can tell here which one opens, and the
-        // boot's one-process judge decides.
-        let keeper = match leaves.iter().position(|(.., held)| *held == Some(true)) {
-            Some(held) => held,
-            None if leaves.iter().any(|(.., held)| held.is_none()) => continue,
-            None if leaves.iter().all(|(path, ..)| *path == leaves[0].0) => 0,
-            None => continue,
+        // The leaf whose pane holds it; with none, every leaf stays and the
+        // boot's one-process judge decides which one wakes it.
+        let Some(keeper) = leaves.iter().position(|(.., held)| *held == Some(true)) else {
+            continue;
         };
         for (place, (path, index, at, _)) in leaves.into_iter().enumerate() {
             if place == keeper {
@@ -1524,6 +1581,7 @@ mod tests {
             term,
             worktree: worktree.to_string(),
             wake: zo(id),
+            sure: true,
         };
         let filed = file_unheld(
             &mut layouts,
@@ -1571,6 +1629,11 @@ mod tests {
             layouts["/w/b"][0].agents.is_empty(),
             "the conversation named twice"
         );
+        assert_none_lost(
+            &layouts,
+            &["1", "2", "3", "9"].map(|at| zo(&format!("session-179000000000{at}-0"))),
+            "t-12063",
+        );
     }
 
     /// The conversations a set of tabs names, leaf by leaf, as `agent id`.
@@ -1592,6 +1655,19 @@ mod tests {
     const COORDINATOR: &str = "68b2661a-1c20-4c40-9ad5-419af3097d57";
     const ZO_COORDINATOR: &str = "session-1792758210243-0";
 
+    /// Every conversation in `living` is still named by some leaf of
+    /// `layouts` (t-76489 r6): no living conversation was lost.
+    fn assert_none_lost(layouts: &Layouts, living: &[WakeAgent], scene: &str) {
+        for wake in living {
+            assert!(
+                !leaves_naming(layouts, wake).is_empty(),
+                "{scene}: the living {} {} was lost",
+                wake.agent,
+                wake.id
+            );
+        }
+    }
+
     /// t-76489 red ③, 2026-10-26 23:03 as the window lived it: the claude
     /// coordinator's tab (term 1) took a split (term 17) of `zo --resume` of
     /// the zo conversation a person's tab beside it (term 16) already held;
@@ -1599,7 +1675,8 @@ mod tests {
     /// in two leaves wakes it twice, and the leaf that keeps it is the one
     /// whose pane holds it: the dead split's leaf becomes a plain shell, the
     /// claude leaf beside it and the person's zo tab stay whole. With no pane
-    /// holding it the first leaf keeps it. Before, both leaves were kept.
+    /// known to hold it every leaf keeps it (r6: in r1 the first did, on a
+    /// guess). Before, both leaves were kept.
     #[test]
     fn a_conversation_two_leaves_name_stays_with_the_pane_that_holds_it() {
         let mut layouts = Layouts::new();
@@ -1639,21 +1716,24 @@ mod tests {
             !layouts["/w/zerocode"][0].running.contains_key(&1),
             "the struck leaf would start a fresh zo where the dead split was"
         );
-        // Asleep — no pane holds it — in one workspace's set: the first
-        // leaf keeps it. In two workspaces' sets nobody here can tell which
-        // folder opens it, and both stay for the boot's judge.
+        assert_none_lost(
+            &layouts,
+            &[claude(COORDINATOR), zo(ZO_COORDINATOR)],
+            "the 23:03 split",
+        );
+        // Asleep — no pane known to hold it — in one workspace's set: both
+        // leaves keep it (r6). The boot wakes it in one, and the other comes
+        // back a plain shell. In two workspaces' sets nobody here can tell
+        // which folder opens it, and both stay for the boot's judge.
         let asleep_tab = || TabLayout {
             agents: HashMap::from([(0, zo(ZO_COORDINATOR))]),
             ..bare(PaneNode::Leaf)
         };
         let mut asleep = Layouts::new();
         asleep.insert("/w/a".to_string(), vec![asleep_tab(), asleep_tab()]);
-        assert_eq!(one_wake_each(&mut asleep, |_, _| Some(false)).len(), 1);
-        assert!(
-            asleep["/w/a"][0].agents.contains_key(&0),
-            "the first keeps it"
-        );
-        assert!(asleep["/w/a"][1].agents.is_empty());
+        let before = asleep.clone();
+        assert!(one_wake_each(&mut asleep, |_, _| Some(false)).is_empty());
+        assert_eq!(asleep, before, "a record taken off on a guess");
         let mut apart = Layouts::new();
         apart.insert("/w/a".to_string(), vec![asleep_tab()]);
         apart.insert("/w/b".to_string(), vec![asleep_tab()]);
@@ -1715,6 +1795,160 @@ mod tests {
             ],
             "the pane known to hold it lost it"
         );
+        assert_none_lost(&layouts, &[claude(COORDINATOR)], "r5");
+    }
+
+    /// t-76489 r6, the codex review's first finding of r5: pane A (term 3)
+    /// is known to hold coordinator C, and pane B (term 8) — a launcher
+    /// whose group was not read whole — cannot be told of, its window
+    /// records naming C too. Both reach the exit's write. A's leaf keeps C
+    /// on every road: B's leaf named C as well, or the last save left B
+    /// out, or two panes nobody can tell of name C and none is known.
+    /// Before, B came to the write as if known, took A's leaf off as a
+    /// record of a pane gone, and wrote C over its own — or, with no leaf,
+    /// as a tab of its own after taking A's off.
+    #[test]
+    fn a_pane_not_known_to_hold_its_conversation_takes_no_record_away() {
+        let main = "/w/zerocode".to_string();
+        let tab = |id: u64, term: u32| TabLayout {
+            id: Some(id),
+            agents: HashMap::from([(0, claude(COORDINATOR))]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            terms: HashMap::from([(0, term)]),
+            ..bare(PaneNode::Leaf)
+        };
+        let pane = |term: u32, sure: bool| LivePane {
+            term,
+            worktree: main.clone(),
+            wake: claude(COORDINATOR),
+            sure,
+        };
+        let holds = |_: &WakeAgent, term: u32| match term {
+            3 => Some(true),
+            _ => None,
+        };
+        let a_keeps = |layouts: &Layouts, scene: &str| {
+            assert!(
+                layouts[&main]
+                    .iter()
+                    .any(|tab| tab.agents.get(&0) == Some(&claude(COORDINATOR))
+                        && tab.terms.get(&0) == Some(&3)),
+                "{scene}: A's leaf lost C: {layouts:#?}"
+            );
+            assert_none_lost(layouts, &[claude(COORDINATOR)], scene);
+        };
+
+        // B's leaf names C too: the save's rule leaves A's alone, and B,
+        // not known, adds nothing over it.
+        let mut layouts = Layouts::from([(main.clone(), vec![tab(1, 3), tab(2, 8)])]);
+        let doubled = one_wake_each(&mut layouts, holds);
+        assert_eq!(doubled.len(), 1, "the pane known to hold C keeps it alone");
+        let filed = file_unheld(&mut layouts, vec![pane(3, true), pane(8, false)], |_| true);
+        assert_eq!(filed, vec![Filed::Named, Filed::Named]);
+        a_keeps(&layouts, "B's leaf named C");
+        // In the other order of the panes, the same.
+        let mut layouts = Layouts::from([(main.clone(), vec![tab(1, 3), tab(2, 8)])]);
+        one_wake_each(&mut layouts, holds);
+        file_unheld(&mut layouts, vec![pane(8, false), pane(3, true)], |_| true);
+        a_keeps(&layouts, "B first");
+
+        // The last save left B out: no leaf of B's at all.
+        let mut layouts = Layouts::from([(main.clone(), vec![tab(1, 3)])]);
+        let before = layouts.clone();
+        assert!(one_wake_each(&mut layouts, holds).is_empty());
+        let filed = file_unheld(&mut layouts, vec![pane(3, true), pane(8, false)], |_| true);
+        assert_eq!(filed, vec![Filed::Named, Filed::Named]);
+        assert_eq!(layouts, before, "B took A's leaf, or wrote C beside it");
+
+        // Two panes nobody can tell of, C on no leaf: the first adds it,
+        // and the second takes nothing of the first's.
+        let mut layouts = Layouts::from([(main.clone(), vec![shell_of(5)])]);
+        let filed = file_unheld(&mut layouts, vec![pane(8, false), pane(9, false)], |_| true);
+        assert_eq!(filed, vec![Filed::Tab(2), Filed::Named]);
+        assert_eq!(layouts[&main][1].agents[&0], claude(COORDINATOR));
+        assert_eq!(layouts[&main][1].terms[&0], 8);
+        assert_none_lost(&layouts, &[claude(COORDINATOR)], "two not known");
+    }
+
+    /// t-76489 r6: a pane not known to hold its conversation only adds. Its
+    /// own leaf names it when that leaf named nothing; a leaf naming another
+    /// conversation keeps it, and the pane is a tab of its own beside it; a
+    /// pane that named no workspace and has no empty leaf is placed nowhere,
+    /// and a record afar stands for it. Nothing any leaf named goes.
+    #[test]
+    fn a_pane_not_known_to_hold_its_conversation_only_adds() {
+        let main = "/w/zerocode".to_string();
+        let other = claude("3b7f0c2e-0000-4000-8000-000000000004");
+        let unknown = |term: u32, worktree: &str| LivePane {
+            term,
+            worktree: worktree.to_string(),
+            wake: claude(COORDINATOR),
+            sure: false,
+        };
+        let naming = |wake: &WakeAgent, term: Option<u32>| TabLayout {
+            id: Some(1),
+            agents: HashMap::from([(0, wake.clone())]),
+            running: HashMap::from([(0, wake.agent.clone())]),
+            terms: term
+                .map(|term| HashMap::from([(0, term)]))
+                .unwrap_or_default(),
+            ..bare(PaneNode::Leaf)
+        };
+
+        let mut layouts = Layouts::from([(main.clone(), vec![shell_of(8)])]);
+        let filed = file_unheld(&mut layouts, vec![unknown(8, &main)], |_| true);
+        assert_eq!(filed, vec![Filed::Renamed]);
+        assert_eq!(layouts[&main][0].agents[&0], claude(COORDINATOR));
+        assert_eq!(layouts[&main][0].running[&0], "claude");
+
+        let mut layouts = Layouts::from([(main.clone(), vec![naming(&other, Some(8))])]);
+        let filed = file_unheld(&mut layouts, vec![unknown(8, &main)], |_| true);
+        assert_eq!(filed, vec![Filed::Tab(2)]);
+        assert_eq!(
+            layouts[&main][0].agents[&0], other,
+            "the leaf's own was put over"
+        );
+        assert!(layouts[&main][0].owed.is_empty());
+        assert_eq!(layouts[&main][1].agents[&0], claude(COORDINATOR));
+        assert_none_lost(&layouts, &[other.clone(), claude(COORDINATOR)], "beside");
+
+        let mut layouts = Layouts::from([(main.clone(), vec![naming(&other, Some(8))])]);
+        let before = layouts.clone();
+        let filed = file_unheld(&mut layouts, vec![unknown(8, "")], |_| true);
+        assert_eq!(filed, vec![Filed::Unplaced]);
+        assert_eq!(layouts, before);
+
+        // A record afar — a tab never woken in another workspace — keeps
+        // it for a pane placed nowhere, and stays beside the pane's own tab
+        // for one placed here.
+        let afar = || {
+            Layouts::from([(
+                "/w/other".to_string(),
+                vec![naming(&claude(COORDINATOR), None)],
+            )])
+        };
+        let mut layouts = afar();
+        let filed = file_unheld(&mut layouts, vec![unknown(8, "")], |_| true);
+        assert_eq!(filed, vec![Filed::Named]);
+        assert_eq!(layouts, afar());
+        let mut layouts = afar();
+        let filed = file_unheld(&mut layouts, vec![unknown(8, &main)], |_| true);
+        assert_eq!(filed, vec![Filed::Tab(1)]);
+        assert_eq!(
+            layouts["/w/other"],
+            afar()["/w/other"],
+            "the record afar went"
+        );
+        assert_eq!(layouts[&main][0].agents[&0], claude(COORDINATOR));
+    }
+
+    /// A stored plain shell that stood for pane `term`.
+    fn shell_of(term: u32) -> TabLayout {
+        TabLayout {
+            id: Some(1),
+            terms: HashMap::from([(0, term)]),
+            ..bare(PaneNode::Leaf)
+        }
     }
 
     /// t-76489 red ④, the exit's net: a run's coordinator conversation the
@@ -1743,6 +1977,7 @@ mod tests {
             term,
             worktree: worktree.to_string(),
             wake,
+            sure: true,
         };
         let filed = file_unheld(
             &mut layouts,
@@ -1764,6 +1999,7 @@ mod tests {
             !layouts.contains_key(""),
             "an unplaced pane was written under no path"
         );
+        assert_none_lost(&layouts, &[claude(COORDINATOR), zo(ZO_COORDINATOR)], "r1 ④");
 
         // The leaf holding the coordinator's shell names a conversation a
         // tab beside it stands for: it names the coordinator now, owing
@@ -1813,6 +2049,14 @@ mod tests {
             "owed a conversation another tab stands for"
         );
         assert_eq!(set[2].owed, vec![zo("session-1792000000000-0")]);
+        assert_none_lost(
+            &held,
+            &[
+                claude(COORDINATOR),
+                claude("3b7f0c2e-0000-4000-8000-000000000002"),
+            ],
+            "r1 ④ renamed",
+        );
     }
 
     /// t-76489 r2 ①, the codex review's first finding: a person ends
@@ -1866,6 +2110,7 @@ mod tests {
         assert!(!set[0].running.contains_key(&0));
         assert_eq!(set[1].running[&0], "claude", "B lost its program");
         assert!(set[1].focused, "B lost the person's eye");
+        assert_none_lost(&layouts, &[claude(COORDINATOR)], "r2 ①");
         // The records alone, as before: the shell in front of A counts for
         // nothing, so the first by order would keep it.
         assert_eq!(
@@ -1917,6 +2162,7 @@ mod tests {
             term: 9,
             worktree: worktree.to_string(),
             wake: claude(COORDINATOR),
+            sure: true,
         };
         let standing = |term: u32| term == 9;
         let screens = |term: u32| standing(term).then(|| format!("screen of {term}"));
@@ -1971,6 +2217,7 @@ mod tests {
             named_in(&layouts, &main),
             vec![vec![None], vec![Some(format!("claude {COORDINATOR}"))]]
         );
+        assert_none_lost(&layouts, &[claude(COORDINATOR)], "r2 ②");
     }
 
     /// t-76489 r3 ②, the codex review's second finding of r2: workspace A's
@@ -2006,6 +2253,7 @@ mod tests {
             term: 9,
             worktree: b.clone(),
             wake,
+            sure: true,
         };
         let standing = |term: u32| term == 9;
         let screens = |term: u32| standing(term).then(|| format!("screen of {term}"));
@@ -2025,6 +2273,7 @@ mod tests {
             "C named twice"
         );
         assert_eq!(standing_worktrees(&layouts), vec![b.clone()]);
+        assert_none_lost(&layouts, &[claude(COORDINATOR)], "r3 ② tab");
 
         // B's leaf holds pane 9 and names another conversation: it names C
         // now, owes the one it named, and A's record goes on this road too.
@@ -2046,6 +2295,7 @@ mod tests {
         assert_eq!(layouts[&b][0].owed, vec![other]);
         assert!(layouts[&a][0].agents.is_empty(), "C named twice");
         assert!(one_wake_each(&mut layouts, |_, _| Some(false)).is_empty());
+        assert_none_lost(&layouts, &[claude(COORDINATOR)], "r3 ② renamed");
 
         // A zo coordinator running in B is written into B as well: B is a
         // folder it opens the conversation from, for it runs it there now.
@@ -2068,6 +2318,7 @@ mod tests {
             "the zo conversation named twice"
         );
         assert_eq!(standing_worktrees(&layouts), vec![b.clone()]);
+        assert_none_lost(&layouts, &[zo(ZO_COORDINATOR)], "r4 ② zo");
 
         // A zo pane that named no workspace leaves the record afar its
         // word, as before: nobody here can place it.

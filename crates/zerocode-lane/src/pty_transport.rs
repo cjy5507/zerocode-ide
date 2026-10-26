@@ -98,6 +98,14 @@ pub trait PtyTransport: Send {
         Vec::new()
     }
 
+    /// [`Self::foreground_programs`], and whether every process holding
+    /// the terminal said all it can say of itself: a name missing because a
+    /// road would not answer is not a name the program lacks. A transport
+    /// that cannot say has read nothing whole.
+    fn foreground_programs_read(&self) -> (Vec<String>, bool) {
+        (self.foreground_programs(), false)
+    }
+
     /// The names of the foreground group's other processes, one list per
     /// process — what a launcher leading the group runs below it — and
     /// whether they are all of them. Used only to tell whose program holds
@@ -202,6 +210,10 @@ impl PtyTransport for PtyHandle {
         self.transport.foreground_programs()
     }
 
+    fn foreground_programs_read(&self) -> (Vec<String>, bool) {
+        self.transport.foreground_programs_read()
+    }
+
     fn foreground_group_programs(&self) -> GroupPrograms {
         self.transport.foreground_group_programs()
     }
@@ -274,6 +286,10 @@ impl PtyTransport for PtyLane {
             return programs;
         }
         PtyLane::foreground_programs(self)
+    }
+
+    fn foreground_programs_read(&self) -> (Vec<String>, bool) {
+        PtyLane::foreground_programs_read(self)
     }
 
     fn foreground_group_programs(&self) -> GroupPrograms {
