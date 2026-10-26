@@ -3477,6 +3477,8 @@ class StatefulBackend {
      checks, and a connection no longer saved loses its record. */
   connectionMemoryKeep(answer, kind) {
     if (!this.connectionMemory) throw new Error("model_connection_checks");
+    // A record the window refuses to write (`model_connection_checks_full`).
+    if (this.connectionMemoryRefusal) throw new Error(this.connectionMemoryRefusal);
     const allowed = kind === "check" ? ["id", "generation", "state", "count", "forgetJudgments"] : ["id", "generation", "model", "protocol", "state"];
     const words = ["ok", "usable", "nokey", "unreadable", "badkey", "down", "schema", "failed"];
     if (Object.keys(answer).some((key) => !allowed.includes(key)) || !words.includes(answer.state)) throw new Error("model_connection_check");
@@ -14654,6 +14656,34 @@ await test("판단 모델: 고르면 확인이 저절로 돌고, 통과하지 �
   await modelScenePictures("judgment-applied");
   return "auto check on pick · failed check blocks apply · keyless row dimmed with its reason";
 }));
+
+await test("저장 실패: 창이 확인 결과를 기록하지 못하면 화면이 그렇다고 말하고 기록은 그대로다 (t-76500 r4 ①)", async () => {
+  const savedMemory = backend.connectionMemory;
+  const T0 = 1_790_000_000_000;
+  backend.connectionMemory = { nowMs: T0, connections: {} };
+  try {
+    return await withModelScene(() => {
+      backend.zoSettings.providers = [
+        { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+      ];
+      // Refused from the start, so the scene's own quiet check is refused too.
+      backend.connectionMemoryRefusal = "model_connection_checks_full";
+    }, async () => {
+      await pageA.click('[data-model-change="judgment"]');
+      await pageA.locator(`input[value='${JSON.stringify(["judge", "judge-model"])}']`).check();
+      await pageA.waitForSelector('[data-verdict="usable"] [data-check-unsaved]');
+      assertEqual(backend.connectionMemory.connections, {}, "a refused record changed");
+      await pageA.click('[data-model-change="judgment"]');
+      await openSettings(pageA, "api-routers");
+      await pageA.locator('[data-connection-id="judge"] [data-connection-check]').click();
+      await pageA.waitForSelector('[data-check-unsaved="judge"]');
+      return "a refused judgment check and connection check each say they were not kept; the record is as it was";
+    });
+  } finally {
+    delete backend.connectionMemoryRefusal;
+    if (savedMemory === undefined) delete backend.connectionMemory; else backend.connectionMemory = savedMemory;
+  }
+});
 
 await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면·「자세히」·로그 어디에도 그 키가 없다 (t-76028)", async () => withModelScene(() => {
   backend.zoSettings.providers = [];
