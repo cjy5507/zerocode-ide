@@ -2,6 +2,7 @@ import ast
 import io
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,6 +13,11 @@ definitions = [node for node in parsed.body if isinstance(node, (ast.Import, ast
                or (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and node.targets[0].id == "MAX_FRAME")]
 bridge = {}
 exec(compile(ast.Module(body=definitions, type_ignores=[]), "owned-native-bridge", "exec"), bridge)
+
+# Windows takes a path without a drive as relative and the native policy refuses it, so the
+# fixtures sit at the root of the current drive there; elsewhere at /.
+ROOT = Path(Path.cwd().anchor)
+EXECUTABLE = str(ROOT / "runtime" / "llama-server")
 
 
 class Ended(BaseException):
@@ -55,7 +61,7 @@ class NativeBoundary(unittest.TestCase):
             self.fail("the owned native operation was refused: " + event)
 
     def test_native_command_disables_jinja_and_does_not_override_template_detection(self):
-        initial = {"nativeExecutable": "/runtime/llama-server", "nativeModelFile": "/models/selected.gguf", "modelId": "fixture", "mode": "model"}
+        initial = {"nativeExecutable": EXECUTABLE, "nativeModelFile": str(ROOT / "models" / "selected.gguf"), "modelId": "fixture", "mode": "model"}
         command = self.arguments(initial)
         self.assertEqual(command[0], initial["nativeExecutable"])
         for flag in ["--no-jinja", "--offline", "--no-webui", "--no-context-shift"]:
@@ -70,14 +76,14 @@ class NativeBoundary(unittest.TestCase):
         self.assertNotIn("--hf-repo", command)
 
     def test_model_paths_are_single_arguments_and_cannot_add_engine_options(self):
-        name = "/models/owned file; --jinja.gguf"
-        command = self.arguments({"nativeExecutable": "/runtime/llama-server", "nativeModelFile": name, "modelId": "fixture", "mode": "model"})
+        name = str(ROOT / "models" / "owned file; --jinja.gguf")
+        command = self.arguments({"nativeExecutable": EXECUTABLE, "nativeModelFile": name, "modelId": "fixture", "mode": "model"})
         self.assertEqual(command[command.index("--model") + 1], name)
         self.assertNotIn("--jinja", command)
 
     def test_runtime_verification_does_not_load_a_model(self):
-        command = self.arguments({"nativeExecutable": "/runtime/llama-server", "mode": "verify"})
-        self.assertEqual(command, ["/runtime/llama-server", "--version"])
+        command = self.arguments({"nativeExecutable": EXECUTABLE, "mode": "verify"})
+        self.assertEqual(command, [EXECUTABLE, "--version"])
 
     def test_only_the_owned_loopback_connection_is_permitted(self):
         bridge["native_address"] = ("127.0.0.1", 32101)
@@ -155,7 +161,7 @@ class NativeBoundary(unittest.TestCase):
             return child
 
         with patch.object(bridge["subprocess"], "Popen", spawn):
-            self.assertIs(bridge["launch_native"]({"nativeExecutable": "/runtime/llama-server", "mode": "verify"}), child)
+            self.assertIs(bridge["launch_native"]({"nativeExecutable": EXECUTABLE, "mode": "verify"}), child)
 
     def test_exit_observes_a_child_published_while_waiting_for_the_spawn_guard(self):
         child = Child()

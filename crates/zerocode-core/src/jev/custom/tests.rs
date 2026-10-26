@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::MAIN_SEPARATOR;
 
 use serde_json::json;
 
@@ -322,7 +323,7 @@ fn limits_hold() {
     let mut large = yes_no("d-0000000d", "Large");
     large.folders = Folders::Chosen(
         (0..store::DEFINITION_MAX_BYTES / 64)
-            .map(|n| format!("/work/{n:058}"))
+            .map(|n| format!("{PRODUCT_FOLDER}{MAIN_SEPARATOR}{n:058}"))
             .collect(),
     );
     assert_eq!(
