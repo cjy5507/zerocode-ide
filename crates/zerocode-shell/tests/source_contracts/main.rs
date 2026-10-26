@@ -16065,6 +16065,43 @@ mod tests {
         );
     }
 
+    /// A program in a window pane that asks for the terminal's colours
+    /// (`OSC 10/11/12 ; ?`) is answered with the colours the window paints
+    /// (t-73869). The renderer alone knows them, so it reports them whenever
+    /// its palette changes; every new shell is dressed at `hold_terminal`, the
+    /// one door, and every live shell is dressed when the report arrives.
+    #[test]
+    fn a_window_pane_is_told_the_colours_it_is_painted_with() {
+        let backend = shipped_backend();
+        let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
+        let window = window_source();
+        assert!(
+            shipped.contains("\n            report_terminal_colors,\n"),
+            "report_terminal_colors is not registered with the window"
+        );
+        let holding = block_after(
+            shipped,
+            "    fn hold_terminal(\n        &self,\n        settings: &settings::SettingsRepository,",
+        );
+        assert!(
+            holding.contains("set_colors(") && holding.contains("self.terminal_colors()"),
+            "a newly spawned shell is not told the colours the window paints:\n{holding}"
+        );
+        let reporting = block_after(shipped, "fn report_terminal_colors(");
+        assert!(
+            reporting.contains("to_colors()")
+                && reporting.contains("state.terminals().handles()")
+                && reporting.contains("set_colors("),
+            "a reported palette does not reach the shells already open:\n{reporting}"
+        );
+        let painting = block_after(window, "function applyTerminalPalette() {");
+        assert!(
+            painting.contains("invoke(\"report_terminal_colors\"")
+                && painting.contains("terminalAnsiColorKeys()"),
+            "the renderer paints a palette without reporting it:\n{painting}"
+        );
+    }
+
     /// The terminal has settings, and the ones that are not stylesheet
     /// variables are applied where they actually live.
     ///

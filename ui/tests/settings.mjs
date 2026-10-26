@@ -1910,6 +1910,7 @@ class StatefulBackend {
         return answer;
       }
       case "apply_ui_zoom": return null;
+      case "report_terminal_colors": return null;
       // 창 안 경로 브라우저(t-2982)의 두 물음. 폴더 필드의 「폴더 선택」은 이제
       // OS 패널이 아니라 이 브라우저를 열고, 시험은 브라우저를 답으로 닫는다.
       case "browse_places": return { home: "/Users/tester", places: [
@@ -10529,6 +10530,20 @@ await test("non-default writes become canonical state before the second window b
       { key: "brightBlue", value: "#abcdef" },
     ],
     "color override gestures emitted a stale or duplicate patch",
+  );
+  // t-73869: the pane's grid answers `OSC 10/11/12 ; ?` with what the window
+  // paints, so the renderer reports the resolved palette — theme plus the
+  // person's overrides — whenever it changes.
+  const paintedReport = backend.last("A", "report_terminal_colors")?.args?.report;
+  assertEqual(
+    {
+      foreground: paintedReport?.foreground,
+      background: paintedReport?.background,
+      brightBlue: paintedReport?.ansi?.[12],
+      named: paintedReport?.ansi?.length,
+    },
+    { foreground: "#f8f8f2", background: "#102030", brightBlue: "#abcdef", named: 16 },
+    "the renderer painted a terminal palette it never reported to the shell",
   );
 
   assertEqual(backend.settings.default_agent, { kind: "blank" }, "Blank was not stored canonically");
