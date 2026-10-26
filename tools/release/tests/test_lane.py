@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,7 @@ import unittest
 from pathlib import Path
 
 import receipt_fixture
+from posix_shell import BASH, WINDOWS_ENV, pick_bash, posix
 
 REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
@@ -135,17 +137,18 @@ class Lane:
 
     def env(self, **stubs):
         env = {
+            **WINDOWS_ENV,
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": os.environ.get("HOME", str(self.tmp)),
+            "HOME": os.environ.get("HOME", posix(self.tmp)),
             "RELEASE_DRY_RUN": "1",
-            "RELEASE_HOME": str(self.home),
-            "RELEASE_REPO": str(REPO),
-            "RELEASE_SCRATCH_ROOT": str(self.scratch_root),
-            "RELEASE_APP_DIR": str(self.app_dir),
-            "RELEASE_ZO_BIN": str(self.zo_bin),
-            "RELEASE_FLAKES_FILE": str(self.flakes),
-            "RELEASE_STUB_LOG": str(self.stub_log),
-            "UPDATER_KEY": str(self.key),
+            "RELEASE_HOME": posix(self.home),
+            "RELEASE_REPO": posix(REPO),
+            "RELEASE_SCRATCH_ROOT": posix(self.scratch_root),
+            "RELEASE_APP_DIR": posix(self.app_dir),
+            "RELEASE_ZO_BIN": posix(self.zo_bin),
+            "RELEASE_FLAKES_FILE": posix(self.flakes),
+            "RELEASE_STUB_LOG": posix(self.stub_log),
+            "UPDATER_KEY": posix(self.key),
         }
         env.update(self.extra_env)
         for k, v in stubs.items():
@@ -164,13 +167,13 @@ class Lane:
 
     def run(self, *args, timeout=30, **stubs):
         return subprocess.run(
-            ["bash", str(LANE), *args], env=self.env(**stubs),
+            [BASH, posix(LANE), *args], env=self.env(**stubs),
             capture_output=True, text=True, timeout=timeout,
         )
 
     def spawn(self, *args, **stubs):
         return subprocess.Popen(
-            ["bash", str(LANE), *args], env=self.env(**stubs),
+            [BASH, posix(LANE), *args], env=self.env(**stubs),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             start_new_session=True,
         )
@@ -219,7 +222,7 @@ class Lane:
         return p.read_text().splitlines() if p.exists() else []
 
     def status_line(self):
-        r = subprocess.run(["bash", str(RELEASE / "status.sh")], env=self.env(), capture_output=True, text=True)
+        r = subprocess.run([BASH, posix(RELEASE / "status.sh")], env=self.env(), capture_output=True, text=True)
         return r.stdout.strip()
 
 
@@ -241,7 +244,7 @@ class Syntax(LaneCase):
             path = RELEASE / name
             self.assertTrue(path.exists(), f"{name} missing")
             self.assertTrue(os.access(path, os.X_OK), f"{name} not executable")
-            rc = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True)
+            rc = subprocess.run([BASH, "-n", posix(path)], capture_output=True, text=True)
             self.assertEqual(rc.returncode, 0, rc.stderr)
 
     def test_every_verify_recipe_runs_after_one_fails(self):
@@ -257,7 +260,7 @@ class Syntax(LaneCase):
             "broken:\n    echo broken >> ran.txt; exit 1\n\n"
             "last:\n    echo last >> ran.txt\n"
         )
-        r = subprocess.run([str(RELEASE / "verify-every-recipe.sh")], cwd=work,
+        r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh")], cwd=work,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertEqual((work / "ran.txt").read_text().split(), ["first", "broken", "last"])
@@ -292,7 +295,7 @@ class Syntax(LaneCase):
         )
         log = work / "gate.log"
         with log.open("w") as out:  # one file for both streams, as run_gate writes it
-            subprocess.run([str(RELEASE / "verify-every-recipe.sh")], cwd=work,
+            subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh")], cwd=work,
                            stdout=out, stderr=subprocess.STDOUT)
         text = log.read_text()
         self.assertEqual(text.count("<== verify recipe "), 4, text)
@@ -301,7 +304,7 @@ class Syntax(LaneCase):
         parse = ('eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"')
 
         def failed(path):
-            return subprocess.run(["bash", "-c", parse, str(LANE), str(path)],
+            return subprocess.run([BASH, "-c", parse, posix(LANE), posix(path)],
                                   capture_output=True, text=True, check=True).stdout.split()
 
         self.assertEqual(failed(log), ["harness:knowledge", "pane::tests::a_flake", "recipe:quiet"])
@@ -321,10 +324,54 @@ class Syntax(LaneCase):
             "killed:\n    echo killed >> ran.txt; kill -TERM $$\n\n"
             "last:\n    echo last >> ran.txt\n"
         )
-        r = subprocess.run([str(RELEASE / "verify-every-recipe.sh")], cwd=work,
+        r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh")], cwd=work,
                            capture_output=True, text=True)
         self.assertGreaterEqual(r.returncode, 128, r.stdout + r.stderr)
         self.assertEqual((work / "ran.txt").read_text().split(), ["first", "killed"])
+
+    def test_python_starts_the_git_bash_and_not_the_wsl_launcher_in_the_windows_directory(self):
+        # t-74384: CreateProcess tries System32 before PATH, so a bare "bash" was
+        # WSL's launcher on the Windows runner and 125 of the 146 failures began there.
+        entries = [r"C:\Windows\system32", r"C:\WINDOWS", r"C:\Program Files\Git\bin", r"C:\tools"]
+        present = {r"C:\Windows\system32\bash.exe", r"C:\Program Files\Git\bin\bash.exe", r"C:\tools\bash.exe"}
+        self.assertEqual(pick_bash(entries, r"C:\Windows", present.__contains__), r"C:\Program Files\Git\bin\bash.exe")
+        self.assertEqual(pick_bash(entries[:2] + [r"C:\WindowsApps"], r"c:\windows", {r"C:\WindowsApps\bash.exe"}.__contains__),
+                         r"C:\WindowsApps\bash.exe", "a sibling whose name starts the same is not the Windows directory")
+        self.assertIsNone(pick_bash(entries[:2], r"C:\Windows", present.__contains__))
+
+    def test_tools_test_runs_every_script_after_one_fails(self):
+        # t-74384: `just` ends a recipe at its first failed line, and the
+        # Windows leg's tools-test ended at its second script (test_lane.py), so
+        # 48 of the 50 never reported there. The real recipe, every script path
+        # swapped for a stub that logs a line, the second one red: all of them
+        # still run, the last line names the red one, and the exit is 1.
+        if shutil.which("just") is None:
+            self.skipTest("just is not installed")
+        text = (REPO / "justfile").read_text(encoding="utf-8")
+        recipe = text[text.index("\ntools-test:\n") + 1:].split("\n\n")[0]
+        seen = []
+
+        def stub(match):
+            seen.append(match.group(0))
+            return "fail.py" if len(seen) == 2 else "ok.py"
+
+        work = Path(self._tmp) / "justdir"
+        work.mkdir()
+        (work / "justfile").write_text(
+            'set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]\n\n'
+            + re.sub(r"tools/\S+\.py", stub, recipe) + "\n", encoding="utf-8")
+        (work / "ok.py").write_text('open("ran.txt", "a").write("ok\\n")\n')
+        (work / "fail.py").write_text('import sys\nopen("ran.txt", "a").write("fail\\n")\nsys.exit(1)\n')
+        calls, macos_only = len(seen), recipe.count("\n    macos ")
+        self.assertGreater(calls, 40, "the recipe lists the tools' tests")
+        r = subprocess.run(["just", "tools-test"], cwd=work, capture_output=True, text=True, timeout=120)
+        ran = (work / "ran.txt").read_text().split()
+        elsewhere = sys.platform != "darwin"  # the macOS-only scripts say SKIPPED aloud and do not run
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertEqual(len(ran), calls - (macos_only if elsewhere else 0), r.stdout + r.stderr)
+        self.assertEqual(ran.count("fail"), 1)
+        self.assertEqual(r.stdout.count("SKIPPED python3 "), macos_only if elsewhere else 0, r.stdout)
+        self.assertIn("tools-test: red scripts: fail.py", r.stderr)
 
     def test_the_end_names_every_red_recipe(self):
         # t-21326: a CI leg's log is read from its end. One run must say every
@@ -345,7 +392,7 @@ class Syntax(LaneCase):
                 env = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS"}
                 if github:
                     env["GITHUB_ACTIONS"] = "true"
-                r = subprocess.run([str(RELEASE / "verify-every-recipe.sh")], cwd=work, env=env,
+                r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh")], cwd=work, env=env,
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
                 self.assertEqual(r.stdout.splitlines()[-1], "verify: red recipes: early late", r.stdout)
@@ -367,7 +414,7 @@ class Syntax(LaneCase):
         log = work / "gate.log"
         env = dict(os.environ, GITHUB_ACTIONS="true")
         with log.open("w") as out:
-            subprocess.run([str(RELEASE / "verify-every-recipe.sh")], cwd=work, env=env,
+            subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh")], cwd=work, env=env,
                            stdout=out, stderr=subprocess.STDOUT)
         text = log.read_text()
         self.assertIn("verify: red recipes: quiet", text)
@@ -377,7 +424,7 @@ class Syntax(LaneCase):
         parse = ('eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"')
 
         def failed(path):
-            return subprocess.run(["bash", "-c", parse, str(LANE), str(path)],
+            return subprocess.run([BASH, "-c", parse, posix(LANE), posix(path)],
                                   capture_output=True, text=True, check=True).stdout.split()
 
         self.assertEqual(failed(log), ["recipe:quiet"])
@@ -400,7 +447,7 @@ class Syntax(LaneCase):
         for args, ran in (([], "strict"), (["--as-written"], "as-written")):
             with self.subTest(args=args):
                 (work / "ran.txt").unlink(missing_ok=True)
-                r = subprocess.run([str(RELEASE / "verify-every-recipe.sh"), *args], cwd=work,
+                r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), *args], cwd=work,
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertEqual((work / "ran.txt").read_text().split(), [ran])
@@ -435,7 +482,7 @@ class Syntax(LaneCase):
                 )
 
     def test_table_is_the_one_place(self):
-        out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
+        out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         self.assertEqual(out.returncode, 0, out.stderr)
         table = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
         table = {k: v.strip("'") for k, v in table.items()}
@@ -484,17 +531,17 @@ class Syntax(LaneCase):
                     scratch / "tauri.conf.json")
         env = self.lane.env()
         env["RELEASE_REPO"] = str(self.lane.tmp / "scratch")
-        out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=env)
+        out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         table = {k: v.strip("'") for k, v in
                  (line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)}
         self.assertEqual(table["RELEASE_GITHUB_REPO"], GITHUB_REPO)
 
     def test_the_default_table_key_is_under_the_release_home(self):
-        out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True,
-                             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.lane.tmp)})
+        out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True,
+                             env={**WINDOWS_ENV, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": posix(self.lane.tmp)})
         table = dict(line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)
-        self.assertEqual(table["UPDATER_KEY"].strip("'"), f"{self.lane.tmp}/.local/share/zerocode/release/keys/updater.key")
+        self.assertEqual(table["UPDATER_KEY"].strip("'"), f"{posix(self.lane.tmp)}/.local/share/zerocode/release/keys/updater.key")
 
     def test_tauri_conf_makes_updater_artifacts_and_the_local_build_opts_out(self):
         conf = json.loads((REPO / "crates" / "zerocode-shell" / "tauri.conf.json").read_text())
@@ -553,7 +600,7 @@ class Syntax(LaneCase):
         )
         for args, listed in (([], ["first", "win-check"]), (["--as-written"], ["first", "win-check-if-available"])):
             with self.subTest(args=args):
-                r = subprocess.run([str(RELEASE / "verify-every-recipe.sh"), *args, "--list"], cwd=work,
+                r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), *args, "--list"], cwd=work,
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
                 self.assertEqual(r.stdout.splitlines(), listed)
@@ -570,7 +617,7 @@ class Syntax(LaneCase):
             "win-check-if-available:\n    echo as-written >> ran.txt\n\n"
             "win-check:\n    echo strict >> ran.txt\n"
         )
-        r = subprocess.run([str(RELEASE / "verify-every-recipe.sh"), "--only", "win-check c a"], cwd=work,
+        r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--only", "win-check c a"], cwd=work,
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((work / "ran.txt").read_text().split(), ["a", "c", "strict"])
@@ -583,7 +630,7 @@ class Syntax(LaneCase):
         (work / "justfile").write_text("verify: a win-check-if-available\n\na:\n    echo a >> ran.txt\n")
         for only in ("zzz", "a zzz", "", "win-check-if-available"):
             with self.subTest(only=only):
-                r = subprocess.run([str(RELEASE / "verify-every-recipe.sh"), "--only", only], cwd=work,
+                r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--only", only], cwd=work,
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertFalse((work / "ran.txt").exists(), "a refused name runs nothing, not even the good ones")
@@ -594,7 +641,7 @@ class Syntax(LaneCase):
         (work / "justfile").write_text("verify: (a 'x')\n\na x:\n    echo {{x}} >> ran.txt\n")
         for args in (["--list"], ["--only", "a"]):
             with self.subTest(args=args):
-                r = subprocess.run([str(RELEASE / "verify-every-recipe.sh"), *args], cwd=work,
+                r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), *args], cwd=work,
                                    capture_output=True, text=True)
                 self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
                 self.assertEqual(r.stdout, "")
@@ -604,13 +651,13 @@ class Syntax(LaneCase):
         # A receipt for the tree before the release notes owes their readers
         # again (t-47516); a reader that is no gate recipe would owe nothing.
         table = dict(l.split("=", 1) for l in subprocess.run(
-            ["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env()).stdout.splitlines()
+            [BASH, posix(LANE), "--table"], capture_output=True, text=True, env=self.lane.env()).stdout.splitlines()
             if "=" in l)
         readers = table.get("NOTES_READERS", "").strip("'").split()
         self.assertTrue(readers)
         listed = set()
         for folder in (REPO, REPO / "zo-ide"):
-            r = subprocess.run([str(RELEASE / "verify-every-recipe.sh"), "--list"], cwd=folder,
+            r = subprocess.run([BASH, posix(RELEASE / "verify-every-recipe.sh"), "--list"], cwd=folder,
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
             listed.update(r.stdout.split())
@@ -679,6 +726,7 @@ class Sweep(LaneCase):
         self.assertNotIn("push", " ".join(self.lane.stub_lines()))
         self.assertIsNone(self.lane.installed())
 
+    @unittest.skipIf(os.name == "nt", "Windows has no SIGTERM to trap: os.kill ends the lane at once, with no sweep")
     def test_sigterm_sweeps_the_scratch_and_its_children(self):
         self.lane.enqueue(SHA_A)
         p = self.lane.spawn(GATE_ROOT_SLEEP=60, GATE_ZO_SLEEP=60)
@@ -883,7 +931,7 @@ class Calm(LaneCase):
 
     @unittest.skipUnless(sys.platform == "darwin", "the load is read with macOS sysctl")
     def test_the_launchd_path_finds_the_load_reading(self):
-        out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
+        out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         table = {k: v.strip("'") for k, v in (line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)}
         self.assertIsNotNone(shutil.which("sysctl", path=table["LAUNCHD_PATH"]), table["LAUNCHD_PATH"])
 
@@ -981,7 +1029,7 @@ class Cap(LaneCase):
         for line in gates:
             self.assertIn("incremental=0", line)
         self.assertEqual(len(self.solos_run()), 3, "the red gate was judged solo on the warm target")
-        out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
+        out = subprocess.run([BASH, posix(LANE), "--table"], capture_output=True, text=True, env=self.lane.env())
         self.assertIn("CARGO_INCREMENTAL='0'", out.stdout.splitlines())
 
     def test_the_repositorys_own_units_are_dropped_and_the_registry_ones_stay_warm(self):
@@ -1189,7 +1237,7 @@ class UiFlakes(LaneCase):
         log = self.lane.tmp / "gate.log"
         log.write_text(text)
         parse = 'eval "$(sed -n \'/^failed_tests()/,/^}/p\' "$0")"; failed_tests "$1"'
-        return subprocess.run(["bash", "-c", parse, str(LANE), str(log)],
+        return subprocess.run([BASH, "-c", parse, posix(LANE), posix(log)],
                               capture_output=True, text=True, check=True).stdout.splitlines()
 
     def test_a_listed_ui_check_is_judged_by_its_suite_alone(self):
@@ -1304,9 +1352,9 @@ class UiFlakes(LaneCase):
         (bin_dir / "just").write_text(f'#!/bin/sh\nprintf "%s|%s\\n" "${{WINDOW_SUITES-unset}}" "$*" >> "{said}"\n')
         (bin_dir / "just").chmod(0o755)
         solo = 'eval "$(bash "$0" --table)"; eval "$(sed -n \'/^ui_solo()/,/^}/p\' "$0")"; ui_solo "$1"'
-        env = {**self.lane.env(), "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}"}
+        env = {**self.lane.env(), "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}"}
         for unit in ("window/pane-conversation-view", "window/a.b"):
-            subprocess.run(["bash", "-c", solo, str(LANE), unit], env=env, check=True)
+            subprocess.run([BASH, "-c", solo, posix(LANE), unit], env=env, check=True)
         self.assertEqual(said.read_text().splitlines(), [
             "^pane-conversation-view$|window-browser-test",
             "^a\\.b$|window-browser-test",
@@ -1464,25 +1512,25 @@ class Supersede(LaneCase):
         self.lane.enqueue(SHA_B, mtime=now - 10)
         r = self.lane.run(ANCESTRY=f"{SHA_B}:{SHA_A}")
         self.assertEqual(r.returncode, 0, r.stdout)
-        w = subprocess.run(["bash", str(RELEASE / "status.sh"), "--wait", SHA_A, "--timeout", "5"],
+        w = subprocess.run([BASH, posix(RELEASE / "status.sh"), "--wait", SHA_A, "--timeout", "5"],
                            env=self.lane.env(), capture_output=True, text=True)
         self.assertEqual(w.returncode, 5, w.stdout + w.stderr)
         self.assertIn("superseded", w.stdout)
-        w = subprocess.run(["bash", str(RELEASE / "status.sh"), "--wait", SHA_B, "--timeout", "5"],
+        w = subprocess.run([BASH, posix(RELEASE / "status.sh"), "--wait", SHA_B, "--timeout", "5"],
                            env=self.lane.env(), capture_output=True, text=True)
         self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
 
 
 class Companions(LaneCase):
     def test_enqueue_touches_the_queue_file(self):
-        r = subprocess.run(["bash", str(RELEASE / "enqueue.sh"), SHA_A], env=self.lane.env(),
+        r = subprocess.run([BASH, posix(RELEASE / "enqueue.sh"), SHA_A], env=self.lane.env(),
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self.lane.queue(), [SHA_A])
         self.assertIn(SHA_A[:8], r.stdout)
 
     def test_enqueue_rejects_a_non_sha(self):
-        r = subprocess.run(["bash", str(RELEASE / "enqueue.sh"), "main"], env=self.lane.env(),
+        r = subprocess.run([BASH, posix(RELEASE / "enqueue.sh"), "main"], env=self.lane.env(),
                            capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(self.lane.queue(), [])
@@ -1490,7 +1538,7 @@ class Companions(LaneCase):
     def test_status_line_and_wait(self):
         self.lane.enqueue(SHA_A)
         self.assertEqual(self.lane.run().returncode, 0)
-        r = subprocess.run(["bash", str(RELEASE / "status.sh")], env=self.lane.env(),
+        r = subprocess.run([BASH, posix(RELEASE / "status.sh")], env=self.lane.env(),
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         line = r.stdout.strip()
@@ -1498,7 +1546,7 @@ class Companions(LaneCase):
         self.assertIn(SHA_A[:8], line)
         self.assertIn("sweep", line)
         self.assertIn("green", line)
-        w = subprocess.run(["bash", str(RELEASE / "status.sh"), "--wait", SHA_A], env=self.lane.env(),
+        w = subprocess.run([BASH, posix(RELEASE / "status.sh"), "--wait", SHA_A], env=self.lane.env(),
                            capture_output=True, text=True, timeout=10)
         self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
         self.assertIn("green", w.stdout)
@@ -1506,18 +1554,18 @@ class Companions(LaneCase):
     def test_status_wait_exit_code_follows_the_outcome(self):
         self.lane.enqueue(SHA_A)
         self.lane.run(GATE_ROOT_RC=101, GATE_ROOT_FAILS="x::y", SOLO_RCS="1")  # stays red solo
-        w = subprocess.run(["bash", str(RELEASE / "status.sh"), "--wait", SHA_A], env=self.lane.env(),
+        w = subprocess.run([BASH, posix(RELEASE / "status.sh"), "--wait", SHA_A], env=self.lane.env(),
                            capture_output=True, text=True, timeout=10)
         self.assertNotEqual(w.returncode, 0)
         self.assertIn("red", w.stdout)
 
     def test_status_without_a_file_says_so(self):
-        r = subprocess.run(["bash", str(RELEASE / "status.sh")], env=self.lane.env(),
+        r = subprocess.run([BASH, posix(RELEASE / "status.sh")], env=self.lane.env(),
                            capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
 
     def test_install_launchd_renders_a_valid_plist(self):
-        r = subprocess.run(["bash", str(RELEASE / "install-launchd.sh"), "--render", "--label-suffix", "selftest"],
+        r = subprocess.run([BASH, posix(RELEASE / "install-launchd.sh"), "--render", "--label-suffix", "selftest"],
                            env=self.lane.env(), capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         plist = Path(self._tmp) / "render.plist"
@@ -1541,7 +1589,7 @@ class Companions(LaneCase):
         self.assertEqual(self.lane.run().returncode, 0)
         self.lane.enqueue(SHA_B)
         self.assertEqual(self.lane.run(VERSION="0.2.0").returncode, 0)
-        r = subprocess.run(["bash", str(RELEASE / "rollback.sh"), "--app", "--zo"], env=self.lane.env(),
+        r = subprocess.run([BASH, posix(RELEASE / "rollback.sh"), "--app", "--zo"], env=self.lane.env(),
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual((self.lane.app_dir / "ZeroCode.app" / "sha").read_text().strip(), SHA_A)
@@ -1559,7 +1607,7 @@ class Companions(LaneCase):
         self.assertEqual((prev["zo"]["sha"], prev["zo"]["version"]), (SHA_B, "0.2.0"))
 
     def test_rollback_without_an_old_copy_refuses(self):
-        r = subprocess.run(["bash", str(RELEASE / "rollback.sh"), "--app"], env=self.lane.env(),
+        r = subprocess.run([BASH, posix(RELEASE / "rollback.sh"), "--app"], env=self.lane.env(),
                            capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
 
@@ -1633,7 +1681,7 @@ class BundleUpdater(LaneCase):
         self.assertEqual(st["updater_pubkey"], "")
         self.assertFalse((self.lane.out(SHA_A) / "latest.json").exists())
         self.assertNotIn("bundle-updater", " ".join(self.lane.stub_lines()), "no build without a key")
-        line = subprocess.run(["bash", str(RELEASE / "status.sh")], env=self.lane.env(),
+        line = subprocess.run([BASH, posix(RELEASE / "status.sh")], env=self.lane.env(),
                               capture_output=True, text=True).stdout.strip()
         self.assertEqual(line.count("\n"), 0)
         self.assertIn("skipped=", line)
@@ -1654,7 +1702,7 @@ class BundleUpdater(LaneCase):
         self.assertEqual(st["updater_pubkey"], "0102030405060708", "the key was still read and recorded")
         self.assertFalse((self.lane.out(SHA_A) / "latest.json").exists())
         self.assertNotIn("bundle-updater", " ".join(self.lane.stub_lines()), "no second build without a publish")
-        line = subprocess.run(["bash", str(RELEASE / "status.sh")], env=self.lane.env(),
+        line = subprocess.run([BASH, posix(RELEASE / "status.sh")], env=self.lane.env(),
                               capture_output=True, text=True).stdout.strip()
         self.assertIn("skipped=", line)
         self.assertIn("bundle-updater", line)
@@ -2014,7 +2062,8 @@ class GateOwedOnGit(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="lane-git-"))
         self.repo = self.tmp / "repo"
-        self.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp), "GIT_CONFIG_NOSYSTEM": "1",
+        self.env = {**WINDOWS_ENV, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp),
+                    "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@x"}
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True, env=self.env)
@@ -2048,7 +2097,7 @@ class GateOwedOnGit(unittest.TestCase):
         return self.commit("bump")
 
     def judge(self, call, sha):
-        result = subprocess.run(["bash", "-c", self.FUNCTIONS + call, str(LANE), str(self.repo), sha,
+        result = subprocess.run([BASH, "-c", self.FUNCTIONS + call, posix(LANE), str(self.repo), sha,
                                  str(self.installed)], env=self.env, capture_output=True, text=True)
         return result.stdout.strip()
 
@@ -2057,7 +2106,9 @@ class GateOwedOnGit(unittest.TestCase):
 
     def lose_the_base_blob(self, name):
         blob = self.git("rev-parse", f"{self.since}:{name}")
-        (self.repo / ".git" / "objects" / blob[:2] / blob[2:]).unlink()
+        loose = self.repo / ".git" / "objects" / blob[:2] / blob[2:]
+        loose.chmod(stat.S_IWRITE)  # git writes loose objects read-only, and Windows will not unlink those
+        loose.unlink()
 
     def test_a_version_line_alone_owes_no_gate(self):
         sha = self.commit_bump()
@@ -2080,6 +2131,7 @@ class GateOwedOnGit(unittest.TestCase):
         sha = self.commit("a name with a space")
         self.assertEqual(self.owed(sha), {"root", "zo"})
 
+    @unittest.skipIf(os.name == "nt", "a Windows file name cannot hold a newline")
     def test_a_path_with_a_newline_owes_both_gates(self):
         self.write("Cargo.toml\nCargo.lock", 'version = "1.0.1"\n')
         sha = self.commit("a name with a newline")
@@ -2148,7 +2200,7 @@ class Receipt(LaneCase):
         return path
 
     def enqueue(self, *args):
-        return subprocess.run(["bash", str(RELEASE / "enqueue.sh"), SHA_A, *args], env=self.lane.env(),
+        return subprocess.run([BASH, posix(RELEASE / "enqueue.sh"), SHA_A, *args], env=self.lane.env(),
                               capture_output=True, text=True)
 
     def kept(self):
@@ -2375,7 +2427,8 @@ class ReceiptOnGit(unittest.TestCase):
         self.repo = self.tmp / "repo"
         self.receipts = self.tmp / "receipts"
         self.receipts.mkdir()
-        self.env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp), "GIT_CONFIG_NOSYSTEM": "1",
+        self.env = {**WINDOWS_ENV, "PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(self.tmp),
+                    "GIT_CONFIG_NOSYSTEM": "1",
                     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "t",
                     "GIT_COMMITTER_EMAIL": "t@x", "GIT_AUTHOR_DATE": self.COMMITTED, "GIT_COMMITTER_DATE": self.COMMITTED}
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True, env=self.env)
@@ -2417,7 +2470,7 @@ class ReceiptOnGit(unittest.TestCase):
                               capture_output=True, text=True)
         self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
         (self.receipts / f"{sha}.json").write_text(made.stdout)
-        out = subprocess.run(["bash", "-c", self.FUNCTIONS + f'receipt_cover {lane}; echo "rc=$?"; echo "only=$ONLY"; '
+        out = subprocess.run([BASH, "-c", self.FUNCTIONS + f'receipt_cover {lane}; echo "rc=$?"; echo "only=$ONLY"; '
                               'echo "said=$RECEIPT"', str(LANE), str(self.repo), sha, str(self.receipts),
                               str(self.tmp / "build-queue")],
                              env=self.env, capture_output=True, text=True)

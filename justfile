@@ -45,57 +45,69 @@ shell-lint:
 # the token-diet baseline's definitions. They sat outside the gate until
 # 2026-09-11 (the signer's until 09-12) — the same silence the knowledge graph
 # tests had.
+# Every script runs even after one fails, for the reason `test` keeps
+# `--no-fail-fast`: the Windows leg stopped at its second script (test_lane.py)
+# for its whole life, so 48 of the 50 never reported there (t-74384). The last
+# line names every red script. The seven that drive macOS-only tools (codesign,
+# launchd, swiftc, osascript) say SKIPPED aloud elsewhere, as `swift-test` does.
+# On Windows Python reads files as UTF-8 here, as it does on a Mac.
 tools-test:
-    python3 -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v
-    python3 tools/release/tests/test_lane.py
-    python3 tools/release/tests/test_coord_receipt.py
-    python3 tools/release/tests/test_workspace_units.py
-    python3 tools/release/tests/test_win_check.py
-    python3 tools/release/tests/test_bump.py
-    python3 tools/release/tests/test_pii_scan.py
-    python3 tools/signing/tests/test_signing.py
-    python3 tools/signing/tests/test_sign_app_bundle.py
-    python3 tools/scoreboard/tests/test_scoreboard_launchd.py
-    python3 tools/computer-bench/test_batch_rtt.py
-    python3 tools/computer-bench/test_background_input.py
-    python3 tools/computer-bench/test_tally.py
-    python3 tools/computer-bench/test_onboarding.py
-    python3 tools/computer-bench/test_scenarios.py
-    python3 tools/computer-bench/test_bench.py
-    python3 tools/computer-bench/test_marks.py
-    python3 tools/computer-bench/test_eye.py
-    python3 tools/computer-bench/test_fixture_apm.py
-    python3 tools/computer-bench/test_fixture_reflex.py
-    python3 tools/computer-bench/test_fixture_support.py
-    python3 tools/computer-bench/test_fixture_rts.py
-    python3 tools/computer-bench/long-form/test_long_form.py
-    python3 tools/tests/test_decision_shadow_summary.py
-    python3 tools/tests/test_jev_token_diet_baseline.py
-    python3 tools/tests/test_hedge_replay_seed.py
-    python3 tools/tests/test_summon_replay_seed.py
-    python3 tools/tests/test_summon_difficulty_replay_seed.py
-    python3 tools/tests/test_compaction_replay_seed.py
-    python3 tools/tests/test_agent_tool_replay_seed.py
-    python3 tools/tests/test_browser_read_replay_seed.py
-    python3 tools/tests/test_notify_replay_seed.py
-    python3 tools/tests/test_mention_rerank_replay_seed.py
-    python3 tools/tests/test_branching_replay_seed.py
-    python3 tools/tests/test_judgment_cache_replay_seed.py
-    python3 tools/tests/test_patch_review_replay_seed.py
-    python3 tools/tests/test_routing_replay_seed.py
-    python3 tools/tests/test_label_audit_seed.py
-    python3 tools/tests/test_jev_seat_replay.py
-    python3 tools/tests/test_jev_answered.py
-    python3 tools/tests/test_vault_pairs_replay_seed.py
-    python3 tools/tests/test_command_guard_replay_seed.py
-    python3 tools/tests/test_ask_wait_replay_seed.py
-    python3 tools/tests/test_mail_triage_replay_seed.py
-    python3 tools/tests/test_question_discovery.py
-    python3 tools/tests/test_jev_review_study.py
-    python3 tools/tests/test_challenger_replay_seed.py
-    python3 tools/tests/test_claude_code_panel_rules.py
-    python3 tools/tests/test_codegraph_bench.py
-    python3 tools/login-renewal-probe/test_probe.py
+    @rc=0; red=; skipped=; \
+    case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) export PYTHONUTF8=1 ;; esac; \
+    t() { echo "python3 $*" >&2; python3 "$@" || { rc=1; red="$red $*"; }; }; \
+    macos() { why=$1; shift; if [ "$(uname -s)" = Darwin ]; then t "$@"; else echo "SKIPPED python3 $* — macOS-only: $why"; skipped="$skipped $*"; fi; }; \
+    t -I -S -B tools/release/tests/test_gate_receipt.py --receipt-mode routine -v; \
+    t tools/release/tests/test_lane.py; \
+    t tools/release/tests/test_coord_receipt.py; \
+    t tools/release/tests/test_workspace_units.py; \
+    macos "win-check cross-compiles from a Mac (cargo-xwin, Homebrew llvm)" tools/release/tests/test_win_check.py; \
+    t tools/release/tests/test_bump.py; \
+    t tools/release/tests/test_pii_scan.py; \
+    macos "signs with macOS codesign and the login keychain" tools/signing/tests/test_signing.py; \
+    macos "signs a macOS .app bundle (codesign, Mach-O)" tools/signing/tests/test_sign_app_bundle.py; \
+    macos "renders a launchd plist" tools/scoreboard/tests/test_scoreboard_launchd.py; \
+    t tools/computer-bench/test_batch_rtt.py; \
+    macos "builds the bench's AppKit fixtures with swiftc" tools/computer-bench/test_background_input.py; \
+    t tools/computer-bench/test_tally.py; \
+    macos "walks the macOS screen and accessibility permissions" tools/computer-bench/test_onboarding.py; \
+    t tools/computer-bench/test_scenarios.py; \
+    macos "scripts macOS ioreg, pgrep, defaults, open and osascript" tools/computer-bench/test_bench.py; \
+    t tools/computer-bench/test_marks.py; \
+    t tools/computer-bench/test_eye.py; \
+    t tools/computer-bench/test_fixture_apm.py; \
+    t tools/computer-bench/test_fixture_reflex.py; \
+    t tools/computer-bench/test_fixture_support.py; \
+    t tools/computer-bench/test_fixture_rts.py; \
+    t tools/computer-bench/long-form/test_long_form.py; \
+    t tools/tests/test_decision_shadow_summary.py; \
+    t tools/tests/test_jev_token_diet_baseline.py; \
+    t tools/tests/test_hedge_replay_seed.py; \
+    t tools/tests/test_summon_replay_seed.py; \
+    t tools/tests/test_summon_difficulty_replay_seed.py; \
+    t tools/tests/test_compaction_replay_seed.py; \
+    t tools/tests/test_agent_tool_replay_seed.py; \
+    t tools/tests/test_browser_read_replay_seed.py; \
+    t tools/tests/test_notify_replay_seed.py; \
+    t tools/tests/test_mention_rerank_replay_seed.py; \
+    t tools/tests/test_branching_replay_seed.py; \
+    t tools/tests/test_judgment_cache_replay_seed.py; \
+    t tools/tests/test_patch_review_replay_seed.py; \
+    t tools/tests/test_routing_replay_seed.py; \
+    t tools/tests/test_label_audit_seed.py; \
+    t tools/tests/test_jev_seat_replay.py; \
+    t tools/tests/test_jev_answered.py; \
+    t tools/tests/test_vault_pairs_replay_seed.py; \
+    t tools/tests/test_command_guard_replay_seed.py; \
+    t tools/tests/test_ask_wait_replay_seed.py; \
+    t tools/tests/test_mail_triage_replay_seed.py; \
+    t tools/tests/test_question_discovery.py; \
+    t tools/tests/test_jev_review_study.py; \
+    t tools/tests/test_challenger_replay_seed.py; \
+    t tools/tests/test_claude_code_panel_rules.py; \
+    t tools/tests/test_codegraph_bench.py; \
+    t tools/login-renewal-probe/test_probe.py; \
+    [ -z "$skipped" ] || echo "tools-test: skipped (macOS-only):$skipped"; \
+    [ -z "$red" ] || { echo "tools-test: red scripts:$red" >&2; exit 1; }; exit $rc
 
 # The native helpers' own tests (Swift, 178 + 5 on 2026-09-21): the pure Core
 # the Computer Use helper's main.swift calls and the case tables it shares with
