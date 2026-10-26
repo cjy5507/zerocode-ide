@@ -6374,7 +6374,9 @@ await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 �
     visible: all.filter((select) => !select.closest("details:not([open])") && select.getClientRects().length > 0).map((select) => select.id),
   }));
   assertEqual(selects, {
-    ids: ["managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model"],
+    // Each saved connection's judgment format (t-76028 F3) is a protocol
+    // choice too, folded in 「고급 — 판단 응답 형식」.
+    ids: ["judgment-format-fixture-OpenRouter", "managed-judgment-filter", "judgment-provider-kind", "judgment-protocol", "judgment-listed-model"],
     visible: ["managed-judgment-filter", "judgment-provider-kind"],
   }, "the provider and candidate filter are visible; protocol and inactive choices stay folded");
   // The worker rows and the classifier moved to the orchestration pane
@@ -14642,6 +14644,7 @@ await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면�
     assert(!logged.some((text) => text.includes(key)), "the key reached the console");
     assert((await pageA.locator("#model-setup").textContent()).includes(await pageA.evaluate(() => t("settings.models.state.badkey", "키가 맞지 않습니다"))), "the 401 is not said as a wrong key");
     assert(drawn.includes("invalid token"), "the server's reason is gone with the key");
+    await modelScenePictures("key-refused");
   } finally {
     pageA.off("console", listen);
   }
@@ -14714,11 +14717,12 @@ await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System On
   // The everyday list names no format; 「고급」 changes one, and the same
   // model can then be applied in it.
   assert(!(await pageA.locator('[data-model-role="judgment"]').innerText()).match(/OpenAI JSON|System One/), "the everyday list speaks a format");
-  await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; });
+  await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; document.getElementById("model-advanced-format-fold").open = true; });
   const format = pageA.locator('#model-advanced [data-judgment-format="judge"]');
   assertEqual(await format.inputValue(), "openai_json", "「고급」 does not show the connection's format");
   await format.selectOption("system_one");
   await renderSettled(pageA);
+  await modelScenePictures("judgment-format");
   const [againCheck, againApply] = await pickAndApply("judge", "judge-model");
   assertEqual(againCheck.protocol, "system_one", "the format picked in 「고급」 was not asked");
   assertEqual(againApply, againCheck, "the apply wrote another reference than the one checked");
@@ -14744,6 +14748,7 @@ await test("검수 F4: 멈춘 이 컴퓨터 모델을 고르면 요청 없이 �
   assert(words.includes(later), "a stopped model does not say it is checked once it runs", words);
   assert(!words.includes(passed) && !words.includes(await pageA.evaluate(() => t("settings.models.state.usable", "쓸 수 있음"))), "a model nobody checked is said to have passed", words);
   assert(!await pageA.locator('[data-model-apply="judgment"]').isDisabled(), "the apply that checks it cannot be pressed");
+  await modelScenePictures("managed-pick-later");
   return `stopped model picked: ${asked.length} requests · says 「${later}」 · no pass words`;
 }));
 

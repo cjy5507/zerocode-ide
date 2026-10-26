@@ -4366,8 +4366,11 @@
             <section class="model-advanced-item" aria-labelledby="model-advanced-format-title">
               <h4 id="model-advanced-format-title" data-i18n="settings.models.formatTitle">판단 응답 형식</h4>
               <p class="settings-row-desc" data-i18n="settings.models.formatAbout">판단 확인은 세 유형(Choice · Score · Noul) 질문에 정해진 모양으로 답하는지 봅니다. 판단 정확도 검증은 아닙니다. 판단 문항과 기준은 의사결정 대시보드에서 고칩니다.</p>
-              <p class="settings-row-desc" data-i18n="settings.models.formatPick">연결마다 판단을 묻는 형식입니다. 판단 서버가 System One으로만 답하면 System One을 고르세요. 바꾸면 그 연결의 모델을 다시 확인한 뒤 적용합니다.</p>
-              <div class="model-formats" id="model-advanced-formats" hidden></div>
+              <details class="settings-fold model-format-fold" id="model-advanced-format-fold" hidden>
+                <summary data-i18n="settings.models.formatFold">연결별 판단 형식 바꾸기</summary>
+                <p class="settings-row-desc" data-i18n="settings.models.formatPick">연결마다 판단을 묻는 형식입니다. 판단 서버가 System One으로만 답하면 System One을 고르세요. 바꾸면 그 연결의 모델을 다시 확인한 뒤 적용합니다.</p>
+                <div class="model-formats" id="model-advanced-formats"></div>
+              </details>
               <div class="settings-action-row">
                 <button type="button" class="btn" id="connections-decisions" data-i18n="settings.connections.decisions">판단 문항 수정 · 삭제</button>
               </div>

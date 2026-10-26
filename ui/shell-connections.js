@@ -865,6 +865,7 @@ const modelConnectionsController = {
       field.dataset.field = "md";
       field.append(modelNode("span", "settings-label", connection.provider.name));
       const select = modelNode("select", "settings-input");
+      select.id = `judgment-format-${connection.id}`;
       select.dataset.judgmentFormat = connection.id;
       for (const [value, words] of [["openai_json", "OpenAI JSON"], ["system_one", "System One"]]) {
         const option = modelNode("option", "", words);
@@ -884,7 +885,7 @@ const modelConnectionsController = {
       field.append(select);
       return field;
     });
-    list.hidden = !fields.length;
+    el("model-advanced-format-fold").hidden = !fields.length;
     list.replaceChildren(...fields);
   },
   routeWords() {
