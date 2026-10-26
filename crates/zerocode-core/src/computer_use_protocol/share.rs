@@ -95,6 +95,11 @@ pub fn app_key(app: &str) -> String {
 }
 
 impl Share {
+    /// End the displayed app's share, forgetting its answer.
+    pub fn end(&mut self, _app: &str, _generation: u64) -> bool {
+        false
+    }
+
     /// Whether an act must wait for an explicit share (off by default).
     pub fn set_required(&mut self, required: bool) {
         self.required = required;

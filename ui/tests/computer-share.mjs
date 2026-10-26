@@ -54,6 +54,7 @@ const installHands = () => {
     handed: [],
     panelLabels: [],
     given: 0,
+    ended: [],
     said(id) {
       const node = document.getElementById(id);
       return node && !node.hidden && !node.closest("[hidden]") ? node.textContent.trim() : null;
@@ -75,7 +76,11 @@ const installHands = () => {
       const take = document.getElementById("computer-band-take");
       const give = document.getElementById("computer-band-give");
       const hand = document.getElementById("computer-band-hand");
+      const end = document.getElementById("computer-band-end");
       return {
+        word: T.said("computer-band-word"),
+        end: end && !end.hidden ? end.textContent.trim() : null,
+        endPersonOnly: end?.hasAttribute("data-person-only") ?? false,
         wait: T.said("computer-band-wait"),
         hand: hand && !hand.hidden ? hand.textContent.trim() : null,
         handPersonOnly: hand?.hasAttribute("data-person-only") ?? false,
@@ -104,6 +109,10 @@ const installHands = () => {
     T.given += 1;
     return null;
   };
+  window.__ANSWER__.computer_share_end = (args) => {
+    T.ended.push(JSON.parse(JSON.stringify(args)));
+    return { target: null, takenBack: false, generation: 8, revision: 12 };
+  };
   window.__ANSWER__.computer_share_state = (args) => {
     T.panelLabels.push(args.panelLabel);
     return { target: null, takenBack: false };
@@ -125,6 +134,64 @@ async function scenario(browser, origin, name, ok, body) {
 
 export async function testComputerShare(browser, origin, ok) {
   const words = SHARE_WORDS.ko;
+
+  await scenario(browser, origin, "ending a stopped or idle share", ok, async (page) => {
+    const translations = {
+      ko: { shared: "「Sample」 창을 에이전트와 공유 중", end: "공유 끝내기", working: "다루는 중" },
+      en: { shared: "Sharing Sample with an agent", end: "End sharing", working: "is working" },
+      ja: { shared: "Sample をエージェントと共有中", end: "共有を終了", working: "操作中" },
+      zh: { shared: "正在与智能体共享 Sample", end: "结束共享", working: "正在操作" },
+      es: { shared: "Compartiendo Sample con un agente", end: "Dejar de compartir", working: "está trabajando" },
+    };
+    for (const [locale, words] of Object.entries(translations)) {
+      const shown = await page.evaluate(async (locale) => {
+        const T = __SHARE_T__;
+        await setLocale(locale, { refresh: false, persist: false });
+        takeComputerShare({ target: "sample", label: "Sample", takenBack: false, generation: 7, revision: 10 });
+        const revision = (computerBandState.revision ?? 0) + 1;
+        takeComputerActivity({ active: true, stopped: null, revision });
+        const active = T.band();
+        takeComputerActivity({ active: true, stopped: "window", revision: revision + 1 });
+        const stopped = T.band();
+        takeComputerActivity({ active: false, stopped: null, revision: revision + 2 });
+        return { active, stopped, idle: T.band() };
+      }, locale);
+      ok(`${locale}: only an active share says the agent is working`, shown.active.share?.includes(words.working), JSON.stringify(shown.active));
+      for (const state of ["stopped", "idle"]) {
+        ok(`${locale}: ${state} names sharing without claiming activity`, shown[state].share === words.shared, JSON.stringify(shown[state]));
+        ok(`${locale}: ${state} offers the person's end-sharing button`, shown[state].end === words.end && shown[state].endPersonOnly, JSON.stringify(shown[state]));
+      }
+    }
+    const ended = await page.evaluate(async () => {
+      const T = __SHARE_T__;
+      document.getElementById("computer-band-end")?.click();
+      await T.settle();
+      const gone = T.band();
+      T.fire("computer:share-state", { target: "sample", label: "Sample", generation: 7, revision: 11 });
+      return { gone, afterLateEvent: T.band(), calls: T.ended };
+    });
+    ok("ending names the displayed app and generation once", JSON.stringify(ended.calls) === JSON.stringify([{ app: "sample", generation: 7 }]), JSON.stringify(ended.calls));
+    ok("the backend's ended share hides the idle band and all share controls", !ended.gone.shown && ended.gone.share === null && ended.gone.take === null && ended.gone.give === null && ended.gone.end === null, JSON.stringify(ended.gone));
+    ok("an older share event cannot restore an ended share", !ended.afterLateEvent.shown, JSON.stringify(ended.afterLateEvent));
+  });
+
+  await scenario(browser, origin, "ending a share waits for the backend", ok, async (page) => {
+    const shown = await page.evaluate(async () => {
+      const T = __SHARE_T__;
+      takeComputerShare({ target: "sample", label: "Sample", takenBack: true, generation: 7, revision: 10 });
+      window.__ANSWER__.computer_share_end = () => Promise.reject(new Error("unavailable"));
+      document.getElementById("computer-band-end")?.click();
+      await T.settle();
+      const refused = T.band();
+      window.__ANSWER__.computer_share_end = () => ({ target: null, takenBack: false, generation: 8, revision: 12 });
+      takeComputerActivity({ active: false, stopped: "window", revision: 1 });
+      document.getElementById("computer-band-end")?.click();
+      await T.settle();
+      return { refused, ended: T.band() };
+    });
+    ok("a failed end leaves the share and hand-back available", shown.refused.share?.includes("Sample") && shown.refused.give === words.give && shown.refused.end === "공유 끝내기", JSON.stringify(shown.refused));
+    ok("ending removes only the share while the person's stop stays reachable", shown.ended.shown && shown.ended.word?.includes("정지됨") && shown.ended.share === null && shown.ended.give === null && shown.ended.end === null, JSON.stringify(shown.ended));
+  });
 
   await scenario(browser, origin, "native panel language", ok, async (page) => {
     for (const [locale, words] of Object.entries(SHARE_WORDS)) {

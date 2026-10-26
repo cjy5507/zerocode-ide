@@ -339,6 +339,15 @@ pub(crate) fn give_back() {
     tell();
 }
 
+/// End the share the person saw on the band.
+pub(crate) fn end(app: &str, generation: u64) -> Value {
+    let ended = with_held(|held| held.share.end(app, generation));
+    if ended {
+        tell();
+    }
+    state()
+}
+
 /// The person hands over, from the band, the app that waits for them under
 /// required sharing — no card. `app` is the key the band was told it by
 /// (`waiting`), taken as it is. Whether it was the app that waits.
