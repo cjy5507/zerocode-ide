@@ -418,6 +418,12 @@ pub fn save_key_at(
     keys.write(service, key)
 }
 
+/// Whether this thread holds the window's guard over keychain items.
+#[cfg(test)]
+pub(crate) fn key_items_held_here() -> bool {
+    false
+}
+
 /// Forget the key kept in the keychain item `service`. Nothing saved is not
 /// an error.
 ///

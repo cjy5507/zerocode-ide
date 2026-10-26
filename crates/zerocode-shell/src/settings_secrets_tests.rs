@@ -11,6 +11,8 @@ use std::os::unix::fs::PermissionsExt;
 /// everything the window says and never expected in any of it.
 const VALUE: &str = "SENTINEL-not-a-secret-0123456789abcdefgh";
 const NAME: &str = "FIXTURE_TOKEN";
+/// The value a project's own file holds in the same cell — never the person's.
+const PROJECT_VALUE: &str = "PROJECT-not-a-secret-9876543210zyxwvuts";
 
 fn listed(file: &Path) -> String {
     serde_json::json!({"literals": [{
@@ -53,7 +55,9 @@ impl Bench {
             "for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{dir}/args.log'; done\n\
              printf -- '---\\n' >> '{dir}/args.log'\n\
              case \"$3\" in check|move) door=\"$3\";; *) door=list;; esac\n\
+             if [ -e '{dir}/settings.json.lock' ]; then echo \"$door\" >> '{dir}/lock.log'; fi\n\
              cat '{dir}/'\"$door\".json\n\
+             if [ -f '{dir}/'\"$door\".then ]; then . '{dir}/'\"$door\".then; fi\n\
              exit \"$(cat '{dir}/'\"$door\".code)\"\n",
             dir = bench.dir.path().display()
         ));
@@ -84,6 +88,29 @@ impl Bench {
             code.to_string(),
         )
         .expect("code");
+    }
+
+    /// What the door does after it has answered, as shell lines — a change
+    /// to the settings file made between two steps of the window's.
+    fn then(&self, door: &str, lines: &str) {
+        std::fs::write(self.dir.path().join(format!("{door}.then")), lines).expect("then");
+    }
+
+    /// A file of the project's, holding a value of its own in the same cell.
+    fn project(&self) -> PathBuf {
+        let project = self.dir.path().join("project.json");
+        std::fs::write(
+            &project,
+            serde_json::json!({"mcpServers": {"fixture-server": {"env": {NAME: PROJECT_VALUE}}}})
+                .to_string(),
+        )
+        .expect("project");
+        project
+    }
+
+    /// The doors zo was asked while the window held the settings file's lock.
+    fn asked_under_the_lock(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("lock.log")).unwrap_or_default()
     }
 
     fn zo(&self) -> ZoDoor {
@@ -180,6 +207,11 @@ fn consent_puts_the_value_in_the_keychain_then_checks_then_moves() {
     assert_eq!(
         bench.calls(),
         vec![list_call(), check_call(), move_call(&bench)]
+    );
+    assert_eq!(
+        bench.asked_under_the_lock(),
+        "",
+        "zo is asked with the settings lock let go, so it can take it"
     );
     said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
 }
@@ -376,4 +408,332 @@ fn a_value_with_spaces_around_it_is_not_trimmed_into_another() {
     );
     assert_eq!(keys.held(&keychain_service(NAME)), None);
     said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
+}
+
+/// A keychain double that does `meanwhile` the first time it is read — a
+/// change to the settings file landing between the window's read of the cell
+/// and its keychain write — and notes, at each read and write, whether the
+/// window's one guard over keychain items was held.
+struct Watched {
+    keys: HeldKeys,
+    meanwhile: std::cell::RefCell<Option<Box<dyn FnOnce()>>>,
+    guarded: std::cell::RefCell<Vec<(&'static str, bool)>>,
+}
+
+impl Watched {
+    fn new(meanwhile: impl FnOnce() + 'static) -> Self {
+        Self {
+            keys: HeldKeys::default(),
+            meanwhile: std::cell::RefCell::new(Some(Box::new(meanwhile))),
+            guarded: std::cell::RefCell::default(),
+        }
+    }
+}
+
+impl RouterKeys for Watched {
+    fn read(&self, service: &str) -> Result<Option<String>, crate::api_routers::RouterRefusal> {
+        self.guarded
+            .borrow_mut()
+            .push(("read", crate::typesafe_settings::key_items_held_here()));
+        let meanwhile = self.meanwhile.borrow_mut().take();
+        if let Some(meanwhile) = meanwhile {
+            meanwhile();
+        }
+        self.keys.read(service)
+    }
+    fn write(&self, service: &str, secret: &str) -> Result<(), crate::api_routers::RouterRefusal> {
+        self.guarded
+            .borrow_mut()
+            .push(("write", crate::typesafe_settings::key_items_held_here()));
+        self.keys.write(service, secret)
+    }
+    fn delete(&self, service: &str) -> Result<(), crate::api_routers::RouterRefusal> {
+        self.keys.delete(service)
+    }
+}
+
+fn reason(outcome: &MoveOutcome) -> Option<&'static str> {
+    outcome.stopped.as_ref().map(|stop| stop.reason)
+}
+
+/// Nothing reached the keychain, zo was asked for the listing alone, and
+/// neither the person's value nor the project's is in anything said.
+fn nothing_kept(bench: &Bench, keys: &HeldKeys, outcome: &MoveOutcome) {
+    assert_eq!(
+        keys.held(&keychain_service(NAME)),
+        None,
+        "no keychain write"
+    );
+    assert!(outcome.moved.is_empty());
+    assert!(bench.calls().iter().all(|call| *call == list_call()));
+    let said = serde_json::to_string(outcome).expect("json");
+    said_nowhere(bench, std::slice::from_ref(&said));
+    assert!(!said.contains(PROJECT_VALUE) && !bench.args_log().contains(PROJECT_VALUE));
+}
+
+#[test]
+fn a_settings_path_that_is_a_link_is_neither_named_nor_read() {
+    let bench = Bench::new();
+    let project = bench.project();
+    std::fs::remove_file(bench.settings()).expect("remove");
+    std::os::unix::fs::symlink(&project, bench.settings()).expect("link");
+    assert_eq!(notice(&bench.zo(), &bench.settings()), None);
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    nothing_kept(&bench, &keys, &outcome);
+}
+
+#[test]
+fn a_link_put_in_place_after_the_listing_is_refused_before_the_read() {
+    let bench = Bench::new();
+    let project = bench.project();
+    bench.then(
+        "list",
+        &format!(
+            "rm '{settings}'\nln -s '{project}' '{settings}'\n",
+            settings = bench.settings().display(),
+            project = project.display()
+        ),
+    );
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    nothing_kept(&bench, &keys, &outcome);
+}
+
+#[test]
+fn a_file_put_in_place_of_the_settings_after_the_listing_is_refused_before_the_read() {
+    let bench = Bench::new();
+    let project = bench.project();
+    bench.then(
+        "list",
+        &format!(
+            "cp '{project}' '{settings}.new'\nmv '{settings}.new' '{settings}'\n",
+            settings = bench.settings().display(),
+            project = project.display()
+        ),
+    );
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    nothing_kept(&bench, &keys, &outcome);
+}
+
+#[test]
+fn a_cell_that_changes_between_the_read_and_the_keychain_write_is_not_kept() {
+    for (label, cell) in [
+        (
+            "another value",
+            "fixture-another-value-written-meanwhile".to_string(),
+        ),
+        ("its reference", format!("${{{NAME}}}")),
+    ] {
+        let bench = Bench::new();
+        let settings = bench.settings();
+        let keys = Watched::new(move || {
+            std::fs::write(
+                &settings,
+                serde_json::json!({"mcpServers": {"fixture-server": {"env": {NAME: cell}}}})
+                    .to_string(),
+            )
+            .expect("changed in place");
+        });
+        let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+        assert_eq!(reason(&outcome), Some("cell_changed"), "{label}");
+        nothing_kept(&bench, &keys.keys, &outcome);
+    }
+}
+
+#[test]
+fn a_file_swapped_between_the_read_and_the_keychain_write_is_not_kept() {
+    let bench = Bench::new();
+    let settings = bench.settings();
+    let project = bench.project();
+    let keys = Watched::new(move || {
+        let fresh = settings.with_extension("fresh");
+        std::fs::copy(&project, &fresh).expect("copy");
+        std::fs::rename(&fresh, &settings).expect("swap");
+    });
+    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    nothing_kept(&bench, &keys.keys, &outcome);
+}
+
+#[test]
+fn a_cell_that_already_refers_to_its_name_is_refused() {
+    let bench = Bench::new();
+    std::fs::write(
+        bench.settings(),
+        serde_json::json!({"mcpServers": {"fixture-server": {"env": {NAME: format!("${{{NAME}}}")}}}})
+            .to_string(),
+    )
+    .expect("reference");
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    assert_eq!(reason(&outcome), Some("already_reference"));
+    nothing_kept(&bench, &keys, &outcome);
+}
+
+#[test]
+fn the_keychain_is_read_and_written_under_the_guard_every_key_save_takes() {
+    let bench = Bench::new();
+    let keys = Watched::new(|| {});
+    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    assert_eq!(outcome.stopped, None);
+    assert_eq!(
+        *keys.guarded.borrow(),
+        vec![("read", true), ("write", true)],
+        "the check for another value and the write are one step"
+    );
+    let saved = Watched::new(|| {});
+    crate::typesafe_settings::save_key_at("fixture.service", "fixture-key", "empty", &saved)
+        .expect("saved");
+    crate::typesafe_settings::remove_key_at("fixture.service", &saved).expect("removed");
+    assert_eq!(
+        *saved.guarded.borrow(),
+        vec![("write", true)],
+        "the window's other key saves take the same guard"
+    );
+    assert!(!crate::typesafe_settings::key_items_held_here());
+}
+
+#[test]
+fn a_second_move_of_the_same_file_while_one_runs_is_refused() {
+    let bench = Bench::new();
+    let (bin, settings) = (bench.bin(), bench.settings());
+    let second = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = second.clone();
+    let keys = Watched::new(move || {
+        let outcome = std::thread::spawn(move || {
+            move_all(
+                &ZoDoor::at(bin, Vec::new()),
+                &settings,
+                &HeldKeys::default(),
+            )
+        })
+        .join()
+        .expect("second move");
+        *seen.lock().expect("seen") = Some(outcome);
+    });
+    let first = move_all(&bench.zo(), &bench.settings(), &keys);
+    assert_eq!(first.stopped, None);
+    let second = second.lock().expect("second").take().expect("ran");
+    assert_eq!(reason(&second), Some("already_moving"));
+    assert!(second.moved.is_empty());
+    assert_eq!(
+        bench.calls(),
+        vec![list_call(), check_call(), move_call(&bench)],
+        "the second move asked zo nothing"
+    );
+    let after = move_all(&bench.zo(), &bench.settings(), &HeldKeys::default());
+    assert_ne!(
+        reason(&after),
+        Some("already_moving"),
+        "the guard goes with the move"
+    );
+}
+
+#[test]
+fn a_listing_of_another_shape_is_not_trusted_and_nothing_is_read() {
+    let settings_with_note = serde_json::json!({
+        "metadata": {"note": VALUE},
+        "mcpServers": {"fixture-server": {"env": {NAME: VALUE, "OTHER": VALUE}, "headers": {NAME: VALUE}}}
+    });
+    let good = serde_json::json!(["mcpServers", "fixture-server", "env", NAME]);
+    for (label, rows) in [
+        (
+            "not under mcpServers",
+            vec![serde_json::json!(["metadata", "note"])],
+        ),
+        (
+            "the last key is not the name",
+            vec![serde_json::json!([
+                "mcpServers",
+                "fixture-server",
+                "env",
+                "OTHER"
+            ])],
+        ),
+        (
+            "not an env cell",
+            vec![serde_json::json!([
+                "mcpServers",
+                "fixture-server",
+                "headers",
+                NAME
+            ])],
+        ),
+        (
+            "deeper than an env cell",
+            vec![serde_json::json!([
+                "mcpServers",
+                "fixture-server",
+                "env",
+                NAME,
+                "x"
+            ])],
+        ),
+        (
+            "one row of another shape among good ones",
+            vec![good.clone(), serde_json::json!(["metadata", "note"])],
+        ),
+    ] {
+        let bench = Bench::new();
+        std::fs::write(bench.settings(), settings_with_note.to_string()).expect("settings");
+        let literals = rows
+            .into_iter()
+            .map(|path| serde_json::json!({"file": bench.settings(), "path": path, "name": NAME}))
+            .collect::<Vec<_>>();
+        bench.answer(
+            "list",
+            &serde_json::json!({"literals": literals}).to_string(),
+            0,
+        );
+        assert_eq!(notice(&bench.zo(), &bench.settings()), None, "{label}");
+        let keys = HeldKeys::default();
+        let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+        assert_eq!(reason(&outcome), Some("zo_silent"), "{label}");
+        nothing_kept(&bench, &keys, &outcome);
+    }
+}
+
+/// A door given a short wait, for the two ways a zo can outlive it.
+fn hurried(bench: &Bench) -> ZoDoor {
+    ZoDoor {
+        wait: Duration::from_millis(300),
+        ..bench.zo()
+    }
+}
+
+#[test]
+fn a_zo_that_closes_its_output_and_keeps_running_is_given_up_on_at_the_wait() {
+    let bench = Bench::new();
+    bench.zo_script("exec >&-\nexec sleep 20\n");
+    let started = Instant::now();
+    assert_eq!(
+        hurried(&bench).ask(&["settings", "secrets", "--json"]),
+        None
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the wait bounds the process too: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_zo_whose_child_keeps_its_output_open_is_given_up_on_at_the_wait() {
+    let bench = Bench::new();
+    bench.zo_script("sleep 20 &\nprintf '{\"literals\":[]}'\nexit 0\n");
+    let started = Instant::now();
+    assert_eq!(
+        hurried(&bench).ask(&["settings", "secrets", "--json"]),
+        None
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "a child holding the output open does not hold the window: {:?}",
+        started.elapsed()
+    );
 }
