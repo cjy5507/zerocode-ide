@@ -7554,6 +7554,7 @@ const CATALOG = {
     "jev.caption.noAnswer": "no answer from this model yet",
     "jev.caption.earlierNumbers": "this model has not answered yet, so the numbers in the table are {{model}}'s",
     "jev.caption.detail": "Details",
+    "settings.models.unsaved": "This check's result could not be saved — after a restart the earlier result shows.",
   },
   ja: {
 
@@ -14748,6 +14749,7 @@ const CATALOG = {
     "jev.caption.noAnswer": "このモデルの回答はまだありません",
     "jev.caption.earlierNumbers": "このモデルの回答がまだないため、表の数値は {{model}} のものです",
     "jev.caption.detail": "詳しい値",
+    "settings.models.unsaved": "この確認結果を保存できませんでした — ウィンドウを開き直すと以前の結果が表示されます。",
   },
   zh: {
 
@@ -21941,6 +21943,7 @@ const CATALOG = {
     "jev.caption.noAnswer": "此模型尚无回答",
     "jev.caption.earlierNumbers": "此模型尚无回答，表中的数字属于 {{model}}",
     "jev.caption.detail": "详细值",
+    "settings.models.unsaved": "无法保存此次检查结果 — 重新打开窗口后会显示之前的结果。",
   },
   es: {
 
@@ -29142,6 +29145,7 @@ const CATALOG = {
     "jev.caption.noAnswer": "este modelo aún no ha respondido",
     "jev.caption.earlierNumbers": "este modelo aún no ha respondido, así que los números de la tabla son de {{model}}",
     "jev.caption.detail": "Detalles",
+    "settings.models.unsaved": "No se pudo guardar el resultado de esta comprobación: al volver a abrir la ventana se verá el resultado anterior.",
   },
 };
 

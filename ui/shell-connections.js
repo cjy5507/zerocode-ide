@@ -280,7 +280,9 @@ const modelConnectionsController = {
     }
   },
   /* A finished check, written to the record: state words only, never what a
-   * server said. A record that cannot be written leaves the page as it is. */
+   * server said. A record the window refused to write answers `{ unsaved }`
+   * (t-76500 r4): the page shows the check, and says the next start will not
+   * — the file still holds the one before it. */
   async keep(command, answer) {
     if (!KEPT_CHECK_STATES.includes(answer.state)) return null;
     try {
@@ -288,8 +290,8 @@ const modelConnectionsController = {
       if (!memory) return null;
       this.memory = memory;
       return memory.connections?.[answer.id] ?? null;
-    } catch {
-      return null;
+    } catch (error) {
+      return { unsaved: String(error?.message ?? error) };
     }
   },
   /* A saved connection's state: its key out of reach, its last check, or
@@ -300,6 +302,14 @@ const modelConnectionsController = {
     if (!check) return { state: "unknown", check: null };
     if (check.generation != null && check.generation !== connection.generation) return { state: "changed", check: null };
     return { state: check.state, check };
+  },
+  /* A check the record refused stays on the page marked as not kept, while
+   * it is still the check `standing` answers. */
+  unsaved(kept, standing) {
+    const check = kept?.unsaved ? standing() : null;
+    if (!check) return;
+    check.unsaved = true;
+    this.render();
   },
   /* Whether a connection is checked without a press: never checked, checked
    * against another generation, or longer ago than the record's spacing —
@@ -694,7 +704,9 @@ const modelConnectionsController = {
       setup.connectionId = connection?.id ?? null;
       if (connection) {
         this.checks.set(connection.id, { state: "ok", count: models.length, generation: connection.generation, checkedMs: this.nowMs() });
-        void this.keep("remember_model_connection_check", { id: connection.id, generation: connection.generation, state: "ok", count: models.length, forgetJudgments: true });
+        const check = this.checks.get(connection.id);
+        void this.keep("remember_model_connection_check", { id: connection.id, generation: connection.generation, state: "ok", count: models.length, forgetJudgments: true })
+          .then((kept) => this.unsaved(kept, () => this.checks.get(connection.id) === check && check));
       }
       setup.count = models.length;
       setup.checked = "ok";
@@ -862,6 +874,7 @@ const modelConnectionsController = {
       id: connection.id, generation: connection.generation, state: answer.state, count: answer.count ?? null, forgetJudgments: !quiet,
     });
     if (kept?.checkedMs != null && this.checks.get(connection.id) === answer) answer.checkedMs = kept.checkedMs;
+    this.unsaved(kept, () => this.checks.get(connection.id) === answer && answer);
     return answer;
   },
   /* A judgment pick is checked the moment it is picked (대응표 19): the same
@@ -891,7 +904,8 @@ const modelConnectionsController = {
     this.renderDaily();
     if (row.kind === "connection") {
       const { id, generation, model, protocol } = row.reference;
-      void this.keep("remember_model_judgment_check", { id, generation, model, protocol, state: answer.state });
+      const kept = await this.keep("remember_model_judgment_check", { id, generation, model, protocol, state: answer.state });
+      this.unsaved(kept, () => this.judged.get(reference) === answer && answer);
     }
   },
 
@@ -1263,6 +1277,11 @@ const modelConnectionsController = {
     if (!row) return false;
     return ["usable", "later"].includes(this.judged.get(JSON.stringify(row.reference ?? row.key))?.state);
   },
+  unsavedNote() {
+    const line = modelNode("span", "model-result-sub", t("settings.models.unsaved", "이 확인 결과를 저장하지 못했습니다 — 창을 다시 켜면 이전 결과가 보입니다."));
+    line.dataset.checkUnsaved = "";
+    return line;
+  },
   judgmentVerdict(key) {
     const row = this.judgmentRows().find((entry) => entry.key === key);
     const judged = row ? this.judged.get(JSON.stringify(row.reference ?? row.key)) : null;
@@ -1277,6 +1296,7 @@ const modelConnectionsController = {
       note.classList.add("is-ok");
       note.setAttribute("role", "status");
       note.append(modelNode("strong", "", modelStateWords("usable").word), modelNode("span", "model-result-sub", t("settings.models.usableSub", "판단 확인을 통과했습니다. 적용을 누르면 다음 판단부터 이 모델을 씁니다.")));
+      if (judged.unsaved) note.append(this.unsavedNote());
       return note;
     }
     if (judged.state === "later") {
@@ -1289,6 +1309,7 @@ const modelConnectionsController = {
     note.setAttribute("role", "alert");
     note.append(modelNode("strong", "", t("settings.models.cannot", "쓸 수 없음 — {{reason}}", { reason: words.word })),
       modelNode("span", "model-result-sub", `${words.todo} ${t("settings.models.kept", "지금 판단 모델은 그대로 씁니다.")}`.trim()));
+    if (judged.unsaved) note.append(this.unsavedNote());
     return note;
   },
   async applyDaily(role) {
@@ -1759,6 +1780,11 @@ const modelConnectionsController = {
       }
       const judgedOff = [...this.judged.entries()].find(([reference, answer]) => JSON.parse(reference)?.id === connection.id && answer.state !== "usable" && answer.state !== "checking");
       if (judgedOff && !missing) extra.push(modelNode("span", "model-line-note", t("settings.models.judgedOff", "판단 확인: {{word}} — {{todo}}", { word: modelStateWords(judgedOff[1].state).word, todo: modelStateWords(judgedOff[1].state).todo })));
+      if (check?.unsaved || judgedOff?.[1].unsaved) {
+        const unsaved = modelNode("span", "model-line-note", t("settings.models.unsaved", "이 확인 결과를 저장하지 못했습니다 — 창을 다시 켜면 이전 결과가 보입니다."));
+        unsaved.dataset.checkUnsaved = connection.id;
+        extra.push(unsaved);
+      }
       const said = this.said.get(connection.id);
       if (said) extra.push(modelNode("span", "model-line-note", said.words));
       extra.push(this.namesFold(models, connection.id));
