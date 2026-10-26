@@ -2281,6 +2281,18 @@ fn is_conflict(result: &Result<(), super::SessionError>) -> bool {
     matches!(result, Err(super::SessionError::Conflict(_)))
 }
 
+/// Moves a bound store as a person or a sync tool would; `false` when Windows
+/// refuses. Windows does not move a folder while a file in it is open, and a
+/// bound writer keeps its lease's lock file open, so there a store cannot move
+/// out from under its writer and the test has nothing left to watch.
+fn move_bound_store(from: &Path, to: &Path) -> bool {
+    match fs::rename(from, to) {
+        Ok(()) => true,
+        Err(error) if cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => panic!("move {} to {}: {error}", from.display(), to.display()),
+    }
+}
+
 /// Today's home-migration incident, pinned end-to-end: a session LOADED from
 /// disk that keeps writing, whose store directory then disappears (a root
 /// move), must refuse the next write with the fingerprint guard's `Conflict`
@@ -2305,7 +2317,9 @@ fn moved_store_directory_refuses_next_write_with_conflict() {
     push_text(&mut reloaded, "after-load").expect("loaded session keeps writing in place");
 
     let aside = std::env::temp_dir().join(format!("runtime-session-moved-store-{nanos}-aside"));
-    fs::rename(&store, &aside).expect("move the store dir aside");
+    if !move_bound_store(&store, &aside) {
+        return;
+    }
 
     let result = push_text(&mut reloaded, "after-move");
     assert!(
@@ -2359,7 +2373,9 @@ fn moved_store_rebinds_to_relocated_root_and_keeps_writing() {
     push_text(&mut session, "before-move").expect("seed the on-disk session");
 
     let root_b = std::env::temp_dir().join(format!("runtime-session-rebind-{nanos}-b"));
-    fs::rename(&root_a, &root_b).expect("relocate the whole root");
+    if !move_bound_store(&root_a, &root_b) {
+        return;
+    }
     assert!(!bound.exists());
 
     assert!(
@@ -2402,7 +2418,9 @@ fn stale_same_id_copy_is_never_adopted() {
     );
 
     let aside = std::env::temp_dir().join(format!("runtime-session-stale-rebind-{nanos}-aside"));
-    fs::rename(&root_a, &aside).expect("move the live store aside");
+    if !move_bound_store(&root_a, &aside) {
+        return;
+    }
 
     let root_b = std::env::temp_dir().join(format!("runtime-session-stale-rebind-{nanos}-b"));
     let candidate = root_b

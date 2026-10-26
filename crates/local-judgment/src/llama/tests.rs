@@ -156,14 +156,14 @@ fn a_cancelled_native_archive_does_not_create_runtime_files() {
 
 #[test]
 fn the_python_supervisor_owns_only_its_pinned_native_child_and_connection() {
-    let source = serde_json::to_string(include_str!("../bridge.py")).expect("bridge source");
+    // The bridge goes by file: inline beside the suite, its 34 KB went past
+    // Windows' 32,767-character command line (os error 206).
+    let stage = tempfile::tempdir().expect("bridge stage");
+    let bridge = stage.path().join("bridge.py");
+    std::fs::write(&bridge, include_str!("../bridge.py")).expect("bridge source");
     let output = std::process::Command::new("python3")
-        .args([
-            "-B",
-            "-c",
-            include_str!("../../tests/llama_boundary.py"),
-            &source,
-        ])
+        .args(["-B", "-c", include_str!("../../tests/llama_boundary.py")])
+        .arg(&bridge)
         .output()
         .expect("supervisor boundary suite");
     assert!(

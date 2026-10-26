@@ -510,16 +510,24 @@ fn a_read_only_safe_bash_waits_out_another_tests_cwd_window() {
     let gone = temp_path("gone-cwd");
     fs::create_dir_all(&gone).expect("window folder");
     std::env::set_current_dir(&gone).expect("open the window");
-    fs::remove_dir(&gone).expect("remove the window's folder");
+    // Windows keeps a process's cwd open and will not remove it (os error 32):
+    // there the window's folder stays, and only the wait asserted below shows
+    // the call did not spawn inside it.
+    if !cfg!(windows) {
+        fs::remove_dir(&gone).expect("remove the window's folder");
+    }
 
     let call = thread::spawn(move || run_read_only_safe_bash(&registry));
     while !call.is_finished() && !crate::tests::waits_for_env_lock(call.thread().id()) {
         thread::yield_now();
     }
+    let waited = crate::tests::waits_for_env_lock(call.thread().id());
     std::env::set_current_dir(&previous).expect("restore cwd");
+    let _ = fs::remove_dir(&gone);
     drop(window);
 
     let output = call.join().expect("the bash call");
+    assert!(waited, "the bash call did not wait for the cwd window: {output:?}");
     assert!(
         output
             .as_ref()
