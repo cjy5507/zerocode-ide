@@ -3,13 +3,16 @@
 //! The rule and the value's road are `crate::settings_secrets`.
 
 use crate::api_routers::{self, Keychain};
-use crate::settings_secrets::{self, MoveOutcome, SecretNotice, ZoDoor};
+use crate::settings_secrets::{self, MoveOutcome, SecretNotice, SettingsFile, ZoDoor};
 use tauri::State;
 
 use crate::*;
 
-fn settings_path() -> Result<std::path::PathBuf, String> {
-    api_routers::zo_settings_path().ok_or_else(|| "설정 경로를 찾을 수 없습니다".to_string())
+/// The person's settings file, with the folder it is trusted from.
+fn settings_path() -> Result<SettingsFile, String> {
+    api_routers::zo_settings_root_and_path()
+        .and_then(|(root, path)| SettingsFile::under(root, path))
+        .ok_or_else(|| "설정 경로를 찾을 수 없습니다".to_string())
 }
 
 /// The names of the secrets the settings file holds as plain text, or nothing

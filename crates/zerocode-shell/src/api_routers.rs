@@ -978,7 +978,12 @@ pub(crate) fn remove_router_if_current(
 
 /// Path to ~/.zo/settings.json.
 pub fn zo_settings_path() -> Option<PathBuf> {
-    zo_settings_path_from(
+    zo_settings_root_and_path().map(|(_, path)| path)
+}
+
+/// [`zo_settings_path`] with the folder it is trusted from (t-76698 r3).
+pub fn zo_settings_root_and_path() -> Option<(PathBuf, PathBuf)> {
+    zo_settings_root_and_path_from(
         std::env::var_os("ZO_CONFIG_HOME").as_deref().map(Path::new),
         std::env::var_os("ZO_HOME").as_deref().map(Path::new),
         dirs::home_dir().as_deref(),
@@ -992,11 +997,22 @@ pub fn zo_settings_path_from(
     zo_home: Option<&Path>,
     home: Option<&Path>,
 ) -> Option<PathBuf> {
-    config_home
-        .map(Path::to_path_buf)
-        .or_else(|| zo_home.map(Path::to_path_buf))
-        .or_else(|| home.map(|home| home.join(".zo")))
-        .map(|root| root.join("settings.json"))
+    zo_settings_root_and_path_from(config_home, zo_home, home).map(|(_, path)| path)
+}
+
+/// The settings path in zo's order, with the folder whose own path is taken
+/// as it is: the config home the person named, or the home folder — below
+/// which `.zo` is a folder like any other, walked without following a link.
+pub fn zo_settings_root_and_path_from(
+    config_home: Option<&Path>,
+    zo_home: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<(PathBuf, PathBuf)> {
+    if let Some(named) = config_home.or(zo_home) {
+        return Some((named.to_path_buf(), named.join("settings.json")));
+    }
+    let home = home?;
+    Some((home.to_path_buf(), home.join(".zo").join("settings.json")))
 }
 
 /// Parse default preset list.

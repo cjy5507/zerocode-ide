@@ -86,6 +86,7 @@ fn the_road_that_holds_a_value_keeps_it_nowhere() {
         "fn move_one(",
         "fn cell(",
         "fn read_pinned(",
+        "fn successor(",
         "fn ask(",
         "fn said_without(",
     ] {

@@ -1,7 +1,9 @@
 //! The move of a plain-text secret, against a fake zo (a script that writes
 //! down its arguments and answers each door from a file), a fake settings
-//! file under a temporary folder and `HeldKeys` for the keychain. No real zo,
-//! keychain, `security` tool or settings file is reached.
+//! file under a temporary folder standing for the home folder and `HeldKeys`
+//! for the keychain. No real zo, keychain, `security` tool or settings file is
+//! reached. The watch over a door is tried on a made-up process and clock:
+//! no real signal is sent and no real wait is timed.
 
 use super::*;
 use crate::api_routers::HeldKeys;
@@ -13,6 +15,9 @@ const VALUE: &str = "SENTINEL-not-a-secret-0123456789abcdefgh";
 const NAME: &str = "FIXTURE_TOKEN";
 /// The value a project's own file holds in the same cell — never the person's.
 const PROJECT_VALUE: &str = "PROJECT-not-a-secret-9876543210zyxwvuts";
+/// A second plain-text secret in the same file.
+const VALUE_2: &str = "SENTINEL-two-not-a-secret-zyxwvuts98765";
+const NAME_2: &str = "FIXTURE_TOKEN_2";
 
 fn listed(file: &Path) -> String {
     serde_json::json!({"literals": [{
@@ -23,7 +28,8 @@ fn listed(file: &Path) -> String {
     .to_string()
 }
 
-/// A folder holding the fake zo, its answers and the settings file.
+/// A folder standing for the home folder: the fake zo, its answers, and the
+/// settings file at `.zo/settings.json`.
 struct Bench {
     dir: tempfile::TempDir,
 }
@@ -31,6 +37,7 @@ struct Bench {
 impl Bench {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("bench");
+        std::fs::create_dir(dir.path().join(".zo")).expect(".zo");
         let bench = Self { dir };
         std::fs::write(
             bench.settings(),
@@ -55,7 +62,7 @@ impl Bench {
             "for a in \"$@\"; do printf '%s\\n' \"$a\" >> '{dir}/args.log'; done\n\
              printf -- '---\\n' >> '{dir}/args.log'\n\
              case \"$3\" in check|move) door=\"$3\";; *) door=list;; esac\n\
-             if [ -e '{dir}/settings.json.lock' ]; then echo \"$door\" >> '{dir}/lock.log'; fi\n\
+             if [ -e '{dir}/.zo/settings.json.lock' ]; then echo \"$door\" >> '{dir}/lock.log'; fi\n\
              cat '{dir}/'\"$door\".json\n\
              if [ -f '{dir}/'\"$door\".then ]; then . '{dir}/'\"$door\".then; fi\n\
              exit \"$(cat '{dir}/'\"$door\".code)\"\n",
@@ -65,7 +72,12 @@ impl Bench {
     }
 
     fn settings(&self) -> PathBuf {
-        self.dir.path().join("settings.json")
+        self.dir.path().join(".zo").join("settings.json")
+    }
+
+    /// The settings file, trusted from the bench as the home folder.
+    fn file(&self) -> SettingsFile {
+        SettingsFile::under(self.dir.path().to_path_buf(), self.settings()).expect("below")
     }
 
     fn backup(&self) -> PathBuf {
@@ -172,7 +184,7 @@ fn said_nowhere(bench: &Bench, said: &[String]) {
 #[test]
 fn a_plain_text_secret_is_named_and_its_value_said_nowhere() {
     let bench = Bench::new();
-    let notice = notice(&bench.zo(), &bench.settings());
+    let notice = notice(&bench.zo(), &bench.file());
     assert_eq!(
         notice,
         Some(SecretNotice {
@@ -187,7 +199,7 @@ fn a_plain_text_secret_is_named_and_its_value_said_nowhere() {
 fn consent_puts_the_value_in_the_keychain_then_checks_then_moves() {
     let bench = Bench::new();
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(
         outcome,
         MoveOutcome {
@@ -222,7 +234,7 @@ fn a_different_value_under_the_name_is_not_overwritten() {
     let keys = HeldKeys::default();
     keys.write(&keychain_service(NAME), "fixture-other-value")
         .expect("held");
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(
         outcome.stopped,
         Some(Stopped {
@@ -250,7 +262,7 @@ fn the_same_value_already_in_the_keychain_is_used_as_it_is() {
     let bench = Bench::new();
     let keys = HeldKeys::default();
     keys.write(&keychain_service(NAME), VALUE).expect("held");
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(outcome.stopped, None);
     assert_eq!(outcome.moved.len(), 1);
     assert_eq!(
@@ -269,7 +281,7 @@ fn a_name_that_does_not_resolve_is_not_moved() {
         1,
     );
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(
         outcome.stopped,
         Some(Stopped {
@@ -298,7 +310,7 @@ fn a_refused_move_says_why_and_leaves_the_file_as_it_was() {
     );
     let before = std::fs::read(bench.settings()).expect("before");
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(
         outcome.stopped,
         Some(Stopped {
@@ -326,7 +338,7 @@ fn a_reason_from_zo_that_carries_the_value_is_not_said() {
             .to_string(),
         1,
     );
-    let outcome = move_all(&bench.zo(), &bench.settings(), &HeldKeys::default());
+    let outcome = move_all(&bench.zo(), &bench.file(), &HeldKeys::default());
     assert_eq!(
         outcome.stopped.as_ref().map(|stop| stop.reason),
         Some("move_refused")
@@ -346,10 +358,10 @@ fn a_reason_from_zo_that_carries_the_value_is_not_said() {
 fn a_zo_without_the_door_shows_nothing() {
     let bench = Bench::new();
     bench.zo_script("echo \"unknown argument '$1'\" >&2\nexit 2\n");
-    assert_eq!(notice(&bench.zo(), &bench.settings()), None);
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
     let missing = ZoDoor::at(bench.dir.path().join("no-zo-here"), Vec::new());
-    assert_eq!(notice(&missing, &bench.settings()), None);
-    let outcome = move_all(&bench.zo(), &bench.settings(), &HeldKeys::default());
+    assert_eq!(notice(&missing, &bench.file()), None);
+    let outcome = move_all(&bench.zo(), &bench.file(), &HeldKeys::default());
     assert!(outcome.moved.is_empty());
     assert_eq!(
         outcome.stopped.as_ref().map(|stop| stop.reason),
@@ -361,7 +373,7 @@ fn a_zo_without_the_door_shows_nothing() {
 fn nothing_written_as_plain_text_shows_nothing() {
     let bench = Bench::new();
     bench.answer("list", r#"{"literals":[]}"#, 0);
-    assert_eq!(notice(&bench.zo(), &bench.settings()), None);
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
 }
 
 #[test]
@@ -370,9 +382,9 @@ fn a_cell_in_another_file_is_neither_named_nor_read() {
     let other = bench.dir.path().join("other.json");
     std::fs::copy(bench.settings(), &other).expect("other");
     bench.answer("list", &listed(&other), 0);
-    assert_eq!(notice(&bench.zo(), &bench.settings()), None);
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert!(outcome.moved.is_empty() && outcome.stopped.is_none());
     assert_eq!(keys.held(&keychain_service(NAME)), None);
 }
@@ -382,7 +394,7 @@ fn a_cell_that_changed_since_the_listing_stops_before_the_keychain() {
     let bench = Bench::new();
     std::fs::write(bench.settings(), r#"{"mcpServers":{}}"#).expect("changed");
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(
         outcome.stopped.as_ref().map(|stop| stop.reason),
         Some("cell_changed")
@@ -401,7 +413,7 @@ fn a_value_with_spaces_around_it_is_not_trimmed_into_another() {
     )
     .expect("padded");
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(
         outcome.stopped.as_ref().map(|stop| stop.reason),
         Some("padded")
@@ -477,9 +489,9 @@ fn a_settings_path_that_is_a_link_is_neither_named_nor_read() {
     let project = bench.project();
     std::fs::remove_file(bench.settings()).expect("remove");
     std::os::unix::fs::symlink(&project, bench.settings()).expect("link");
-    assert_eq!(notice(&bench.zo(), &bench.settings()), None);
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(reason(&outcome), Some("file_swapped"));
     nothing_kept(&bench, &keys, &outcome);
 }
@@ -497,7 +509,7 @@ fn a_link_put_in_place_after_the_listing_is_refused_before_the_read() {
         ),
     );
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(reason(&outcome), Some("file_swapped"));
     nothing_kept(&bench, &keys, &outcome);
 }
@@ -515,7 +527,7 @@ fn a_file_put_in_place_of_the_settings_after_the_listing_is_refused_before_the_r
         ),
     );
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(reason(&outcome), Some("file_swapped"));
     nothing_kept(&bench, &keys, &outcome);
 }
@@ -539,7 +551,7 @@ fn a_cell_that_changes_between_the_read_and_the_keychain_write_is_not_kept() {
             )
             .expect("changed in place");
         });
-        let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+        let outcome = move_all(&bench.zo(), &bench.file(), &keys);
         assert_eq!(reason(&outcome), Some("cell_changed"), "{label}");
         nothing_kept(&bench, &keys.keys, &outcome);
     }
@@ -555,7 +567,7 @@ fn a_file_swapped_between_the_read_and_the_keychain_write_is_not_kept() {
         std::fs::copy(&project, &fresh).expect("copy");
         std::fs::rename(&fresh, &settings).expect("swap");
     });
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(reason(&outcome), Some("file_swapped"));
     nothing_kept(&bench, &keys.keys, &outcome);
 }
@@ -570,7 +582,7 @@ fn a_cell_that_already_refers_to_its_name_is_refused() {
     )
     .expect("reference");
     let keys = HeldKeys::default();
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(reason(&outcome), Some("already_reference"));
     nothing_kept(&bench, &keys, &outcome);
 }
@@ -579,7 +591,7 @@ fn a_cell_that_already_refers_to_its_name_is_refused() {
 fn the_keychain_is_read_and_written_under_the_guard_every_key_save_takes() {
     let bench = Bench::new();
     let keys = Watched::new(|| {});
-    let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(outcome.stopped, None);
     assert_eq!(
         *keys.guarded.borrow(),
@@ -601,7 +613,7 @@ fn the_keychain_is_read_and_written_under_the_guard_every_key_save_takes() {
 #[test]
 fn a_second_move_of_the_same_file_while_one_runs_is_refused() {
     let bench = Bench::new();
-    let (bin, settings) = (bench.bin(), bench.settings());
+    let (bin, settings) = (bench.bin(), bench.file());
     let second = std::sync::Arc::new(std::sync::Mutex::new(None));
     let seen = second.clone();
     let keys = Watched::new(move || {
@@ -616,7 +628,7 @@ fn a_second_move_of_the_same_file_while_one_runs_is_refused() {
         .expect("second move");
         *seen.lock().expect("seen") = Some(outcome);
     });
-    let first = move_all(&bench.zo(), &bench.settings(), &keys);
+    let first = move_all(&bench.zo(), &bench.file(), &keys);
     assert_eq!(first.stopped, None);
     let second = second.lock().expect("second").take().expect("ran");
     assert_eq!(reason(&second), Some("already_moving"));
@@ -626,7 +638,7 @@ fn a_second_move_of_the_same_file_while_one_runs_is_refused() {
         vec![list_call(), check_call(), move_call(&bench)],
         "the second move asked zo nothing"
     );
-    let after = move_all(&bench.zo(), &bench.settings(), &HeldKeys::default());
+    let after = move_all(&bench.zo(), &bench.file(), &HeldKeys::default());
     assert_ne!(
         reason(&after),
         Some("already_moving"),
@@ -690,50 +702,386 @@ fn a_listing_of_another_shape_is_not_trusted_and_nothing_is_read() {
             &serde_json::json!({"literals": literals}).to_string(),
             0,
         );
-        assert_eq!(notice(&bench.zo(), &bench.settings()), None, "{label}");
+        assert_eq!(notice(&bench.zo(), &bench.file()), None, "{label}");
         let keys = HeldKeys::default();
-        let outcome = move_all(&bench.zo(), &bench.settings(), &keys);
+        let outcome = move_all(&bench.zo(), &bench.file(), &keys);
         assert_eq!(reason(&outcome), Some("zo_silent"), "{label}");
         nothing_kept(&bench, &keys, &outcome);
     }
 }
 
-/// A door given a short wait, for the two ways a zo can outlive it.
-fn hurried(bench: &Bench) -> ZoDoor {
-    ZoDoor {
-        wait: Duration::from_millis(300),
-        ..bench.zo()
+/// Two plain-text secrets in one file, each listed, and a zo whose move
+/// rewrites the cell it is named as zo does: a new file renamed over the old.
+fn two_cells() -> Bench {
+    let bench = Bench::new();
+    std::fs::write(
+        bench.settings(),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": {
+                "fixture-server": {"command": "fixture", "env": {NAME: VALUE}},
+                "second-server": {"command": "fixture", "env": {NAME_2: VALUE_2}},
+            }
+        }))
+        .expect("settings"),
+    )
+    .expect("settings file");
+    bench.answer(
+        "list",
+        &serde_json::json!({"literals": [
+            {"file": bench.settings(), "path": ["mcpServers", "fixture-server", "env", NAME], "name": NAME},
+            {"file": bench.settings(), "path": ["mcpServers", "second-server", "env", NAME_2], "name": NAME_2},
+        ]})
+        .to_string(),
+        0,
+    );
+    bench.then("move", &rewrite(&bench, "mv"));
+    bench
+}
+
+/// Shell lines that write the settings file with the cell named by the move's
+/// `--name` turned into its reference: renamed over the file with `mv`, or
+/// copied into it in place with `cat`. `also` is a further `sed` expression.
+fn rewrite_with(bench: &Bench, how: &str, also: &str) -> String {
+    let settings = bench.settings().display().to_string();
+    let put = match how {
+        "mv" => format!("mv '{settings}.zo-new' '{settings}'"),
+        _ => format!("cat '{settings}.zo-new' > '{settings}'; rm '{settings}.zo-new'"),
+    };
+    format!(
+        "case \"$9\" in {NAME}) v='{VALUE}';; {NAME_2}) v='{VALUE_2}';; esac\n\
+         sed -e \"s/\\\"$v\\\"/\\\"\\${{$9}}\\\"/\"{also} '{settings}' > '{settings}.zo-new'\n\
+         {put}\n"
+    )
+}
+
+fn rewrite(bench: &Bench, how: &str) -> String {
+    rewrite_with(bench, how, "")
+}
+
+fn check_call_of(name: &str) -> Vec<String> {
+    strings(&["settings", "secrets", "check", "--name", name, "--json"])
+}
+
+fn move_call_of(bench: &Bench, server: &str, name: &str) -> Vec<String> {
+    vec![
+        "settings".to_string(),
+        "secrets".to_string(),
+        "move".to_string(),
+        "--file".to_string(),
+        bench.settings().display().to_string(),
+        "--path".to_string(),
+        format!(r#"["mcpServers","{server}","env","{name}"]"#),
+        "--name".to_string(),
+        name.to_string(),
+        "--json".to_string(),
+    ]
+}
+
+#[test]
+fn a_settings_folder_that_is_a_link_to_a_project_is_neither_named_nor_read() {
+    let bench = Bench::new();
+    let project = bench.dir.path().join("project");
+    std::fs::create_dir(&project).expect("project");
+    std::fs::write(
+        project.join("settings.json"),
+        serde_json::json!({"mcpServers": {"fixture-server": {"env": {NAME: PROJECT_VALUE}}}})
+            .to_string(),
+    )
+    .expect("project settings");
+    std::fs::remove_dir_all(bench.dir.path().join(".zo")).expect("remove .zo");
+    std::os::unix::fs::symlink(&project, bench.dir.path().join(".zo")).expect("link .zo");
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
+    let keys = Watched::new(|| {});
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    assert!(
+        keys.guarded.borrow().is_empty(),
+        "the keychain is neither read nor written"
+    );
+    nothing_kept(&bench, &keys.keys, &outcome);
+}
+
+#[test]
+fn a_settings_folder_turned_into_a_link_after_the_listing_is_refused_before_the_read() {
+    let bench = Bench::new();
+    let project = bench.dir.path().join("project");
+    std::fs::create_dir(&project).expect("project");
+    std::fs::write(
+        project.join("settings.json"),
+        serde_json::json!({"mcpServers": {"fixture-server": {"env": {NAME: PROJECT_VALUE}}}})
+            .to_string(),
+    )
+    .expect("project settings");
+    bench.then(
+        "list",
+        &format!(
+            "mv '{home}/.zo' '{home}/.zo-was'\nln -s '{project}' '{home}/.zo'\n",
+            home = bench.dir.path().display(),
+            project = project.display()
+        ),
+    );
+    let keys = Watched::new(|| {});
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    assert!(keys.guarded.borrow().is_empty());
+    nothing_kept(&bench, &keys.keys, &outcome);
+}
+
+#[test]
+fn a_path_that_leaves_the_folder_it_is_trusted_from_is_not_taken() {
+    let home = PathBuf::from("/fixture-home");
+    for path in [
+        "/elsewhere/.zo/settings.json",
+        "/fixture-home/../elsewhere/settings.json",
+        "/fixture-home",
+    ] {
+        assert!(
+            SettingsFile::under(home.clone(), PathBuf::from(path)).is_none(),
+            "{path}"
+        );
+    }
+    assert!(SettingsFile::under(home, PathBuf::from("/fixture-home/.zo/settings.json")).is_some());
+}
+
+#[test]
+fn every_cell_is_moved_through_the_file_each_move_leaves() {
+    let bench = two_cells();
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(outcome.stopped, None, "{outcome:?}");
+    assert_eq!(
+        outcome
+            .moved
+            .iter()
+            .map(|moved| moved.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![NAME, NAME_2]
+    );
+    assert_eq!(keys.held(&keychain_service(NAME)).as_deref(), Some(VALUE));
+    assert_eq!(
+        keys.held(&keychain_service(NAME_2)).as_deref(),
+        Some(VALUE_2)
+    );
+    assert_eq!(
+        bench.calls(),
+        vec![
+            list_call(),
+            check_call_of(NAME),
+            move_call_of(&bench, "fixture-server", NAME),
+            check_call_of(NAME_2),
+            move_call_of(&bench, "second-server", NAME_2),
+        ]
+    );
+    let left = std::fs::read_to_string(bench.settings()).expect("left");
+    assert!(
+        left.contains(&format!("${{{NAME}}}")) && left.contains(&format!("${{{NAME_2}}}")),
+        "both cells are references now"
+    );
+    let said = serde_json::to_string(&outcome).expect("json");
+    said_nowhere(&bench, std::slice::from_ref(&said));
+    assert!(!said.contains(VALUE_2) && !bench.args_log().contains(VALUE_2));
+}
+
+#[test]
+fn a_move_that_leaves_more_changed_than_its_cell_is_not_gone_on_from() {
+    for how in ["mv", "in place"] {
+        let bench = two_cells();
+        // zo's move also puts the project's value in the second cell.
+        bench.then(
+            "move",
+            &rewrite_with(&bench, how, &format!(" -e 's/{VALUE_2}/{PROJECT_VALUE}/'")),
+        );
+        let keys = HeldKeys::default();
+        let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+        assert_eq!(outcome.moved.len(), 1, "{how}");
+        assert_eq!(
+            outcome.stopped,
+            Some(Stopped {
+                name: NAME_2.to_string(),
+                reason: "file_swapped",
+                why: None,
+                keychain_kept: false,
+            }),
+            "{how}"
+        );
+        assert_eq!(keys.held(&keychain_service(NAME_2)), None, "{how}");
+        assert_eq!(
+            bench.calls().len(),
+            3,
+            "{how}: nothing asked for the second"
+        );
+        let said = serde_json::to_string(&outcome).expect("json");
+        assert!(!said.contains(PROJECT_VALUE) && !said.contains(VALUE_2));
     }
 }
 
 #[test]
-fn a_zo_that_closes_its_output_and_keeps_running_is_given_up_on_at_the_wait() {
-    let bench = Bench::new();
-    bench.zo_script("exec >&-\nexec sleep 20\n");
-    let started = Instant::now();
-    assert_eq!(
-        hurried(&bench).ask(&["settings", "secrets", "--json"]),
-        None
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "the wait bounds the process too: {:?}",
-        started.elapsed()
-    );
+fn a_file_put_in_place_while_zo_checks_is_not_handed_to_zos_move() {
+    for (label, meanwhile, expected) in [
+        (
+            "a new plain file with the very same bytes",
+            "cp '{s}' '{s}.fresh'\nmv '{s}.fresh' '{s}'\n",
+            "file_swapped",
+        ),
+        (
+            "the same file with another cell changed",
+            "sed -e 's/\"command\": \"fixture\"/\"command\": \"other\"/' '{s}' > '{s}.edit'\ncat '{s}.edit' > '{s}'\n",
+            "cell_changed",
+        ),
+    ] {
+        let bench = Bench::new();
+        let before = std::fs::read(bench.settings()).expect("before");
+        bench.then(
+            "check",
+            &meanwhile.replace("{s}", &bench.settings().display().to_string()),
+        );
+        let keys = HeldKeys::default();
+        let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+        assert_eq!(
+            outcome.stopped,
+            Some(Stopped {
+                name: NAME.to_string(),
+                reason: expected,
+                why: None,
+                keychain_kept: true,
+            }),
+            "{label}"
+        );
+        assert_eq!(
+            bench.calls(),
+            vec![list_call(), check_call()],
+            "{label}: move is not asked"
+        );
+        if label.starts_with("a new") {
+            assert_eq!(std::fs::read(bench.settings()).expect("after"), before);
+        }
+        said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
+    }
+}
+
+/// A made-up door: a clock that moves only when the watch waits, and a zo
+/// that closes its output and ends at the times given (never, for `None`).
+/// It notes each kill of zo's group, with the time and whether zo had been
+/// reaped by then — once reaped, zo's number may be another group's.
+struct MadeUp {
+    start: Instant,
+    at: Duration,
+    output_closes: Option<Duration>,
+    ends: Option<Duration>,
+    wait_fails: bool,
+    reaped: bool,
+    kills: Vec<(Duration, bool)>,
+    reaps: Vec<Duration>,
+}
+
+impl MadeUp {
+    fn new(output_closes: Option<Duration>, ends: Option<Duration>) -> Self {
+        Self {
+            start: Instant::now(),
+            at: Duration::ZERO,
+            output_closes,
+            ends,
+            wait_fails: false,
+            reaped: false,
+            kills: Vec::new(),
+            reaps: Vec::new(),
+        }
+    }
+}
+
+impl Answering for MadeUp {
+    fn now(&self) -> Instant {
+        self.start + self.at
+    }
+
+    fn printed(&mut self, tick: Duration) -> Option<Option<String>> {
+        match self.output_closes {
+            Some(closes) if closes <= self.at + tick => {
+                self.at = self.at.max(closes);
+                Some(Some(r#"{"literals":[]}"#.to_string()))
+            }
+            _ => {
+                self.at += tick;
+                None
+            }
+        }
+    }
+
+    fn reaped(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        use std::os::unix::process::ExitStatusExt;
+        if self.wait_fails {
+            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+        }
+        if self.ends.is_some_and(|ends| ends <= self.at) && !self.reaped {
+            self.reaped = true;
+            self.reaps.push(self.at);
+        }
+        Ok(self.reaped.then(|| ExitStatus::from_raw(0)))
+    }
+
+    fn give_up(&mut self) {
+        self.kills.push((self.at, self.reaped));
+        if !self.reaped {
+            self.reaped = true;
+            self.reaps.push(self.at);
+        }
+    }
+
+    fn pause(&mut self, tick: Duration) {
+        self.at += tick;
+    }
+}
+
+const WAIT: Duration = Duration::from_secs(10);
+
+/// The one kill came at the wait, to a zo not yet reaped.
+fn killed_once_at_the_wait_unreaped(door: &MadeUp) {
+    assert_eq!(door.kills.len(), 1, "{:?}", door.kills);
+    let (at, reaped) = door.kills[0];
+    assert!(at >= WAIT && at < WAIT + TICK, "at the wait: {at:?}");
+    assert!(!reaped, "the group is killed while zo's number is its own");
+    assert_eq!(door.reaps, vec![at], "reaped once, after the kill");
 }
 
 #[test]
-fn a_zo_whose_child_keeps_its_output_open_is_given_up_on_at_the_wait() {
-    let bench = Bench::new();
-    bench.zo_script("sleep 20 &\nprintf '{\"literals\":[]}'\nexit 0\n");
-    let started = Instant::now();
-    assert_eq!(
-        hurried(&bench).ask(&["settings", "secrets", "--json"]),
-        None
+fn a_zo_that_ended_while_a_child_holds_its_output_is_killed_before_it_is_reaped() {
+    // zo ends at once; a child of its — in its group, or one that left it —
+    // keeps the output open past the wait.
+    let mut door = MadeUp::new(None, Some(Duration::ZERO));
+    assert_eq!(watch(&mut door, WAIT), None);
+    killed_once_at_the_wait_unreaped(&door);
+}
+
+#[test]
+fn a_zo_that_closes_its_output_and_keeps_running_is_killed_at_the_wait() {
+    let mut door = MadeUp::new(Some(Duration::ZERO), None);
+    assert_eq!(watch(&mut door, WAIT), None);
+    killed_once_at_the_wait_unreaped(&door);
+}
+
+#[test]
+fn a_zo_that_answers_and_ends_within_the_wait_is_reaped_and_sent_nothing() {
+    let mut door = MadeUp::new(
+        Some(Duration::from_millis(40)),
+        Some(Duration::from_millis(70)),
     );
+    assert_eq!(
+        watch(&mut door, WAIT),
+        Some((0, serde_json::json!({"literals": []})))
+    );
+    assert!(door.kills.is_empty(), "{:?}", door.kills);
+    assert_eq!(door.reaps.len(), 1);
+    assert!(door.reaps[0] >= Duration::from_millis(70) && door.reaps[0] < WAIT);
+}
+
+#[test]
+fn a_zo_the_window_can_no_longer_wait_on_is_sent_nothing() {
+    let mut door = MadeUp::new(Some(Duration::ZERO), Some(Duration::ZERO));
+    door.wait_fails = true;
+    assert_eq!(watch(&mut door, WAIT), None);
     assert!(
-        started.elapsed() < Duration::from_secs(10),
-        "a child holding the output open does not hold the window: {:?}",
-        started.elapsed()
+        door.kills.is_empty(),
+        "a number the window cannot wait on may be another's: {:?}",
+        door.kills
     );
 }
