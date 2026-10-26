@@ -1280,7 +1280,7 @@ mod tests {
         let failed = |provider: &str, detail: String| serde_json::json!({"provider": provider, "source": format!("{provider}-api"), "ok": false, "count": 0, "detail": detail});
         // A report as zo sets it (t-76968): the kind and the status in
         // fields of their own, whatever the text says.
-        let reported = |provider: &str, detail: String, kind: &str, status: Option<u16>| {
+        let reported = |provider: &str, detail: String, kind: &str, status: Option<u64>| {
             let mut report = failed(provider, detail);
             report["failureKind"] = serde_json::json!(kind);
             if let Some(status) = status {
