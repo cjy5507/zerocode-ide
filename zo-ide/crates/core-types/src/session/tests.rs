@@ -2789,6 +2789,95 @@ fn a_refusal_names_the_holder_and_a_free_lease_has_none() {
     let _ = fs::remove_file(super::lock_sibling_path(&path));
 }
 
+/// 잠금 파일이 말하지 못해도 거절은 보유자를 이름한다. Windows 의 잠금(LockFileEx)은 파일
+/// 전체를 배타로 잠가 다른 핸들이 읽지도 못하므로, 잠금 파일 안의 도장만으로는 거절이
+/// pid 0 을 댄다(v1.1.95 Windows CI 40252005838). 여기서는 잠금 파일의 도장을 비워 그
+/// 상태를 어느 플랫폼에서나 만든다.
+#[test]
+fn a_refusal_names_the_holder_when_the_lock_file_cannot_say() {
+    let path = temp_session_path("lease-holder-unreadable");
+    let lock = super::lock_sibling_path(&path);
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&lock);
+
+    let mut first = persisted_session(&path);
+    push_text(&mut first, "first").expect("the first writer takes the lease");
+    // On Windows the lease already keeps this write out, which is the state being made.
+    let _ = fs::write(&lock, b"");
+    let holder = super::writer_lease_holder(&path).expect("held by this process");
+    assert_eq!(holder.pid, std::process::id(), "{holder:?}");
+
+    let mut blocked = persisted_session(&path);
+    let text = format!("{}", push_text(&mut blocked, "blocked").expect_err("refused"));
+    assert!(
+        text.contains(&format!("writer lease held by zo pid {}", std::process::id())),
+        "the refusal names the holder: {text}"
+    );
+
+    first.release_writer_lease();
+    drop(first);
+    assert_eq!(super::writer_lease_holder(&path), None, "a released lease has no holder");
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&lock);
+}
+
+/// 곁 도장은 보유자가 쥐고 있을 때만 보유자를 말한다. 곁 도장을 쓰는 판이 충돌로 끝나면
+/// 그 도장이 남고, 곁 도장을 모르는 옛 판이 다음 잠금을 잡을 수 있다. 잠금 파일을 읽지
+/// 못하는 조회(Windows)는 곁으로 가는데, 거기 적힌 pid 는 끝난 판의 것이다(검수 R2,
+/// 2026-10-27). 쥔 이 없는 곁 도장은 아무의 것도 아니어서 보유자는 미상이고, 거절도 그
+/// pid 를 대지 않는다. 옛 판은 잠금 파일만 잠그고 그 안의 도장을 비워 둔 것으로 만든다 —
+/// Windows 에서 다른 핸들이 그 도장을 읽지 못하는 상태와 같다.
+#[test]
+fn a_stamp_beside_the_lock_that_no_holder_keeps_names_nobody() {
+    let path = temp_session_path("lease-holder-stale-stamp");
+    let lock = super::lock_sibling_path(&path);
+    let stamp = super::holder_stamp_path(&lock);
+    for leftover in [&*path, lock.as_path(), stamp.as_path()] {
+        let _ = fs::remove_file(leftover);
+    }
+
+    let crashed = super::WriterLeaseHolder {
+        pid: 999_999,
+        cwd: Some("/a/build/that/crashed".to_string()),
+        at_ms: 1,
+    };
+    let policy = crate::paths::ParentDirPolicy::LeaveParent;
+    let crashed_stamp = serde_json::to_string(&crashed).expect("serialize the crashed stamp");
+    crate::paths::write_private_file(&stamp, crashed_stamp.as_bytes(), &policy)
+        .expect("the crashed build's stamp stays beside the lock");
+    crate::paths::write_private_file(&lock, b"", &policy).expect("the lock file");
+    let older_build = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock)
+        .expect("open the lock file");
+    older_build.try_lock().expect("an older build takes the lease");
+
+    let holder = super::writer_lease_holder(&path).expect("the lease is held");
+    assert_eq!(
+        holder,
+        super::WriterLeaseHolder {
+            pid: 0,
+            cwd: None,
+            at_ms: 0
+        },
+        "a stamp nobody keeps named the holder"
+    );
+
+    let mut refused = persisted_session(&path);
+    let text = format!("{}", push_text(&mut refused, "refused").expect_err("the lease is held"));
+    assert!(text.contains("writer lease held"), "{text}");
+    assert!(
+        !text.contains("999999"),
+        "the refusal named a holder that is gone: {text}"
+    );
+
+    drop(older_build);
+    for leftover in [&*path, lock.as_path(), stamp.as_path()] {
+        let _ = fs::remove_file(leftover);
+    }
+}
+
 /// **리스 누수 회귀 핀** — 리스는 공유 writer 상태의 수명만큼 유지되고 `Session`
 /// 클론이 그 상태를 공유한다. 그래서 런타임이 세션을 갈아끼울 때 옛 세션의 클론이
 /// 하나라도 살아 있으면 **버려진 경로가 프로세스가 죽을 때까지 잠긴 채** 남았고,
