@@ -2914,6 +2914,15 @@ class StatefulBackend {
           smart.previousJudgmentSelection ??= { judgmentProvider: smart.judgmentProvider ?? null };
           smart.judgmentConnection = clone(args.reference);
           smart.judgmentProvider = { kind: "remote", protocol: args.reference.protocol, baseUrl: row.provider.base_url, model: args.reference.model, requiresAuth: row.provider.requires_auth };
+          // Another window edits the connection's address right after this
+          // write: the same id and model, the next generation.
+          if (this.connectionApplyMoved) {
+            const moved = this.zoSettings.providers.find((provider) => provider.connection?.id === args.reference.id);
+            moved.base_url = "https://judge-moved.example.test/v1";
+            moved.connection.generation += 1;
+            smart.judgmentConnection = { ...smart.judgmentConnection, generation: moved.connection.generation };
+            smart.judgmentProvider.baseUrl = moved.base_url;
+          }
         } else {
           smart.previousCodingSelection ??= this.zoSettings.model ?? null;
           smart.codingConnection = clone(args.reference);
@@ -3042,7 +3051,11 @@ class StatefulBackend {
       // Mirrors `typesafe_settings.rs`: the key is kept trimmed under the one
       // item every zo reads and never sent back; the switch is
       // `smart.jev.enabled`, written as the core's press writes it.
-      case "typesafe_settings": return clone(await (this.judgmentSettingsWait ?? this.typesafeSettings()));
+      case "typesafe_settings": {
+        // A read the scene broke right after an apply (t-76598 r2 ①).
+        if (this.settingsReadBroken) throw "status_unavailable";
+        return clone(await (this.judgmentSettingsWait ?? this.typesafeSettings()));
+      }
       case "managed_judgment_status": return clone(await (this.judgmentStatusWait ?? this.managedJudgmentSettings()));
       case "judgment_latest_request": {
         if (this.judgmentUsageError) throw this.judgmentUsageError;
@@ -3172,7 +3185,12 @@ class StatefulBackend {
         held.configuredModelId = held.server.modelId;
         held.appliedModelId = held.server.modelId;
         held.revision += 1;
-        return this.managedJudgmentSettings();
+        const answer = this.managedJudgmentSettings();
+        // What a scene does right after the write lands: the settings can no
+        // longer be read, or another window names another provider.
+        if (this.managedApplyThen === "unreadable") this.settingsReadBroken = true;
+        if (this.managedApplyThen === "overwritten") this.zoSettings.smart = { ...this.zoSettings.smart, judgmentProvider: { kind: "jev", protocol: "system_one", model: "jev-other-window" } };
+        return answer;
       }
       case "managed_judgment_stop": {
         // A refusal a test puts in front of the next stop — the settings
@@ -14787,11 +14805,81 @@ await test("적용 확인: 적용 뒤 설정을 다시 읽어 같으면 그렇�
       assert(words.includes("judge-model") && words.includes("judge-two"), "the difference does not name what was read and what was picked", words);
       assertEqual(Object.keys(backend.connectionMemory.applied), [identity], "an apply that did not land was kept as one");
       await modelScenePictures("judgment-applied-differs");
-      return "read back equal → 「다시 읽은 설정도 …」 + time kept · lost write → read and picked named, nothing kept";
+      // The write lands, and another window changes the connection's address
+      // under the same id and model: the generation read back is not the one
+      // picked, and that is a difference too (t-76598 r2 ②).
+      delete backend.connectionApplyLost;
+      backend.connectionApplyMoved = true;
+      await pick("judge-two");
+      assertEqual(backend.zoSettings.smart.judgmentConnection.generation, 3, "the scene did not move the connection");
+      assert(await differs.isVisible(), "an apply read back at another generation of the connection was said as done");
+      const moved = await differs.innerText();
+      const movedWords = await pageA.evaluate(() => t("settings.models.appliedGeneration", "{{words}} (그 사이 연결의 주소나 키가 바뀜)", { words: "" }).trim());
+      assert(moved.includes(movedWords), "the difference does not say the connection changed meanwhile", moved);
+      assertEqual(Object.keys(backend.connectionMemory.applied).length, 1, "an apply read back at another generation was kept as one");
+      return "read back equal → 「다시 읽은 설정도 …」 + time kept · lost write → read and picked named, nothing kept · another generation → said, nothing kept";
     });
   } finally {
     delete backend.connectionApplyLost;
+    delete backend.connectionApplyMoved;
     if (savedMemory === undefined) delete backend.connectionMemory; else backend.connectionMemory = savedMemory;
+  }
+});
+
+await test("적용 확인: 이 컴퓨터 모델도 적용 뒤 설정을 다시 읽고, 못 읽거나 다른 모델이면 그렇다고 말하며, 같을 때만 바꾼 시각을 남긴다 (t-76598 r2 ①)", async () => {
+  const savedMemory = backend.connectionMemory;
+  const T0 = 1_790_000_000_000;
+  backend.connectionMemory = { nowMs: T0, connections: {} };
+  try {
+    return await withModelScene(() => {
+      const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32106", model: "fixture-decision", requiresAuth: false };
+      delete backend.managedModelState;
+      backend.managedJudgmentSettings();
+      Object.assign(backend.managedModelState, {
+        instanceId: "fixture-readback-instance", runtime: { state: "ready", downloadBytes: 0, reason: null },
+        server: { id: "fixture-readback-server", state: "ready", modelId: provider.model, provider, checked: true, error: null },
+      });
+      backend.managedModelState.models[0].installed = true;
+    }, async () => {
+      const apply = async (then) => {
+        backend.managedApplyThen = then;
+        const at = backend.calls.length;
+        try {
+          await pageA.evaluate(async () => { await refreshTypeSafe(); await managedJudgmentController.refresh(); });
+          const result = await pageA.evaluate(() => modelConnectionsController.applyJudgment("managed:fixture-decision", null));
+          const kept = backend.calls.slice(at).filter((call) => call.command === "remember_judgment_applied").length;
+          return { result, kept };
+        } finally {
+          delete backend.managedApplyThen;
+          delete backend.settingsReadBroken;
+        }
+      };
+      const unread = await apply("unreadable");
+      const unreadWords = await pageA.evaluate(() => t("settings.models.appliedUnread", "설정을 다시 읽지 못했습니다"));
+      assert(unread.result.applied && unread.result.differs === unreadWords, "a local apply whose settings could not be read again was said as read back", JSON.stringify(unread.result));
+      assertEqual(unread.kept, 0, "a local apply read back from nothing kept its time");
+      const overwritten = await apply("overwritten");
+      const jevWords = await pageA.evaluate(() => t("jev.place.jev", "Jev 서비스"));
+      assert(overwritten.result.applied && String(overwritten.result.differs ?? "").includes(jevWords), "a local apply the settings no longer hold was said as done", JSON.stringify(overwritten.result));
+      assertEqual(overwritten.kept, 0, "a local apply another window overwrote kept its time");
+      const held = await apply(null);
+      assertEqual(held.result.differs, null, "a local apply the settings hold was said as another", JSON.stringify(held.result));
+      assertEqual(held.kept, 1, "a local apply read back as picked did not keep its time");
+      const identity = backend.typesafeSettings().providerIdentity;
+      assertEqual(backend.connectionMemory.applied?.[identity], T0, "the local apply's time was not kept for the provider read back");
+      return "local apply → read back like any other: unreadable → said, nothing kept · overwritten → named, nothing kept · held → time kept";
+    });
+  } finally {
+    if (savedMemory === undefined) delete backend.connectionMemory; else backend.connectionMemory = savedMemory;
+    // The page read a local model applied; the scenes after start from the
+    // settings and the managed state put back.
+    await pageA.evaluate(async () => {
+      if (typesafeRefreshing) await typesafeRefreshing.promise;
+      await refreshTypeSafe();
+      await managedJudgmentController.refresh();
+      await refreshApiRouters();
+    });
+    await renderSettled(pageA);
   }
 });
 
