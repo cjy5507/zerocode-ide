@@ -32,11 +32,16 @@ export const SETTINGS_SECRET_WORDS = Object.freeze({
 });
 
 const NAMES = ["FIXTURE_TOKEN", "OTHER_FIXTURE_KEY"];
+const BACKUP_NOTE_KO = "백업에는 옮기기 전의 비밀 값이 그대로 들어 있습니다. 옮긴 것이 잘 되는지 확인한 뒤 백업 파일을 지워 주세요.";
+const STOPPED_TITLE_KO = "설정 파일의 비밀을 다 옮기지 못했습니다";
+const UNLISTED_KO = "남은 목록을 zo에게서 다시 받지 못했습니다. 설정을 다시 열어 확인해 주세요.";
 const BACKUP = "/fixture/home/.zo/settings.json.bak-20261027-fixture";
 
 /* The stubs and a record of every call, put on the page before it boots. */
 const installHands = (sentinel) => {
-  window.__SECRETS__ = { listed: null, listThrows: false, outcome: null, moveThrows: null };
+  // `relist`, when set, is what the listing answers after a move (`"throw"`:
+  // it fails) — in place of the names the move left.
+  window.__SECRETS__ = { listed: null, listThrows: false, outcome: null, moveThrows: null, relist: undefined };
   window.__SECRET_CALLS__ = [];
   window.__SECRET_CONSOLE__ = [];
   for (const level of ["log", "info", "warn", "error", "debug"]) {
@@ -54,6 +59,10 @@ const stubBackend = () => {
   window.__ANSWER__.settings_secret_literals = (args) => {
     window.__SECRET_CALLS__.push({ name: "settings_secret_literals", args: JSON.stringify(args ?? null) });
     if (S.listThrows) throw new Error("zo: unknown argument 'settings'");
+    if (S.moved && S.relist !== undefined) {
+      if (S.relist === "throw") throw new Error("fixture: the listing failed");
+      return S.relist;
+    }
     return S.listed;
   };
   window.__ANSWER__.move_settings_secrets = (args, options) => {
@@ -62,6 +71,7 @@ const stubBackend = () => {
       args: JSON.stringify(args ?? null),
       hand: options?.headers?.["zerocode-hand"] ?? null,
     });
+    S.moved = true;
     if (S.moveThrows) throw S.moveThrows;
     const outcome = S.outcome;
     // What the backend lists after a move: what is left.
@@ -82,6 +92,7 @@ const look = () => {
     names: said("settings-secrets-names"),
     body: said("settings-secrets-body"),
     done: said("settings-secrets-done"),
+    backupNote: said("settings-secrets-backup-note"),
     why: said("settings-secrets-why"),
     move: said("settings-secrets-move"),
     asked: window.__SECRET_CALLS__.filter((call) => call.name === "settings_secret_literals").length,
@@ -89,7 +100,24 @@ const look = () => {
   };
 };
 
-const settle = (page, ms = 250) => page.waitForTimeout(ms);
+/* Waits until the line has asked for the listing `asks` times and pressed the
+ * move `moves` times, and is busy with neither: each call the stub counted has
+ * come back and been painted. Nothing here waits on a clock. */
+async function settled(page, { asks, moves = 0 }) {
+  await page.waitForFunction(([asks, moves]) => {
+    const calls = window.__SECRET_CALLS__;
+    const line = document.getElementById("settings-secrets");
+    return calls.filter((call) => call.name === "settings_secret_literals").length === asks &&
+      calls.filter((call) => call.name === "move_settings_secrets").length === moves &&
+      !!line && line.getAttribute("aria-busy") === "false";
+  }, [asks, moves]);
+}
+
+/* Presses the move, and waits for it and the listing asked after it. */
+async function pressMove(page) {
+  await page.click("#settings-secrets-move");
+  await settled(page, { asks: 2, moves: 1 });
+}
 
 const shot = async (page, file) => {
   const dir = process.env.SETTINGS_SECRETS_SHOTS_DIR;
@@ -118,7 +146,7 @@ async function scenario(browser, origin, name, ok, body, { width = 1280 } = {}) 
 async function openSettings(page) {
   await page.evaluate(() => setSettingsOpen(true));
   await page.waitForFunction(() => !document.getElementById("settings-view").hidden);
-  await settle(page);
+  await settled(page, { asks: 1 });
 }
 
 const keepsOf = () => {
@@ -152,6 +180,11 @@ async function named(browser, origin, ok) {
         seen.names === NAMES.join(", ") && seen.move === SETTINGS_SECRET_WORDS.ko.move && seen.done === null && seen.why === null,
       JSON.stringify(seen),
     );
+    ok(
+      "before the press the line already says zo's backup will hold the old values",
+      seen.body?.includes("그 백업에는 옛 값이 그대로 들어 있습니다") && seen.backupNote === null,
+      JSON.stringify(seen),
+    );
     const kept = await page.evaluate(keepsOf);
     ok("no value is in the document, storage, console or any backend call", !kept.holds, `searched ${kept.searched} characters`);
   });
@@ -164,8 +197,7 @@ async function moved(browser, origin, ok) {
       window.__SECRETS__.outcome = { moved: names.map((name) => ({ name, backup })), stopped: null, left: [] };
     }, [NAMES, BACKUP]);
     await openSettings(page);
-    await page.click("#settings-secrets-move");
-    await settle(page);
+    await pressMove(page);
     const seen = await page.evaluate(look);
     await shot(page, "moved-1280.png");
     ok(
@@ -177,6 +209,11 @@ async function moved(browser, origin, ok) {
       "a full move says it with zo's backup, and the button goes",
       seen.shown && seen.title === "설정 파일의 비밀을 키체인으로 옮겼습니다" &&
         seen.done === `옮김 · 백업 ${BACKUP}` && seen.move === null && seen.names === null && seen.why === null,
+      JSON.stringify(seen),
+    );
+    ok(
+      "beside the backup the line says it still holds the old values, to be removed once the move is checked",
+      seen.backupNote === BACKUP_NOTE_KO && !/<button|삭제|지우기 단추/.test(seen.backupNote ?? ""),
       JSON.stringify(seen),
     );
     const kept = await page.evaluate(keepsOf);
@@ -195,8 +232,7 @@ async function stoppedDiffers(browser, origin, ok) {
       };
     }, NAMES);
     await openSettings(page);
-    await page.click("#settings-secrets-move");
-    await settle(page);
+    await pressMove(page);
     const seen = await page.evaluate(look);
     ok(
       "a different value under the name stops the move and says so, with what was not tried",
@@ -220,8 +256,7 @@ async function stoppedByZo(browser, origin, ok) {
       };
     }, [NAMES, why]);
     await openSettings(page);
-    await page.click("#settings-secrets-move");
-    await settle(page);
+    await pressMove(page);
     const seen = await page.evaluate(look);
     ok(
       "a refused move says zo's own reason and that the keychain item was left for the next try",
@@ -230,6 +265,45 @@ async function stoppedByZo(browser, origin, ok) {
       JSON.stringify(seen),
     );
   });
+}
+
+/* A move that stopped, after which the listing could not be read again: the
+ * names are unknown, and nothing may read as a finished move. */
+async function stoppedUnlisted(browser, origin, ok) {
+  for (const [label, setup] of [
+    ["zo stopped answering and the listing came back empty", (S, names) => {
+      S.listed = { names };
+      S.outcome = { moved: [], stopped: { name: "", reason: "zo_silent", why: null, keychainKept: false }, left: [] };
+      S.relist = null;
+    }],
+    ["the move itself failed and the listing failed too", (S, names) => {
+      S.listed = { names };
+      S.moveThrows = "fixture: the window could not start the move";
+      S.relist = "throw";
+    }],
+    ["one moved, the next stopped and the listing came back empty", (S, names) => {
+      S.listed = { names };
+      S.outcome = {
+        moved: [{ name: names[0], backup: "/fixture/home/.zo/settings.json.bak-fixture" }],
+        stopped: { name: names[1], reason: "move_refused", why: null, keychainKept: true },
+        left: [],
+      };
+      S.relist = null;
+    }],
+  ]) {
+    await scenario(browser, origin, `stopped, unlisted: ${label}`, ok, async (page) => {
+      await page.evaluate(`(${setup})(window.__SECRETS__, ${JSON.stringify(NAMES)})`);
+      await openSettings(page);
+      await pressMove(page);
+      const seen = await page.evaluate(look);
+      ok(
+        `when ${label}, the title is not the finished one and the line says the list was not read again`,
+        seen.shown && seen.title === STOPPED_TITLE_KO && seen.title !== "설정 파일의 비밀을 키체인으로 옮겼습니다" &&
+          !!seen.why && seen.why.includes(UNLISTED_KO),
+        JSON.stringify(seen),
+      );
+    });
+  }
 }
 
 async function oldZo(browser, origin, ok) {
@@ -254,7 +328,6 @@ async function languages(browser, origin, ok) {
       const out = {};
       for (const code of codes) {
         setLocale(code, { persist: false, refresh: false });
-        await new Promise((done) => setTimeout(done, 30));
         out[code] = {
           title: document.getElementById("settings-secrets-title").textContent.trim(),
           move: document.getElementById("settings-secrets-move").textContent.trim(),
@@ -271,6 +344,28 @@ async function languages(browser, origin, ok) {
     }
     ok("each language has its own explanation", bodies.size === 5, JSON.stringify([...bodies]));
   });
+  await scenario(browser, origin, "languages after a move", ok, async (page) => {
+    await page.evaluate(([names, backup]) => {
+      window.__SECRETS__.listed = { names };
+      window.__SECRETS__.outcome = { moved: names.map((name) => ({ name, backup })), stopped: null, left: [] };
+    }, [NAMES, BACKUP]);
+    await openSettings(page);
+    await pressMove(page);
+    const notes = await page.evaluate((codes) => {
+      const out = {};
+      for (const code of codes) {
+        setLocale(code, { persist: false, refresh: false });
+        out[code] = document.getElementById("settings-secrets-backup-note").textContent.trim();
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      return out;
+    }, Object.keys(SETTINGS_SECRET_WORDS));
+    ok(
+      "the backup's warning speaks each of the five languages",
+      new Set(Object.values(notes).filter(Boolean)).size === 5 && notes.ko === BACKUP_NOTE_KO,
+      JSON.stringify(notes),
+    );
+  });
 }
 
 async function narrow(browser, origin, ok) {
@@ -285,13 +380,11 @@ async function narrow(browser, origin, ok) {
       };
     }, [long, BACKUP]);
     await openSettings(page);
-    await page.click("#settings-secrets-move");
-    await settle(page);
+    await pressMove(page);
     await shot(page, "stopped-390.png");
     for (const code of Object.keys(SETTINGS_SECRET_WORDS)) {
       const spill = await page.evaluate(async (code) => {
         setLocale(code, { persist: false, refresh: false });
-        await new Promise((done) => setTimeout(done, 30));
         const line = document.getElementById("settings-secrets");
         const box = line.getBoundingClientRect();
         const over = [line, ...line.querySelectorAll("*")]
@@ -310,6 +403,7 @@ export async function testSettingsSecrets(browser, origin, ok) {
   await moved(browser, origin, ok);
   await stoppedDiffers(browser, origin, ok);
   await stoppedByZo(browser, origin, ok);
+  await stoppedUnlisted(browser, origin, ok);
   await oldZo(browser, origin, ok);
   await languages(browser, origin, ok);
   await narrow(browser, origin, ok);
