@@ -22464,6 +22464,33 @@ pub(crate) mod computer_desktop_wait {
         crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
     }
 
+    #[test]
+    fn press_key_combinations_run_as_hotkey_once() {
+        use crate::agent_tools_runtime::call_with_the_persons_last_step;
+        use crate::computer_use::confirm::Asking;
+        use zerocode_core::computer_use_protocol::keys::parse_key_spec;
+        for key in ["cmd+v", "command+v", "Ctrl+Shift+T"] {
+            let command = zerocode_core::computer_use::parse_command(&words(&[
+                "press-key", "--app", "Fixture", "--key", key, "--no-screenshot",
+            ])).expect("a combination is accepted");
+            let mut calls = Vec::new();
+            let answer = call_with_the_persons_last_step(&command, Asking::HandBack, &mut |method, params| {
+                calls.push((method.to_string(), parse_key_spec(params["key"].as_str().unwrap()).unwrap()));
+                Ok(serde_json::json!({"fixture": true}))
+            }).unwrap();
+            assert_eq!(calls, vec![("hotkey".to_string(), parse_key_spec(key).unwrap())]);
+            assert_eq!(answer["ranAs"], "hotkey");
+        }
+        let command = zerocode_core::computer_use::parse_command(&words(&[
+            "press-key", "--app", "Fixture", "--key", "Return",
+        ])).unwrap();
+        let answer = call_with_the_persons_last_step(&command, Asking::HandBack, &mut |method, _| {
+            assert_eq!(method, "pressKey");
+            Ok(serde_json::json!({"fixture": true}))
+        }).unwrap();
+        assert!(answer.get("ranAs").is_none());
+    }
+
     /// A press the helper found guarded is handed back unpressed to a walk
     /// that has nobody to ask (a recipe): the helper's own words, one call, no
     /// question. The person's road still asks — and refuses on silence.

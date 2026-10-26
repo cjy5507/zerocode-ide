@@ -7256,6 +7256,23 @@ mod tests {
     }
 
     #[test]
+    fn press_key_combinations_share_hotkey_validation() {
+        for key in ["cmd+v", "command+v", "Ctrl+Shift+T"] {
+            let press = parse_command(&words(&["press-key", "--app", "Fixture", "--key", key]))
+                .expect("press-key accepts a hotkey combination");
+            let hotkey = parse_command(&words(&["hotkey", "--app", "Fixture", "--key", key]))
+                .unwrap();
+            assert_eq!(press.params, hotkey.params);
+        }
+        for key in ["cmd+", "+v", "foo+v", "cmd+unknown-key", "cmd+shift"] {
+            for verb in ["press-key", "hotkey"] {
+                assert!(parse_command(&words(&[verb, "--app", "Fixture", "--key", key])).is_err(),
+                    "accepted {verb} {key}");
+            }
+        }
+    }
+
+    #[test]
     fn unsafe_or_ambiguous_targets_are_refused_before_the_provider() {
         for argv in [
             words(&["click", "--app", "Finder"]),
@@ -7280,7 +7297,6 @@ mod tests {
                 "--window-index",
                 "2",
             ]),
-            words(&["press-key", "--app", "Finder", "--key", "CmdOrCtrl+V"]),
             words(&["hotkey", "--app", "Finder", "--key", "Return"]),
         ] {
             assert!(parse_command(&argv).is_err(), "accepted {argv:?}");
