@@ -66,7 +66,9 @@ fn a_login_model_zo_lists_becomes_the_coding_model_without_a_connection() {
     let root = read(&path);
     assert_eq!(root["model"], "fixture-claude-top");
     assert!(
-        root["smart"].get(connections::CODING_CONNECTION_KEY).is_none(),
+        root["smart"]
+            .get(connections::CODING_CONNECTION_KEY)
+            .is_none(),
         "a login model kept the router's coding connection"
     );
     assert_eq!(
@@ -136,7 +138,11 @@ fn a_router_model_zo_reads_from_outside_the_settings_is_written_as_zo_names_it()
     .expect("a router zo knows from its own environment");
     let root = read(&path);
     assert_eq!(root["model"], "Elsewhere/env-only-model");
-    assert!(root["smart"].get(connections::CODING_CONNECTION_KEY).is_none());
+    assert!(
+        root["smart"]
+            .get(connections::CODING_CONNECTION_KEY)
+            .is_none()
+    );
 }
 
 #[test]
@@ -146,8 +152,13 @@ fn a_model_zo_does_not_list_or_a_moved_selection_leaves_the_file_unchanged() {
     settings_with_router(&path, "fixture-claude-top");
     let before = std::fs::read(&path).expect("before");
     assert_eq!(
-        apply_coding_model(&path, "not-a-listed-model", Some("fixture-claude-top"), &listed())
-            .unwrap_err(),
+        apply_coding_model(
+            &path,
+            "not-a-listed-model",
+            Some("fixture-claude-top"),
+            &listed()
+        )
+        .unwrap_err(),
         "provider_model"
     );
     assert_eq!(
@@ -156,8 +167,13 @@ fn a_model_zo_does_not_list_or_a_moved_selection_leaves_the_file_unchanged() {
         "settings_changed"
     );
     assert_eq!(
-        apply_coding_model(&path, "fixture-openai-one", Some("fixture-claude-top"), &Value::Null)
-            .unwrap_err(),
+        apply_coding_model(
+            &path,
+            "fixture-openai-one",
+            Some("fixture-claude-top"),
+            &Value::Null
+        )
+        .unwrap_err(),
         "provider_model",
         "with no zo list there is nothing to check a pick against"
     );
@@ -183,7 +199,9 @@ impl FirstRequest {
                 let mut bytes = Vec::new();
                 let mut buffer = [0_u8; 65536];
                 loop {
-                    let Ok(read) = stream.read(&mut buffer) else { break };
+                    let Ok(read) = stream.read(&mut buffer) else {
+                        break;
+                    };
                     if read == 0 {
                         break;
                     }
@@ -203,13 +221,17 @@ impl FirstRequest {
                         }
                     }
                 }
-                let answer = "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"fixture\"}}";
+                let answer =
+                    "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"fixture\"}}";
                 let _ = write!(
                     stream,
                     "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{answer}",
                     answer.len()
                 );
-                if tell.send(String::from_utf8_lossy(&bytes).into_owned()).is_err() {
+                if tell
+                    .send(String::from_utf8_lossy(&bytes).into_owned())
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -233,7 +255,11 @@ fn installed_zo() -> std::path::PathBuf {
 
 /// A new zo session started in `home` with nothing but the settings the
 /// window wrote: its first request, as the server read it.
-fn first_request_of_a_new_session(home: &Path, extra: &[(&str, String)], server: &FirstRequest) -> (String, Value) {
+fn first_request_of_a_new_session(
+    home: &Path,
+    extra: &[(&str, String)],
+    server: &FirstRequest,
+) -> (String, Value) {
     let mut command = std::process::Command::new(installed_zo());
     command
         .arg("-p")
@@ -288,8 +314,13 @@ fn the_next_zo_session_sends_a_picked_router_model_to_its_router() {
         .to_string(),
     )
     .expect("settings");
-    apply_coding_model(&path, "Fixture/second-model", Some("fixture-claude-top"), &listed())
-        .expect("pick");
+    apply_coding_model(
+        &path,
+        "Fixture/second-model",
+        Some("fixture-claude-top"),
+        &listed(),
+    )
+    .expect("pick");
     let (line, body) = first_request_of_a_new_session(home.path(), &[], &server);
     assert!(line.starts_with("POST /v1/chat/completions "), "{line}");
     assert_eq!(body["model"], "second-model");
@@ -311,8 +342,13 @@ fn the_next_zo_session_sends_a_picked_login_model() {
         .as_array_mut()
         .expect("models")
         .push(json!({"id":"claude-opus-5-5","provider":"claude","displayName":"Fixture Opus","band":"second"}));
-    apply_coding_model(&path, "claude-opus-5-5", Some("Fixture/second-model"), &zo_list)
-        .expect("pick");
+    apply_coding_model(
+        &path,
+        "claude-opus-5-5",
+        Some("Fixture/second-model"),
+        &zo_list,
+    )
+    .expect("pick");
     let (line, body) = first_request_of_a_new_session(
         home.path(),
         &[

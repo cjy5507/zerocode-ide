@@ -157,8 +157,7 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
             || api_routers::read_connection_key(&provider.auth_env, keys)
                 .map_err(|error| error.message)?
                 .is_some_and(|key| !key.trim().is_empty());
-        let legacy_key =
-            !key_available && legacy_key_of(&root, &metadata, row, keys)?.is_some();
+        let legacy_key = !key_available && legacy_key_of(&root, &metadata, row, keys)?.is_some();
         let uses = [
             (Role::Coding, coding.as_ref()),
             (Role::Judgment, judgment.as_ref()),
@@ -625,7 +624,9 @@ fn legacy_key_of(
         };
         legacy.connection = None;
         let held = keys
-            .read(&crate::typesafe_settings::provider_keychain_service(&legacy))
+            .read(&crate::typesafe_settings::provider_keychain_service(
+                &legacy,
+            ))
             .map_err(|error| error.message)?
             .filter(|key| !key.trim().is_empty());
         if held.is_some() {

@@ -744,7 +744,10 @@ fn a_connection_takes_the_old_judgment_key_for_its_address_with_one_press() {
     let mut root: Value =
         serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
     let foreign = "FIXTURE_T75762_FOREIGN_LLM_KEY";
-    assert!(std::env::var_os(foreign).is_none(), "the fixture variable is set");
+    assert!(
+        std::env::var_os(foreign).is_none(),
+        "the fixture variable is set"
+    );
     root["providers"] = json!([{
         "name":"Fixture gateway", "base_url":format!("{}/v1", endpoint.base()),
         "auth_env":foreign, "requires_auth":true, "models":["fixture-model"],
@@ -765,8 +768,14 @@ fn a_connection_takes_the_old_judgment_key_for_its_address_with_one_press() {
 
     let before = crate::model_connection_store::catalog(&path, &keys).expect("catalog");
     let row = &before.connections[0];
-    assert!(!row.key_available, "an unreadable variable was called a key");
-    assert!(row.legacy_key, "the old key for this address was not offered");
+    assert!(
+        !row.key_available,
+        "an unreadable variable was called a key"
+    );
+    assert!(
+        row.legacy_key,
+        "the old key for this address was not offered"
+    );
     let refused = crate::model_connection_store::check(
         &path,
         &reference,
@@ -776,7 +785,10 @@ fn a_connection_takes_the_old_judgment_key_for_its_address_with_one_press() {
     )
     .expect("check");
     assert_eq!(refused.preflight.failure.as_deref(), Some("no_key"));
-    assert!(endpoint.asked().is_empty(), "a keyless check reached the server");
+    assert!(
+        endpoint.asked().is_empty(),
+        "a keyless check reached the server"
+    );
 
     crate::model_connection_store::adopt_legacy_judgment_key(&path, "fixture-foreign", 1, &keys)
         .expect("one press moves the key");
@@ -828,7 +840,8 @@ fn an_applied_judgment_connection_model_is_the_next_requests_model() {
         "requires_auth":false, "models":["fixture-other","fixture-judge-model"],
         "connection":{"id":"fixture-judge", "generation":4}
     }]);
-    root["smart"]["jev"] = json!({"enabled":true,"workspaces":[door::resolved_path(workspace.path())]});
+    root["smart"]["jev"] =
+        json!({"enabled":true,"workspaces":[door::resolved_path(workspace.path())]});
     let seat = &JEV_USES[0];
     root["smart"][seat.setting] = json!(
         seat.modes
@@ -856,11 +869,18 @@ fn an_applied_judgment_connection_model_is_the_next_requests_model() {
     let _ = settings_wire(&path).ask(
         seat,
         Some(workspace.path()),
-        crate::systemone::request_body(&json!("Ready"), &json!({"ready":{"type":"noul","instructions":"Ready?"}})),
+        crate::systemone::request_body(
+            &json!("Ready"),
+            &json!({"ready":{"type":"noul","instructions":"Ready?"}}),
+        ),
         std::time::Duration::from_secs(5),
     );
     let asked = endpoint.asked();
-    assert_eq!(asked.len(), applied + 1, "the next judgment did not reach the connection");
+    assert_eq!(
+        asked.len(),
+        applied + 1,
+        "the next judgment did not reach the connection"
+    );
     let (head, body) = asked[applied].split_once("\r\n\r\n").expect("request");
     assert!(head.starts_with("POST /route/systemone "), "{head}");
     let body: Value = serde_json::from_str(body).expect("JSON");
