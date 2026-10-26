@@ -40,8 +40,10 @@ fn a_request_nothing_answers_is_a_timeout_with_no_number() {
 /// A port nobody listens on is refused at once. The limit is long so that a
 /// loaded machine reads the refusal before the clock ends the request; the
 /// one thing left to chance is another process taking the released port
-/// between the drop and the connect.
+/// between the drop and the connect, so the gate does not run it: run it by
+/// name with `--ignored`.
 #[test]
+#[ignore = "a released loopback port can be taken by another process before the connect"]
 fn a_refused_connection_is_network_with_no_number() {
     let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
     let url = format!("http://{}/", closed.local_addr().expect("its address"));
