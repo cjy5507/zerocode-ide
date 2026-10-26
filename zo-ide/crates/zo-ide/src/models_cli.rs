@@ -493,6 +493,7 @@ mod tests {
             count,
             fetched_at: 1_000,
             origin: origin.to_string(),
+            credential_store: String::new(),
         };
         let now = 1_000 + 2 * 3600;
         assert_eq!(

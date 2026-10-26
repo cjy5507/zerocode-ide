@@ -170,6 +170,9 @@ pub struct Source {
     /// and the words a report says instead of the raw body — xAI's
     /// `spending-limit` is an account without credits, not a bad key.
     pub refusals: &'static [(&'static str, &'static str)],
+    /// The credential store this process reads the source's login from —
+    /// [`SourceReport::credential_store`]. Offline and cheap, never a secret.
+    pub store: fn() -> String,
 }
 
 impl Source {
@@ -215,6 +218,7 @@ pub const SOURCES: [Source; 6] = [
         ask: openai_models,
         lists_every_model: true,
         refusals: &[],
+        store: api::managed_account::codex_store_label,
     },
     Source {
         provider: "anthropic",
@@ -226,6 +230,7 @@ pub const SOURCES: [Source; 6] = [
         ask: anthropic_models,
         lists_every_model: true,
         refusals: &[],
+        store: api::claude_code_store_label,
     },
     Source {
         provider: "google",
@@ -237,6 +242,7 @@ pub const SOURCES: [Source; 6] = [
         ask: google_models,
         lists_every_model: false,
         refusals: &[],
+        store: String::new,
     },
     Source {
         provider: "google",
@@ -248,6 +254,7 @@ pub const SOURCES: [Source; 6] = [
         ask: antigravity_models,
         lists_every_model: true,
         refusals: &[],
+        store: String::new,
     },
     Source {
         provider: "xai",
@@ -262,6 +269,7 @@ pub const SOURCES: [Source; 6] = [
             "spending-limit",
             "no subscription or credits on this xAI account — add credits or a Grok subscription (the login itself was accepted)",
         )],
+        store: api::grok_store_label,
     },
     Source {
         provider: "kimi",
@@ -273,6 +281,7 @@ pub const SOURCES: [Source; 6] = [
         ask: kimi_code_models,
         lists_every_model: true,
         refusals: &[],
+        store: api::kimi_code_store_label,
     },
 ];
 
@@ -447,6 +456,12 @@ pub struct SourceReport {
     /// [`ORIGIN_PREVIOUS`] when a failed refresh kept last time's rows.
     #[serde(default)]
     pub origin: String,
+    /// The credential store the process that wrote this report read the
+    /// source's login from ([`Source::store`]): `keychain`,
+    /// `<variable>:<folder>`, `home`, or empty when unknown or when the
+    /// source has no per-account store. The window reads these values.
+    #[serde(default)]
+    pub credential_store: String,
 }
 
 impl SourceReport {
@@ -663,7 +678,7 @@ pub type SourceAnswer = Result<Answered, (String, String)>;
 pub fn discover() -> DiscoveredCatalog {
     let previous = load_cached();
     let every: Vec<&'static str> = SOURCES.iter().map(|source| source.key).collect();
-    refresh_with(previous.as_ref(), &every, now_secs(), &selected_models(), ask)
+    refresh_under(previous.as_ref(), &every, now_secs(), &selected_models(), ask, store_of)
 }
 
 /// Ask only the sources whose last answer is older than `ttl_secs` (or
@@ -675,7 +690,7 @@ pub fn discover() -> DiscoveredCatalog {
 pub fn discover_due(now_secs: u64, ttl_secs: u64) -> Option<DiscoveredCatalog> {
     let previous = load_cached();
     let due = due_sources(previous.as_ref(), now_secs, ttl_secs);
-    (!due.is_empty()).then(|| refresh_with(previous.as_ref(), &due, now_secs, &selected_models(), ask))
+    (!due.is_empty()).then(|| refresh_under(previous.as_ref(), &due, now_secs, &selected_models(), ask, store_of))
 }
 
 /// The sources a connection at `now_secs` has to ask again: every source the
@@ -695,10 +710,8 @@ pub fn due_sources(previous: Option<&DiscoveredCatalog>, now_secs: u64, ttl_secs
         .collect()
 }
 
-/// One refresh: the sources in `due` are asked through `fetch`, every other
-/// source keeps the rows and report the previous catalog carried, a failed
-/// source keeps last time's rows ([`carry_forward`]), and a selected model
-/// the sources stopped listing stays as an unlisted row ([`keep_selected`]).
+/// [`refresh_under`] with every store unknown — the reports record none,
+/// and no store's answer is kept over another's.
 pub fn refresh_with(
     previous: Option<&DiscoveredCatalog>,
     due: &[&str],
@@ -706,6 +719,24 @@ pub fn refresh_with(
     selected: &[String],
     fetch: impl Fn(&'static str) -> SourceAnswer,
 ) -> DiscoveredCatalog {
+    refresh_under(previous, due, now_secs, selected, fetch, |_| String::new())
+}
+
+/// One refresh: the sources in `due` are asked through `fetch`, every other
+/// source keeps the rows and report the previous catalog carried, a failed
+/// source keeps last time's rows ([`carry_forward`]), and a selected model
+/// the sources stopped listing stays as an unlisted row ([`keep_selected`]).
+/// `store` names the credential store this process reads each source from
+/// ([`Source::store`]).
+pub fn refresh_under(
+    previous: Option<&DiscoveredCatalog>,
+    due: &[&str],
+    now_secs: u64,
+    selected: &[String],
+    fetch: impl Fn(&'static str) -> SourceAnswer,
+    store: impl Fn(&'static str) -> String,
+) -> DiscoveredCatalog {
+    let _ = &store;
     let mut catalog = DiscoveredCatalog {
         fetched_at: now_secs,
         ..Default::default()
@@ -749,6 +780,7 @@ pub fn refresh_with(
                     count,
                     fetched_at: answered.fetched_at,
                     origin: answered.origin,
+                    credential_store: String::new(),
                 });
                 catalog.models.extend(answered.models);
             }
@@ -760,6 +792,7 @@ pub fn refresh_with(
                 count: 0,
                 fetched_at: now_secs,
                 origin: String::new(),
+                credential_store: String::new(),
             }),
         }
     }
@@ -849,6 +882,11 @@ pub fn withdrawn_since_in(catalog: &DiscoveredCatalog, id: &str) -> Option<u64> 
 pub fn withdrawn_since(id: &str) -> Option<u64> {
     let catalog = current()?;
     withdrawn_since_in(&catalog, id)
+}
+
+/// The real credential stores, by source key — each row's own.
+fn store_of(source: &'static str) -> String {
+    self::source(source).map_or_else(String::new, |row| (row.store)())
 }
 
 /// The real fetchers, by source key — each row's own.
@@ -4363,6 +4401,7 @@ mod tests {
             count: 1,
             fetched_at,
             origin: super::ORIGIN_LIVE.to_string(),
+            credential_store: String::new(),
         };
         let row = |source: &str, id: &str| DiscoveredModel {
             provider: "openai".to_string(),
@@ -4508,6 +4547,7 @@ mod tests {
             count: 0,
             fetched_at,
             origin: String::new(),
+            credential_store: String::new(),
         };
         let ttl = 3_600;
         let asked = Cell::new(0);
@@ -4560,6 +4600,7 @@ mod tests {
             count,
             fetched_at: 0,
             origin: String::new(),
+            credential_store: String::new(),
         };
         let fresh = super::DiscoveredCatalog {
             fetched_at: previous.fetched_at + 60,
@@ -4764,6 +4805,7 @@ mod tests {
                 count: 1,
                 fetched_at: now - 7_200,
                 origin: super::ORIGIN_LIVE.to_string(),
+                credential_store: String::new(),
             }],
             models: vec![DiscoveredModel {
                 provider: "anthropic".to_string(),
@@ -4830,6 +4872,7 @@ mod tests {
                     count: 0,
                     fetched_at: now - 60,
                     origin: String::new(),
+                    credential_store: String::new(),
                 })
                 .collect(),
             models: Vec::new(),
@@ -4892,6 +4935,185 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// The store a window pane reads its Claude login from, and the one the
+    /// window's own `zo models --json` read without the pane's variables
+    /// (t-76621): the pane's login works, the machine's own does not.
+    const PANE_STORE: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane";
+    const WINDOW_STORE: &str = "keychain";
+
+    /// One anthropic refresh at `now`: the anthropic column answers `answer`
+    /// under `store`, every other source is skipped under no store.
+    fn anthropic_refresh(
+        previous: Option<&DiscoveredCatalog>,
+        now: u64,
+        store: &'static str,
+        answer: &super::SourceAnswer,
+    ) -> DiscoveredCatalog {
+        super::refresh_under(
+            previous,
+            &[super::ANTHROPIC_SOURCE],
+            now,
+            &[],
+            |source| {
+                if source == super::ANTHROPIC_SOURCE {
+                    answer.clone()
+                } else {
+                    Err((source.to_string(), "skipped: not in this test".to_string()))
+                }
+            },
+            |source| if source == super::ANTHROPIC_SOURCE { store.to_string() } else { String::new() },
+        )
+    }
+
+    /// The pane's answer: one Opus row, live at `now`.
+    fn opus_answer(now: u64) -> super::Answered {
+        super::Answered {
+            source: super::ANTHROPIC_SOURCE.to_string(),
+            models: vec![DiscoveredModel {
+                provider: "anthropic".to_string(),
+                id: "claude-opus-5-5".to_string(),
+                display_name: "Opus 5.5".to_string(),
+                source: super::ANTHROPIC_SOURCE.to_string(),
+                ..Default::default()
+            }],
+            origin: super::ORIGIN_LIVE.to_string(),
+            fetched_at: now,
+            note: None,
+        }
+    }
+
+    /// The window's answer without the pane's variables: zo's saved copy,
+    /// refused.
+    fn refused_answer() -> super::SourceAnswer {
+        Err((
+            super::ANTHROPIC_SOURCE.to_string(),
+            "claude credential present but not usable: zo's saved Claude login is a copy of an earlier Claude Code sign-in".to_string(),
+        ))
+    }
+
+    fn anthropic_report(catalog: &DiscoveredCatalog) -> &super::SourceReport {
+        catalog
+            .reports
+            .iter()
+            .find(|report| report.source == super::ANTHROPIC_SOURCE)
+            .expect("the anthropic report")
+    }
+
+    fn holds_opus(catalog: &DiscoveredCatalog) -> bool {
+        catalog.models.iter().any(|model| model.id == "claude-opus-5-5")
+    }
+
+    /// (a) t-76621: a report says which credential store answered it — a
+    /// success and a failure alike, and an unasked source carries the store
+    /// it was answered under.
+    #[test]
+    fn a_report_records_the_credential_store_it_was_answered_under() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now, PANE_STORE, &Ok(opus_answer(now)));
+        assert_eq!(anthropic_report(&pane).credential_store, PANE_STORE);
+        let failed = anthropic_refresh(None, now, WINDOW_STORE, &refused_answer());
+        assert_eq!(anthropic_report(&failed).credential_store, WINDOW_STORE);
+        let carried = super::refresh_under(
+            Some(&pane),
+            &[],
+            now + 60,
+            &[],
+            |source| unreachable!("{source} is not due"),
+            |_| WINDOW_STORE.to_string(),
+        );
+        assert_eq!(
+            anthropic_report(&carried).credential_store,
+            PANE_STORE,
+            "a source nobody asked keeps the store that answered it"
+        );
+    }
+
+    /// (b) t-76621: the window's process cannot see the pane's login; its
+    /// failure must not overwrite the pane's success — the pane's report and
+    /// rows stay exactly as they were.
+    #[test]
+    fn a_failure_under_another_store_keeps_the_success_and_rows_it_found() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now - 60, PANE_STORE, &Ok(opus_answer(now - 60)));
+        let window = anthropic_refresh(Some(&pane), now, WINDOW_STORE, &refused_answer());
+        assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the pane's report stands");
+        assert!(holds_opus(&window), "and its rows with it");
+        assert_eq!(
+            window.models.iter().find(|model| model.id == "claude-opus-5-5").map(|model| model.source.as_str()),
+            Some(super::ANTHROPIC_SOURCE)
+        );
+    }
+
+    /// (c) t-76621: a skip written under another store is no answer about
+    /// the pane's login either.
+    #[test]
+    fn a_skip_under_another_store_keeps_the_success_it_found() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now - 60, PANE_STORE, &Ok(opus_answer(now - 60)));
+        let skipped = Err((super::ANTHROPIC_SOURCE.to_string(), "skipped: no Anthropic credential".to_string()));
+        let window = anthropic_refresh(Some(&pane), now, WINDOW_STORE, &skipped);
+        assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the pane's report stands");
+        assert!(holds_opus(&window), "and its rows with it");
+    }
+
+    /// (d) t-76621: under the same store — or where either side names none —
+    /// a failure is this login's own answer: it reports the failure and
+    /// carries last time's rows, and a skip keeps nothing, as before.
+    #[test]
+    fn a_failure_under_the_same_or_an_unknown_store_carries_its_rows_forward_as_before() {
+        let now = 1_790_200_000;
+        let pane = anthropic_refresh(None, now - 60, PANE_STORE, &Ok(opus_answer(now - 60)));
+        let unknown = anthropic_refresh(None, now - 60, "", &Ok(opus_answer(now - 60)));
+        for (previous, store) in [(&pane, PANE_STORE), (&pane, ""), (&unknown, WINDOW_STORE)] {
+            let again = anthropic_refresh(Some(previous), now, store, &refused_answer());
+            let report = anthropic_report(&again);
+            assert!(!report.ok && !report.skipped(), "{store:?}: {}", report.detail);
+            assert_eq!(report.origin, super::ORIGIN_PREVIOUS, "{store:?}: last time's rows answer for it");
+            assert_eq!(report.credential_store, store, "the failure names the store it failed under");
+            assert_eq!(report.fetched_at, now - 60, "dated from the answer the rows came from");
+            assert!(holds_opus(&again), "{store:?}: the rows are carried");
+        }
+        let skipped = Err((super::ANTHROPIC_SOURCE.to_string(), "skipped: no Anthropic credential".to_string()));
+        let gone = anthropic_refresh(Some(&pane), now, PANE_STORE, &skipped);
+        assert!(anthropic_report(&gone).skipped(), "a skip under the same store is the answer");
+        assert!(!holds_opus(&gone), "and keeps nothing");
+        let replaced = anthropic_refresh(Some(&pane), now, WINDOW_STORE, &Ok(opus_answer(now)));
+        assert_eq!(anthropic_report(&replaced).credential_store, WINDOW_STORE, "a success replaces whoever answered");
+        assert_eq!(anthropic_report(&replaced).fetched_at, now);
+    }
+
+    /// (e) t-76621: a cache written before the key existed still parses, its
+    /// store unknown, and the key round-trips as `credential_store`.
+    #[test]
+    fn the_credential_store_key_is_optional_on_read_and_round_trips() {
+        let old: super::SourceReport = serde_json::from_value(json!({
+            "provider": "anthropic", "source": super::ANTHROPIC_SOURCE, "ok": true,
+            "detail": "1 model(s)", "count": 1, "fetched_at": 1_790_000_000_u64, "origin": "live"
+        }))
+        .expect("an old report parses");
+        assert_eq!(old.credential_store, "");
+        let pane = super::SourceReport {
+            credential_store: PANE_STORE.to_string(),
+            ..old
+        };
+        let written = serde_json::to_value(&pane).expect("a report serializes");
+        assert_eq!(written["credential_store"], json!(PANE_STORE));
+        assert_eq!(serde_json::from_value::<super::SourceReport>(written).expect("and reads back"), pane);
+    }
+
+    /// t-76621: a failure stays due at every connection — one written under
+    /// another store a second ago too, so the process whose login works
+    /// answers at once.
+    #[test]
+    fn a_failure_written_under_another_store_is_due_at_once() {
+        let now = 1_790_200_000;
+        let failed = anthropic_refresh(None, now, WINDOW_STORE, &refused_answer());
+        let report = anthropic_report(&failed);
+        assert_eq!(report.credential_store, WINDOW_STORE);
+        assert!(report.due(now, super::LIVE_TTL_SECS, || true), "due the same second it was written");
+        assert!(report.due(now, super::LIVE_TTL_SECS, || false), "whatever this process holds");
     }
 
     /// Codex's own model list on 2026-09-23 (the window's runtime home,

@@ -68,6 +68,30 @@ fn cli_home(var: &str, dir: &str) -> Option<PathBuf> {
         .or_else(|| dirs::home_dir().map(|home| home.join(dir)))
 }
 
+/// The store a CLI's login is read from, as a model-discovery report names
+/// it: `<variable>:<folder>` when its variable moves the home, else the
+/// person's own home.
+fn cli_store_label(var: &str) -> String {
+    std::env::var_os(var)
+        .filter(|named| !named.is_empty())
+        .map_or_else(
+            || crate::managed_account::OWN_HOME_STORE.to_string(),
+            |named| format!("{var}:{}", PathBuf::from(named).display()),
+        )
+}
+
+/// [`cli_store_label`] of the Grok CLI's login.
+#[must_use]
+pub fn grok_store_label() -> String {
+    cli_store_label(GROK_HOME_ENV)
+}
+
+/// [`cli_store_label`] of the Kimi Code CLI's login.
+#[must_use]
+pub fn kimi_code_store_label() -> String {
+    cli_store_label(KIMI_CODE_HOME_ENV)
+}
+
 /// `$GROK_HOME/auth.json`.
 #[must_use]
 pub fn grok_auth_file() -> Option<PathBuf> {

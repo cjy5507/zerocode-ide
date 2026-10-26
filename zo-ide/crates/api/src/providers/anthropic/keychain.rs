@@ -528,6 +528,19 @@ fn read_store_session(store: &ClaudeCodeStore) -> Result<KeychainSession, Creden
     }
 }
 
+/// The store this process reads its Claude Code login from, as a
+/// model-discovery report names it: `keychain` for the machine's own login,
+/// else `<variable>:<folder>` for the variable that named the folder
+/// ([`ClaudeCodeStore::current`]). Reads no secret and no file.
+#[must_use]
+pub fn claude_code_store_label() -> String {
+    let store = ClaudeCodeStore::current();
+    match store.folder {
+        Some(folder) => format!("{}:{}", store.named_by, folder.display()),
+        None => store.named_by.to_string(),
+    }
+}
+
 /// Whether a Claude Code login is kept where this process would read one —
 /// kept, not necessarily usable. Never reads a secret and never renews: the
 /// scoped store's file or keychain item for a scoped login, the machine's
