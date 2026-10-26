@@ -1,0 +1,146 @@
+import { openWindowTestPage } from "./window-boot.mjs";
+
+/* One window shared with an agent, as the person meets it (t-73906).
+ *
+ * The backend raises a card the first time an agent acts in an app
+ * (`computer:share`) and tells the band what is shared
+ * (`computer:share-state`). This suite drives both only through what the
+ * backend sends and what a person presses, and reads the result off the
+ * document:
+ *
+ *  - the card says which app, in the person's language, and its two answers
+ *    go back by id through `computer_confirm_answer` — the refusal is the
+ *    safe default;
+ *  - the band names the shared app and offers 「제어권 가져오기」 at once,
+ *    whatever the agent last did; pressing it calls `computer_take_control`;
+ *  - after the person took control the band offers 「다시 맡기기」 alone,
+ *    which calls `computer_give_back`;
+ *  - both band buttons are the person's (`data-person-only`).
+ *
+ *   WINDOW_SUITES=computer-share node ui/tests/window.mjs */
+
+/* The words in the five languages the window speaks, pinned here so a
+ * catalog that drifted, or a key nobody translated, fails. */
+export const SHARE_WORDS = Object.freeze({
+  ko: { title: "이 창을 맡길까요?", allow: "맡기기", deny: "거절", take: "제어권 가져오기", give: "다시 맡기기" },
+  en: { title: "Hand this window over?", allow: "Hand over", deny: "Decline", take: "Take control", give: "Hand back" },
+  ja: { title: "このウィンドウを任せますか？", allow: "任せる", deny: "断る", take: "操作を取り戻す", give: "再び任せる" },
+  zh: { title: "要把这个窗口交给它吗？", allow: "交给它", deny: "拒绝", take: "收回控制权", give: "重新交给它" },
+  es: { title: "¿Ceder esta ventana?", allow: "Ceder", deny: "Rechazar", take: "Tomar el control", give: "Volver a ceder" },
+});
+
+const installHands = () => {
+  const T = {
+    settle: (ms = 120) => new Promise((done) => setTimeout(done, ms)),
+    fire(name, payload) {
+      for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+    },
+    answered: [],
+    taken: 0,
+    given: 0,
+    said(id) {
+      const node = document.getElementById(id);
+      return node && !node.hidden && !node.closest("[hidden]") ? node.textContent.trim() : null;
+    },
+    popup() {
+      const scrim = document.getElementById("ask-scrim");
+      const section = scrim?.querySelector("[data-kind]");
+      return {
+        shown: !!scrim && !scrim.hidden,
+        kind: section?.dataset.kind ?? null,
+        title: T.said("ask-title"),
+        why: T.said("ask-why"),
+        buttons: [...(scrim?.querySelectorAll("#ask-choices button") ?? [])].map((one) => one.textContent.trim()),
+      };
+    },
+    band() {
+      const band = document.getElementById("computer-band");
+      const take = document.getElementById("computer-band-take");
+      const give = document.getElementById("computer-band-give");
+      return {
+        shown: !!band && !band.hidden,
+        share: T.said("computer-band-share"),
+        take: take && !take.hidden ? take.textContent.trim() : null,
+        give: give && !give.hidden ? give.textContent.trim() : null,
+        takePersonOnly: take?.hasAttribute("data-person-only") ?? false,
+        givePersonOnly: give?.hasAttribute("data-person-only") ?? false,
+      };
+    },
+  };
+  window.__ANSWER__.computer_confirm_answer = (args) => {
+    T.answered.push(JSON.parse(JSON.stringify(args)));
+    return true;
+  };
+  window.__ANSWER__.computer_take_control = () => {
+    T.taken += 1;
+    return null;
+  };
+  window.__ANSWER__.computer_give_back = () => {
+    T.given += 1;
+    return null;
+  };
+  window.__SHARE_T__ = T;
+};
+
+async function scenario(browser, origin, name, ok, body) {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(installHands);
+    await body(page);
+  } catch (error) {
+    ok(`the ${name} scenario ran to its end`, false, String(error?.stack ?? error).split("\n").slice(0, 3).join(" | "));
+  } finally {
+    await page.close();
+  }
+}
+
+export async function testComputerShare(browser, origin, ok) {
+  const words = SHARE_WORDS.ko;
+
+  await scenario(browser, origin, "card", ok, async (page) => {
+    const said = await page.evaluate(async () => {
+      const T = window.__SHARE_T__;
+      T.fire("computer:share", { id: "share-1", app: "Safari", timeoutMs: 30000 });
+      await T.settle();
+      const before = T.popup();
+      const allow = [...document.querySelectorAll("#ask-choices button")].find((one) => one.dataset.allow === "true")
+        ?? [...document.querySelectorAll("#ask-choices button")][1];
+      allow?.click();
+      await T.settle();
+      return { before, answered: T.answered, after: T.popup() };
+    });
+    ok("the card stands in the question popup as its own kind", said.before.shown && said.before.kind === "computer-share", JSON.stringify(said.before));
+    ok("the card asks in the person's language", said.before.title === words.title, String(said.before.title));
+    ok("the card names the app", (said.before.why ?? "").includes("Safari"), String(said.before.why));
+    ok("the card offers the refusal first, then the hand-over", JSON.stringify(said.before.buttons) === JSON.stringify([words.deny, words.allow]), JSON.stringify(said.before.buttons));
+    ok("a hand-over answers by id through the confirm road",
+      said.answered.length === 1 && said.answered[0].id === "share-1" && said.answered[0].allow === true, JSON.stringify(said.answered));
+  });
+
+  await scenario(browser, origin, "band", ok, async (page) => {
+    const said = await page.evaluate(async () => {
+      const T = window.__SHARE_T__;
+      T.fire("computer:share-state", { target: "Safari", takenBack: false });
+      await T.settle();
+      const sharing = T.band();
+      document.getElementById("computer-band-take")?.click();
+      await T.settle();
+      T.fire("computer:share-state", { target: "Safari", takenBack: true });
+      await T.settle();
+      const taken = T.band();
+      document.getElementById("computer-band-give")?.click();
+      await T.settle();
+      T.fire("computer:share-state", { target: null, takenBack: false });
+      await T.settle();
+      return { sharing, taken, gone: T.band(), takes: T.taken, gives: T.given };
+    });
+    ok("the band stands while a window is shared", said.sharing.shown, JSON.stringify(said.sharing));
+    ok("the band names the shared app", (said.sharing.share ?? "").includes("Safari"), String(said.sharing.share));
+    ok("the band offers to take control", said.sharing.take === words.take && said.sharing.give === null, JSON.stringify(said.sharing));
+    ok("both band buttons are the person's", said.sharing.takePersonOnly && said.sharing.givePersonOnly, JSON.stringify(said.sharing));
+    ok("taking control asks the backend once", said.takes === 1, String(said.takes));
+    ok("after taking control the band offers to hand back alone", said.taken.give === words.give && said.taken.take === null, JSON.stringify(said.taken));
+    ok("handing back asks the backend once", said.gives === 1, String(said.gives));
+    ok("with nothing shared the band offers neither", said.gone.take === null && said.gone.give === null && said.gone.share === null, JSON.stringify(said.gone));
+  });
+}

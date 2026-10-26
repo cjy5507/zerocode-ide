@@ -896,6 +896,8 @@ function askPanelNode(card, draft) {
   const question = prompt.questions[draft.index];
   const panel = document.createElement("span");
   panel.className = "board-ask";
+  // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
+  panel.dataset.personOnly = "";
 
   if (total > 1) {
     const steps = document.createElement("span");
@@ -1040,6 +1042,8 @@ function askSendWord(card, draft) {
 function approvalPanelNode(card, draft) {
   const panel = document.createElement("span");
   panel.className = "board-approve";
+  // Its answers are the person's: an agent pressing in the window never makes them (t-73906).
+  panel.dataset.personOnly = "";
   // The plan this permission asks approval FOR, when the CLI's plan tool is
   // what asked (`ApprovalPrompt.plan`, filled off the catalog in Rust): the
   // extension's plan review card — the plan itself instead of a summary

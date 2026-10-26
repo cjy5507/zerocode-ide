@@ -301,9 +301,12 @@ fn the_popup_names_no_agent_of_its_own() {
     );
     // The Computer Use kinds name the feature through the catalog's own key,
     // not a literal.
+    // One per kind: the confirm, the hand-over and the share card (t-73906).
     let computer = ui_file("shell-computer.js");
+    let kinds = computer.matches("registerAskKind(\"computer-").count();
+    assert!(kinds >= 3, "the Computer Use kinds are registered here");
     assert!(
-        computer.matches("t(\"computerUse.title\"").count() == 2,
+        computer.matches("t(\"computerUse.title\"").count() == kinds,
         "a Computer Use ask names its source without the catalog"
     );
 }
