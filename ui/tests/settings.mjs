@@ -2841,10 +2841,11 @@ class StatefulBackend {
       case "api_router_presets": return clone(this.routerPresets);
       case "api_router_providers": return clone(this.zoSettings.providers);
       case "model_connections": return this.modelConnections();
-      case "zo_model_list": return this.zoModelList();
+      case "zo_model_list": return this.zoListRead();
       case "select_coding_model": {
-        // Mirrors `model_connections::apply_coding_model`.
-        const listed = this.zoModelList();
+        // Mirrors `model_connections::apply_coding_model`, checked against
+        // the same cached list the screen read.
+        const listed = this.zoListRead();
         const model = String(args.model ?? "");
         const zoLists = listed.models.some((row) => row.id === model) || listed.customProviders.some((row) => row.models.includes(model));
         if (!zoLists) throw "provider_model";
@@ -3451,6 +3452,15 @@ class StatefulBackend {
       }), coding, judgment, codingModel: this.zoSettings.model ?? null,
       activeProviderIdentity: this.typesafeSettings().providerIdentity, legacyKeyPresent: false,
     });
+  }
+
+  /* The list as `slash_catalog::zo_models_catalog` hands it out: with
+     `zoListCaching` on, the read held until it is forgotten, the way the
+     window's cache holds it; off, every read sees the settings at once. */
+  zoListRead() {
+    if (!this.zoListCaching) return this.zoModelList();
+    this.zoListHeld ??= this.zoModelList();
+    return clone(this.zoListHeld);
   }
 
   /* `zo models --json` as the window reads it (`zo_model_list`): zo spells
@@ -14597,6 +14607,140 @@ await test("판단 모델: 고르면 확인이 저절로 돌고, 통과하지 �
   assertEqual(applied.args.reference, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_json" }, "the apply named another connection");
   await modelScenePictures("judgment-applied");
   return "auto check on pick · failed check blocks apply · keyless row dimmed with its reason";
+}));
+
+await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면·「자세히」·로그 어디에도 그 키가 없다 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
+}, async () => {
+  const key = "[합성-키]-echo-7f3a";
+  const logged = [];
+  const listen = (message) => logged.push(message.text());
+  pageA.on("console", listen);
+  try {
+    await pageA.click('[data-model-choice="key"]');
+    await pageA.selectOption("#model-setup-service", "fixture-router");
+    await pageA.fill("#model-setup-key", key);
+    // An answer that carries the key back whole: whatever road brought it,
+    // the screen keeps it off every line it draws.
+    backend.routerProbeRefusal = `서버 오류: HTTP 401 Unauthorized — invalid token Bearer ${key}`;
+    const at = backend.calls.length;
+    await pageA.click("#model-setup-check");
+    await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "fail");
+    await pageA.locator("#model-setup details summary").first().click().catch(() => {});
+    const held = await pageA.evaluate(() => JSON.stringify(modelConnectionsController.setup));
+    const drawn = await pageA.evaluate(() => document.body.innerHTML);
+    const noted = backend.calls.slice(at).filter((call) => call.command === "note_webview_error").map((call) => JSON.stringify(call.args));
+    assert(!held.includes(key), "the page holds the key it was handed back");
+    assert(!drawn.includes(key), "the key the server said back is drawn on the screen");
+    assert(!noted.some((text) => text.includes(key)), "the key reached the window's log");
+    assert(!logged.some((text) => text.includes(key)), "the key reached the console");
+    assert((await pageA.locator("#model-setup").textContent()).includes(await pageA.evaluate(() => t("settings.models.state.badkey", "키가 맞지 않습니다"))), "the 401 is not said as a wrong key");
+    assert(drawn.includes("invalid token"), "the server's reason is gone with the key");
+  } finally {
+    pageA.off("console", listen);
+  }
+  return "401 echoing the pasted key: page state 0 · DOM 0 · window log 0 · console 0 hits; reason kept";
+}));
+
+await test("검수 F2: 빈 zo 목록을 먼저 읽은 뒤 새 연결을 저장하면 곧바로 「추천대로 쓰기」가 그 연결의 모델로 적용된다 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
+  backend.routerProbeAnswers = { "https://fixture-router.example.test/v1": ["model-alpha", "model-beta"] };
+  // The window's zo list is `slash_catalog`'s cache: what was read stands
+  // until a change the window makes forgets it.
+  backend.zoListCaching = true;
+  backend.zoListHeld = null;
+}, async () => {
+  try {
+    assertEqual(backend.zoListHeld?.customProviders.length, 0, "the screen did not read the empty list first");
+    await pageA.click('[data-model-choice="key"]');
+    await pageA.selectOption("#model-setup-service", "fixture-router");
+    await pageA.fill("#model-setup-key", "[합성-키]");
+    await pageA.click("#model-setup-check");
+    await pageA.waitForFunction(() => modelConnectionsController.setup?.checked === "ok");
+    const coding = pageA.locator('[data-model-reco="coding"]');
+    assert((await coding.textContent()).includes("model-alpha"), "the new connection's model is not offered for coding", await coding.textContent());
+    const at = backend.calls.length;
+    await pageA.click("[data-model-apply-setup]");
+    await pageA.waitForSelector("[data-model-done]");
+    const applied = backend.calls.slice(at).find((call) => call.command === "select_coding_model");
+    assertEqual(applied?.args.model, "Fixture Router/model-alpha", "the recommendation was not applied");
+    assertEqual(backend.zoSettings.model, "Fixture Router/model-alpha", "the coding model is not the new connection's");
+    assert(await pageA.locator("[data-model-done].is-ok").count(), "the done line says the coding model was not applied", await pageA.locator("[data-model-done]").textContent());
+  } finally {
+    backend.zoListCaching = false;
+    backend.zoListHeld = null;
+  }
+  return "empty list read → connection saved → recommendation applied as Fixture Router/model-alpha";
+}));
+
+await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System One과 OpenAI JSON 각각 확인·적용이 같은 형식이고, 바꾸는 것은 「고급」에서만 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Bench", base_url: "http://127.0.0.1:8091/v1", models: ["bench-a", "bench-b"], requires_auth: false, connection: { id: "bench", generation: 4 } },
+    { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+  ];
+  const reference = { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" };
+  backend.zoSettings.smart = {
+    judgmentConnection: reference,
+    judgmentProvider: { kind: "remote", protocol: "system_one", baseUrl: "http://127.0.0.1:8091/v1", model: "bench-a", requiresAuth: false },
+  };
+}, async () => {
+  const pickAndApply = async (connection, model) => {
+    if (!await pageA.locator('[data-model-apply="judgment"]').count()) await pageA.click('[data-model-change="judgment"]');
+    const at = backend.calls.length;
+    await pageA.locator(`input[name="model-pick-judgment"][value='${JSON.stringify([connection, model])}']`).check();
+    const checked = await backend.waitForCall("A", "check_model_connection", at);
+    await pageA.waitForSelector('[data-verdict="usable"]');
+    await pageA.click('[data-model-apply="judgment"]');
+    const applied = await backend.waitForCall("A", "select_model_connection", at);
+    await renderSettled(pageA);
+    return [checked.args.reference, applied.args.reference];
+  };
+  // System One: another model of the connection judgment already uses.
+  const [systemCheck, systemApply] = await pickAndApply("bench", "bench-b");
+  assertEqual(systemCheck, { id: "bench", generation: 4, model: "bench-b", protocol: "system_one" }, "the check asked another format than the connection's");
+  assertEqual(systemApply, systemCheck, "the apply wrote another reference than the one checked");
+  // OpenAI JSON: a connection judgment never used, in its default format.
+  const [openCheck, openApply] = await pickAndApply("judge", "judge-model");
+  assertEqual(openCheck, { id: "judge", generation: 2, model: "judge-model", protocol: "openai_json" });
+  assertEqual(openApply, openCheck, "the apply wrote another reference than the one checked");
+  // The everyday list names no format; 「고급」 changes one, and the same
+  // model can then be applied in it.
+  assert(!(await pageA.locator('[data-model-role="judgment"]').innerText()).match(/OpenAI JSON|System One/), "the everyday list speaks a format");
+  await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; });
+  const format = pageA.locator('#model-advanced [data-judgment-format="judge"]');
+  assertEqual(await format.inputValue(), "openai_json", "「고급」 does not show the connection's format");
+  await format.selectOption("system_one");
+  await renderSettled(pageA);
+  const [againCheck, againApply] = await pickAndApply("judge", "judge-model");
+  assertEqual(againCheck.protocol, "system_one", "the format picked in 「고급」 was not asked");
+  assertEqual(againApply, againCheck, "the apply wrote another reference than the one checked");
+  return "System One kept for check+apply · OpenAI JSON kept for check+apply · 「고급」 switches judge to System One and re-applies";
+}));
+
+await test("검수 F4: 멈춘 이 컴퓨터 모델을 고르면 요청 없이 「실행 뒤 확인합니다」라고만 말하고, 확인 전에는 통과라고 하지 않는다 (t-76028)", async () => withModelScene(() => {
+  delete backend.managedModelState;
+  backend.managedJudgmentSettings();
+  Object.assign(backend.managedModelState, { instanceId: "fixture-stopped-instance", runtime: { state: "ready", downloadBytes: 0, reason: null } });
+  backend.managedModelState.models[0].installed = true;
+}, async () => {
+  await pageA.click('[data-model-change="judgment"]');
+  const at = backend.calls.length;
+  await pageA.locator(`input[name="model-pick-judgment"][value="managed:fixture-decision"]`).check();
+  await renderSettled(pageA);
+  const asked = backend.calls.slice(at).filter((call) => /^(check_model_connection|preflight_judgment_provider|managed_judgment_)/.test(call.command));
+  assertEqual(asked.length, 0, "picking asked something it does not wait for");
+  const verdict = pageA.locator('[data-model-role="judgment"] .model-verdict');
+  const words = await verdict.textContent();
+  const later = await pageA.evaluate(() => t("settings.models.state.later", "실행 뒤 확인합니다"));
+  const passed = await pageA.evaluate(() => t("settings.models.usableSub", "판단 확인을 통과했습니다. 적용을 누르면 다음 판단부터 이 모델을 씁니다."));
+  assert(words.includes(later), "a stopped model does not say it is checked once it runs", words);
+  assert(!words.includes(passed) && !words.includes(await pageA.evaluate(() => t("settings.models.state.usable", "쓸 수 있음"))), "a model nobody checked is said to have passed", words);
+  assert(!await pageA.locator('[data-model-apply="judgment"]').isDisabled(), "the apply that checks it cannot be pressed");
+  return `stopped model picked: ${asked.length} requests · says 「${later}」 · no pass words`;
 }));
 
 await test("⑥ 창이 못 읽는 키 변수의 연결은 미리 그렇다고 말하고, 이전 판단 키는 어디서 어디로 옮기는지 보인 뒤 사람이 누를 때만 옮긴다", async () => withModelScene(() => {

@@ -619,7 +619,20 @@ pub fn zo_model_list(home: &Path) -> serde_json::Value {
 /// missing, fails, says nothing readable or outlives [`MODELS_WAIT`] — killed
 /// then — leaves the catalog last read standing, or `Null` before any was.
 fn zo_models_catalog(home: &Path) -> serde_json::Value {
-    let held = models_cache().lock().ok().and_then(|cache| cache.clone());
+    catalog_through(models_cache(), home)
+}
+
+/// A change the window just made to what zo lists — a connection saved,
+/// edited or removed (t-76028 F2) — makes the next read ask zo again; until
+/// zo answers, the catalog last read still stands.
+pub fn forget_zo_models() {
+    forget_models_in(models_cache());
+}
+
+fn forget_models_in(_cache: &Mutex<ModelsCache>) {}
+
+fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value {
+    let held = cache.lock().ok().and_then(|cache| cache.clone());
     if let Some((_, catalog)) = held.as_ref().filter(|(at, _)| at.elapsed() < MODELS_TTL) {
         return catalog.clone();
     }
@@ -628,7 +641,7 @@ fn zo_models_catalog(home: &Path) -> serde_json::Value {
         .and_then(|lines| serde_json::from_str::<serde_json::Value>(&lines.join("\n")).ok())
         .or_else(|| held.map(|(_, catalog)| catalog))
         .unwrap_or_default();
-    if let Ok(mut cache) = models_cache().lock() {
+    if let Ok(mut cache) = cache.lock() {
         *cache = Some((Instant::now(), catalog.clone()));
     }
     catalog
@@ -706,6 +719,52 @@ fn markdown_files(dir: &Path) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cached list and a change the window makes to it (t-76028 F2): a
+    /// read inside the minute is the list held, and after the window forgets
+    /// it the next read is zo's own answer — never a second cache. The zo here
+    /// is a script under a temporary home that prints the list it is given.
+    #[test]
+    fn a_saved_connection_is_in_the_next_zo_list_read() {
+        let home = tempfile::tempdir().expect("home");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        let listed = home.path().join("listed.json");
+        std::fs::write(&bin, format!("#!/bin/sh\ncat '{}'\n", listed.display())).expect("zo");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        }
+        let routers = |names: &[&str]| {
+            serde_json::json!({"models": [], "customProviders": names
+                .iter()
+                .map(|name| serde_json::json!({"name": name, "models": [format!("{name}/model")]}))
+                .collect::<Vec<_>>()})
+        };
+        let cache = Mutex::new(None);
+        std::fs::write(&listed, routers(&[]).to_string()).expect("empty list");
+        assert_eq!(catalog_through(&cache, home.path()), routers(&[]));
+        std::fs::write(&listed, routers(&["Fixture"]).to_string()).expect("saved list");
+        assert_eq!(
+            catalog_through(&cache, home.path()),
+            routers(&[]),
+            "a read inside the minute is the list held"
+        );
+        forget_models_in(&cache);
+        assert_eq!(
+            catalog_through(&cache, home.path()),
+            routers(&["Fixture"]),
+            "the read after a saved connection does not list it"
+        );
+        std::fs::remove_file(&bin).expect("no zo");
+        forget_models_in(&cache);
+        assert_eq!(
+            catalog_through(&cache, home.path()),
+            routers(&["Fixture"]),
+            "a zo that cannot answer drops the list last read"
+        );
+    }
 
     #[test]
     fn a_bundle_yields_name_and_description_pairs_once_each() {
