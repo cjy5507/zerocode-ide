@@ -3527,6 +3527,21 @@ mod tests {
             "zo's store came back with its wire in it, or short of a turn"
         );
     }
+
+    #[test]
+    fn a_notice_record_never_uses_the_persons_voice() {
+        let notice = serde_json::json!({"type":"message","origin":"notice",
+            "message":{"role":"user","blocks":[{"type":"text","text":"a fixed mail notice"}]}});
+        let mut content_notice = notice.clone();
+        content_notice["message"]["content"] = serde_json::json!("a fixed mail notice");
+        assert!(typed_prompt(&content_notice.to_string()).is_none(),
+            "a notice became the person's naming prompt");
+        assert!(turns_in(&notice.to_string()).is_empty(),
+            "a notice appeared in the conversation as the person");
+        let mut typed = notice;
+        typed.as_object_mut().unwrap().remove("origin");
+        assert_eq!(turns_in(&typed.to_string())[0].role, "user");
+    }
     /// Reasoning is a turn of its own, never prose. zo writes the model's
     /// thought as a `thinking` block and carries an earlier turn's thought
     /// into the next as a text block wearing `[earlier reasoning]` — the
