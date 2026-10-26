@@ -457,11 +457,11 @@ impl Session {
             // freshness re-read. The fingerprint itself stays, exactly as the
             // doc above promises.
             state.disarm_identity();
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 state.lock = None;
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             {
                 let _ = &mut state;
             }
