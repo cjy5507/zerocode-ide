@@ -19962,6 +19962,128 @@ fn a_worker_that_never_became_ready_may_be_asked_again_by_the_same_name() {
     crate::agent_teams::forget_term(91_371);
 }
 
+/// The answer to a request asked again while its first pane is still waiting
+/// for the worker must not tell the caller to ask under a new name (t-77154).
+///
+/// A caller bound to run A that asked for a worker in run B with no task has
+/// no task-level guard against a second worker. The plain `worker-list` shows
+/// run A only, so a caller told "ask under a new name" after finding nothing
+/// there would seat a second worker in run B beside the first one. The answer
+/// names the lookup that does see the first worker — `worker-list --run` the
+/// run it was asked in — and keeps the retry name.
+#[test]
+fn a_request_asked_again_while_its_worker_is_getting_ready_is_not_told_to_use_a_new_name() {
+    let (_window, _store) = PrivateWindow::boot();
+    const LEADER_TERM: u32 = 91_380;
+    let team = format!("team-replay-while-ready-{LEADER_TERM}");
+    seat_a_team(&team, LEADER_TERM);
+    let seat = zerocode_core::agent_teams::LEADER_PANE;
+    struct AsksAgainWhileReady {
+        onto: u32,
+        team: String,
+        argv: Vec<String>,
+        again: std::sync::Mutex<Option<zerocode_hookd::TeamAnswer>>,
+    }
+    impl Host for AsksAgainWhileReady {
+        fn split(
+            &self,
+            _team: &str,
+            _leader_term: u32,
+            _from_term: u32,
+            _pane: &str,
+            _direction: zerocode_core::agent_teams::Direction,
+            _command: &str,
+            _token: &str,
+        ) -> Option<u32> {
+            Some(self.onto)
+        }
+        fn await_worker_ready(
+            &self,
+            _term: u32,
+        ) -> Result<(), crate::agent_teams::HostStartFailure> {
+            let mut again = self.again.lock().unwrap();
+            if again.is_none() {
+                *again = Some(run(
+                    self,
+                    Vec::new(),
+                    &self.team,
+                    zerocode_core::agent_teams::LEADER_PANE,
+                    TEST_CAPABILITY,
+                    &self.argv,
+                    1_500,
+                ));
+            }
+            Ok(())
+        }
+        fn send(&self, _term: u32, _text: &str) -> bool {
+            true
+        }
+        fn capture(&self, _term: u32) -> Option<String> {
+            Some(String::new())
+        }
+        fn focus(&self, _term: u32) -> bool {
+            true
+        }
+        fn close(&self, _term: u32) {}
+        fn actor_for(&self, term: u32) -> Option<String> {
+            Some(test_actor(term))
+        }
+    }
+    let named = "worker-start --agent claude --retry-request replay-while-ready";
+    let host = AsksAgainWhileReady {
+        onto: 91_381,
+        team: team.clone(),
+        argv: words(named),
+        again: std::sync::Mutex::new(None),
+    };
+    let made = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words("run-create --name replay-while-ready"),
+        500,
+    );
+    assert_eq!(made.exit_code, 0, "{}", made.stderr);
+    let first = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(named),
+        1_000,
+    );
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    let again = host
+        .again
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the host was never asked to wait for the worker");
+    assert_eq!(
+        again.exit_code, 1,
+        "the second ask seated a worker: {again:?}"
+    );
+    assert!(
+        !again.stderr.contains("new name"),
+        "the answer sends the caller to a new name, which seats a second worker: {}",
+        again.stderr
+    );
+    assert!(
+        again.stderr.contains("worker-list --run"),
+        "the answer does not name the lookup that sees the first worker: {}",
+        again.stderr
+    );
+    assert!(
+        again.stderr.contains("same --retry-request"),
+        "the answer does not keep the retry name: {}",
+        again.stderr
+    );
+    crate::agent_teams::forget_term(91_381);
+}
+
 #[test]
 fn a_worker_preflight_refusal_reaches_the_coordinator() {
     let _window = the_window();

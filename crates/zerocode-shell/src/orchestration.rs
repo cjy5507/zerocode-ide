@@ -11796,7 +11796,7 @@ fn carried(
                         actor,
                         minted.as_deref(),
                         now_ms,
-                        "this request's pane was already cut once — worker-list shows a worker it started; if none came up, ask again under a new name",
+                        "this request's pane was already cut once and its worker may still be getting ready — look it up with worker-list --run <the run the request named> (the plain worker-list shows only your own run), and ask again under the same --retry-request name, never a new one",
                     );
                 }
                 Ok((BeginEffect::Refused(_), _)) => {
