@@ -23,6 +23,7 @@ const MODEL_STATES = Object.freeze({
   nologin: { key: "settings.models.state.nologin", word: "로그인 안 됨", badge: "checking", todo: "settings.models.todo.nologin", todoWord: "터미널에서 그 CLI에 로그인하면 여기에 저절로 나타납니다." },
   unknown: { key: "settings.models.state.unknown", word: "아직 확인 안 함", badge: "unchecked" },
   checking: { key: "settings.models.state.checking", word: "확인하는 중…", badge: "checking" },
+  later: { key: "settings.models.state.later", word: "실행 뒤 확인합니다", badge: "unchecked" },
   restarting: { key: "settings.models.state.restarting", word: "다시 띄우는 중", badge: "checking" },
   stopped: { key: "settings.models.state.stopped", word: "멈춤", badge: "error" },
   busy: { key: "settings.models.state.busy", word: "다른 작업 중", badge: "checking" },
@@ -372,6 +373,17 @@ const modelConnectionsController = {
     if (server.state === "ready") return "running";
     return "stopped";
   },
+  /* What a managed model can say the moment it is picked, with no request
+   * (t-76028 F4): a server running it whose answers were checked passed; one
+   * this computer can run is checked when the apply starts it; anything else
+   * keeps its state. */
+  managedPick(model) {
+    const state = this.managedState(model);
+    const server = managedJudgmentController.snapshot?.server;
+    if (state === "running" && server?.modelId === model.id && server.checked) return "usable";
+    if (["running", "none", "stopped"].includes(state) && managedJudgmentController.localSupported(model)) return "later";
+    return state;
+  },
   managedReason(model) {
     const server = managedJudgmentController.snapshot?.server;
     if (!server || server.modelId !== model.id || !server.exit) return "";
@@ -645,8 +657,7 @@ const modelConnectionsController = {
         const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity: typesafeState.providerIdentity, key: null });
         answer = check.answered ? { state: "usable" } : { state: modelFailureState(check.failure) };
       } else {
-        const state = this.managedState(row.model);
-        answer = { state: ["running", "none", "stopped"].includes(state) || managedJudgmentController.localSupported(row.model) ? "usable" : state };
+        answer = { state: this.managedPick(row.model) };
       }
     } catch (error) {
       answer = { state: modelFailureState(error) };
@@ -966,7 +977,7 @@ const modelConnectionsController = {
   judgmentReady(key) {
     const row = this.judgmentRows().find((entry) => entry.key === key);
     if (!row) return false;
-    return this.judged.get(JSON.stringify(row.reference ?? row.key))?.state === "usable";
+    return ["usable", "later"].includes(this.judged.get(JSON.stringify(row.reference ?? row.key))?.state);
   },
   judgmentVerdict(key) {
     const row = this.judgmentRows().find((entry) => entry.key === key);
@@ -982,6 +993,11 @@ const modelConnectionsController = {
       note.classList.add("is-ok");
       note.setAttribute("role", "status");
       note.append(modelNode("strong", "", modelStateWords("usable").word), modelNode("span", "model-result-sub", t("settings.models.usableSub", "판단 확인을 통과했습니다. 적용을 누르면 다음 판단부터 이 모델을 씁니다.")));
+      return note;
+    }
+    if (judged.state === "later") {
+      note.setAttribute("role", "status");
+      note.append(modelNode("strong", "", modelStateWords("later").word), modelNode("span", "model-result-sub", t("settings.models.laterSub", "적용을 누르면 이 컴퓨터에서 모델을 준비해 실행한 뒤 판단 확인을 합니다. 통과하지 못하면 지금 판단 모델을 그대로 씁니다.")));
       return note;
     }
     const words = modelStateWords(judged.state, { env: row?.connection?.provider.auth_env ?? "" });
