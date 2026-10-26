@@ -21,7 +21,7 @@ use serde_json::Value;
 
 pub(crate) const TEAM_INBOX_REMINDER_PREFIX: &str = "Low-trust TeamInbox updates";
 pub(crate) const DEFAULT_MAX_DELIVERY_RETRIES: u32 = 3;
-const STORE_ENV: &str = "ZO_TEAM_INBOX_STORE";
+pub(crate) const STORE_ENV: &str = "ZO_TEAM_INBOX_STORE";
 const DB_FILE: &str = "team_inbox.sqlite3";
 const JSONL_FILE: &str = "team_inbox.jsonl";
 const DEFAULT_MAX_UPDATES: usize = 8;
