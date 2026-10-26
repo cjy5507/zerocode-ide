@@ -933,6 +933,21 @@ struct LaunchPane<'a> {
     submitted: bool,
 }
 
+/// SessionStart also initializes the turn clock, so that clock alone proves
+/// no input was taken. A real finish can arrive before the watch starts;
+/// unlike a session boundary it does prove that the agent ran a turn.
+pub(super) fn briefing_work_reported(
+    state: zerocode_core::hook::HookState,
+    session_boundary: bool,
+) -> bool {
+    use zerocode_core::hook::HookState;
+    match state {
+        HookState::Working | HookState::NeedsAttention => true,
+        HookState::Done => !session_boundary,
+        HookState::Idle => false,
+    }
+}
+
 impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
     fn submitted(&mut self) -> bool {
         self.submitted || crate::human_input::taken(self.term) > 0
@@ -942,7 +957,7 @@ impl zerocode_pty::briefing::BriefingPane for LaunchPane<'_> {
         self.state
             .pane_states()
             .get(&self.term)
-            .is_some_and(|pane| pane.turn_started_at.is_some())
+            .is_some_and(|pane| briefing_work_reported(pane.state, pane.session_boundary))
     }
 
     fn screen(&mut self) -> Option<String> {

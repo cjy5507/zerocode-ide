@@ -12117,6 +12117,16 @@ fn a_worker_start_listens_for_the_submission_its_delivery_entered() {
     assert!(await_prompt_submission(None, Instant::now()));
 }
 
+#[test]
+fn a_worker_briefing_accepts_a_real_turn_but_not_a_session_boundary() {
+    use zerocode_core::hook::HookState;
+    assert!(!briefing_work_reported(HookState::Done, true));
+    assert!(!briefing_work_reported(HookState::Idle, false));
+    for state in [HookState::Working, HookState::NeedsAttention, HookState::Done] {
+        assert!(briefing_work_reported(state, false), "{state:?}");
+    }
+}
+
 /// The agent picker is honest about what this machine has.
 ///
 /// Through `detected_agents`, the same road the command takes — which also
