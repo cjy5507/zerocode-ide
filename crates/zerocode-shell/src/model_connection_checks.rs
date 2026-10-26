@@ -152,10 +152,59 @@ fn valid_id(id: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_')
 }
 
+/// What a write is making and the trim must not take: the judgment being
+/// written, and with it the newest judgment of its connection.
+struct Keep<'a> {
+    id: &'a str,
+    model: &'a str,
+    protocol: &'a str,
+}
+
+/// Trim the oldest judgment checks until the file is one the next read
+/// accepts, never the whole record. The clock is the system's and can be set
+/// back, so the judgment being written (and the newest one of its connection)
+/// is not a candidate however old its time looks: the others go first. When
+/// that is not enough the write fails, so it never answers 「kept」 for a
+/// judgment it dropped.
+fn fit(file: &mut File, limit: u64, keep: Option<&Keep>) -> Result<Vec<u8>, String> {
+    let mut bytes = serde_json::to_vec(file).map_err(|error| error.to_string())?;
+    while bytes.len() as u64 > limit {
+        let oldest = file
+            .connections
+            .iter()
+            .flat_map(|(id, record)| {
+                let newest = record.judgments.iter().map(|kept| kept.checked_ms).max();
+                record
+                    .judgments
+                    .iter()
+                    .enumerate()
+                    .filter(move |(_, kept)| {
+                        !keep.is_some_and(|keep| {
+                            keep.id == id
+                                && (Some(kept.checked_ms) == newest
+                                    || (kept.model == keep.model && kept.protocol == keep.protocol))
+                        })
+                    })
+                    .map(move |(index, kept)| (kept.checked_ms, id, index))
+            })
+            .min_by_key(|(checked_ms, _, _)| *checked_ms)
+            .map(|(_, id, index)| (id.clone(), index));
+        let Some((id, index)) = oldest else {
+            return Err("model_connection_checks_full".to_string());
+        };
+        if let Some(record) = file.connections.get_mut(&id) {
+            record.judgments.remove(index);
+        }
+        bytes = serde_json::to_vec(file).map_err(|error| error.to_string())?;
+    }
+    Ok(bytes)
+}
+
 fn write(
     path: &Path,
     live: &BTreeSet<String>,
     now_ms: u64,
+    keep: Option<&Keep>,
     change: impl FnOnce(&mut BTreeMap<String, Record>),
 ) -> Result<Remembered, String> {
     let _held = WRITING
@@ -172,31 +221,9 @@ fn write(
         version: VERSION,
         connections,
     };
-    let mut bytes = serde_json::to_vec(&file).map_err(|error| error.to_string())?;
     // The counts and lengths above do not bound the bytes (a model name of
-    // 256 wide characters is 1 KiB): the oldest judgment checks go until the
-    // file is one the next read accepts, never the whole record.
-    while bytes.len() as u64 > MAX_BYTES {
-        let oldest = file
-            .connections
-            .iter()
-            .flat_map(|(id, record)| {
-                record
-                    .judgments
-                    .iter()
-                    .enumerate()
-                    .map(move |(index, kept)| (kept.checked_ms, id, index))
-            })
-            .min_by_key(|(checked_ms, _, _)| *checked_ms)
-            .map(|(_, id, index)| (id.clone(), index));
-        let Some((id, index)) = oldest else {
-            return Err("model_connection_checks_full".to_string());
-        };
-        if let Some(record) = file.connections.get_mut(&id) {
-            record.judgments.remove(index);
-        }
-        bytes = serde_json::to_vec(&file).map_err(|error| error.to_string())?;
-    }
+    // 256 wide characters is 1 KiB).
+    let bytes = fit(&mut file, MAX_BYTES, keep)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -235,7 +262,7 @@ pub fn remember_check(
     if !valid_id(&answer.id) || answer.state == Verdict::Usable {
         return Err("model_connection_check".to_string());
     }
-    write(path, live, now_ms, |connections| {
+    write(path, live, now_ms, None, |connections| {
         let record = record_for(connections, &answer.id, answer.generation);
         record.state = Some(answer.state);
         record.count = answer.count.filter(|_| answer.state == Verdict::Ok);
@@ -266,7 +293,12 @@ pub fn remember_judgment(
     if !valid_id(&answer.id) || !protocol_ok || !model_ok || answer.state == Verdict::Ok {
         return Err("model_connection_check".to_string());
     }
-    write(path, live, now_ms, |connections| {
+    let keep = Keep {
+        id: &answer.id,
+        model: &answer.model,
+        protocol: &answer.protocol,
+    };
+    write(path, live, now_ms, Some(&keep), |connections| {
         let record = record_for(connections, &answer.id, answer.generation);
         record
             .judgments

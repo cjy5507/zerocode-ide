@@ -413,6 +413,122 @@ fn a_write_past_the_read_limit_drops_the_oldest_checks_not_the_whole_file() {
 }
 
 #[test]
+fn a_clock_set_back_does_not_trim_away_the_judgment_just_written() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("checks.json");
+    let ids = widest_file(&path, 9);
+    // The system clock was set back a second after the seeded checks: the
+    // judgment written now carries the smallest time in the file, and the
+    // file is over the read limit with it.
+    let back = CLOCK - 1_000;
+    let fresh = format!("{:0>256}", 9_999);
+    let wrote = remember_judgment(&path, &judgment("c4", 1, &fresh, Verdict::Down), &ids, back)
+        .expect("a write past the limit is trimmed, not lost");
+    let on_disk = std::fs::metadata(&path).expect("file").len();
+    assert!(
+        on_disk <= MAX_BYTES,
+        "the file passes the read limit: {on_disk}"
+    );
+    let current = |read: &Remembered| {
+        read.connections["c4"]
+            .judgments
+            .iter()
+            .find(|one| one.model == fresh)
+            .map(|one| (one.state, one.checked_ms))
+    };
+    assert_eq!(current(&wrote), Some((Verdict::Down, back)));
+    // The oldest of the others went instead.
+    assert!(
+        wrote.connections["c1"]
+            .judgments
+            .iter()
+            .all(|one| one.checked_ms > CLOCK + 1),
+        "the oldest other check stayed"
+    );
+    assert_eq!(kept_judgments(&wrote), 256 * 3 + 9);
+    // What the next start reads has the judgment, and a later save keeps it.
+    let next = read(&path, CLOCK);
+    assert_eq!(next.connections, wrote.connections);
+    assert_eq!(current(&next), Some((Verdict::Down, back)));
+    let again = remember_check(
+        &path,
+        &check("c2", 1, Verdict::Ok, Some(4)),
+        &ids,
+        CLOCK + 5_000,
+    )
+    .expect("the next save");
+    assert_eq!(current(&again), Some((Verdict::Down, back)));
+}
+
+#[test]
+fn a_file_that_cannot_fit_without_the_current_judgment_says_so() {
+    let mut file = File {
+        version: VERSION,
+        connections: BTreeMap::new(),
+    };
+    for id in ["c1", "c2"] {
+        let judgments = (0..3_u64)
+            .map(|n| Judgment {
+                model: format!("{id}-{n}"),
+                protocol: "openai_chat".into(),
+                state: Verdict::Schema,
+                checked_ms: CLOCK + n,
+            })
+            .collect();
+        file.connections.insert(
+            id.to_string(),
+            Record {
+                generation: 1,
+                judgments,
+                ..Record::default()
+            },
+        );
+    }
+    let keep = Keep {
+        id: "c2",
+        model: "c2-0",
+        protocol: "openai_chat",
+    };
+    // A limit only the kept judgment and its connection's newest can meet:
+    // the others go, those two stay.
+    let fits = serde_json::to_vec(&File {
+        version: VERSION,
+        connections: BTreeMap::from([(
+            "c2".to_string(),
+            Record {
+                generation: 1,
+                judgments: vec![
+                    file.connections["c2"].judgments[0].clone(),
+                    file.connections["c2"].judgments[2].clone(),
+                ],
+                ..Record::default()
+            },
+        )]),
+    })
+    .expect("fits")
+    .len() as u64;
+    let mut trimmed = file.clone();
+    let bytes = fit(&mut trimmed, fits + 40, Some(&keep)).expect("fits");
+    assert!(bytes.len() as u64 <= fits + 40);
+    let models: Vec<&str> = trimmed.connections["c2"]
+        .judgments
+        .iter()
+        .map(|one| one.model.as_str())
+        .collect();
+    assert_eq!(models, ["c2-0", "c2-2"]);
+    // A limit below that is not met by losing the current judgment: an error.
+    let error = fit(&mut file, 10, Some(&keep)).expect_err("nothing else can go");
+    assert_eq!(error, "model_connection_checks_full");
+    assert!(
+        file.connections["c2"]
+            .judgments
+            .iter()
+            .any(|one| one.model == "c2-0"),
+        "the current judgment was dropped"
+    );
+}
+
+#[test]
 fn a_model_name_of_wide_characters_still_leaves_a_file_the_read_accepts() {
     let dir = tempfile::tempdir().expect("dir");
     let path = dir.path().join("checks.json");
