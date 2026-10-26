@@ -2398,11 +2398,14 @@ class Receipt(LaneCase):
                       self.lane.phase("gate-root").get("receipt", ""))
 
     def test_jobs_that_say_no_coordinator_are_refused_and_the_gates_run_whole(self):
-        # …and their `# who:` to a coordinator's coord-<label>: a worker's jobs are no landing gate.
-        self.beside(self.receipt(who="w-70906"))
+        # …and their `# who:` to a coordinator's coord-<label>: a worker's jobs are no landing gate,
+        # and (t-76396 r3) make itself seals nothing for them, so the lane has no receipt and runs whole.
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", self.GATE, who="w-70906")
+        made = subprocess.run([sys.executable, str(RELEASE / "coord_receipt.py"), "make", *map(str, jobs)],
+                              capture_output=True, text=True)
+        self.assertEqual(made.returncode, 1, made.stdout + made.stderr)
+        self.assertIn("the jobs say w-70906, not a coordinator's coord-<label>", made.stdout + made.stderr)
         self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
-        self.assertIn("refused: the jobs say w-70906, not a coordinator's coord-<label>",
-                      self.lane.phase("gate-root").get("receipt", ""))
 
     def test_a_head_that_does_not_hold_the_tree_its_jobs_printed_is_refused(self):
         # ZO's review, P2-3: the head and the tree are both what a job printed; git ties them.

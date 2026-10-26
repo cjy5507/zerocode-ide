@@ -287,8 +287,14 @@ class SplitGate(ReceiptCase):
     def test_a_single_line_owner_still_stands_alone_but_must_be_a_coordinator(self):
         said = self.read_cli(self.made(self.gate(SPLIT, who="coord-l9-zo")))
         self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
-        said = self.read_cli(self.made(self.gate(SPLIT, who={"g1-build": "w-70906", "g3a-zo-lint": "w-70906"})))
-        self.assertEqual(said.returncode, 1)
+
+    def test_make_refuses_owners_that_are_not_coordinators_even_when_every_job_names_the_same_one(self):
+        """t-76396 r3: one non-coordinator owner skipped the pair check, so make sealed a receipt only read refused."""
+        for case, who in (("every job one worker", {"g1-build": "w-70906", "g3a-zo-lint": "w-70906"}),
+                          ("a plain worker for all", "w-70906")):
+            with self.subTest(case=case):
+                self.assertIn("coordinator", self.refused(lambda: coord_receipt.make(self.gate(SPLIT, who=who))))
+                shutil.rmtree(self.tmp / "build-queue")
 
     def test_a_plus_in_one_jobs_owner_is_refused_so_no_bundle_skips_the_pair_check(self):
         """t-76396 r2: an owner that is itself coord-a+coord-b made the joined name look like two owners."""
@@ -355,12 +361,11 @@ class OnTheLine(ReceiptCase):
         self.assertIn("runner.log is missing", self.read_cli(receipt).stdout)
 
     def test_jobs_that_say_another_run_or_no_coordinator_are_refused(self):
-        for key, value, why in (("run", "run-11955", "the jobs say run run-11955, not run-4275"),
-                                ("who", "w-70906", "the jobs say w-70906, not a coordinator's coord-<label>")):
-            with self.subTest(key=key):
-                said = self.read_cli(self.made(self.gate(**{key: value})))
-                self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
-                self.assertIn(why, said.stdout)
+        said = self.read_cli(self.made(self.gate(run="run-11955")))
+        self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
+        self.assertIn("the jobs say run run-11955, not run-4275", said.stdout)
+        self.assertIn("not a coordinator's coord-<label>", self.refused(lambda: coord_receipt.make(self.gate(who="w-70906"))))
+        shutil.rmtree(self.tmp / "build-queue")
         said = self.read_cli(self.made(self.gate()), run="run-1")
         self.assertIn("the jobs say run run-4275, not run-1", said.stdout, "the run is the lane's, not the receipt's")
 
