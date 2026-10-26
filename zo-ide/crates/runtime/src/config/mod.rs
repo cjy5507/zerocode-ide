@@ -1125,11 +1125,18 @@ pub(super) enum NotPersonsOwn {
     Unsupported,
 }
 
-/// A user settings file the loader found to be the person's own, as it was
-/// when checked. (Red: the r2 check, behind the r3 entry points.)
+/// A user settings file found to be the person's own, judged by the file
+/// opened rather than by its path. The path is opened once without following
+/// a link at its end; the open file must be a regular file with one name, and
+/// where the system says that file stands must be outside the workspace and
+/// none of its project documents — or be the person's settings path itself
+/// (`~/.zo/settings.json`), the one file a workspace holding the home may
+/// hold. Only the bytes read through that open file are parsed, so a link that
+/// changes on the way cannot put another file's servers under this file's
+/// grant. The loader, `zo settings secrets` and its move all ask here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PersonsOwnSettingsFile {
-    /// The file the settings path names, links followed.
+    /// Where the open file stands, as the system names it.
     pub(super) real: PathBuf,
     identity: FilesystemIdentity,
 }
@@ -1142,51 +1149,78 @@ impl PersonsOwnSettingsFile {
 
     /// [`Self::read`] with the person's home folder given, and `between`
     /// called once the file is judged and before it is read, and again before
-    /// it is judged a second time.
+    /// it is judged a second time: where a test changes the way to the file.
+    #[cfg(unix)]
     pub(super) fn read_with(
         path: &Path,
         workspace: &Path,
         home: Option<&Path>,
         between: &dyn Fn(),
     ) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
-        let checked = Self::check_beside(path, workspace, home).ok_or(if path.exists() {
-            NotPersonsOwn::Workspaces
-        } else {
-            NotPersonsOwn::Unreadable
-        })?;
+        use std::io::Read as _;
+        use rustix::fs::{Mode, OFlags};
+
+        let opened = rustix::fs::open(path, OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC, Mode::empty());
+        let mut file = match opened {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(rustix::io::Errno::LOOP) => return Err(NotPersonsOwn::Link),
+            Err(_) => return Err(NotPersonsOwn::Unreadable),
+        };
+        let checked = Self::judge(&file, workspace, home)?;
         between();
-        let contents = std::fs::read(path).map_err(|_| NotPersonsOwn::Unreadable)?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).map_err(|_| NotPersonsOwn::Unreadable)?;
         between();
-        if Self::check_beside(path, workspace, home).as_ref() != Some(&checked) {
+        if Self::judge(&file, workspace, home)? != checked {
             return Err(NotPersonsOwn::Unreadable);
         }
         Ok((checked, contents))
     }
 
-    fn check_beside(path: &Path, workspace: &Path, home: Option<&Path>) -> Option<Self> {
-        let real = path.canonicalize().ok()?;
-        let metadata = std::fs::metadata(&real).ok()?;
+    /// No identity, no place: this system does not tell the person's own file.
+    #[cfg(not(unix))]
+    pub(super) fn read_with(
+        _path: &Path,
+        _workspace: &Path,
+        _home: Option<&Path>,
+        _between: &dyn Fn(),
+    ) -> Result<(Self, Vec<u8>), NotPersonsOwn> {
+        Err(NotPersonsOwn::Unsupported)
+    }
+
+    /// The open `file` as the person's own settings file next to `workspace`.
+    #[cfg(unix)]
+    fn judge(file: &std::fs::File, workspace: &Path, home: Option<&Path>) -> Result<Self, NotPersonsOwn> {
+        let metadata = file.metadata().map_err(|_| NotPersonsOwn::Unreadable)?;
         if !metadata.is_file() {
-            return None;
+            return Err(NotPersonsOwn::Workspaces);
         }
-        let identity = filesystem_identity(&metadata).ok()?;
-        let workspace = workspace.canonicalize().ok()?;
-        let holds_home = home
+        let identity = filesystem_identity(&metadata).map_err(|_| NotPersonsOwn::Unreadable)?;
+        // A second name could stand anywhere, the workspace too.
+        if identity.links != 1 {
+            return Err(NotPersonsOwn::Workspaces);
+        }
+        let real = held_file_path(file).ok_or(if can_tell_persons_own_settings_file() {
+            NotPersonsOwn::Unreadable
+        } else {
+            NotPersonsOwn::Unsupported
+        })?;
+        let workspace = workspace.canonicalize().map_err(|_| NotPersonsOwn::Unreadable)?;
+        let at_the_persons_own_path = home
             .and_then(|home| home.canonicalize().ok())
-            .is_some_and(|home| home.starts_with(&workspace));
-        if holds_home {
-            return Some(Self { real, identity });
+            .is_some_and(|home| real == home.join(core_types::paths::ZO_DIR_NAME).join("settings.json"));
+        if !at_the_persons_own_path {
+            let names_a_project_document = PROJECT_SETTINGS_DOCUMENTS.iter().any(|name| {
+                std::fs::metadata(workspace.join(".zo").join(name))
+                    .ok()
+                    .and_then(|metadata| filesystem_identity(&metadata).ok())
+                    .is_some_and(|project| project.device == identity.device && project.inode == identity.inode)
+            });
+            if real.starts_with(&workspace) || names_a_project_document {
+                return Err(NotPersonsOwn::Workspaces);
+            }
         }
-        if real.starts_with(&workspace) {
-            return None;
-        }
-        let names_a_project_document = PROJECT_SETTINGS_DOCUMENTS.iter().any(|name| {
-            std::fs::metadata(workspace.join(".zo").join(name))
-                .ok()
-                .and_then(|metadata| filesystem_identity(&metadata).ok())
-                .is_some_and(|project| same_file(&project, &identity))
-        });
-        (!names_a_project_document).then_some(Self { real, identity })
+        Ok(Self { real, identity })
     }
 
     /// Whether `path` still opens to this same file, unchanged, holding `contents`.
@@ -1195,14 +1229,27 @@ impl PersonsOwnSettingsFile {
     }
 }
 
-#[cfg(unix)]
-fn same_file(left: &FilesystemIdentity, right: &FilesystemIdentity) -> bool {
-    left.device == right.device && left.inode == right.inode
+/// Where the open `file` stands, as the system names it (`F_GETPATH`).
+#[cfg(target_os = "macos")]
+fn held_file_path(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let path = rustix::fs::getpath(file).ok()?;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(path.into_bytes())))
 }
 
-#[cfg(not(unix))]
-fn same_file(_left: &FilesystemIdentity, _right: &FilesystemIdentity) -> bool {
-    true
+/// Where the open `file` stands, as the system names it.
+#[cfg(target_os = "linux")]
+fn held_file_path(file: &std::fs::File) -> Option<PathBuf> {
+    use std::os::fd::AsRawFd as _;
+
+    std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()
+}
+
+/// This system does not say where an open file stands.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn held_file_path(_file: &std::fs::File) -> Option<PathBuf> {
+    None
 }
 
 /// The person's home folder, the parent of their conventional `~/.zo`.
