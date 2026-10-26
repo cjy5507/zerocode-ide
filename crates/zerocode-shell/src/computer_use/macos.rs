@@ -193,6 +193,9 @@ impl Wire {
 struct StopWatch {
     stream: std::os::unix::net::UnixStream,
     thread: std::thread::JoinHandle<()>,
+    /// Set before the connection is shut on purpose: the request that ends
+    /// because of it is no loss, and says nothing.
+    leaving: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StopWatch {
@@ -201,12 +204,37 @@ impl StopWatch {
     /// flight and none waits behind it (t-62469 B2). Each answer goes to the
     /// guard, which takes in the person's chord at once; then it asks again
     /// after the stop it heard. A helper that cannot answer one — or a
-    /// connection that broke — ends it; the session goes on without it.
+    /// connection that broke — ends it, and the end is said to the guard
+    /// (t-68324 ①): the session goes on without it, the person's chord
+    /// reaching the window only at its next command. One that never began is
+    /// said the same way.
     fn start(socket: &Path, token: &str) -> Option<Self> {
-        let stream = std::os::unix::net::UnixStream::connect(socket).ok()?;
-        let kept = stream.try_clone().ok()?;
-        let mut wire = Wire::new(stream, token.to_string()).ok()?;
+        match Self::begin(socket, token) {
+            Ok(watch) => Some(watch),
+            Err(why) => {
+                super::guard::watch_lost(&format!("the waiting request could not start: {why}"));
+                None
+            }
+        }
+    }
+
+    fn begin(socket: &Path, token: &str) -> Result<Self, String> {
+        let stream = std::os::unix::net::UnixStream::connect(socket)
+            .map_err(|error| format!("connect: {error}"))?;
+        let kept = stream
+            .try_clone()
+            .map_err(|error| format!("clone: {error}"))?;
+        let mut wire = Wire::new(stream, token.to_string()).map_err(|error| error.message)?;
         let wait = u64::try_from(STOP_WATCH_WAIT.as_millis()).unwrap_or(u64::MAX);
+        let leaving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let leaving_seen = std::sync::Arc::clone(&leaving);
+        let lost = move |reason: String| {
+            if !leaving_seen.load(std::sync::atomic::Ordering::Acquire) {
+                super::guard::watch_lost(&reason);
+            }
+        };
+        // Begun before the thread can end, so an end is never overwritten.
+        super::guard::watch_began();
         let thread = std::thread::Builder::new()
             .name("computer-use-stop-watch".into())
             .spawn(move || {
@@ -217,27 +245,39 @@ impl StopWatch {
                     if let Some(after) = after {
                         asked.insert("after".into(), after.into());
                     }
-                    let Ok(heard) = wire.request(STOP_WATCH_METHOD, Value::Object(asked)) else {
-                        return;
+                    let heard = match wire.request(STOP_WATCH_METHOD, Value::Object(asked)) {
+                        Ok(heard) => heard,
+                        Err(failure) => {
+                            let error = failure.into_error_pub();
+                            return lost(format!(
+                                "the waiting request failed: {} ({})",
+                                error.message, error.code
+                            ));
+                        }
                     };
                     super::guard::hear_watched(&heard);
                     // An answer with no count to ask after is not this road's.
                     let Some(revision) = heard.get("stopRevision").and_then(Value::as_u64) else {
-                        return;
+                        return lost(
+                            "the helper's answer carried no stop count to ask after".to_string(),
+                        );
                     };
                     after = Some(revision);
                 }
             })
-            .ok()?;
-        Some(Self {
+            .map_err(|error| format!("thread: {error}"))?;
+        Ok(Self {
             stream: kept,
             thread,
+            leaving,
         })
     }
 
     /// Shut its connection, which ends the request waiting on it, and wait
     /// for its thread to end: nothing it heard is taken in after the session.
     fn end(self) {
+        self.leaving
+            .store(true, std::sync::atomic::Ordering::Release);
         let _ = self.stream.shutdown(std::net::Shutdown::Both);
         let _ = self.thread.join();
     }
@@ -415,6 +455,8 @@ impl Drop for Session {
         if let Some(watching) = self.watching.take() {
             watching.end();
         }
+        // The session is over, and its watch with it: nothing is lost.
+        super::guard::watch_left();
         let id = self.wire.next_id;
         if let Ok(line) = serde_json::to_vec(&json!({
             "id": id,
