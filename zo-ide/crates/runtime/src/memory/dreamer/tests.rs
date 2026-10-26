@@ -2610,27 +2610,32 @@ fn composite_source_merges_both_producers() {
 
 #[test]
 fn maybe_auto_dream_throttles_second_call() {
-    let _lock = crate::test_env_lock();
-    let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.path();
-    let dream_dir = cwd.join(".zo").join("dream");
-    fs::create_dir_all(&dream_dir).unwrap();
+    let config_home = tempfile::tempdir().unwrap();
+    let env_lock = crate::test_env_lock();
+    with_config_home(&env_lock, config_home.path(), || {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path();
+        let dream_dir = cwd.join(".zo").join("dream");
+        fs::create_dir_all(&dream_dir).unwrap();
 
-    let mut log = String::new();
-    for o in [obs("auto x", "s1", true), obs("auto x", "s2", true)] {
-        log.push_str(&serde_json::to_string(&o).unwrap());
-        log.push('\n');
-    }
-    fs::write(dream_dir.join("s.jsonl"), log).unwrap();
+        let mut log = String::new();
+        for o in [obs("auto x", "s1", true), obs("auto x", "s2", true)] {
+            log.push_str(&serde_json::to_string(&o).unwrap());
+            log.push('\n');
+        }
+        fs::write(dream_dir.join("s.jsonl"), log).unwrap();
 
-    // First call (no marker) runs and promotes; marker is then stamped.
-    let first = super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
-    assert!(first.is_some());
-    assert_eq!(first.unwrap().applied.len(), 1);
+        // First call (no marker) runs and promotes; marker is then stamped.
+        let first =
+            super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().applied.len(), 1);
 
-    // Immediate second call is throttled → None, no extra work.
-    let second = super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
-    assert!(second.is_none());
+        // Immediate second call is throttled → None, no extra work.
+        let second =
+            super::maybe_auto_dream(cwd, std::time::Duration::from_secs(3600), None).unwrap();
+        assert!(second.is_none());
+    });
 }
 
 #[test]
