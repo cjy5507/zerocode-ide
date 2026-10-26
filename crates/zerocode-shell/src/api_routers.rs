@@ -991,18 +991,10 @@ pub fn zo_settings_root_and_path() -> Option<(PathBuf, PathBuf)> {
 }
 
 /// zo's own order for its config home: `ZO_CONFIG_HOME`, then `ZO_HOME`, then
-/// `~/.zo` — the window must write where zo will read.
-pub fn zo_settings_path_from(
-    config_home: Option<&Path>,
-    zo_home: Option<&Path>,
-    home: Option<&Path>,
-) -> Option<PathBuf> {
-    zo_settings_root_and_path_from(config_home, zo_home, home).map(|(_, path)| path)
-}
-
-/// The settings path in zo's order, with the folder whose own path is taken
-/// as it is: the config home the person named, or the home folder — below
-/// which `.zo` is a folder like any other, walked without following a link.
+/// `~/.zo` — the window must write where zo will read. With the path, the
+/// folder whose own path is taken as it is: the config home the person
+/// named, or the home folder — below which `.zo` is a folder like any other,
+/// walked without following a link.
 pub fn zo_settings_root_and_path_from(
     config_home: Option<&Path>,
     zo_home: Option<&Path>,
@@ -1745,6 +1737,9 @@ mod tests {
     /// `ZO_HOME` set would otherwise never see the provider the pane wrote.
     #[test]
     fn the_settings_path_follows_zos_config_home_chain() {
+        let zo_settings_path_from = |config_home, zo_home, home| {
+            zo_settings_root_and_path_from(config_home, zo_home, home).map(|(_, path)| path)
+        };
         let cfg = Path::new("/cfg");
         let zo_home = Path::new("/zo-home");
         let home = Path::new("/Users/x");
@@ -1761,6 +1756,16 @@ mod tests {
             Some(PathBuf::from("/Users/x/.zo/settings.json"))
         );
         assert_eq!(zo_settings_path_from(None, None, None), None);
+        assert_eq!(
+            zo_settings_root_and_path_from(None, None, Some(home)).map(|(root, _)| root),
+            Some(PathBuf::from("/Users/x")),
+            "below the home folder, .zo is walked as a folder"
+        );
+        assert_eq!(
+            zo_settings_root_and_path_from(None, Some(zo_home), Some(home)).map(|(root, _)| root),
+            Some(PathBuf::from("/zo-home")),
+            "a config home the person named is taken as it is"
+        );
     }
 
     /// A zo launch is handed the window's own router keys and nothing else:

@@ -63,7 +63,7 @@ const SETTINGS_SECRET_STOPS = Object.freeze({
   ),
   file_swapped: (name) => t(
     "settings.secrets.stop.fileSwapped",
-    "설정 파일이 링크이거나 목록을 읽은 뒤 다른 파일로 바뀌어 옮기지 않았습니다. 설정 파일을 확인한 뒤 다시 옮겨 주세요.",
+    "설정 파일이나 그 위 폴더가 링크이거나, 목록을 읽은 뒤 다른 파일로 바뀌어 옮기지 않았습니다. 설정 파일을 확인한 뒤 다시 옮겨 주세요.",
     { name },
   ),
   already_reference: (name) => t(

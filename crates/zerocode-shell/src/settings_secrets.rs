@@ -151,32 +151,27 @@ trait Answering {
 /// either.
 fn watch(door: &mut dyn Answering, wait: Duration) -> Option<(i32, Value)> {
     let deadline = door.now() + wait;
-    let mut printed = None;
-    let mut status = None;
-    while printed.is_none() || status.is_none() {
+    let printed = loop {
         if door.now() >= deadline {
             door.give_up();
             return None;
         }
-        if status.is_none() {
-            match door.reaped() {
-                Ok(ended) => status = ended,
-                Err(_) => {
-                    door.give_up();
-                    return None;
-                }
-            }
+        if let Some(printed) = door.printed(TICK) {
+            break printed;
         }
-        if printed.is_none() {
-            printed = door.printed(TICK);
-        } else {
-            door.pause(TICK);
+    };
+    let status = loop {
+        if door.now() >= deadline {
+            door.give_up();
+            return None;
         }
-    }
-    Some((
-        status?.code()?,
-        serde_json::from_str(printed??.trim()).ok()?,
-    ))
+        match door.reaped() {
+            Ok(Some(status)) => break status,
+            Ok(None) => door.pause(TICK),
+            Err(_) => return None,
+        }
+    };
+    Some((status.code()?, serde_json::from_str(printed?.trim()).ok()?))
 }
 
 /// A real zo, started.
@@ -307,16 +302,28 @@ impl SettingsFile {
     #[cfg(unix)]
     fn open(&self) -> std::io::Result<((u64, u64), File)> {
         use std::os::unix::fs::OpenOptionsExt;
-        let meta = std::fs::symlink_metadata(&self.path)?;
-        if !meta.file_type().is_file() {
+        let names = self
+            .path
+            .strip_prefix(&self.root)
+            .map_err(std::io::Error::other)?
+            .iter()
+            .collect::<Vec<_>>();
+        let Some((name, folders)) = names.split_last() else {
+            return Err(std::io::ErrorKind::NotFound.into());
+        };
+        let mut folder = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(&self.root)?;
+        for below in folders {
+            folder = open_at(&folder, below, libc::O_DIRECTORY)?;
+        }
+        // Not blocking: a pipe put at the path is not waited on.
+        let file = open_at(&folder, name, libc::O_NONBLOCK)?;
+        if !file.metadata()?.file_type().is_file() {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
-        let folder = std::fs::metadata(self.path.parent().ok_or(std::io::ErrorKind::NotFound)?)?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&self.path)?;
-        Ok((identity(&folder), file))
+        Ok((identity(&folder.metadata()?), file))
     }
 
     /// Elsewhere each name on the way is looked at for a link, then the file
@@ -340,6 +347,28 @@ impl SettingsFile {
         }
         Ok(((0, 0), file))
     }
+}
+
+/// `name` in `folder`, opened read-only without following a link.
+#[cfg(unix)]
+fn open_at(folder: &File, name: &std::ffi::OsStr, flags: libc::c_int) -> std::io::Result<File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name.as_bytes())?;
+    // SAFETY: `folder` is an open folder for the call's length and `name` a
+    // NUL-terminated string that outlives it; no other pointer is passed.
+    let fd = unsafe {
+        libc::openat(
+            folder.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | flags,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` was just opened by this call and is owned by nothing else.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 /// The settings file a move trusts, as it stood when the move began: the file
@@ -537,7 +566,7 @@ pub(crate) fn move_all(zo: &ZoDoor, settings: &SettingsFile, keys: &dyn RouterKe
                     name: literal.name,
                     backup,
                 });
-                let _ = next;
+                pinned = next;
             }
             Err(stopped) => {
                 outcome.stopped = Some(stopped);
@@ -613,6 +642,19 @@ fn move_one(
             return Err(stop("not_resolved", why_of(&said, &value), true));
         }
         _ => return Err(stop("zo_silent", None, true)),
+    }
+    // The file zo is to rewrite is the file read, holding the bytes read:
+    // looked at once more, under the lock, just before zo is asked. What is
+    // left between this look and zo's own is zo's to refuse (its own read
+    // again, the person's settings file, the value's very bytes).
+    {
+        let _lock = SettingsFileLock::acquire(&settings.path)
+            .map_err(|_| stop("settings_busy", None, true))?;
+        match read_pinned(settings, pinned) {
+            Ok(now) if now == bytes => {}
+            Ok(_) => return Err(stop("cell_changed", None, true)),
+            Err(reason) => return Err(stop(reason, None, true)),
+        }
     }
     let path =
         serde_json::to_string(&literal.path).map_err(|_| stop("cell_changed", None, true))?;
