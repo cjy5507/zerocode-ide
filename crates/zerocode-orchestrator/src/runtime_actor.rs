@@ -26,6 +26,8 @@ use crate::workflow_store::{StoreHold, WorkflowStore};
 use zerocode_core::ProviderSession;
 
 pub mod gate_session;
+mod serving;
+pub use serving::{Served, Serving};
 use zerocode_core::agent_teams::{Effect, Team};
 use zerocode_core::orchestration::{
     Decided, Launcher, Ledger, LedgerProjectionV1, MAX_LIST, MAX_NAME, MAX_PROSE,
@@ -1943,6 +1945,7 @@ pub struct RuntimeActor {
     sender: Option<SyncSender<ActorCommand>>,
     join: Option<JoinHandle<Result<RuntimeImage, RuntimeError>>>,
     terminal: Arc<Terminal>,
+    serving: Arc<Serving>,
 }
 
 impl std::fmt::Debug for RuntimeActor {
@@ -1977,6 +1980,8 @@ impl RuntimeActor {
         let (boot_sender, boot_receiver) = mpsc::sync_channel(0);
         let terminal = Arc::new(Terminal::new());
         let thread_terminal = Arc::clone(&terminal);
+        let serving = Arc::new(Serving::default());
+        let thread_serving = Arc::clone(&serving);
         let join = thread::Builder::new()
             .name("zerocode-runtime-actor".to_string())
             .spawn(move || {
@@ -1989,6 +1994,7 @@ impl RuntimeActor {
                         launcher,
                         receiver,
                         boot_sender,
+                        &thread_serving,
                     )
                 }));
                 match outcome {
@@ -2011,6 +2017,7 @@ impl RuntimeActor {
             sender: Some(sender),
             join: Some(join),
             terminal,
+            serving,
         };
         match boot_receiver.recv() {
             Ok(Ok(_)) => Ok(actor),
@@ -2026,6 +2033,12 @@ impl RuntimeActor {
                 Err(error)
             }
         }
+    }
+
+    /// What the actor is serving now, for a watcher that must never ask it.
+    #[must_use]
+    pub fn serving(&self) -> &Serving {
+        &self.serving
     }
 
     pub fn request(&self, request: RuntimeRequest) -> Result<RuntimeReply, RuntimeError> {
@@ -6770,6 +6783,7 @@ fn actor_main(
     launcher: Box<dyn Launcher + Send>,
     receiver: Receiver<ActorCommand>,
     boot_reply: SyncSender<Result<RuntimeImage, RuntimeError>>,
+    serving: &Serving,
 ) -> Result<RuntimeImage, RuntimeError> {
     let mut state = match RuntimeState::boot(store, ledger_id, boot, panes, launcher) {
         Ok(state) => state,
@@ -6792,19 +6806,25 @@ fn actor_main(
             Err(_) => return Ok(state.image()),
         };
         match command {
-            ActorCommand::Request { request, reply } => match state.request(*request) {
-                Ok(answer) => {
-                    let _ = reply.send(Ok(answer));
+            ActorCommand::Request { request, reply } => {
+                let begun = serving.begin(request.verb(), wall_clock_ms());
+                let answered = state.request(*request);
+                drop(begun);
+                match answered {
+                    Ok(answer) => {
+                        let _ = reply.send(Ok(answer));
+                    }
+                    Err(error) if error.fatal() => {
+                        let _ = reply.send(Err(error.clone()));
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
                 }
-                Err(error) if error.fatal() => {
-                    let _ = reply.send(Err(error.clone()));
-                    return Err(error);
-                }
-                Err(error) => {
-                    let _ = reply.send(Err(error));
-                }
-            },
+            }
             ActorCommand::Shutdown { reply } => {
+                let _begun = serving.begin("shutdown", wall_clock_ms());
                 if let Err(error) = state.verify_authority() {
                     let _ = reply.send(Err(error.clone()));
                     return Err(error);

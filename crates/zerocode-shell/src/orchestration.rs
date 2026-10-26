@@ -277,6 +277,15 @@ fn runtime_cell() -> &'static Mutex<Option<LiveRuntime>> {
 /// came up.
 const NO_RUNTIME: &str = "orchestration is unavailable in this window — the runtime never started";
 
+/// What the ledger actor is serving now (t-75646), for the hang watch: read
+/// without asking the actor and without waiting on any lock — `None` when one
+/// was held at this very moment.
+pub(crate) fn actor_serving() -> Option<Option<zerocode_orchestrator::runtime_actor::Served>> {
+    let cell = runtime_cell().try_lock().ok()?;
+    cell.as_ref()
+        .map_or(Some(None), |seat| seat.actor.serving().peek())
+}
+
 /// The runtime, if this window has one.
 fn runtime() -> Option<LiveRuntime> {
     runtime_cell()

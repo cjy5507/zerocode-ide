@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tauri::{Emitter as _, Manager as _};
 
 use crate::crash::Limits;
+use zerocode_orchestrator::runtime_actor::Served;
 
 static READY: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(true);
@@ -48,7 +49,15 @@ struct Tick {
     /// the beat its answer arrives. The hang line's own number is only when
     /// it was seen, which for such a hang is always the first threshold.
     ended: Option<u64>,
+    /// A hang seen still unanswered, said again every
+    /// [`STILL_OPEN_EVERY_MS`] while it stays open.
+    still: Option<u64>,
 }
+
+/// How often a hang still open is said again (t-75646): the 3 min 40 s of
+/// 2026-10-26 07:30 left no line between its start and the person's close,
+/// so nobody could tell a long hang from a short one ended by the close.
+const STILL_OPEN_EVERY_MS: u64 = 10_000;
 
 /// One beat of the observer, as its own clocks saw it.
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +198,77 @@ impl Watch {
     }
 }
 
+/// The ledger actor's long requests, as the watch has said them (t-75646).
+///
+/// Both stands of 2026-10-26 ended with a goodbye that the actor did not
+/// answer while the main thread took the close at once: the stand was the
+/// actor's, and this watch only ever looked at the main thread. It reads what
+/// the actor serves without asking it anything, and says a request that has
+/// run past the first threshold — again while it runs, at most once per
+/// [`STILL_OPEN_EVERY_MS`] — and its end once.
+#[derive(Debug, Default)]
+struct ActorWatch {
+    /// The request said busy, and the length its next line is due at.
+    said: Option<(Served, u64)>,
+    /// When the last busy line was said, wall-clock ms.
+    last_line_ms: Option<i64>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ActorLine {
+    Busy { verb: &'static str, ms: u64 },
+    Answered { verb: &'static str, ms: u64 },
+}
+
+impl fmt::Display for ActorLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Busy { verb, ms } => write!(f, "ledger actor busy: {ms}ms on {verb}"),
+            Self::Answered { verb, ms } => {
+                write!(f, "ledger actor answered: {verb} after about {ms}ms")
+            }
+        }
+    }
+}
+
+impl ActorWatch {
+    /// `look` is the actor's [`Serving::peek`]: `None` when it could not be
+    /// read this beat, which changes nothing.
+    fn step(&mut self, look: Option<Option<Served>>, now_ms: i64, first_ms: u64) -> Vec<ActorLine> {
+        let Some(serving) = look else {
+            return Vec::new();
+        };
+        let ran =
+            |served: Served| u64::try_from(now_ms.saturating_sub(served.since_ms)).unwrap_or(0);
+        let mut lines = Vec::new();
+        if let Some((said, _)) = self.said
+            && serving != Some(said)
+        {
+            lines.push(ActorLine::Answered {
+                verb: said.verb,
+                ms: ran(said),
+            });
+            self.said = None;
+        }
+        if let Some(served) = serving {
+            let ms = ran(served);
+            let due = self.said.map_or(first_ms, |(_, due)| due);
+            let quiet = self.last_line_ms.is_none_or(|at| {
+                u64::try_from(now_ms.saturating_sub(at)).unwrap_or(0) >= STILL_OPEN_EVERY_MS
+            });
+            if ms >= due && quiet {
+                lines.push(ActorLine::Busy {
+                    verb: served.verb,
+                    ms,
+                });
+                self.said = Some((served, ms.saturating_add(STILL_OPEN_EVERY_MS)));
+                self.last_line_ms = Some(now_ms);
+            }
+        }
+        lines
+    }
+}
+
 /// What the sample taken after a hang was seen can speak for (t-72138).
 ///
 /// `sample` starts only once the hang is seen and then runs a second, so a
@@ -240,9 +320,81 @@ impl fmt::Display for Sampled {
     }
 }
 
+/// The one main-thread closure the observer keeps queued, and its answer.
 struct Answer {
     outstanding: AtomicBool,
     at_ms: AtomicU64,
+}
+
+impl Answer {
+    fn new() -> Self {
+        Self {
+            outstanding: AtomicBool::new(false),
+            at_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// The main thread's answer to the last ping, taken; `None` while the
+    /// closure still waits in the queue.
+    fn take(&self) -> Option<u64> {
+        (!self.outstanding.load(Acquire))
+            .then(|| self.at_ms.swap(0, Relaxed))
+            .filter(|at| *at != 0)
+    }
+
+    /// [`Self::take`] without taking: the next beat says the end.
+    fn peek(&self) -> Option<u64> {
+        (!self.outstanding.load(Acquire))
+            .then(|| self.at_ms.load(Relaxed))
+            .filter(|at| *at != 0)
+    }
+
+    /// Claim the queue's one slot for a new ping; `false` while the last
+    /// closure is still queued.
+    fn claim(&self) -> bool {
+        self.outstanding
+            .compare_exchange(false, true, AcqRel, Acquire)
+            .is_ok()
+    }
+
+    /// What the queued closure does on the main thread.
+    fn answer(&self, at_ms: u64) {
+        self.at_ms.store(at_ms, Relaxed);
+        self.outstanding.store(false, Release);
+    }
+
+    /// A closure that could not be queued holds no slot.
+    fn release(&self) {
+        self.outstanding.store(false, Release);
+    }
+}
+
+/// One beat against the answer slot.
+struct Beaten {
+    tick: Tick,
+    answered: Option<u64>,
+    /// Whether a new closure must go on the main thread's queue.
+    queue: bool,
+}
+
+/// The watch's judgment for one beat, and whether it queues a ping.
+///
+/// A ping the watch asks for while the last closure is still queued is not
+/// queued again — a closure cannot be taken back out of the queue — and
+/// the watch goes on judging from this beat: the main thread has not run
+/// its queue since at least now.
+fn beat_once(watch: &mut Watch, answer: &Answer, beat: Beat, limits: Limits) -> Beaten {
+    let answered = answer.take();
+    let tick = watch.step(beat, answered, limits);
+    let queue = tick.ping && answer.claim();
+    if tick.ping && !queue {
+        watch.pending = None;
+    }
+    Beaten {
+        tick,
+        answered,
+        queue,
+    }
 }
 
 pub(crate) struct Monitor {
@@ -250,6 +402,7 @@ pub(crate) struct Monitor {
     watch: Watch,
     answer: Arc<Answer>,
     armed: bool,
+    actor: ActorWatch,
 }
 
 impl Monitor {
@@ -257,11 +410,9 @@ impl Monitor {
         Self {
             start: Instant::now(),
             watch: Watch::new(0),
-            answer: Arc::new(Answer {
-                outstanding: AtomicBool::new(false),
-                at_ms: AtomicU64::new(0),
-            }),
+            answer: Arc::new(Answer::new()),
             armed: false,
+            actor: ActorWatch::default(),
         }
     }
     pub(crate) fn resumed(&mut self) {
@@ -288,16 +439,30 @@ impl Monitor {
                 .max(first_ms + Limits::DEFAULT.ping_ms),
             ..Limits::DEFAULT
         };
-        let answered = (!self.answer.outstanding.load(Acquire))
-            .then(|| self.answer.at_ms.swap(0, Relaxed))
-            .filter(|at| *at != 0);
         let beat = Beat {
             now,
             wall: wall_ms(),
             nap: u64::try_from(nap.as_millis()).unwrap_or(u64::MAX),
             seen: screens_awake(),
         };
-        let tick = self.watch.step(beat, answered, limits);
+        let Beaten {
+            tick,
+            answered,
+            queue,
+        } = beat_once(&mut self.watch, &self.answer, beat, limits);
+        if limits.watchdog {
+            let wall = i64::try_from(beat.wall).unwrap_or(i64::MAX);
+            for line in self
+                .actor
+                .step(crate::orchestration::actor_serving(), wall, first_ms)
+            {
+                crate::crumbs::record("ledger_actor", format_args!("{line}"));
+                crate::note_window_event(
+                    app.state::<crate::AppState>().local_data_root(),
+                    &line.to_string(),
+                );
+            }
+        }
         if let Some(Voided { ms, why }) = tick.voided {
             // Said once per withdrawn judgment, so a week of these lines
             // counts what the old watchdog would have filed as hangs.
@@ -315,31 +480,17 @@ impl Monitor {
                 &format!("hang ended: {ms}ms"),
             );
         }
-        if tick.ping {
+        if queue {
             // A disabled/resumed monitor can abandon a judgment, but it cannot
             // cancel a queued Tauri closure. Keep that queue slot until it answers.
-            if self
-                .answer
-                .outstanding
-                .compare_exchange(false, true, AcqRel, Acquire)
-                .is_ok()
+            let answer = Arc::clone(&self.answer);
+            let start = self.start;
+            if app
+                .run_on_main_thread(move || answer.answer(start.elapsed().as_millis() as u64))
+                .is_err()
             {
-                let answer = Arc::clone(&self.answer);
-                let start = self.start;
-                if app
-                    .run_on_main_thread(move || {
-                        answer
-                            .at_ms
-                            .store(start.elapsed().as_millis() as u64, Relaxed);
-                        answer.outstanding.store(false, Release);
-                    })
-                    .is_err()
-                {
-                    self.answer.outstanding.store(false, Release);
-                    self.armed = false;
-                }
-            } else {
-                self.watch.pending = None;
+                self.answer.release();
+                self.armed = false;
             }
         }
         // A census rides its own main-thread closure, queued behind the ping so
@@ -390,9 +541,7 @@ impl Monitor {
                 let sample_from = self.start.elapsed().as_millis() as u64;
                 let sample = crate::hang_sample::sample_main_thread();
                 // Peeked, not taken: the next beat takes it and says the end.
-                let answered = (!self.answer.outstanding.load(Acquire))
-                    .then(|| self.answer.at_ms.load(Relaxed))
-                    .filter(|at| *at != 0);
+                let answered = self.answer.peek();
                 // Unanswered at this beat, so the hang is the time since the ping.
                 let sampled = sampled(now.saturating_sub(ms), sample_from, answered);
                 (sampled.frames(sample), sampled)
@@ -767,6 +916,145 @@ mod tests {
     /// its stack. A sample that began after the answer holds none of the
     /// hang; one the answer arrived in holds its end. Either way the record
     /// says when the answer came, so the frames are read for what they are.
+    /// 2026-10-26 07:30 and 15:21 (t-75646): the window stood for minutes and
+    /// the watch wrote nothing. One beat back late inside a hang's first two
+    /// seconds withdraws the judgment and warms the watch up; when the warm-up
+    /// ends the ping is still queued, so no second closure can be, and the
+    /// watch used to drop its judgment on every beat after — silent until the
+    /// main thread answered, however long that took. The watch judges from
+    /// its return instead: the main thread has not run since at least then.
+    #[test]
+    fn a_hang_whose_start_the_observer_missed_is_judged_from_its_return() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let answer = Answer::new();
+        let sent = limits.warmup_ms;
+        assert!(beat_once(&mut watch, &answer, beat(sent), limits).queue);
+        let late = sent + limits.first_ms / 2;
+        let missed = beat_once(
+            &mut watch,
+            &answer,
+            Beat {
+                nap: limits.ping_ms * 3,
+                ..beat(late)
+            },
+            limits,
+        );
+        assert_eq!(missed.tick, Tick::default());
+        let back = late + limits.warmup_ms;
+        let mut now = late;
+        let mut seen = None;
+        while now < back + limits.second_ms {
+            now += limits.ping_ms;
+            let beaten = beat_once(&mut watch, &answer, beat(now), limits);
+            assert!(!beaten.queue, "the queued closure keeps the one slot");
+            seen = seen.or(beaten.tick.hang.map(|ms| (now, ms)));
+        }
+        assert_eq!(seen, Some((back + limits.first_ms, limits.first_ms)));
+        answer.answer(now);
+        let ended = beat_once(&mut watch, &answer, beat(now + limits.ping_ms), limits);
+        assert_eq!(ended.tick.ended, Some(now - back));
+        assert!(ended.queue, "the slot is free again once answered");
+    }
+
+    /// A hang still open is said again every ten seconds, and only while it
+    /// is open: the line written at the first threshold is not the last word
+    /// about a hang the person ends by closing the window.
+    #[test]
+    fn a_hang_still_open_is_said_again_every_ten_seconds() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        assert!(watch.step(beat(sent), None, limits).ping);
+        let mut now = sent;
+        let mut still = Vec::new();
+        while now < sent + 35_000 {
+            now += limits.ping_ms;
+            still.extend(watch.step(beat(now), None, limits).still);
+        }
+        assert_eq!(
+            still,
+            [
+                limits.first_ms + STILL_OPEN_EVERY_MS,
+                limits.first_ms + STILL_OPEN_EVERY_MS * 2,
+                limits.first_ms + STILL_OPEN_EVERY_MS * 3,
+            ]
+        );
+        let tick = watch.step(beat(now + limits.ping_ms), Some(now), limits);
+        assert_eq!((tick.still, tick.ended), (None, Some(now - sent)));
+        assert_eq!(watch.count, 1, "one hang, however often it is said");
+    }
+
+    fn served(verb: &'static str, since_ms: i64) -> Option<Option<Served>> {
+        Some(Some(Served { verb, since_ms }))
+    }
+
+    /// A request the actor serves for 25 s is said at the first threshold and
+    /// every ten seconds after, and its end once; short ones say nothing.
+    #[test]
+    fn a_long_actor_request_is_said_while_it_runs_and_once_when_it_ends() {
+        let first = Limits::DEFAULT.first_ms;
+        let mut watch = ActorWatch::default();
+        let mut said = Vec::new();
+        assert!(watch.step(served("check", 0), 1_000, first).is_empty());
+        assert!(watch.step(Some(None), 1_500, first).is_empty());
+        for now in (0..=25_000).step_by(250) {
+            said.extend(watch.step(served("window_exiting", 2_000), 2_000 + now, first));
+        }
+        said.extend(watch.step(Some(None), 27_250, first));
+        assert!(watch.step(Some(None), 27_500, first).is_empty());
+        assert_eq!(
+            said,
+            [
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 2_000
+                },
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 12_000
+                },
+                ActorLine::Busy {
+                    verb: "window_exiting",
+                    ms: 22_000
+                },
+                ActorLine::Answered {
+                    verb: "window_exiting",
+                    ms: 25_250
+                },
+            ]
+        );
+        assert_eq!(
+            said[0].to_string(),
+            "ledger actor busy: 2000ms on window_exiting"
+        );
+    }
+
+    /// A beat that meets the actor writing reads nothing and says nothing;
+    /// a run of requests each just past the threshold says one busy line per
+    /// ten seconds, not one per request.
+    #[test]
+    fn actor_lines_are_at_most_one_busy_line_per_ten_seconds() {
+        let first = Limits::DEFAULT.first_ms;
+        let mut watch = ActorWatch::default();
+        let mut busy = 0;
+        let mut since = 0;
+        for now in (0..60_000).step_by(250) {
+            if now - since >= 2_500 {
+                since = now;
+            }
+            if now % 1_000 == 0 {
+                assert!(watch.step(None, now, first).is_empty());
+            }
+            busy += watch
+                .step(served("view", since), now, first)
+                .iter()
+                .filter(|line| matches!(line, ActorLine::Busy { .. }))
+                .count();
+        }
+        assert!((1..=6).contains(&busy), "{busy} busy lines in 60 s");
+    }
+
     #[test]
     fn a_sample_taken_after_the_answer_is_not_filed_as_the_hangs_stack() {
         let limits = Limits::DEFAULT;
