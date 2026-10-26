@@ -528,7 +528,7 @@ fn captured_lines_in(
     wait: Duration,
     env: &[(String, String)],
 ) -> Option<Vec<String>> {
-    let mut command = crate::proc::quiet_command(binary);
+    let mut command = crate::proc::quiet_command_with_env(binary, env);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -536,11 +536,10 @@ fn captured_lines_in(
         .stderr(Stdio::null());
     for (key, _) in std::env::vars_os() {
         let key = key.to_string_lossy();
-        if key.starts_with("ZEROCODE") {
+        if key.starts_with("ZEROCODE") && !env.iter().any(|(given, _)| *given == *key) {
             command.env_remove(&*key);
         }
     }
-    command.envs(env.iter().map(|(key, value)| (key, value)));
     let mut child = command.spawn().ok()?;
     let stdout = child.stdout.take()?;
     let started = Instant::now();

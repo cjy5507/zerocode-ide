@@ -827,7 +827,8 @@ pub fn launch_env(config_root: &Path) -> Vec<(String, String)> {
     let Some((home, env)) = chosen_env(config_root) else {
         return Vec::new();
     };
-    carry_settings_into(&home);
+    let home = home.as_path();
+    carry_settings_into(home);
     let _ = materialize_into(config_root, &resolve_runtime_home(config_root));
     env
 }
