@@ -2532,7 +2532,7 @@ fn acquire_writer_lock(path: &Path, state: &mut WriterState) -> Result<(), Sessi
                     Err(error) => return Err(error.into()),
                 }
             }
-            let file = crate::paths::open_windows_owner_only_regular_file(&lock_path, true)?;
+            let file = crate::paths::open_windows_owner_only_regular_file_read_write(&lock_path)?;
             match file.try_lock() {
                 Ok(()) => {
                     if crate::paths::windows_file_handle_matches_path(&file, &lock_path)
@@ -2744,7 +2744,8 @@ pub fn try_reclaim_orphan_lock(lock_path: &Path) -> bool {
     }
     #[cfg(windows)]
     {
-        let Ok(file) = crate::paths::open_windows_owner_only_regular_file(lock_path, true) else {
+        let Ok(file) = crate::paths::open_windows_owner_only_regular_file_read_write(lock_path)
+        else {
             return false;
         };
         if file.try_lock().is_err()
