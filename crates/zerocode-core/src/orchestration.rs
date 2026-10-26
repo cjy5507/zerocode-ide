@@ -1591,6 +1591,17 @@ impl std::fmt::Debug for Worker {
     }
 }
 
+impl Worker {
+    /// Whether the window closes this worker's pane once its report lands.
+    ///
+    /// Only a worker nobody asked to keep: `Retained` is the record that the
+    /// pane outlives its task, and a pane the person took is theirs
+    /// (t-76477).
+    pub const fn closes_pane_on_report(&self) -> bool {
+        matches!(self.state, WorkerState::Active) && !self.taken_over
+    }
+}
+
 /// How loudly a message asks to be read. A tag on the row, never a reorder:
 /// the queue stays FIFO, because a coordinator that acked batch N expects
 /// batch N+1 to be what arrived next — and a batch replayed for recovery has
@@ -8848,7 +8859,16 @@ impl Ledger {
             .position(|worker| worker.id == worker_id)
             .expect("found above");
         run.workers[at].dispatch = Some(dispatch_id.clone());
-        run.workers[at].state = WorkerState::Active;
+        /* A kept worker stays kept while it carries the next task (t-76477).
+         * `Retained` is the one record that somebody asked for this pane to
+         * outlive its work, and `Active` written over it made the report that
+         * ended this attempt look like an unkept worker's: the window's
+         * auto-release closed the pane and the coordinator's next dispatch
+         * found no terminal. `retain_worker` already lets a worker that is
+         * carrying work be kept, so this is the same pair, not a new one. */
+        if run.workers[at].state != WorkerState::Retained {
+            run.workers[at].state = WorkerState::Active;
+        }
         /* A fresh attempt gets fresh turn stamps: the quiet the LAST attempt
          * ended on is not something this one should be reported for. */
         run.workers[at].quiet_at = None;
