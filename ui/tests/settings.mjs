@@ -3358,6 +3358,10 @@ class StatefulBackend {
       // The computer-use band asks what is shared at boot (t-73906). Nothing
       // is shared in these scenes, so the band stays hidden.
       case "computer_share_state": return { target: null, label: null, takenBack: false };
+      // The plain-text secrets line asks once the settings are drawn
+      // (t-76698). These scenes' zo writes no secret as plain text, so the
+      // line stays hidden; the line's own suite is settings-secrets.mjs.
+      case "settings_secret_literals": return null;
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);
