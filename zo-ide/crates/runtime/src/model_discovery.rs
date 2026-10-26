@@ -737,6 +737,20 @@ pub fn refresh_under(
     fetch: impl Fn(&'static str) -> SourceAnswer,
     store: impl Fn(&'static str) -> String,
 ) -> DiscoveredCatalog {
+    refresh_noting(previous, due, now_secs, selected, fetch, store, |line| eprintln!("{line}"))
+}
+
+/// [`refresh_under`] handing each stderr line to `note`, so a test reads
+/// exactly what the process would have printed.
+pub fn refresh_noting(
+    previous: Option<&DiscoveredCatalog>,
+    due: &[&str],
+    now_secs: u64,
+    selected: &[String],
+    fetch: impl Fn(&'static str) -> SourceAnswer,
+    store: impl Fn(&'static str) -> String,
+    mut note: impl FnMut(&str),
+) -> DiscoveredCatalog {
     let mut catalog = DiscoveredCatalog {
         fetched_at: now_secs,
         ..Default::default()
@@ -784,10 +798,10 @@ pub fn refresh_under(
             }
             Err((asked, detail)) => match last.filter(|last| answered_under_another_store(last, &asked_under)) {
                 Some(last) => {
-                    eprintln!(
+                    note(&format!(
                         "[zo] model discovery: {source}: kept the answer from {}; this process ({asked_under}) could not ask: {detail}",
                         last.credential_store
-                    );
+                    ));
                     keep(&mut catalog, last);
                 }
                 None => catalog.reports.push(SourceReport {
@@ -5119,6 +5133,49 @@ mod tests {
         let written = serde_json::to_value(&pane).expect("a report serializes");
         assert_eq!(written["credential_store"], json!(PANE_STORE));
         assert_eq!(serde_json::from_value::<super::SourceReport>(written).expect("and reads back"), pane);
+    }
+
+    /// t-76829: the one stderr line a kept answer prints is one line with no
+    /// secret in it, whatever the failure's detail or the stores' names
+    /// carry — a response body that repeats a key, a line break in a folder.
+    #[test]
+    fn the_stderr_line_of_a_kept_answer_is_one_line_and_holds_no_secret() {
+        let now = 1_790_200_000;
+        let key = "sk-ant-api03-Zq8Vn2Lk0Pw4Xt7Yb1Mc";
+        let pane_store = "CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane\nsk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz";
+        let window_store = "CODEX_HOME:/accounts/win\r\ndow-9f8e7d6c5b4a39281706";
+        let pane = anthropic_refresh(None, now - 60, "pane-store", &Ok(opus_answer(now - 60)));
+        let pane = super::DiscoveredCatalog {
+            reports: pane
+                .reports
+                .iter()
+                .map(|report| super::SourceReport { credential_store: pane_store.to_string(), ..report.clone() })
+                .collect(),
+            ..pane
+        };
+        let detail = format!(
+            "HTTP 401 Unauthorized: {{\"error\":\n{{\"message\":\"invalid x-api-key {key}\"}}}}\r\nAuthorization: Bearer abc.def-ghi\n\t\"api_key\":\"hunter2hunter2\" \u{1b}[31mred\u{1b}[0m"
+        );
+        let mut notes = Vec::new();
+        let window = super::refresh_noting(
+            Some(&pane),
+            &[super::ANTHROPIC_SOURCE],
+            now,
+            &[],
+            |source| Err((source.to_string(), detail.clone())),
+            |source| if source == super::ANTHROPIC_SOURCE { window_store.to_string() } else { String::new() },
+            |line| notes.push(line.to_string()),
+        );
+        assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the kept answer still stands");
+        let err = notes.join("\n");
+        let printed = notes.iter().filter(|line| line.contains("kept the answer from")).count();
+        assert_eq!(printed, 1, "one kept-answer line: {err:?}");
+        assert!(notes.iter().all(|line| !line.contains(['\n', '\r', '\t', '\u{1b}'])), "one clean line: {err:?}");
+        for secret in [key, "sk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz", "abc.def-ghi", "hunter2hunter2", "9f8e7d6c5b4a39281706"] {
+            assert!(!err.contains(secret), "{secret} reached stderr: {err:?}");
+        }
+        assert!(err.contains("HTTP 401 Unauthorized"), "the reason that is not a value stays: {err:?}");
+        assert!(err.contains("CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane"), "a store's folder stays: {err:?}");
     }
 
     /// t-76621: a failure stays due at every connection — one written under
