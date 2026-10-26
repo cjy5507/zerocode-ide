@@ -24197,6 +24197,77 @@ pub(crate) mod computer_desktop_wait {
         }
     }
 
+    /// t-76055: a click at a point on a mirrored phone — a window whose tree
+    /// is the window alone, as the helper's answer counts it — answers with
+    /// the batch by words as its next step, and the click it names is taken
+    /// by the same window: read once, pressed at the line's centre. A window
+    /// with a tree is told nothing.
+    #[test]
+    fn a_point_click_on_a_treeless_window_answers_its_batch_by_words() {
+        use zerocode_core::computer_use::CLICK_NEXT_KEY;
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::computer_use::guard::lift();
+        crate::computer_use::confirm::set_policy(crate::computer_use::confirm::Policy::default());
+        let count = std::rc::Rc::new(std::cell::Cell::new(1_u64));
+        let elements = std::rc::Rc::clone(&count);
+        let pressed = std::rc::Rc::new(std::cell::RefCell::new(Vec::<serde_json::Value>::new()));
+        let presses = std::rc::Rc::clone(&pressed);
+        let _helper = crate::computer_use::test_helper::stand(move |method, params| {
+            Ok(match method {
+                "click" | "mouseClick" => {
+                    presses.borrow_mut().push(serde_json::json!({ "method": method, "params": params }));
+                    serde_json::json!({
+                        "action": { "path": "window" },
+                        "snapshot": {
+                            "app": { "name": "iPhone Mirroring", "bundleId": "com.apple.ScreenContinuity", "pid": 4243 },
+                            "window": { "id": 33265, "title": "iPhone Mirroring" },
+                            "treeText": "",
+                            "elementCount": elements.get(),
+                        },
+                    })
+                }
+                "readText" => serde_json::json!({ "source": "ocr", "lines": [
+                    { "text": "검색", "x": 200.0, "y": 110.0, "width": 40.0, "height": 20.0 },
+                ] }),
+                _ => serde_json::json!({ "stopped": false }),
+            })
+        });
+        let point = [
+            "click", "--app", "iPhone Mirroring", "--x", "220", "--y", "120",
+            "--no-screenshot", "--window-id", "33265", "--json",
+        ];
+        let said = envelope(&answer_computer_command(&words(&point)));
+        let next = said["result"][CLICK_NEXT_KEY].as_str().unwrap_or_default().to_string();
+        assert!(next.contains("--ocr --text"), "the click says its faster road: {said}");
+        let opens = next.find("'[").unwrap_or_default();
+        let closes = next.rfind("]'").unwrap_or_default();
+        let commands: serde_json::Value =
+            serde_json::from_str(next.get(opens + 1..=closes).unwrap_or("null")).unwrap_or_default();
+        let mut first: Vec<String> = commands[0]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect();
+        assert!(!first.is_empty(), "a batch is named: {next}");
+        // The words the next step names, as an agent fills them in.
+        if let Some(at) = first.iter().position(|word| word == "--text") {
+            first[at + 1] = "검색".into();
+        }
+        first.push("--json".into());
+        pressed.borrow_mut().clear();
+        let taken = envelope(&answer_computer_command(&first));
+        assert_eq!(taken["ok"], true, "the window takes the click it named: {taken}");
+        assert_eq!(taken["result"]["pressed"]["words"], "검색", "{taken}");
+        assert_eq!(pressed.borrow().len(), 1, "one press: {:?}", pressed.borrow());
+        count.set(9);
+        let treed = envelope(&answer_computer_command(&words(&point)));
+        assert!(treed["result"].get(CLICK_NEXT_KEY).is_none(), "a tree is told nothing: {treed}");
+    }
+
     /// A wait-for satisfied names the look it was satisfied on — the
     /// helper's snapshot, the revision an action after it is held to
     /// (t-66760 b2).
