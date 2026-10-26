@@ -127,6 +127,16 @@ const LOOK_EVERY: Duration = Duration::from_millis(100);
 
 /// The pane a launch briefing went into, as the watch needs it.
 pub trait BriefingPane {
+    /// The provider acknowledged taking this launch's briefing. This is
+    /// stronger evidence than text a TUI may erase when it redraws.
+    fn submitted(&mut self) -> bool {
+        false
+    }
+    /// The launched agent has started its turn. A working agent must not
+    /// receive another copy of its launch briefing.
+    fn working(&mut self) -> bool {
+        false
+    }
     /// The pane's scrollback and visible text; `None` once the pane is gone.
     fn screen(&mut self) -> Option<String>;
     /// Type the briefing once more, and say where that delivery's outcome
@@ -238,6 +248,70 @@ mod tests {
     #[test]
     fn a_briefing_with_nothing_to_see_shows_on_any_screen() {
         assert!(briefing_shows("❯ ", "  \n\t"));
+    }
+
+    #[test]
+    fn the_tail_shows_a_briefing_whose_head_was_erased_by_a_redraw() {
+        let briefing =
+            format!("{BRIEFING}\nNow do this: 입력을 받은 워커의 화면을 확인하고 계속 작업하세요.");
+        assert!(briefing_shows(
+            "│ 입력을 받은 워커의 화면을\n│ 확인하고 계속 작업하세요.\n⏺ Working",
+            &briefing
+        ));
+        assert!(!briefing_shows("❯ some unrelated task", &briefing));
+    }
+
+    struct AcceptedPane {
+        submitted: bool,
+        working_checks: usize,
+    }
+
+    impl BriefingPane for AcceptedPane {
+        fn submitted(&mut self) -> bool {
+            self.submitted
+        }
+
+        fn working(&mut self) -> bool {
+            self.working_checks += 1;
+            self.working_checks > 1
+        }
+
+        fn screen(&mut self) -> Option<String> {
+            assert!(!self.submitted, "a receipt must not need a screen read");
+            Some("❯ ".into())
+        }
+
+        fn retype(&mut self) -> Receiver<Outcome> {
+            panic!("an accepted briefing must not be typed again")
+        }
+
+        fn withdraw(&mut self) {
+            panic!("an accepted briefing has nothing to withdraw")
+        }
+    }
+
+    #[test]
+    fn a_submission_receipt_needs_no_screen_read_or_retype() {
+        let mut pane = AcceptedPane {
+            submitted: true,
+            working_checks: 0,
+        };
+        assert_eq!(
+            confirm(&mut pane, BRIEFING, Duration::ZERO, Duration::ZERO),
+            Verdict::Taken
+        );
+    }
+
+    #[test]
+    fn a_turn_starting_before_the_retype_keeps_its_briefing_once() {
+        let mut pane = AcceptedPane {
+            submitted: false,
+            working_checks: 0,
+        };
+        assert_eq!(
+            confirm(&mut pane, BRIEFING, Duration::ZERO, Duration::ZERO),
+            Verdict::Taken
+        );
     }
 
     #[test]
