@@ -337,8 +337,8 @@ pub(crate) fn holding_pane(state: &AppState, wanted: &ConversationKey) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
     use zerocode_core::SessionKey;
 
     const ZO: &str = "zo";

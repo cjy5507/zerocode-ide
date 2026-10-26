@@ -1229,10 +1229,15 @@ pub(crate) fn carry_zo_pane_sessions(
 /// Whether the shell `term` holds the conversation `wake` names now
 /// (t-76489): the agent this window knows the pane as and the session it
 /// reported — the two records [`crate::conversation_wake::panes_naming`]
-/// reads.
+/// reads — and `in_front`, that the pane's agent still holds its terminal
+/// ([`crate::agent_tools_runtime::agent_in_front_within`]). Both records
+/// outlive an agent quit back to its shell, so a pane that ended the
+/// conversation and the pane that reopened it since would both answer by
+/// the records alone, and the first by order would take the second's place.
 pub(crate) fn pane_holds(
     sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
     agents: &HashMap<TermId, &'static str>,
+    in_front: &dyn Fn(TermId) -> bool,
     wake: &pane_layout::WakeAgent,
     term: TermId,
 ) -> bool {
@@ -1240,6 +1245,7 @@ pub(crate) fn pane_holds(
         && sessions
             .get(&term)
             .is_some_and(|session| session.id == wake.id)
+        && in_front(term)
 }
 
 /// One line in the window's log for the leaves a pane-layout road took a
@@ -1305,7 +1311,18 @@ pub(crate) fn save_pane_layouts(
         worktree,
         left.kept(),
         &crate::exit_runtime::leaving,
-        &|wake, term| pane_holds(&sessions, &agents, wake, term),
+        &|wake, term| {
+            let in_front = |term| {
+                let shell_pane = { state.shell_panes().contains(&term) };
+                crate::agent_tools_runtime::agent_in_front_within(
+                    state.terminals(),
+                    shell_pane,
+                    term,
+                    None,
+                )
+            };
+            pane_holds(&sessions, &agents, &in_front, wake, term)
+        },
     )
     .map(Option::unwrap_or_default)
     .map_err(|error| error.to_string())?;

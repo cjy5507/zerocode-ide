@@ -736,6 +736,36 @@ pub(super) fn shell_in_front_of(state: &AppState, term: TermId) -> bool {
     front == Some(true)
 }
 
+/// Whether `term`'s own agent holds its terminal now (t-76489): the terminal
+/// stands, and on a shell pane the shell is not back in front of it. An
+/// agent quit back to its shell keeps the window's record of its
+/// conversation (`pane_runtime::clear_departed_agent`) — the 이어서 menu
+/// reopens it from there — yet holds nothing, and another pane may have
+/// reopened the same conversation since. `shell_pane` is whether the pty's
+/// child is the shell itself; `patience` bounds the wait for the pane's lock
+/// — `None` waits as [`shell_in_front_of`] does — and a pane busy past it is
+/// standing with what it ran, as the exit's capture reads it.
+pub(crate) fn agent_in_front_within(
+    terminals: &TerminalRegistry,
+    shell_pane: bool,
+    term: TermId,
+    patience: Option<Duration>,
+) -> bool {
+    let Some(held) = terminals.handle(term) else {
+        return false;
+    };
+    if !shell_pane {
+        return true;
+    }
+    let front = match patience {
+        Some(patience) => {
+            terminal_registry::lock_pty_within(&held, patience).map(|pty| pty.foreground_is_child())
+        }
+        None => Some(lock_pty(&held).foreground_is_child()),
+    };
+    front.is_none_or(|front| front != Some(true))
+}
+
 /// Whether `term`'s last turn ended at rest with its agent in front, as the
 /// mail pointer reads it ([`crate::orchestration::turn_rests`]), and no
 /// person's words wait on its line — the two halves of "between turns" that

@@ -28983,7 +28983,10 @@ mod browser_form_fill {
 /// on any other lock each cost the way out its patience and nothing more.
 mod exit_capture {
     use super::*;
-    use crate::system_runtime::{exit_capture_within, exit_screen, seated_teammates};
+    use crate::system_runtime::{
+        Written, coordinator_filed_line, coordinator_lost_letter, exit_capture_within,
+        exit_screen, exit_write, seated_teammates, unheld_panes,
+    };
     use std::sync::mpsc::channel;
     use zerocode_lane::{PtyHandle, PtyTransport, PtyTransportError};
     use zerocode_pty::{Pumped, Terminal};
@@ -29182,6 +29185,216 @@ mod exit_capture {
         );
     }
 
+    /// A terminal whose foreground is the shell itself (`Some(true)`), the
+    /// agent started in it (`Some(false)`), or unknown (`None`).
+    struct Front(Terminal, Option<bool>);
+
+    impl PtyTransport for Front {
+        fn pump(&mut self) -> Pumped {
+            Pumped {
+                bytes: 0,
+                ended: false,
+                answered: false,
+                unanswered_since: None,
+            }
+        }
+
+        fn terminal(&self) -> &Terminal {
+            &self.0
+        }
+
+        fn terminal_mut(&mut self) -> &mut Terminal {
+            &mut self.0
+        }
+
+        fn write_input(&mut self, _bytes: &[u8]) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn resize(&mut self, _rows: u16, _cols: u16) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn try_wait(&mut self) -> Result<Option<u32>, PtyTransportError> {
+            Ok(None)
+        }
+
+        fn kill(&mut self) -> Result<(), PtyTransportError> {
+            Ok(())
+        }
+
+        fn foreground_is_child(&self) -> Option<bool> {
+            self.1
+        }
+    }
+
+    const ENDED: &str = "68b2661a-1c20-4c40-9ad5-419af3097d57";
+
+    /// t-76489 r2 ①, the exit's half: a person quit the coordinator's
+    /// claude in pane 3 back to its shell and reopened the conversation in
+    /// pane 8. Both keep the window's records of agent and session; only
+    /// pane 8's agent holds its terminal. The exit files pane 8 alone — and
+    /// pane 4, a zo quit back to its shell, not at all. Before, the exit
+    /// asked only whether each pane's terminal was open.
+    #[test]
+    fn the_exit_files_only_the_panes_whose_agent_holds_its_terminal() {
+        let registry = TerminalRegistry::default();
+        let front = |registry: &TerminalRegistry, term: TermId, shell: Option<bool>| {
+            registry.insert(term, PtyHandle::new(Front(Terminal::new(4, 20), shell)));
+        };
+        front(&registry, 3, Some(true));
+        front(&registry, 4, Some(true));
+        front(&registry, 8, Some(false));
+        front(&registry, 11, None);
+        let shell_panes = std::collections::HashSet::from([3, 4, 8, 11]);
+        let in_front = |term: TermId| {
+            crate::agent_tools_runtime::agent_in_front_within(
+                &registry,
+                shell_panes.contains(&term),
+                term,
+                Some(Duration::from_millis(50)),
+            )
+        };
+        assert_eq!(
+            [3, 4, 8, 11, 12].map(in_front),
+            [false, false, true, true, false],
+            "a shell in front holds nothing, an agent or an unknown front holds its terminal, a gone one nothing"
+        );
+        assert!(
+            crate::agent_tools_runtime::agent_in_front_within(&registry, false, 3, None),
+            "a pane whose child is the agent itself holds its terminal while it stands"
+        );
+
+        let session = |id: &str| zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: id.to_string(),
+            transcript_path: None,
+        };
+        let agents = HashMap::from([(3, "claude"), (4, "zo"), (8, "claude")]);
+        let sessions = HashMap::from([
+            (3, session(ENDED)),
+            (4, session("session-1792758210243-0")),
+            (8, session(ENDED)),
+        ]);
+        let seats = |agent: &str, _: &str, id: &str| {
+            (agent == "claude" && id == ENDED).then(|| "run-4275".to_string())
+        };
+        let live = unheld_panes(
+            agents.clone(),
+            &sessions,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+            Some(&seats),
+            &in_front,
+        );
+        let filed: Vec<(TermId, Option<String>)> = live
+            .iter()
+            .map(|(pane, run)| (pane.term, run.clone()))
+            .collect();
+        assert_eq!(filed, vec![(8, Some("run-4275".to_string()))]);
+        // The records alone, as before, would file the quit panes too.
+        let before = unheld_panes(
+            agents,
+            &sessions,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+            Some(&seats),
+            &|term| registry.handle(term).is_some(),
+        );
+        assert_eq!(before.len(), 3);
+    }
+
+    /// t-76489 r2 ③, the codex review's third finding: the exit's write
+    /// says what became of it — done, cancelled because the way out moved
+    /// on, or failed — and a coordinator no saved leaf named is said written
+    /// only when it was. A cancelled or failed write is said so under the
+    /// run's name in the log, and its board gets a letter; a written one
+    /// gets a line and no letter. Before, the line said "written as tab"
+    /// whatever the write did, and only a pane placed nowhere got a letter.
+    #[test]
+    fn the_exit_says_a_coordinator_was_written_only_when_the_file_holds_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("zerocode");
+        std::fs::create_dir_all(&main).expect("a checkout");
+        let main = main.to_string_lossy().into_owned();
+        let pane = pane_layout::LivePane {
+            term: 1,
+            worktree: main.clone(),
+            wake: pane_layout::WakeAgent {
+                agent: "claude".to_string(),
+                key: "session_id".to_string(),
+                id: ENDED.to_string(),
+                transcript_path: None,
+                interrupted: false,
+            },
+        };
+        let write = |file: &std::path::Path, wanted: &dyn Fn() -> bool| {
+            exit_write(
+                file,
+                vec![pane.clone()],
+                &|_, _| false,
+                &|term| term == 1,
+                &|term| (term == 1).then(|| "screen".to_string()),
+                wanted,
+            )
+        };
+
+        let file = dir.path().join("pane-layouts.json");
+        let done = write(&file, &|| true);
+        assert_eq!(done.written, Written::Done);
+        assert!(matches!(done.filed[..], [pane_layout::Filed::Tab(1)]));
+        assert_eq!(pane_layout::read(&file)[&main][0].agents[&0].id, ENDED);
+        let line = coordinator_filed_line(&pane, "run-4275", done.filed[0], &done.written)
+            .expect("a line");
+        assert!(line.contains("written as tab 1"), "{line}");
+        assert_eq!(
+            coordinator_lost_letter(&pane, "run-4275", done.filed[0], &done.written),
+            None,
+            "a coordinator the file holds was reported lost"
+        );
+
+        let untouched = dir.path().join("cancelled.json");
+        let cancelled = write(&untouched, &|| false);
+        assert_eq!(cancelled.written, Written::Cancelled);
+        assert!(!untouched.exists(), "a cancelled write wrote");
+        let line =
+            coordinator_filed_line(&pane, "run-4275", cancelled.filed[0], &cancelled.written)
+                .expect("a line");
+        assert!(
+            line.contains("run:run-4275")
+                && line.contains("moved on before it was written")
+                && !line.contains("written as tab"),
+            "{line}"
+        );
+        let (body, receipt) =
+            coordinator_lost_letter(&pane, "run-4275", cancelled.filed[0], &cancelled.written)
+                .expect("the run's letter");
+        assert!(body.contains(ENDED), "{body}");
+        assert_eq!(receipt, format!("exit-unwritten:run-4275:{ENDED}"));
+
+        // A file whose folder is a plain file cannot be replaced.
+        let blocked = dir.path().join("not-a-folder");
+        std::fs::write(&blocked, b"").expect("a plain file");
+        let failed = write(&blocked.join("pane-layouts.json"), &|| true);
+        assert!(matches!(failed.written, Written::Failed(_)), "{failed:?}");
+        let line = coordinator_filed_line(&pane, "run-4275", failed.filed[0], &failed.written)
+            .expect("a line");
+        assert!(
+            line.contains("the write failed") && !line.contains("written as tab"),
+            "{line}"
+        );
+        assert!(
+            coordinator_lost_letter(&pane, "run-4275", failed.filed[0], &failed.written)
+                .is_some_and(|(_, receipt)| receipt.starts_with("exit-unwritten:")),
+            "a failed write sent the run no letter"
+        );
+        // One a saved leaf already named is the file's either way.
+        assert_eq!(
+            coordinator_filed_line(&pane, "run-4275", pane_layout::Filed::Named, &failed.written),
+            None
+        );
+    }
+
     /// The exit reads through the bounded doors above, not around them.
     #[test]
     fn the_exit_capture_reads_through_its_bounded_doors() {
@@ -29198,9 +29411,25 @@ mod exit_capture {
         assert!(
             capture.contains("exit_capture_within(EXIT_CAPTURE_PATIENCE,")
                 && capture.contains("exit_screen(terminals, term)")
-                && capture.contains("wanted()")
+                && capture.contains("exit_agent_in_front(&state, term)")
+                && capture.contains("exit_write(")
                 && !capture.contains("lock_pty("),
             "the exit capture reads a lock without its patience:\n{capture}"
+        );
+        // The write asks whether the way out still waits, under the file's
+        // one writer (t-76489), and each pane's agent is asked about through
+        // the pane's bounded lock.
+        let write = body("pub(super) fn exit_write(");
+        assert!(
+            write.contains("pane_layout::rewrite(file,")
+                && write.contains("wanted()")
+                && !write.contains("lock_pty("),
+            "the exit writes whether or not the way out still waits:\n{write}"
+        );
+        let in_front = body("fn exit_agent_in_front(");
+        assert!(
+            in_front.contains("Some(EXIT_LOCK_PATIENCE)") && !in_front.contains("lock_pty("),
+            "the exit asks a pane's agent without the lock's patience:\n{in_front}"
         );
         let live = body("fn live_unheld_panes(");
         assert!(

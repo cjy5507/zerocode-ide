@@ -906,6 +906,7 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
                     interrupted: false,
                 },
             }],
+            |term| live.contains_key(&term),
         );
         crate::pane_layout::capture_exit(layouts, screens);
         true
@@ -922,6 +923,116 @@ fn a_tab_of_a_coordinator_and_a_zo_beside_it_comes_back_whole() {
     assert_eq!(
         crate::cmd::settings::standing_set(&file),
         vec![main.clone()]
+    );
+    for pane in [FIRST, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}
+
+/// t-76489 r2 ③, through the ledger: the exit found run's coordinator in no
+/// saved leaf and filed it as a tab, and then its write failed — or the way
+/// out moved on before it was done. The window's log says so under the run's
+/// name, and the run's board gets one letter from the ledger itself with the
+/// conversation's id; the same exit told twice is one letter. A write that
+/// was done sends no letter. Before, a failed or cancelled write was logged
+/// "written as tab" and the board heard nothing.
+#[test]
+fn a_coordinator_lost_with_the_exits_write_is_told_to_its_run() {
+    const LEADER: u32 = 764_920;
+    const FIRST: u32 = 764_921;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let main = root.path().join("zerocode");
+    std::fs::create_dir_all(&main).expect("a checkout");
+    let host = Restoring::new(&main, FIRST, (0, test_actor(LEADER)));
+    let (_team, run) = a_run(&host, LEADER, "exit-lost");
+    let coordinator = format!("test-session-of-term-{LEADER}");
+    let live = vec![(
+        crate::pane_layout::LivePane {
+            term: 1,
+            worktree: main.to_string_lossy().into_owned(),
+            wake: crate::pane_layout::WakeAgent {
+                agent: "claude".to_string(),
+                key: "session_id".to_string(),
+                id: coordinator.clone(),
+                transcript_path: None,
+                interrupted: false,
+            },
+        },
+        Some(run.clone()),
+    )];
+    let exited = |written| crate::system_runtime::Exited {
+        doubled: Vec::new(),
+        filed: vec![crate::pane_layout::Filed::Tab(2)],
+        written,
+    };
+    let letters = |receipt: &str| {
+        the_rows()
+            .messages
+            .into_iter()
+            .filter(|mail| mail.run == run && mail.subject.as_str() == receipt)
+            .collect::<Vec<_>>()
+    };
+    let local = tempfile::tempdir().expect("the window's own folder");
+    let log = || {
+        std::fs::read_to_string(local.path().join(crate::system_runtime::WINDOW_LOG))
+            .unwrap_or_default()
+    };
+
+    crate::system_runtime::exit_notices(
+        local.path(),
+        &live,
+        &exited(crate::system_runtime::Written::Done),
+    );
+    assert!(
+        letters(&format!("exit-unwritten:{run}:{coordinator}")).is_empty()
+            && letters(&format!("exit-unplaced:{run}:{coordinator}")).is_empty(),
+        "a coordinator the file holds was told to its board"
+    );
+    assert!(log().contains("written as tab 2"), "{}", log());
+
+    let failed = exited(crate::system_runtime::Written::Failed(
+        "Not a directory (os error 20)".to_string(),
+    ));
+    crate::system_runtime::exit_notices(local.path(), &live, &failed);
+    crate::system_runtime::exit_notices(local.path(), &live, &failed);
+    let told = letters(&format!("exit-unwritten:{run}:{coordinator}"));
+    assert_eq!(told.len(), 1, "one exit, one letter");
+    assert_eq!(
+        (told[0].from.as_str(), told[0].to.as_str()),
+        (
+            zerocode_core::orchestration::LEDGER_ITSELF,
+            format!("run:{run}").as_str()
+        )
+    );
+    assert!(
+        told[0].body.as_str().contains(&coordinator) && !told[0].body.as_str().contains("os error"),
+        "{}",
+        told[0].body.as_str()
+    );
+    let lines = log();
+    assert!(
+        lines
+            .lines()
+            .any(|line| line.contains(&format!("run:{run}"))
+                && line.contains("the write failed: Not a directory")),
+        "{lines}"
+    );
+
+    // Cancelled: the same letter road, the same receipt, still one letter.
+    crate::system_runtime::exit_notices(
+        local.path(),
+        &live,
+        &exited(crate::system_runtime::Written::Cancelled),
+    );
+    assert_eq!(
+        letters(&format!("exit-unwritten:{run}:{coordinator}")).len(),
+        1
+    );
+    assert!(
+        log().contains("moved on before it was written"),
+        "{}",
+        log()
     );
     for pane in [FIRST, LEADER] {
         crate::agent_teams::forget_term(pane);

@@ -29608,10 +29608,11 @@ mod tests {
             "nothing captures the screens on the way out"
         );
         // The spending lives with the file's rules (t-14036), where the same
-        // walk says which tabs were standing.
+        // walk says which tabs were standing — asked by the exit's one write
+        // of the file (t-76489).
         assert!(
-            block_after(shipped, "fn capture_scrollback_at_exit(")
-                .contains("pane_layout::capture_exit(")
+            block_after(shipped, "fn capture_scrollback_at_exit(").contains("exit_write(")
+                && block_after(shipped, "fn exit_write(").contains("pane_layout::capture_exit(")
                 && block_after(rules, "pub(crate) fn capture_exit(")
                     .contains("std::mem::take(&mut layout.terms)"),
             "the capture no longer spends and clears the stored pty ids"

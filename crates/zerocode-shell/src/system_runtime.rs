@@ -654,8 +654,12 @@ pub(super) fn stage_layouts_file(config_root: &Path) -> PathBuf {
 /// lose: on 2026-10-26 the saved set had no line for run-4275's claude, and
 /// the next window brought back the zo beside it alone. Never a pane seated
 /// under another pane's team — a ledger worker comes back on the ledger's
-/// road and a teammate is its leader's.
-fn live_unheld_panes(state: &AppState) -> Vec<(pane_layout::LivePane, Option<String>)> {
+/// road and a teammate is its leader's. `in_front` says the pane's agent
+/// still holds its terminal ([`exit_agent_in_front`]).
+fn live_unheld_panes(
+    state: &AppState,
+    in_front: &dyn Fn(TermId) -> bool,
+) -> Vec<(pane_layout::LivePane, Option<String>)> {
     // Without the teammates a teammate would be filed as a tab of its own, so
     // a team table held past the patience files nothing this time (t-51380).
     let Some(seated) = seated_teammates() else {
@@ -670,23 +674,48 @@ fn live_unheld_panes(state: &AppState) -> Vec<(pane_layout::LivePane, Option<Str
     let coordinators = crate::orchestration::goodbye_answered()
         .then(crate::orchestration::seated_conversations)
         .flatten();
-    let terminals = state.terminals();
+    unheld_panes(
+        agents,
+        &sessions,
+        &statuses,
+        &seated,
+        coordinators.as_ref().map(|seated| seated as SeatOf<'_>),
+        in_front,
+    )
+}
+
+/// The run whose coordinator seat a conversation holds, by agent, key word
+/// and id ([`crate::orchestration::seated_conversations`]).
+pub(super) type SeatOf<'a> = &'a dyn Fn(&str, &str, &str) -> Option<String>;
+
+/// [`live_unheld_panes`] off the window's maps as read: `agents` and
+/// `sessions` the window's records of each pane, `seated` the teammates,
+/// `coordinators` the run a conversation's seat is, and `in_front` whether
+/// a pane's agent holds its terminal now. A pane whose agent was quit back
+/// to its shell keeps both records yet holds nothing (t-76489): it is no
+/// pane to write down, and a coordinator it once was is now another pane's.
+pub(super) fn unheld_panes(
+    agents: HashMap<TermId, &'static str>,
+    sessions: &HashMap<TermId, zerocode_core::ProviderSession>,
+    statuses: &HashMap<String, crate::last_status::LastStatus>,
+    seated: &std::collections::HashSet<u32>,
+    coordinators: Option<SeatOf<'_>>,
+    in_front: &dyn Fn(TermId) -> bool,
+) -> Vec<(pane_layout::LivePane, Option<String>)> {
     let mut live: Vec<_> = agents
         .into_iter()
-        .filter(|(term, _)| !seated.contains(term) && terminals.handle(*term).is_some())
+        .filter(|(term, _)| !seated.contains(term) && in_front(*term))
         .filter_map(|(term, agent)| {
             let session = sessions.get(&term)?;
             let key = match session.key {
                 zerocode_core::SessionKey::SessionId => "session_id",
                 zerocode_core::SessionKey::ConversationId => "conversation_id",
             };
-            let run = coordinators
-                .as_ref()
-                .and_then(|seated| seated(agent, key, &session.id));
+            let run = coordinators.and_then(|seated| seated(agent, key, &session.id));
             if agent != AgentKind::Zo.slug() && run.is_none() {
                 return None;
             }
-            let worktree = pane_worktree(&statuses, term, &session.id).unwrap_or_default();
+            let worktree = pane_worktree(statuses, term, &session.id).unwrap_or_default();
             Some((
                 pane_layout::LivePane {
                     term,
@@ -705,6 +734,18 @@ fn live_unheld_panes(state: &AppState) -> Vec<(pane_layout::LivePane, Option<Str
         .collect();
     live.sort_by_key(|(pane, _)| pane.term);
     live
+}
+
+/// Whether `term`'s agent holds its terminal as the window goes (t-76489),
+/// each pane's lock waited for at most [`EXIT_LOCK_PATIENCE`].
+fn exit_agent_in_front(state: &AppState, term: TermId) -> bool {
+    let shell_pane = { state.shell_panes().contains(&term) };
+    crate::agent_tools_runtime::agent_in_front_within(
+        state.terminals(),
+        shell_pane,
+        term,
+        Some(EXIT_LOCK_PATIENCE),
+    )
 }
 
 /// The workspace the pane `term`'s own hooks last named for the conversation
@@ -823,64 +864,140 @@ pub(super) fn capture_scrollback_at_exit(app: &AppHandle) {
     let _ = exit_capture_within(EXIT_CAPTURE_PATIENCE, move |wanted| {
         let state = app.state::<AppState>();
         let file = pane_layouts_file(state.config_root());
-        let live = live_unheld_panes(&state);
+        let in_front = |term| exit_agent_in_front(&state, term);
+        let live = live_unheld_panes(&state, &in_front);
         let sessions = state.pane_sessions().clone();
         let agents = state.agent_terms().clone();
         let terminals = state.terminals();
-        let mut doubled = Vec::new();
-        let mut filed = Vec::new();
-        // Through the file's one writer (t-7812 D) — the exit's own snapshot,
-        // so it is the one write a leaving window still makes.
-        let _ = pane_layout::rewrite(&file, |layouts| {
-            // One leaf per conversation (t-76489): the one whose pane holds
-            // it keeps it, before anything is filed against the names.
-            doubled = pane_layout::one_wake_each(layouts, |wake, term| {
-                crate::cmd::settings::pane_holds(&sessions, &agents, wake, term)
-            });
-            // Then the zo panes and the coordinators no saved leaf names
-            // (t-12063, t-76489), so their screens are captured below with
-            // everyone else's.
-            filed = pane_layout::file_unheld(
-                layouts,
-                live.iter().map(|(pane, _)| pane.clone()).collect(),
-            );
-            // Every leaf's screen, and which tabs were standing (t-14036).
-            pane_layout::capture_exit(layouts, |term| exit_screen(terminals, term));
-            wanted()
-        });
-        let local = state.local_data_root();
-        if !doubled.is_empty() {
-            note_window_event(
-                local,
-                &format!(
-                    "pane layouts: the exit kept one leaf per conversation and took {} off {} other leaf(s)",
-                    doubled.join(", "),
-                    doubled.len()
-                ),
-            );
-        }
-        for ((pane, run), filed) in live.iter().zip(filed) {
-            let Some(run) = run else { continue };
-            if let Some(line) = coordinator_filed_line(pane, run, filed) {
-                note_window_event(local, &line);
-            }
-            if filed == pane_layout::Filed::Unplaced {
-                coordinator_unplaced_letter(pane, run);
-            }
-        }
+        let exited = exit_write(
+            &file,
+            live.iter().map(|(pane, _)| pane.clone()).collect(),
+            &|wake, term| {
+                crate::cmd::settings::pane_holds(&sessions, &agents, &in_front, wake, term)
+            },
+            &|term| terminals.handle(term).is_some(),
+            &|term| exit_screen(terminals, term),
+            wanted,
+        );
+        exit_notices(state.local_data_root(), &live, &exited);
     });
+}
+
+/// What the exit's own write did ([`exit_write`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Exited {
+    /// Each conversation taken off a leaf because another leaf names it.
+    pub(crate) doubled: Vec<String>,
+    /// What became of each live pane, in the order given.
+    pub(crate) filed: Vec<pane_layout::Filed>,
+    /// Whether the file holds any of it.
+    pub(crate) written: Written,
+}
+
+/// How the exit's own write ended (t-76489). Only [`Written::Done`] put
+/// anything in the file: the layouts are changed in memory first, and a
+/// write cancelled or failed after that leaves the file as the window's own
+/// saves left it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Written {
+    /// The file holds what the exit wrote.
+    Done,
+    /// The way out moved on before the write was done: nothing written.
+    Cancelled,
+    /// The file could not be replaced, in the error's own words.
+    Failed(String),
+}
+
+/// The exit's one write of the layouts file, through its one writer
+/// (t-7812 D): one leaf per conversation, the one `holds` says holds it
+/// now (t-76489); the zo panes and coordinators in `live` no saved leaf
+/// names (t-12063), `standing` saying which shells are still open; every
+/// leaf's `screen` and which tabs were standing (t-14036) — and written only
+/// while `wanted` says the way out still waits.
+pub(super) fn exit_write(
+    file: &Path,
+    live: Vec<pane_layout::LivePane>,
+    holds: &dyn Fn(&pane_layout::WakeAgent, u32) -> bool,
+    standing: &dyn Fn(u32) -> bool,
+    screen: &dyn Fn(u32) -> Option<String>,
+    wanted: &dyn Fn() -> bool,
+) -> Exited {
+    let mut doubled = Vec::new();
+    let mut filed = Vec::new();
+    let wrote = pane_layout::rewrite(file, |layouts| {
+        // One leaf per conversation (t-76489): the one whose pane holds
+        // it keeps it, before anything is filed against the names.
+        doubled = pane_layout::one_wake_each(layouts, holds);
+        // Then the zo panes and the coordinators no saved leaf names
+        // (t-12063, t-76489), so their screens are captured below with
+        // everyone else's.
+        filed = pane_layout::file_unheld(layouts, live, standing);
+        // Every leaf's screen, and which tabs were standing (t-14036).
+        pane_layout::capture_exit(layouts, screen);
+        wanted()
+    });
+    let written = match wrote {
+        Ok(true) => Written::Done,
+        Ok(false) => Written::Cancelled,
+        Err(error) => Written::Failed(error.to_string()),
+    };
+    Exited {
+        doubled,
+        filed,
+        written,
+    }
+}
+
+/// The window log's lines and the runs' letters for what the exit's write
+/// did (t-76489): the leaves it took a doubled conversation off, and each
+/// coordinator no saved leaf named — written down, or, when the write was
+/// cancelled or failed or found it no place, said so under its run's name
+/// in the log and on its board.
+pub(super) fn exit_notices(
+    local: &Path,
+    live: &[(pane_layout::LivePane, Option<String>)],
+    exited: &Exited,
+) {
+    if exited.written == Written::Done && !exited.doubled.is_empty() {
+        note_window_event(
+            local,
+            &format!(
+                "pane layouts: the exit kept one leaf per conversation and took {} off {} other leaf(s)",
+                exited.doubled.join(", "),
+                exited.doubled.len()
+            ),
+        );
+    }
+    for ((pane, run), filed) in live.iter().zip(exited.filed.iter().copied()) {
+        let Some(run) = run else { continue };
+        if let Some(line) = coordinator_filed_line(pane, run, filed, &exited.written) {
+            note_window_event(local, &line);
+        }
+        if let Some((body, receipt)) = coordinator_lost_letter(pane, run, filed, &exited.written) {
+            crate::orchestration::post_observation_once(
+                Some(run),
+                &format!("run:{run}"),
+                &body,
+                &receipt,
+                now_epoch_ms(),
+            );
+        }
+    }
 }
 
 /// The window log's line for a run's coordinator conversation the exit
 /// found no saved leaf naming (t-76489): written into its workspace as a tab
-/// of its own, put into the leaf that held its shell, or — named once more
-/// as the run's — placed nowhere. Nothing for one a leaf already named. Only
-/// the run, the pane, the agent, the conversation's first characters and the
-/// workspace: nothing anybody wrote.
-fn coordinator_filed_line(
+/// of its own, put into the leaf that held its shell or the one that named
+/// it from a pane gone, or — named once more as the run's — placed nowhere,
+/// or lost with a write that was cancelled or failed. Nothing for one a leaf
+/// already named. Only the run, the pane, the agent, the conversation's
+/// first characters, the workspace and the write's error: nothing anybody
+/// wrote.
+pub(super) fn coordinator_filed_line(
     pane: &pane_layout::LivePane,
     run: &str,
     filed: pane_layout::Filed,
+    written: &Written,
 ) -> Option<String> {
     let head = format!(
         "exit: coordinator of run:{run} on terminal {} ({} {})",
@@ -888,10 +1005,26 @@ fn coordinator_filed_line(
         pane.wake.agent,
         crate::restart_nudge_runtime::session_prefix(&pane.wake.id)
     );
+    if filed == pane_layout::Filed::Named {
+        return None;
+    }
+    let unwritten = match written {
+        Written::Done => None,
+        Written::Cancelled => Some("the way out moved on before it was written".to_string()),
+        Written::Failed(error) => Some(format!("the write failed: {error}")),
+    };
+    if let Some(why) = unwritten {
+        return Some(format!(
+            "{head} was in no saved leaf and {why} — the next window cannot bring it back on its own"
+        ));
+    }
     match filed {
         pane_layout::Filed::Named => None,
         pane_layout::Filed::Renamed => Some(format!(
             "{head} was in no saved leaf — the leaf holding its shell names it now"
+        )),
+        pane_layout::Filed::Relinked => Some(format!(
+            "{head} was named only by a leaf of a pane gone — that leaf stands for its pane now"
         )),
         pane_layout::Filed::Tab(id) => Some(format!(
             "{head} was in no saved tab — written as tab {id} of {}",
@@ -903,20 +1036,39 @@ fn coordinator_filed_line(
     }
 }
 
-/// The run's own letter for a coordinator conversation the exit could place
-/// nowhere (t-76489): its coordinator card says so, with the way back. The
-/// run, the agent and the conversation's id — nothing anybody wrote.
-fn coordinator_unplaced_letter(pane: &pane_layout::LivePane, run: &str) {
-    let body = format!(
-        "the window went with this run's coordinator conversation ({} {}) in no saved tab and no workspace it could name — reopen it by its id",
-        pane.wake.agent, pane.wake.id
-    );
-    let receipt = format!("exit-unplaced:{run}:{}", pane.wake.id);
-    crate::orchestration::post_observation_once(
-        Some(run),
-        &format!("run:{run}"),
-        &body,
-        &receipt,
-        now_epoch_ms(),
-    );
+/// The run's own letter for a coordinator conversation the next window will
+/// not bring back on its own (t-76489) — placed nowhere, or its write
+/// cancelled or failed — as its body and its receipt: its coordinator card
+/// says so, with the way back. The run, the agent and the conversation's id
+/// — nothing anybody wrote, not the error's words either. Nothing for one
+/// the file holds.
+pub(super) fn coordinator_lost_letter(
+    pane: &pane_layout::LivePane,
+    run: &str,
+    filed: pane_layout::Filed,
+    written: &Written,
+) -> Option<(String, String)> {
+    let (why, road) = match (filed, written) {
+        (pane_layout::Filed::Named, _) => return None,
+        (_, Written::Cancelled) => (
+            "in no saved tab, and the window went before its last write of the tabs was done",
+            "exit-unwritten",
+        ),
+        (_, Written::Failed(_)) => (
+            "in no saved tab, and the window's last write of the tabs failed",
+            "exit-unwritten",
+        ),
+        (pane_layout::Filed::Unplaced, Written::Done) => (
+            "in no saved tab and no workspace it could name",
+            "exit-unplaced",
+        ),
+        (_, Written::Done) => return None,
+    };
+    Some((
+        format!(
+            "the window went with this run's coordinator conversation ({} {}) {why} — reopen it by its id",
+            pane.wake.agent, pane.wake.id
+        ),
+        format!("{road}:{run}:{}", pane.wake.id),
+    ))
 }
