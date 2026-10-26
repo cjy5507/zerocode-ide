@@ -14,6 +14,8 @@
 //! [`looks_like_a_credential`] and [`contains_ascii_case`] — allocate
 //! nothing; [`mask_values`] and [`may_carry_a_credential`] build strings.
 
+use std::borrow::Cow;
+
 /// Words that NAME a credential, matched inside a word in any ASCII case.
 pub const KEY_WORDS: [&str; 7] = [
     "authorization",
@@ -126,6 +128,158 @@ pub fn contains_ascii_case(raw: &str, needle: &str) -> bool {
         .any(|part| part.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+/// A complete reference, optionally named by an assignment or auth header.
+/// Bare `$TOKEN`, concatenated literals and incomplete delimiters remain
+/// credential candidates. Every consumer uses this same boundary reading.
+#[must_use]
+pub fn is_reference_value(value: &str) -> bool {
+    reference_prefix_len(value, true) == Some(value.len())
+}
+
+/// The end of one reference value, including an optional pair of quotes.
+fn reference_value_end(value: &str) -> Option<usize> {
+    let quote = value
+        .as_bytes()
+        .first()
+        .copied()
+        .filter(|b| matches!(b, b'\'' | b'"'));
+    let start = usize::from(quote.is_some());
+    let raw = &value[start..];
+    let mut end = if let Some(name) = raw.strip_prefix("{{") {
+        let close = name.find("}}")?;
+        crate::computer_recipe::recipe_param_name(&name[..close]).then_some(close + 4)?
+    } else if let Some(name) = raw.strip_prefix("${") {
+        let close = name.find('}')?;
+        let name = &name[..close];
+        (crate::computer_recipe::recipe_param_name(name) && !name.contains('-'))
+            .then_some(close + 3)?
+    } else if raw.starts_with("$(") {
+        command_reference_end(raw)?
+    } else {
+        return None;
+    } + start;
+    if let Some(quote) = quote {
+        if value.as_bytes().get(end) != Some(&quote) {
+            return None;
+        }
+        end += 1;
+    }
+    value[end..]
+        .chars()
+        .next()
+        .is_none_or(char::is_whitespace)
+        .then_some(end)
+}
+
+/// Read command substitutions without executing them. Quoted or escaped
+/// parentheses do not close the outer substitution.
+fn command_reference_end(value: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, byte) in value.bytes().enumerate().skip(2) {
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' && quote != Some(b'\'') {
+            escaped = true;
+        } else if quote == Some(byte) {
+            quote = None;
+        } else if quote.is_none() {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (!value[2..index].trim().is_empty()).then_some(index + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+/// A whole reference token or the syntax that names it. Headers consume their
+/// entire value; an extra literal after a header reference still needs masking.
+fn reference_prefix_len(text: &str, named: bool) -> Option<usize> {
+    if let Some(end) = reference_value_end(text) {
+        return Some(end);
+    }
+    if !named {
+        return None;
+    }
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let word = &text[..end];
+    if let Some(split) = word.find(['=', ':']) {
+        let key = &word[..split];
+        if crate::computer_recipe::recipe_param_name(key)
+            && !(word.as_bytes()[split] == b':' && names_a_header(key))
+            && let Some(value_end) = reference_value_end(&text[split + 1..])
+        {
+            return Some(split + 1 + value_end);
+        }
+    }
+    let after = text[end..].trim_start();
+    if word.ends_with(':') && names_a_header(word) {
+        let scheme_end = after.find(char::is_whitespace).unwrap_or(after.len());
+        let value = if SCHEME_WORDS
+            .iter()
+            .any(|scheme| after[..scheme_end].eq_ignore_ascii_case(scheme))
+            || after[..scheme_end].eq_ignore_ascii_case("basic")
+        {
+            after[scheme_end..].trim_start()
+        } else {
+            after
+        };
+        return reference_value_end(value)
+            .filter(|&end| value[end..].trim().is_empty())
+            .map(|_| text.len());
+    }
+    if SCHEME_WORDS
+        .iter()
+        .any(|scheme| word.eq_ignore_ascii_case(scheme))
+        || (word.starts_with('-') && names_a_credential(word))
+    {
+        return reference_value_end(after).map(|value_end| text.len() - after.len() + value_end);
+    }
+    None
+}
+
+/// Remove only complete references and the names attached to them before the
+/// conservative cue scan. A real value elsewhere on the line still counts.
+fn without_reference_values(line: &str) -> Cow<'_, str> {
+    let mut remaining: Option<String> = None;
+    let mut rest = line;
+    while !rest.is_empty() {
+        let space = rest.len() - rest.trim_start().len();
+        if let Some(remaining) = &mut remaining {
+            remaining.push_str(&rest[..space]);
+        }
+        rest = &rest[space..];
+        if rest.is_empty() {
+            break;
+        }
+        let end = if let Some(end) = reference_prefix_len(rest, true) {
+            remaining.get_or_insert_with(|| line[..line.len() - rest.len()].to_owned());
+            end
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            if let Some(remaining) = &mut remaining {
+                remaining.push_str(&rest[..end]);
+            }
+            end
+        };
+        rest = &rest[end..];
+    }
+    remaining.map_or(Cow::Borrowed(line), |mut remaining| {
+        // `export KEY=reference` leaves only `export`, with no literal value.
+        remaining.truncate(remaining.trim_end().len());
+        Cow::Owned(remaining)
+    })
+}
+
 /// Auth-scheme words whose next word is the credential (`Bearer <token>`).
 /// `Basic` is not here: it is an ordinary English word, and a Basic header
 /// already names itself (`Authorization: Basic …`).
@@ -210,10 +364,12 @@ fn names_a_header(word: &str) -> bool {
 /// credential: a word that names or looks like one, an auth scheme, a URL's
 /// userinfo, a glued password flag, a shell `export`, or a PEM block. A road
 /// that must not pass a credential on withholds such a line whole rather than
-/// trust [`mask_values`] to find the whole value. No allocation beyond the
-/// userinfo check.
+/// trust [`mask_values`] to find the whole value. Complete references are
+/// omitted before reading the remaining cues.
 #[must_use]
 pub fn may_carry_a_credential(line: &str) -> bool {
+    let remaining = without_reference_values(line);
+    let line = remaining.as_ref();
     looks_like_a_payment_card(line)
         || names_a_credential(line)
         || line.split_whitespace().any(looks_like_a_credential)
@@ -251,6 +407,10 @@ fn unclosed_quote(value: &str) -> Option<char> {
 }
 
 fn mask_line(line: &str, out: &mut String, reading: Reading) {
+    if reading == Reading::ByNameAndShape && looks_like_a_payment_card(line) {
+        out.push_str(MASK);
+        return;
+    }
     let netrc = line
         .split_whitespace()
         .next()
@@ -265,6 +425,15 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
         let space = rest.len() - rest.trim_start().len();
         let spacing = &rest[..space];
         rest = &rest[space..];
+        if quoted.is_none()
+            && let Some(end) = reference_prefix_len(rest, !mask_next)
+        {
+            out.push_str(spacing);
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+            mask_next = false;
+            continue;
+        }
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         let (word, after) = rest.split_at(end);
         rest = after;
@@ -338,6 +507,7 @@ mod tests {
         for text in [
             "password={{password}}",
             "password=${PASSWORD}",
+            "TASK_TOKEN=${TOKEN}",
             "export GITHUB_TOKEN=$(gh auth token)",
             "Authorization: Bearer ${TOKEN}",
             "Bearer {{token}}",
@@ -373,6 +543,8 @@ mod tests {
             "password={{password}}suffix",
             "password=prefix${PASSWORD}",
             "password=${PASSWORD}suffix",
+            "password=${PASSWORD-default}",
+            "password=${PASSWORD:-default}",
             "password=$(gh auth token)suffix",
             "password={{}}",
             "password=${}",
@@ -385,7 +557,9 @@ mod tests {
             assert!(may_carry_a_credential(text), "{text}");
             assert_ne!(mask_named_values(text), text, "{text}");
         }
-        assert!(may_carry_a_credential("export X=hunter2 password={{password}}"));
+        assert!(may_carry_a_credential(
+            "export X=hunter2 password={{password}}"
+        ));
         for text in ["4111111111111111", "4111 1111 1111 1111"] {
             assert!(may_carry_a_credential(text), "{text}");
             assert_eq!(mask_values(text), MASK, "{text}");

@@ -252,10 +252,9 @@ pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Whether a word holds a recipe's placeholder (`{{name}}`): a line a recipe
-/// walk logs in its own words — the document's text, with its names.
+/// A whole reference, including a named assignment, carries no literal input.
 fn names_a_placeholder(word: &str) -> bool {
-    zerocode_core::computer_recipe::privacy::is_parameter_word(word)
+    zerocode_core::computer_recipe::privacy::is_reference_value(word)
 }
 
 /// How a redacted word reads in the log — written and read back here only.
