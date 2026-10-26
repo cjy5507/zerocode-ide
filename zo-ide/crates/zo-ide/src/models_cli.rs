@@ -515,6 +515,52 @@ mod tests {
         );
     }
 
+    /// t-76984: `zo models --json` carries each failed source's kind and
+    /// HTTP number as the report holds them — `failureKind`, `httpStatus` —
+    /// so the window reads them instead of the sentence. A source that
+    /// failed without a response has a kind and no number.
+    #[test]
+    fn a_failed_reports_kind_and_http_status_reach_the_json() {
+        use runtime::model_catalog::ModelCatalog;
+        use runtime::model_discovery::{DiscoveredCatalog, Overlay, SourceReport, UpdatePolicy};
+        let home = tempfile::tempdir().expect("an overlay home");
+        let user = ModelCatalog::load_from_home(home.path()).expect("an empty overlay");
+        let rows = user.rows(&super::ALL_PROVIDERS, false);
+        let report = |value: serde_json::Value| -> SourceReport { serde_json::from_value(value).expect("a report") };
+        let catalog = DiscoveredCatalog {
+            fetched_at: 1_790_121_000,
+            reports: vec![
+                report(serde_json::json!({
+                    "provider": "openai", "source": runtime::model_discovery::OPENAI_SOURCE, "ok": false,
+                    "detail": "live: HTTP 401 Unauthorized · cache: skipped: no models_cache.json", "count": 0,
+                    "fetched_at": 1_790_121_000_u64, "origin": "", "failure_kind": "auth_rejected", "http_status": 401
+                })),
+                report(serde_json::json!({
+                    "provider": "xai", "source": runtime::model_discovery::XAI_SOURCE, "ok": false,
+                    "detail": "error sending request", "count": 0,
+                    "fetched_at": 1_790_121_000_u64, "origin": "", "failure_kind": "network"
+                })),
+            ],
+            ..Default::default()
+        };
+        let overlay = Overlay::default();
+        let report = super::Report {
+            policy: UpdatePolicy::Auto,
+            catalog: &catalog,
+            user: &user,
+            rows: &rows,
+            overlay: &overlay,
+            merged: None,
+            tiers: &[],
+            now: 1_790_121_060,
+        };
+        let json: serde_json::Value = serde_json::from_str(&report.json().expect("json")).unwrap();
+        assert_eq!(json["reports"][0]["failureKind"], "auth_rejected");
+        assert_eq!(json["reports"][0]["httpStatus"], 401);
+        assert_eq!(json["reports"][1]["failureKind"], "network");
+        assert!(json["reports"][1].get("httpStatus").is_none(), "no response, no number: {}", json["reports"][1]);
+    }
+
     /// C4 (t-6248): a shipped row its provider withdrew says so on its own
     /// line — in the picker's words, with the local clock of the first list
     /// without it — and the family alias left with no living release says

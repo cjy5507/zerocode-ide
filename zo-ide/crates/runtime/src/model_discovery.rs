@@ -1505,9 +1505,15 @@ fn cache_origin(path: &Path) -> String {
 /// The OpenAI column: the ChatGPT backend live, else the freshest Codex
 /// cache this machine has — with the live failure on the report line.
 fn openai_models() -> SourceAnswer {
-    match chatgpt_backend_models() {
+    openai_answer(chatgpt_backend_models(), codex_cache_models)
+}
+
+/// [`openai_models`] over the two answers it chooses between: the live one,
+/// and — asked only when the live one failed — the cache's.
+fn openai_answer(live: SourceAnswer, cache: impl FnOnce() -> SourceAnswer) -> SourceAnswer {
+    match live {
         Ok(answer) => Ok(answer),
-        Err((source, live)) => match codex_cache_models() {
+        Err((source, live)) => match cache() {
             Ok(mut cached) => {
                 cached.note = Some(format!("live: {live}"));
                 Ok(cached)
@@ -5246,6 +5252,216 @@ mod tests {
         assert_eq!(report.credential_store, WINDOW_STORE);
         assert!(report.due(now, super::LIVE_TTL_SECS, || true), "due the same second it was written");
         assert!(report.due(now, super::LIVE_TTL_SECS, || false), "whatever this process holds");
+    }
+
+    // ---- t-76984: a failure's kind and HTTP number are made where it happens ----
+
+    fn openai_tokens() -> core_types::OpenAiOAuthTokens {
+        core_types::OpenAiOAuthTokens {
+            access_token: "secret-bearer".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            account_id: Some("acct_42".to_string()),
+            scopes: Vec::new(),
+        }
+    }
+
+    /// One refresh of the `source` column that finds `answer`, over a
+    /// previous catalog that skipped every source. Returns that source's
+    /// report as the cache file writes it.
+    fn report_json(source: &'static str, answer: &super::SourceAnswer, now: u64) -> Value {
+        let refreshed = super::refresh_under(
+            Some(&skipped_everywhere(now)),
+            &[source],
+            now,
+            &[],
+            |asked| if asked == source { answer.clone() } else { unreachable!("{asked} is not due") },
+            |_| "home".to_string(),
+        );
+        let report = refreshed.reports.iter().find(|report| report.source == source).expect("the report");
+        serde_json::to_value(report).expect("a report serializes")
+    }
+
+    /// The stderr lines of the same refresh when the previous catalog holds a
+    /// success another store answered, so the kept-answer line is printed.
+    fn openai_kept_lines(answer: &super::SourceAnswer, now: u64) -> Vec<String> {
+        let mut previous = skipped_everywhere(now);
+        let kept: super::SourceReport = serde_json::from_value(json!({
+            "provider": "openai", "source": super::OPENAI_SOURCE, "ok": true, "detail": "1 model(s)",
+            "count": 0, "fetched_at": now - 60, "origin": "live", "credential_store": "CODEX_HOME:/accounts/pane"
+        }))
+        .expect("a success report");
+        previous.reports.iter_mut().filter(|report| report.source == super::OPENAI_SOURCE).for_each(|report| *report = kept.clone());
+        let mut lines = Vec::new();
+        super::refresh_noting(
+            Some(&previous),
+            &[super::OPENAI_SOURCE],
+            now,
+            &[],
+            |source| if source == super::OPENAI_SOURCE { answer.clone() } else { unreachable!("{source} is not due") },
+            |_| "home".to_string(),
+            |line| lines.push(line.to_string()),
+        );
+        lines
+    }
+
+    /// t-76984: the kind and the HTTP number of a failure come from the
+    /// response that failed — never from its words, its URL or the name of a
+    /// folder. Every status the table names, asked of a local ChatGPT
+    /// backend; the OpenAI column then joins that live failure with its
+    /// cache's miss in one sentence that opens `live:` (the real shape), and
+    /// the cache sits in a folder whose name holds `timeout` and `connect`.
+    /// The report and the stderr line both keep the live request's kind.
+    #[test]
+    fn a_failed_response_names_its_kind_and_status_whatever_the_sentence_or_the_folder_says() {
+        let now = 1_790_300_000;
+        let table = [
+            ("401 Unauthorized", "auth_rejected", 401_u64),
+            ("403 Forbidden", "forbidden", 403),
+            ("404 Not Found", "not_found", 404),
+            ("429 Too Many Requests", "rate_limited", 429),
+            ("500 Internal Server Error", "server_error", 500),
+            ("503 Service Unavailable", "server_error", 503),
+            ("418 I'm a teapot", "unknown", 418),
+        ];
+        for folder in ["account", "timeout-connect-home"] {
+            for (status_line, kind, status) in table {
+                let dir = scratch("kind-by-status");
+                let _machine = bare_machine(&dir);
+                let (url, backend) = fake_backend(vec![(
+                    status_line,
+                    vec![],
+                    "connection timed out: could not connect to the key service".to_string(),
+                )]);
+                let cache_path = dir.join(folder).join(super::CODEX_MODELS_CACHE_FILE);
+                let live = super::chatgpt_backend_models_at(&url, &openai_tokens(), &cache_path, None, now);
+                backend.join().unwrap();
+                let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
+                let report = report_json(super::OPENAI_SOURCE, &answer, now);
+                let scene = format!("{status_line} / {folder}: {}", report["detail"]);
+                assert!(report["detail"].as_str().unwrap().starts_with("live: "), "the real shape: {scene}");
+                assert_eq!(report["failure_kind"], json!(kind), "{scene}");
+                assert_eq!(report["http_status"], json!(status), "{scene}");
+                let lines = openai_kept_lines(&answer, now);
+                assert_eq!(lines.len(), 1, "{scene}: {lines:?}");
+                assert!(lines[0].contains(&format!("{kind} (HTTP {status})")), "{scene}: {}", lines[0]);
+                assert!(!lines[0].contains("timeout") && !lines[0].contains("timed out"), "{scene}: {}", lines[0]);
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    /// t-76984: a request that never got a response is `network` when the
+    /// connection was refused — no HTTP number — and a machine with no login
+    /// at all is `no_credentials`, even when the cache it looked in sits in a
+    /// folder named for a timeout.
+    #[test]
+    fn a_refused_connection_is_network_and_no_login_is_no_credentials() {
+        let now = 1_790_300_000;
+        let dir = scratch("kind-by-transport");
+        let cache_path = dir.join("timeout-connect-home").join(super::CODEX_MODELS_CACHE_FILE);
+        let (offline_url, gone) = fake_backend(Vec::new());
+        gone.join().unwrap();
+        {
+            let _machine = bare_machine(&dir);
+            let live = super::chatgpt_backend_models_at(&offline_url, &openai_tokens(), &cache_path, None, now);
+            let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
+            let report = report_json(super::OPENAI_SOURCE, &answer, now);
+            assert_eq!(report["failure_kind"], json!("network"), "{}", report["detail"]);
+            assert!(report.get("http_status").is_none(), "no response, no number: {report}");
+            let lines = openai_kept_lines(&answer, now);
+            assert!(lines.len() == 1 && lines[0].contains("network") && !lines[0].contains("HTTP"), "{lines:?}");
+        }
+        {
+            let _scope = nothing_configured(&dir);
+            let answer = super::openai_answer(super::chatgpt_backend_models(), || {
+                super::codex_cache_models_from(std::slice::from_ref(&cache_path))
+            });
+            let report = report_json(super::OPENAI_SOURCE, &answer, now);
+            assert!(report["detail"].as_str().unwrap().starts_with("skipped: "), "{}", report["detail"]);
+            assert_eq!(report["failure_kind"], json!("no_credentials"), "{}", report["detail"]);
+            assert!(report.get("http_status").is_none(), "{report}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// t-76984: a login zo knows is unusable before it asks (an expired
+    /// Claude session with nothing to renew it) is `credential_unusable` —
+    /// the way back is to sign in again — while no login at all is
+    /// `no_credentials`. Neither carries an HTTP number.
+    #[test]
+    fn an_unusable_login_is_credential_unusable_and_no_login_is_no_credentials() {
+        let now = 1_790_300_000;
+        let store = scratch("kind-by-login-store");
+        let managed = scratch("kind-by-login-managed");
+        std::fs::write(
+            managed.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"expired-access-value","expiresAt":1000,"scopes":["user:inference"]}}"#,
+        )
+        .unwrap();
+        let answer_of = |managed: Option<&std::path::Path>| {
+            let _scope = claude_scope(&store, managed);
+            super::anthropic_models()
+        };
+        let report = report_json(super::ANTHROPIC_SOURCE, &answer_of(Some(managed.as_path())), now);
+        assert_eq!(report["failure_kind"], json!("credential_unusable"), "{}", report["detail"]);
+        assert!(report.get("http_status").is_none(), "{report}");
+        let report = report_json(super::ANTHROPIC_SOURCE, &answer_of(None), now);
+        assert_eq!(report["failure_kind"], json!("no_credentials"), "{}", report["detail"]);
+        let _ = std::fs::remove_dir_all(store);
+        let _ = std::fs::remove_dir_all(managed);
+    }
+
+    /// t-76984: xAI spells its own refusal (`spending-limit`) in the row's
+    /// words, and the status still comes from the response: 403 is
+    /// `forbidden` whatever the sentence says.
+    #[test]
+    fn a_row_worded_refusal_keeps_the_kind_of_its_status() {
+        let now = 1_790_300_000;
+        let store = scratch("kind-by-row-words");
+        let (url, server) = fake_backend(vec![(
+            "403 Forbidden",
+            vec![("content-type", "application/json")],
+            XAI_SPENDING_LIMIT.to_string(),
+        )]);
+        let base = url.replace("/backend-api/codex/models", "/v1");
+        let refused = {
+            let _scope = nothing_configured(&store);
+            std::env::set_var("XAI_BASE_URL", &base);
+            std::env::set_var("XAI_API_KEY", "xai-test-key");
+            super::xai_models()
+        };
+        server.join().unwrap();
+        let report = report_json(super::XAI_SOURCE, &refused, now);
+        assert!(report["detail"].as_str().unwrap().contains("no subscription or credits"), "{}", report["detail"]);
+        assert_eq!(report["failure_kind"], json!("forbidden"), "{}", report["detail"]);
+        assert_eq!(report["http_status"], json!(403), "{}", report["detail"]);
+        let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// t-76984: a cache written before the keys existed parses with no kind
+    /// and no number and writes none back; both keys round-trip, and the
+    /// number is left out when there is none.
+    #[test]
+    fn the_failure_keys_are_optional_on_read_and_round_trip() {
+        let old: super::SourceReport = serde_json::from_value(json!({
+            "provider": "openai", "source": super::OPENAI_SOURCE, "ok": false,
+            "detail": "HTTP 401 Unauthorized", "count": 0, "fetched_at": 1_790_000_000_u64, "origin": ""
+        }))
+        .expect("an old report parses");
+        let written = serde_json::to_value(&old).expect("a report serializes");
+        assert_eq!(written["failure_kind"], json!(""), "no kind was ever written");
+        assert!(written.get("http_status").is_none(), "{written}");
+        let failed: super::SourceReport = serde_json::from_value(json!({
+            "provider": "openai", "source": super::OPENAI_SOURCE, "ok": false,
+            "detail": "HTTP 401 Unauthorized", "count": 0, "fetched_at": 1_790_000_000_u64, "origin": "",
+            "failure_kind": "auth_rejected", "http_status": 401
+        }))
+        .expect("a new report parses");
+        let written = serde_json::to_value(&failed).expect("a report serializes");
+        assert_eq!(written["failure_kind"], json!("auth_rejected"));
+        assert_eq!(written["http_status"], json!(401));
+        assert_eq!(serde_json::from_value::<super::SourceReport>(written).expect("and reads back"), failed);
     }
 
     /// Codex's own model list on 2026-09-23 (the window's runtime home,
