@@ -116,13 +116,16 @@ pub(crate) struct Seen {
     pub(crate) exe: Option<String>,
 }
 
-/// One look at a pid.
+/// One look at a pid. Only macOS reads a process
+/// ([`looked_up_by_the_kernel`]); elsewhere every look is [`Lookup::Unread`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Lookup {
     /// No process has the pid.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Gone,
     /// A process has it, and the host could not say what it is.
     Unread,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Seen(Seen),
 }
 
