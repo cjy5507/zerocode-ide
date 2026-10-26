@@ -6833,6 +6833,76 @@ async fn e2e_a_pane_closed_under_zo_ends_without_a_panic() {
     );
 }
 
+/// [`e2e_a_pane_closed_under_zo_ends_without_a_panic`] on the terminal the
+/// window really gives a pane: the pty is zo's standard streams and nobody's
+/// controlling terminal (`ps` shows `??` for every pane process), so closing it
+/// sends no SIGHUP. Only the input knows the pane is gone, and crossterm's
+/// reader meets a closed pty's end-of-file by reading again, forever: the turn
+/// ran on and kept the session's writer lease after the window restarted
+/// (t-76434, 2026-10-26). Closed mid-turn with a tool parked, zo ends, and the
+/// session opens again at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_pane_closed_mid_turn_ends_zo_without_a_hang_up_signal() {
+    let layout = Layout::new();
+    let service =
+        ScriptedAnthropicService::parked_tool(PARKED_TOOL_SECONDS, "back after the pane closed")
+            .await
+            .expect("start parked-tool script");
+    let args = interactive_args();
+    let mut run = pty(&layout, service.base_url(), &args);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Run the long command and tell me when it lands\r")
+        .expect("send the tool prompt");
+    let transcript = wait_for_transcript(&layout, "toolu_parked_e2e", TEST_TIMEOUT);
+
+    let code = run.hang_up(TEST_TIMEOUT);
+    assert_eq!(
+        code,
+        Some(0),
+        "zo ran on after the window closed its pane mid-turn: {code:?}"
+    );
+
+    let session_id = session_id_of(&transcript);
+    let resumed_args = [
+        "--resume",
+        session_id.as_str(),
+        "--permission-mode",
+        "danger-full-access",
+    ];
+    let mut resumed = pty(&layout, service.base_url(), &resumed_args);
+    resumed.wait_for("Run the long command", TEST_TIMEOUT);
+    resumed
+        .send(b"Just say you are back\r")
+        .expect("send the resumed prompt");
+    resumed.wait_for("back after the pane closed", TEST_TIMEOUT);
+    let _ = resumed.finish();
+}
+
+/// The same pane closed while zo idles. Nothing wakes an idle zo but its idle
+/// look, `IDLE_TEND` (thirty seconds) after the last, so that is the bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_pane_closed_while_zo_idles_ends_zo_without_a_hang_up_signal() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("the answer stands")
+        .await
+        .expect("start text script");
+    let args = interactive_args();
+    let mut run = pty(&layout, service.base_url(), &args);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"answer once\r").expect("send prompt");
+    run.wait_for("the answer stands", TEST_TIMEOUT);
+    let _ = wait_for_transcript(&layout, "the answer stands", TEST_TIMEOUT);
+
+    let code = run.hang_up(Duration::from_secs(45));
+    assert_eq!(
+        code,
+        Some(0),
+        "an idle zo outlived the pane the window closed: {code:?}"
+    );
+}
+
 /// Wait until the scripted service has recorded exactly `expected` request
 /// bodies, then pin the count. A prompt whose echo already contains the
 /// answer text makes `wait_for` return before the provider is asked, so the
