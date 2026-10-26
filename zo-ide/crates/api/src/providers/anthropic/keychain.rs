@@ -539,7 +539,7 @@ fn read_store_session(store: &ClaudeCodeStore) -> Result<KeychainSession, Creden
 /// The store this process reads its Claude Code login from, as a
 /// model-discovery report names it: `keychain` for the machine's own login,
 /// else `<variable>:<folder>` for the variable that named the folder
-/// ([`ClaudeCodeStore::current`]). Reads no secret and no file.
+/// (`ClaudeCodeStore::current`). Reads no secret and no file.
 #[must_use]
 pub fn claude_code_store_label() -> String {
     ClaudeCodeStore::current().label()

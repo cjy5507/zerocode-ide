@@ -4622,8 +4622,8 @@ fn reference_keychain() -> &'static RwLock<Option<WindowKeychain>> {
 /// window keeps for them: the keychain item `service_prefix` + the name — the
 /// item and the reader [`find_service_keys_in_keychain`] uses for
 /// `TYPESAFE_API_KEY`, for whichever name a reference spells. A road of its
-/// own rather than a [`WindowKeyNames`] entry, so the provider keys
-/// [`connection_credential`] looks up never fall through to it. Nothing is
+/// own rather than a `WindowKeyNames` entry, so the provider keys
+/// `connection_credential` looks up never fall through to it. Nothing is
 /// read here, and nothing read is kept: each launch asks again, so a key the
 /// window just stored is found.
 pub fn find_reference_keys_in_keychain(service_prefix: &str) {

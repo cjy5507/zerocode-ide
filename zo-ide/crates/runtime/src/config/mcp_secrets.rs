@@ -85,7 +85,7 @@ pub fn mcp_literal_secrets(path: &Path) -> Result<Vec<McpLiteralSecret>, String>
 
 /// The slots of the person's own settings file at `path` next to
 /// `workspace` that hold a credential written out, read through the file
-/// judged to be theirs ([`PersonsOwnSettingsFile`]). A file that is not
+/// judged to be theirs (`PersonsOwnSettingsFile`). A file that is not
 /// theirs — absent, a link, the workspace's — holds none.
 ///
 /// # Errors
@@ -138,7 +138,7 @@ fn literal_secrets_in(path: &Path, contents: &[u8]) -> Result<Vec<McpLiteralSecr
 /// answer where the document as it was is kept.
 ///
 /// `path` must open to the person's own settings file next to `workspace`
-/// ([`PersonsOwnSettingsFile`]), and not be a link itself: the bytes compared
+/// (`PersonsOwnSettingsFile`), and not be a link itself: the bytes compared
 /// are the bytes read through the file judged, and that file, unchanged, is
 /// the file replaced.
 /// `resolve` answers what `name` resolves to (or one sentence why it does not);

@@ -894,7 +894,7 @@ pub fn refresh_with(
 /// the sources stopped listing stays as an unlisted row ([`keep_selected`]).
 /// `store` names the credential store this process reads each source from
 /// ([`Source::store`]); a failure or skip never replaces a success another
-/// store answered ([`answered_under_another_store`]).
+/// store answered (`answered_under_another_store`).
 pub fn refresh_under(
     previous: Option<&DiscoveredCatalog>,
     due: &[&str],

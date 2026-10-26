@@ -80,13 +80,13 @@ fn cli_store_label(var: &str) -> String {
         )
 }
 
-/// [`cli_store_label`] of the Grok CLI's login.
+/// `cli_store_label` of the Grok CLI's login.
 #[must_use]
 pub fn grok_store_label() -> String {
     cli_store_label(GROK_HOME_ENV)
 }
 
-/// [`cli_store_label`] of the Kimi Code CLI's login.
+/// `cli_store_label` of the Kimi Code CLI's login.
 #[must_use]
 pub fn kimi_code_store_label() -> String {
     cli_store_label(KIMI_CODE_HOME_ENV)
