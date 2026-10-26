@@ -4329,11 +4329,12 @@ mod agent_manifest_tests {
     fn ensure_agent_store_writable_creates_a_fresh_dir() {
         // The happy path: a not-yet-existing store dir under a writable parent
         // is created (recursively) without error — the normal spawn precondition.
-        let dir = temp_dir("agent-store-mk").join("nested").join("agents");
+        let base = temp_dir("agent-store-mk");
+        let dir = base.join("nested").join("agents");
         assert!(!dir.exists());
         ensure_agent_store_writable(&dir).expect("fresh store dir must be created");
         assert!(dir.is_dir(), "store dir should exist after ensure");
-        let _ = std::fs::remove_dir_all(temp_dir("agent-store-mk"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]
