@@ -30,6 +30,9 @@ pub struct ConnectionRow {
     pub auth: connections::Authentication,
     pub probe_headers: Option<std::collections::BTreeMap<String, String>>,
     pub key_available: bool,
+    /// Whether the old judgment setting kept a key for this row's address
+    /// that the row itself cannot reach — what the pane offers to move.
+    pub legacy_key: bool,
     pub uses: Vec<Role>,
 }
 
@@ -172,6 +175,7 @@ pub fn catalog(path: &Path, keys: &dyn RouterKeys) -> Result<Catalog, String> {
             auth: metadata.auth,
             probe_headers: api_routers::probe_headers(row)?,
             key_available,
+            legacy_key: false,
             uses,
         });
     }
@@ -430,3 +434,30 @@ pub(crate) fn uses_connection(root: &Value, id: &str) -> bool {
             .flatten()
             .is_some_and(|reference| reference.id == id)
 }
+
+/// A model `zo models --json` lists, made the default of new zo sessions.
+pub fn apply_coding_model(
+    path: &Path,
+    model: &str,
+    expected: Option<&str>,
+    listed: &Value,
+) -> Result<(), String> {
+    let _ = (path, model, expected, listed);
+    Err("provider_model".to_string())
+}
+
+/// The key the old judgment setting kept for `id`'s address, moved into the
+/// row as the window's own router key — pressed by a person, never on its own.
+pub fn adopt_legacy_judgment_key(
+    path: &Path,
+    id: &str,
+    expected_generation: u64,
+    keys: &dyn RouterKeys,
+) -> Result<(), String> {
+    let _ = (path, id, expected_generation, keys);
+    Err("no_key".to_string())
+}
+
+#[cfg(test)]
+#[path = "model_connections_tests.rs"]
+mod tests;

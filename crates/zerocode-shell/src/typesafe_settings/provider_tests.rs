@@ -728,6 +728,88 @@ fn a_shared_connection_preflight_uses_its_own_key_headers_and_exact_route() {
     assert_eq!(std::fs::read(&path).expect("unchanged"), before);
 }
 
+/// t-75762 ⑥, as the machine showed it: a connection whose key variable has
+/// no window prefix is read from the window's own environment, which a
+/// window started from the Dock never has — so its judgment check ended
+/// `no_key` while the old judgment setting still kept a key for the same
+/// address. The catalog says so before any request, and one press moves that
+/// key into the connection, after which the check finds it.
+#[test]
+fn a_connection_takes_the_old_judgment_key_for_its_address_with_one_press() {
+    use judgment_provider::connections::{self, Reference};
+    let home = tempfile::tempdir().expect("home");
+    let path = home.path().join("settings.json");
+    let (selected, _) = selected_with_managed_model(&path);
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", preflight_answer().to_string(), 0);
+    let mut root: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+    let foreign = "FIXTURE_T75762_FOREIGN_LLM_KEY";
+    assert!(std::env::var_os(foreign).is_none(), "the fixture variable is set");
+    root["providers"] = json!([{
+        "name":"Fixture gateway", "base_url":format!("{}/v1", endpoint.base()),
+        "auth_env":foreign, "requires_auth":true, "models":["fixture-model"],
+        "connection":{"id":"fixture-foreign", "generation":1}
+    }]);
+    std::fs::write(&path, root.to_string()).expect("write");
+    let reference = Reference {
+        id: "fixture-foreign".to_string(),
+        generation: 1,
+        model: "fixture-model".to_string(),
+        protocol: Protocol::SystemOne,
+    };
+    let mut legacy = connections::candidate(&root, &reference).expect("candidate");
+    legacy.connection = None;
+    let keys = HeldKeys::default();
+    keys.write(&provider_keychain_service(&legacy), "[합성-이전-판단-키]")
+        .expect("old key");
+
+    let before = crate::model_connection_store::catalog(&path, &keys).expect("catalog");
+    let row = &before.connections[0];
+    assert!(!row.key_available, "an unreadable variable was called a key");
+    assert!(row.legacy_key, "the old key for this address was not offered");
+    let refused = crate::model_connection_store::check(
+        &path,
+        &reference,
+        &selected.identity(),
+        &keys,
+        &settings_wire(&path),
+    )
+    .expect("check");
+    assert_eq!(refused.preflight.failure.as_deref(), Some("no_key"));
+    assert!(endpoint.asked().is_empty(), "a keyless check reached the server");
+
+    crate::model_connection_store::adopt_legacy_judgment_key(&path, "fixture-foreign", 1, &keys)
+        .expect("one press moves the key");
+    let after = crate::model_connection_store::catalog(&path, &keys).expect("catalog");
+    let row = &after.connections[0];
+    assert!(row.key_available);
+    assert!(!row.legacy_key, "the moved key is still offered");
+    assert!(
+        crate::api_routers::is_router_env(&row.provider.auth_env),
+        "the row still names a variable the window cannot read"
+    );
+    assert!(
+        !std::fs::read_to_string(&path)
+            .expect("settings")
+            .contains("[합성-이전-판단-키]"),
+        "the key was written into the settings file"
+    );
+    let reference = Reference {
+        generation: row.generation,
+        ..reference
+    };
+    let answered = crate::model_connection_store::check(
+        &path,
+        &reference,
+        &selected.identity(),
+        &keys,
+        &settings_wire(&path),
+    )
+    .expect("check");
+    assert!(answered.preflight.answered, "{:?}", answered.preflight);
+    assert!(endpoint.asked()[0].contains("[합성-이전-판단-키]"));
+}
+
 #[test]
 fn returning_from_a_connection_restores_the_previous_managed_selection() {
     use judgment_provider::connections::{self, Reference};

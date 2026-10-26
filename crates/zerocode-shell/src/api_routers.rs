@@ -156,10 +156,18 @@ pub(crate) fn read_connection_key(
     auth_env: &str,
     keys: &dyn RouterKeys,
 ) -> Result<Option<String>, RouterRefusal> {
+    read_connection_key_from(auth_env, keys, |name| std::env::var(name))
+}
+
+fn read_connection_key_from(
+    auth_env: &str,
+    keys: &dyn RouterKeys,
+    environment: impl Fn(&str) -> Result<String, std::env::VarError>,
+) -> Result<Option<String>, RouterRefusal> {
     if is_router_env(auth_env) {
         return keys.read(&router_keychain_service_for_env(auth_env));
     }
-    match std::env::var(auth_env) {
+    match environment(auth_env) {
         Ok(value) => Ok((!value.trim().is_empty()).then_some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(_) => Err("provider_settings".to_string().into()),
@@ -1688,6 +1696,52 @@ mod tests {
             )
             .unwrap()
             .is_empty()
+        );
+    }
+
+    /// t-75762 ⑥: zo takes a connection's key from its environment first and
+    /// the window's keychain item second (`connection_credential`). The
+    /// judgment check reads the same connection in the same order, so a key
+    /// that answers zo's coding requests answers the check too.
+    #[test]
+    fn a_connection_key_is_read_in_zos_order_environment_then_keychain() {
+        let name = "ZEROCODE_ROUTER_T75762_FIXTURE_KEY";
+        let keys = HeldKeys::default();
+        let environment = |asked: &str| {
+            if asked == name {
+                Ok("[합성-환경-키]".to_string())
+            } else {
+                Err(std::env::VarError::NotPresent)
+            }
+        };
+        assert_eq!(
+            read_connection_key_from(name, &keys, environment)
+                .unwrap()
+                .as_deref(),
+            Some("[합성-환경-키]"),
+            "a key zo finds in its environment was not found by the check"
+        );
+        keys.write(&router_keychain_service_for_env(name), "[합성-키체인-키]")
+            .unwrap();
+        assert_eq!(
+            read_connection_key_from(name, &keys, environment)
+                .unwrap()
+                .as_deref(),
+            Some("[합성-환경-키]"),
+            "the environment comes first, as it does for zo"
+        );
+        assert_eq!(
+            read_connection_key_from(name, &keys, |_| Err(std::env::VarError::NotPresent))
+                .unwrap()
+                .as_deref(),
+            Some("[합성-키체인-키]")
+        );
+        assert_eq!(
+            read_connection_key_from(name, &keys, |_| Ok("  ".to_string()))
+                .unwrap()
+                .as_deref(),
+            Some("[합성-키체인-키]"),
+            "an empty variable is no key, as zo reads it"
         );
     }
 
