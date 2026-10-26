@@ -307,6 +307,7 @@ fn widest_file(path: &Path, last: usize) -> BTreeSet<String> {
         version: VERSION,
         connections,
         applied: BTreeMap::new(),
+        last_applied: None,
     })
     .expect("seed");
     std::fs::write(path, bytes).expect("seed file");
@@ -467,6 +468,7 @@ fn a_file_that_cannot_fit_without_the_current_judgment_says_so() {
         version: VERSION,
         connections: BTreeMap::new(),
         applied: BTreeMap::new(),
+        last_applied: None,
     };
     for id in ["c1", "c2"] {
         let judgments = (0..3_u64)
@@ -507,6 +509,7 @@ fn a_file_that_cannot_fit_without_the_current_judgment_says_so() {
             },
         )]),
         applied: BTreeMap::new(),
+        last_applied: None,
     })
     .expect("fits")
     .len() as u64;
@@ -621,11 +624,55 @@ fn an_applied_judgment_provider_keeps_its_time_until_another_is_applied() {
     assert!(remember_applied(&path, "bad\nidentity", &ids, CLOCK).is_err());
 }
 
+/// Which provider was applied last is kept apart from the times (t-76759):
+/// a wall clock that went back, or two applies in one millisecond, do not
+/// make an earlier provider the last one — so the provider applied last,
+/// applied again, keeps its time, and one coming back is applied anew.
+#[test]
+fn the_provider_applied_last_is_kept_apart_from_the_wall_clock() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("checks.json");
+    let ids = live(&["c1"]);
+    // A at 2000, then B with the clock set back to 1000, then A again at
+    // 1100: A comes back after B, so its time is 1100.
+    remember_applied(&path, "judgment-aaaa", &ids, 2_000).expect("a");
+    remember_applied(&path, "judgment-bbbb", &ids, 1_000).expect("b");
+    let back = remember_applied(&path, "judgment-aaaa", &ids, 1_100).expect("a again");
+    assert_eq!(
+        back.applied.get("judgment-aaaa"),
+        Some(&1_100),
+        "a provider coming back after another kept the time from before"
+    );
+    // B again, later: B was not the last one applied, so it starts anew.
+    let b = remember_applied(&path, "judgment-bbbb", &ids, 1_200).expect("b again");
+    assert_eq!(b.applied.get("judgment-bbbb"), Some(&1_200));
+    let still = remember_applied(&path, "judgment-bbbb", &ids, 1_300).expect("b once more");
+    assert_eq!(
+        still.applied.get("judgment-bbbb"),
+        Some(&1_200),
+        "the provider applied last, applied again, started over"
+    );
+
+    // Two applies in one millisecond: the second is the last, whichever
+    // identity sorts first.
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("checks.json");
+    remember_applied(&path, "judgment-bbbb", &ids, 5_000).expect("b");
+    remember_applied(&path, "judgment-aaaa", &ids, 5_000).expect("a");
+    let again = remember_applied(&path, "judgment-aaaa", &ids, 5_500).expect("a again");
+    assert_eq!(
+        again.applied.get("judgment-aaaa"),
+        Some(&5_000),
+        "the provider applied last in a tied millisecond was taken for an earlier one"
+    );
+}
+
 fn seed(path: &Path, connections: BTreeMap<String, Record>) {
     let bytes = serde_json::to_vec(&File {
         version: VERSION,
         connections,
         applied: BTreeMap::new(),
+        last_applied: None,
     })
     .expect("seed");
     std::fs::write(path, bytes).expect("seed file");
@@ -707,6 +754,7 @@ fn a_full_record_refuses_the_judgment_and_leaves_the_file_as_it_was() {
             version: VERSION,
             connections: BTreeMap::from([("c1".to_string(), record(count))]),
             applied: BTreeMap::new(),
+            last_applied: None,
         })
         .expect("size")
         .len() as u64

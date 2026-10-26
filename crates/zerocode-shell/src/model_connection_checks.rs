@@ -90,6 +90,10 @@ struct File {
     connections: BTreeMap<String, Record>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     applied: BTreeMap<String, u64>,
+    /// The identity applied last, kept apart from the times: a wall clock
+    /// can go back, and two applies can share a millisecond (t-76759).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_applied: Option<String>,
 }
 
 /// What the page reads: the records, the clock they are read against, and
@@ -137,6 +141,7 @@ fn read_file(path: &Path) -> File {
         version: VERSION,
         connections: BTreeMap::new(),
         applied: BTreeMap::new(),
+        last_applied: None,
     };
     let Ok(meta) = std::fs::metadata(path) else {
         return empty;
@@ -351,6 +356,7 @@ pub fn remember_judgment(
 /// Keep that the judgment provider `identity` was applied at `now_ms`. The
 /// provider applied last applied again keeps its time — its judgments did
 /// not start over — and one coming back after another is applied anew.
+/// Which one was last is the record's own word, never the largest time.
 pub fn remember_applied(
     path: &Path,
     identity: &str,
@@ -364,14 +370,18 @@ pub fn remember_applied(
         return Err("model_judgment_applied".to_string());
     }
     write(path, live, now_ms, None, |file| {
-        let newest = file
-            .applied
-            .iter()
-            .max_by_key(|(_, at)| **at)
-            .map(|(held, _)| held.clone());
-        if newest.as_deref() != Some(identity) {
+        // A record written before the last one was kept apart names it by
+        // its newest time, once.
+        let last = file.last_applied.clone().or_else(|| {
+            file.applied
+                .iter()
+                .max_by_key(|(_, at)| **at)
+                .map(|(held, _)| held.clone())
+        });
+        if last.as_deref() != Some(identity) {
             file.applied.insert(identity.to_string(), now_ms);
         }
+        file.last_applied = Some(identity.to_string());
         while file.applied.len() > MAX_APPLIED {
             let Some(oldest) = file
                 .applied
