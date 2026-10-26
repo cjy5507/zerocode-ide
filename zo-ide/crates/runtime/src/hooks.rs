@@ -1270,8 +1270,15 @@ mod tests {
 
         assert!(matches!(result, CommandExecution::Finished(output) if output.status.success()));
         plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
+        // The group's SIGKILL lands asynchronously, so its `sleep` may outlive the
+        // reap by a moment. The wait stays well under that `sleep 5`, so a group
+        // that was never ended still fails.
         let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
-        assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
+        let until = Instant::now() + Duration::from_secs(2);
+        while nix::sys::signal::killpg(group, None).is_ok() {
+            assert!(Instant::now() < until, "the group {leader} still has members");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[cfg(windows)]

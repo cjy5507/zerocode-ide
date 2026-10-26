@@ -1891,8 +1891,7 @@ mod tests {
         let _ = runner.join();
         let _ = std::fs::remove_file(&pidfile);
         plugins::bounded_child::trace::assert_ended_before_reaped(mark, leader);
-        let group = nix::unistd::Pid::from_raw(i32::try_from(leader).expect("leader pid fits"));
-        assert!(nix::sys::signal::killpg(group, None).is_err(), "the group {leader} still has members");
+        assert_group_empty(i32::try_from(leader).expect("leader pid fits"));
     }
 
     /// 유예가 만료되는 경로의 계약: 파이프가 아직 열려 있어 기다림이 끝나지
