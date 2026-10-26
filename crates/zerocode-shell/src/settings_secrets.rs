@@ -46,6 +46,11 @@
 //! read, pinned or gone on from. The file the last move left is looked at as
 //! any other, and one not as expected is said. zo's output is read by the
 //! watch without blocking and to a bound, and let go at the wait.
+//!
+//! And only where a key is kept (t-76698 r5): on a machine with no keychain
+//! (every one but a Mac) no door is asked and nothing is shown — before zo is
+//! started, not after its answer. A pipe there would be read by a blocking
+//! thread no deadline can cancel, so no such reader is written.
 
 use std::fs::File;
 use std::io::Read;
@@ -70,6 +75,7 @@ const TICK: Duration = Duration::from_millis(20);
 
 /// The most of a door's output read, in bytes: a listing names a few cells,
 /// and an output past this is no answer.
+#[cfg(unix)]
 const PRINTED_BYTES: usize = 1024 * 1024;
 
 /// The longest reason the page is given from zo, in characters.
@@ -116,8 +122,12 @@ impl ZoDoor {
     }
 
     /// One door's exit code and the JSON it printed, whatever the code; `None`
-    /// when zo is missing, is killed for outliving the wait, or prints no JSON.
+    /// when zo is missing, is killed for outliving the wait, or prints no JSON
+    /// — and with zo not started where no key is kept.
     fn ask(&self, args: &[&str]) -> Option<(i32, Value)> {
+        if !self.supported {
+            return None;
+        }
         let mut command = crate::proc::quiet_command_with_env(&self.bin, &self.env);
         command
             .args(args)
@@ -220,35 +230,20 @@ impl Output {
     }
 }
 
-/// Elsewhere a pipe is not read without blocking: a thread reads it to its
-/// end or its bound, and is let go at the wait.
+/// Elsewhere no key is kept and zo is not asked (see [`ZoDoor::supported`]);
+/// a pipe is not read without blocking there, so none is read: a door that is
+/// asked all the same is given up.
 #[cfg(not(unix))]
-struct Output {
-    heard: std::sync::mpsc::Receiver<Option<String>>,
-}
+struct Output;
 
 #[cfg(not(unix))]
 impl Output {
-    fn of(pipe: impl Read + Send + 'static) -> std::io::Result<Self> {
-        let (said, heard) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let read = pipe.take(PRINTED_BYTES as u64 + 1).read_to_end(&mut bytes);
-            let text = (read.is_ok() && bytes.len() <= PRINTED_BYTES)
-                .then(|| String::from_utf8(bytes).ok())
-                .flatten();
-            let _ = said.send(text);
-        });
-        Ok(Self { heard })
+    fn of(_pipe: std::process::ChildStdout) -> std::io::Result<Self> {
+        Err(std::io::ErrorKind::Unsupported.into())
     }
 
-    fn printed(&mut self, tick: Duration) -> Option<Option<String>> {
-        use std::sync::mpsc::RecvTimeoutError;
-        match self.heard.recv_timeout(tick) {
-            Ok(text) => Some(text),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => Some(None),
-        }
+    fn printed(&mut self, _tick: Duration) -> Option<Option<String>> {
+        Some(None)
     }
 
     fn close(&mut self) {}
@@ -663,6 +658,9 @@ fn literals(zo: &ZoDoor, settings: &SettingsFile, pinned: Pinned) -> Option<Vec<
 /// The names the settings line shows, or `None` when there is nothing to show
 /// — none written as plain text, or a zo that does not know the door.
 pub(crate) fn notice(zo: &ZoDoor, settings: &SettingsFile) -> Option<SecretNotice> {
+    if !zo.supported {
+        return None;
+    }
     let mut names: Vec<String> = Vec::new();
     for literal in literals(zo, settings, Pinned::at(settings)?)? {
         if !names.contains(&literal.name) {
@@ -687,6 +685,9 @@ pub(crate) fn move_all(zo: &ZoDoor, settings: &SettingsFile, keys: &dyn RouterKe
         }),
         ..MoveOutcome::default()
     };
+    if !zo.supported {
+        return before_any("zo_silent");
+    }
     let Some(_moving) = Moving::take(&settings.path) else {
         return before_any("already_moving");
     };
