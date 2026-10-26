@@ -106,8 +106,8 @@ const PROBE_PROMPT: &str = "hi";
 /// Answers by (agent, checkout), each with the moment it was read.
 type CatalogCache = HashMap<(String, String), (Instant, SlashCatalog)>;
 /// zo's model catalog (`zo models --json`, whole), with the moment it was
-/// read.
-type ModelsCache = Option<(Instant, serde_json::Value)>;
+/// read — none once the window forgot it ([`forget_zo_models`]).
+type ModelsCache = Option<(Option<Instant>, serde_json::Value)>;
 
 fn catalog_cache() -> &'static Mutex<CatalogCache> {
     static CACHE: OnceLock<Mutex<CatalogCache>> = OnceLock::new();
@@ -629,11 +629,20 @@ pub fn forget_zo_models() {
     forget_models_in(models_cache());
 }
 
-fn forget_models_in(_cache: &Mutex<ModelsCache>) {}
+fn forget_models_in(cache: &Mutex<ModelsCache>) {
+    if let Ok(mut cache) = cache.lock()
+        && let Some((at, _)) = cache.as_mut()
+    {
+        *at = None;
+    }
+}
 
 fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value {
     let held = cache.lock().ok().and_then(|cache| cache.clone());
-    if let Some((_, catalog)) = held.as_ref().filter(|(at, _)| at.elapsed() < MODELS_TTL) {
+    if let Some((_, catalog)) = held
+        .as_ref()
+        .filter(|(at, _)| at.is_some_and(|at| at.elapsed() < MODELS_TTL))
+    {
         return catalog.clone();
     }
     let bin = crate::zo_companion::zo_path_under(home);
@@ -642,7 +651,7 @@ fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value
         .or_else(|| held.map(|(_, catalog)| catalog))
         .unwrap_or_default();
     if let Ok(mut cache) = cache.lock() {
-        *cache = Some((Instant::now(), catalog.clone()));
+        *cache = Some((Some(Instant::now()), catalog.clone()));
     }
     catalog
 }

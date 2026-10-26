@@ -98,6 +98,8 @@ pub(crate) async fn adopt_legacy_judgment_key(
         let path = path()?;
         let keys = Keychain::of_this_machine();
         store::adopt_legacy_judgment_key(&path, &id, expected_generation, &keys)?;
+        // The key moved under the row: whether zo can use it changed.
+        crate::slash_catalog::forget_zo_models();
         super::managed_judgment::settings_changed();
         store::catalog(&path, &keys)
     })

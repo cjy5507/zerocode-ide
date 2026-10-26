@@ -2872,6 +2872,7 @@ class StatefulBackend {
         provider.auth_env = `ZEROCODE_ROUTER_${provider.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_KEY`;
         this.keychain.set(`dev.zerocode.router.${provider.auth_env}`, key);
         this.legacyKeys.delete(args.id);
+        this.zoListHeld = null;
         return this.modelConnections();
       }
       case "sync_model_connections": return clone(this.connectionReloadStatus ?? { queued: 1, restartRequired: 0, unknown: 0 });
@@ -2986,6 +2987,8 @@ class StatefulBackend {
           entry.headers = args.headers;
         }
         const existingIdx = this.zoSettings.providers.findIndex((p) => p.name === args.name);
+        // Mirrors the command's `forget_zo_models`: the next read asks zo.
+        this.zoListHeld = null;
         if (existingIdx >= 0) {
           // Mirrors `resave_row`: the window's keys are replaced in place, a
           // provider-wide window is cleared, every other key stays.
@@ -3008,6 +3011,7 @@ class StatefulBackend {
         }
         const own = this.zoSettings.providers.find((p) => p.name === args.name)?.auth_env;
         this.zoSettings.providers = this.zoSettings.providers.filter((p) => p.name !== args.name);
+        this.zoListHeld = null;
         if (own?.startsWith("ZEROCODE_ROUTER_")
           && !this.zoSettings.providers.some((p) => p.auth_env === own)) {
           this.keychain.delete(`dev.zerocode.router.${own}`);
