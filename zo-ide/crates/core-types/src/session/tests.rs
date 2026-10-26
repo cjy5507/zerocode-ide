@@ -1,7 +1,8 @@
 use super::{
     cleanup_rotated_logs, reconcile_tool_history, rotate_session_file_if_needed,
     seal_orphan_tool_uses, vault_path_for, AnchorSummary, ContentBlock, ConversationMessage,
-    MessageRole, Session, SessionError, SessionFork, MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX,
+    DeclineKind, MessageRole, Session, SessionError, SessionFork, MODEL_HANDOFF_PREFIX,
+    PROCESS_EVENT_PREFIX,
 };
 use crate::json::JsonValue;
 use crate::usage::TokenUsage;
@@ -1048,6 +1049,7 @@ fn record_compaction_rewrites_persisted_snapshot_to_compacted_state() {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     }];
     session.messages = std::sync::Arc::new(compacted.clone());
     session.record_compaction("summarized earlier work", 3);
@@ -1919,6 +1921,7 @@ fn make_tool_result_message(tool_use_id: &str) -> ConversationMessage {
         reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
     }
 }
 
@@ -2023,6 +2026,7 @@ fn rewind_treats_a_cleared_reminder_as_the_annotation_it_replaced() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
     assert!(
         cleared.is_reminder_annotation(),
@@ -2909,6 +2913,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
     let summary = ConversationMessage {
         role: MessageRole::System,
@@ -2920,6 +2925,7 @@ fn rewind_pops_persisted_reminder_annotations_with_their_turn() {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     };
 
     let mut session = Session::new();
@@ -4142,4 +4148,135 @@ fn rewind_still_stops_at_a_compaction_summary_behind_a_seam_note() {
 
     assert_eq!(session.rewind_turns(1), 0);
     assert_eq!(session.messages.len(), 2, "nothing moved");
+}
+
+// --- a recorded decline names itself on its record (t-57445) ----------------
+//
+// The window holds its mail pointer on a zo pane whose newest answer is a
+// recorded decline, and the refusal ladder drops a declined exchange before
+// its context-cleaning retry. Both knew a decline only by the notice's exact
+// words, so a reworded notice would have been no decline to either. The record
+// names it in a `decline` key beside `updated_at_ms`. Like the times, these
+// read what is written, as the window reads the file.
+
+/// The `decline` name of every message record in `jsonl`, in order; `None`
+/// for a record that names none.
+fn message_declines_in(jsonl: &str) -> Vec<Option<String>> {
+    jsonl
+        .lines()
+        .filter_map(|line| JsonValue::parse(line).ok())
+        .filter_map(|record| {
+            let record = record.as_object()?;
+            (record.get("type")?.as_str()? == "message").then(|| {
+                record
+                    .get("decline")
+                    .and_then(JsonValue::as_str)
+                    .map(ToOwned::to_owned)
+            })
+        })
+        .collect()
+}
+
+/// Whether a message record in `jsonl` carries a `decline` key inside its
+/// message, which is what a wire encoder reads.
+fn a_message_in_names_a_decline(jsonl: &str) -> bool {
+    jsonl
+        .lines()
+        .filter_map(|line| JsonValue::parse(line).ok())
+        .any(|record| {
+            record
+                .as_object()
+                .and_then(|record| record.get("message"))
+                .and_then(JsonValue::as_object)
+                .is_some_and(|message| message.contains_key("decline"))
+        })
+}
+
+/// A session file holding a prompt and one answer whose record's `decline` key
+/// holds `decline`, raw JSON. The answer is told in words no notice of this zo
+/// has.
+fn a_file_with_one_named_answer(label: &str, decline: &str) -> TempSession {
+    let contents = [
+        r#"{"created_at_ms":1790000000000,"session_id":"session-decline-0","type":"session_meta","updated_at_ms":1790000001000,"version":1}"#
+            .to_string(),
+        r#"{"message":{"blocks":[{"text":"list it","type":"text"}],"role":"user"},"turn_index":0,"type":"message","updated_at_ms":1790000002000}"#
+            .to_string(),
+        format!(
+            r#"{{"decline":{decline},"message":{{"blocks":[{{"text":"Reworded: still declined.","type":"text"}}],"role":"assistant"}},"turn_index":0,"type":"message","updated_at_ms":1790000003000}}"#
+        ),
+    ]
+    .join("\n");
+    write_temp_session_file(label, &contents)
+}
+
+#[test]
+fn a_records_decline_name_comes_through_a_full_rewrite() {
+    let path = a_file_with_one_named_answer("decline-rewrite", r#""standing""#);
+    let session = Session::load_from_path(&path).expect("load the file");
+
+    let rewritten = session.render_jsonl_snapshot().expect("render the full rewrite");
+
+    assert_eq!(
+        message_declines_in(&rewritten),
+        vec![None, Some("standing".to_string())],
+        "a full rewrite writes the decline a record named, whatever words it was told in"
+    );
+    assert!(
+        !a_message_in_names_a_decline(&rewritten),
+        "the name is the record's key and never part of the message a model is sent"
+    );
+    cleanup_session_file(&path);
+}
+
+#[test]
+fn a_record_naming_no_known_decline_loads_and_its_rewrite_names_none() {
+    for (label, decline) in [("decline-unknown", r#""none""#), ("decline-number", "7")] {
+        let path = a_file_with_one_named_answer(label, decline);
+        let session = Session::load_from_path(&path).unwrap_or_else(|error| {
+            panic!("a record whose decline is {decline} must still load: {error:?}")
+        });
+
+        let rewritten = session.render_jsonl_snapshot().expect("render the full rewrite");
+
+        assert_eq!(session.messages.len(), 2, "both messages load");
+        assert_eq!(
+            message_declines_in(&rewritten),
+            vec![None, None],
+            "a name this zo does not know names no decline, so a rewrite writes none for {decline}"
+        );
+        cleanup_session_file(&path);
+    }
+}
+
+#[test]
+fn a_pushed_decline_is_named_on_its_line_and_read_back_by_that_name() {
+    let path = temp_session_path("decline-push");
+    let mut session = Session::new().with_persistence_path(path.to_path_buf());
+    session.push_user_text("list it").unwrap();
+    session
+        .push_message(
+            ConversationMessage::assistant(vec![ContentBlock::Text {
+                text: "Reworded: still declined.".to_string(),
+            }])
+            .with_decline(DeclineKind::Standing),
+        )
+        .unwrap();
+
+    let written = fs::read_to_string(&*path).expect("read the session file");
+    assert_eq!(
+        message_declines_in(&written),
+        vec![None, Some("standing".to_string())],
+        "the appended line names the decline the message was recorded as"
+    );
+    assert!(
+        !a_message_in_names_a_decline(&written),
+        "the name is the record's key and never part of the message a model is sent"
+    );
+    let loaded = Session::load_from_path(&path).expect("load the file");
+    assert_eq!(
+        loaded.messages.iter().map(|message| message.decline).collect::<Vec<_>>(),
+        vec![None, Some(DeclineKind::Standing)],
+        "a load reads the decline back by its name"
+    );
+    cleanup_session_file(&path);
 }

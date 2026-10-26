@@ -69,6 +69,39 @@ pub enum MessageRole {
     Tool,
 }
 
+/// Which decline a recorded refusal notice is ([`ConversationMessage::decline`]),
+/// named on its record as `surfaced` or `standing` (t-57445).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclineKind {
+    /// A decline surfaced once the refusal ladder found nothing more to try.
+    Surfaced,
+    /// A decline this conversation had surfaced already that stood again: the
+    /// ladder found nothing new to try (t-15890).
+    Standing,
+}
+
+impl DeclineKind {
+    /// The word a record's `decline` key holds.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Surfaced => "surfaced",
+            Self::Standing => "standing",
+        }
+    }
+
+    /// The decline a record's `decline` word names; `None` for a word this zo
+    /// does not know, which names no decline.
+    #[must_use]
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "surfaced" => Some(Self::Surfaced),
+            "standing" => Some(Self::Standing),
+            _ => None,
+        }
+    }
+}
+
 /// Structured message content stored inside a [`Session`](super::Session).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentBlock {
@@ -163,6 +196,22 @@ pub struct ConversationMessage {
     /// model, and equality ignores it, so the same words are the same message
     /// whenever they were written.
     pub updated_at_ms: Option<u64>,
+    /// The decline this message is the record of (t-57445): set on the
+    /// synthetic assistant message a surfaced refusal is recorded as, and
+    /// written as the `decline` key of the message's record in the session
+    /// file. The window reads it to hold its mail pointer on a pane whose
+    /// newest answer is a decline, and the refusal ladder to find the declined
+    /// exchange it drops, so neither knows a decline by the words it was told
+    /// in.
+    ///
+    /// `None` for every other message, and for a notice that a zo from before
+    /// the key wrote; for those, both readers fall back to the notice's own
+    /// words.
+    ///
+    /// Like [`Self::updated_at_ms`] it is the record's key and not part of the
+    /// message: [`Self::to_json`] leaves it out, no wire encoder reads it, and
+    /// equality ignores it.
+    pub decline: Option<DeclineKind>,
 }
 
 impl PartialEq for ConversationMessage {
@@ -170,7 +219,8 @@ impl PartialEq for ConversationMessage {
         // Both sides are taken apart without a `..`, so a field added to the
         // struct stops compiling here until someone decides whether it is
         // content. `updated_at_ms` is not: it says when the line was written,
-        // not what the message says.
+        // not what the message says. Nor is `decline`: it names what the
+        // record is, and the words stay the message's own.
         let Self {
             role,
             blocks,
@@ -179,6 +229,7 @@ impl PartialEq for ConversationMessage {
             reasoning_replay,
             model,
             updated_at_ms: _,
+            decline: _,
         } = self;
         let Self {
             role: other_role,
@@ -188,6 +239,7 @@ impl PartialEq for ConversationMessage {
             reasoning_replay: other_reasoning_replay,
             model: other_model,
             updated_at_ms: _,
+            decline: _,
         } = other;
         role == other_role
             && blocks == other_blocks
@@ -211,6 +263,7 @@ impl ConversationMessage {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         }
     }
 
@@ -230,6 +283,7 @@ impl ConversationMessage {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         }
     }
 
@@ -243,6 +297,7 @@ impl ConversationMessage {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         }
     }
 
@@ -256,6 +311,7 @@ impl ConversationMessage {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         }
     }
 
@@ -295,6 +351,14 @@ impl ConversationMessage {
     #[must_use]
     pub fn with_updated_at_ms(mut self, updated_at_ms: Option<u64>) -> Self {
         self.updated_at_ms = updated_at_ms;
+        self
+    }
+
+    /// The same message, recorded as the decline `decline`: its record carries
+    /// the `decline` key. See [`Self::decline`].
+    #[must_use]
+    pub fn with_decline(mut self, decline: DeclineKind) -> Self {
+        self.decline = Some(decline);
         self
     }
 
@@ -375,6 +439,7 @@ impl ConversationMessage {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         }
     }
 
@@ -402,6 +467,7 @@ impl ConversationMessage {
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         }
     }
 
@@ -500,9 +566,10 @@ impl ConversationMessage {
             thought_signature,
             reasoning_replay,
             model,
-            // The record carries the time, not the message: the record parser
-            // puts it here.
+            // The record carries the time and the decline, not the message:
+            // the record parser puts them here.
             updated_at_ms: None,
+            decline: None,
         })
     }
 }

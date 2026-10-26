@@ -666,6 +666,7 @@ mod tests {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         }
     }
 
@@ -706,6 +707,7 @@ mod tests {
             reasoning_replay: None,
                     model: None,
                     updated_at_ms: None,
+                    decline: None,
         }
     }
 

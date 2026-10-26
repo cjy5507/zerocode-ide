@@ -9,7 +9,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::mpsc;
 
 use crate::message_stream::types::{BlockIdGen, RenderBlock, WireModelSource};
-use crate::session::{ContentBlock, ConversationMessage};
+use crate::session::{ContentBlock, ConversationMessage, DeclineKind};
 
 use super::{
     ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, Attendance, ClassifierFallback,
@@ -467,19 +467,27 @@ pub(super) fn surfaced_refusal_notice(standing: bool) -> &'static str {
     }
 }
 
-/// Whether `text` is one of the notices a surfaced decline is recorded as —
-/// what marks an exchange in history as a declined one.
+/// Whether `text` is one of the notices a surfaced decline is told in — what
+/// still marks an exchange as a declined one in history from before the
+/// `decline` key (t-57445); a newer record names its decline.
 fn is_surfaced_refusal_notice(text: &str) -> bool {
     text == REFUSAL_SURFACED_NOTICE || text == core_types::retry_signal::REFUSAL_STANDING_NOTICE
 }
 
 /// The synthetic assistant message recorded when a refusal is surfaced (rather
 /// than retried), so the turn is well-formed — a user turn is never left with no
-/// assistant response — and the notice is visible on the headless path.
+/// assistant response — and the notice is visible on the headless path. Its
+/// record names the decline (t-57445), so the window and the refusal ladder
+/// know it by that name and not by its words.
 pub(super) fn refusal_surfaced_message(standing: bool) -> ConversationMessage {
     ConversationMessage::assistant(vec![ContentBlock::Text {
         text: surfaced_refusal_notice(standing).to_string(),
     }])
+    .with_decline(if standing {
+        DeclineKind::Standing
+    } else {
+        DeclineKind::Surfaced
+    })
 }
 /// Drive an [`AsyncApiClient`] to completion from a synchronous context and
 /// return its assembled [`AssistantEvent`] sequence, discarding the render
@@ -1279,8 +1287,8 @@ where
     }
 
     /// Whether history still holds an earlier surfaced refusal — a user message
-    /// answered only by [`REFUSAL_SURFACED_NOTICE`]. That exchange is what a
-    /// sticky classifier keeps reading, so [`Self::drop_last_declined_exchange`]
+    /// answered by a recorded decline. That exchange is what a sticky
+    /// classifier keeps reading, so [`Self::drop_last_declined_exchange`]
     /// removes it before the context-cleaning retry.
     fn has_prior_declined_exchange(&self) -> bool {
         self.last_declined_exchange_index().is_some()
@@ -1288,14 +1296,17 @@ where
 
     /// The history index of the assistant message that surfaced a refusal, most
     /// recent first, when the message just before it is the user turn it
-    /// declined. `None` when no such pair exists.
+    /// declined. A message is that notice when its record names a decline
+    /// (t-57445), whatever its words, or — in history from before the name —
+    /// when its words are a notice's own. `None` when no such pair exists.
     fn last_declined_exchange_index(&self) -> Option<usize> {
         let messages = &self.session.messages;
         messages.iter().enumerate().rev().find_map(|(idx, message)| {
             let is_surfaced = message.role == crate::session::MessageRole::Assistant
-                && message.blocks.iter().any(|block| {
-                    matches!(block, ContentBlock::Text { text } if is_surfaced_refusal_notice(text))
-                });
+                && (message.decline.is_some()
+                    || message.blocks.iter().any(|block| {
+                        matches!(block, ContentBlock::Text { text } if is_surfaced_refusal_notice(text))
+                    }));
             (is_surfaced
                 && idx > 0
                 && messages[idx - 1].role == crate::session::MessageRole::User)

@@ -488,6 +488,7 @@ fn reminder_message(text: &str) -> ConversationMessage {
         reasoning_replay: None,
         model: None,
         updated_at_ms: None,
+        decline: None,
     }
 }
 

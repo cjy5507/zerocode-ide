@@ -426,6 +426,7 @@ where
             reasoning_replay: None,
             model: None,
             updated_at_ms: None,
+            decline: None,
         };
         if let Err(error) = self.session.push_message(message) {
             eprintln!(

@@ -37,7 +37,7 @@ pub use mask::{
     WITHHELD_LINE_MARKER,
 };
 pub use message::{
-    is_reminder_lineage_text, ContentBlock, ConversationMessage, MessageRole,
+    is_reminder_lineage_text, ContentBlock, ConversationMessage, DeclineKind, MessageRole,
     CLEARED_REMINDER_PLACEHOLDER, MODEL_HANDOFF_PREFIX, PROCESS_EVENT_PREFIX, REMINDER_TAG_OPEN,
 };
 
@@ -2059,9 +2059,11 @@ pub fn reconcile_tool_history(
                 thought_signature: message.thought_signature.clone(),
                 reasoning_replay: message.reasoning_replay.clone(),
                             model: None,
-                // A per-request view, never stored: it keeps the time so a
-                // message rebuilt from a stored one is not one that never had it.
+                // A per-request view, never stored: it keeps the time and the
+                // decline so a message rebuilt from a stored one is not one
+                // that never had them.
                 updated_at_ms: message.updated_at_ms,
+                decline: message.decline,
             }
         })
         .collect();
@@ -2173,6 +2175,13 @@ pub(super) fn parse_jsonl_record(
             // own: every reader of the record sees it, and a full rewrite
             // writes it back.
             message.updated_at_ms = record_updated_at_ms;
+            // So is the decline a notice's record names (t-57445). A word this
+            // zo does not know, or a value that is no word, names none, and
+            // the record still loads.
+            message.decline = object
+                .get("decline")
+                .and_then(JsonValue::as_str)
+                .and_then(DeclineKind::parse);
             SessionJsonlRecord::Message {
                 turn_index,
                 record_updated_at_ms,
@@ -2226,6 +2235,12 @@ fn message_record(
         object.insert(
             "updated_at_ms".to_string(),
             JsonValue::Number(i64::try_from(updated_at_ms).unwrap_or(i64::MAX)),
+        );
+    }
+    if let Some(decline) = message.decline {
+        object.insert(
+            "decline".to_string(),
+            JsonValue::String(decline.as_str().to_string()),
         );
     }
     object.insert("message".to_string(), message.to_json());

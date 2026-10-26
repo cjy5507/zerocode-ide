@@ -1346,6 +1346,7 @@ impl PlainSession {
                 reasoning_replay: None,
                 model: None,
                 updated_at_ms: None,
+                decline: None,
             };
             if let Err(error) = runtime.session_mut().push_message(message) {
                 eprintln!("zo: could not record the workspace rewind ({error})");
@@ -1513,6 +1514,7 @@ impl PlainSession {
                 reasoning_replay: None,
                 model: None,
                 updated_at_ms: None,
+                decline: None,
             }) {
                 eprintln!("zo: could not record the model handoff ({error})");
             }
