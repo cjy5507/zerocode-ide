@@ -14312,7 +14312,7 @@ async function withModelScene(prepare, run) {
     await openSettings(pageA, "judgment-models");
     await pageA.evaluate(() => {
       Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
-      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats]) held.clear();
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
     });
@@ -14329,7 +14329,7 @@ async function withModelScene(prepare, run) {
     await setQualityTheme(pageA, "dark");
     await pageA.evaluate(() => {
       Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
-      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats]) held.clear();
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats, modelConnectionsController.usedFormats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
     });

@@ -106,8 +106,14 @@ const PROBE_PROMPT: &str = "hi";
 /// Answers by (agent, checkout), each with the moment it was read.
 type CatalogCache = HashMap<(String, String), (Instant, SlashCatalog)>;
 /// zo's model catalog (`zo models --json`, whole), with the moment it was
-/// read — none once the window forgot it ([`forget_zo_models`]).
-type ModelsCache = Option<(Option<Instant>, serde_json::Value)>;
+/// read — none once the window forgot it ([`forget_zo_models`]) — and how
+/// many times the window forgot it: a read that began before a forget does
+/// not keep what it read (t-76028 R2).
+#[derive(Default)]
+struct ModelsCache {
+    forgotten: u64,
+    held: Option<(Option<Instant>, serde_json::Value)>,
+}
 
 fn catalog_cache() -> &'static Mutex<CatalogCache> {
     static CACHE: OnceLock<Mutex<CatalogCache>> = OnceLock::new();
@@ -116,7 +122,7 @@ fn catalog_cache() -> &'static Mutex<CatalogCache> {
 
 fn models_cache() -> &'static Mutex<ModelsCache> {
     static CACHE: OnceLock<Mutex<ModelsCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+    CACHE.get_or_init(|| Mutex::new(ModelsCache::default()))
 }
 
 /// The commands `agent` takes in `cwd`, cached for [`CATALOG_TTL`].
@@ -630,10 +636,11 @@ pub fn forget_zo_models() {
 }
 
 fn forget_models_in(cache: &Mutex<ModelsCache>) {
-    if let Ok(mut cache) = cache.lock()
-        && let Some((at, _)) = cache.as_mut()
-    {
-        *at = None;
+    if let Ok(mut cache) = cache.lock() {
+        cache.forgotten += 1;
+        if let Some((at, _)) = cache.held.as_mut() {
+            *at = None;
+        }
     }
 }
 
@@ -647,24 +654,37 @@ fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value
 
 /// The cached catalog, or what `read` — zo, asked — answers, held for
 /// [`MODELS_TTL`]; `None` from it leaves the catalog last read standing.
+/// An answer to a read the window forgot the list during may predate the
+/// change it forgot it for, so zo is asked again (t-76028 R2).
 fn catalog_read(
     cache: &Mutex<ModelsCache>,
     read: impl Fn() -> Option<serde_json::Value>,
 ) -> serde_json::Value {
-    let held = cache.lock().ok().and_then(|cache| cache.clone());
-    if let Some((_, catalog)) = held
-        .as_ref()
-        .filter(|(at, _)| at.is_some_and(|at| at.elapsed() < MODELS_TTL))
-    {
-        return catalog.clone();
+    loop {
+        let Some((forgotten, held)) = cache
+            .lock()
+            .ok()
+            .map(|cache| (cache.forgotten, cache.held.clone()))
+        else {
+            return read().unwrap_or_default();
+        };
+        if let Some((_, catalog)) = held
+            .as_ref()
+            .filter(|(at, _)| at.is_some_and(|at| at.elapsed() < MODELS_TTL))
+        {
+            return catalog.clone();
+        }
+        let catalog = read()
+            .or_else(|| held.map(|(_, catalog)| catalog))
+            .unwrap_or_default();
+        let Ok(mut cache) = cache.lock() else {
+            return catalog;
+        };
+        if cache.forgotten == forgotten {
+            cache.held = Some((Some(Instant::now()), catalog.clone()));
+            return catalog;
+        }
     }
-    let catalog = read()
-        .or_else(|| held.map(|(_, catalog)| catalog))
-        .unwrap_or_default();
-    if let Ok(mut cache) = cache.lock() {
-        *cache = Some((Some(Instant::now()), catalog.clone()));
-    }
-    catalog
 }
 
 // ---- readers ----------------------------------------------------------------

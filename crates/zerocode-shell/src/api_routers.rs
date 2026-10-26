@@ -1200,26 +1200,59 @@ fn refusal_detail(body: &str) -> Option<String> {
     .map(str::to_string)
 }
 
-/// Shorter than this, a sent value is a word a refusal may hold for its own
-/// sake (`1`, `yes`), not a secret it says back.
+/// Shorter than this, a sent header value that names no credential is a
+/// word a refusal may hold for its own sake (`1`, `yes`), not a secret it
+/// says back.
 const SENT_VALUE_MIN_CHARS: usize = 6;
 
+/// Whether a header the row brings carries a credential: the probe's own
+/// auth header, or a name that says so (`X-Api-Key`, `X-Auth-Token`).
+fn header_carries_a_credential(name: &str, auth_header: &str) -> bool {
+    use zerocode_core::credential::{contains_ascii_case, names_a_credential};
+    name.eq_ignore_ascii_case(auth_header)
+        || names_a_credential(name)
+        || contains_ascii_case(name, "key")
+        || contains_ascii_case(name, "auth")
+}
+
 /// Every value a probe puts on the wire that a gateway could say back: the
-/// key, and each extra header's value. The key's scheme (`Bearer`) is not
-/// one; the key behind it is.
+/// key, and each extra header's value, whole and without its scheme — a
+/// gateway says back the token behind `Bearer` as readily as the line. A
+/// credential is masked at any length (t-76028 R1); another header's value
+/// only from [`SENT_VALUE_MIN_CHARS`]. Longest first, so no shorter value
+/// splits a longer one before it is masked.
 fn sent_values<'a>(
     key: Option<&'a str>,
+    auth_header: &str,
     headers: Option<&'a std::collections::BTreeMap<String, String>>,
 ) -> Vec<&'a str> {
-    key.into_iter()
-        .chain(
-            headers
+    let mut sent: Vec<&str> = key
+        .map(|key| (key, true))
+        .into_iter()
+        .chain(headers.into_iter().flatten().map(|(name, value)| {
+            (
+                value.as_str(),
+                header_carries_a_credential(name, auth_header),
+            )
+        }))
+        .flat_map(|(value, credential)| {
+            let token = value
+                .trim()
+                .split_once(char::is_whitespace)
+                .map(|(_, token)| token);
+            [Some(value), token]
                 .into_iter()
-                .flat_map(|headers| headers.values().map(String::as_str)),
-        )
-        .map(str::trim)
-        .filter(|value| value.chars().count() >= SENT_VALUE_MIN_CHARS)
-        .collect()
+                .flatten()
+                .map(str::trim)
+                .filter(move |value| {
+                    !value.is_empty()
+                        && (credential || value.chars().count() >= SENT_VALUE_MIN_CHARS)
+                })
+        })
+        .collect();
+    sent.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    sent.dedup();
+    sent
 }
 
 /// A probe's failure as the window may hold it (t-76028 F1): what the
@@ -1355,7 +1388,7 @@ pub async fn test_router_endpoint(probe: &RouterProbe<'_>) -> Result<Vec<Discove
         req = req.header(&auth.header, auth_val);
     }
 
-    let sent = sent_values(key, headers);
+    let sent = sent_values(key, &auth.header, headers);
     let res = req
         .send()
         .await

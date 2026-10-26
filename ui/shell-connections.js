@@ -113,6 +113,9 @@ const modelConnectionsController = {
   judged: new Map(),
   /* A judgment format picked in 「고급」 for a connection, by its id. */
   formats: new Map(),
+  /* The format each connection was last read in as judgment's, by its id:
+   * kept after judgment moves to another connection (t-76028 R3). */
+  usedFormats: new Map(),
   /* The daily cards: the role being changed, the row picked and its answer. */
   picking: null, draft: null, said: new Map(),
   /* The first question, while it stands. */
@@ -195,7 +198,7 @@ const modelConnectionsController = {
     if (state.value && Array.isArray(state.value.connections)) {
       const signature = (value) => JSON.stringify([value?.activeProviderIdentity, value?.connections?.map((row) => [row.id, row.generation])]);
       if (signature(state.value) !== signature(this.state)) this.judged.clear();
-      this.state = state.value;
+      this.hold(state.value);
       this.failed = null;
     } else {
       this.failed = state.error ?? "provider_settings";
@@ -329,12 +332,17 @@ const modelConnectionsController = {
     if (this.checks.get(connection.id)?.state === "down") return { group: "off", state: "down" };
     return { group: "check", state: judged?.state ?? "unknown" };
   },
+  /* A connections answer, taken: judgment's format is kept by connection,
+   * so moving judgment elsewhere does not forget it (t-76028 R3). */
+  hold(state) {
+    if (state?.judgment?.protocol) this.usedFormats.set(state.judgment.id, state.judgment.protocol);
+    this.state = state;
+  },
   /* The format a connection is asked for judgment in: the one picked in
-   * 「고급」, else the one judgment already uses it in, else OpenAI JSON
-   * (t-76028 F3). */
+   * 「고급」, else the one judgment used it in last, else OpenAI JSON
+   * (t-76028 F3, R3). */
   judgmentFormat(connection) {
-    const judgment = this.state?.judgment;
-    return this.formats.get(connection.id) ?? (judgment?.id === connection.id ? judgment.protocol : "openai_json");
+    return this.formats.get(connection.id) ?? this.usedFormats.get(connection.id) ?? "openai_json";
   },
   currentJudgmentKey() {
     const provider = typesafeState?.provider;
@@ -582,7 +590,7 @@ const modelConnectionsController = {
       if (check.state !== "ok") return { applied: false, key, state: check.state, raw: check.raw };
     }
     try {
-      this.state = await invoke("select_coding_model", { model: key, expectedModel: this.state?.codingModel ?? null }, { hand });
+      this.hold(await invoke("select_coding_model", { model: key, expectedModel: this.state?.codingModel ?? null }, { hand }));
       return { applied: true, key };
     } catch (error) {
       return { applied: false, key, state: "failed", raw: this.failure(error) };
@@ -604,10 +612,10 @@ const modelConnectionsController = {
         if (!check.answered) return { applied: false, key, state: modelFailureState(check.failure) };
         await invoke("set_judgment_provider", { provider, expectedProviderIdentity, key: jevKey }, { hand });
       } else {
-        this.state = await invoke("select_model_connection", {
+        this.hold(await invoke("select_model_connection", {
           role: "judgment", reference: row.reference, expectedReference: this.state?.judgment ?? null,
           expectedProviderIdentity: this.state.activeProviderIdentity,
-        }, { hand });
+        }, { hand }));
       }
       await refreshTypeSafe();
       return { applied: true, key };
@@ -687,7 +695,7 @@ const modelConnectionsController = {
     const started = handNow();
     this.adopting = null;
     try {
-      this.state = await invoke("adopt_legacy_judgment_key", { id: connection.id, expectedGeneration: connection.generation }, { hand: flowHand(started) });
+      this.hold(await invoke("adopt_legacy_judgment_key", { id: connection.id, expectedGeneration: connection.generation }, { hand: flowHand(started) }));
       this.judged.clear();
       this.said.set(connection.id, { words: t("settings.models.legacyMoved", "이전 판단 설정의 키를 이 연결로 옮겼습니다. 키 값은 화면에 읽어 오지 않았습니다.") });
     } catch (error) {
