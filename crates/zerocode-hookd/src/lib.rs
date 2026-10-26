@@ -1110,8 +1110,11 @@ async fn receive_team_command(State(state): State<BridgeState>, request: Request
         // (see `READY_REPORT_HEADROOM_MS`) the worker may still be standing, so the caller is told
         // where to look instead of being left to ask again under a new name and cut a second pane.
         Err(_) if summoning => refused(
-            "tmux: timed out waiting for the window — the worker may still be coming up; \
-             worker-list shows it if it did, and a worker missing there did not start\n",
+            "tmux: timed out waiting for the window — the outcome is not settled and the worker \
+             may still be coming up; read `worker-list --run <the run you summoned it into>` \
+             (the plain list shows only the run this pane is bound to, so a worker started with \
+             --run is missing from it), and to ask again repeat the original --retry-request \
+             name rather than a new one\n",
         ),
         Err(_) => refused("tmux: timed out waiting for the window\n"),
     }
