@@ -276,12 +276,15 @@ fn limits_hold() {
         let decision = yes_no(&format!("d-{n:08x}"), &format!("Decision {n}"));
         store::create(home.path(), &decision, JevMode::Shadow, NOW).unwrap();
     }
+    let one_more = store::create(
+        home.path(),
+        &yes_no("d-000000ff", "One more"),
+        JevMode::Shadow,
+        NOW,
+    );
     assert!(
-        matches!(
-            store::create(home.path(), &yes_no("d-000000ff", "One more"), JevMode::Shadow, NOW),
-            Err(Error::Refused(refused)) if refused == [Refusal::TooMany]
-        ),
-        "the twenty-first decision is refused",
+        matches!(&one_more, Err(Error::Refused(refused)) if *refused == [Refusal::TooMany]),
+        "the twenty-first decision is refused: {one_more:?}",
     );
 
     let home = tempfile::tempdir().unwrap();

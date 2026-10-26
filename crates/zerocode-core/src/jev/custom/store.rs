@@ -29,6 +29,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::{DECISIONS_MAX, Definition, MODES, Refusal, SCHEMA_VERSION, check, is_id, version_of};
 use crate::civil;
 use crate::jev::JevMode;
+use crate::jev::store_lock::StoreLock;
 
 /// Where the store lives under zo's config home.
 pub const DIRECTORY: &str = "jev/decisions";
@@ -588,7 +589,7 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn lock(root: &Path) -> io::Result<File> {
+fn lock(root: &Path) -> io::Result<StoreLock> {
     private_directory(root)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -601,7 +602,7 @@ fn lock(root: &Path) -> io::Result<File> {
     let until = Instant::now() + LOCK_WAIT;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(StoreLock::held(file)),
             Err(TryLockError::WouldBlock) if Instant::now() < until => thread::sleep(LOCK_POLL),
             Err(TryLockError::WouldBlock) => {
                 return Err(io::Error::new(
@@ -860,5 +861,23 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of the store's lock until the exec; the duplicate here is that
+    /// copy, without a launch winning a race. The next writer must not wait
+    /// on it.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_writer() {
+        let home = tempfile::tempdir().unwrap();
+        let held = lock(&root(home.path())).unwrap();
+        let inherited = held.try_clone().unwrap();
+        drop(held);
+        let next = lock(&root(home.path()));
+        drop(inherited);
+        assert!(
+            next.is_ok(),
+            "a lock its holder let go is still held by a copy: {next:?}"
+        );
     }
 }

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::{Advice, Book, Invalid, MAX_BOOK_BYTES, MAX_SOURCE_BYTES, source_hash};
+use crate::jev::store_lock::StoreLock;
 
 #[must_use]
 pub fn workspace_root(workspace: &Path) -> PathBuf {
@@ -147,11 +148,11 @@ fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn lock(root: &Path) -> io::Result<File> {
+fn lock(root: &Path) -> io::Result<StoreLock> {
     lock_file(root, ".lock")
 }
 
-fn lock_file(root: &Path, name: &str) -> io::Result<File> {
+fn lock_file(root: &Path, name: &str) -> io::Result<StoreLock> {
     fs::create_dir_all(root)?;
     let mut options = OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
@@ -171,10 +172,10 @@ fn lock_file(root: &Path, name: &str) -> io::Result<File> {
             Err(error) => return Err(io::Error::other(error)),
         }
     }
-    Ok(file)
+    Ok(StoreLock::held(file))
 }
 
-fn lock_recipient(root: &Path, recipient: &str) -> io::Result<File> {
+fn lock_recipient(root: &Path, recipient: &str) -> io::Result<StoreLock> {
     lock_file(
         root,
         &format!(".lock-{}", source_hash(recipient.as_bytes())),
@@ -778,6 +779,25 @@ mod tests {
         let _held = lock_recipient(&root, "one").unwrap();
         assert!(begin_check(home.path(), workspace.path(), "two", 1, "turn").unwrap());
         assert!(begin_check(home.path(), workspace.path(), "one", 1, "turn").is_err());
+    }
+
+    /// A process launch on another thread that forks before it execs holds a
+    /// copy of the lock's descriptor until the exec; the duplicate here is
+    /// that copy, without a launch winning a race. The next check must not
+    /// wait on it.
+    #[test]
+    fn a_copy_of_the_lock_left_in_a_launch_does_not_hold_the_next_check() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("rules");
+        let held = lock(&root).unwrap();
+        let inherited = held.try_clone().unwrap();
+        drop(held);
+        let next = lock(&root);
+        drop(inherited);
+        assert!(
+            next.is_ok(),
+            "a lock its holder let go is still held by a copy: {next:?}"
+        );
     }
 
     #[cfg(unix)]
