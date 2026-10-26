@@ -5235,6 +5235,58 @@ mod tests {
         assert!(err.contains("CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane"), "a store's folder stays: {err:?}");
     }
 
+    /// t-76896: the stderr line a kept answer prints names the kind of the
+    /// failure and the stores' variable names — never the failure's own
+    /// words. A short token, a token with no digit, a query token, a body
+    /// over several lines and a bearer all stay out of the line.
+    #[test]
+    fn the_stderr_line_of_a_kept_answer_names_the_kind_and_never_the_failures_words() {
+        let now = 1_790_200_000;
+        let pane_store = "CLAUDE_CONFIG_DIR:/Users/someone/accounts/pane";
+        let window_store = "CODEX_HOME:/Users/someone/accounts/win\nsk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz";
+        let pane = anthropic_refresh(None, now - 60, "pane-store", &Ok(opus_answer(now - 60)));
+        let pane = super::DiscoveredCatalog {
+            reports: pane
+                .reports
+                .iter()
+                .map(|report| super::SourceReport { credential_store: pane_store.to_string(), ..report.clone() })
+                .collect(),
+            ..pane
+        };
+        let cases: [(&str, &[&str], &str, &str); 8] = [
+            ("HTTP 401 Unauthorized: invalid key abc123", &["abc123"], "authentication refused", "401"),
+            ("HTTP 403 Forbidden: key hunter2 may not list models", &["hunter2"], "permission denied", "403"),
+            ("HTTP 429 Too Many Requests: slow down, token qwertyuiop", &["qwertyuiop"], "rate limit", "429"),
+            ("HTTP 503 Service Unavailable:\r\nAuthorization: Bearer zzzz.yyyy\n\tx", &["zzzz.yyyy", "Bearer"], "server error", "503"),
+            ("error sending request for url (https://api.example/v1/models?key=shorty&access_token=nodigitstokenvalue)", &["shorty", "nodigitstokenvalue", "api.example"], "network", ""),
+            ("operation timed out after 30s while asking https://x/?token=tk", &["tk", "https://x"], "timed out", ""),
+            ("claude credential present but not usable: the login of someone@example.com (secret pw9) is a copy", &["someone@example.com", "pw9"], "not usable", ""),
+            ("skipped: no Claude login\nsecret: s3", &["s3", "no Claude login"], "skipped", ""),
+        ];
+        for (detail, secrets, kind, status) in cases {
+            let mut notes = Vec::new();
+            let window = super::refresh_noting(
+                Some(&pane),
+                &[super::ANTHROPIC_SOURCE],
+                now,
+                &[],
+                |source| Err((source.to_string(), detail.to_string())),
+                |source| if source == super::ANTHROPIC_SOURCE { window_store.to_string() } else { String::new() },
+                |line| notes.push(line.to_string()),
+            );
+            assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the kept answer still stands: {detail:?}");
+            let err = notes.join("\n");
+            assert_eq!(notes.len(), 1, "one kept-answer line: {err:?}");
+            assert!(!err.contains(['\n', '\r', '\t', '\u{1b}']), "no line break: {err:?}");
+            for secret in secrets.iter().copied().chain(["sk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz", "someone", "/accounts"]) {
+                assert!(!err.contains(secret), "{secret} reached stderr: {err:?}");
+            }
+            assert!(err.contains(kind), "the kind {kind:?} is named: {err:?}");
+            assert!(status.is_empty() || err.contains(status), "the status {status:?} is named: {err:?}");
+            assert!(err.contains("CLAUDE_CONFIG_DIR") && err.contains("CODEX_HOME"), "both stores' variable names: {err:?}");
+        }
+    }
+
     /// t-76829: the masking takes a value and leaves the words around it.
     #[test]
     fn the_one_line_form_masks_values_and_keeps_the_words_and_folders() {
