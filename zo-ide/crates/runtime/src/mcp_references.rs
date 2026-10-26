@@ -16,7 +16,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::config::ConfigSource;
 use crate::mcp_client::{McpClientBootstrap, McpClientTransport};
 
 /// Where one name's value came from.
@@ -180,6 +179,45 @@ pub fn resolve_references(
     Ok(out)
 }
 
+/// How a value reads in the grammar a launch resolves by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceShape {
+    /// No reference: the value is handed over as written.
+    Plain,
+    /// The whole value is one `${NAME}`.
+    Whole,
+    /// The whole value is one `${NAME:-default}`.
+    Defaulted,
+    /// One or more references with other text around them, which only a
+    /// person can split into a name and the rest.
+    Mixed,
+}
+
+/// The shape of `text` as [`resolve_references`] reads it.
+#[must_use]
+pub fn reference_shape(text: &str) -> ReferenceShape {
+    if !text.is_empty() {
+        return ReferenceShape::Plain;
+    }
+    if let Some((_, default, consumed)) = text.strip_prefix("${").and_then(reference_at) {
+        if consumed + 2 == text.len() {
+            return if default.is_some() {
+                ReferenceShape::Defaulted
+            } else {
+                ReferenceShape::Whole
+            };
+        }
+    }
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        rest = &rest[at + 2..];
+        if reference_at(rest).is_some() {
+            return ReferenceShape::Mixed;
+        }
+    }
+    ReferenceShape::Plain
+}
+
 /// The reference that opens `after` (the text just past `${`): its name, its
 /// default, and how many bytes it takes up to and including the `}`.
 fn reference_at(after: &str) -> Option<(&str, Option<&str>, usize)> {
@@ -202,7 +240,8 @@ fn reference_at(after: &str) -> Option<(&str, Option<&str>, usize)> {
 
 /// The bootstrap a launch opens: a stdio server's `env` values and `args`, and
 /// a remote server's `headers` values, resolved. The keychain is read only for
-/// a server the person's own settings file declared.
+/// a server the loader found the person's own settings file to declare
+/// ([`McpClientBootstrap::keychain_grant`]), never on its `User` scope alone.
 ///
 /// # Errors
 ///
@@ -211,7 +250,7 @@ pub fn resolve_launch_references(
     bootstrap: &McpClientBootstrap,
     keys: &dyn ReferenceKeys,
 ) -> Result<McpClientBootstrap, UnresolvedReference> {
-    let keychain = bootstrap.scope == ConfigSource::User;
+    let keychain = bootstrap.keychain_grant.is_some();
     let mut resolved = bootstrap.clone();
     match &mut resolved.transport {
         McpClientTransport::Stdio(stdio) => {
@@ -255,8 +294,8 @@ mod tests {
     use crate::mcp_client::{McpClientBootstrap, McpClientTransport};
 
     use super::{
-        resolve_launch_references, resolve_reference_name, resolve_references, ReferenceKeys,
-        ReferenceMiss, ReferenceSource,
+        reference_shape, resolve_launch_references, resolve_reference_name, resolve_references,
+        ReferenceKeys, ReferenceMiss, ReferenceShape, ReferenceSource,
     };
 
     /// Values no real key has, so a leak is a string a test can look for.
@@ -306,11 +345,17 @@ mod tests {
         }
     }
 
+    /// The settings file a user server's grant names; never read here.
+    const USER_FILE: &str = "/fixture-home/.zo/settings.json";
+
+    /// A server of `scope`, with the loader's keychain grant when the scope is
+    /// `User` — what the loader gives the person's own file.
     fn stdio(scope: ConfigSource, env: &[(&str, &str)], args: &[&str]) -> McpClientBootstrap {
         McpClientBootstrap::from_scoped_config(
             "refs",
             &ScopedMcpServerConfig {
                 scope,
+                keychain_grant: (scope == ConfigSource::User).then(|| USER_FILE.into()),
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "npx".to_string(),
                     args: args.iter().map(|arg| (*arg).to_string()).collect(),
@@ -372,6 +417,7 @@ mod tests {
             "remote",
             &ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: Some(USER_FILE.into()),
                 config: McpServerConfig::Http(McpRemoteServerConfig {
                     url: "https://vendor.example/mcp".to_string(),
                     headers: BTreeMap::from([(
@@ -477,5 +523,175 @@ mod tests {
             resolve_reference_name("LOCKED", &unreadable, true),
             Err(ReferenceMiss::KeychainUnreadable)
         );
+    }
+
+    #[test]
+    fn a_user_scope_without_the_loaders_grant_never_reads_the_keychain() {
+        let keys = Keys::default().with_keychain("PERSON_KEY", KEYCHAIN_VALUE);
+        let bootstrap = McpClientBootstrap::from_scoped_config(
+            "unchecked",
+            &ScopedMcpServerConfig {
+                scope: ConfigSource::User,
+                keychain_grant: None,
+                config: McpServerConfig::Stdio(McpStdioServerConfig {
+                    command: "npx".to_string(),
+                    args: Vec::new(),
+                    env: BTreeMap::from([("TOKEN".to_string(), "${PERSON_KEY}".to_string())]),
+                    tool_call_timeout_ms: None,
+                }),
+            },
+        );
+        let unresolved = resolve_launch_references(&bootstrap, &keys).expect_err("no grant, no keychain");
+        assert_eq!(unresolved.to_string(), "unresolved reference ${PERSON_KEY}");
+        assert!(keys.asked().is_empty(), "keychain asked for {:?}", keys.asked());
+    }
+
+    #[test]
+    fn a_value_reads_in_the_grammar_a_launch_resolves_by() {
+        for (text, shape) in [
+            ("plain-token", ReferenceShape::Plain),
+            ("$NAME and {{name}}", ReferenceShape::Plain),
+            ("${1DIGIT}", ReferenceShape::Plain),
+            ("${NAME}", ReferenceShape::Whole),
+            ("${NAME:-fallback}", ReferenceShape::Defaulted),
+            ("${NAME:-}", ReferenceShape::Defaulted),
+            ("Token ${NAME}", ReferenceShape::Mixed),
+            ("Bearer ${NAME}", ReferenceShape::Mixed),
+            ("${USER}:${PASS}", ReferenceShape::Mixed),
+            ("${NAME}${OTHER}", ReferenceShape::Mixed),
+            ("${NAME} ", ReferenceShape::Mixed),
+            ("${ then ${NAME}", ReferenceShape::Mixed),
+        ] {
+            assert_eq!(reference_shape(text), shape, "{text}");
+        }
+    }
+
+    /// A workspace and a person's config home side by side, loaded the way a
+    /// session loads them, the keychain a fake one.
+    #[cfg(unix)]
+    mod loaded {
+        use std::path::{Path, PathBuf};
+
+        use tempfile::TempDir;
+
+        use super::{Keys, KEYCHAIN_VALUE};
+        use crate::config::ConfigLoader;
+        use crate::mcp_client::McpClientBootstrap;
+        use crate::mcp_references::resolve_launch_references;
+
+        /// A server the workspace's own `.zo/settings.json` declares, asking
+        /// for the person's key by name.
+        const PROJECT_DOCUMENT: &str = r#"{"mcpServers": {"repo-server": {"command": "npx", "env": {"TOKEN": "${PERSON_KEY}"}}}}"#;
+
+        struct Scene {
+            _root: TempDir,
+            workspace: PathBuf,
+            outside: PathBuf,
+        }
+
+        impl Scene {
+            fn new() -> Self {
+                let root = tempfile::tempdir().expect("root");
+                let base = root.path().canonicalize().expect("canonical root");
+                let workspace = base.join("workspace");
+                let outside = base.join("person");
+                std::fs::create_dir_all(workspace.join(".zo")).expect("workspace .zo");
+                std::fs::create_dir_all(&outside).expect("person");
+                std::fs::write(workspace.join(".zo").join("settings.json"), PROJECT_DOCUMENT)
+                    .expect("project document");
+                Self {
+                    _root: root,
+                    workspace,
+                    outside,
+                }
+            }
+
+            fn project_document(&self) -> PathBuf {
+                self.workspace.join(".zo").join("settings.json")
+            }
+
+            /// What launching the server named `name` asks of `keys`, with
+            /// the config home at `config_home`.
+            fn launch(&self, config_home: &Path, name: &str, keys: &Keys) -> Result<(), String> {
+                let config = ConfigLoader::new(&self.workspace, config_home)
+                    .load()
+                    .expect("loads");
+                let server = config.mcp().get(name).expect("the server is loaded");
+                let bootstrap = McpClientBootstrap::from_scoped_config(name, server);
+                resolve_launch_references(&bootstrap, keys)
+                    .map(|_| ())
+                    .map_err(|unresolved| unresolved.to_string())
+            }
+        }
+
+        fn person_keys() -> Keys {
+            Keys::default().with_keychain("PERSON_KEY", KEYCHAIN_VALUE)
+        }
+
+        #[test]
+        fn a_user_settings_link_into_the_workspace_never_reads_the_keychain() {
+            let scene = Scene::new();
+            let home = scene.outside.join(".zo");
+            std::fs::create_dir_all(&home).expect("home");
+            std::os::unix::fs::symlink(scene.project_document(), home.join("settings.json"))
+                .expect("link");
+            let keys = person_keys();
+            assert_eq!(
+                scene.launch(&home, "repo-server", &keys),
+                Err("unresolved reference ${PERSON_KEY}".to_string())
+            );
+            assert!(keys.asked().is_empty(), "keychain asked for {:?}", keys.asked());
+        }
+
+        #[test]
+        fn a_config_home_linked_or_placed_inside_the_workspace_never_reads_the_keychain() {
+            let scene = Scene::new();
+            let linked_home = scene.outside.join(".zo");
+            std::os::unix::fs::symlink(scene.workspace.join(".zo"), &linked_home).expect("link");
+            for home in [linked_home, scene.workspace.join(".zo")] {
+                let keys = person_keys();
+                assert_eq!(
+                    scene.launch(&home, "repo-server", &keys),
+                    Err("unresolved reference ${PERSON_KEY}".to_string()),
+                    "{}",
+                    home.display()
+                );
+                assert!(keys.asked().is_empty(), "{}: keychain asked", home.display());
+            }
+        }
+
+        #[test]
+        fn a_user_settings_file_that_is_a_project_document_by_another_name_never_reads_the_keychain() {
+            let scene = Scene::new();
+            let home = scene.outside.join(".zo");
+            std::fs::create_dir_all(&home).expect("home");
+            std::fs::hard_link(scene.project_document(), home.join("settings.json")).expect("hard link");
+            let keys = person_keys();
+            assert_eq!(
+                scene.launch(&home, "repo-server", &keys),
+                Err("unresolved reference ${PERSON_KEY}".to_string())
+            );
+            assert!(keys.asked().is_empty(), "keychain asked for {:?}", keys.asked());
+        }
+
+        #[test]
+        fn the_persons_own_settings_file_reads_the_keychain_and_names_itself_as_the_grant() {
+            let scene = Scene::new();
+            let home = scene.outside.join(".zo");
+            std::fs::create_dir_all(&home).expect("home");
+            std::fs::write(
+                home.join("settings.json"),
+                r#"{"mcpServers": {"own-server": {"command": "npx", "env": {"TOKEN": "${PERSON_KEY}"}}}}"#,
+            )
+            .expect("user document");
+            let keys = person_keys();
+            assert_eq!(scene.launch(&home, "own-server", &keys), Ok(()));
+            assert_eq!(keys.asked(), vec!["PERSON_KEY".to_string()]);
+            let config = ConfigLoader::new(&scene.workspace, &home).load().expect("loads");
+            assert_eq!(
+                config.mcp().get("own-server").and_then(|server| server.keychain_grant.clone()),
+                Some(home.join("settings.json"))
+            );
+        }
     }
 }

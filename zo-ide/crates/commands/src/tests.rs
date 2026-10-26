@@ -1932,6 +1932,7 @@ fn mcp_auth_list_includes_http_servers_without_explicit_oauth() {
         "remote-http".to_string(),
         ScopedMcpServerConfig {
             scope: ConfigSource::User,
+            keychain_grant: None,
             config: McpServerConfig::Http(McpRemoteServerConfig {
                 url: "https://mcp.example.test/mcp".to_string(),
                 headers: BTreeMap::new(),

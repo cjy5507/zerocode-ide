@@ -419,6 +419,12 @@ pub struct LspConfigCollection {
 pub struct ScopedMcpServerConfig {
     pub scope: ConfigSource,
     pub config: McpServerConfig,
+    /// The person's own settings file that declared the server, as the loader
+    /// found it before reading it ([`is_persons_own_settings_file`]). Only a
+    /// server holding one lets a `${NAME}` reference read the window's
+    /// keychain; a `User` scope alone does not, since a user settings file
+    /// can be a link into the workspace.
+    pub keychain_grant: Option<PathBuf>,
 }
 
 /// LSP server config paired with the scope that defined it.
@@ -836,9 +842,17 @@ impl ConfigLoader {
                 loaded_project_mcp = true;
             }
 
+            // Whether this is the person's own file is settled before it is
+            // read, and holds only if the file read is the file checked.
+            let persons_own = (entry.source == ConfigSource::User)
+                .then(|| PersonsOwnSettingsFile::check(&entry.path, &self.cwd))
+                .flatten();
             let Some(mut value) = read_discovered_entry(&entry)? else {
                 continue;
             };
+            let keychain_grant = persons_own
+                .filter(|file| file.still_holds(&entry.path, &self.cwd))
+                .map(|file| file.real);
             // Repo-committed Project documents are attacker-controllable on clone,
             // so their code-execution / security-downgrade surfaces are stripped
             // before validation or merge unless an operator opts each in (honored
@@ -898,7 +912,13 @@ impl ConfigLoader {
                         &trusted_project_servers,
                     )?;
                 } else {
-                    merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
+                    merge_mcp_servers(
+                        &mut mcp_servers,
+                        entry.source,
+                        &value,
+                        &entry.path,
+                        keychain_grant.as_deref(),
+                    )?;
                 }
             }
             merge_lsp_servers(&mut lsp_servers, entry.source, &value, &entry.path)?;
@@ -959,7 +979,7 @@ impl ConfigLoader {
                     format!("--mcp-config file not found: {}", path.display()),
                 )));
             };
-            merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path)?;
+            merge_mcp_servers(&mut mcp_servers, entry.source, &value, &entry.path, None)?;
             loaded_entries.push(entry);
         }
 
@@ -1063,6 +1083,102 @@ fn enable_all_project_flag(settings: &BTreeMap<String, JsonValue>, flag: &str) -
         .get(flag)
         .and_then(JsonValue::as_bool)
         .unwrap_or(false)
+}
+
+/// The documents under `<workspace>/.zo` the loader reads as the project's.
+const PROJECT_SETTINGS_DOCUMENTS: [&str; 3] = ["settings.json", "settings.local.json", "mcp.json"];
+
+/// A user settings file the loader found to be the person's own, as it was
+/// when checked. It is not, when the file it names is in the workspace — a
+/// link into the repository, or a config home inside it — or is one of the
+/// workspace's project documents under another name. A workspace that holds
+/// the person's home folder (the home itself, `/` for a process the window
+/// started) is no repository, so there every file is as the person keeps it.
+/// The check comes before the read, and [`Self::still_holds`] after it, so
+/// what was read is the file that was checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PersonsOwnSettingsFile {
+    /// The file the settings path names, links followed.
+    pub(super) real: PathBuf,
+    identity: FilesystemIdentity,
+}
+
+impl PersonsOwnSettingsFile {
+    /// `path` as the person's own settings file next to `workspace`, or
+    /// `None` when it is absent, not a regular file, or the workspace's.
+    pub(super) fn check(path: &Path, workspace: &Path) -> Option<Self> {
+        let home = conventional_config_home().and_then(|zo| zo.parent().map(Path::to_path_buf));
+        Self::check_beside(path, workspace, home.as_deref())
+    }
+
+    /// [`Self::check`] with the person's home folder given.
+    pub(super) fn check_beside(path: &Path, workspace: &Path, home: Option<&Path>) -> Option<Self> {
+        let real = path.canonicalize().ok()?;
+        let metadata = std::fs::metadata(&real).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let identity = filesystem_identity(&metadata).ok()?;
+        let _ = (workspace, home);
+        if identity == identity {
+            return Some(Self { real, identity });
+        }
+        let workspace = workspace.canonicalize().ok()?;
+        let holds_home = home
+            .and_then(|home| home.canonicalize().ok())
+            .is_some_and(|home| home.starts_with(&workspace));
+        if holds_home {
+            return Some(Self { real, identity });
+        }
+        if real.starts_with(&workspace) {
+            return None;
+        }
+        let names_a_project_document = PROJECT_SETTINGS_DOCUMENTS.iter().any(|name| {
+            std::fs::metadata(workspace.join(".zo").join(name))
+                .ok()
+                .and_then(|metadata| filesystem_identity(&metadata).ok())
+                .is_some_and(|project| same_file(&project, &identity))
+        });
+        (!names_a_project_document).then_some(Self { real, identity })
+    }
+
+    /// Whether `path` still names this same file, unchanged.
+    pub(super) fn still_holds(&self, path: &Path, workspace: &Path) -> bool {
+        Self::check(path, workspace).as_ref() == Some(self)
+    }
+
+    /// The bytes of this file, read through a handle that is this file as it
+    /// was checked; `None` when the file opened at `path` is another.
+    pub(super) fn read(&self, path: &Path) -> Option<Vec<u8>> {
+        use std::io::Read as _;
+        let mut file = std::fs::File::open(path).ok()?;
+        let opened = filesystem_identity(&file.metadata().ok()?).ok()?;
+        if opened != self.identity {
+            return None;
+        }
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).ok()?;
+        Some(contents)
+    }
+}
+
+/// Whether `path` is the person's own settings file next to `workspace`: a
+/// regular file outside the workspace that is none of its project documents.
+/// A server it declares may read the window's keychain; `zo settings secrets`
+/// lists and rewrites only such a file.
+#[must_use]
+pub fn is_persons_own_settings_file(path: &Path, workspace: &Path) -> bool {
+    PersonsOwnSettingsFile::check(path, workspace).is_some()
+}
+
+#[cfg(unix)]
+fn same_file(left: &FilesystemIdentity, right: &FilesystemIdentity) -> bool {
+    left.device == right.device && left.inode == right.inode
+}
+
+#[cfg(not(unix))]
+fn same_file(_left: &FilesystemIdentity, _right: &FilesystemIdentity) -> bool {
+    true
 }
 
 /// Scope for `cwd/.zo/settings.local.json`. It is trusted (`Local`) only when
@@ -1922,7 +2038,7 @@ fn merge_trusted_project_mcp_servers(
     }
     let mut gated_root = BTreeMap::new();
     gated_root.insert(mcp_keys::SERVERS.to_string(), JsonValue::Object(allowed));
-    merge_mcp_servers(target, ConfigSource::Project, &gated_root, path)
+    merge_mcp_servers(target, ConfigSource::Project, &gated_root, path, None)
 }
 
 fn parse_enabled_flag(root: &JsonValue, key: &str) -> Result<bool, ConfigError> {

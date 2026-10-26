@@ -453,6 +453,7 @@ fn write_manager_mcp_server_script() -> PathBuf {
 fn sample_bootstrap(script_path: &Path) -> McpClientBootstrap {
     let config = ScopedMcpServerConfig {
         scope: ConfigSource::Local,
+        keychain_grant: None,
         config: McpServerConfig::Stdio(McpStdioServerConfig {
             command: "/bin/sh".to_string(),
             args: vec![script_path.to_string_lossy().into_owned()],
@@ -502,6 +503,7 @@ fn remote_bridge_stdio_gets_longer_initialize_timeout() {
         "atlassian".to_string(),
         ScopedMcpServerConfig {
             scope: ConfigSource::User,
+            keychain_grant: None,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
                 command: "npx".to_string(),
                 args: vec![
@@ -530,6 +532,7 @@ fn ordinary_stdio_keeps_default_initialize_timeout() {
         "local".to_string(),
         ScopedMcpServerConfig {
             scope: ConfigSource::User,
+            keychain_grant: None,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
                 command: "uvx".to_string(),
                 args: vec!["local-mcp".to_string()],
@@ -559,6 +562,7 @@ fn npx_cold_start_stdio_gets_longer_initialize_timeout() {
         "chrome-devtools".to_string(),
         ScopedMcpServerConfig {
             scope: ConfigSource::User,
+            keychain_grant: None,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
                 command: "npx".to_string(),
                 args: vec![
@@ -587,6 +591,7 @@ fn discovery_timeout_wraps_initialize_retry_and_tools_list() {
             "atlassian".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "npx".to_string(),
                     args: vec![
@@ -603,6 +608,7 @@ fn discovery_timeout_wraps_initialize_retry_and_tools_list() {
             "local".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "uvx".to_string(),
                     args: vec!["local-mcp".to_string()],
@@ -656,6 +662,7 @@ fn manager_server_config_with_env(
     env.extend(extra_env);
     ScopedMcpServerConfig {
         scope: ConfigSource::Local,
+        keychain_grant: None,
         config: McpServerConfig::Stdio(McpStdioServerConfig {
             command: "python3".to_string(),
             args: vec![script_path.to_string_lossy().into_owned()],
@@ -704,6 +711,7 @@ fn bootstrap_spawn_adds_mcp_audit_environment() {
         let script_path = write_audit_env_script();
         let config = ScopedMcpServerConfig {
             scope: ConfigSource::Project,
+            keychain_grant: None,
             config: McpServerConfig::Stdio(McpStdioServerConfig {
                 command: "/bin/sh".to_string(),
                 args: vec![script_path.to_string_lossy().into_owned()],
@@ -743,6 +751,7 @@ fn bootstrap_spawn_adds_mcp_audit_environment() {
 fn rejects_non_stdio_bootstrap() {
     let config = ScopedMcpServerConfig {
         scope: ConfigSource::Local,
+        keychain_grant: None,
         config: McpServerConfig::Sdk(crate::config::McpSdkServerConfig {
             name: "sdk-server".to_string(),
         }),
@@ -1195,6 +1204,7 @@ fn discover_tools_best_effort_skips_remote_when_total_cannot_cover_initialize_an
             "a-remote".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     args: vec![
@@ -1333,6 +1343,7 @@ fn discover_tools_best_effort_attempts_remote_when_budget_covers_initialize() {
             "z-remote".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     args: vec![
@@ -1919,6 +1930,7 @@ fn manager_times_out_slow_tool_calls() {
             "slow".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     args: vec![script_path.to_string_lossy().into_owned()],
@@ -1972,6 +1984,7 @@ fn manager_surfaces_parse_errors_from_tool_calls() {
             "broken".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     args: vec![script_path.to_string_lossy().into_owned()],
@@ -2251,6 +2264,7 @@ fn given_oauth_bridge_initialize_times_out_then_child_is_never_respawned() {
             "atlassian".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     // The trailing `mcp-remote` arg marks this config as an
@@ -2549,6 +2563,7 @@ fn manager_discovery_report_keeps_healthy_servers_when_one_server_fails() {
                 "broken".to_string(),
                 ScopedMcpServerConfig {
                     scope: ConfigSource::Local,
+                    keychain_grant: None,
                     config: McpServerConfig::Stdio(McpStdioServerConfig {
                         command: "python3".to_string(),
                         args: vec!["-c".to_string(), "import sys; sys.exit(0)".to_string()],
@@ -2624,6 +2639,7 @@ fn manager_records_only_truly_unsupported_servers_without_panicking() {
             "http".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Http(McpRemoteServerConfig {
                     url: "https://example.test/mcp".to_string(),
                     headers: BTreeMap::new(),
@@ -2636,6 +2652,7 @@ fn manager_records_only_truly_unsupported_servers_without_panicking() {
             "sdk".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Sdk(McpSdkServerConfig {
                     name: "sdk-server".to_string(),
                 }),
@@ -2645,6 +2662,7 @@ fn manager_records_only_truly_unsupported_servers_without_panicking() {
             "ws".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Ws(McpWebSocketServerConfig {
                     url: "wss://example.test/mcp".to_string(),
                     headers: BTreeMap::new(),
@@ -2780,6 +2798,7 @@ fn oauth_server_name_surfaces_the_name_for_remote_servers() {
             name,
             &ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: None,
                 config: McpServerConfig::Sse(McpRemoteServerConfig {
                     url: "https://mcp.example/sse".to_string(),
                     headers: BTreeMap::new(),
@@ -2863,6 +2882,7 @@ fn paginated_listing_aborts_when_the_cursor_never_advances() {
 fn remote_http_server_config(url: &str) -> ScopedMcpServerConfig {
     ScopedMcpServerConfig {
         scope: ConfigSource::User,
+        keychain_grant: None,
         config: McpServerConfig::Http(McpRemoteServerConfig {
             url: url.to_string(),
             headers: BTreeMap::new(),
@@ -2886,6 +2906,7 @@ fn discovery_class_splits_stdio_bridge_from_remote() {
             "bridge".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "npx".to_string(),
                     args: vec!["-y".to_string(), "mcp-remote".to_string()],
@@ -2919,6 +2940,7 @@ fn initialize_timeout_ms_for_orders_fast_local_before_slow_bridge() {
             "bridge".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::User,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "npx".to_string(),
                     args: vec!["-y".to_string(), "mcp-remote".to_string()],
@@ -3116,6 +3138,7 @@ fn given_oauth_bridge_never_initializes_then_respawn_blocked() {
             "atlassian".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     args: vec![
@@ -3191,6 +3214,7 @@ fn given_oauth_bridge_stays_alive_then_refresh_succeeds() {
             "atlassian".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     args: vec![
@@ -3269,6 +3293,7 @@ fn given_oauth_bridge_crashes_after_auth_then_recovery_respawns() {
             "atlassian".to_string(),
             ScopedMcpServerConfig {
                 scope: ConfigSource::Local,
+                keychain_grant: None,
                 config: McpServerConfig::Stdio(McpStdioServerConfig {
                     command: "python3".to_string(),
                     args: vec![

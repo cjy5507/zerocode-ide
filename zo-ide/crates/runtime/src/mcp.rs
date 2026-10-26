@@ -295,10 +295,12 @@ mod tests {
         });
         let user = ScopedMcpServerConfig {
             scope: ConfigSource::User,
+            keychain_grant: None,
             config: base_config.clone(),
         };
         let local = ScopedMcpServerConfig {
             scope: ConfigSource::Local,
+            keychain_grant: None,
             config: base_config,
         };
         assert_eq!(
@@ -308,6 +310,7 @@ mod tests {
 
         let changed = ScopedMcpServerConfig {
             scope: ConfigSource::Local,
+            keychain_grant: None,
             config: McpServerConfig::Http(McpRemoteServerConfig {
                 url: "https://vendor.example/v2/mcp".to_string(),
                 headers: BTreeMap::new(),

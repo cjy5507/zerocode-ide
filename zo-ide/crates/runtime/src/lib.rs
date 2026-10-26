@@ -146,7 +146,7 @@ pub use config::{
     TRUSTED_MCP_SERVERS_FILE, ZO_SETTINGS_SCHEMA_NAME,
     persist_allow_always_rules, remove_mcp_server, trust_mcp_server, untrust_mcp_server,
     write_mcp_server, mcp_literal_secrets, move_mcp_literal_to_reference,
-    slot_holds_literal_secret, McpLiteralSecret,
+    slot_holds_literal_secret, is_persons_own_settings_file, McpLiteralSecret,
 };
 pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{

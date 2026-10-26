@@ -104,11 +104,12 @@ fn answer(request: &Request, loader: &ConfigLoader, keys: &dyn ReferenceKeys) ->
 }
 
 /// The person's own settings files: every user root the loader reads, in the
-/// order it merges them, each once.
+/// order it merges them, each once, as the loader names them — links not
+/// followed, so a link into a workspace never makes its target one of them.
 fn user_settings_files(loader: &ConfigLoader) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = Vec::new();
     for root in loader.config_roots().iter().rev() {
-        let file = absolute(&root.join("settings.json"));
+        let file = lexical(&root.join("settings.json"));
         if !files.contains(&file) {
             files.push(file);
         }
@@ -116,15 +117,20 @@ fn user_settings_files(loader: &ConfigLoader) -> Vec<PathBuf> {
     files
 }
 
-fn absolute(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path)
-        .or_else(|_| std::path::absolute(path))
-        .unwrap_or_else(|_| path.to_path_buf())
+/// `path` made absolute and its `.` and `..` folded, without asking the disk.
+fn lexical(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    std::fs::canonicalize(path).unwrap_or_else(|_| core_types::paths::normalize_path_components(&absolute))
 }
 
 fn list(loader: &ConfigLoader) -> Answer {
     let mut literals = Vec::new();
     for file in user_settings_files(loader) {
+        // A user settings file that is the workspace's own document under
+        // another name is not the person's to list or to move.
+        if file.as_os_str().is_empty() && !runtime::is_persons_own_settings_file(&file, loader.cwd()) {
+            continue;
+        }
         match runtime::mcp_literal_secrets(&file) {
             Ok(found) => literals.extend(found.iter().map(|slot| {
                 json!({
@@ -170,7 +176,10 @@ fn move_slot(
     if !given.is_absolute() {
         return refused("--file must be an absolute path.".to_string());
     }
-    let file = absolute(given);
+    // The boundary is the path as given, before any link is followed; the
+    // move itself then checks that the file there is the person's own and
+    // keeps it the same file from its read to its replacement.
+    let file = lexical(given);
     if !user_settings_files(loader).contains(&file) {
         return refused(format!(
             "{} is not your user settings file; only that file is rewritten.",
@@ -185,7 +194,7 @@ fn move_slot(
             .map(|(value, _)| value)
             .map_err(|miss| miss.why().to_string())
     };
-    match runtime::move_mcp_literal_to_reference(&file, &key_path, name, &resolve) {
+    match runtime::move_mcp_literal_to_reference(&file, loader.cwd(), &key_path, name, &resolve) {
         Ok(backup) => Answer {
             json: json!({ "moved": true, "backup": backup.display().to_string() }),
             code: 0,
@@ -286,9 +295,6 @@ mod tests {
         }
     }
 
-    fn canonical(path: &Path) -> String {
-        std::fs::canonicalize(path).expect("canonical").display().to_string()
-    }
 
     const TOKEN_PATH: &str = r#"["mcpServers","github","env","GITHUB_PERSONAL_ACCESS_TOKEN"]"#;
 
@@ -300,7 +306,7 @@ mod tests {
         assert_eq!(
             answered.json,
             json!({"literals": [{
-                "file": canonical(&scratch.home_settings()),
+                "file": scratch.home_settings().display().to_string(),
                 "path": ["mcpServers", "github", "env", "GITHUB_PERSONAL_ACCESS_TOKEN"],
                 "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
             }]}),
@@ -386,5 +392,46 @@ mod tests {
                 .is_some_and(Vec::is_empty),
             "nothing written out is left"
         );
+    }
+
+    /// The person's settings file is a link to the workspace's own
+    /// `.zo/settings.json`: neither path is the person's to list or rewrite.
+    #[cfg(unix)]
+    #[test]
+    fn a_user_settings_link_into_the_workspace_is_neither_listed_nor_moved() {
+        let scratch = Scratch::new();
+        std::fs::remove_file(scratch.home_settings()).expect("drop the home file");
+        std::os::unix::fs::symlink(scratch.project_settings(), scratch.home_settings()).expect("link");
+        let matching = Keys {
+            keychain: BTreeMap::from([(
+                "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                LITERAL.to_string(),
+            )]),
+            ..Keys::default()
+        };
+        let listed = scratch.run(&["secrets", "--json"], &matching);
+        assert_eq!(listed.json, json!({"literals": []}), "the workspace's file is not listed as the person's");
+
+        let link = scratch.home_settings().display().to_string();
+        let project = scratch.project_settings().display().to_string();
+        let canonical_project = std::fs::canonicalize(scratch.project_settings())
+            .expect("canonical")
+            .display()
+            .to_string();
+        for file in [&link, &project, &canonical_project] {
+            let words = [
+                "secrets", "move", "--file", file, "--path", TOKEN_PATH, "--name",
+                "GITHUB_PERSONAL_ACCESS_TOKEN", "--json",
+            ];
+            let refused = scratch.run(&words, &matching);
+            assert_eq!((refused.json["moved"].clone(), refused.code), (json!(false), 1), "{file}: {}", refused.json);
+        }
+        assert!(std::fs::read_to_string(scratch.project_settings()).expect("project").contains(LITERAL));
+        let backups: Vec<_> = std::fs::read_dir(scratch.cwd.path().join(".zo"))
+            .expect(".zo")
+            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".bak-"))
+            .collect();
+        assert!(backups.is_empty(), "no backup in the project folder: {backups:?}");
     }
 }
