@@ -15250,6 +15250,13 @@ await test("the Google card names zo and the gauge as the sign-in's users — in
   return JSON.stringify(seen);
 });
 
+/* The pages booted before a scene keeps a record have each made their one
+   start-time read of it already (and found none): a scene's record is read
+   only by the windows the scene starts. */
+async function pastStartQuietChecks() {
+  await pageA.waitForFunction(() => modelConnectionsController.memory !== null, null, { timeout: 30_000 });
+}
+
 /* t-76500: a connection checked once stays 「연결됨」 across a window start
    — the window keeps each connection's last check (state words, model count,
    time, generation; never a key or a server's words) — and the ones whose
@@ -15258,6 +15265,7 @@ await test("the Google card names zo and the gauge as the sign-in's users — in
 await test("모델 연결: 확인한 연결은 창을 다시 켜도 「연결됨 · N시간 전 확인」이고, 오래됐거나 안 한 것만 누르지 않아도 하나씩 다시 확인한다 (t-76500)", async () => {
   const HOUR = 60 * 60 * 1000;
   const T0 = Date.UTC(2026, 9, 26, 12);
+  await pastStartQuietChecks();
   const saved = { providers: clone(backend.zoSettings.providers), answers: backend.routerProbeAnswers, memory: backend.connectionMemory, locale: backend.settings.locale };
   const row = (name, base, id, generation = 1) => ({ name, base_url: base, models: [`${id}-one`, `${id}-two`], requires_auth: false, connection: { id, generation } });
   backend.zoSettings.providers = [
@@ -15349,6 +15357,46 @@ await test("모델 연결: 확인한 연결은 창을 다시 켜도 「연결됨
     delete backend.routerProbeHold;
     backend.settings.locale = saved.locale;
     for (const page of pages) if (!page.isClosed()) await page.close();
+  }
+});
+
+/* t-76500 B: the window's start checks a due connection with nobody opening
+   settings — after its first paint and an idle moment, never before. */
+await test("모델 연결: 설정을 열지 않아도 창이 뜬 뒤 한가할 때 오래된 연결을 한 번 확인하고, 첫 그림 전에는 묻지 않는다 (t-76500)", async () => {
+  const HOUR = 60 * 60 * 1000;
+  const T0 = Date.UTC(2026, 9, 27, 0);
+  await pastStartQuietChecks();
+  const saved = { providers: clone(backend.zoSettings.providers), answers: backend.routerProbeAnswers, memory: backend.connectionMemory };
+  backend.zoSettings.providers = [
+    { name: "Gateway", base_url: "https://gateway.example.test/v1", models: ["one"], requires_auth: false, connection: { id: "gateway", generation: 1 } },
+    { name: "Recent", base_url: "https://recent.example.test/v1", models: ["one"], requires_auth: false, connection: { id: "recent", generation: 1 } },
+  ];
+  backend.routerProbeAnswers = { "https://gateway.example.test/v1": ["one"], "https://recent.example.test/v1": ["one"] };
+  backend.connectionMemory = { nowMs: T0, connections: {
+    gateway: { generation: 1, state: "ok", count: 1, checkedMs: T0 - 7 * HOUR },
+    recent: { generation: 1, state: "ok", count: 1, checkedMs: T0 - HOUR },
+  } };
+  const page = await context.newPage();
+  try {
+    await installTauri(page, "memory-boot");
+    attachFaultRecorder(page, "memory-boot");
+    const from = backend.calls.length;
+    await bootPage(page, "memory-boot");
+    const probes = () => backend.calls.slice(from).filter((call) => call.command === "test_router_connection").map((call) => call.args.sourceId);
+    assertEqual(probes(), [], "the window asked a provider before its first paint settled");
+    const started = Date.now();
+    await backend.waitForCall("memory-boot", "test_router_connection", from, 20_000);
+    const waited = Date.now() - started;
+    await page.waitForFunction(() => !modelConnectionsController.quieting, null, { timeout: UI_TIMEOUT });
+    assertEqual(probes(), ["gateway"], "the start did not check exactly the old connection once");
+    assertEqual(backend.connectionMemory.connections.gateway.checkedMs, T0, "the start's quiet check was not kept");
+    assert(await page.evaluate(() => !document.querySelector(".settings-pane:not([hidden])")?.offsetParent), "the quiet check opened settings");
+    return `1 quiet check ${Math.round(waited / 100) / 10} s after the first paint settled; the 1 h old one not asked`;
+  } finally {
+    backend.zoSettings.providers = saved.providers;
+    backend.routerProbeAnswers = saved.answers;
+    if (saved.memory === undefined) delete backend.connectionMemory; else backend.connectionMemory = saved.memory;
+    await page.close();
   }
 });
 

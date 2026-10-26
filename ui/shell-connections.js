@@ -109,10 +109,36 @@ function modelReportAge(age) {
   }
 }
 
+/* How long ago a kept check was made, in the reader's own language: seconds
+ * under a minute, minutes under an hour, hours under two days, then days. */
+function modelCheckAge(ms) {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const [value, unit] = seconds < 60 ? [seconds, "second"] : seconds < 3600 ? [Math.floor(seconds / 60), "minute"]
+    : seconds < 172800 ? [Math.floor(seconds / 3600), "hour"] : [Math.floor(seconds / 86400), "day"];
+  try {
+    return new Intl.RelativeTimeFormat(document.documentElement.lang || "ko", { numeric: "auto" }).format(-value, unit);
+  } catch {
+    return "";
+  }
+}
+
+/* The states a finished check is kept in — `model_connection_checks::Verdict`. */
+const KEPT_CHECK_STATES = Object.freeze(["ok", "usable", "nokey", "unreadable", "badkey", "down", "schema", "failed"]);
+
+/* The quiet check waits for the window's first paint and then an idle
+ * moment, so a window start never waits on a provider (t-76500 B). */
+const QUIET_CHECK_AFTER_PAINT_MS = 10_000;
+
 const modelConnectionsController = {
   state: null, zo: null, sequence: 0, busy: false, editing: null, view: "catalog", deletion: null,
-  /* The last check each saved connection had in this window, by id. */
+  /* The last check each saved connection had, by id: made in this window,
+   * or kept from an earlier start (`recalled`), with the generation it was
+   * made against and when (t-76500). */
   checks: new Map(),
+  /* The window's record of those checks as last read or written, with the
+   * page's clock at that moment; `false` while it cannot be read — then
+   * nothing is checked unasked, as its spacing cannot be kept. */
+  memory: null, recalled: new Set(), quieting: false, quietQueued: false,
   /* The last judgment check each candidate had, by its reference. */
   judged: new Map(),
   /* A judgment format picked in 「고급」 for a connection, by its id. */
@@ -188,6 +214,7 @@ const modelConnectionsController = {
     const [state, zo] = await Promise.all([
       invoke("model_connections").then((value) => ({ value }), (error) => ({ error })),
       invoke("zo_model_list").then((value) => ({ value }), (error) => ({ error })),
+      this.recall(),
     ]);
     if (sequence !== this.sequence) return;
     if (!routerPresets.length) {
@@ -208,8 +235,123 @@ const modelConnectionsController = {
       this.failed = state.error ?? "provider_settings";
     }
     if (zo.value) this.zo = zo.value;
+    this.takeRecalled();
     this.autoSetup();
     this.render();
+    this.quietSoon();
+  },
+
+  /* ---- the kept checks (t-76500) ----------------------------------------- */
+
+  async recall() {
+    try {
+      this.memory = this.taken(await invoke("remembered_model_connection_checks"));
+    } catch {
+      this.memory = false;
+    }
+  },
+  /* A record answer as the page holds it, or `false` for anything else. */
+  taken(read) {
+    if (!Number.isFinite(read?.nowMs) || !Number.isFinite(read?.everyMs) || typeof read.connections !== "object") return false;
+    return { ...read, readAt: performance.now() };
+  },
+  nowMs() {
+    return this.memory ? this.memory.nowMs + (performance.now() - this.memory.readAt) : null;
+  },
+  /* A kept check stands for a connection this page has no answer for yet,
+   * once per page and generation; a kept judgment check only for the
+   * generation it was made against. */
+  takeRecalled() {
+    if (!this.memory) return;
+    for (const connection of this.state?.connections ?? []) {
+      const kept = this.memory.connections?.[connection.id];
+      if (!kept || this.recalled.has(`${connection.id}:${kept.generation}`)) continue;
+      this.recalled.add(`${connection.id}:${kept.generation}`);
+      if (kept.state && !this.checks.has(connection.id)) {
+        this.checks.set(connection.id, { state: kept.state, count: kept.count, checkedMs: kept.checkedMs, generation: kept.generation, recalled: true });
+      }
+      if (kept.generation !== connection.generation) continue;
+      for (const judged of kept.judgments ?? []) {
+        const reference = JSON.stringify({ id: connection.id, generation: kept.generation, model: judged.model, protocol: judged.protocol });
+        if (!this.judged.has(reference)) this.judged.set(reference, { state: judged.state, checkedMs: judged.checkedMs, recalled: true });
+      }
+    }
+  },
+  /* A finished check, written to the record: state words only, never what a
+   * server said. A record that cannot be written leaves the page as it is. */
+  async keep(command, answer) {
+    if (!KEPT_CHECK_STATES.includes(answer.state)) return null;
+    try {
+      const memory = this.taken(await invoke(command, { answer }));
+      if (!memory) return null;
+      this.memory = memory;
+      return memory.connections?.[answer.id] ?? null;
+    } catch {
+      return null;
+    }
+  },
+  /* A saved connection's state: its key out of reach, its last check, or
+   * 「설정이 바뀜」 when that check was made against another generation. */
+  connectionCheck(connection) {
+    if (connection.provider.requires_auth && !connection.keyAvailable) return { state: this.keyMissing(connection), check: null };
+    const check = this.checks.get(connection.id);
+    if (!check) return { state: "unknown", check: null };
+    if (check.generation != null && check.generation !== connection.generation) return { state: "changed", check: null };
+    return { state: check.state, check };
+  },
+  /* Whether a connection is checked without a press: never checked, checked
+   * against another generation, or longer ago than the record's spacing —
+   * and never while it is being checked or its key is out of reach. */
+  dueQuietly(connection) {
+    if (!this.memory || (connection.provider.requires_auth && !connection.keyAvailable)) return false;
+    const check = this.checks.get(connection.id);
+    if (!check) return true;
+    if (check.state === "checking") return false;
+    if (check.generation != null && check.generation !== connection.generation) return true;
+    return check.checkedMs != null && this.nowMs() - check.checkedMs >= this.memory.everyMs;
+  },
+  /* After what called it has finished its own turn — a press that checks a
+   * connection itself marks it first. */
+  quietSoon() {
+    if (this.quietQueued || !this.memory) return;
+    this.quietQueued = true;
+    window.setTimeout(() => {
+      this.quietQueued = false;
+      void this.quietRecheck();
+    }, 0);
+  },
+  /* The due connections, one at a time, with the light check only — the
+   * model list, never a judgment request (ZO m-76513 ③). */
+  async quietRecheck() {
+    if (this.quieting) return;
+    this.quieting = true;
+    const asked = new Set();
+    try {
+      for (;;) {
+        const connection = (this.state?.connections ?? []).find((one) => !asked.has(one.id) && this.dueQuietly(one));
+        if (!connection) break;
+        asked.add(connection.id);
+        await this.checkConnection(connection, { quiet: true });
+      }
+    } finally {
+      this.quieting = false;
+    }
+  },
+  /* The window's start: after the first paint and an idle moment, the
+   * record is read and the due connections are checked (t-76500 B). */
+  async wake() {
+    await this.recall();
+    if (!this.memory) return;
+    if (!this.state) {
+      try {
+        this.hold(await invoke("model_connections"));
+      } catch {
+        return;
+      }
+    }
+    this.takeRecalled();
+    this.render();
+    await this.quietRecheck();
   },
 
   async sync() {
@@ -291,8 +433,7 @@ const modelConnectionsController = {
     if (!row) return "unknown";
     if (row.login) return row.login.state;
     const connection = row.router?.row;
-    if (connection && connection.provider.requires_auth && !connection.keyAvailable) return this.keyMissing(connection);
-    return this.checks.get(connection?.id)?.state ?? "unknown";
+    return connection ? this.connectionCheck(connection).state : "unknown";
   },
   keyMissing(connection) {
     return connection.provider.auth_env && !connection.provider.auth_env.startsWith("ZEROCODE_ROUTER_") ? "unreadable" : "nokey";
@@ -333,7 +474,7 @@ const modelConnectionsController = {
     if (connection.provider.requires_auth && !connection.keyAvailable) return { group: "off", state: this.keyMissing(connection) };
     const judged = this.judged.get(JSON.stringify(row.reference));
     if (judged && judged.state !== "usable") return { group: "off", state: judged.state };
-    if (this.checks.get(connection.id)?.state === "down") return { group: "off", state: "down" };
+    if (this.connectionCheck(connection).state === "down") return { group: "off", state: "down" };
     return { group: "check", state: judged?.state ?? "unknown" };
   },
   /* A connections answer, taken: judgment's format is kept by connection,
@@ -512,7 +653,10 @@ const modelConnectionsController = {
       if (setup !== this.setup) return;
       const connection = this.state?.connections.find((row) => row.provider.name === preset.name);
       setup.connectionId = connection?.id ?? null;
-      if (connection) this.checks.set(connection.id, { state: "ok", count: models.length });
+      if (connection) {
+        this.checks.set(connection.id, { state: "ok", count: models.length, generation: connection.generation, checkedMs: this.nowMs() });
+        void this.keep("remember_model_connection_check", { id: connection.id, generation: connection.generation, state: "ok", count: models.length, forgetJudgments: true });
+      }
       setup.count = models.length;
       setup.checked = "ok";
     } catch (error) {
@@ -627,13 +771,17 @@ const modelConnectionsController = {
       return { applied: false, key, state: modelFailureState(error), raw: this.failure(error) };
     }
   },
-  /* A saved connection's model list, read with its saved key. */
-  async checkConnection(connection) {
-    // Checking a connection again lets its models be asked for judgment again.
-    for (const reference of [...this.judged.keys()]) {
-      if (JSON.parse(reference)?.id === connection.id) this.judged.delete(reference);
+  /* A saved connection's model list, read with its saved key: pressed, or
+   * quietly because its check is due. The answer is kept for the next start. */
+  async checkConnection(connection, { quiet = false } = {}) {
+    // Checking a connection again by hand lets its models be asked for
+    // judgment again; a quiet check keeps what they answered.
+    if (!quiet) {
+      for (const reference of [...this.judged.keys()]) {
+        if (JSON.parse(reference)?.id === connection.id) this.judged.delete(reference);
+      }
     }
-    this.checks.set(connection.id, { state: "checking" });
+    this.checks.set(connection.id, { state: "checking", generation: connection.generation });
     this.render();
     let answer;
     try {
@@ -647,8 +795,13 @@ const modelConnectionsController = {
       const raw = typeof error === "string" ? error : error?.message ?? String(error);
       answer = { state: connection.provider.requires_auth && !connection.keyAvailable ? this.keyMissing(connection) : modelFailureState(raw), raw };
     }
+    Object.assign(answer, { generation: connection.generation, checkedMs: this.nowMs() });
     this.checks.set(connection.id, answer);
     this.render();
+    const kept = await this.keep("remember_model_connection_check", {
+      id: connection.id, generation: connection.generation, state: answer.state, count: answer.count ?? null, forgetJudgments: !quiet,
+    });
+    if (kept?.checkedMs != null && this.checks.get(connection.id) === answer) answer.checkedMs = kept.checkedMs;
     return answer;
   },
   /* A judgment pick is checked the moment it is picked (대응표 19): the same
@@ -676,6 +829,10 @@ const modelConnectionsController = {
     }
     this.judged.set(reference, answer);
     this.renderDaily();
+    if (row.kind === "connection") {
+      const { id, generation, model, protocol } = row.reference;
+      void this.keep("remember_model_judgment_check", { id, generation, model, protocol, state: answer.state });
+    }
   },
 
   /* The 이 컴퓨터 row's buttons are the managed server's own commands; a
@@ -1468,13 +1625,20 @@ const modelConnectionsController = {
     for (const connection of this.state?.connections ?? []) {
       const isLocal = this.location(connection.provider.base_url) === "local";
       const models = (connection.provider.models ?? []).map((model) => (typeof model === "string" ? model : model.id));
-      const check = this.checks.get(connection.id);
       const missing = connection.provider.requires_auth && !connection.keyAvailable;
-      const state = missing ? this.keyMissing(connection) : check?.state ?? "unknown";
+      const { state, check } = this.connectionCheck(connection);
       const words = modelStateWords(state, { env: connection.provider.auth_env ?? "" });
       const extra = [];
-      if (words.todo && state !== "unknown") extra.push(modelNode("span", "model-line-note", words.todo));
-      else if (check?.state === "ok") extra.push(modelNode("span", "model-line-note", t("settings.models.connected", "연결됨 — 모델 {{count}}개", { count: check.count })));
+      // A check kept from an earlier start says how long ago it was made.
+      const ago = check?.recalled && check.checkedMs != null && this.memory ? modelCheckAge(this.nowMs() - check.checkedMs) : "";
+      if (words.todo && state !== "unknown") {
+        extra.push(modelNode("span", "model-line-note", words.todo));
+        if (ago) extra.push(modelNode("span", "model-line-note", t("settings.models.checkedAgo", "{{ago}} 확인", { ago })));
+      } else if (check?.state === "ok") {
+        extra.push(modelNode("span", "model-line-note", ago
+          ? t("settings.models.connectedAgo", "연결됨 · {{ago}} 확인 — 모델 {{count}}개", { ago, count: check.count ?? 0 })
+          : t("settings.models.connected", "연결됨 — 모델 {{count}}개", { count: check.count })));
+      }
       const judgedOff = [...this.judged.entries()].find(([reference, answer]) => JSON.parse(reference)?.id === connection.id && answer.state !== "usable" && answer.state !== "checking");
       if (judgedOff && !missing) extra.push(modelNode("span", "model-line-note", t("settings.models.judgedOff", "판단 확인: {{word}} — {{todo}}", { word: modelStateWords(judgedOff[1].state).word, todo: modelStateWords(judgedOff[1].state).todo })));
       const said = this.said.get(connection.id);
@@ -1586,6 +1750,11 @@ const modelConnectionsController = {
   },
 };
 
+requestAnimationFrame(() => window.setTimeout(() => {
+  const wake = () => void modelConnectionsController.wake();
+  if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(wake, { timeout: QUIET_CHECK_AFTER_PAINT_MS });
+  else wake();
+}, QUIET_CHECK_AFTER_PAINT_MS));
 el("connections-decisions")?.addEventListener("click", () => openJevView());
 el("model-open-orchestration")?.addEventListener("click", () => showSettingsPane("orchestration"));
 for (const button of document.querySelectorAll("[data-connection-nav]")) button.addEventListener("click", () => modelConnectionsController.show(button.dataset.connectionNav));

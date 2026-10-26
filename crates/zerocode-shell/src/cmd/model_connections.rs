@@ -1,6 +1,7 @@
 use judgment_provider::connections::Reference;
 
 use crate::api_routers::{self, Keychain};
+use crate::model_connection_checks as checks;
 use crate::model_connection_store::{self as store, Catalog, Check, Role};
 
 fn path() -> Result<std::path::PathBuf, String> {
@@ -117,6 +118,71 @@ pub(crate) async fn clear_model_connection(
         store::clear(&path, role, expected_reference.as_ref())?;
         super::managed_judgment::settings_changed();
         store::catalog(&path, &Keychain::of_this_machine())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The window's own record of the last check each connection had
+/// (t-76500): `<local data>/model-connection-checks.json`.
+fn checks_path(state: &crate::AppState) -> std::path::PathBuf {
+    state
+        .local_data_root()
+        .join(crate::app_paths::artifact_file::MODEL_CONNECTION_CHECKS)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// The ids of the connections saved now: a record of any other goes.
+fn saved_ids() -> Result<std::collections::BTreeSet<String>, String> {
+    let root = api_routers::read_zo_settings_root(&path()?)?;
+    Ok(root
+        .get("providers")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| judgment_provider::connections::metadata(row).ok())
+        .map(|metadata| metadata.id)
+        .collect())
+}
+
+#[tauri::command]
+pub(crate) async fn remembered_model_connection_checks(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<checks::Remembered, String> {
+    let path = checks_path(&state);
+    tauri::async_runtime::spawn_blocking(move || Ok(checks::read(&path, now_ms())))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn remember_model_connection_check(
+    state: tauri::State<'_, crate::AppState>,
+    answer: checks::CheckAnswer,
+) -> Result<checks::Remembered, String> {
+    let path = checks_path(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        checks::remember_check(&path, &answer, &saved_ids()?, now_ms())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub(crate) async fn remember_model_judgment_check(
+    state: tauri::State<'_, crate::AppState>,
+    answer: checks::JudgmentAnswer,
+) -> Result<checks::Remembered, String> {
+    let path = checks_path(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        checks::remember_judgment(&path, &answer, &saved_ids()?, now_ms())
     })
     .await
     .map_err(|error| error.to_string())?
