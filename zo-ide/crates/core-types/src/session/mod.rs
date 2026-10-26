@@ -266,14 +266,29 @@ type HeldLock = nix::fcntl::Flock<std::fs::File>;
 #[cfg(windows)]
 type HeldLock = std::fs::File;
 
-/// A held writer lease and the stamp beside its lock file that names this process. `drop`
-/// removes the stamp before the lock is released, so ending a lease never removes the next
-/// holder's stamp.
+/// A held writer lease and the stamp beside its lock file that names this process. The
+/// stamp is kept locked shared for as long as the lease: that lock is what tells a reader
+/// the stamp is a live holder's and not one a crash left behind. `drop` removes the stamp
+/// before either lock is released, and lets the stamp's lock go before the lease's, so
+/// ending a lease never removes the next holder's stamp.
 #[cfg(any(unix, windows))]
 #[derive(Debug)]
 struct WriterLock {
+    _stamp_lock: Option<std::fs::File>,
     _lock: HeldLock,
     stamp: PathBuf,
+}
+
+#[cfg(any(unix, windows))]
+impl WriterLock {
+    /// Hold a lease just taken, stamped with this process in its lock file and beside it.
+    fn stamped(lock: HeldLock, lock_path: &Path) -> Self {
+        Self {
+            _stamp_lock: stamp_lease_holder(&lock, lock_path),
+            _lock: lock,
+            stamp: holder_stamp_path(lock_path),
+        }
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -2568,10 +2583,7 @@ fn acquire_writer_lock(path: &Path, state: &mut WriterState) -> Result<(), Sessi
         // which no bounded retry makes safe — surface it as contention.
         for _ in 0..2 {
             if let Some(flock) = bind_writer_lock_once(path, &lock_path)? {
-                state.lock = Some(WriterLock {
-                    _lock: flock,
-                    stamp: holder_stamp_path(&lock_path),
-                });
+                state.lock = Some(WriterLock::stamped(flock, &lock_path));
                 return Ok(());
             }
         }
@@ -2607,11 +2619,7 @@ fn acquire_writer_lock(path: &Path, state: &mut WriterState) -> Result<(), Sessi
                     if crate::paths::windows_file_handle_matches_path(&file, &lock_path)
                         .unwrap_or(false)
                     {
-                        stamp_lease_holder(&file, &lock_path);
-                        state.lock = Some(WriterLock {
-                            _lock: file,
-                            stamp: holder_stamp_path(&lock_path),
-                        });
+                        state.lock = Some(WriterLock::stamped(file, &lock_path));
                         return Ok(());
                     }
                 }
@@ -2910,33 +2918,50 @@ fn held_for(ms: u64) -> String {
 }
 
 /// Stamp this process into the lock file it just locked, and beside it for the readers the
-/// lock keeps out (Windows). Best effort: a stamp that fails to write costs nothing but the
+/// lock keeps out (Windows), answering the stamp beside it locked shared: the handle the
+/// lease keeps. Best effort: a stamp that fails to write or to lock costs nothing but the
 /// name in a later refusal.
 #[cfg(any(unix, windows))]
-fn stamp_lease_holder(file: &std::fs::File, lock_path: &Path) {
+fn stamp_lease_holder(file: &std::fs::File, lock_path: &Path) -> Option<std::fs::File> {
     use std::io::{Seek as _, SeekFrom, Write as _};
     let mut file = file;
-    if let Ok(text) = serde_json::to_string(&WriterLeaseHolder::this_process()) {
-        let _ = crate::paths::write_private_file(
-            &holder_stamp_path(lock_path),
-            text.as_bytes(),
-            &crate::paths::ParentDirPolicy::LeaveParent,
-        );
-        let _ = file.set_len(0);
-        let _ = file.seek(SeekFrom::Start(0));
-        let _ = file.write_all(text.as_bytes());
-        let _ = file.flush();
-    }
+    let text = serde_json::to_string(&WriterLeaseHolder::this_process()).ok()?;
+    let stamp = holder_stamp_path(lock_path);
+    let kept = crate::paths::write_private_file(
+        &stamp,
+        text.as_bytes(),
+        &crate::paths::ParentDirPolicy::LeaveParent,
+    )
+    .ok()
+    .and_then(|()| fs::File::open(&stamp).ok())
+    .filter(|kept| kept.try_lock_shared().is_ok());
+    let _ = file.set_len(0);
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.write_all(text.as_bytes());
+    let _ = file.flush();
+    kept
 }
 
 /// The stamp naming a lease's holder: the one in the lock file, which every zo build
-/// writes, else the one beside it, which a refused reader can read on Windows too.
+/// writes, else the one beside it, which a refused reader can read on Windows too, but
+/// only while a holder keeps it locked. A stamp beside the lock that nobody keeps was left
+/// by a crash, or outlived its lease into one an older build took, which stamps only
+/// inside the lock file: it names nobody (review R2, 2026-10-27).
 fn read_lease_holder(lock_path: &Path) -> Option<WriterLeaseHolder> {
-    let read = |path: &Path| -> Option<WriterLeaseHolder> {
-        let text = fs::read_to_string(path).ok()?;
-        serde_json::from_str(text.trim()).ok()
-    };
-    read(lock_path).or_else(|| read(holder_stamp_path(lock_path).as_path()))
+    use std::io::Read as _;
+    let parse = |text: &str| serde_json::from_str::<WriterLeaseHolder>(text.trim()).ok();
+    if let Some(holder) = fs::read_to_string(lock_path).ok().as_deref().and_then(parse) {
+        return Some(holder);
+    }
+    let mut stamp = fs::File::open(holder_stamp_path(lock_path)).ok()?;
+    match stamp.try_lock() {
+        Err(fs::TryLockError::WouldBlock) => {
+            let mut text = String::new();
+            stamp.read_to_string(&mut text).ok()?;
+            parse(&text)
+        }
+        Ok(()) | Err(fs::TryLockError::Error(_)) => None,
+    }
 }
 
 /// The refusal, naming the holder when the lock file says who.
@@ -3043,7 +3068,6 @@ fn bind_writer_lock_once(
                 drop(flock);
                 return Ok(None);
             }
-            stamp_lease_holder(&flock, lock_path);
             Ok(Some(flock))
         }
         Err((_file, errno))
