@@ -507,6 +507,10 @@ mod tests {
                             // runs the real door against a real repository,
                             // beside the function it reads.
                             | "worktree_runtime.rs"
+                            // t-75907 · t-76044: a worker briefing's turn
+                            // verdict and the press-key combinations are
+                            // tested beside the private doors they decide.
+                            | "agent_tools_runtime.rs"
                     ),
                 "`{name}` acquired a test fence; only the shell and command crates \
                  may own source-contract fences"

@@ -7180,6 +7180,10 @@ fn no_label_reaches_the_window_hardcoded() {
         // in (「한국어로 보고」): it quotes the instruction, it never speaks to the
         // person.
         r"/(?:한국어|영어|일본어|중국어|스페인어)\s?(?:로|으로)\s?(?:만\s?)?(?:보고|답변|답|작성|말|쓰|출력|요약)/,",
+        // A reader, not a label: `modelFailureState` classifies the router
+        // probe's fixed Korean sentence (api_routers.rs `연결 실패: {err}`)
+        // whatever the window speaks; the pattern never reaches the screen.
+        "const PROBE_TRANSPORT_FAILURE = /^연결 실패/;",
     ];
 
     // The catalog-bearing part is exactly one file. The byte range used

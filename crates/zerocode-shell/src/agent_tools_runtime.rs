@@ -6507,10 +6507,6 @@ pub(super) fn call_with_the_persons_last_step(
     call_with_confirmation_asker(command, asking, call, &mut computer_use::confirm::ask)
 }
 
-#[cfg(test)]
-#[path = "computer_use/key_combinations_tests.rs"]
-mod key_combinations_tests;
-
 pub(super) fn call_with_confirmation_asker(
     command: &zerocode_core::computer_use::ComputerCommand,
     asking: computer_use::confirm::Asking,
@@ -8820,8 +8816,10 @@ pub(super) fn write_agent_screenshot(
         .into_owned())
 }
 
+// The source contracts read everything above the first test-only marker as
+// the shipped code, and that marker must open `mod tests` (shipped_backend).
 #[cfg(test)]
-mod briefing_tests {
+mod tests {
     use super::briefing_work_reported;
     use zerocode_core::hook::HookState;
 
@@ -8838,3 +8836,7 @@ mod briefing_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "computer_use/key_combinations_tests.rs"]
+mod key_combinations_tests;

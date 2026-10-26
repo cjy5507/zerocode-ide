@@ -34,13 +34,17 @@ const MODEL_STATES = Object.freeze({
 /* What a failure a command answered is, in the table's states: a door's
  * token (`no_key`, `unauthorized`, `transport`, `schema_…`, `http_503`…) or
  * a router probe's sentence (`연결 실패: …`, `서버 오류: HTTP 401 …`). */
+/* A reader, not a label: the router probe says a transport failure in fixed
+ * Korean (api_routers.rs `연결 실패: {err}`) whatever the window speaks. */
+const PROBE_TRANSPORT_FAILURE = /^연결 실패/;
+
 function modelFailureState(error) {
   const token = String(typeof error === "string" ? error : error?.message ?? error ?? "");
   if (token === "no_key") return "nokey";
   if (token === "unauthorized" || /HTTP 40[13]\b/.test(token)) return "badkey";
   if (token === "schema" || token.startsWith("schema_")) return "schema";
   if (["transport", "timeout", "provider_request", "overloaded"].includes(token) || /^http_5\d\d$/.test(token) ||
-      /^연결 실패/.test(token) || /HTTP 5\d\d\b/.test(token)) return "down";
+      PROBE_TRANSPORT_FAILURE.test(token) || /HTTP 5\d\d\b/.test(token)) return "down";
   return "failed";
 }
 
