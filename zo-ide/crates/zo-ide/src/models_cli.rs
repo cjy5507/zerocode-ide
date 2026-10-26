@@ -148,8 +148,13 @@ impl Report<'_> {
                     "age": describe_age(report.fetched_at, self.now),
                     "origin": report.origin,
                     "credentialStore": report.credential_store,
-                    "failureKind": report.failure_kind,
                 });
+                // A report with no kind — a success, a skip an older zo cached —
+                // has no key, as in the cache: the window reads "no key" as an
+                // older zo, and an empty value as a kind it does not know.
+                if !report.failure_kind.is_empty() {
+                    value["failureKind"] = json!(report.failure_kind);
+                }
                 // A failure without a response has a kind and no number.
                 if let Some(status) = report.http_status {
                     value["httpStatus"] = json!(status);

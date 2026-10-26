@@ -465,8 +465,11 @@ pub struct SourceReport {
     pub credential_store: String,
     /// Why the source did not answer, as [`FailureKind::key`] spells it —
     /// made where the failure happened, never read from [`Self::detail`].
-    /// Empty for a success and for a report written before the key existed.
-    #[serde(default)]
+    /// Empty for a success and for a report written before the key existed,
+    /// and then not written at all: the window reads "no key" as an older zo
+    /// and checks the `skipped:` words itself, where an empty value would read
+    /// as an unknown kind (t-77146).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub failure_kind: String,
     /// The status number of the response that failed it, when there was one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -727,6 +730,19 @@ impl FailureKind {
         }
     }
 
+    /// The kind of a request that got no response, by what the client says of
+    /// its error: ran out of time, could not connect, or neither.
+    #[must_use]
+    pub const fn of_transport(timed_out: bool, connect_failed: bool) -> Self {
+        if timed_out {
+            Self::Timeout
+        } else if connect_failed {
+            Self::Network
+        } else {
+            Self::Unknown
+        }
+    }
+
     /// The kind of an HTTP response by its status number.
     #[must_use]
     pub const fn of_status(status: u16) -> Self {
@@ -784,16 +800,9 @@ impl Fault {
     /// A transport error of the HTTP client: its own kind decides.
     #[must_use]
     pub fn transport(error: &reqwest::Error) -> Self {
-        let kind = if error.is_timeout() {
-            FailureKind::Timeout
-        } else if error.is_connect() {
-            FailureKind::Network
-        } else {
-            FailureKind::Unknown
-        };
         Self {
             detail: error.to_string(),
-            kind,
+            kind: FailureKind::of_transport(error.is_timeout(), error.is_connect()),
             http_status: error.status().map(|status| status.as_u16()),
         }
     }
@@ -808,6 +817,21 @@ impl Fault {
             api::ApiError::RetriesExhausted { last_error, .. } => Self { detail: error.to_string(), ..Self::api(last_error) },
             _ => Self::unknown(error.to_string()),
         }
+    }
+}
+
+/// The body of a response whose status is already known. A response that
+/// was not a success keeps its status when the body then breaks off or runs
+/// out of time: the kind and the number are made the moment the status is
+/// received, and the body only adds words (t-77146). The error of the
+/// read alone would name neither — a cut body is a decode error that
+/// carries no status. A success whose body fails has no failed status to
+/// keep, so the client's own error stands.
+async fn body_after(response: reqwest::Response, status: reqwest::StatusCode) -> Result<String, Fault> {
+    match response.text().await {
+        Ok(text) => Ok(text),
+        Err(error) if !status.is_success() => Err(Fault::http(status, format!("HTTP {status}: {error}"))),
+        Err(error) => Err(Fault::transport(&error)),
     }
 }
 
@@ -1933,7 +1957,7 @@ pub fn fetch_chatgpt_models(
             .get(reqwest::header::ETAG)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        let body = response.text().await.map_err(|error| Fault::transport(&error))?;
+        let body = body_after(response, status).await?;
         Ok::<_, Fault>((status, body, answered_etag))
     })?;
     if status == reqwest::StatusCode::NOT_MODIFIED {
@@ -2183,7 +2207,7 @@ fn anthropic_models() -> SourceAnswer {
             .await
             .map_err(|error| Fault::transport(&error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| Fault::transport(&error))?;
+        let text = body_after(response, status).await?;
         if !status.is_success() {
             return Err(Fault::http(status, format!("HTTP {status}: {}", text.chars().take(160).collect::<String>())));
         }
@@ -2308,7 +2332,7 @@ fn google_models() -> SourceAnswer {
             .await
             .map_err(|error| Fault::transport(&error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| Fault::transport(&error))?;
+        let text = body_after(response, status).await?;
         if !status.is_success() {
             return Err(Fault::http(status, format!("HTTP {status}: {}", text.chars().take(160).collect::<String>())));
         }
@@ -2458,7 +2482,7 @@ fn bearer_models(row: &'static Source, bearer: String) -> SourceAnswer {
             .await
             .map_err(|error| Fault::transport(&error))?;
         let status = response.status();
-        let text = response.text().await.map_err(|error| Fault::transport(&error))?;
+        let text = body_after(response, status).await?;
         Ok::<_, Fault>((status, text))
     })
     .map_err(|fault| (row.key.to_string(), fault))?;
@@ -4101,13 +4125,6 @@ mod tests {
         assert!(!heads[0].to_ascii_lowercase().contains("if-none-match"), "no cache, no etag: {}", heads[0]);
         assert!(heads[1].to_ascii_lowercase().contains("if-none-match: w/\"v1\""), "{}", heads[1]);
 
-        // 4. Offline: nothing listens on the port any more.
-        let (offline_url, gone) = fake_backend(Vec::new());
-        gone.join().unwrap();
-        let (_, fault) = super::chatgpt_backend_models_at(&offline_url, &tokens, &cache_path, None, 1_788_510_800)
-            .expect_err("a refused connection is a failure of the live source");
-        assert!(!fault.detail.starts_with("skipped:"), "a transport failure keeps last time's rows: {}", fault.detail);
-        assert_eq!((fault.kind, fault.http_status), (super::FailureKind::Network, None));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5391,37 +5408,25 @@ mod tests {
         }
     }
 
-    /// t-76984: the kind of a transport error is the HTTP client's own: a
-    /// request that ran out of time is `timeout`, one that could not connect
-    /// is `network`, and neither carries an HTTP number. A local socket that
-    /// accepts and never answers, asked with a 50 ms limit.
+    /// t-76984: the kind of a request that got no response is the HTTP
+    /// client's own word for its error — ran out of time is `timeout`, could
+    /// not connect is `network`, anything else `unknown` — and a status
+    /// number names the kind of a response. Both tables are decided without a
+    /// socket or a clock (t-77146); the same classification on real client
+    /// errors is the integration test `model_discovery_transport`.
     #[test]
     fn a_transport_error_is_classified_by_the_clients_error_kind() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let held = format!("http://{}/", listener.local_addr().unwrap());
-        let ask = |url: String| {
-            api::sync_bridge::run_blocking(async move {
-                reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_millis(50))
-                    .build()
-                    .unwrap()
-                    .get(url)
-                    .send()
-                    .await
-            })
-        };
-        let timed_out = ask(held).expect_err("nothing answers");
-        let fault = super::Fault::transport(&timed_out);
-        assert_eq!((fault.kind, fault.http_status), (super::FailureKind::Timeout, None), "{}", fault.detail);
-        drop(listener);
-        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let gone = format!("http://{}/", closed.local_addr().unwrap());
-        drop(closed);
-        let refused = ask(gone).expect_err("nothing listens");
-        let fault = super::Fault::transport(&refused);
-        assert_eq!((fault.kind, fault.http_status), (super::FailureKind::Network, None), "{}", fault.detail);
+        use super::FailureKind;
+        for (timed_out, connect_failed, kind) in [
+            (true, false, "timeout"),
+            (true, true, "timeout"),
+            (false, true, "network"),
+            (false, false, "unknown"),
+        ] {
+            assert_eq!(FailureKind::of_transport(timed_out, connect_failed).key(), kind, "timed out {timed_out}, connect failed {connect_failed}");
+        }
         for (status, kind) in [(401, "auth_rejected"), (403, "forbidden"), (404, "not_found"), (429, "rate_limited"), (500, "server_error"), (599, "server_error"), (400, "unknown"), (418, "unknown"), (304, "unknown")] {
-            assert_eq!(super::FailureKind::of_status(status).key(), kind, "HTTP {status}");
+            assert_eq!(FailureKind::of_status(status).key(), kind, "HTTP {status}");
         }
     }
 
@@ -5566,7 +5571,7 @@ mod tests {
     fn a_body_that_breaks_off_after_a_failed_status_keeps_the_status() {
         let now = 1_790_300_000;
         for (status_line, kind, status) in [
-            ("401 Unauthorized", "auth_rejected", 401_u64),
+            ("401 Unauthorized", "auth_rejected", 401_u16),
             ("403 Forbidden", "forbidden", 403),
             ("429 Too Many Requests", "rate_limited", 429),
             ("503 Service Unavailable", "server_error", 503),
@@ -5579,7 +5584,7 @@ mod tests {
             let live = super::chatgpt_backend_models_at(&url, &openai_tokens(), &cache_path, None, now);
             backend.join().unwrap();
             let (_, fault) = live.clone().expect_err("a refused status is a failure");
-            assert_eq!((fault.kind.key(), fault.http_status), (kind, Some(status as u16)), "{status_line}: {}", fault.detail);
+            assert_eq!((fault.kind.key(), fault.http_status), (kind, Some(status)), "{status_line}: {}", fault.detail);
             assert!(!fault.detail.contains("secret-bearer"), "{status_line}: {}", fault.detail);
             let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
             let report = report_json(super::OPENAI_SOURCE, &answer, now);
@@ -5600,20 +5605,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// t-76984: a request that never got a response is `network` when the
-    /// connection was refused — no HTTP number — and a machine with no login
-    /// at all is `no_credentials`, even when the cache it looked in sits in a
-    /// folder named for a timeout.
+    /// t-76984: a request that never got a response is `network` when it
+    /// could not connect — no HTTP number — and a machine with no login at
+    /// all is `no_credentials`, even when the cache it looked in sits in a
+    /// folder named for a timeout. The live failure is handed in as the
+    /// client would make it (t-77146): no port and no clock are involved.
     #[test]
     fn a_refused_connection_is_network_and_no_login_is_no_credentials() {
         let now = 1_790_300_000;
         let dir = scratch("kind-by-transport");
         let cache_path = dir.join("timeout-connect-home").join(super::CODEX_MODELS_CACHE_FILE);
-        let (offline_url, gone) = fake_backend(Vec::new());
-        gone.join().unwrap();
         {
             let _machine = bare_machine(&dir);
-            let live = super::chatgpt_backend_models_at(&offline_url, &openai_tokens(), &cache_path, None, now);
+            let live = Err((
+                super::OPENAI_SOURCE.to_string(),
+                super::Fault::new(super::FailureKind::of_transport(false, true), "error sending request for url (http://127.0.0.1:1/)"),
+            ));
             let answer = super::openai_answer(live, || super::codex_cache_models_from(std::slice::from_ref(&cache_path)));
             let report = report_json(super::OPENAI_SOURCE, &answer, now);
             assert_eq!(report["failure_kind"], json!("network"), "{}", report["detail"]);
