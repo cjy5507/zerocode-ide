@@ -814,6 +814,10 @@ pub(super) fn start_automation(
         state.local_data_root(),
         &format!("term {term} spawned {program} {args:?}"),
     );
+    // The one process of this pane a way out may end (t-76504).
+    if let Some(driving) = driving {
+        crate::pane_leftovers::launched(term, pty.pid(), driving);
+    }
     state.hold_terminal(term, pty);
     let launch = crate::cmd::terminal::launch_fingerprint(&launch_token);
     state.launch_tokens().insert(term, launch_token);

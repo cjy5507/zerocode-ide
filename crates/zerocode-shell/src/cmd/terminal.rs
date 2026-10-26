@@ -1565,6 +1565,8 @@ pub(crate) fn launch_agent_tab(
         state.local_data_root(),
         &format!("term {term} spawned {program}"),
     );
+    // The one process of this pane a way out may end (t-76504).
+    crate::pane_leftovers::launched(term, zerocode_lane::PtyTransport::pid(&pty), spec.id);
     state.hold_terminal(term, pty);
     // The leader's own team environment, so a teammate it opens can be handed
     // the same coordinates. Held only for a launch that really opened a team.

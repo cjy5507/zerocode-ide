@@ -419,6 +419,11 @@ pub(crate) trait Terminating {
     fn keep_screens(&self);
     /// The last statuses, flushed past their debounce.
     fn keep_statuses(&self);
+    /// Every agent pane's process group told to go — hangup, TERM, KILL by
+    /// the deadline, on a thread of its own — and written down for the next
+    /// window (t-76434, `pane_leftovers`). After the goodbye, so the ledger
+    /// settles nothing as they go.
+    fn hang_up_panes(&self);
     /// Every pane ended, here, rather than whenever the process happens to.
     fn end_panes(&self);
     /// The embedded browser's own shutdown.
@@ -444,12 +449,15 @@ pub(crate) fn terminate(steps: &dyn Terminating) {
 /// A restart button's way out (`relaunch_window`), which tauri follows with
 /// no exit event at all — tauri's restart replaces the process — so what the
 /// next window restores from is written here or nowhere (t-7812 D): the
-/// goodbye, then the screens and the statuses. The panes and the browser end
-/// with the process it replaces.
+/// goodbye, then the screens and the statuses, then the panes' agents told
+/// to go (t-76434). On 2026-10-26 nothing here ended a pane: the closing
+/// terminals' hangup was all three zo processes heard, and they turned on
+/// without one for over an hour. The browser ends with the process.
 pub(crate) fn relaunch(road: ExitRoad, steps: &dyn Terminating) {
     steps.goodbye(road);
     steps.keep_screens();
     steps.keep_statuses();
+    steps.hang_up_panes();
 }
 
 /// [`terminate`]'s order, for the road already named.
@@ -457,6 +465,7 @@ fn leave_in_order(road: ExitRoad, steps: &dyn Terminating) {
     steps.goodbye(road);
     steps.keep_screens();
     steps.keep_statuses();
+    steps.hang_up_panes();
     steps.end_panes();
     steps.shut_browser();
     steps.mark_clean_exit();
@@ -829,6 +838,8 @@ const UNREAD: crate::orchestration::restart_census::Busy =
         turning: 0,
         background: 0,
         unknown: 1,
+        conversations: 0,
+        unheard_conversations: 0,
         running: 0,
         gap: false,
     };
@@ -1009,6 +1020,8 @@ mod tests {
             background: 0,
             running,
             unknown,
+            conversations: 0,
+            unheard_conversations: 0,
             gap: running == 0 && unknown == 0,
         }
     }
@@ -1342,6 +1355,9 @@ mod tests {
         fn keep_statuses(&self) {
             self.taken.borrow_mut().push("statuses");
         }
+        fn hang_up_panes(&self) {
+            self.taken.borrow_mut().push("hangup");
+        }
         fn end_panes(&self) {
             self.taken.borrow_mut().push("panes");
         }
@@ -1366,21 +1382,26 @@ mod tests {
         assert_eq!(
             *steps.taken.borrow(),
             [
-                "goodbye", "screens", "statuses", "panes", "browser", "clean"
+                "goodbye", "screens", "statuses", "hangup", "panes", "browser", "clean"
             ]
         );
     }
 
     /// The restart button's road: the goodbye and what the next window
     /// restores from, before tauri's restart replaces the process — which
-    /// no exit event follows.
+    /// no exit event follows — and then the panes' agents told to go
+    /// (t-76434): the 2026-10-26 restart ended none, and three zo processes
+    /// outlived the window by an hour.
     #[test]
     fn a_restart_button_says_goodbye_and_keeps_the_list_before_it_restarts() {
         let steps = Steps::default();
         let road = ExitRoad::Restart(Some(RestartDoor::UpdateToast));
         relaunch(road, &steps);
         assert_eq!(steps.road.get(), Some(road));
-        assert_eq!(*steps.taken.borrow(), ["goodbye", "screens", "statuses"]);
+        assert_eq!(
+            *steps.taken.borrow(),
+            ["goodbye", "screens", "statuses", "hangup"]
+        );
     }
 
     /// The layouts file stops being the window's to rewrite the moment a

@@ -1570,6 +1570,10 @@ impl agent_teams::Host for TeamWindow {
             state.local_data_root(),
             &format!("term {term} spawned {program}"),
         );
+        // The one process of this pane a way out may end (t-76504).
+        if let Some(agent) = named {
+            crate::pane_leftovers::launched(term, pty.pid(), agent);
+        }
         state.hold_terminal(term, pty);
         if worker_isolated && let Some(checkout) = isolated.as_ref() {
             state.isolated_worker_terms().insert(term, checkout.clone());

@@ -3658,6 +3658,16 @@ function busyWords(busy) {
   if (busy.turning > 0) parts.push(t("exit.busyTurning", "워커 {{n}}명 턴 중", { n: busy.turning }));
   if (busy.background > 0) parts.push(t("exit.busyBackground", "배경 작업 {{n}}개", { n: busy.background }));
   if (busy.unknown > 0) parts.push(t("exit.busyUnknown", "상태를 모르는 워커 {{n}}명", { n: busy.unknown }));
+  // A coordinator's or a person's conversation in a turn (t-76434): a
+  // restart cuts it as surely as a worker's.
+  if (busy.conversations > 0) {
+    parts.push(t("exit.busyConversations", "턴 중인 대화 {{n}}개", { n: busy.conversations }));
+  }
+  // One this window has not heard from yet is not known to be at rest
+  // (t-76504), as a worker never heard is not.
+  if (busy.unheardConversations > 0) {
+    parts.push(t("exit.busyUnheardConversations", "상태를 모르는 대화 {{n}}개", { n: busy.unheardConversations }));
+  }
   return parts.join(" · ");
 }
 
