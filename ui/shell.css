@@ -51839,7 +51839,7 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .model-state, .model-use { white-space: normal; }
 .model-setup .model-steps { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-4); margin: 0; padding: 0; list-style: none; color: var(--ink-mist); font: var(--type-label-12); }
 .model-steps .is-now { color: var(--ink-chalk); font-weight: 600; }
-.model-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: var(--space-3); }
+.model-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--field-md)), 1fr)); gap: var(--space-3); }
 .model-choice { display: grid; gap: var(--space-1); align-content: start; min-width: 0; padding: var(--space-3) var(--space-4); border: 0; border-radius: var(--radius-md); background: var(--surface-well); box-shadow: var(--shadow-border); color: var(--ink-mist); font: var(--type-copy-13); text-align: start; cursor: pointer; transition: box-shadow var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard); }
 .model-choice:hover { background: var(--row-hover); }
 .model-choice[aria-pressed="true"] { box-shadow: 0 0 0 var(--rule-width) var(--ink-chalk); background: var(--row-active); }
@@ -51874,6 +51874,8 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
 .model-change-table th, .model-change-table td { padding: var(--space-1) var(--space-2); border-block-end: var(--rule-width) solid var(--edge-rule); text-align: start; vertical-align: top; overflow-wrap: anywhere; }
 .model-change-key { font: var(--type-label-12-mono); }
 .model-advanced { margin-block-start: var(--space-2); }
+.model-formats { display: grid; gap: var(--space-2); margin-block-end: var(--space-3); }
+.model-formats > .model-format { padding: 0; }
 .model-advanced > .model-advanced-item { max-width: none; color: inherit; font-size: inherit; padding-block: var(--space-4) 0; border-block-start: var(--rule-width) solid var(--edge-rule); }
 .model-connections { display: grid; gap: var(--space-5); min-width: 0; margin-block: var(--space-4); }
 .jev-input-preview-question { border-block-start: var(--rule-width) solid var(--edge-rule); padding-block: var(--space-3); }

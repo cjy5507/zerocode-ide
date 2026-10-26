@@ -110,6 +110,8 @@ const modelConnectionsController = {
   checks: new Map(),
   /* The last judgment check each candidate had, by its reference. */
   judged: new Map(),
+  /* A judgment format picked in 「고급」 for a connection, by its id. */
+  formats: new Map(),
   /* The daily cards: the role being changed, the row picked and its answer. */
   picking: null, draft: null, said: new Map(),
   /* The first question, while it stands. */
@@ -303,7 +305,7 @@ const modelConnectionsController = {
       const local = this.location(connection.provider.base_url) === "local";
       for (const model of connection.provider.models ?? []) {
         const id = typeof model === "string" ? model : model.id;
-        const reference = { id: connection.id, generation: connection.generation, model: id, protocol: "openai_json" };
+        const reference = { id: connection.id, generation: connection.generation, model: id, protocol: this.judgmentFormat(connection) };
         rows.push({
           key: JSON.stringify([connection.id, id]), kind: "connection", connection, reference, name: id,
           way: local ? t("settings.models.wayLocal", "{{name}} · 이 컴퓨터", { name: connection.provider.name })
@@ -326,10 +328,22 @@ const modelConnectionsController = {
     if (this.checks.get(connection.id)?.state === "down") return { group: "off", state: "down" };
     return { group: "check", state: judged?.state ?? "unknown" };
   },
+  /* The format a connection is asked for judgment in: the one picked in
+   * 「고급」, else the one judgment already uses it in, else OpenAI JSON
+   * (t-76028 F3). */
+  judgmentFormat(connection) {
+    const judgment = this.state?.judgment;
+    return this.formats.get(connection.id) ?? (judgment?.id === connection.id ? judgment.protocol : "openai_json");
+  },
   currentJudgmentKey() {
     const provider = typesafeState?.provider;
     if (!provider) return null;
-    if (this.state?.judgment) return JSON.stringify([this.state.judgment.id, this.state.judgment.model]);
+    const judgment = this.state?.judgment;
+    if (judgment) {
+      // A format changed in 「고급」 makes the same model a new pick.
+      const connection = this.state.connections.find((row) => row.id === judgment.id);
+      return connection && this.judgmentFormat(connection) !== judgment.protocol ? null : JSON.stringify([judgment.id, judgment.model]);
+    }
     if (provider.kind === "jev") return "jev";
     if (provider.kind === "local" && managedJudgmentController.snapshot?.models?.some((model) => model.id === provider.model)) return `managed:${provider.model}`;
     return null;
@@ -805,7 +819,7 @@ const modelConnectionsController = {
       const row = this.judgmentRows().find((entry) => entry.key === key);
       const provider = typesafeState?.provider;
       line("smart.judgmentProvider", provider ? `${provider.kind} · ${provider.model}` : null,
-        row?.kind === "connection" ? `openai_json · ${row.connection.provider.name} · ${row.name}` : row?.kind === "jev" ? "jev" : row ? `local · ${row.model.id}` : null);
+        row?.kind === "connection" ? `${row.reference.protocol} · ${row.connection.provider.name} · ${row.name}` : row?.kind === "jev" ? "jev" : row ? `local · ${row.model.id}` : null);
     }
     const thead = modelNode("thead");
     thead.append(head);
@@ -828,6 +842,39 @@ const modelConnectionsController = {
     coding.replaceChildren(...this.roleBody("coding"));
     judgment.replaceChildren(...this.roleBody("judgment"));
     say(el("model-advanced-route"), () => this.routeWords());
+    this.renderFormats();
+  },
+  /* 「고급 — 판단 응답 형식」: each saved connection's format, the only
+   * place it changes. A change forgets the connection's judgment checks. */
+  renderFormats() {
+    const list = el("model-advanced-formats");
+    if (!list) return;
+    const fields = (this.state?.connections ?? []).map((connection) => {
+      const field = modelNode("label", "settings-field model-format");
+      field.dataset.field = "md";
+      field.append(modelNode("span", "settings-label", connection.provider.name));
+      const select = modelNode("select", "settings-input");
+      select.dataset.judgmentFormat = connection.id;
+      for (const [value, words] of [["openai_json", "OpenAI JSON"], ["system_one", "System One"]]) {
+        const option = modelNode("option", "", words);
+        option.value = value;
+        select.append(option);
+      }
+      select.value = this.judgmentFormat(connection);
+      select.disabled = this.busy;
+      select.addEventListener("change", () => {
+        this.formats.set(connection.id, select.value);
+        for (const reference of [...this.judged.keys()]) {
+          if (JSON.parse(reference)?.id === connection.id) this.judged.delete(reference);
+        }
+        this.draft = null;
+        this.renderDaily();
+      });
+      field.append(select);
+      return field;
+    });
+    list.hidden = !fields.length;
+    list.replaceChildren(...fields);
   },
   routeWords() {
     const coding = this.state?.coding;
