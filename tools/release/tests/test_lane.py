@@ -2407,6 +2407,15 @@ class Receipt(LaneCase):
         self.assertIn("the jobs say w-70906, not a coordinator's coord-<label>", made.stdout + made.stderr)
         self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
 
+    def test_a_receipt_a_worker_owned_is_refused_by_the_lane_and_the_gates_run_whole(self):
+        # t-76396 r4: make refuses it, but a receipt an older make sealed still sits beside the queue; the lane reads it.
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", self.GATE, who="w-70906")
+        self.kept().parent.mkdir(parents=True, exist_ok=True)
+        self.kept().write_text(receipt_fixture.sealed(jobs, who="w-70906"))
+        self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
+        self.assertIn("refused: the jobs say w-70906, not a coordinator's coord-<label>",
+                      self.lane.phase("gate-root").get("receipt", ""))
+
     def test_a_head_that_does_not_hold_the_tree_its_jobs_printed_is_refused(self):
         # ZO's review, P2-3: the head and the tree are both what a job printed; git ties them.
         ran = self.cut(self.receipt(), HEAD_TREE="3" * 40)

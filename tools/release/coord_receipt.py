@@ -169,11 +169,11 @@ def agreed(jobs):
         if "+" in one["who"]:
             raise Refused(f"job {one['name']}'s owner {one['who']} joins owners with +")
     owners = sorted({one["who"] for one in jobs})
-    if len(owners) > 1 and not split_gate(owners):
-        raise Refused(f"the jobs name more than one who: {' '.join(owners)}")
-    for who in owners:   # every owner is a coordinator's name once the owners are one name or one pair: one worker owning all jobs is no receipt
+    for who in owners:   # every raw owner is a coordinator's name before the owners are counted or paired: one worker owning any job is no receipt
         if not COORDINATOR.fullmatch(who):
             raise Refused(f"the jobs say {who}, not a coordinator's coord-<label>")
+    if len(owners) > 1 and not split_gate(owners):
+        raise Refused(f"the jobs name more than one who: {' '.join(owners)}")
     return {"who": "+".join(owners), **{key: jobs[0][key] for key in FACTS}}
 
 

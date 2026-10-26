@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import receipt_fixture
@@ -182,11 +183,13 @@ class Refusing(ReceiptCase):
         self.assertIn("more than one tree", self.refused(lambda: coord_receipt.make(jobs)))
 
     def test_jobs_of_two_owners_runs_or_folders_are_refused(self):
-        for key, value in (("who", "w-70906"), ("run", "run-1"), ("cwd", self.tmp / "coord-gate" / "zo-ide")):
+        for key, value, why in (("who", "w-70906", "the jobs say w-70906, not a coordinator's coord-<label>"),
+                                ("run", "run-1", "more than one run"),
+                                ("cwd", self.tmp / "coord-gate" / "zo-ide", "more than one cwd")):
             with self.subTest(key=key):
                 jobs = self.gate({"g1": [("pii-check", "just pii-check", 0)]})
                 jobs += receipt_fixture.write_gate(self.tmp, "l9", {"g2": [("test", "just test", 0)]}, **{key: value})
-                self.assertIn(f"more than one {key}", self.refused(lambda: coord_receipt.make(jobs)))
+                self.assertIn(why, self.refused(lambda: coord_receipt.make(jobs)))
 
     def test_a_job_that_names_no_folder_is_refused(self):
         jobs = self.gate()
@@ -294,6 +297,25 @@ class SplitGate(ReceiptCase):
                           ("a plain worker for all", "w-70906")):
             with self.subTest(case=case):
                 self.assertIn("coordinator", self.refused(lambda: coord_receipt.make(self.gate(SPLIT, who=who))))
+                shutil.rmtree(self.tmp / "build-queue")
+
+    def test_read_refuses_a_receipt_a_worker_owned_that_an_older_make_sealed(self):
+        """t-76396 r4: make now refuses these, so the reader's own refusal is pinned on a receipt built by hand."""
+        jobs = self.gate(SPLIT, who="w-70906")
+        receipt = self.tmp / "receipt.json"
+        receipt.write_text(receipt_fixture.sealed(jobs, who="w-70906"))
+        said = self.read_cli(receipt)
+        self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
+        self.assertIn("the jobs say w-70906, not a coordinator's coord-<label>", said.stdout)
+
+    def test_a_mixed_non_coordinator_owner_is_refused_before_any_pair_check(self):
+        """t-76396 r4: each owner is a coordinator's name before the owners are counted or paired."""
+        for case, root, zo in (("worker beside a line", "coord-l9-root", "w-70906"),
+                               ("worker beside a plain coordinator", "coord-l9", "w-70906")):
+            with self.subTest(case=case):
+                with mock.patch.object(coord_receipt, "split_gate", side_effect=AssertionError("pair check reached")):
+                    said = self.refused(lambda: coord_receipt.make(self.split(root, zo)))
+                self.assertIn("the jobs say w-70906, not a coordinator's coord-<label>", said)
                 shutil.rmtree(self.tmp / "build-queue")
 
     def test_a_plus_in_one_jobs_owner_is_refused_so_no_bundle_skips_the_pair_check(self):
