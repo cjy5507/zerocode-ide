@@ -690,3 +690,28 @@ fn a_turn_begins_at_the_persons_words() {
     let turns = persons_turns(&messages);
     assert_eq!(turns.iter().map(|turn| turn.len()).collect::<Vec<_>>(), [5, 2]);
 }
+
+/// A turn the window's notice opened is not the person's (t-75726): its words
+/// are the window's pointer, so the person's newest words, every task reading
+/// and the turn the notice's work belongs to stay with what the person last
+/// said. The same words typed without the mark are the person's.
+#[test]
+fn a_notice_turn_is_not_the_persons_words() {
+    const POINTER: &str = "You have 1 orchestration message. Run `zerocode-orc check`.";
+    let messages = vec![
+        user_text("fix the parser"),
+        ConversationMessage::assistant(vec![ContentBlock::Text { text: "fixed".to_string() }]),
+        user_text(POINTER).with_origin(crate::session::MessageOrigin::Notice),
+        ConversationMessage::assistant(vec![ContentBlock::Text { text: "read the mail".to_string() }]),
+    ];
+    assert_eq!(persons_words(&messages), "fix the parser");
+    for reading in [TaskReading::PersonsNewest, TaskReading::PersonsRecent] {
+        assert_eq!(task_by(&messages, reading), "fix the parser", "{}", reading.word());
+    }
+    assert_eq!(persons_turns(&messages).iter().map(|turn| turn.len()).collect::<Vec<_>>(), [4]);
+
+    let mut typed = messages.clone();
+    typed[2] = user_text(POINTER);
+    assert_eq!(persons_words(&typed), POINTER, "the same words without the mark are the person's");
+    assert_eq!(persons_turns(&typed).iter().map(|turn| turn.len()).collect::<Vec<_>>(), [2, 2]);
+}
