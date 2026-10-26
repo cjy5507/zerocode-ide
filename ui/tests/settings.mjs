@@ -14799,13 +14799,14 @@ await test("저장 실패: 창이 확인 결과를 기록하지 못하면 화면
   const savedMemory = backend.connectionMemory;
   const T0 = 1_790_000_000_000;
   backend.connectionMemory = { nowMs: T0, connections: {} };
+  // Refused from the record's first moment: a quiet check still running from
+  // the scene before, or the scene's own, is refused too.
+  backend.connectionMemoryRefusal = "model_connection_checks_full";
   try {
     return await withModelScene(() => {
       backend.zoSettings.providers = [
         { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
       ];
-      // Refused from the start, so the scene's own quiet check is refused too.
-      backend.connectionMemoryRefusal = "model_connection_checks_full";
     }, async () => {
       await pageA.click('[data-model-change="judgment"]');
       await pageA.locator(`input[value='${JSON.stringify(["judge", "judge-model"])}']`).check();
