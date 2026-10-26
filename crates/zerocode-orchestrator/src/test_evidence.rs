@@ -2213,6 +2213,89 @@ mod tests {
         None
     }
 
+    /// Every other process whose command line names `path` — a holder found
+    /// by its own argument, whether or not it ever wrote its pid. One that
+    /// stalled after `setsid` and before its write outlives any wait for the
+    /// pid file (review t-76464), and nothing else this test counts would
+    /// see it: the runner closes the parent's end of its pipes itself.
+    fn processes_naming(path: &Path) -> Vec<i32> {
+        let wanted = path.to_string_lossy();
+        let own = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
+        // `-ww`: the whole command line, however long — the marker is at its end.
+        // Never panics: the drop guard below calls it during an unwind.
+        let Ok(listing) = Command::new("ps")
+            .args(["-ww", "-Ao", "pid=,command="])
+            .output()
+        else {
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&listing.stdout)
+            .lines()
+            .filter(|line| line.contains(wanted.as_ref()))
+            .filter_map(|line| line.split_whitespace().next()?.parse::<i32>().ok())
+            .filter(|pid| *pid != own)
+            .collect()
+    }
+
+    /// Reap every process naming `path`, and wait until each is gone.
+    fn reap_naming(path: &Path) {
+        for pid in processes_naming(path) {
+            // SAFETY: the pid names this attempt's own marker in its argv.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            wait_until_gone(pid);
+        }
+    }
+
+    /// Reaps every process naming its path when it goes out of scope — on
+    /// every road out of an attempt or the proof: a `continue`, a pass, and
+    /// a failed assertion's unwind alike (review t-76473 R2). It never
+    /// asserts: a panic during an unwind would abort the test binary.
+    struct ReapNaming<'a>(&'a Path);
+
+    impl Drop for ReapNaming<'_> {
+        fn drop(&mut self) {
+            for pid in processes_naming(self.0) {
+                // SAFETY: the pid names this proof's own marker in its argv.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+        }
+    }
+
+    #[test]
+    fn a_process_is_found_by_the_path_its_command_line_names() {
+        let home = tempfile::tempdir().expect("home");
+        let marker = home.path().join("daemon-9.pid");
+        // Reaped whichever way this test ends, a failed assertion included.
+        let _sweep = ReapNaming(&marker);
+        let python =
+            resolve_host_executable(OsString::from("python3")).expect("absolute Python executable");
+        // A holder's own shape: Python with the marker path among its
+        // arguments, left behind by a shell that has already gone — so it is
+        // nobody's child here, as an escaped holder is not, and it never
+        // writes a pid.
+        let status = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "'{}' -c 'import time; time.sleep(30)' '{}' </dev/null >/dev/null 2>&1 &",
+                python.display(),
+                marker.display()
+            ))
+            .status()
+            .expect("leave a process naming the marker");
+        assert!(status.success());
+        let mut found = Vec::new();
+        for _ in 0..300 {
+            found = processes_naming(&marker);
+            if !found.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!found.is_empty(), "no process names {}", marker.display());
+        reap_naming(&marker);
+        assert!(processes_naming(&marker).is_empty());
+    }
+
     #[test]
     fn only_an_attempt_that_made_its_holder_proves_anything_about_holders() {
         assert_eq!(holder_attempt(true, true), HolderAttempt::Proves);
@@ -2225,6 +2308,7 @@ mod tests {
     fn prove_a_daemonized_pipe_holder_in_this_process() {
         let repository = repository(Vec::new());
         let home = tempfile::tempdir().expect("authority home");
+        let _sweep_home = ReapNaming(home.path());
         let (_, store) = store(&home);
         let python =
             resolve_host_executable(OsString::from("python3")).expect("absolute Python executable");
@@ -2238,6 +2322,7 @@ mod tests {
                 "the host never managed to start the command in six tries"
             );
             let marker = home.path().join(format!("daemon-{attempt}.pid"));
+            let _sweep_attempt = ReapNaming(&marker);
             let started_marker = home.path().join(format!("daemon-{attempt}.started"));
             let script = executable(
                 home.path(),
@@ -2333,6 +2418,8 @@ mod tests {
                     unsafe { libc::kill(late, libc::SIGKILL) };
                     wait_until_gone(late);
                 }
+                // One that never wrote its pid is still found by its argv.
+                reap_naming(&marker);
                 continue;
             }
             assert_eq!(
@@ -2348,6 +2435,9 @@ mod tests {
             );
             proven += 1;
         }
+        // Whatever attempt left a holder behind — one that woke after every
+        // wait for it — names this proof's home and goes with it.
+        reap_naming(home.path());
         assert!(
             fd_count_settles_at(before_fds + 2),
             "escaped writers leaked process pipe descriptors"
