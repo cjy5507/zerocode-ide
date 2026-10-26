@@ -63,6 +63,10 @@ const ZO_WAIT: Duration = Duration::from_secs(10);
 /// How long a door's watch waits for the output, or between two looks at zo.
 const TICK: Duration = Duration::from_millis(20);
 
+/// The most of a door's output read, in bytes: a listing names a few cells,
+/// and an output past this is no answer.
+const PRINTED_BYTES: usize = 1024 * 1024;
+
 /// The longest reason the page is given from zo, in characters.
 const WHY_CHARS: usize = 300;
 
@@ -112,19 +116,41 @@ impl ZoDoor {
         #[cfg(unix)]
         crate::codex_queue::prepare_process_group(&mut command);
         let mut child = command.spawn().ok()?;
-        let Some(mut stdout) = child.stdout.take() else {
+        let Some(output) = child.stdout.take().and_then(|out| Output::of(out).ok()) else {
             give_up(&mut child);
             return None;
         };
+        watch(&mut Started { child, output }, self.wait)
+    }
+}
+
+/// zo's output as it comes.
+struct Output {
+    heard: Receiver<Option<String>>,
+}
+
+impl Output {
+    fn of(mut pipe: impl Read + Send + 'static) -> std::io::Result<Self> {
         // Not joined: a reader still held open at the wait is let go, and ends
         // when the group's kill closes the pipe.
         let (said, heard) = mpsc::channel();
         std::thread::spawn(move || {
             let mut text = String::new();
-            let _ = said.send(stdout.read_to_string(&mut text).map(|_| text).ok());
+            let _ = said.send(pipe.read_to_string(&mut text).map(|_| text).ok());
         });
-        watch(&mut Started { child, heard }, self.wait)
+        Ok(Self { heard })
     }
+
+    /// As [`Answering::printed`].
+    fn printed(&mut self, tick: Duration) -> Option<Option<String>> {
+        match self.heard.recv_timeout(tick) {
+            Ok(text) => Some(text),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => Some(None),
+        }
+    }
+
+    fn close(&mut self) {}
 }
 
 /// A door zo is answering, as [`watch`] sees it: zo's output, zo the process
@@ -177,7 +203,7 @@ fn watch(door: &mut dyn Answering, wait: Duration) -> Option<(i32, Value)> {
 /// A real zo, started.
 struct Started {
     child: Child,
-    heard: Receiver<Option<String>>,
+    output: Output,
 }
 
 impl Answering for Started {
@@ -186,11 +212,7 @@ impl Answering for Started {
     }
 
     fn printed(&mut self, tick: Duration) -> Option<Option<String>> {
-        match self.heard.recv_timeout(tick) {
-            Ok(text) => Some(text),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => Some(None),
-        }
+        self.output.printed(tick)
     }
 
     fn reaped(&mut self) -> std::io::Result<Option<ExitStatus>> {
@@ -198,6 +220,7 @@ impl Answering for Started {
     }
 
     fn give_up(&mut self) {
+        self.output.close();
         give_up(&mut self.child);
     }
 

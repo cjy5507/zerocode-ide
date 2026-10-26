@@ -68,6 +68,16 @@ impl Bench {
              exit \"$(cat '{dir}/'\"$door\".code)\"\n",
             dir = bench.dir.path().display()
         ));
+        // A move that answers it moved rewrites the cell as zo does; one that
+        // answers it did not leaves the file alone.
+        bench.then(
+            "move",
+            &format!(
+                "if grep -q '\"moved\":true' '{dir}/move.json'; then\n{rewrite}fi\n",
+                dir = bench.dir.path().display(),
+                rewrite = rewrite(&bench, "mv")
+            ),
+        );
         bench
     }
 
@@ -367,6 +377,33 @@ fn a_zo_without_the_door_shows_nothing() {
         outcome.stopped.as_ref().map(|stop| stop.reason),
         Some("zo_silent")
     );
+}
+
+#[test]
+fn a_zo_that_says_the_move_is_not_supported_here_shows_nothing() {
+    let bench = Bench::new();
+    let row = serde_json::json!({
+        "file": bench.settings(),
+        "path": ["mcpServers", "fixture-server", "env", NAME],
+        "name": NAME,
+    });
+    for literals in [Vec::new(), vec![row]] {
+        bench.answer(
+            "list",
+            &serde_json::json!({
+                "literals": literals,
+                "supported": false,
+                "why": "fixture: no keychain here",
+            })
+            .to_string(),
+            0,
+        );
+        assert_eq!(notice(&bench.zo(), &bench.file()), None, "{literals:?}");
+        let keys = HeldKeys::default();
+        let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+        assert_eq!(reason(&outcome), Some("zo_silent"));
+        nothing_kept(&bench, &keys, &outcome);
+    }
 }
 
 #[test]
@@ -928,6 +965,11 @@ fn a_file_put_in_place_while_zo_checks_is_not_handed_to_zos_move() {
             "sed -e 's/\"command\": \"fixture\"/\"command\": \"other\"/' '{s}' > '{s}.edit'\ncat '{s}.edit' > '{s}'\n",
             "cell_changed",
         ),
+        (
+            "the same file given a second name",
+            "ln '{s}' '{s}.linked'\n",
+            "file_swapped",
+        ),
     ] {
         let bench = Bench::new();
         let before = std::fs::read(bench.settings()).expect("before");
@@ -957,6 +999,222 @@ fn a_file_put_in_place_while_zo_checks_is_not_handed_to_zos_move() {
         }
         said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
     }
+}
+
+/// A file of the project's standing on the settings file's own inode — a hard
+/// link, which no folder handle or `O_NOFOLLOW` can see — one way or the
+/// other: the settings path linked to the project's file, or the project's
+/// path linked to the settings file.
+fn hard_linked(bench: &Bench, settings_is_the_link: bool) {
+    if settings_is_the_link {
+        let project = bench.project();
+        std::fs::remove_file(bench.settings()).expect("remove");
+        std::fs::hard_link(&project, bench.settings()).expect("hard link");
+    } else {
+        std::fs::hard_link(bench.settings(), bench.dir.path().join("project.json"))
+            .expect("hard link");
+    }
+}
+
+#[test]
+fn a_settings_file_hard_linked_to_a_project_file_is_neither_named_nor_read() {
+    for settings_is_the_link in [true, false] {
+        let bench = Bench::new();
+        hard_linked(&bench, settings_is_the_link);
+        let label = if settings_is_the_link {
+            "the settings path is a hard link to the project's file"
+        } else {
+            "the project's path is a hard link to the settings file"
+        };
+        assert_eq!(notice(&bench.zo(), &bench.file()), None, "{label}");
+        let keys = Watched::new(|| {});
+        let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+        assert_eq!(reason(&outcome), Some("file_swapped"), "{label}");
+        assert!(
+            keys.guarded.borrow().is_empty(),
+            "{label}: the keychain is neither read nor written"
+        );
+        nothing_kept(&bench, &keys.keys, &outcome);
+    }
+}
+
+#[test]
+fn a_spelling_of_the_settings_file_from_outside_its_root_is_not_taken() {
+    let bench = Bench::new();
+    // Another folder, outside the home folder, whose `alias` is a link to the
+    // person's `.zo`: zo's spelling through it stands on the very same file.
+    let outside = tempfile::tempdir().expect("outside");
+    std::os::unix::fs::symlink(bench.dir.path().join(".zo"), outside.path().join("alias"))
+        .expect("alias");
+    bench.answer(
+        "list",
+        &listed(&outside.path().join("alias").join("settings.json")),
+        0,
+    );
+    assert_eq!(notice(&bench.zo(), &bench.file()), None);
+    let keys = Watched::new(|| {});
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert!(outcome.moved.is_empty() && outcome.stopped.is_none());
+    assert!(
+        keys.guarded.borrow().is_empty(),
+        "the keychain is neither read nor written"
+    );
+    assert_eq!(bench.calls(), vec![list_call(), list_call()]);
+}
+
+#[test]
+fn a_hard_link_made_after_the_listing_is_refused_before_the_read() {
+    let bench = Bench::new();
+    bench.then(
+        "list",
+        &format!(
+            "ln '{settings}' '{project}'\n",
+            settings = bench.settings().display(),
+            project = bench.dir.path().join("project.json").display()
+        ),
+    );
+    let keys = Watched::new(|| {});
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    assert!(
+        keys.guarded.borrow().is_empty(),
+        "the keychain is neither read nor written"
+    );
+    nothing_kept(&bench, &keys.keys, &outcome);
+}
+
+#[test]
+fn a_hard_link_made_between_the_read_and_the_keychain_write_is_not_kept() {
+    let bench = Bench::new();
+    let (settings, project) = (bench.settings(), bench.dir.path().join("project.json"));
+    let keys = Watched::new(move || {
+        std::fs::hard_link(&settings, &project).expect("hard link");
+    });
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(reason(&outcome), Some("file_swapped"));
+    assert_eq!(
+        *keys.guarded.borrow(),
+        vec![("read", true)],
+        "the keychain is read for another value, and never written"
+    );
+    nothing_kept(&bench, &keys.keys, &outcome);
+}
+
+#[test]
+fn a_file_zo_left_with_a_second_name_is_not_gone_on_from() {
+    let bench = two_cells();
+    bench.then(
+        "move",
+        &format!(
+            "{rewrite}ln '{settings}' '{project}'\n",
+            rewrite = rewrite(&bench, "mv"),
+            settings = bench.settings().display(),
+            project = bench.dir.path().join("project.json").display()
+        ),
+    );
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(outcome.moved.len(), 1);
+    assert_eq!(
+        outcome.stopped,
+        Some(Stopped {
+            name: NAME_2.to_string(),
+            reason: "file_swapped",
+            why: None,
+            keychain_kept: false,
+        })
+    );
+    assert_eq!(keys.held(&keychain_service(NAME_2)), None);
+    assert_eq!(bench.calls().len(), 3, "nothing asked for the second");
+}
+
+/// The last cell's move answered, and the file it left is not the one read
+/// with that cell turned into its reference: the move is not reported
+/// finished. The cell zo said it moved is said moved, with its backup; the
+/// keychain item stays.
+fn unconfirmed(name: &str) -> Option<Stopped> {
+    Some(Stopped {
+        name: name.to_string(),
+        reason: "unconfirmed",
+        why: None,
+        keychain_kept: true,
+    })
+}
+
+#[test]
+fn a_single_cell_zo_says_it_moved_but_left_as_it_was_is_not_reported_finished() {
+    let bench = Bench::new();
+    bench.then("move", "");
+    let before = std::fs::read(bench.settings()).expect("before");
+    let keys = HeldKeys::default();
+    let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+    assert_eq!(
+        outcome,
+        MoveOutcome {
+            moved: vec![Moved {
+                name: NAME.to_string(),
+                backup: bench.backup().display().to_string(),
+            }],
+            stopped: unconfirmed(NAME),
+            left: Vec::new(),
+        }
+    );
+    assert_eq!(std::fs::read(bench.settings()).expect("after"), before);
+    assert_eq!(keys.held(&keychain_service(NAME)).as_deref(), Some(VALUE));
+    said_nowhere(&bench, &[serde_json::to_string(&outcome).expect("json")]);
+}
+
+#[test]
+fn a_last_cell_whose_move_changed_more_than_the_cell_is_not_reported_finished() {
+    for how in ["mv", "in place"] {
+        let bench = two_cells();
+        // The second move also changes the first server's command.
+        bench.then(
+            "move",
+            &format!(
+                "if [ \"$9\" = '{NAME_2}' ]; then\n{also}else\n{plain}fi\n",
+                also = rewrite_with(
+                    &bench,
+                    how,
+                    " -e 's/\"command\": \"fixture\"/\"command\": \"other\"/'"
+                ),
+                plain = rewrite(&bench, how),
+            ),
+        );
+        let keys = HeldKeys::default();
+        let outcome = move_all(&bench.zo(), &bench.file(), &keys);
+        assert_eq!(
+            outcome
+                .moved
+                .iter()
+                .map(|moved| moved.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![NAME, NAME_2],
+            "{how}"
+        );
+        assert_eq!(outcome.stopped, unconfirmed(NAME_2), "{how}");
+        assert!(outcome.left.is_empty(), "{how}");
+        let said = serde_json::to_string(&outcome).expect("json");
+        said_nowhere(&bench, std::slice::from_ref(&said));
+        assert!(!said.contains(VALUE_2));
+    }
+}
+
+#[test]
+fn a_last_cell_whose_file_is_given_a_second_name_is_not_reported_finished() {
+    let bench = Bench::new();
+    bench.then(
+        "move",
+        &format!(
+            "{rewrite}ln '{settings}' '{project}'\n",
+            rewrite = rewrite(&bench, "mv"),
+            settings = bench.settings().display(),
+            project = bench.dir.path().join("project.json").display()
+        ),
+    );
+    let outcome = move_all(&bench.zo(), &bench.file(), &HeldKeys::default());
+    assert_eq!(outcome.moved.len(), 1);
+    assert_eq!(outcome.stopped, unconfirmed(NAME));
 }
 
 /// A made-up door: a clock that moves only when the watch waits, and a zo
@@ -1083,5 +1341,125 @@ fn a_zo_the_window_can_no_longer_wait_on_is_sent_nothing() {
         door.kills.is_empty(),
         "a number the window cannot wait on may be another's: {:?}",
         door.kills
+    );
+}
+
+/// The made-up zo and clock, with zo's output a real pipe whose write end a
+/// child that left zo's group still holds: the pipe is read as a real zo's
+/// is, and no real process or signal is involved.
+struct Held {
+    output: Output,
+    door: MadeUp,
+}
+
+impl Answering for Held {
+    fn now(&self) -> Instant {
+        self.door.now()
+    }
+
+    fn printed(&mut self, tick: Duration) -> Option<Option<String>> {
+        let printed = self.output.printed(Duration::ZERO);
+        if printed.is_none() {
+            self.door.pause(tick);
+        }
+        printed
+    }
+
+    fn reaped(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.door.reaped()
+    }
+
+    fn give_up(&mut self) {
+        self.output.close();
+        self.door.give_up();
+    }
+
+    fn pause(&mut self, tick: Duration) {
+        self.door.pause(tick);
+    }
+}
+
+/// Whether the window still holds its end of the pipe: a write to the other
+/// end goes through while it does, and breaks once it is let go.
+fn still_read(writer: &mut std::io::PipeWriter) -> bool {
+    use std::io::Write;
+    match writer.write(b"x") {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => false,
+        Err(error) => panic!("the pipe: {error}"),
+    }
+}
+
+#[test]
+fn an_output_a_child_that_left_zos_group_holds_is_let_go_at_the_wait() {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    let mut door = Held {
+        output: Output::of(reader).expect("output"),
+        // zo ends at once; its detached child holds the output open.
+        door: MadeUp::new(None, Some(Duration::ZERO)),
+    };
+    assert!(still_read(&mut writer), "read while the door is watched");
+    assert_eq!(watch(&mut door, WAIT), None);
+    killed_once_at_the_wait_unreaped(&door.door);
+    assert!(
+        let_go(&mut writer),
+        "the window's end of the output is closed at the wait: no reader, no descriptor is left"
+    );
+}
+
+/// Whether the window's end of the pipe is let go: writes to the other end
+/// until one breaks, up to twice [`PRINTED_BYTES`]. A process another test
+/// started in the moment the pipe was made may hold a copy of the window's
+/// end (`pipe` and its close-on-exec flag are two steps on macOS) and keep a
+/// write going until it ends; a window still reading takes every byte.
+fn let_go(writer: &mut std::io::PipeWriter) -> bool {
+    use std::io::Write;
+    let chunk = [b'x'; 8192];
+    let mut written = 0;
+    while written < 2 * PRINTED_BYTES {
+        match writer.write(&chunk) {
+            Ok(wrote) => written += wrote,
+            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return true,
+            Err(error) => panic!("the pipe: {error}"),
+        }
+    }
+    false
+}
+
+#[test]
+fn an_output_past_its_bound_is_let_go_and_not_read_as_an_answer() {
+    let (reader, mut writer) = std::io::pipe().expect("pipe");
+    // A child that left zo's group and prints without end, ending only when
+    // its output breaks — or, for a window that reads it all, after twice the
+    // bound, closing it.
+    let printing = std::thread::spawn(move || {
+        use std::io::Write;
+        let chunk = [b'x'; 8192];
+        let mut written = 0;
+        while written < 2 * PRINTED_BYTES {
+            match writer.write(&chunk) {
+                Ok(wrote) => written += wrote,
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                    return (written, true);
+                }
+                Err(error) => panic!("the pipe: {error}"),
+            }
+        }
+        (written, false)
+    });
+    // Each look waits up to a tick for the output and drains it to its end
+    // or its bound; the looks go on until the output is done with.
+    let mut output = Output::of(reader).expect("output");
+    let answered = loop {
+        if let Some(printed) = output.printed(TICK) {
+            break printed;
+        }
+    };
+    let (written, broke) = printing.join().expect("printing");
+    assert_eq!(answered, None, "an output past its bound is no answer");
+    assert!(broke, "the window let its end go: {written} bytes written");
+    assert!(
+        written <= PRINTED_BYTES + 1024 * 1024,
+        "read to the bound, not to the end: {written} bytes"
     );
 }

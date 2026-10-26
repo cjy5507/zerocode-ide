@@ -33,6 +33,7 @@ export const SETTINGS_SECRET_WORDS = Object.freeze({
 
 const NAMES = ["FIXTURE_TOKEN", "OTHER_FIXTURE_KEY"];
 const BACKUP_NOTE_KO = "백업에는 옮기기 전의 비밀 값이 그대로 들어 있습니다. 옮긴 것이 잘 되는지 확인한 뒤 백업 파일을 지워 주세요.";
+const WHERE_KO = "홈 폴더나 /(루트)에서 연 zo는 이 참조를 풀지 않아 그 MCP 서버를 띄우지 않습니다 — 프로젝트 폴더에서 zo를 여세요.";
 const STOPPED_TITLE_KO = "설정 파일의 비밀을 다 옮기지 못했습니다";
 const UNLISTED_KO = "남은 목록을 zo에게서 다시 받지 못했습니다. 설정을 다시 열어 확인해 주세요.";
 const BACKUP = "/fixture/home/.zo/settings.json.bak-20261027-fixture";
@@ -93,6 +94,7 @@ const look = () => {
     body: said("settings-secrets-body"),
     done: said("settings-secrets-done"),
     backupNote: said("settings-secrets-backup-note"),
+    where: said("settings-secrets-where"),
     why: said("settings-secrets-why"),
     move: said("settings-secrets-move"),
     asked: window.__SECRET_CALLS__.filter((call) => call.name === "settings_secret_literals").length,
@@ -182,7 +184,7 @@ async function named(browser, origin, ok) {
     );
     ok(
       "before the press the line already says zo's backup will hold the old values",
-      seen.body?.includes("그 백업에는 옛 값이 그대로 들어 있습니다") && seen.backupNote === null,
+      seen.body?.includes("그 백업에는 옛 값이 그대로 들어 있습니다") && seen.backupNote === null && seen.where === null,
       JSON.stringify(seen),
     );
     const kept = await page.evaluate(keepsOf);
@@ -214,6 +216,11 @@ async function moved(browser, origin, ok) {
     ok(
       "beside the backup the line says it still holds the old values, to be removed once the move is checked",
       seen.backupNote === BACKUP_NOTE_KO && !/<button|삭제|지우기 단추/.test(seen.backupNote ?? ""),
+      JSON.stringify(seen),
+    );
+    ok(
+      "after a move the line says a zo opened in the home folder or at / does not resolve the reference",
+      seen.where === WHERE_KO,
       JSON.stringify(seen),
     );
     const kept = await page.evaluate(keepsOf);
@@ -306,6 +313,49 @@ async function stoppedUnlisted(browser, origin, ok) {
   }
 }
 
+/* zo said it moved the last cell, and the file it left is not the one the
+ * window read with that cell turned into its reference: the line says so in
+ * each language, and nothing reads as a finished move. */
+async function stoppedUnconfirmed(browser, origin, ok) {
+  await scenario(browser, origin, "last cell unconfirmed", ok, async (page) => {
+    await page.evaluate(([names, backup]) => {
+      window.__SECRETS__.listed = { names: [names[0]] };
+      window.__SECRETS__.outcome = {
+        moved: [{ name: names[0], backup }],
+        stopped: { name: names[0], reason: "unconfirmed", why: null, keychainKept: true },
+        left: [],
+      };
+      window.__SECRETS__.relist = { names: [] };
+    }, [NAMES, BACKUP]);
+    await openSettings(page);
+    await pressMove(page);
+    const seen = await page.evaluate(look);
+    ok(
+      "a last cell zo said it moved, in a file not the one expected, is said as such and not as a finished move",
+      seen.shown && seen.title === STOPPED_TITLE_KO && seen.done === `옮김 · 백업 ${BACKUP}` &&
+        seen.why ===
+          `zo는 ${NAMES[0]} 칸을 옮겼다고 답했지만, 남은 설정 파일이 그 칸만 참조로 바뀐 파일이 아닙니다. 설정 파일과 백업을 확인해 주세요. ` +
+          `키체인 항목 ${NAMES[0]}은(는) 그대로 두었습니다 — 다음에 옮길 때 그대로 씁니다. ${UNLISTED_KO}`,
+      JSON.stringify(seen),
+    );
+    const whys = await page.evaluate((codes) => {
+      const out = {};
+      for (const code of codes) {
+        setLocale(code, { persist: false, refresh: false });
+        out[code] = document.getElementById("settings-secrets-why").textContent.trim();
+      }
+      setLocale("ko", { persist: false, refresh: false });
+      return out;
+    }, Object.keys(SETTINGS_SECRET_WORDS));
+    ok(
+      "the unconfirmed move speaks each of the five languages",
+      new Set(Object.values(whys).filter(Boolean)).size === 5 &&
+        Object.values(whys).every((why) => why.includes(NAMES[0])),
+      JSON.stringify(whys),
+    );
+  });
+}
+
 async function oldZo(browser, origin, ok) {
   for (const [label, setup] of [
     ["answers nothing", (S) => { S.listed = null; }],
@@ -356,13 +406,14 @@ async function languages(browser, origin, ok) {
       for (const code of codes) {
         setLocale(code, { persist: false, refresh: false });
         out[code] = document.getElementById("settings-secrets-backup-note").textContent.trim();
+        out[`${code}-where`] = document.getElementById("settings-secrets-where").textContent.trim();
       }
       setLocale("ko", { persist: false, refresh: false });
       return out;
     }, Object.keys(SETTINGS_SECRET_WORDS));
     ok(
-      "the backup's warning speaks each of the five languages",
-      new Set(Object.values(notes).filter(Boolean)).size === 5 && notes.ko === BACKUP_NOTE_KO,
+      "the backup's warning and where zo resolves the reference speak each of the five languages",
+      new Set(Object.values(notes).filter(Boolean)).size === 10 && notes.ko === BACKUP_NOTE_KO && notes["ko-where"] === WHERE_KO,
       JSON.stringify(notes),
     );
   });
@@ -404,6 +455,7 @@ export async function testSettingsSecrets(browser, origin, ok) {
   await stoppedDiffers(browser, origin, ok);
   await stoppedByZo(browser, origin, ok);
   await stoppedUnlisted(browser, origin, ok);
+  await stoppedUnconfirmed(browser, origin, ok);
   await oldZo(browser, origin, ok);
   await languages(browser, origin, ok);
   await narrow(browser, origin, ok);
