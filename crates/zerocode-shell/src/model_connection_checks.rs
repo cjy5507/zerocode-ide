@@ -326,8 +326,25 @@ pub fn remember_judgment(
             state: answer.state,
             checked_ms: now_ms,
         });
-        let over = record.judgments.len().saturating_sub(MAX_JUDGMENTS);
-        record.judgments.drain(..over);
+        // The count bound spares what the byte bound spares: the check just
+        // written and the connection's newest, whatever the clock said.
+        while record.judgments.len() > MAX_JUDGMENTS {
+            let newest = record.judgments.iter().map(|kept| kept.checked_ms).max();
+            let Some(oldest) = record
+                .judgments
+                .iter()
+                .enumerate()
+                .filter(|(_, kept)| {
+                    Some(kept.checked_ms) != newest
+                        && !(kept.model == answer.model && kept.protocol == answer.protocol)
+                })
+                .min_by_key(|(_, kept)| kept.checked_ms)
+                .map(|(index, _)| index)
+            else {
+                break;
+            };
+            record.judgments.remove(oldest);
+        }
     })
 }
 
