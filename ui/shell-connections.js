@@ -76,6 +76,18 @@ const MODEL_LOGINS = Object.freeze({
   kimi: () => t("settings.models.login.kimi", "Kimi 로그인"),
 });
 const MODEL_LOGIN_ORDER = Object.freeze(Object.keys(MODEL_LOGINS));
+/* Why a login's check failed, by the kind word the window keeps in place of
+ * the provider's answer (t-76873): the answer itself never reaches here. */
+const MODEL_FAILURE_KINDS = Object.freeze({
+  auth: () => t("settings.models.failure.auth", "인증 거절"),
+  forbidden: () => t("settings.models.failure.forbidden", "권한 없음"),
+  notFound: () => t("settings.models.failure.notFound", "찾을 수 없음"),
+  rateLimit: () => t("settings.models.failure.rateLimit", "한도 초과"),
+  server: () => t("settings.models.failure.server", "서버 오류"),
+  network: () => t("settings.models.failure.network", "네트워크 오류"),
+  timeout: () => t("settings.models.failure.timeout", "시간 초과"),
+  unknown: () => t("settings.models.failure.unknown", "알 수 없는 오류"),
+});
 
 /* Where each preset's key is made (v2 대응표 5), by preset id. */
 const MODEL_KEY_HELP = Object.freeze({
@@ -414,7 +426,7 @@ const modelConnectionsController = {
     if (pane && own.some((report) => report.provider === "anthropic" && store(report) && store(report) !== pane)) return "elsewhere";
     if (answered.length) return "ok";
     if (!own.length) return models.length ? "unknown" : "nologin";
-    if (own.some((report) => String(report.detail ?? "").startsWith("skipped:"))) return "nologin";
+    if (own.some((report) => report.diagnosis?.skipped === true)) return "nologin";
     return models.length ? "stale" : "failed";
   },
   /* A login whose models zo would run: one it lists, unless it is not
@@ -423,10 +435,14 @@ const modelConnectionsController = {
     return login.models.length > 0 && login.state !== "nologin";
   },
   /* What a login's line says beyond its badge: how many models and when zo
-   * checked them, or why the list is not today's, in one line. */
+   * checked them, or why the list is not today's, in one line — the failure
+   * by the window's diagnosis, its status and kind, never the provider's
+   * answer (t-76873). */
   loginWords(login) {
     const age = modelReportAge(login.report?.age);
-    const detail = String(login.report?.detail ?? "").split("\n")[0].trim().slice(0, 160);
+    const failure = login.report?.diagnosis;
+    const kind = failure ? (MODEL_FAILURE_KINDS[failure.kind] ?? MODEL_FAILURE_KINDS.unknown)() : "";
+    const detail = failure && Number.isInteger(failure.status) ? `HTTP ${failure.status} · ${kind}` : kind;
     if (login.state === "ok") {
       return [t("settings.connections.modelCount", "모델 {{count}}개", { count: login.models.length }), age ? t("settings.models.zoChecked", "zo가 확인한 때: {{age}}", { age }) : ""].filter(Boolean).join(" · ");
     }
@@ -807,6 +823,7 @@ const modelConnectionsController = {
       if (row.kind === "managed") {
         const applied = await managedJudgmentController.activate(row.model);
         if (!applied) return { applied: false, key, state: "failed", raw: managedJudgmentController.failure(managedJudgmentController.lastError) };
+        picked.provider = managedJudgmentController.appliedProvider;
       } else if (row.kind === "jev") {
         const provider = picked.provider;
         const expectedProviderIdentity = typesafeState.providerIdentity;
@@ -1260,10 +1277,11 @@ const modelConnectionsController = {
     return row?.protocol === "openai_json";
   },
   /* A judgment row's pick, copied whole when Apply is pressed: the kind,
-   * the managed model, the Jev provider it writes, or the connection's full
-   * reference — its generation too. */
+   * the managed model — and, once activated, the provider it applied — the
+   * Jev provider it writes, or the connection's full reference — its
+   * generation too. */
   judgmentPick(row) {
-    if (row.kind === "managed") return { kind: "managed", model: row.model.id };
+    if (row.kind === "managed") return { kind: "managed", model: row.model.id, provider: null };
     if (row.kind === "jev") {
       const provider = judgmentProviderController.copy(typesafeState.jevProvider);
       if (!provider.model) provider.model = typesafeState.model?.alias;
@@ -1283,7 +1301,10 @@ const modelConnectionsController = {
     const same = (a, b) => Boolean(a) && Boolean(b) && ["id", "generation", "model", "protocol"].every((field) => a[field] === b[field]);
     const held = (() => {
       if (picked.kind === "jev") return provider.kind === "jev" && (!picked.provider.model || provider.model === picked.provider.model);
-      if (picked.kind === "managed") return provider.kind === "local" && provider.model === picked.model;
+      // The whole provider the activation applied — another local server or
+      // another protocol under the same model id is another provider — and
+      // no connection, which a managed server is never bound to.
+      if (picked.kind === "managed") return judgmentProviderController.sameProvider(provider, picked.provider) && !typesafeState.providerConnection;
       const judgment = this.state?.judgment;
       return provider.model === picked.reference.model && provider.protocol === picked.reference.protocol &&
         same(typesafeState.providerConnection, picked.reference) && (!judgment || same(judgment, picked.reference));
@@ -1296,6 +1317,10 @@ const modelConnectionsController = {
     if (picked.kind === "connection" && connection?.id === picked.reference.id && connection.model === picked.reference.model &&
       connection.generation !== picked.reference.generation) {
       return t("settings.models.appliedGeneration", "{{words}} (그 사이 연결의 주소나 키가 바뀜)", { words });
+    }
+    // The same model id read back from another server reads the same too.
+    if (picked.kind === "managed" && provider.model === picked.provider?.model) {
+      return t("settings.models.appliedServer", "{{words}} (같은 모델 이름이지만 다른 판단 서버)", { words });
     }
     return words;
   },

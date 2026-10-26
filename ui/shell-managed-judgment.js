@@ -5,6 +5,9 @@ const managedJudgmentController = {
   busy: false,
   activating: false,
   lastError: null,
+  // The provider the last activation applied, as the server ran it when the
+  // write landed — what the settings must read back (t-76873 P2 ①).
+  appliedProvider: null,
   statusError: false,
   rows: new Map(),
   candidates: new Map(),
@@ -409,6 +412,7 @@ const managedJudgmentController = {
 
   async activate(model, source = null) {
     this.lastError = null;
+    this.appliedProvider = null;
     if (this.busy || this.operating() || typesafeBusy || judgmentModelSourceController.busy || !this.localSupported(model)) return false;
     const expectedProviderIdentity = this.snapshot.providerIdentity;
     if (!expectedProviderIdentity) return false;
@@ -451,6 +455,7 @@ const managedJudgmentController = {
         this.accept(await invoke("managed_judgment_apply", { serverId, expectedProviderIdentity }));
       }
       if (this.snapshot.appliedModelId !== model.id) throw new Error("model_not_applied");
+      this.appliedProvider = this.snapshot.server.provider ? judgmentProviderController.copy(this.snapshot.server.provider) : null;
       await judgmentProviderController.refreshAfterApply();
       this.say(t("settings.managed.applied", "로컬 모델을 적용했습니다. 응답 확인은 작업 정확도 검증과 별개입니다."));
       return true;

@@ -63,10 +63,10 @@ const ZO_LIST_FIXTURE = Object.freeze({
     { id: "fixture-google-flash", provider: "google", displayName: "Fixture Google Flash", band: null, supersededBy: null },
   ],
   reports: [
-    { provider: "anthropic", source: "anthropic-api", ok: true, count: 3, detail: "3 model(s)", age: "5m old" },
-    { provider: "openai", source: "chatgpt-backend", ok: true, count: 2, detail: "2 model(s)", age: "12m old" },
-    { provider: "google", source: "antigravity-registry", ok: true, count: 1, detail: "1 model(s)", age: "2h old" },
-    { provider: "xai", source: "xai-api", ok: false, count: 0, detail: "skipped: no login", age: "12m old" },
+    { provider: "anthropic", source: "anthropic-api", ok: true, count: 3, age: "5m old" },
+    { provider: "openai", source: "chatgpt-backend", ok: true, count: 2, age: "12m old" },
+    { provider: "google", source: "antigravity-registry", ok: true, count: 1, age: "2h old" },
+    { provider: "xai", source: "xai-api", ok: false, count: 0, diagnosis: { status: null, kind: "unknown", skipped: true }, age: "12m old" },
   ],
   aliases: [{ alias: "fixture-claude", canonical: "fixture-claude-top", provider: "anthropic" }],
 });
@@ -3192,6 +3192,10 @@ class StatefulBackend {
         // longer be read, or another window names another provider.
         if (this.managedApplyThen === "unreadable") this.settingsReadBroken = true;
         if (this.managedApplyThen === "overwritten") this.zoSettings.smart = { ...this.zoSettings.smart, judgmentProvider: { kind: "jev", protocol: "system_one", model: "jev-other-window" } };
+        // Or names the same model id on another local server, or asked as a
+        // general model (t-76873 P2 ①).
+        if (this.managedApplyThen === "anotherServer") this.zoSettings.smart = { ...this.zoSettings.smart, judgmentProvider: { ...clone(held.server.provider), baseUrl: "http://127.0.0.1:32107" } };
+        if (this.managedApplyThen === "anotherProtocol") this.zoSettings.smart = { ...this.zoSettings.smart, judgmentProvider: { ...clone(held.server.provider), protocol: "openai_json" } };
         return answer;
       }
       case "managed_judgment_stop": {
@@ -14380,10 +14384,14 @@ const MODEL_FIXTURE_PRESET = Object.freeze({
   models: { path: "/models", id_field: "id", context_field: "context_length" },
 });
 
+/* Synthetic values a provider's answer might echo — a query token and a
+   header's value on its next line, neither with a digit (t-76873). */
+const LOGIN_BODY_SECRETS = ["fixtureonlyletters", "fixturemultilinevalue"];
+
 /* A login with no credential, as zo reports it (ZO m-76597): the source is
    skipped. A report that failed any other way kept last time's list and is
    not 「로그인 안 됨」 (t-76598). */
-const signedOut = (report) => ({ ...report, ok: false, count: 0, detail: "skipped: no login" });
+const signedOut = (report) => ({ ...report, ok: false, count: 0, diagnosis: { status: null, kind: "unknown", skipped: true } });
 
 async function withModelScene(prepare, run) {
   const saved = {
@@ -14705,7 +14713,10 @@ await test("판단 모델: 고르면 확인이 저절로 돌고, 통과하지 �
 await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 · 지금 조회 실패」, 건너뛴 원천만 「로그인 안 됨」, 다른 곳의 조회는 그렇게 (t-76598 ④)", async () => withModelScene(() => {
   backend.zoSettings.providers = [];
   backend.zoList.reports = backend.zoList.reports.map((report) => report.provider === "anthropic"
-    ? { ...report, ok: false, count: 0, detail: "anthropic-api: HTTP 401 token expired\nsecond line", age: "3h old", origin: "previous" }
+    // The window keeps a diagnosis of a failed check (t-76873); a body that
+    // still rode along, whatever it holds, is never drawn.
+    ? { ...report, ok: false, count: 0, diagnosis: { status: 401, kind: "auth", skipped: false }, age: "3h old", origin: "previous",
+      detail: `HTTP 401 at https://example.test/?access_token=${LOGIN_BODY_SECRETS[0]}\nAuthorization:\n${LOGIN_BODY_SECRETS[1]}` }
     : report);
 }, async () => {
   await openSettings(pageA, "api-routers");
@@ -14714,10 +14725,11 @@ await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 ·
   const state = async (provider) => line(provider).locator(".model-state").getAttribute("data-model-state");
   assertEqual(await state("claude"), "stale", "a failed read of a listed login is not said as an earlier list");
   const said = await line("claude").innerText();
-  const words = await pageA.evaluate(() => ({ nologin: t("settings.models.state.nologin", "로그인 안 됨"), failed: t("settings.models.staleFailedPlain", "지금 조회 실패") }));
+  const words = await pageA.evaluate(() => ({ nologin: t("settings.models.state.nologin", "로그인 안 됨"), failed: t("settings.models.staleFailedPlain", "지금 조회 실패"),
+    auth: t("settings.models.failure.auth", "인증 거절") }));
   assert(!said.includes(words.nologin), "a signed-in login whose read failed reads 「로그인 안 됨」", said);
-  assert(said.includes("목록은 이전 확인 것") && said.includes(words.failed) && said.includes("HTTP 401 token expired"), "the line does not say the list is earlier and why now failed", said);
-  assert(!said.includes("second line"), "the failure is said in more than one line", said);
+  assert(said.includes("목록은 이전 확인 것") && said.includes(words.failed) && said.includes(`HTTP 401 · ${words.auth}`), "the line does not say the list is earlier and why now failed", said);
+  for (const secret of LOGIN_BODY_SECRETS) assert(!said.includes(secret), "a provider's answer reached the login line", said);
   assertEqual(await state("xai"), "nologin", "a skipped source is not said as signed out");
   await modelScenePictures("login-stale");
   // The coding chooser says the same beside the login's models.
@@ -14725,12 +14737,13 @@ await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 ·
   await pageA.click('[data-model-change="coding"]');
   const note = await pageA.locator(".model-chooser .model-pick-note").first().innerText();
   assert(note.includes("목록은 이전 확인 것") && !note.includes(words.nologin), "the chooser calls the earlier list a missing login", note);
+  for (const secret of LOGIN_BODY_SECRETS) assert(!note.includes(secret), "a provider's answer reached the chooser", note);
   await pageA.click('[data-model-change="coding"]');
   // A report from another credential store than a zo pane's says so; an
   // older zo's report without the key is read by the rules above.
   backend.zoList.paneCredentialStore = "CLAUDE_CONFIG_DIR:/fixture/pane-home";
   backend.zoList.reports = backend.zoList.reports.map((report) => report.provider === "anthropic"
-    ? { ...report, ok: true, count: 3, detail: "3 model(s)", origin: "live", credentialStore: "keychain" } : report);
+    ? { ...report, ok: true, count: 3, origin: "live", credentialStore: "keychain" } : report);
   await pageA.evaluate(() => modelConnectionsController.refresh());
   await openSettings(pageA, "api-routers");
   assertEqual(await state("claude"), "elsewhere", "a list read from another credential store passes as the pane's");
@@ -14882,12 +14895,21 @@ await test("적용 확인: 이 컴퓨터 모델도 적용 뒤 설정을 다시 �
       const jevWords = await pageA.evaluate(() => t("jev.place.jev", "Jev 서비스"));
       assert(overwritten.result.applied && String(overwritten.result.differs ?? "").includes(jevWords), "a local apply the settings no longer hold was said as done", JSON.stringify(overwritten.result));
       assertEqual(overwritten.kept, 0, "a local apply another window overwrote kept its time");
+      // The same model id, read back from another local server or asked as a
+      // general model, is another provider: said, nothing kept (t-76873 P2 ①).
+      const serverWords = await pageA.evaluate(() => t("settings.models.appliedServer", "{{words}} (같은 모델 이름이지만 다른 판단 서버)", { words: "" }).trim());
+      for (const then of ["anotherServer", "anotherProtocol"]) {
+        const moved = await apply(then);
+        assert(moved.result.applied && moved.result.differs, `a local apply read back as ${then} was said as done`, JSON.stringify(moved.result));
+        assertEqual(moved.kept, 0, `a local apply read back as ${then} kept its time`);
+        if (then === "anotherServer") assert(String(moved.result.differs).includes(serverWords), "the difference does not say the server is another", moved.result.differs);
+      }
       const held = await apply(null);
       assertEqual(held.result.differs, null, "a local apply the settings hold was said as another", JSON.stringify(held.result));
       assertEqual(held.kept, 1, "a local apply read back as picked did not keep its time");
       const identity = backend.typesafeSettings().providerIdentity;
       assertEqual(backend.connectionMemory.applied?.[identity], T0, "the local apply's time was not kept for the provider read back");
-      return "local apply → read back like any other: unreadable → said, nothing kept · overwritten → named, nothing kept · held → time kept";
+      return "local apply → read back like any other: unreadable → said, nothing kept · overwritten → named, nothing kept · same model on another server or protocol → said, nothing kept · held → time kept";
     });
   } finally {
     if (savedMemory === undefined) delete backend.connectionMemory; else backend.connectionMemory = savedMemory;
