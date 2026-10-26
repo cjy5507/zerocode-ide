@@ -94,6 +94,7 @@ pub(crate) const PERSON_ONLY_COMMANDS: &[&str] = &[
     "adopt_legacy_judgment_key",
     "save_typesafe_key",
     "remove_typesafe_key",
+    "move_settings_secrets",
     "check_typesafe_key",
     "save_type_value_key",
     "remove_type_value_key",
@@ -198,6 +199,9 @@ pub(crate) const AGENT_ALLOWED_SENSITIVE: &[&str] = &[
     "cli_login_witness",
     "cli_login_wait",
     "cli_login_witness_drop",
+    // The names of the secrets zo's settings file holds as plain text, never
+    // a value (t-76698): a read. Moving them is the person's alone.
+    "settings_secret_literals",
     // Keys as in keyboard keys, not credentials: a terminal's input, a
     // shortcut, the keyboard layout.
     "key_input",

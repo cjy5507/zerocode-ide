@@ -231,6 +231,10 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
     ),
     ("cmd/worktree.rs", include_str!("../../src/cmd/worktree.rs")),
     ("cmd/settings.rs", include_str!("../../src/cmd/settings.rs")),
+    (
+        "cmd/settings_secrets.rs",
+        include_str!("../../src/cmd/settings_secrets.rs"),
+    ),
     ("cmd/session.rs", include_str!("../../src/cmd/session.rs")),
 ];
 
@@ -707,6 +711,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
     (
         "shell-settings.js",
         include_str!("../../../../ui/shell-settings.js"),
+    ),
+    (
+        "shell-settings-secrets.js",
+        include_str!("../../../../ui/shell-settings-secrets.js"),
     ),
     (
         "shell-design.js",

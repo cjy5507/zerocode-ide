@@ -189,6 +189,7 @@ mod seat_triage;
 mod secret_watch;
 mod settings;
 mod settings_runtime;
+mod settings_secrets;
 mod sftp_runtime;
 mod sftp_sources;
 mod shell_path;
@@ -436,6 +437,7 @@ use cmd::{
     integration_queue_setting, land_batch_bisect, land_batch_cancel, land_batch_promote,
     land_batch_restack, set_integration_queue_enabled,
 };
+use cmd::{move_settings_secrets, settings_secret_literals};
 use emulator::{
     acknowledge_emulator_payload, android_accessibility_tree, android_accessibility_tree_direct,
     android_button, android_button_direct, android_emulators, android_emulators_direct,
@@ -2680,6 +2682,8 @@ fn main() -> ExitCode {
             typesafe_settings,
             save_typesafe_key,
             remove_typesafe_key,
+            settings_secret_literals,
+            move_settings_secrets,
             type_value_keys,
             save_type_value_key,
             remove_type_value_key,

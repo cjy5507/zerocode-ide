@@ -978,7 +978,12 @@ pub(crate) fn remove_router_if_current(
 
 /// Path to ~/.zo/settings.json.
 pub fn zo_settings_path() -> Option<PathBuf> {
-    zo_settings_path_from(
+    zo_settings_root_and_path().map(|(_, path)| path)
+}
+
+/// [`zo_settings_path`] with the folder it is trusted from (t-76698 r3).
+pub fn zo_settings_root_and_path() -> Option<(PathBuf, PathBuf)> {
+    zo_settings_root_and_path_from(
         std::env::var_os("ZO_CONFIG_HOME").as_deref().map(Path::new),
         std::env::var_os("ZO_HOME").as_deref().map(Path::new),
         dirs::home_dir().as_deref(),
@@ -986,17 +991,20 @@ pub fn zo_settings_path() -> Option<PathBuf> {
 }
 
 /// zo's own order for its config home: `ZO_CONFIG_HOME`, then `ZO_HOME`, then
-/// `~/.zo` — the window must write where zo will read.
-pub fn zo_settings_path_from(
+/// `~/.zo` — the window must write where zo will read. With the path, the
+/// folder whose own path is taken as it is: the config home the person
+/// named, or the home folder — below which `.zo` is a folder like any other,
+/// walked without following a link.
+pub fn zo_settings_root_and_path_from(
     config_home: Option<&Path>,
     zo_home: Option<&Path>,
     home: Option<&Path>,
-) -> Option<PathBuf> {
-    config_home
-        .map(Path::to_path_buf)
-        .or_else(|| zo_home.map(Path::to_path_buf))
-        .or_else(|| home.map(|home| home.join(".zo")))
-        .map(|root| root.join("settings.json"))
+) -> Option<(PathBuf, PathBuf)> {
+    if let Some(named) = config_home.or(zo_home) {
+        return Some((named.to_path_buf(), named.join("settings.json")));
+    }
+    let home = home?;
+    Some((home.to_path_buf(), home.join(".zo").join("settings.json")))
 }
 
 /// Parse default preset list.
@@ -1729,6 +1737,9 @@ mod tests {
     /// `ZO_HOME` set would otherwise never see the provider the pane wrote.
     #[test]
     fn the_settings_path_follows_zos_config_home_chain() {
+        let zo_settings_path_from = |config_home, zo_home, home| {
+            zo_settings_root_and_path_from(config_home, zo_home, home).map(|(_, path)| path)
+        };
         let cfg = Path::new("/cfg");
         let zo_home = Path::new("/zo-home");
         let home = Path::new("/Users/x");
@@ -1745,6 +1756,16 @@ mod tests {
             Some(PathBuf::from("/Users/x/.zo/settings.json"))
         );
         assert_eq!(zo_settings_path_from(None, None, None), None);
+        assert_eq!(
+            zo_settings_root_and_path_from(None, None, Some(home)).map(|(root, _)| root),
+            Some(PathBuf::from("/Users/x")),
+            "below the home folder, .zo is walked as a folder"
+        );
+        assert_eq!(
+            zo_settings_root_and_path_from(None, Some(zo_home), Some(home)).map(|(root, _)| root),
+            Some(PathBuf::from("/zo-home")),
+            "a config home the person named is taken as it is"
+        );
     }
 
     /// A zo launch is handed the window's own router keys and nothing else:

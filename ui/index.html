@@ -62,6 +62,7 @@
     <script defer src="./shell-computer.js"></script>
     <script defer src="./shell-self-act.js"></script>
     <script defer src="./shell-settings.js"></script>
+    <script defer src="./shell-settings-secrets.js"></script>
     <script defer src="./shell-design.js"></script>
     <script defer src="./shell-managed-judgment.js"></script>
     <script defer src="./shell-model-source.js"></script>
@@ -3890,6 +3891,25 @@
           <div class="settings-health-copy">
             <p class="settings-health-title" id="settings-health-title"></p>
             <p class="settings-health-detail" id="settings-health-detail"></p>
+          </div>
+        </div>
+        <!-- Secrets zo's settings file still holds as plain text (t-76698):
+             the names, never a value, and the one press that moves them into
+             the keychain. The storage line's shape, under it. -->
+        <div class="settings-health settings-secrets" id="settings-secrets" role="status" aria-live="polite"
+             aria-atomic="true" aria-labelledby="settings-secrets-title" hidden>
+          <span class="settings-health-mark" aria-hidden="true">!</span>
+          <div class="settings-health-copy">
+            <p class="settings-health-title" id="settings-secrets-title"></p>
+            <p class="settings-health-detail settings-secrets-names" id="settings-secrets-names"></p>
+            <p class="settings-health-detail" id="settings-secrets-body"></p>
+            <p class="settings-health-detail" id="settings-secrets-done" hidden></p>
+            <p class="settings-health-detail" id="settings-secrets-backup-note" hidden></p>
+            <p class="settings-health-detail" id="settings-secrets-where" hidden></p>
+            <p class="settings-health-detail" id="settings-secrets-why" hidden></p>
+            <div class="settings-secrets-actions">
+              <button class="btn" id="settings-secrets-move" type="button"></button>
+            </div>
           </div>
         </div>
         <!-- A query that matches nothing says so where the section would have
