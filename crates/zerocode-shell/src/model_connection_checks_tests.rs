@@ -602,3 +602,106 @@ fn an_applied_judgment_provider_keeps_its_time_until_another_is_applied() {
     assert!(remember_applied(&path, "", &ids, CLOCK).is_err());
     assert!(remember_applied(&path, "bad\nidentity", &ids, CLOCK).is_err());
 }
+
+fn seed(path: &Path, connections: BTreeMap<String, Record>) {
+    let bytes = serde_json::to_vec(&File {
+        version: VERSION,
+        connections,
+        applied: BTreeMap::new(),
+    })
+    .expect("seed");
+    std::fs::write(path, bytes).expect("seed file");
+}
+
+/// The count bound keeps the judgment being written and its connection's
+/// newest, as the byte bound does (t-76500 r4, Codex review P2 ②): with the
+/// clock set back, the newest check stands first in the list, and a bound
+/// that cut the list's front took it while answering 「kept」.
+#[test]
+fn the_count_bound_keeps_the_newest_judgment_when_the_clock_was_set_back() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("checks.json");
+    let mut judgments = vec![Judgment {
+        model: "newest".into(),
+        protocol: "openai_chat".into(),
+        state: Verdict::Schema,
+        checked_ms: CLOCK + 1_000,
+    }];
+    judgments.extend((0..(MAX_JUDGMENTS as u64 - 1)).map(|n| Judgment {
+        model: format!("m{n}"),
+        protocol: "openai_chat".into(),
+        state: Verdict::Schema,
+        checked_ms: CLOCK + n,
+    }));
+    seed(
+        &path,
+        BTreeMap::from([(
+            "c1".to_string(),
+            Record {
+                generation: 1,
+                judgments,
+                ..Record::default()
+            },
+        )]),
+    );
+    let mut answer = judgment("c1", 1, "fresh", Verdict::Usable);
+    answer.protocol = "openai_chat".into();
+    let kept = remember_judgment(&path, &answer, &live(&["c1"]), CLOCK + 255).expect("kept");
+    let models: Vec<&str> = kept.connections["c1"]
+        .judgments
+        .iter()
+        .map(|one| one.model.as_str())
+        .collect();
+    assert_eq!(models.len(), MAX_JUDGMENTS);
+    assert!(models.contains(&"newest"), "the connection's newest check went");
+    assert!(models.contains(&"fresh"), "the check just written went");
+    assert!(!models.contains(&"m0"), "the oldest check stayed while a newer one went");
+}
+
+/// A judgment that cannot be kept fails, and the file stays as it was
+/// (t-76500 r4, Codex review P2 ①): every check left is one the trim must
+/// keep, so the write says it is full rather than dropping any of them.
+#[test]
+fn a_full_record_refuses_the_judgment_and_leaves_the_file_as_it_was() {
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("checks.json");
+    let wide = |n: usize| format!("{n:\u{1F600}>256}");
+    let record = |count: usize| Record {
+        generation: 1,
+        judgments: (0..count)
+            .map(|n| Judgment {
+                model: wide(n),
+                protocol: "openai_chat".into(),
+                state: Verdict::Schema,
+                checked_ms: CLOCK + 10_000,
+            })
+            .collect(),
+        ..Record::default()
+    };
+    let size = |count: usize| {
+        serde_json::to_vec(&File {
+            version: VERSION,
+            connections: BTreeMap::from([("c1".to_string(), record(count))]),
+            applied: BTreeMap::new(),
+        })
+        .expect("size")
+        .len() as u64
+    };
+    // As many of the newest checks as the read accepts, with room for no
+    // other.
+    let count = (1..MAX_JUDGMENTS)
+        .take_while(|count| size(*count + 1) <= MAX_BYTES)
+        .last()
+        .expect("a count")
+        + 1;
+    assert!(size(count) <= MAX_BYTES && size(count + 1) > MAX_BYTES);
+    seed(&path, BTreeMap::from([("c1".to_string(), record(count))]));
+    let before = std::fs::read(&path).expect("before");
+    let mut answer = judgment("c1", 1, &wide(9_999), Verdict::Usable);
+    answer.protocol = "openai_chat".into();
+    assert_eq!(
+        remember_judgment(&path, &answer, &live(&["c1"]), CLOCK).expect_err("full"),
+        "model_connection_checks_full"
+    );
+    assert_eq!(std::fs::read(&path).expect("after"), before, "the file moved");
+}
