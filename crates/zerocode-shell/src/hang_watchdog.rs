@@ -215,19 +215,22 @@ impl Watch {
 /// run past the first threshold — again while it runs, at most once per
 /// [`STILL_OPEN_EVERY_MS`] — and its end once.
 ///
-/// It times on the monotonic clock the actor stamps a request with, and it
-/// testifies only for time the main-thread watch was there for (t-75646 r2):
-/// a beat the watch was away for — a sleep, a late nap, no screen, its
-/// warm-up — withdraws what it was saying, and a request still standing is
-/// timed again from the watch's first beat back.
+/// It judges on the monotonic clock the actor stamps a request with, and on
+/// nothing else (t-75646 r3). That clock stops while the machine sleeps —
+/// `CLOCK_UPTIME_RAW` on macOS, `CLOCK_MONOTONIC` on Linux — so a sleep
+/// drops out of a request's length by itself, and the main-thread watch's
+/// sleep judgment, which reads the wall clock and so takes a clock set ahead
+/// for a sleep, neither pauses this watch nor times a request again. A beat
+/// that comes back late is not taken back either: the actor held the request
+/// all that time. On Windows `Instant` is the performance counter, and
+/// whether it counts a sleep is not settled here: there a request a sleep
+/// fell inside may be said with the sleep in its length.
 #[derive(Debug, Default)]
 struct ActorWatch {
     /// The request said busy, and the length its next line is due at.
     said: Option<(Served, u64)>,
     /// When the last busy line was said.
     last_line: Option<Instant>,
-    /// The watch's first beat back since it was last away; `None` while away.
-    back: Option<Instant>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -249,25 +252,17 @@ impl fmt::Display for ActorLine {
 
 impl ActorWatch {
     /// `look` is the actor's [`Serving::peek`]: `None` when it could not be
-    /// read this beat, which changes nothing. `witnessed` is whether the
-    /// main-thread watch was there for this beat.
+    /// read this beat, which changes nothing.
     fn step(
         &mut self,
         look: Option<Option<Served>>,
         now: Instant,
-        witnessed: bool,
         first_ms: u64,
     ) -> Vec<ActorLine> {
-        if !witnessed {
-            self.said = None;
-            self.back = None;
-            return Vec::new();
-        }
-        let back = *self.back.get_or_insert(now);
         let Some(serving) = look else {
             return Vec::new();
         };
-        let ran = |served: Served| millis(now.saturating_duration_since(served.since.max(back)));
+        let ran = |served: Served| millis(now.saturating_duration_since(served.since));
         let mut lines = Vec::new();
         if let Some((said, _)) = self.said
             && serving != Some(said)
@@ -446,7 +441,6 @@ impl Monitor {
     }
     pub(crate) fn resumed(&mut self) {
         self.armed = false;
-        self.actor = ActorWatch::default();
     }
 
     /// One beat's judgments, the main thread's and the actor's, without the
@@ -464,12 +458,14 @@ impl Monitor {
             self.armed = true;
         }
         let beaten = beat_once(&mut self.watch, &self.answer, beat, limits);
-        // The actor is read only on a beat the watch testifies for: its own
-        // judgment says whether it was there, and a watch turned off is not.
-        let witnessed = beat.now >= self.watch.warm_until;
-        let look = if witnessed { look() } else { None };
+        // The actor is judged on its own clock, whatever the watch's warm-up
+        // or sleep judgment says; only a watch turned off judges nothing.
+        if !limits.watchdog {
+            self.actor = ActorWatch::default();
+            return (beaten, Vec::new());
+        }
         let now = self.start + Duration::from_millis(beat.now);
-        let actor = self.actor.step(look, now, witnessed, limits.first_ms);
+        let actor = self.actor.step(look(), now, limits.first_ms);
         (beaten, actor)
     }
     /// One beat, after a nap that really took `nap` of wall time.
@@ -1066,7 +1062,7 @@ mod tests {
         let clock = Clock(Instant::now());
         let mut watch = ActorWatch::default();
         let mut said = Vec::new();
-        let mut step = |look, now| watch.step(look, clock.at(now), true, first);
+        let mut step = |look, now| watch.step(look, clock.at(now), first);
         assert!(step(clock.served("check", 0), 1_000).is_empty());
         assert!(step(Some(None), 1_500).is_empty());
         for now in (0..=25_000).step_by(250) {
@@ -1116,10 +1112,10 @@ mod tests {
                 since = now;
             }
             if now % 1_000 == 0 {
-                assert!(watch.step(None, clock.at(now), true, first).is_empty());
+                assert!(watch.step(None, clock.at(now), first).is_empty());
             }
             busy += watch
-                .step(clock.served("view", since), clock.at(now), true, first)
+                .step(clock.served("view", since), clock.at(now), first)
                 .iter()
                 .filter(|line| matches!(line, ActorLine::Busy { .. }))
                 .count();
