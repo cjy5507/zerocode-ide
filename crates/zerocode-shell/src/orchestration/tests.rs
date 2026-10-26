@@ -15471,6 +15471,67 @@ fn a_notice_reaches_a_running_root_and_leaves_the_draft() {
 }
 
 #[test]
+fn a_notice_reports_only_failure_to_its_sender() {
+    use crate::orchestration_notify::PointerOffer;
+    use zerocode_hookd::session_notify::NotificationOutcome;
+
+    const LEADER: u32 = 75_734;
+    const WORKER: u32 = 75_735;
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let team = format!("team-notice-result-{LEADER}");
+    let (run_id, _, pane) = an_agent_carrying_work("zo", &team, LEADER, WORKER);
+    let held = crate::agent_teams::current_pane_capability(&team, &pane).unwrap();
+    let host = Holding::new(zerocode_core::AgentKind::Zo);
+    let letter = said_at(
+        &host,
+        &team,
+        &pane,
+        &held,
+        "send --type status --body ready --retry-request notice-result",
+    );
+    let newest = letter["messageId"].as_str().unwrap();
+    let sender = message_sender(&run_id, newest).unwrap();
+    let results = || {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.run == run_id && row.to == sender && row.body.as_str().contains("native notice")
+            })
+            .map(|row| row.body.as_str().to_string())
+            .collect::<Vec<_>>()
+    };
+    for (offered, expected) in [
+        (PointerOffer::NativePending, 0),
+        (PointerOffer::Confirmed, 0),
+        (PointerOffer::NativeFailed(NotificationOutcome::Unknown), 1),
+        (PointerOffer::NativeFailed(NotificationOutcome::Unknown), 1),
+    ] {
+        tell_notice_delivery(
+            &host,
+            NoticeDelivery {
+                run: run_id.clone(),
+                address: format!("run:{run_id}"),
+                newest: newest.to_string(),
+                term: LEADER,
+                offered,
+                notice_only: true,
+            },
+            clock(),
+        );
+        let sent = results();
+        assert_eq!(sent.len(), expected, "{offered:?}: {sent:?}");
+        assert!(
+            sent.iter()
+                .all(|body| body.contains("native notice failed"))
+        );
+    }
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
+#[test]
 fn a_notice_wakes_an_idle_root_and_leaves_the_draft() {
     const LEADER: u32 = 75_730;
     const WORKER: u32 = 75_731;
@@ -15503,21 +15564,13 @@ fn a_notice_wakes_an_idle_root_and_leaves_the_draft() {
     heard
         .recv_timeout(A_KNOCK_IS_HEARD)
         .expect("the idle root's notice");
-    let accepted = || {
-        the_rows()
-            .messages
-            .iter()
-            .any(|row| row.run == run_id && row.body.as_str().contains("native notice accepted"))
-    };
+    let accepted = || host.cleared.lock().unwrap().contains(&LEADER);
     let deadline = std::time::Instant::now() + A_KNOCK_IS_HEARD;
     while !accepted() && std::time::Instant::now() < deadline {
         tick(&host, &[], clock());
         std::thread::yield_now();
     }
-    assert!(
-        accepted(),
-        "the sender never received the notice's acceptance"
-    );
+    assert!(accepted(), "the host never cleared the accepted notice");
     assert_eq!(crate::human_input::line_of(LEADER), draft);
     assert_eq!(host.offers(), (0, 0), "the native notice used the composer");
     assert_eq!(
