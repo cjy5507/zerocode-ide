@@ -98,6 +98,7 @@ mod code_sign_clone;
 mod codex_accounts;
 mod codex_queue;
 mod codex_tokens;
+mod composer_empty;
 mod computer_use;
 mod conversation_wake;
 mod crash;
@@ -246,6 +247,7 @@ mod worktree_runtime;
 mod worktree_shared;
 mod zo_companion;
 mod zo_integration_runtime;
+mod zo_notice;
 mod zsh_wrapper;
 
 use agent_tools_runtime::*;

@@ -41,12 +41,10 @@
 //! the pane is presumed to be holding a draft, and a door that cannot account
 //! for what is on the line does not write on it.
 //!
-//! # What this deliberately is not
-//!
-//! It is not a reading of the composer. No window can parse every TUI's input
-//! buffer, and one that tried would be wrong quietly. This says only "somebody
-//! typed here and nothing has reported taking it", which is the smaller claim
-//! and the one that can be made honestly.
+//! Known live fields can also prove emptiness: `composer_empty` requires the
+//! input cursor, its borders and empty cells (or a styled placeholder). That
+//! observation must follow the last hand and a finished redraw. Unknown
+//! layouts, pickers and real drafts keep the conservative mark.
 //!
 //! It fails CLOSED, three ways. A provider that reports no prompt event
 //! leaves the mark standing, so a pane a person once typed into stays refused
@@ -119,6 +117,7 @@ struct Typed {
     entered_at: Option<u64>,
     /// When that Enter reached the pane, for [`PROMPT_REPORT_GRACE`].
     entered_when: Option<Instant>,
+    screen_checked: Option<Instant>,
     at: Instant,
 }
 
@@ -225,6 +224,7 @@ fn hand(term: u32, words: bool) {
             // is no longer what the next prompt event answers.
             entered_at: None,
             entered_when: None,
+            screen_checked: None,
             at: Instant::now(),
         },
     );
@@ -365,6 +365,53 @@ pub(crate) fn line_of(term: u32) -> (bool, Option<u64>) {
     line_at(term, Instant::now())
 }
 
+/// Reconcile a pending mark with the pane's own live field. The caller holds
+/// the terminal lock, shared with human writes. A picture older than the
+/// hand, an unfinished redraw, a running provider or an unknown layout proves
+/// nothing. Failed observations are bounded to one look per grace period;
+/// another key makes the next completed redraw eligible again.
+pub(crate) fn recheck_grid(
+    term: u32,
+    agent: &str,
+    grid: &zerocode_pty::TerminalGrid,
+    output_at: Option<Instant>,
+    now: Instant,
+) {
+    let provider = hands()
+        .providers
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .get(&term)
+        .copied();
+    if !provider.is_some_and(|said| said.at_rest) {
+        return;
+    }
+    let mut typed = hands()
+        .typed
+        .lock()
+        .unwrap_or_else(|held| held.into_inner());
+    let Some(held) = typed.get_mut(&term) else {
+        return;
+    };
+    let Some(output_at) = output_at else { return };
+    if !held.pending
+        || output_at <= held.at
+        || now.saturating_duration_since(output_at) < zerocode_pty::ready::SUBMIT_GAP
+        || held
+            .screen_checked
+            .is_some_and(|checked| now.saturating_duration_since(checked) < PROMPT_REPORT_GRACE)
+    {
+        return;
+    }
+    held.screen_checked = Some(now);
+    if crate::composer_empty::observed(agent, grid) {
+        held.pending = false;
+        held.words = false;
+        held.entered_at = None;
+        held.entered_when = None;
+    }
+}
+
 /// [`line_of`] at a given moment.
 ///
 /// A mark whose last hand was closed by an Enter that no prompt event ever
@@ -405,6 +452,39 @@ pub(crate) fn line_at(term: u32, now: Instant) -> (bool, Option<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_old_or_busy_picture_cannot_clear_a_draft_and_a_fresh_empty_field_can() {
+        const TERM: u32 = 75_750;
+        forget_term(TERM);
+        typed(TERM);
+        let before = generation(TERM);
+        let mut screen = zerocode_pty::Terminal::new(8, 64);
+        screen.feed("\x1b[?2004h\x1b[?25h\x1b[3;1H────────\r\n❯ \r\n────────\x1b[4;3H".as_bytes());
+        let hand_at = hands().typed.lock().unwrap()[&TERM].at;
+        let output = hand_at + Duration::from_secs(1);
+        let now = output + Duration::from_secs(1);
+        provider_said(TERM, true, true);
+        recheck_grid(TERM, "claude", screen.grid(), Some(hand_at), now);
+        assert!(
+            holds_a_draft(TERM),
+            "a picture older than the hand erased a draft"
+        );
+        provider_said(TERM, true, false);
+        recheck_grid(TERM, "claude", screen.grid(), Some(output), now);
+        assert!(holds_a_draft(TERM), "a running turn erased its draft");
+        provider_said(TERM, true, true);
+        recheck_grid(TERM, "claude", screen.grid(), Some(output), output);
+        assert!(holds_a_draft(TERM), "an unfinished redraw erased a draft");
+        recheck_grid(TERM, "claude", screen.grid(), Some(output), now);
+        assert!(!holds_a_draft(TERM));
+        assert_eq!(
+            generation(TERM),
+            before,
+            "observing emptiness erased a person's hand count"
+        );
+        forget_term(TERM);
+    }
 
     #[test]
     fn a_hand_marks_the_line_and_the_providers_word_about_its_enter_clears_it() {

@@ -14748,6 +14748,7 @@ struct BesideADraft {
     /// Every pane whose waiting condition ended: its line landed there
     /// (t-45801).
     cleared: Mutex<Vec<u32>>,
+    empty_screen: Option<(zerocode_core::AgentKind, Mutex<zerocode_pty::Terminal>)>,
 }
 
 impl BesideADraft {
@@ -14796,7 +14797,7 @@ impl Host for BesideADraft {
         _line: &str,
         _submit: bool,
     ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
-        let outcome = if crate::human_input::line_of(term).0 {
+        let outcome = if self.line_holds_a_draft(term) {
             zerocode_pty::DeliveryOutcome::Refused(zerocode_pty::ready::Refusal::HoldsADraft)
         } else {
             zerocode_pty::DeliveryOutcome::Delivered
@@ -14809,6 +14810,20 @@ impl Host for BesideADraft {
         let _ = settle.send(outcome);
         Some(receipt)
     }
+    fn line_holds_a_draft(&self, term: u32) -> bool {
+        if let Some((agent, screen)) = &self.empty_screen {
+            let screen = screen.lock().unwrap();
+            let output = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            crate::human_input::recheck_grid(
+                term,
+                agent.slug(),
+                screen.grid(),
+                Some(output),
+                output + std::time::Duration::from_secs(1),
+            );
+        }
+        crate::human_input::line_of(term).0
+    }
     fn capture(&self, _term: u32) -> Option<String> {
         None
     }
@@ -14820,7 +14835,13 @@ impl Host for BesideADraft {
         Some(test_actor(term))
     }
     fn agent_of(&self, _term: u32) -> Option<String> {
-        Some(zerocode_core::AgentKind::Claude.slug().to_string())
+        Some(
+            self.empty_screen
+                .as_ref()
+                .map_or(zerocode_core::AgentKind::Claude, |(agent, _)| *agent)
+                .slug()
+                .to_string(),
+        )
     }
     fn mail_waiting_not_typed(&self, term: u32, why: &str) {
         self.told
@@ -14862,6 +14883,7 @@ fn mail_behind_a_persons_draft_is_offered_once_per_watermark_until_the_draft_goe
         offered: Mutex::new(Vec::new()),
         told: Mutex::new(Vec::new()),
         cleared: Mutex::new(Vec::new()),
+        empty_screen: None,
     };
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
@@ -15421,8 +15443,13 @@ fn a_notice_reaches_a_running_root_and_leaves_the_draft() {
     pane_turn_began(LEADER, clock());
     crate::human_input::typed(LEADER);
     let before = crate::human_input::line_of(LEADER);
-    said_at(&host, &team, &pane, &held,
-        "send --type status --body ready --retry-request running-notice");
+    said_at(
+        &host,
+        &team,
+        &pane,
+        &held,
+        "send --type status --body ready --retry-request running-notice",
+    );
 
     tick(&host, &[], clock());
     let received = heard.recv_timeout(A_KNOCK_IS_HEARD);
@@ -15433,8 +15460,175 @@ fn a_notice_reaches_a_running_root_and_leaves_the_draft() {
     crate::agent_teams::forget_term(WORKER);
     assert!(received.is_ok(), "a running root never received its notice");
     assert_eq!(after, before, "the notice changed the person's draft");
-    assert!(typed.is_empty(), "a native notice also typed into the composer");
-    assert_eq!(knocked.carried(), vec![zerocode_core::orchestration::pointer_text(1)]);
+    assert!(
+        typed.is_empty(),
+        "a native notice also typed into the composer"
+    );
+    assert_eq!(
+        knocked.carried(),
+        vec![zerocode_core::orchestration::pointer_text(1)]
+    );
+}
+
+#[test]
+fn a_notice_wakes_an_idle_root_and_leaves_the_draft() {
+    const LEADER: u32 = 75_730;
+    const WORKER: u32 = 75_731;
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let team = format!("team-idle-notice-{LEADER}");
+    let (run_id, _, pane) = an_agent_carrying_work("zo", &team, LEADER, WORKER);
+    let held = crate::agent_teams::current_pane_capability(&team, &pane).unwrap();
+    let host = BesideADraft {
+        term: LEADER,
+        offered: Mutex::new(Vec::new()),
+        told: Mutex::new(Vec::new()),
+        cleared: Mutex::new(Vec::new()),
+        empty_screen: None,
+    };
+    let (knocked, heard) = Knocked::new();
+    let _lease = crate::orchestration_notify::register_notice_route(LEADER, knocked.clone());
+    pane_turn_began(LEADER, clock());
+    pane_turn_ended(LEADER, clock(), false, clock());
+    crate::human_input::typed(LEADER);
+    let draft = crate::human_input::line_of(LEADER);
+    let letter = said_at(
+        &host,
+        &team,
+        &pane,
+        &held,
+        "send --type status --body private-message-body --retry-request idle-notice",
+    );
+    tick(&host, &[], clock());
+    heard
+        .recv_timeout(A_KNOCK_IS_HEARD)
+        .expect("the idle root's notice");
+    let accepted = || {
+        the_rows()
+            .messages
+            .iter()
+            .any(|row| row.run == run_id && row.body.as_str().contains("native notice accepted"))
+    };
+    let deadline = std::time::Instant::now() + A_KNOCK_IS_HEARD;
+    while !accepted() && std::time::Instant::now() < deadline {
+        tick(&host, &[], clock());
+        std::thread::yield_now();
+    }
+    assert!(
+        accepted(),
+        "the sender never received the notice's acceptance"
+    );
+    assert_eq!(crate::human_input::line_of(LEADER), draft);
+    assert_eq!(host.offers(), (0, 0), "the native notice used the composer");
+    assert_eq!(
+        knocked.carried(),
+        vec![zerocode_core::orchestration::pointer_text(1)]
+    );
+    assert!(!knocked.carried()[0].contains("private-message-body"));
+    let denied = run(
+        &host,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words("coordinator-seat-claim --generation 1"),
+        clock(),
+    );
+    assert_ne!(
+        denied.exit_code, 0,
+        "the notice granted a human-only declaration"
+    );
+    assert!(
+        denied.stderr.contains("human declaration"),
+        "{}",
+        denied.stderr
+    );
+    assert!(
+        the_rows()
+            .messages
+            .iter()
+            .any(|row| row.id == letter["messageId"].as_str().unwrap()),
+        "accepting a notice consumed durable mail"
+    );
+    crate::human_input::forget_term(LEADER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
+#[test]
+fn a_model_picker_then_escape_allows_the_pointer_only_after_the_empty_field_is_seen() {
+    use zerocode_core::AgentKind;
+    for (index, agent) in [AgentKind::Zo, AgentKind::Claude].into_iter().enumerate() {
+        let leader = 75_740 + index as u32 * 2;
+        let worker = leader + 1;
+        let _window = the_window();
+        let _beat = one_beat_at_a_time();
+        let team = format!("team-picker-{leader}");
+        let (_, _, pane) = an_agent_carrying_work(agent.slug(), &team, leader, worker);
+        let held = crate::agent_teams::current_pane_capability(&team, &pane).unwrap();
+        let mut screen = zerocode_pty::Terminal::new(8, 64);
+        let frame = |words: &str| match agent {
+            AgentKind::Zo => format!(
+                "\x1b[?2004h\x1b[?25h\x1b[3;1H╭────────────╮\r\n│› {words}│\r\n╰────────────╯\x1b[4;4H"
+            ),
+            _ => format!(
+                "\x1b[?2004h\x1b[?25h\x1b[3;1H────────────\r\n❯ {words}\r\n────────────\x1b[4;3H"
+            ),
+        };
+        screen.feed(frame("unsent draft").as_bytes());
+        let host = BesideADraft {
+            term: leader,
+            offered: Mutex::new(Vec::new()),
+            told: Mutex::new(Vec::new()),
+            cleared: Mutex::new(Vec::new()),
+            empty_screen: Some((agent, Mutex::new(screen))),
+        };
+        pane_turn_began(leader, clock());
+        pane_turn_ended(leader, clock(), false, clock());
+        crate::human_input::provider_said(leader, true, true);
+        crate::human_input::typed(leader);
+        said_at(
+            &host,
+            &team,
+            &pane,
+            &held,
+            "send --type status --body ready --retry-request picker-notice",
+        );
+        tick(&host, &[], clock());
+        tick(&host, &[], clock());
+        assert_eq!(
+            host.offers(),
+            (1, 1),
+            "{agent:?}: a real draft was overwritten"
+        );
+
+        for bytes in [b"\x15".as_slice(), b"/model", b"\r", b"\x1b"] {
+            crate::prompt_transaction::human_write(leader, bytes, || Ok::<_, ()>(())).unwrap();
+        }
+        let mut screen = host.empty_screen.as_ref().unwrap().1.lock().unwrap();
+        screen.feed(b"\x1b[2J");
+        screen.feed(
+            frame(if agent == AgentKind::Zo {
+                "\x1b[2mAsk zo to do anything\x1b[22m"
+            } else {
+                " "
+            })
+            .as_bytes(),
+        );
+        drop(screen);
+        for _ in 0..3 {
+            tick(&host, &[], clock());
+        }
+        assert_eq!(
+            host.offers(),
+            (2, 1),
+            "{agent:?}: the empty field kept a stale draft mark"
+        );
+        assert!(!crate::human_input::holds_a_draft(leader));
+        crate::human_input::forget_term(leader);
+        crate::agent_teams::forget_term(leader);
+        crate::agent_teams::forget_term(worker);
+    }
 }
 
 /// One verb from a pane, JSON back — panicking with the refusal.
@@ -27888,6 +28082,7 @@ fn an_unpointed_message_is_told_to_the_person_and_to_its_sender_once() {
         offered: Mutex::new(Vec::new()),
         told: Mutex::new(Vec::new()),
         cleared: Mutex::new(Vec::new()),
+        empty_screen: None,
     };
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
@@ -28741,6 +28936,7 @@ fn followup_a_refusal_after_an_unreached_line_raises_the_notice_its_standing_cla
         offered: Mutex::new(Vec::new()),
         told: Mutex::new(Vec::new()),
         cleared: Mutex::new(Vec::new()),
+        empty_screen: None,
     };
     let key = ("fixture-run".to_string(), "fixture-address".to_string());
     let mut standing: Option<super::Standing> = None;
@@ -28796,6 +28992,7 @@ fn followup_successful_advice_clears_only_a_previously_notified_condition() {
         offered: Mutex::new(Vec::new()),
         told: Mutex::new(Vec::new()),
         cleared: Mutex::new(Vec::new()),
+        empty_screen: None,
     };
     for outcome in [
         DeliveryOutcome::Delivered,

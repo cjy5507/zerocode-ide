@@ -101,8 +101,9 @@ pub enum NotificationOutcome {
     Confirmed,
     /// No provider action began, so the PTY path is safe immediately.
     DefinitelyUnsent,
-    /// Provider action may have begun; native retry is forbidden for this
-    /// watermark and route generation.
+    /// Provider action may have begun. Ordinary routes must not retry this
+    /// watermark; an explicitly idempotent notice route may use its bounded
+    /// retry policy without falling back to the composer.
     Unknown,
 }
 
