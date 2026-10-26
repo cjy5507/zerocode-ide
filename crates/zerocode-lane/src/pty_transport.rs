@@ -98,6 +98,14 @@ pub trait PtyTransport: Send {
         Vec::new()
     }
 
+    /// The names of the foreground group's other processes, one list per
+    /// process — what a launcher leading the group runs below it. Used only
+    /// to tell whose program holds the terminal; a transport that cannot
+    /// prove process identity returns none.
+    fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+        Vec::new()
+    }
+
     /// Whether the terminal echoes typed bytes right now. `None` is "cannot
     /// tell": a ConPTY has no line discipline to ask, and a remote channel has
     /// none here.
@@ -193,6 +201,10 @@ impl PtyTransport for PtyHandle {
         self.transport.foreground_programs()
     }
 
+    fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+        self.transport.foreground_group_programs()
+    }
+
     fn echo_on(&self) -> Option<bool> {
         self.transport.echo_on()
     }
@@ -261,6 +273,10 @@ impl PtyTransport for PtyLane {
             return programs;
         }
         PtyLane::foreground_programs(self)
+    }
+
+    fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+        PtyLane::foreground_group_programs(self)
     }
 
     fn echo_on(&self) -> Option<bool> {

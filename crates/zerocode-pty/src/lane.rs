@@ -841,6 +841,108 @@ impl PtyLane {
             .collect();
         ordered_names(&line, std::env::consts::EXE_SUFFIX)
     }
+
+    /// The names of every OTHER process in the terminal's foreground group,
+    /// one list per process, each best first by the roads
+    /// [`Self::foreground_programs`] takes — at most
+    /// `FOREGROUND_GROUP_NAMED` of them, lowest pid first.
+    ///
+    /// A launcher that does not `exec` its program leads the group while the
+    /// program runs below it: a shell script running `claude "$@"` and
+    /// waiting for its status names `sh` alone to
+    /// [`Self::foreground_programs`], and the agent it waits on is one of
+    /// these (t-76489 r4). A non-interactive shell does no job control, so
+    /// what it starts stays in its group.
+    ///
+    /// Empty when the platform will not say. Windows names the process
+    /// line down from the holder in [`Self::foreground_programs`] already,
+    /// so it has nothing more to give here.
+    #[must_use]
+    pub fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+        #[cfg(unix)]
+        {
+            let Some(leader) = self.master.process_group_leader() else {
+                return Vec::new();
+            };
+            group_members(leader)
+                .into_iter()
+                .filter(|pid| *pid != leader)
+                .take(FOREGROUND_GROUP_NAMED)
+                .map(|pid| ordered_names(&[process_facts(pid)], std::env::consts::EXE_SUFFIX))
+                .collect()
+        }
+
+        #[cfg(not(unix))]
+        {
+            Vec::new()
+        }
+    }
+}
+
+/// How many of a foreground group's other processes
+/// [`PtyLane::foreground_group_programs`] names: a launcher's program is
+/// born right after it, and a build leading a group of hundreds is not read
+/// whole.
+#[cfg(unix)]
+const FOREGROUND_GROUP_NAMED: usize = 32;
+
+/// The pids in process group `group`, lowest first; empty when the platform
+/// will not say.
+#[cfg(target_os = "macos")]
+fn group_members(group: i32) -> Vec<i32> {
+    // `proc_listpids` out of libproc, declared here as `proc_pidpath` is;
+    // PROC_PGRP_ONLY is libproc's own selector for "the members of one
+    // process group". Asked once for the size, then for the pids, with room
+    // for a few born in between.
+    unsafe extern "C" {
+        fn proc_listpids(kind: u32, typeinfo: u32, buffer: *mut i32, buffersize: i32) -> i32;
+    }
+    const PROC_PGRP_ONLY: u32 = 2;
+    let Ok(typeinfo) = u32::try_from(group) else {
+        return Vec::new();
+    };
+    let wanted = unsafe { proc_listpids(PROC_PGRP_ONLY, typeinfo, std::ptr::null_mut(), 0) };
+    let Ok(wanted) = usize::try_from(wanted) else {
+        return Vec::new();
+    };
+    let mut pids = vec![0i32; wanted / std::mem::size_of::<i32>() + 16];
+    let Ok(room) = i32::try_from(pids.len() * std::mem::size_of::<i32>()) else {
+        return Vec::new();
+    };
+    let filled = unsafe { proc_listpids(PROC_PGRP_ONLY, typeinfo, pids.as_mut_ptr(), room) };
+    let Ok(filled) = usize::try_from(filled) else {
+        return Vec::new();
+    };
+    pids.truncate((filled / std::mem::size_of::<i32>()).min(pids.len()));
+    pids.retain(|pid| *pid > 0);
+    pids.sort_unstable();
+    pids.dedup();
+    pids
+}
+
+/// The pids in process group `group`, lowest first, off `/proc` — the
+/// group is the fifth field of each `stat`, the first after the command's
+/// closing parenthesis but two. Empty where there is no `/proc`.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn group_members(group: i32) -> Vec<i32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut pids: Vec<i32> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let (_, after) = stat.rsplit_once(')')?;
+                    after.split_whitespace().nth(2)?.parse::<i32>().ok()
+                })
+                == Some(group)
+        })
+        .collect();
+    pids.sort_unstable();
+    pids
 }
 
 /// What the OS says about one process: its image path and its argv.
@@ -2127,6 +2229,36 @@ mod launch_shape_tests {
             "pid, group, terminal's group, /dev/tty"
         );
         assert_eq!(lane.foreground_is_child(), Some(true));
+    }
+
+    /// What a script runs without `exec` stays in the script's group and
+    /// is named among the group's other processes, the script itself not
+    /// (t-76489 r4): a launcher's agent is found below it.
+    #[test]
+    fn a_program_a_script_runs_is_named_among_its_group() {
+        let mut lane = spawned("sleep 30 & echo READY; wait");
+        line_with(&mut lane, "READY");
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            lane.pump();
+            let members = lane.foreground_group_programs();
+            if members
+                .iter()
+                .any(|names| names.iter().any(|name| name == "sleep"))
+            {
+                let leader = lane.foreground_programs();
+                assert!(
+                    !members.contains(&leader),
+                    "the group's leader {leader:?} named among its other processes: {members:?}"
+                );
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the script's sleep was never named: {members:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// ^C typed into the pane reaches the child as SIGINT.

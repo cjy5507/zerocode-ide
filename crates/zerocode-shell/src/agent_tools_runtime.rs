@@ -763,6 +763,7 @@ pub(crate) fn agent_in_front_within(
         front_is_agent(
             pty.foreground_is_child(),
             || pty.foreground_programs(),
+            || pty.foreground_group_programs(),
             agent,
         )
     };
@@ -780,24 +781,40 @@ pub(crate) fn agent_in_front_within(
 /// then — the sweep's own road (`pane_runtime::sweep_arrived_agents`). A
 /// shell in front holds nothing; neither does an ordinary command run in
 /// it after its agent quit — a `vim`, a build — which leads its own group
-/// just as an agent does, so the group alone cannot tell them apart. A
-/// terminal that will not say, or names nothing it can read, has no
-/// opinion and is standing with its agent.
+/// just as an agent does, so the group alone cannot tell them apart.
+///
+/// A leader whose names are no agent's may be a launcher: a script that
+/// runs `claude` without `exec` and waits for its status leads the group
+/// as `sh` while the agent runs below it (t-76489 r4). So `members`, the
+/// names of the group's other processes, are read then, and the pane is
+/// standing with `agent` when one of them is it. A leader that names
+/// another agent holds the terminal for that one. A terminal that will not
+/// say, or names nothing it can read, has no opinion and is standing with
+/// its agent.
 pub(crate) fn front_is_agent(
     child_in_front: Option<bool>,
     programs: impl FnOnce() -> Vec<String>,
+    members: impl FnOnce() -> Vec<Vec<String>>,
     agent: &str,
 ) -> bool {
+    let named = |names: &[String]| {
+        names
+            .iter()
+            .find_map(|program| zerocode_core::agent::agent_spec_by_process(program))
+    };
     match child_in_front {
         Some(true) => false,
         None => true,
         Some(false) => {
             let programs = programs();
-            programs.is_empty()
-                || programs
-                    .iter()
-                    .find_map(|program| zerocode_core::agent::agent_spec_by_process(program))
-                    .is_some_and(|spec| spec.id == agent)
+            if let Some(spec) = named(&programs) {
+                return spec.id == agent;
+            }
+            let members = members();
+            members
+                .iter()
+                .any(|names| named(names).is_some_and(|spec| spec.id == agent))
+                || (programs.is_empty() && members.iter().all(Vec::is_empty))
         }
     }
 }

@@ -29186,9 +29186,10 @@ mod exit_capture {
     }
 
     /// A terminal whose foreground is the shell itself (`Some(true)`), a
-    /// program started in it (`Some(false)`), or unknown (`None`) — and the
-    /// names that program goes by, empty when the terminal will not say.
-    struct Front(Terminal, Option<bool>, Vec<String>);
+    /// program started in it (`Some(false)`), or unknown (`None`) — the
+    /// names that program goes by, empty when the terminal will not say,
+    /// and the names of the other processes in its group, one list each.
+    struct Front(Terminal, Option<bool>, Vec<String>, Vec<Vec<String>>);
 
     impl PtyTransport for Front {
         fn pump(&mut self) -> Pumped {
@@ -29231,6 +29232,10 @@ mod exit_capture {
         fn foreground_programs(&self) -> Vec<String> {
             self.2.clone()
         }
+
+        fn foreground_group_programs(&self) -> Vec<Vec<String>> {
+            self.3.clone()
+        }
     }
 
     const ENDED: &str = "68b2661a-1c20-4c40-9ad5-419af3097d57";
@@ -29247,7 +29252,7 @@ mod exit_capture {
         let front = |registry: &TerminalRegistry, term: TermId, shell: Option<bool>| {
             registry.insert(
                 term,
-                PtyHandle::new(Front(Terminal::new(4, 20), shell, Vec::new())),
+                PtyHandle::new(Front(Terminal::new(4, 20), shell, Vec::new(), Vec::new())),
             );
         };
         front(&registry, 3, Some(true));
@@ -29329,7 +29334,7 @@ mod exit_capture {
         let front = |term: TermId, child: Option<bool>, programs: Vec<String>| {
             registry.insert(
                 term,
-                PtyHandle::new(Front(Terminal::new(4, 20), child, programs)),
+                PtyHandle::new(Front(Terminal::new(4, 20), child, programs, Vec::new())),
             );
         };
         front(3, Some(false), names(&["vim"]));
@@ -29505,6 +29510,254 @@ mod exit_capture {
         let stored = pane_layout::read(&file);
         assert_eq!(stored[&b][0].agents[&0].id, ENDED);
         assert!(stored[&a][0].agents.is_empty(), "the conversation named twice");
+        assert_eq!(
+            pane_layout::standing_worktrees(&stored),
+            vec![b.clone()],
+            "the boot would not put B back"
+        );
+    }
+
+    /// t-76489 r4 ①, the codex review's first finding of r3: a person ends
+    /// conversation C in pane A (term 3) and runs a build there, and opens
+    /// C again in pane B (term 8), which comes after A, through a launcher
+    /// script that runs `claude` without `exec` and waits for its status.
+    /// B's terminal names the script's `sh` as the group's leader; claude
+    /// is another process of that group. Only B holds C: the exit files B
+    /// alone, keeps C in B's leaf with its program, and A's leaf comes back
+    /// a plain shell. A launcher running another agent, or no agent, holds
+    /// nothing for claude, and a leader that is another agent answers for
+    /// that one. Before, the leader's names alone answered: B held nothing,
+    /// the exit filed nobody, and A, first by order, took B's place.
+    #[test]
+    fn a_coordinator_under_a_launcher_keeps_its_conversation_past_a_command_pane() {
+        let registry = TerminalRegistry::default();
+        let names =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|name| name.to_string()).collect() };
+        let front = |term: TermId, programs: Vec<String>, members: Vec<Vec<String>>| {
+            registry.insert(
+                term,
+                PtyHandle::new(Front(Terminal::new(4, 20), Some(false), programs, members)),
+            );
+        };
+        let launcher = || names(&["sh", "launch-session", "bin"]);
+        front(3, names(&["make"]), vec![names(&["cc"])]);
+        // Claude Code's binary is a version number; its name is a folder.
+        front(
+            8,
+            launcher(),
+            vec![names(&["2.1.232", "versions", "claude"]), names(&["node"])],
+        );
+        front(12, launcher(), vec![names(&["codex"])]);
+        front(13, launcher(), vec![names(&["sleep"])]);
+        front(
+            14,
+            names(&["codex"]),
+            vec![names(&["2.1.232", "versions", "claude"])],
+        );
+        let shell_panes = std::collections::HashSet::from([3, 8, 12, 13, 14]);
+        let asked = |term: TermId, agent: &str| {
+            crate::agent_tools_runtime::agent_in_front_within(
+                &registry,
+                shell_panes.contains(&term),
+                term,
+                agent,
+                Some(Duration::from_millis(50)),
+            )
+        };
+        assert_eq!(
+            [
+                (3, "claude"),
+                (8, "claude"),
+                (8, "codex"),
+                (12, "claude"),
+                (12, "codex"),
+                (13, "claude"),
+                (14, "claude"),
+                (14, "codex"),
+            ]
+            .map(|(t, a)| asked(t, a)),
+            [false, true, false, false, true, false, false, true],
+            "a build holds nothing, claude under a launcher holds its pane, a launcher of \
+             another agent or of none does not, and a leader that is an agent answers for it"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("zerocode");
+        std::fs::create_dir_all(&main).expect("a checkout");
+        let main = main.to_string_lossy().into_owned();
+        let wake = pane_layout::WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: ENDED.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        };
+        let leaf = |id: u64, term: u32, focused: bool| pane_layout::TabLayout {
+            id: Some(id),
+            root: pane_layout::PaneNode::Leaf,
+            titles: HashMap::new(),
+            names: HashMap::new(),
+            agents: HashMap::from([(0, wake.clone())]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            active: 0,
+            expanded: None,
+            pinned: false,
+            focused,
+            terms: HashMap::from([(0, term)]),
+            buffers: HashMap::new(),
+            owed: Vec::new(),
+            awake: false,
+        };
+        let file = dir.path().join("pane-layouts.json");
+        pane_layout::rewrite(&file, |layouts| {
+            layouts.insert(main.clone(), vec![leaf(1, 3, false), leaf(2, 8, true)]);
+            true
+        })
+        .expect("the saved set");
+
+        let session = zerocode_core::ProviderSession {
+            key: zerocode_core::SessionKey::SessionId,
+            id: ENDED.to_string(),
+            transcript_path: None,
+        };
+        let agents = HashMap::from([(3, "claude"), (8, "claude")]);
+        let sessions = HashMap::from([(3, session.clone()), (8, session)]);
+        let in_front = |term: TermId| agents.get(&term).is_some_and(|agent| asked(term, agent));
+        let seats = |agent: &str, _: &str, id: &str| {
+            (agent == "claude" && id == ENDED).then(|| "run-4275".to_string())
+        };
+        let live = unheld_panes(
+            agents.clone(),
+            &sessions,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+            Some(&seats),
+            &in_front,
+        );
+        assert_eq!(
+            live.iter()
+                .map(|(pane, run)| (pane.term, run.clone()))
+                .collect::<Vec<_>>(),
+            vec![(8, Some("run-4275".to_string()))],
+            "the exit did not find the coordinator under its launcher"
+        );
+        let exited = exit_write(
+            &file,
+            live.into_iter().map(|(pane, _)| pane).collect(),
+            &|wake, term| {
+                crate::cmd::settings::pane_holds(&sessions, &agents, &in_front, wake, term)
+            },
+            &|term| registry.handle(term).is_some(),
+            &|term| registry.handle(term).map(|_| format!("screen of {term}")),
+            &|| true,
+        );
+        assert_eq!(exited.written, Written::Done);
+        assert_eq!(exited.doubled, vec![format!("claude {}", &ENDED[..8])]);
+        assert_eq!(exited.filed, vec![pane_layout::Filed::Named]);
+        let stored = pane_layout::read(&file);
+        let set = &stored[&main];
+        assert!(
+            set[0].agents.is_empty() && set[0].running.is_empty(),
+            "the pane running a build kept the conversation it ended: {:?}",
+            set[0].agents
+        );
+        assert_eq!(set[1].agents[&0].id, ENDED, "B lost its conversation");
+        assert_eq!(set[1].running[&0], "claude", "B lost its program");
+        assert_eq!(set[1].id, Some(2), "B lost its place");
+        assert_eq!(set[1].buffers[&0], "screen of 8", "B's screen was not its own");
+        assert!(set[1].focused && set[1].awake);
+        assert_eq!(pane_layout::standing_worktrees(&stored), vec![main.clone()]);
+    }
+
+    /// t-76489 r4 ②, the codex review's second finding of r3, the exit end
+    /// to end: workspace A's set names the run's zo coordinator in a tab
+    /// this window never woke, and the coordinator runs in pane 9 of
+    /// workspace B, which no saved leaf holds — zo resumes one id from any
+    /// folder under a shared `ZO_SESSION_ROOT`. The exit writes it into B
+    /// once, says so under the run's name, and the boot's list puts B back.
+    /// Before, A's record answered for a zo: the file kept A's tab asleep,
+    /// no line was written and no letter sent, and B was on no list.
+    #[test]
+    fn the_exit_writes_a_zo_coordinator_running_beside_a_record_afar_into_its_workspace() {
+        const ZO_COORDINATOR: &str = "session-1792758210243-0";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = |name: &str| {
+            let at = dir.path().join(name);
+            std::fs::create_dir_all(&at).expect("a checkout");
+            at.to_string_lossy().into_owned()
+        };
+        let (a, b) = (path("a"), path("b"));
+        let wake = pane_layout::WakeAgent {
+            agent: "zo".to_string(),
+            key: "session_id".to_string(),
+            id: ZO_COORDINATOR.to_string(),
+            transcript_path: None,
+            interrupted: false,
+        };
+        let file = dir.path().join("pane-layouts.json");
+        pane_layout::rewrite(&file, |layouts| {
+            layouts.insert(
+                a.clone(),
+                vec![pane_layout::TabLayout {
+                    id: Some(4),
+                    root: pane_layout::PaneNode::Leaf,
+                    titles: HashMap::new(),
+                    names: HashMap::new(),
+                    agents: HashMap::from([(0, wake.clone())]),
+                    running: HashMap::from([(0, "zo".to_string())]),
+                    active: 0,
+                    expanded: None,
+                    pinned: false,
+                    focused: true,
+                    terms: HashMap::new(),
+                    buffers: HashMap::new(),
+                    owed: Vec::new(),
+                    awake: false,
+                }],
+            );
+            true
+        })
+        .expect("the saved set");
+        let pane = pane_layout::LivePane {
+            term: 9,
+            worktree: b.clone(),
+            wake,
+        };
+        let exited = exit_write(
+            &file,
+            vec![pane.clone()],
+            &|_, _| false,
+            &|term| term == 9,
+            &|term| (term == 9).then(|| "screen".to_string()),
+            &|| true,
+        );
+        assert_eq!(exited.written, Written::Done);
+        assert_eq!(
+            exited.filed,
+            vec![pane_layout::Filed::Tab(1)],
+            "the record afar answered for B's zo coordinator"
+        );
+        let line = coordinator_filed_line(&pane, "run-4275", exited.filed[0], &exited.written)
+            .expect("the exit said nothing of the run's coordinator");
+        assert!(
+            line.contains("run:run-4275") && line.contains("written as tab 1"),
+            "{line}"
+        );
+        assert_eq!(
+            coordinator_lost_letter(&pane, "run-4275", exited.filed[0], &exited.written),
+            None,
+            "a coordinator the file holds was told to its board"
+        );
+        let stored = pane_layout::read(&file);
+        let tab = &stored[&b][0];
+        assert_eq!(tab.agents[&0].id, ZO_COORDINATOR);
+        assert_eq!(tab.running[&0], "zo");
+        assert_eq!(tab.buffers[&0], "screen", "B's screen was not its own");
+        assert!(tab.awake, "B's zo coordinator was stored asleep");
+        assert!(
+            stored[&a][0].agents.is_empty() && stored[&a][0].running.is_empty(),
+            "the conversation named twice"
+        );
         assert_eq!(
             pane_layout::standing_worktrees(&stored),
             vec![b.clone()],
