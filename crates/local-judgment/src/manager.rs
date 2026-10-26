@@ -472,6 +472,10 @@ pub struct Manager {
     closed: AtomicBool,
     #[cfg(test)]
     engine_factory: Mutex<Option<EngineFactory>>,
+    /// Runs once in the next reap, after the end is published and before its
+    /// record is kept.
+    #[cfg(test)]
+    before_exit_kept: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -628,6 +632,8 @@ impl Manager {
             closed: AtomicBool::new(false),
             #[cfg(test)]
             engine_factory: Mutex::new(None),
+            #[cfg(test)]
+            before_exit_kept: Mutex::new(None),
         }))
     }
 
@@ -1109,6 +1115,13 @@ impl Manager {
             if let Recovery::Restart { generation, wait } = recovery {
                 record["generation"] = json!(generation);
                 record["waitMs"] = json!(millis(wait));
+            }
+            #[cfg(test)]
+            {
+                let hook = lock(&self.before_exit_kept).take();
+                if let Some(hook) = hook {
+                    hook();
+                }
             }
             self.keep(&record);
         }
@@ -3672,6 +3685,13 @@ pub(crate) mod test_support {
     #[cfg(unix)]
     pub fn replace_engine_factory(manager: &Manager, factory: EngineFactory) {
         *lock(&manager.engine_factory) = Some(factory);
+    }
+
+    /// Runs `hook` once in the next reap of `manager`, after the end is
+    /// published and before its record is kept.
+    #[cfg(unix)]
+    pub fn before_exit_kept(manager: &Manager, hook: impl FnOnce() + Send + 'static) {
+        *lock(&manager.before_exit_kept) = Some(Box::new(hook));
     }
 
     #[cfg(unix)]
