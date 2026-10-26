@@ -21,6 +21,10 @@ struct ZoNotifier {
     channel: ZoChannel,
     session: String,
     current: Box<dyn Fn() -> bool + Send + Sync>,
+    /// How long one notice may take: [`NOTICE_DEADLINE`] in the window. A
+    /// test gives a hang guard instead, so it judges the notice and not how
+    /// fast a loaded machine answers in two seconds (l79j g2, load ~100).
+    deadline: Duration,
 }
 
 impl SessionNotifier for ZoNotifier {
@@ -34,7 +38,7 @@ impl SessionNotifier for ZoNotifier {
             self.channel.addr.clone(),
             self.channel.token.clone(),
             |error| error.to_string(),
-            Some(NOTICE_DEADLINE),
+            Some(self.deadline),
             async move |client| {
                 client
                     .call(
@@ -68,6 +72,7 @@ pub(crate) fn register(
             channel,
             session,
             current: Box::new(current),
+            deadline: NOTICE_DEADLINE,
         }),
     )
 }
@@ -140,6 +145,10 @@ mod tests {
         assert!(!supported(&serde_json::json!({"steer":{"supported":true}})));
     }
 
+    /// A bound that only stops a hung test: every wait here is for the
+    /// fixture's own peer, and none of them judges how fast a machine is.
+    const HANG_GUARD: Duration = Duration::from_secs(60);
+
     #[test]
     fn a_notice_wakes_an_idle_root_over_its_own_channel_and_leaves_the_draft() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -147,7 +156,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let (sent, received) = std::sync::mpsc::sync_channel(1);
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(5);
+            let deadline = Instant::now() + HANG_GUARD;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -158,12 +167,8 @@ mod tests {
                     Err(error) => panic!("accept: {error}"),
                 }
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+            stream.set_write_timeout(Some(HANG_GUARD)).unwrap();
             let mut line = String::new();
             BufReader::new(stream.try_clone().unwrap())
                 .read_line(&mut line)
@@ -185,10 +190,11 @@ mod tests {
             channel: zo_channel_entry(addr, Some("fixture-pane-bearer".into())),
             session: "idle-root".into(),
             current: Box::new(|| true),
+            deadline: HANG_GUARD,
         };
         let notice = PointerNotice::new("run-1", "run:run-1", "m-1", 1).unwrap();
         let outcome = notifier.notify(&notice);
-        let request = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        let request = received.recv_timeout(HANG_GUARD).unwrap();
         server.join().unwrap();
         assert_eq!(outcome, NotificationOutcome::Confirmed);
         assert_eq!(request["method"], "session.steer");
@@ -208,6 +214,7 @@ mod tests {
             channel: zo_channel_entry("192.0.2.1:9".into(), None),
             session: "gone".into(),
             current: Box::new(|| false),
+            deadline: NOTICE_DEADLINE,
         };
         let notice = PointerNotice::new("run-1", "run:run-1", "m-1", 1).unwrap();
         assert_eq!(
