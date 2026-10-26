@@ -2848,6 +2848,16 @@ class StatefulBackend {
       case "remembered_model_connection_checks": return this.connectionMemoryRead();
       case "remember_model_connection_check": return this.connectionMemoryKeep(args.answer, "check");
       case "remember_model_judgment_check": return this.connectionMemoryKeep(args.answer, "judgment");
+      // `model_connection_checks::remember_applied` (t-76598): the identity
+      // read back off the settings, never one the page sends.
+      case "remember_judgment_applied": {
+        if (!this.connectionMemory) throw new Error("model_connection_checks");
+        const applied = this.connectionMemory.applied ??= {};
+        const identity = this.typesafeSettings().providerIdentity;
+        const newest = Object.entries(applied).sort((a, b) => b[1] - a[1])[0]?.[0];
+        if (newest !== identity) applied[identity] = this.connectionMemory.nowMs;
+        return this.connectionMemoryRead();
+      }
       case "zo_model_list": return this.zoListRead();
       case "select_coding_model": {
         // Mirrors `model_connections::apply_coding_model`, checked against
@@ -2893,6 +2903,9 @@ class StatefulBackend {
       }
       case "select_model_connection": {
         if (this.connectionApplyError) throw this.connectionApplyError;
+        // Another window wrote first and this write did not land: the answer
+        // still comes back, and only reading the settings again shows it.
+        if (this.connectionApplyLost) return this.modelConnections();
         const smart = this.zoSettings.smart ??= {};
         const row = this.modelConnections().connections.find(row => row.id === args.reference.id);
         if (!row || row.generation !== args.reference.generation) throw "settings_changed";
@@ -3469,7 +3482,7 @@ class StatefulBackend {
   /* `model_connection_checks::read` against the scene's clock. */
   connectionMemoryRead() {
     if (!this.connectionMemory) throw new Error("model_connection_checks");
-    return clone({ nowMs: this.connectionMemory.nowMs, everyMs: 6 * 60 * 60 * 1000, connections: this.connectionMemory.connections });
+    return clone({ nowMs: this.connectionMemory.nowMs, everyMs: 6 * 60 * 60 * 1000, connections: this.connectionMemory.connections, applied: this.connectionMemory.applied ?? {} });
   }
 
   /* `remember_check` / `remember_judgment`: state words only, a record of
@@ -3516,6 +3529,8 @@ class StatefulBackend {
       models: this.zoList.models,
       reports: this.zoList.reports,
       aliases: this.zoList.aliases,
+      // Where a zo pane reads its Claude login (`slash_catalog::zo_model_list`).
+      ...(this.zoList.paneCredentialStore ? { paneCredentialStore: this.zoList.paneCredentialStore } : {}),
       customProviders: [
         ...this.zoSettings.providers.map((provider) => ({
           name: provider.name,
@@ -3574,6 +3589,11 @@ class StatefulBackend {
       provider,
       providerIdentity: `fixture-provider:${JSON.stringify(provider)}`,
       providerConnection: smart.judgmentConnection ?? null,
+      // `TypeSafeSettings::provider_connection_name` (t-76598): the bound
+      // connection's own name.
+      providerConnectionName: smart.judgmentConnection
+        ? this.zoSettings.providers.find((row) => (row.connection?.id ?? `fixture-${row.name}`) === smart.judgmentConnection.id)?.name ?? null
+        : null,
       jevProvider,
       jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
       // The rows a person wrote, and what each difficulty runs (t-14437):
@@ -14340,6 +14360,11 @@ const MODEL_FIXTURE_PRESET = Object.freeze({
   models: { path: "/models", id_field: "id", context_field: "context_length" },
 });
 
+/* A login with no credential, as zo reports it (ZO m-76597): the source is
+   skipped. A report that failed any other way kept last time's list and is
+   not 「로그인 안 됨」 (t-76598). */
+const signedOut = (report) => ({ ...report, ok: false, count: 0, detail: "skipped: no login" });
+
 async function withModelScene(prepare, run) {
   const saved = {
     zoSettings: clone(backend.zoSettings), zoList: clone(backend.zoList), zoEnvRouters: clone(backend.zoEnvRouters),
@@ -14521,7 +14546,7 @@ await test("모델 연결: 네 묶음이 실제 상태로 서고, 로그인 줄�
 
 await test("처음 질문: 연결도 로그인도 없으면 저절로 묻고, 처음 화면에는 전문 용어가 없다 (결정 7, 시험 12)", async () => withModelScene(() => {
   backend.zoSettings.providers = [];
-  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.zoList.reports = backend.zoList.reports.map(signedOut);
 }, async () => {
   const setup = pageA.locator("#model-setup");
   assert(await setup.isVisible(), "a person with no connection and no login was not asked");
@@ -14552,7 +14577,7 @@ await test("처음 질문: 연결도 로그인도 없으면 저절로 묻고, �
 
 await test("② API 키: 연결 확인이 「연결됨 — 모델 N개」로 답하고 키는 키체인에만 간다; 401·닫힌 서버는 쉬운 말로 (시험 6·7)", async () => withModelScene(() => {
   backend.zoSettings.providers = [];
-  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.zoList.reports = backend.zoList.reports.map(signedOut);
   backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
   backend.routerProbeAnswers = { "https://fixture-router.example.test/v1": ["model-alpha", "model-beta", "model-gamma", "model-delta"] };
 }, async () => {
@@ -14588,7 +14613,7 @@ await test("② API 키: 연결 확인이 「연결됨 — 모델 N개」로 답
 
 await test("추천대로 쓰기: 로그인 계정의 「최상위」를 코딩에, 실행 중인 이 컴퓨터 모델을 판단에 — 한 번에 적용하고 zo에 한 번 알린다 (결정 6, 시험 8)", async () => withModelScene(() => {
   backend.zoSettings.providers = [];
-  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.zoList.reports = backend.zoList.reports.map(signedOut);
   const provider = { kind: "local", protocol: "system_one", baseUrl: "http://127.0.0.1:32105", model: "fixture-decision", requiresAuth: false };
   backend.zoSettings.smart = { judgmentProvider: provider };
   backend.zoSettings.model = "fixture-openai-old";
@@ -14657,6 +14682,119 @@ await test("판단 모델: 고르면 확인이 저절로 돌고, 통과하지 �
   return "auto check on pick · failed check blocks apply · keyless row dimmed with its reason";
 }));
 
+await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 · 지금 조회 실패」, 건너뛴 원천만 「로그인 안 됨」, 다른 곳의 조회는 그렇게 (t-76598 ④)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [];
+  backend.zoList.reports = backend.zoList.reports.map((report) => report.provider === "anthropic"
+    ? { ...report, ok: false, count: 0, detail: "anthropic-api: HTTP 401 token expired\nsecond line", age: "3h old", origin: "previous" }
+    : report);
+}, async () => {
+  await openSettings(pageA, "api-routers");
+  await renderSettled(pageA);
+  const line = (provider) => pageA.locator(`[data-connection-group="login"] [data-model-login="${provider}"]`);
+  const state = async (provider) => line(provider).locator(".model-state").getAttribute("data-model-state");
+  assertEqual(await state("claude"), "stale", "a failed read of a listed login is not said as an earlier list");
+  const said = await line("claude").innerText();
+  const words = await pageA.evaluate(() => ({ nologin: t("settings.models.state.nologin", "로그인 안 됨"), failed: t("settings.models.staleFailedPlain", "지금 조회 실패") }));
+  assert(!said.includes(words.nologin), "a signed-in login whose read failed reads 「로그인 안 됨」", said);
+  assert(said.includes("목록은 이전 확인 것") && said.includes(words.failed) && said.includes("HTTP 401 token expired"), "the line does not say the list is earlier and why now failed", said);
+  assert(!said.includes("second line"), "the failure is said in more than one line", said);
+  assertEqual(await state("xai"), "nologin", "a skipped source is not said as signed out");
+  // The coding chooser says the same beside the login's models.
+  await openSettings(pageA, "judgment-models");
+  await pageA.click('[data-model-change="coding"]');
+  const note = await pageA.locator(".model-chooser .model-pick-note").first().innerText();
+  assert(note.includes("목록은 이전 확인 것") && !note.includes(words.nologin), "the chooser calls the earlier list a missing login", note);
+  await pageA.click('[data-model-change="coding"]');
+  // A report from another credential store than a zo pane's says so; an
+  // older zo's report without the key is read by the rules above.
+  backend.zoList.paneCredentialStore = "CLAUDE_CONFIG_DIR:/fixture/pane-home";
+  backend.zoList.reports = backend.zoList.reports.map((report) => report.provider === "anthropic"
+    ? { ...report, ok: true, count: 3, detail: "3 model(s)", origin: "live", credentialStore: "keychain" } : report);
+  await pageA.evaluate(() => modelConnectionsController.refresh());
+  await openSettings(pageA, "api-routers");
+  assertEqual(await state("claude"), "elsewhere", "a list read from another credential store passes as the pane's");
+  backend.zoList.reports = backend.zoList.reports.map((report) => report.provider === "anthropic"
+    ? { ...report, credentialStore: "CLAUDE_CONFIG_DIR:/fixture/pane-home" } : report);
+  await pageA.evaluate(() => modelConnectionsController.refresh());
+  assertEqual(await state("claude"), "ok", "the pane's own store was said as another's");
+  delete backend.zoList.paneCredentialStore;
+  await modelScenePictures("login-stale");
+  return "401 with an earlier list → 「목록은 이전 확인 것 · 지금 조회 실패」 · skipped → 로그인 안 됨 · keychain ≠ pane folder → 다른 환경의 조회";
+}));
+
+await test("판단 고르기: System One을 권하고, 일반 LLM을 고르면 한계 한 줄이 서며, 경로 글귀에 원시 값이 없다 (t-76598 ②⑤)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+  ];
+}, async () => {
+  await pageA.click('[data-model-change="judgment"]');
+  assert(await pageA.locator("[data-judgment-advice]").isVisible(), "the chooser does not recommend System One");
+  const general = JSON.stringify(["judge", "judge-model"]);
+  const way = await pageA.locator(`input[value='${general}']`).locator("xpath=..").locator(".model-pick-way").innerText();
+  assert(way.includes("일반 LLM"), "a general model's row does not say how it judges", way);
+  await pageA.locator(`input[value='${general}']`).check();
+  await pageA.waitForSelector('[data-verdict="usable"]');
+  assert(await pageA.locator('[data-judgment-limit=""]').isVisible(), "a general LLM was picked without its limit");
+  assert(await pageA.locator("[data-judgment-restart]").isVisible(), "a change does not say judging starts over");
+  await pageA.locator("input[value='jev']").check();
+  await pageA.waitForSelector('[data-verdict="usable"]');
+  assertEqual(await pageA.locator('[data-judgment-limit=""]').count(), 0, "a System One pick carries the general LLM's limit");
+  await pageA.click('[data-model-change="judgment"]');
+  // Where each choice goes, in a beginner's words, in every language.
+  backend.zoSettings.smart = { ...(backend.zoSettings.smart ?? {}), judgmentConnection: { id: "judge", generation: 2, model: "judge-model", protocol: "openai_json" },
+    judgmentProvider: { kind: "remote", protocol: "openai_json", baseUrl: "https://judge.example.test/v1", model: "judge-model", requiresAuth: false } };
+  await pageA.evaluate(async () => { await refreshTypeSafe(); await modelConnectionsController.refresh(); });
+  for (const locale of SETTINGS_QUALITY_SPEC.locales) {
+    await setQualityLocale(pageA, locale);
+    const route = await pageA.evaluate(() => modelConnectionsController.routeWords());
+    for (const raw of [...MODEL_TECH_WORDS, "remote", "openai_json", "system_one", "judgment-"]) assert(!route.includes(raw), `${locale}: the route says ${raw}`, route);
+    assert(route.includes("Judge") && route.includes("judge-model"), `${locale}: the route does not name the connection and model`, route);
+  }
+  await setQualityLocale(pageA, "ko");
+  const current = await pageA.locator('[data-model-current="judgment"]').innerText();
+  assert(current.includes("일반 LLM") && await pageA.locator('[data-judgment-limit="current"]').isVisible(), "the general LLM judging now does not say its limit", current);
+  await modelScenePictures("judgment-advice");
+  return "System One advised · general LLM pick → limit line, Jev pick → none · route words carry no raw value in five languages";
+}));
+
+await test("적용 확인: 적용 뒤 설정을 다시 읽어 같으면 그렇다고, 다르면 그 자리에서 무엇이 다른지 말하고, 같을 때만 바꾼 시각을 남긴다 (t-76598 ③)", async () => {
+  const savedMemory = backend.connectionMemory;
+  const T0 = 1_790_000_000_000;
+  backend.connectionMemory = { nowMs: T0, connections: {} };
+  try {
+    return await withModelScene(() => {
+      backend.zoSettings.providers = [
+        { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model", "judge-two"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+      ];
+    }, async () => {
+      const pick = async (model) => {
+        await pageA.click('[data-model-change="judgment"]');
+        await pageA.locator(`input[value='${JSON.stringify(["judge", model])}']`).check();
+        await pageA.waitForSelector('[data-verdict="usable"]');
+        await pageA.click('[data-model-apply="judgment"]');
+        await pageA.waitForSelector('[data-model-role="judgment"] .model-result');
+      };
+      await pick("judge-model");
+      const said = await pageA.locator('[data-model-role="judgment"] .model-result').innerText();
+      assert(said.includes("다시 읽은 설정도") && said.includes("Judge · judge-model · 일반 LLM"), "the apply does not say what the settings read back", said);
+      const identity = backend.typesafeSettings().providerIdentity;
+      assertEqual(backend.connectionMemory.applied, { [identity]: T0 }, "the apply's time was not kept for the provider read back");
+      backend.connectionApplyLost = true;
+      await pick("judge-two");
+      const differs = pageA.locator("[data-applied-differs]");
+      assert(await differs.isVisible(), "an apply the settings do not hold was said as done");
+      const words = await differs.innerText();
+      assert(words.includes("judge-model") && words.includes("judge-two"), "the difference does not name what was read and what was picked", words);
+      assertEqual(Object.keys(backend.connectionMemory.applied), [identity], "an apply that did not land was kept as one");
+      await modelScenePictures("judgment-applied-differs");
+      return "read back equal → 「다시 읽은 설정도 …」 + time kept · lost write → read and picked named, nothing kept";
+    });
+  } finally {
+    delete backend.connectionApplyLost;
+    if (savedMemory === undefined) delete backend.connectionMemory; else backend.connectionMemory = savedMemory;
+  }
+});
+
 await test("저장 실패: 창이 확인 결과를 기록하지 못하면 화면이 그렇다고 말하고 기록은 그대로다 (t-76500 r4 ①)", async () => {
   const savedMemory = backend.connectionMemory;
   const T0 = 1_790_000_000_000;
@@ -14687,7 +14825,7 @@ await test("저장 실패: 창이 확인 결과를 기록하지 못하면 화면
 
 await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면·「자세히」·로그 어디에도 그 키가 없다 (t-76028)", async () => withModelScene(() => {
   backend.zoSettings.providers = [];
-  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.zoList.reports = backend.zoList.reports.map(signedOut);
   backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
 }, async () => {
   const key = "[합성-키]-echo-7f3a";
@@ -14723,7 +14861,7 @@ await test("검수 F1: 연결 확인의 거절에 키가 되돌아와도 화면�
 
 await test("검수 F2: 빈 zo 목록을 먼저 읽은 뒤 새 연결을 저장하면 곧바로 「추천대로 쓰기」가 그 연결의 모델로 적용된다 (t-76028)", async () => withModelScene(() => {
   backend.zoSettings.providers = [];
-  backend.zoList.reports = backend.zoList.reports.map((report) => ({ ...report, ok: false }));
+  backend.zoList.reports = backend.zoList.reports.map(signedOut);
   backend.routerPresets = [{ ...MODEL_FIXTURE_PRESET, base_url: "https://fixture-router.example.test/v1" }];
   backend.routerProbeAnswers = { "https://fixture-router.example.test/v1": ["model-alpha", "model-beta"] };
   // The window's zo list is `slash_catalog`'s cache: what was read stands

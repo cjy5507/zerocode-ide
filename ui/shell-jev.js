@@ -470,7 +470,7 @@ function jevAskersLine(held) {
  * did — the reason a thin window gives for itself. */
 function jevCutWords(held) {
   if (!held.verdict?.cutModel) return "";
-  return t("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: jevVersion(held.verdict.cutModel).words });
+  return t("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: jevVersion(held.verdict.cutModel).short });
 }
 
 /* ---- the dashboard ---- */
@@ -2018,26 +2018,29 @@ function judgmentProviderWords(state = typesafeState, model = state?.provider?.m
  * Jev's. */
 const JUDGMENT_VERSION = /^(judgment-[0-9a-f]+):(.+)$/;
 
-/* What a version from the table is, for a person: the provider judging now
- * named in words, or 「이전 판단 모델」 for one whose name the window no
- * longer knows; `raw` is what zo wrote, for the folded detail, when the
- * words leave something out. `current` is whether the settings name it now. */
+/* What a version from the table is, for a person: `words` names the
+ * provider judging now in full (the caption's), `short` only what tells it
+ * from the one over the table (a row's, the drawer's, a cut's) — the model,
+ * or 「이전 판단 모델」 for an identity the settings no longer name; `raw` is
+ * what zo wrote, for the folded detail, when the words leave something out.
+ * `current` is whether the settings name it now. */
 function jevVersion(model) {
   const found = JUDGMENT_VERSION.exec(model ?? "");
-  const provider = typesafeState?.provider;
   if (found) {
     const current = found[1] === typesafeState?.providerIdentity;
+    const earlier = t("jev.model.earlier", "이전 판단 모델 · {{model}}", { model: found[2] });
     return {
       current,
-      words: current ? judgmentProviderWords(typesafeState, found[2])
-        : t("jev.model.earlier", "이전 판단 모델 · {{model}}", { model: found[2] }),
+      words: current ? judgmentProviderWords(typesafeState, found[2]) : earlier,
+      short: current ? found[2] : earlier,
       raw: model,
     };
   }
-  const current = provider?.kind === "jev";
+  const current = typesafeState?.provider?.kind === "jev";
   return {
     current,
     words: current ? judgmentProviderWords(typesafeState, model) : model,
+    short: model,
     raw: null,
   };
 }
@@ -2174,8 +2177,10 @@ function jevStatusCell(held, choice, standing, head) {
     said.dataset.jevWhy = "";
     cell.append(said);
   }
-  const other = held.model && held.model !== head
-    ? t("settings.typesafe.seatVersion", "모델 {{model}}", { model: jevVersion(held.model).words }) : "";
+  const version = held.model && held.model !== head ? jevVersion(held.model) : null;
+  // An earlier provider's words already say it is a model.
+  const other = !version ? "" : version.raw && !version.current ? version.short
+    : t("settings.typesafe.seatVersion", "모델 {{model}}", { model: version.short });
   for (const fact of [other, jevCutWords(held)]) {
     if (fact) cell.append(jevNode("p", "jev-status-fact", document.createTextNode(fact)));
   }
@@ -2571,7 +2576,7 @@ function paintJevDrawer(view, id, held) {
   const models = [];
   const model = typesafeState?.model?.pinned ? held?.askedModel : held?.model;
   if (model) {
-    const words = jevVersion(model).words;
+    const words = jevVersion(model).short;
     models.push({ key: "jev.drawer.model", word: "응답한 모델", said: typesafeState?.model?.pinned
       ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model: words })
       : t("settings.typesafe.seatVersion", "모델 {{model}}", { model: words }) });
