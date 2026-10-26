@@ -19937,6 +19937,33 @@ fn a_worker_that_never_became_ready_may_be_asked_again_by_the_same_name() {
         "the reason did not come back with the refusal: {}",
         first.stderr
     );
+    // Before the retry floor (first_at + 1) the same request is refused, but
+    // not for good: the answer keeps the name and points at the lookup.
+    let early = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words(named),
+        first_at,
+    );
+    assert_eq!(
+        early.exit_code, 1,
+        "an early ask seated a worker: {early:?}"
+    );
+    assert!(
+        !early.stderr.contains("new name") && !early.stderr.contains("for good"),
+        "a refusal that can be retried was called final: {}",
+        early.stderr
+    );
+    assert!(
+        early.stderr.contains("same --retry-request")
+            && early.stderr.contains("worker-list --run")
+            && early.stderr.contains(&format!("{} ms", first_at + 1)),
+        "the answer does not name the floor, the same name and the lookup: {}",
+        early.stderr
+    );
     // Strictly past the retry floor the withdrawal wrote (first_at + 1).
     let second_at = first_at + 2;
     let second = run(
@@ -19981,7 +20008,8 @@ fn a_request_asked_again_while_its_worker_is_getting_ready_is_not_told_to_use_a_
     struct AsksAgainWhileReady {
         onto: u32,
         team: String,
-        argv: Vec<String>,
+        argv: std::sync::Mutex<Vec<String>>,
+        splits: std::sync::atomic::AtomicUsize,
         again: std::sync::Mutex<Option<zerocode_hookd::TeamAnswer>>,
     }
     impl Host for AsksAgainWhileReady {
@@ -19995,12 +20023,15 @@ fn a_request_asked_again_while_its_worker_is_getting_ready_is_not_told_to_use_a_
             _command: &str,
             _token: &str,
         ) -> Option<u32> {
+            self.splits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Some(self.onto)
         }
         fn await_worker_ready(
             &self,
             _term: u32,
         ) -> Result<(), crate::agent_teams::HostStartFailure> {
+            let argv = self.argv.lock().unwrap().clone();
             let mut again = self.again.lock().unwrap();
             if again.is_none() {
                 *again = Some(run(
@@ -20009,7 +20040,7 @@ fn a_request_asked_again_while_its_worker_is_getting_ready_is_not_told_to_use_a_
                     &self.team,
                     zerocode_core::agent_teams::LEADER_PANE,
                     TEST_CAPABILITY,
-                    &self.argv,
+                    &argv,
                     1_500,
                 ));
             }
@@ -20029,33 +20060,82 @@ fn a_request_asked_again_while_its_worker_is_getting_ready_is_not_told_to_use_a_
             Some(test_actor(term))
         }
     }
-    let named = "worker-start --agent claude --retry-request replay-while-ready";
     let host = AsksAgainWhileReady {
         onto: 91_381,
         team: team.clone(),
-        argv: words(named),
+        argv: std::sync::Mutex::new(Vec::new()),
+        splits: std::sync::atomic::AtomicUsize::new(0),
         again: std::sync::Mutex::new(None),
     };
+    // Run B first, then run A: the caller ends up bound to A and names B.
+    let made_b = run(
+        &host,
+        Vec::new(),
+        &team,
+        seat,
+        TEST_CAPABILITY,
+        &words("run-create --name replay-while-ready-b"),
+        500,
+    );
+    assert_eq!(made_b.exit_code, 0, "{}", made_b.stderr);
+    let run_b = serde_json::from_str::<serde_json::Value>(&made_b.stdout).expect("a run")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
     let made = run(
         &host,
         Vec::new(),
         &team,
         seat,
         TEST_CAPABILITY,
-        &words("run-create --name replay-while-ready"),
-        500,
+        &words("run-create --name replay-while-ready-a"),
+        600,
     );
     assert_eq!(made.exit_code, 0, "{}", made.stderr);
+    let named =
+        format!("worker-start --agent claude --run {run_b} --retry-request replay-while-ready");
+    *host.argv.lock().unwrap() = words(&named);
     let first = run(
         &host,
         Vec::new(),
         &team,
         seat,
         TEST_CAPABILITY,
-        &words(named),
+        &words(&named),
         1_000,
     );
     assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    let listing = |line: &str| {
+        let said = run(
+            &host,
+            Vec::new(),
+            &team,
+            seat,
+            TEST_CAPABILITY,
+            &words(line),
+            2_000,
+        );
+        assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+        serde_json::from_str::<serde_json::Value>(&said.stdout).expect("a roster")["workers"]
+            .as_array()
+            .expect("workers")
+            .len()
+    };
+    assert_eq!(
+        listing("worker-list"),
+        0,
+        "run A's list shows run B's worker"
+    );
+    assert_eq!(
+        listing(&format!("worker-list --run {run_b}")),
+        1,
+        "run B's list does not show the one worker"
+    );
+    assert_eq!(
+        host.splits.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "asking again while the worker got ready cut a second pane"
+    );
     let again = host
         .again
         .lock()

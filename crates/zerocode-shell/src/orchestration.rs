@@ -11799,13 +11799,20 @@ fn carried(
                         "this request's pane was already cut once and its worker may still be getting ready — look it up with worker-list --run <the run the request named> (the plain worker-list shows only your own run), and ask again under the same --retry-request name, never a new one",
                     );
                 }
-                Ok((BeginEffect::Refused(_), _)) => {
-                    return roll_back_the_seat(
-                        actor,
-                        minted.as_deref(),
-                        now_ms,
-                        "this request was already refused for good — ask again under a new name",
-                    );
+                Ok((BeginEffect::Refused(refusal), _)) => {
+                    /* A refusal is not always final: a worker that never became
+                     * ready leaves a retry floor a moment past its failure, and
+                     * a request that arrives before that floor is refused with
+                     * `retryable`. Naming a new request there would seat a
+                     * second worker beside the first once the floor passes. */
+                    let why = match (refusal.retryable(), refusal.retry_not_before_ms()) {
+                        (true, Some(floor)) => format!(
+                            "this request's first attempt just failed and may be asked again from {floor} ms on — wait until then and ask again under the same --retry-request name, never a new one; until then look it up with worker-list --run <the run the request named>"
+                        ),
+                        (true, None) => "this request's first attempt just failed and may be asked again shortly — wait a moment and ask again under the same --retry-request name, never a new one; until then look it up with worker-list --run <the run the request named>".to_string(),
+                        (false, _) => "this request was already refused for good".to_string(),
+                    };
+                    return roll_back_the_seat(actor, minted.as_deref(), now_ms, &why);
                 }
                 Ok((BeginEffect::Reconcile(permit), _)) => {
                     /* An earlier attempt of this very request is still open in
