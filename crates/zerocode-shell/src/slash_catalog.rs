@@ -638,6 +638,19 @@ fn forget_models_in(cache: &Mutex<ModelsCache>) {
 }
 
 fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value {
+    let bin = crate::zo_companion::zo_path_under(home);
+    catalog_read(cache, || {
+        captured_lines(&bin, &["models", "--json"], MODELS_WAIT)
+            .and_then(|lines| serde_json::from_str(&lines.join("\n")).ok())
+    })
+}
+
+/// The cached catalog, or what `read` — zo, asked — answers, held for
+/// [`MODELS_TTL`]; `None` from it leaves the catalog last read standing.
+fn catalog_read(
+    cache: &Mutex<ModelsCache>,
+    read: impl Fn() -> Option<serde_json::Value>,
+) -> serde_json::Value {
     let held = cache.lock().ok().and_then(|cache| cache.clone());
     if let Some((_, catalog)) = held
         .as_ref()
@@ -645,9 +658,7 @@ fn catalog_through(cache: &Mutex<ModelsCache>, home: &Path) -> serde_json::Value
     {
         return catalog.clone();
     }
-    let bin = crate::zo_companion::zo_path_under(home);
-    let catalog = captured_lines(&bin, &["models", "--json"], MODELS_WAIT)
-        .and_then(|lines| serde_json::from_str::<serde_json::Value>(&lines.join("\n")).ok())
+    let catalog = read()
         .or_else(|| held.map(|(_, catalog)| catalog))
         .unwrap_or_default();
     if let Ok(mut cache) = cache.lock() {
@@ -731,47 +742,102 @@ mod tests {
 
     /// The cached list and a change the window makes to it (t-76028 F2): a
     /// read inside the minute is the list held, and after the window forgets
-    /// it the next read is zo's own answer — never a second cache. The zo here
-    /// is a script under a temporary home that prints the list it is given.
+    /// it the next read is zo's own answer — never a second cache. zo here
+    /// answers with the list it is given, or not at all (t-76028 R4: no
+    /// process, so every platform runs it).
     #[test]
     fn a_saved_connection_is_in_the_next_zo_list_read() {
-        let home = tempfile::tempdir().expect("home");
-        let bin = crate::zo_companion::zo_path_under(home.path());
-        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
-        let listed = home.path().join("listed.json");
-        std::fs::write(&bin, format!("#!/bin/sh\ncat '{}'\n", listed.display())).expect("zo");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
-        }
         let routers = |names: &[&str]| {
             serde_json::json!({"models": [], "customProviders": names
                 .iter()
                 .map(|name| serde_json::json!({"name": name, "models": [format!("{name}/model")]}))
                 .collect::<Vec<_>>()})
         };
-        let cache = Mutex::new(None);
-        std::fs::write(&listed, routers(&[]).to_string()).expect("empty list");
-        assert_eq!(catalog_through(&cache, home.path()), routers(&[]));
-        std::fs::write(&listed, routers(&["Fixture"]).to_string()).expect("saved list");
+        let listed = Mutex::new(Some(routers(&[])));
+        let zo = || listed.lock().expect("listed").clone();
+        let cache = Mutex::new(ModelsCache::default());
+        assert_eq!(catalog_read(&cache, zo), routers(&[]));
+        *listed.lock().expect("listed") = Some(routers(&["Fixture"]));
         assert_eq!(
-            catalog_through(&cache, home.path()),
+            catalog_read(&cache, zo),
             routers(&[]),
             "a read inside the minute is the list held"
         );
         forget_models_in(&cache);
         assert_eq!(
-            catalog_through(&cache, home.path()),
+            catalog_read(&cache, zo),
             routers(&["Fixture"]),
             "the read after a saved connection does not list it"
         );
-        std::fs::remove_file(&bin).expect("no zo");
+        *listed.lock().expect("listed") = None;
         forget_models_in(&cache);
         assert_eq!(
-            catalog_through(&cache, home.path()),
+            catalog_read(&cache, zo),
             routers(&["Fixture"]),
             "a zo that cannot answer drops the list last read"
+        );
+    }
+
+    /// A list read that began before the window forgot it (t-76028 R2) — a
+    /// connection saved while zo was being asked — does not put its older
+    /// answer back for a minute: it asks again, and the list held after is
+    /// the one that names the saved connection. The order is fixed by
+    /// channels, not by a clock.
+    #[test]
+    fn a_list_read_that_outlives_a_save_does_not_bring_back_the_list_before_it() {
+        let before = serde_json::json!({"customProviders": []});
+        let after = serde_json::json!({"customProviders": [{"name": "Fixture"}]});
+        let cache = Mutex::new(ModelsCache::default());
+        let (asked_tx, asked) = std::sync::mpsc::channel();
+        let (answer, answer_rx) = std::sync::mpsc::channel::<()>();
+        let answer_rx = Mutex::new(answer_rx);
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let read = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                catalog_read(&cache, || {
+                    if reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        asked_tx.send(()).expect("asked");
+                        answer_rx.lock().expect("answer").recv().expect("answer");
+                        Some(before.clone())
+                    } else {
+                        Some(after.clone())
+                    }
+                })
+            });
+            asked.recv().expect("zo was asked");
+            forget_models_in(&cache);
+            answer.send(()).expect("answer");
+            reader.join().expect("reader")
+        });
+        assert_eq!(
+            read, after,
+            "the read answered the list from before the save"
+        );
+        assert_eq!(
+            catalog_read(&cache, || panic!("a read inside the minute asked zo")),
+            after,
+            "the list held after the save is the one from before it"
+        );
+    }
+
+    /// The list is `zo models --json` from the zo under the home, whole.
+    /// The zo here is a POSIX script, so this one runs where one starts.
+    #[cfg(unix)]
+    #[test]
+    fn the_zo_list_is_what_the_zo_under_the_home_prints() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().expect("home");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\n[ \"$1 $2\" = 'models --json' ] && echo '{\"customProviders\":[{\"name\":\"Fixture\"}]}'\n",
+        )
+        .expect("zo");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+        assert_eq!(
+            catalog_through(&Mutex::new(ModelsCache::default()), home.path()),
+            serde_json::json!({"customProviders": [{"name": "Fixture"}]})
         );
     }
 

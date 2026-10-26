@@ -14312,7 +14312,7 @@ async function withModelScene(prepare, run) {
     await openSettings(pageA, "judgment-models");
     await pageA.evaluate(() => {
       Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
-      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said]) held.clear();
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
     });
@@ -14329,7 +14329,7 @@ async function withModelScene(prepare, run) {
     await setQualityTheme(pageA, "dark");
     await pageA.evaluate(() => {
       Object.assign(modelConnectionsController, { setup: null, setupDismissed: false, picking: null, draft: null, adopting: null });
-      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said]) held.clear();
+      for (const held of [modelConnectionsController.checks, modelConnectionsController.judged, modelConnectionsController.said, modelConnectionsController.formats]) held.clear();
       routerPresets = [];
       return refreshApiRouters();
     });
@@ -14727,6 +14727,41 @@ await test("검수 F3: 판단 형식은 연결이 쓰던 그대로 — System On
   assertEqual(againCheck.protocol, "system_one", "the format picked in 「고급」 was not asked");
   assertEqual(againApply, againCheck, "the apply wrote another reference than the one checked");
   return "System One kept for check+apply · OpenAI JSON kept for check+apply · 「고급」 switches judge to System One and re-applies";
+}));
+
+await test("재검수 R3: System One 연결 → 다른 연결 → 원래 연결로 돌아와도, 화면을 다시 열어도 그 연결의 판단 형식은 그대로다 (t-76028)", async () => withModelScene(() => {
+  backend.zoSettings.providers = [
+    { name: "Bench", base_url: "http://127.0.0.1:8091/v1", models: ["bench-a", "bench-b"], requires_auth: false, connection: { id: "bench", generation: 4 } },
+    { name: "Judge", base_url: "https://judge.example.test/v1", models: ["judge-model"], requires_auth: false, connection: { id: "judge", generation: 2 } },
+  ];
+  backend.zoSettings.smart = {
+    judgmentConnection: { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" },
+    judgmentProvider: { kind: "remote", protocol: "system_one", baseUrl: "http://127.0.0.1:8091/v1", model: "bench-a", requiresAuth: false },
+  };
+}, async () => {
+  const pickAndApply = async (connection, model) => {
+    if (!await pageA.locator('[data-model-apply="judgment"]').count()) await pageA.click('[data-model-change="judgment"]');
+    const at = backend.calls.length;
+    await pageA.locator(`input[name="model-pick-judgment"][value='${JSON.stringify([connection, model])}']`).check();
+    const checked = await backend.waitForCall("A", "check_model_connection", at);
+    await pageA.waitForSelector('[data-verdict="usable"]');
+    await pageA.click('[data-model-apply="judgment"]');
+    const applied = await backend.waitForCall("A", "select_model_connection", at);
+    await renderSettled(pageA);
+    return [checked.args.reference, applied.args.reference];
+  };
+  const [judgeCheck] = await pickAndApply("judge", "judge-model");
+  assertEqual(judgeCheck.protocol, "openai_json", "a connection judgment never used was asked in another format");
+  await openSettings(pageA, "api-routers");
+  await openSettings(pageA, "judgment-models");
+  await renderSettled(pageA);
+  await pageA.evaluate(() => { document.getElementById("model-advanced").open = true; document.getElementById("model-advanced-format-fold").open = true; });
+  assertEqual(await pageA.locator('#model-advanced [data-judgment-format="bench"]').inputValue(), "system_one", "「고급」 shows Bench in another format once judgment moved on");
+  const [benchCheck, benchApply] = await pickAndApply("bench", "bench-a");
+  assertEqual(benchCheck, { id: "bench", generation: 4, model: "bench-a", protocol: "system_one" }, "coming back to Bench asked it in another format");
+  assertEqual(benchApply, benchCheck, "the apply wrote another reference than the one checked");
+  assertEqual(await pageA.locator('#model-advanced [data-judgment-format="judge"]').inputValue(), "openai_json", "Judge's format changed with nobody touching 「고급」");
+  return "Bench system_one → Judge openai_json → (screen reopened) Bench system_one for check+apply";
 }));
 
 await test("검수 F4: 멈춘 이 컴퓨터 모델을 고르면 요청 없이 「실행 뒤 확인합니다」라고만 말하고, 확인 전에는 통과라고 하지 않는다 (t-76028)", async () => withModelScene(() => {

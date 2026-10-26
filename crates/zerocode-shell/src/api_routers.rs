@@ -1555,7 +1555,8 @@ mod tests {
 
     /// A loopback gateway that refuses every probe 401 and says back the
     /// `Authorization` value it was sent — inside a JSON message on
-    /// `/models`, as a bare body on `/raw` — with a key-shaped word beside it.
+    /// `/models`, as a bare body on `/raw`, and on `/token` only the token
+    /// behind the scheme — with a key-shaped word beside it.
     fn echoing_gateway() -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -1581,6 +1582,13 @@ mod tests {
                             .then(|| value.trim().to_string())
                     })
                     .unwrap_or_default();
+                let sent = if head.starts_with("GET /token") {
+                    sent.split_once(' ')
+                        .map_or(sent.as_str(), |(_, token)| token)
+                        .to_string()
+                } else {
+                    sent
+                };
                 let echoed = format!("invalid token {sent} near fixtureShapedWord000111222333");
                 let body = if head.starts_with("GET /raw") {
                     echoed
@@ -1630,6 +1638,54 @@ mod tests {
                 assert!(
                     !refusal.contains(secret),
                     "{path}: a sent or key-shaped value went over IPC"
+                );
+            }
+        }
+    }
+
+    /// A refusal that says back what a length or a scheme hid (t-76028 R1):
+    /// a key shorter than any word rule, and the token of an `Authorization`
+    /// header the row brings itself, without its `Bearer`, in a hex shape the
+    /// credential rule lets pass. Neither goes over IPC.
+    #[tokio::test]
+    async fn a_refusal_that_says_back_a_short_key_or_a_bare_header_token_reaches_the_window_without_it()
+     {
+        let base = echoing_gateway();
+        let auth = RouterAuth {
+            header: "Authorization".to_string(),
+            scheme: Some("Bearer".to_string()),
+        };
+        let short_key = "q7z4";
+        let token = "12ab34cd56ef789012ab34cd56ef7890";
+        let row_headers = std::collections::BTreeMap::from([(
+            "Authorization".to_string(),
+            format!("Bearer {token}"),
+        )]);
+        for (key, headers, secret) in [
+            (Some(short_key), None, short_key),
+            (None, Some(&row_headers), token),
+        ] {
+            for path in ["/models", "/raw", "/token"] {
+                let refusal = test_router_endpoint(&RouterProbe {
+                    base_url: &base,
+                    auth: &auth,
+                    key,
+                    models_path: Some(path),
+                    id_field: None,
+                    context_field: None,
+                    client_fingerprint: None,
+                    headers,
+                })
+                .await
+                .expect_err("a 401 is a refusal");
+                assert!(refusal.contains("HTTP 401"), "{path}: the status stays");
+                assert!(
+                    refusal.contains("invalid token"),
+                    "{path}: the gateway's reason stays"
+                );
+                assert!(
+                    !refusal.contains(secret),
+                    "{path}: a sent value went over IPC: {refusal}"
                 );
             }
         }
