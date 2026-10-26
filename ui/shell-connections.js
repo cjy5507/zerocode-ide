@@ -86,7 +86,7 @@ const MODEL_FAILURE_KINDS = Object.freeze({
   server: () => t("settings.models.failure.server", "서버 오류"),
   network: () => t("settings.models.failure.network", "네트워크 오류"),
   timeout: () => t("settings.models.failure.timeout", "시간 초과"),
-  unknown: () => t("settings.models.failure.unknown", "알 수 없는 오류"),
+  unknown: () => t("settings.models.failure.unknown", "알 수 없는 까닭"),
 });
 
 /* Where each preset's key is made (v2 대응표 5), by preset id. */
@@ -441,8 +441,10 @@ const modelConnectionsController = {
   loginWords(login) {
     const age = modelReportAge(login.report?.age);
     const failure = login.report?.diagnosis;
-    const kind = failure ? (MODEL_FAILURE_KINDS[failure.kind] ?? MODEL_FAILURE_KINDS.unknown)() : "";
-    const detail = failure && Number.isInteger(failure.status) ? `HTTP ${failure.status} · ${kind}` : kind;
+    // zo's own fields say what failed (`failureKind`, `httpStatus`); an older
+    // zo names none, and then the line only says it failed (t-76968).
+    const kind = failure && typeof failure.kind === "string" ? (MODEL_FAILURE_KINDS[failure.kind] ?? MODEL_FAILURE_KINDS.unknown)() : "";
+    const detail = failure && Number.isInteger(failure.status) ? [`HTTP ${failure.status}`, kind].filter(Boolean).join(" · ") : kind;
     if (login.state === "ok") {
       return [t("settings.connections.modelCount", "모델 {{count}}개", { count: login.models.length }), age ? t("settings.models.zoChecked", "zo가 확인한 때: {{age}}", { age }) : ""].filter(Boolean).join(" · ");
     }

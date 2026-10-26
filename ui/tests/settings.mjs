@@ -66,7 +66,7 @@ const ZO_LIST_FIXTURE = Object.freeze({
     { provider: "anthropic", source: "anthropic-api", ok: true, count: 3, age: "5m old" },
     { provider: "openai", source: "chatgpt-backend", ok: true, count: 2, age: "12m old" },
     { provider: "google", source: "antigravity-registry", ok: true, count: 1, age: "2h old" },
-    { provider: "xai", source: "xai-api", ok: false, count: 0, diagnosis: { status: null, kind: "unknown", skipped: true }, age: "12m old" },
+    { provider: "xai", source: "xai-api", ok: false, count: 0, diagnosis: { status: null, kind: null, skipped: true }, age: "12m old" },
   ],
   aliases: [{ alias: "fixture-claude", canonical: "fixture-claude-top", provider: "anthropic" }],
 });
@@ -14391,7 +14391,7 @@ const LOGIN_BODY_SECRETS = ["fixtureonlyletters", "fixturemultilinevalue"];
 /* A login with no credential, as zo reports it (ZO m-76597): the source is
    skipped. A report that failed any other way kept last time's list and is
    not 「로그인 안 됨」 (t-76598). */
-const signedOut = (report) => ({ ...report, ok: false, count: 0, diagnosis: { status: null, kind: "unknown", skipped: true } });
+const signedOut = (report) => ({ ...report, ok: false, count: 0, diagnosis: { status: null, kind: null, skipped: true } });
 
 async function withModelScene(prepare, run) {
   const saved = {
@@ -14739,6 +14739,25 @@ await test("로그인 줄: 실패한 조회는 「목록은 이전 확인 것 ·
   assert(note.includes("목록은 이전 확인 것") && !note.includes(words.nologin), "the chooser calls the earlier list a missing login", note);
   for (const secret of LOGIN_BODY_SECRETS) assert(!note.includes(secret), "a provider's answer reached the chooser", note);
   await pageA.click('[data-model-change="coding"]');
+  // The failure is said by the fields zo sets, never guessed from text
+  // (t-76968): a kind zo calls unknown is 「알 수 없는 까닭」, a status with it
+  // is kept, and an older zo that names no kind is only 「지금 조회 실패」.
+  const failureLine = async (diagnosis) => {
+    backend.zoList.reports = backend.zoList.reports.map((report) => report.provider === "anthropic" ? { ...report, diagnosis } : report);
+    await pageA.evaluate(() => modelConnectionsController.refresh());
+    await openSettings(pageA, "api-routers");
+    return line("claude").innerText();
+  };
+  const reason = await pageA.evaluate(() => ({ unknown: t("settings.models.failure.unknown", "알 수 없는 까닭"), network: t("settings.models.failure.network", "네트워크 오류") }));
+  assertEqual(reason.unknown, "알 수 없는 까닭", "the unknown kind is not said as a reason");
+  let failure = await failureLine({ status: null, kind: "unknown", skipped: false });
+  assert(failure.includes(`${words.failed}: ${reason.unknown}`) && !failure.includes(reason.network), "an unknown kind is not said as unknown", failure);
+  failure = await failureLine({ status: 503, kind: "unknown", skipped: false });
+  assert(failure.includes(`HTTP 503 · ${reason.unknown}`), "a status with an unknown kind lost one of them", failure);
+  failure = await failureLine({ status: null, kind: null, skipped: false });
+  assert(failure.includes(words.failed) && !failure.includes(`${words.failed}:`) && !failure.includes(reason.unknown) && !failure.includes(reason.network), "a report without a kind names one", failure);
+  failure = await failureLine({ status: null, kind: "network", skipped: false });
+  assert(failure.includes(`${words.failed}: ${reason.network}`), "zo's network kind is not said as the network", failure);
   // A report from another credential store than a zo pane's says so; an
   // older zo's report without the key is read by the rules above.
   backend.zoList.paneCredentialStore = "CLAUDE_CONFIG_DIR:/fixture/pane-home";

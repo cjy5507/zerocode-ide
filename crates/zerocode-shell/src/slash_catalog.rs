@@ -653,8 +653,9 @@ fn model_list_of(catalog: &serde_json::Value) -> serde_json::Map<String, serde_j
 /// what a provider answered — an HTTP error body zo already cut, where a
 /// query token, a header's value on its next line or an address cut before
 /// its `@` hides from any masking rule — so it never enters the window. A
-/// failed report keeps only its diagnosis: the HTTP status, one kind word
-/// and whether zo skipped the source for want of a credential.
+/// failed report keeps only its diagnosis: the HTTP status and the kind of
+/// failure zo names in its own fields, and whether the source was skipped
+/// for want of a credential.
 fn diagnosed(mut catalog: serde_json::Value) -> serde_json::Value {
     let reports = catalog
         .get_mut("reports")
@@ -671,47 +672,65 @@ fn diagnosed(mut catalog: serde_json::Value) -> serde_json::Value {
             .as_ref()
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        report.insert("diagnosis".to_string(), diagnosis_of(detail));
+        let kind = field(report, "failureKind", "failure_kind");
+        let status = field(report, "httpStatus", "http_status");
+        report.remove("failureKind");
+        report.remove("failure_kind");
+        report.remove("httpStatus");
+        report.remove("http_status");
+        report.insert("diagnosis".to_string(), diagnosis_of(kind, status, detail));
     }
     catalog
 }
 
-/// A failed report's words reduced to what may be shown: zo's own skip mark
-/// (`SourceReport::skipped`), the first `HTTP <status>` and the kind of
-/// failure it, or a transport error's words, name.
-fn diagnosis_of(detail: &str) -> serde_json::Value {
-    let status = detail.match_indices("HTTP ").find_map(|(at, word)| {
-        let rest = &detail[at + word.len()..];
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        (digits == 3).then(|| rest[..3].parse::<u16>().ok())?
-    });
-    let words = detail.to_ascii_lowercase();
-    let says = |markers: &[&str]| markers.iter().any(|marker| words.contains(marker));
-    let kind = match status {
-        Some(401) => "auth",
-        Some(403) => "forbidden",
-        Some(404) => "notFound",
-        Some(408) => "timeout",
-        Some(429) => "rateLimit",
-        Some(500..=599) => "server",
-        Some(_) => "unknown",
-        None if says(&["timed out", "timeout"]) => "timeout",
-        None if says(&[
-            "error sending request",
-            "connect",
-            "dns",
-            "network",
-            "unreachable",
-        ]) =>
-        {
-            "network"
-        }
-        None => "unknown",
+/// A report's field as `zo models --json` spells it (camelCase) or its cache
+/// file does (snake_case, which an older window reads the same way).
+fn field(
+    report: &serde_json::Map<String, serde_json::Value>,
+    camel: &str,
+    snake: &str,
+) -> Option<serde_json::Value> {
+    report.get(camel).or_else(|| report.get(snake)).cloned()
+}
+
+/// A failed report as the window reads it (t-76968): by the fields zo sets
+/// for it — `failureKind` (one of zo's nine kinds) and `httpStatus` — and by
+/// no word of the error text, whose wording the window cannot know: zo's
+/// own advice, an address or a header's name can say "connect" or
+/// "timeout" in a failure that was neither. A report without the kind is an
+/// older zo's: it names none, and only zo's fixed `skipped:` head, which it
+/// has always written, says a source was skipped for want of a credential.
+/// A kind this window does not know is `unknown`, not a guess.
+fn diagnosis_of(
+    kind: Option<serde_json::Value>,
+    status: Option<serde_json::Value>,
+    detail: &str,
+) -> serde_json::Value {
+    let kind = kind.as_ref().and_then(serde_json::Value::as_str);
+    let status = status
+        .as_ref()
+        .and_then(serde_json::Value::as_u64)
+        .filter(|status| (100..=599).contains(status));
+    let named = match kind {
+        None => None,
+        Some("no_credentials") => None,
+        Some("auth_rejected") => Some("auth"),
+        Some("forbidden") => Some("forbidden"),
+        Some("not_found") => Some("notFound"),
+        Some("rate_limited") => Some("rateLimit"),
+        Some("server_error") => Some("server"),
+        Some("network") => Some("network"),
+        Some("timeout") => Some("timeout"),
+        Some(_) => Some("unknown"),
+    };
+    let skipped = match kind {
+        Some(kind) => kind == "no_credentials",
+        None => detail.starts_with("skipped:"),
     };
     serde_json::json!({
         "status": status,
-        "kind": kind,
-        "skipped": detail.starts_with("skipped:"),
+        "kind": named,
+        "skipped": skipped,
     })
 }
 
@@ -1258,18 +1277,41 @@ mod tests {
             "sk-ant-api03-TESTONLYxxxxxxxxxxxxxxxxxxxxxxxx",
         ];
         let failed = |provider: &str, detail: String| serde_json::json!({"provider": provider, "source": format!("{provider}-api"), "ok": false, "count": 0, "detail": detail});
+        // A report as zo sets it (t-76968): the kind and the status in
+        // fields of their own, whatever the text says.
+        let reported = |provider: &str, detail: String, kind: &str, status: Option<u16>| {
+            let mut report = failed(provider, detail);
+            report["failureKind"] = serde_json::json!(kind);
+            if let Some(status) = status {
+                report["httpStatus"] = serde_json::json!(status);
+            }
+            report
+        };
         let printed = serde_json::json!({
             "reports": [
-                failed("anthropic", format!("HTTP 401 Unauthorized at https://example.test/?access_token={}", secrets[0])),
-                failed("anthropic", format!("HTTP 403 Forbidden: echoed Authorization:\n{}", secrets[1])),
-                failed("openai", format!("HTTP 404 Not Found: {{\"url\":\"https://fixtureuser:{}", secrets[2])),
-                failed("openai", format!("HTTP 429 Too Many Requests: Authorization: Bearer {}", secrets[3])),
-                failed("google", format!("HTTP 503 Service Unavailable: https://files.example.test/o?X-Amz-Signature={}", secrets[4])),
-                failed("anthropic", format!("error sending request for url (https://example.test/v1/models?key={}) · kept 3 model(s) from the previous refresh", secrets[5])),
-                failed("xai", format!("operation timed out after reading {}", secrets[0])),
-                failed("xai", "skipped: no login".to_string()),
-                failed("google", format!("unexpected answer {}", secrets[3])),
-                {"provider": "google", "source": "google-api", "ok": true, "count": 3, "detail": format!("3 model(s) · {}", secrets[0])}
+                reported("anthropic", format!("HTTP 401 Unauthorized at https://example.test/?access_token={}", secrets[0]), "auth_rejected", Some(401)),
+                reported("anthropic", format!("HTTP 403 Forbidden: echoed Authorization:\n{}", secrets[1]), "forbidden", Some(403)),
+                reported("openai", format!("HTTP 404 Not Found: {{\"url\":\"https://fixtureuser:{}", secrets[2]), "not_found", Some(404)),
+                reported("openai", format!("HTTP 429 Too Many Requests: Authorization: Bearer {}", secrets[3]), "rate_limited", Some(429)),
+                reported("google", format!("HTTP 503 Service Unavailable: https://files.example.test/o?X-Amz-Signature={}", secrets[4]), "server_error", Some(503)),
+                reported("anthropic", format!("error sending request for url (https://example.test/v1/models?key={}) · kept 3 model(s) from the previous refresh", secrets[5]), "network", None),
+                reported("xai", format!("operation timed out after reading {}", secrets[0]), "timeout", None),
+                reported("xai", "skipped: no login".to_string(), "no_credentials", None),
+                reported("google", format!("unexpected answer {}", secrets[3]), "unknown", None),
+                {"provider": "google", "source": "google-api", "ok": true, "count": 3, "detail": format!("3 model(s) · {}", secrets[0])},
+                // An older zo names no kind: the window names none either,
+                // reads no status out of the text, and takes only zo's
+                // fixed `skipped:` head for a missing credential.
+                failed("anthropic", format!("HTTP 401 Unauthorized {}", secrets[0])),
+                failed("xai", "skipped: no key".to_string()),
+                // The text never changes the kind: "connect", "timeout" and
+                // a status in the words of a failure zo calls unknown.
+                reported("openai", format!("the next connection asks again · connect timeout HTTP 503 {}", secrets[3]), "unknown", None),
+                // A kind this window does not know is unknown, a status that
+                // is no HTTP status is none, and the cache file's spelling
+                // reads like the command's.
+                reported("google", "a later zo's kind".to_string(), "a_kind_from_a_later_zo", Some(99999)),
+                {"provider": "google", "source": "google-api", "ok": false, "count": 0, "detail": "x", "failure_kind": "rate_limited", "http_status": 429},
             ]
         });
         let home = tempfile::tempdir().expect("home");
@@ -1297,6 +1339,9 @@ mod tests {
                 !said.contains("\"detail\""),
                 "a body reached {place}: {said}"
             );
+            for raw in ["failureKind", "failure_kind", "httpStatus", "http_status"] {
+                assert!(!said.contains(raw), "{raw} reached {place}: {said}");
+            }
         }
         let diagnoses: Vec<serde_json::Value> = list["reports"]
             .as_array()
@@ -1304,20 +1349,25 @@ mod tests {
             .iter()
             .map(|report| report.get("diagnosis").cloned().unwrap_or_default())
             .collect();
-        let diagnosis = |status: Option<u16>, kind: &str, skipped: bool| serde_json::json!({"status": status, "kind": kind, "skipped": skipped});
+        let diagnosis = |status: Option<u16>, kind: Option<&str>, skipped: bool| serde_json::json!({"status": status, "kind": kind, "skipped": skipped});
         assert_eq!(
             diagnoses,
             [
-                diagnosis(Some(401), "auth", false),
-                diagnosis(Some(403), "forbidden", false),
-                diagnosis(Some(404), "notFound", false),
-                diagnosis(Some(429), "rateLimit", false),
-                diagnosis(Some(503), "server", false),
-                diagnosis(None, "network", false),
-                diagnosis(None, "timeout", false),
-                diagnosis(None, "unknown", true),
-                diagnosis(None, "unknown", false),
+                diagnosis(Some(401), Some("auth"), false),
+                diagnosis(Some(403), Some("forbidden"), false),
+                diagnosis(Some(404), Some("notFound"), false),
+                diagnosis(Some(429), Some("rateLimit"), false),
+                diagnosis(Some(503), Some("server"), false),
+                diagnosis(None, Some("network"), false),
+                diagnosis(None, Some("timeout"), false),
+                diagnosis(None, None, true),
+                diagnosis(None, Some("unknown"), false),
                 serde_json::Value::Null,
+                diagnosis(None, None, false),
+                diagnosis(None, None, true),
+                diagnosis(None, Some("unknown"), false),
+                diagnosis(None, Some("unknown"), false),
+                diagnosis(Some(429), Some("rateLimit"), false),
             ]
         );
         assert_eq!(list["reports"][9]["count"], 3, "an answer lost its count");
