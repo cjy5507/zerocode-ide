@@ -720,6 +720,11 @@ Never infer indexes from `elementCount`; use the numeric labels in `treeText`.
 
 ## Actions
 
+`press-key` accepts a single key or a modifier combination. For combinations,
+it runs `hotkey` and reports `ranAs: "hotkey"`. For example,
+`press-key --key cmd+v` and `hotkey --key Cmd+V` use the same input path.
+`command+v` and `Ctrl+Shift+T` work too. Keep the app and window scope.
+
 ```text
 zerocode-computer get-app-state --app <app> [--window-id <id>|--window-index <n>] [--restore-window] [--no-screenshot] --json
 zerocode-computer click --app <app> (--element-index <n>|--x <x> --y <y>) [--mouse-button left|right|middle] [--modifiers CmdOrCtrl+Shift] --json
@@ -727,6 +732,7 @@ zerocode-computer perform-secondary-action --app <app> --element-index <n> --act
 zerocode-computer set-value --app <app> --element-index <n> --value <text> --json
 zerocode-computer type-text --app <app> --text <text> --json
 zerocode-computer press-key --app <app> --key Return --json
+zerocode-computer press-key --app <app> --key cmd+v --json
 zerocode-computer hotkey --app <app> --key CmdOrCtrl+A --json
 zerocode-computer paste-text --app <app> --text <text> --json
 zerocode-computer scroll --app <app> (--element-index <n>|--x <x> --y <y>) --direction down --json

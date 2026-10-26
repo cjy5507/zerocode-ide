@@ -6495,6 +6495,10 @@ pub(super) fn call_with_the_persons_last_step(
     call_with_confirmation_asker(command, asking, call, &mut computer_use::confirm::ask)
 }
 
+#[cfg(test)]
+#[path = "computer_use/key_combinations_tests.rs"]
+mod key_combinations_tests;
+
 pub(super) fn call_with_confirmation_asker(
     command: &zerocode_core::computer_use::ComputerCommand,
     asking: computer_use::confirm::Asking,
@@ -6512,7 +6516,19 @@ pub(super) fn call_with_confirmation_asker(
     use zerocode_core::computer_use::{ConfirmKind, parse_confirmation_required};
     use zerocode_core::computer_use_protocol::error_code;
 
-    let method = command.method.provider_name().expect("provider method");
+    // Models often send a chord to press-key. Use the hotkey provider path,
+    // including its accessibility shortcuts and keyboard safety checks.
+    let ran_as_hotkey = command.method == zerocode_core::computer_use::ComputerMethod::PressKey
+        && command
+            .params
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|key| key.contains('+'));
+    let method = if ran_as_hotkey {
+        "hotkey"
+    } else {
+        command.method.provider_name().expect("provider method")
+    };
     let verb = command.method;
     let mut params = command.params.clone();
     let policy = confirm::policy();
@@ -6584,6 +6600,12 @@ pub(super) fn call_with_confirmation_asker(
         }
         other => other,
     }
+    .map(|mut answer| {
+        if ran_as_hotkey && let Some(object) = answer.as_object_mut() {
+            object.insert("ranAs".into(), serde_json::json!("hotkey"));
+        }
+        answer
+    })
 }
 
 /// Recipes (§7.2): saved from this session's steps (or a folder named), kept

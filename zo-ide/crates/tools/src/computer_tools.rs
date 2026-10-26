@@ -294,7 +294,7 @@ pub(crate) struct ComputerInput {
     pub coordinate: Option<[f64; 2]>,
     #[serde(default, deserialize_with = "loose::point")]
     pub start_coordinate: Option<[f64; 2]>,
-    /// The key chord for `key`/`hold_key`, the text for `type`, the modifiers
+    /// The key chord for `key`/`hold_key` (Return, cmd+v, command+v, Ctrl+Shift+T), the text for `type`, the modifiers
     /// held during a click, the text to find/wait for, the clipboard text.
     pub text: Option<String>,
     pub scroll_direction: Option<String>,
