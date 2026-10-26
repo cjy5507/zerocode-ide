@@ -14,6 +14,8 @@
 //! [`looks_like_a_credential`] and [`contains_ascii_case`] — allocate
 //! nothing; [`mask_values`] and [`may_carry_a_credential`] build strings.
 
+use std::borrow::Cow;
+
 /// Words that NAME a credential, matched inside a word in any ASCII case.
 pub const KEY_WORDS: [&str; 7] = [
     "authorization",
@@ -126,6 +128,174 @@ pub fn contains_ascii_case(raw: &str, needle: &str) -> bool {
         .any(|part| part.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+/// A complete `{{name}}` or `${name}` reference, optionally named by an
+/// assignment or auth header. Command substitutions can contain literal input
+/// and are never references.
+/// Bare `$TOKEN`, concatenated literals and incomplete delimiters remain
+/// credential candidates. Every consumer uses this same boundary reading.
+#[must_use]
+pub fn is_reference_value(value: &str) -> bool {
+    reference_prefix_len(value, true) == Some(value.len())
+}
+
+/// The end of one reference value, including an optional pair of quotes.
+fn reference_value_end(value: &str) -> Option<usize> {
+    let quote = value
+        .as_bytes()
+        .first()
+        .copied()
+        .filter(|b| matches!(b, b'\'' | b'"'));
+    let start = usize::from(quote.is_some());
+    let raw = &value[start..];
+    let mut end = if let Some(name) = raw.strip_prefix("{{") {
+        let close = name.find("}}")?;
+        crate::computer_recipe::recipe_param_name(&name[..close]).then_some(close + 4)?
+    } else if let Some(name) = raw.strip_prefix("${") {
+        let close = name.find('}')?;
+        let name = &name[..close];
+        (crate::computer_recipe::recipe_param_name(name) && !name.contains('-'))
+            .then_some(close + 3)?
+    } else {
+        return None;
+    } + start;
+    if let Some(quote) = quote {
+        if value.as_bytes().get(end) != Some(&quote) {
+            return None;
+        }
+        end += 1;
+    }
+    value[end..]
+        .chars()
+        .next()
+        .is_none_or(char::is_whitespace)
+        .then_some(end)
+}
+
+/// Read a named shell value as one span when it contains a substitution.
+/// Each nested command keeps its own quotes. Incomplete values consume the
+/// remaining line. This only finds the masking boundary; it executes nothing.
+fn command_value_end(value: &str) -> Option<usize> {
+    let mut parents = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut command = false;
+    let mut chars = value.char_indices().peekable();
+    while let Some((index, glyph)) = chars.next() {
+        if escaped {
+            escaped = false;
+        } else if glyph == '\\' && quote != Some('\'') {
+            escaped = true;
+        } else if glyph == '$' && chars.peek().is_some_and(|&(_, next)| next == '(') {
+            command = true;
+            if quote != Some('\'') {
+                parents.push((depth, quote));
+                depth = 1;
+                quote = None;
+                chars.next();
+                continue;
+            }
+        } else if quote == Some(glyph) {
+            quote = None;
+        } else if quote.is_none() {
+            match glyph {
+                '\'' | '"' => quote = Some(glyph),
+                '(' if depth > 0 => depth += 1,
+                ')' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        (depth, quote) = parents.pop()?;
+                    }
+                }
+                _ if depth == 0 && glyph.is_whitespace() => {
+                    return command.then_some(index);
+                }
+                _ => {}
+            }
+        }
+    }
+    command.then_some(value.len())
+}
+
+/// A whole reference token or the syntax that names it. Headers consume their
+/// entire value; an extra literal after a header reference still needs masking.
+fn reference_prefix_len(text: &str, named: bool) -> Option<usize> {
+    if let Some(end) = reference_value_end(text) {
+        return Some(end);
+    }
+    if !named {
+        return None;
+    }
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let word = &text[..end];
+    if let Some(split) = word.find(['=', ':']) {
+        let key = &word[..split];
+        if crate::computer_recipe::recipe_param_name(key)
+            && !(word.as_bytes()[split] == b':' && names_a_header(key))
+            && let Some(value_end) = reference_value_end(&text[split + 1..])
+        {
+            return Some(split + 1 + value_end);
+        }
+    }
+    let after = text[end..].trim_start();
+    if word.ends_with(':') && names_a_header(word) {
+        let scheme_end = after.find(char::is_whitespace).unwrap_or(after.len());
+        let value = if SCHEME_WORDS
+            .iter()
+            .any(|scheme| after[..scheme_end].eq_ignore_ascii_case(scheme))
+            || after[..scheme_end].eq_ignore_ascii_case("basic")
+        {
+            after[scheme_end..].trim_start()
+        } else {
+            after
+        };
+        return reference_value_end(value)
+            .filter(|&end| value[end..].trim().is_empty())
+            .map(|_| text.len());
+    }
+    if SCHEME_WORDS
+        .iter()
+        .any(|scheme| word.eq_ignore_ascii_case(scheme))
+        || (word.starts_with('-') && names_a_credential(word))
+    {
+        return reference_value_end(after).map(|value_end| text.len() - after.len() + value_end);
+    }
+    None
+}
+
+/// Remove only complete references and the names attached to them before the
+/// conservative cue scan. A real value elsewhere on the line still counts.
+fn without_reference_values(line: &str) -> Cow<'_, str> {
+    let mut remaining: Option<String> = None;
+    let mut rest = line;
+    while !rest.is_empty() {
+        let space = rest.len() - rest.trim_start().len();
+        if let Some(remaining) = &mut remaining {
+            remaining.push_str(&rest[..space]);
+        }
+        rest = &rest[space..];
+        if rest.is_empty() {
+            break;
+        }
+        let end = if let Some(end) = reference_prefix_len(rest, true) {
+            remaining.get_or_insert_with(|| line[..line.len() - rest.len()].to_owned());
+            end
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            if let Some(remaining) = &mut remaining {
+                remaining.push_str(&rest[..end]);
+            }
+            end
+        };
+        rest = &rest[end..];
+    }
+    remaining.map_or(Cow::Borrowed(line), |mut remaining| {
+        // `export KEY=reference` leaves only `export`, with no literal value.
+        remaining.truncate(remaining.trim_end().len());
+        Cow::Owned(remaining)
+    })
+}
+
 /// Auth-scheme words whose next word is the credential (`Bearer <token>`).
 /// `Basic` is not here: it is an ordinary English word, and a Basic header
 /// already names itself (`Authorization: Basic …`).
@@ -210,10 +380,12 @@ fn names_a_header(word: &str) -> bool {
 /// credential: a word that names or looks like one, an auth scheme, a URL's
 /// userinfo, a glued password flag, a shell `export`, or a PEM block. A road
 /// that must not pass a credential on withholds such a line whole rather than
-/// trust [`mask_values`] to find the whole value. No allocation beyond the
-/// userinfo check.
+/// trust [`mask_values`] to find the whole value. Complete references are
+/// omitted before reading the remaining cues.
 #[must_use]
 pub fn may_carry_a_credential(line: &str) -> bool {
+    let remaining = without_reference_values(line);
+    let line = remaining.as_ref();
     looks_like_a_payment_card(line)
         || names_a_credential(line)
         || line.split_whitespace().any(looks_like_a_credential)
@@ -251,6 +423,10 @@ fn unclosed_quote(value: &str) -> Option<char> {
 }
 
 fn mask_line(line: &str, out: &mut String, reading: Reading) {
+    if reading == Reading::ByNameAndShape && looks_like_a_payment_card(line) {
+        out.push_str(MASK);
+        return;
+    }
     let netrc = line
         .split_whitespace()
         .next()
@@ -265,7 +441,39 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
         let space = rest.len() - rest.trim_start().len();
         let spacing = &rest[..space];
         rest = &rest[space..];
+        if quoted.is_none()
+            && let Some(end) = reference_prefix_len(rest, !mask_next)
+        {
+            out.push_str(spacing);
+            out.push_str(&rest[..end]);
+            rest = &rest[end..];
+            mask_next = false;
+            continue;
+        }
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..end];
+        let separators: &[char] = match reading {
+            Reading::ByNameAndShape => &['=', ':'],
+            Reading::ByName => &['='],
+        };
+        let value_start = if mask_next {
+            Some(0)
+        } else {
+            word.find(separators)
+                .filter(|&split| names_a_credential(&word[..split]))
+                .map(|split| split + 1)
+        };
+        if quoted.is_none()
+            && let Some(start) = value_start
+            && let Some(end) = command_value_end(&rest[start..])
+        {
+            out.push_str(spacing);
+            out.push_str(&rest[..start]);
+            out.push_str(MASK);
+            rest = &rest[start + end..];
+            mask_next = false;
+            continue;
+        }
         let (word, after) = rest.split_at(end);
         rest = after;
         if let Some(quote) = quoted {
@@ -284,10 +492,6 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
             mask_next = false;
             continue;
         }
-        let separators: &[char] = match reading {
-            Reading::ByNameAndShape => &['=', ':'],
-            Reading::ByName => &['='],
-        };
         if let Some(split) = word.find(separators)
             && split + 1 < word.len()
             && names_a_credential(&word[..split])
@@ -332,6 +536,194 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Deliberately synthetic values, constructed so no fixture is a real key.
+    fn literal_command_values() -> Vec<String> {
+        vec![
+            "$(printf hunter2)".to_owned(),
+            "$(gh auth token)".to_owned(),
+            "$(printf '%s' \"$(gh auth token)\")".to_owned(),
+            format!("$(echo ghp_{})", "FAKE".repeat(9)),
+            format!("$(printf '%s' sk-{})", "FAKE".repeat(8)),
+            format!("$(echo {})", "FAKE0".repeat(6)),
+            format!("$(printf '%s' \"$(echo ghp_{})\")", "FAKE".repeat(9)),
+            format!("$(echo {})", "4111".to_owned() + &"1111".repeat(3)),
+            format!("$(echo '{}')", ["4111", "1111", "1111", "1111"].join(" ")),
+        ]
+    }
+
+    #[test]
+    fn literal_command_values_are_not_references() {
+        let failures: Vec<_> = literal_command_values()
+            .into_iter()
+            .filter(|value| is_reference_value(value))
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "literal commands accepted: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn literal_command_values_are_fully_masked() {
+        let mut failures = Vec::new();
+        for value in literal_command_values() {
+            for text in [
+                format!("password={value}"),
+                format!("export GITHUB_TOKEN={value}"),
+                format!("client --password {value}"),
+                format!("password=\"{value}\""),
+            ] {
+                for masked in [mask_named_values(&text), mask_values(&text)] {
+                    if !masked.contains(MASK)
+                        || masked.contains("FAKE")
+                        || masked.contains("4111")
+                        || masked.contains("1111")
+                        || masked.contains("hunter2")
+                        || masked.contains("$(")
+                    {
+                        failures.push((text.clone(), masked));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "literal commands retained: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn literal_command_values_trigger_credential_cues() {
+        let failures: Vec<_> = literal_command_values()
+            .into_iter()
+            .map(|value| format!("password={value}"))
+            .filter(|text| !may_carry_a_credential(text))
+            .collect();
+        assert!(
+            failures.is_empty(),
+            "literal commands omitted: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn command_values_are_masked_through_their_end() {
+        let mut failures = Vec::new();
+        for value in [
+            "$(printf hunter2)",
+            "\"$(printf hunter2)\"",
+            "'$(printf hunter2)'",
+            "$(printf '%s' \"$(printf hunter2)\")",
+            "$(printf '%s' 'hunter2)')",
+            "$(printf '%s' hunter2\\))",
+            "$(printf hunter2)suffix",
+            "prefix$(printf hunter2)",
+            "$(printf hello)$(printf hunter2)",
+            "\"prefix $(printf '%s %s' hunter2 hunter3)\"",
+            "\"$(printf hunter2)\\\"suffix secret\"",
+            "$(printf '%s' \"$(printf '%s' 'hunter2)')\")",
+            "$(printf '%s' '비밀 값')",
+        ] {
+            for (text, expected) in [
+                (
+                    format!("password={value} && make"),
+                    format!("password={MASK} && make"),
+                ),
+                (
+                    format!("client --password {value} next"),
+                    format!("client --password {MASK} next"),
+                ),
+            ] {
+                for masked in [mask_named_values(&text), mask_values(&text)] {
+                    if masked != expected {
+                        failures.push((text.clone(), masked, expected.clone()));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "incorrect command spans: {failures:?}");
+    }
+
+    #[test]
+    fn incomplete_command_values_mask_the_remaining_line() {
+        let failures: Vec<_> = [
+            "password=$(printf hunter2",
+            "password=\"$(printf hunter2) suffix",
+            "password=$(printf '%s' \"$(printf hunter2)",
+        ]
+        .into_iter()
+        .filter(|text| {
+            [mask_named_values(text), mask_values(text)]
+                .iter()
+                .any(|masked| masked != &format!("password={MASK}"))
+        })
+        .collect();
+        assert!(
+            failures.is_empty(),
+            "incomplete commands retained: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn whole_reference_values_keep_their_text_in_both_masking_readings() {
+        for text in [
+            "password={{password}}",
+            "password=${PASSWORD}",
+            "TASK_TOKEN=${TOKEN}",
+            "Authorization: Bearer ${TOKEN}",
+            "Bearer {{token}}",
+            "client --password \"${PASSWORD}\" next",
+            "password='{{비밀번호}}'",
+        ] {
+            assert_eq!(mask_named_values(text), text, "named: {text}");
+            assert_eq!(mask_values(text), text, "shapes: {text}");
+        }
+    }
+
+    #[test]
+    fn whole_reference_values_do_not_trigger_credential_cues() {
+        for text in [
+            "password={{password}}",
+            "password=${PASSWORD}",
+            "Authorization: Bearer ${TOKEN}",
+            "Bearer {{token}}",
+            "{{token}}",
+        ] {
+            assert!(!may_carry_a_credential(text), "{text}");
+            assert!(!location_segment_may_carry_a_credential(text), "{text}");
+        }
+    }
+
+    #[test]
+    fn references_do_not_exempt_literal_or_incomplete_credential_values() {
+        for text in [
+            "Bearer $TOKEN",
+            "password=hunter2",
+            "password={{password}}suffix",
+            "password=prefix${PASSWORD}",
+            "password=${PASSWORD}suffix",
+            "password=${PASSWORD-default}",
+            "password=${PASSWORD:-default}",
+            "password=$(gh auth token)suffix",
+            "password={{}}",
+            "password=${}",
+            "password=$()",
+            "password={{password}",
+            "password=$(gh auth token",
+            "password={{password}} password=hunter2",
+            "Authorization: Bearer ${TOKEN} literal",
+        ] {
+            assert!(may_carry_a_credential(text), "{text}");
+            assert_ne!(mask_named_values(text), text, "{text}");
+        }
+        assert!(may_carry_a_credential(
+            "export X=hunter2 password={{password}}"
+        ));
+        for text in ["4111111111111111", "4111 1111 1111 1111"] {
+            assert!(may_carry_a_credential(text), "{text}");
+            assert_eq!(mask_values(text), MASK, "{text}");
+        }
+    }
 
     #[test]
     fn values_are_masked_and_their_keys_and_the_prose_around_them_stay() {

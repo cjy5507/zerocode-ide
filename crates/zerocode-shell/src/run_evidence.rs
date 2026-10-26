@@ -252,10 +252,9 @@ pub fn redacted(tool: &str, argv: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Whether a word holds a recipe's placeholder (`{{name}}`): a line a recipe
-/// walk logs in its own words — the document's text, with its names.
+/// A whole reference, including a named assignment, carries no literal input.
 fn names_a_placeholder(word: &str) -> bool {
-    zerocode_core::computer_recipe::privacy::is_parameter_word(word)
+    zerocode_core::computer_recipe::privacy::is_reference_value(word)
 }
 
 /// How a redacted word reads in the log — written and read back here only.
@@ -742,6 +741,48 @@ fn walk_files(dir: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn literal_command_credentials_do_not_survive_input_redaction() {
+        // Synthetic key-shaped inputs only; no fixture is a usable key.
+        let values = [
+            "password=$(printf hunter2)".to_owned(),
+            "password=$(gh auth token)".to_owned(),
+            "password=$(printf '%s' \"$(gh auth token)\")".to_owned(),
+            format!("export GITHUB_TOKEN=$(echo ghp_{})", "FAKE".repeat(9)),
+            format!("password=$(printf '%s' sk-{})", "FAKE".repeat(8)),
+            format!("password=$(echo {})", "FAKE0".repeat(6)),
+            format!("password=$(echo {})", "4111".to_owned() + &"1111".repeat(3)),
+            format!(
+                "password=$(printf '%s' \"$(echo ghp_{})\")",
+                "FAKE".repeat(9)
+            ),
+        ];
+        let failures: Vec<_> = values
+            .into_iter()
+            .filter(|value| {
+                let argv = words(&["type", "--text", value]);
+                redacted("computer", &argv) == argv
+            })
+            .collect();
+        assert!(failures.is_empty(), "literal inputs retained: {failures:?}");
+    }
+
+    #[test]
+    fn whole_credential_references_survive_input_redaction() {
+        for value in [
+            "password={{password}}",
+            "password=${PASSWORD}",
+            "Authorization: Bearer ${TOKEN}",
+        ] {
+            let argv = words(&["type", "--text", value]);
+            assert_eq!(redacted("computer", &argv), argv, "{value}");
+        }
+        for value in ["Bearer $TOKEN", "password=hunter2", "4111111111111111"] {
+            let argv = words(&["type", "--text", value]);
+            assert_ne!(redacted("computer", &argv), argv, "{value}");
+        }
+    }
+
     #[test]
     fn secret_input_facts_and_credential_rejections_survive_value_redaction() {
         let root = tempfile::tempdir().unwrap();

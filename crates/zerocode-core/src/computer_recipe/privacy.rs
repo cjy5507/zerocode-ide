@@ -100,7 +100,7 @@ pub fn is_parameter_word(word: &str) -> bool {
 }
 
 pub fn is_reference_value(value: &str) -> bool {
-    if is_parameter_word(value) {
+    if is_person_parameter(value) || credential::is_reference_value(value) {
         return true;
     }
     value
@@ -109,7 +109,7 @@ pub fn is_reference_value(value: &str) -> bool {
         .is_some_and(|(key, value)| {
             recipe_param_name(key)
                 && !credential::looks_like_a_credential(key)
-                && is_parameter_word(value)
+                && is_person_parameter(value)
         })
 }
 
@@ -149,7 +149,8 @@ pub fn input_policy(tool: &str, argv: &[String], masked: &[String]) -> InputPoli
     } else {
         let target = argv.get(2);
         let known_secret = target.is_some_and(|handle| {
-            masked.contains(handle) || credential::names_a_credential(handle)
+            masked.contains(handle)
+                || (credential::names_a_credential(handle) && !is_reference_value(handle))
         });
         out.secret = known_secret
             || positions
@@ -174,7 +175,7 @@ pub fn unsafe_location_or_value(value: &str) -> bool {
             return true;
         }
         if url.query_pairs().any(|(key, value)| {
-            !is_parameter_word(&value)
+            !is_reference_value(&value)
                 && (credential::names_a_credential(&key)
                     || credential::may_carry_a_credential(&value))
         }) {
@@ -225,6 +226,8 @@ mod tests {
             "{{password}}",
             "password=$secret_password",
             "password={{password}}",
+            "password=${TOKEN}",
+            "Bearer ${TOKEN}",
             "https://example.test/?password=$secret_password",
         ] {
             assert!(
@@ -232,12 +235,18 @@ mod tests {
                 "a reference is not a stored value"
             );
         }
-        for value in [
+        let unsafe_values = [
             "password=SYNTHETIC_INPUT_ONLY",
+            "password=$(printf hunter2)",
+            "password=$(gh auth token)",
+            "password=$(printf '%s' \"$(gh auth token)\")",
             "https://example.test/?password=SYNTHETIC_INPUT_ONLY",
-        ] {
-            assert!(unsafe_location_or_value(value));
-        }
+        ];
+        let failures: Vec<_> = unsafe_values
+            .into_iter()
+            .filter(|value| !unsafe_location_or_value(value))
+            .collect();
+        assert!(failures.is_empty(), "unsafe values accepted: {failures:?}");
     }
 
     #[test]
