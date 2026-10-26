@@ -209,10 +209,19 @@ pub fn written_patch(tool_name: &str, output: &str) -> Option<(String, Vec<Struc
 }
 
 /// The person's newest words in `messages`: the newest user message that
-/// spoke and does not open with [`HARNESS_TAG_OPEN`].
+/// spoke, does not open with [`HARNESS_TAG_OPEN`] and carries no origin — a
+/// turn the window's notice opened is not the person's (t-75726).
 #[must_use]
 pub fn persons_words(messages: &[ConversationMessage]) -> String {
-    newest_words_where(messages, MessageRole::User, is_persons)
+    persons_said(messages).next().map(|(_, words)| words).unwrap_or_default()
+}
+
+/// Every user message in `messages` that the person said, newest first,
+/// beside its index: [`words_where`] under [`is_persons`], less the messages
+/// that carry an origin — a turn the window's notice opened speaks the
+/// window's pointer, not the person's words (t-75726).
+fn persons_said(messages: &[ConversationMessage]) -> impl Iterator<Item = (usize, String)> + '_ {
+    words_where(messages, MessageRole::User, is_persons).filter(move |(at, _)| messages[*at].origin.is_none())
 }
 
 /// Whether a user message's words are the person's own — not what the
@@ -286,7 +295,7 @@ impl TaskReading {
 /// as they always were.
 #[must_use]
 pub fn task_by(messages: &[ConversationMessage], reading: TaskReading) -> String {
-    let mut persons = words_where(messages, MessageRole::User, is_persons);
+    let mut persons = persons_said(messages);
     let Some((turn_began, newest)) = persons.next() else {
         return String::new();
     };
@@ -934,7 +943,8 @@ pub fn hindsight_of_turn(
 
 /// The turns of a conversation as the host takes them: each begins at the
 /// person's own words ([`persons_words`]'s rule) — what the harness writes in
-/// their place continues the turn it was written in.
+/// their place continues the turn it was written in, and so does a turn the
+/// window's notice opened.
 #[must_use]
 pub fn persons_turns(messages: &[ConversationMessage]) -> Vec<&[ConversationMessage]> {
     let mut starts: Vec<usize> = messages
@@ -942,6 +952,7 @@ pub fn persons_turns(messages: &[ConversationMessage]) -> Vec<&[ConversationMess
         .enumerate()
         .filter(|(_, message)| {
             message.role == MessageRole::User
+                && message.origin.is_none()
                 && message.blocks.iter().any(|block| {
                     matches!(block, ContentBlock::Text { text }
                         if !text.trim().is_empty() && !text.trim_start().starts_with(HARNESS_TAG_OPEN))
