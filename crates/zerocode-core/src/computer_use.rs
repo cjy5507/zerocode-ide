@@ -4570,12 +4570,14 @@ const TREELESS_CHECK_MS: u64 = 5_000;
 /// the screen shows, and send one screen as one batch whose last step is the
 /// check — the road that took a mirrored phone's form from 138 model round
 /// trips to 12 (t-37883). `None` for a click by any other name, a click that
-/// named no app, or a window with a tree.
+/// named no app, a background click (a click by words needs the foreground,
+/// so naming it would send the agent to a refusal), or a window with a tree.
 #[must_use]
 pub fn treeless_click_next(params: &Value, answer: &Value) -> Option<String> {
     let app = params.get("app")?.as_str()?.trim();
     let at_a_point = ["x", "y"].iter().all(|key| params.get(*key).is_some());
-    if app.is_empty() || !at_a_point {
+    let background = params.get("background") == Some(&Value::Bool(true));
+    if app.is_empty() || !at_a_point || background {
         return None;
     }
     if answer.pointer("/snapshot/elementCount")?.as_u64()? > 1 {
@@ -9448,6 +9450,13 @@ mod tests {
         assert!(
             quiet(json!({ "app": app, "elementIndex": 3 }), &treeless),
             "an element"
+        );
+        assert!(
+            quiet(
+                json!({ "app": app, "x": 1.0, "y": 2.0, "background": true }),
+                &treeless
+            ),
+            "a background click: a click by words needs the foreground"
         );
         assert!(
             quiet(

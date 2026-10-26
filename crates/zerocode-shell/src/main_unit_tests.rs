@@ -24201,10 +24201,12 @@ pub(crate) mod computer_desktop_wait {
     /// is the window alone, as the helper's answer counts it — answers with
     /// the batch by words as its next step, and the click it names is taken
     /// by the same window: read once, pressed at the line's centre. A window
-    /// with a tree is told nothing.
+    /// with a tree is told nothing, and neither is a click under the
+    /// background policy, where a click by words is refused.
     #[test]
     fn a_point_click_on_a_treeless_window_answers_its_batch_by_words() {
         use zerocode_core::computer_use::CLICK_NEXT_KEY;
+        use zerocode_core::computer_use_protocol::execution::InputPolicy;
         let _hand = ONE_HAND
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -24238,6 +24240,16 @@ pub(crate) mod computer_desktop_wait {
             "click", "--app", "iPhone Mirroring", "--x", "220", "--y", "120",
             "--no-screenshot", "--window-id", "33265", "--json",
         ];
+        {
+            // The default policy: input goes to the app in the background.
+            let behind = envelope(&answer_computer_command(&words(&point)));
+            assert_eq!(behind["ok"], true, "{behind}");
+            assert!(
+                behind["result"].get(CLICK_NEXT_KEY).is_none(),
+                "a background click is not sent to a click by words: {behind}"
+            );
+        }
+        let _policy = crate::computer_use::input_policy::enter(InputPolicy::SharedDesktop);
         let said = envelope(&answer_computer_command(&words(&point)));
         let next = said["result"][CLICK_NEXT_KEY].as_str().unwrap_or_default().to_string();
         assert!(next.contains("--ocr --text"), "the click says its faster road: {said}");
