@@ -2246,6 +2246,14 @@ class Receipt(LaneCase):
         self.assertIn("skipped: receipt coord-l9", log)
         self.assertIn("skipped=gate-root(receipt coord-l9", self.lane.status_line())
 
+    def test_a_gate_run_as_two_lines_is_one_receipt_that_skips_both_gates(self):
+        # t-76396: mkgate-split's coord-<label>-root and coord-<label>-zo, not a whole gate again.
+        owners = {"g1-build": "coord-l9-root", "g2-tests": "coord-l9-root", "g3-zo": "coord-l9-zo"}
+        self.assertEqual(self.cut(self.receipt(who=owners)), {}, "neither gate ran")
+        self.assertTrue(self.lane.phase("gate-root")["skipped"].startswith(
+            f"receipt coord-l9-root+coord-l9-zo of {receipt_fixture.RUN} as its jobs say"))
+        self.assertEqual(self.lane.status()["outcome"], "green")
+
     def test_a_receipt_that_covers_part_runs_only_what_it_left_owed(self):
         # 10-22's gate covered every recipe but the strict Windows checks: the lane
         # runs those alone instead of both gates whole (3168 + 1719 s for v1.1.84).
@@ -2390,8 +2398,20 @@ class Receipt(LaneCase):
                       self.lane.phase("gate-root").get("receipt", ""))
 
     def test_jobs_that_say_no_coordinator_are_refused_and_the_gates_run_whole(self):
-        # …and their `# who:` to a coordinator's coord-<label>: a worker's jobs are no landing gate.
-        self.beside(self.receipt(who="w-70906"))
+        # …and their `# who:` to a coordinator's coord-<label>: a worker's jobs are no landing gate,
+        # and (t-76396 r3) make itself seals nothing for them, so the lane has no receipt and runs whole.
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", self.GATE, who="w-70906")
+        made = subprocess.run([sys.executable, str(RELEASE / "coord_receipt.py"), "make", *map(str, jobs)],
+                              capture_output=True, text=True)
+        self.assertEqual(made.returncode, 1, made.stdout + made.stderr)
+        self.assertIn("the jobs say w-70906, not a coordinator's coord-<label>", made.stdout + made.stderr)
+        self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
+
+    def test_a_receipt_a_worker_owned_is_refused_by_the_lane_and_the_gates_run_whole(self):
+        # t-76396 r4: make refuses it, but a receipt an older make sealed still sits beside the queue; the lane reads it.
+        jobs = receipt_fixture.write_gate(Path(self._tmp), "l9", self.GATE, who="w-70906")
+        self.kept().parent.mkdir(parents=True, exist_ok=True)
+        self.kept().write_text(receipt_fixture.sealed(jobs, who="w-70906"))
         self.assertEqual(self.cut(), {"root": "all", "zo": "all"})
         self.assertIn("refused: the jobs say w-70906, not a coordinator's coord-<label>",
                       self.lane.phase("gate-root").get("receipt", ""))

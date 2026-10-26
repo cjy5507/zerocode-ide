@@ -20,7 +20,8 @@ tree and one folder it ran in, and the receipt was made after the last job ended
 must be one the build line QUEUE ran: its files sit in QUEUE's done/, and the runner's log
 there started it under its owner and last ended it with rc 0. Owner and run are only what
 the jobs say of themselves (`# who:`, `# run:`) — nothing signs them — so they are held to
-the lane's own: a coordinator's `coord-<label>` of RUN. It prints facts, one a line:
+the lane's own: a coordinator's `coord-<label>` of RUN — or, for a gate run as two lines, both
+`coord-<label>-root` and `coord-<label>-zo` of one label (printed as `who <a>+<b>`). It prints facts, one a line:
 
     who <owner> · run <run> · tree <tree> · logs <folder> · cwd <the folder the jobs ran in>
     head <sha> <the earliest end, epoch seconds, of a job on that head>
@@ -54,8 +55,9 @@ LOGGED = re.compile(r'"\$@" > (\S+)/\$key\.log ')     # where `entry()` sends ea
 IN_FOLDER = re.compile(r"cd (\S+) && just ([A-Za-z0-9_][A-Za-z0-9_-]*)")
 RECIPE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
 SHELLS = {"zsh", "bash", "sh"}
-FACTS = ("who", "run", "tree", "logs", "cwd")   # what every job of a receipt names alike
-COORDINATOR = re.compile(r"coord-[A-Za-z0-9]+")   # the coordinator's own jobs: coord-<the landing's label>
+FACTS = ("run", "tree", "logs", "cwd")   # what every job of a receipt names alike (its owner may be one of two, see COORDINATOR)
+COORDINATOR = re.compile(r"coord-([A-Za-z0-9]+)(?:-(root|zo))?")   # the coordinator's own jobs: coord-<the landing's label>, or
+                                                                    # coord-<label>-root and coord-<label>-zo for a gate run as two lines
 STARTED = re.compile(r"RUN (\S+) who=(\S*) .*")    # the runner's log: RUN <name> who=<who> lane=<n> cap=<n>s <time>
 ENDED = re.compile(r"DONE (\S+) rc=(\S+) .*")      # …and DONE <name> rc=<rc> <n>s lane=<n> <time> load=<n>
 
@@ -147,6 +149,12 @@ def job(stem):
             "head": opening[1], "tree": opening[2], "ended": ended, "entries": entries, "logs": folder, "seen": seen}
 
 
+def split_gate(owners):
+    """OWNERS are exactly the two lines of one gate, coord-<label>-root and coord-<label>-zo."""
+    found = [COORDINATOR.fullmatch(who) for who in owners]
+    return len(found) == 2 and all(found) and {one[2] for one in found} == {"root", "zo"} and found[0][1] == found[1][1]
+
+
 def agreed(jobs):
     """The owner, run, tree, logs folder and folder run in that every job names; refused when they differ."""
     if not jobs:
@@ -157,7 +165,16 @@ def agreed(jobs):
         values = sorted({one[key] for one in jobs})
         if len(values) != 1:
             raise Refused(f"the jobs name more than one {key}: {' '.join(values)}")
-    return {key: jobs[0][key] for key in FACTS}
+    for one in jobs:   # a job's own owner is one name: a "+" would make the joined owners look like a pair
+        if "+" in one["who"]:
+            raise Refused(f"job {one['name']}'s owner {one['who']} joins owners with +")
+    owners = sorted({one["who"] for one in jobs})
+    for who in owners:   # every raw owner is a coordinator's name before the owners are counted or paired: one worker owning any job is no receipt
+        if not COORDINATOR.fullmatch(who):
+            raise Refused(f"the jobs say {who}, not a coordinator's coord-<label>")
+    if len(owners) > 1 and not split_gate(owners):
+        raise Refused(f"the jobs name more than one who: {' '.join(owners)}")
+    return {"who": "+".join(owners), **{key: jobs[0][key] for key in FACTS}}
 
 
 def on_the_line(jobs, queue):
@@ -181,10 +198,10 @@ def on_the_line(jobs, queue):
 
 
 def held_to(facts, run):
-    """The jobs say they are a coordinator's (coord-<label>) of RUN, the lane's own run."""
+    """The jobs say they are a coordinator's (coord-<label>, or its -root and -zo lines) of RUN, the lane's own run."""
     if facts["run"] != run:
         raise Refused(f"the jobs say run {facts['run']}, not {run}")
-    if not COORDINATOR.fullmatch(facts["who"]):
+    if not all(COORDINATOR.fullmatch(who) for who in facts["who"].split("+")):
         raise Refused(f"the jobs say {facts['who']}, not a coordinator's coord-<label>")
 
 

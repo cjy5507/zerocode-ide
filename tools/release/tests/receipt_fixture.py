@@ -22,7 +22,7 @@ FIRST_JOB = 1792610090   # the build line names a job by the second it was made
 
 def write_gate(root, label, jobs, head=HEAD, tree=TREE, run=RUN, who=None, rc=None, cwd=None):
     """JOBS: {name: [(key, command, rc), ...]} -> the .job paths, in order. RC: {name: the job's rc file}.
-    CWD: the folder the jobs ran in — by default the top of the gate's checkout, which holds its .git."""
+    WHO: one owner for every job, or {name: owner} (a gate run as two lines). CWD: the folder the jobs ran in — by default the top of the gate's checkout, which holds its .git."""
     root = Path(root)
     queue, logs, top = root / "build-queue", root / "gates" / label, root / "coord-gate"
     (queue / "done").mkdir(parents=True, exist_ok=True)
@@ -30,9 +30,11 @@ def write_gate(root, label, jobs, head=HEAD, tree=TREE, run=RUN, who=None, rc=No
     (top / ".git").mkdir(parents=True, exist_ok=True)
     cwd = Path(cwd) if cwd is not None else top
     cwd.mkdir(parents=True, exist_ok=True)
-    who = who or f"coord-{label}"
+    owners = who if isinstance(who, dict) else {}
+    default_who = who if isinstance(who, str) else f"coord-{label}"
     paths, ran = [], []
     for n, (name, entries) in enumerate(jobs.items()):
+        who = owners.get(name, default_who)
         stem = queue / "done" / f"0-{FIRST_JOB + n}-coord-{label}-{name}"
         bad = sum(1 for _, _, code in entries if code != 0)
         body = [

@@ -21,6 +21,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import receipt_fixture
@@ -182,11 +183,13 @@ class Refusing(ReceiptCase):
         self.assertIn("more than one tree", self.refused(lambda: coord_receipt.make(jobs)))
 
     def test_jobs_of_two_owners_runs_or_folders_are_refused(self):
-        for key, value in (("who", "w-70906"), ("run", "run-1"), ("cwd", self.tmp / "coord-gate" / "zo-ide")):
+        for key, value, why in (("who", "w-70906", "the jobs say w-70906, not a coordinator's coord-<label>"),
+                                ("run", "run-1", "more than one run"),
+                                ("cwd", self.tmp / "coord-gate" / "zo-ide", "more than one cwd")):
             with self.subTest(key=key):
                 jobs = self.gate({"g1": [("pii-check", "just pii-check", 0)]})
                 jobs += receipt_fixture.write_gate(self.tmp, "l9", {"g2": [("test", "just test", 0)]}, **{key: value})
-                self.assertIn(f"more than one {key}", self.refused(lambda: coord_receipt.make(jobs)))
+                self.assertIn(why, self.refused(lambda: coord_receipt.make(jobs)))
 
     def test_a_job_that_names_no_folder_is_refused(self):
         jobs = self.gate()
@@ -244,6 +247,100 @@ class Refusing(ReceiptCase):
                 self.refused(lambda: self.facts(receipt))
 
 
+SPLIT = {"g1-build": [("pii-check", "just pii-check", 0)],
+         "g3a-zo-lint": [("zo-fmt-check", "zsh -c 'cd zo-ide && just fmt-check'", 0)]}
+
+
+class SplitGate(ReceiptCase):
+    """t-76396: a gate run as two lines (mkgate-split) has two owners, coord-<label>-root and
+    coord-<label>-zo; the lane takes them as one receipt, and nothing looser."""
+
+    def split(self, root="coord-l9-root", zo="coord-l9-zo", **kw):
+        return self.gate(SPLIT, who={"g1-build": root, "g3a-zo-lint": zo}, **kw)
+
+    def test_the_root_and_zo_lines_of_one_label_are_one_receipt(self):
+        said = self.read_cli(self.made(self.split()), "--dir", ".")
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+        lines = said.stdout.splitlines()
+        self.assertIn("who coord-l9-root+coord-l9-zo", lines)
+        self.assertIn(f"run {RUN}", lines)
+        self.assertIn("recipe pii-check", lines)
+
+    def test_each_line_must_have_ended_green_under_its_own_owner(self):
+        receipt = self.made(self.split())
+        runner = self.tmp / "build-queue" / "runner.log"
+        name = f"0-{FIRST_JOB + 1}-coord-l9-g3a-zo-lint"
+        runner.write_text(runner.read_text().replace(f"RUN {name} who=coord-l9-zo", f"RUN {name} who=coord-l9-root"))
+        said = self.read_cli(receipt)
+        self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
+        self.assertIn(f"runner.log never ended job {name} green under coord-l9-zo", said.stdout)
+
+    def test_owners_other_than_the_two_lines_of_one_label_are_refused(self):
+        for case, root, zo in (("two labels", "coord-l9-root", "coord-l10-zo"),
+                               ("a plain owner and a line", "coord-l9", "coord-l9-zo"),
+                               ("the same line twice over two names", "coord-l9-zo", "coord-l9-zo+"),
+                               ("a third kind of line", "coord-l9-root", "coord-l9-web"),
+                               ("not a coordinator", "coord-l9-root", "w-70906"),
+                               ("one line named twice with another label", "coord-l9-root", "coord-l9-root-zo")):
+            with self.subTest(case=case):
+                with self.assertRaises(coord_receipt.Refused):
+                    coord_receipt.make(self.split(root, zo))
+                shutil.rmtree(self.tmp / "build-queue")
+
+    def test_a_single_line_owner_still_stands_alone_but_must_be_a_coordinator(self):
+        said = self.read_cli(self.made(self.gate(SPLIT, who="coord-l9-zo")))
+        self.assertEqual(said.returncode, 0, said.stdout + said.stderr)
+
+    def test_make_refuses_owners_that_are_not_coordinators_even_when_every_job_names_the_same_one(self):
+        """t-76396 r3: one non-coordinator owner skipped the pair check, so make sealed a receipt only read refused."""
+        for case, who in (("every job one worker", {"g1-build": "w-70906", "g3a-zo-lint": "w-70906"}),
+                          ("a plain worker for all", "w-70906")):
+            with self.subTest(case=case):
+                self.assertIn("coordinator", self.refused(lambda: coord_receipt.make(self.gate(SPLIT, who=who))))
+                shutil.rmtree(self.tmp / "build-queue")
+
+    def test_read_refuses_a_receipt_a_worker_owned_that_an_older_make_sealed(self):
+        """t-76396 r4: make now refuses these, so the reader's own refusal is pinned on a receipt built by hand."""
+        jobs = self.gate(SPLIT, who="w-70906")
+        receipt = self.tmp / "receipt.json"
+        receipt.write_text(receipt_fixture.sealed(jobs, who="w-70906"))
+        said = self.read_cli(receipt)
+        self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
+        self.assertIn("the jobs say w-70906, not a coordinator's coord-<label>", said.stdout)
+
+    def test_a_mixed_non_coordinator_owner_is_refused_before_any_pair_check(self):
+        """t-76396 r4: each owner is a coordinator's name before the owners are counted or paired."""
+        for case, root, zo in (("worker beside a line", "coord-l9-root", "w-70906"),
+                               ("worker beside a plain coordinator", "coord-l9", "w-70906")):
+            with self.subTest(case=case):
+                with mock.patch.object(coord_receipt, "split_gate", side_effect=AssertionError("pair check reached")):
+                    said = self.refused(lambda: coord_receipt.make(self.split(root, zo)))
+                self.assertIn("the jobs say w-70906, not a coordinator's coord-<label>", said)
+                shutil.rmtree(self.tmp / "build-queue")
+
+    def test_a_plus_in_one_jobs_owner_is_refused_so_no_bundle_skips_the_pair_check(self):
+        """t-76396 r2: an owner that is itself coord-a+coord-b made the joined name look like two owners."""
+        for case, root, zo in (("a root-and-zo bundle on both", "coord-l9-root+coord-l10-zo", "coord-l9-root+coord-l10-zo"),
+                               ("a three-label bundle on both", "coord-l9+coord-l10+coord-l11", "coord-l9+coord-l10+coord-l11"),
+                               ("a bundle beside a plain line", "coord-l9-root+coord-l10-zo", "coord-l9-zo")):
+            with self.subTest(case=case):
+                self.assertIn("+", self.refused(lambda: coord_receipt.make(self.split(root, zo))))
+                shutil.rmtree(self.tmp / "build-queue")
+        for case, who in (("one job", "coord-l9-root+coord-l10-zo"), ("every job", "coord-l9+coord-l10+coord-l11")):
+            with self.subTest(case=case):
+                self.refused(lambda: coord_receipt.make(self.gate(SPLIT, who=who)))
+                shutil.rmtree(self.tmp / "build-queue")
+
+    def test_the_two_lines_of_one_label_and_one_plain_owner_still_make_a_receipt(self):
+        self.assertEqual(coord_receipt.make(self.split())["who"], "coord-l9-root+coord-l9-zo")
+        shutil.rmtree(self.tmp / "build-queue")
+        self.assertEqual(coord_receipt.make(self.gate(SPLIT, who="coord-l9"))["who"], "coord-l9")
+
+    def test_the_run_is_still_the_lanes_for_both_lines(self):
+        said = self.read_cli(self.made(self.split(run="run-11955")))
+        self.assertIn("the jobs say run run-11955, not run-4275", said.stdout)
+
+
 class OnTheLine(ReceiptCase):
     """ZO's review of t-47516, P2-1: the receipt's evidence is only words the jobs wrote, so
     the reader holds every job to the build line that ran it and to the coordinator's run.
@@ -286,12 +383,11 @@ class OnTheLine(ReceiptCase):
         self.assertIn("runner.log is missing", self.read_cli(receipt).stdout)
 
     def test_jobs_that_say_another_run_or_no_coordinator_are_refused(self):
-        for key, value, why in (("run", "run-11955", "the jobs say run run-11955, not run-4275"),
-                                ("who", "w-70906", "the jobs say w-70906, not a coordinator's coord-<label>")):
-            with self.subTest(key=key):
-                said = self.read_cli(self.made(self.gate(**{key: value})))
-                self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
-                self.assertIn(why, said.stdout)
+        said = self.read_cli(self.made(self.gate(run="run-11955")))
+        self.assertEqual(said.returncode, 1, said.stdout + said.stderr)
+        self.assertIn("the jobs say run run-11955, not run-4275", said.stdout)
+        self.assertIn("not a coordinator's coord-<label>", self.refused(lambda: coord_receipt.make(self.gate(who="w-70906"))))
+        shutil.rmtree(self.tmp / "build-queue")
         said = self.read_cli(self.made(self.gate()), run="run-1")
         self.assertIn("the jobs say run run-4275, not run-1", said.stdout, "the run is the lane's, not the receipt's")
 
