@@ -706,7 +706,7 @@ const modelConnectionsController = {
     input.addEventListener("change", () => onPick?.(role, row));
     const copy = modelNode("span", "model-pick-copy");
     copy.append(modelNode("span", "model-pick-name", current ? t("settings.models.current", "{{name}} (지금 사용 중)", { name: row.name }) : row.name),
-      modelNode("span", "model-pick-way", row.way ?? this.codingWay(row)));
+      ...(row.way ? [modelNode("span", "model-pick-way", row.way)] : []));
     if (why) copy.append(modelNode("span", "model-pick-why", why));
     label.append(input, copy);
     if (state) label.append(state);
@@ -987,7 +987,7 @@ const modelConnectionsController = {
     const steps = modelNode("ol", "model-steps");
     steps.setAttribute("aria-label", t("settings.models.stepsLabel", "단계"));
     for (const [at, word] of [[1, t("settings.models.step1", "연결 고르기")], [2, t("settings.models.step2", "연결 확인")], [3, t("settings.models.step3", "추천대로 쓰기")]]) {
-      const item = modelNode("li", at === step ? "is-now" : "", word);
+      const item = modelNode("li", at === step ? "is-now" : "", `${at}. ${word}`);
       if (at === step) item.setAttribute("aria-current", "step");
       steps.append(item);
     }

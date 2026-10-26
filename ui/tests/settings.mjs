@@ -14338,6 +14338,15 @@ async function modelScenePictures(name) {
       assert(scroll <= 1, `${name} ${theme} ${width}px scrolls sideways`, scroll);
       if (process.env.MODEL_SCENE_SHOTS) {
         await mkdir(process.env.MODEL_SCENE_SHOTS, { recursive: true });
+        // The pane scrolls inside the settings frame: the window is made as
+        // tall as the pane's content so the picture holds all of it.
+        const tall = await pane.evaluate((root) => {
+          const frame = root.closest(".settings-frame") ?? root.parentElement;
+          frame.scrollTop = 0;
+          return Math.ceil(frame.scrollHeight + frame.getBoundingClientRect().top + 16);
+        });
+        await pageA.setViewportSize({ width, height: Math.min(6000, Math.max(900, tall)) });
+        await settlePaint(pageA);
         await pane.screenshot({ path: resolve(process.env.MODEL_SCENE_SHOTS, `${name}-${theme}-${width}.png`), animations: "disabled" });
       }
     }
@@ -14406,6 +14415,10 @@ if (process.env.MODEL_REAL_ZO) await test("이 기계의 zo 목록: 구현된 �
   await pageA.locator("#model-judgment [data-model-logins] summary").click();
   const logins = await pageA.locator("#model-judgment [data-model-logins] .model-pick-name").count();
   assertEqual(logins, models, "the judgment list does not name every login model");
+  await modelScenePictures("real-judgment-list");
+  await pageA.click('[data-model-change="judgment"]');
+  await pageA.click('[data-model-change="coding"]');
+  await modelScenePictures("real-coding-list");
   return `zoModels ${models} · zoCustomModels ${routers} · codingRows ${rows.length} · judgeLoginExpanded ${logins} · olderGeneration ${rows.filter((row) => row.old).length}`;
 }));
 
