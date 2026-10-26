@@ -65,6 +65,7 @@ pub fn slot_holds_literal_secret(name: &str, value: &str) -> bool {
     zerocode_core::credential::names_a_credential(name)
         && !value.trim().is_empty()
         && !zerocode_core::credential::is_reference_value(value)
+        && crate::mcp_references::reference_shape(value) == ReferenceShape::Plain
 }
 
 /// The slots of the document at `path` that hold a credential written out. A
@@ -165,6 +166,9 @@ fn move_with(
         .map_err(|_| "another process is writing the settings file; nothing was written.".to_string())?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err("the settings file is a link; edit it by hand where it points.".to_string());
+        }
         Ok(_) => return Err("the settings file is not a regular file; nothing was written.".to_string()),
         Err(_) => return Err("the settings file could not be read.".to_string()),
     }
@@ -185,7 +189,7 @@ fn move_with(
     if zerocode_core::credential::is_reference_value(literal_text) {
         return Err("the slot already holds a reference; nothing was written.".to_string());
     }
-    match ReferenceShape::Plain {
+    match crate::mcp_references::reference_shape(literal_text) {
         ReferenceShape::Whole | ReferenceShape::Defaulted => {
             return Err("the slot already holds a reference; nothing was written.".to_string());
         }
@@ -226,9 +230,9 @@ fn move_with(
             return Err(why);
         }
     };
+    prepared();
     let unchanged = checked.still_holds(path, workspace)
         && std::fs::read(path).ok().as_deref() == Some(before.as_slice());
-    prepared();
     if !unchanged {
         let _ = std::fs::remove_file(&temp);
         let _ = std::fs::remove_file(&backup);

@@ -74,10 +74,7 @@ impl McpClientBootstrap {
             signature: mcp_server_signature(&config.config),
             transport: McpClientTransport::from_config(&config.config),
             is_project_scoped: config.scope == ConfigSource::Project,
-            keychain_grant: config
-                .keychain_grant
-                .clone()
-                .or_else(|| (config.scope == ConfigSource::User).then(PathBuf::new)),
+            keychain_grant: config.keychain_grant.clone(),
         }
     }
 }

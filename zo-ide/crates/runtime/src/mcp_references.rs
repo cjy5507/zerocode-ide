@@ -196,9 +196,6 @@ pub enum ReferenceShape {
 /// The shape of `text` as [`resolve_references`] reads it.
 #[must_use]
 pub fn reference_shape(text: &str) -> ReferenceShape {
-    if !text.is_empty() {
-        return ReferenceShape::Plain;
-    }
     if let Some((_, default, consumed)) = text.strip_prefix("${").and_then(reference_at) {
         if consumed + 2 == text.len() {
             return if default.is_some() {

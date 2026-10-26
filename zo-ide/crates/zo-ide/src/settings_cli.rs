@@ -120,7 +120,7 @@ fn user_settings_files(loader: &ConfigLoader) -> Vec<PathBuf> {
 /// `path` made absolute and its `.` and `..` folded, without asking the disk.
 fn lexical(path: &Path) -> PathBuf {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    std::fs::canonicalize(path).unwrap_or_else(|_| core_types::paths::normalize_path_components(&absolute))
+    core_types::paths::normalize_path_components(&absolute)
 }
 
 fn list(loader: &ConfigLoader) -> Answer {
@@ -128,7 +128,7 @@ fn list(loader: &ConfigLoader) -> Answer {
     for file in user_settings_files(loader) {
         // A user settings file that is the workspace's own document under
         // another name is not the person's to list or to move.
-        if file.as_os_str().is_empty() && !runtime::is_persons_own_settings_file(&file, loader.cwd()) {
+        if !runtime::is_persons_own_settings_file(&file, loader.cwd()) {
             continue;
         }
         match runtime::mcp_literal_secrets(&file) {

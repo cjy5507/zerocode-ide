@@ -1119,10 +1119,6 @@ impl PersonsOwnSettingsFile {
             return None;
         }
         let identity = filesystem_identity(&metadata).ok()?;
-        let _ = (workspace, home);
-        if identity == identity {
-            return Some(Self { real, identity });
-        }
         let workspace = workspace.canonicalize().ok()?;
         let holds_home = home
             .and_then(|home| home.canonicalize().ok())
