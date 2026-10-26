@@ -17,7 +17,8 @@
 //! which pane holds it; the webview keeps no second copy of the rule.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use zerocode_core::{ConversationKey, ProviderSession};
@@ -162,7 +163,15 @@ impl WakeRoad {
 /// then on.
 pub(crate) struct WakeClaims {
     waking: Mutex<Vec<(ConversationKey, TermId)>>,
+    /// Rung whenever a wake settles, for a door waiting on it ([`Self::claim_settled`]).
+    settled: Condvar,
 }
+
+/// How long a door waits for a wake already in flight on its conversation
+/// to settle before it is told that wake's pane holds it (t-76434): a zo
+/// resume's own channel waits twenty seconds, and the last window's leftover
+/// it may end first five more (`pane_leftovers::BOOT_PLAN`).
+pub(crate) const WAKE_IN_FLIGHT_PATIENCE: Duration = Duration::from_secs(30);
 
 /// The window's one set: one process, one set of panes — the same reason the
 /// keychain's write lock is process-wide.
@@ -172,6 +181,7 @@ impl WakeClaims {
     pub(crate) const fn new() -> Self {
         Self {
             waking: Mutex::new(Vec::new()),
+            settled: Condvar::new(),
         }
     }
 
@@ -185,9 +195,39 @@ impl WakeClaims {
         term: TermId,
         holder: impl FnOnce(&ConversationKey) -> Option<TermId>,
     ) -> Result<WakeClaim<'_>, TermId> {
+        self.claim_settled(wanted, term, holder, Duration::ZERO)
+    }
+
+    /// [`Self::claim`], but a wake in flight on `wanted` is waited out for up
+    /// to `patience` first (t-76434): the door is told that wake's pane holds
+    /// the conversation only if it still does once the wake settles. On
+    /// 2026-10-26 a restored leaf asked for the zo coordinator while term 4's
+    /// wake was opening it, was told term 4 held it and stood a plain shell;
+    /// half a second later term 4 died at a leftover's writer lease, and the
+    /// conversation stood nowhere.
+    pub(crate) fn claim_settled(
+        &self,
+        wanted: ConversationKey,
+        term: TermId,
+        holder: impl FnOnce(&ConversationKey) -> Option<TermId>,
+        patience: Duration,
+    ) -> Result<WakeClaim<'_>, TermId> {
+        let until = Instant::now() + patience;
         let mut waking = self.waking.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((_, first)) = waking.iter().find(|(held, _)| *held == wanted) {
-            return Err(*first);
+        while let Some(first) = waking
+            .iter()
+            .find(|(held, _)| *held == wanted)
+            .map(|(_, first)| *first)
+        {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(first);
+            }
+            waking = self
+                .settled
+                .wait_timeout(waking, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
         }
         if let Some(standing) = holder(&wanted) {
             return Err(standing);
@@ -215,6 +255,7 @@ impl Drop for WakeClaim<'_> {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .retain(|(held, term)| !(*held == self.wanted && *term == self.term));
+        self.claims.settled.notify_all();
     }
 }
 
@@ -263,7 +304,9 @@ pub(crate) fn claim_among(
     let Some(wanted) = zerocode_core::conversation_key(agent, session) else {
         return Ok(None);
     };
-    WAKES.claim(wanted, term, holder).map(Some)
+    WAKES
+        .claim_settled(wanted, term, holder, WAKE_IN_FLIGHT_PATIENCE)
+        .map(Some)
 }
 
 /// The live pane holding `wanted`, if one does: a pane that reported it and
@@ -329,6 +372,55 @@ mod tests {
             claims.claim(key(ZO, HELD), 6, |_| None).is_ok(),
             "a wake that ended holds nothing — its failure must not lock the \
              conversation out"
+        );
+    }
+
+    /// t-76434, 2026-10-26 as the window lived it: term 3's leaf asked for
+    /// the zo coordinator while term 4's wake was opening it. A door that
+    /// waits on a wake in flight is told that wake's pane holds the
+    /// conversation only if it does once the wake settles: a wake refused at
+    /// its spawn leaves it free, and the door that waited opens it itself; a
+    /// wake that opened it answers its pane. With no patience the door is
+    /// told at once, as before.
+    #[test]
+    fn a_door_waiting_on_a_refused_wake_opens_the_conversation_itself() {
+        static CLAIMS: WakeClaims = WakeClaims::new();
+        let patience = Duration::from_secs(5);
+        let refused = CLAIMS
+            .claim(key(ZO, HELD), 4, |_| None)
+            .expect("term 4's wake claims the conversation");
+        assert_eq!(
+            CLAIMS.claim(key(ZO, HELD), 3, |_| None).err(),
+            Some(4),
+            "no patience is told at once"
+        );
+        let leaf = std::thread::spawn(move || {
+            CLAIMS
+                .claim_settled(key(ZO, HELD), 3, |_| None, patience)
+                .map(|claim| claim.term)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        drop(refused);
+        assert_eq!(
+            leaf.join().expect("the leaf's door"),
+            Ok(3),
+            "the leaf stood a plain shell over a wake that was refused"
+        );
+
+        let opened = CLAIMS
+            .claim(key(ZO, HELD), 5, |_| None)
+            .expect("term 5's wake claims it");
+        let leaf = std::thread::spawn(move || {
+            CLAIMS
+                .claim_settled(key(ZO, HELD), 6, |_| Some(5), patience)
+                .map(|claim| claim.term)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        drop(opened);
+        assert_eq!(
+            leaf.join().expect("the second leaf's door"),
+            Err(5),
+            "a wake that opened the conversation holds it"
         );
     }
 

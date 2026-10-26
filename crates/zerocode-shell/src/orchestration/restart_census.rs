@@ -151,14 +151,15 @@ const TAB_KEY_PREFIX: &str = "tab:";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RestartCensus {
     pub(crate) workers: Vec<WorkerCut>,
-    /// Every run's coordinator seated here (t-11537). Not counted in
-    /// [`Self::busy`]: the restart question is about work a restart cuts,
-    /// and a coordinator's pane is the person's conversation — its wake reads
-    /// its entry, and nothing asks the person about it.
+    /// Every run's coordinator seated here (t-11537), by its turn alone. A
+    /// turn under way or stopped at a question is busy to a restart
+    /// ([`Busy::conversations`], t-76434): on 2026-10-26 22:56 the update
+    /// toast went `choice unasked` over four coordinators whose turns were
+    /// running, and the three zo processes among them outlived the window.
     pub(crate) coordinators: Vec<KeyedCut>,
     /// Every other pane holding a conversation this window knows — a
-    /// person's own tab (t-11537 C) — by its turn alone, and outside
-    /// [`Self::busy`] for the same reason.
+    /// person's own tab (t-11537 C) — by its turn alone, counted the same
+    /// way.
     pub(crate) tabs: Vec<KeyedCut>,
     /// What the reading cost, for the goodbye's line.
     pub(crate) took_ms: u64,
@@ -177,13 +178,21 @@ pub(crate) struct Busy {
     pub(crate) background: usize,
     /// Workers the window could not read: never heard, or no table.
     pub(crate) unknown: usize,
+    /// Conversations whose turn is under way or stopped at a question — a
+    /// run's coordinator or a person's tab (t-76434). Read by their turn
+    /// alone: a pane that never reported is not counted, since a person's
+    /// tab whose agent runs no hooks would otherwise ask at every restart.
+    #[serde(default)]
+    pub(crate) conversations: usize,
     /// Commands running under every worker's pane, whatever its turn —
     /// what 「끝나면」 waits out.
     pub(crate) running: usize,
     /// The first gap 「끝나면」 leaves at: nothing runs under any worker's
-    /// pane and nothing is unread. A turn under way with nothing running
-    /// under it is a gap — the cut is its reply in flight, which the
-    /// restart nudge picks up; a command cut is work done again.
+    /// pane, nothing is unread, and no conversation is in a turn. A worker's
+    /// turn under way with nothing running under it is a gap — the cut is
+    /// its reply in flight, which the restart nudge picks up; a command cut
+    /// is work done again. A conversation's commands are not read, so its
+    /// turn is waited out whole (t-76434).
     pub(crate) gap: bool,
 }
 
@@ -196,6 +205,7 @@ impl Default for Busy {
             turning: 0,
             background: 0,
             unknown: 0,
+            conversations: 0,
             running: 0,
             gap: true,
         }
@@ -218,10 +228,17 @@ impl RestartCensus {
             }
             said.running += one.commands.as_ref().map_or(0, Vec::len);
         }
-        said.busy = said.turning + said.unknown + said.background > 0;
-        said.gap = self.workers.iter().all(|one| {
-            one.turn != Turn::Unheard && one.commands.as_ref().is_some_and(Vec::is_empty)
-        });
+        said.conversations = self
+            .coordinators
+            .iter()
+            .chain(&self.tabs)
+            .filter(|one| matches!(one.turn, Turn::Running | Turn::Asking))
+            .count();
+        said.busy = said.turning + said.unknown + said.background + said.conversations > 0;
+        said.gap = said.conversations == 0
+            && self.workers.iter().all(|one| {
+                one.turn != Turn::Unheard && one.commands.as_ref().is_some_and(Vec::is_empty)
+            });
         said
     }
 }
@@ -735,12 +752,13 @@ pub(crate) fn goodbye_lines(road: &str, choice: &str, census: &RestartCensus) ->
     let busy = census.busy();
     let mut lines = vec![format!(
         "exit by {road} · workers {} · mid-turn {} · background {} · running {} · unknown {} · \
-         busy {} · choice {choice} · census {} ms",
+         conversations {} · busy {} · choice {choice} · census {} ms",
         busy.workers,
         busy.turning,
         busy.background,
         busy.running,
         busy.unknown,
+        busy.conversations,
         if busy.busy { "yes" } else { "no" },
         census.took_ms
     )];
@@ -850,6 +868,82 @@ mod tests {
         assert!(census(Vec::new()).gap);
         let idle = census(vec![worker(Turn::Rest, Some(&[]))]);
         assert!(idle.gap && !idle.busy);
+    }
+
+    fn keyed(key: &str, term: u32, turn: Turn) -> KeyedCut {
+        KeyedCut {
+            key: key.to_string(),
+            term,
+            turn,
+        }
+    }
+
+    /// t-76434, 2026-10-26 22:56:34 as the window lived it: one worker at
+    /// rest with nothing under it, and four coordinators whose turns were
+    /// running — `busy no · choice unasked`, and the update toast restarted
+    /// without a word over them. A conversation in a turn, or stopped at a
+    /// question, is busy; one at rest, interrupted or never heard is not —
+    /// and nobody busy still asks nothing.
+    #[test]
+    fn a_conversation_in_a_turn_is_busy_to_a_restart() {
+        let census = |coordinators: Vec<KeyedCut>, tabs: Vec<KeyedCut>| {
+            RestartCensus {
+                workers: vec![worker(Turn::Rest, Some(&[]))],
+                coordinators,
+                tabs,
+                took_ms: 0,
+            }
+            .busy()
+        };
+        let lived = census(
+            vec![
+                keyed("run:run-4275", 3, Turn::Rest),
+                keyed("run:run-11955", 4, Turn::Running),
+                keyed("run:run-53371", 1, Turn::Running),
+                keyed("run:run-75995", 2, Turn::Running),
+                keyed("run:run-76398", 6, Turn::Running),
+            ],
+            vec![keyed("tab:x", 21, Turn::Rest)],
+        );
+        assert!(lived.busy, "{lived:?}");
+        assert_eq!(lived.conversations, 4);
+        assert_eq!(
+            (lived.turning, lived.unknown),
+            (0, 0),
+            "workers are counted apart"
+        );
+        assert!(
+            !lived.gap,
+            "「끝나면」 left while four conversations were mid-turn"
+        );
+        let asking_tab = census(Vec::new(), vec![keyed("tab:y", 9, Turn::Asking)]);
+        assert!(
+            asking_tab.busy && asking_tab.conversations == 1,
+            "{asking_tab:?}"
+        );
+        let quiet = census(
+            vec![
+                keyed("run:a", 3, Turn::Rest),
+                keyed("run:b", 4, Turn::Interrupted),
+            ],
+            vec![keyed("tab:z", 5, Turn::Unheard)],
+        );
+        assert!(!quiet.busy && quiet.gap, "{quiet:?}");
+        assert_eq!(quiet.conversations, 0);
+        assert_eq!(
+            goodbye_lines(
+                "restart:update-toast",
+                "unasked",
+                &RestartCensus {
+                    workers: Vec::new(),
+                    coordinators: vec![keyed("run:run-11955", 4, Turn::Running)],
+                    tabs: Vec::new(),
+                    took_ms: 0,
+                }
+            )[0],
+            "exit by restart:update-toast · workers 0 · mid-turn 0 · background 0 · running 0 · \
+             unknown 0 · conversations 1 · busy yes · choice unasked · census 0 ms"
+        );
     }
 
     /// Nobody asleep: what an older goodbye owed is nobody's.
@@ -1419,7 +1513,7 @@ mod tests {
         assert_eq!(
             lines[0],
             "exit by close · workers 2 · mid-turn 1 · background 1 · running 1 · unknown 0 · \
-             busy yes · choice gap · census 38 ms"
+             conversations 0 · busy yes · choice gap · census 38 ms"
         );
         assert_eq!(
             lines[1],
@@ -1435,7 +1529,7 @@ mod tests {
             goodbye_lines("terminate", "unasked", &RestartCensus::default()),
             vec![
                 "exit by terminate · workers 0 · mid-turn 0 · background 0 · running 0 · unknown 0 · \
-                 busy no · choice unasked · census 0 ms"
+                 conversations 0 · busy no · choice unasked · census 0 ms"
                     .to_string()
             ]
         );

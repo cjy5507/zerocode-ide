@@ -15217,7 +15217,7 @@ fn a_stand_in_pane_says_what_it_stands_in_for_and_how_to_go_on() {
         transcript_path: None,
     };
     let spelled = |agent: &str, id: &str, folder: Option<&str>| {
-        cmd::board::spelled_resume(agent, &session(id), folder.map(std::path::Path::new))
+        cmd::board::spelled_resume(agent, &session(id), folder.map(std::path::Path::new), None)
     };
     // Unix only: the line is a POSIX one (`cd … && …`) and its folder must be
     // made of plain shell words, which a Windows path (`C:\…`) is not — it is
@@ -15225,12 +15225,28 @@ fn a_stand_in_pane_says_what_it_stands_in_for_and_how_to_go_on() {
     if cfg!(unix) {
         assert_eq!(
             spelled("zo", "session-1790551803628-0", Some("/Users/dev/work")).as_deref(),
-            Some("cd /Users/dev/work && zo --resume session-1790551803628-0")
+            Some(
+                "cd /Users/dev/work && zo --permission-mode danger-full-access \
+                 --resume session-1790551803628-0"
+            )
         );
     }
+    // The launch the pane's own resume carries — the permission mode above
+    // all (t-76434): a bare `zo --resume` typed by hand came back asking
+    // before every tool. A person's stored words ride in place of the
+    // defaults, a word a shell would read as syntax quoted.
     assert_eq!(
         spelled("claude", "3f1e2d4c-0000-4000-8000-00000000c1a0", None).as_deref(),
-        Some("claude --resume 3f1e2d4c-0000-4000-8000-00000000c1a0")
+        Some("claude --dangerously-skip-permissions --resume 3f1e2d4c-0000-4000-8000-00000000c1a0")
+    );
+    let manual = zerocode_core::LaunchOverride {
+        args: Some("--permission-mode workspace-write --name 'my pane'".to_string()),
+        ..zerocode_core::LaunchOverride::default()
+    };
+    assert_eq!(
+        cmd::board::spelled_resume("zo", &session("session-1790551803628-0"), None, Some(&manual))
+            .as_deref(),
+        Some("zo --permission-mode workspace-write --name 'my pane' --resume session-1790551803628-0")
     );
     // An id is resumed as one argv element, where a space or a `;` is inert;
     // a line a person copies into a shell is parsed, so no such word is ever

@@ -434,6 +434,31 @@ export async function testRestartNotice({ browser, origin, ok, faults }) {
       for (const note of document.querySelectorAll(".toast")) note.remove();
     });
 
+    /* ④b — t-76434: no worker busy, four coordinators mid-turn (2026-10-26
+     * 22:56, `choice unasked`). The door asks, and the question names them. */
+    await page.evaluate(() => {
+      window.__CENSUS__ = { busy: true, workers: 1, turning: 0, background: 0, unknown: 0, conversations: 4, running: 0, gap: false };
+      window.__ROAD__ = [];
+      void askBeforeRestart("update-toast");
+    });
+    await page.waitForTimeout(150);
+    const talking = await page.evaluate(() => ({
+      questioned: !document.getElementById("ask-scrim").hidden,
+      body: document.getElementById("ask-scrim").textContent ?? "",
+      want: t("exit.busyConversations", "턴 중인 대화 {{n}}개", { n: 4 }),
+      road: window.__ROAD__.map(([kind]) => kind),
+    }));
+    if (talking.questioned) await press("#ask-cancel").catch(() => false);
+    await page.evaluate(() => {
+      document.getElementById("ask-scrim").hidden = true;
+      for (const note of document.querySelectorAll(".toast")) note.remove();
+    });
+    ok(
+      "a restart over conversations mid-turn and no busy worker asks first, and its question says 「턴 중인 대화 4개」 — it no longer goes unasked (t-76434)",
+      talking.questioned && talking.body.includes(talking.want) && !talking.road.includes("now"),
+      JSON.stringify(talking),
+    );
+
     /* ⑤ — the window a restart started says which build it came back as, once. */
     const back = await page.evaluate(async () => {
       const said = () => [...document.querySelectorAll(".toast")]
@@ -470,7 +495,7 @@ export async function testRestartNotice({ browser, origin, ok, faults }) {
 
     /* ⑥ — the new words in every catalogue. */
     const langs = await page.evaluate(() => {
-      const KEYS = ["exit.noticeTo", "exit.notice", "exit.noticeHeld", "exit.backTo", "exit.backToBuild", "exit.back"];
+      const KEYS = ["exit.noticeTo", "exit.notice", "exit.noticeHeld", "exit.backTo", "exit.backToBuild", "exit.back", "exit.busyConversations"];
       const found = {};
       for (const code of ["en", "ja", "zh", "es"]) {
         found[code] = KEYS.filter((key) => typeof CATALOG[code]?.[key] !== "string");

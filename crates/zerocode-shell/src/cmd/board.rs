@@ -1365,7 +1365,15 @@ pub(crate) fn resume_line(
     let folder = worktree
         .as_deref()
         .and_then(|named| wake_root(state.inner(), Some(named)).ok());
-    spelled_resume(&agent, &session, folder.as_deref())
+    let launch_override = stored_launch_override(state.settings(), &agent)
+        .ok()
+        .flatten();
+    spelled_resume(
+        &agent,
+        &session,
+        folder.as_deref(),
+        launch_override.as_ref(),
+    )
 }
 
 /// The longest word [`spelled_resume`] will put on a line a person types.
@@ -1389,10 +1397,20 @@ fn plain_shell_word(word: &str) -> bool {
 
 /// The resume a person types for `session`, from `folder` when one is known —
 /// every word plainly safe ([`plain_shell_word`]), or no line at all.
+///
+/// It carries the launch the pane's own resume carries ([`resume_command`]'s
+/// base: the person's stored launch words, or the agent's defaults, without
+/// the row's own selectors) — the permission mode above all (t-76434): on
+/// 2026-10-26 the person reopened a zo coordinator by hand after a restart,
+/// and a bare `zo --resume …` comes back asking before every tool. Those
+/// words are the window's or the person's own, never the conversation's, so
+/// one a shell would read as syntax is quoted ([`zerocode_core::vault::resume_word`])
+/// rather than dropping the line.
 pub(crate) fn spelled_resume(
     agent: &str,
     session: &zerocode_core::ProviderSession,
     folder: Option<&Path>,
+    launch_override: Option<&zerocode_core::LaunchOverride>,
 ) -> Option<String> {
     let kind = zerocode_core::AgentKind::from_slug(agent)?;
     let argv = zerocode_core::resume_argv(kind, session)?;
@@ -1404,7 +1422,19 @@ pub(crate) fn spelled_resume(
     {
         return None;
     }
-    let line = argv.join(" ");
+    let plan = zerocode_core::launch_plan(kind.slug(), launch_override);
+    let base = agent_spec(kind.slug())?
+        .capabilities()
+        .resume
+        .launch_args_without_selectors(&plan.args);
+    let line = std::iter::once(program.clone())
+        .chain(
+            base.iter()
+                .map(|word| zerocode_core::vault::resume_word(word)),
+        )
+        .chain(rest.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
     let Some(folder) = folder else {
         return Some(line);
     };
@@ -1683,6 +1713,11 @@ pub(crate) trait WakeWindow {
     /// (t-7538) — the window's own look at a process group the ledger holds
     /// a conversation for.
     fn exit_seen(&self, witness: &crate::agent_teams::ExitWitness) -> bool;
+    /// End the last window's leftover holding `session`, when the window can
+    /// prove it is one (t-76434, [`crate::pane_leftovers::free_conversation`]),
+    /// before anything of this wake starts a process that would meet its
+    /// writer lease.
+    fn free_leftover(&self, agent: &str, session: &str);
 }
 
 /// Wake one conversation into `term` — the resume road every door takes
@@ -1750,6 +1785,12 @@ pub(crate) fn wake_conversation<W: WakeWindow>(
             ));
         }
     }
+    // The last window's own zo, left turning without a terminal when it went
+    // (t-76434): on 2026-10-26 three of them held their conversations' writer
+    // leases, and both zo resumes died at them. One proven to be that window's
+    // leftover holding this conversation is ended first; one that is not is
+    // left alone, and the resume refuses in zo's words as before.
+    window.free_leftover(agent, &session.id);
     let launch_override = window.launch_override(agent)?;
     // The words the wake carries are decided here, before the argv is built
     // (t-3058): whether a sleeper in the ledger is this very conversation
@@ -2312,6 +2353,13 @@ impl WakeWindow for ResumeDoor<'_> {
 
     fn record(&self, term: TermId, session: zerocode_core::ProviderSession) {
         self.state.pane_sessions().insert(term, session);
+    }
+
+    fn free_leftover(&self, agent: &str, session: &str) {
+        let root = self.state.local_data_root();
+        crate::pane_leftovers::free_conversation(root, agent, session, &|line| {
+            note_window_event(root, line);
+        });
     }
 
     fn attach(&self, term: TermId, channel: ZoChannel) {

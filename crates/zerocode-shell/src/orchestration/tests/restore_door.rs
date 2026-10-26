@@ -102,6 +102,9 @@ pub(super) struct Door {
     /// The road this door's wakes come by (t-57717): none named, unless a
     /// test says.
     pub(super) road: Mutex<WakeRoad>,
+    /// Each conversation a wake asked to be freed of the last window's
+    /// leftover (t-76434), with how many things the door had done by then.
+    pub(super) freed: Mutex<Vec<(usize, String)>>,
 }
 
 impl Door {
@@ -121,6 +124,7 @@ impl Door {
             timeline: Mutex::new(None),
             lingering: Mutex::new(false),
             road: Mutex::new(WakeRoad::Unnamed),
+            freed: Mutex::new(Vec::new()),
         }
     }
 
@@ -429,6 +433,14 @@ impl WakeWindow for Door {
 
     fn exit_seen(&self, _witness: &crate::agent_teams::ExitWitness) -> bool {
         !*self.lingering.lock().unwrap()
+    }
+
+    fn free_leftover(&self, agent: &str, session: &str) {
+        let done = self.did.lock().unwrap().len();
+        self.freed
+            .lock()
+            .unwrap()
+            .push((done, format!("{agent} {session}")));
     }
 }
 
@@ -1444,6 +1456,29 @@ fn a_restored_conversation_names_its_folder_and_asks_the_ledger_for_its_seat() {
     );
     assert_eq!(origin, "none ledger=none", "{lines:?}");
     assert!(door.did.lock().unwrap().contains(&Did::Rebound(DOOR)));
+    crate::agent_teams::forget_term(DOOR);
+}
+
+/// t-76434: a wake asks for its conversation to be freed of the last
+/// window's leftover before anything of it happens — before the seat, before
+/// the spawn that would meet the leftover's writer lease.
+#[test]
+fn a_wake_frees_its_conversation_of_the_last_windows_leftover_before_anything_starts() {
+    const DOOR: u32 = 278_700;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the folder it comes back in");
+    let door = Door::new(checkout.path());
+
+    door.wake(DOOR, "zo", "session-1789537852228-7")
+        .expect("the wake");
+
+    assert_eq!(
+        *door.freed.lock().unwrap(),
+        [(0, "zo session-1789537852228-7".to_string())],
+        "the leftover was not asked after first: {:?}",
+        door.did.lock().unwrap()
+    );
+    assert!(door.did.lock().unwrap().contains(&Did::Prepared(DOOR)));
     crate::agent_teams::forget_term(DOOR);
 }
 

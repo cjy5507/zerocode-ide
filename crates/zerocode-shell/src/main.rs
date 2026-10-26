@@ -153,6 +153,7 @@ mod orchestration_pointer_mailbox;
 mod pane_cwd_runtime;
 mod pane_guard;
 mod pane_layout;
+mod pane_leftovers;
 mod pane_runtime;
 mod pane_transcript;
 mod pick_runtime;
@@ -3482,6 +3483,10 @@ fn main() -> ExitCode {
             if let Err(error) = crash::begin(crash_root) {
                 note_window_event(crash_root, &format!("crash boot: {error}"));
             }
+            // What the last window's panes left running without a terminal
+            // (t-76434): ended before the panes it would hold out of their
+            // conversations come back, on a thread of its own.
+            pane_leftovers::sweep_at_boot(crash_root.to_path_buf(), note_window_event);
             boot_timeline::set_root(paths.active_root(app_paths::PathClass::LocalData));
             let state = build_app_state(paths, root.clone());
             state.set_legacy_authority(legacy_authority);
@@ -3986,6 +3991,15 @@ impl exit_runtime::Terminating for ExitSteps<'_> {
 
     fn keep_statuses(&self) {
         write_last_statuses_now(self.0);
+    }
+
+    fn hang_up_panes(&self) {
+        let state = self.0.state::<AppState>();
+        pane_leftovers::leave(
+            state.local_data_root().to_path_buf(),
+            pane_leftovers::pane_groups(state.inner()),
+            note_window_event,
+        );
     }
 
     fn end_panes(&self) {

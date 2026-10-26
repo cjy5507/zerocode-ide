@@ -190,7 +190,7 @@ function leavingWords(census) {
         ? ""
         : t(
             "exit.closeNote",
-            "「끝나면 종료」는 워커 판 아래 도는 명령이 없는 첫 틈에 종료합니다 · 최대 {{minutes}}분 · {{seconds}}초 안에 답이 없으면 지금 종료합니다",
+            "「끝나면 종료」는 워커 판 아래 도는 명령이 없고 턴 중인 대화도 없는 첫 틈에 종료합니다 · 최대 {{minutes}}분 · {{seconds}}초 안에 답이 없으면 지금 종료합니다",
             { minutes: census.waitMin, seconds: census.answerSec },
           ),
       confirm: t("exit.whenIdleClose", "끝나면 종료"),
@@ -203,7 +203,7 @@ function leavingWords(census) {
       ? ""
       : t(
           "exit.restartNote",
-          "「끝나면 다시 시작」은 워커 판 아래 도는 명령이 없는 첫 틈에 다시 시작합니다 · 최대 {{minutes}}분 기다립니다",
+          "「끝나면 다시 시작」은 워커 판 아래 도는 명령이 없고 턴 중인 대화도 없는 첫 틈에 다시 시작합니다 · 최대 {{minutes}}분 기다립니다",
           { minutes: census.waitMin },
         ),
     confirm: t("exit.whenIdleRestart", "끝나면 다시 시작"),
