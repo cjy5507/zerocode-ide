@@ -623,16 +623,17 @@ pub fn zo_model_list(home: &Path) -> serde_json::Value {
     if let Some(root) = ACCOUNTS_ROOT.get() {
         list.insert(
             "paneCredentialStore".to_string(),
-            serde_json::Value::String(credential_store(&listing_env(root))),
+            serde_json::Value::String(credential_store(&lookup_env(&listing_env(root), |name| {
+                std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
+            }))),
         );
     }
     serde_json::Value::Object(list)
 }
 
-/// The settings' part of zo's catalog, as the screen may hold it: a report's
-/// `detail` is what a provider answered — an HTTP error body among it — so
-/// every credential in it is masked here, before the IPC answer, and whole,
-/// before the screen cuts it to a line (t-76759).
+/// The settings' part of zo's catalog, as the screen may hold it — its
+/// reports already carry a diagnosis in place of zo's words
+/// ([`diagnosed`]).
 fn model_list_of(catalog: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     let mut list = serde_json::Map::new();
     for key in ["models", "customProviders", "reports", "aliases"] {
@@ -645,20 +646,73 @@ fn model_list_of(catalog: &serde_json::Value) -> serde_json::Map<String, serde_j
                 .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
         );
     }
-    if let Some(reports) = list
+    list
+}
+
+/// zo's catalog as the window keeps it (t-76873 P1): a report's `detail` is
+/// what a provider answered — an HTTP error body zo already cut, where a
+/// query token, a header's value on its next line or an address cut before
+/// its `@` hides from any masking rule — so it never enters the window. A
+/// failed report keeps only its diagnosis: the HTTP status, one kind word
+/// and whether zo skipped the source for want of a credential.
+fn diagnosed(mut catalog: serde_json::Value) -> serde_json::Value {
+    let reports = catalog
         .get_mut("reports")
         .and_then(serde_json::Value::as_array_mut)
-    {
-        for detail in reports
-            .iter_mut()
-            .filter_map(|report| report.get_mut("detail"))
-        {
-            if let Some(text) = detail.as_str() {
-                *detail = serde_json::Value::String(zerocode_core::credential::mask_values(text));
-            }
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_object_mut);
+    for report in reports {
+        let detail = report.remove("detail");
+        if report.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
         }
+        let detail = detail
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        report.insert("diagnosis".to_string(), diagnosis_of(detail));
     }
-    list
+    catalog
+}
+
+/// A failed report's words reduced to what may be shown: zo's own skip mark
+/// (`SourceReport::skipped`), the first `HTTP <status>` and the kind of
+/// failure it, or a transport error's words, name.
+fn diagnosis_of(detail: &str) -> serde_json::Value {
+    let status = detail.match_indices("HTTP ").find_map(|(at, word)| {
+        let rest = &detail[at + word.len()..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        (digits == 3).then(|| rest[..3].parse::<u16>().ok())?
+    });
+    let words = detail.to_ascii_lowercase();
+    let says = |markers: &[&str]| markers.iter().any(|marker| words.contains(marker));
+    let kind = match status {
+        Some(401) => "auth",
+        Some(403) => "forbidden",
+        Some(404) => "notFound",
+        Some(408) => "timeout",
+        Some(429) => "rateLimit",
+        Some(500..=599) => "server",
+        Some(_) => "unknown",
+        None if says(&["timed out", "timeout"]) => "timeout",
+        None if says(&[
+            "error sending request",
+            "connect",
+            "dns",
+            "network",
+            "unreachable",
+        ]) =>
+        {
+            "network"
+        }
+        None => "unknown",
+    };
+    serde_json::json!({
+        "status": status,
+        "kind": kind,
+        "skipped": detail.starts_with("skipped:"),
+    })
 }
 
 /// Where the window keeps its accounts, named once at boot. Until it is,
@@ -676,6 +730,26 @@ pub(crate) fn configure_accounts(config_root: PathBuf) {
 /// is materialized and a signed-out account does not stop the read.
 fn listing_env(config_root: &Path) -> Vec<(String, String)> {
     crate::usage_runtime::account_vars_for(config_root, "zo")
+}
+
+/// The Claude folder variables a lookup's zo ends with (t-76873 P2 ②): the
+/// ones `env` names, and those it leaves out as the zo inherits them from
+/// the window — the system's default account names none, and its zo reads
+/// the folder the window was started with.
+fn lookup_env(
+    env: &[(String, String)],
+    inherited: impl Fn(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+    let mut ends = env.to_vec();
+    for name in [SECURE_STORAGE_CONFIG_DIR_VAR, CONFIG_DIR_VAR] {
+        if !env.iter().any(|(key, _)| key == name)
+            && let Some(folder) = inherited(name)
+        {
+            ends.push((name.to_string(), folder));
+        }
+    }
+    ends
 }
 
 /// Where a zo given `env` reads its Claude login, in the words zo's report
@@ -736,6 +810,7 @@ fn catalog_through(
         let env = accounts.map(listing_env).unwrap_or_default();
         captured_lines_in(&bin, &["models", "--json"], MODELS_WAIT, &env)
             .and_then(|lines| serde_json::from_str(&lines.join("\n")).ok())
+            .map(diagnosed)
     })
 }
 
@@ -1083,47 +1158,169 @@ mod tests {
         assert_eq!(credential_store(&[]), "keychain");
     }
 
-    /// A login report's `detail` is a provider's answer — an HTTP error body
-    /// that echoes a key, a bearer token or a signed address among it — and
-    /// the screen cuts its first line; every credential is masked before the
-    /// list leaves for the screen (t-76759 P1). Synthetic values only.
+    /// The label is made from the variables the list's zo ends with, not
+    /// only those the window names (t-76873 P2 ②): the system's default
+    /// account names no Claude folder, and the zo then reads the one it
+    /// inherits from the window — the same place a pane reads, which is not
+    /// 「다른 환경」. What the window names wins over what is inherited, by
+    /// zo's rule, and an empty credential folder is still the keychain.
     #[test]
-    fn a_login_failure_reaches_the_screen_with_its_credentials_masked() {
+    fn the_pane_store_counts_the_folder_the_lookup_inherits() {
+        use zerocode_core::account::{CONFIG_DIR_VAR, SECURE_STORAGE_CONFIG_DIR_VAR};
+        let env = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect()
+        };
+        let inheriting = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_string())
+            }
+        };
+        let store = |given: &[(&str, &str)], inherited: &'static [(&'static str, &'static str)]| {
+            credential_store(&lookup_env(&env(given), inheriting(inherited)))
+        };
+        assert_eq!(
+            store(
+                &[("ANTHROPIC_API_KEY", "")],
+                &[(CONFIG_DIR_VAR, "/fixture/ambient")]
+            ),
+            "CLAUDE_CONFIG_DIR:/fixture/ambient",
+            "the default account's lookup reads the inherited folder"
+        );
+        assert_eq!(
+            store(
+                &[],
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/ambient-account")]
+            ),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/ambient-account"
+        );
+        assert_eq!(
+            store(
+                &[(CONFIG_DIR_VAR, "/fixture/runtime")],
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/ambient-account")]
+            ),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/ambient-account",
+            "an inherited credential folder wins over a named config folder, by zo's rule"
+        );
+        assert_eq!(
+            store(
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/account")],
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "/fixture/ambient-account")]
+            ),
+            "CLAUDE_SECURESTORAGE_CONFIG_DIR:/fixture/account",
+            "an inherited folder overrode the one the window names"
+        );
+        assert_eq!(
+            store(
+                &[(SECURE_STORAGE_CONFIG_DIR_VAR, "")],
+                &[(CONFIG_DIR_VAR, "/fixture/ambient")]
+            ),
+            "keychain",
+            "an empty credential folder named by the window is the keychain"
+        );
+        assert_eq!(
+            store(
+                &[],
+                &[
+                    (SECURE_STORAGE_CONFIG_DIR_VAR, ""),
+                    (CONFIG_DIR_VAR, "/fixture/ambient")
+                ]
+            ),
+            "keychain",
+            "an empty inherited credential folder is the keychain"
+        );
+        assert_eq!(store(&[], &[]), "keychain");
+    }
+
+    /// A login report's `detail` is a provider's answer — an HTTP error body
+    /// zo cut at 160 characters — and no masking rule reads every credential
+    /// such a body can hold: a query token without a digit, a header value on
+    /// the line after its name, an address cut before its `@` (t-76873 P1).
+    /// So the text never enters the window: the list keeps a diagnosis made of
+    /// the status, one kind word and whether zo skipped the source, and
+    /// neither the answer to the screen nor the list the window holds carries
+    /// a word of the body. Synthetic values only; the zo is a POSIX script.
+    #[cfg(unix)]
+    #[test]
+    fn a_login_failure_reaches_the_window_as_a_diagnosis_and_never_as_its_body() {
+        use std::os::unix::fs::PermissionsExt;
         let secrets = [
+            "fixtureonlyletters",
+            "fixturemultilinevalue",
+            "fixturecutpassword",
+            "fixturebearerletters",
+            "abcdefabcdef",
             "sk-ant-api03-TESTONLYxxxxxxxxxxxxxxxxxxxxxxxx",
-            "TEST_ONLY_LOGIN_SECRET",
-            "X-Amz-Signature=0f3a9c2b7d1e4f5a6b7c8d9e0f1a2b3c",
-            "AKIATESTONLY00000000",
         ];
-        let catalog = serde_json::json!({
+        let failed = |provider: &str, detail: String| serde_json::json!({"provider": provider, "source": format!("{provider}-api"), "ok": false, "count": 0, "detail": detail});
+        let printed = serde_json::json!({
             "reports": [
-                {"provider": "anthropic", "ok": false,
-                 "detail": format!("anthropic-api: HTTP 401 {{\"error\":\"invalid x-api-key {}\"}}\nsecond line", secrets[0])},
-                {"provider": "anthropic", "ok": false,
-                 "detail": format!("anthropic-api: HTTP 401 echoed Authorization: Bearer {}", secrets[1])},
-                {"provider": "openai", "ok": false,
-                 "detail": format!("openai: HTTP 403 at https://files.example.com/o?{}&X-Amz-Credential={}", secrets[2], secrets[3])},
-                {"provider": "xai", "ok": false, "detail": "skipped: no login"},
-                {"provider": "google", "ok": true, "count": 3}
+                failed("anthropic", format!("HTTP 401 Unauthorized at https://example.test/?access_token={}", secrets[0])),
+                failed("anthropic", format!("HTTP 403 Forbidden: echoed Authorization:\n{}", secrets[1])),
+                failed("openai", format!("HTTP 404 Not Found: {{\"url\":\"https://fixtureuser:{}", secrets[2])),
+                failed("openai", format!("HTTP 429 Too Many Requests: Authorization: Bearer {}", secrets[3])),
+                failed("google", format!("HTTP 503 Service Unavailable: https://files.example.test/o?X-Amz-Signature={}", secrets[4])),
+                failed("anthropic", format!("error sending request for url (https://example.test/v1/models?key={}) · kept 3 model(s) from the previous refresh", secrets[5])),
+                failed("xai", format!("operation timed out after reading {}", secrets[0])),
+                failed("xai", "skipped: no login".to_string()),
+                failed("google", format!("unexpected answer {}", secrets[3])),
+                {"provider": "google", "source": "google-api", "ok": true, "count": 3, "detail": format!("3 model(s) · {}", secrets[0])}
             ]
         });
-        let list = model_list_of(&catalog);
-        let reports = list["reports"].as_array().expect("reports");
-        let said = serde_json::to_string(reports).expect("json");
-        for secret in secrets {
+        let home = tempfile::tempdir().expect("home");
+        let bin = crate::zo_companion::zo_path_under(home.path());
+        std::fs::create_dir_all(bin.parent().expect("bin dir")).expect("bin dir");
+        let answer = home.path().join("answer.json");
+        std::fs::write(&answer, printed.to_string()).expect("answer");
+        std::fs::write(&bin, format!("#!/bin/sh\ncat '{}'\n", answer.display())).expect("zo");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("mode");
+
+        let cache = Mutex::new(ModelsCache::default());
+        let list = model_list_of(&catalog_through(&cache, home.path(), None));
+        let held = cache.lock().expect("cache").held.clone().expect("held").1;
+        for (place, said) in [
+            (
+                "the answer to the screen",
+                serde_json::to_string(&list).expect("json"),
+            ),
+            ("the list the window holds", held.to_string()),
+        ] {
+            for secret in secrets {
+                assert!(!said.contains(secret), "{secret} reached {place}: {said}");
+            }
             assert!(
-                !said.contains(secret),
-                "{secret} reached the screen: {said}"
+                !said.contains("\"detail\""),
+                "a body reached {place}: {said}"
             );
         }
-        assert!(
-            reports[0]["detail"]
-                .as_str()
-                .is_some_and(|detail| detail.starts_with("anthropic-api: HTTP 401")),
-            "the diagnosis around the credential was lost: {said}"
+        let diagnoses: Vec<serde_json::Value> = list["reports"]
+            .as_array()
+            .expect("reports")
+            .iter()
+            .map(|report| report.get("diagnosis").cloned().unwrap_or_default())
+            .collect();
+        let diagnosis = |status: Option<u16>, kind: &str, skipped: bool| serde_json::json!({"status": status, "kind": kind, "skipped": skipped});
+        assert_eq!(
+            diagnoses,
+            [
+                diagnosis(Some(401), "auth", false),
+                diagnosis(Some(403), "forbidden", false),
+                diagnosis(Some(404), "notFound", false),
+                diagnosis(Some(429), "rateLimit", false),
+                diagnosis(Some(503), "server", false),
+                diagnosis(None, "network", false),
+                diagnosis(None, "timeout", false),
+                diagnosis(None, "unknown", true),
+                diagnosis(None, "unknown", false),
+                serde_json::Value::Null,
+            ]
         );
-        assert_eq!(reports[3]["detail"], "skipped: no login");
-        assert!(reports[4].get("detail").is_none());
+        assert_eq!(list["reports"][9]["count"], 3, "an answer lost its count");
     }
 
     #[test]
