@@ -137,17 +137,25 @@ impl Report<'_> {
                 "settingsKeySuperseded": self.user.settings_key_superseded(),
             },
             "merged": self.merged,
-            "reports": self.catalog.reports.iter().map(|report| json!({
-                "provider": report.provider,
-                "source": report.source,
-                "ok": report.ok,
-                "detail": report.detail,
-                "count": report.count,
-                "fetchedAt": report.fetched_at,
-                "age": describe_age(report.fetched_at, self.now),
-                "origin": report.origin,
-                "credentialStore": report.credential_store,
-            })).collect::<Vec<_>>(),
+            "reports": self.catalog.reports.iter().map(|report| {
+                let mut value = json!({
+                    "provider": report.provider,
+                    "source": report.source,
+                    "ok": report.ok,
+                    "detail": report.detail,
+                    "count": report.count,
+                    "fetchedAt": report.fetched_at,
+                    "age": describe_age(report.fetched_at, self.now),
+                    "origin": report.origin,
+                    "credentialStore": report.credential_store,
+                    "failureKind": report.failure_kind,
+                });
+                // A failure without a response has a kind and no number.
+                if let Some(status) = report.http_status {
+                    value["httpStatus"] = json!(status);
+                }
+                value
+            }).collect::<Vec<_>>(),
             "models": self.rows.iter().map(|row| json!({
                 "provider": row.provider.key(),
                 "id": row.id,
@@ -495,6 +503,8 @@ mod tests {
             fetched_at: 1_000,
             origin: origin.to_string(),
             credential_store: String::new(),
+            failure_kind: String::new(),
+            http_status: None,
         };
         let now = 1_000 + 2 * 3600;
         assert_eq!(
@@ -767,7 +777,7 @@ mod tests {
                     note: None,
                 })
             } else {
-                Err((source.to_string(), "skipped: not asked in this test".to_string()))
+                Err((source.to_string(), runtime::model_discovery::Fault::skipped("skipped: not asked in this test")))
             }
         });
         let overlay = Overlay::default();

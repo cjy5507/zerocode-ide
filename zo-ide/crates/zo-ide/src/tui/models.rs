@@ -453,7 +453,7 @@ mod tests {
                     note: None,
                 })
             } else {
-                Err((source.to_string(), "skipped: not asked in this test".to_string()))
+                Err((source.to_string(), runtime::model_discovery::Fault::skipped("skipped: not asked in this test")))
             }
         });
         crate::model_wire_env::publish(None, overlay(&catalog, UpdatePolicy::Auto).json.as_deref()).expect("publish");
