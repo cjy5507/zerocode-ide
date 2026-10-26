@@ -56,6 +56,10 @@ pub struct McpClientBootstrap {
     pub signature: Option<String>,
     pub transport: McpClientTransport,
     pub is_project_scoped: bool,
+    /// The document that declared the server. Only the person's own settings
+    /// file lets a `${NAME}` reference read the window's keychain
+    /// ([`crate::mcp_references`]).
+    pub scope: ConfigSource,
 }
 
 impl McpClientBootstrap {
@@ -68,6 +72,7 @@ impl McpClientBootstrap {
             signature: mcp_server_signature(&config.config),
             transport: McpClientTransport::from_config(&config.config),
             is_project_scoped: config.scope == ConfigSource::Project,
+            scope: config.scope,
         }
     }
 }

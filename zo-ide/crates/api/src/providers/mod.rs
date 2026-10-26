@@ -4599,6 +4599,60 @@ fn install_window_keychain(names: WindowKeyNames, service_prefix: &str, read: fn
         });
 }
 
+/// What the window's keychain answered for one name a `${NAME}` reference in
+/// an MCP server's settings spells ([`reference_key_in_window_keychain`]).
+/// No `Debug`: a value must not reach a log by way of a `{:?}`.
+pub enum ReferenceKey {
+    Found(String),
+    /// No item, no keychain on this platform, the kill switch, or no road
+    /// installed — settled, nothing to wait for.
+    Absent,
+    /// The keychain did not answer (locked, denied).
+    Unreadable,
+}
+
+/// The prefix the window files its service keys under, once this process was
+/// told it ([`find_reference_keys_in_keychain`]); none, and no keychain is read.
+fn reference_keychain() -> &'static RwLock<Option<WindowKeychain>> {
+    static KEYCHAIN: OnceLock<RwLock<Option<WindowKeychain>>> = OnceLock::new();
+    KEYCHAIN.get_or_init(Default::default)
+}
+
+/// Let `${NAME}` references in the person's own MCP settings find a value the
+/// window keeps for them: the keychain item `service_prefix` + the name — the
+/// item and the reader [`find_service_keys_in_keychain`] uses for
+/// `TYPESAFE_API_KEY`, for whichever name a reference spells. A road of its
+/// own rather than a [`WindowKeyNames`] entry, so the provider keys
+/// [`connection_credential`] looks up never fall through to it. Nothing is
+/// read here, and nothing read is kept: each launch asks again, so a key the
+/// window just stored is found.
+pub fn find_reference_keys_in_keychain(service_prefix: &str) {
+    *reference_keychain()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(WindowKeychain {
+        names: WindowKeyNames::Prefix(String::new()),
+        service_prefix: service_prefix.to_string(),
+        read: anthropic::keychain::read_router_key,
+    });
+}
+
+/// The window's keychain item for `name`, read now
+/// ([`find_reference_keys_in_keychain`]).
+#[must_use]
+pub fn reference_key_in_window_keychain(name: &str) -> ReferenceKey {
+    let keychain = reference_keychain()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(keychain) = keychain.as_ref() else {
+        return ReferenceKey::Absent;
+    };
+    match (keychain.read)(&format!("{}{name}", keychain.service_prefix)) {
+        KeychainAnswer::Found(value) => ReferenceKey::Found(value),
+        KeychainAnswer::Absent => ReferenceKey::Absent,
+        KeychainAnswer::Unanswered => ReferenceKey::Unreadable,
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn forget_adopted_launch_keys_for_test() {
     crate::connection_keys::clear();

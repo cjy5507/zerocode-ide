@@ -1,4 +1,5 @@
 mod mcp_edit;
+mod mcp_secrets;
 mod parsers;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,10 @@ use crate::sandbox::SandboxConfig;
 
 pub use self::mcp_edit::{
     remove_mcp_server, trust_mcp_server, untrust_mcp_server, write_mcp_server, McpEdit,
+};
+pub use self::mcp_secrets::{
+    mcp_literal_secrets, move_mcp_literal_to_reference, slot_holds_literal_secret,
+    McpLiteralSecret,
 };
 
 use self::parsers::mcp_keys;

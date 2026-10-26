@@ -3328,3 +3328,81 @@ fn given_oauth_bridge_crashes_after_auth_then_recovery_respawns() {
         cleanup_script(&script_path);
     });
 }
+
+/// A server whose settings name `${NAME}` is launched with the value, and one
+/// whose reference nothing answers is not launched at all: its discovery
+/// failure says `unresolved reference ${NAME}` and no process ever ran.
+#[test]
+fn a_reference_resolves_at_launch_and_an_unresolved_one_keeps_its_server_from_starting() {
+    // No environment, keychain road or settings file holds this name.
+    const ABSENT: &str = "ZO_TEST_MCP_REFERENCE_ABSENT_76674";
+    assert!(std::env::var_os(ABSENT).is_none());
+    let runtime = Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let script_path = write_manager_mcp_server_script();
+        let parent = script_path.parent().expect("script parent");
+        let resolved_spawns = parent.join("resolved-spawn.log");
+        let unresolved_spawns = parent.join("unresolved-spawn.log");
+
+        let mut servers = BTreeMap::new();
+        let mut resolved = manager_server_config_with_env(
+            &script_path,
+            "resolved",
+            &parent.join("resolved.log"),
+            BTreeMap::from([(
+                "MCP_SPAWN_LOG".to_string(),
+                format!("${{{ABSENT}:-{}}}", resolved_spawns.display()),
+            )]),
+        );
+        resolved.scope = ConfigSource::User;
+        servers.insert("resolved".to_string(), resolved);
+        let mut unresolved = manager_server_config_with_env(
+            &script_path,
+            "unresolved",
+            &parent.join("unresolved.log"),
+            BTreeMap::from([
+                (
+                    "MCP_SPAWN_LOG".to_string(),
+                    unresolved_spawns.to_string_lossy().into_owned(),
+                ),
+                ("MCP_TEST_TOKEN".to_string(), format!("${{{ABSENT}}}")),
+            ]),
+        );
+        unresolved.scope = ConfigSource::User;
+        servers.insert("unresolved".to_string(), unresolved);
+        let mut manager = McpServerManager::from_servers(&servers);
+
+        let report = manager.discover_tools_best_effort().await;
+        assert!(
+            report.tools.iter().any(|tool| tool.server_name == "resolved"),
+            "the defaulted reference launched its server: {:?}",
+            report.failed_servers
+        );
+        assert_eq!(
+            fs::read_to_string(&resolved_spawns).expect("the resolved server ran").lines().count(),
+            1
+        );
+        let failure = report
+            .failed_servers
+            .iter()
+            .find(|failure| failure.server_name == "unresolved")
+            .expect("the unresolved server failed");
+        assert!(
+            failure
+                .error
+                .contains(&format!("unresolved reference ${{{ABSENT}}}")),
+            "{}",
+            failure.error
+        );
+        assert!(
+            !unresolved_spawns.exists(),
+            "a server whose reference has no value is never started"
+        );
+
+        manager.shutdown().await.expect("shutdown");
+        cleanup_script(&script_path);
+    });
+}
