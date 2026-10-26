@@ -61,7 +61,6 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, Once, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::memory::recall::SENSITIVE_SNIPPET_LINE_MARKERS;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -801,9 +800,9 @@ pub fn refresh_noting(
                 Some(last) => {
                     note(&format!(
                         "[zo] model discovery: {source}: kept the answer from {}; this process ({}) could not ask: {}",
-                        one_line_without_values(&last.credential_store),
-                        one_line_without_values(&asked_under),
-                        one_line_without_values(&detail),
+                        store_variable(&last.credential_store),
+                        store_variable(&asked_under),
+                        failure_kind(&detail),
                     ));
                     keep(&mut catalog, last);
                 }
@@ -825,58 +824,50 @@ pub fn refresh_noting(
     withdraw_shipped(catalog, previous, now_secs)
 }
 
-/// What a failure's detail or a store's name may say on stderr: one line,
-/// with every value-shaped word masked. A failed response repeats whatever
-/// the provider echoes — a key, a bearer — and a folder name or a body may
-/// carry line breaks, so the line the person reads holds neither (t-76829).
-/// A word is value-shaped when it begins like a key, runs 40 or more
-/// characters, or runs 20 or more with letters and digits both; and the word
-/// after a name of [`SENSITIVE_SNIPPET_LINE_MARKERS`] is a value when a `:`
-/// or `=` joins them (or the name is `bearer`). `/` ends a word, so a
-/// store's folder stays readable.
-fn one_line_without_values(text: &str) -> String {
-    const KEY_PREFIXES: [&str; 8] = ["sk-", "ghp_", "gho_", "xox", "eyj", "akia", "aiza", "ya29."];
-    let is_word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+');
-    let value_shaped = |word: &str| {
-        let lower = word.to_ascii_lowercase();
-        let long = word.chars().count();
-        KEY_PREFIXES.iter().any(|prefix| lower.starts_with(prefix) && long >= 12)
-            || long >= 40
-            || (long >= 20 && word.chars().any(|c| c.is_ascii_digit()) && word.chars().any(|c| c.is_ascii_alphabetic()))
-    };
-    let names_a_value = |word: &str| {
-        let word = word.to_ascii_lowercase().replace('-', "_");
-        SENSITIVE_SNIPPET_LINE_MARKERS
-            .iter()
-            .map(|marker| marker.trim_end_matches([':', ' ']))
-            .any(|marker| word == marker || word.ends_with(&format!("_{marker}")))
-    };
-    let spaced: String = text.chars().map(|c| if c.is_control() || c.is_whitespace() { ' ' } else { c }).collect();
-    let mut line = String::with_capacity(spaced.len());
-    let mut pending = false;
-    let mut rest = spaced.as_str();
-    while let Some(first) = rest.chars().next() {
-        let word = is_word(first);
-        let split = rest.find(|c| is_word(c) != word).unwrap_or(rest.len());
-        let (run, tail) = rest.split_at(split);
-        rest = tail;
-        if !word {
-            pending = pending && run.chars().all(|c| matches!(c, ' ' | '"' | '\'' | ':' | '='));
-            line.push_str(run);
-        } else if pending && !matches!(run.to_ascii_lowercase().as_str(), "bearer" | "basic") {
-            pending = false;
-            line.push_str("[redacted]");
-        } else if value_shaped(run) {
-            line.push_str("[redacted]");
-        } else {
-            pending = pending || (names_a_value(run) && {
-                let gap = rest.split(is_word).next().unwrap_or("");
-                run.eq_ignore_ascii_case("bearer") || gap.contains([':', '='])
-            });
-            line.push_str(run);
-        }
+/// What a failed ask says on stderr: its kind, and the HTTP status number
+/// when the detail opens with one — never the detail. A failed response
+/// repeats whatever the provider echoes (a key, a bearer, a query token) in
+/// any shape, so no masking can promise to catch every value; the line holds
+/// only words this function chose (t-76896).
+fn failure_kind(detail: &str) -> String {
+    let lower = detail.trim_start().to_ascii_lowercase();
+    let status = lower
+        .strip_prefix("http ")
+        .map(|rest| rest.chars().take_while(char::is_ascii_digit).collect::<String>())
+        .filter(|digits| digits.len() == 3)
+        .and_then(|digits| digits.parse::<u16>().ok());
+    if let Some(status) = status {
+        let kind = match status {
+            401 => "authentication refused",
+            403 => "permission denied",
+            429 => "rate limit",
+            500..=599 => "server error",
+            _ => "request refused",
+        };
+        return format!("{kind} (HTTP {status})");
     }
-    line.split_whitespace().collect::<Vec<_>>().join(" ")
+    let kind = if lower.starts_with("skipped") {
+        "no credential (skipped)"
+    } else if lower.contains("not usable") {
+        "credential not usable"
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "timed out"
+    } else if lower.contains("error sending request") || lower.contains("connect") || lower.contains("dns error") {
+        "network error"
+    } else {
+        "unknown"
+    };
+    kind.to_string()
+}
+
+/// A credential store's label as stderr may show it: the variable that named
+/// it (`CLAUDE_CONFIG_DIR`), or `keychain` / `home` — never the folder after
+/// the `:`, which holds the person's name. A label of any other shape is
+/// `store`.
+fn store_variable(store: &str) -> String {
+    let name = store.split(':').next().unwrap_or("");
+    let plain = !name.is_empty() && name.len() <= 40 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    if plain { name.to_string() } else { "store".to_string() }
 }
 
 /// Whether a failure or skip asked under `asking` leaves `last` standing:
@@ -5192,49 +5183,6 @@ mod tests {
         assert_eq!(serde_json::from_value::<super::SourceReport>(written).expect("and reads back"), pane);
     }
 
-    /// t-76829: the one stderr line a kept answer prints is one line with no
-    /// secret in it, whatever the failure's detail or the stores' names
-    /// carry — a response body that repeats a key, a line break in a folder.
-    #[test]
-    fn the_stderr_line_of_a_kept_answer_is_one_line_and_holds_no_secret() {
-        let now = 1_790_200_000;
-        let key = "sk-ant-api03-Zq8Vn2Lk0Pw4Xt7Yb1Mc";
-        let pane_store = "CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane\nsk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz";
-        let window_store = "CODEX_HOME:/accounts/win\r\ndow-9f8e7d6c5b4a39281706";
-        let pane = anthropic_refresh(None, now - 60, "pane-store", &Ok(opus_answer(now - 60)));
-        let pane = super::DiscoveredCatalog {
-            reports: pane
-                .reports
-                .iter()
-                .map(|report| super::SourceReport { credential_store: pane_store.to_string(), ..report.clone() })
-                .collect(),
-            ..pane
-        };
-        let detail = format!(
-            "HTTP 401 Unauthorized: {{\"error\":\n{{\"message\":\"invalid x-api-key {key}\"}}}}\r\nAuthorization: Bearer abc.def-ghi\n\t\"api_key\":\"hunter2hunter2\" \u{1b}[31mred\u{1b}[0m"
-        );
-        let mut notes = Vec::new();
-        let window = super::refresh_noting(
-            Some(&pane),
-            &[super::ANTHROPIC_SOURCE],
-            now,
-            &[],
-            |source| Err((source.to_string(), detail.clone())),
-            |source| if source == super::ANTHROPIC_SOURCE { window_store.to_string() } else { String::new() },
-            |line| notes.push(line.to_string()),
-        );
-        assert_eq!(anthropic_report(&window), anthropic_report(&pane), "the kept answer still stands");
-        let err = notes.join("\n");
-        let printed = notes.iter().filter(|line| line.contains("kept the answer from")).count();
-        assert_eq!(printed, 1, "one kept-answer line: {err:?}");
-        assert!(notes.iter().all(|line| !line.contains(['\n', '\r', '\t', '\u{1b}'])), "one clean line: {err:?}");
-        for secret in [key, "sk-ant-oat01-Hh5Jr9Ds3Fg6Aq2Ew8Tz", "abc.def-ghi", "hunter2hunter2", "9f8e7d6c5b4a39281706"] {
-            assert!(!err.contains(secret), "{secret} reached stderr: {err:?}");
-        }
-        assert!(err.contains("HTTP 401 Unauthorized"), "the reason that is not a value stays: {err:?}");
-        assert!(err.contains("CLAUDE_SECURESTORAGE_CONFIG_DIR:/accounts/pane"), "a store's folder stays: {err:?}");
-    }
-
     /// t-76896: the stderr line a kept answer prints names the kind of the
     /// failure and the stores' variable names — never the failure's own
     /// words. A short token, a token with no digit, a query token, a body
@@ -5285,22 +5233,6 @@ mod tests {
             assert!(status.is_empty() || err.contains(status), "the status {status:?} is named: {err:?}");
             assert!(err.contains("CLAUDE_CONFIG_DIR") && err.contains("CODEX_HOME"), "both stores' variable names: {err:?}");
         }
-    }
-
-    /// t-76829: the masking takes a value and leaves the words around it.
-    #[test]
-    fn the_one_line_form_masks_values_and_keeps_the_words_and_folders() {
-        let line = super::one_line_without_values;
-        assert_eq!(line("claude token expired\nsign in again"), "claude token expired sign in again");
-        assert_eq!(line("token: abc123def456"), "token: [redacted]");
-        assert_eq!(line("Authorization: Bearer abc.def"), "Authorization: Bearer [redacted]");
-        assert_eq!(line("x-api-key=hunter2 failed"), "x-api-key=[redacted] failed");
-        assert_eq!(
-            line("CLAUDE_CONFIG_DIR:/Users/joe/zerocode/workspaces/w-76675/accounts"),
-            "CLAUDE_CONFIG_DIR:/Users/joe/zerocode/workspaces/w-76675/accounts"
-        );
-        assert_eq!(line("sk-ant-api03-Zq8Vn2Lk0Pw4Xt7Yb1Mc"), "[redacted]");
-        assert_eq!(line(""), "");
     }
 
     /// t-76621: a failure stays due at every connection — one written under
