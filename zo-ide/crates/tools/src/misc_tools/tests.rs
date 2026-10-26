@@ -746,6 +746,61 @@ fn memory_write_refuses_a_line_that_carries_a_credential_value() {
     std::fs::remove_dir_all(root).expect("cleanup temp dir");
 }
 
+/// The refusal tells the model to write a `{{name}}` parameter where a
+/// credential goes, so a value that is wholly a reference to a named value —
+/// `{{name}}` or `${name}` — saves (t-75740). A command substitution stays
+/// refused: `$(printf hunter2)` holds an ordinary password no shape can tell
+/// apart. So does a bare `$NAME`, and so does the value itself.
+#[test]
+fn memory_write_saves_a_whole_reference_in_place_of_a_credential_and_nothing_else() {
+    let _guard = env_lock();
+    let root = temp_dir();
+    std::fs::create_dir_all(&root).expect("temp root");
+    let config_home = root.join("home").join(".zo");
+    std::fs::create_dir_all(&config_home).expect("config home");
+    let config_home = std::fs::canonicalize(config_home).expect("canonical config home");
+    let ctx = ToolContext::new().with_cwd(root.clone());
+    let memory_dir = with_config_home(&config_home, || {
+        runtime::memory::paths::memory_write_dir(&root, false)
+    });
+    let write = |slug: &str, line: &str| {
+        with_config_home(&config_home, || {
+            super::run_memory_write(
+                &super::MemoryWriteInput {
+                    slug: slug.to_string(),
+                    summary: "how the portal login goes".to_string(),
+                    body: format!("# Portal login\n\n{line}\nthen open the inbox."),
+                    local: false,
+                },
+                &ctx,
+            )
+        })
+    };
+
+    for (slug, line) in [
+        ("portal-braces", "password={{password}}"),
+        ("portal-dollar-braces", "password=${PORTAL_PASSWORD}"),
+    ] {
+        write(slug, line).unwrap_or_else(|refused| panic!("{line} names a value and saves: {refused:?}"));
+        assert!(memory_dir.join(format!("{slug}.md")).exists(), "{line}");
+    }
+
+    for (slug, line) in [
+        ("portal-substitution", "password=$(printf fixture-pass-7731)"),
+        ("portal-bare-dollar", "password=$PORTAL_PASSWORD"),
+        ("portal-value", "password=fixture-pass-7731"),
+    ] {
+        let refused = write(slug, line).expect_err(line);
+        let ToolError::Declined(verdict) = &refused else {
+            panic!("a refusal, not a failure: {refused:?}");
+        };
+        assert!(verdict.contains("line 3"), "{line}: {verdict}");
+        assert!(!memory_dir.join(format!("{slug}.md")).exists(), "{line}: nothing was written");
+    }
+
+    std::fs::remove_dir_all(root).expect("cleanup temp dir");
+}
+
 /// `MemoryWrite` is deferred (t-68770): its schema never reaches the provider.
 /// Called through `CapabilityInvoke`, whose `input` is a bare `object` on the
 /// wire, or by name, `local` can arrive as the words `"false"`/`"true"`. The
