@@ -50,7 +50,7 @@ const CODEX: Shape = Shape {
     working: "Working (0s \\342\\200\\242 esc to interrupt)",
 };
 
-const BRIEFING: &str = "You are a worker in this window's orchestration, carrying task T-STAMP-7. Now do this: check the redraw for task T-STAMP-7.";
+const BRIEFING: &str = "You are a worker in this window's orchestration, carrying task T-STAMP-7. Now do this: check the redraw for REDRAW-TAIL-9.";
 
 /// The launch the pane holds, as the window fingerprints it; a relaunch under
 /// the briefing typed again makes it the next one.
@@ -767,7 +767,7 @@ fn after_redraw(evidence: RedrawEvidence) -> Journey {
     let reads = gates.path("reads");
     let handshake_seen = until_said(&gates.path(Gates::HANDSHAKE_SEEN));
     let tail = if matches!(evidence, RedrawEvidence::Tail) {
-        "Now do this: check the redraw for task T-STAMP-7."
+        "Now do this: check the redraw for REDRAW-TAIL-9."
     } else {
         ""
     };

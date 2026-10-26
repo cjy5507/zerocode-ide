@@ -267,10 +267,11 @@ mod tests {
 
     #[test]
     fn the_tail_shows_a_briefing_whose_head_was_erased_by_a_redraw() {
-        let briefing =
-            format!("{BRIEFING}\nNow do this: 입력을 받은 워커의 화면을 확인하고 계속 작업하세요.");
+        let briefing = format!(
+            "{BRIEFING}\nNow do this: 입력을 받은 워커의 화면을 확인하고 안전하게 계속 작업하세요."
+        );
         assert!(briefing_shows(
-            "│ 입력을 받은 워커의 화면을\n│ 확인하고 계속 작업하세요.\n⏺ Working",
+            "│ 입력을 받은 워커의 화면을\n│ 확인하고 안전하게 계속 작업하세요.\n⏺ Working",
             &briefing
         ));
         assert!(!briefing_shows("❯ some unrelated task", &briefing));
