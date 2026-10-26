@@ -798,32 +798,34 @@ const modelConnectionsController = {
   async applyJudgment(key, hand, jevKey = null) {
     const row = this.judgmentRows().find((entry) => entry.key === key);
     if (!row) return { applied: false, key, state: "failed" };
+    // The pick as it stood when pressed, kept whole: what the settings must
+    // hold after, whatever the rows are redrawn to meanwhile.
+    const picked = this.judgmentPick(row);
     try {
       if (row.kind === "managed") {
         const applied = await managedJudgmentController.activate(row.model);
-        return applied ? { applied: true, key } : { applied: false, key, state: "failed", raw: managedJudgmentController.failure(managedJudgmentController.lastError) };
-      }
-      if (row.kind === "jev") {
-        const provider = judgmentProviderController.copy(typesafeState.jevProvider);
-        if (!provider.model) provider.model = typesafeState.model?.alias;
+        if (!applied) return { applied: false, key, state: "failed", raw: managedJudgmentController.failure(managedJudgmentController.lastError) };
+      } else if (row.kind === "jev") {
+        const provider = picked.provider;
         const expectedProviderIdentity = typesafeState.providerIdentity;
         const check = await invoke("preflight_judgment_provider", { provider, expectedProviderIdentity, key: jevKey });
         if (!check.answered) return { applied: false, key, state: modelFailureState(check.failure) };
         await invoke("set_judgment_provider", { provider, expectedProviderIdentity, key: jevKey }, { hand });
       } else {
         this.hold(await invoke("select_model_connection", {
-          role: "judgment", reference: row.reference, expectedReference: this.state?.judgment ?? null,
+          role: "judgment", reference: picked.reference, expectedReference: this.state?.judgment ?? null,
           expectedProviderIdentity: this.state.activeProviderIdentity,
         }, { hand }));
       }
-      // Read back what was written: zo's settings and the connections.
+      // Read back what was written, whatever wrote it: zo's settings and
+      // the connections.
       await refreshTypeSafe();
       try {
         this.hold(await invoke("model_connections"));
       } catch {
         // The difference below reads zo's settings alone then.
       }
-      const differs = this.appliedDifference(row);
+      const differs = this.appliedDifference(picked);
       if (differs === null) await this.rememberApplied();
       return { applied: true, key, differs };
     } catch (error) {
@@ -1255,22 +1257,45 @@ const modelConnectionsController = {
   judgmentGeneral(row) {
     return row?.protocol === "openai_json";
   },
+  /* A judgment row's pick, copied whole when Apply is pressed: the kind,
+   * the managed model, the Jev provider it writes, or the connection's full
+   * reference — its generation too. */
+  judgmentPick(row) {
+    if (row.kind === "managed") return { kind: "managed", model: row.model.id };
+    if (row.kind === "jev") {
+      const provider = judgmentProviderController.copy(typesafeState.jevProvider);
+      if (!provider.model) provider.model = typesafeState.model?.alias;
+      return { kind: "jev", provider };
+    }
+    return { kind: "connection", reference: { ...row.reference } };
+  },
   /* What the settings say after an apply, against the pick (t-76598 ③):
    * read back from zo's settings and the connections, never assumed. `null`
-   * when they hold the pick; else the words of what they hold. */
-  appliedDifference(row) {
-    const provider = typesafeState?.provider;
+   * when they hold the pick — a connection's at the generation picked, so an
+   * address or key changed meanwhile under the same id is a difference; else
+   * the words of what they hold. A read that failed holds nothing. */
+  appliedDifference(picked) {
+    const provider = typesafeRefreshFailed ? null : typesafeState?.provider;
+    const unread = t("settings.models.appliedUnread", "설정을 다시 읽지 못했습니다");
+    if (!provider) return unread;
+    const same = (a, b) => Boolean(a) && Boolean(b) && ["id", "generation", "model", "protocol"].every((field) => a[field] === b[field]);
     const held = (() => {
-      if (!provider) return false;
-      if (row.kind === "jev") return provider.kind === "jev";
-      if (row.kind === "managed") return provider.kind === "local" && provider.model === row.model.id;
+      if (picked.kind === "jev") return provider.kind === "jev" && (!picked.provider.model || provider.model === picked.provider.model);
+      if (picked.kind === "managed") return provider.kind === "local" && provider.model === picked.model;
       const judgment = this.state?.judgment;
-      return provider.model === row.reference.model && provider.protocol === row.reference.protocol &&
-        typesafeState.providerConnection?.id === row.reference.id &&
-        (!judgment || (judgment.id === row.reference.id && judgment.model === row.reference.model));
+      return provider.model === picked.reference.model && provider.protocol === picked.reference.protocol &&
+        same(typesafeState.providerConnection, picked.reference) && (!judgment || same(judgment, picked.reference));
     })();
     if (held) return null;
-    return judgmentProviderWords() || t("settings.models.appliedUnread", "설정을 다시 읽지 못했습니다");
+    const words = judgmentProviderWords() || unread;
+    const connection = typesafeState.providerConnection;
+    // The same connection and model under another generation reads the same
+    // in words: say what moved.
+    if (picked.kind === "connection" && connection?.id === picked.reference.id && connection.model === picked.reference.model &&
+      connection.generation !== picked.reference.generation) {
+      return t("settings.models.appliedGeneration", "{{words}} (그 사이 연결의 주소나 키가 바뀜)", { words });
+    }
+    return words;
   },
   judgmentReady(key) {
     const row = this.judgmentRows().find((entry) => entry.key === key);

@@ -2064,10 +2064,22 @@ function paintJevCaption(view, numbers) {
     if (Number.isFinite(since)) words.push(t("jev.caption.since", "{{time}}에 바꿈 — 이 모델의 판단은 그때부터 셉니다", { time: jevSinceTime(since) }));
     if (!version) words.push(t("jev.caption.noAnswer", "아직 이 모델의 답이 없습니다"));
   } else {
-    // Applied, and nothing answered since: the numbers are the earlier
-    // model's, and the caption says both rather than the one zo last wrote.
+    // Most features' newest answers name an earlier model. Whether this one
+    // answered any is asked apart: once some features answer with it, the
+    // table is a mix, and says so rather than 「아직 답이 없음」.
+    const named = numbers.filter((held) => held.model);
+    const answered = named.filter((held) => jevVersion(held.model).current).length;
     words.push(t("jev.caption.now", "판단 모델: {{model}}", { model: now }));
-    words.push(t("jev.caption.earlierNumbers", "아직 이 모델의 답이 없어 표의 숫자는 {{model}}의 것입니다", { model: version.words }));
+    if (answered) {
+      const since = jevApplied?.[typesafeState?.providerIdentity];
+      if (Number.isFinite(since)) words.push(t("jev.caption.since", "{{time}}에 바꿈 — 이 모델의 판단은 그때부터 셉니다", { time: jevSinceTime(since) }));
+      words.push(t("jev.caption.mixedNumbers", "기능 {{answered}}개는 이 모델이 답했고, {{earlier}}개는 아직 {{model}}의 기록입니다",
+        { answered: jevCount(answered), earlier: jevCount(named.length - answered), model: version.words }));
+    } else {
+      // Applied, and nothing answered since: the numbers are the earlier
+      // model's, and the caption says both rather than the one zo last wrote.
+      words.push(t("jev.caption.earlierNumbers", "아직 이 모델의 답이 없어 표의 숫자는 {{model}}의 것입니다", { model: version.words }));
+    }
   }
   const said = jevNode("span", "jev-caption-words", document.createTextNode(words.join(" · ")));
   const parts = [said];
