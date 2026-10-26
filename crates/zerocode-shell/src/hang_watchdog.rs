@@ -459,9 +459,11 @@ impl Monitor {
         }
         let beaten = beat_once(&mut self.watch, &self.answer, beat, limits);
         // The actor is judged on its own clock, whatever the watch's warm-up
-        // or sleep judgment says; only a watch turned off judges nothing.
+        // or sleep judgment says; only a watch turned off judges nothing. It
+        // forgets the request it said, but not when it last said one, so a
+        // watch turned off and on keeps ten seconds between busy lines.
         if !limits.watchdog {
-            self.actor = ActorWatch::default();
+            self.actor.said = None;
             return (beaten, Vec::new());
         }
         let now = self.start + Duration::from_millis(beat.now);
