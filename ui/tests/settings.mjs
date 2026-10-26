@@ -2841,6 +2841,13 @@ class StatefulBackend {
       case "api_router_presets": return clone(this.routerPresets);
       case "api_router_providers": return clone(this.zoSettings.providers);
       case "model_connections": return this.modelConnections();
+      // The window's record of each connection's last check (t-76500,
+      // model_connection_checks.rs). A scene keeps one in `connectionMemory`;
+      // without it the read fails, the way a window that cannot read its
+      // record cannot keep the six-hour spacing and checks nothing quietly.
+      case "remembered_model_connection_checks": return this.connectionMemoryRead();
+      case "remember_model_connection_check": return this.connectionMemoryKeep(args.answer, "check");
+      case "remember_model_judgment_check": return this.connectionMemoryKeep(args.answer, "judgment");
       case "zo_model_list": return this.zoListRead();
       case "select_coding_model": {
         // Mirrors `model_connections::apply_coding_model`, checked against
@@ -2920,6 +2927,7 @@ class StatefulBackend {
            the body — which is the shape the pane has to keep off its first
            line. */
         if (this.routerProbeRefusal) throw new Error(this.routerProbeRefusal);
+        if (this.routerProbeHold) await this.routerProbeHold;
         const answered = this.routerProbeAnswers?.[args.baseUrl];
         if (answered) return answered.map((id) => ({ id, context_length: null }));
         const url = `${args.baseUrl.replace(/\/+$/, "")}${args.modelsPath || "/models"}`;
@@ -3456,6 +3464,38 @@ class StatefulBackend {
       }), coding, judgment, codingModel: this.zoSettings.model ?? null,
       activeProviderIdentity: this.typesafeSettings().providerIdentity, legacyKeyPresent: false,
     });
+  }
+
+  /* `model_connection_checks::read` against the scene's clock. */
+  connectionMemoryRead() {
+    if (!this.connectionMemory) throw new Error("model_connection_checks");
+    return clone({ nowMs: this.connectionMemory.nowMs, everyMs: 6 * 60 * 60 * 1000, connections: this.connectionMemory.connections });
+  }
+
+  /* `remember_check` / `remember_judgment`: state words only, a record of
+     another generation starts over, a press forgets the models' judgment
+     checks, and a connection no longer saved loses its record. */
+  connectionMemoryKeep(answer, kind) {
+    if (!this.connectionMemory) throw new Error("model_connection_checks");
+    const allowed = kind === "check" ? ["id", "generation", "state", "count", "forgetJudgments"] : ["id", "generation", "model", "protocol", "state"];
+    const words = ["ok", "usable", "nokey", "unreadable", "badkey", "down", "schema", "failed"];
+    if (Object.keys(answer).some((key) => !allowed.includes(key)) || !words.includes(answer.state)) throw new Error("model_connection_check");
+    const memory = this.connectionMemory;
+    const now = memory.nowMs;
+    let record = memory.connections[answer.id];
+    if (!record || record.generation !== answer.generation) record = memory.connections[answer.id] = { generation: answer.generation };
+    if (kind === "check") {
+      record.state = answer.state;
+      if (answer.state === "ok" && answer.count != null) record.count = answer.count; else delete record.count;
+      record.checkedMs = now;
+      if (answer.forgetJudgments) delete record.judgments;
+    } else {
+      record.judgments = (record.judgments ?? []).filter((kept) => !(kept.model === answer.model && kept.protocol === answer.protocol));
+      record.judgments.push({ model: answer.model, protocol: answer.protocol, state: answer.state, checkedMs: now });
+    }
+    const live = new Set(this.zoSettings.providers.map((provider) => provider.connection?.id ?? `fixture-${provider.name}`));
+    for (const id of Object.keys(memory.connections)) if (!live.has(id)) delete memory.connections[id];
+    return this.connectionMemoryRead();
   }
 
   /* The list as `slash_catalog::zo_models_catalog` hands it out: with
@@ -15208,6 +15248,185 @@ await test("the Google card names zo and the gauge as the sign-in's users — in
   await setQualityLocale(pageA, "ko");
   }
   return JSON.stringify(seen);
+});
+
+/* The pages booted before a scene keeps a record have each made their one
+   start-time read of it already (and found none): a scene's record is read
+   only by the windows the scene starts. */
+async function pastStartQuietChecks() {
+  await pageA.waitForFunction(() => modelConnectionsController.memory !== null, null, { timeout: 30_000 });
+}
+
+/* t-76500: a connection checked once stays 「연결됨」 across a window start
+   — the window keeps each connection's last check (state words, model count,
+   time, generation; never a key or a server's words) — and the ones whose
+   check is old, never made or made against another generation are checked
+   again one at a time without a press; a fresh one is not asked again. */
+await test("모델 연결: 확인한 연결은 창을 다시 켜도 「연결됨 · N시간 전 확인」이고, 오래됐거나 안 한 것만 누르지 않아도 하나씩 다시 확인한다 (t-76500)", async () => {
+  const HOUR = 60 * 60 * 1000;
+  const T0 = Date.UTC(2026, 9, 26, 12);
+  await pastStartQuietChecks();
+  const saved = { providers: clone(backend.zoSettings.providers), answers: backend.routerProbeAnswers, memory: backend.connectionMemory, locale: backend.settings.locale };
+  const row = (name, base, id, generation = 1) => ({ name, base_url: base, models: [`${id}-one`, `${id}-two`], requires_auth: false, connection: { id, generation } });
+  backend.zoSettings.providers = [
+    row("Gateway", "https://gateway.example.test/v1", "gateway"),
+    row("Bench", "https://bench.example.test/v1", "bench"),
+    row("Stale", "https://stale.example.test/v1", "stale"),
+  ];
+  backend.routerProbeAnswers = Object.fromEntries(backend.zoSettings.providers.map((provider) => [provider.base_url, provider.models]));
+  backend.connectionMemory = { nowMs: T0, connections: {} };
+  const probes = (from) => backend.calls.slice(from).filter((call) => call.command === "test_router_connection").map((call) => call.args.sourceId);
+  const states = (page) => page.evaluate(() => Object.fromEntries([...document.querySelectorAll('#model-connection-groups .model-line[data-connection-id]')]
+    .map((line) => [line.dataset.connectionId, { state: line.querySelector(".model-state").dataset.modelState, notes: [...line.querySelectorAll(".model-line-note")].map((note) => note.textContent) }])));
+  const pages = [];
+  const boot = async (id) => {
+    const page = await context.newPage();
+    pages.push(page);
+    await installTauri(page, id);
+    attachFaultRecorder(page, id);
+    await bootPage(page, id);
+    return page;
+  };
+  try {
+    // ---- the first start: nothing kept, so each is checked once, unasked --
+    const firstAt = backend.calls.length;
+    const first = await boot("memory-first");
+    await openSettings(first, "api-routers");
+    await first.waitForFunction(() => ["gateway", "bench", "stale"].every((id) => modelConnectionsController.checks.get(id)?.state === "ok"), null, { timeout: UI_TIMEOUT });
+    assertEqual(probes(firstAt).sort(), ["bench", "gateway", "stale"], "the first start did not check each connection exactly once");
+    assertEqual(Object.keys(backend.connectionMemory.connections).sort(), ["bench", "gateway", "stale"], "a check was not kept");
+    assertEqual(backend.connectionMemory.connections.gateway, { generation: 1, state: "ok", count: 2, checkedMs: T0 }, "the kept check holds more or less than its words");
+    const format = await first.evaluate(() => modelConnectionsController.judgmentFormat(modelConnectionsController.state.connections.find((one) => one.id === "gateway")));
+    await first.close();
+
+    // ---- three hours later the window starts again ---------------------------
+    backend.connectionMemory.nowMs = T0 + 3 * HOUR;
+    backend.connectionMemory.connections.stale.checkedMs = T0 - 4 * HOUR;
+    backend.connectionMemory.connections.gateway.judgments = [{ model: "gateway-two", protocol: format, state: "schema", checkedMs: T0 }];
+    backend.zoSettings.providers.find((provider) => provider.name === "Bench").connection.generation = 2;
+    backend.zoSettings.providers.push(row("Fresh", "https://fresh.example.test/v1", "fresh"));
+    backend.routerProbeAnswers["https://fresh.example.test/v1"] = ["fresh-one"];
+    let release;
+    backend.routerProbeHold = new Promise((done) => { release = done; });
+    const secondAt = backend.calls.length;
+    const second = await boot("memory-second");
+    await openSettings(second, "api-routers");
+    await backend.waitForCall("memory-second", "test_router_connection", secondAt);
+    await renderSettled(second);
+    const held = await states(second);
+    assertEqual(held.gateway.state, "ok", "a connection checked three hours ago says 「아직 확인 안 함」 after a start");
+    const ago = await second.evaluate(() => t("settings.models.connectedAgo", "연결됨 · {{ago}} 확인 — 모델 {{count}}개", { ago: new Intl.RelativeTimeFormat("ko", { numeric: "auto" }).format(-3, "hour"), count: 2 }));
+    assert(held.gateway.notes.includes(ago), "the kept check does not say how long ago it was made", held.gateway);
+    const schema = await second.evaluate(() => modelStateWords("schema"));
+    assert(held.gateway.notes.some((note) => note.includes(schema.word)), "the kept judgment check of a model was forgotten", held.gateway);
+    assertEqual(Object.values(held).filter((one) => one.state === "checking").length, 1, "more than one connection is checked at a time", held);
+    assert(["changed", "checking"].includes(held.bench.state), "a check made against the old setting was drawn as if it still stood", held.bench);
+    assert(["unknown", "checking"].includes(held.fresh.state), "a connection never checked wears another state", held.fresh);
+    assert(["ok", "checking"].includes(held.stale.state), "an old check was dropped before the new one came", held.stale);
+    release();
+    delete backend.routerProbeHold;
+    await second.waitForFunction(() => ["bench", "stale", "fresh"].every((id) => modelConnectionsController.checks.get(id)?.state === "ok"), null, { timeout: UI_TIMEOUT });
+    await renderSettled(second);
+    assertEqual(probes(secondAt).sort(), ["bench", "fresh", "stale"], "the start did not check exactly the old, changed and never-checked connections, once each");
+    assertEqual(backend.connectionMemory.connections.stale.checkedMs, T0 + 3 * HOUR, "the quiet check was not kept");
+    assertEqual(backend.connectionMemory.connections.gateway.judgments?.length, 1, "a quiet check of another connection cost a judgment check");
+    // Opening the page again asks nothing more: every check is fresh.
+    const againAt = backend.calls.length;
+    await second.evaluate(() => setSettingsOpen(false));
+    await openSettings(second, "api-routers");
+    await backend.waitForCall("memory-second", "remembered_model_connection_checks", againAt);
+    await renderSettled(second);
+    assertEqual(probes(againAt), [], "a fresh check was asked again");
+    // Five languages, 390 px: the new words stay inside the pane.
+    for (const locale of ["ko", "en", "ja", "zh", "es"]) {
+      await setQualityLocale(second, locale);
+      await second.setViewportSize({ width: 390, height: 900 });
+      await second.evaluate(() => modelConnectionsController.render());
+      await renderSettled(second);
+      const wide = await second.locator(".settings-pane:not([hidden])").evaluate((root) => {
+        const right = root.getBoundingClientRect().right;
+        return [...root.querySelectorAll("*")].filter((node) => node.getClientRects().length && node.getBoundingClientRect().right > right + 1).map((node) => node.className).slice(0, 3);
+      });
+      assertEqual(wide, [], `${locale} 390px reaches past its pane`);
+    }
+    return `first start 3 quiet checks · start +3 h: gateway 「${ago}」, 3 checked one at a time (old, changed, never), 0 asked of the fresh one`;
+  } finally {
+    backend.zoSettings.providers = saved.providers;
+    backend.routerProbeAnswers = saved.answers;
+    if (saved.memory === undefined) delete backend.connectionMemory; else backend.connectionMemory = saved.memory;
+    delete backend.routerProbeHold;
+    backend.settings.locale = saved.locale;
+    for (const page of pages) if (!page.isClosed()) await page.close();
+  }
+});
+
+/* t-76500 B: the window's start checks a due connection with nobody opening
+   settings — after its first paint and an idle moment, never before. */
+await test("모델 연결: 설정을 열지 않아도 창이 뜬 뒤 한가할 때 오래된 연결을 한 번 확인하고, 첫 그림 전에는 묻지 않는다 (t-76500)", async () => {
+  const HOUR = 60 * 60 * 1000;
+  const T0 = Date.UTC(2026, 9, 27, 0);
+  await pastStartQuietChecks();
+  const saved = { providers: clone(backend.zoSettings.providers), answers: backend.routerProbeAnswers, memory: backend.connectionMemory };
+  backend.zoSettings.providers = [
+    { name: "Gateway", base_url: "https://gateway.example.test/v1", models: ["one"], requires_auth: false, connection: { id: "gateway", generation: 1 } },
+    { name: "Recent", base_url: "https://recent.example.test/v1", models: ["one"], requires_auth: false, connection: { id: "recent", generation: 1 } },
+  ];
+  backend.routerProbeAnswers = { "https://gateway.example.test/v1": ["one"], "https://recent.example.test/v1": ["one"] };
+  backend.connectionMemory = { nowMs: T0, connections: {
+    gateway: { generation: 1, state: "ok", count: 1, checkedMs: T0 - 7 * HOUR },
+    recent: { generation: 1, state: "ok", count: 1, checkedMs: T0 - HOUR },
+  } };
+  const page = await context.newPage();
+  try {
+    await installTauri(page, "memory-boot");
+    attachFaultRecorder(page, "memory-boot");
+    /* The page's start holds its next frame, its 10 s timer and its idle
+       moment in the test's hands: nothing here waits on a real frame, a real
+       10 s or a real idle callback. Only what shell-connections.js asks for
+       is held; every other frame and timer runs as it does. */
+    await page.addInitScript(() => {
+      const held = { frames: [], timers: [], idles: [] };
+      window.__BOOT_CLOCK__ = held;
+      const mine = () => new Error().stack.includes("shell-connections.js");
+      const frame = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = (callback) => (mine() ? held.frames.push(callback) : frame(callback));
+      const timer = window.setTimeout.bind(window);
+      window.setTimeout = (callback, delay, ...rest) => (mine() && delay >= 10_000 ? held.timers.push({ callback, delay }) : timer(callback, delay, ...rest));
+      const idle = window.requestIdleCallback.bind(window);
+      window.requestIdleCallback = (callback, options) => (mine() ? held.idles.push({ callback, options }) : idle(callback, options));
+    });
+    const from = backend.calls.length;
+    await bootPage(page, "memory-boot");
+    const probes = () => backend.calls.slice(from).filter((call) => call.command === "test_router_connection").map((call) => call.args.sourceId);
+    const clock = () => page.evaluate(() => ({ frames: window.__BOOT_CLOCK__.frames.length, timers: window.__BOOT_CLOCK__.timers.map((one) => one.delay), idles: window.__BOOT_CLOCK__.idles.map((one) => one.options?.timeout ?? null) }));
+    const settle = () => page.evaluate(() => new Promise((done) => window.setTimeout(done, 0)));
+    // The first frame has not come: no timer, no idle moment, no provider asked.
+    assertEqual(await clock(), { frames: 1, timers: [], idles: [] }, "the start did not wait for its first frame");
+    assertEqual(probes(), [], "the window asked a provider before its first paint settled");
+    // The frame comes: the 10 s wait is set, and still nothing is asked.
+    await page.evaluate(() => { const [frame] = window.__BOOT_CLOCK__.frames.splice(0); frame(performance.now()); });
+    assertEqual(await clock(), { frames: 0, timers: [10_000], idles: [] }, "the first frame did not set exactly one 10 s wait");
+    await settle();
+    assertEqual(probes(), [], "the window asked a provider before its 10 s wait was over");
+    // The 10 s pass: an idle moment is asked for, and still nothing is asked.
+    await page.evaluate(() => { const [one] = window.__BOOT_CLOCK__.timers.splice(0); one.callback(); });
+    assertEqual(await clock(), { frames: 0, timers: [], idles: [10_000] }, "the 10 s wait did not ask for one idle moment");
+    await settle();
+    assertEqual(probes(), [], "the window asked a provider before an idle moment came");
+    // The idle moment comes: the one old connection is checked, once.
+    await page.evaluate(() => { const [one] = window.__BOOT_CLOCK__.idles.splice(0); one.callback({ didTimeout: false, timeRemaining: () => 50 }); });
+    await backend.waitForCall("memory-boot", "test_router_connection", from);
+    await page.waitForFunction(() => !modelConnectionsController.quieting, null, { timeout: UI_TIMEOUT });
+    assertEqual(probes(), ["gateway"], "the start did not check exactly the old connection once");
+    assertEqual(backend.connectionMemory.connections.gateway.checkedMs, T0, "the start's quiet check was not kept");
+    assert(await page.evaluate(() => !document.querySelector(".settings-pane:not([hidden])")?.offsetParent), "the quiet check opened settings");
+    return "0 asked before the frame, the 10 s wait and the idle moment; then 1 quiet check; the 1 h old one not asked";
+  } finally {
+    backend.zoSettings.providers = saved.providers;
+    backend.routerProbeAnswers = saved.answers;
+    if (saved.memory === undefined) delete backend.connectionMemory; else backend.connectionMemory = saved.memory;
+    await page.close();
+  }
 });
 
 await (await import("./settings-gguf.mjs")).runSettingsGguf({ test, assert, assertEqual, backend, withJudgmentStatus, setQualityLocale });
