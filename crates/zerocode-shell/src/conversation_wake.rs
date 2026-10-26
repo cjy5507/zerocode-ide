@@ -165,6 +165,10 @@ pub(crate) struct WakeClaims {
     waking: Mutex<Vec<(ConversationKey, TermId)>>,
     /// Rung whenever a wake settles, for a door waiting on it ([`Self::claim_settled`]).
     settled: Condvar,
+    /// How many times a door has gone to sleep on [`Self::settled`] — what a
+    /// test reads to know a door is truly waiting before it lets the wake go.
+    #[cfg(test)]
+    sleeps: std::sync::atomic::AtomicUsize,
 }
 
 /// How long a door waits for a wake already in flight on its conversation
@@ -182,6 +186,8 @@ impl WakeClaims {
         Self {
             waking: Mutex::new(Vec::new()),
             settled: Condvar::new(),
+            #[cfg(test)]
+            sleeps: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -223,6 +229,11 @@ impl WakeClaims {
             if left.is_zero() {
                 return Err(first);
             }
+            // Counted under the lock the wait gives up, so a test that sees the
+            // count and then takes the lock knows the door is asleep.
+            #[cfg(test)]
+            self.sleeps
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             waking = self
                 .settled
                 .wait_timeout(waking, left)
@@ -326,6 +337,8 @@ pub(crate) fn holding_pane(state: &AppState, wanted: &ConversationKey) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::Arc;
     use zerocode_core::SessionKey;
 
     const ZO: &str = "zo";
@@ -394,33 +407,91 @@ mod tests {
             Some(4),
             "no patience is told at once"
         );
-        let leaf = std::thread::spawn(move || {
-            CLAIMS
-                .claim_settled(key(ZO, HELD), 3, |_| None, patience)
-                .map(|claim| claim.term)
+        let asked = Arc::new(AtomicBool::new(false));
+        let asleep = CLAIMS.sleeps.load(SeqCst);
+        let leaf = std::thread::spawn({
+            let asked = Arc::clone(&asked);
+            move || {
+                CLAIMS
+                    .claim_settled(
+                        key(ZO, HELD),
+                        3,
+                        |_| {
+                            asked.store(true, SeqCst);
+                            None
+                        },
+                        patience,
+                    )
+                    .map(|claim| claim.term)
+            }
         });
-        std::thread::sleep(Duration::from_millis(50));
+        door_asleep(&CLAIMS, asleep, &leaf);
+        assert!(
+            !asked.load(SeqCst),
+            "the door asked who holds the conversation while the wake was still in flight"
+        );
         drop(refused);
         assert_eq!(
             leaf.join().expect("the leaf's door"),
             Ok(3),
             "the leaf stood a plain shell over a wake that was refused"
         );
+        assert!(
+            asked.load(SeqCst),
+            "the door never asked who holds the conversation once the wake settled"
+        );
 
         let opened = CLAIMS
             .claim(key(ZO, HELD), 5, |_| None)
             .expect("term 5's wake claims it");
-        let leaf = std::thread::spawn(move || {
-            CLAIMS
-                .claim_settled(key(ZO, HELD), 6, |_| Some(5), patience)
-                .map(|claim| claim.term)
+        let asked = Arc::new(AtomicBool::new(false));
+        let asleep = CLAIMS.sleeps.load(SeqCst);
+        let leaf = std::thread::spawn({
+            let asked = Arc::clone(&asked);
+            move || {
+                CLAIMS
+                    .claim_settled(
+                        key(ZO, HELD),
+                        6,
+                        |_| {
+                            asked.store(true, SeqCst);
+                            Some(5)
+                        },
+                        patience,
+                    )
+                    .map(|claim| claim.term)
+            }
         });
-        std::thread::sleep(Duration::from_millis(50));
+        door_asleep(&CLAIMS, asleep, &leaf);
+        assert!(
+            !asked.load(SeqCst),
+            "the second door asked who holds the conversation while the wake was still in flight"
+        );
         drop(opened);
         assert_eq!(
             leaf.join().expect("the second leaf's door"),
             Err(5),
             "a wake that opened the conversation holds it"
+        );
+        assert!(
+            asked.load(SeqCst),
+            "the second door never asked who holds the conversation once the wake settled"
+        );
+    }
+
+    /// Waits, without sleeping, until `leaf` is asleep on `claims`' settle
+    /// signal past `before` sleeps — a door that skipped the wait answers at
+    /// once, so it ends the thread instead and the assertion names that. The
+    /// deadline only keeps a hung door from hanging the run.
+    fn door_asleep<T>(claims: &WakeClaims, before: usize, leaf: &std::thread::JoinHandle<T>) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while claims.sleeps.load(SeqCst) == before && !leaf.is_finished() {
+            assert!(Instant::now() < deadline, "the door never began to wait");
+            std::thread::yield_now();
+        }
+        assert!(
+            claims.sleeps.load(SeqCst) > before && !leaf.is_finished(),
+            "the door did not wait for the wake in flight: it answered before the wake settled"
         );
     }
 
