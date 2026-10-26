@@ -9,6 +9,7 @@
 //! reader that meets the actor writing simply reads nothing that once.
 
 use std::sync::Mutex;
+use std::time::Instant;
 
 use super::RuntimeRequest;
 
@@ -19,17 +20,18 @@ pub struct Serving {
 }
 
 /// One request the actor is serving: its name — never its payload — and the
-/// wall-clock ms it was taken at.
+/// moment it was taken, on the monotonic clock: a wall clock set back an hour
+/// would make a standing request look as if it had just begun (t-75646 r2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Served {
     pub verb: &'static str,
-    pub since_ms: i64,
+    pub since: Instant,
 }
 
 impl Serving {
     /// The actor took `verb`; it is served until the returned guard drops.
-    pub(super) fn begin(&self, verb: &'static str, since_ms: i64) -> Begun<'_> {
-        *self.now.lock().unwrap_or_else(|held| held.into_inner()) = Some(Served { verb, since_ms });
+    pub(super) fn begin(&self, verb: &'static str, since: Instant) -> Begun<'_> {
+        *self.now.lock().unwrap_or_else(|held| held.into_inner()) = Some(Served { verb, since });
         Begun { serving: self }
     }
 
@@ -146,13 +148,14 @@ mod tests {
     fn a_request_is_served_until_its_guard_drops_and_a_reader_never_waits() {
         let serving = Serving::default();
         assert_eq!(serving.peek(), Some(None));
+        let since = Instant::now();
         {
-            let _begun = serving.begin("view", 7);
+            let _begun = serving.begin("view", since);
             assert_eq!(
                 serving.peek(),
                 Some(Some(Served {
                     verb: "view",
-                    since_ms: 7
+                    since
                 }))
             );
             let writing = serving.now.lock().unwrap();

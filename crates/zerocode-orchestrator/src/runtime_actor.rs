@@ -15,6 +15,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
@@ -6816,7 +6817,7 @@ fn actor_main(
         };
         match command {
             ActorCommand::Request { request, reply } => {
-                let begun = serving.begin(request.verb(), wall_clock_ms());
+                let begun = serving.begin(request.verb(), Instant::now());
                 let answered = state.request(*request);
                 drop(begun);
                 match answered {
@@ -6833,7 +6834,7 @@ fn actor_main(
                 }
             }
             ActorCommand::Shutdown { reply } => {
-                let _begun = serving.begin("shutdown", wall_clock_ms());
+                let _begun = serving.begin("shutdown", Instant::now());
                 if let Err(error) = state.verify_authority() {
                     let _ = reply.send(Err(error.clone()));
                     return Err(error);

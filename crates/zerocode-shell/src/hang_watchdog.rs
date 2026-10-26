@@ -214,12 +214,20 @@ impl Watch {
 /// the actor serves without asking it anything, and says a request that has
 /// run past the first threshold — again while it runs, at most once per
 /// [`STILL_OPEN_EVERY_MS`] — and its end once.
+///
+/// It times on the monotonic clock the actor stamps a request with, and it
+/// testifies only for time the main-thread watch was there for (t-75646 r2):
+/// a beat the watch was away for — a sleep, a late nap, no screen, its
+/// warm-up — withdraws what it was saying, and a request still standing is
+/// timed again from the watch's first beat back.
 #[derive(Debug, Default)]
 struct ActorWatch {
     /// The request said busy, and the length its next line is due at.
     said: Option<(Served, u64)>,
-    /// When the last busy line was said, wall-clock ms.
-    last_line_ms: Option<i64>,
+    /// When the last busy line was said.
+    last_line: Option<Instant>,
+    /// The watch's first beat back since it was last away; `None` while away.
+    back: Option<Instant>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -241,13 +249,25 @@ impl fmt::Display for ActorLine {
 
 impl ActorWatch {
     /// `look` is the actor's [`Serving::peek`]: `None` when it could not be
-    /// read this beat, which changes nothing.
-    fn step(&mut self, look: Option<Option<Served>>, now_ms: i64, first_ms: u64) -> Vec<ActorLine> {
+    /// read this beat, which changes nothing. `witnessed` is whether the
+    /// main-thread watch was there for this beat.
+    fn step(
+        &mut self,
+        look: Option<Option<Served>>,
+        now: Instant,
+        witnessed: bool,
+        first_ms: u64,
+    ) -> Vec<ActorLine> {
+        if !witnessed {
+            self.said = None;
+            self.back = None;
+            return Vec::new();
+        }
+        let back = *self.back.get_or_insert(now);
         let Some(serving) = look else {
             return Vec::new();
         };
-        let ran =
-            |served: Served| u64::try_from(now_ms.saturating_sub(served.since_ms)).unwrap_or(0);
+        let ran = |served: Served| millis(now.saturating_duration_since(served.since.max(back)));
         let mut lines = Vec::new();
         if let Some((said, _)) = self.said
             && serving != Some(said)
@@ -261,20 +281,24 @@ impl ActorWatch {
         if let Some(served) = serving {
             let ms = ran(served);
             let due = self.said.map_or(first_ms, |(_, due)| due);
-            let quiet = self.last_line_ms.is_none_or(|at| {
-                u64::try_from(now_ms.saturating_sub(at)).unwrap_or(0) >= STILL_OPEN_EVERY_MS
-            });
+            let quiet = self
+                .last_line
+                .is_none_or(|at| millis(now.saturating_duration_since(at)) >= STILL_OPEN_EVERY_MS);
             if ms >= due && quiet {
                 lines.push(ActorLine::Busy {
                     verb: served.verb,
                     ms,
                 });
                 self.said = Some((served, ms.saturating_add(STILL_OPEN_EVERY_MS)));
-                self.last_line_ms = Some(now_ms);
+                self.last_line = Some(now);
             }
         }
         lines
     }
+}
+
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What the sample taken after a hang was seen can speak for (t-72138).
@@ -422,6 +446,7 @@ impl Monitor {
     }
     pub(crate) fn resumed(&mut self) {
         self.armed = false;
+        self.actor = ActorWatch::default();
     }
 
     /// One beat's judgments, the main thread's and the actor's, without the
@@ -439,12 +464,12 @@ impl Monitor {
             self.armed = true;
         }
         let beaten = beat_once(&mut self.watch, &self.answer, beat, limits);
-        let actor = if limits.watchdog {
-            let wall = i64::try_from(beat.wall).unwrap_or(i64::MAX);
-            self.actor.step(look(), wall, limits.first_ms)
-        } else {
-            Vec::new()
-        };
+        // The actor is read only on a beat the watch testifies for: its own
+        // judgment says whether it was there, and a watch turned off is not.
+        let witnessed = beat.now >= self.watch.warm_until;
+        let look = if witnessed { look() } else { None };
+        let now = self.start + Duration::from_millis(beat.now);
+        let actor = self.actor.step(look, now, witnessed, limits.first_ms);
         (beaten, actor)
     }
     /// One beat, after a nap that really took `nap` of wall time.
@@ -721,8 +746,13 @@ mod tests {
         );
         // Still open: no second hang, no second badge, no new ping — at most
         // the line that says it is still open.
-        let open = watch.step(beat(begin + limits.second_ms * 2), None, limits);
-        assert_eq!((open.hang, open.badge, open.ping), (None, None, false));
+        assert_eq!(
+            watch.step(beat(begin + limits.second_ms * 2), None, limits),
+            Tick {
+                still: Some(limits.second_ms * 2),
+                ..Tick::default()
+            }
+        );
         assert!(
             watch
                 .step(
@@ -943,13 +973,6 @@ mod tests {
         assert_eq!((tick.hang, tick.ended), (Some(2_266), None));
     }
 
-    /// 2026-10-23 05:19 (t-72138): the ping went unanswered 2,031 ms while
-    /// the main thread ran Chromium's message pump, and the one-second
-    /// sample that followed found it idle in `mach_msg` in 72 of its 78
-    /// samples — the hang had ended, and its task carried the idle loop as
-    /// its stack. A sample that began after the answer holds none of the
-    /// hang; one the answer arrived in holds its end. Either way the record
-    /// says when the answer came, so the frames are read for what they are.
     /// 2026-10-26 07:30 and 15:21 (t-75646): the window stood for minutes and
     /// the watch wrote nothing. One beat back late inside a hang's first two
     /// seconds withdraws the judgment and warms the watch up; when the warm-up
@@ -1019,8 +1042,20 @@ mod tests {
         assert_eq!(watch.count, 1, "one hang, however often it is said");
     }
 
-    fn served(verb: &'static str, since_ms: i64) -> Option<Option<Served>> {
-        Some(Some(Served { verb, since_ms }))
+    /// Made-up moments for the actor watch alone: `ms` past one origin.
+    struct Clock(Instant);
+
+    impl Clock {
+        fn at(&self, ms: u64) -> Instant {
+            self.0 + Duration::from_millis(ms)
+        }
+
+        fn served(&self, verb: &'static str, since_ms: u64) -> Option<Option<Served>> {
+            Some(Some(Served {
+                verb,
+                since: self.at(since_ms),
+            }))
+        }
     }
 
     /// A request the actor serves for 25 s is said at the first threshold and
@@ -1028,15 +1063,17 @@ mod tests {
     #[test]
     fn a_long_actor_request_is_said_while_it_runs_and_once_when_it_ends() {
         let first = Limits::DEFAULT.first_ms;
+        let clock = Clock(Instant::now());
         let mut watch = ActorWatch::default();
         let mut said = Vec::new();
-        assert!(watch.step(served("check", 0), 1_000, first).is_empty());
-        assert!(watch.step(Some(None), 1_500, first).is_empty());
+        let mut step = |look, now| watch.step(look, clock.at(now), true, first);
+        assert!(step(clock.served("check", 0), 1_000).is_empty());
+        assert!(step(Some(None), 1_500).is_empty());
         for now in (0..=25_000).step_by(250) {
-            said.extend(watch.step(served("window_exiting", 2_000), 2_000 + now, first));
+            said.extend(step(clock.served("window_exiting", 2_000), 2_000 + now));
         }
-        said.extend(watch.step(Some(None), 27_250, first));
-        assert!(watch.step(Some(None), 27_500, first).is_empty());
+        said.extend(step(Some(None), 27_250));
+        assert!(step(Some(None), 27_500).is_empty());
         assert_eq!(
             said,
             [
@@ -1070,6 +1107,7 @@ mod tests {
     #[test]
     fn actor_lines_are_at_most_one_busy_line_per_ten_seconds() {
         let first = Limits::DEFAULT.first_ms;
+        let clock = Clock(Instant::now());
         let mut watch = ActorWatch::default();
         let mut busy = 0;
         let mut since = 0;
@@ -1078,10 +1116,10 @@ mod tests {
                 since = now;
             }
             if now % 1_000 == 0 {
-                assert!(watch.step(None, now, first).is_empty());
+                assert!(watch.step(None, clock.at(now), true, first).is_empty());
             }
             busy += watch
-                .step(served("view", since), now, first)
+                .step(clock.served("view", since), clock.at(now), true, first)
                 .iter()
                 .filter(|line| matches!(line, ActorLine::Busy { .. }))
                 .count();
@@ -1118,7 +1156,7 @@ mod tests {
         fn take(&self, verb: &'static str) -> Served {
             Served {
                 verb,
-                since_ms: i64::try_from(self.wall).unwrap(),
+                since: self.monitor.start + Duration::from_millis(self.up),
             }
         }
 
@@ -1132,9 +1170,7 @@ mod tests {
                 nap,
                 seen: true,
             };
-            let (beaten, lines) = self
-                .monitor
-                .judge(beat, Limits::DEFAULT, || Some(serving));
+            let (beaten, lines) = self.monitor.judge(beat, Limits::DEFAULT, || Some(serving));
             if beaten.queue {
                 self.monitor.answer.answer(self.up);
             }
@@ -1238,7 +1274,9 @@ mod tests {
     /// actor: the watch was not there, as it is not for the main thread.
     #[test]
     fn a_short_actor_request_across_a_sleep_says_nothing() {
-        let away: [(&str, fn(&mut Machine, Served)); 3] = [
+        /// One way the watch is away while the request stands.
+        type Away = fn(&mut Machine, Served);
+        let away: [(&str, Away); 3] = [
             ("slept in the nap", |machine, _| machine.sleep(30_000)),
             ("slept between beats", |machine, _| machine.wall += 30_000),
             ("not run", |machine, request| {
@@ -1276,6 +1314,13 @@ mod tests {
         );
     }
 
+    /// 2026-10-23 05:19 (t-72138): the ping went unanswered 2,031 ms while
+    /// the main thread ran Chromium's message pump, and the one-second
+    /// sample that followed found it idle in `mach_msg` in 72 of its 78
+    /// samples — the hang had ended, and its task carried the idle loop as
+    /// its stack. A sample that began after the answer holds none of the
+    /// hang; one the answer arrived in holds its end. Either way the record
+    /// says when the answer came, so the frames are read for what they are.
     #[test]
     fn a_sample_taken_after_the_answer_is_not_filed_as_the_hangs_stack() {
         let limits = Limits::DEFAULT;
