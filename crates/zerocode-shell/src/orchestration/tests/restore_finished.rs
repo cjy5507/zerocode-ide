@@ -1116,3 +1116,120 @@ fn a_coordinator_lost_with_the_exits_write_is_told_to_its_run() {
         crate::agent_teams::forget_term(pane);
     }
 }
+
+/// t-76489 r7, the codex review's finding of r6, through the exit's own
+/// write and the next boot: run's coordinator C runs in pane 9 of a
+/// workspace not in front, the last save left that pane out, and nobody can
+/// tell whether it holds C. The workspace's only record of C is an old one —
+/// its pane gone, or no pane named. The exit keeps the old record and writes
+/// pane 9 beside it, the tab stands with its screen, the boot puts the
+/// workspace back behind the front, and its door opens C. Before, the old
+/// record's name alone answered: the exit wrote nothing for pane 9, its tab
+/// was stored asleep, the boot left the workspace out, and no line or letter
+/// said C was lost.
+#[test]
+fn a_coordinator_beside_a_dead_record_comes_back_with_the_next_boot() {
+    const LEADER: u32 = 764_970;
+    const FIRST: u32 = 764_971;
+    const DOOR: u32 = 764_975;
+    let (_window, _store) = PrivateWindow::boot();
+    let root = tempfile::tempdir().expect("the checkouts");
+    let front = root.path().join("zerocode");
+    let behind = root.path().join("t-76489");
+    for folder in [&front, &behind] {
+        std::fs::create_dir_all(folder).expect("a checkout");
+    }
+    let at = |folder: &std::path::Path| folder.to_string_lossy().into_owned();
+    let host = Restoring::new(&front, FIRST, (0, test_actor(LEADER)));
+    let (_team, _run) = a_run(&host, LEADER, "exit-dead-record");
+    let coordinator = format!("test-session-of-term-{LEADER}");
+    let pane = crate::pane_layout::LivePane {
+        term: 9,
+        worktree: at(&behind),
+        wake: crate::pane_layout::WakeAgent {
+            agent: "claude".to_string(),
+            key: "session_id".to_string(),
+            id: coordinator.clone(),
+            transcript_path: None,
+            interrupted: false,
+        },
+        sure: false,
+    };
+
+    for (scene, dead) in [
+        ("a dead pane's record", Some(5)),
+        ("a record of no pane", None),
+    ] {
+        let file = root
+            .path()
+            .join(format!("{}.json", dead.map_or(0, |term| term)));
+        let mut old = record("claude", &coordinator);
+        old.focused = false;
+        old.terms = dead
+            .map(|term| std::collections::HashMap::from([(0, term)]))
+            .unwrap_or_default();
+        crate::pane_layout::rewrite(&file, |held| {
+            crate::pane_layout::store(held, at(&front), vec![shell()]);
+            crate::pane_layout::store(held, at(&behind), vec![old.clone()]);
+            true
+        })
+        .expect("the stored sets");
+        let exited = crate::system_runtime::exit_write(
+            &file,
+            vec![pane.clone()],
+            &|_, _| None,
+            &|term| term == 9,
+            &|term| (term == 9).then(|| "screen of 9".to_string()),
+            &|| true,
+        );
+        assert_eq!(
+            exited.written,
+            crate::system_runtime::Written::Done,
+            "{scene}"
+        );
+        assert!(
+            matches!(exited.filed[..], [crate::pane_layout::Filed::Tab(_)]),
+            "{scene}: {:?}",
+            exited.filed
+        );
+        assert_eq!(
+            crate::cmd::settings::standing_set(&file),
+            vec![at(&behind)],
+            "{scene}: the boot leaves the coordinator's workspace out"
+        );
+        let back = crate::cmd::settings::opened_set(&file, &at(&behind));
+        assert!(back.struck.is_empty(), "{scene}: {back:?}");
+        let back = back.kept();
+        assert!(
+            back.iter().any(|tab| tab.awake
+                && tab.agents.get(&0).map(|wake| wake.id.as_str()) == Some(&coordinator)),
+            "{scene}: no standing tab of C: {back:#?}"
+        );
+        // The visit's read leaves the screens to their own door; the file
+        // holds pane 9's.
+        assert!(
+            crate::pane_layout::read(&file)[&at(&behind)]
+                .iter()
+                .any(|tab| tab.buffers.get(&0).map(String::as_str) == Some("screen of 9")),
+            "{scene}: pane 9's screen was not captured"
+        );
+        assert_eq!(
+            back.iter()
+                .filter(|tab| tab.agents.values().any(|wake| wake.id == coordinator))
+                .count(),
+            2,
+            "{scene}: the old record went"
+        );
+        let door = Door::new(&behind);
+        door.on_road(WakeRoad::RestoreBehind);
+        match door.wake(DOOR, "claude", &coordinator) {
+            Ok(woke) if woke.finished.is_none() => {}
+            other => panic!("{scene}: the boot's door: {other:?}"),
+        }
+        assert_eq!(resumes(&door), 1, "{scene}: {:?}", door.started());
+        crate::agent_teams::forget_term(DOOR);
+    }
+    for pane in [FIRST, LEADER] {
+        crate::agent_teams::forget_term(pane);
+    }
+}

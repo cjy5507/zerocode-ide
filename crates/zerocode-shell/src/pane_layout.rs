@@ -673,9 +673,10 @@ pub(crate) struct LivePane {
 /// conversation stays on its leaf, so no other leaf's copy is lost. A pane
 /// the window could not tell of only adds (t-76489 r6): on its own empty
 /// leaf, else as a tab of its own in its workspace when no leaf there
-/// names it, and it takes no record off any leaf and puts none over
-/// another conversation. In r5 such a pane took a pane known to hold the
-/// same conversation off its leaf, as a record of a pane gone.
+/// names it from a pane still standing (r7), and it takes no record off
+/// any leaf and puts none over another conversation. In r5 such a pane
+/// took a pane known to hold the same conversation off its leaf, as a
+/// record of a pane gone.
 pub(crate) fn file_unheld(
     layouts: &mut Layouts,
     live: Vec<LivePane>,
@@ -688,7 +689,7 @@ pub(crate) fn file_unheld(
             continue;
         }
         if !pane.sure {
-            filed.push(add_unconfirmed(layouts, pane));
+            filed.push(add_unconfirmed(layouts, pane, &standing));
             continue;
         }
         let (afar, stale): (Vec<_>, Vec<_>) = leaves_naming(layouts, &pane.wake)
@@ -760,18 +761,29 @@ pub(crate) fn file_unheld(
 /// [`file_unheld`] for a pane the window could not tell holds its
 /// conversation (t-76489 r6): it adds the conversation where it is
 /// missing and takes nothing off any leaf. A leaf naming it in the pane's
-/// workspace — or, for a pane that named none, anywhere — stands for it as
-/// it is; else its own leaf names it when that leaf names nothing; else it
-/// is a tab of its own in its workspace, beside whatever else names it.
-/// A conversation two leaves name wakes in one of them, and the other
-/// comes back a plain shell (`spawnStoredLeaf`): two leaves lose nothing,
-/// and taking one off on a guess loses the pane that held it.
-fn add_unconfirmed(layouts: &mut Layouts, pane: LivePane) -> Filed {
+/// workspace — or, for a pane that named none, anywhere — from a pane
+/// still `standing` stands for it as it is; else its own leaf names it
+/// when that leaf names nothing; else it is a tab of its own in its
+/// workspace, beside whatever else names it. A conversation two leaves
+/// name wakes in one of them, and the other comes back a plain shell
+/// (`spawnStoredLeaf`): two leaves lose nothing, and taking one off on a
+/// guess loses the pane that held it.
+///
+/// A leaf whose pane is gone, or that names no pane, is a record no screen
+/// is captured for, and it does not stand for this pane (t-76489 r7): in
+/// r6 such a record's name alone answered, nothing pointed at the living
+/// pane, its tab was stored asleep, and a workspace not in front never
+/// came back. For a pane that named no workspace, with no empty leaf of its
+/// own, a dead pane's leaf is tied to it — the leaf keeps its conversation
+/// and its place — and a record of no pane, which nothing here confirms,
+/// keeps it as before.
+fn add_unconfirmed(layouts: &mut Layouts, pane: LivePane, standing: impl Fn(u32) -> bool) -> Filed {
     let placed = !pane.worktree.is_empty();
-    let standing_for = leaves_naming(layouts, &pane.wake)
-        .iter()
-        .any(|(path, ..)| !placed || *path == pane.worktree);
-    if standing_for {
+    let naming: Vec<_> = leaves_naming(layouts, &pane.wake)
+        .into_iter()
+        .filter(|(path, ..)| !placed || *path == pane.worktree)
+        .collect();
+    if naming.iter().any(|(.., term)| term.is_some_and(&standing)) {
         return Filed::Named;
     }
     let empty_own = layouts.values_mut().flatten().find_map(|tab| {
@@ -787,6 +799,17 @@ fn add_unconfirmed(layouts: &mut Layouts, pane: LivePane) -> Filed {
         return Filed::Renamed;
     }
     if !placed {
+        let dead = naming.iter().find(|(.., term)| term.is_some());
+        if let Some((path, index, at, _)) = dead
+            && let Some(tab) = layouts.get_mut(path).and_then(|tabs| tabs.get_mut(*index))
+        {
+            tab.terms.insert(*at, pane.term);
+            tab.running.insert(*at, pane.wake.agent.clone());
+            return Filed::Relinked;
+        }
+        if !naming.is_empty() {
+            return Filed::Named;
+        }
         return Filed::Unplaced;
     }
     Filed::Tab(tab_of_its_own(layouts, pane))
@@ -881,13 +904,15 @@ pub(crate) enum Filed {
     /// this window never woke in another workspace keeps it for a pane that
     /// named no workspace, or it names none that could wake: nothing
     /// written. For a pane the window could not tell of, also: a leaf of
-    /// its workspace names it.
+    /// its workspace names it from a pane still standing, or — for one that
+    /// named no workspace — a record of no pane does.
     Named,
     /// The stored leaf holding its shell now names its conversation — for
     /// a pane the window could not tell of, only a leaf that named nothing.
     Renamed,
     /// The leaf that named its conversation from a pane that is gone now
-    /// stands for this pane, in its place.
+    /// stands for this pane, in its place — for a pane the window could
+    /// not tell of, only one that named no workspace and had no empty leaf.
     Relinked,
     /// No leaf names it or holds its shell, and it named no workspace to be
     /// written into (an empty one): nothing written.
@@ -1940,6 +1965,102 @@ mod tests {
             "the record afar went"
         );
         assert_eq!(layouts[&main][0].agents[&0], claude(COORDINATOR));
+    }
+
+    /// t-76489 r7, the codex review's finding of r6: coordinator C runs in
+    /// pane 9, which the last save left out and nobody can tell of, and the
+    /// only record of C in its workspace is an old one — its pane 5 gone, or
+    /// no pane named at all. The old record stays, and pane 9 is written
+    /// beside it as a tab of its own: the exit captures its screen, the tab
+    /// stands, and the next boot puts the workspace back with C in it. A
+    /// record whose pane still stands answers for it as before, and a pane
+    /// placed nowhere names C on its own empty leaf, else ties a dead pane's
+    /// record to itself. Before, the old record's name alone answered
+    /// `Named`: nothing pointed at pane 9, the tab was stored asleep, and a
+    /// workspace not in front never came back, with nothing said of it.
+    #[test]
+    fn a_record_of_no_living_pane_does_not_answer_for_a_pane_not_known_to_hold_it() {
+        let root = tempfile::tempdir().expect("the checkouts");
+        let main = root.path().join("zerocode");
+        std::fs::create_dir_all(&main).expect("a checkout");
+        let main = main.to_string_lossy().into_owned();
+        let record = |term: Option<u32>| TabLayout {
+            id: Some(1),
+            agents: HashMap::from([(0, claude(COORDINATOR))]),
+            running: HashMap::from([(0, "claude".to_string())]),
+            terms: term
+                .map(|term| HashMap::from([(0, term)]))
+                .unwrap_or_default(),
+            ..bare(PaneNode::Leaf)
+        };
+        let unknown = |worktree: &str| LivePane {
+            term: 9,
+            worktree: worktree.to_string(),
+            wake: claude(COORDINATOR),
+            sure: false,
+        };
+        let standing = |term: u32| term == 9;
+        let screens = |term: u32| standing(term).then(|| format!("screen of {term}"));
+
+        for (scene, term) in [
+            ("a dead pane's record", Some(5)),
+            ("a record of no pane", None),
+        ] {
+            let mut layouts = Layouts::from([(main.clone(), vec![record(term)])]);
+            let filed = file_unheld(&mut layouts, vec![unknown(&main)], standing);
+            assert_eq!(filed, vec![Filed::Tab(2)], "{scene}");
+            assert_eq!(
+                layouts[&main][0],
+                record(term),
+                "{scene}: the old record was changed"
+            );
+            capture_exit(&mut layouts, screens);
+            let tab = &layouts[&main][1];
+            assert_eq!(tab.agents[&0], claude(COORDINATOR), "{scene}");
+            assert!(
+                tab.awake,
+                "{scene}: the living coordinator's tab was stored asleep"
+            );
+            assert_eq!(tab.buffers[&0], "screen of 9", "{scene}: no screen");
+            assert_eq!(standing_worktrees(&layouts), vec![main.clone()], "{scene}");
+            assert_none_lost(&layouts, &[claude(COORDINATOR)], scene);
+        }
+
+        // A record whose pane still stands answers for it: nothing added.
+        let mut layouts = Layouts::from([(main.clone(), vec![record(Some(5))])]);
+        let before = layouts.clone();
+        let filed = file_unheld(&mut layouts, vec![unknown(&main)], |term| {
+            term == 5 || term == 9
+        });
+        assert_eq!(filed, vec![Filed::Named]);
+        assert_eq!(layouts, before);
+
+        // A pane placed nowhere names C on its own empty leaf, beside the
+        // dead pane's record.
+        let mut layouts = Layouts::from([(main.clone(), vec![record(Some(5)), shell_of(9)])]);
+        let filed = file_unheld(&mut layouts, vec![unknown("")], standing);
+        assert_eq!(filed, vec![Filed::Renamed]);
+        assert_eq!(layouts[&main][0], record(Some(5)));
+        assert_eq!(layouts[&main][1].agents[&0], claude(COORDINATOR));
+        capture_exit(&mut layouts, screens);
+        assert_eq!(standing_worktrees(&layouts), vec![main.clone()]);
+
+        // With no leaf of its own, the dead pane's record is tied to it —
+        // the record keeps its conversation and its place — and a record of
+        // no pane, which a pane placed nowhere cannot confirm, stands for
+        // it as before.
+        let mut layouts = Layouts::from([(main.clone(), vec![record(Some(5))])]);
+        let filed = file_unheld(&mut layouts, vec![unknown("")], standing);
+        assert_eq!(filed, vec![Filed::Relinked]);
+        assert_eq!(layouts[&main][0].agents[&0], claude(COORDINATOR));
+        assert_eq!(layouts[&main][0].terms[&0], 9);
+        capture_exit(&mut layouts, screens);
+        assert!(layouts[&main][0].awake);
+        assert_eq!(standing_worktrees(&layouts), vec![main.clone()]);
+        let mut layouts = Layouts::from([(main.clone(), vec![record(None)])]);
+        let filed = file_unheld(&mut layouts, vec![unknown("")], standing);
+        assert_eq!(filed, vec![Filed::Named]);
+        assert_eq!(layouts[&main], vec![record(None)]);
     }
 
     /// A stored plain shell that stood for pane `term`.
