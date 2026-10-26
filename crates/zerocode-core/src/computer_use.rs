@@ -4675,11 +4675,16 @@ fn optional_non_negative_integer(
         .transpose()
 }
 
+const HOTKEY_EXAMPLE: &str = "use hotkey --key Cmd+V or press-key --key cmd+v";
+
 fn validate_press_key(key: &str) -> Result<(), String> {
-    if key.trim().is_empty() || key.contains('+') {
-        return Err(
-            "press-key accepts one key without modifiers; use hotkey for combinations".into(),
-        );
+    if key.contains('+') {
+        return validate_hotkey(key);
+    }
+    if key.trim().is_empty() {
+        return Err(format!(
+            "press-key needs one key; {HOTKEY_EXAMPLE} for combinations"
+        ));
     }
     Ok(())
 }
@@ -4687,7 +4692,9 @@ fn validate_press_key(key: &str) -> Result<(), String> {
 fn validate_hotkey(key: &str) -> Result<(), String> {
     let parts = key.split('+').map(str::trim).collect::<Vec<_>>();
     if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
-        return Err("hotkey requires modifiers plus one key, such as CmdOrCtrl+A".into());
+        return Err(format!(
+            "hotkey requires modifiers plus one key; {HOTKEY_EXAMPLE}"
+        ));
     }
     let modifiers = &parts[..parts.len() - 1];
     if modifiers.iter().any(|part| {
@@ -4706,7 +4713,16 @@ fn validate_hotkey(key: &str) -> Result<(), String> {
                 | "super"
         )
     }) {
-        return Err("hotkey contains an unsupported modifier".into());
+        return Err(format!(
+            "hotkey contains an unsupported modifier; {HOTKEY_EXAMPLE}"
+        ));
+    }
+    if !crate::computer_use_protocol::keys::KEY_NAMES
+        .contains(&parts[parts.len() - 1].to_ascii_lowercase().as_str())
+    {
+        return Err(format!(
+            "hotkey contains an unsupported key; {HOTKEY_EXAMPLE}"
+        ));
     }
     Ok(())
 }
@@ -4736,7 +4752,7 @@ pub fn usage() -> String {
         "  zerocode-computer scroll --app <app> (--element-index N|--x X --y Y) --direction <up|down|left|right> [--json]",
         "  zerocode-computer drag --app <app> (--from-element-index N --to-element-index N|--from-x X --from-y Y --to-x X --to-y Y) [--json]",
         "  zerocode-computer type-text --app <app> (--text text|--text-stdin) [--json]",
-        "  zerocode-computer press-key --app <app> --key <key> [--json]",
+        "  zerocode-computer press-key --app <app> --key <key|modifier+key> [--json] (combinations run as hotkey)",
         "  zerocode-computer hotkey --app <app> --key <modifier+key> [--json]",
         "  zerocode-computer paste-text --app <app> (--text text|--text-stdin) [--json]",
         "  zerocode-computer set-value --app <app> --element-index N (--value text|--value-stdin) [--json]",
@@ -7260,14 +7276,16 @@ mod tests {
         for key in ["cmd+v", "command+v", "Ctrl+Shift+T"] {
             let press = parse_command(&words(&["press-key", "--app", "Fixture", "--key", key]))
                 .expect("press-key accepts a hotkey combination");
-            let hotkey = parse_command(&words(&["hotkey", "--app", "Fixture", "--key", key]))
-                .unwrap();
+            let hotkey =
+                parse_command(&words(&["hotkey", "--app", "Fixture", "--key", key])).unwrap();
             assert_eq!(press.params, hotkey.params);
         }
         for key in ["cmd+", "+v", "foo+v", "cmd+unknown-key", "cmd+shift"] {
             for verb in ["press-key", "hotkey"] {
-                assert!(parse_command(&words(&[verb, "--app", "Fixture", "--key", key])).is_err(),
-                    "accepted {verb} {key}");
+                let error = parse_command(&words(&[verb, "--app", "Fixture", "--key", key]))
+                    .expect_err("invalid key combination");
+                assert!(error.contains("hotkey --key Cmd+V"), "{error}");
+                assert!(error.contains("press-key --key cmd+v"), "{error}");
             }
         }
     }
