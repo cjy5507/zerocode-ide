@@ -128,7 +128,9 @@ pub fn contains_ascii_case(raw: &str, needle: &str) -> bool {
         .any(|part| part.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-/// A complete reference, optionally named by an assignment or auth header.
+/// A complete `{{name}}` or `${name}` reference, optionally named by an
+/// assignment or auth header. Command substitutions can contain literal input
+/// and are never references.
 /// Bare `$TOKEN`, concatenated literals and incomplete delimiters remain
 /// credential candidates. Every consumer uses this same boundary reading.
 #[must_use]
@@ -153,8 +155,6 @@ fn reference_value_end(value: &str) -> Option<usize> {
         let name = &name[..close];
         (crate::computer_recipe::recipe_param_name(name) && !name.contains('-'))
             .then_some(close + 3)?
-    } else if raw.starts_with("$(") {
-        command_reference_end(raw)?
     } else {
         return None;
     } + start;
@@ -171,34 +171,50 @@ fn reference_value_end(value: &str) -> Option<usize> {
         .then_some(end)
 }
 
-/// Read command substitutions without executing them. Quoted or escaped
-/// parentheses do not close the outer substitution.
-fn command_reference_end(value: &str) -> Option<usize> {
-    let mut depth = 1usize;
+/// Read a named shell value as one span when it contains a substitution.
+/// Each nested command keeps its own quotes. Incomplete values consume the
+/// remaining line. This only finds the masking boundary; it executes nothing.
+fn command_value_end(value: &str) -> Option<usize> {
+    let mut parents = Vec::new();
+    let mut depth = 0usize;
     let mut quote = None;
     let mut escaped = false;
-    for (index, byte) in value.bytes().enumerate().skip(2) {
+    let mut command = false;
+    let mut chars = value.char_indices().peekable();
+    while let Some((index, glyph)) = chars.next() {
         if escaped {
             escaped = false;
-        } else if byte == b'\\' && quote != Some(b'\'') {
+        } else if glyph == '\\' && quote != Some('\'') {
             escaped = true;
-        } else if quote == Some(byte) {
+        } else if glyph == '$' && chars.peek().is_some_and(|&(_, next)| next == '(') {
+            command = true;
+            if quote != Some('\'') {
+                parents.push((depth, quote));
+                depth = 1;
+                quote = None;
+                chars.next();
+                continue;
+            }
+        } else if quote == Some(glyph) {
             quote = None;
         } else if quote.is_none() {
-            match byte {
-                b'\'' | b'"' => quote = Some(byte),
-                b'(' => depth += 1,
-                b')' => {
+            match glyph {
+                '\'' | '"' => quote = Some(glyph),
+                '(' if depth > 0 => depth += 1,
+                ')' if depth > 0 => {
                     depth -= 1;
                     if depth == 0 {
-                        return (!value[2..index].trim().is_empty()).then_some(index + 1);
+                        (depth, quote) = parents.pop()?;
                     }
+                }
+                _ if depth == 0 && glyph.is_whitespace() => {
+                    return command.then_some(index);
                 }
                 _ => {}
             }
         }
     }
-    None
+    command.then_some(value.len())
 }
 
 /// A whole reference token or the syntax that names it. Headers consume their
@@ -435,6 +451,29 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
             continue;
         }
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..end];
+        let separators: &[char] = match reading {
+            Reading::ByNameAndShape => &['=', ':'],
+            Reading::ByName => &['='],
+        };
+        let value_start = if mask_next {
+            Some(0)
+        } else {
+            word.find(separators)
+                .filter(|&split| names_a_credential(&word[..split]))
+                .map(|split| split + 1)
+        };
+        if quoted.is_none()
+            && let Some(start) = value_start
+            && let Some(end) = command_value_end(&rest[start..])
+        {
+            out.push_str(spacing);
+            out.push_str(&rest[..start]);
+            out.push_str(MASK);
+            rest = &rest[start + end..];
+            mask_next = false;
+            continue;
+        }
         let (word, after) = rest.split_at(end);
         rest = after;
         if let Some(quote) = quoted {
@@ -453,10 +492,6 @@ fn mask_line(line: &str, out: &mut String, reading: Reading) {
             mask_next = false;
             continue;
         }
-        let separators: &[char] = match reading {
-            Reading::ByNameAndShape => &['=', ':'],
-            Reading::ByName => &['='],
-        };
         if let Some(split) = word.find(separators)
             && split + 1 < word.len()
             && names_a_credential(&word[..split])
