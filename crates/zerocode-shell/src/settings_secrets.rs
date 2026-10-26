@@ -83,16 +83,22 @@ pub(crate) struct ZoDoor {
     bin: PathBuf,
     env: Vec<(String, String)>,
     wait: Duration,
+    /// Whether this machine keeps a key at all. Where it does not, the doors
+    /// are not asked (t-76698 r5).
+    supported: bool,
 }
 
 impl ZoDoor {
     /// The installed zo, with a zo pane's account variables.
     pub(crate) fn of_this_window(config_root: &Path) -> Option<Self> {
         let home = dirs::home_dir()?;
-        Some(Self::at(
-            crate::zo_companion::zo_path_under(&home),
-            crate::accounts::reading_env_for(config_root, "zo"),
-        ))
+        Some(
+            Self::at(
+                crate::zo_companion::zo_path_under(&home),
+                crate::accounts::reading_env_for(config_root, "zo"),
+            )
+            .supported(crate::accounts::KEYCHAIN_AVAILABLE),
+        )
     }
 
     pub(crate) fn at(bin: PathBuf, env: Vec<(String, String)>) -> Self {
@@ -100,7 +106,13 @@ impl ZoDoor {
             bin,
             env,
             wait: ZO_WAIT,
+            supported: true,
         }
+    }
+
+    /// The same door on a machine that does, or does not, keep a key.
+    pub(crate) fn supported(self, supported: bool) -> Self {
+        Self { supported, ..self }
     }
 
     /// One door's exit code and the JSON it printed, whatever the code; `None`

@@ -407,6 +407,38 @@ fn a_zo_that_says_the_move_is_not_supported_here_shows_nothing() {
 }
 
 #[test]
+fn a_machine_that_keeps_no_key_does_not_ask_zo_at_all() {
+    let bench = Bench::new();
+    let off = || bench.zo().supported(false);
+    let before = std::fs::read(bench.settings()).expect("settings");
+    assert_eq!(notice(&off(), &bench.file()), None);
+    assert_eq!(off().ask(&["settings", "secrets", "--json"]), None);
+    let keys = HeldKeys::default();
+    let outcome = move_all(&off(), &bench.file(), &keys);
+    assert_eq!(reason(&outcome), Some("zo_silent"));
+    assert!(outcome.moved.is_empty() && outcome.left.is_empty());
+    assert_eq!(keys.held(&keychain_service(NAME)), None);
+    assert_eq!(
+        bench.calls(),
+        Vec::<Vec<String>>::new(),
+        "no door of zo's was asked"
+    );
+    assert_eq!(std::fs::read(bench.settings()).expect("settings"), before);
+    // The same door, on a machine that keeps keys, is asked as before.
+    assert!(notice(&bench.zo().supported(true), &bench.file()).is_some());
+    assert_eq!(bench.calls(), vec![list_call()]);
+}
+
+#[test]
+fn the_window_asks_zo_only_where_a_keychain_keeps_the_key() {
+    let config = tempfile::tempdir().expect("config");
+    assert_eq!(
+        ZoDoor::of_this_window(config.path()).map(|zo| zo.supported),
+        Some(crate::accounts::KEYCHAIN_AVAILABLE)
+    );
+}
+
+#[test]
 fn nothing_written_as_plain_text_shows_nothing() {
     let bench = Bench::new();
     bench.answer("list", r#"{"literals":[]}"#, 0);
