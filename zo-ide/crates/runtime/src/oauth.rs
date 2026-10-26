@@ -110,14 +110,21 @@ mod tests {
     }
 
     fn temp_config_home() -> std::path::PathBuf {
+        temp_config_home_at(now_nanos())
+    }
+
+    fn temp_config_home_at(nanos: u128) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "runtime-oauth-test-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("time")
-                .as_nanos()
+            "runtime-oauth-test-{}-{nanos}",
+            std::process::id()
         ))
+    }
+
+    fn now_nanos() -> u128 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos()
     }
 
     #[test]
@@ -201,9 +208,12 @@ mod tests {
     #[test]
     fn lower_root_mcp_token_clear_stays_cleared() {
         let _guard = env_lock();
-        let primary = temp_config_home();
-        let lower = temp_config_home();
-        let home = temp_config_home();
+        // macOS reads the clock in whole microseconds, so homes made back to
+        // back can share one reading: make all three from one.
+        let tick = now_nanos();
+        let primary = temp_config_home_at(tick);
+        let lower = temp_config_home_at(tick);
+        let home = temp_config_home_at(tick);
         let prior: Vec<(&str, Option<std::ffi::OsString>)> = ["ZO_CONFIG_HOME", "ZO_HOME", "HOME"]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
