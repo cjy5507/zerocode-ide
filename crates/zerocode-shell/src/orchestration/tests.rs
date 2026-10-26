@@ -15406,6 +15406,37 @@ impl Host for Holding {
 /// call on the hub's own worker thread.
 const A_KNOCK_IS_HEARD: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[test]
+fn a_notice_reaches_a_running_root_and_leaves_the_draft() {
+    const LEADER: u32 = 75_726;
+    const WORKER: u32 = 75_727;
+    let _window = the_window();
+    let _beat = one_beat_at_a_time();
+    let team = format!("team-notice-{LEADER}");
+    let (_, _, pane) = an_agent_carrying_work("zo", &team, LEADER, WORKER);
+    let held = crate::agent_teams::current_pane_capability(&team, &pane).unwrap();
+    let host = Holding::new(zerocode_core::AgentKind::Zo);
+    let (knocked, heard) = Knocked::new();
+    let _lease = crate::orchestration_notify::register_route(LEADER, knocked.clone());
+    pane_turn_began(LEADER, clock());
+    crate::human_input::typed(LEADER);
+    let before = crate::human_input::line_of(LEADER);
+    said_at(&host, &team, &pane, &held,
+        "send --type status --body ready --retry-request running-notice");
+
+    tick(&host, &[], clock());
+    let received = heard.recv_timeout(A_KNOCK_IS_HEARD);
+    let after = crate::human_input::line_of(LEADER);
+    let typed = host.typed_at(LEADER);
+    crate::human_input::forget_term(LEADER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    assert!(received.is_ok(), "a running root never received its notice");
+    assert_eq!(after, before, "the notice changed the person's draft");
+    assert!(typed.is_empty(), "a native notice also typed into the composer");
+    assert_eq!(knocked.carried(), vec![zerocode_core::orchestration::pointer_text(1)]);
+}
+
 /// One verb from a pane, JSON back — panicking with the refusal.
 fn said_at(host: &dyn Host, team: &str, pane: &str, held: &str, line: &str) -> serde_json::Value {
     let answer = run(host, Vec::new(), team, pane, held, &words(line), clock());

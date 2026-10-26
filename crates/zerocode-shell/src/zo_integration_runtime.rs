@@ -903,6 +903,16 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_capability_keeps_the_idle_root_contract() {
+        let mut value = fixture();
+        value["support"]["notice"] = json!({"supported":true,"method":"session.steer",
+            "kind":"notice","scope":"idle-next-turn","private":"CANARY"});
+        let receipt = parse_receipt(value).unwrap();
+        assert_eq!(receipt.support["notice"], json!({"supported":true,
+            "method":"session.steer","kind":"notice","scope":"idle-next-turn"}));
+    }
+
+    #[test]
     fn protocol_unknown_fields_are_ignored_but_major_schema_and_size_are_distinct() {
         let mut next = fixture();
         next["protocol"]["minor"] = json!(99);
