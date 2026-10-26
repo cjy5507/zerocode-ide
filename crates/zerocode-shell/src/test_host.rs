@@ -100,11 +100,26 @@ pub(crate) fn program_path(dir: &Path, name: &str) -> PathBuf {
 /// runner's `sh`, and the `.cmd` is what comes back — `.sh` has no meaning
 /// to CreateProcess, and a `.cmd` is the one script it runs.
 pub(crate) fn fake_program(dir: &Path, name: &str, body: &str) -> PathBuf {
+    fake_program_traced(dir, name, body, None)
+}
+
+/// [`fake_program`] whose launcher also writes down what it was handed, for
+/// a test that has to say afterwards what reached the script and in what
+/// spelling. `trace` is the file to append to and the one environment
+/// variable to read back. A Unix program has no launcher, so there is
+/// nothing to write: the script's own first lines are the only record.
+pub(crate) fn fake_program_traced(
+    dir: &Path,
+    name: &str,
+    body: &str,
+    trace: Option<(&Path, &str)>,
+) -> PathBuf {
     std::fs::create_dir_all(dir).expect("a folder for the program");
     let text = format!("#!/bin/sh\n{body}\n");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        let _ = trace;
         let script = program_path(dir, name);
         std::fs::write(&script, text).expect("write the program");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
@@ -116,13 +131,27 @@ pub(crate) fn fake_program(dir: &Path, name: &str, body: &str) -> PathBuf {
         let body_file = dir.join(format!("{name}.sh"));
         std::fs::write(&body_file, text).expect("write the program's script");
         let launcher = program_path(dir, name);
-        std::fs::write(
-            &launcher,
-            format!("@echo off\r\n{WINDOWS_SH} \"%~dp0{name}.sh\" %*\r\nexit /b %errorlevel%\r\n"),
-        )
-        .expect("write the program's launcher");
+        std::fs::write(&launcher, windows_launcher(WINDOWS_SH, name, trace))
+            .expect("write the program's launcher");
         launcher
     }
+}
+
+/// The text of the `.cmd` that starts a fake on Windows: it hands its
+/// arguments to `shell` and returns the script's exit code.
+///
+/// With a `trace` it first appends two lines to the file: the arguments as
+/// the batch file received them (`%*`, before any shell touched them) and the
+/// one variable as the batch file sees it. The file is named before the `>>`
+/// so an argument that ends in a digit is not read as a handle number.
+fn windows_launcher(shell: &str, name: &str, trace: Option<(&Path, &str)>) -> String {
+    let record = trace.map_or_else(String::new, |(file, var)| {
+        let file = file.display();
+        format!(
+            ">>\"{file}\" echo wrapper-argv: %*\r\n>>\"{file}\" echo wrapper-env {var}=%{var}%\r\n"
+        )
+    });
+    format!("@echo off\r\n{record}{shell} \"%~dp0{name}.sh\" %*\r\nexit /b %errorlevel%\r\n")
 }
 
 /// The one argument [`fake_cli_program`]'s own run of a fake hands it: the
@@ -135,6 +164,17 @@ const FIRST_RUN: &str = "zerocode-first-run";
 /// here, before any wall starts, and the program comes back only once that
 /// run has finished: every run a test times is a later one.
 pub(crate) fn fake_cli_program(dir: &Path, name: &str, body: &str, first_start: u32) -> PathBuf {
+    fake_cli_program_traced(dir, name, body, first_start, None)
+}
+
+/// [`fake_cli_program`] with the launcher's record of [`fake_program_traced`].
+pub(crate) fn fake_cli_program_traced(
+    dir: &Path,
+    name: &str,
+    body: &str,
+    first_start: u32,
+    trace: Option<(&Path, &str)>,
+) -> PathBuf {
     let started = dir.join(format!("{name}.started"));
     let finished = dir.join(format!("{name}.first-run"));
     let slow = if first_start > 0 {
@@ -145,13 +185,14 @@ pub(crate) fn fake_cli_program(dir: &Path, name: &str, body: &str, first_start: 
     } else {
         String::new()
     };
-    let program = fake_program(
+    let program = fake_program_traced(
         dir,
         name,
         &format!(
             "{slow}[ \"$1\" != {FIRST_RUN} ] || {{ : > \"{finished}\"; exit 0; }}\n{body}",
             finished = finished.display()
         ),
+        trace,
     );
     let first = crate::proc::quiet_command(&program)
         .arg(FIRST_RUN)
@@ -202,5 +243,34 @@ pub(crate) fn echo_program(dir: &Path) -> String {
     {
         let _ = dir;
         "/bin/echo".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_launcher_without_a_trace_only_hands_over() {
+        assert_eq!(
+            windows_launcher("sh", "tool", None),
+            "@echo off\r\nsh \"%~dp0tool.sh\" %*\r\nexit /b %errorlevel%\r\n"
+        );
+    }
+
+    #[test]
+    fn a_traced_launcher_writes_down_its_arguments_and_variable_before_the_shell_runs() {
+        let launcher = windows_launcher("sh", "tool", Some((Path::new("trace.log"), "HOME")));
+        let lines: Vec<&str> = launcher.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "@echo off",
+                ">>\"trace.log\" echo wrapper-argv: %*",
+                ">>\"trace.log\" echo wrapper-env HOME=%HOME%",
+                "sh \"%~dp0tool.sh\" %*",
+                "exit /b %errorlevel%",
+            ]
+        );
     }
 }

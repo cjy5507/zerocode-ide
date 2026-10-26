@@ -2595,13 +2595,19 @@ mod tests {
     /// caught even when nothing was supposed to change.
     fn fake_cli_for(fake: &Fake, root: &Path, home: &Path) -> String {
         let home = home.to_string_lossy().into_owned();
+        let trace = body_trace(root, fake.agent);
         let mut body = format!(
-            "home=\"${{{var}}}\"\n\
-             [ \"$home\" = '{home}' ] || {{ echo \"wrong {var}: $home\" >&2; exit 8; }}\n\
+            "{{ printf 'argc=%s' \"$#\"; for arg in \"$@\"; do printf ' <%s>' \"$arg\"; done; \
+             printf '\\n'; \
+             printf 'pid=%s ppid=%s winpid=%s\\n' \"$$\" \"$PPID\" \"$(cat /proc/$$/winpid 2>/dev/null)\"; \
+             printf '{var}=<%s>\\n' \"${{{var}}}\"; }} >> '{trace}'\n\
+             home=\"${{{var}}}\"\n\
+             [ \"$home\" = '{home}' ] || {{ echo \"wrong {var}: $home (wanted {home})\" >&2; exit 8; }}\n\
              mkdir -p \"$home\"\n\
              printf '%s\\n' \"$*\" >> \"$home/.called\"\n\
              case \"$*\" in\n",
             var = fake.home_var,
+            trace = trace.display(),
         );
         let landing = match fake.witness {
             Some((file, text)) => format!(
@@ -2633,7 +2639,15 @@ mod tests {
             ));
         }
         body.push_str("  *) echo \"unexpected: $*\" >&2; exit 9;;\nesac");
-        fake_cli(root, fake.agent, &body)
+        crate::test_host::fake_cli_program_traced(
+            &root.join("bin"),
+            fake.agent,
+            &body,
+            0,
+            Some((&wrapper_trace(root, fake.agent), fake.home_var)),
+        )
+        .to_string_lossy()
+        .into_owned()
     }
 
     /// Every call the fake CLI has taken, one line each.
@@ -2643,6 +2657,255 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    /// Where a fake CLI's script writes what it was handed, before it
+    /// judges any of it.
+    fn body_trace(root: &Path, agent: &str) -> PathBuf {
+        root.join(format!("{agent}.body-trace"))
+    }
+
+    /// Where a fake CLI's launcher writes what it was handed, on a host that
+    /// has a launcher at all.
+    fn wrapper_trace(root: &Path, agent: &str) -> PathBuf {
+        root.join(format!("{agent}.wrapper-trace"))
+    }
+
+    /// At most this much of any one captured text goes into a failure
+    /// message.
+    const CLIP: usize = 1500;
+
+    fn clip(text: &str) -> String {
+        let text = text.trim_end();
+        match text.char_indices().nth(CLIP) {
+            Some((end, _)) => format!("{}… ({} bytes in all)", &text[..end], text.len()),
+            None => text.to_string(),
+        }
+    }
+
+    /// `text` as indented lines under a heading, or the heading and a word
+    /// for nothing.
+    fn listed(heading: &str, text: &str) -> String {
+        let text = clip(text);
+        if text.is_empty() {
+            return format!("{heading}: (nothing)\n");
+        }
+        let lines: Vec<String> = text.lines().map(|line| format!("    {line}")).collect();
+        format!("{heading}:\n{}\n", lines.join("\n"))
+    }
+
+    /// The directory `received` names, spelled by the host: the test shell
+    /// is asked to go there and print where it is, the way the host spells a
+    /// physical place.
+    fn resolved_by_the_shell(received: &str) -> Result<String, String> {
+        let output = crate::proc::quiet_command(crate::test_host::shell_program())
+            .arg("-c")
+            .arg(format!(
+                "cd \"$1\" && {}",
+                crate::test_host::SH_PHYSICAL_PWD
+            ))
+            .arg("sh")
+            .arg(received)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+        }
+    }
+
+    /// What the host says about each process number in `ids`: the one
+    /// process of that number the host itself lists, and who its parent is.
+    /// On Windows the numbers a shell script prints (`$$`) and the numbers
+    /// the host lists are two different sets, so every number is asked as
+    /// the host's own and the candidates a fake CLI can be are listed with
+    /// their parents; elsewhere `ps` is the one authority.
+    fn process_facts(ids: &[&str]) -> String {
+        let ids: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            .collect();
+        if ids.is_empty() {
+            return "    (no process number to ask about)\n".to_string();
+        }
+        let list = ids.join(",");
+        let output = if cfg!(windows) {
+            let script = "foreach ($id in @(@IDS@)) { \
+                 $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $id); \
+                 if ($p) { 'native pid {0} is {1}, parent {2}' -f $id, $p.Name, $p.ParentProcessId } \
+                 else { 'no native process has pid {0}' -f $id } }; \
+                 Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(cmd|sh|sleep)[.]exe$' } | \
+                 ForEach-Object { 'listed {0} {1}, parent {2}' -f $_.ProcessId, $_.Name, $_.ParentProcessId }"
+                .replace("@IDS@", &list);
+            crate::proc::quiet_command("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .output()
+        } else {
+            crate::proc::quiet_command("ps")
+                .args(["-o", "pid=,ppid=,comm=", "-p", &list])
+                .output()
+        };
+        match output {
+            Ok(output) => {
+                let said = String::from_utf8_lossy(&output.stdout).into_owned();
+                let said = if said.trim().is_empty() {
+                    "(none of them is running)".to_string()
+                } else {
+                    said
+                };
+                let lines: Vec<String> = clip(&said)
+                    .lines()
+                    .map(|line| format!("    {line}"))
+                    .collect();
+                format!("{}\n", lines.join("\n"))
+            }
+            Err(error) => format!("    (the process listing could not run: {error})\n"),
+        }
+    }
+
+    /// [`process_facts`] for the numbers a fake CLI wrote of itself into
+    /// `identity` (`pid=… ppid=… winpid=…`): the number its shell calls its
+    /// own and the one the host does.
+    fn processes_named_by(identity: &Path) -> String {
+        let text = std::fs::read_to_string(identity).unwrap_or_default();
+        let numbers: Vec<&str> = text
+            .split_whitespace()
+            .filter_map(|word| {
+                word.strip_prefix("pid=")
+                    .or_else(|| word.strip_prefix("winpid="))
+            })
+            .collect();
+        process_facts(&numbers)
+    }
+
+    /// One fake CLI's road in one sandbox: the places a failing step needs to
+    /// name, so its message carries what the next run has to know to sort the
+    /// failure — what the CLI was handed at the launcher and at the script,
+    /// which directory its home variable named, and what it said.
+    struct Walk<'a> {
+        agent: &'static str,
+        root: &'a Path,
+        home: &'a Path,
+        cli: &'a str,
+        home_var: &'static str,
+    }
+
+    impl Walk<'_> {
+        /// Everything a failure at `step` can say, as text. `said` is the
+        /// shell line's own answer, where the step typed one.
+        fn facts(&self, step: &str, said: Option<&std::process::Output>) -> String {
+            let requested = self.home.to_string_lossy().into_owned();
+            let mut out = format!("---- facts: {} at {step} ----\n", self.agent);
+            out.push_str(&format!("program: {}\n", self.cli));
+            out.push_str(&format!(
+                "requested {}: {requested:?}, as the host resolves it: {:?}\n",
+                self.home_var,
+                std::fs::canonicalize(self.home)
+            ));
+            let wrapper = std::fs::read_to_string(wrapper_trace(self.root, self.agent))
+                .unwrap_or_else(|error| {
+                    format!("(no launcher on this host, or none ran: {error})")
+                });
+            out.push_str(&listed("the launcher was handed", &wrapper));
+            let body = std::fs::read_to_string(body_trace(self.root, self.agent))
+                .unwrap_or_else(|error| format!("(the script never ran: {error})"));
+            out.push_str(&listed("the script was handed", &body));
+            let prefix = format!("{}=<", self.home_var);
+            let received = body
+                .lines()
+                .rev()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .and_then(|rest| rest.strip_suffix('>'));
+            match received {
+                Some(received) => {
+                    out.push_str(&format!(
+                        "received {}: {received:?}; the same string as requested: {}\n",
+                        self.home_var,
+                        received == requested
+                    ));
+                    match resolved_by_the_shell(received) {
+                        Ok(place) => out.push_str(&format!(
+                            "the shell resolves that to {place:?}, which the host resolves to {:?}; \
+                             the same directory as requested: {}\n",
+                            std::fs::canonicalize(&place),
+                            std::fs::canonicalize(&place).ok()
+                                == std::fs::canonicalize(self.home).ok()
+                        )),
+                        Err(why) => out.push_str(&format!(
+                            "the shell cannot go to that directory: {why}\n"
+                        )),
+                    }
+                }
+                None => out.push_str("received: (the script wrote no home line)\n"),
+            }
+            out.push_str(&listed("calls the CLI took", &calls(self.home).join("\n")));
+            if let Some(said) = said {
+                out.push_str(&format!("the typed line ended: {}\n", said.status));
+                out.push_str(&listed("stdout", &String::from_utf8_lossy(&said.stdout)));
+                out.push_str(&listed("stderr", &String::from_utf8_lossy(&said.stderr)));
+            }
+            out
+        }
+
+        /// A step the person plays alone (a login this window cannot read):
+        /// the line must end well.
+        fn typed_ok(&self, step: &str, line: &str) {
+            let said = typed(line);
+            assert!(
+                said.status.success(),
+                "{}: the CLI refused its own line\n{}",
+                self.agent,
+                self.facts(step, Some(&said))
+            );
+        }
+
+        /// A step the person plays while this window watches: the line is
+        /// typed once the watch is on, the watch must see `signed_in`, and the
+        /// line must end well. The typed line's own answer is taken even when
+        /// the watch gave up, so the failure can say what the CLI told it.
+        fn watched(&self, row: &CliLogin, step: &str, line: String, signed_in: bool) {
+            let go = self.root.join("go-ahead");
+            let person = typed_when(go.clone(), line);
+            std::fs::write(&go, b"").expect("the go-ahead");
+            let landed = watch_in(
+                row,
+                Some(self.cli),
+                self.home,
+                signed_in,
+                NOW_MS,
+                WAIT,
+                POLL,
+                None,
+            );
+            let way = if signed_in { "login" } else { "logout" };
+            if landed.is_err() {
+                // The shell line has long since ended unless it hung; a hung
+                // one is reported without its answer rather than waited on.
+                let ended = Instant::now() + WAIT;
+                while !person.is_finished() && Instant::now() < ended {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let said = person
+                    .is_finished()
+                    .then(|| person.join().expect("the shell"));
+                let why = landed.expect_err("checked just above");
+                panic!(
+                    "{}: the {way} never landed: {why}\n{}",
+                    self.agent,
+                    self.facts(step, said.as_ref())
+                );
+            }
+            let said = person.join().expect("the shell");
+            assert!(
+                said.status.success(),
+                "{}: the CLI refused its own line\n{}",
+                self.agent,
+                self.facts(step, Some(&said))
+            );
+            std::fs::remove_file(&go).expect("the go-ahead");
+        }
     }
 
     /// Run one shell line the way a person's terminal would.
@@ -2721,7 +2984,13 @@ mod tests {
         let home = sandboxed_home(row, root.path());
         let cli = fake_cli_for(fake, root.path(), &home);
         let readable = !matches!(row.proof, Proof::Unreadable);
-        let go = root.path().join("go-ahead");
+        let walk = Walk {
+            agent: row.agent,
+            root: root.path(),
+            home: &home,
+            cli: &cli,
+            home_var: row.home_var,
+        };
 
         assert_eq!(
             row.verdict(Some(&cli), &home, NOW_MS),
@@ -2737,8 +3006,12 @@ mod tests {
                     fake.login,
                     "{agent}: the headless verb is not the one its evidence spells"
                 );
-                login_headless_in(row, &cli, &home, NOW_MS)
-                    .unwrap_or_else(|why| panic!("{agent}: the login: {why}"));
+                login_headless_in(row, &cli, &home, NOW_MS).unwrap_or_else(|why| {
+                    panic!(
+                        "{agent}: the login: {why}\n{}",
+                        walk.facts("the headless login", None)
+                    )
+                });
             }
             LoginRoad::PaneVerb(args) => {
                 assert_eq!(
@@ -2750,22 +3023,9 @@ mod tests {
                     .pane_command(&cli, &home)
                     .unwrap_or_else(|| panic!("{agent}: a pane row with no line to type"));
                 if readable {
-                    let person = typed_when(go.clone(), line);
-                    std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL, None)
-                        .unwrap_or_else(|why| panic!("{agent}: the login never landed: {why}"));
-                    let said = person.join().expect("the shell");
-                    assert!(
-                        said.status.success(),
-                        "{agent}: the CLI refused its own line"
-                    );
-                    std::fs::remove_file(&go).expect("the go-ahead");
+                    walk.watched(row, "the login typed in a pane", line, true);
                 } else {
-                    let said = typed(&line);
-                    assert!(
-                        said.status.success(),
-                        "{agent}: the CLI refused its own line"
-                    );
+                    walk.typed_ok("the login typed in a pane", &line);
                 }
             }
             LoginRoad::TuiCommand(command) => {
@@ -2775,14 +3035,9 @@ mod tests {
                 );
                 let line = tui_line(row, &cli, &home, command);
                 if readable {
-                    let person = typed_when(go.clone(), line);
-                    std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL, None)
-                        .unwrap_or_else(|why| panic!("{agent}: the login never landed: {why}"));
-                    assert!(person.join().expect("the shell").status.success());
-                    std::fs::remove_file(&go).expect("the go-ahead");
+                    walk.watched(row, "the login command typed at the CLI", line, true);
                 } else {
-                    assert!(typed(&line).status.success());
+                    walk.typed_ok("the login command typed at the CLI", &line);
                 }
             }
             LoginRoad::FirstRun => {
@@ -2791,18 +3046,14 @@ mod tests {
                     "{agent}: a first-run row whose CLI expects words"
                 );
                 let line = tui_line(row, &cli, &home, "");
-                let person = typed_when(go.clone(), line);
-                std::fs::write(&go, b"").expect("the go-ahead");
-                watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL, None)
-                    .unwrap_or_else(|why| panic!("{agent}: the login never landed: {why}"));
-                assert!(person.join().expect("the shell").status.success());
-                std::fs::remove_file(&go).expect("the go-ahead");
+                walk.watched(row, "the first run of the CLI", line, true);
             }
         }
         let taken = calls(&home);
         assert!(
             taken.iter().any(|said| said == fake.login),
-            "{agent}: the CLI was never handed its own login words; it was handed {taken:?}"
+            "{agent}: the CLI was never handed its own login words; it was handed {taken:?}\n{}",
+            walk.facts("after the login", None)
         );
         let known: Vec<&str> = [
             Some(fake.login),
@@ -2815,7 +3066,8 @@ mod tests {
         for said in &taken {
             assert!(
                 known.contains(&said.as_str()),
-                "{agent}: the CLI was handed words its row does not carry: {said:?}"
+                "{agent}: the CLI was handed words its row does not carry: {said:?}\n{}",
+                walk.facts("after the login", None)
             );
         }
         assert_eq!(
@@ -2825,7 +3077,8 @@ mod tests {
             } else {
                 Verdict::Unknown
             },
-            "{agent}: the login did not change what the row says"
+            "{agent}: the login did not change what the row says\n{}",
+            walk.facts("after the login", None)
         );
         if !readable {
             assert!(
@@ -2843,8 +3096,12 @@ mod tests {
                     fake.logout.unwrap_or_default(),
                     "{agent}: the logout verb is not the one its evidence spells"
                 );
-                logout_headless_in(row, &cli, &home, NOW_MS)
-                    .unwrap_or_else(|why| panic!("{agent}: the logout: {why}"));
+                logout_headless_in(row, &cli, &home, NOW_MS).unwrap_or_else(|why| {
+                    panic!(
+                        "{agent}: the logout: {why}\n{}",
+                        walk.facts("the headless logout", None)
+                    )
+                });
             }
             LogoutRoad::PaneVerb(args) => {
                 assert_eq!(args.join(" "), fake.logout.unwrap_or_default());
@@ -2852,28 +3109,18 @@ mod tests {
                     .logout_command(&cli, &home)
                     .unwrap_or_else(|| panic!("{agent}: a pane logout with no line to type"));
                 if readable {
-                    let person = typed_when(go.clone(), line);
-                    std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, false, NOW_MS, WAIT, POLL, None)
-                        .unwrap_or_else(|why| panic!("{agent}: the logout never landed: {why}"));
-                    assert!(person.join().expect("the shell").status.success());
-                    std::fs::remove_file(&go).expect("the go-ahead");
+                    walk.watched(row, "the logout typed in a pane", line, false);
                 } else {
-                    assert!(typed(&line).status.success());
+                    walk.typed_ok("the logout typed in a pane", &line);
                 }
             }
             LogoutRoad::TuiCommand(command) => {
                 assert_eq!(command, fake.logout.unwrap_or_default());
                 let line = tui_line(row, &cli, &home, command);
                 if readable {
-                    let person = typed_when(go.clone(), line);
-                    std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, false, NOW_MS, WAIT, POLL, None)
-                        .unwrap_or_else(|why| panic!("{agent}: the logout never landed: {why}"));
-                    assert!(person.join().expect("the shell").status.success());
-                    std::fs::remove_file(&go).expect("the go-ahead");
+                    walk.watched(row, "the logout command typed at the CLI", line, false);
                 } else {
-                    assert!(typed(&line).status.success());
+                    walk.typed_ok("the logout command typed at the CLI", &line);
                 }
             }
             LogoutRoad::None => {
@@ -2892,7 +3139,8 @@ mod tests {
         assert_eq!(
             row.verdict(Some(&cli), &home, NOW_MS),
             nobody(row),
-            "{agent}: the logout did not change what the row says"
+            "{agent}: the logout did not change what the row says\n{}",
+            walk.facts("after the logout", None)
         );
     }
 
@@ -3119,6 +3367,7 @@ mod tests {
         let (home, witness) = sandboxed_places(grok, root.path());
         let seen_home = root.path().join("seen-home");
         let pid_file = root.path().join("pid");
+        let identity = root.path().join("identity");
         let wrote_at = root.path().join("wrote-at");
         let (_, text) = fake("grok").witness.expect("a grok witness");
         let cli = fake_cli(
@@ -3128,6 +3377,7 @@ mod tests {
                 "[ \"$1\" = login ] || exit 9\n\
                  printf '%s' \"${}\" > '{}'\n\
                  printf '%s' $$ > '{}'\n\
+                 printf 'pid=%s ppid=%s winpid=%s\\n' \"$$\" \"$PPID\" \"$(cat /proc/$$/winpid 2>/dev/null)\" > '{}'\n\
                  sleep 0.1\n\
                  mkdir -p \"$(dirname '{}')\"\n\
                  printf '%s' '{}' > '{}'\n\
@@ -3136,15 +3386,39 @@ mod tests {
                 grok.home_var,
                 seen_home.display(),
                 pid_file.display(),
+                identity.display(),
                 witness.display(),
                 text,
                 witness.display(),
                 wrote_at.display(),
             ),
         );
-        let began = Instant::now();
-        login_headless_in(grok, &cli, &home, NOW_MS).expect("the login");
-        let took = began.elapsed();
+        let origin = Instant::now();
+        // The login runs on a thread of its own so this one can look at the
+        // processes while it runs — once the CLI has started, and once its
+        // witness has landed — without the runner's wait paying for the look.
+        let mut looks: Vec<(String, String)> = Vec::new();
+        let (outcome, took) = std::thread::scope(|scope| {
+            let running = scope.spawn(|| {
+                let began = Instant::now();
+                let outcome = login_headless_in(grok, &cli, &home, NOW_MS);
+                (outcome, began.elapsed())
+            });
+            for (what, file) in [
+                ("the CLI had started", &identity),
+                ("the witness had landed", &wrote_at),
+            ] {
+                while !file.exists() && !running.is_finished() && origin.elapsed() < WAIT {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if file.exists() {
+                    let at = origin.elapsed();
+                    looks.push((format!("{what} ({at:?} in)"), processes_named_by(&identity)));
+                }
+            }
+            running.join().expect("the login thread")
+        });
+        outcome.expect("the login");
         let since_write = since(&wrote_at);
         assert_eq!(
             grok.verdict(None, &home, NOW_MS),
@@ -3171,7 +3445,29 @@ mod tests {
             .expect("kill -0")
             .status
             .success();
-        assert!(!alive, "the lingering CLI (pid {pid}) survived the login");
+        if alive {
+            looks.push((
+                "the runner had returned".to_string(),
+                processes_named_by(&identity),
+            ));
+            std::thread::sleep(Duration::from_secs(1));
+            looks.push((
+                "one second after the runner returned".to_string(),
+                processes_named_by(&identity),
+            ));
+        }
+        let looked: String = looks
+            .iter()
+            .map(|(when, table)| format!("when {when}:\n{table}"))
+            .collect();
+        assert!(
+            !alive,
+            "the lingering CLI (pid {pid}) survived the login\n\
+             what the CLI wrote of itself: {}\n{looked}",
+            std::fs::read_to_string(&identity)
+                .unwrap_or_default()
+                .trim()
+        );
         // Measured for the report: the file landed when `wrote_at` was
         // touched; the runner noticed within one poll (the rest is grace).
         let noticed_within = since_write.saturating_sub(POST_AUTH_GRACE);
@@ -3181,6 +3477,106 @@ mod tests {
         assert!(
             noticed_within <= WITNESS_POLL + Duration::from_millis(500),
             "the witness was noticed {noticed_within:?} after it landed"
+        );
+    }
+
+    /// A fake CLI that has run once, and the [`Walk`] fields its facts need.
+    fn walked_once(
+        root: &Path,
+        handed_home: Option<&Path>,
+    ) -> (String, PathBuf, std::process::Output) {
+        let kimi = row("kimi").expect("kimi row");
+        let home = sandboxed_home(kimi, root);
+        let cli = fake_cli_for(fake("kimi"), root, &home);
+        let said = typed(&tui_line(kimi, &cli, handed_home.unwrap_or(&home), "login"));
+        (cli, home, said)
+    }
+
+    fn facts_of(root: &Path, cli: &str, home: &Path, said: &std::process::Output) -> String {
+        Walk {
+            agent: "kimi",
+            root,
+            home,
+            cli,
+            home_var: "KIMI_CODE_HOME",
+        }
+        .facts("a test step", Some(said))
+    }
+
+    #[test]
+    fn a_step_that_went_well_still_says_what_the_cli_was_handed_and_which_directory() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let (cli, home, said) = walked_once(root.path(), None);
+        assert!(said.status.success(), "the fake CLI took its own line");
+        let facts = facts_of(root.path(), &cli, &home, &said);
+        for expected in [
+            "the script was handed:\n    argc=1 <login>",
+            "KIMI_CODE_HOME=<",
+            "the same string as requested: true",
+            "the same directory as requested: true",
+            "calls the CLI took:\n    login\n",
+            "the typed line ended: exit status: 0",
+        ] {
+            assert!(
+                facts.contains(expected),
+                "{expected:?} is missing from:\n{facts}"
+            );
+        }
+    }
+
+    /// The case the Windows run has to tell apart: the CLI was told the same
+    /// directory under another spelling, or it was told another directory.
+    #[cfg(unix)]
+    #[test]
+    fn the_facts_tell_a_home_spelled_otherwise_from_another_home() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let kimi = row("kimi").expect("kimi row");
+        let home = sandboxed_home(kimi, root.path());
+
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&home, &alias).expect("an alias of the home");
+        let (cli, _, said) = walked_once(root.path(), Some(&alias));
+        assert_eq!(
+            said.status.code(),
+            Some(8),
+            "the fake CLI compares spellings"
+        );
+        let facts = facts_of(root.path(), &cli, &home, &said);
+        assert!(
+            facts.contains("the same string as requested: false"),
+            "{facts}"
+        );
+        assert!(
+            facts.contains("the same directory as requested: true"),
+            "{facts}"
+        );
+        assert!(facts.contains("wrong KIMI_CODE_HOME"), "{facts}");
+
+        let other = root.path().join("another-home");
+        std::fs::create_dir_all(&other).expect("another home");
+        let (_, _, said) = walked_once(root.path(), Some(&other));
+        let facts = facts_of(root.path(), &cli, &home, &said);
+        assert!(
+            facts.contains("the same string as requested: false"),
+            "{facts}"
+        );
+        assert!(
+            facts.contains("the same directory as requested: false"),
+            "{facts}"
+        );
+    }
+
+    #[test]
+    fn the_process_facts_name_a_running_process_and_its_parent() {
+        let own = std::process::id().to_string();
+        let facts = process_facts(&[own.as_str(), "", "not-a-number"]);
+        assert!(
+            facts.contains(&own),
+            "this test's own process is missing:\n{facts}"
+        );
+        assert_eq!(
+            process_facts(&["", "x"]),
+            "    (no process number to ask about)\n"
         );
     }
 
