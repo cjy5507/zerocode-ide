@@ -19,10 +19,16 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream};
 use futures_util::task::AtomicWaker;
 use futures_util::Stream;
+
+/// 터미널이 끊겼는지 묻는 간격. 루프가 어차피 하는 폴링에 얹혀 묻기만 하므로
+/// 조용한 판이 깨는 횟수는 그대로다 — 턴 동안은 틱마다, 유휴에는 `IDLE_TEND`
+/// 마다 한 번.
+const HANG_UP_LOOK: Duration = Duration::from_millis(500);
 
 /// 안쪽 스트림에 건네는 waker 의 몫 — 깨움이 왔다는 표시와, 그 깨움을
 /// 넘겨줄 지금의 태스크.
@@ -49,12 +55,22 @@ pub struct TerminalEvents<S = EventStream> {
     wakeup: Arc<Wakeup>,
     /// 안쪽이 마지막에 `Pending` 이었다 — 다음 새 입력은 깨움으로 온다.
     armed: bool,
+    /// 안쪽 뒤의 터미널이 끊겼는가 — 창이 판을 닫았다. 판 pty 는 누구의 제어
+    /// 터미널도 아니라 SIGHUP 이 오지 않고, crossterm 의 읽기 스레드는 닫힌
+    /// pty 의 EOF 에 다시 poll 하며 영원히 돌아 안쪽은 스스로 끝나지 않는다
+    /// (t-76434). 그래서 이 흐름이 끝내고, 루프들의 입력 끝 팔이 턴 취소·기록·
+    /// 종료를 한다.
+    hung_up: fn() -> bool,
+    /// 마지막으로 끊김을 물은 때.
+    looked: Option<Instant>,
+    /// 끊김을 보고 끝났다 — 다음 폴링도 끝을 말한다.
+    ended: bool,
 }
 
 impl TerminalEvents {
     #[must_use]
     pub fn new() -> Self {
-        Self::over(EventStream::new())
+        Self::over(EventStream::new(), super::tty::hung_up)
     }
 }
 
@@ -65,11 +81,14 @@ impl Default for TerminalEvents {
 }
 
 impl<S> TerminalEvents<S> {
-    fn over(inner: S) -> Self {
+    fn over(inner: S, hung_up: fn() -> bool) -> Self {
         Self {
             inner,
             wakeup: Arc::new(Wakeup::default()),
             armed: false,
+            hung_up,
+            looked: None,
+            ended: false,
         }
     }
 }
@@ -82,6 +101,16 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.ended {
+            return Poll::Ready(None);
+        }
+        if this.looked.is_none_or(|at| at.elapsed() >= HANG_UP_LOOK) {
+            this.looked = Some(Instant::now());
+            if (this.hung_up)() {
+                this.ended = true;
+                return Poll::Ready(None);
+            }
+        }
         // 등록이 표시 확인보다 먼저다: 확인과 등록 사이에 온 깨움이 옛
         // 태스크로 새지 않는다.
         this.wakeup.task.register(cx.waker());
@@ -156,11 +185,26 @@ mod tests {
         Pin::new(events).poll_next(&mut cx)
     }
 
+    fn never_hung_up() -> bool {
+        false
+    }
+
+    /// 창이 판을 닫으면 키가 하나도 오지 않아도 흐름이 끝나고, 끝난 흐름은
+    /// 끝난 채다. 닫힌 터미널에는 읽을 것이 없으니 안쪽은 묻지 않는다.
+    #[test]
+    fn a_terminal_that_hung_up_ends_the_stream() {
+        let terminal = Fake::default();
+        let mut events = TerminalEvents::over(terminal.clone(), || true);
+        assert!(matches!(poll(&mut events), Poll::Ready(None)));
+        assert!(matches!(poll(&mut events), Poll::Ready(None)), "an ended stream came back");
+        assert_eq!(terminal.polls(), 0, "a hung-up terminal was read");
+    }
+
     /// 틱이 서른 번, 블록이 백 번 깨워도 조용한 터미널은 한 번만 묻는다.
     #[test]
     fn a_quiet_terminal_is_asked_once_however_often_the_loop_wakes() {
         let terminal = Fake::default();
-        let mut events = TerminalEvents::over(terminal.clone());
+        let mut events = TerminalEvents::over(terminal.clone(), never_hung_up);
         for _ in 0..100 {
             assert!(poll(&mut events).is_pending());
         }
@@ -171,7 +215,7 @@ mod tests {
     #[test]
     fn a_key_is_read_on_the_wake_that_brings_it() {
         let terminal = Fake::default();
-        let mut events = TerminalEvents::over(terminal.clone());
+        let mut events = TerminalEvents::over(terminal.clone(), never_hung_up);
         assert!(poll(&mut events).is_pending());
         terminal.press(KeyCode::Char('a'));
         match poll(&mut events) {
@@ -214,7 +258,7 @@ mod tests {
     #[test]
     fn keys_queued_behind_one_wake_are_all_read() {
         let terminal = Fake::default();
-        let mut events = TerminalEvents::over(terminal.clone());
+        let mut events = TerminalEvents::over(terminal.clone(), never_hung_up);
         assert!(poll(&mut events).is_pending());
         terminal.press(KeyCode::Char('x'));
         terminal.press(KeyCode::Enter);
