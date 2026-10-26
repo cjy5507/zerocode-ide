@@ -3,6 +3,7 @@
 
 use std::io;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -73,6 +74,12 @@ enum Script {
     /// stays parked between "the `tool_use` was persisted" and "a result
     /// exists", which is the window a window restart kills zo in.
     ParkedTool { seconds: u32, final_text: String },
+    /// A `bash` that ends only when the test lets it go: it writes its pid to
+    /// `<hold>/pid`, touches `<hold>/started`, and waits until
+    /// `<hold>/release` exists; then a final answer. A test that never
+    /// releases it knows the turn it parks cannot end on its own.
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    HeldTool { hold: PathBuf, final_text: String },
     /// One assistant answer streamed in pieces with a gap between them, so a
     /// test can kill zo while the text is still arriving.
     DribbledText { text: String, pieces: usize, gap: Duration },
@@ -171,6 +178,8 @@ impl Script {
             Self::SlowTool { final_text } => text_sse("msg_slow_final", final_text),
             Self::ParkedTool { seconds, .. } if request_index == 0 => parked_tool_sse(*seconds),
             Self::ParkedTool { final_text, .. } => text_sse("msg_parked_final", final_text),
+            Self::HeldTool { hold, .. } if request_index == 0 => held_tool_sse(hold),
+            Self::HeldTool { final_text, .. } => text_sse("msg_held_final", final_text),
             Self::DribbledText { text, pieces, .. } if request_index == 0 => {
                 dribbled_text_sse("msg_dribbled", text, *pieces)
             }
@@ -449,6 +458,17 @@ impl ScriptedAnthropicService {
     pub async fn parked_tool(seconds: u32, final_text: impl Into<String>) -> io::Result<Self> {
         Self::spawn(Script::ParkedTool {
             seconds,
+            final_text: final_text.into(),
+        })
+        .await
+    }
+
+    /// Respond first with a `bash` call that runs until `<hold>/release`
+    /// exists, then `final_text` on every later request.
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    pub async fn held_tool(hold: &Path, final_text: impl Into<String>) -> io::Result<Self> {
+        Self::spawn(Script::HeldTool {
+            hold: hold.to_path_buf(),
             final_text: final_text.into(),
         })
         .await
@@ -1259,6 +1279,21 @@ fn parked_tool_sse(seconds: u32) -> String {
                 u64::from(seconds) * 1_000 + 10_000
             ),
         );
+    })
+}
+
+/// A tool call that ends only once the test lets it go. Its own timeout is
+/// far past any test's bound, so nothing but the test or a cancelled turn
+/// ends it.
+fn held_tool_sse(hold: &Path) -> String {
+    let hold = hold.display();
+    let command = format!(
+        "echo $$ > '{hold}/pid' && touch '{hold}/started' && \
+         while [ ! -e '{hold}/release' ]; do sleep 0.1; done && printf 'held done'"
+    );
+    let input = json!({"command": command, "timeout": 120_000}).to_string();
+    tool_message_sse("msg_held_tools", |body| {
+        append_tool_use(body, 0, "toolu_held_e2e", "bash", &input);
     })
 }
 

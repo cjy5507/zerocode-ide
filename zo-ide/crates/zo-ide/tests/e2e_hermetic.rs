@@ -6833,6 +6833,132 @@ async fn e2e_a_pane_closed_under_zo_ends_without_a_panic() {
     );
 }
 
+/// [`e2e_a_pane_closed_under_zo_ends_without_a_panic`] on the terminal the
+/// window really gives a pane: the pty is zo's standard streams and nobody's
+/// controlling terminal (`ps` shows `??` for every pane process), so closing it
+/// sends no SIGHUP. Only the input knows the pane is gone, and crossterm's
+/// reader meets a closed pty's end-of-file by reading again, forever: the turn
+/// ran on and kept the session's writer lease after the window restarted
+/// (t-76434, 2026-10-26). Closed mid-turn while a command is held, zo ends and
+/// the command ends with the turn: it could end only once the test let it go,
+/// and the test lets it go only after zo has left. The session then opens
+/// again at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_pane_closed_mid_turn_ends_zo_without_a_hang_up_signal() {
+    let layout = Layout::new();
+    let hold = layout.root.path().join("hold");
+    fs::create_dir(&hold).expect("make the held command's folder");
+    let service = ScriptedAnthropicService::held_tool(&hold, "back after the pane closed")
+        .await
+        .expect("start held-tool script");
+    let args = interactive_args();
+    let mut run = pty(&layout, service.base_url(), &args);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Run the held command and tell me when it lands\r")
+        .expect("send the tool prompt");
+    wait_for_path(&hold.join("started"), TEST_TIMEOUT);
+    let command = fs::read_to_string(hold.join("pid")).expect("the held command's pid");
+    let command = nix::unistd::Pid::from_raw(command.trim().parse().expect("a pid"));
+    let transcript = wait_for_transcript(&layout, "toolu_held_e2e", TEST_TIMEOUT);
+
+    let code = run.hang_up(TEST_TIMEOUT);
+    let command_ran_on = code.is_some() && outlives(command, CHILD_GONE);
+    fs::write(hold.join("release"), b"").expect("let the held command go");
+    assert_eq!(
+        code,
+        Some(0),
+        "zo ran on after the window closed its pane mid-turn: {code:?}"
+    );
+    assert!(
+        !command_ran_on,
+        "the held command outlived the turn the closed pane ended"
+    );
+
+    let session_id = session_id_of(&transcript);
+    let resumed_args = [
+        "--resume",
+        session_id.as_str(),
+        "--permission-mode",
+        "danger-full-access",
+    ];
+    let mut resumed = pty(&layout, service.base_url(), &resumed_args);
+    resumed.wait_for("Run the held command", TEST_TIMEOUT);
+    resumed
+        .send(b"Just say you are back\r")
+        .expect("send the resumed prompt");
+    resumed.wait_for("back after the pane closed", TEST_TIMEOUT);
+    let _ = resumed.finish();
+}
+
+/// The same pane closed while zo idles. An idle zo's loop wakes for nothing
+/// but its tend, `IDLE_TEND` (thirty seconds) after the last, so the terminal
+/// stream has to look on its own: zo ends inside the same bound as mid-turn.
+/// The pane closes once the turn's end frame has come and the screen has gone
+/// quiet, so it is the idle loop, not the turn, that meets the closed pane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_a_pane_closed_while_zo_idles_ends_zo_without_a_hang_up_signal() {
+    let layout = Layout::new();
+    let service = ScriptedAnthropicService::text("the answer stands")
+        .await
+        .expect("start text script");
+    let address = layout.root.path().join("idle.addr");
+    let address_text = address.to_string_lossy().into_owned();
+    let mut run = PtyRun::spawn_with_env(
+        &layout.cwd,
+        &layout.home,
+        &layout.sessions,
+        &layout.state,
+        service.base_url(),
+        &interactive_args(),
+        &[("ZO_EVENTS_ADDR_FILE", address_text.as_str()), ("ZO_SERVE_TOKEN", HELPER_STOP_TOKEN)],
+    )
+    .expect("spawn zo in PTY");
+    run.wait_for("directory:", TEST_TIMEOUT);
+    let mut client = connect_to_addr_file(&address, HELPER_STOP_TOKEN).await;
+    let info = client.call(method::INFO, serde_json::json!({})).await.expect("session.info");
+    let session = info["id"].as_str().expect("the channel names its session").to_string();
+    let (frames, watcher) = watch_frames(&address, &session).await;
+
+    run.send(b"answer once\r").expect("send prompt");
+    run.wait_for("the answer stands", TEST_TIMEOUT);
+    let _ = wait_for_transcript(&layout, "the answer stands", TEST_TIMEOUT);
+    wait_for_turn_ends(&frames, 1).await;
+    wait_until_quiet(&run, Duration::from_millis(500), TEST_TIMEOUT);
+
+    let code = run.hang_up(TEST_TIMEOUT);
+    watcher.abort();
+    assert_eq!(
+        code,
+        Some(0),
+        "an idle zo outlived the pane the window closed: {code:?}"
+    );
+}
+
+/// How long a command a cancelled turn ends has to be gone in.
+const CHILD_GONE: Duration = Duration::from_secs(5);
+
+/// Wait until `path` exists, or panic at `timeout`.
+fn wait_for_path(path: &std::path::Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "{} never appeared", path.display());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether process `pid` still runs `within` from now.
+fn outlives(pid: nix::unistd::Pid, within: Duration) -> bool {
+    let deadline = Instant::now() + within;
+    while nix::sys::signal::kill(pid, None).is_ok() {
+        if Instant::now() >= deadline {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
 /// Wait until the scripted service has recorded exactly `expected` request
 /// bodies, then pin the count. A prompt whose echo already contains the
 /// answer text makes `wait_for` return before the provider is asked, so the

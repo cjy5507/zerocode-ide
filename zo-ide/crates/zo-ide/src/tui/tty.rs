@@ -38,6 +38,26 @@ pub(super) fn size() -> std::io::Result<(u16, u16)> {
     crossterm::terminal::size()
 }
 
+/// Whether `terminal` has hung up: the window closed the pane.
+///
+/// A pane's pty is zo's standard streams and nobody's controlling terminal, so
+/// closing it sends no SIGHUP; and crossterm's reader answers the end-of-file a
+/// closed pty gives every read by polling again, forever, so the input stream
+/// never ends either (t-76434). `poll` tells without taking a byte from that
+/// reader: a pty whose other end closed is `POLLHUP` (`POLLIN | POLLHUP` on
+/// macOS), a live one never is. Windows panes are consoles, not ptys, and have
+/// nothing here to ask.
+#[cfg(unix)]
+pub(super) fn hung_up_on(terminal: std::os::fd::BorrowedFd<'_>) -> bool {
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+
+    let mut fds = [PollFd::new(terminal, PollFlags::POLLIN)];
+    matches!(poll(&mut fds, PollTimeout::ZERO), Ok(ready) if ready > 0)
+        && fds[0]
+            .revents()
+            .is_some_and(|revents| revents.contains(PollFlags::POLLHUP))
+}
+
 /// What `reclaim_foreground` found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Foreground {
@@ -109,5 +129,25 @@ mod tests {
             reclaim_foreground(),
             Foreground::Ours | Foreground::NoTerminal
         ));
+    }
+
+    /// A pty whose other end is open has not hung up; once that end closes,
+    /// the way the window closes a pane, it has.
+    #[cfg(unix)]
+    #[test]
+    fn a_pty_has_hung_up_once_its_other_end_closes() {
+        use std::os::fd::AsFd as _;
+
+        let pty = nix::pty::openpty(
+            None::<&nix::pty::Winsize>,
+            None::<&nix::sys::termios::Termios>,
+        )
+        .expect("open a pty");
+        assert!(!super::hung_up_on(pty.slave.as_fd()), "a live pty has not hung up");
+        drop(pty.master);
+        assert!(
+            super::hung_up_on(pty.slave.as_fd()),
+            "a pty whose other end closed has hung up"
+        );
     }
 }
